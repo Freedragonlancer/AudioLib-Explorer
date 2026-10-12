@@ -1,8 +1,8 @@
-# AudioLib Explorer v0.4.2
+# AudioLib Explorer v0.4.3
 
 发布日期：2026-10-12
 
-版本：程序 0.4.2 | API /api/v1/ | schema 5 | 快照兼容 3..=5
+版本：程序 0.4.3 | API /api/v1/ | schema 5 | 快照兼容 3..=5
 
 ## 缓存加载与进度显示
 
@@ -14,6 +14,8 @@
 ## 验证与升级
 
 默认与 ASIO 配置均运行格式检查、严格 Clippy、工作区测试及便携包验证，发布构建结果见附件 `Rust_CI_Release.json`。缓存复用、下载失败回退与进度状态回归的说明见 [Rust 验证记录](Rust_Validation.md)。
+
+修正了无音频输出设备时的数据源恢复测试：使用当前搜索的发布状态判断完成，避免播放错误覆盖状态栏文字后误报超时，并补充输出设备不可用的回归用例。
 
 API、数据库 schema 和快照兼容范围与 v0.4.1 一致。升级保留资料库、Metadata、标注、扫描历史与偏好设置，运行状态继续保存在 `%LOCALAPPDATA%/AudioLibExplorer/v1` 或原有显式配置路径。Windows x64 便携包包含 WASAPI 与 ASIO。
 

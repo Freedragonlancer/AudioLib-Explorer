@@ -218,11 +218,22 @@ fn indexed_sounds(root: &Path) -> (Arc<SqliteProvider>, AudioFile) {
 #[test]
 fn unchanged_sources_resume_cancelled_reads_without_replaying_completed_auditions() {
     isolated("child_unchanged_sources_resume_reads");
+    isolated("child_unchanged_sources_without_output");
 }
 
 #[test]
 #[ignore = "isolated Slint unchanged-source read recovery helper"]
 fn child_unchanged_sources_resume_reads() {
+    unchanged_sources_resume_reads(false);
+}
+
+#[test]
+#[ignore = "isolated Slint unchanged-source recovery without an output device"]
+fn child_unchanged_sources_without_output() {
+    unchanged_sources_resume_reads(true);
+}
+
+fn unchanged_sources_resume_reads(missing_output: bool) {
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -238,6 +249,7 @@ fn child_unchanged_sources_resume_reads() {
         ..Default::default()
     });
     let playback = PlaybackConfig {
+        device_id: missing_output.then(|| "audiolib-regression-unavailable-output".into()),
         volume: 0.0,
         ..Default::default()
     };
@@ -283,9 +295,18 @@ fn child_unchanged_sources_resume_reads() {
         let Some(ui) = window.upgrade() else {
             return false;
         };
+        if missing_output
+            && next.get() == 0
+            && !ui
+                .get_status()
+                .contains("Selected output device is unavailable")
+        {
+            return false;
+        }
+        // Playback errors can replace the shared Ready text on a machine without
+        // an output device. Observe the current search publication itself instead.
         let published = !c.source_changing.load(Ordering::Acquire)
             && !ui.get_searching()
-            && ui.get_status().starts_with("Ready")
             && ui.get_rows().row_count() == 1
             && ui.get_rows().row_data(0).unwrap().id.as_str() == id.to_string()
             && ui.get_folders().row_count() == 1
@@ -294,7 +315,11 @@ fn child_unchanged_sources_resume_reads() {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|state| state.model_published)
+                .is_some_and(|state| {
+                    state.generation == c.search_generation.load(Ordering::Acquire)
+                        && state.page == SearchPagePhase::Published
+                        && state.model_published
+                })
             && c.latest_selection.lock().unwrap().is_none()
             && ui.get_selected_id().as_str() == id.to_string()
             && ui.get_waveform_ready();
