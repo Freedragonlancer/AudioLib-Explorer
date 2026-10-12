@@ -1,10 +1,12 @@
 # AudioLib Explorer
 
+<img src="resources/icons/AudioLibExplorer.png" width="128" height="128" alt="AudioLib Explorer: audio library and Waveform icon">
+
 [中文说明 / Chinese](README.zh-CN.md)
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.4.0 (workspace `Cargo.toml`)
+- **Program version:** 0.4.1 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 5 (snapshot compatibility range 3..=5)
 - **License:** [GPL-3.0-only](LICENSE)

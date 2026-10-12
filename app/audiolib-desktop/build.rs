@@ -12,13 +12,16 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/icons");
     println!("cargo:rerun-if-changed=ui/theme.slint");
     println!("cargo:rerun-if-changed=app.manifest");
+    println!("cargo:rerun-if-changed=../../resources/icons/AudioLibExplorer.ico");
+    println!("cargo:rerun-if-changed=../../resources/icons/AudioLibExplorer.png");
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         winresource::WindowsResource::new()
+            .set_icon("../../resources/icons/AudioLibExplorer.ico")
             .set_manifest_file("app.manifest")
             .set("ProductName", "AudioLib Explorer")
             .set("FileDescription", "AudioLib Explorer sound library")
             .set("OriginalFilename", "AudioLibExplorer.exe")
             .compile()
-            .expect("compile Windows application manifest");
+            .expect("compile Windows application icon and manifest");
     }
 }

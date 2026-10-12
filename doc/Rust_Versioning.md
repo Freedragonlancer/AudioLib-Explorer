@@ -4,7 +4,7 @@
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.0 | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.1 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 5 | SQLite 资料库结构（`user_version`） |
 
@@ -26,18 +26,18 @@
 
 ## 发布流程
 
-当前待发布版本为 **0.4.0**（schema 已是 5，而最近的 v0.3.7 标签是 schema 3，所以不能再用 0.3.x）。
+当前发布版本为 **0.4.1**（应用图标更新；API 与 schema 和 v0.4.0 一致）。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
 3. 本地预检（不创建标签，标签用参数传入）：
-   `pwsh tools/check-release.ps1 -Tag v0.4.0 [-BaseTag v0.3.7]`
+   `pwsh tools/check-release.ps1 -Tag v0.4.1 -BaseTag v0.4.0`
    省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
 4. 运行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --all-targets --locked`；ASIO 配置按 AGENTS.md 的准备和验证流程执行。
-5. 合并后在发布提交上打标签 `v0.4.0`（或 `v0.4.0-rc.1`）并推送。
+5. 合并后在发布提交上打标签 `v0.4.1`（或 `v0.4.1-rc.1`）并推送。
 6. GitHub Actions（`.github/workflows/release.yml`）在 Windows runner 上：检出标签，拉取其他 `v*` 标签，运行 `check-release.ps1`，再执行 `ci-release.ps1`（校验、构建、打包），最后创建 GitHub Release 并上传 ZIP、SHA256 与报告。
 
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：
 
-- 通过：Cargo 0.4.0 + 版本行 + `-Tag v0.4.0 -BaseTag v0.3.7`
-- 失败：`-Tag v0.4.1`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
+- 通过：Cargo 0.4.1 + 版本行 + `-Tag v0.4.1 -BaseTag v0.4.0`
+- 失败：`-Tag v0.4.2`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
