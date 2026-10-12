@@ -90,8 +90,8 @@ pub use stream::{
     SourceAuth, StreamProbe, StreamSource, WAKING_HINT_AFTER, WebDavAuth, probe_stream,
 };
 pub use sync::{
-    CacheState, RemoteCache, SyncOutcome, SyncProgress, refresh_cached_roots, sync_library,
-    validate_snapshot,
+    CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress, refresh_cached_roots,
+    sync_library, validate_snapshot,
 };
 pub use tls::{TRUST_STORE, TlsInfo};
 pub use util::encode_path_segment;

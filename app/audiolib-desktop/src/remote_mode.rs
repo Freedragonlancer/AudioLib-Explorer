@@ -60,9 +60,33 @@ pub struct RemoteStartup {
     pub state: Option<CacheState>,
 }
 
+/// Bootstrap the GUI without opening/upgrading a large cache. The manager's single
+/// sync pipeline selects, prepares and opens the actual snapshot after the UI is visible.
+pub fn open_remote_placeholder(config: &AppConfig) -> anyhow::Result<RemoteStartup> {
+    apply_audition_memory(&config.data_source);
+    let path = RemoteCache::new(&config.data_root()).placeholder_database()?;
+    Ok(RemoteStartup {
+        provider: Arc::new(SqliteProvider::open_read_only(&path)?),
+        state: None,
+    })
+}
+
 /// Open the last synced snapshot (offline-capable) or an empty placeholder. The local
 /// working library is not opened or modified in server mode.
-pub fn open_remote_startup(config: &AppConfig) -> anyhow::Result<RemoteStartup> {
+#[cfg(test)]
+fn open_remote_startup(config: &AppConfig) -> anyhow::Result<RemoteStartup> {
+    open_remote_startup_with_progress(config, &mut |_| {})
+}
+
+/// Open the cached server source, reporting offline preparation on the caller's worker.
+pub fn open_remote_startup_with_progress(
+    config: &AppConfig,
+    progress: &mut dyn FnMut(crate::startup::StartupProgress),
+) -> anyhow::Result<RemoteStartup> {
+    use crate::startup::StartupProgress;
+    progress(StartupProgress::Remote(
+        audiolib_remote::CachePreparation::Checking,
+    ));
     let cache = RemoteCache::new(&config.data_root());
     apply_audition_memory(&config.data_source);
     // Audition streams into memory now: the disk audition cache of earlier versions goes
@@ -75,11 +99,16 @@ pub fn open_remote_startup(config: &AppConfig) -> anyhow::Result<RemoteStartup> 
         .active()
         .filter(|state| cached_source_matches(&state.server_url, &config.data_source.server_url))
     {
-        let opened = cache.prepare_cached_state(&state).and_then(|state| {
-            SqliteProvider::open_read_only(&cache.database_path(&state))
-                .map(|provider| (provider, state))
-                .map_err(|error| RemoteError::Snapshot(error.to_string()))
-        });
+        let opened = cache
+            .prepare_cached_state_with_progress(&state, &mut |stage| {
+                progress(StartupProgress::Remote(stage));
+            })
+            .and_then(|state| {
+                progress(StartupProgress::Opening);
+                SqliteProvider::open_read_only(&cache.database_path(&state))
+                    .map(|provider| (provider, state))
+                    .map_err(|error| RemoteError::Snapshot(error.to_string()))
+            });
         match opened {
             Ok((provider, state)) => {
                 return Ok(RemoteStartup {
@@ -90,6 +119,7 @@ pub fn open_remote_startup(config: &AppConfig) -> anyhow::Result<RemoteStartup> 
             Err(error) => tracing::warn!(%error, "Cached server snapshot unusable"),
         }
     }
+    progress(StartupProgress::Placeholder);
     let placeholder = cache.placeholder_database()?;
     Ok(RemoteStartup {
         provider: Arc::new(SqliteProvider::open_read_only(&placeholder)?),
@@ -693,12 +723,16 @@ impl Controller {
     pub(super) fn init_remote(self: &Arc<Self>, startup: Option<RemoteStartup>) {
         self.start_revision_poller();
         if let Some(startup) = startup {
+            let deferred = startup.state.is_none();
             self.remote_mode.store(true, Ordering::Release);
             self.remote.lock().unwrap().state = startup.state;
             if let Some(ui) = self.ui.upgrade() {
                 self.publish_data_source(&ui);
+                if deferred {
+                    ui.invoke_open_data_source();
+                }
             }
-            self.start_sync(false, false);
+            self.start_sync(false, deferred);
         } else if let Some(ui) = self.ui.upgrade() {
             self.publish_data_source(&ui);
         }
@@ -1201,7 +1235,9 @@ impl Controller {
             }
         };
         ui.set_data_source_label(label.into());
-        ui.set_ds_sync_info(self.sync_info(chinese).into());
+        if !ui.get_ds_syncing() {
+            ui.set_ds_sync_info(self.sync_info(chinese).into());
+        }
         self.publish_remote_notice(ui);
         if ui.get_library_visible() {
             self.publish_sources(ui);
@@ -1357,7 +1393,7 @@ impl Controller {
     /// swap the provider. `apply` also switches from local mode, falling back to the last
     /// cache (or the empty placeholder) with a clear error when the server is unavailable.
     pub(super) fn start_sync(self: &Arc<Self>, force: bool, apply: bool) {
-        if self.shutdown.load(Ordering::Acquire) {
+        if self.shutdown.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
             return;
         }
         if self.remote_busy.swap(true, Ordering::AcqRel) {
@@ -1393,105 +1429,133 @@ impl Controller {
         std::thread::spawn(move || {
             let cache = RemoteCache::new(&data_root);
             let mut last_post = Instant::now() - Duration::from_secs(1);
-            let result =
-                RemoteClient::new(&settings.server_url, &secrets.token).and_then(|client| {
-                    sync_library(
-                        &client,
-                        &cache,
-                        &mut |progress| {
-                            let now = Instant::now();
-                            if now.duration_since(last_post) < Duration::from_millis(200)
-                                && matches!(progress, SyncProgress::Downloading { .. })
-                            {
-                                return;
-                            }
-                            last_post = now;
-                            let (text, fraction) = match progress {
-                                SyncProgress::Checking => (
-                                    cn_or(
-                                        chinese,
-                                        "正在检查服务器版本…",
-                                        "Checking server revision…",
-                                    ),
-                                    -1.0,
-                                ),
-                                // The server copies the library before the first byte
-                                // (several seconds for a few hundred MB).
-                                SyncProgress::Downloading {
-                                    received: 0,
-                                    total: None,
-                                } => (
-                                    cn_or(
-                                        chinese,
-                                        "服务器正在准备快照…",
-                                        "The server is preparing the snapshot…",
-                                    ),
-                                    -1.0,
-                                ),
-                                SyncProgress::Downloading { received, total } => {
-                                    let mib = received as f64 / 1_048_576.0;
-                                    match total {
-                                        Some(total) if total > 0 => (
-                                            if chinese {
-                                                format!(
-                                                    "正在下载快照 {mib:.1} / {:.1} MiB",
-                                                    total as f64 / 1_048_576.0
-                                                )
-                                            } else {
-                                                format!(
-                                                    "Downloading snapshot {mib:.1} / {:.1} MiB",
-                                                    total as f64 / 1_048_576.0
-                                                )
-                                            },
-                                            received as f32 / total as f32,
-                                        ),
-                                        _ => (
-                                            if chinese {
-                                                format!("正在下载快照 {mib:.1} MiB")
-                                            } else {
-                                                format!("Downloading snapshot {mib:.1} MiB")
-                                            },
-                                            -1.0,
-                                        ),
-                                    }
-                                }
-                                SyncProgress::Validating => (
-                                    cn_or(
-                                        chinese,
-                                        "正在校验快照完整性…",
-                                        "Validating snapshot integrity…",
-                                    ),
-                                    -1.0,
-                                ),
-                                SyncProgress::Saving => (
-                                    cn_or(chinese, "正在更新本地缓存…", "Updating local cache…"),
-                                    -1.0,
-                                ),
-                            };
-                            let c2 = c.clone();
-                            post(c.ui.clone(), move |ui| {
-                                if c2.remote_generation.load(Ordering::Acquire) == generation {
-                                    ui.set_ds_progress(fraction);
-                                    ui.set_ds_sync_info(text.clone().into());
-                                    ui.set_status(text.into());
-                                }
-                            });
-                        },
-                        &cancel,
-                        force,
+            let cached_preparation_incomplete = std::cell::Cell::new(false);
+            let mut report = |progress| {
+                match progress {
+                    SyncProgress::Preparing(audiolib_remote::CachePreparation::Checking) => {
+                        cached_preparation_incomplete.set(true);
+                    }
+                    // Reaching publication means cache preparation succeeded, even
+                    // if saving the refreshed server/check metadata then fails.
+                    SyncProgress::Saving => cached_preparation_incomplete.set(false),
+                    _ => {}
+                }
+                let now = Instant::now();
+                if now.duration_since(last_post) < Duration::from_millis(200)
+                    && matches!(
+                        progress,
+                        SyncProgress::Downloading { .. }
+                            | SyncProgress::Preparing(
+                                audiolib_remote::CachePreparation::Copying { .. }
+                            )
                     )
-                });
-            let fallback = if result.is_err() && apply {
-                Some(match cache.active() {
-                    Some(state) => (cache.database_path(&state), Some(state)),
-                    None => match cache.placeholder_database() {
-                        Ok(path) => (path, None),
-                        Err(error) => {
-                            tracing::warn!(%error, "Server placeholder library unavailable");
-                            (PathBuf::new(), None)
+                {
+                    return;
+                }
+                last_post = now;
+                let (text, fraction) = match progress {
+                    SyncProgress::Checking => (
+                        cn_or(chinese, "正在检查服务器版本…", "Checking server revision…"),
+                        -1.0,
+                    ),
+                    // The server copies the library before the first byte
+                    // (several seconds for a few hundred MB).
+                    SyncProgress::Downloading {
+                        received: 0,
+                        total: None,
+                    } => (
+                        cn_or(
+                            chinese,
+                            "服务器正在准备快照…",
+                            "The server is preparing the snapshot…",
+                        ),
+                        -1.0,
+                    ),
+                    SyncProgress::Downloading { received, total } => {
+                        let mib = received as f64 / 1_048_576.0;
+                        match total {
+                            Some(total) if total > 0 => (
+                                if chinese {
+                                    format!(
+                                        "正在下载快照 {mib:.1} / {:.1} MiB",
+                                        total as f64 / 1_048_576.0
+                                    )
+                                } else {
+                                    format!(
+                                        "Downloading snapshot {mib:.1} / {:.1} MiB",
+                                        total as f64 / 1_048_576.0
+                                    )
+                                },
+                                received as f32 / total as f32,
+                            ),
+                            _ => (
+                                if chinese {
+                                    format!("正在下载快照 {mib:.1} MiB")
+                                } else {
+                                    format!("Downloading snapshot {mib:.1} MiB")
+                                },
+                                -1.0,
+                            ),
                         }
-                    },
-                })
+                    }
+                    SyncProgress::Validating => (
+                        cn_or(
+                            chinese,
+                            "正在校验快照完整性…",
+                            "Validating snapshot integrity…",
+                        ),
+                        -1.0,
+                    ),
+                    SyncProgress::Saving => (
+                        cn_or(chinese, "正在更新本地缓存…", "Updating local cache…"),
+                        -1.0,
+                    ),
+                    SyncProgress::Preparing(stage) => {
+                        let stage = crate::startup::StartupProgress::Remote(stage);
+                        let fraction = stage.fraction();
+                        let text = if fraction >= 0.0 {
+                            format!("{} · {:.0}%", stage.label(chinese), fraction * 100.0)
+                        } else {
+                            stage.label(chinese).to_owned()
+                        };
+                        (text, fraction)
+                    }
+                };
+                let c2 = c.clone();
+                post(c.ui.clone(), move |ui| {
+                    if c2.remote_generation.load(Ordering::Acquire) == generation {
+                        ui.set_ds_progress(fraction);
+                        ui.set_ds_sync_info(text.clone().into());
+                        ui.set_status(text.into());
+                    }
+                });
+            };
+            let result = RemoteClient::new(&settings.server_url, &secrets.token)
+                .and_then(|client| sync_library(&client, &cache, &mut report, &cancel, force));
+            let fallback = if result
+                .as_ref()
+                .is_err_and(|error| !matches!(error, RemoteError::Cancelled))
+                && !cached_preparation_incomplete.get()
+                && apply
+                && !cancel.load(Ordering::Acquire)
+            {
+                // Offline startup uses the same preparation stages as sync. Never
+                // open another endpoint's cache or retry its failed preparation.
+                // A rejected *new* snapshot must still allow the valid old cache.
+                cache
+                    .active()
+                    .filter(|state| cached_source_matches(&state.server_url, &settings.server_url))
+                    .and_then(|state| {
+                        cache
+                            .prepare_cached_state_with_progress(&state, &mut |stage| {
+                                report(SyncProgress::Preparing(stage))
+                            })
+                            .map(|state| (cache.database_path(&state), Some(state)))
+                            .map_err(
+                                |error| tracing::warn!(%error, "Offline cache preparation failed"),
+                            )
+                            .ok()
+                    })
             } else {
                 None
             };
@@ -1502,6 +1566,7 @@ impl Controller {
                 ui.set_ds_progress(0.0);
                 if c2.remote_generation.load(Ordering::Acquire) != generation
                     || c2.shutdown.load(Ordering::Acquire)
+                    || c2.closing.load(Ordering::Acquire)
                 {
                     return;
                 }
@@ -1654,7 +1719,7 @@ impl Controller {
                 if let Some((database, state)) =
                     fallback.filter(|(path, _)| !path.as_os_str().is_empty())
                 {
-                    if !self.remote_read_only() {
+                    if !self.remote_read_only() || self.remote.lock().unwrap().state.is_none() {
                         // The server could not be reached: no live root status (the roots
                         // saved with the cache are used without their old status).
                         self.remote.lock().unwrap().live_roots = slow_roots.clone();

@@ -96,6 +96,8 @@ Legacy YAML is read only before Rust settings or a Rust library exist. Initial d
 
 Fatal desktop startup failures write a synchronous `logs/AudioLibExplorer-startup-error.log` even when preference parsing fails before tracing initialization, and show a native Windows error dialog. Headless/UI smoke modes suppress the modal dialog and return a failure exit code.
 
+Local library initialization runs behind a responsive startup panel with bilingual stage text, elapsed time and an animated progress bar. Server-mode GUI startup uses a small placeholder and delegates cache loading/upgrades/downloads to the library manager's single sync pipeline. It checks the remote revision before preparing an old cache that might be replaced; offline fallback accepts only a matching endpoint. Cache-copy percentages count SQLite pages from the pinned read snapshot and describe the copy stage only; download percentages count received bytes. Integrity checks, index upgrades and other unknown-duration stages show an animated segment without an estimated percentage. Worker statuses return through the Slint event loop; background publication cannot replace an active progress message. Closing drains initialization and cache work before releasing the desktop instance lease.
+
 Playback CLI commands use a per-user Windows named pipe. It rejects remote clients, bounds messages to 64 KiB and times out stalled requests. The control protocol carries JSON commands/status only, never PCM. No HTTP service is created.
 
 The JSON envelope retains success, error, error_code, warnings, metadata, execution_time_ms, timestamp and data. An unavailable desktop or invalid playback operation returns an error instead of a fictitious successful zero-value status.

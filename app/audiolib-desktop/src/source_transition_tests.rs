@@ -1226,6 +1226,270 @@ fn cached_library(config: &AppConfig, name: &str, server_url: &str) -> CacheStat
 }
 
 #[test]
+fn gui_defers_server_cache_to_manager_and_close_drains_cache_worker() {
+    isolated("child_deferred_server_cache");
+}
+
+#[test]
+fn gui_rejected_new_snapshot_keeps_the_previous_cache_available() {
+    isolated("child_rejected_snapshot_cache");
+    isolated("child_unsupported_snapshot_cache");
+}
+
+#[test]
+#[ignore = "isolated rejected download fallback helper"]
+fn child_rejected_snapshot_cache() {
+    rejected_snapshot_cache(false);
+}
+
+#[test]
+#[ignore = "isolated unsupported server schema fallback helper"]
+fn child_unsupported_snapshot_cache() {
+    rejected_snapshot_cache(true);
+}
+
+fn rejected_snapshot_cache(unsupported: bool) {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let mut config = configuration(&root.join("preferences"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    config.data_source.mode = DataSourceMode::Server;
+    config.data_source.server_url = format!("http://{}", listener.local_addr().unwrap());
+    config.data_source.poll_interval_secs = 0;
+    config.data_source.migrate_profiles();
+    let state = cached_library(&config, "fallback", &config.data_source.server_url);
+    let cache = RemoteCache::new(&config.data_root());
+    let path = cache.database_path(&state);
+    let original = std::fs::read(&path).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let finished = stop.clone();
+    let server = std::thread::spawn(move || {
+        let mut downloads = 0;
+        while !finished.load(Ordering::Acquire) {
+            let (mut socket, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("mock server accept: {error}"),
+            };
+            socket.set_nonblocking(false).unwrap();
+            let request = request(&mut socket);
+            let path = request.split_whitespace().nth(1).unwrap();
+            match path {
+                "/api/v1/health" => respond(
+                    &mut socket,
+                    "200 OK",
+                    r#"{"status":"ok","version":"0.4.1"}"#,
+                ),
+                "/api/v1/library" => respond(
+                    &mut socket,
+                    "200 OK",
+                    &format!(
+                        r#"{{"library_id":"test-library-fallback","schema_version":{},"revision":2}}"#,
+                        if unsupported {
+                            99
+                        } else {
+                            audiolib_db::SCHEMA_VERSION
+                        }
+                    ),
+                ),
+                "/api/v1/roots" => respond(&mut socket, "200 OK", "[]"),
+                "/api/v1/library/snapshot" => {
+                    downloads += 1;
+                    respond(&mut socket, "200 OK", "invalid SQLite snapshot");
+                }
+                _ => respond(
+                    &mut socket,
+                    "403 Forbidden",
+                    r#"{"error_code":"FORBIDDEN","message":"test capability disabled"}"#,
+                ),
+            }
+        }
+        downloads
+    });
+    let ui = AppWindow::new().unwrap();
+    let (provider, deferred) = crate::startup::show_while_opening(&ui, config.clone())
+        .unwrap()
+        .unwrap();
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let controller = Controller::new_with_source(
+        &ui,
+        provider,
+        engine.handle(),
+        config.clone(),
+        playback,
+        deferred,
+    );
+    let c = controller.clone();
+    run_until(&ui, move || {
+        !c.remote_busy.load(Ordering::Acquire) && !c.library_busy.load(Ordering::Acquire)
+    });
+    assert_eq!(
+        controller.remote.lock().unwrap().state.as_ref(),
+        Some(&state)
+    );
+    assert_eq!(controller.provider().database_path(), path);
+    assert!(ui.get_ds_message().contains("offline cache"));
+    assert_eq!(cache.active().unwrap(), state);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(!config.paths.database.exists());
+    controller.shutdown();
+    ui.hide().unwrap();
+    stop.store(true, Ordering::Release);
+    assert_eq!(server.join().unwrap(), usize::from(!unsupported));
+}
+
+#[test]
+fn cache_provider_open_keeps_manager_progress_until_the_swap_finishes() {
+    isolated("child_cache_provider_progress");
+}
+
+#[test]
+#[ignore = "isolated manager provider-open progress helper"]
+fn child_cache_provider_progress() {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let mut config = configuration(&root.join("preferences"));
+    config.data_source.mode = DataSourceMode::Server;
+    config.data_source.poll_interval_secs = 0;
+    let state = cached_library(&config, "opening", "http://127.0.0.1:1");
+    let cache = RemoteCache::new(&config.data_root());
+    let placeholder = open_remote_placeholder(&config).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let controller = Controller::new(&ui, placeholder.provider, engine.handle(), config, playback);
+    ui.set_library_visible(true);
+    controller.swap_to(
+        &ui,
+        DataSourceSwitch::Server {
+            database: cache.database_path(&state),
+            state: Some(state.clone()),
+        },
+    );
+    // Completion is queued on the event loop, so this observes the real opening
+    // interval without introducing timing sleeps or blocking a worker's locks.
+    assert!(ui.get_library_busy());
+    assert!(ui.get_ds_syncing());
+    assert_eq!(ui.get_ds_progress(), -1.0);
+    assert_eq!(ui.get_ds_sync_info(), "Opening the cached library…");
+    let c = controller.clone();
+    run_until(&ui, move || !c.library_busy.load(Ordering::Acquire));
+    assert!(!ui.get_ds_syncing());
+    assert_eq!(
+        controller.remote.lock().unwrap().state.as_ref(),
+        Some(&state)
+    );
+    controller.shutdown();
+    ui.hide().unwrap();
+}
+
+#[test]
+#[ignore = "isolated deferred server startup and close helper"]
+fn child_deferred_server_cache() {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let mut config = configuration(&root.join("preferences"));
+    let offline = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    config.data_source.mode = DataSourceMode::Server;
+    config.data_source.server_url = format!("http://{}", offline.local_addr().unwrap());
+    config.data_source.poll_interval_secs = 0;
+    drop(offline);
+    config.data_source.migrate_profiles();
+    let state = cached_library(&config, "offline", &config.data_source.server_url);
+    let cache = RemoteCache::new(&config.data_root());
+    let path = cache.database_path(&state);
+    let original = std::fs::read(&path).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let (provider, deferred) = crate::startup::show_while_opening(&ui, config.clone())
+        .unwrap()
+        .unwrap();
+    assert!(!ui.get_startup_busy());
+    assert!(deferred.as_ref().unwrap().state.is_none());
+    assert_ne!(provider.database_path(), path.as_path());
+    assert!(!config.paths.database.exists());
+    assert_eq!(cache.active().unwrap(), state);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let controller = Controller::new_with_source(
+        &ui,
+        provider,
+        engine.handle(),
+        config.clone(),
+        playback,
+        deferred,
+    );
+    assert!(ui.get_library_visible() && ui.get_ds_syncing());
+    let c = controller.clone();
+    let weak = ui.as_weak();
+    let waiting = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));
+    let started = waiting.clone();
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let finished = released.clone();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(10),
+        move || {
+            assert!(Instant::now() < deadline, "Deferred cache/close timed out");
+            let ui = weak.upgrade().unwrap();
+            if let Some(start) = started.get() {
+                if !finished.get() && start.elapsed() >= Duration::from_millis(200) {
+                    assert!(ui.window().is_visible());
+                    c.remote_busy.store(false, Ordering::Release);
+                    finished.set(true);
+                }
+            } else if !c.remote_busy.load(Ordering::Acquire)
+                && !c.library_busy.load(Ordering::Acquire)
+                && c.remote.lock().unwrap().state.is_some()
+            {
+                // Hold an in-flight cache worker while requesting close; only release
+                // it after observing the window still visible. Use one event loop so
+                // repeated helper Quit events cannot short-circuit the close assertion.
+                c.remote_busy.store(true, Ordering::Release);
+                c.request_close(&ui);
+                started.set(Some(Instant::now()));
+            }
+        },
+    );
+    ui.show().unwrap();
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    assert!(released.get());
+    assert_eq!(
+        controller
+            .remote
+            .lock()
+            .unwrap()
+            .state
+            .as_ref()
+            .unwrap()
+            .library_id,
+        state.library_id
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(!config.paths.database.exists());
+    assert!(!controller.remote_busy.load(Ordering::Acquire));
+    assert!(!ui.window().is_visible());
+    controller.shutdown();
+}
+
+#[test]
 fn startup_refuses_another_servers_active_snapshot_and_accepts_effective_same_url() {
     let root = std::env::temp_dir().join(format!(
         "audiolib-source-startup-{}-{}",

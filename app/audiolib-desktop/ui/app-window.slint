@@ -202,6 +202,12 @@ export component AppWindow inherits Window {
     in property <string> app-version: "development";
     in property <bool> startup-busy: false;
     in property <string> startup-message;
+    in property <string> startup-stage;
+    in property <string> startup-elapsed;
+    in property <bool> startup-closing;
+    // Negative means unknown total. Percentages refer only to the current stage.
+    in property <float> startup-progress: -1;
+    in property <float> startup-motion;
     in-out property <bool> chinese: false;
     in-out property <string> query: "";
     in-out property <string> scan-path: "";
@@ -418,6 +424,10 @@ export component AppWindow inherits Window {
     in property <bool> ds-syncing: false;
     in property <bool> ds-applying: false;
     in property <float> ds-progress: 0;
+    private property <float> ds-motion: root.ds-syncing && root.ds-progress < 0 ? (1 - cos(360deg * mod(animation-tick(), 2s) / 2s)) / 2 : 0;
+    private property <duration> ds-started;
+    private property <string> ds-elapsed: (root.chinese ? "已用时 " : "Elapsed: ") + floor((animation-tick() - root.ds-started) / 1s) + (root.chinese ? " 秒" : " s");
+    changed ds-syncing => { if root.ds-syncing { root.ds-started = animation-tick(); } }
     in-out property <string> ds-poll-interval: "60";
     in-out property <bool> ds-auto-sync: false;
     in-out property <bool> ds-transcode: false;
@@ -1455,8 +1465,9 @@ export component AppWindow inherits Window {
                                 Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.ds-sync-info; }
                             }
                             if root.sm-active && root.ds-syncing: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
-                                Rectangle { x: 0px; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                                Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                             }
+                            if root.sm-active && root.ds-syncing: Label { font-size: 11px; color: Theme.muted; text: root.ds-elapsed; }
                             if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                             if !root.sm-active: Label { wrap: word-wrap; font-size: 11px; text: root.chinese ? "切换到此数据源后，可在这里同步快照、查看扫描历史与最近播放、校验、备份副本和导出。" : "Switch to this source to sync its snapshot, view scan history and recent playback, check, back up a copy and export here."; }
                             Rectangle { height: 1px; background: Theme.border; }
@@ -1614,9 +1625,10 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if root.ds-syncing: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
-                                    Rectangle { x: 0px; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                                    Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                                 }
                                 Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
+                                if root.ds-syncing: Label { font-size: 11px; color: Theme.muted; text: root.ds-elapsed; }
                                 if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                                 HorizontalLayout { height: 33px; spacing: 8px;
                                     Action { width: 110px; enabled: !root.ds-testing && !root.ds-applying; label: root.ds-testing ? (root.chinese ? "测试中…" : "Testing…") : (root.chinese ? "测试连接" : "Test connection"); clicked => { root.data-source-test-requested(); } }
@@ -1779,19 +1791,32 @@ export component AppWindow inherits Window {
         }
         }
     }
-    if root.library-busy: Rectangle { background: Theme.overlay;
+    if root.library-busy && !((root.ds-syncing || root.ds-applying) && root.library-visible): Rectangle { background: Theme.overlay;
         TouchArea { }
         Rectangle { width: 410px; height: 135px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 9px; border-width: 1px; border-color: Theme.border;
-            Text { x: 20px; width: parent.width - 40px; height: parent.height; text: root.scan-browse-busy ? (root.chinese ? "请在文件夹选择窗口中选择音效位置…" : "Choose your sound folder in the folder picker…") : (root.chinese ? "正在处理音效库操作…\n先保存草稿并等待扫描结束。" : "Working on the library…\nSaving drafts and waiting for scans to finish."); color: Theme.ink; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
+            Text { x: 20px; width: parent.width - 40px; height: parent.height; text: root.scan-browse-busy ? (root.chinese ? "请在文件夹选择窗口中选择音效位置…" : "Choose your sound folder in the folder picker…") : (root.chinese ? "正在处理音效库操作…\n请稍候。" : "Working on the library…\nPlease wait."); color: Theme.ink; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
         }
     }
     if root.startup-busy: Rectangle {
         background: Theme.overlay;
         TouchArea { }
-        Rectangle { width: 510px; height: 185px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 9px; border-width: 1px; border-color: Theme.border;
-            VerticalLayout { padding: 25px; spacing: 18px;
-                Text { text: root.chinese ? "正在打开音效库…" : "Opening your sound library…"; color: Theme.ink; font-size: 21px; }
-                Text { text: root.startup-message; color: Theme.ink; wrap: word-wrap; vertical-stretch: 1; }
+        Rectangle { width: 540px; height: 250px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 9px; border-width: 1px; border-color: Theme.border;
+            VerticalLayout { padding: 25px; spacing: 16px;
+                Text { text: root.startup-closing ? (root.chinese ? "正在安全退出…" : "Closing safely…") : (root.chinese ? "正在打开音效库…" : "Opening your sound library…"); color: Theme.ink; font-size: 21px; }
+                HorizontalLayout { spacing: 12px;
+                    Text { text: root.startup-stage; color: Theme.ink; horizontal-stretch: 1; }
+                    Text { text: root.startup-progress >= 0 ? (root.chinese ? "复制 " : "Copy ") + round(root.startup-progress * 100) + "%" : (root.chinese ? "处理中" : "Working"); color: Theme.dim; }
+                }
+                Rectangle { height: 6px; background: Theme.raised; border-radius: 3px;
+                    Rectangle {
+                        height: parent.height;
+                        width: root.startup-progress >= 0 ? parent.width * clamp(root.startup-progress, 0, 1) : parent.width * 0.25;
+                        x: root.startup-progress >= 0 ? 0px : (parent.width - self.width) * root.startup-motion;
+                        background: Theme.accent; border-radius: 3px;
+                    }
+                }
+                Text { text: root.startup-message; color: Theme.dim; wrap: word-wrap; vertical-stretch: 1; }
+                Text { text: root.startup-elapsed; color: Theme.muted; font-size: 12px; }
             }
         }
     }

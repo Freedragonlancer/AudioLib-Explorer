@@ -43,7 +43,7 @@ mod result_rows_tests;
 #[cfg(test)]
 #[path = "single_click_play_tests.rs"]
 mod single_click_play_tests;
-pub use remote_mode::{RemoteStartup, open_remote_startup};
+pub use remote_mode::{RemoteStartup, open_remote_placeholder, open_remote_startup_with_progress};
 
 #[derive(Clone)]
 enum LibraryOperation {
@@ -1503,6 +1503,24 @@ impl Controller {
             return;
         }
         ui.set_library_busy(true);
+        let opening_cache = matches!(
+            operation,
+            LibraryOperation::DataSource(remote_mode::DataSourceSwitch::Server { .. })
+        );
+        if opening_cache {
+            // The provider open is the final cache stage. Keep its progress in the
+            // manager while the write gate drains drafts/scans and installs it.
+            ui.set_ds_syncing(true);
+            ui.set_ds_progress(-1.0);
+            ui.set_ds_sync_info(
+                if self.chinese.load(Ordering::Acquire) {
+                    "正在打开缓存音效库…"
+                } else {
+                    "Opening the cached library…"
+                }
+                .into(),
+            );
+        }
         self.invalidate_library_reads();
         self.metadata_wake.notify_all();
         if let Some(cancel) = self.scan_cancel.lock().unwrap().as_ref() {
@@ -1689,6 +1707,10 @@ impl Controller {
             post(c.ui.clone(), move |ui| {
                 c2.library_busy.store(false, Ordering::Release);
                 ui.set_library_busy(false);
+                if opening_cache {
+                    ui.set_ds_syncing(false);
+                    ui.set_ds_progress(0.0);
+                }
                 ui.set_scanning(false);
                 ui.set_scan_validating(false);
                 ui.set_searching(false);
@@ -3649,6 +3671,7 @@ impl Controller {
             }
         };
         self.closing.store(true, Ordering::Release);
+        self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
         self.invalidate_library_reads();
         ui.set_searching(false);
@@ -3667,6 +3690,11 @@ impl Controller {
                     if c.shutdown.load(Ordering::Acquire) {
                         return Err("Desktop is shutting down".into());
                     }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // Cache preparation can be in a non-cancellable SQLite upgrade.
+                // Keep the event loop and instance lease alive until its worker drains.
+                while c.remote_busy.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 Ok(())

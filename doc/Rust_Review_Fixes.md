@@ -1,5 +1,16 @@
 # Rust 代码审查修复
 
+## 缓存流程推送前 CR（2026-10-12，0.4.1）
+
+审查 `fcb1f65` 之后的缓存启动、进度发布、离线回退及关闭排空改动，补修两项 P2：
+
+| 问题 | 修复与回归 |
+| --- | --- |
+| 新快照损坏或服务器 schema 不受支持时，GUI 停留在空占位库，已有有效缓存不可用 | 区分新快照拒绝与本地缓存准备失败；前者仍回退到匹配端点的旧缓存并保留原错误提示，后者不立即重做同一失败操作。`gui_rejected_new_snapshot_keeps_the_previous_cache_available` 通过独立子进程分别验证损坏下载和 schema 99 拒绝，原缓存状态和字节不变 |
+| 同步完成后打开缓存 provider 的阶段提前清除进度，重新出现通用等待遮罩 | 将 provider 打开纳入管理页的动态进度，在操作完成或失败后清除；仍由原有写入保护排空 Metadata 和扫描。`cache_provider_open_keeps_manager_progress_until_the_swap_finishes` 验证实际打开期间及完成后的 UI 状态 |
+
+上述两项回归在补修前均失败、补修后通过；相关数据源转换测试共 18 passed。用户要求延后的重新聚焦黑屏问题保持登记为 [UI-001](Rust_Known_Issues.md)。全量检查及本地安装结果见 [Rust 验证报告](Rust_Validation.md)。
+
 ## 推送前独立 CR（2026-10-11，0.4.0）
 
 对 `origin/main` 到已合并本地 `main` 的待推送内容独立审查，修复以下五项 P2，并复审本轮修复未引入新的 P0–P2 问题：

@@ -103,6 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     SyncProgress::Checking => "checking",
                     SyncProgress::Downloading { .. } => "downloading",
                     SyncProgress::Validating => "validating",
+                    SyncProgress::Preparing(_) => "preparing cache",
                     SyncProgress::Saving => "saving",
                 };
                 if name != last {

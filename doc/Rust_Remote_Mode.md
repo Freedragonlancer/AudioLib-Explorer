@@ -257,13 +257,25 @@ resyncs; an in-place restore keeps the id and bumps the revision. If the server 
 unreachable at startup, the last cache opens offline; without any cache an empty
 placeholder library is shown with a banner, and the next successful sync replaces it.
 
-The GUI shows a preparation window before opening or upgrading the cached snapshot.
-Library initialization runs on an owned worker while the Slint event loop shows elapsed
-time and remains responsive. Closing during preparation waits for that worker to finish
-safely with the desktop instance lease held. Older caches are upgraded in a consistent
-owned copy without per-step backup sleeps; all original integrity checks remain. A
-prepared cache opens directly on later starts. Headless validation still waits for the
-opened library and returns startup failures synchronously.
+The server-mode GUI opens on a small placeholder and displays the library manager.
+Its single sync worker checks the server revision before selecting a snapshot: reuse
+the current cache, prepare an older cache in an owned copy, or download a newer snapshot.
+It does not first upgrade the old snapshot in a separate startup window. If the server
+is unavailable, the same preparation path opens the last cache matching the configured
+endpoint. The local working library stays untouched. Headless validation still opens
+the cached library synchronously.
+
+A rejected new download or unsupported server schema also preserves access to a valid
+matching old cache, with the original failure still visible. A failed preparation of
+that old cache is not immediately attempted again in the same sync.
+
+The manager shows the actual copy/download fraction, bilingual preparation stages and
+elapsed time. Unknown-duration integrity checks and index upgrades show an animated
+bar, without an estimated percentage. The source-change gate preserves drafts while
+leaving this progress visible through the final provider-open stage. Closing drains
+the cache worker before releasing the desktop instance lease. Original integrity
+checks and owned-copy safety are retained;
+an unchanged prepared snapshot is reused without copying, downloading or rebuilding.
 
 Timeouts: connect 3 s, JSON responses 15 s (bodies 30 s), snapshot response 120 s and body
 up to 1 h, audio stream first byte 100 s (a NAS disk spinning up, see *Playback*). Errors map to localized messages for unreachable server, timeout, 401

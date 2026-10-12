@@ -167,6 +167,17 @@ pub enum SyncProgress {
     Checking,
     Downloading { received: u64, total: Option<u64> },
     Validating,
+    Preparing(CachePreparation),
+    Saving,
+}
+
+/// Offline cache preparation stages. Copy counts are SQLite pages, not total startup progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CachePreparation {
+    Checking,
+    Copying { completed: u64, total: u64 },
+    Validating,
+    Upgrading,
     Saving,
 }
 
@@ -305,6 +316,17 @@ impl RemoteCache {
     /// snapshot available to any already-open read-only provider. Works offline and
     /// never opens or modifies the user's local working library.
     pub fn prepare_cached_state(&self, state: &CacheState) -> Result<CacheState> {
+        self.prepare_cached_state_with_progress(state, &mut |_| {})
+    }
+
+    /// Prepare an offline cache with synchronous, lightweight worker-thread callbacks.
+    /// Unknown-duration validation/index stages intentionally have no percentage.
+    pub fn prepare_cached_state_with_progress(
+        &self,
+        state: &CacheState,
+        progress: &mut dyn FnMut(CachePreparation),
+    ) -> Result<CacheState> {
+        progress(CachePreparation::Checking);
         let source = self.database_path(state);
         if SqliteProvider::has_current_search_state(&source)? {
             return Ok(state.clone());
@@ -340,13 +362,31 @@ impl RemoteCache {
             source
                 .execute_batch("BEGIN; SELECT COUNT(*) FROM sqlite_schema;")
                 .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
-            rusqlite::backup::Backup::new(&source, &mut target)
-                .map_err(|error| RemoteError::Snapshot(error.to_string()))?
-                .run_to_completion(4096, Duration::ZERO, None)
+            progress(CachePreparation::Copying {
+                completed: 0,
+                total: 0,
+            });
+            let backup = rusqlite::backup::Backup::new(&source, &mut target)
                 .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
+            loop {
+                let step = backup
+                    .step(4096)
+                    .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
+                let copied = backup.progress();
+                progress(CachePreparation::Copying {
+                    completed: (copied.pagecount - copied.remaining).max(0) as u64,
+                    total: copied.pagecount.max(0) as u64,
+                });
+                match step {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => {}
+                    _ => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            drop(backup);
             drop(target);
             drop(source);
-            validate_snapshot(&staging)
+            validate_snapshot_with_progress(&staging, progress)
         })();
         let info = match result {
             Ok(info) => info,
@@ -355,6 +395,7 @@ impl RemoteCache {
                 return Err(error);
             }
         };
+        progress(CachePreparation::Saving);
         let target = directory.join(&name);
         if let Err(error) = std::fs::rename(&staging, &target) {
             remove_owned_staging(&staging);
@@ -533,6 +574,14 @@ impl RemoteCache {
 /// supported schema, quick_check, foreign keys and FTS5 consistency. Converts the file
 /// to rollback-journal mode so it opens read-only without WAL sidecars.
 pub fn validate_snapshot(path: &Path) -> Result<audiolib_core::LibraryInfo> {
+    validate_snapshot_with_progress(path, &mut |_| {})
+}
+
+fn validate_snapshot_with_progress(
+    path: &Path,
+    progress: &mut dyn FnMut(CachePreparation),
+) -> Result<audiolib_core::LibraryInfo> {
+    progress(CachePreparation::Validating);
     {
         let conn = rusqlite::Connection::open(path)
             .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
@@ -561,7 +610,9 @@ pub fn validate_snapshot(path: &Path) -> Result<audiolib_core::LibraryInfo> {
     // Validate the downloaded bytes before repairing derived state, so an unexpected
     // or missing FTS trigger cannot be hidden by a successful rebuild. This file is
     // owned staging, not a live/user library; upgrade without creating WAL sidecars.
+    progress(CachePreparation::Upgrading);
     if SqliteProvider::upgrade_owned_snapshot(path)? {
+        progress(CachePreparation::Validating);
         let upgraded = SqliteProvider::check_owned_file(path)?;
         if !upgraded.is_ok() {
             return Err(RemoteError::Snapshot(format!(
@@ -638,7 +689,9 @@ pub fn sync_library(
             .clone()
             .filter(|state| state.revision == library.revision)
     {
-        state = cache.prepare_cached_state(&state)?;
+        state = cache.prepare_cached_state_with_progress(&state, &mut |stage| {
+            progress(SyncProgress::Preparing(stage))
+        })?;
         if let Some(roots) = roots {
             state.roots = roots;
         }
@@ -713,7 +766,9 @@ pub fn sync_library(
             ));
         }
         progress(SyncProgress::Validating);
-        let info = validate_snapshot(&staging)?;
+        let info = validate_snapshot_with_progress(&staging, &mut |stage| {
+            progress(SyncProgress::Preparing(stage))
+        })?;
         Ok((meta, info))
     })();
     let (meta, info) = match result {
@@ -858,7 +913,36 @@ mod tests {
         cache.save_state(&state).unwrap();
         let original = std::fs::read(&path).unwrap();
         let original_provider = SqliteProvider::open_read_only(&path).unwrap();
-        let prepared = cache.prepare_cached_state(&state).unwrap();
+        let mut events = Vec::new();
+        let prepared = cache
+            .prepare_cached_state_with_progress(&state, &mut |stage| events.push(stage))
+            .unwrap();
+        assert_eq!(events.first(), Some(&CachePreparation::Checking));
+        assert_eq!(events.last(), Some(&CachePreparation::Saving));
+        let copies: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                CachePreparation::Copying { completed, total } if *total > 0 => {
+                    Some((*completed, *total))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!copies.is_empty());
+        assert!(copies.iter().all(|(done, total)| done <= total));
+        assert!(
+            copies
+                .windows(2)
+                .all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 == pair[1].1)
+        );
+        let (done, total) = copies.last().unwrap();
+        assert_eq!(done, total);
+        assert!(events.windows(3).any(|stages| stages
+            == [
+                CachePreparation::Validating,
+                CachePreparation::Upgrading,
+                CachePreparation::Validating
+            ]));
         assert_ne!(prepared.database_file, state.database_file);
         assert_eq!(prepared.revision, state.revision);
         assert_eq!(prepared.server_url, state.server_url);
@@ -867,7 +951,14 @@ mod tests {
         let upgraded = SqliteProvider::open_read_only(&cache.database_path(&prepared)).unwrap();
         assert_unicode_source(&upgraded);
         assert_eq!(cache.active().unwrap(), prepared);
-        assert_eq!(cache.prepare_cached_state(&prepared).unwrap(), prepared);
+        events.clear();
+        assert_eq!(
+            cache
+                .prepare_cached_state_with_progress(&prepared, &mut |stage| events.push(stage))
+                .unwrap(),
+            prepared
+        );
+        assert_eq!(events, [CachePreparation::Checking]);
         let names: Vec<_> = std::fs::read_dir(cache.library_dir(&state.library_id))
             .unwrap()
             .flatten()
@@ -1358,8 +1449,25 @@ mod tests {
         assert_eq!(cache.active().unwrap(), first.state);
         SqliteProvider::open_read_only(&db).unwrap();
 
-        let second = sync_library(&client, &cache, &mut |_| {}, &cancel, false).unwrap();
+        phases.clear();
+        let second = sync_library(
+            &client,
+            &cache,
+            &mut |stage| phases.push(stage),
+            &cancel,
+            false,
+        )
+        .unwrap();
         assert!(!second.downloaded);
+        assert_eq!(second.state.database_file, first.state.database_file);
+        assert_eq!(
+            phases,
+            [
+                SyncProgress::Checking,
+                SyncProgress::Preparing(CachePreparation::Checking),
+                SyncProgress::Saving
+            ]
+        );
         assert_eq!(fixture.lock().unwrap().downloads, 1);
 
         fixture.lock().unwrap().revision = 2;
