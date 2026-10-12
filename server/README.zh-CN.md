@@ -100,7 +100,7 @@ AUDIOLIB_SERVER_TOKEN='<至少 16 个可见 ASCII 字符>' audiolib-server --con
 
 - **大库首次快照慢：** 百万文件约需 30–60 秒准备；超过 `snapshot_wait_secs`（默认 90）返回 503 `BUSY` + `Retry-After`，后台继续准备，客户端会重试。
 - **409 `BUSY`**（如扫描中移除根目录）或 **503 `BUSY`**（流/试听并发已满）：按 `Retry-After` 稍后重试。
-- **启动后 503 `UNAVAILABLE`：** 库仍在打开（`/health` 为 `starting`）。v3/v4 → v5 升级在打开时做 schema 迁移与提取标签回填（2026-10-11 在约 90 万条记录的大库副本上实测约 198 秒，库增大约 166 MB；3,009 条小库约 7 秒）。全文索引**不会**自动重建，需之后手动运行 CLI：`AudioLibCli db rebuild-search`（同库另约 513 秒）；该步骤会留下一份与库差不多大的回滚备份，升级前请预留足够磁盘空间。见 [deploy/README.md](deploy/README.md#search-index-backfill-and-fts-rebuild-db-rebuild-search)。
+- **启动后 503 `UNAVAILABLE`：** 库仍在打开（`/health` 为 `starting`）。v3/v4 → v5 升级在打开时做 schema 迁移与提取标签回填（2026-10-11 匿名实测：大库副本约 198 秒，较小库约 7 秒；记录数及库容量不公开）。全文索引**不会**自动重建，需之后手动运行 CLI：`AudioLibCli db rebuild-search`（同库另约 513 秒）；该步骤会留下一份与库差不多大的回滚备份，升级前请预留足够磁盘空间。见 [deploy/README.md](deploy/README.md#search-index-backfill-and-fts-rebuild-db-rebuild-search)。
 - **磁盘空间：** 快照在 `snapshot_dir`（默认系统临时目录），波形缓存在 `waveform_cache_dir`（受 `waveform_cache_mb` 限制），备份与回滚副本在库旁。
 
 ## 升级、回滚与备份

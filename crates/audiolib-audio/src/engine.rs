@@ -158,6 +158,15 @@ pub enum AudioCommand {
     /// Acknowledge after all preceding control commands have completed.
     Synchronize,
     Configure(PlaybackConfig),
+    /// Replace a representation of the same source while reconfiguring output.
+    /// The generation/path guard rejects stale asynchronous preparations. Unlike
+    /// Load, this retains the logical source generation, position and play session.
+    ConfigureSource {
+        expected_generation: u64,
+        expected_path: PathBuf,
+        path: PathBuf,
+        config: PlaybackConfig,
+    },
     ControlPanel,
     Shutdown,
 }
@@ -332,6 +341,16 @@ impl CommandCompletion {
     pub fn wait(self, timeout: Duration) -> Result<PlaybackStatus> {
         self.acknowledgment
             .recv_timeout(timeout)
+            .map_err(|error| Error::Audio(format!("Audio acknowledgment: {error}")))?
+    }
+
+    /// Wait for a definitive result before disposing transactional source resources.
+    /// Call only from a worker thread; source interruption remains controlled by
+    /// the owner, and disconnection still returns an error. A timeout cannot prove
+    /// whether a queued source replacement committed, so it cannot safely roll back.
+    pub fn wait_until_completed(self) -> Result<PlaybackStatus> {
+        self.acknowledgment
+            .recv()
             .map_err(|error| Error::Audio(format!("Audio acknowledgment: {error}")))?
     }
 }
@@ -1063,7 +1082,10 @@ impl Worker {
         });
     }
     fn execute_command(&mut self, command: AudioCommand) -> Result<()> {
-        let configuring = matches!(&command, AudioCommand::Configure(_));
+        let configuring = matches!(
+            &command,
+            AudioCommand::Configure(_) | AudioCommand::ConfigureSource { .. }
+        );
         let result = self.command(command);
         if let Err(error) = &result
             && error.is_read_interrupted()
@@ -1597,6 +1619,68 @@ impl Worker {
                     });
                 }
             }
+            AudioCommand::ConfigureSource {
+                expected_generation,
+                expected_path,
+                path,
+                mut config,
+            } => {
+                let before = self.snapshot();
+                if before.generation != expected_generation
+                    || before.file_path.as_ref() != Some(&expected_path)
+                {
+                    return Err(Error::Validation(
+                        "The loaded source changed while output settings were prepared".into(),
+                    ));
+                }
+                // Output settings do not edit audition transforms. Pause/seek/
+                // transform commands admitted while the route downloaded win.
+                config.audition = before.audition;
+                config.validate()?;
+                // Validate the new representation before closing valid output. All
+                // decoder/network work stays on this worker, never in the callback.
+                let decoder = Decoder::open(&path)?;
+                let metadata = decoder.info.metadata.clone();
+                if usize::from(config.source_pair) * 2 >= usize::from(metadata.channels) {
+                    return Err(Error::Validation(
+                        "Source channel pair is outside the replacement WAV channels".into(),
+                    ));
+                }
+                let position = self
+                    .output
+                    .as_ref()
+                    .map_or(before.position, |output| output.position());
+                let previous_config = self.config.clone();
+                self.close_output();
+                self.config = config;
+                self.needs_recovery = false;
+                // Do not publish Loading/Ready: this is still the same logical
+                // record/session and a paused audition must remain paused.
+                self.update(|status| {
+                    status.file_path = Some(path);
+                    status.sample_rate = metadata.sample_rate;
+                    status.channels = metadata.channels;
+                    status.duration = metadata.duration;
+                    status.position = position.min(metadata.duration);
+                    status.volume = self.config.volume;
+                    status.audition = self.config.audition;
+                    status.buffering = false;
+                    status.error = None;
+                });
+                if before.state == PlaybackState::Playing {
+                    if let Err(error) = self.start_output_at(Some(position)) {
+                        self.config = previous_config;
+                        // Retain the previous representation for a later resume;
+                        // execute_command reports failure as Paused safely.
+                        self.update(|status| {
+                            *status = PlaybackStatus { position, ..before };
+                        });
+                        return Err(error);
+                    }
+                } else {
+                    self.update_transport(|_| {});
+                }
+            }
             AudioCommand::ControlPanel => {
                 if self.config.backend != AudioBackend::Asio {
                     return Err(Error::Audio("Driver control panel requires ASIO".into()));
@@ -2015,6 +2099,110 @@ mod tests {
             .unwrap();
         worker.update(|status| status.position = 0.08);
         assert_eq!(worker.snapshot().transport_revision, revision);
+    }
+
+    #[test]
+    fn representation_replacement_retains_cursor_audition_and_history_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let stereo = temp.path().join("stereo-preview.wav");
+        let multichannel = temp.path().join("all-channel-preview.wav");
+        crate::tests::write_wav(&stereo, 1000, 2, 16, 1, &vec![0; 4000], false, false);
+        crate::tests::write_wav(&multichannel, 1000, 4, 16, 1, &vec![0; 8000], false, false);
+        for state in [
+            PlaybackState::Ready,
+            PlaybackState::Paused,
+            PlaybackState::Stopped,
+            PlaybackState::Ended,
+        ] {
+            let audition = AuditionSettings {
+                rate: 0.5,
+                pitch_semitones: 3.0,
+                mono: true,
+                loop_enabled: true,
+            };
+            let mut worker = worker(PlaybackStatus {
+                generation: 8,
+                transport_revision: 13,
+                play_session_id: 4,
+                state,
+                file_path: Some(stereo.clone()),
+                position: 0.375,
+                duration: 1.0,
+                channels: 2,
+                sample_rate: 1000,
+                audition,
+                ..Default::default()
+            });
+            worker
+                .execute_command(AudioCommand::ConfigureSource {
+                    expected_generation: 8,
+                    expected_path: stereo.clone(),
+                    path: multichannel.clone(),
+                    config: PlaybackConfig {
+                        source_pair: 1,
+                        audition,
+                        ..Default::default()
+                    },
+                })
+                .unwrap();
+            let replaced = worker.snapshot();
+            assert_eq!(replaced.file_path, Some(multichannel.clone()));
+            assert_eq!(replaced.generation, 8);
+            assert_eq!(replaced.play_session_id, 4);
+            assert_eq!(replaced.transport_revision, 14);
+            assert_eq!(replaced.position, 0.375);
+            assert_eq!(replaced.channels, 4);
+            assert_eq!(replaced.state, state);
+            assert_eq!(replaced.audition, audition);
+            if state == PlaybackState::Paused {
+                // A hardware-free prepared output exercises the actual session
+                // publication after resuming the replaced paused source.
+                worker.output = Some(prepared_output(&temp.path().join("device.wav")));
+                worker.execute_command(AudioCommand::Play).unwrap();
+                assert_eq!(worker.snapshot().play_session_id, 4);
+            }
+        }
+    }
+
+    #[test]
+    fn stale_or_wrong_channel_representation_never_replaces_the_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("stereo-preview.wav");
+        crate::tests::write_wav(&source, 1000, 2, 16, 1, &vec![0; 4000], false, false);
+        for (generation, expected, pair) in [
+            (7, source.clone(), 0),
+            (8, temp.path().join("other.wav"), 0),
+            (8, source.clone(), 1),
+        ] {
+            let mut worker = worker(PlaybackStatus {
+                generation: 8,
+                transport_revision: 13,
+                play_session_id: 4,
+                state: PlaybackState::Paused,
+                file_path: Some(source.clone()),
+                position: 0.375,
+                duration: 1.0,
+                channels: 2,
+                ..Default::default()
+            });
+            let result = worker.execute_command(AudioCommand::ConfigureSource {
+                expected_generation: generation,
+                expected_path: expected,
+                path: source.clone(),
+                config: PlaybackConfig {
+                    source_pair: pair,
+                    ..Default::default()
+                },
+            });
+            assert!(matches!(result, Err(Error::Validation(_))));
+            let retained = worker.snapshot();
+            assert_eq!(retained.file_path, Some(source.clone()));
+            assert_eq!(retained.generation, 8);
+            assert_eq!(retained.position, 0.375);
+            assert_eq!(retained.play_session_id, 4);
+            assert_eq!(retained.state, PlaybackState::Paused);
+            assert_eq!(retained.transport_revision, 13);
+        }
     }
 
     #[test]

@@ -85,6 +85,10 @@ pub struct LibraryResponse {
     pub library_id: String,
     /// Monotonic change revision.
     pub revision: u64,
+    /// This server rejects mutations unless their snapshot library identity matches.
+    /// Clients must keep older servers (field absent/false) read-only.
+    #[serde(default)]
+    pub identity_bound_writes: bool,
     /// `DataProvider::library_info`, flattened; includes `schema_version` (SQLite user_version).
     /// `database_bytes` is main file + `-wal` file; `wal_bytes` is the WAL part.
     #[serde(flatten)]
@@ -477,6 +481,8 @@ const INLINE_STATS_MILLIS: u64 = 250;
 struct Inner {
     provider: Arc<SqliteProvider>,
     tracker: RevisionTracker,
+    /// Immutable identity of this provider; never takes the revision/write mutex.
+    library_id: String,
     /// Current root monitor; replaced as a whole when roots change on the admin page.
     roots: RwLock<Arc<RootMonitor>>,
     root_policy: RootPolicy,
@@ -566,6 +572,7 @@ impl AppState {
         }
         let provider = Arc::new(SqliteProvider::open_existing(&config.library_db)?);
         let tracker = RevisionTracker::open(provider.database_path())?;
+        let library_id = tracker.current()?.library_id;
         let provider_path = provider.database_path().to_path_buf();
         let roots_db = Connection::open_with_flags(
             provider.database_path(),
@@ -589,6 +596,7 @@ impl AppState {
             inner: Arc::new(Inner {
                 provider,
                 tracker,
+                library_id,
                 roots: RwLock::new(Arc::new(monitor())),
                 root_policy: config.root_policy(),
                 roots_edit: Mutex::new(()),
@@ -621,6 +629,12 @@ impl AppState {
     /// The library provider; future endpoints use it for all business data access.
     pub fn provider(&self) -> &Arc<SqliteProvider> {
         &self.inner.provider
+    }
+
+    /// Immutable library identity pinned by this AppState and its DataProvider.
+    /// Reading it never waits for database writes or revision polling.
+    pub fn library_id(&self) -> &str {
+        &self.inner.library_id
     }
 
     /// Remote scans (`POST /scans`, see [`crate::scans`]).
@@ -728,7 +742,7 @@ impl AppState {
         } = self.open_audio_reporting(id, progress)?;
         drop(file);
         progress.clear();
-        let key = WaveformKey::new(&etag, params);
+        let key = WaveformKey::new(self.library_id(), id, &path, &etag, params);
         let etag = key.etag(zstd);
         if if_none_match.is_some_and(|value| crate::stream::none_match(value, &etag)) {
             return Ok(WaveformReply::NotModified { etag });
@@ -933,6 +947,7 @@ impl AppState {
         Ok(LibraryResponse {
             library_id: revision.library_id,
             revision: revision.revision,
+            identity_bound_writes: true,
             info,
         })
     }

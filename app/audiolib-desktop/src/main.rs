@@ -13,6 +13,7 @@ mod startup;
 #[cfg(test)]
 mod ui_tests;
 mod waveform_view;
+mod window_repaint;
 use anyhow::{Context, Result};
 use audiolib_audio::{AudioEngine, PlaybackConfig};
 use audiolib_core::{DataProvider, config::AppConfig};
@@ -151,6 +152,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let ui = AppWindow::new().context("Create desktop window")?;
+    window_repaint::install(ui.window());
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_chinese(config.language == "cn");
     let Some((sqlite, remote)) = startup::show_while_opening(&ui, config.clone())? else {
@@ -234,6 +236,14 @@ fn run() -> Result<()> {
                 "server-settings" => {
                     ui.invoke_open_data_source();
                     ui.invoke_sm_select_row(-1);
+                }
+                "window-repaint" => {
+                    ui.invoke_open_data_source();
+                    ui.invoke_sm_select_row(-1);
+                    // Synthetic unsaved form values for native repaint validation.
+                    ui.set_ds_server_url("https://example.invalid/unsaved-draft".into());
+                    ui.set_ds_token("synthetic-unsaved-token".into());
+                    ui.set_ds_dirty(true);
                 }
                 "scan" | "scan-paused" => {
                     let paused = smoke_view == "scan-paused";

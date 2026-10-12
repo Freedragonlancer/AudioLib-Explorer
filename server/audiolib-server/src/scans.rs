@@ -15,7 +15,8 @@
 use crate::{
     ApiError, AppState,
     roots::{
-        RootState, describe_io_error, is_transient_network_error, probe_root, without_verbatim,
+        RootMonitor, RootState, describe_io_error, is_transient_network_error, probe_root,
+        without_verbatim,
     },
     state::INLINE_RECHECK,
 };
@@ -303,6 +304,22 @@ impl ScanManager {
     }
 }
 
+/// Owns a startup reservation until the spawned scan thread takes responsibility.
+/// A failed root recheck, spawn error or startup panic releases the slot.
+struct ScanReservation<'a> {
+    manager: &'a ScanManager,
+    job: &'a Arc<ScanJob>,
+    handed_off: bool,
+}
+
+impl Drop for ScanReservation<'_> {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            self.manager.finish(self.job, false);
+        }
+    }
+}
+
 /// Validate a `subpath` lexically: relative, `/`-separated, no `.`/`..` components.
 /// Empty components (doubled or trailing `/`) are dropped. Returns the normalized form.
 pub fn normalize_subpath(raw: &str) -> Result<String, ApiError> {
@@ -359,6 +376,9 @@ impl AppState {
                 "workers must be 1..={MAX_SCAN_WORKERS} (or null for automatic)"
             )));
         }
+        // Root edits and reservation share this lock. Once reserved, root removal
+        // sees BUSY; resolution keeps this exact monitor even after later additions.
+        let edit = self.roots_edit_lock();
         let monitor = self.root_monitor();
         let index = monitor
             .roots()
@@ -369,18 +389,6 @@ impl AppState {
             })?;
         let manager = self.scans();
         ScanManager::busy(&manager.jobs())?;
-        // Same bounded inline recheck as /audio/{id}/stream for a root cached offline.
-        let mut status = monitor.status(index);
-        if status.state == RootState::Offline {
-            status = monitor.check_now(index, INLINE_RECHECK);
-        }
-        if status.state == RootState::Offline {
-            return Err(ApiError::root_offline(format!(
-                "Library root {:?} is offline: {}",
-                request.root,
-                status.message.unwrap_or_default()
-            )));
-        }
         let job = Arc::new(ScanJob {
             root: request.root,
             subpath,
@@ -398,18 +406,46 @@ impl AppState {
             ScanManager::busy(&jobs)?;
             jobs.active = Some(job.clone());
         }
+        let mut reservation = ScanReservation {
+            manager,
+            job: &job,
+            handed_off: false,
+        };
+        drop(edit);
+        // Reserve before checking a sleeping root so concurrent removal cannot
+        // invalidate the requested root while this bounded recheck waits.
+        let mut status = monitor.status(index);
+        if status.state == RootState::Offline {
+            status = monitor.check_now(index, INLINE_RECHECK);
+        }
+        if status.state == RootState::Offline {
+            return Err(ApiError::root_offline(format!(
+                "Library root {:?} is offline: {}",
+                job.root,
+                status.message.unwrap_or_default()
+            )));
+        }
         let (sender, receiver) = oneshot::channel();
         let state = self.clone();
         let thread_job = job.clone();
         let spawned = std::thread::Builder::new()
             .name("audiolib-scan".into())
-            .spawn(move || run_scan(&state, &thread_job, index, workers as usize, sender));
+            .spawn(move || {
+                run_scan(
+                    &state,
+                    &thread_job,
+                    monitor,
+                    index,
+                    workers as usize,
+                    sender,
+                )
+            });
         if let Err(error) = spawned {
-            manager.finish(&job, false);
             return Err(ApiError::internal(format!(
                 "Cannot start the scan thread: {error}"
             )));
         }
+        reservation.handed_off = true;
         Ok(receiver)
     }
 
@@ -591,11 +627,10 @@ fn resolve_failure(root_name: &str, subpath: &str, error: &std::io::Error) -> Ap
 /// Resolve the root and the scanned directory on the scan thread (a sleeping disk may
 /// take long): `(canonical root, canonical target)`.
 fn resolve_directories(
-    state: &AppState,
+    monitor: &RootMonitor,
     index: usize,
     job: &ScanJob,
 ) -> Result<(PathBuf, PathBuf), ApiError> {
-    let monitor = state.root_monitor();
     let root_config = &monitor.roots()[index];
     let probe = probe_root(&root_config.server_path);
     monitor.record(index, probe.clone());
@@ -648,16 +683,76 @@ fn start_failure(error: Error, root_name: &str) -> ApiError {
 fn run_scan(
     state: &AppState,
     job: &Arc<ScanJob>,
+    monitor: Arc<RootMonitor>,
     index: usize,
     workers: usize,
     sender: oneshot::Sender<Result<ScanResponse, ApiError>>,
 ) {
-    let manager = state.scans();
     let mut sender = Some(sender);
-    let (root, target) = match resolve_directories(state, index, job) {
+    let mut cleanup = ScanCleanup {
+        state,
+        job,
+        holding_revision: false,
+    };
+    // Includes root resolution and completion bookkeeping, not only ScanService.
+    // The cleanup guard also runs if panic recovery itself unwinds.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_scan_inner(
+            state,
+            job,
+            &monitor,
+            index,
+            workers,
+            &mut sender,
+            &mut cleanup,
+        )
+    }));
+    if outcome.is_err() {
+        let mut status = job.status();
+        status.progress.state = ScanState::Failed;
+        status.progress.message = "The scan thread panicked".into();
+        drop(status);
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(Err(ApiError::internal("The scan thread panicked")));
+        }
+    }
+}
+
+/// Releases both reservations on every exit, including a panic before session creation.
+struct ScanCleanup<'a> {
+    state: &'a AppState,
+    job: &'a Arc<ScanJob>,
+    holding_revision: bool,
+}
+
+impl Drop for ScanCleanup<'_> {
+    fn drop(&mut self) {
+        if self.holding_revision {
+            let _ = self.state.tracker().end_hold(true);
+        }
+        {
+            let mut status = self.job.status();
+            status.active = false;
+            status.progress.paused = false;
+        }
+        self.state
+            .scans()
+            .finish(self.job, self.job.session_id() > 0);
+    }
+}
+
+fn run_scan_inner(
+    state: &AppState,
+    job: &Arc<ScanJob>,
+    monitor: &RootMonitor,
+    index: usize,
+    workers: usize,
+    sender: &mut Option<oneshot::Sender<Result<ScanResponse, ApiError>>>,
+    cleanup: &mut ScanCleanup<'_>,
+) {
+    let (root, target) = match resolve_directories(monitor, index, job) {
         Ok(paths) => paths,
         Err(error) => {
-            manager.finish(job, false);
             if let Some(sender) = sender.take() {
                 let _ = sender.send(Err(error));
             }
@@ -667,12 +762,12 @@ fn run_scan(
     let started = Instant::now();
     let provider = state.provider().clone();
     if let Err(error) = state.tracker().begin_hold() {
-        manager.finish(job, false);
         if let Some(sender) = sender.take() {
             let _ = sender.send(Err(error.into()));
         }
         return;
     }
+    cleanup.holding_revision = true;
     let shape_before = library_shape(state);
     let foreign_before = provider.foreign_data_version().ok();
     let options = ScanOptions {
@@ -720,6 +815,7 @@ fn run_scan(
         && same_shape(&shape_before, &library_shape(state))
         && foreign_before.is_some()
         && provider.foreign_data_version().ok() == foreign_before;
+    cleanup.holding_revision = false;
     let revision = match state.tracker().end_hold(!unchanged) {
         Ok(info) => Some(info.revision),
         Err(error) => {
@@ -727,7 +823,6 @@ fn run_scan(
             None
         }
     };
-    let failed_to_start = !session_started;
     {
         let mut status = job.status();
         match &result {
@@ -763,7 +858,6 @@ fn run_scan(
             "Scan finished"
         );
     }
-    manager.finish(job, !failed_to_start);
     if let Some(sender) = sender.take() {
         let error = match result {
             Err(error) => start_failure(error, &job.root),
@@ -776,6 +870,94 @@ fn run_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resolution_panic_releases_the_scan_slot_and_answers_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(audiolib_db::SqliteProvider::open(&dir.path().join("library.db")).unwrap());
+        let config = crate::ServerConfig::from_toml_str(
+            &format!(
+                "library_db='library.db'\n[[roots]]\nname='SFX'\nserver_path='{}'\n",
+                dir.path().display()
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        let state = AppState::open(&config, None).unwrap();
+        let job = Arc::new(ScanJob {
+            root: "SFX".into(),
+            subpath: String::new(),
+            mode: ScanMode::Incremental,
+            control: ScanCancellation::default(),
+            status: Mutex::new(JobStatus {
+                progress: ScanProgress::default(),
+                active: true,
+                revision: None,
+                shutdown: false,
+            }),
+        });
+        state.scans().jobs().active = Some(job.clone());
+        let (sender, receiver) = oneshot::channel();
+        // Simulate an unexpected failure before ScanService creates a session.
+        run_scan(&state, &job, state.root_monitor(), usize::MAX, 1, sender);
+        assert_eq!(
+            receiver.blocking_recv().unwrap().unwrap_err().code(),
+            "INTERNAL"
+        );
+        assert!(state.scans().current().is_none());
+        assert!(!job.response().active);
+        // The following reservation is usable instead of becoming permanently BUSY.
+        let started = state
+            .start_scan(ScanRequest {
+                root: "SFX".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(started.blocking_recv().unwrap().is_ok());
+        assert!(state.scans().shutdown(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn scan_cleanup_releases_a_revision_hold_when_completion_unwinds() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(audiolib_db::SqliteProvider::open(&dir.path().join("library.db")).unwrap());
+        let config = crate::ServerConfig::from_toml_str(
+            &format!(
+                "library_db='library.db'\n[[roots]]\nname='SFX'\nserver_path='{}'\n",
+                dir.path().display()
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        let state = AppState::open(&config, None).unwrap();
+        let job = Arc::new(ScanJob {
+            root: "SFX".into(),
+            subpath: String::new(),
+            mode: ScanMode::Incremental,
+            control: ScanCancellation::default(),
+            status: Mutex::new(JobStatus {
+                progress: ScanProgress::default(),
+                active: true,
+                revision: None,
+                shutdown: false,
+            }),
+        });
+        state.scans().jobs().active = Some(job.clone());
+        let before = state.revision().unwrap().revision;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.tracker().begin_hold().unwrap();
+            let _cleanup = ScanCleanup {
+                state: &state,
+                job: &job,
+                holding_revision: true,
+            };
+            panic!("completion failure after beginning the hold");
+        }));
+        assert!(panic.is_err());
+        assert!(state.scans().current().is_none());
+        assert!(!job.response().active);
+        assert!(state.revision().unwrap().revision > before);
+    }
 
     #[test]
     fn subpaths_are_relative_and_cannot_climb() {

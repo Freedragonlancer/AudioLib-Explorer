@@ -21,7 +21,8 @@ fn folder_counts_keep_a_scrollbar_gutter_and_remain_clickable_when_sidebar_resiz
                         "Continuous aviation engine recordings",
                     ]
                 };
-                let counts = ["80562", "1000000"];
+                // Synthetic five- and seven-digit counts exercise the scrollbar gutter.
+                let counts = ["54321", "1000000"];
                 ui.set_folders(ModelRc::new(VecModel::from(
                     (0..if overflow { 80 } else { 2 })
                         .map(|index| FolderRow {

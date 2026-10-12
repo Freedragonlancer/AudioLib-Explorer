@@ -6,6 +6,7 @@ use audiolib_core::AudioFile;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -25,6 +26,8 @@ const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const WRITE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 /// The server's request body limit (`413 PAYLOAD_TOO_LARGE` above it).
 pub const MAX_WRITE_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Required on mutations: identifies the cached library to which record/session IDs belong.
+pub const LIBRARY_ID_HEADER: &str = "X-AudioLib-Library-Id";
 
 /// Reply to `PATCH /audio/{id}/metadata` and `POST /audio/{id}/plays` (§6.3): the record
 /// after the write and the library revision before/after it.
@@ -84,6 +87,10 @@ impl HealthInfo {
 pub struct RemoteLibrary {
     /// Stable identity generated when the server library was created.
     pub library_id: String,
+    /// The server atomically enforces `X-AudioLib-Library-Id` on every mutation.
+    /// Older servers omit this capability and remain readable; cached-ID writes are refused.
+    #[serde(default)]
+    pub identity_bound_writes: bool,
     #[serde(default)]
     pub schema_version: i64,
     /// Monotonic, conservative revision: any server write, scan, restore or external
@@ -196,6 +203,8 @@ pub struct RemoteClient {
     library: Timeouts,
     bulk: Timeouts,
     pub(crate) writes: Timeouts,
+    expected_library_id: Option<String>,
+    library_changed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for RemoteClient {
@@ -254,7 +263,13 @@ pub(crate) fn call_cancellable<T: Send + 'static>(
     let started = std::time::Instant::now();
     loop {
         match receiver.recv_timeout(WAIT_TICK) {
-            Ok(result) => return result,
+            Ok(result) => {
+                if cancel.load(Ordering::Acquire) {
+                    abort.abort();
+                    return Err(RemoteError::Cancelled);
+                }
+                return result;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if cancel.load(Ordering::Acquire) {
                     abort.abort();
@@ -267,6 +282,41 @@ pub(crate) fn call_cancellable<T: Send + 'static>(
             }
         }
     }
+}
+
+/// Keep the HTTP exchange and file writes on the caller while a scoped watcher shuts
+/// its sockets down on cancellation. The watcher always joins before returning, and
+/// the caller has already closed/removed any partial file when cancellation returns.
+fn cancellable_io<T>(cancel: &AtomicBool, exchange: impl FnOnce() -> Result<T>) -> Result<T> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(RemoteError::Cancelled);
+    }
+    std::thread::scope(|scope| {
+        let abort = crate::abort::Abort::default();
+        let handle = abort.clone();
+        let (done, waiting) = std::sync::mpsc::sync_channel::<()>(1);
+        std::thread::Builder::new()
+            .name("audiolib-snapshot-cancel".into())
+            .spawn_scoped(scope, move || {
+                loop {
+                    if cancel.load(Ordering::Acquire) {
+                        handle.abort();
+                        break;
+                    }
+                    match waiting.recv_timeout(WAIT_TICK) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        _ => break,
+                    }
+                }
+            })?;
+        let _transport_scope = abort.enter(None);
+        let result = exchange();
+        let _ = done.send(());
+        match result {
+            Err(_) if cancel.load(Ordering::Acquire) => Err(RemoteError::Cancelled),
+            other => other,
+        }
+    })
 }
 
 impl RemoteClient {
@@ -286,7 +336,77 @@ impl RemoteClient {
             library: agent(LIBRARY_RESPONSE_TIMEOUT, LIBRARY_BODY_TIMEOUT),
             bulk: agent(SNAPSHOT_RESPONSE_TIMEOUT, SNAPSHOT_BODY_TIMEOUT),
             writes: agent(WRITE_RESPONSE_TIMEOUT, JSON_BODY_TIMEOUT),
+            expected_library_id: None,
+            library_changed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Bind cached IDs to their library. A conflicting rebind permanently refuses writes;
+    /// create a fresh client after switching snapshots instead of replacing its identity.
+    pub(crate) fn bind_library(mut self, library_id: &str) -> Self {
+        match &self.expected_library_id {
+            Some(expected) if expected != library_id => {
+                self.library_changed.store(true, Ordering::Release);
+            }
+            None => {
+                self.expected_library_id = Some(library_id.to_owned());
+                // Unbound clones used for reads need not share a writer's invalidation.
+                self.library_changed = Arc::new(AtomicBool::new(false));
+            }
+            _ => {}
+        }
+        self
+    }
+
+    /// Bind management requests to the displayed snapshot's library identity. This
+    /// never replaces an existing binding; use a fresh client after switching libraries.
+    pub fn with_library_id(self, library_id: &str) -> Result<Self> {
+        if library_id.trim().is_empty() || ureq::http::HeaderValue::from_str(library_id).is_err() {
+            return Err(RemoteError::Validation(
+                "Invalid cached library identity".into(),
+            ));
+        }
+        let client = self.bind_library(library_id);
+        if client.library_changed.load(Ordering::Acquire) {
+            return Err(RemoteError::LibraryChanged(
+                "The client is bound to a different server library; sync and create a new client"
+                    .into(),
+            ));
+        }
+        Ok(client)
+    }
+
+    /// Check identity before every mutation, including on older servers that ignore the
+    /// identity header. A mismatch observed by any bound clone remains invalidated.
+    pub(crate) fn write_library_id(&self) -> Result<String> {
+        if self.library_changed.load(Ordering::Acquire) {
+            return Err(RemoteError::LibraryChanged(
+                "The server library changed; sync and reopen the library before writing".into(),
+            ));
+        }
+        let library = self.library()?;
+        if let Some(expected) = &self.expected_library_id
+            && (expected.trim().is_empty() || expected != &library.library_id)
+        {
+            self.library_changed.store(true, Ordering::Release);
+            return Err(RemoteError::LibraryChanged(
+                "The cached library no longer matches the server; sync before writing".into(),
+            ));
+        }
+        if self.library_changed.load(Ordering::Acquire) {
+            return Err(RemoteError::LibraryChanged(
+                "The server library changed; sync before writing".into(),
+            ));
+        }
+        if self.expected_library_id.is_some() && !library.identity_bound_writes {
+            return Err(RemoteError::Unsupported(
+                "The server cannot bind writes to the cached library identity; update the server before editing or managing this library".into(),
+            ));
+        }
+        Ok(self
+            .expected_library_id
+            .clone()
+            .unwrap_or(library.library_id))
     }
 
     /// API base URL, e.g. `http://host:8790/api/v1`.
@@ -341,6 +461,9 @@ impl RemoteClient {
                 .read_to_string()
                 .unwrap_or_default();
             let error = RemoteError::from_response(status, &body, context, retry_after);
+            if matches!(error, RemoteError::LibraryChanged(_)) {
+                self.library_changed.store(true, Ordering::Release);
+            }
             return Err(if self.token.is_empty() {
                 error.without_token()
             } else {
@@ -379,9 +502,13 @@ impl RemoteClient {
             None => None,
         };
         let authorization = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let library_id = self.write_library_id()?;
         let result = match method {
             "PATCH" => {
-                let mut request = self.writes.patch(&url);
+                let mut request = self
+                    .writes
+                    .patch(&url)
+                    .header(LIBRARY_ID_HEADER, &library_id);
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
@@ -390,7 +517,10 @@ impl RemoteClient {
                     .send(bytes.unwrap_or_default().as_slice())
             }
             _ => {
-                let mut request = self.writes.post(&url);
+                let mut request = self
+                    .writes
+                    .post(&url)
+                    .header(LIBRARY_ID_HEADER, &library_id);
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
@@ -610,6 +740,35 @@ impl RemoteClient {
         self.json("/health", false)
     }
 
+    /// A short JSON exchange cancellable during both response headers and body reads.
+    fn read_cancellable<T: Send + 'static>(
+        &self,
+        cancel: &AtomicBool,
+        read: impl FnOnce(Self) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let client = self.clone();
+        call_cancellable(
+            move |abort| {
+                let _scope = abort.enter(None);
+                read(client)
+            },
+            cancel,
+            &mut |_| {},
+        )
+    }
+
+    pub(crate) fn health_cancellable(&self, cancel: &AtomicBool) -> Result<HealthInfo> {
+        self.read_cancellable(cancel, |client| client.health())
+    }
+
+    pub(crate) fn library_cancellable(&self, cancel: &AtomicBool) -> Result<RemoteLibrary> {
+        self.read_cancellable(cancel, |client| client.library())
+    }
+
+    pub(crate) fn roots_cancellable(&self, cancel: &AtomicBool) -> Result<Vec<RemoteRoot>> {
+        self.read_cancellable(cancel, |client| client.roots())
+    }
+
     /// `GET /library`: identity, schema and revision of the server library.
     pub fn library(&self) -> Result<RemoteLibrary> {
         let library: RemoteLibrary = self.json_on(&self.library, "/library", true)?;
@@ -617,6 +776,13 @@ impl RemoteClient {
             return Err(RemoteError::Protocol(
                 "GET /library: library_id is missing".into(),
             ));
+        }
+        if self
+            .expected_library_id
+            .as_ref()
+            .is_some_and(|expected| expected != &library.library_id)
+        {
+            self.library_changed.store(true, Ordering::Release);
         }
         Ok(library)
     }
@@ -662,10 +828,22 @@ impl RemoteClient {
 
     /// Stream `GET /library/snapshot` into `destination` through a sibling `.part`
     /// file, then atomically rename. `progress(received, total)` runs per chunk and
-    /// `cancel` is checked between chunks; a failure never leaves a partial target.
+    /// `cancel` closes the request socket during headers and body reads; a failure
+    /// preserves an existing target and removes the partial file before returning.
     /// A `409 BUSY` (server snapshot slots exhausted) is returned as [`RemoteError::Busy`]
     /// so callers can retry with backoff.
     pub fn download_snapshot(
+        &self,
+        destination: &Path,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+        cancel: &AtomicBool,
+    ) -> Result<SnapshotMeta> {
+        cancellable_io(cancel, || {
+            self.download_snapshot_io(destination, progress, cancel)
+        })
+    }
+
+    fn download_snapshot_io(
         &self,
         destination: &Path,
         progress: &mut dyn FnMut(u64, Option<u64>),
@@ -745,7 +923,9 @@ impl RemoteClient {
                     return Err(RemoteError::Cancelled);
                 }
                 let read = reader.read(&mut buffer).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::Other && compressed {
+                    if cancel.load(Ordering::Acquire) {
+                        RemoteError::Cancelled
+                    } else if error.kind() == std::io::ErrorKind::Other && compressed {
                         RemoteError::Protocol(format!("snapshot: zstd: {error}"))
                     } else {
                         RemoteError::Unreachable(format!("snapshot: {error}"))
@@ -780,6 +960,9 @@ impl RemoteClient {
             }
             file.sync_all()?;
             drop(file);
+            if cancel.load(Ordering::Acquire) {
+                return Err(RemoteError::Cancelled);
+            }
             std::fs::rename(&partial, destination)?;
             Ok(received)
         })();
@@ -869,7 +1052,7 @@ mod tests {
                 ),
                 ("GET", "/api/v1/roots") => TestResponse::json(
                     200,
-                    r#"[{"name":"SFX","server_path":"/Volumes/Sound/SFX","webdav_url":"http://nas/dav/SFX","file_count":80586,"online":false,"status":"offline","status_message":"Root directory not found (volume not mounted?)","checked_at":1791460727},{"name":"Foley","path":"/Volumes/Sound/Foley","available":true}]"#,
+                    r#"[{"name":"SFX","server_path":"/Volumes/Sound/SFX","webdav_url":"http://nas/dav/SFX","file_count":25,"online":false,"status":"offline","status_message":"Root directory not found (volume not mounted?)","checked_at":1704067200},{"name":"Foley","path":"/Volumes/Sound/Foley","available":true}]"#,
                 ),
                 ("GET", "/api/v1/library/snapshot") => TestResponse::bytes(200, vec![7u8; 300_000])
                     .with_header("X-Library-Id", "lib-1")
@@ -942,8 +1125,8 @@ mod tests {
         assert_eq!(roots[0].webdav_url.as_deref(), Some("http://nas/dav/SFX"));
         assert_eq!(roots[1].server_path, "/Volumes/Sound/Foley");
         assert_eq!(roots[0].state(), crate::RootState::Offline);
-        assert_eq!(roots[0].file_count, Some(80586));
-        assert_eq!(roots[0].checked_at, Some(1791460727));
+        assert_eq!(roots[0].file_count, Some(25));
+        assert_eq!(roots[0].checked_at, Some(1704067200));
         assert!(
             roots[0]
                 .status_message
@@ -1038,6 +1221,109 @@ mod tests {
             .library()
             .unwrap_err();
         assert!(matches!(wrong, RemoteError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn snapshot_cancellation_interrupts_headers_and_stalled_body_and_preserves_target() {
+        for stalled_body in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("snapshot.db");
+            std::fs::write(&target, b"existing snapshot").unwrap();
+            let (requested, waiting) = std::sync::mpsc::sync_channel(1);
+            let server = TestServer::start(move |request| {
+                assert_eq!(request.path, "/api/v1/library/snapshot");
+                let _ = requested.send(());
+                let response = TestResponse::bytes(200, vec![7; 300_000]);
+                if stalled_body {
+                    response.slow(1024, Duration::from_secs(2))
+                } else {
+                    response.delayed(Duration::from_secs(2))
+                }
+            });
+            let client = RemoteClient::new(&server.url, "").unwrap();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            let cancelled = std::thread::spawn(move || {
+                waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                flag.store(true, Ordering::Release);
+                std::time::Instant::now()
+            });
+            let mut observed = Vec::new();
+            let result = client.download_snapshot(
+                &target,
+                &mut |received, total| observed.push((received, total)),
+                &cancel,
+            );
+            let returned = std::time::Instant::now();
+            let cancelled_at = cancelled.join().unwrap();
+            assert!(matches!(result, Err(RemoteError::Cancelled)), "{result:?}");
+            assert!(
+                returned.saturating_duration_since(cancelled_at) < Duration::from_secs(1),
+                "stalled_body={stalled_body}, cancellation elapsed={:?}",
+                returned.saturating_duration_since(cancelled_at)
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"existing snapshot");
+            assert_eq!(
+                std::fs::read_dir(directory.path()).unwrap().count(),
+                1,
+                "partial removed before return"
+            );
+            assert!(
+                observed
+                    .iter()
+                    .all(|(received, total)| *received < total.unwrap_or(u64::MAX))
+            );
+            if !stalled_body {
+                assert!(
+                    observed.is_empty(),
+                    "no byte progress before delayed headers"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_id_writes_require_the_servers_atomic_identity_capability() {
+        let mutations = Arc::new(std::sync::Mutex::new(0));
+        let server = {
+            let mutations = mutations.clone();
+            TestServer::start(move |request| {
+                if request.path == "/api/v1/library" {
+                    return TestResponse::json(
+                        200,
+                        r#"{"library_id":"old-server","schema_version":3,"revision":1}"#,
+                    );
+                }
+                *mutations.lock().unwrap() += 1;
+                TestResponse::json(200, "{}")
+            })
+        };
+        let client = RemoteClient::new(&server.url, "")
+            .unwrap()
+            .with_library_id("old-server")
+            .unwrap();
+        assert_eq!(
+            client.library().unwrap().library_id,
+            "old-server",
+            "older servers remain readable"
+        );
+        assert!(matches!(
+            client.record_play(3),
+            Err(RemoteError::Unsupported(_))
+        ));
+        assert!(matches!(
+            client.remove_audio(&[3]),
+            Err(RemoteError::Unsupported(_))
+        ));
+        assert!(matches!(
+            client.start_scan(&crate::ScanRequest {
+                root: "SFX".into(),
+                ..crate::ScanRequest::default()
+            }),
+            Err(RemoteError::Unsupported(_))
+        ));
+        assert_eq!(*mutations.lock().unwrap(), 0);
     }
 
     #[test]

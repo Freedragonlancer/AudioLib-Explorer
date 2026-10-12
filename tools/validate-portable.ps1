@@ -101,7 +101,7 @@ try {
         mode=$(if ($CleanCheckout) { 'clean-checkout-synthetic' } else { 'legacy-import' })
         checks=@('packaged EXE hashes match release',$(if ($CleanCheckout) { 'isolated empty first launch and synthetic WAV scan' } else { 'headless first launch imports 34 records' }),'packaged CLI statistics','Chinese UI snapshot and clean exit','invalid preferences return failure and synchronous diagnostic','Slint, SoundTouch and ASIO license materials','source unchanged')
         records=$expectedCount
-        screenshot=$snapshot
+        screenshot='.rust-validation/portable-smoke/chinese.png'
         original_database_unchanged=$(if ($CleanCheckout) { $null } else { $unchanged })
         source_unchanged=$unchanged
         python_runtime_required=$false

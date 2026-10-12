@@ -293,6 +293,12 @@ impl Controller {
 
     /// The menu gate of the server that is active now.
     fn current_server_manage(&self) -> ServerManage {
+        if let Err(note) = self.require_remote_write_identity() {
+            return ServerManage {
+                note,
+                ..Default::default()
+            };
+        }
         let url = self.config.lock().unwrap().data_source.server_url.clone();
         self.remote.lock().unwrap().manage.for_server(&url)
     }
@@ -439,12 +445,12 @@ mod tests {
     #[test]
     fn memory_keys_name_their_record() {
         assert_eq!(
-            stream_key_id("7b0db485-aaaa/42/1024/pcm-48000/server"),
+            stream_key_id("11111111-aaaa/42/1024/pcm-48000/server"),
             Some(42)
         );
         assert_eq!(stream_key_id("lib"), None);
         assert_eq!(
-            waveform_key_id("7b0db485-aaaa/12/42-0-18446744073709551615-1024-1"),
+            waveform_key_id("11111111-aaaa/12/42-0-18446744073709551615-1024-1"),
             Some(42)
         );
         assert_eq!(waveform_key_id("lib/12"), None);

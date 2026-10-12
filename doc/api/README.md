@@ -14,6 +14,8 @@
 
 - Base URL：`<服务器地址>/api/v1`。服务器地址由用户填写：局域网为 `http://<host>:8790`（服务端默认端口 `8790`，避开 Mac 上已占用的 3000/2222），外网为反代的公网地址，形如 `https://<域名>:<端口>`，可带路径前缀（如 `https://example.com/audiolib` → `https://example.com/audiolib/api/v1`）。服务端在 `/health` 的 `public_url` 里给出管理员配置的公网地址（§6.2）。
 - 编码：请求/响应 `application/json; charset=utf-8`，快照和音频流除外。
+- JSON 修改请求（含管理页 JSON API）必须声明 `Content-Type: application/json`（可带 `charset`）；缺少该头或使用 `text/plain` / 表单类型返回 415 `JSON_CONTENT_TYPE_REQUIRED`。无 JSON 正文的播放计数、扫描控制、根检查和 DELETE 不要求该头。
+- 浏览器发来的修改请求（包括正文被忽略的 `POST /audio/{id}/plays`、根检查）若带 `Origin`，必须与请求 `Host` 的主机、端口及实际监听器协议一致，否则返回 403 `ORIGIN_FORBIDDEN`。HTTP 监听器只接受同源 `http`，原生 TLS 监听器只接受同源 `https`；不信任转发头的协议声明，无法验证监听器、重复/无效 Origin 也拒绝。管理页沿用 403 `ADMIN_HEADER_REQUIRED`。无 Origin 的原生客户端照常使用。
 - 鉴权：按**鉴权模式**（§2.2）决定，默认 `external`：**局域网直连不需要 token，请求里带的 `Authorization` 头被完全忽略**（有效、已撤销或乱写的 token 都不会导致 401）；经反向代理或来自公网的请求需要 `Authorization: Bearer <token>`。`GET /health` 永远不需要 token。客户端可以始终发送已保存的 token，各种模式都兼容。
 - 时间：Unix 秒（与现有 envelope 的 `timestamp` 一致）；时长 `duration` 为秒（f64）。
 
@@ -36,6 +38,10 @@
 | 路由存在但方法不对（如 `POST /library`） | 405 | `METHOD_NOT_ALLOWED`（JSON 错误体，保留 `Allow` 头） |
 | 非流式端点超过 30 秒未完成 | 408 | `TIMEOUT` |
 | `Busy`（扫描/维护/快照并发占用；已有扫描时再 `POST /scans`，§6.6；扫描进行中或暂停中、或其他进程扫描/维护同一个库时 `POST /audio/remove`、`DELETE /folders/{id}`，§6.8） | 409 | `BUSY` |
+| 库修改请求缺少 `X-AudioLib-Library-Id` 或包含重复/空值；读取端点、管理页和根检查除外 | 409 | `LIBRARY_ID_REQUIRED` |
+| `X-AudioLib-Library-Id` 与处理该请求的库身份不一致 | 409 | `LIBRARY_CHANGED` |
+| 浏览器修改请求带非同源、无效或无法验证的 Origin | 403 | `ORIGIN_FORBIDDEN` |
+| JSON 修改请求的 Content-Type 缺少或不是 application/json | 415 | `JSON_CONTENT_TYPE_REQUIRED` |
 | `Cancelled` | 409 | `CANCELLED` |
 | 扫描会话当前状态不允许该操作（已结束、正在取消、已进入最终对账等，§6.6） | 409 | `SCAN_STATE` |
 | JSON 请求体超过 8 MiB（§6.3） | 413 | `PAYLOAD_TOO_LARGE` |
@@ -235,9 +241,9 @@ audiolib.example.com:8443 {
   | `idx_audio_visible_color` | `audio_files(user_color COLLATE NOCASE,id) WHERE missing=0 AND user_color IS NOT NULL` | 颜色筛选 |
 
 - **Schema v5 (ratings removed from the product).** v5 changes indexes plus one additive derived column (see *Derived column* below): it drops `idx_audio_visible_rating`, `idx_audio_visible_rating_desc` and `idx_user_rating`, and rebuilds `idx_audio_visible_favorite` as `audio_files(filename COLLATE NOCASE,id) WHERE missing=0 AND favorite=1` (no `user_rating`). The `user_rating` column and every stored rating stay untouched but are no longer read, written, filtered or sorted by any client or server code; `MIN_SNAPSHOT_SCHEMA_VERSION` stays **3** and the accepted snapshot range is **3..=5** (client SELECTs never reference `user_rating`). v3/v4 -> v5 runs in one transaction with idempotent statements; v3 libraries also get the v4 indexes. The API no longer has a `rating` field: `AudioFile`, `MetadataPatch`, the `rating_min` filter and the `rating` sort are gone; a legacy `rating` key in a PATCH/batch body is ignored (unknown keys are not rejected) and a legacy `rating` in a response is ignored by the client. Annotation import (CSV/JSONL) ignores a legacy `rating`; exports no longer write it.
-- **Derived column `audio_files.source_tags_text` (v5).** `TEXT NOT NULL DEFAULT ''`: the extracted tags (`audiolib_core::source_tags`) joined with `', '` and casefolded (`''` when none). It is never user-visible, never written to `user_tags`, and is maintained by the scanner UPSERT (`metadata_json` and the column are written in the same statement; the FTS text still comes from the same `metadata_json`). `tagged_only` = `user_tags` non-blank OR `source_tags_text<>''`; `tag_contains` = casefolded `user_tags` contains OR `source_tags_text` contains; neither parses `metadata_json` any more. Upgrade: `ALTER TABLE ADD COLUMN` (idempotent, also applied to a v5 library that predates the column) + index, then `open` backfills in id-ordered batches of 20 000 rows, one short transaction per batch, progress in `library_meta.source_tags_progress`, completion marker `library_meta.source_tags_rev = '1'` (re-entrant after a crash; no-op when marked). New libraries and full search rebuilds (`rebuild_search`, legacy import) populate the column and the marker directly. `SqliteProvider::ensure_source_tags_current()` re-runs the backfill explicitly. Until the marker is set (unfinished backfill) and for v3/v4 snapshots (no column), the client falls back to the JSON path (`audiolib_has_source_tags` / `audiolib_source_tags`), so results are identical, only slower. v5 snapshots carry the column and `idx_audio_visible_tagged_any`; client SELECTs never reference the column, so older v3/v4-era clients read v5 snapshots unchanged. Server operators: opening a v3/v4 library with the new binary adds the column and index, but the backfill is **not** quick on a real library. Measured on the server with a real 900k-row library: the tag backfill takes about 3 minutes (198 s) and the FTS rebuild (`ensure_source_search_current`) about 8.5 minutes (513 s); the earlier ~6 s figure came from a synthetic library with tiny `metadata_json` and does not apply. Run the upgrade by hand in a maintenance window: `AudioLibCli db rebuild-search` (backfill, then FTS rebuild, with progress on stderr and per-step timings in the JSON result; `--if-needed` skips an up-to-date library). Until it finishes, searches fall back to the slower JSON path. **Disk:** the FTS rebuild goes through the maintenance path, which leaves an `audiolib-rollback-*.db` in the library directory as large as the library itself; keep that much free space and delete the file after verifying the result. First-snapshot generation for such a library takes ~125 s on the server, which clients cover by retrying BUSY for up to 240 s (see `Rust_Remote_Mode.md`).
+- **Derived column `audio_files.source_tags_text` (v5).** `TEXT NOT NULL DEFAULT ''`: the extracted tags (`audiolib_core::source_tags`) joined with `', '` and casefolded (`''` when none). It is never user-visible, never written to `user_tags`, and is maintained by the scanner UPSERT (`metadata_json` and the column are written in the same statement; the FTS text still comes from the same `metadata_json`). `tagged_only` = `user_tags` non-blank OR `source_tags_text<>''`; `tag_contains` = casefolded `user_tags` contains OR `source_tags_text` contains; neither parses `metadata_json` any more. Upgrade: `ALTER TABLE ADD COLUMN` (idempotent, also applied to a v5 library that predates the column) + index, then `open` backfills in id-ordered batches of 20 000 rows, one short transaction per batch, progress in `library_meta.source_tags_progress`, completion marker `library_meta.source_tags_rev = '1'` (re-entrant after a crash; no-op when marked). New libraries and full search rebuilds (`rebuild_search`, legacy import) populate the column and the marker directly. `SqliteProvider::ensure_source_tags_current()` re-runs the backfill explicitly. Until the marker is set (unfinished backfill) and for v3/v4 snapshots (no column), the client falls back to the JSON path (`audiolib_has_source_tags` / `audiolib_source_tags`), so results are identical, only slower. v5 snapshots carry the column and `idx_audio_visible_tagged_any`; client SELECTs never reference the column, so older v3/v4-era clients read v5 snapshots unchanged. Server operators: opening a v3/v4 library with the new binary adds the column and index, but the backfill is **not** quick on a real library. An anonymized large-library measurement (record count and capacity omitted): the tag backfill takes about 3 minutes (198 s) and the FTS rebuild (`ensure_source_search_current`) about 8.5 minutes (513 s); the earlier ~6 s figure came from a synthetic library with tiny `metadata_json` and does not apply. Run the upgrade by hand in a maintenance window: `AudioLibCli db rebuild-search` (backfill, then FTS rebuild, with progress on stderr and per-step timings in the JSON result; `--if-needed` skips an up-to-date library). Until it finishes, searches fall back to the slower JSON path. **Disk:** the FTS rebuild goes through the maintenance path, which leaves an `audiolib-rollback-*.db` in the library directory as large as the library itself; keep that much free space and delete the file after verifying the result. First-snapshot generation for such a library takes ~125 s on the server, which clients cover by retrying BUSY for up to 240 s (see `Rust_Remote_Mode.md`).
 - **Legacy-client compatibility (server, v5).** The server accepts legacy rating request fields. Pre-v5 clients that require a `rating` response field must still be upgraded; request acceptance alone does not guarantee their response decoding. (1) `PATCH /audio/{id}/metadata` whose body carries `rating` and no non-null `tags`/`color`/`notes`/`favorite` is a **200 no-op**: it returns the current record (no `rating` key) with `revision_before == revision` (no write, no revision bump, `modified_at` untouched); a `rating` next to real fields is ignored and the real fields are applied as usual. Unknown ids stay 404, auth stays 401, wrongly typed fields stay 400, and a body without `rating` and without any field is unchanged. (2) `POST /audio/metadata/batch` whose `patch` is rating-only is a **200 no-op** (`report.updated = 0`, current `files`, `revision_before == revision`); `ids` are still validated (400 for empty/non-positive/over 10000) and unknown ids are still 404. (3) The server has no list/search endpoint (search runs on the client's snapshot), so `sort=rating` and `rating_min` query parameters are simply ignored by every route (unknown query keys are not rejected) and never produce 400; with `sort=rating` the client-side default order applies. These behaviours are implemented in the server route layer only and are covered by `legacy_*` tests in `server/audiolib-server/tests/api.rs`. New clients must not send `rating`.
-- **Extracted tags.** `tagged_only` and `tag_contains` also match the tags derived from `metadata_json` (`audiolib_core::source_tags`, never stored in `user_tags`), and the derived FTS text (`bwf_description_tokenized`) includes the `keywords/category/subcategory/vendor_category/cat_id` fields. A library built before this change must recompute that text once: `SqliteProvider::ensure_source_search_current()` does it (marker `library_meta.source_search_rev = '2'`, same transaction as the rebuild; rollback backup + integrity check via the maintenance path; `Busy` while a scan runs). `open` never calls it, so a server operator runs it by hand in a maintenance window with `AudioLibCli db rebuild-search` (it runs `ensure_source_tags_current()` and then `ensure_source_search_current()`, prints progress to stderr and reports `tags_seconds`, `rebuild_seconds`, `total_seconds`, `rollback_copies`; `--if-needed` is a no-op on a current library, without it a current library is rebuilt as a repair). Real 900k-row library: backfill about 3 minutes (198 s), FTS rebuild about 8.5 minutes (513 s); the rebuild leaves a library-sized `audiolib-rollback-*.db` in the library directory.
+- **Extracted tags.** `tagged_only` and `tag_contains` also match the tags derived from `metadata_json` (`audiolib_core::source_tags`, never stored in `user_tags`), and the derived FTS text (`bwf_description_tokenized`) includes the `keywords/category/subcategory/vendor_category/cat_id` fields. A library built before this change must recompute that text once: `SqliteProvider::ensure_source_search_current()` does it (marker `library_meta.source_search_rev = '2'`, same transaction as the rebuild; rollback backup + integrity check via the maintenance path; `Busy` while a scan runs). `open` never calls it, so a server operator runs it by hand in a maintenance window with `AudioLibCli db rebuild-search` (it runs `ensure_source_tags_current()` and then `ensure_source_search_current()`, prints progress to stderr and reports `tags_seconds`, `rebuild_seconds`, `total_seconds`, `rollback_copies`; `--if-needed` is a no-op on a current library, without it a current library is rebuilt as a repair). An anonymized large-library measurement: backfill about 3 minutes (198 s), FTS rebuild about 8.5 minutes (513 s); the rebuild leaves a library-sized `audiolib-rollback-*.db` in the library directory.
 
   `schema_v5` 测试（`crates/audiolib-db/tests/schema_v5.rs`）用 `EXPLAIN QUERY PLAN` 固定上述索引被命中且无临时排序。
 
@@ -294,6 +300,10 @@ audiolib.example.com:8443 {
 
 管理页 `/admin` 和 `/admin/api/...` 不在 `/api/v1` 下，只供局域网浏览器使用，见 §2.3。
 
+所有针对库记录或扫描会话的修改请求必须带 `X-AudioLib-Library-Id: <客户端已打开快照的 library_id>`：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`、`POST /audio/remove`、`DELETE /folders/{id}`、`POST /scans` 及其 pause/resume/cancel 控制。服务端校验后固定该请求使用的 AppState（库身份及 DataProvider），直到操作结束；不能只先读取当前库 ID 再向可能切换的提供者写入。缺失返回 409 `LIBRARY_ID_REQUIRED`，不匹配返回 409 `LIBRARY_CHANGED`，均不写入且不递增 revision。`POST /roots/{name}/check` 和 `/admin/api/...` 不要求该客户端头。
+
+`GET /library` 新增 `identity_bound_writes: true`，表示服务端强制上述库身份约束。旧服务器缺少该字段（视为 false）仍可同步、试听，但新版客户端拒绝向它写入；不能用写入前 GET /library 代替原子身份约束。收到上述 409 时客户端停止写入，保留未保存草稿，提示同步并切换到新库后再编辑。旧客户端缺少请求头时写入被拒绝，读取不受影响。
+
 - `/roots.file_count`：该根在库中对应文件夹的非 missing 文件总数（含子目录），只查库、不访问磁盘（根离线时照常返回）；根尚未扫描时为 `null`。`missing_count`、`last_scan`、`scanning` 见 §6.4。`webdav_url` 未配置时为 `null`（**WebDAV 功能未完善**，见 §7）。
 - 扫描进度 v1 用轮询（**建议每 500 ms** `GET /scans/{id}`，GUI 本来就会节流合并进度）；以后需要再加 SSE `GET /scans/{id}/events`。同一个库同时只允许一个扫描，冲突返回 409 `BUSY`。详见 §6.6。
 
@@ -320,7 +330,7 @@ audiolib.example.com:8443 {
 - 并发：同时进行中的快照响应（准备 + 发送）最多 2 个，超出返回 409 `BUSY`，客户端稍后重试。
 - **磁盘空间检查**：生成原始快照前按库文件大小（含 WAL）、生成 zstd 副本前按原始大小的 1/8（实测约 6–7 %）检查 `snapshot_dir`（默认系统临时目录）所在卷的剩余空间，另留 max(64 MiB, 2 %) 余量；不足时在写任何字节前返回 **507 `INSUFFICIENT_STORAGE`**（磁盘写到一半满了同样映射为 507）。无法取得剩余空间的平台（非 Unix）跳过检查。`backup_library`（桌面端备份）使用同一检查。
 - **准备在后台进行**：快照（及 zstd 副本）的准备在独立的后台线程里做，不绑定发起它的请求（每种编码单飞）。请求最多等 `snapshot_wait_secs`（服务端配置，1..=3600，默认 90，须小于客户端 120 秒的响应头超时）；超时返回 **503 `BUSY` + `Retry-After: 5`**，准备继续，客户端重试时加入同一次准备（或直接拿到已完成的快照），不会再拷贝一份。客户端对 503 `BUSY` 按 `Retry-After` 重试。
-- 实测（生产库 80 562 条，SQLite 文件 687 992 832 字节，Mac 内置盘）：首次生成 1.9 秒（旧实现每 256 页停 10 ms，需 11–12 秒），缓存命中首字节 < 1 ms；zstd 压缩 0.19 秒，**46 191 153 字节（原大小的 6.7%）**，客户端解压约 0.2 秒。对比：zstd -1 50.5 MB、-9 39.5 MB（0.6 秒）、-19 35.2 MB（21 秒）；gzip -6 54.9 MB（4 秒）。准备期间 `/library` 照常（实测 36 ms），写入不被阻塞。磁盘占用：缓存的原始 + 压缩版各一份（约 690 MB + 46 MB），revision 切换时短暂可能多一份。
+- 匿名实际库的历史实测（记录数、容量及存储位置不公开）：首次生成 1.9 秒（旧实现每 256 页停 10 ms，需 11–12 秒），缓存命中首字节 < 1 ms；zstd 压缩 0.19 秒，压缩后为原大小的 6.7%，客户端解压约 0.2 秒。压缩耗时对比：zstd -9 为 0.6 秒、-19 为 21 秒，gzip -6 为 4 秒。准备期间 `/library` 照常（实测 36 ms），写入不被阻塞。磁盘占用：缓存的原始 + 压缩版各一份，revision 切换时短暂可能多一份。这些时间仅描述该次测量，不保证其他库的准备时间。
 - 进程崩溃/被杀后遗留的 `audiolib-snapshot-*` 临时目录在服务端下次启动时清理（配置了 `snapshot_dir` 时清理其中所有此类目录；用系统临时目录时只清理 24 小时以前的，避免误删其他实例正在用的）。因此**不要让两个服务端实例共用同一个 `snapshot_dir`**。
 
 ### 6.2 启动状态与 `/health`
@@ -408,7 +418,7 @@ audiolib.example.com:8443 {
 - 文件打开失败时，服务端会顺带检查该根：根本身不可达则标记离线并返回 503 `ROOT_OFFLINE`；根可达但文件访问遇到超时/连接断开/网络文件句柄失效（`ETIMEDOUT`、`ENOTCONN`、`ECONNRESET`、`ESTALE` 等）时同样返回 503 `ROOT_OFFLINE`（`Root is not answering reliably: …`，可重试，不改根状态）；根可达且文件不存在才按文件缺失返回 404，其余 I/O 错误（如 `EIO`）为 500 `IO`。**根离线或变慢都不会把库里的文件标为 missing**。
 - 扫描器遵守同样的规则：根目录不存在/不可读时扫描直接失败，不改任何记录；扫描途中目录读取出错（例如卷断开）时不做 missing 对账；全量扫描遇到**完全为空**的根目录（只有 `.DS_Store` 等隐藏文件也算空；典型的未挂载挂载点）也不做 missing 对账（代价：用户真的删光了根目录下所有文件和文件夹时，记录不会被标 missing，直到根目录里重新有内容后再全量扫描；这种情况下流端点对这些文件返回 404）；慢只会让扫描变慢，扫描本身没有超时。
 
-`/roots` 的扫描相关字段（只查库，不访问根目录；用 `missing = 1` 部分索引和很小的 `scan_sessions` 表，生产库 80 562 条上实测：局域网 `GET /roots` 整个请求中位数约 1 ms，本机回环约 0.4 ms，2026-10-09）：
+`/roots` 的扫描相关字段（只查库，不访问根目录；用 `missing = 1` 部分索引和很小的 `scan_sessions` 表，匿名实际库上实测：局域网 `GET /roots` 整个请求中位数约 1 ms，本机回环约 0.4 ms，2026-10-09）：
 
 | 字段 | 含义 |
 |---|---|
@@ -416,22 +426,22 @@ audiolib.example.com:8443 {
 | `last_scan` | 该根**或其下子目录**最新的一次扫描会话（库里的扫描历史，含其他进程做的扫描），没有时为 `null`。嵌套配置的根（一个根在另一个根下面）只看扫描路径在自己之内的会话，上层根的扫描不算。字段：`id`（会话 id，可用于 `GET /scans/{id}`）、`subpath`（相对根，`""` = 整个根）、`mode`（`incremental` \| `full`）、`state`（库里记录的 `running` \| `completed` \| `cancelled` \| `failed`；`running` 但本服务端没在扫描 = 中断或另一进程在扫描，见 §6.6）、`started_at` / `finished_at`（Unix 秒，未结束为 `null`）、`scanned`、`added`、`updated`、`removed`、`unchanged`、`errors` |
 | `scanning` | 本服务端正在扫描（含暂停中）该根或其下子目录时为 `true`；其他进程的扫描不反映在这里 |
 
-示例：
+示例（合成数据）：
 
 ```json
 [{ "name": "SFX_Main", "server_path": "/srv/audiolib/music/SFX_Main", "webdav_url": null,
-   "file_count": 80562, "missing_count": 0, "online": true, "status": "online", "status_message": null,
-   "checked_at": 1791460727, "scanning": false,
+   "file_count": 12, "missing_count": 0, "online": true, "status": "online", "status_message": null,
+   "checked_at": 1700000001, "scanning": false,
    "last_scan": { "id": 2, "subpath": "", "mode": "incremental", "state": "completed",
-                  "started_at": 1791460931, "finished_at": 1791462032, "scanned": 80586, "added": 79362,
-                  "updated": 0, "removed": 0, "unchanged": 1200, "errors": 24 } }]
+                  "started_at": 1700000000, "finished_at": 1700000001, "scanned": 12, "added": 2,
+                  "updated": 0, "removed": 0, "unchanged": 10, "errors": 0 } }]
 ```
 
 ### 6.5 增量同步 `GET /library/changes`（⚠️ 草案，待客户端评审，未实现）
 
 > **DRAFT / 草案**：本节只是提案，服务端尚未实现，字段和错误码都可能改。客户端评审通过后再实现。在此之前客户端继续用 §4 的“revision 变化 → 下载快照”（快照现已按 revision 缓存并支持 zstd，§6.1）。
 
-目的：`revision` 变化后只拉取变化的记录，而不是重新下载整个快照（生产库快照 688 MB / zstd 46 MB）。
+目的：`revision` 变化后只拉取变化的记录，而不是重新下载整个快照。
 
 **请求**：`GET /library/changes?since=<revision>&limit=<1..=2000，默认 500>[&cursor=<不透明字符串>]`
 
@@ -441,7 +451,7 @@ audiolib.example.com:8443 {
 
 ```json
 {
-  "library_id": "7b0db485-…",
+  "library_id": "00000000-0000-4000-8000-000000000001",
   "since": 120,
   "until": 135,
   "changes": [
@@ -579,7 +589,7 @@ audiolib.example.com:8443 {
 - **扫描期间不可用**：本服务端有扫描在运行或暂停中（§6.6），或另一个进程（CLI、本地模式桌面端）正在扫描/维护同一个库 → 409 `BUSY`（`message` 含会话 id），即使请求的 id 都不存在也是 409。客户端稍后重试，或先取消/等扫描结束。
 - 与本地模式 `remove_audio` / `remove_folder` 相同，被移除记录的播放列表条目、工程引用、波形缓存行和**播放历史**也一并删除（`/history/plays` 里不再出现）。扫描历史不受影响。
 - **revision**：与 metadata 写入相同的临界区（§4）；真正删除了东西时 `revision = revision_before + 1`，按 revision 缓存的快照随之失效；什么都没删时不写库、`revision == revision_before`。
-- 受 30 秒请求超时约束（实测一次删除 19,600 条记录、101 个文件夹约 0.5 秒）。
+- 受 30 秒请求超时约束（实测一次较大批量删除约 0.5 秒，生产记录量已从公开记录移除）。
 
 #### `POST /audio/remove`
 
@@ -671,7 +681,7 @@ audiolib.example.com:8443 {
   - `bytes=a-b` → 206，`b` 超出文件末尾时截到最后一个字节；`bytes=a-` → 206，从 `a` 到末尾；`bytes=-n` → 206，最后 `n` 个字节（`n` 大于文件长度时为整个文件）。
   - 起点 ≥ 文件长度、`bytes=-0`、或文件长度为 0 → **416** `RANGE_NOT_SATISFIABLE`，附 `Content-Range: bytes */<文件长度>`，JSON 错误体。
   - **多区间**（如 `bytes=0-1,5-6`）不实现 `multipart/byteranges`，直接返回 **200 + 整个文件**；单位不是 `bytes` 或语法非法（如 `bytes=9-2`）的 `Range` 按 RFC 9110 忽略，同样返回 200 整个文件。客户端应以状态码（206 还是 200）判断收到的是区间还是全文件。
-- **`ETag`**：强校验器，由服务端打开的那个文件的大小 + 修改时间计算，Unix（含 macOS 服务端）上另含 inode 和 ctime（同大小同 mtime 的替换文件也会得到新 ETag）；客户端把它当作不透明的带引号字符串。库记录里没有“提取版本”字段，所以 v1 不含提取版本（以后加入时 ETag 会整体变化，客户端无需改动）。不发送 `Last-Modified`。
+- **`ETag`**：强校验器，由服务端打开的那个文件的大小 + 修改时间计算，Unix（含 macOS 服务端）上另含 inode 和 ctime（同大小同 mtime 的替换文件也会得到新 ETag），Windows 另含创建时间；客户端把它当作不透明的带引号字符串。库记录里没有“提取版本”字段，所以 v1 不含提取版本（以后加入时 ETag 会整体变化，客户端无需改动）。不发送 `Last-Modified`。
   - `If-None-Match`：任一标签（弱比较，或 `*`）匹配 → **304**，无响应体。
   - `If-Range`：只接受与当前 `ETag` 完全相同的强 ETag，此时按 `Range` 返回 206；不匹配、弱 ETag（`W/"…"`）或 HTTP 日期 → 忽略 `Range`，返回 **200 + 整个文件**。
 - **只提供配置的根下的文件**：服务端把库里的 `file_path` 规范化（解析符号链接和 `..`），只有落在某个 `[[roots]] server_path`（同样规范化，按路径分量比较，每次请求时重新解析，因此启动后才挂载的卷也有效）之下的普通文件才会返回；Unix 上打开后还核对打开的文件与检查过的路径是同一个文件（设备号 + inode），不一致也拒绝。根之外的路径返回与文件缺失**完全相同**的 404，不泄露根之外的文件是否存在。
@@ -695,7 +705,7 @@ audiolib.example.com:8443 {
 
 ### 8.1 试听预览 `GET /audio/{id}/preview`（已实现）
 
-用途：低带宽（目标 5 Mbps）下流畅试听。生产库主要是 96 kHz/24-bit WAV（立体声约 4.6 Mbps），预览把它变小；原始文件仍走 `/stream`（拖出、导出、精确播放）。按 §2.2 鉴权；支持 `HEAD`（只返回响应头）。两种编码：
+用途：低带宽（目标 5 Mbps）下流畅试听。例如 96 kHz/24-bit 的立体声 PCM WAV 约需 4.6 Mbps，预览可降低传输量；原始文件仍走 `/stream`（拖出、导出、精确播放）。按 §2.2 鉴权；支持 `HEAD`（只返回响应头）。两种编码：
 
 | `codec` | 实现 | 长度 / Range | 定位方式 | 适用 |
 |---|---|---|---|---|
@@ -787,9 +797,9 @@ audiolib.example.com:8443 {
 ```
 
   `frames` = 覆盖的帧数（`end_frame − start_frame`）；`peaks[channel][column]`，每列 `min`/`max`/`rms`（−1..1）、`color`（`[r,g,b]` 或 `null`）、`dominant_hz`、`tonality`，字段含义与桌面端相同。
-- **缓存**：结果存在服务端缓存目录（默认库文件旁的 `waveforms/`，配置 `waveform_cache_dir`；上限 `waveform_cache_mb`，默认 1024 MiB，超出按最近使用淘汰）。缓存键 = 源文件的流 `ETag`（§8：大小、mtime、inode、ctime）+ `CACHE_VERSION` 4 + `buckets` + `colors` + `start_frame` + `end_frame`。命中时只 `stat` 源文件（用于 `ETag`，与 `/stream` 的打开检查相同），**不读音频数据**；文件变化后自动重新计算。
-- **`ETag`**：`W/"wf4-<16 位十六进制>"`，由上面的缓存键计算，任一参数或文件版本变化都会变化；zstd 响应的 `ETag` 另带 `-zstd` 后缀。`If-None-Match` 匹配 → 304（带 `ETag`，无响应体）。`Cache-Control: private, no-cache`。
-- **压缩**：`Accept-Encoding` 含 `zstd`（q ≠ 0）时返回 `Content-Encoding: zstd`（压缩副本同样缓存），`Content-Length` 为压缩后长度。所有响应都带 `Vary: Accept-Encoding`。实测（60 s 立体声 48 kHz/24-bit，Mac 内置盘，release）：`buckets=1024&colors=1` 计算 140 ms，JSON 239 KiB → zstd 24 KiB；`colors=0` 15 ms，199 KiB → 15 KiB；`buckets=8192&colors=1` 1.9 MiB → 192 KiB。计算时间主要是读取 + 解码，NAS 上的长文件按其读取速度计。
+- **缓存**：结果存在服务端缓存目录（默认库文件旁的 `waveforms/`，配置 `waveform_cache_dir`；上限 `waveform_cache_mb`，默认 1024 MiB，超出按最近使用淘汰）。缓存键 = `library_id` + 记录 ID + 完整 canonical 源路径 + 源文件流 `ETag`（§8：大小、mtime；Unix 加 inode、ctime，Windows 加创建时间）+ 服务端键版本 2 + 算法版本 4 + `buckets` + `colors` + `start_frame` + `end_frame`。两份大小和 mtime 相同的不同 WAV 不会复用缓存；旧键版本不再命中。命中时只读取源文件 Metadata（与 `/stream` 的打开检查相同），**不读音频数据**；文件变化后自动重新计算。
+- **`ETag`**：`W/"wf4-k2-<16 位十六进制>"`，由上面的缓存键计算，任一参数、库/源身份或文件版本变化都会变化；zstd 响应的 `ETag` 另带 `-zstd` 后缀。`If-None-Match` 匹配 → 304（带 `ETag`，无响应体）。`Cache-Control: private, no-cache`。
+- **压缩**：`Accept-Encoding` 含 `zstd`（q ≠ 0）时返回 `Content-Encoding: zstd`（压缩副本同样缓存），`Content-Length` 为压缩后长度。所有响应都带 `Vary: Accept-Encoding`。实测（60 s 立体声 48 kHz/24-bit，本地存储，release）：`buckets=1024&colors=1` 计算 140 ms，JSON 239 KiB → zstd 24 KiB；`colors=0` 15 ms，199 KiB → 15 KiB；`buckets=8192&colors=1` 1.9 MiB → 192 KiB。计算时间主要是读取 + 解码，NAS 上的长文件按其读取速度计。
 - **并发**：同时最多 `max_waveforms` 个（默认 4）请求在打开/计算，其余**排队等待**（不返回 503）；客户端断开时立即让出名额，正在进行的解码在下一块（4096 帧）处取消，不写缓存。
 - **根离线 / 慢速磁盘**：与 `/stream` 完全相同（§6.4）：根缓存为离线时先即时重查（约 2 秒），仍离线返回 503 `ROOT_OFFLINE` + `Retry-After: 5`；没有 30 秒时间上限，NAS 唤醒期间一直等待；打开超过 10 秒记 WARN。解码途中网络卷断开（超时类错误）同样返回 `ROOT_OFFLINE`。
 - 其他错误：无此记录 / 文件缺失 / 不在根下 → 404 `NOT_FOUND`（同 §8）；无法解码 → 500 `AUDIO`；非整数 id 400 `VALIDATION`。

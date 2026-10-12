@@ -543,6 +543,16 @@ mod tests {
         // The check finally answers: online again without any request.
         release(1);
         wait_for(&monitor, RootState::Online);
+        // Online was already cached by record() above. Wait for the released check
+        // to finish so its late success cannot overwrite the next simulated failure.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while monitor.slots[0].lock().finished < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "Released root check did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         // A failed stream open marks it offline, a successful one brings it back.
         monitor.record(
             0,

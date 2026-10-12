@@ -154,15 +154,30 @@ async fn request(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    if let Ok(state) = service.app_state() {
+        request = request.header(
+            "x-audiolib-library-id",
+            state.revision().unwrap().library_id,
+        );
+    }
+    if body.is_some()
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        request = request.header("content-type", "application/json");
+    }
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
     let mut request = request
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .unwrap();
-    if let Some(connection) = connection {
-        request.extensions_mut().insert(connection);
-    }
+    let connection = connection.unwrap_or(ConnectionInfo {
+        peer: "127.0.0.1:1".parse().unwrap(),
+        listener: Listener::Http,
+    });
+    request.extensions_mut().insert(connection);
     router(service).oneshot(request).await.unwrap()
 }
 

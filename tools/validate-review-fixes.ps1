@@ -1,6 +1,6 @@
 # tools/validate-review-fixes.ps1
 [CmdletBinding()]
-param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release')
+param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release', [switch]$CleanCheckout)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -13,7 +13,7 @@ $checks = [Collections.Generic.List[string]]::new()
 $ownedProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 $savedDataRoot = $env:AUDIOLIB_DATA_DIR
 $sourceDatabase = Join-Path $taskRoot 'data/audiolib.db'
-$sourceHash = (Get-FileHash -LiteralPath $sourceDatabase -Algorithm SHA256).Hash
+$sourceHash = if (!$CleanCheckout) { (Get-FileHash -LiteralPath $sourceDatabase -Algorithm SHA256).Hash } else { $null }
 function New-ReviewWav([string]$Path, [string]$Description = '') {
     $stream = [IO.MemoryStream]::new()
     $writer = [IO.BinaryWriter]::new($stream)
@@ -83,11 +83,14 @@ try {
     New-Item -ItemType Directory -Force -Path $env:AUDIOLIB_DATA_DIR | Out-Null
     Copy-Item -LiteralPath (Join-Path $taskRoot 'config/rust_settings.example.json') -Destination (Join-Path $env:AUDIOLIB_DATA_DIR 'settings.json')
     $null = Invoke-ReviewLibrary @('db','create',$database)
-    $legacyCopy = Join-Path $testRoot 'legacy-source.db'
-    Copy-Item -LiteralPath $sourceDatabase -Destination $legacyCopy
-    $legacyCopyHash = (Get-FileHash -LiteralPath $legacyCopy -Algorithm SHA256).Hash
-    Assert-RejectedReview @('--database',$legacyCopy,'stats')
-    if ((Get-FileHash -LiteralPath $legacyCopy -Algorithm SHA256).Hash -ne $legacyCopyHash) { throw 'Ordinary CLI statistics migrated an existing legacy source in place.' }
+    if (!$CleanCheckout) {
+        $legacyCopy = Join-Path $testRoot 'legacy-source.db'
+        Copy-Item -LiteralPath $sourceDatabase -Destination $legacyCopy
+        $legacyCopyHash = (Get-FileHash -LiteralPath $legacyCopy -Algorithm SHA256).Hash
+        Assert-RejectedReview @('--database',$legacyCopy,'stats')
+        if ((Get-FileHash -LiteralPath $legacyCopy -Algorithm SHA256).Hash -ne $legacyCopyHash) { throw 'Ordinary CLI statistics migrated an existing legacy source in place.' }
+        $checks.Add('ordinary CLI rejects existing legacy database without modifying it')
+    }
     $absentExplicit = Join-Path $testRoot 'explicit-absent.db'
     Assert-RejectedReview @('--database',$absentExplicit,'stats')
     if (Test-Path -LiteralPath $absentExplicit) { throw 'Ordinary CLI statistics created an explicit missing database.' }
@@ -100,7 +103,7 @@ try {
         Assert-RejectedReview @('stats')
         if (Test-Path -LiteralPath $settings.active_database) { throw 'Ordinary CLI statistics recreated a missing selected database.' }
     } finally { [IO.File]::WriteAllBytes($settingsPath,$originalSettings) }
-    $checks.Add('ordinary CLI rejects legacy and explicit/selected missing databases without modifying or creating them')
+    $checks.Add('ordinary CLI rejects explicit/selected missing databases without creating them')
     $parent = Join-Path $testRoot 'parent'
     $child = Join-Path $parent 'child'
     New-Item -ItemType Directory -Force -Path $child | Out-Null
@@ -207,8 +210,14 @@ try {
         if ($LASTEXITCODE -ne 0 -or !$repeat.success) { throw 'Initialized CLI library still depends on old YAML validity.' }
     } finally { Pop-Location }
     $checks.Add('first CLI launch persists inherited preferences and later ignores legacy YAML')
-    if ((Get-FileHash -LiteralPath $sourceDatabase -Algorithm SHA256).Hash -ne $sourceHash) { throw 'Original database changed during review regression.' }
-    $report = [PSCustomObject]@{ success=$true; checks=$checks; overlapping_fixture_records=$fixtureCount; source_database_unchanged=$true; audio_output_opened=$false }
+    if (!$CleanCheckout -and (Get-FileHash -LiteralPath $sourceDatabase -Algorithm SHA256).Hash -ne $sourceHash) { throw 'Original database changed during review regression.' }
+    $report = [PSCustomObject]@{
+        success=$true; mode=$(if ($CleanCheckout) { 'clean-checkout-synthetic' } else { 'legacy-and-synthetic' })
+        checks=$checks; overlapping_fixture_records=$fixtureCount
+        source_database_unchanged=$(if ($CleanCheckout) { $null } else { $true })
+        skipped=$(if ($CleanCheckout) { @('real legacy database read-only rejection and unchanged hash (excluded in clean-checkout mode)') } else { @() })
+        audio_output_opened=$false
+    }
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $taskRoot 'doc/Rust_Review_Regression.json') -Encoding UTF8
     $report | ConvertTo-Json -Depth 5
 } finally {

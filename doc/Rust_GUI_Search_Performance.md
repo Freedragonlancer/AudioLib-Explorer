@@ -15,7 +15,7 @@ The primary target remains **P95 latency <500ms for 1M+ records**. This change a
 
 ## Reproduction and measurement boundaries
 
-Measurements use Windows x64, AMD Ryzen 7 9800X3D (8 cores / 16 logical CPUs), Rust 1.97.1 and version 0.3.7 with the verified ASIO SDK. The database is the existing isolated 1,000,000-record synthetic benchmark, with 200-record pages, warm/uncontrolled OS caches, 64 MiB SQLite reader caches and a 1 GiB mmap limit. This is not the user's 800,000-record production snapshot.
+Measurements use Windows x64, AMD Ryzen 7 9800X3D (8 cores / 16 logical CPUs), Rust 1.97.1 and version 0.3.7 with the verified ASIO SDK. The database is the existing isolated 1,000,000-record synthetic benchmark, with 200-record pages, warm/uncontrolled OS caches, 64 MiB SQLite reader caches and a 1 GiB mmap limit. These are synthetic measurements; no production snapshot was used.
 
 The GUI benchmark runs real controller workers and the Slint testing event loop. It measures query publication, cancellation followed by a replacement query, and 20 expansion/collapse publications with an independently constructed 20,001-directory presentation model. It also measures the old full-library statistics call that was removed from tree refresh. Testing-backend timing excludes physical display/pointer latency and is not a manual acceptance measurement. The directory model is synthetic; it does not claim that the database contains 20,001 populated directories.
 
@@ -33,7 +33,7 @@ The GUI regression covers cross-folder navigation, zero-hit breadcrumbs, rapid q
 
 The external-write GUI regression failed before the fix: after another provider cleared the last matching favorite, result rows were empty but the tree retained `sounds: 1` / `wind: 1` until timeout. The regression now requires both to become empty without F5. Additional checks cover invalid duration / overlength query cancelling pending work, stale statistics and errors, missing / changed cache revisions, and the observer seeing own writes, external writes, read-only snapshot changes, search-index maintenance and restore. All fixtures are isolated temporary databases.
 
-Production acceptance remains pending: configure the user's server, then test `gears` against the actual approximately 800,000-record / 10 TB library. The measurements below predate these review corrections and are not production results.
+Production acceptance remains pending: configure the server, then test search against its actual library. The measurements below predate these review corrections and are not production results.
 
 ## Measured results
 
@@ -46,6 +46,6 @@ Raw results retain all 20 directory/statistics samples and the provider benchmar
 | Replace an in-flight broad query with a no-hit keyword, one run | 15.748 ms |
 | Broad `metal` query including directory publication, one run | 687.639 ms |
 
-The statistics and directory measurements are different workloads: they show the cost removed and the new presentation cost, not a controlled before/after GUI speedup ratio. Broad first-query ranking and directory aggregation remain material costs; the complete `metal` interaction still exceeds 500 ms. Result-page latency is recorded separately in the JSON. No production 800,000-record snapshot was available for this run.
+The statistics and directory measurements are different workloads: they show the cost removed and the new presentation cost, not a controlled before/after GUI speedup ratio. Broad first-query ranking and directory aggregation remain material costs; the complete `metal` interaction still exceeds 500 ms. Result-page latency is recorded separately in the JSON. No production snapshot was available for this run.
 
 Formatting, default and ASIO Clippy/workspace tests, the explicit optimized GUI benchmark, and release runtime/review-fixes/library-management regressions passed. Packaging and the fixed local installation are verified separately with `validate-portable.ps1`; both installed EXEs must match the validated portable payload.

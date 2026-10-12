@@ -1030,7 +1030,7 @@ mod tests {
         }))
     }
 
-    const OFFLINE_BODY: &str = r#"{"error_code":"UNAVAILABLE","message":"Library root \"1_Boom\" is offline: Root directory not found (volume not mounted?)"}"#;
+    const OFFLINE_BODY: &str = r#"{"error_code":"UNAVAILABLE","message":"Library root \"SFX\" is offline: Root directory not found (volume not mounted?)"}"#;
 
     #[test]
     fn an_offline_root_reports_the_server_reason_or_uses_an_earlier_download() {
@@ -1057,7 +1057,7 @@ mod tests {
                 message,
                 retry_after,
             }) => {
-                assert!(message.contains("\"1_Boom\" is offline"), "{message}");
+                assert!(message.contains("\"SFX\" is offline"), "{message}");
                 assert_eq!(retry_after, Some(5));
             }
             other => panic!("{other:?}"),

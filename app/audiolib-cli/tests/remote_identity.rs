@@ -155,10 +155,11 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
             match (request.method.as_str(), request.path.as_str()) {
                 ("GET", "/api/v1/library") => TestResponse::json(
                     200,
-                    &json!({"library_id": LIBRARY, "schema_version":5,"revision":*revision})
+                    &json!({"library_id": LIBRARY, "identity_bound_writes":true, "schema_version":5,"revision":*revision})
                         .to_string(),
                 ),
                 ("PATCH", "/api/v1/audio/7/metadata") | ("POST", "/api/v1/audio/7/plays") => {
+                    assert_eq!(request.header(audiolib_remote::LIBRARY_ID_HEADER), Some(LIBRARY));
                     if request.method == "PATCH" {
                         let patch: Value = serde_json::from_slice(&request.body).unwrap();
                         assert_eq!(patch["notes"], "saved notes");
@@ -207,18 +208,72 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
     assert_eq!(file.play_count, 1);
     let requests = requests.lock().unwrap();
     assert_eq!(requests[0], ("GET".into(), "/api/v1/library".into()));
+    let mutations = requests
+        .iter()
+        .filter(|(method, _)| matches!(method.as_str(), "PATCH" | "POST"))
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
-        requests[1],
-        ("PATCH".into(), "/api/v1/audio/7/metadata".into())
+        mutations,
+        [
+            ("PATCH".into(), "/api/v1/audio/7/metadata".into()),
+            ("POST".into(), "/api/v1/audio/7/plays".into()),
+        ]
     );
-    assert_eq!(requests[2], ("GET".into(), "/api/v1/library".into()));
-    assert_eq!(requests[3], ("POST".into(), "/api/v1/audio/7/plays".into()));
-    assert_eq!(requests[4], ("GET".into(), "/api/v1/library".into()));
     assert!(
         requests
             .iter()
             .any(|(method, path)| method == "GET" && path.ends_with("?download=1"))
     );
+}
+
+#[test]
+fn legacy_server_remains_readable_but_cli_never_sends_cached_id_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let server = {
+        let requests = requests.clone();
+        TestServer::start(move |request| {
+            requests
+                .lock()
+                .unwrap()
+                .push((request.method.clone(), request.path.clone()));
+            if request.method == "GET" && request.path == "/api/v1/library" {
+                TestResponse::json(
+                    200,
+                    &json!({"library_id":LIBRARY,"schema_version":5,"revision":1}).to_string(),
+                )
+            } else {
+                TestResponse::json(500, "{}")
+            }
+        })
+    };
+    let cache = prepare_cache(directory.path(), &server.url, &server.url);
+    let state = cache.active().unwrap();
+    let before = std::fs::read(cache.database_path(&state)).unwrap();
+    for args in [
+        vec!["remote", "edit", "7", "--notes", "saved notes"],
+        vec!["remote", "plays", "7"],
+    ] {
+        let reply = cli(directory.path(), &args);
+        assert_eq!(reply["success"], false, "{reply}");
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("update the server"),
+            "{reply}"
+        );
+    }
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, path)| method == "GET" && path == "/api/v1/library")
+    );
+    assert_eq!(cache.active().unwrap(), state);
+    assert_eq!(std::fs::read(cache.database_path(&state)).unwrap(), before);
 }
 
 #[test]

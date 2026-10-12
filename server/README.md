@@ -159,8 +159,9 @@ treated as external. Full checklist and nginx/Caddy examples: API document §2.4
   full): wait and retry after `Retry-After`.
 - **503 `UNAVAILABLE` right after start:** the library is still opening (`/health` says
   `starting`). A v3/v4 → v5 upgrade runs schema migration plus extracted-tag backfill on
-  open (measured 2026-10-11 on a ~900k-row library copy: about 198 s, database grew about
-  166 MB; a 3,009-row library about 7 s). The full-text index is **not** rebuilt
+  open (anonymized measurements from 2026-10-11: about 198 s for a large library copy
+  and about 7 s for a smaller copy; record counts and database capacity are omitted).
+  The full-text index is **not** rebuilt
   automatically — afterward run the CLI `AudioLibCli db rebuild-search` by hand (about
   513 s more on that large copy); reserve free disk about the size of the library for the
   rollback copy left during that step — see

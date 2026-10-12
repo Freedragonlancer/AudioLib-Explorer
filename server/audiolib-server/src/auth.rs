@@ -206,6 +206,64 @@ pub fn classify(headers: &HeaderMap, connection: Option<&ConnectionInfo>) -> Req
     }
 }
 
+/// Whether a browser request's Origin exactly names this listener's scheme and Host
+/// authority. Native requests without Origin pass. Forwarding headers are untrusted
+/// for this check, so a proxy cannot claim that an HTTP connection used TLS.
+pub(crate) fn same_request_origin(request: &axum::extract::Request) -> bool {
+    let mut origins = request.headers().get_all(header::ORIGIN).iter();
+    let Some(origin) = origins.next() else {
+        return true;
+    };
+    if origins.next().is_some() {
+        return false;
+    }
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<axum::http::Uri>().ok())
+    else {
+        return false;
+    };
+    let scheme = match request.extensions().get::<ConnectionInfo>() {
+        Some(info) if info.listener == Listener::Tls => "https",
+        Some(_) => "http",
+        None => return false,
+    };
+    if origin.scheme_str() != Some(scheme)
+        || origin
+            .path_and_query()
+            .is_some_and(|path| path.as_str() != "/")
+    {
+        return false;
+    }
+    let mut hosts = request.headers().get_all(header::HOST).iter();
+    let host = hosts
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok());
+    if hosts.next().is_some() {
+        return false;
+    }
+    match (origin.authority(), host) {
+        (Some(origin), Some(host))
+            if !origin.as_str().contains('@') && !host.as_str().contains('@') =>
+        {
+            // Authority::port_u16 treats nonnumeric ports as absent. Parse the raw
+            // authority strictly so malformed ports cannot match a default port.
+            let Some((origin_host, origin_port)) = split_host_port(origin.as_str()) else {
+                return false;
+            };
+            let Some((request_host, request_port)) = split_host_port(host.as_str()) else {
+                return false;
+            };
+            let default_port = if scheme == "https" { 443 } else { 80 };
+            origin_host.eq_ignore_ascii_case(request_host)
+                && origin_port.unwrap_or(default_port) == request_port.unwrap_or(default_port)
+        }
+        _ => false,
+    }
+}
+
 /// Validate and normalize a public base URL such as `https://audiolib.example.com:8443`
 /// or `https://example.com/audiolib`: `http`/`https`, a host, an optional port and an
 /// optional path prefix; no user info, query or fragment. Scheme and host are lowercased,
@@ -1094,6 +1152,63 @@ fn interface_ipv4_addresses() -> Vec<(String, std::net::Ipv4Addr)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_origin_requires_one_valid_authority_and_the_actual_listener_scheme() {
+        let request = |host: &str, origin: &str, listener: Option<Listener>| {
+            let mut request = axum::http::Request::builder()
+                .uri("/api/v1/audio/1/plays")
+                .header(header::HOST, host)
+                .header(header::ORIGIN, origin)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            if let Some(listener) = listener {
+                request.extensions_mut().insert(ConnectionInfo {
+                    peer: "127.0.0.1:1".parse().unwrap(),
+                    listener,
+                });
+            }
+            request
+        };
+        assert!(same_request_origin(&request(
+            "SERVER.lan:80",
+            "http://server.lan",
+            Some(Listener::Http)
+        )));
+        assert!(same_request_origin(&request(
+            "[::1]:443",
+            "https://[::1]",
+            Some(Listener::Tls)
+        )));
+        for (host, origin, listener) in [
+            ("server.lan", "http://server.lan", None),
+            ("server.lan", "https://server.lan", Some(Listener::Http)),
+            ("server.lan", "http://server.lan", Some(Listener::Tls)),
+            ("server.lan:bad", "http://server.lan", Some(Listener::Http)),
+            ("server.lan", "http://server.lan:bad", Some(Listener::Http)),
+            ("server.lan", "http://user@server.lan", Some(Listener::Http)),
+            ("server.lan", "http://server.lan?x", Some(Listener::Http)),
+        ] {
+            assert!(
+                !same_request_origin(&request(host, origin, listener)),
+                "{host} {origin}"
+            );
+        }
+        let mut duplicate = request("server.lan", "http://server.lan", Some(Listener::Http));
+        duplicate
+            .headers_mut()
+            .append(header::ORIGIN, "http://server.lan".parse().unwrap());
+        assert!(!same_request_origin(&duplicate));
+        let mut proxy_claim = request("server.lan", "https://server.lan", Some(Listener::Http));
+        proxy_claim
+            .headers_mut()
+            .insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(!same_request_origin(&proxy_claim));
+        let native = axum::http::Request::builder()
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(same_request_origin(&native));
+    }
     use axum::http::HeaderValue;
 
     fn conn(peer: &str, listener: Listener) -> ConnectionInfo {

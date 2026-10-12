@@ -1,5 +1,23 @@
 # Rust 验证报告
 
+## 客户端、服务端与隐私审查修复（2026-10-13，0.4.4）
+
+源码基于 `6f30d713aadc1927f37bab013a2935fc4e0258c0` 加本轮修复；逐项变化见 [审查修复](Rust_Review_Fixes.md)。194 个非文档源码、配置和资源输入在最终检查与构建期间 SHA256 保持一致。程序版本 0.4.4，API v1、schema 5、snapshot 3..=5 不变。
+
+格式检查、默认与 ASIO 严格 Clippy 全部通过。两种配置各完成 49 个顶层目标、714 passed、0 failed、51 ignored；隔离子进程结果仅累计一次。回归覆盖库身份绑定和旧服务端能力拒绝、全部九项服务器库写入保护、根目录编辑/扫描预约与 panic 清理、Waveform 身份、同步 header/body 取消、声道表示替换及延迟 Stop、管理请求 busy token，以及原生重绘的完整损伤。忽略项包含按条件执行的 native/live-server/真实素材及可选 benchmark，不将其算作通过。
+
+本轮正式 ASIO release 使用已验证 Steinberg SDK 2.3.4，首次完整构建耗时 3 分 58 秒。Rust 编译路径重映射；SoundTouch 使用原生 NDEBUG Release 配置，避免 C++ 调试断言中的宽字符编译机路径进入 EXE。最初构建被公开包路径检查拒绝，补修后重新构建并执行新二进制回归，不沿用先前二进制。最后复查将测试响应中的生产路径、精确扫描数量和时间改成合成 fixture，保留目录前缀、计数、布局及协议断言；随后重新通过上述完整默认/ASIO 检查，并从最终源码再次构建、验证和安装。
+
+`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 与 `validate-playback-ipc.ps1 -CleanCheckout` 均通过。前者保留 2000 条并发扫描、Metadata、路径和初始偏好验证，明确排除缺失的真实旧库检查；后者使用 owned、已索引的 105 秒 192 kHz float stereo 静音 WAV，保留传输、暂停/seek、Pitch/Rate、重复、播放 session、实例排他及关闭持久化检查。样本 161,280,044 bytes，实际设备输出 96 kHz / 960 frames，最终回归工作集增量 1,085,440 bytes；这是一次 Windows 测量，不代表物理音频启动延迟，也不代表真实旧素材验收。
+
+UI-001 的复用软件 buffer 回归通过，验证完整帧、草稿和选择恢复且空闲不重复绘制。新 release 的 native 自有窗口 DC 抓帧在 192 DPI、1094×630 client 下完成九次恢复操作，像素保持；不使用 PrintWindow 或主动渲染来掩盖问题。当次 Windows 会话锁定，input desktop 不可访问，实际前台失焦/暴露转换尚未验收，报告明确 `foreground_exposure_verified=false`。解锁后需补充 [UI-001](Rust_Known_Issues.md) 的前台验收。
+
+公开资料移除实际生产库身份、路径、规模和私人截图；正式性能条件、合成规模和测量时间保留。portable 使用明确清单和全新暂存目录，隐私检查覆盖隐藏文件、本机 UTF-8/UTF-16 路径、报告允许字段及 EXE 哈希；真实打包发现 SMB 将点前缀目录标为隐藏后，补上 Force 查询并增加回归。包边界回归验证历史残留、忽略报告与未跟踪资源不混入新包，拒绝私有路径、额外报告字段、错误 EXE 哈希及 junction。
+
+最终二进制的公开包隐私检查及 `validate-portable.ps1 -BinaryDirectory dist/latest/portable -CleanCheckout` 通过，覆盖 EXE 身份、隔离首启、合成 WAV、中文 GUI、CLI、启动诊断和许可证。测试和新二进制回归后，六项已有数据库、sidecar 与偏好输入 SHA256 不变，正常数据目录环境保持。固定安装路径继续使用 `local_release/`，安装只覆盖包内文件，并按 AGENTS.md 对两 EXE 哈希和隔离首启再次验证。源输入、完整日志、截图、包与安装验收记录保留于本机忽略目录 `.rust-validation/fix-all-v0.4.4/`，不随 Git 或 ZIP 分发。
+
+本轮未执行生产服务端写入/全量同步、Linux 实机、百万条性能 benchmark 或物理音频延迟测量。远程写入需要客户端与服务端一起升级。普通提交和新包不移除已公开的旧 Git 对象与 Release 私人信息副本；本轮不改写远端历史或删除旧附件。主指标仍为 **P95 latency <500ms for 1M+ records**。
+
 ## 发布前 CI 回归修正（2026-10-12，0.4.3）
 
 0.4.2 发布准备中的 Windows CI 两次在 `unchanged_sources_resume_cancelled_reads_without_replaying_completed_auditions` 超时。本机完整默认/ASIO 测试和额外十次重复均通过，但测试把共享状态栏的 `Ready` 文本当作搜索完成条件；无输出设备时，播放错误会持续覆盖这段文字。
@@ -38,7 +56,7 @@ runtime、review-fixes、library-management、access-denial、playback-ipc 五�
 
 格式检查、默认与 ASIO 严格 Clippy 均通过。两种配置分别完成全部 workspace/all-targets 测试：49 个顶层目标、686 passed、0 failed、44 ignored，嵌套子进程汇总只累计一次。真实 Windows 准备窗口测试及关闭排空测试分别 1 passed。新增合并回归覆盖 v3/v4/v5 原库字节、ID 高水位、旧评分数据、关键词及只读 staging 修复；非法 snapshot 版本在下载或写缓存前拒绝。正式 ASIO release 使用已验证 Steinberg SDK 2.3.4，从上述合并提交构建，耗时 329.589 秒。
 
-新 release CLI 对实际服务器的只读连接测试返回 exit 0、success=true：服务器报告 0.3.7、schema 4、revision 282、909342 条声音，库 ID 为 `7b0db485-5e97-4636-9686-c8bc9a838ccc`。TLS、授权、库身份、根目录、1 byte stream 与有界 preview 检查均通过；未请求生产 snapshot 同步，也未改变连接配置。截图中的 schema 4 超出旧客户端支持上限 3 的错误由此次客户端兼容范围更新覆盖。
+新 release CLI 对实际服务器的只读连接测试返回 exit 0、success=true，服务端 snapshot 为 schema 4。TLS、授权、库身份、根目录、1 byte stream 与有界 preview 检查均通过；未请求生产 snapshot 同步，也未改变连接配置。生产库身份、记录数和 revision 已从公开报告移除。截图中的 schema 4 超出旧客户端支持上限 3 的错误由此次客户端兼容范围更新覆盖。
 
 runtime、review-fixes、library-management、access-denial 与 playback-ipc 五套发布回归全部通过。真实 Windows ACL 拒绝期间保留 2 条记录，权限恢复后正确保留 1 条。静音播放验证确认暂停/恢复、seek、Stop/Ended 后新 session、转换设置及关闭持久化；不代表物理音频延迟测量。隔离回归后，原有设置、工作数据库及 sidecar、旧迁移数据库和 YAML 共六个文件 SHA256 不变。
 
@@ -52,9 +70,9 @@ runtime、review-fixes、library-management、access-denial 与 playback-ipc 五
 
 本轮修复七项客户端问题及大型服务器缓存启动前无窗口的问题，逐项说明及正式测试见 [审查修复](Rust_Review_Fixes.md)。源码基于 `06fb246ad7d32c3ff520a775ee12298ccb724d3a` 加本地修复，版本保持 0.3.7；采用已验证 Steinberg ASIO SDK 2.3.4。默认与 ASIO workspace/all-targets 测试均为：43 个顶层目标、633 passed、0 failed、44 ignored，子进程汇总只累计一次。默认与 ASIO 严格 Clippy、格式检查通过。真实 Windows 准备窗口测试和 Metadata 排空关闭测试分别 1 passed；前者验证耗时初始化期间可捕获软件渲染窗口、处理关闭事件、安全完成 worker 并再次运行同一原生事件循环。
 
-旧版实机服务器缓存大小 10,082,988,032 字节，启动过程约 220 秒后才创建主窗口；这是一次旧派生索引升级观察。新版先显示窗口，后台完成同样的 owned copy 和完整校验，并去掉备份的固定分段等待。该观察不作为日常搜索或新版首次大库升级的计时；本轮未重跑百万条性能 benchmark，主指标仍为 **P95 latency <500ms for 1M+ records**。
+旧版实机的大型服务器缓存启动过程约 220 秒后才创建主窗口；这是一次旧派生索引升级观察，生产缓存精确容量已从公开记录移除。新版先显示窗口，后台完成同样的 owned copy 和完整校验，并去掉备份的固定分段等待。该观察不作为日常搜索或新版首次大库升级的计时；本轮未重跑百万条性能 benchmark，主指标仍为 **P95 latency <500ms for 1M+ records**。
 
-runtime、review-fixes、library-management、access-denial、playback-ipc 发布回归与 portable 包/已安装目录验证全部通过。1231 个包内文件覆盖到固定 `local_release/`；两个 EXE SHA256 与最新 ASIO 包一致，安装验证前后六个已有设置/数据库/sidecar 文件的 SHA256 不变，正常数据目录环境恢复。从该目录的 `Start-AudioLibExplorer.cmd` 正常启动，当前已保存配置及 Windows 热缓存条件下，194.436 ms 获得可见窗口句柄，251.563 ms 返回 IPC ready；这不是首次 10 GB 服务器缓存升级耗时或物理显示延迟。源码身份、哈希及结果见 客户端修复验证数据。未发布远程 Release。
+runtime、review-fixes、library-management、access-denial、playback-ipc 发布回归与 portable 包/已安装目录验证全部通过。1231 个包内文件覆盖到固定 `local_release/`；两个 EXE SHA256 与最新 ASIO 包一致，安装验证前后六个已有设置/数据库/sidecar 文件的 SHA256 不变，正常数据目录环境恢复。从该目录的 `Start-AudioLibExplorer.cmd` 正常启动，当前已保存配置及 Windows 热缓存条件下，194.436 ms 获得可见窗口句柄，251.563 ms 返回 IPC ready；这不是首次大型服务器缓存升级耗时或物理显示延迟。源码身份、哈希及结果见 客户端修复验证数据。未发布远程 Release。
 
 ## 提交前 CR 补修及最终复测（2026-10-11，0.3.7）
 
@@ -122,7 +140,7 @@ GUI 60 次首轮全部小于 500ms，涵盖两套库的无筛选、48kHz 和评�
 | 含边缘查询（15 类） | 150 | 5.150 | 165.211 | 171.935 | 447.238 | 120 |
 | 边缘查询 + 目录统计（15 类） | 150 | 77.450 | 310.184 | 333.294 | 595.342 | 120 |
 
-边缘查询覆盖同词目录范围、采样率筛选、offset 200,000、缺失可见性及文件名排序。重复阶段在每类请求执行一遍后开始，复用有界 exact BM25 排名 ID；Metadata、筛选与总数仍从当前固定读 snapshot 获取。首轮各类请求按顺序执行，后面的同词变体可能命中已建立的排名缓存；JSON 保留每类首次耗时与命中标志，不能将首轮称为完全冷启动。以上三个重复阶段 P95 达标，首次建立缓存或同时计算目录统计仍可能超过 500ms；不代表任意冷请求或约 80 万条 / 10 TB 生产服务器验收。
+边缘查询覆盖同词目录范围、采样率筛选、offset 200,000、缺失可见性及文件名排序。重复阶段在每类请求执行一遍后开始，复用有界 exact BM25 排名 ID；Metadata、筛选与总数仍从当前固定读 snapshot 获取。首轮各类请求按顺序执行，后面的同词变体可能命中已建立的排名缓存；JSON 保留每类首次耗时与命中标志，不能将首轮称为完全冷启动。以上三个重复阶段 P95 达标，首次建立缓存或同时计算目录统计仍可能超过 500ms；不代表任意冷请求或生产服务器验收。
 
 Slint testing backend 的真实 Controller 复测：单次首次 `metal` 发布 615.791ms，取消宽查询后替换请求 6.663ms；20,001 个合成目录展示模型的展开/折叠共 20 次，P95 30.767ms。它测量请求到事件循环发布，不包含原生渲染、物理显示或指针延迟，也不声称数据库中存在 20,001 个目录。
 
@@ -146,7 +164,7 @@ ASIO 发布构建及 `validate-runtime.ps1`、`validate-review-fixes.ps1`、`val
 
 在搜索优化实现上修复目录缓存未检测外部写入、库统计完成乱序、非法输入未取消旧请求，以及短查询在取消后仍可能返回成功的问题。外部修改收藏的 GUI 回归在修复前稳定超时，修复后通过；新增数据库版本观察回归覆盖自身/外部提交、只读快照、索引维护和恢复。详细边界见 [GUI 搜索性能](Rust_GUI_Search_Performance.md)。
 
-默认及已校验 ASIO SDK 2.3.4 的严格 Clippy、workspace/all-targets 测试通过，各 532 passed、0 failed、17 ignored（不重复累计子进程结果）；测试库均位于隔离临时目录。日志位于 `.rust-validation/gui-review/`。真实服务器约 80 万条 / 10 TB 数据的 `gears` 搜索验收待用户配置服务器后执行，既有合成性能数字不是生产库测试结果。
+默认及已校验 ASIO SDK 2.3.4 的严格 Clippy、workspace/all-targets 测试通过，各 532 passed、0 failed、17 ignored（不重复累计子进程结果）；测试库均位于隔离临时目录。日志位于 `.rust-validation/gui-review/`。真实服务器搜索验收待用户配置服务器后执行，既有合成性能数字不是生产库测试结果。
 
 同步远端 `main` 至 `c57a4e6` 后，最终合并源码（含 reader 获取后的取消检查）再次通过格式、默认/ASIO 严格 Clippy 与完整 workspace/all-targets 测试，各 532 passed、0 failed、17 ignored。4 项取消/版本定向回归通过。最新源码 ASIO release 构建通过，运行时 8 项、审查回归 10 项、音效库管理 10 项发布检查通过，原始数据库与源 WAV 保持不变。最终检查日志与源码身份位于 `.rust-validation/cr-push/`；两种配置的 33 个 Cargo 测试目标仅累计各自最终汇总。
 
@@ -250,7 +268,7 @@ cargo test --locked -p audiolib-desktop controller::click_preview_tests::real_po
 
 扫描使用有界 Rust Metadata 线程池、单写入线程、复用 SQL、批内目录缓存及合并字段更新；普通 ID3 标签跳过封面等二进制帧。搜索先分页 ID 再载入 Metadata，FTS5 目录计数改为流式累计后汇总，保留同一读取快照、筛选语义和稳定排序。未增加数据库格式迁移或查询结果缓存。详见 [实现和复测说明](Rust_Scan_Search_Performance.md) 与 完整性能数据。
 
-同机最终发布版：BOOM 554 个 WAV 全扫描 **40.679 → 29.156 秒**，减少 **28.3%**；增量 **1.249 → 0.991 秒**。全部专业字段、五组来源、554 条库名召回及源文件大小/修改时间一致，0 错误、0 警告。2,000 个本地微型合成 WAV 的完整扫描 **0.430 → 0.249 秒**；其 8,045 files/s 不代表大型 Metadata 或网络存储吞吐。
+同机最终发布版：匿名实际 WAV 样本全扫描 **40.679 → 29.156 秒**，减少 **28.3%**；增量 **1.249 → 0.991 秒**。全部专业字段、五组来源、全部样本的库名召回及源文件大小/修改时间一致，0 错误、0 警告。2,000 个本地微型合成 WAV 的完整扫描 **0.430 → 0.249 秒**；其 8,045 files/s 不代表大型 Metadata 或网络存储吞吐。
 
 1,000,000 条合成记录、100 次查询、同一数据库顺序前后复测：结果页 P95 **411.056 → 401.902ms**，满足 **P95 latency <500ms for 1M+ records**；加上目录命中统计的 P95 **621.454 → 536.618ms**，减少 **13.7%**，但该组合口径仍超过 500ms。GUI 先发布结果页再更新目录。测试没有清空系统文件缓存，不能视为冷盘保证。
 
@@ -260,7 +278,7 @@ cargo test --locked -p audiolib-desktop controller::click_preview_tests::real_po
 
 补齐 LIST/INFO、iXML USER/ASWG/vendor 字段、aXML/XMP、ID3v2 文本及 Soundminer SMED。SMED 支持已验证的 Blowfish/ECB + UTF-16 XML 包装，封面及 Waveform 缓存不进入数据库或 FTS5。旧记录在下次增量扫描时按提取版本自动补扫，保留用户标注和未知扩展字段。试听和 Waveform 只读音频头，不重复提取大型 Metadata。
 
-用户提供的 某商业电影音效库（Z: 路径）共 **554 个 WAV，554 个成功，0 错误、0 Metadata 警告**。Description、Category、SubCategory、CatID、Library、Manufacturer、VendorCategory 均为 554 条；SMED、iXML、INFO、ID3、XMP 五组字段均为 554 条。库名查询命中 554 条，二次增量扫描跳过 554 条。源 WAV 大小和修改时间保持不变。发布版全扫描耗时 45.16 秒，包含 CLI 启动并与其他验证并行；这是带大型嵌入封面的网络路径实测，不代表 SSD 扫描目标或 1M+ 搜索性能。原 34 个 P-51 Mustang 样本也通过 SMED 分类、子分类、话筒及库名验证。详见 Metadata 验证数据 和 [格式说明](Rust_Wav_Metadata.md)。
+匿名商业 WAV 样本全部扫描成功，**0 错误、0 Metadata 警告**。每条记录均保留 Description、Category、SubCategory、CatID、Library、Manufacturer、VendorCategory，以及 SMED、iXML、INFO、ID3、XMP 五组字段。库名查询召回全部样本，二次增量扫描跳过全部未变化样本。源 WAV 大小和修改时间保持不变；实际路径、记录数和库容量不在公开报告中列出。发布版全扫描耗时 45.16 秒，包含 CLI 启动并与其他验证并行；这是带大型嵌入封面的网络路径实测，不代表 SSD 扫描目标或 1M+ 搜索性能。原 34 个 P-51 Mustang 样本也通过 SMED 分类、子分类、话筒及库名验证。详见 Metadata 验证数据 和 [格式说明](Rust_Wav_Metadata.md)。
 
 最终默认与 ASIO 配置各 **169 项测试通过、7 项按需测试忽略**（不重复计算子进程输出）；34 个 BOOM 样本的按需测试单独运行通过。格式检查、workspace/all-targets 严格 Clippy、release 构建、运行时、审查修复、库管理及静音播放 IPC 回归全部通过。构建基于 `137bfde` 加当前工作区改动；新回归覆盖尾部块、XML namespaces/CDATA/entities、UTF-16/旧编码、ID3 三个版本、含大封面的 SMED、错误/超限块、重扫补齐、索引重建和用户标注保护。
 
@@ -569,7 +587,7 @@ cargo run --release --locked -p audiolib-db --bin search-benchmark -- --records 
 
 ## 2026-10-10 大库 GUI 搜索与目录刷新
 
-参见 [GUI 搜索性能报告](Rust_GUI_Search_Performance.md)：增加 SQLite 过期查询取消、目录 facet 复用和按可见行转换的 Slint 模型，移除展开目录时的全库统计。默认/ASIO Clippy 与工作区测试、发布版 runtime/review-fixes/library-management 回归及独立 release GUI 性能测试通过。百万记录模拟库和 20,001 个目录模型的测量不等同于真实 80 万记录服务器快照或物理显示响应；宽泛查询的完整交互仍超过 500 ms。
+参见 [GUI 搜索性能报告](Rust_GUI_Search_Performance.md)：增加 SQLite 过期查询取消、目录 facet 复用和按可见行转换的 Slint 模型，移除展开目录时的全库统计。默认/ASIO Clippy 与工作区测试、发布版 runtime/review-fixes/library-management 回归及独立 release GUI 性能测试通过。百万记录模拟库和 20,001 个目录模型的测量不等同于真实服务器快照或物理显示响应；宽泛查询的完整交互仍超过 500 ms。
 
 ## 2026-10-10 远程彩色 Waveform 分段显示
 

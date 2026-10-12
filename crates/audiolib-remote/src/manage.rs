@@ -351,6 +351,9 @@ impl RemoteClient {
         let url = format!("{}{path}", self.api);
         let context = format!("{method} {path}");
         let authorization = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let library_id = (method != "GET")
+            .then(|| self.write_library_id())
+            .transpose()?;
         let result = match method {
             // Reads may be resent once on a stale keep-alive connection; writes never are.
             "GET" => crate::abort::call_fresh(|| {
@@ -361,14 +364,20 @@ impl RemoteClient {
                 }
             }),
             "DELETE" => {
-                let mut request = self.writes.delete(&url);
+                let mut request = self.writes.delete(&url).header(
+                    crate::client::LIBRARY_ID_HEADER,
+                    library_id.as_deref().unwrap_or_default(),
+                );
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
                 request.call()
             }
             _ => {
-                let mut request = agent.unwrap_or(&self.writes).post(&url);
+                let mut request = agent.unwrap_or(&self.writes).post(&url).header(
+                    crate::client::LIBRARY_ID_HEADER,
+                    library_id.as_deref().unwrap_or_default(),
+                );
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
@@ -601,8 +610,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// The §6.6 example reply, plus a field a later server might add.
-    const STARTED: &str = r#"{"session_id":17,"state":"running","paused":false,"finalizing":false,"discovered":0,"processed":0,"added":0,"updated":0,"unchanged":0,"removed":0,"errors":0,"error_details":[],"errors_truncated":0,"current_path":"/srv/audiolib/library/A_Lib/1_Boom/Foley/Doors","message":"","root":"1_Boom","subpath":"Foley/Doors","mode":"incremental","active":true,"pause_requested":false,"cancel_requested":false,"revision":null,"future":{"x":1}}"#;
-    const FINISHED: &str = r#"{"session_id":17,"state":"completed","paused":false,"finalizing":false,"discovered":12,"processed":12,"added":1,"updated":0,"unchanged":11,"removed":0,"errors":0,"error_details":[],"errors_truncated":0,"current_path":"","message":"","root":"1_Boom","subpath":"Foley/Doors","mode":"incremental","active":false,"pause_requested":false,"cancel_requested":false,"revision":1288}"#;
+    const STARTED: &str = r#"{"session_id":17,"state":"running","paused":false,"finalizing":false,"discovered":0,"processed":0,"added":0,"updated":0,"unchanged":0,"removed":0,"errors":0,"error_details":[],"errors_truncated":0,"current_path":"/srv/audiolib/library/ExampleLibrary/SFX/Foley/Doors","message":"","root":"SFX","subpath":"Foley/Doors","mode":"incremental","active":true,"pause_requested":false,"cancel_requested":false,"revision":null,"future":{"x":1}}"#;
+    const FINISHED: &str = r#"{"session_id":17,"state":"completed","paused":false,"finalizing":false,"discovered":12,"processed":12,"added":1,"updated":0,"unchanged":11,"removed":0,"errors":0,"error_details":[],"errors_truncated":0,"current_path":"","message":"","root":"SFX","subpath":"Foley/Doors","mode":"incremental","active":false,"pause_requested":false,"cancel_requested":false,"revision":42}"#;
 
     struct Seen {
         method: String,
@@ -617,6 +626,15 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
         let server = TestServer::start(move |request| {
+            if request.method == "GET" && request.path == "/api/v1/library" {
+                return TestResponse::json(
+                    200,
+                    r#"{"library_id":"lib-manage","identity_bound_writes":true,"schema_version":5,"revision":1}"#,
+                );
+            }
+            if request.method != "GET" && !request.path.starts_with("/api/v1/roots/") {
+                assert_eq!(request.header(crate::LIBRARY_ID_HEADER), Some("lib-manage"));
+            }
             log.lock().unwrap().push(Seen {
                 method: request.method.clone(),
                 path: request.path.clone(),
@@ -688,24 +706,24 @@ mod tests {
 
     #[test]
     fn roots_carry_missing_count_last_scan_and_scanning() {
-        // The §6.4 production example, one never-scanned root and an older server's entry.
+        // Synthetic §6.4 entries: a completed scan, an active scan and an older server.
         let (server, _) = server(|method, path| match (method, path) {
             ("GET", "/api/v1/roots") => TestResponse::json(
                 200,
-                r#"[{"name":"1_Boom","server_path":"/srv/audiolib/library/A_Lib/1_Boom","webdav_url":null,"file_count":80562,"missing_count":0,"online":true,"status":"online","status_message":null,"checked_at":1791460727,"scanning":false,"last_scan":{"id":2,"subpath":"","mode":"incremental","state":"completed","started_at":1791460931,"finished_at":1791462032,"scanned":80586,"added":79362,"updated":0,"removed":0,"unchanged":1200,"errors":24}},{"name":"2_Foley","server_path":"/x/2_Foley","file_count":null,"missing_count":0,"online":true,"status":"waking","scanning":true,"last_scan":{"id":5,"subpath":"Doors","mode":"full","state":"running","started_at":1791463000,"finished_at":null,"scanned":10}},{"name":"3_Amb","path":"/x/3_Amb","available":true}]"#,
+                r#"[{"name":"SFX","server_path":"/srv/audiolib/library/ExampleLibrary/SFX","webdav_url":null,"file_count":22,"missing_count":0,"online":true,"status":"online","status_message":null,"checked_at":1704067200,"scanning":false,"last_scan":{"id":2,"subpath":"","mode":"incremental","state":"completed","started_at":1704067260,"finished_at":1704067380,"scanned":25,"added":20,"updated":0,"removed":0,"unchanged":2,"errors":3}},{"name":"Foley","server_path":"/x/Foley","file_count":null,"missing_count":0,"online":true,"status":"waking","scanning":true,"last_scan":{"id":5,"subpath":"Doors","mode":"full","state":"running","started_at":1704067800,"finished_at":null,"scanned":10}},{"name":"Ambience","path":"/x/Ambience","available":true}]"#,
             ),
-            ("POST", "/api/v1/roots/1_Boom/check") => TestResponse::json(
+            ("POST", "/api/v1/roots/SFX/check") => TestResponse::json(
                 200,
-                r#"{"name":"1_Boom","server_path":"/x/1_Boom","online":false,"status":"offline","status_message":"Root directory not found","missing_count":3,"scanning":false,"last_scan":null}"#,
+                r#"{"name":"SFX","server_path":"/x/SFX","online":false,"status":"offline","status_message":"Root directory not found","missing_count":3,"scanning":false,"last_scan":null}"#,
             ),
             _ => error(404, "NOT_FOUND", "No such endpoint"),
         });
         let client = RemoteClient::new(&server.url, "").unwrap();
         let roots = client.roots().unwrap();
         assert_eq!(roots.len(), 3);
-        let boom = &roots[0];
-        assert_eq!((boom.missing_count, boom.scanning), (Some(0), Some(false)));
-        let scan = boom.last_scan.as_ref().unwrap();
+        let sfx = &roots[0];
+        assert_eq!((sfx.missing_count, sfx.scanning), (Some(0), Some(false)));
+        let scan = sfx.last_scan.as_ref().unwrap();
         assert_eq!(
             (
                 scan.id,
@@ -717,11 +735,11 @@ mod tests {
         );
         assert_eq!(
             (scan.started_at, scan.finished_at),
-            (Some(1791460931), Some(1791462032))
+            (Some(1704067260), Some(1704067380))
         );
         assert_eq!(
             (scan.scanned, scan.added, scan.unchanged, scan.errors),
-            (80586, 79362, 1200, 24)
+            (25, 20, 2, 3)
         );
         let foley = &roots[1];
         assert_eq!(foley.scanning, Some(true));
@@ -739,7 +757,7 @@ mod tests {
         assert!(older.last_scan.is_none() && older.missing_count.is_none());
         assert!(older.scanning.is_none());
         // The existing re-check endpoint carries them too.
-        let checked = client.check_root("1_Boom").unwrap();
+        let checked = client.check_root("SFX").unwrap();
         assert_eq!(
             (checked.missing_count, checked.scanning),
             (Some(3), Some(false))
@@ -779,7 +797,7 @@ mod tests {
         let client = RemoteClient::new(&server.url, "").unwrap();
         let started = client
             .start_scan(&ScanRequest {
-                root: " 1_Boom ".into(),
+                root: " SFX ".into(),
                 subpath: Some("Foley//Doors/".into()),
                 mode: ScanMode::Incremental,
                 workers: Some(0),
@@ -787,7 +805,7 @@ mod tests {
             .unwrap();
         assert_eq!(started.progress.session_id, 17);
         assert!(started.is_active() && !started.pause_requested);
-        assert_eq!(started.root.as_deref(), Some("1_Boom"));
+        assert_eq!(started.root.as_deref(), Some("SFX"));
         assert_eq!(started.subpath.as_deref(), Some("Foley/Doors"));
         assert_eq!(started.mode.as_deref(), Some("incremental"));
         assert_eq!(started.revision, None);
@@ -796,7 +814,7 @@ mod tests {
             let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
             assert_eq!(
                 body,
-                serde_json::json!({"root":"1_Boom","subpath":"Foley/Doors","mode":"incremental"})
+                serde_json::json!({"root":"SFX","subpath":"Foley/Doors","mode":"incremental"})
             );
             assert!(seen[0].authorization.is_none(), "LAN without token");
         }
@@ -813,11 +831,8 @@ mod tests {
         };
         assert_eq!(*polls.lock().unwrap(), 3);
         assert_eq!(finished.progress.state, audiolib_core::ScanState::Completed);
-        assert_eq!(
-            (finished.progress.added, finished.revision),
-            (1, Some(1288))
-        );
-        assert!(finished.needs_sync(1287) && !finished.needs_sync(1288));
+        assert_eq!((finished.progress.added, finished.revision), (1, Some(42)));
+        assert!(finished.needs_sync(41) && !finished.needs_sync(42));
         assert!(!started.needs_sync(1), "running scans never ask for a sync");
         // A control the state does not allow: its own error, still a "busy"-like 409.
         let state = client.control_scan(17, ScanControl::Cancel).unwrap_err();
@@ -834,22 +849,22 @@ mod tests {
         // Rejected locally: absolute or escaping subpaths, bad roots, too many workers.
         for request in [
             ScanRequest {
-                root: "1_Boom".into(),
+                root: "SFX".into(),
                 subpath: Some("/Volumes/x".into()),
                 ..ScanRequest::default()
             },
             ScanRequest {
-                root: "1_Boom".into(),
+                root: "SFX".into(),
                 subpath: Some("a/../b".into()),
                 ..ScanRequest::default()
             },
             ScanRequest {
-                root: "1_Boom".into(),
+                root: "SFX".into(),
                 subpath: Some("a/./b".into()),
                 ..ScanRequest::default()
             },
             ScanRequest {
-                root: "1_Boom".into(),
+                root: "SFX".into(),
                 subpath: Some("a\\b".into()),
                 ..ScanRequest::default()
             },
@@ -858,7 +873,7 @@ mod tests {
                 ..ScanRequest::default()
             },
             ScanRequest {
-                root: "1_Boom".into(),
+                root: "SFX".into(),
                 workers: Some(17),
                 ..ScanRequest::default()
             },
@@ -870,7 +885,7 @@ mod tests {
         }
         assert!(client.scan_status(0).is_err());
         let whole = ScanRequest {
-            root: "1_Boom".into(),
+            root: "SFX".into(),
             subpath: Some("/".repeat(0)),
             mode: ScanMode::Full,
             workers: Some(4),
@@ -879,7 +894,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::to_value(&whole).unwrap(),
-            serde_json::json!({"root":"1_Boom","mode":"full","workers":4})
+            serde_json::json!({"root":"SFX","mode":"full","workers":4})
         );
     }
 
@@ -904,11 +919,11 @@ mod tests {
         let (server, seen) = server(|_, path| match path {
             "/api/v1/history/scans?limit=5&offset=0" => TestResponse::json(
                 200,
-                r#"[{"id":17,"start_time":"2026-10-08 17:20:31.120","end_time":"2026-10-08 17:20:33.004","scan_path":"/x/1_Boom/Foley/Doors","scan_type":"incremental","state":"completed","scanned":12,"added":1,"updated":0,"removed":0,"unchanged":11,"errors":0,"error_details":[],"errors_truncated":0},{"id":16,"start_time":"2026-10-08 17:00:00.000","end_time":null,"scan_path":"/x/1_Boom","scan_type":"full","state":"running","scanned":3}]"#,
+                r#"[{"id":17,"start_time":"2000-01-01 12:00:00.100","end_time":"2000-01-01 12:00:02.200","scan_path":"/x/SFX/Foley/Doors","scan_type":"incremental","state":"completed","scanned":12,"added":1,"updated":0,"removed":0,"unchanged":11,"errors":0,"error_details":[],"errors_truncated":0},{"id":16,"start_time":"2000-01-01 11:30:00.000","end_time":null,"scan_path":"/x/SFX","scan_type":"full","state":"running","scanned":3}]"#,
             ),
             "/api/v1/history/plays?limit=10000&offset=20" => TestResponse::json(
                 200,
-                r#"[{"id":5,"audio_file_id":3,"played_at":"2026-10-08 17:25:02.511","filename":"door.wav","file_path":"/Volumes/SFX/door.wav","missing":false}]"#,
+                r#"[{"id":5,"audio_file_id":3,"played_at":"2000-01-01 12:01:00.300","filename":"door.wav","file_path":"/Volumes/SFX/door.wav","missing":false}]"#,
             ),
             _ => error(400, "VALIDATION", "limit must be 1..=10000"),
         });
@@ -917,7 +932,7 @@ mod tests {
         assert_eq!(scans.len(), 2);
         assert_eq!(
             (scans[0].id, scans[0].scanned, scans[0].start_time.as_str()),
-            (17, 12, "2026-10-08 17:20:31.120")
+            (17, 12, "2000-01-01 12:00:00.100")
         );
         assert_eq!(scans[1].end_time, None);
         assert_eq!(scans[1].state, audiolib_core::ScanState::Running);
@@ -942,11 +957,9 @@ mod tests {
     fn agreed_error_codes_are_typed_with_chinese_messages() {
         let (current, _) = server(|method, path| match (method, path) {
             ("POST", "/api/v1/scans") => error(409, "BUSY", "Scan session 17 is running"),
-            ("GET", "/api/v1/scans/9") => error(
-                503,
-                "ROOT_OFFLINE",
-                "Library root \\\"2_Foley\\\" is offline",
-            ),
+            ("GET", "/api/v1/scans/9") => {
+                error(503, "ROOT_OFFLINE", "Library root \\\"Foley\\\" is offline")
+            }
             ("GET", "/api/v1/scans/10") => error(503, "UNAVAILABLE", "The server is shutting down"),
             ("POST", "/api/v1/audio/remove") => error(
                 403,
@@ -963,7 +976,7 @@ mod tests {
         let client = RemoteClient::new(&current.url, "tok").unwrap();
         let busy = client
             .start_scan(&ScanRequest {
-                root: "1_Boom".into(),
+                root: "SFX".into(),
                 ..ScanRequest::default()
             })
             .unwrap_err();

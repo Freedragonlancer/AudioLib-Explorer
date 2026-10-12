@@ -94,11 +94,14 @@ pub struct RemoteWriter {
 }
 
 impl RemoteWriter {
+    /// Bind every mutation, including management through [`Self::client`], to the
+    /// identity of the cached snapshot. A fresh client is required after a library switch.
     pub fn new(client: RemoteClient, cache: RemoteCache, library_id: impl Into<String>) -> Self {
+        let library_id = library_id.into();
         Self {
-            client,
+            client: client.bind_library(&library_id),
             cache,
-            library_id: library_id.into(),
+            library_id,
         }
     }
 
@@ -227,6 +230,9 @@ pub enum WriteEvent {
     Applied { revision: u64 },
     /// Run a full snapshot sync (revision mismatch, apply failure or uncertain outcome).
     Resync { reason: String },
+    /// No write was sent/applied: the snapshot's IDs belong to a replaced library.
+    /// Disable writes and management until a new snapshot/provider has been opened.
+    LibraryChanged { reason: String },
 }
 
 /// Listener for [`WriteEvent`]s (called on the writing thread).
@@ -281,7 +287,11 @@ impl RemoteProvider {
                 Ok(outcome.value)
             }
             Err(error) => {
-                if error.write_may_have_committed() {
+                if matches!(error, RemoteError::LibraryChanged(_)) {
+                    self.emit(WriteEvent::LibraryChanged {
+                        reason: error.localized(self.chinese),
+                    });
+                } else if error.write_may_have_committed() {
                     self.emit(WriteEvent::Resync {
                         reason: format!("write outcome uncertain: {error}"),
                     });
@@ -296,6 +306,11 @@ impl RemoteProvider {
     fn settle_manage<T>(&self, result: Result<WriteOutcome<T>>) -> audiolib_core::Result<T> {
         match result {
             Err(error) if !error.write_may_have_committed() => {
+                if matches!(error, RemoteError::LibraryChanged(_)) {
+                    self.emit(WriteEvent::LibraryChanged {
+                        reason: error.localized(self.chinese),
+                    });
+                }
                 let text = manage_error_text(&error, self.chinese);
                 Err(match error {
                     RemoteError::NotFound(_) => Error::NotFound(text),
@@ -428,6 +443,165 @@ mod tests {
 
     const LIBRARY: &str = "lib-w";
 
+    #[test]
+    fn changed_library_blocks_all_bound_mutations_and_preserves_the_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 41);
+        let cached = cache.state(LIBRARY).unwrap();
+        let before = std::fs::read(cache.database_path(&cached)).unwrap();
+        let mutations = Arc::new(StdMutex::new(Vec::new()));
+        let identity = Arc::new(StdMutex::new("replacement".to_owned()));
+        let server = {
+            let mutations = mutations.clone();
+            let identity = identity.clone();
+            TestServer::start(move |request| {
+                if request.method == "GET" && request.path == "/api/v1/library" {
+                    return TestResponse::json(
+                        200,
+                        &format!(
+                            r#"{{"library_id":"{}","schema_version":5,"revision":41}}"#,
+                            identity.lock().unwrap(),
+                        ),
+                    );
+                }
+                // Simulate an older server that would ignore the new header.
+                mutations.lock().unwrap().push(request.path.clone());
+                TestResponse::json(200, "{}")
+            })
+        };
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let listener: WriteListener = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let writer = RemoteWriter::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            cache.clone(),
+            LIBRARY,
+        );
+        let provider = RemoteProvider::new(
+            Arc::new(snapshot(&cache)),
+            writer.clone(),
+            false,
+            Some(listener),
+        );
+        assert!(
+            provider
+                .update_metadata(
+                    3,
+                    &MetadataPatch {
+                        favorite: Some(true),
+                        ..MetadataPatch::default()
+                    }
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [WriteEvent::LibraryChanged { .. }]
+        ));
+        let client = writer.client();
+        let results = [
+            client
+                .patch_metadata(3, &MetadataPatch::default())
+                .map(drop),
+            client
+                .batch_metadata(&BatchMetadataRequest {
+                    ids: vec![3],
+                    patch: MetadataPatch {
+                        favorite: Some(true),
+                        ..MetadataPatch::default()
+                    },
+                    tag_mode: TagEditMode::Replace,
+                })
+                .map(drop),
+            client.record_play(3).map(drop),
+            client.remove_audio(&[3]).map(drop),
+            client.remove_folder(7).map(drop),
+            client
+                .start_scan(&crate::ScanRequest {
+                    root: "SFX".into(),
+                    ..crate::ScanRequest::default()
+                })
+                .map(drop),
+            client.control_scan(17, crate::ScanControl::Pause).map(drop),
+            client
+                .control_scan(17, crate::ScanControl::Resume)
+                .map(drop),
+            client
+                .control_scan(17, crate::ScanControl::Cancel)
+                .map(drop),
+        ];
+        for result in results {
+            assert!(
+                matches!(result, Err(RemoteError::LibraryChanged(_))),
+                "{result:?}"
+            );
+        }
+        // Once any GET reports a mismatch, observing the old ID again cannot revive
+        // the existing provider or silently rebind a client to different cached IDs.
+        *identity.lock().unwrap() = LIBRARY.into();
+        assert_eq!(client.library().unwrap().library_id, LIBRARY);
+        assert!(matches!(
+            client.record_play(3),
+            Err(RemoteError::LibraryChanged(_))
+        ));
+        assert!(matches!(
+            client.clone().with_library_id("replacement"),
+            Err(RemoteError::LibraryChanged(_))
+        ));
+        assert!(mutations.lock().unwrap().is_empty());
+        assert_eq!(cache.state(LIBRARY).unwrap(), cached);
+        assert_eq!(cache.active().unwrap(), cached);
+        assert_eq!(std::fs::read(cache.database_path(&cached)).unwrap(), before);
+        assert!(!provider.get_audio(3).unwrap().favorite);
+    }
+
+    #[test]
+    fn server_identity_conflicts_emit_invalidation_and_leave_the_cache_unchanged() {
+        for code in ["LIBRARY_CHANGED", "LIBRARY_ID_REQUIRED"] {
+            let directory = tempfile::tempdir().unwrap();
+            let cache = cached_library(directory.path(), 41);
+            let cached = cache.state(LIBRARY).unwrap();
+            let before = std::fs::read(cache.database_path(&cached)).unwrap();
+            let server = TestServer::start(move |request| {
+                if request.path == "/api/v1/library" {
+                    return TestResponse::json(
+                        200,
+                        &format!(
+                            r#"{{"library_id":"{LIBRARY}","identity_bound_writes":true,"schema_version":5,"revision":41}}"#,
+                        ),
+                    );
+                }
+                assert_eq!(request.header(crate::LIBRARY_ID_HEADER), Some(LIBRARY));
+                TestResponse::json(
+                    409,
+                    &format!(r#"{{"error_code":"{code}","message":"Library identity mismatch"}}"#,),
+                )
+            });
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let listener: WriteListener = {
+                let events = events.clone();
+                Arc::new(move |event| events.lock().unwrap().push(event))
+            };
+            let writer = RemoteWriter::new(
+                RemoteClient::new(&server.url, "").unwrap(),
+                cache.clone(),
+                LIBRARY,
+            );
+            let provider =
+                RemoteProvider::new(Arc::new(snapshot(&cache)), writer, true, Some(listener));
+            let error = provider.remove_audio(&[3]).unwrap_err();
+            assert!(error.to_string().contains("身份未确认"));
+            assert!(matches!(
+                events.lock().unwrap().as_slice(),
+                [WriteEvent::LibraryChanged { .. }]
+            ));
+            assert_eq!(cache.active().unwrap(), cached);
+            assert_eq!(std::fs::read(cache.database_path(&cached)).unwrap(), before);
+        }
+    }
+
     /// A cached snapshot with records 3 (`door.wav`) and 7 (`雷声 近.wav`) at `revision`.
     fn cached_library(directory: &Path, revision: u64) -> RemoteCache {
         let cache = RemoteCache::new(directory);
@@ -483,6 +657,17 @@ mod tests {
         reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
     ) -> TestServer {
         TestServer::start(move |request| {
+            if request.method == "GET" && request.path == "/api/v1/library" {
+                return TestResponse::json(
+                    200,
+                    &format!(
+                        r#"{{"library_id":"{LIBRARY}","identity_bound_writes":true,"schema_version":5,"revision":1}}"#,
+                    ),
+                );
+            }
+            if request.method != "GET" {
+                assert_eq!(request.header(crate::LIBRARY_ID_HEADER), Some(LIBRARY));
+            }
             seen.lock().unwrap().push(Seen {
                 method: request.method.clone(),
                 path: request.path.clone(),

@@ -31,8 +31,8 @@ impl ByteRange {
 }
 
 /// Strong entity tag for an opened file: size + modification time, plus inode and
-/// status-change time on Unix (so a replaced file with an equal size and mtime still gets
-/// a new tag). Clients treat it as an opaque quoted string.
+/// status-change time on Unix and creation time on Windows. Clients treat it as an
+/// opaque quoted string. Waveform cache identities additionally include the source path.
 pub fn file_etag(metadata: &std::fs::Metadata) -> String {
     let len = metadata.len();
     let modified = crate::revision::mtime_ns(metadata);
@@ -47,7 +47,15 @@ pub fn file_etag(metadata: &std::fs::Metadata) -> String {
             changed.max(0)
         )
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Creation time is exposed safely by std and distinguishes file replacement
+        // without requiring Windows handle FFI. Waveform keys additionally scope the
+        // version to the canonical source path, record id and library identity.
+        format!("\"{len:x}-{modified:x}-{:x}\"", metadata.creation_time())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         format!("\"{len:x}-{modified:x}\"")
     }

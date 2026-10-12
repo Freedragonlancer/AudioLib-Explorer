@@ -87,7 +87,7 @@ pub enum RemoteError {
     },
     /// `503 UNAVAILABLE` on `/audio/{id}/stream` (§6.4): the record's library root is
     /// offline (NAS share unmounted or unreachable); the server and library are fine.
-    /// `message` is the server's text, e.g. `Library root "1_Boom" is offline: …`.
+    /// `message` is the server's text, e.g. `Library root "SFX" is offline: …`.
     #[error("Library root offline: {message}")]
     RootOffline {
         message: String,
@@ -109,6 +109,10 @@ pub enum RemoteError {
     /// [`RemoteError::Busy`] retrying does not help; refresh the scan status instead.
     #[error("Scan state does not allow this: {0}")]
     ScanState(String),
+    /// The cached record/session IDs belong to another library (`409 LIBRARY_CHANGED`
+    /// or `LIBRARY_ID_REQUIRED`); reject the write and sync before allowing new edits.
+    #[error("Server library changed: {0}")]
+    LibraryChanged(String),
     /// `413 PAYLOAD_TOO_LARGE`: the request body exceeds the server's 8 MiB limit.
     #[error("Request too large: {0}")]
     PayloadTooLarge(String),
@@ -209,6 +213,7 @@ impl RemoteError {
             (_, "MANAGE_FORBIDDEN") => Self::Forbidden(message),
             // Before the generic 409 arm; other 409 codes stay `Busy`.
             (_, "SCAN_STATE") => Self::ScanState(message),
+            (_, "LIBRARY_CHANGED" | "LIBRARY_ID_REQUIRED") => Self::LibraryChanged(message),
             // Before the 503 arm: a `503 BUSY` is a full stream cap, not a starting server.
             (409, _) | (_, "BUSY") | (_, "CANCELLED") => Self::Busy {
                 message,
@@ -385,6 +390,9 @@ impl RemoteError {
                 Self::ScanState(detail) => format!(
                     "The scan's current state does not allow this (409); refresh the scan progress. ({detail})"
                 ),
+                Self::LibraryChanged(detail) => format!(
+                    "The server library changed or its identity is unconfirmed (409); nothing was written. Sync before editing again. ({detail})"
+                ),
                 other => other.to_string(),
             };
         }
@@ -427,6 +435,11 @@ impl RemoteError {
             ),
             Self::ScanState(detail) => {
                 format!("扫描当前的状态不允许此操作（409），请刷新扫描进度：{detail}")
+            }
+            Self::LibraryChanged(detail) => {
+                format!(
+                    "服务器素材库已更换或身份未确认（409），操作未执行；请同步后再编辑：{detail}"
+                )
             }
             Self::PayloadTooLarge(detail) => format!(
                 "请求过大（413，服务器上限 8 MiB），请减少一次编辑的记录数或缩短标签/备注：{detail}"
@@ -621,6 +634,7 @@ impl RemoteError {
             },
             Self::Forbidden(detail) => Self::Forbidden(detail.clone()),
             Self::ScanState(detail) => Self::ScanState(detail.clone()),
+            Self::LibraryChanged(detail) => Self::LibraryChanged(detail.clone()),
             Self::PayloadTooLarge(detail) => Self::PayloadTooLarge(detail.clone()),
             Self::InsufficientStorage(detail) => Self::InsufficientStorage(detail.clone()),
             Self::Unsupported(detail) => Self::Unsupported(detail.clone()),
@@ -888,13 +902,13 @@ mod tests {
 
     #[test]
     fn root_offline_is_classified_by_its_error_code() {
-        let body = r#"{"error_code":"ROOT_OFFLINE","message":"Library root \"1_Boom\" is offline: Root is not answering reliably: timed out"}"#;
+        let body = r#"{"error_code":"ROOT_OFFLINE","message":"Library root \"SFX\" is offline: Root is not answering reliably: timed out"}"#;
         for error in [
             RemoteError::from_audio_response(503, body, "GET /api/v1/audio/7/stream", Some(5)),
             RemoteError::from_response(503, body, "GET /api/v1/audio/7/waveform", Some(5)),
         ] {
             assert!(
-                matches!(&error, RemoteError::RootOffline { message, retry_after: Some(5) } if message.starts_with("Library root \"1_Boom\"")),
+                matches!(&error, RemoteError::RootOffline { message, retry_after: Some(5) } if message.starts_with("Library root \"SFX\"")),
                 "{error:?}"
             );
             assert!(error.localized(true).contains("根目录"));
@@ -928,12 +942,12 @@ mod tests {
     fn audio_503_is_a_root_offline_only_when_it_names_a_root() {
         let root = RemoteError::from_audio_response(
             503,
-            r#"{"error_code":"UNAVAILABLE","message":"Library root \"1_Boom\" is offline: Root directory not found (volume not mounted?)"}"#,
+            r#"{"error_code":"UNAVAILABLE","message":"Library root \"SFX\" is offline: Root directory not found (volume not mounted?)"}"#,
             "GET /api/v1/audio/7/stream",
             Some(5),
         );
         assert!(
-            matches!(&root, RemoteError::RootOffline { message, retry_after: Some(5) } if message.starts_with("Library root \"1_Boom\"")),
+            matches!(&root, RemoteError::RootOffline { message, retry_after: Some(5) } if message.starts_with("Library root \"SFX\"")),
             "{root:?}"
         );
         // The whole library still opening (or failing to open) is a starting server.

@@ -652,17 +652,24 @@ pub fn sync_library(
 ) -> Result<SyncOutcome> {
     let started = Instant::now();
     progress(SyncProgress::Checking);
-    let server_version = client
-        .health()
-        .map(|health| health.version)
-        .unwrap_or_default();
-    let library: RemoteLibrary = match client.library() {
+    let server_version = match client.health_cancellable(cancel) {
+        Ok(health) => health.version,
+        Err(RemoteError::Cancelled) => return Err(RemoteError::Cancelled),
+        Err(_) => String::new(),
+    };
+    let library: RemoteLibrary = match client.library_cancellable(cancel) {
         Ok(library) => library,
         Err(error) => {
             // `/roots` may still answer when `/library` is slow, but this response
             // cannot update a cache without confirming its library identity.
             if error.is_slow() {
-                refresh_cached_roots(client, cache, None);
+                // No identity was confirmed, so these roots cannot be persisted.
+                if matches!(
+                    client.roots_cancellable(cancel),
+                    Err(RemoteError::Cancelled)
+                ) {
+                    return Err(RemoteError::Cancelled);
+                }
             }
             return Err(error);
         }
@@ -670,9 +677,11 @@ pub fn sync_library(
     if let Some(message) = snapshot_schema_error(library.schema_version, false) {
         return Err(RemoteError::Snapshot(message));
     }
-    let roots = match client.roots() {
+    let roots = match client.roots_cancellable(cancel) {
         Ok(roots) => Some(roots),
-        Err(error) if error.is_unauthorized() => return Err(error),
+        Err(error) if error.is_unauthorized() || matches!(error, RemoteError::Cancelled) => {
+            return Err(error);
+        }
         Err(error) => {
             tracing::warn!(%error, "Server roots unavailable; keeping cached roots");
             None
@@ -698,7 +707,13 @@ pub fn sync_library(
         state.server_url = client.api_url().to_owned();
         state.server_version = server_version;
         state.checked_at = now;
+        if cancel.load(Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
         progress(SyncProgress::Saving);
+        if cancel.load(Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
         cache.save_state(&state)?;
         return Ok(SyncOutcome {
             state,
@@ -765,6 +780,9 @@ pub fn sync_library(
                 "the server library changed during download; sync again".into(),
             ));
         }
+        if cancel.load(Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
         progress(SyncProgress::Validating);
         let info = validate_snapshot_with_progress(&staging, &mut |stage| {
             progress(SyncProgress::Preparing(stage))
@@ -778,6 +796,10 @@ pub fn sync_library(
             return Err(error);
         }
     };
+    if cancel.load(Ordering::Acquire) {
+        remove_owned_staging(&staging);
+        return Err(RemoteError::Cancelled);
+    }
     let target = directory.join(&file_name);
     std::fs::rename(&staging, &target)?;
     let state = CacheState {
@@ -799,6 +821,10 @@ pub fn sync_library(
             .unwrap_or_default(),
     };
     progress(SyncProgress::Saving);
+    if cancel.load(Ordering::Acquire) {
+        remove_owned_staging(&target);
+        return Err(RemoteError::Cancelled);
+    }
     cache.save_state(&state)?;
     Ok(SyncOutcome {
         state,
@@ -1734,6 +1760,94 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_each_http_sync_phase_keeps_existing_cache_and_removes_staging() {
+        for (path, stalled_body) in [
+            ("/api/v1/health", false),
+            ("/api/v1/library", false),
+            ("/api/v1/roots", false),
+            ("/api/v1/library/snapshot", false),
+            ("/api/v1/library/snapshot", true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let bytes = sample_snapshot(directory.path());
+            let enabled = Arc::new(AtomicBool::new(false));
+            let (requested, waiting) = std::sync::mpsc::sync_channel(1);
+            let server = {
+                let enabled = enabled.clone();
+                TestServer::start(move |request| {
+                    let response = match request.path.as_str() {
+                        "/api/v1/health" => {
+                            TestResponse::json(200, r#"{"status":"ok","version":"test"}"#)
+                        }
+                        "/api/v1/library" => TestResponse::json(200, &library_json(1)),
+                        "/api/v1/roots" => TestResponse::json(200, "[]"),
+                        "/api/v1/library/snapshot" => TestResponse::bytes(200, bytes.clone())
+                            .with_header("X-Library-Id", "lib-r")
+                            .with_header("X-Library-Revision", "1")
+                            .with_header("X-Schema-Version", "3"),
+                        _ => panic!("unexpected request {}", request.path),
+                    };
+                    if enabled.load(Ordering::Acquire) && request.path == path {
+                        let _ = requested.send(());
+                        if stalled_body {
+                            response.slow(1024, Duration::from_secs(2))
+                        } else {
+                            response.delayed(Duration::from_secs(2))
+                        }
+                    } else {
+                        response
+                    }
+                })
+            };
+            let client = RemoteClient::new(&server.url, "").unwrap();
+            let cache = RemoteCache::new(&directory.path().join("data"));
+            let first =
+                sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap();
+            let state_path = cache.library_dir("lib-r").join(STATE_FILE);
+            let active_path = cache.root.join(ACTIVE_FILE);
+            let database = cache.database_path(&first.state);
+            let before = (
+                std::fs::read(&state_path).unwrap(),
+                std::fs::read(&active_path).unwrap(),
+                std::fs::read(&database).unwrap(),
+            );
+            enabled.store(true, Ordering::Release);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            let cancelled = std::thread::spawn(move || {
+                waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                flag.store(true, Ordering::Release);
+                Instant::now()
+            });
+            let result = sync_library(&client, &cache, &mut |_| {}, &cancel, true);
+            let returned = Instant::now();
+            let cancelled_at = cancelled.join().unwrap();
+            assert!(
+                matches!(result, Err(RemoteError::Cancelled)),
+                "{path}: {result:?}"
+            );
+            assert!(
+                returned.saturating_duration_since(cancelled_at) < Duration::from_secs(1),
+                "{path}, stalled_body={stalled_body}, cancellation elapsed={:?}",
+                returned.saturating_duration_since(cancelled_at)
+            );
+            assert_eq!(cache.active().unwrap(), first.state, "{path}");
+            assert_eq!(std::fs::read(&state_path).unwrap(), before.0);
+            assert_eq!(std::fs::read(&active_path).unwrap(), before.1);
+            assert_eq!(std::fs::read(&database).unwrap(), before.2);
+            let mut files = std::fs::read_dir(cache.library_dir("lib-r"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            files.sort();
+            let mut expected = vec![STATE_FILE.to_owned(), first.state.database_file];
+            expected.sort();
+            assert_eq!(files, expected, "cancel left staging artifacts at {path}");
+        }
+    }
+
+    #[test]
     fn a_snapshot_timeout_or_lost_connection_is_retried_a_few_times() {
         let directory = tempfile::tempdir().unwrap();
         let snapshot = sample_snapshot(directory.path());
@@ -1830,14 +1944,14 @@ mod tests {
         // the saved mapping before this library's identity is confirmed again.
         *state.lock().unwrap() = (
             true,
-            r#"[{"name":"SFX","server_path":"/Volumes/SFX","webdav_url":null},{"name":"A_Lib","server_path":"/Volumes/A_Lib","webdav_url":null}]"#
+            r#"[{"name":"SFX","server_path":"/Volumes/SFX","webdav_url":null},{"name":"ExampleLibrary","server_path":"/Volumes/ExampleLibrary","webdav_url":null}]"#
                 .to_owned(),
         );
         let error = sync_library(&client, &cache, &mut |_| {}, &cancel, false).unwrap_err();
         assert!(error.is_slow(), "{error:?}");
         let roots = refresh_cached_roots(&client, &cache, None).unwrap();
         let names: Vec<&str> = roots.iter().map(|root| root.name.as_str()).collect();
-        assert_eq!(names, ["SFX", "A_Lib"]);
+        assert_eq!(names, ["SFX", "ExampleLibrary"]);
         assert_eq!(cache.active().unwrap(), first.state);
 
         let mut unmatching = RemoteLibrary {

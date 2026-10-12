@@ -2,8 +2,8 @@
 //! `GET /audio/{id}/waveform`: peak summaries computed with `audiolib_audio` and kept in
 //! a server-side cache (default `<library_db directory>/waveforms`).
 //!
-//! Cache entries and the ETag are keyed by the source file's stream ETag (size, mtime,
-//! inode, ctime), the waveform algorithm version ([`WAVEFORM_CACHE_VERSION`]) and the
+//! Cache entries and the ETag are keyed by library identity, record id, canonical
+//! source path, the source stream ETag, cache/algorithm versions and the
 //! request parameters, so a cache hit only needs the file's metadata, never its audio
 //! data. Compressed copies (`Accept-Encoding: zstd`) are cached next to the JSON. The
 //! cache is trimmed to `waveform_cache_mb`, least recently used first.
@@ -28,6 +28,8 @@ pub const MAX_BUCKETS: u32 = 8192;
 const ZSTD_LEVEL: i32 = 3;
 /// The cache is trimmed after this many new entries.
 const TRIM_EVERY: u64 = 32;
+/// Server cache identity version; v2 separates libraries and distinct source files.
+const SERVER_CACHE_VERSION: u32 = 2;
 
 /// Validated `GET /audio/{id}/waveform` parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,14 +121,43 @@ pub struct WaveformKey {
 }
 
 impl WaveformKey {
-    /// Key for the file whose stream ETag is `file_etag` and these parameters.
-    pub fn new(file_etag: &str, params: &WaveformParams) -> Self {
-        let text = format!(
-            "v{WAVEFORM_CACHE_VERSION}|{file_etag}|b{}|c{}|s{:?}|e{:?}",
-            params.buckets, params.colors as u8, params.start_frame, params.end_frame
-        );
+    /// Key scoped to a library, record and canonical source, then its file version
+    /// and rendering parameters. Equal length/mtime values never merge two sources.
+    pub fn new(
+        library_id: &str,
+        id: i64,
+        source: &Path,
+        file_etag: &str,
+        params: &WaveformParams,
+    ) -> Self {
+        #[cfg(windows)]
+        let source: Vec<u8> = {
+            use std::os::windows::ffi::OsStrExt;
+            source
+                .as_os_str()
+                .encode_wide()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        };
+        #[cfg(not(windows))]
+        let source: Vec<u8> = source.as_os_str().as_encoded_bytes().to_vec();
+        // JSON length-delimits strings and bytes so source names cannot alias tuple
+        // boundaries. This tuple consists only of infallibly serializable primitives.
+        let text = serde_json::to_vec(&(
+            SERVER_CACHE_VERSION,
+            WAVEFORM_CACHE_VERSION,
+            library_id,
+            id,
+            source,
+            file_etag,
+            params.buckets,
+            params.colors,
+            params.start_frame,
+            params.end_frame,
+        ))
+        .expect("Waveform identity primitives are serializable");
         Self {
-            hash: fnv1a64(text.as_bytes()),
+            hash: fnv1a64(&text),
         }
     }
 
@@ -134,7 +165,7 @@ impl WaveformKey {
     pub fn etag(&self, zstd: bool) -> String {
         let suffix = if zstd { "-zstd" } else { "" };
         format!(
-            "W/\"wf{WAVEFORM_CACHE_VERSION}-{:016x}{suffix}\"",
+            "W/\"wf{WAVEFORM_CACHE_VERSION}-k{SERVER_CACHE_VERSION}-{:016x}{suffix}\"",
             self.hash
         )
     }
@@ -321,10 +352,16 @@ mod tests {
     #[test]
     fn keys_cover_file_version_and_every_parameter() {
         let base = WaveformParams::parse(None, None, None, None).unwrap();
-        let key = WaveformKey::new("\"a\"", &base);
+        let key = WaveformKey::new("lib", 1, Path::new("a.wav"), "\"a\"", &base);
         let variants = [
-            WaveformKey::new("\"b\"", &base),
+            WaveformKey::new("other-library", 1, Path::new("a.wav"), "\"a\"", &base),
+            WaveformKey::new("lib", 2, Path::new("a.wav"), "\"a\"", &base),
+            WaveformKey::new("lib", 1, Path::new("b.wav"), "\"a\"", &base),
+            WaveformKey::new("lib", 1, Path::new("a.wav"), "\"b\"", &base),
             WaveformKey::new(
+                "lib",
+                1,
+                Path::new("a.wav"),
                 "\"a\"",
                 &WaveformParams {
                     buckets: 512,
@@ -332,6 +369,9 @@ mod tests {
                 },
             ),
             WaveformKey::new(
+                "lib",
+                1,
+                Path::new("a.wav"),
                 "\"a\"",
                 &WaveformParams {
                     colors: false,
@@ -339,6 +379,9 @@ mod tests {
                 },
             ),
             WaveformKey::new(
+                "lib",
+                1,
+                Path::new("a.wav"),
                 "\"a\"",
                 &WaveformParams {
                     start_frame: Some(0),
@@ -346,6 +389,9 @@ mod tests {
                 },
             ),
             WaveformKey::new(
+                "lib",
+                1,
+                Path::new("a.wav"),
                 "\"a\"",
                 &WaveformParams {
                     end_frame: Some(9),
@@ -356,9 +402,12 @@ mod tests {
         for other in &variants {
             assert_ne!(other.etag(false), key.etag(false));
         }
-        assert_eq!(key, WaveformKey::new("\"a\"", &base));
+        assert_eq!(
+            key,
+            WaveformKey::new("lib", 1, Path::new("a.wav"), "\"a\"", &base)
+        );
         assert_ne!(key.etag(true), key.etag(false));
-        assert!(key.etag(false).starts_with("W/\"wf4-"));
+        assert!(key.etag(false).starts_with("W/\"wf4-k2-"));
     }
 
     #[test]
@@ -369,6 +418,9 @@ mod tests {
         let keys: Vec<_> = (0..3)
             .map(|i| {
                 WaveformKey::new(
+                    "lib",
+                    1,
+                    Path::new("a.wav"),
                     &format!("\"{i}\""),
                     &WaveformParams::parse(None, None, None, None).unwrap(),
                 )

@@ -35,6 +35,9 @@ mod folder_search_tests;
 #[path = "remote_mode.rs"]
 mod remote_mode;
 #[cfg(test)]
+#[path = "remote_output_tests.rs"]
+mod remote_output_tests;
+#[cfg(test)]
 #[path = "request_recovery_tests.rs"]
 mod request_recovery_tests;
 #[cfg(test)]
@@ -492,6 +495,9 @@ pub struct Controller {
     selection_wake: Condvar,
     selection_audio_job: Mutex<Option<SelectionAudioJob>>,
     selection_audio_wake: Condvar,
+    /// Serialize remote route preparation and Load acknowledgment with output
+    /// reconfiguration. Selection/Stop still cancel through the admission lock.
+    remote_audio_prepare: Mutex<()>,
     search_generation: AtomicU64,
     search_job: Mutex<Option<SearchJob>>,
     search_wake: Condvar,
@@ -530,6 +536,9 @@ pub struct Controller {
     /// Server-mode in-memory stream of the selected record, registered as its playback
     /// source.
     remote_stream: Mutex<Option<remote_mode::RemotePlayback>>,
+    /// Old engine source retained while a different representation is prepared.
+    /// Stop/shutdown must also interrupt it after the new route is registered.
+    remote_retained_stream: Mutex<Option<remote_mode::RemotePlayback>>,
     /// Wake counter for the background revision poller (bumped to check immediately).
     poll_signal: Mutex<u64>,
     poll_wake: Condvar,
@@ -643,6 +652,7 @@ impl Controller {
             selection_wake: Condvar::new(),
             selection_audio_job: Mutex::new(None),
             selection_audio_wake: Condvar::new(),
+            remote_audio_prepare: Mutex::new(()),
             search_generation: AtomicU64::new(0),
             search_job: Mutex::new(None),
             search_wake: Condvar::new(),
@@ -674,6 +684,7 @@ impl Controller {
             remote_audio_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             audio_reload: Mutex::new(None),
             remote_stream: Mutex::new(None),
+            remote_retained_stream: Mutex::new(None),
             poll_signal: Mutex::new(0),
             poll_wake: Condvar::new(),
             drag_busy: AtomicBool::new(false),
@@ -3359,6 +3370,7 @@ impl Controller {
     }
 
     fn load_selection_audio(self: &Arc<Self>, job: SelectionAudioJob) {
+        let _prepare = self.remote_audio_prepare.lock().unwrap();
         let SelectionAudioJob {
             file: displayed,
             play,
@@ -4308,20 +4320,18 @@ impl Controller {
         );
         let c = self.clone();
         std::thread::spawn(move || {
-            if let Err(error) = c.audio.send_and_wait(
-                AudioCommand::Configure(playback.clone()),
-                Duration::from_secs(4),
-            ) {
+            let result = c.configure_output(playback.clone());
+            if let Err(error) = result {
                 post(c.ui.clone(), move |ui| {
                     ui.set_output_applying(false);
-                    ui.set_device_info(error.to_string().into());
+                    ui.set_device_info(error.into());
                 });
                 return;
             }
             if c.shutdown.load(Ordering::Acquire) {
                 return;
             }
-            *c.playback.lock().unwrap() = playback.clone();
+            let playback = c.playback.lock().unwrap().clone();
             let mut config = c.config.lock().unwrap();
             config.playback = serde_json::to_value(playback).unwrap_or_default();
             let saved = config.save();
@@ -4337,6 +4347,111 @@ impl Controller {
                 c.command(AudioCommand::ControlPanel);
             }
         });
+    }
+
+    /// Re-evaluate a server audition when its source pair changes. Preparing a
+    /// different representation never stops/cancels the currently loaded source.
+    /// The guarded engine command consumes the then-current cursor and state.
+    fn configure_output(self: &Arc<Self>, playback: PlaybackConfig) -> Result<(), String> {
+        let _prepare = self.remote_audio_prepare.lock().unwrap();
+        let status = self.audio.status();
+        let file = status.file_path.as_deref().and_then(|path| {
+            (self.remote_read_only()
+                && self.playback.lock().unwrap().source_pair != playback.source_pair)
+                .then(|| self.remote_wave_file(path))
+                .flatten()
+        });
+        let Some(file) = file else {
+            self.audio
+                .send_and_wait(
+                    AudioCommand::Configure(playback.clone()),
+                    Duration::from_secs(4),
+                )
+                .map_err(|error| error.to_string())?;
+            *self.playback.lock().unwrap() = playback;
+            return Ok(());
+        };
+        let generation = self.selection_generation.load(Ordering::Acquire);
+        let cancel = Arc::new(AtomicBool::new(false));
+        std::mem::replace(
+            &mut *self.remote_audio_cancel.lock().unwrap(),
+            cancel.clone(),
+        )
+        .store(true, Ordering::Release);
+        let retained = self.remote_stream.lock().unwrap().clone();
+        *self.remote_retained_stream.lock().unwrap() = retained.clone();
+        let path = match self.playable_path_for_pair(
+            &file,
+            &cancel,
+            generation,
+            playback.source_pair,
+            true,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                *self.remote_retained_stream.lock().unwrap() = None;
+                return Err(error);
+            }
+        };
+        let completion = {
+            let _admission = self.latest_selection.lock().unwrap();
+            if self.selection_generation.load(Ordering::Acquire) != generation
+                || cancel.load(Ordering::Acquire)
+                || self.closing.load(Ordering::Acquire)
+                || self.shutdown.load(Ordering::Acquire)
+            {
+                self.restore_prepared_stream(&path, retained, false);
+                return Err("The audition changed while output settings were prepared".into());
+            }
+            self.audio.enqueue_with_ack(AudioCommand::ConfigureSource {
+                expected_generation: status.generation,
+                expected_path: status.file_path.unwrap(),
+                path: path.clone(),
+                config: playback.clone(),
+            })
+        };
+        let result = completion
+            .and_then(|completion| completion.wait_until_completed())
+            .map_err(|error| error.to_string());
+        self.restore_prepared_stream(&path, retained, result.is_ok());
+        if let Ok(status) = &result {
+            let mut playback = playback;
+            playback.audition = status.audition;
+            *self.playback.lock().unwrap() = playback;
+        }
+        result.map(|_| ())
+    }
+
+    /// Commit source registration only after engine acknowledgment; on failure
+    /// restore the old stream unless Stop/shutdown already removed the registration.
+    fn restore_prepared_stream(
+        &self,
+        path: &Path,
+        retained: Option<remote_mode::RemotePlayback>,
+        committed: bool,
+    ) {
+        *self.remote_retained_stream.lock().unwrap() = None;
+        if retained.as_ref().is_some_and(|old| old.path == path) {
+            return;
+        }
+        let mut current = self.remote_stream.lock().unwrap();
+        if committed {
+            if let Some(old) = retained {
+                old.stream.cancel();
+                audiolib_audio::unregister_stream_source(&old.path);
+            }
+        } else if current.as_ref().is_some_and(|new| new.path == path) {
+            if let Some(new) = current.take() {
+                new.stream.cancel();
+                audiolib_audio::unregister_stream_source(&new.path);
+            }
+            if self.available() {
+                *current = retained;
+            } else if let Some(old) = retained {
+                old.stream.cancel();
+                audiolib_audio::unregister_stream_source(&old.path);
+            }
+        }
     }
 
     fn command(&self, command: AudioCommand) {

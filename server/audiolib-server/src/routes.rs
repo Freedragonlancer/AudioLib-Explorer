@@ -2,7 +2,7 @@
 //! `/api/v1` routing, bearer authentication and endpoint handlers.
 use crate::{
     ApiError, AppState, VERSION,
-    auth::{ConnectionInfo, RequestOrigin, classify},
+    auth::{ConnectionInfo, RequestOrigin, classify, same_request_origin},
     manage::{CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse, RemoveFolderResponse},
     pcm::{self, PcmPlan, Renderer, WavError},
     preview::{self, Codec, FlacPlan, FlacStream, PreviewRequest, SourceFormat},
@@ -171,7 +171,9 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             .route("/capabilities", get(capabilities))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_token)),
     );
-    let api = with_request_timeout(timeout, open).merge(protected);
+    let api = with_request_timeout(timeout, open)
+        .merge(protected)
+        .layer(middleware::from_fn(guard_api_mutation));
     Router::new()
         .nest(API_BASE, api)
         .merge(with_request_timeout(timeout, crate::admin::router()))
@@ -228,11 +230,79 @@ async fn require_bearer(
     }
     match service.app_state() {
         Ok(state) => {
+            // This cloned AppState pins the provider and its immutable library identity
+            // for the whole request, even if Service installs a different AppState.
+            if library_mutation(&request) {
+                let values = request.headers().get_all(LIBRARY_ID_HEADER);
+                let mut values = values.iter();
+                let id = values.next().and_then(|value| value.to_str().ok());
+                let id = id.filter(|id| !id.trim().is_empty() && values.next().is_none());
+                let Some(id) = id else {
+                    return ApiError::new(
+                        StatusCode::CONFLICT,
+                        "LIBRARY_ID_REQUIRED",
+                        "Library mutations require X-AudioLib-Library-Id from the opened snapshot",
+                    )
+                    .into_response();
+                };
+                if state.library_id() != id {
+                    return ApiError::new(
+                        StatusCode::CONFLICT,
+                        "LIBRARY_CHANGED",
+                        "The server library changed; synchronize before writing",
+                    )
+                    .into_response();
+                }
+            }
             request.extensions_mut().insert(state);
             next.run(request).await
         }
         Err(error) => error.into_response(),
     }
+}
+
+/// Snapshot identity required by protected library mutations.
+pub const LIBRARY_ID_HEADER: &str = "x-audiolib-library-id";
+
+fn library_mutation(request: &Request) -> bool {
+    let Some(path) = request.extensions().get::<axum::extract::MatchedPath>() else {
+        return false;
+    };
+    let path = path.as_str();
+    match *request.method() {
+        Method::PATCH => path.ends_with("/audio/{id}/metadata"),
+        Method::DELETE => path.ends_with("/folders/{id}"),
+        Method::POST => [
+            "/audio/metadata/batch",
+            "/audio/{id}/plays",
+            "/audio/remove",
+            "/scans",
+            "/scans/{session_id}/pause",
+            "/scans/{session_id}/resume",
+            "/scans/{session_id}/cancel",
+        ]
+        .iter()
+        .any(|mutation| path.ends_with(*mutation)),
+        _ => false,
+    }
+}
+
+/// Native clients omit Origin. Browser mutations must prove the same authority and
+/// listener scheme; forwarded headers never establish a trusted browser origin.
+async fn guard_api_mutation(request: Request, next: Next) -> Response {
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) && !same_request_origin(&request)
+    {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_FORBIDDEN",
+            "Browser mutations require the server's own origin",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 /// Authorize the request per the authentication mode only (no library needed).
@@ -344,10 +414,25 @@ async fn audio(
 }
 
 /// Decode a JSON request body; malformed JSON or wrong field types are 400 `VALIDATION`,
-/// an oversized body 413 `PAYLOAD_TOO_LARGE`. The `Content-Type` header is not checked.
+/// an oversized body 413 `PAYLOAD_TOO_LARGE`. JSON mutations require application/json.
 pub(crate) fn json_body<T: DeserializeOwned>(
+    headers: &HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<T, ApiError> {
+    let mut content_types = headers.get_all(header::CONTENT_TYPE).iter();
+    let is_json = content_types
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        && content_types.next().is_none();
+    if !is_json {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "JSON_CONTENT_TYPE_REQUIRED",
+            "JSON mutations require Content-Type: application/json",
+        ));
+    }
     let body = body.map_err(|rejection| {
         if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
             ApiError::new(
@@ -385,10 +470,11 @@ fn is_legacy_rating_only(value: &serde_json::Value) -> bool {
 async fn update_metadata(
     Extension(state): Extension<AppState>,
     Path(raw_id): Path<String>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<AudioWriteResponse>, ApiError> {
     let id = parse_id(&raw_id)?;
-    let raw: serde_json::Value = json_body(body)?;
+    let raw: serde_json::Value = json_body(&headers, body)?;
     if is_legacy_rating_only(&raw) {
         return Ok(Json(
             blocking(move || {
@@ -424,9 +510,10 @@ struct BatchMetadataBody {
 /// `revision_before == revision` (ids are still validated).
 async fn update_metadata_batch(
     Extension(state): Extension<AppState>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<BatchWriteResponse>, ApiError> {
-    let raw: serde_json::Value = json_body(body)?;
+    let raw: serde_json::Value = json_body(&headers, body)?;
     if raw.get("patch").is_some_and(is_legacy_rating_only) {
         let ids: Vec<i64> = raw
             .get("ids")
@@ -484,9 +571,10 @@ async fn record_play(
 /// `POST /audio/remove`: remove library records (never files); see `crate::manage`.
 async fn remove_audio(
     Extension(state): Extension<AppState>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<RemoveAudioResponse>, ApiError> {
-    let request: RemoveAudioRequest = json_body(body)?;
+    let request: RemoveAudioRequest = json_body(&headers, body)?;
     Ok(Json(
         blocking_api(move || state.remove_audio(&request.ids)).await?,
     ))
@@ -580,9 +668,10 @@ fn parse_session_id(raw: &str) -> Result<i64, ApiError> {
 /// answer with its first progress once the library session exists.
 async fn start_scan(
     Extension(state): Extension<AppState>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<ScanResponse>, ApiError> {
-    let request: ScanRequest = json_body(body)?;
+    let request: ScanRequest = json_body(&headers, body)?;
     let started = blocking_api(move || state.start_scan(request)).await?;
     // If the client gives up while the directory is still resolving, the scan still
     // starts; `GET /scans/current` shows it.

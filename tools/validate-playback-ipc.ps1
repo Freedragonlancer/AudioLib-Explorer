@@ -1,6 +1,6 @@
 # tools/validate-playback-ipc.ps1
 [CmdletBinding()]
-param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release')
+param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release', [switch]$CleanCheckout)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }
@@ -10,11 +10,50 @@ $previousRoot = $env:AUDIOLIB_DATA_DIR
 $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $testRoot = [IO.Path]::GetFullPath((Join-Path $temporaryRoot ('AudioLibPlayback-' + [guid]::NewGuid().ToString('N'))))
 $ownedProcess = $null
+$second = $null
+$primaryError = $null
 $checks = [Collections.Generic.List[string]]::new()
 function Invoke-Control([string[]]$Arguments) {
     $reply = (& $cli @Arguments | Out-String) | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or !$reply.success) { throw "Playback command failed: $($reply.error)" }
     return $reply.data
+}
+function New-SilentFloatWav([string]$Path, [int]$Rate, [int]$Seconds) {
+    $dataSize = $Rate * $Seconds * 8
+    $writer = [IO.BinaryWriter]::new([IO.File]::Create($Path))
+    try {
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $writer.Write([uint32]($dataSize + 36))
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt ')); $writer.Write([uint32]16)
+        $writer.Write([uint16]3); $writer.Write([uint16]2); $writer.Write([uint32]$Rate)
+        $writer.Write([uint32]($Rate * 8)); $writer.Write([uint16]8); $writer.Write([uint16]32)
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('data')); $writer.Write([uint32]$dataSize)
+        $silence = [byte[]]::new(1MB)
+        for ($remaining = $dataSize; $remaining -gt 0; $remaining -= $count) {
+            $count = [Math]::Min($remaining,$silence.Length)
+            $writer.Write($silence,0,$count)
+        }
+    } finally { $writer.Dispose() }
+}
+function Close-OwnedDesktop($Process) {
+    if (!$Process) { return $true }
+    $Process.Refresh()
+    if (!$Process.HasExited) {
+        $null = $Process.CloseMainWindow()
+        if (!$Process.WaitForExit(25000)) { return $false }
+    }
+    return $true
+}
+function Remove-OwnedTemporaryRoot {
+    $resolvedRoot = [IO.Path]::GetFullPath($testRoot)
+    if (!$resolvedRoot.StartsWith($temporaryRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the owned temporary root.' }
+    if (!(Test-Path -LiteralPath $resolvedRoot)) { return }
+    $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($resolvedRoot)
+    while ($pending.Count -gt 0) {
+        $item = Get-Item -LiteralPath $pending.Pop() -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing cleanup of a temporary subtree containing a reparse point.' }
+        if ($item.PSIsContainer) { foreach ($child in Get-ChildItem -LiteralPath $item.FullName -Force) { $pending.Push($child.FullName) } }
+    }
+    Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
 }
 try {
     $absent = (& $cli status | Out-String) | ConvertFrom-Json
@@ -22,26 +61,35 @@ try {
     $checks.Add('absent desktop returns explicit failure')
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     $env:AUDIOLIB_DATA_DIR = Join-Path $testRoot 'userdata'
+    New-Item -ItemType Directory -Path $env:AUDIOLIB_DATA_DIR | Out-Null
+    $libraryPath = Join-Path $env:AUDIOLIB_DATA_DIR 'library.db'
+    $settingsPath = Join-Path $env:AUDIOLIB_DATA_DIR 'settings.json'
+    # Explicit preferences and an owned database exclude all first-run legacy inputs.
+    $settings = @{active_database=$libraryPath;language='en';playback=@{volume=0.0};allowed_scan_roots=@();data_source=@{mode='local';server_url=''}} | ConvertTo-Json -Depth 5
+    [IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
+    $null = Invoke-Control @('db','create',$libraryPath)
     $wavPath = Join-Path $testRoot 'silent-192k.wav'
-    $stream = [IO.File]::Create($wavPath)
-    $writer = [IO.BinaryWriter]::new($stream)
-    try {
-        $rate = 192000
-        $dataSize = $rate * 5 * 8
-        $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF'))
-        $writer.Write([uint32]($dataSize + 36))
-        $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
-        $writer.Write([uint32]16)
-        $writer.Write([uint16]3)
-        $writer.Write([uint16]2)
-        $writer.Write([uint32]$rate)
-        $writer.Write([uint32]($rate * 8))
-        $writer.Write([uint16]8)
-        $writer.Write([uint16]32)
-        $writer.Write([Text.Encoding]::ASCII.GetBytes('data'))
-        $writer.Write([uint32]$dataSize)
-        $writer.Write([byte[]]::new($dataSize))
-    } finally { $writer.Dispose() }
+    New-SilentFloatWav $wavPath 192000 5
+    $fixtureRoot = Join-Path $testRoot 'indexed-fixtures'
+    New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
+    New-SilentFloatWav (Join-Path $fixtureRoot '! Owned GUI selection.wav') 48000 1
+    if ($CleanCheckout) {
+        $longPath = Join-Path $fixtureRoot 'ZZZ Owned long 192k.wav'
+        New-SilentFloatWav $longPath 192000 105
+        $largest = Get-Item -LiteralPath $longPath
+        $fixtureKind = 'owned-synthetic-silence'
+    } else {
+        $legacyFixture = Join-Path $taskRoot 'test_audiolib/P-51 Mustang'
+        if (!(Test-Path -LiteralPath $legacyFixture -PathType Container)) { throw 'Legacy playback fixtures are absent; rerun with -CleanCheckout for owned synthetic audio.' }
+        $largest = Get-ChildItem -LiteralPath $legacyFixture -Filter '*.wav' -Recurse -File | Sort-Object Length -Descending | Select-Object -First 1
+        if (!$largest) { throw 'Legacy playback fixtures contain no WAV; rerun with -CleanCheckout.' }
+        $null = Invoke-Control @('scan',$legacyFixture)
+        $fixtureKind = 'read-only-legacy-fixture'
+    }
+    $null = Invoke-Control @('scan',$fixtureRoot)
+    $selected = Invoke-Control @('search','--limit','1')
+    if ($selected.results[0].file_path -eq $largest.FullName) { throw 'The GUI selection must differ from the indexed IPC history source.' }
+    $checks.Add('explicit isolated preferences/database and distinct indexed history source')
     $screenshot = Join-Path $testRoot 'ipc-ui.png'
     $ownedProcess = Start-Process -FilePath $desktop -WorkingDirectory $taskRoot -WindowStyle Hidden -ArgumentList @('--smoke-ui','--smoke-duration-ms','24000','--screenshot',('"' + $screenshot + '"')) -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
@@ -53,8 +101,6 @@ try {
     if (!$ready.success) { throw 'Local control server did not become ready.' }
     # Selection in UI smoke happens at 900 ms; finish it before this IPC load.
     Start-Sleep -Milliseconds 1000
-    $libraryPath = Join-Path $testRoot 'userdata/library.db'
-    $settingsPath = Join-Path $testRoot 'userdata/settings.json'
     $settingsHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
     $secondError = Join-Path $testRoot 'second-desktop.stderr'
     $second = Start-Process -FilePath $desktop -WorkingDirectory $taskRoot -WindowStyle Hidden -ArgumentList @('--smoke-ui') -RedirectStandardError $secondError -PassThru
@@ -65,8 +111,9 @@ try {
             throw 'Duplicate desktop startup did not protect the first instance preferences.'
         }
     } finally {
-        if (!$second.HasExited) { $second.Kill(); $second.WaitForExit() }
-        $second.Dispose()
+        try {
+            if (!$second.HasExited -and !(Close-OwnedDesktop $second)) { Write-Warning 'The owned duplicate test instance did not close gracefully; its data will be retained.' }
+        } catch { Write-Warning ('Duplicate-instance cleanup failed: ' + $_.Exception.Message) }
     }
     $checks.Add('duplicate desktop startup fails before modifying shared preferences')
     $blockedUse = (& $cli db use $libraryPath | Out-String) | ConvertFrom-Json
@@ -116,7 +163,6 @@ try {
     $null = Invoke-Control @('audition')
     $checks.Add('repeat wraps at end with pitch-preserving 4x speed and unchanged source identity')
 
-    $largest = Get-ChildItem -LiteralPath (Join-Path $taskRoot 'test_audiolib/P-51 Mustang') -Filter '*.wav' -Recurse -File | Sort-Object Length -Descending | Select-Object -First 1
     $memoryDelta = $null
     if ($largest) {
         $baselineMemory = (Get-Process -Id $ownedProcess.Id).WorkingSet64
@@ -140,7 +186,7 @@ try {
             throw 'Playback history did not resolve the actual IPC source or recorded the GUI-selected/unindexed file.'
         }
         $checks.Add('playback history resolves actual indexed IPC source while GUI selection differs')
-        # The real fixture remains muted throughout these replay/history checks.
+        # The indexed source remains muted throughout these replay/history checks.
         $null = Invoke-Control @('play')
         Start-Sleep -Milliseconds 120
         $null = Invoke-Control @('pause')
@@ -174,7 +220,7 @@ try {
         $null = Invoke-Control @('pause')
         $checks.Add('pause/resume and seek preserve history; stop/replay and natural end/replay each add one session')
         $null = Invoke-Control @('volume','0.37')
-        $checks.Add('largest 192k fixture decodes muted without full-file PCM memory')
+        $checks.Add('indexed long WAV decodes muted without full-file PCM memory')
     }
     $stopped = Invoke-Control @('stop')
     if ($stopped.state -ne 'stopped' -or $stopped.position -ne 0) { throw 'Stop did not rewind transport.' }
@@ -188,12 +234,22 @@ try {
     if ($preferences.playback.audition.pitch_semitones -ne 7 -or $preferences.playback.audition.rate -ne 0.75 -or !$preferences.playback.audition.mono) { throw 'Confirmed audition settings were lost on desktop shutdown.' }
     $checks.Add('confirmed independent Pitch/Rate and mono survive desktop shutdown')
     $checks.Add('desktop snapshot and clean shutdown')
-    [PSCustomObject]@{ success=$true; checks=$checks; output_rate=$playing.device_sample_rate; actual_buffer_frames=$playing.actual_buffer_frames; synthetic_audio_is_silent=$true; real_fixture_gain_is_zero=$true; large_fixture_bytes=$largest.Length; large_fixture_duration=$largePlayback.duration; working_set_before_bytes=$baselineMemory; working_set_large_bytes=$largeMemory; large_fixture_working_set_delta_bytes=$memoryDelta; acoustic_latency_measured=$false } | ConvertTo-Json -Depth 4
+    [PSCustomObject]@{ success=$true; checks=$checks; output_rate=$playing.device_sample_rate; actual_buffer_frames=$playing.actual_buffer_frames; synthetic_audio_is_silent=$true; fixture_kind=$fixtureKind; real_fixture_tested=(!$CleanCheckout); indexed_source_gain_is_zero=$true; large_fixture_bytes=$largest.Length; large_fixture_duration=$largePlayback.duration; working_set_before_bytes=$baselineMemory; working_set_large_bytes=$largeMemory; large_fixture_working_set_delta_bytes=$memoryDelta; acoustic_latency_measured=$false } | ConvertTo-Json -Depth 4
+} catch {
+    $primaryError = $_
+    throw
 } finally {
-    if ($ownedProcess -and !$ownedProcess.HasExited) { Stop-Process -Id $ownedProcess.Id -Force }
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    $closed = $true
+    foreach ($process in @($second,$ownedProcess)) {
+        try {
+            if (!(Close-OwnedDesktop $process)) { $closed=$false; $cleanupErrors.Add('An owned test GUI did not close gracefully; its temporary data is retained.') }
+        } catch { $closed=$false; $cleanupErrors.Add($_.Exception.Message) }
+    }
     $env:AUDIOLIB_DATA_DIR = $previousRoot
-    $resolvedRoot = [IO.Path]::GetFullPath($testRoot)
-    if ($resolvedRoot.StartsWith($temporaryRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedRoot)) {
-        Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
+    if ($closed) { try { Remove-OwnedTemporaryRoot } catch { $cleanupErrors.Add($_.Exception.Message) } }
+    if ($cleanupErrors.Count) {
+        $message = $cleanupErrors -join ' '
+        if ($primaryError) { Write-Warning $message } else { throw $message }
     }
 }

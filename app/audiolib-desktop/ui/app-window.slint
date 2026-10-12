@@ -391,13 +391,15 @@ export component AppWindow inherits Window {
 
     // Data source (local library or read-only server snapshot).
     in property <bool> remote-mode: false;
+    // Cached record IDs must not be written after a known server library replacement.
+    in property <bool> remote-writes-blocked: false;
     // Appended to write actions that the read-only server snapshot disables.
     property <string> ro-suffix: root.remote-mode ? (root.chinese ? "（服务器模式只读）" : " (read-only in server mode)") : "";
     // Server mode: record removals go to the active server when its /capabilities lets this
     // PC manage; otherwise the items stay greyed with the server's reason.
     in property <bool> server-can-manage: false;
     in property <string> server-manage-note: "";
-    property <bool> removal-allowed: !root.remote-mode || root.server-can-manage;
+    property <bool> removal-allowed: !root.remote-writes-blocked && (!root.remote-mode || root.server-can-manage);
     property <string> removal-suffix: root.removal-allowed ? "" : (root.server-manage-note == "" ? root.ro-suffix : (root.chinese ? "（" + root.server-manage-note + "）" : " (" + root.server-manage-note + ")"));
     in property <string> data-source-label: "";
     in-out property <string> ds-server-url: "";
@@ -494,7 +496,7 @@ export component AppWindow inherits Window {
     in-out property <int> sm-scan-mode: 0;
     // Inline removal confirmation: 0 none, 1 移除所选记录, 2 删除目录记录.
     in-out property <int> sm-confirm: 0;
-    property <bool> sm-manageable: root.sm-active && root.remote-mode && root.sm-can-manage;
+    property <bool> sm-manageable: root.sm-active && root.remote-mode && root.sm-can-manage && !root.remote-writes-blocked;
     property <string> sm-manage-note: !root.sm-active ? (root.chinese ? "只有当前数据源可以管理；请先切换到此数据源。" : "Only the active source can be managed; switch to this source first.") : (!root.remote-mode ? (root.chinese ? "快照尚未打开：同步完成后才能管理。" : "The snapshot is not open yet: manage after the sync.") : (!root.sm-can-manage ? (root.sm-capabilities != "" ? (root.chinese ? "服务器不允许本机管理，只能查看。" : "The server does not allow management from this PC; view only.") + " " + root.sm-capabilities : (root.chinese ? "尚未取得服务器的管理权限信息（/capabilities），只能查看。" : "No management information from the server (/capabilities) yet; view only.")) : ""));
     // Unsaved-edit prompt: -3 close, -2 none, -1 a new server, >=0 source row.
     in-out property <int> sm-pending-select: -2;
@@ -589,7 +591,7 @@ export component AppWindow inherits Window {
         root.schedule-modal-focus();
     }
     function open-batch() {
-        root.batch-visible = true;
+        if !root.remote-writes-blocked { root.batch-visible = true; }
     }
 
     // Menu targets are immutable IDs/paths captured when opened, never row positions.
@@ -765,7 +767,7 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: root.chinese ? "选择当前页" : "Check current page"; enabled: root.menu-ready && root.rows.length > 0; activated => { root.check-page-requested(true); } }
             MenuItem { title: root.chinese ? "清除全部选择" : "Clear selection"; enabled: root.menu-ready && root.checked-count > 0; activated => { root.check-page-requested(false); } }
-            MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection; activated => { root.file-action-requested(root.selected-id, 5); } }
+            MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
             MenuSeparator { }
             MenuItem { title: root.chinese ? "复制所选文件路径" : "Copy selected file path"; enabled: root.menu-ready && root.has-selection; activated => { root.copy-text(root.selected-path); } }
             MenuItem { title: (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer") + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 2); } }
@@ -954,7 +956,7 @@ export component AppWindow inherits Window {
                         label: root.checked-count + (root.chinese ? " 条已选" : " selected");
                         clicked => { selection-menu.show({x: self.absolute-position.x, y: self.absolute-position.y + self.height}); }
                     }
-                    if root.checked-count > 1 && root.wide-layout: Action { width: 86px; enabled: !root.background-blocked; label: root.chinese ? "批量标注" : "Batch edit"; clicked => { root.open-batch(); } }
+                    if root.checked-count > 1 && root.wide-layout: Action { width: 86px; enabled: !root.background-blocked && !root.remote-writes-blocked; label: root.chinese ? "批量标注" : "Batch edit"; clicked => { root.open-batch(); } }
                     if root.checked-count > 1 && root.wide-layout: Action { width: 64px; subtle: true; enabled: !root.background-blocked && root.removal-allowed; label: root.chinese ? "移除" : "Remove"; clicked => { root.library-action(11); } }
                     if root.checked-count > 1: Rectangle { horizontal-stretch: 1; }
                     ComboBox { width: 116px; model: root.chinese ? ["存在的文件", "缺失的文件", "全部记录"] : ["Present files", "Missing files", "All records"]; current-index <=> root.visibility-index; selected => { root.filter-requested(); } }
@@ -1098,7 +1100,7 @@ export component AppWindow inherits Window {
                 VerticalLayout { padding: 10px; spacing: 8px;
                     HorizontalLayout { height: 30px;
                         Text { horizontal-stretch: 1; text: root.chinese ? "声音详情" : "Sound details"; color: Theme.ink; font-size: 13px; font-weight: 600; vertical-alignment: center; }
-                        if root.has-selection: Action { width: 36px; subtle: true; active: root.edit-favorite; enabled: !root.background-blocked; label: root.edit-favorite ? "★" : "☆"; action-label: root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "收藏" : "Add to favorites"); clicked => { root.edit-favorite = !root.edit-favorite; root.metadata-dirty = true; root.metadata-edited(); } }
+                        if root.has-selection: Action { width: 36px; subtle: true; active: root.edit-favorite; enabled: !root.background-blocked && !root.remote-writes-blocked; label: root.edit-favorite ? "★" : "☆"; action-label: root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "收藏" : "Add to favorites"); clicked => { root.edit-favorite = !root.edit-favorite; root.metadata-dirty = true; root.metadata-edited(); } }
                         Action { width: 36px; subtle: true; label: "×"; clicked => { root.inspector-visible = false; } }
                     }
                     if !root.has-selection: VerticalLayout { spacing: 6px; padding-top: 12px;
@@ -1138,10 +1140,10 @@ export component AppWindow inherits Window {
                             Rectangle { height: 1px; background: Theme.border; }
                             HorizontalLayout { height: 30px; spacing: 8px;
                                 Label { width: 34px; text: root.chinese ? "标签" : "Tags"; }
-                                LineEdit { min-width: 0px; input-label: root.chinese ? "标签 · 逗号分隔" : "Tags, comma separated"; enabled: !root.background-blocked; text <=> root.edit-tags; placeholder-text: root.chinese ? "标签，用逗号分隔" : "Tags, comma separated"; edited => { root.metadata-dirty = true; root.metadata-edited(); } }
+                                LineEdit { min-width: 0px; input-label: root.chinese ? "标签 · 逗号分隔" : "Tags, comma separated"; enabled: !root.background-blocked && !root.remote-writes-blocked; text <=> root.edit-tags; placeholder-text: root.chinese ? "标签，用逗号分隔" : "Tags, comma separated"; edited => { root.metadata-dirty = true; root.metadata-edited(); } }
                             }
                             Action { height: 30px; subtle: true; active: root.notes-visible; label: (root.notes-visible ? "−  " : "+  ") + (root.chinese ? "备注" : "Notes") + (root.edit-notes == "" ? "" : " ·"); clicked => { root.notes-visible = !root.notes-visible; } }
-                            if root.notes-visible: TextEdit { height: 62px; accessible-label: root.chinese ? "备注" : "Notes"; enabled: !root.background-blocked; text <=> root.edit-notes; edited => { root.metadata-dirty = true; root.metadata-edited(); } }
+                            if root.notes-visible: TextEdit { height: 62px; accessible-label: root.chinese ? "备注" : "Notes"; enabled: !root.background-blocked && !root.remote-writes-blocked; text <=> root.edit-notes; edited => { root.metadata-dirty = true; root.metadata-edited(); } }
                             Label { height: 16px; text: root.chinese ? "文件路径" : "FILE PATH"; font-size: 10px; }
                             ScrollView { height: root.short-layout ? 36px : 48px; viewport-width: self.visible-width;
                                 VerticalLayout { padding: 0px; alignment: start;
@@ -1154,7 +1156,7 @@ export component AppWindow inherits Window {
                     }
                     if root.has-selection: HorizontalLayout { height: 30px;
                         Label { horizontal-stretch: 1; text: root.metadata-dirty ? (root.chinese ? "未保存" : "Unsaved") : root.remote-mode ? (root.chinese ? "已保存到服务器" : "Saved to server") : (root.chinese ? "已保存到素材库" : "Saved to library"); color: root.metadata-dirty ? Theme.warning : Theme.dim; font-size: 10px; }
-                        Action { width: 98px; primary: root.metadata-dirty; subtle: !root.metadata-dirty; enabled: root.metadata-dirty && !root.closing && !root.library-busy; label: root.chinese ? "保存 · Ctrl S" : "Save · Ctrl S"; clicked => { root.save-metadata-requested(); } }
+                        Action { width: 98px; primary: root.metadata-dirty; subtle: !root.metadata-dirty; enabled: root.metadata-dirty && !root.closing && !root.library-busy && !root.remote-writes-blocked; label: root.chinese ? "保存 · Ctrl S" : "Save · Ctrl S"; clicked => { root.save-metadata-requested(); } }
                     }
                 }
             }
@@ -1198,7 +1200,7 @@ export component AppWindow inherits Window {
 
     selection-menu := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
         Menu {
-            MenuItem { title: root.chinese ? "批量标注" : "Batch edit"; enabled: root.checked-count > 1 && !root.background-blocked; activated => { root.open-batch(); } }
+            MenuItem { title: root.chinese ? "批量标注" : "Batch edit"; enabled: root.checked-count > 1 && !root.background-blocked && !root.remote-writes-blocked; activated => { root.open-batch(); } }
             MenuItem { title: root.chinese ? "清除选择" : "Clear selection"; enabled: !root.background-blocked; activated => { root.check-page-requested(false); } }
             MenuItem { title: (root.chinese ? "移除选择记录（保留 WAV）…" : "Remove selected records (keep WAV)…") + root.removal-suffix; enabled: !root.background-blocked && root.removal-allowed; activated => { root.library-action(11); } }
         }
@@ -1210,7 +1212,7 @@ export component AppWindow inherits Window {
             MenuItem { title: root.chinese ? "试听" : "Audition"; enabled: !root.context-file.missing; activated => { root.file-action(0); } }
             MenuItem { title: root.chinese ? "查看 / 编辑 Metadata" : "View / edit Metadata"; activated => { root.inspector-visible = true; root.file-action(1); } }
             MenuSeparator { }
-            MenuItem { title: (root.context-file.favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); activated => { root.file-action(5); } }
+            MenuItem { title: (root.context-file.favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: !root.remote-writes-blocked; activated => { root.file-action(5); } }
             MenuSeparator { }
             MenuItem { title: (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer") + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(2); } }
             MenuItem { title: root.chinese ? "复制完整路径" : "Copy full path"; activated => { root.copy-text(root.context-file.file-path); } }
@@ -1754,7 +1756,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout { height: 34px; spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
                     Action { width: 90px; label: root.chinese ? "取消" : "Cancel"; clicked => { root.batch-visible = false; } }
-                    Action { width: 150px; primary: true; enabled: root.checked-count > 0 && !root.library-busy; label: root.chinese ? "应用到选择记录" : "Apply to selected"; clicked => { root.batch-requested(); } }
+                    Action { width: 150px; primary: true; enabled: root.checked-count > 0 && !root.library-busy && !root.remote-writes-blocked; label: root.chinese ? "应用到选择记录" : "Apply to selected"; clicked => { root.batch-requested(); } }
                 }
             }
         }

@@ -914,7 +914,7 @@ mod tests {
                             "/api/v1/library" => TestResponse::json(
                                 200,
                                 &format!(
-                                    r#"{{"library_id":"schema-test","schema_version":{version},"revision":282,"stats":{{"audio_files":909342}}}}"#
+                                    r#"{{"library_id":"schema-test","schema_version":{version},"revision":42,"stats":{{"audio_files":123456}}}}"#
                                 ),
                             ),
                             "/api/v1/roots" => TestResponse::json(200, "[]"),
@@ -934,8 +934,8 @@ mod tests {
                 assert!(!report.unauthorized && !report.server_starting());
                 assert_eq!(report.server_version.as_deref(), Some("0.4.0"));
                 let library = report.library.as_ref().unwrap();
-                assert_eq!((library.schema_version, library.revision), (version, 282));
-                assert_eq!(library.audio_files(), Some(909342));
+                assert_eq!((library.schema_version, library.revision), (version, 42));
+                assert_eq!(library.audio_files(), Some(123456));
                 let step = report
                     .steps
                     .iter()
@@ -997,7 +997,7 @@ mod tests {
         report.steps.push(StepReport {
             optional: true,
             ok: false,
-            target: "1_Boom".into(),
+            target: "SFX".into(),
             ..ok(ProbeStep::WebDav)
         });
         assert_eq!(report.verdict(false), "ok · 0.3.5 · r6 · 1 warnings");

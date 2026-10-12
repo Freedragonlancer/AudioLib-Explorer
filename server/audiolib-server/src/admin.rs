@@ -30,7 +30,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, Request, State,
         rejection::{BytesRejection, QueryRejection},
     },
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -114,28 +114,12 @@ fn check(request: &Request) -> Result<(), ApiError> {
         let marked = headers
             .get(ADMIN_HEADER)
             .is_some_and(|value| value.as_bytes() == b"1");
-        let same_origin = match headers.get(header::ORIGIN) {
-            None => true,
-            Some(origin) => match (origin.to_str().ok().and_then(origin_authority), host) {
-                (Some(origin), Some(host)) => origin.eq_ignore_ascii_case(host),
-                (Some(origin), None) => is_lan_host(origin),
-                (None, _) => false,
-            },
-        };
+        let same_origin = crate::auth::same_request_origin(request);
         if !marked || !same_origin {
             return Err(ApiError::admin_header_required());
         }
     }
     Ok(())
-}
-
-/// `host[:port]` of an `Origin` value such as `http://192.0.2.10:8790`.
-fn origin_authority(origin: &str) -> Option<&str> {
-    let (scheme, rest) = origin.split_once("://")?;
-    if scheme != "http" && scheme != "https" {
-        return None;
-    }
-    Some(rest.trim_end_matches('/'))
 }
 
 /// IP literal, `localhost`, a single-label name or a `.local` / `.lan` / `.home.arpa` /
@@ -382,9 +366,10 @@ async fn run_blocking<T: Send + 'static>(
 
 async fn update_settings(
     State(service): State<Service>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<AdminStatus>, ApiError> {
-    let body: SettingsBody = json_body(body)?;
+    let body: SettingsBody = json_body(&headers, body)?;
     let public_url = body.public_url.map(url_field).transpose()?;
     let lan_url = body.lan_url.map(url_field).transpose()?;
     let auth_mode = body.auth_mode;
@@ -428,9 +413,10 @@ async fn wait_for_tls(service: &Service) {
 
 async fn update_tls(
     State(service): State<Service>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<AdminStatus>, ApiError> {
-    let settings: TlsSettings = json_body(body)?;
+    let settings: TlsSettings = json_body(&headers, body)?;
     let security = service.security().clone();
     let http_port = security.http_port();
     run_blocking(move || {
@@ -475,9 +461,10 @@ struct CreatedToken {
 
 async fn create_token(
     State(service): State<Service>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
-    let body: CreateTokenBody = json_body(body)?;
+    let body: CreateTokenBody = json_body(&headers, body)?;
     let security = service.security().clone();
     let (token, secret) = run_blocking(move || security.create_token(&body.name)).await?;
     Ok((StatusCode::CREATED, Json(CreatedToken { token, secret })).into_response())
@@ -549,9 +536,10 @@ async fn list_roots(State(service): State<Service>) -> Result<Json<Vec<RootRespo
 /// `POST /admin/api/roots` `{ "name", "path" }` → 201 with the new root's entry.
 async fn add_root(
     State(service): State<Service>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
-    let request: AddRootRequest = json_body(body)?;
+    let request: AddRootRequest = json_body(&headers, body)?;
     let state = service.app_state()?;
     let shown = request.path.clone();
     let root = with_fs_timeout(&shown, run_fs_blocking(move || state.add_root(request))).await?;
@@ -570,9 +558,10 @@ async fn remove_root(
 /// `POST /admin/api/scans`: same body and reply as `POST /api/v1/scans`.
 async fn start_scan(
     State(service): State<Service>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<ScanResponse>, ApiError> {
-    let request: ScanRequest = json_body(body)?;
+    let request: ScanRequest = json_body(&headers, body)?;
     let state = service.app_state()?;
     let started = run_blocking(move || state.start_scan(request)).await?;
     match started.await {
@@ -697,15 +686,5 @@ mod tests {
         ] {
             assert!(!is_lan_host(host), "{host}");
         }
-    }
-
-    #[test]
-    fn origins_reduce_to_their_authority() {
-        assert_eq!(
-            origin_authority("http://192.0.2.10:8790"),
-            Some("192.0.2.10:8790")
-        );
-        assert_eq!(origin_authority("null"), None);
-        assert_eq!(origin_authority("file://x"), None);
     }
 }

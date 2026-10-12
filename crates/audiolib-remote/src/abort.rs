@@ -545,15 +545,42 @@ impl Transport for ScopedTransport {
         {
             wanted = Some(wanted.map_or(stall, |wanted| wanted.min(stall)));
         }
-        if wanted != self.read_timeout {
-            self.stream.set_read_timeout(wanted)?;
-            self.read_timeout = wanted;
-        }
-        let input = self.buffers.input_append_buf();
-        let amount = (&*self.stream).read(input);
-        let amount = match amount {
-            Ok(amount) => amount,
-            Err(error) => return Err(self.failure(error, timeout)),
+        // Windows shutdown can leave a pending blocking recv asleep until the peer
+        // writes/closes. Poll scoped reads so cancellation also bounds the worker's
+        // lifetime when the peer retains its socket; retain the original deadline.
+        let deadline = wanted.map(|wait| std::time::Instant::now() + wait);
+        let scoped = self.registration.is_some();
+        let amount = loop {
+            if self.aborted() {
+                return Err(cancelled().into());
+            }
+            let remaining = deadline
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return Err(ureq::Error::Timeout(timeout.reason));
+            }
+            let read_wait = if scoped {
+                Some(remaining.map_or(crate::client::WAIT_TICK, |remaining| {
+                    remaining.min(crate::client::WAIT_TICK)
+                }))
+            } else {
+                remaining
+            };
+            if read_wait != self.read_timeout {
+                self.stream.set_read_timeout(read_wait)?;
+                self.read_timeout = read_wait;
+            }
+            let input = self.buffers.input_append_buf();
+            match (&*self.stream).read(input) {
+                Ok(amount) => break amount,
+                Err(error)
+                    if scoped
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                        ) => {}
+                Err(error) => return Err(self.failure(error, timeout)),
+            }
         };
         self.buffers.input_appended(amount);
         Ok(amount > 0)

@@ -57,6 +57,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $ghArgs = @($env:RELEASE_TAG, '--verify-tag', '--title', "AudioLib Explorer $($env:RELEASE_TAG)", '--notes-file', 'dist/release/notes.md')
           if ($env:RELEASE_TAG.Contains('-')) { $ghArgs += '--prerelease' }
-          $ghArgs += (Get-ChildItem dist/release -File | Where-Object Name -ne 'notes.md' | ForEach-Object { $_.FullName })
+          # Publish only the three validated assets, even if this output directory
+          # contains unrelated files from a previous invocation.
+          $zipName = "AudioLibExplorer-$($env:RELEASE_TAG)-win-x64-portable.zip"
+          $ghArgs += @("dist/release/$zipName", "dist/release/$zipName.sha256", 'dist/release/Rust_CI_Release.json')
           gh release create @ghArgs
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

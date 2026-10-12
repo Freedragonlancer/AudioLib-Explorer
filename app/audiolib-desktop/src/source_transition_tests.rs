@@ -1658,6 +1658,13 @@ fn source_switch_flow(edit_active_profile: bool) {
     let (sent, received) = std::sync::mpsc::channel();
     let (release, wait_release) = std::sync::mpsc::channel();
     let server_a = std::thread::spawn(move || {
+        let mut preflight = accept(&a);
+        assert!(request(&mut preflight).starts_with("GET /api/v1/library"));
+        respond(
+            &mut preflight,
+            "200 OK",
+            r#"{"library_id":"a-library","identity_bound_writes":true,"revision":1,"schema_version":5}"#,
+        );
         let mut socket = accept(&a);
         sent.send(request(&mut socket)).unwrap();
         wait_release.recv_timeout(Duration::from_secs(8)).unwrap();
@@ -1825,6 +1832,13 @@ fn child_failed_annotation_snapshot() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
+        let mut preflight = accept(&listener);
+        assert!(request(&mut preflight).starts_with("GET /api/v1/library"));
+        respond(
+            &mut preflight,
+            "200 OK",
+            r#"{"library_id":"same-library","identity_bound_writes":true,"revision":1,"schema_version":5}"#,
+        );
         let mut socket = accept(&listener);
         let request = request(&mut socket);
         respond(
@@ -1870,6 +1884,11 @@ fn child_failed_annotation_snapshot() {
         "{request}"
     );
     assert!(request.contains("failed draft must survive"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("x-audiolib-library-id: same-library")
+    );
     assert_eq!(
         controller.provider().database_path(),
         provider.database_path()

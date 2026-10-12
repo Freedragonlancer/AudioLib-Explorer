@@ -231,15 +231,16 @@ Point the CLI at the right library (`--database <path>` or the configured defaul
 Stage 1 backfills `source_tags_text` in resumable batches; stage 2 rebuilds the FTS index
 under an exclusive lease, with an integrity check.
 
-**Measured timings (2026-10-11, ~900k-row library copy):** upgrade plus extracted-tag
-backfill about 198 s, database grew about 166 MB; FTS rebuild about 513 s more (only via
-`AudioLibCli db rebuild-search`, not on open). A 3,009-row library upgraded in about 7 s.
+**Anonymized measured timings (2026-10-11, large library copy):** upgrade plus extracted-tag
+backfill about 198 s; FTS rebuild about 513 s more (only via
+`AudioLibCli db rebuild-search`, not on open). A smaller library upgraded in about 7 s.
+Record counts and database capacity are omitted from the public report.
 Scale roughly with row count and disk speed. Do not interrupt it: the backfill is resumable
 and the FTS stage is protected by the rollback copy.
 
 **Disk space:** during backfill/rebuild the FTS stage first writes a rollback copy
 `audiolib-rollback-*.db` next to the library, about as large as the library itself. Reserve
-that much free space before the upgrade (on top of the ~166 MB growth). Check `df -h`
+that much free space before the upgrade, plus room for derived-column and index growth. Check `df -h`
 before starting. Keep the copy until the new index is verified, then remove it by hand
 (nothing deletes it automatically). It counts together with the backup from step 0.
 

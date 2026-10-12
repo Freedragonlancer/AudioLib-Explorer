@@ -5,8 +5,8 @@ use audiolib_core::DataProvider;
 use audiolib_db::SqliteProvider;
 use audiolib_server::{
     AppState, BearerToken, ConnectionInfo, CurrentScanResponse, ErrorBody, LibraryResponse,
-    Listener, RootMonitor, RootPolicy, RootProbe, RootResponse, ScanResponse, ServerConfig,
-    Service, router,
+    Listener, RootMonitor, RootPolicy, RootProbe, RootResponse, RootState, ScanRequest,
+    ScanResponse, ServerConfig, Service, router,
 };
 use axum::{
     body::Body,
@@ -23,6 +23,108 @@ use std::{
 use tower::ServiceExt;
 
 const TOKEN: &str = "test-token-0123456789abcdef";
+
+#[test]
+fn root_removal_cannot_pass_a_scan_reservation_during_inline_recheck() {
+    use std::sync::{
+        Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("A");
+    let b = dir.path().join("B");
+    fs::create_dir_all(&a).unwrap();
+    wav(&b.join("b.wav"), 4);
+    drop(SqliteProvider::open(&dir.path().join("library.db")).unwrap());
+    let config = ServerConfig::from_toml_str(&format!(
+        "library_db='library.db'\n[[roots]]\nname='A'\nserver_path='{}'\n[[roots]]\nname='B'\nserver_path='{}'\n",
+        a.display(), b.display(),
+    ), dir.path()).unwrap();
+    let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let probes = Arc::new(AtomicUsize::new(0));
+    let probe: RootProbe = {
+        let gate = gate.clone();
+        let probes = probes.clone();
+        Arc::new(move |path| {
+            if path.file_name().is_some_and(|name| name == "B") {
+                if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err("initial offline".into());
+                }
+                let (mutex, signal) = &*gate;
+                let mut flags = mutex.lock().unwrap();
+                flags.0 = true;
+                signal.notify_all();
+                while !flags.1 {
+                    flags = signal.wait(flags).unwrap();
+                }
+            }
+            path.canonicalize().map_err(|error| error.to_string())
+        })
+    };
+    let monitor = RootMonitor::start_with_probe(&config.roots, RootPolicy::default(), probe);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while monitor.status(1).state != RootState::Offline {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let state = AppState::open_with_monitor(&config, None, monitor).unwrap();
+    let scanning = state.clone();
+    let starting = std::thread::spawn(move || {
+        scanning.start_scan(ScanRequest {
+            root: "B".into(),
+            ..Default::default()
+        })
+    });
+    {
+        let (mutex, signal) = &*gate;
+        let flags = mutex.lock().unwrap();
+        let (flags, timeout) = signal
+            .wait_timeout_while(flags, Duration::from_secs(5), |flags| !flags.0)
+            .unwrap();
+        assert!(!timeout.timed_out() && flags.0);
+    }
+    let removal = state.remove_root("A");
+    {
+        let (mutex, signal) = &*gate;
+        let mut flags = mutex.lock().unwrap();
+        flags.1 = true;
+        signal.notify_all();
+    }
+    assert_eq!(removal.unwrap_err().code(), "BUSY");
+    let first = starting
+        .join()
+        .unwrap()
+        .unwrap()
+        .blocking_recv()
+        .unwrap()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while state.scans().current().is_some() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        state
+            .scan_status(first.progress.session_id)
+            .unwrap()
+            .progress
+            .added,
+        1
+    );
+    state.remove_root("A").unwrap();
+    // The preceding root is now gone; B is index 0 in a new monitor and still scans.
+    let second = state
+        .start_scan(ScanRequest {
+            root: "B".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .blocking_recv()
+        .unwrap()
+        .unwrap();
+    assert!(second.progress.session_id > first.progress.session_id);
+    assert!(state.scans().shutdown(Duration::from_secs(10)));
+}
 
 /// A tiny silent 16-bit mono WAV whose length depends on `samples`.
 fn wav(path: &Path, samples: usize) {
@@ -101,15 +203,28 @@ async fn call(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    request = request.header(
+        "x-audiolib-library-id",
+        state.revision().unwrap().library_id,
+    );
+    if body.is_some()
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        request = request.header("content-type", "application/json");
+    }
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
     let mut request = request
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .unwrap();
-    if let Some(connection) = connection {
-        request.extensions_mut().insert(connection);
-    }
+    let connection = connection.unwrap_or(ConnectionInfo {
+        peer: "127.0.0.1:1".parse().unwrap(),
+        listener: Listener::Http,
+    });
+    request.extensions_mut().insert(connection);
     router(Service::from(state.clone()))
         .oneshot(request)
         .await

@@ -24,6 +24,7 @@ try {
     $tagCommit = (git rev-parse "$Tag`^{commit}").Trim()
     if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $commit) { throw 'Build must check out the tagged commit.' }
     Invoke-Check 'format' { cargo fmt --all -- --check }
+    Invoke-Check 'package-boundary' { & (Join-Path $PSScriptRoot 'test-package-boundary.ps1') }
     Invoke-Check 'clippy' { cargo clippy --workspace --all-targets --locked -- -D warnings }
     # Hosted runners have no audio output device; substring skip also covers the child_ variant.
     $skipArgs = @('--skip', 'delayed_ipc_reload_play_is_cancelled_by_stop')
@@ -32,21 +33,30 @@ try {
     Invoke-Check 'asio-clippy' { cargo clippy --workspace --all-targets --locked --features 'audiolib-desktop/asio,audiolib-cli/asio' -- -D warnings }
     Invoke-Check 'asio-tests' { cargo test --workspace --all-targets --locked --features 'audiolib-desktop/asio,audiolib-cli/asio' -- @skipArgs }
     & (Join-Path $PSScriptRoot 'build-release.ps1')
+    Invoke-Check 'review-regressions' { & (Join-Path $PSScriptRoot 'validate-review-fixes.ps1') -CleanCheckout }
     & (Join-Path $PSScriptRoot 'package-portable.ps1') -SkipBuild
     & (Join-Path $PSScriptRoot 'validate-portable.ps1') -CleanCheckout
     $binaries = @{}
     foreach ($name in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
         $binaries[$name] = (Get-FileHash -LiteralPath (Join-Path $taskRoot ('dist/latest/portable/' + $name)) -Algorithm SHA256).Hash
     }
+    $portable = Get-Content -LiteralPath (Join-Path $taskRoot 'doc/Rust_Portable.json') -Raw | ConvertFrom-Json
+    # Public reports have an explicit schema. Never publish raw local reports,
+    # screenshots, runtime configuration or machine-specific artifact paths.
     $report = @{
         success = $true; tag = $Tag; commit = $commit; version = $desktop.version
         checked_at = [DateTime]::UtcNow.ToString('o')
-        checks = @('format','default strict Clippy','default workspace tests','ASIO strict Clippy','ASIO workspace tests','ASIO release build','clean-checkout portable validation')
+        checks = @('format','package boundary regression','default strict Clippy','default workspace tests','ASIO strict Clippy','ASIO workspace tests','ASIO release build','synthetic review regressions (real legacy fixture excluded)','clean-checkout portable validation','publication privacy boundary')
         binaries = $binaries
-        portable = Get-Content -LiteralPath (Join-Path $taskRoot 'doc/Rust_Portable.json') -Raw | ConvertFrom-Json
+        portable = @{
+            success = [bool]$portable.success
+            mode = [string]$portable.mode
+            records = [int]$portable.records
+            source_unchanged = [bool]$portable.source_unchanged
+            python_runtime_required = [bool]$portable.python_runtime_required
+        }
     }
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $taskRoot 'doc/Rust_CI_Release.json') -Encoding UTF8
-    # Include the report from this exact build in the downloadable package.
-    & (Join-Path $PSScriptRoot 'package-portable.ps1') -SkipBuild
+    & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -ReleaseReport (Join-Path $taskRoot 'doc/Rust_CI_Release.json')
     Write-Host "Release checks passed for $Tag ($commit)."
 } finally { Pop-Location }

@@ -75,6 +75,17 @@ pub(super) struct SourceManager {
     /// Bumped on every page, selection or visibility change: server library loads and
     /// scan polling stop when theirs is no longer current.
     library_generation: u64,
+    /// A busy indicator belongs to one request; invalidation releases it and a
+    /// delayed completion cannot release a newer request's indicator.
+    manage_sequence: u64,
+    manage_pending: Option<u64>,
+}
+
+impl SourceManager {
+    pub(super) fn invalidate_library(&mut self) {
+        self.library_generation += 1;
+        self.manage_pending = None;
+    }
 }
 
 /// Everything the 服务器音效库 page shows, fetched together off the UI thread.
@@ -157,11 +168,12 @@ impl Controller {
         ui.on_sm_closed(move || {
             let mut remote = c.remote.lock().unwrap();
             remote.manager.form_generation += 1;
-            remote.manager.library_generation += 1;
+            remote.manager.invalidate_library();
             drop(remote);
             // A typed but unsaved token does not outlive the window.
             if let Some(ui) = c.ui.upgrade() {
                 ui.set_ds_token("".into());
+                c.publish_manage_busy(&ui);
             }
         });
         let c = self.clone();
@@ -213,7 +225,11 @@ impl Controller {
         let mut remote = self.remote.lock().unwrap();
         remote.manager.selected = selection;
         remote.manager.form_generation += 1;
-        remote.manager.library_generation += 1;
+        remote.manager.invalidate_library();
+        drop(remote);
+        if let Some(ui) = self.ui.upgrade() {
+            self.publish_manage_busy(&ui);
+        }
     }
 
     fn selection(&self) -> Selection {
@@ -240,6 +256,34 @@ impl Controller {
 
     fn library_current(&self, generation: u64) -> bool {
         self.remote.lock().unwrap().manager.library_generation == generation
+    }
+
+    fn begin_manage_request(&self, ui: &AppWindow) -> (u64, u64) {
+        let mut remote = self.remote.lock().unwrap();
+        let manager = &mut remote.manager;
+        manager.manage_sequence += 1;
+        let request = manager.manage_sequence;
+        manager.manage_pending = Some(request);
+        let generation = manager.library_generation;
+        drop(remote);
+        ui.set_sm_manage_busy(true);
+        (generation, request)
+    }
+
+    fn finish_manage_request(&self, ui: &AppWindow, request: u64) -> bool {
+        let mut remote = self.remote.lock().unwrap();
+        if remote.manager.manage_pending != Some(request) {
+            return false;
+        }
+        remote.manager.manage_pending = None;
+        drop(remote);
+        ui.set_sm_manage_busy(false);
+        true
+    }
+
+    /// Publish on the UI thread after page/selection/visibility or provider invalidation.
+    pub(super) fn publish_manage_busy(&self, ui: &AppWindow) {
+        ui.set_sm_manage_busy(self.remote.lock().unwrap().manager.manage_pending.is_some());
     }
 
     /// Refresh the list and refill the form and current page from the saved settings.
@@ -372,7 +416,8 @@ impl Controller {
 
     fn show_page(self: &Arc<Self>, page: i32) {
         let Some(ui) = self.ui.upgrade() else { return };
-        self.remote.lock().unwrap().manager.library_generation += 1;
+        self.remote.lock().unwrap().manager.invalidate_library();
+        self.publish_manage_busy(&ui);
         match page {
             PAGE_LIBRARY => self.load_server_library(&ui),
             PAGE_CACHE => self.publish_cache_info(&ui),
@@ -1014,7 +1059,8 @@ impl Controller {
     }
 
     /// Active profile whose connection page is selected, with a usable manage client.
-    fn active_manage_client(&self) -> Result<(ServerProfile, RemoteClient), String> {
+    fn active_manage_client(&self) -> Result<(ServerProfile, RemoteClient, CacheState), String> {
+        self.require_remote_write_identity()?;
         let chinese = self.chinese.load(Ordering::Acquire);
         let Some(profile) = self.selected_profile() else {
             return Err(cn_or(
@@ -1033,8 +1079,23 @@ impl Controller {
             ));
         }
         let token = self.secrets().token_for(&profile.id).to_owned();
+        let snapshot = self
+            .remote
+            .lock()
+            .unwrap()
+            .state
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                cn_or(
+                    chinese,
+                    "请先同步服务器素材库",
+                    "Sync the server library first",
+                )
+            })?;
         RemoteClient::new(&profile.server_url, &token)
-            .map(|client| (profile, client))
+            .and_then(|client| client.with_library_id(&snapshot.library_id))
+            .map(|client| (profile, client, snapshot))
             .map_err(|error| manage_error_text(&error, chinese))
     }
 
@@ -1089,16 +1150,15 @@ impl Controller {
                 return;
             }
         };
-        let client = match self.active_manage_client() {
-            Ok((_, client)) => client,
+        let (client, snapshot) = match self.active_manage_client() {
+            Ok((_, client, snapshot)) => (client, snapshot),
             Err(error) => {
                 ui.set_sm_manage_error(true);
                 ui.set_sm_manage_message(error.into());
                 return;
             }
         };
-        let generation = self.remote.lock().unwrap().manager.library_generation;
-        ui.set_sm_manage_busy(true);
+        let (generation, request_token) = self.begin_manage_request(&ui);
         ui.set_sm_manage_error(false);
         ui.set_sm_manage_message(cn_or(chinese, "正在开始扫描…", "Starting the scan…").into());
         let c = self.clone();
@@ -1106,8 +1166,10 @@ impl Controller {
             let started = client.start_scan(&request);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
-                ui.set_sm_manage_busy(false);
-                if !c2.library_current(generation) {
+                if !c2.finish_manage_request(&ui, request_token)
+                    || !c2.library_current(generation)
+                    || !c2.remote_snapshot_current(&snapshot)
+                {
                     return;
                 }
                 match started {
@@ -1134,6 +1196,7 @@ impl Controller {
                         }
                     }
                     Err(error) => {
+                        c2.note_remote_identity_error(&ui, &snapshot, &error);
                         ui.set_sm_manage_error(true);
                         ui.set_sm_manage_message(Self::manage_text(&error, chinese).into());
                         if matches!(error, RemoteError::Busy { .. }) {
@@ -1159,7 +1222,7 @@ impl Controller {
             2 => ScanControl::Cancel,
             _ => return,
         };
-        let (_, client) = match self.active_manage_client() {
+        let (_, client, snapshot) = match self.active_manage_client() {
             Ok(pair) => pair,
             Err(error) => {
                 ui.set_sm_manage_error(true);
@@ -1167,8 +1230,7 @@ impl Controller {
                 return;
             }
         };
-        let generation = self.remote.lock().unwrap().manager.library_generation;
-        ui.set_sm_manage_busy(true);
+        let (generation, request_token) = self.begin_manage_request(&ui);
         ui.set_sm_manage_error(false);
         ui.set_sm_manage_message(
             match control {
@@ -1190,8 +1252,10 @@ impl Controller {
             };
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
-                ui.set_sm_manage_busy(false);
-                if !c2.library_current(generation) {
+                if !c2.finish_manage_request(&ui, request_token)
+                    || !c2.library_current(generation)
+                    || !c2.remote_snapshot_current(&snapshot)
+                {
                     return;
                 }
                 match outcome {
@@ -1205,6 +1269,7 @@ impl Controller {
                         }
                     }
                     Err(error) => {
+                        c2.note_remote_identity_error(&ui, &snapshot, &error);
                         ui.set_sm_manage_error(true);
                         ui.set_sm_manage_message(Self::manage_text(&error, chinese).into());
                         // SCAN_STATE etc.: show the server's current state.
@@ -1459,7 +1524,9 @@ impl Controller {
             match &page.capabilities {
                 Ok(capabilities) => {
                     ui.set_sm_capabilities(capabilities_text(capabilities, chinese).into());
-                    ui.set_sm_can_manage(capabilities.may_manage());
+                    ui.set_sm_can_manage(
+                        capabilities.may_manage() && c.require_remote_write_identity().is_ok(),
+                    );
                 }
                 Err(error) => {
                     note(&cn_or(chinese, "权限信息", "capabilities"), error);
@@ -1933,6 +2000,36 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
+        // Every invalidation releases its own busy indicator. A late completion
+        // must preserve a subsequent request's indicator, even after a real
+        // provider swap (which occurs off the UI thread in normal operation).
+        for action in 0..4 {
+            let (_, old) = controller.begin_manage_request(&ui);
+            assert!(ui.get_sm_manage_busy());
+            match action {
+                0 => controller.show_page(PAGE_CONNECTION),
+                1 => ui.invoke_sm_closed(),
+                2 => controller.set_selection(Selection::Local),
+                _ => {
+                    controller
+                        .switch_data_source(&super::super::DataSourceSwitch::Local)
+                        .unwrap();
+                    controller.publish_data_source(&ui);
+                }
+            }
+            assert!(
+                !ui.get_sm_manage_busy(),
+                "invalidation {action} retained busy state"
+            );
+            let (_, current) = controller.begin_manage_request(&ui);
+            assert!(!controller.finish_manage_request(&ui, old));
+            assert!(
+                ui.get_sm_manage_busy(),
+                "old completion cleared current request"
+            );
+            assert!(controller.finish_manage_request(&ui, current));
+            assert!(!ui.get_sm_manage_busy());
+        }
         {
             let mut remote = controller.remote.lock().unwrap();
             remote.secrets_loaded = true;
@@ -2124,21 +2221,21 @@ mod tests {
     fn cache_info_explains_unknown_and_missing_snapshots() {
         assert!(cache_info(None, None, None, true).contains("测试连接或同步后显示"));
         let missing = cache_info(
-            Some("7b0db485-5e97"),
-            Some("D:/data/remote/7b0db485-5e97"),
+            Some("11111111-5e97"),
+            Some("D:/data/remote/11111111-5e97"),
             None,
             true,
         );
         assert!(missing.contains("本机还没有这个音效库的快照"), "{missing}");
         let state = CacheState {
-            library_id: "7b0db485-5e97".into(),
+            library_id: "11111111-5e97".into(),
             revision: 6,
             audio_files: 3009,
             snapshot_bytes: 2 * 1_048_576,
             server_url: "http://192.168.1.10:8790".into(),
             ..CacheState::default()
         };
-        let text = cache_info(Some("7b0db485-5e97"), Some("D:/x"), Some(&state), true);
+        let text = cache_info(Some("11111111-5e97"), Some("D:/x"), Some(&state), true);
         assert!(text.contains("快照：r6 · 3009 个音效 · 2.0 MiB"), "{text}");
     }
 

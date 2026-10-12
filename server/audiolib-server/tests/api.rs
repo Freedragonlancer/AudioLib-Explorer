@@ -228,6 +228,7 @@ async fn wrong_methods_get_json_405_with_allow_header() {
 async fn library_reports_identity_schema_and_monotonic_revision() {
     let f = fixture();
     let first: LibraryResponse = json(send(&f.state, "/api/v1/library", Some(TOKEN)).await).await;
+    assert!(first.identity_bound_writes);
     assert!(!first.library_id.is_empty());
     assert_eq!(first.info.schema_version, 5);
     assert_eq!(first.info.stats.audio_files, 3);
@@ -1121,15 +1122,19 @@ async fn send_json(
     body: Option<&str>,
     token: Option<&str>,
 ) -> Response {
-    let mut request = Request::builder().method(method).uri(path);
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(
+            "x-audiolib-library-id",
+            state.revision().unwrap().library_id,
+        )
+        .header(header::CONTENT_TYPE, "application/json");
     if let Some(token) = token {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
     let body = match body {
-        Some(body) => {
-            request = request.header(header::CONTENT_TYPE, "application/json");
-            Body::from(body.to_string())
-        }
+        Some(body) => Body::from(body.to_string()),
         None => Body::empty(),
     };
     router(state.clone())
@@ -1148,6 +1153,191 @@ async fn library_revision(state: &AppState) -> u64 {
 fn main_file_state(path: &Path) -> (u64, std::time::SystemTime) {
     let metadata = fs::metadata(path).unwrap();
     (metadata.len(), metadata.modified().unwrap())
+}
+
+/// Guard regression requests deliberately omit the normal helpers' identity/type defaults.
+async fn guard_request(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    headers: &[(&str, &str)],
+    connection: Option<ConnectionInfo>,
+    body: &str,
+) -> Response {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut request = request.body(Body::from(body.to_owned())).unwrap();
+    let connection = connection.unwrap_or(ConnectionInfo {
+        peer: "127.0.0.1:1".parse().unwrap(),
+        listener: Listener::Http,
+    });
+    request.extensions_mut().insert(connection);
+    router(state.clone()).oneshot(request).await.unwrap()
+}
+
+#[tokio::test]
+async fn library_mutations_require_the_identity_of_the_captured_library() {
+    let f = fixture_with("");
+    let other = fixture_with("");
+    let id = audio_id(&f, "door.wav");
+    let before = f.state.revision().unwrap();
+    let other_id = other.state.revision().unwrap().library_id;
+    for (method, path, body) in [
+        (
+            Method::PATCH,
+            format!("/api/v1/audio/{id}/metadata"),
+            r#"{"notes":"guarded"}"#,
+        ),
+        (
+            Method::POST,
+            "/api/v1/audio/metadata/batch".into(),
+            r#"{"ids":[1],"patch":{"favorite":true}}"#,
+        ),
+        (Method::POST, format!("/api/v1/audio/{id}/plays"), ""),
+        (
+            Method::POST,
+            "/api/v1/audio/remove".into(),
+            r#"{"ids":[1]}"#,
+        ),
+        (Method::DELETE, "/api/v1/folders/1".into(), ""),
+        (
+            Method::POST,
+            "/api/v1/scans".into(),
+            r#"{"root":"SFX_Main"}"#,
+        ),
+        (Method::POST, "/api/v1/scans/1/pause".into(), ""),
+        (Method::POST, "/api/v1/scans/1/resume".into(), ""),
+        (Method::POST, "/api/v1/scans/1/cancel".into(), ""),
+    ] {
+        for (library_id, expected) in [
+            (None, "LIBRARY_ID_REQUIRED"),
+            (Some(other_id.as_str()), "LIBRARY_CHANGED"),
+        ] {
+            let mut headers = vec![("content-type", "application/json")];
+            if let Some(library_id) = library_id {
+                headers.push(("x-audiolib-library-id", library_id));
+            }
+            let response =
+                guard_request(&f.state, method.clone(), &path, &headers, None, body).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{path}");
+            assert_eq!(
+                json::<ErrorBody>(response).await.error_code,
+                expected,
+                "{path}"
+            );
+        }
+    }
+    assert_eq!(f.state.revision().unwrap(), before);
+    assert!(f.state.audio(id).unwrap().notes.is_empty());
+    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(f.state.scans().current().is_none());
+    // Root rechecks do not target cached database ids and remain header-free.
+    let response = guard_request(
+        &f.state,
+        Method::POST,
+        "/api/v1/roots/SFX_Main/check",
+        &[],
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() {
+    let f = fixture_with("");
+    let id = audio_id(&f, "door.wav");
+    let library_id = f.state.revision().unwrap().library_id;
+    let path = format!("/api/v1/audio/{id}/plays");
+    for origin in [
+        "http://other.lan:8790",
+        "https://server.lan:8790",
+        "null",
+        "http://server.lan:8791",
+        "http://server.lan:8790/path",
+    ] {
+        let response = guard_request(
+            &f.state,
+            Method::POST,
+            &path,
+            &[
+                ("x-audiolib-library-id", &library_id),
+                ("host", "server.lan:8790"),
+                ("origin", origin),
+                ("content-type", "text/plain"),
+            ],
+            Some(peer("10.0.0.20:50000", Listener::Http)),
+            "ignored body",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin}");
+        assert_eq!(
+            json::<ErrorBody>(response).await.error_code,
+            "ORIGIN_FORBIDDEN"
+        );
+    }
+    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    let metadata_path = format!("/api/v1/audio/{id}/metadata");
+    for content_type in [
+        None,
+        Some("text/plain"),
+        Some("application/x-www-form-urlencoded"),
+    ] {
+        let mut headers = vec![("x-audiolib-library-id", library_id.as_str())];
+        if let Some(content_type) = content_type {
+            headers.push(("content-type", content_type));
+        }
+        let response = guard_request(
+            &f.state,
+            Method::PATCH,
+            &metadata_path,
+            &headers,
+            None,
+            r#"{"notes":"unsaved"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            json::<ErrorBody>(response).await.error_code,
+            "JSON_CONTENT_TYPE_REQUIRED"
+        );
+    }
+    assert!(f.state.audio(id).unwrap().notes.is_empty());
+    // The listener proves TLS, so the same HTTPS browser origin succeeds.
+    let response = guard_request(
+        &f.state,
+        Method::PATCH,
+        &metadata_path,
+        &[
+            ("x-audiolib-library-id", &library_id),
+            ("host", "server.lan:8790"),
+            ("origin", "https://SERVER.lan:8790"),
+            ("content-type", "application/json; charset=utf-8"),
+        ],
+        Some(peer("10.0.0.20:50000", Listener::Tls)),
+        r#"{"notes":"saved"}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(f.state.audio(id).unwrap().notes, "saved");
+    // Native clients omit Origin and can use the bodyless play route.
+    let response = guard_request(
+        &f.state,
+        Method::POST,
+        &path,
+        &[("x-audiolib-library-id", &library_id)],
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(f.state.audio(id).unwrap().play_count, 1);
 }
 
 #[tokio::test]
@@ -2172,6 +2362,61 @@ async fn disconnecting_while_the_disk_wakes_frees_the_stream_slot() {
 }
 
 #[tokio::test]
+async fn equal_length_and_mtime_sources_get_distinct_waveforms_and_cache_entries() {
+    let f = fixture();
+    let quiet_id = audio_id(&f, "flyby_01.wav");
+    let loud_id = audio_id(&f, "flyby_02.wav");
+    let quiet = real_path(f.dir.path()).join("sounds/Aircraft/flyby_01.wav");
+    let loud = real_path(f.dir.path()).join("sounds/Aircraft/flyby_02.wav");
+    let mut loud_bytes = fs::read(&loud).unwrap();
+    for sample in loud_bytes[44..].chunks_exact_mut(2) {
+        sample.copy_from_slice(&16_000_i16.to_le_bytes());
+    }
+    fs::write(&loud, loud_bytes).unwrap();
+    let modified = fs::metadata(&quiet).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&loud)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(
+        fs::metadata(&quiet).unwrap().len(),
+        fs::metadata(&loud).unwrap().len()
+    );
+    assert_eq!(
+        fs::metadata(&quiet).unwrap().modified().unwrap(),
+        fs::metadata(&loud).unwrap().modified().unwrap()
+    );
+    let quiet_response = send(
+        &f.state,
+        &format!("/api/v1/audio/{quiet_id}/waveform?buckets=64&colors=0"),
+        Some(TOKEN),
+    )
+    .await;
+    let quiet_etag = header_str(&quiet_response, header::ETAG).to_owned();
+    let quiet_body: serde_json::Value = json(quiet_response).await;
+    let loud_response = send(
+        &f.state,
+        &format!("/api/v1/audio/{loud_id}/waveform?buckets=64&colors=0"),
+        Some(TOKEN),
+    )
+    .await;
+    let loud_etag = header_str(&loud_response, header::ETAG).to_owned();
+    let loud_body: serde_json::Value = json(loud_response).await;
+    assert_ne!(quiet_etag, loud_etag);
+    assert_ne!(quiet_body, loud_body);
+    assert_eq!(quiet_body["peaks"][0][0]["max"], 0.0);
+    assert!(
+        (loud_body["peaks"][0][0]["max"].as_f64().unwrap() - 16_000.0 / 32768.0).abs() < 0.00001
+    );
+    assert_eq!(
+        fs::read_dir(f.state.waveform_cache_dir()).unwrap().count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn waveform_is_cached_validated_and_compressed() {
     let f = fixture();
     let id = audio_id(&f, "door.wav");
@@ -3168,15 +3413,30 @@ async fn call(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    if let Ok(state) = service.clone().into().app_state() {
+        request = request.header(
+            "x-audiolib-library-id",
+            state.revision().unwrap().library_id,
+        );
+    }
+    if body.is_some()
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        request = request.header(header::CONTENT_TYPE, "application/json");
+    }
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
     let mut request = request
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .unwrap();
-    if let Some(connection) = connection {
-        request.extensions_mut().insert(connection);
-    }
+    let connection = connection.unwrap_or(ConnectionInfo {
+        peer: "127.0.0.1:1".parse().unwrap(),
+        listener: Listener::Http,
+    });
+    request.extensions_mut().insert(connection);
     router(service.clone()).oneshot(request).await.unwrap()
 }
 

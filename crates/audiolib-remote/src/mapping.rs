@@ -247,20 +247,23 @@ mod tests {
     fn root_for_path_picks_the_longest_containing_root() {
         let roots = vec![
             RemoteRoot {
-                name: "A_Lib".into(),
-                server_path: "/volume1/A_Lib".into(),
+                name: "ExampleLibrary".into(),
+                server_path: "/volume1/ExampleLibrary".into(),
                 ..Default::default()
             },
             RemoteRoot {
-                name: "1_Boom".into(),
-                server_path: "/volume1/A_Lib/1_Boom/".into(),
+                name: "SFX".into(),
+                server_path: "/volume1/ExampleLibrary/SFX/".into(),
                 ..Default::default()
             },
         ];
         let found = |path| root_for_path(path, &roots).map(|root| root.name.as_str());
-        assert_eq!(found("/volume1/A_Lib/1_Boom/爆炸/a.wav"), Some("1_Boom"));
-        assert_eq!(found("/volume1/a_lib/other/b.wav"), Some("A_Lib"));
-        assert_eq!(found("/volume1/A_Lib_2/c.wav"), None);
+        assert_eq!(found("/volume1/ExampleLibrary/SFX/爆炸/a.wav"), Some("SFX"));
+        assert_eq!(
+            found("/volume1/examplelibrary/other/b.wav"),
+            Some("ExampleLibrary")
+        );
+        assert_eq!(found("/volume1/ExampleLibrary_2/c.wav"), None);
         // §6.4 status; absent fields (older servers) mean online.
         let status = |online: Option<bool>, status: Option<&str>| {
             RemoteRoot {

@@ -184,6 +184,9 @@ pub(super) struct RemoteRuntime {
     last_error: Option<String>,
     /// Latest background revision check (or sync failure) for the open snapshot.
     check: Option<RevisionCheck>,
+    /// A known replacement blocks writes until its snapshot is actually opened.
+    /// Later offline/check failures must never re-enable stale cached record IDs.
+    library_changed: bool,
     /// Unix seconds of the next automatic revision check, when scheduled.
     next_check: Option<u64>,
     /// A new revision is known but automatic sync waits for the server to settle
@@ -570,6 +573,7 @@ impl Controller {
     /// revision rule (otherwise a full sync is started).
     pub(super) fn remote_provider(self: &Arc<Self>) -> Result<Arc<RemoteProvider>, String> {
         let chinese = self.chinese.load(Ordering::Acquire);
+        self.require_remote_write_identity()?;
         let state = self.remote.lock().unwrap().state.clone().ok_or_else(|| {
             cn_or(
                 chinese,
@@ -587,10 +591,11 @@ impl Controller {
             state.library_id.clone(),
         );
         let controller = Arc::downgrade(self);
+        let library_id = state.library_id;
         let database_file = state.database_file;
         let listener: WriteListener = Arc::new(move |event| {
             if let Some(controller) = controller.upgrade() {
-                controller.remote_write_event(&database_file, event);
+                controller.remote_write_event(&library_id, &database_file, event);
             }
         });
         Ok(Arc::new(RemoteProvider::new(
@@ -602,14 +607,18 @@ impl Controller {
     }
 
     /// Cache effect of a server write (called on the writing thread).
-    fn remote_write_event(self: &Arc<Self>, database_file: &str, event: WriteEvent) {
+    fn remote_write_event(
+        self: &Arc<Self>,
+        library_id: &str,
+        database_file: &str,
+        event: WriteEvent,
+    ) {
         match event {
             WriteEvent::Applied { revision } => {
                 let mut remote = self.remote.lock().unwrap();
-                let current = remote
-                    .state
-                    .as_mut()
-                    .filter(|state| state.database_file == database_file);
+                let current = remote.state.as_mut().filter(|state| {
+                    state.library_id == library_id && state.database_file == database_file
+                });
                 let Some(state) = current else {
                     // The snapshot was replaced meanwhile: let a sync settle it.
                     drop(remote);
@@ -628,8 +637,90 @@ impl Controller {
                 let c = self.clone();
                 post(self.ui.clone(), move |ui| c.publish_data_source(&ui));
             }
-            WriteEvent::Resync { reason } => self.post_remote_resync(&reason),
+            WriteEvent::Resync { reason } => {
+                let current = self
+                    .remote
+                    .lock()
+                    .unwrap()
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| {
+                        state.library_id == library_id && state.database_file == database_file
+                    });
+                if current && self.remote_read_only() {
+                    self.post_remote_resync(&reason);
+                }
+            }
+            WriteEvent::LibraryChanged { reason } => {
+                let mut remote = self.remote.lock().unwrap();
+                if !self.remote_read_only()
+                    || !remote.state.as_ref().is_some_and(|state| {
+                        state.library_id == library_id && state.database_file == database_file
+                    })
+                {
+                    return;
+                }
+                remote.library_changed = true;
+                drop(remote);
+                let c = self.clone();
+                post(self.ui.clone(), move |ui| {
+                    if c.require_remote_write_identity().is_ok() {
+                        return;
+                    }
+                    c.publish_data_source(&ui);
+                    ui.set_status(reason.into());
+                });
+                self.post_remote_resync("server library identity changed");
+            }
         }
+    }
+
+    /// A displayed snapshot's IDs can only be sent to the same server library.
+    pub(super) fn require_remote_write_identity(&self) -> Result<(), String> {
+        if self.remote_read_only() && self.remote.lock().unwrap().library_changed {
+            return Err(cn_or(
+                self.chinese.load(Ordering::Acquire),
+                "服务器素材库已更换，请同步新素材库后再编辑或管理",
+                "The server library was replaced; sync the new library before editing or managing it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A rejected bound management request is also a known identity replacement.
+    pub(super) fn note_remote_identity_error(
+        &self,
+        ui: &AppWindow,
+        snapshot: &CacheState,
+        error: &RemoteError,
+    ) {
+        let mut remote = self.remote.lock().unwrap();
+        if matches!(error, RemoteError::LibraryChanged(_))
+            && self.remote_read_only()
+            && remote.state.as_ref().is_some_and(|current| {
+                current.library_id == snapshot.library_id
+                    && current.database_file == snapshot.database_file
+            })
+        {
+            remote.library_changed = true;
+            drop(remote);
+            self.publish_data_source(ui);
+        }
+    }
+
+    /// Background management results belong to the snapshot that created their client.
+    pub(super) fn remote_snapshot_current(&self, snapshot: &CacheState) -> bool {
+        self.remote_read_only()
+            && self
+                .remote
+                .lock()
+                .unwrap()
+                .state
+                .as_ref()
+                .is_some_and(|current| {
+                    current.library_id == snapshot.library_id
+                        && current.database_file == snapshot.database_file
+                })
     }
 
     /// Start a normal snapshot sync once the library is idle (a batch edit is itself a
@@ -1104,6 +1195,9 @@ impl Controller {
         let update = check.update_available();
         {
             let mut remote = self.remote.lock().unwrap();
+            if matches!(check, RevisionCheck::LibraryChanged { .. }) {
+                remote.library_changed = true;
+            }
             remote.check = Some(check);
             remote.next_check = next_check;
             remote.auto_deferred = update && auto_sync && !auto_due;
@@ -1174,9 +1268,11 @@ impl Controller {
 
     /// Header/status identity: current mode, server and library revision.
     pub(super) fn publish_data_source(&self, ui: &AppWindow) {
+        self.publish_manage_busy(ui);
         let chinese = self.chinese.load(Ordering::Acquire);
         let remote = self.remote_read_only();
         ui.set_remote_mode(remote);
+        ui.set_remote_writes_blocked(remote && self.remote.lock().unwrap().library_changed);
         self.publish_server_manage(ui);
         let label = if !remote {
             cn_or(chinese, "本地模式", "Local mode")
@@ -1790,6 +1886,8 @@ impl Controller {
                 self.remote_mode.store(false, Ordering::Release);
                 let mut remote = self.remote.lock().unwrap();
                 remote.state = None;
+                remote.library_changed = false;
+                remote.manager.invalidate_library();
                 // Root status belongs to the server left behind.
                 remote.live_roots = None;
                 drop(remote);
@@ -1804,7 +1902,12 @@ impl Controller {
                     SqliteProvider::open_read_only(database).map_err(|error| error.to_string())?;
                 *self.sqlite.write().unwrap() = Arc::new(next);
                 self.remote_mode.store(true, Ordering::Release);
-                self.remote.lock().unwrap().state = state.clone();
+                {
+                    let mut remote = self.remote.lock().unwrap();
+                    remote.state = state.clone();
+                    remote.library_changed = false;
+                    remote.manager.invalidate_library();
+                }
                 if let Some(state) = state {
                     // Only now, with the provider on the new file: older snapshots and a
                     // library the server replaced (its snapshots and audio cache) go.
@@ -1856,6 +1959,20 @@ impl Controller {
         cancel: &AtomicBool,
         generation: u64,
     ) -> Result<PathBuf, String> {
+        let source_pair = self.playback.lock().unwrap().source_pair;
+        self.playable_path_for_pair(file, cancel, generation, source_pair, false)
+    }
+
+    /// Prepare a representation for a specific output source pair. Reconfiguration
+    /// retains the current stream until the engine acknowledges its replacement.
+    pub(super) fn playable_path_for_pair(
+        self: &Arc<Self>,
+        file: &AudioFile,
+        cancel: &AtomicBool,
+        generation: u64,
+        source_pair: u16,
+        retain_current: bool,
+    ) -> Result<PathBuf, String> {
         if !self.remote_read_only() {
             return Ok(PathBuf::from(&file.file_path));
         }
@@ -1872,7 +1989,6 @@ impl Controller {
         let client = RemoteClient::new(&settings.server_url, &secrets.token)
             .map_err(|error| error.localized(chinese))?;
         let library_dir = RemoteCache::new(&self.data_root()).library_dir(&state.library_id);
-        let source_pair = self.playback.lock().unwrap().source_pair;
         let (pcm_refused, flac_refused) = {
             let remote = self.remote.lock().unwrap();
             let refused = remote
@@ -1919,7 +2035,7 @@ impl Controller {
             {
                 return Ok(playback.path.clone());
             }
-            if let Some(playback) = current.take() {
+            if !retain_current && let Some(playback) = current.take() {
                 // Another record: stop the old request first (its connection closes), so a
                 // decoder still waiting on it fails at once instead of holding the audio
                 // worker. What arrived stays in the memory cache for a later selection.
@@ -2186,6 +2302,11 @@ impl Controller {
         {
             playback.stream.interrupt_reads();
         }
+        if let Some(playback) = self.remote_retained_stream.lock().unwrap().as_ref()
+            && !playback.stream.is_complete()
+        {
+            playback.stream.interrupt_reads();
+        }
     }
 
     /// Server-mode drag-out: make each record a complete local file in the download cache
@@ -2263,6 +2384,10 @@ impl Controller {
 
     /// Cancel and unregister the server-mode playback stream (mode switch, shutdown).
     pub(super) fn stop_remote_stream(&self) {
+        if let Some(playback) = self.remote_retained_stream.lock().unwrap().take() {
+            playback.stream.cancel();
+            audiolib_audio::unregister_stream_source(&playback.path);
+        }
         if let Some(playback) = self.remote_stream.lock().unwrap().take() {
             playback.stream.cancel();
             audiolib_audio::unregister_stream_source(&playback.path);
@@ -2542,6 +2667,7 @@ fn decode_server_waveform(
 }
 
 /// The server-mode audition stream the engine plays.
+#[derive(Clone)]
 pub(super) struct RemotePlayback {
     /// Virtual path the stream is registered under (never created on disk).
     pub(super) path: PathBuf,
@@ -2577,7 +2703,7 @@ pub(super) fn waking_hint(name: &str, waited: Duration, chinese: bool) -> Option
     })
 }
 
-/// Header suffix for roots that are not plainly online (§6.4), e.g. ` · 根目录离线：1_Boom`.
+/// Header suffix for roots that are not plainly online (§6.4), e.g. ` · 根目录离线：SFX`.
 pub(super) fn root_summary(roots: &[RemoteRoot], chinese: bool) -> String {
     let mut summary = String::new();
     for (state, label_cn, label_en) in [
@@ -2982,7 +3108,7 @@ mod tests {
         );
         // Local mode (no record name) keeps the file's own name.
         assert_eq!(
-            playback_name(Path::new("Z:/A_Lib/雷声 近.wav"), None),
+            playback_name(Path::new("Z:/ExampleLibrary/雷声 近.wav"), None),
             "雷声 近.wav"
         );
         assert_eq!(
@@ -3019,6 +3145,12 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(format!("{head}\r\n{}", String::from_utf8_lossy(&body)));
+                let response = if head.starts_with("GET /api/v1/library ") {
+                    // Writer preflight binds mutations to the displayed snapshot.
+                    r#"{"library_id":"lib-1","identity_bound_writes":true,"revision":1,"schema_version":5}"#.to_owned()
+                } else {
+                    response.clone()
+                };
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
                     response.len()
@@ -3110,26 +3242,26 @@ mod tests {
         );
         // 404: the file is missing on a reachable root (an offline root is a 503).
         let root = RemoteRoot {
-            name: "1_Boom".into(),
-            server_path: "/volume1/A_Lib/1_Boom".into(),
+            name: "SFX".into(),
+            server_path: "/volume1/ExampleLibrary/SFX".into(),
             ..Default::default()
         };
         let missing = RemoteError::NotFound("audio 7".into());
         let text = super::stream_error_text(&missing, Some(&root), true);
         assert!(
-            text.contains("「1_Boom」") && text.contains("改名或删除") && !text.contains("离线"),
+            text.contains("「SFX」") && text.contains("改名或删除") && !text.contains("离线"),
             "{text}"
         );
         let text = super::stream_error_text(&missing, Some(&root), false);
         assert!(
-            text.contains("root \"1_Boom\"") && !text.contains("offline"),
+            text.contains("root \"SFX\"") && !text.contains("offline"),
             "{text}"
         );
         assert!(!super::stream_error_text(&missing, None, true).contains("离线"));
         // §6.4 root status: a stream's 503 UNAVAILABLE shows the server's message.
         let offline = RemoteError::RootOffline {
             message:
-                "Library root \"1_Boom\" is offline: Root directory not found (volume not mounted?)"
+                "Library root \"SFX\" is offline: Root directory not found (volume not mounted?)"
                     .into(),
             retry_after: Some(5),
         };
@@ -3140,35 +3272,34 @@ mod tests {
         );
         let roots = vec![
             RemoteRoot {
-                name: "1_Boom".into(),
+                name: "SFX".into(),
                 online: Some(false),
                 status: Some("offline".into()),
                 status_message: Some("Root directory not found (volume not mounted?)".into()),
                 ..Default::default()
             },
             RemoteRoot {
-                name: "2_Foley".into(),
+                name: "Foley".into(),
                 online: Some(true),
                 status: Some("waking".into()),
                 ..Default::default()
             },
             RemoteRoot {
-                name: "3_Amb".into(),
+                name: "Ambience".into(),
                 ..Default::default()
             },
         ];
         assert_eq!(
             super::root_summary(&roots, true),
-            " · 根目录离线：1_Boom · 磁盘唤醒中：2_Foley"
+            " · 根目录离线：SFX · 磁盘唤醒中：Foley"
         );
         assert_eq!(super::root_summary(&roots[2..], false), "");
         let notice = super::root_notice(&roots, true).unwrap();
         assert!(
-            notice.contains("「1_Boom」（Root directory not found")
-                && notice.contains("不标为缺失"),
+            notice.contains("「SFX」（Root directory not found") && notice.contains("不标为缺失"),
             "{notice}"
         );
-        assert!(!notice.contains("2_Foley"));
+        assert!(!notice.contains("Foley"));
         assert!(super::root_notice(&roots[1..], false).is_none());
     }
 
@@ -3661,7 +3792,7 @@ mod tests {
         // Library up to date but a root offline (§6.4, from the polled /roots): the notice
         // names it with Retry; nothing about it marks records missing.
         controller.remote.lock().unwrap().live_roots = Some(vec![RemoteRoot {
-            name: "1_Boom".into(),
+            name: "SFX".into(),
             online: Some(false),
             status: Some("offline".into()),
             status_message: Some("Root directory not found".into()),
@@ -3676,7 +3807,7 @@ mod tests {
         );
         assert_eq!(ui.get_remote_notice_kind(), super::NOTICE_RETRY);
         assert!(
-            ui.get_remote_notice().contains("1_Boom"),
+            ui.get_remote_notice().contains("SFX"),
             "{}",
             ui.get_remote_notice()
         );
@@ -3764,7 +3895,7 @@ mod tests {
         controller.wait_metadata(sequence, false).unwrap();
         let request = writes.lock().unwrap().join("\n---\n");
         assert!(
-            request.starts_with(&format!("PATCH /api/v1/audio/{}/metadata", file.id)),
+            request.contains(&format!("PATCH /api/v1/audio/{}/metadata", file.id)),
             "{request}"
         );
         assert!(
@@ -3772,6 +3903,11 @@ mod tests {
             "{request}"
         );
         assert!(controller.metadata.lock().unwrap().failures.is_empty());
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-audiolib-library-id: lib-1")
+        );
         assert_eq!(
             provider.get_audio(file.id).unwrap().notes,
             "saved on the server"
@@ -3788,6 +3924,74 @@ mod tests {
             2
         );
         assert_eq!(cache.state("lib-1").unwrap().revision, 2);
+
+        // Once a replacement is known, later offline results cannot make cached
+        // IDs writable. A provider created before the check is server-bound too.
+        controller.apply_revision_check(
+            &ui,
+            Some(CachedIdentity {
+                library_id: "lib-1".into(),
+                revision: 2,
+            }),
+            RevisionCheck::LibraryChanged {
+                cached_id: "lib-1".into(),
+                server_id: "lib-2".into(),
+                server_revision: 1,
+            },
+            None,
+            false,
+        );
+        assert!(ui.get_remote_writes_blocked());
+        assert!(controller.remote_provider().is_err());
+        controller.apply_revision_check(
+            &ui,
+            Some(CachedIdentity {
+                library_id: "lib-1".into(),
+                revision: 2,
+            }),
+            RevisionCheck::Offline("down".into()),
+            None,
+            false,
+        );
+        assert!(controller.remote_provider().is_err());
+        // Opening the validated snapshot clears the gate; a late writer from
+        // a different database filename cannot block this current provider.
+        controller
+            .switch_data_source(&DataSourceSwitch::Server {
+                database: snapshot.clone(),
+                state: cache.state("lib-1"),
+            })
+            .unwrap();
+        controller.remote_write_event(
+            "lib-1",
+            "stale-snapshot.db",
+            audiolib_remote::WriteEvent::LibraryChanged {
+                reason: "old provider conflict".into(),
+            },
+        );
+        assert!(controller.remote_provider().is_ok());
+        controller.remote_write_event(
+            "another-library",
+            "library-r1-1.db",
+            audiolib_remote::WriteEvent::LibraryChanged {
+                reason: "same filename in an old library".into(),
+            },
+        );
+        assert!(controller.remote_provider().is_ok());
+        controller.publish_data_source(&ui);
+        assert!(!ui.get_remote_writes_blocked());
+        let stale = CacheState {
+            library_id: "lib-1".into(),
+            database_file: "stale-snapshot.db".into(),
+            ..Default::default()
+        };
+        controller.note_remote_identity_error(
+            &ui,
+            &stale,
+            &RemoteError::LibraryChanged("late scan result".into()),
+        );
+        assert!(!ui.get_remote_writes_blocked());
+        assert!(controller.remote_provider().is_ok());
 
         // A sleeping NAS disk: the first byte takes 3 s (20-30 s in reality). Stop gives up
         // the pending request at once; otherwise the selection simply waits for it, and

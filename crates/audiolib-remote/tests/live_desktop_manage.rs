@@ -89,6 +89,7 @@ fn provider(
         log.lock().unwrap().push(match event {
             WriteEvent::Applied { revision } => format!("applied {revision}"),
             WriteEvent::Resync { .. } => "resync".into(),
+            WriteEvent::LibraryChanged { .. } => "library-changed".into(),
         });
     });
     RemoteProvider::new(snapshot, writer, true, Some(listener))

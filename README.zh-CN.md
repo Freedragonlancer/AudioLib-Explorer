@@ -6,7 +6,7 @@
 
 AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它把大型 WAV 音效库索引到 SQLite（FTS5）中，提供即时搜索，通过 WASAPI（可选 ASIO）试听，也可以浏览由自带的 `audiolib-server` 提供的远程音效库。
 
-- **程序版本：** 0.4.3（工作区 `Cargo.toml`）
+- **程序版本：** 0.4.4（工作区 `Cargo.toml`）
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 5（快照兼容范围 3..=5）
 - **许可证：** [GPL-3.0-only](LICENSE)
@@ -18,7 +18,7 @@ AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件�
 - 流式解码播放、设备采样率重采样、波形与频谱视图、独立的音高/速率试听（SoundTouch），支持 WASAPI 与可选 ASIO 输出。
 - 资料库管理：添加文件夹、修复被移动或改名的文件、批量标注、备份/恢复、完整性检查、JSONL/CSV 交换。
 - 命令行工具 `AudioLibCli`（JSON/表格/CSV 输出、库管理、控制正在运行的桌面实例播放）。
-- 服务器模式：`server/audiolib-server` 通过 `/api/v1/` 提供一个资料库（快照、Range 流式音频、预览、波形、令牌认证、仅局域网管理页）。客户端只读打开经过校验的快照，不会写入远程资料库。
+- 服务器模式：`server/audiolib-server` 通过 `/api/v1/` 提供一个资料库（快照、Range 流式音频、预览、Waveform、令牌认证、仅局域网管理页）。客户端只读打开经过校验的快照；Metadata 和管理写入使用绑定库身份的 HTTP 请求。远程写入须同时升级客户端和服务端，旧服务端仍可读取。
 - 中英文双语界面。
 
 ## 构建

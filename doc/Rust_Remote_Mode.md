@@ -9,8 +9,8 @@ documented in [doc/api/README.md](api/README.md); this document describes client
 In server mode the client downloads a validated SQLite snapshot and opens it with the
 ordinary read-only `SqliteProvider`, so search, folders and filters keep local-mode
 performance. Annotation edits and play counts are written to the server and applied to the
-snapshot by revision (see *Writes in server mode*); scans, removal and other structural
-changes stay read-only. The local working library and its settings are never opened,
+snapshot by revision (see *Writes in server mode*); permitted scans and removals use
+the server management API. The local working library and its settings are never opened,
 modified or replaced while in server mode; switching back to local mode reopens it as before.
 
 ## Settings and secrets
@@ -75,7 +75,7 @@ settings files load as local mode):
     { "id": "p-3f9c0a1b2d", "name": "192.0.2.10:8790 (external)",
       "server_url": "https://audiolib.example.com:8443", "kind": "external",
       "group": "default", "library_id": "…", "transcode": true,
-      "last_test": { "at": 1791460727, "ok": true, "summary": "…" } }
+      "last_test": { "at": 1704067200, "ok": true, "summary": "…" } }
   ]
 }
 ```
@@ -235,10 +235,10 @@ changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:
    updated (`AudioLibCli remote sync --force` re-downloads anyway).
 4. Otherwise `GET /library/snapshot` streams to disk in 256 KiB chunks (never buffered in
    memory) into `.part-<pid>`, renamed to `<file>.download` when complete (Content-Length
-   checked, cancellable between reads). The desktop shows "The server is preparing the
+   checked, cancellable during HTTP response headers and body reads). The desktop shows "The server is preparing the
    snapshot…" until the first byte (the server copies the library first: about 7 s for
    645 MB) and then "Downloading snapshot x / y MiB" with a progress bar. `409 BUSY` and `503 BUSY` are retried for up to 240 s from the first request (`BUSY_WINDOW`), waiting the server's
-   `Retry-After` when sent (capped at 10 s per wait), else exponential backoff (0.5 s, 1 s, 2 s, 4 s, then 10 s). The first snapshot of a 900k-row library takes the server about 125 s and its first HTTP response is a `503 BUSY` with `Retry-After` after about 90 s; the 240 s window (and the 240 s snapshot response timeout) covers that with margin, so the client does not fail early.
+   `Retry-After` when sent (capped at 10 s per wait), else exponential backoff (0.5 s, 1 s, 2 s, 4 s, then 10 s). An anonymized large-library measurement took the server about 125 s to prepare its first snapshot and its first HTTP response was a `503 BUSY` with `Retry-After` after about 90 s; the 240 s window (and the 240 s snapshot response timeout) covers that measurement with margin, so the client does not fail early.
 5. The `X-Library-Id` header must match `/library`; the revision comes from
    `X-Library-Revision` (falls back to `/library`).
 6. Validation: `journal_mode=DELETE`, `user_version` equals the supported schema, opens
@@ -277,13 +277,20 @@ the cache worker before releasing the desktop instance lease. Original integrity
 checks and owned-copy safety are retained;
 an unchanged prepared snapshot is reused without copying, downloading or rebuilding.
 
-Timeouts: connect 3 s, JSON responses 15 s (bodies 30 s), snapshot response 120 s and body
+Timeouts: connect 3 s, ordinary JSON responses 15 s (bodies 30 s), library statistics
+response/body 60 s, snapshot response 240 s and body
 up to 1 h, audio stream first byte 100 s (a NAS disk spinning up, see *Playback*). Errors map to localized messages for unreachable server, timeout, 401
 (invalid token, or "token required" when none is configured), 404, BUSY, validation and
 server `INTERNAL` errors. A server `408 TIMEOUT` (a non-streaming request that ran longer
 than the server's 30 s limit) is treated exactly like a client timeout: transient, shown as
 offline in polling (the cache stays in use and the check is retried), retried by the audio
 stream after its first response, never reported as a token or protocol problem.
+
+Sync health/library/roots checks and snapshot transfers use a scoped cancellation
+transport. Cancel closes the active socket, and scoped reads poll at most every 100 ms
+so a Windows blocked read also exits while a peer remains silent. Snapshot cancellation
+returns after file cleanup and the cancellation watcher joins; existing cache state and
+snapshot bytes are retained. Owned SQLite validation/upgrades still drain safely.
 
 ## Revision polling
 
@@ -373,6 +380,18 @@ find this file in its root <name>: moved, renamed or deleted". `remote download`
 drag-out report the same message.
 
 ## Writes in server mode
+
+From 0.4.4, each writer binds the opened snapshot's immutable library ID. Before every
+mutation it checks `/library`, requires `identity_bound_writes: true`, and sends
+`X-AudioLib-Library-Id`; the server compares that value against the same captured
+AppState/provider used by the handler. This closes the gap between checking and writing.
+Older servers remain readable but bound writes are refused until the server is upgraded;
+older clients without the header cannot write to the upgraded server.
+
+A known replacement disables GUI editing and management until the replacement snapshot
+is opened. Offline checks cannot re-enable stale IDs, and delayed events from a former
+library/snapshot cannot disable the new provider. Identity rejection leaves drafts and
+cached bytes intact and is distinct from authentication, busy and uncertain write errors.
 
 Annotations are edited directly on the server; everything structural stays read-only.
 
@@ -594,7 +613,7 @@ byte source; the drag-out still copies the original from the download cache.
    audition stream starts or is cancelled, so the next request finds a warm connection. The first byte may still take 100 s (NAS wake-up);
    body reads fail after 30 s without data (tolerates jitter on a remote link).
 
-### Measurements (2026-10-09, production server 726d776)
+### Measurements (2026-10-09, anonymized server workload)
 
 `cargo run --release -p audiolib-remote --example stream_bench` through
 `tools/throttle_proxy.py` (GET/HEAD only, one shared token bucket, keep-alive client
@@ -603,7 +622,8 @@ connection (TCP + TLS): 40 ms RTT, and 175 ms RTT like the external reverse prox
 connection costs ~0.5 s to first byte there). The bucket setting is not the goodput:
 Windows timer granularity in the proxy makes "4" and "3" Mbit/s deliver ~2.8, "5" ~4.2,
 "10" ~8.4, "2" ~1.7 and "60" ~34 Mbit/s (the client's own estimate, in brackets).
-Records: 698 (96 kHz/24-bit, 53 s), 4 (192 kHz/24-bit), 16926 (96 kHz/24-bit 6ch); 20 s of
+Samples: A (96 kHz/24-bit, 53 s), B (192 kHz/24-bit), C (96 kHz/24-bit 6ch); source record
+IDs and server identity are omitted. Each sample used 20 s of
 simulated engine playback each (0.5 s ring, prebuffer 0.5 s, rebuffer 2 s); then the record
 selected afresh (nothing cached) and clicked to 70 % at the first sound ("seek"; at 175 ms
 also 1 s after the first sound). Arrowing: 20 records at 120 ms and 300 ms per key
@@ -611,21 +631,21 @@ also 1 s after the first sound). Arrowing: 20 records at 120 ms and 300 ms per k
 each tier starts with no bandwidth estimate (the app normally has one from the snapshot
 sync) and with no pooled connection.
 
-| Link [goodput] | Route 698 / 4 / 16926 | TTFA ms | Stalls | Seek ms | Waveform ms (304) | Arrow 120 / 300 ms | Peak cache | 503 / max audio conns / audio reqs reusing a connection |
+| Link [goodput] | Route A / B / C | TTFA ms | Stalls | Seek ms | Waveform ms (304) | Arrow 120 / 300 ms | Peak cache | 503 / max audio conns / audio reqs reusing a connection |
 |---|---|---|---|---|---|---|---|---|
 | LAN | pcm¹ / raw / raw | 30 / 17 / 18 | 0 | 5–7 | 8–13 (2) | 0.21 / 0.20 s | 294 MiB | 0 / 2 / 31 of 33 |
 | 10 [8.4] @40 ms | pcm 48k/16 ×3 | 233 / 153 / 152 | 0 | 155–156 | 222–314 (47–54) | 0.33 / 0.39 s | 14 MiB | 0 / 2 / 28 of 33 |
 | 5 [4.2] @40 ms | pcm 48k/16 ×3 | 324 / 226 / 232 | 0 | 276–277 | 286–486 (48) | 0.42 / 0.45 s | 12 MiB | 0 / 2 / 29 of 31 |
 | 4 [2.8] @40 ms | pcm 48k/16 ×3 | 388 / 292 / 296 | 0 | 415–419 | 371–643 (48–50) | 0.48 / 0.57 s | 10 MiB | 0 / 2 / 27 of 31 |
-| 4 [1.4 share] @40 ms + drag-out | pcm¹ / flac / flac | 726 / 409 / 389 | 1 (2.1 s, 698)² | 461–541 | 751–1378 (90–107) | 0.80 / 0.67 s | 12 MiB | 0 / 2 / 31 of 33 |
+| 4 [1.4 share] @40 ms + drag-out | pcm¹ / flac / flac | 726 / 409 / 389 | 1 (2.1 s, A)² | 461–541 | 751–1378 (90–107) | 0.80 / 0.67 s | 12 MiB | 0 / 2 / 31 of 33 |
 | 2 [1.7] @40 ms | pcm¹ / flac / flac | 541 / 398 / 356 | 0 | 381–463 | 578–1074 (47–49) | 0.65 / 0.61 s | 12 MiB | 0 / 2 / 31 of 33 |
 | 60 [34] @175 ms | pcm¹ / raw / raw | 600 / 340 / 415 | 0 | 607–753; 1 s later 254–404 | 548–567 (183–187) | 0.47 / 0.45 s | 78 MiB | 0 / 3 / 30 of 40 |
 | 5 [4.2] @175 ms | pcm 48k/16 ×3 | 713 / 368 / 373 | 0 | 733–739; 1 s later 384–394 | 693–891 (188–189) | 0.55 / 0.54 s | 12 MiB | 0 / 3 / 27 of 38 |
 | 4 [2.8] @175 ms | pcm 48k/16 ×3 | 777 / 434 / 431 | 0 | 461–817; 1 s later 456–457 | 744–1042 (187–189) | 0.82 / 0.66 s | 10 MiB | 0 / 3 / 25 of 38 |
-| 4 [1.4 share] @175 ms + drag-out³ | pcm¹ / flac / flac | 1131 / 533 / 527 | 1 (2.0 s, 698)² | 559–654 | 1096–1675 (218–249) | 1.16 / 0.80 s | 12 MiB | 0 / 3 / 23 of 33 |
+| 4 [1.4 share] @175 ms + drag-out³ | pcm¹ / flac / flac | 1131 / 533 / 527 | 1 (2.0 s, A)² | 559–654 | 1096–1675 (218–249) | 1.16 / 0.80 s | 12 MiB | 0 / 3 / 23 of 33 |
 
 ¹ No estimate yet: the conservative 4 Mbit/s picks the 16-bit pcm preview.
-² A concurrent `curl` download of record 4's original took half the link while 698 played
+² A concurrent `curl` download of sample B's original took half the link while A played
 pcm at the conservative estimate; from the second record on the estimate chose flac and
 nothing stalled. The server's separate preview quota keeps the audition from getting
 `503`, but bandwidth is shared; switching a running pcm audition to flac on underrun is not
@@ -699,8 +719,8 @@ cache/<library_id>/<file_id>-<etag token>/<original filename>
 
 Synthetic libraries of the server schema (85,000 rows, 1,783 folders, Chinese and English
 names, tags and descriptions), served by the real `audiolib-server` on loopback. The
-release build ran on the development PC. The production library has 80,562 rows and a
-656 MiB snapshot.
+release build ran on the development PC. The table below describes those synthetic
+fixtures; production-library counts and capacity are omitted from public documentation.
 
 | Measure | 160 MB snapshot | 645 MB snapshot |
 |---|---|---|

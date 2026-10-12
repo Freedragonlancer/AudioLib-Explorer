@@ -2407,7 +2407,7 @@ mod tests {
                 r#"{"error_code":"NOT_FOUND","message":"file missing"}"#,
             ),
             "/token" => TestResponse::json(401, r#"{"error_code":"UNAUTHORIZED"}"#),
-            "/starting" => TestResponse::json(503, r#"{"error_code":"UNAVAILABLE","message":"Library root \"1_Boom\" is offline: Root directory not found (volume not mounted?)"}"#)
+            "/starting" => TestResponse::json(503, r#"{"error_code":"UNAVAILABLE","message":"Library root \"SFX\" is offline: Root directory not found (volume not mounted?)"}"#)
                 .with_header("Retry-After", "5"),
             "/pcm415" => TestResponse::json(415, r#"{"error_code":"PREVIEW_UNSUPPORTED_FORMAT","message":"cannot be previewed with codec=pcm"}"#),
             "/noffmpeg" => TestResponse::json(503, r#"{"error_code":"TRANSCODER_UNAVAILABLE","message":"ffmpeg missing"}"#),
@@ -2442,7 +2442,7 @@ mod tests {
                 message,
                 retry_after: Some(5),
             }) => assert!(
-                message.starts_with("Library root \"1_Boom\" is offline"),
+                message.starts_with("Library root \"SFX\" is offline"),
                 "{message}"
             ),
             other => panic!("{other:?}"),
