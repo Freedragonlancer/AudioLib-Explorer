@@ -1,16 +1,22 @@
-# AudioLib Explorer v0.4.1
+# AudioLib Explorer v0.4.2
 
 发布日期：2026-10-12
 
-版本：程序 0.4.1 | API /api/v1/ | schema 5 | 快照兼容 3..=5
+版本：程序 0.4.2 | API /api/v1/ | schema 5 | 快照兼容 3..=5
 
-## 应用图标与高 DPI 资源
+## 缓存加载与进度显示
 
-- 新增现代扁平风格的应用图标：叠放的音频素材文件夹与 Waveform，深灰和青绿色配色，透明外边缘。
-- Windows EXE 嵌入 16–256 px 的 16 个图标尺寸，覆盖常见 100%–400% 缩放；窗口图标一并接入，保留 PerMonitorV2 DPI 设置。
-- 提供 macOS `.icns`、标准 `.iconset` 及最大 1024×1024 的 Retina 图层，并配置 cargo-bundle 图标元数据。此版本发布 Windows x64 便携包；macOS 桌面构建、签名及实机显示尚未验证。
-- 中英文 README 展示新图标；附原始图稿及可重复生成各尺寸的 PowerShell 工具。日常运行及 Cargo 构建不需要图像服务或 Python。
+- 服务器模式统一由音效库管理处理缓存加载和下载。启动时不再提前准备旧缓存，避免启动和管理界面重复执行耗时工作；先检查服务器版本，未变化且已准备好的缓存直接复用。
+- 缓存复制和下载显示实际进度；校验、索引准备和打开资料库等无法确定总量的阶段显示动态进度条、当前阶段与已等待时间，中英文界面同步支持。
+- 同步和打开缓存期间保留管理界面的进度反馈，不再被通用的“等待扫描结束”遮罩覆盖。
+- 新快照损坏或 schema 不受支持时，可回退到同一服务器原有的有效缓存；关闭窗口时取消并等待后台缓存任务退出。
 
-API、数据库 schema 和快照兼容范围与 v0.4.0 一致。升级保留资料库、Metadata、标注、扫描历史与偏好设置，运行状态继续保存在 `%LOCALAPPDATA%/AudioLibExplorer/v1` 或原有显式配置路径。
+## 验证与升级
 
-Windows x64 便携包包含 WASAPI 与 ASIO。校验结果随 Release 的 `Rust_CI_Release.json` 提供；完整的 macOS/Windows 图标接入说明见仓库 `doc/Rust_App_Icon.md`。
+默认与 ASIO 配置均运行格式检查、严格 Clippy、工作区测试及便携包验证，发布构建结果见附件 `Rust_CI_Release.json`。缓存复用、下载失败回退与进度状态回归的说明见 [Rust 验证记录](Rust_Validation.md)。
+
+API、数据库 schema 和快照兼容范围与 v0.4.1 一致。升级保留资料库、Metadata、标注、扫描历史与偏好设置，运行状态继续保存在 `%LOCALAPPDATA%/AudioLibExplorer/v1` 或原有显式配置路径。Windows x64 便携包包含 WASAPI 与 ASIO。
+
+## 已知问题
+
+UI-001：窗口失焦后重新聚焦，界面可能大面积变黑或仅显示部分控件。已登记待复现、待修复，本版本尚未解决。

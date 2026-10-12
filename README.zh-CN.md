@@ -6,7 +6,7 @@
 
 AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它把大型 WAV 音效库索引到 SQLite（FTS5）中，提供即时搜索，通过 WASAPI（可选 ASIO）试听，也可以浏览由自带的 `audiolib-server` 提供的远程音效库。
 
-- **程序版本：** 0.4.1（工作区 `Cargo.toml`）
+- **程序版本：** 0.4.2（工作区 `Cargo.toml`）
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 5（快照兼容范围 3..=5）
 - **许可证：** [GPL-3.0-only](LICENSE)
