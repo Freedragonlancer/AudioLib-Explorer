@@ -1,0 +1,35 @@
+/target/
+/dist/
+/local_release/
+/tools/.build-tools/
+/.rust-validation/
+
+# User libraries, source audio fixtures, and generated runtime state.
+/data/
+/test_audiolib/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+/logs/
+/.audiolib-user/
+*.log
+/config/audiolib_config.yaml
+/nul
+
+# Ignore legacy Python caches and local editor state.
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.venv/
+/venv/
+/.claude/settings.local.json
+.env
+.env.*
+!.env.example
+
+
+# Generated validation reports (written by tools/validate-*.ps1; not tracked).
+/doc/Rust_*.json
+/doc/Rust_*.txt

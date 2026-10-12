@@ -1,0 +1,31 @@
+[package]
+name = "audiolib-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["scanner"]
+scanner = ["dep:audiolib-audio"]
+
+[dependencies]
+audiolib-core = { path = "../audiolib-core" }
+audiolib-audio = { path = "../audiolib-audio", default-features = false, optional = true }
+rusqlite = { workspace = true, features = ["functions", "hooks"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+unicode-segmentation = "=1.13.3"
+icu_casemap.workspace = true
+jieba-rs = "=0.11.0"
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# statvfs: free-space check before writing a backup / snapshot copy.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+

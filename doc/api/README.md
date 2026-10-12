@@ -1,0 +1,854 @@
+# AudioLib 远程 API（v1，讨论稿）
+
+> 状态：讨论稿。里程碑 1（`/health`、`/library`、`/library/snapshot`、`/roots`）和里程碑 2（`/audio/{id}`、`/audio/{id}/stream`，以及启动期 `/health` 状态 + 503 `UNAVAILABLE`）、里程碑 3（metadata 写入：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`，§6.3）以及波形（§9）、试听预览 `/audio/{id}/preview`（§8.1）、远程扫描 `/scans`（§6.6）、历史列表 `/history/...`（§6.7）、从库中移除记录/文件夹 `POST /audio/remove`、`DELETE /folders/{id}`（§6.8）以及库管理权限 `manage_mode` + `GET /capabilities`（§6.9）已在 `server/audiolib-server` 实现；其余端点仍为计划，等服务端确认、用户拍板后再定稿。改任何路由或字段先在「AudioLib 开发组」群里通知对方。
+
+## 1. 目标与边界
+
+- 服务器模式 = 一个实现 `audiolib_core::DataProvider` 的远程提供者（`crates/audiolib-remote`）+ 服务端进程（`server/audiolib-server`）。UI / CLI 不感知本地还是远程。
+- 服务端直接复用 `audiolib-core` 的 DTO（`AudioFile`、`Folder`、`SearchRequest`、`SearchPage`、`MetadataPatch`、`ScanProgress`、`LibraryStats`、`LibraryInfo` 等），JSON 字段名与 serde 序列化结果一致，remote 端可以直接反序列化。
+- 源音频永远只在服务端磁盘上；客户端通过 WebDAV（见 §7）或流端点（见 §8）读取，不直接打开服务端路径。
+- v1 不做：备份/还原、维护（integrity/FTS 重建）、relink、JSONL/CSV 导入导出、多用户权限。这些在远程模式下返回 `UNSUPPORTED`，留在服务端本机 CLI 操作。`GET /library/snapshot` 是只读导出，不属于上述备份/还原。
+- 局域网内直接用 HTTP（`http://192.0.2.10:8790`，默认不需要 token）；外网经 HTTPS 反向代理访问（如 `https://audiolib.example.com:8443`，需要 token），见 §2.2–§2.4。token 在服务端管理页 `/admin` 生成和撤销（§2.3）。
+
+## 2. 基础约定
+
+- Base URL：`<服务器地址>/api/v1`。服务器地址由用户填写：局域网为 `http://<host>:8790`（服务端默认端口 `8790`，避开 Mac 上已占用的 3000/2222），外网为反代的公网地址，形如 `https://<域名>:<端口>`，可带路径前缀（如 `https://example.com/audiolib` → `https://example.com/audiolib/api/v1`）。服务端在 `/health` 的 `public_url` 里给出管理员配置的公网地址（§6.2）。
+- 编码：请求/响应 `application/json; charset=utf-8`，快照和音频流除外。
+- 鉴权：按**鉴权模式**（§2.2）决定，默认 `external`：**局域网直连不需要 token，请求里带的 `Authorization` 头被完全忽略**（有效、已撤销或乱写的 token 都不会导致 401）；经反向代理或来自公网的请求需要 `Authorization: Bearer <token>`。`GET /health` 永远不需要 token。客户端可以始终发送已保存的 token，各种模式都兼容。
+- 时间：Unix 秒（与现有 envelope 的 `timestamp` 一致）；时长 `duration` 为秒（f64）。
+
+### 2.1 成功与错误
+
+成功直接返回 DTO 本体（不再包 `success/data` envelope，HTTP 状态码表示成败）。错误统一：
+
+```json
+{ "error_code": "VALIDATION", "message": "Search limit must be 1..=10000" }
+```
+
+| `audiolib_core::Error` | HTTP | `error_code` |
+|---|---|---|
+| `Validation` / 路径参数非法（如 `/audio/abc`）/ 请求体不是合法 JSON 或字段类型不对 | 400 | `VALIDATION` |
+| 需要 token 时（§2.2）token 缺失、错误或已撤销 | 401 | `UNAUTHORIZED`（附 `WWW-Authenticate: Bearer`；缺失和错误同一个码，只有 `message` 不同） |
+| 管理页 `/admin` 经反代、从公网或用非局域网主机名访问（§2.3） | 403 | `ADMIN_LAN_ONLY` |
+| 管理页的修改请求缺少 `X-AudioLib-Admin: 1` 或来自其他源（§2.3） | 403 | `ADMIN_HEADER_REQUIRED` |
+| 库管理（扫描及其暂停/继续/取消、`POST /audio/remove`、`DELETE /folders/{id}`）被 `manage_mode` 拒绝：`lan` 模式下的外部请求，或 `off` 模式下的任何请求（§6.9）；先过鉴权，缺 token 仍是 401 | 403 | `MANAGE_FORBIDDEN` |
+| `NotFound` / 未知路由 / 音频文件缺失或不在配置的根下 | 404 | `NOT_FOUND` |
+| 路由存在但方法不对（如 `POST /library`） | 405 | `METHOD_NOT_ALLOWED`（JSON 错误体，保留 `Allow` 头） |
+| 非流式端点超过 30 秒未完成 | 408 | `TIMEOUT` |
+| `Busy`（扫描/维护/快照并发占用；已有扫描时再 `POST /scans`，§6.6；扫描进行中或暂停中、或其他进程扫描/维护同一个库时 `POST /audio/remove`、`DELETE /folders/{id}`，§6.8） | 409 | `BUSY` |
+| `Cancelled` | 409 | `CANCELLED` |
+| 扫描会话当前状态不允许该操作（已结束、正在取消、已进入最终对账等，§6.6） | 409 | `SCAN_STATE` |
+| JSON 请求体超过 8 MiB（§6.3） | 413 | `PAYLOAD_TOO_LARGE` |
+| 音频流 `Range` 无法满足（§8）、`pcm` 预览 `Range` 无法满足（§8.1） | 416 | `RANGE_NOT_SATISFIABLE`（附 `Content-Range: bytes */<长度>`） |
+| `flac` 预览的 `t=` 在时长之后（§8.1） | 416 | `RANGE_NOT_SATISFIABLE`（不带 `Content-Range`） |
+| `codec=pcm` 预览遇到不支持的文件（非 WAV、ADPCM 等，文件头损坏或截断，或采样率无法按 `sr` 整数倍抽取，§8.1） | 415 | `PREVIEW_UNSUPPORTED_FORMAT` |
+| 远程不支持的操作 | 501 | `UNSUPPORTED` |
+| 库尚未打开（启动中）或打开失败、正在重试（§6.2） | 503 | `UNAVAILABLE`（附 `Retry-After: 5`）；**只用于这一种情况** |
+| 音频流/预览/波形所在的库根目录、或 `POST /scans` 要扫描的根离线或暂时无响应（§6.4、§6.6） | 503 | `ROOT_OFFLINE`（附 `Retry-After: 5`，`message` 为 `Library root "<根名>" is offline: <原因>`） |
+| 音频流并发达到上限 `max_streams`（§8），预览（`pcm`/`flac`）并发达到独立的上限 `max_previews`，或 `flac` 预览等待 0.5 秒仍无转码名额 `max_transcodes`（§8.1） | 503 | `BUSY`（附 `Retry-After: 1`，几种情况形状完全相同；快照并发仍为 409 `BUSY`） |
+| 快照还在准备、等待超过 `snapshot_wait_secs`（§6.1） | 503 | `BUSY`（附 `Retry-After: 5`；准备在后台继续，重试即可拿到；与音频流 `BUSY` 同码，靠 `Retry-After` 和端点区分） |
+| `flac` 预览所需的 ffmpeg 不存在或无法启动（§8.1） | 503 | `TRANSCODER_UNAVAILABLE`（不带 `Retry-After`） |
+| 写快照/备份副本前检查所在卷的剩余空间不足（§6.1；需要的字节数 + max(64 MiB, 2 %) 余量）或系统报告磁盘已满 | 507 | `INSUFFICIENT_STORAGE`（`message` 含目录和所需/剩余 MiB；腾出空间后重试，无 `Retry-After`） |
+| `Database` / `Audio` / `Io` | 500 | `DATABASE` / `AUDIO` / `IO` |
+| 服务端内部故障（如后台任务崩溃） | 500 | `INTERNAL` |
+
+remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有错误提示逻辑不变；`INTERNAL` 按 `Database` 处理即可，`RANGE_NOT_SATISFIABLE` 只会出现在音频流和预览上（§8、§8.1），`BUSY` 按状态码区分快照（409）和音频流/波形（503）。各种 503 按 `error_code` 区分，不要匹配 `message` 文字：
+
+- `BUSY`（503）：音频流/预览名额已满，按 `Retry-After` 稍后重试（§8、§8.1）。
+- `TRANSCODER_UNAVAILABLE`：只出现在 `/audio/{id}/preview?codec=flac` 上，服务端没有可用的 ffmpeg；重试无用，改用 `codec=pcm` 或 `/stream`。
+- `UNAVAILABLE`：**整个库**暂不可用（服务端启动中或开库失败正在重试，§6.2），任何需鉴权的端点都可能返回；按“服务器暂不可用、稍后重试”处理（类似连接失败，可沿用离线缓存）。
+- `ROOT_OFFLINE`：只出现在 `/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans`（§6.6）上，表示**该文件所在（或要扫描）的库根**离线或暂时无响应；库本身可用（元数据、快照、写入照常），客户端可显示 `message` 中的原因、查看 `/roots` 的 `status`，或用 `POST /roots/{name}/check` 立即重查（§6.4）。
+
+500 的 `message` 可能包含服务端路径；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
+
+连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这六个端点没有任何时间上限，见 §6.4、§6.6；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
+
+### 2.2 鉴权模式与 token
+
+服务端有三种鉴权模式（`config.toml` 的 `auth_mode`，或管理页设置，管理页优先）：
+
+| 模式 | 局域网直连 | 外部请求（经反代 / 公网对端） |
+|---|---|---|
+| `off` | 不需要 token | 不需要 token（只在完全可信的网络里用） |
+| `external`（**默认**） | 不需要 token，`Authorization` 被**完全忽略** | 需要 `Authorization: Bearer <token>` |
+| `all` | 需要 token | 需要 token |
+
+- 旧配置 `auth = true` 等同 `all`（并且启动时必须有环境变量 token）；`auth = false` 或不写时为 `external`。示例配置是 `auth = false`，所以升级后局域网客户端的行为不变（不需要 token）。
+- **外部请求的判定**（满足任一即外部）：请求带有 `X-Forwarded-For`、`X-Forwarded-Proto`、`X-Forwarded-Host`、`Forwarded` 或 `X-Real-IP` 头（不论值，表示经过反向代理）；或 TCP 对端地址不在回环/私有网段内（`127.0.0.0/8`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`::1`、`fc00::/7`、`fe80::/10`；`100.64/10`、`169.254/16` 等都算外部）。原生 TLS 监听（§2.3）上的公网对端也是外部；局域网对端经 TLS 直连仍算局域网。服务端不信任这些头里的地址，只看“有没有”，所以客户端伪造它们只会让自己被当作外部请求。**因此反向代理必须设置 `X-Forwarded-For`（§2.4），否则同机或局域网内的反代会被当成局域网直连。**
+- 有效 token：管理页生成的 token（未撤销），或环境变量 `AUDIOLIB_SERVER_TOKEN`（`token_env` 可改名；部署时通常由 systemd `EnvironmentFile` 或启动脚本导出它，所以它也一直有效）。生成的 token 形如 `al_` + 64 个十六进制字符；服务端只保存 SHA-256 哈希（常量时间比较），明文只在生成时显示一次。撤销立即生效。
+- 认证头格式：`Authorization: Bearer <token>`（`Bearer` 不区分大小写）。`Basic` 等其他方案视为没有 token。
+- 错误：需要 token 而缺失 → 401 `UNAUTHORIZED`（`message`：`A bearer token is required for access from outside the LAN`；`all` 模式为 `A valid bearer token is required`）；token 错误或已撤销 → 401 `UNAUTHORIZED`（`message`：`The bearer token is invalid or has been revoked`）。都带 `WWW-Authenticate: Bearer realm="audiolib"`。客户端按状态码和 `error_code` 判断，不要匹配 `message`。没有新增错误码（`TOKEN_REQUIRED` / `TOKEN_INVALID` 不存在）。
+- token 的“最近使用时间”最多每分钟记一次（避免频繁写盘），在管理页显示。
+
+### 2.3 管理页 `/admin`
+
+浏览器打开 `http://<服务器局域网地址>:8790/admin`（例如：`http://192.0.2.10:8790/admin`，在 Mac 本机也可用 `http://127.0.0.1:8790/admin`）。页面是编译进服务端的静态 HTML + JS，不需要构建、不加载任何外部资源。功能：
+
+- **客户端连接**：显示客户端应填写的外网地址（公网地址）和局域网地址，以及当前鉴权模式下哪种地址需要 token。局域网地址默认从网卡自动检测（私有网段的 IPv4，`en*` 优先），可在页面改写。
+- **公网地址**：例如 `https://audiolib.example.com:8443`，可带路径前缀（`https://example.com/audiolib`）。必须是 `http`/`https` URL，不能含用户名密码、查询串或片段；保存时规范化（小写协议和主机、去掉结尾 `/` 和多余的 `/api/v1`）。保存后 `/health` 的 `public_url` 立即更新。
+- **鉴权模式**：`off` / `external` / `all`，或恢复 `config.toml` 的默认值。
+- **库根目录**：列出当前根目录（名称、路径、在线状态、文件数、缺失数、最近扫描），添加 / 移除根目录（带服务器磁盘浏览器，可浏览已挂载的 SMB 卷），对某个根目录发起增量 / 完整扫描并显示进度、暂停 / 继续 / 取消。改动立即生效，无需重启，详见 §2.3.1。
+- **库管理权限**（`manage_mode`）：`all`（默认，所有通过鉴权的请求）/ `lan`（只允许局域网直连）/ `off`（全部禁止），或恢复 `config.toml` 的默认值；决定谁能远程扫描、从库中移除记录和文件夹（§6.9）。保存后立即生效。
+- **访问令牌**：填名称生成（明文只显示一次，带复制按钮）；列表显示名称、生成时间、最近使用时间；撤销。最多 256 个。
+- **原生 HTTPS（可选）**：证书链 PEM 路径 + 私钥 PEM 路径（绝对路径）+ HTTPS 端口（如 8791，不能等于 HTTP 端口）。保存前校验文件能加载、证书和私钥匹配；保存后**立即生效、无需重启**（服务端在与 `bind` 相同的地址上另开 rustls 监听，8790 的 HTTP 照常），页面显示监听状态或错误（如端口被占用）。停用同样即时。**本版本客户端只信任公共 CA 签发的证书（如 Let's Encrypt），自签名证书客户端不会接受。** 一般用反向代理提供 HTTPS（§2.4），不需要这个功能。
+
+**访问限制**（本轮唯一的安全措施，没有管理密码）：
+
+- 只接受局域网直连：TCP 对端在上面的私有网段内，且**没有**任何转发头（`X-Forwarded-For` 等，即不是经反向代理来的），原生 TLS 监听上的公网对端也拒绝；否则 403 `ADMIN_LAN_ONLY`。
+- `Host` 必须是 IP 地址、`localhost`、不带点的主机名或 `.local` / `.lan` / `.home.arpa` / `.internal` 结尾的名字，否则 403 `ADMIN_LAN_ONLY`（防 DNS 重绑定：恶意网页无法借自己的域名访问管理接口）。
+- 修改请求（`PUT`/`POST`/`DELETE`）必须带 `X-AudioLib-Admin: 1`，浏览器带 `Origin` 时必须与 `Host` 同源，否则 403 `ADMIN_HEADER_REQUIRED`（自定义头使跨站网页无法静默发起修改）。
+- 管理响应都带 `Cache-Control: no-store`、`X-Frame-Options: DENY`，页面另有严格的 `Content-Security-Policy`。
+
+**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。所有设置都即时生效，没有需要重启的项。
+
+管理接口（页面自己使用，JSON；错误同 §2.1）：
+
+| 请求 | 说明 |
+|---|---|
+| `GET /admin/api/status` | 版本、库状态、`auth_mode`(+`_source`: `default`/`config`/`admin`)、`manage_mode`(+`_source`，同上)、`public_url`(+`_source`)、`lan_url`、`lan_url_source`、`lan_url_candidates`、`http_port`、`env_token`（是否配置了环境变量 token）、`token_count`、`tls { configured, source, state: off/starting/listening/error, port, message }`、设置文件路径、`warnings` |
+| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）；回复同 status |
+| `PUT /admin/api/tls` | `{"cert_path","key_path","port"}`，校验后保存并（重新）监听；回复同 status（最多等 4 秒拿到监听结果） |
+| `DELETE /admin/api/tls` | 停用（回到 `config.toml` 的 TLS 设置，默认没有） |
+| `GET /admin/api/tokens` | `{"tokens":[{"id","name","created_at","last_used_at"}]}`（不含哈希） |
+| `POST /admin/api/tokens` | `{"name"}` → 201 `{"token":{…},"secret":"al_…"}`，`secret` 只出现这一次 |
+| `DELETE /admin/api/tokens/{id}` | 撤销 → 204；不存在 → 404 `NOT_FOUND` |
+| `GET /admin/api/fs`、`GET`/`POST /admin/api/roots`、`DELETE /admin/api/roots/{name}`、`/admin/api/scans...` | 库根目录管理，见 §2.3.1 |
+
+#### 2.3.1 库根目录管理（管理页专用 Web API）
+
+> **客户端不得依赖本节接口**：它们只供管理页使用，可能随时改动，且只接受局域网直连（§2.3 的全部访问限制：非局域网 / 带转发头 403 `ADMIN_LAN_ONLY`，修改请求缺 `X-AudioLib-Admin: 1` 或跨源 403 `ADMIN_HEADER_REQUIRED`）。客户端读取根目录仍用 `GET /api/v1/roots`（形状不变），在管理页添加的根目录会出现在其中（`webdav_url` 为 `null`），移除的根目录消失。鉴权模式和 `manage_mode` 对这些接口无关（管理页本身就是服务端管理员的入口）。
+
+**根目录的保存与生效**：添加 / 移除后，当前完整的根目录列表写入 `admin-settings.json` 的 `roots`，**此后以它为准**，不再读取 `config.toml` 的 `[[roots]]`（和其他管理页设置一样，管理页覆盖 `config.toml`；`config.toml` 里原有的根目录也可以在页面移除）。改动立即生效，无需重启，重启后保持。
+
+**`GET /admin/api/fs`**（只读，从不写入、删除或递归扫描；每次请求只做一次 `read_dir`，在 SMB 上也很快）：
+
+- 不带 `path`：起点列表 `{"places":[{"kind":"root|volume|home|library_root","name","path","network":true|false|null}]}`：`/`、`/Volumes/*`（`network` 由一次 `statfs` 的文件系统类型判断，`smbfs`/`nfs`/`afpfs`/`webdav` 为 `true`）、主目录、现有根目录（Windows 上是各盘符）。
+- `?path=<绝对路径>[&hidden=1]`：列出该目录的子目录（默认不含 `.` 开头的隐藏目录），路径先 `canonicalize`（解析 `..` 和符号链接）：
+
+```json
+{ "path": "/srv/audiolib/music/Sounds", "parent": "/srv/audiolib/music", "network": false,
+  "entries": [ { "name": "Ambience", "path": "/srv/audiolib/music/Sounds/Ambience", "is_symlink": false } ],
+  "truncated": false, "wav_files": 12, "other_files": 3, "counts_truncated": false }
+```
+
+  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（共 4 个，浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
+
+**`POST /admin/api/roots`** `{"name","path"}` → 201，回复同 `GET /api/v1/roots` 的一项（新根目录尚未扫描，`file_count` 为 `null`）。校验（400 `VALIDATION`，不存在 404，权限 403 `FS_FORBIDDEN`）：`name` 非空、1..=128 字符、无首尾空白、不含 `/` `\` 和控制字符、与现有根目录不重名（不区分大小写）；`path` 是已存在的绝对目录；不能与现有根目录相同、位于其内部或包含它。保存的 `server_path` 是规范化后的真实路径。
+
+**`DELETE /admin/api/roots/{name}`** → 200：
+
+```json
+{ "name": "Music", "removed": 3, "folders_removed": 2, "revision_before": 41, "revision": 42 }
+```
+
+先让库忘记该根目录下的全部记录（与 `DELETE /folders/{id}` 相同的清理：音频记录、文件夹记录、播放历史、歌单项、波形缓存），再把它从根目录列表移除；**绝不删除任何音频文件**，重新添加并扫描即可恢复。只有真的删掉记录时 `revision` 才加 1（从未扫描过的根目录：`removed` 为 0，`revision` 不变）。有扫描在运行或暂停时 → 409 `BUSY`；不存在 → 404 `NOT_FOUND`。
+
+**扫描**：`POST /admin/api/scans`（请求体和回复同 `POST /api/v1/scans`）、`GET /admin/api/scans/current`、`GET /admin/api/scans/{id}`、`POST /admin/api/scans/{id}/pause|resume|cancel` 与 §6.6 的同名接口完全相同，只是走管理页的访问限制、不受 `manage_mode` 限制。`GET /admin/api/roots` 返回与 `GET /api/v1/roots` 相同的列表（不需要令牌）。
+
+### 2.4 外网反代要求
+
+给配置公网反向代理（如 `https://audiolib.example.com:8443`）的人：
+
+1. **转发目标**：`http://192.0.2.10:8790`（反代与服务端在同一台 Mac 上时也可用 `http://127.0.0.1:8790`）。整个站点（或路径前缀下的全部路径）转发；路径前缀要在转发时去掉（`/audiolib/api/v1/...` → `/api/v1/...`）。**不要转发 `/admin`**（转发了也只会得到 403，但最好在反代上直接拦掉）。
+2. **必须设置 `X-Forwarded-For`**（追加客户端地址）和 **`X-Forwarded-Proto: https`**。服务端靠这些头识别外部请求并要求 token（§2.2）；反代不发这些头时，来自同机/局域网的反代连接会被当成局域网直连而**不需要 token**。配置完成后务必验证：从外网（或带上 `--resolve` 的本机 curl）请求 `<公网地址>/api/v1/library` **不带 token 必须得到 401**，带有效 token 得到 200。
+3. **原样透传**请求头 `Range`、`If-None-Match`、`If-Range`、`Authorization`、`Accept-Encoding`，以及响应头 `ETag`、`Content-Range`、`Accept-Ranges`、`Content-Length`、`Content-Encoding`、`Vary`、`Retry-After`、`WWW-Authenticate`、`Content-Disposition` 和所有 `X-*` 头（`X-Preview-*`、`X-Start-*`、`X-Total-Frames`、`X-Duration` 等）。不要改写或去掉 `ETag`（弱化、加引号等都会破坏 `If-None-Match`/`If-Range`）。
+4. **关闭缓冲**：`/audio/{id}/stream`、`/audio/{id}/preview`、`/library/snapshot` 是长时间的流式响应（`flac` 预览为 chunked），反代必须边收边发（nginx `proxy_buffering off;`），不能先缓存整个响应；请求体很小，`proxy_request_buffering` 无所谓。
+5. **长超时**：读超时至少 1 小时（`proxy_read_timeout 3600s; proxy_send_timeout 3600s;`）——慢速 NAS 唤醒时首字节可能要等 90 秒以上，大文件下载持续很久。
+6. **不要再压缩**：关掉反代的 gzip/br 压缩（服务端已对快照和波形使用 `Content-Encoding: zstd`，音频本身不可压缩）；保留服务端的 `Content-Encoding` 和 `Vary: Accept-Encoding`，不要解压或改写。
+7. HTTP/1.1 到上游（nginx `proxy_http_version 1.1;`），保持 `Host` 或设置为上游地址均可（服务端不依赖 `Host`，只有管理页检查它）。
+8. TLS 证书必须由公共 CA 签发并覆盖所用域名（客户端本版本只信任公共 CA）。
+
+nginx 示例：
+
+```nginx
+server {
+    listen 8443 ssl;
+    server_name audiolib.example.com;
+    ssl_certificate     /path/fullchain.pem;
+    ssl_certificate_key /path/privkey.pem;
+
+    location /admin { return 403; }
+    location / {
+        proxy_pass http://192.0.2.10:8790;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        gzip off;
+        # Range / If-None-Match / If-Range / Authorization 默认原样转发，不要用 proxy_set_header 清掉。
+    }
+}
+```
+
+Caddy 示例（Caddy 默认就会设置 `X-Forwarded-For`/`X-Forwarded-Proto`、透传 Range 等头，且不压缩）：
+
+```caddy
+audiolib.example.com:8443 {
+    respond /admin* 403
+    reverse_proxy 192.0.2.10:8790 {
+        flush_interval -1
+        transport http {
+            read_timeout 1h
+            write_timeout 1h
+        }
+    }
+}
+```
+
+带路径前缀时（`https://example.com/audiolib`）：nginx 用 `location /audiolib/ { proxy_pass http://192.0.2.10:8790/; … }`，Caddy 用 `handle_path /audiolib/* { reverse_proxy … }`。
+
+## 3. 标识与路径
+
+- **文件 ID**：用服务端数据库的 `audio_files.id`（i64），与 `DataProvider` 签名一致。ID 只在同一个库内有效。
+- **id 稳定性**（已核对 `audiolib-db/src/lib.rs`）：重扫时已有文件按 `path_key` 原地 UPDATE，id 不变；扫不到的只标 `missing=1`，不删记录。移动/改名后重扫会生成新 id、旧记录变 missing，需 relink 接回。只有 `remove_audio` / `remove_folder`（服务器模式下即 `POST /audio/remove`、`DELETE /folders/{id}`，§6.8）真正删除记录；被移除的文件重扫后以**新 id** 回到库中。客户端可以缓存 id，遇到 404 或 `missing` 再刷新。
+- **库身份**：`GET /library` 返回 `library_id`、`schema_version` 和 `revision`。客户端每次连接比对 `library_id`，变了就清空选择、草稿和缓存（对应现有的 library generation 机制）。
+  - `library_id` 保存在服务端自有的旁路文件 `<db>.server-state.json`（与库文件同目录，原子写入），在服务端**第一次打开该 db 路径**时生成（UUID v4）。schema v3/v4 本身没有库身份字段。
+  - 原地还原（restore）保留 `library_id`，`revision` 递增；把库复制到另一路径再提供服务会得到新的 `library_id`。旁路文件损坏时服务端拒绝启动，不会悄悄换新 id。
+  - 以后可考虑 schema v5 在库内保存身份（例如元数据表或 SQLite `application_id` + UUID），届时旁路文件只作迁移来源。
+- **路径**：服务端**暴露绝对路径**——`GET /roots` 的 `server_path`、`GET /library` 的 `database`，以及 `AudioFile.file_path` / `Folder.path` 均为服务端（Mac）上的原始绝对路径。客户端把库里的路径前缀 `server_path` 替换为该根的 WebDAV 地址来访问音频（见 §7）。目前只在局域网使用，因此接受路径暴露；以后若开放到局域网之外再重新评估。
+- **扫描根**：服务端配置允许的根（`[[roots]]`，对应 `allowed_scan_roots`），客户端只能从 `GET /roots` 里选，不能传任意路径。
+
+### 3.1 快照 schema 3 → 4（只加索引）
+
+- `SCHEMA_VERSION` = **5**（`crates/audiolib-db/src/schema.rs`，由 `audiolib_db::SCHEMA_VERSION` 导出）。`MIN_SNAPSHOT_SCHEMA_VERSION` = **3**（同文件，客户端的 `MIN_SNAPSHOT_SCHEMA` 直接引用它，不重复定义）。`GET /library` 的 `schema_version` 与快照响应头 `X-Schema-Version` 现在都是 `5`。
+- v4 **只新增索引**：不改任何表、列、触发器、FTS，不改行数据，所以 v3 与 v4 用同一套查询；`/library` 的 `stats` 条件由 `COALESCE(missing,0)=0` 改为 `missing=0`（`missing` 列是 `NOT NULL DEFAULT 0`），可命中部分索引。
+- **升级行为**：服务端以可写方式打开一个 v3 库时，在一个事务里执行 `PERFORMANCE_INDEXES`（全部 `CREATE INDEX IF NOT EXISTS`，重复或中断后重跑无害）并把 `user_version` 设为 4。首次升级要为全部行建索引，大库需要几十秒到数分钟（实测见 `~/AudioLibScaleTest/report.md`），期间服务端处于启动中状态；库文件会变大。v1/v2 库照旧先补管理表再建全部索引。降级（用旧服务端打开 v4 库）不被支持：旧服务端要求 `user_version` 精确为 3。
+- **v3 快照兼容**：客户端接受 `user_version` 为 3、4 或 5 的快照；原快照只读，必要的派生状态升级只在一致性备份所得 owned 副本执行（`open_read_only`、`apply_snapshot_records`、`validate_snapshot` 统一用 `snapshot_schema_supported`），其他版本拒绝。连着仍是 v3 的服务端时，客户端读到的快照没有新索引，只是少了加速，功能一致。
+- **新增索引清单（13 个，全部在 `PERFORMANCE_INDEXES`）**：
+
+  | 索引 | 定义 | 用途 |
+  | --- | --- | --- |
+  | `idx_audio_visible_stats` | `audio_files(folder_id,duration,file_size) WHERE missing=0` | `/library` 统计与文件夹聚合（覆盖索引） |
+  | `idx_play_history_audio` | `play_history(audio_file_id)` | 移除文件/文件夹时的外键级联与按素材查历史 |
+  | `idx_playlist_items_audio` | `playlist_items(audio_file_id)` | 同上 |
+  | `idx_project_references_audio` | `project_references(audio_file_id)` | 同上 |
+  | `idx_waveform_cache_audio` | `waveform_cache(audio_file_id)` | 同上 |
+  | `idx_audio_visible_modified` | `audio_files(modified_at,id) WHERE missing=0` | 按修改时间升序 |
+  | `idx_audio_visible_modified_desc` | `audio_files(modified_at DESC,id) WHERE missing=0` | 按修改时间降序（排序为 `value DESC, id ASC`，升序索引会留下临时排序，故单独建降序索引） |
+  | `idx_audio_visible_format` | `audio_files(bit_depth,channels) WHERE missing=0` | 位深/声道筛选 |
+  | `idx_audio_visible_format_name` | `audio_files(bit_depth,filename COLLATE NOCASE,id) WHERE missing=0` | 位深筛选 + 文件名排序（避免临时排序） |
+  | `idx_audio_visible_tagged_any` | `audio_files(filename COLLATE NOCASE,id,user_tags,source_tags_text) WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'')` | `tagged_only` / `tag_contains` ????????WHERE ?????????v5 ??? `idx_audio_visible_tagged`? |
+  | `idx_audio_visible_color` | `audio_files(user_color COLLATE NOCASE,id) WHERE missing=0 AND user_color IS NOT NULL` | 颜色筛选 |
+
+- **Schema v5 (ratings removed from the product).** v5 changes indexes plus one additive derived column (see *Derived column* below): it drops `idx_audio_visible_rating`, `idx_audio_visible_rating_desc` and `idx_user_rating`, and rebuilds `idx_audio_visible_favorite` as `audio_files(filename COLLATE NOCASE,id) WHERE missing=0 AND favorite=1` (no `user_rating`). The `user_rating` column and every stored rating stay untouched but are no longer read, written, filtered or sorted by any client or server code; `MIN_SNAPSHOT_SCHEMA_VERSION` stays **3** and the accepted snapshot range is **3..=5** (client SELECTs never reference `user_rating`). v3/v4 -> v5 runs in one transaction with idempotent statements; v3 libraries also get the v4 indexes. The API no longer has a `rating` field: `AudioFile`, `MetadataPatch`, the `rating_min` filter and the `rating` sort are gone; a legacy `rating` key in a PATCH/batch body is ignored (unknown keys are not rejected) and a legacy `rating` in a response is ignored by the client. Annotation import (CSV/JSONL) ignores a legacy `rating`; exports no longer write it.
+- **Derived column `audio_files.source_tags_text` (v5).** `TEXT NOT NULL DEFAULT ''`: the extracted tags (`audiolib_core::source_tags`) joined with `', '` and casefolded (`''` when none). It is never user-visible, never written to `user_tags`, and is maintained by the scanner UPSERT (`metadata_json` and the column are written in the same statement; the FTS text still comes from the same `metadata_json`). `tagged_only` = `user_tags` non-blank OR `source_tags_text<>''`; `tag_contains` = casefolded `user_tags` contains OR `source_tags_text` contains; neither parses `metadata_json` any more. Upgrade: `ALTER TABLE ADD COLUMN` (idempotent, also applied to a v5 library that predates the column) + index, then `open` backfills in id-ordered batches of 20 000 rows, one short transaction per batch, progress in `library_meta.source_tags_progress`, completion marker `library_meta.source_tags_rev = '1'` (re-entrant after a crash; no-op when marked). New libraries and full search rebuilds (`rebuild_search`, legacy import) populate the column and the marker directly. `SqliteProvider::ensure_source_tags_current()` re-runs the backfill explicitly. Until the marker is set (unfinished backfill) and for v3/v4 snapshots (no column), the client falls back to the JSON path (`audiolib_has_source_tags` / `audiolib_source_tags`), so results are identical, only slower. v5 snapshots carry the column and `idx_audio_visible_tagged_any`; client SELECTs never reference the column, so older v3/v4-era clients read v5 snapshots unchanged. Server operators: opening a v3/v4 library with the new binary adds the column and index, but the backfill is **not** quick on a real library. Measured on the server with a real 900k-row library: the tag backfill takes about 3 minutes (198 s) and the FTS rebuild (`ensure_source_search_current`) about 8.5 minutes (513 s); the earlier ~6 s figure came from a synthetic library with tiny `metadata_json` and does not apply. Run the upgrade by hand in a maintenance window: `AudioLibCli db rebuild-search` (backfill, then FTS rebuild, with progress on stderr and per-step timings in the JSON result; `--if-needed` skips an up-to-date library). Until it finishes, searches fall back to the slower JSON path. **Disk:** the FTS rebuild goes through the maintenance path, which leaves an `audiolib-rollback-*.db` in the library directory as large as the library itself; keep that much free space and delete the file after verifying the result. First-snapshot generation for such a library takes ~125 s on the server, which clients cover by retrying BUSY for up to 240 s (see `Rust_Remote_Mode.md`).
+- **Legacy-client compatibility (server, v5).** The server accepts legacy rating request fields. Pre-v5 clients that require a `rating` response field must still be upgraded; request acceptance alone does not guarantee their response decoding. (1) `PATCH /audio/{id}/metadata` whose body carries `rating` and no non-null `tags`/`color`/`notes`/`favorite` is a **200 no-op**: it returns the current record (no `rating` key) with `revision_before == revision` (no write, no revision bump, `modified_at` untouched); a `rating` next to real fields is ignored and the real fields are applied as usual. Unknown ids stay 404, auth stays 401, wrongly typed fields stay 400, and a body without `rating` and without any field is unchanged. (2) `POST /audio/metadata/batch` whose `patch` is rating-only is a **200 no-op** (`report.updated = 0`, current `files`, `revision_before == revision`); `ids` are still validated (400 for empty/non-positive/over 10000) and unknown ids are still 404. (3) The server has no list/search endpoint (search runs on the client's snapshot), so `sort=rating` and `rating_min` query parameters are simply ignored by every route (unknown query keys are not rejected) and never produce 400; with `sort=rating` the client-side default order applies. These behaviours are implemented in the server route layer only and are covered by `legacy_*` tests in `server/audiolib-server/tests/api.rs`. New clients must not send `rating`.
+- **Extracted tags.** `tagged_only` and `tag_contains` also match the tags derived from `metadata_json` (`audiolib_core::source_tags`, never stored in `user_tags`), and the derived FTS text (`bwf_description_tokenized`) includes the `keywords/category/subcategory/vendor_category/cat_id` fields. A library built before this change must recompute that text once: `SqliteProvider::ensure_source_search_current()` does it (marker `library_meta.source_search_rev = '2'`, same transaction as the rebuild; rollback backup + integrity check via the maintenance path; `Busy` while a scan runs). `open` never calls it, so a server operator runs it by hand in a maintenance window with `AudioLibCli db rebuild-search` (it runs `ensure_source_tags_current()` and then `ensure_source_search_current()`, prints progress to stderr and reports `tags_seconds`, `rebuild_seconds`, `total_seconds`, `rollback_copies`; `--if-needed` is a no-op on a current library, without it a current library is rebuilt as a repair). Real 900k-row library: backfill about 3 minutes (198 s), FTS rebuild about 8.5 minutes (513 s); the rebuild leaves a library-sized `audiolib-rollback-*.db` in the library directory.
+
+  `schema_v5` 测试（`crates/audiolib-db/tests/schema_v5.rs`）用 `EXPLAIN QUERY PLAN` 固定上述索引被命中且无临时排序。
+
+## 4. 服务器模式同步模型（已在群里约定）
+
+- 客户端在本机保存库缓存：`%LOCALAPPDATA%/AudioLibExplorer/v1/remote/<library_id>/library.db`。搜索、浏览、统计直接走本地缓存，延迟与本地模式一致。
+- 客户端轮询 `GET /library`；`revision` 变化时重新下载 `GET /library/snapshot`，校验后替换本地缓存（先下载到临时文件，校验 `X-Library-Id`、快照 `user_version` 的兼容范围和 SQLite 完整性，读取 `X-Schema-Version` 响应头，再原子替换）。
+- `revision` 是保守的变更提示：服务端用专用只读连接轮询 `PRAGMA data_version`（其他连接/进程的每次提交都会改变它，包括只写进 WAL、尚未 checkpoint 的提交），并比对**主库文件**的大小/mtime（默认每 3 秒一次，每次 `/library` 和快照请求也会检查）。WAL 文件的大小/mtime 不参与运行期比对（它们在每次打开/关闭时都会变化，以前会导致每次重启都递增）。服务端停机期间的改动在下次启动时递增一次：主库文件变化，或 WAL 签名（WAL 文件长度 + 32 字节文件头中的 checkpoint 序号和 salt，不含 mtime）变化。服务端退出时故意不关闭自己的 SQLite 连接，避免最后一个连接关闭时把 WAL checkpoint 进主库、下次启动被误判为变更；因此**单纯重启服务端不会递增 `revision`**。它**可能在没有实际变更时递增**（如其他进程做 WAL checkpoint），但**不会漏掉已提交的变更**。`revision` 先于数据读取，所以返回的数据不会比所标的 `revision` 旧。
+- Metadata 编辑：先写服务端，成功后再更新本地缓存。写入端点（§6.3）返回写入后的完整记录以及 `revision_before` / `revision`：服务端在同一个临界区里（所有服务端写入串行）先把此前所有未计入的提交计入 `revision`，记下 `revision_before`，执行写入，然后把 `revision` 设为 `revision_before + 1` 并更新轮询基线，所以这次写入**只递增一次**，轮询不会再为它递增。
+  - **客户端规则**：若本地缓存的 `revision == revision_before`，把返回的记录（`file` 或 `files`）写入本地缓存，并把本地 `revision` 设为返回的 `revision`；否则（期间有别的改动）按正常流程下载完整快照同步。写入失败（4xx/5xx）时 `revision` 不变，本地缓存也不要改。
+  - 已知窄窗口：服务端写入执行期间若恰好有其他进程提交，那次提交会并入同一次递增；客户端按上面的规则只应用返回的记录，那次外部改动要等下一次变更（`revision` 再变）才会同步到。
+  - 写入端点受 30 秒请求超时约束；若超时返回 408，写入可能已经提交，`revision` 会照常变化，客户端下一次轮询会走快照同步。
+- 远程扫描（§6.6）：扫描期间 `revision` 冻结，结束时有改动才递增一次（无改动的增量扫描不递增）；客户端照常按 `revision` 变化同步。
+- 移除记录/文件夹（§6.8）：与 metadata 写入同一个临界区，返回 `revision_before` / `revision`；真正删除了记录（或文件夹）时只递增一次，什么都没删时不递增（`revision == revision_before`）。客户端规则同上：`revision_before` 等于本地值时可直接在本地缓存里删掉这些记录，否则做快照同步。
+- `library_id` 变化：清空本地缓存目录、选择和草稿，重新下载快照。
+
+## 5. 分页
+
+- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。理由：与本地实现完全一致，remote 改动最小。
+- 游标分页（服务端提议）列为待定：如果服务端需要快照一致性，建议游标为不透明字符串 `next_cursor`，内部编码排序键 + 最后一个 id；`SearchRequest` 再加可选 `cursor` 字段，有游标时忽略 `offset`。
+- 历史类列表（扫描历史、播放历史）同样用 `limit` + `offset`。
+
+## 6. 端点清单
+
+状态：✅ = 已实现；⏳ = 计划中。
+
+| 状态 | 方法 | 路径 | 对应 `DataProvider` | 请求 | 响应 |
+|---|---|---|---|---|---|
+| ✅ | GET | `/health` | — | 免鉴权 | `{ "status": "ok" \| "starting" \| "error", "version": "0.3.x", "api_version": "v1", "schema_version": 5, "commit": "abc1234" \| "unknown", "message"?: "…", "public_url": "…" \| null }`，见 §6.2 |
+| ✅ | GET | `/library` | `library_info` | — | `LibraryInfo` 字段（含 `database`、`schema_version`、`stats`、`database_bytes`、`wal_bytes`）+ `library_id`、`revision`；`stats` 按 revision 缓存（内存 + 库旁 `<库文件>.stats.json`，重启后立即可用）：revision 变化后若上次计算耗时 >250 ms，先返回上一份统计并在后台重算（计数只可能滞后最近几次写入），否则同步重算；播放记录与元数据修改不影响这些统计，写入后缓存直接沿用到新 revision（不整表重算）；启动时后台预热（库旁缓存已是当前 revision 时跳过）；`database_bytes` = 主库文件 + `-wal` 文件的字节数（库实际占用），`wal_bytes` 为其中 WAL 部分 |
+| ✅ | GET | `/library/snapshot` | `backup_library`（只读导出） | — | SQLite 快照字节，见 §6.1 |
+| ✅ | GET | `/roots` | `folders`（求 `file_count`）+ 根状态缓存 + 扫描历史 | — | `[{ "name", "server_path", "webdav_url": "…" \| null（功能未完善，见 §7）, "file_count": n \| null, "missing_count": n, "online": bool, "status": "checking" \| "online" \| "waking" \| "offline", "status_message": "…" \| null, "checked_at": unix秒 \| null, "last_scan": { … } \| null, "scanning": bool }]`，见 §6.4 |
+| ✅ | POST | `/roots/{name}/check` | 根状态 | 无请求体 | 立即重查该根（最多约 2 秒），返回该根的 `/roots` 条目；未知根名 404 `NOT_FOUND`，见 §6.4 |
+| ⏳ | GET | `/stats` | `stats` | — | `LibraryStats` |
+| ⏳ | POST | `/search` | `search` | `SearchRequest` | `SearchPage` |
+| ⏳ | POST | `/search/folders` | `search_folders` | `SearchRequest` | `Folder[]` |
+| ⏳ | GET | `/folders?parent_id=<id>` | `folders` | 不带 `parent_id` 为根 | `Folder[]` |
+| ✅ | GET | `/audio/{id}` | `get_audio` | — | `AudioFile`；无此记录 404 `NOT_FOUND`，非整数 id 400 `VALIDATION` |
+| ✅ | PATCH | `/audio/{id}/metadata` | `update_metadata` | `MetadataPatch` | `{ "file": AudioFile, "revision_before": n, "revision": n+1 }`，见 §6.3 |
+| ✅ | POST | `/audio/metadata/batch` | `update_metadata_batch` | `BatchMetadataRequest`（`tag_mode` 可省略，默认 `replace`） | `{ "report": BatchMetadataReport, "files": AudioFile[], "revision_before": n, "revision": n+1 }`，见 §6.3 |
+| ✅ | POST | `/audio/remove` | `remove_audio` | `{ "ids": [n, …] }`（1..=10000 个） | 200 `{ "removed": n, "not_found": [id…], "revision_before": n, "revision": n \| n+1 }`；只删库记录，不删文件；受 `manage_mode` 限制，扫描中 409 `BUSY`，见 §6.8 |
+| ✅ | DELETE | `/folders/{id}` | `remove_folder` | 无请求体 | 200 `{ "removed": n, "folders_removed": n, "revision_before": n, "revision": n+1 }`（整个子树）；未知 404，库根顶层文件夹 400，见 §6.8 |
+| ✅ | GET | `/capabilities` | — | — | `{ "manage_mode": "all" \| "lan" \| "off", "external": bool, "can_manage": bool }`；需鉴权，库启动中也可用，见 §6.9 |
+| ✅ | POST | `/audio/{id}/plays` | `record_play` | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n+1 }`（`play_count` 在快照里，所以也走 revision 规则），见 §6.3 |
+| ✅ | GET | `/history/plays?limit=&offset=` | `play_history` | `limit` 默认 100（1..=10000），`offset` 默认 0 | `PlayRecord[]`，新的在前，见 §6.7 |
+| ✅ | GET | `/history/scans?limit=&offset=` | `scan_history` | 同上 | `ScanSession[]`，新的在前，见 §6.7 |
+| ✅ | POST | `/scans` | 扫描（`ScanService::scan`；受 `manage_mode` 限制，§6.9） | `{ "root": "<name>", "subpath": "", "mode": "incremental" \| "full", "workers": null }` | 200 `ScanResponse`（`ScanProgress` 字段 + `root`/`subpath`/`mode`/`active`/`pause_requested`/`cancel_requested`/`revision`，含新的 `session_id`），见 §6.6 |
+| ✅ | GET | `/scans/current` | 扫描进度 | — | 200 `{ "scan": ScanResponse \| null }`（没有扫描时为 `null`，不是 404），见 §6.6 |
+| ✅ | GET | `/scans/{session_id}` | 扫描进度 | — | `ScanResponse`；未知会话 404 `NOT_FOUND`，见 §6.6 |
+| ✅ | POST | `/scans/{session_id}/pause` · `/resume` · `/cancel` | 扫描控制（受 `manage_mode` 限制，§6.9） | 无请求体 | `ScanResponse`；状态不允许时 409 `SCAN_STATE`，见 §6.6 |
+| ✅ | GET / HEAD | `/audio/{id}/stream[?download=1]` | 音频流 / 下载 | 见 §8 | 音频字节（`download=1` 时附 `Content-Disposition: attachment`，§8） |
+| ✅ | GET / HEAD | `/audio/{id}/waveform?buckets=&colors=&start_frame=&end_frame=` | `audiolib_audio::waveform` | 见 §9 | `WaveformData` JSON + `start_frame`/`end_frame`/`total_frames`（可 zstd），见 §9 |
+| ✅ | GET / HEAD | `/audio/{id}/preview?codec=pcm\|flac&sr=&bits=&ch=[&t=]` | 低带宽试听预览 | 见 §8.1 | `pcm`：进程内生成的 WAV（有长度，可 Range）；`flac`：ffmpeg 实时转码的分块 FLAC 流 |
+
+管理页 `/admin` 和 `/admin/api/...` 不在 `/api/v1` 下，只供局域网浏览器使用，见 §2.3。
+
+- `/roots.file_count`：该根在库中对应文件夹的非 missing 文件总数（含子目录），只查库、不访问磁盘（根离线时照常返回）；根尚未扫描时为 `null`。`missing_count`、`last_scan`、`scanning` 见 §6.4。`webdav_url` 未配置时为 `null`（**WebDAV 功能未完善**，见 §7）。
+- 扫描进度 v1 用轮询（**建议每 500 ms** `GET /scans/{id}`，GUI 本来就会节流合并进度）；以后需要再加 SSE `GET /scans/{id}/events`。同一个库同时只允许一个扫描，冲突返回 409 `BUSY`。详见 §6.6。
+
+### 6.1 `GET /library/snapshot`
+
+- 服务端用现有 `backup_library`（SQLite backup API，单个读事务内的一致快照）写入 `snapshot_dir` 下的临时目录，再以 `application/octet-stream` 流式返回。
+- **按 revision 缓存**：服务端保留最新一份快照，键为 `(library_id, revision)`；请求到来时先检查变更（同 `/library`），`revision` 未变就直接发送缓存的文件，**绝不会把缓存的文件当作另一个 revision 发送**。`revision` 一变，下一次请求重新生成并替换缓存，旧文件在没有响应再使用它之后删除。准备过程单飞：并发请求等同一份拷贝。
+- **压缩（可选）**：请求带 `Accept-Encoding: zstd`（`q=0` 表示不接受）时返回 zstd 压缩（level 3，多线程）的同一个 SQLite 文件，`Content-Encoding: zstd`；压缩版也按 revision 缓存，第一次请求时生成。不带时照旧返回原始文件。
+- 响应头（200）：
+
+  | 头 | 说明 |
+  |---|---|
+  | `Content-Length` | 实际发送的字节数（压缩时为**压缩后**长度） |
+  | `X-Uncompressed-Length` | 未压缩 SQLite 文件的字节数（不压缩时等于 `Content-Length`） |
+  | `Content-Encoding` | 仅压缩时为 `zstd` |
+  | `ETag` | 弱 ETag `W/"<library_id>-r<revision>"`，压缩版为 `W/"<library_id>-r<revision>-zstd"`（两种表示的 ETag 不同） |
+  | `X-Library-Id` / `X-Library-Revision` | 快照所属的库和 **生成它所依据的 revision**（已有头，名称不变）；快照内容不旧于该 revision |
+  | `X-Schema-Version` | 快照文件自身的 `user_version`（当前服务端为 `5`；客户端接受 `3..=5`，见 §3.1） |
+  | `Vary` | 总是 `accept-encoding`（含 304 和错误响应） |
+  | `Content-Disposition` | `attachment; filename="audiolib-<library_id>-r<revision>.db"` |
+  | `Cache-Control` | `no-store` |
+
+- `If-None-Match`：与当前 revision、当前编码的 ETag 匹配时返回 **304**（带 `ETag`、`X-Library-Id`、`X-Library-Revision`，不生成快照），客户端已有该 revision 时可用它省掉下载。
+- 并发：同时进行中的快照响应（准备 + 发送）最多 2 个，超出返回 409 `BUSY`，客户端稍后重试。
+- **磁盘空间检查**：生成原始快照前按库文件大小（含 WAL）、生成 zstd 副本前按原始大小的 1/8（实测约 6–7 %）检查 `snapshot_dir`（默认系统临时目录）所在卷的剩余空间，另留 max(64 MiB, 2 %) 余量；不足时在写任何字节前返回 **507 `INSUFFICIENT_STORAGE`**（磁盘写到一半满了同样映射为 507）。无法取得剩余空间的平台（非 Unix）跳过检查。`backup_library`（桌面端备份）使用同一检查。
+- **准备在后台进行**：快照（及 zstd 副本）的准备在独立的后台线程里做，不绑定发起它的请求（每种编码单飞）。请求最多等 `snapshot_wait_secs`（服务端配置，1..=3600，默认 90，须小于客户端 120 秒的响应头超时）；超时返回 **503 `BUSY` + `Retry-After: 5`**，准备继续，客户端重试时加入同一次准备（或直接拿到已完成的快照），不会再拷贝一份。客户端对 503 `BUSY` 按 `Retry-After` 重试。
+- 实测（生产库 80 562 条，SQLite 文件 687 992 832 字节，Mac 内置盘）：首次生成 1.9 秒（旧实现每 256 页停 10 ms，需 11–12 秒），缓存命中首字节 < 1 ms；zstd 压缩 0.19 秒，**46 191 153 字节（原大小的 6.7%）**，客户端解压约 0.2 秒。对比：zstd -1 50.5 MB、-9 39.5 MB（0.6 秒）、-19 35.2 MB（21 秒）；gzip -6 54.9 MB（4 秒）。准备期间 `/library` 照常（实测 36 ms），写入不被阻塞。磁盘占用：缓存的原始 + 压缩版各一份（约 690 MB + 46 MB），revision 切换时短暂可能多一份。
+- 进程崩溃/被杀后遗留的 `audiolib-snapshot-*` 临时目录在服务端下次启动时清理（配置了 `snapshot_dir` 时清理其中所有此类目录；用系统临时目录时只清理 24 小时以前的，避免误删其他实例正在用的）。因此**不要让两个服务端实例共用同一个 `snapshot_dir`**。
+
+### 6.2 启动状态与 `/health`
+
+服务端**先监听、后开库**：进程启动后立即绑定端口提供服务，库（及 revision 轮询）在后台线程打开。这样外置卷上的库被 macOS 权限弹窗（可移动卷访问授权）卡住时，端口仍然可用，launchd 也不会反复重启进程。
+
+| 阶段 | `GET /health`（始终 HTTP 200） | 需鉴权的端点 |
+|---|---|---|
+| 正在打开库 | `{"status":"starting","version":"…","public_url":…}` | 需要 token 时（§2.2）先校验 token（错误仍为 401），再返回 503 `UNAVAILABLE` + `Retry-After: 5` |
+| 已就绪 | `{"status":"ok","version":"…","public_url":null}`（里程碑 1 的字段 + `public_url`） | 正常 |
+| 打开失败 | `{"status":"error","version":"…","message":"The library could not be opened; the server keeps retrying","public_url":…}` | 503 `UNAVAILABLE`，`message` 为同样的固定文字 |
+
+- 版本字段（三种状态都带，只增不改，旧客户端忽略未知字段）：`version` 程序版本（工作区 `Cargo.toml`）；`api_version` API 版本（`"v1"`，对应 `/api/v1/`）；`schema_version` 本服务端构建支持的库 schema 版本（整数，取 `audiolib-db` 的 `SCHEMA_VERSION`，不是库文件当前的 `user_version`）；`commit` 构建时的 git 短哈希，取不到为 `"unknown"`。三套版本的规则见 `doc/Rust_Versioning.md`。
+- `public_url`：管理员在管理页（§2.3）或 `config.toml` 配置的公网地址（规范化后，如 `https://audiolib.example.com:8443`，不含 `/api/v1`），未配置时为 `null`；三种状态都带。`/health` 不需要 token。
+- 打开失败不会退出进程：错误写入日志，按 5 秒起、每次翻倍、最长 300 秒的间隔重试；之后一旦成功即转为 `ok`（例如用户在弹窗里授权、外置卷挂载后）。`ok` 之后不会再回到 `starting`/`error`。
+- `/health` 和 503 `UNAVAILABLE` 的 `message` 都只给固定文字，不含路径或密钥；具体原因只写入服务端日志。
+- 客户端：`/health` 为 `starting`/`error` 或收到 503 `UNAVAILABLE` 时，按“服务器暂不可用”处理并稍后重试，不要当成空库或 token 错误。503 `UNAVAILABLE` 只表示库未就绪；库根离线是另一个错误码 `ROOT_OFFLINE`（§2.1、§6.4），此时服务器和库都可用。
+
+### 6.3 Metadata 写入（已实现）
+
+三个写入端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。请求体为 JSON（不检查 `Content-Type`），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。成功后 `revision == revision_before + 1`，客户端按 §4 的规则应用返回的记录。
+
+`PATCH /audio/{id}/metadata`，请求体 `MetadataPatch`，省略的字段不变（`color` 传 `""` 清除颜色）：
+
+```json
+{ "tags": "loud door", "color": "#FF8800", "notes": "slam", "favorite": true }
+```
+
+响应 200（`file` 为写入后的完整 `AudioFile`，与 `GET /audio/{id}` 相同）：
+
+```json
+{
+  "file": {
+    "id": 3, "file_path": "/srv/audiolib/music/SFX/door.wav", "filename": "door.wav", "folder_id": 1,
+    "file_size": 52, "sample_rate": 48000, "bit_depth": 16, "channels": 1, "duration": 0.0000833,
+    "tags": "loud door", "color": "#FF8800", "notes": "slam", "favorite": true,
+    "bext_description": "", "play_count": 0, "attributes": {}, "missing": false
+  },
+  "revision_before": 41,
+  "revision": 42
+}
+```
+
+`POST /audio/metadata/batch`，请求体 `BatchMetadataRequest`（`ids` 1..=10000 个正整数，`patch` 至少一个字段；`tag_mode` 为 `replace` | `append` | `remove`，省略为 `replace`）。整批在一个事务里，任一 id 不存在则整批回滚、返回 404。扫描进行中返回 409 `BUSY`。
+
+```json
+{ "ids": [3, 7, 3], "patch": { "tags": "wood" }, "tag_mode": "append" }
+```
+
+响应 200（`report.updated` = 去重后的 id 数；`files` 为这些记录写入后的完整 `AudioFile`，按请求顺序、去重）：
+
+```json
+{ "report": { "updated": 2 }, "files": [ { "id": 3, "…": "…" }, { "id": 7, "…": "…" } ], "revision_before": 42, "revision": 43 }
+```
+
+`POST /audio/{id}/plays`，无请求体：`play_count` +1 并写入播放历史。响应 200，形状与 `PATCH /audio/{id}/metadata` 相同（`file.play_count` 为新值）：
+
+```json
+{ "file": { "id": 3, "play_count": 1, "…": "…" }, "revision_before": 43, "revision": 44 }
+```
+
+错误：`color` 不是空串或 `#RRGGBB`、`tags` > 16 KiB、`notes` > 1 MiB、非法 JSON / 字段类型不对、非整数 id、空 `ids` 或空 `patch`、未知 `tag_mode` → 400 `VALIDATION`；无此 id → 404 `NOT_FOUND`；需要 token 时（§2.2）token 缺失或错误 → 401。任何错误都不改库，`revision` 不变。
+
+### 6.4 库根目录状态与慢速磁盘（已实现）
+
+库根目录通常在 NAS 上，NAS 硬盘休眠后唤醒要 20–30 秒甚至更久。服务端因此遵守：
+
+1. **只有 `/audio/{id}/stream`（GET/HEAD，含 `download=1`）、`/audio/{id}/preview`（GET/HEAD）和 `/audio/{id}/waveform` 会访问根目录下的文件**，而且没有任何时间上限：不受 30 秒 408 限制，打开/stat/首次读取等多久都行（≥ 90 秒没问题）；唯一的超时是 10 秒的请求头读取，只针对客户端发送请求头。打开文件在 tokio 的阻塞线程池里进行，不占用异步运行时；客户端在等待期间断开时，处理函数连同它占用的并发名额（`max_streams` / `max_previews` / 波形名额）立即释放，即使阻塞的 `open()` 本身还卡着（例如 macOS 的“网络宗卷”授权弹窗未处理时）。这些卡住的打开会在服务端登记：每个根最多同时存在 4 × (`max_streams` + `max_previews`) 个未结束的打开（流和预览的打开共用这个上限），超出时新请求直接返回 503 `ROOT_OFFLINE`（`…earlier file opens have not finished yet`），所以卡住的线程有上限。打开超过 10 秒时服务端日志记一条 WARN（含根名和文件路径），结束时若总共超过 10 秒再记一条。
+2. **`/health`、`/library`、`/library/snapshot`、`/roots`、`/audio/{id}`、`/history/...`、`/scans/...` 的查询和控制端点以及 metadata 写入端点从不访问根目录**（只读写本机磁盘上的库文件和内存缓存），NAS 休眠或离线时照常快速响应。`POST /scans`（§6.6）是例外：扫描本身就要读根目录，它在独立后台线程里进行，没有时间上限。服务端启动时也不访问根目录；根检查线程在库打开成功之后才启动。
+3. **根状态由后台线程检查并缓存**，`/roots` 只读缓存。每个根一个检查线程：启动时、每 `root_check_secs` 秒（默认 300）、以及有请求要求重查时（见下）各检查一次。检查只做根目录的 `realpath` + `stat`（不列目录、不读文件），**不会为保持唤醒而轮询**；若连这个也不想要，把 `root_check_secs` 调大（最大 86400）。进行中的文件打开与进行中的检查同等对待：自上次成功以来超过 5 秒未完成 → `waking`，超过 `root_offline_secs` → `offline`；在此之后的一次成功（检查或打开）立即恢复 `online`。
+
+`/roots` 的状态字段：
+
+| `status` | `online` | 含义 |
+|---|---|---|
+| `checking` | `true` | 启动后第一次检查还没结束（按在线处理） |
+| `online` | `true` | 最近一次检查或音频流打开成功 |
+| `waking` | `true` | 之前在线，新的检查或文件打开已超过 5 秒未返回（多半是硬盘在唤醒）；**慢不等于离线** |
+| `offline` | `false` | 确定的失败（根目录不存在/卷未挂载、无权限、I/O 或连接错误），或检查/文件打开超过 `root_offline_secs` 秒（默认 120）仍未返回（`Root has not answered for N s`）；`status_message` 给出原因（不含路径） |
+
+- `checked_at`：最近一次完成的检查（或音频流打开）的 Unix 秒，启动后尚未完成时为 `null`。
+- 离线后无需人工干预：任何一次检查或音频流打开成功都会立刻恢复 `online`。
+- 根缓存为离线时：`/audio/{id}/stream`（**GET 和 HEAD 都一样**，所以客户端可以用一个 `HEAD` 触发重查）和 `/audio/{id}/waveform` 先做一次**有界的即时重查**（最多等约 2 秒，由检查线程执行）：卷已恢复就直接正常响应（不会先收到一次 503）；仍离线或 2 秒内没有结论则返回 503 `ROOT_OFFLINE` + `Retry-After: 5`，`message` 如 `Library root "SFX_Main" is offline: Root directory not found (volume not mounted?)`，未完成的检查在后台继续。重查请求会合并：每个根同一时间只有一个检查在跑，并发请求等同一个结果，不会形成检查风暴。
+- **`POST /roots/{name}/check`**：同样的有界即时重查（约 2 秒），返回该根更新后的 `/roots` 条目。2 秒内没有结论时返回当时的状态，检查在后台继续：之前在线的根显示 `waking`，之前离线的根保持 `offline`（直到某次检查成功），首次检查未完成为 `checking`。未知根名返回 404 `NOT_FOUND`。适合客户端“重试”按钮。
+- 文件打开失败时，服务端会顺带检查该根：根本身不可达则标记离线并返回 503 `ROOT_OFFLINE`；根可达但文件访问遇到超时/连接断开/网络文件句柄失效（`ETIMEDOUT`、`ENOTCONN`、`ECONNRESET`、`ESTALE` 等）时同样返回 503 `ROOT_OFFLINE`（`Root is not answering reliably: …`，可重试，不改根状态）；根可达且文件不存在才按文件缺失返回 404，其余 I/O 错误（如 `EIO`）为 500 `IO`。**根离线或变慢都不会把库里的文件标为 missing**。
+- 扫描器遵守同样的规则：根目录不存在/不可读时扫描直接失败，不改任何记录；扫描途中目录读取出错（例如卷断开）时不做 missing 对账；全量扫描遇到**完全为空**的根目录（只有 `.DS_Store` 等隐藏文件也算空；典型的未挂载挂载点）也不做 missing 对账（代价：用户真的删光了根目录下所有文件和文件夹时，记录不会被标 missing，直到根目录里重新有内容后再全量扫描；这种情况下流端点对这些文件返回 404）；慢只会让扫描变慢，扫描本身没有超时。
+
+`/roots` 的扫描相关字段（只查库，不访问根目录；用 `missing = 1` 部分索引和很小的 `scan_sessions` 表，生产库 80 562 条上实测：局域网 `GET /roots` 整个请求中位数约 1 ms，本机回环约 0.4 ms，2026-10-09）：
+
+| 字段 | 含义 |
+|---|---|
+| `missing_count` | 该根下（按路径前缀，含子目录）`missing = 1` 的记录数；根尚未扫描时为 `0` |
+| `last_scan` | 该根**或其下子目录**最新的一次扫描会话（库里的扫描历史，含其他进程做的扫描），没有时为 `null`。嵌套配置的根（一个根在另一个根下面）只看扫描路径在自己之内的会话，上层根的扫描不算。字段：`id`（会话 id，可用于 `GET /scans/{id}`）、`subpath`（相对根，`""` = 整个根）、`mode`（`incremental` \| `full`）、`state`（库里记录的 `running` \| `completed` \| `cancelled` \| `failed`；`running` 但本服务端没在扫描 = 中断或另一进程在扫描，见 §6.6）、`started_at` / `finished_at`（Unix 秒，未结束为 `null`）、`scanned`、`added`、`updated`、`removed`、`unchanged`、`errors` |
+| `scanning` | 本服务端正在扫描（含暂停中）该根或其下子目录时为 `true`；其他进程的扫描不反映在这里 |
+
+示例：
+
+```json
+[{ "name": "SFX_Main", "server_path": "/srv/audiolib/music/SFX_Main", "webdav_url": null,
+   "file_count": 80562, "missing_count": 0, "online": true, "status": "online", "status_message": null,
+   "checked_at": 1791460727, "scanning": false,
+   "last_scan": { "id": 2, "subpath": "", "mode": "incremental", "state": "completed",
+                  "started_at": 1791460931, "finished_at": 1791462032, "scanned": 80586, "added": 79362,
+                  "updated": 0, "removed": 0, "unchanged": 1200, "errors": 24 } }]
+```
+
+### 6.5 增量同步 `GET /library/changes`（⚠️ 草案，待客户端评审，未实现）
+
+> **DRAFT / 草案**：本节只是提案，服务端尚未实现，字段和错误码都可能改。客户端评审通过后再实现。在此之前客户端继续用 §4 的“revision 变化 → 下载快照”（快照现已按 revision 缓存并支持 zstd，§6.1）。
+
+目的：`revision` 变化后只拉取变化的记录，而不是重新下载整个快照（生产库快照 688 MB / zstd 46 MB）。
+
+**请求**：`GET /library/changes?since=<revision>&limit=<1..=2000，默认 500>[&cursor=<不透明字符串>]`
+
+- 第一页只带 `since`（客户端本地缓存对应的 `revision`）；后续页只带上一页返回的 `cursor`（`since`/`limit` 可省略，以游标为准）。
+
+**响应**（200）：
+
+```json
+{
+  "library_id": "7b0db485-…",
+  "since": 120,
+  "until": 135,
+  "changes": [
+    { "seq": 9001, "kind": "audio_upsert",  "id": 66869, "record": { "...": "完整 AudioFile" } },
+    { "seq": 9002, "kind": "audio_delete",  "id": 70001, "record": null },
+    { "seq": 9003, "kind": "folder_upsert", "id": 412,   "record": { "...": "完整 Folder" } },
+    { "seq": 9004, "kind": "folder_delete", "id": 413,   "record": null },
+    { "seq": 9005, "kind": "roots_changed", "id": null,  "record": null }
+  ],
+  "has_more": true,
+  "next_cursor": "opaque…"
+}
+```
+
+- `until`：这组变化**完整覆盖到**的 revision。第一页就确定 `until`，后续页沿用同一个 `until`（游标里固定了上界），所以分页期间新发生的改动不会混进来，也不会漏掉——它们属于下一次 `since=<until>` 的请求。
+- **客户端规则**：依次应用所有页（直到 `has_more = false`），全部成功后把本地 `revision` 设为 `until`。中途失败就丢弃已应用的部分（或保留，因为每条都是记录的最新完整状态，重复应用是幂等的），下次从原来的 `since` 重来。
+- 覆盖范围：
+  - `audio_upsert`：`audio_files` 的新增和任何列的修改（metadata 编辑、播放计数、扫描更新、`missing` 标记变化、relink），`record` 为当前完整 `AudioFile`；
+  - `audio_delete`：记录被真正删除（`remove_audio` / `remove_folder`）；
+  - `folder_upsert` / `folder_delete`：`folders` 的新增、修改（含 `file_count`）、删除；
+  - `roots_changed`：服务端配置的根（增删、`server_path`/`webdav_url` 变化）或根状态以外的根信息变化，客户端重新 `GET /roots`；
+  - 统计（`stats`）不单独传，客户端由记录重算或重新 `GET /library`。
+- 同一实体在区间内多次变化只返回一条（最新状态，`seq` 取最后一次），所以总条数 ≤ 变化的实体数。
+- **退回快照**：`since` 早于服务端保留的变更日志、`since > 当前 revision`、或 `library_id` 不符时返回 **410 `CHANGES_EXPIRED`**，客户端改为下载快照。服务端也可以在变化量超过阈值（例如 > 20% 记录）时返回 410，让客户端直接下快照。
+- 实现设想（供讨论）：未来 schema 版本（v4 为索引升级、v5 为评分接口移除与提取标签派生状态，见 §3.1）在库里加 `change_log(seq INTEGER PRIMARY KEY, entity, entity_id, op)` 和 `audio_files` / `folders` 上的触发器（这样服务端之外的写入者，例如 CLI 扫描器，也会被记录）；服务端在每次 `revision` 递增时记下“revision → 当时最大 seq”，`since`/`until` 由此换算成 seq 区间；日志按时间或条数裁剪。schema v3 期间无法捕获外部写入，所以本端点依赖尚未实现的未来 schema。
+
+### 6.6 远程扫描 `/scans`（已实现）
+
+服务端用工作区里的扫描器（`audiolib_db::ScanService`，与本地模式同一套代码）在独立的 OS 线程上扫描配置的根（或其下的子目录），不占异步运行时、没有时间上限。进度就是本地模式的 `ScanProgress`（字段名完全相同），外加几个服务端字段。扫描只读源文件，只写库，永远不改 WAV。按 §2.2 鉴权（属于写入端点：局域网直连免 token，外部请求需要 token）；`POST /scans` 和暂停/继续/取消另受库管理权限 `manage_mode` 限制（§6.9，被拒绝时 403 `MANAGE_FORBIDDEN`），查询进度的 GET 不受限；库未就绪时 503 `UNAVAILABLE`。
+
+#### `POST /scans`
+
+请求体（JSON，最大 8 MiB，不检查 `Content-Type`）：
+
+```json
+{ "root": "SFX_Main", "subpath": "Foley/Doors", "mode": "incremental", "workers": null }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `root` | **必填**，`GET /roots` 里的 `name`。未知根名 → 404 `NOT_FOUND` |
+| `subpath` | 可省略、`null` 或 `""` = 整个根。相对于根、用 `/` 分隔（连续或末尾的 `/` 忽略）。以 `/` 开头、含 `\`、含 `.` 或 `..` 分量、含 NUL 或超过 4096 字节 → 400 `VALIDATION`。服务端解析真实路径（跟随符号链接）后必须仍在根内，否则 400 `VALIDATION`（`…resolves outside library root…`）；不存在或不是目录 → 404 `NOT_FOUND` |
+| `mode` | `incremental`（默认）：只读取新文件和大小/修改时间变化的文件，从不标记 missing；`full`：重新读取每个文件，无错误完成的全量扫描把扫描范围内没找到的记录标为 missing（不删除记录）。其他值 → 400 |
+| `workers` | 读取元数据的线程数 `1..=16`；省略、`null` 或 `0` = 自动（CPU 数 − 2，限制在 1..8，与本地模式相同）。其他值 → 400 |
+
+响应 200（`ScanResponse`，扫描会话在库里建好、拿到 `session_id` 后立即返回，通常不到 1 秒）：
+
+```json
+{
+  "session_id": 17, "state": "running", "paused": false, "finalizing": false,
+  "discovered": 0, "processed": 0, "added": 0, "updated": 0, "unchanged": 0, "removed": 0,
+  "errors": 0, "error_details": [], "errors_truncated": 0,
+  "current_path": "/srv/audiolib/music/SFX_Main/Foley/Doors", "message": "",
+  "root": "SFX_Main", "subpath": "Foley/Doors", "mode": "incremental",
+  "active": true, "pause_requested": false, "cancel_requested": false, "revision": null
+}
+```
+
+| 服务端字段 | 含义 |
+|---|---|
+| `root` / `subpath` | 根名和规范化后的子目录（`""` = 整个根）；来自历史的会话若扫描路径不在任何配置的根下则为 `null` |
+| `mode` | `incremental` \| `full` |
+| `active` | **本服务端进程正在执行这个会话**（运行或暂停中）。轮询直到它变为 `false` |
+| `pause_requested` | 已请求暂停且尚未继续；工作线程在安全点真正停下后 `paused`（`ScanProgress` 原有字段）才变为 `true`，通常不到 0.2 秒 |
+| `cancel_requested` | 已请求取消 |
+| `revision` | 扫描结束后库的 `revision`（运行中、以及来自历史的会话为 `null`），见下面的 revision 规则 |
+
+`ScanProgress` 原有字段：`state`（`running` \| `completed` \| `cancelled` \| `failed`）、`finalizing`（已开始最终的原子对账，之后不再接受控制）、`discovered`/`processed`（找到/处理的 WAV 数）、`added`、`updated`、`unchanged`、`removed`（标为 missing 的记录数）、`errors` + `error_details`（最多 100 条 `{path, message}`，其余计入 `errors_truncated`）、`current_path`（服务端绝对路径，同 §3 的路径暴露约定）、`message`。
+
+规则：
+
+- **返回时机与超时**：返回前服务端要解析根目录和 `subpath`（NAS 硬盘休眠时可能要 20–30 秒或更久），所以 `POST /scans` **不受 30 秒限制**。客户端放弃等待（断开）时扫描照常开始，用 `GET /scans/current` 找回。
+- **根离线**：根在状态缓存里为 `offline` 时先做与 `/stream` 相同的有界即时重查（约 2 秒，§6.4），仍离线 → 503 `ROOT_OFFLINE` + `Retry-After: 5`（`message` 为 `Library root "<根名>" is offline: <原因>`）；扫描线程解析根目录时失败（卷未挂载、无权限、网络超时）也返回 503 `ROOT_OFFLINE`。这些情况都不建会话、不改库。
+- **同一时间只有一个扫描**：本服务端已有扫描（运行或暂停中，含刚开始解析目录的）→ 409 `BUSY`（`message` 含会话 id）；另一个进程（CLI、本地模式桌面端）正在扫描或维护同一个库 → 409 `BUSY`。扫描期间 `POST /audio/metadata/batch` 返回 409 `BUSY`（§6.3，与本地模式相同）；单条 `PATCH /audio/{id}/metadata` 和 `POST /audio/{id}/plays` 照常可用。
+- **慢盘、空根、出错（§6.4 的规则不变）**：根目录不存在/不可读时扫描直接失败、不改记录；扫描途中目录读取出错（例如卷断开）、遇到符号链接（不跟随）、被取消或失败时都**不做 missing 对账**；全量扫描遇到完全为空的根（典型的未挂载挂载点）也不对账；慢只会让扫描变慢。单个文件读不出来记一条 `error_details`，扫描继续（但全量扫描只要有任何错误就不做 missing 对账）。
+- **子目录扫描**：扫描范围是 `subpath` 之下；它的文件夹记录挂在所属根的文件夹树下（必要时先建好从根到该子目录的文件夹记录），不会变成单独的顶层文件夹。全量子目录扫描只对该子目录范围做 missing 对账。
+- **停机 / 重新部署**：服务端收到停止信号时立即取消正在进行（含暂停中）的扫描，最多等 10 秒让它把会话记为 `cancelled`（已提交的批次保留；每批一个事务，库不会损坏；不做 missing 对账）。停止期间新的 `POST /scans` → 503 `UNAVAILABLE`。若扫描线程卡在 NAS 上 10 秒内没结束，进程照常退出，库里该会话保持 `running`，直到下一次扫描开始时被标为 `failed`（`Previous scanning process exited before finalization`）；`GET /scans/{id}` 对这种会话返回 `active: false`，`message` 说明它不在本服务端运行。
+
+#### 进度：`GET /scans/{session_id}` 与 `GET /scans/current`
+
+- **轮询**：开始扫描后每 **500 ms** `GET /scans/{session_id}`，直到 `active` 为 `false`，再看 `state` 和 `revision`。暂停中也照常轮询（进度不动）。
+- `GET /scans/current` 始终 200：`{ "scan": ScanResponse }`，没有扫描时 `{ "scan": null }`（不是 404）。客户端连上/重连服务器时用它恢复扫描进度界面。`scan.session_id == 0` 表示扫描正在解析目录、会话还没建好（极短；NAS 唤醒时可能较久）。
+- 会话保留：本进程最近结束的 32 个会话保留完整状态（含 `root`、`subpath`、`revision`）。更早的、或服务端重启之前的会话从库的扫描历史读出（只有计数：`discovered` = `processed` = `scanned`，`revision` 为 `null`，`root`/`subpath` 由扫描路径推算）。不存在的会话 → 404 `NOT_FOUND`；非正整数 id → 400 `VALIDATION`。
+
+#### 控制：`POST /scans/{session_id}/pause` · `/resume` · `/cancel`
+
+无请求体，200 返回操作后的 `ScanResponse`。重复已经生效的操作返回 200（幂等，网络重试安全）：
+
+| 操作 | 效果 |
+|---|---|
+| `pause` | `pause_requested` 变为 `true`，工作线程在安全点停下后 `paused` 变为 `true`。暂停中会话和扫描锁都保留（其他扫描仍 409，`revision` 仍冻结） |
+| `resume` | 继续同一个扫描（队列和计数不变）；未暂停时不变 |
+| `cancel` | `cancel_requested` 变为 `true`，扫描在当前文件后停止（暂停中也可以直接取消）；已提交的批次保留，不做 missing 对账，最终 `state` 为 `cancelled` |
+
+**409 `SCAN_STATE`**（`message` 说明原因）：会话已结束（`completed`/`cancelled`/`failed`）；会话不在本服务端运行（历史里的 `running`）；正在取消时 `pause`/`resume`；已进入最终对账（`finalizing: true`）后 `pause`/`resume`/`cancel`。未知会话 404。（旧客户端把所有 409 当作 `Busy` 处理，同样可用。）
+
+#### revision 规则
+
+- **扫描期间 `revision` 冻结**：扫描分批提交（每批 128 个文件一个事务），但 `/library` 轮询不会每批递增，客户端不会在扫描中途反复下载整库快照。扫描期间请求的快照标的是冻结的 `revision`，内容不旧于它（可能已含部分扫描结果）。
+- **结束（完成、取消或失败）时最多递增一次**：扫描有改动（`added`、`updated`、`removed` 任一 > 0，或文件/文件夹/missing 统计变化），或扫描期间有其他进程写过库 → `revision` +1，按 revision 缓存的快照随之失效；否则**不递增**（扫描会话记录和“本次已见”标记的写入不算改动）。因此：**无改动的增量扫描不递增**；全量扫描会重写每条记录（`updated` = 文件数），**总会递增**。
+- 结束后的 `revision` 在响应的 `revision` 字段里；与客户端缓存的 `revision` 不同就按 §4 同步快照（下一次 `/library` 轮询也会看到）。
+- 扫描期间成功的单条 metadata 写入照常递增：`revision_before` = 冻结值 + 1（已包含此前的扫描提交），`revision` = 冻结值 + 2；客户端按 §4 规则：`revision_before` 与本地不同就做快照同步。被拒绝的写入（例如 409 `BUSY` 的批量写入）不改变 `revision`。
+- 快照里也有扫描会话表，但无改动的扫描不递增 `revision`，所以本地快照里的扫描历史可能落后；**显示扫描历史请用 `GET /history/scans`**（§6.7）。
+
+### 6.7 历史 `GET /history/scans`、`GET /history/plays`（已实现）
+
+- 查询参数：`limit`（默认 100，`1..=10000`）、`offset`（默认 0，非负整数）；超出范围、不是整数或重复 → 400 `VALIDATION`。按 §2.2 鉴权，只读库，30 秒超时。
+- `GET /history/scans` → `ScanSession[]`，按会话 id 从新到旧：
+
+  ```json
+  [{ "id": 17, "start_time": "2026-10-08 17:20:31.120", "end_time": "2026-10-08 17:20:33.004",
+     "scan_path": "/srv/audiolib/music/SFX_Main/Foley/Doors", "scan_type": "incremental",
+     "state": "completed", "scanned": 12, "added": 1, "updated": 0, "removed": 0, "unchanged": 11,
+     "errors": 0, "error_details": [], "errors_truncated": 0 }]
+  ```
+
+- `GET /history/plays` → `PlayRecord[]`，按播放时间从新到旧：
+
+  ```json
+  [{ "id": 5, "audio_file_id": 3, "played_at": "2026-10-08 17:25:02.511", "filename": "door.wav",
+     "file_path": "/srv/audiolib/music/SFX/door.wav", "missing": false }]
+  ```
+
+- 两者都是 `audiolib-core` DTO 原样（与本地模式 `scan_history` / `play_history` 相同）；其中的时间是 SQLite 记录的 **UTC 文本**（`YYYY-MM-DD HH:MM:SS.fff`），不是 Unix 秒。`ScanSession.state` 为 `running` 而本服务端没有在扫描（`GET /scans/current` 为 `null`）时表示那次扫描被中断或由另一进程执行（见 §6.6 停机）。
+
+### 6.8 从库中移除：`POST /audio/remove`、`DELETE /folders/{id}`（已实现）
+
+**只让库“忘记”记录，从不删除、移动或修改任何音频文件。** 文件仍在磁盘上时，下一次扫描（增量或全量）会把它们重新加入库中（得到**新的 id**，评分、标签、备注、颜色、收藏、播放次数等不会恢复）。客户端确认文案统一用：
+
+> 从库中移除（不删除文件，重新扫描会恢复）
+
+两个端点共同的规则：
+
+- 按 §2.2 鉴权，再受库管理权限 `manage_mode` 限制（§6.9；被拒绝时 403 `MANAGE_FORBIDDEN`）。检查顺序：鉴权 401 → `manage_mode` 403 → 请求参数 400 → 扫描占用 409 → （文件夹）不存在 404 → 库根顶层文件夹 400。
+- **扫描期间不可用**：本服务端有扫描在运行或暂停中（§6.6），或另一个进程（CLI、本地模式桌面端）正在扫描/维护同一个库 → 409 `BUSY`（`message` 含会话 id），即使请求的 id 都不存在也是 409。客户端稍后重试，或先取消/等扫描结束。
+- 与本地模式 `remove_audio` / `remove_folder` 相同，被移除记录的播放列表条目、工程引用、波形缓存行和**播放历史**也一并删除（`/history/plays` 里不再出现）。扫描历史不受影响。
+- **revision**：与 metadata 写入相同的临界区（§4）；真正删除了东西时 `revision = revision_before + 1`，按 revision 缓存的快照随之失效；什么都没删时不写库、`revision == revision_before`。
+- 受 30 秒请求超时约束（实测一次删除 19,600 条记录、101 个文件夹约 0.5 秒）。
+
+#### `POST /audio/remove`
+
+```json
+{ "ids": [5, 999999999, 5, 6] }
+```
+
+- `ids`：1..=10000 个正整数（按原始数组计数，含重复）；空数组、超过 10000、非正数、不是整数数组或不是合法 JSON → 400 `VALIDATION`。重复的 id 自动去重。
+- 不存在的 id 不算错误，原样（按请求顺序、去重后）放进 `not_found`。
+- 响应 200（测试实例的真实输出）：
+
+```json
+{ "removed": 2, "not_found": [999999999], "revision_before": 2, "revision": 3 }
+```
+
+  再发一次同样的 id（都已不存在）：`{ "removed": 0, "not_found": [5, 999999999], "revision_before": 3, "revision": 3 }`。
+
+- 错误示例：`{"error_code":"VALIDATION","message":"ids must contain 1..=10000 audio ids, got 10001"}`、`{"error_code":"VALIDATION","message":"ids must be positive integers, got 0"}`。
+
+#### `DELETE /folders/{id}`
+
+- 移除该文件夹**整个子树**：其中（含所有子文件夹）的全部音频记录、这些文件夹记录本身，以及文件夹闭包表；之后刷新文件夹统计（`/roots.file_count` 随之变化）。`id` 来自 `Folder.id`（快照中的 `folders` 表）。
+- 非整数 id → 400 `VALIDATION`（同 `/audio/abc`）；不存在 → 404 `NOT_FOUND`。
+- **库根的顶层文件夹**（`[[roots]].server_path` 对应的文件夹），以及包含某个库根的上级文件夹 → 400 `VALIDATION`：库根不能经 API 删除：库根的添加和移除由服务端管理员在管理页 `/admin` 的「库根目录」中完成（§2.3.1），或编辑服务端配置。
+- 响应 200（`folders_removed` = 删除的文件夹数，含它自己）：
+
+```json
+{ "removed": 2, "folders_removed": 2, "revision_before": 3, "revision": 4 }
+```
+
+  即使子树里没有音频（`removed: 0`），文件夹记录也被删除，`revision` 照样 +1。
+
+- 错误示例：
+
+```json
+{ "error_code": "NOT_FOUND", "message": "Not found: Folder 999999999" }
+{ "error_code": "VALIDATION", "message": "Folder 1 is the top-level folder of library root \"Scratch\" (or contains it) and cannot be removed through the API; remove the library root on the server's admin page (管理页 /admin → 库根目录)" }
+{ "error_code": "BUSY", "message": "Busy: A scan is running for this library (session 2); retry when it has finished" }
+```
+
+### 6.9 库管理权限 `manage_mode` 与 `GET /capabilities`（已实现）
+
+服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和所有 GET 不受影响。
+
+| `manage_mode` | 局域网直连 | 外部请求（经反代 / 公网对端，判定同 §2.2） |
+|---|---|---|
+| `all`（**默认**） | 允许 | 允许（仍需按 §2.2 带 token） |
+| `lan` | 允许 | 403 `MANAGE_FORBIDDEN` |
+| `off` | 403 `MANAGE_FORBIDDEN` | 403 `MANAGE_FORBIDDEN` |
+
+- 在管理页「库管理权限」设置（保存在 `admin-settings.json`，立即生效，§2.3），或 `config.toml` 的 `manage_mode`（管理页优先）。
+- 与鉴权模式独立：先按 §2.2 鉴权（缺 token 仍是 401），通过后才检查 `manage_mode`。
+- 403 示例：`{"error_code":"MANAGE_FORBIDDEN","message":"Library management (scans, removing records or folders) is only allowed from the LAN on this server (manage_mode = lan)"}`；`off` 时为 `… is disabled on this server (manage_mode = off)`。
+
+`GET /capabilities` 让客户端决定是否显示/启用扫描和移除功能：
+
+- 按 §2.2 鉴权（与其他端点相同，不并入免鉴权的 `/health`）；不需要库已打开，服务端启动中也返回 200。30 秒超时。
+- 响应 200：
+
+```json
+{ "manage_mode": "lan", "external": true, "can_manage": false }
+```
+
+| 字段 | 含义 |
+|---|---|
+| `manage_mode` | 当前生效的 `all` \| `lan` \| `off` |
+| `external` | 服务端是否把**这个请求**当作外部请求（§2.2 的判定） |
+| `can_manage` | 这个请求（同样的网络路径）调用上述管理端点是否会被允许 |
+
+- 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
+
+## 7. WebDAV 与音频访问
+
+> **WebDAV：功能未完善。** 下面的约定和现有字段保持不变（`/roots.webdav_url` 仍可为 `null`，服务端只给建议默认值，地址由客户端用户填写），服务端不提供任何 WebDAV 端点，也不保证 WebDAV 路径可用；试听和拖出请走 §8 的服务端直连。
+
+- **局域网服务器模式的默认路径是服务端直连**：试听走 `GET /audio/{id}/stream`，文件传输（拖出、导出）走 `GET /audio/{id}/stream?download=1`（§8）。WebDAV 是**可选项**，不配置也能完整使用试听和拖出。
+- 客户端拖出文件：先用 `download=1` 下载到本地缓存（键 = `library_id` / 文件 id + `ETag`，缓存文件使用原始文件名，即 `Content-Disposition` 的 `filename*`），完成后把这个真实本地路径交给 Windows 拖放；缓存命中时可用 `HEAD` 或 `If-None-Match` 复核 `ETag`，下载中断可用 `Range` + `If-Range` 续传。
+- 服务端**不自带 WebDAV**，使用 Mac 上已有的 WebDAV 服务（NAS / 文件共享等）发布扫描根目录。
+- 按用户决定：每个扫描根的 WebDAV 地址在客户端**可由用户编辑**。服务端 `[[roots]].webdav_url` 只是建议默认值，可以不配置（`/roots` 返回 `null`）。
+- 客户端把 `AudioFile.file_path` 的 `server_path` 前缀替换为该根的 WebDAV 地址后读取音频。
+
+## 8. 音频流（已实现）
+
+`GET /audio/{id}/stream`（按 §2.2 鉴权；也支持 `HEAD`，只返回响应头）返回原始文件字节，不转码，客户端负责解码、重采样和输出（与本地模式一致）；低带宽试听用 §8.1 的 `/audio/{id}/preview`。客户端 Symphonia 解码器通过 HTTP Range 实现可 seek 的读取（RIFF/RF64 头部读取、ADPCM 按块 seek 都依赖随机访问）。WebDAV（§7）仍可继续使用。
+
+- **响应头**（200/206/304/416 都带）：`Accept-Ranges: bytes`、`ETag`、`Cache-Control: private, no-cache`。200/206 另带 `Content-Type`、`Content-Length`；206 带 `Content-Range: bytes <start>-<end>/<文件长度>`。
+- **`Content-Type`**：按扩展名，`.wav`/`.wave`/`.bwf`/`.rf64` → `audio/wav`（当前库只有 WAV）；`.aif(f)`/`.aifc` → `audio/aiff`、`.flac` → `audio/flac`、`.mp3` → `audio/mpeg`、`.ogg`/`.oga` → `audio/ogg`、`.m4a`/`.mp4` → `audio/mp4`；其他 `application/octet-stream`。
+- **Range**（只支持单个区间）：
+  - `bytes=a-b` → 206，`b` 超出文件末尾时截到最后一个字节；`bytes=a-` → 206，从 `a` 到末尾；`bytes=-n` → 206，最后 `n` 个字节（`n` 大于文件长度时为整个文件）。
+  - 起点 ≥ 文件长度、`bytes=-0`、或文件长度为 0 → **416** `RANGE_NOT_SATISFIABLE`，附 `Content-Range: bytes */<文件长度>`，JSON 错误体。
+  - **多区间**（如 `bytes=0-1,5-6`）不实现 `multipart/byteranges`，直接返回 **200 + 整个文件**；单位不是 `bytes` 或语法非法（如 `bytes=9-2`）的 `Range` 按 RFC 9110 忽略，同样返回 200 整个文件。客户端应以状态码（206 还是 200）判断收到的是区间还是全文件。
+- **`ETag`**：强校验器，由服务端打开的那个文件的大小 + 修改时间计算，Unix（含 macOS 服务端）上另含 inode 和 ctime（同大小同 mtime 的替换文件也会得到新 ETag）；客户端把它当作不透明的带引号字符串。库记录里没有“提取版本”字段，所以 v1 不含提取版本（以后加入时 ETag 会整体变化，客户端无需改动）。不发送 `Last-Modified`。
+  - `If-None-Match`：任一标签（弱比较，或 `*`）匹配 → **304**，无响应体。
+  - `If-Range`：只接受与当前 `ETag` 完全相同的强 ETag，此时按 `Range` 返回 206；不匹配、弱 ETag（`W/"…"`）或 HTTP 日期 → 忽略 `Range`，返回 **200 + 整个文件**。
+- **只提供配置的根下的文件**：服务端把库里的 `file_path` 规范化（解析符号链接和 `..`），只有落在某个 `[[roots]] server_path`（同样规范化，按路径分量比较，每次请求时重新解析，因此启动后才挂载的卷也有效）之下的普通文件才会返回；Unix 上打开后还核对打开的文件与检查过的路径是同一个文件（设备号 + inode），不一致也拒绝。根之外的路径返回与文件缺失**完全相同**的 404，不泄露根之外的文件是否存在。
+- **404 `NOT_FOUND`**：无此记录；或文件缺失、不是普通文件、不在配置的根下（后三种 `message` 相同，均含 `missing`）。
+- **根离线 / 慢速磁盘**：文件所在的根离线时先即时重查（约 2 秒），仍离线则返回 503 `ROOT_OFFLINE` + `Retry-After: 5`（§6.4）；`HEAD` 同样触发重查。本端点没有时间上限，NAS 硬盘唤醒期间请求会一直等待，不会 408。
+- **并发上限**：同时进行中的流响应最多 `max_streams` 个（服务端配置，默认 16；名额一直占用到响应体发完或客户端断开）。超出时返回 **503 `BUSY`** + `Retry-After: 1`，客户端按 `Retry-After` 稍后重试。304/416 不占名额。§8.1 的预览**不占**这些名额（有自己的 `max_previews`），所以拖出下载等把 `/stream` 名额占满时预览照常可用。
+- **响应体不完整**：发送途中文件被截断或连接中断时，客户端收到的字节数会少于 `Content-Length`（或 `Content-Range` 所示长度），应视为失败并重试（可用 `If-Range` + 已收到部分续传）。文件缺失时，下次重扫后 `GET /audio/{id}` 的 `missing` 为 true（流端点本身不改库）。
+- 服务端用 tokio 文件 + 分块流（256 KiB）发送，不会把整个文件读入内存。
+- **下载 `?download=1`**（也接受 `download=true`，大小写不敏感；不带该参数为默认的播放用途，响应不带 `Content-Disposition`，即按 inline 处理；`download` 的其他取值、重复或格式错误的查询串 → 400 `VALIDATION`，其他未知参数忽略）。文件选择、根目录限制、404、并发上限、`Range`/`If-Range`/`If-None-Match`/304/416 与上面完全相同（`Range` 照常生效，用于续传中断的下载），唯一区别是 200/206/304 响应多一个头：
+
+  ```
+  Content-Disposition: attachment; filename="<ASCII 回退名>"; filename*=UTF-8''<RFC 5987 百分号编码的原始文件名>
+  ```
+
+  例如库里文件名为 `雷声 近.wav`（id 7）：`Content-Disposition: attachment; filename="audio-7.wav"; filename*=UTF-8''%E9%9B%B7%E5%A3%B0%20%E8%BF%91.wav`；`door.wav` 则为 `attachment; filename="door.wav"; filename*=UTF-8''door.wav`。原始文件名取库记录的 `filename`。ASCII 回退名：非可打印 ASCII 字符以及 `"` `\` `/` `:` `*` `?` `<` `>` `|` 换成 `_`；主名里没有 ASCII 字母数字时改为 `audio-<id>`（保留 ASCII 扩展名）；最长 150 个字符。`filename*` 按 RFC 5987 对 UTF-8 字节编码（`attr-char` 之外的字节一律 `%XX`，大写十六进制），客户端应优先使用 `filename*`。
+  
+  `download=1` 的三条保证（有测试覆盖）：
+  1. **`ETag` 与不带参数的 `/stream` 逐字节相同**（同一文件版本），`Content-Disposition` 不参与 `ETag` 计算，所以缓存、`If-None-Match`、`If-Range` 在播放和下载之间通用。
+  2. **200/206 总是带 `Content-Length`**；`HEAD ...?download=1` 返回与 `GET` 相同的响应头（含 `Content-Length`、`ETag`、`Content-Disposition`、`Accept-Ranges`），没有响应体。
+  3. **`Content-Disposition` 同时带 `filename=`（ASCII 回退）和 `filename*=UTF-8''…`**，中文等非 ASCII 文件名不丢失。
+
+### 8.1 试听预览 `GET /audio/{id}/preview`（已实现）
+
+用途：低带宽（目标 5 Mbps）下流畅试听。生产库主要是 96 kHz/24-bit WAV（立体声约 4.6 Mbps），预览把它变小；原始文件仍走 `/stream`（拖出、导出、精确播放）。按 §2.2 鉴权；支持 `HEAD`（只返回响应头）。两种编码：
+
+| `codec` | 实现 | 长度 / Range | 定位方式 | 适用 |
+|---|---|---|---|---|
+| `pcm`（**首选**） | 服务端进程内：解析 WAV → 整数倍抽取（抗混叠 FIR）→ 折叠声道 → 量化（确定性 TPDF 抖动），输出 44 字节头的标准 WAV；不用 ffmpeg | 总长已知：`Content-Length`、`Accept-Ranges: bytes`、单区间 `Range`（206/416）、强 `ETag`、`If-None-Match`/`If-Range`，规则同 §8 | `Range`：输出帧 k 位于字节 `44 + k × block_align` | WAV：PCM 16/24/32-bit 整数或 32/64-bit 浮点 |
+| `flac`（后备） | ffmpeg 实时转码 | chunked，无总长度，不支持 Range | `t=<秒>` | 带宽低于约 2 Mbps，或 `pcm` 不支持的 WAV 编码（ADPCM 等） |
+
+**客户端选择**：
+
+- **务必同时传 `sr` 和 `bits`**（例如 `?codec=pcm&sr=48000&bits=16`）：两者都省略时保持源分辨率，`codec=pcm` 单独使用会把 96 kHz/24-bit 源原样返回（96 kHz/24-bit 立体声约 4.6 Mbps，并不比 `/stream` 小）。`ch` 同理，省略 = 源声道数。
+- WAV：先用 `codec=pcm`（48 kHz/16-bit 立体声 1.536 Mbps，单声道 0.768 Mbps；服务端 CPU 极低；可 Range、续传、按 `ETag` 缓存）。
+- 带宽低于约 2 Mbps，或 `pcm` 返回 415 `PREVIEW_UNSUPPORTED_FORMAT`：用 `codec=flac`（48 kHz/16-bit 立体声实测约 0.2–1.0 Mbps，取决于素材，安静素材更低；单声道约一半）。
+- Ogg、MP3 等非 WAV 文件：直接用 `/stream`（本身已是压缩格式），不要用预览；`pcm` 对它们返回 415。
+- 源已经是所请求的格式时（如 48 kHz/16-bit 立体声）`pcm` 照样生成（采样数据逐字节等于源，代价很小），客户端也可以直接用 `/stream`。
+
+**查询参数**（未知参数忽略；同一参数重复或格式错误 → 400 `VALIDATION`）：
+
+| 参数 | 说明 |
+|---|---|
+| `codec` | **必填**，`pcm` 或 `flac`（大小写不敏感）。其他值（包括以后才会支持的 `opus`）→ 400 |
+| `sr` | 目标采样率，十进制整数 `8000..=192000`；省略 = 源采样率。**从不升采样**。`pcm`：只做整数倍抽取，实际输出 = 源采样率 / n，n 是满足“整除源采样率且 源/n ≤ `sr`”的最小正整数（96k→48k：n=2；192k→48k：n=4；88.2k 请求 48000 → 44.1k；44.1k、48k 请求 48000 不变；96k 请求 44100 → 32k）；n 最大 96（768k→8k），需要更大 n 的源（质数等不常见采样率，如 96001 Hz 请求 48000）→ 415 `PREVIEW_UNSUPPORTED_FORMAT`，改用 `flac`、更高的 `sr` 或 `/stream`。`flac`：输出 = min(`sr`, 源)，任意值都可以（ffmpeg 重采样） |
+| `bits` | `16` 或 `24`；省略时源为 ≤16-bit 整数则 16，否则 24。不会超过整数源的位深（16-bit 源请求 24 得到 16）；浮点源可输出 24 |
+| `ch` | 省略 = 源声道数；`1` = 所有声道平均（立体声即 (L+R)/2）；`2` = 多于两声道的源折叠为立体声（L = 第 0、2、4… 声道的平均，R = 第 1、3、5… 声道的平均）；≥ 源声道数 = 不变（不升混）；其他值 → 400 |
+| `t` | 仅 `flac`：起始位置（秒，非负十进制，如 `12.5`、`.5`；不接受符号和指数）。`pcm` 带 `t` → 400（用 `Range` 定位） |
+
+**实际输出格式和长度**总在响应头里（钳位/取整之后的值；两种编码相同，HEAD、206、304 也带）：
+
+| 响应头 | 含义 |
+|---|---|
+| `X-Preview-Sample-Rate`、`X-Preview-Bits`、`X-Preview-Channels` | 输出格式 |
+| `X-Total-Frames` | 从起点（`pcm` 为文件开头，`flac` 为 `X-Start-Frame`）到结尾的输出帧数，按**输出**采样率计。`pcm` 等于 `out_frames`（也就是 `X-Preview-Frames`，精确）；`flac` = round(源总帧数 × 输出采样率 / 源采样率) − `X-Start-Frame`（WAV 用文件头的精确帧数；非 WAV 用库记录的 `duration`，未知时不发这两个头） |
+| `X-Duration` | `X-Total-Frames / 输出采样率`，秒，6 位小数（如 `6.790000`），即从起点开始的输出时长 |
+
+服务端未配置 CORS（客户端是桌面程序），所以没有 `Access-Control-Expose-Headers`；以后加 CORS 时这些 `X-*` 头和 `ETag` 都要列入。
+
+#### `codec=pcm`
+
+- **支持的源**：RIFF / RF64 / BW64 WAV，`WAVE_FORMAT_PCM`（16/24/32-bit；24-bit 容器里的 20-bit 等按 24 处理）、`WAVE_FORMAT_IEEE_FLOAT`（32/64-bit），以及这两种的 `WAVE_FORMAT_EXTENSIBLE`；`bext`、`iXML`、`LIST`、`JUNK` 等其他块跳过（奇数长度块按 RIFF 规则跳过填充字节；个别写入器漏写填充字节的文件也能识别）；1..=64 声道；源采样率 1..=768000 Hz。依据是**文件头**，不是扩展名或库记录。其他（ADPCM、A-law/µ-law、8-bit、WAV 里的 MP3、非 WAV 文件），以及文件头损坏（`fmt `/`ds64` 块被文件末尾截断、位深大于 `block_align` 给出的样本容器、采样率超出范围、没有 `fmt `/`data` 块）→ **415 `PREVIEW_UNSUPPORTED_FORMAT`**，`message` 给出原因并建议 `codec=flac` 或 `/stream`，例如 `Audio 7 cannot be previewed with codec=pcm (WAV codec 0x0011 (IMA ADPCM)); use codec=flac or /stream`。
+- **输出**：44 字节头的 `WAVE_FORMAT_PCM` WAV（`Content-Type: audio/wav`）。`out_frames = floor(src_frames / n)`，`Content-Length = 44 + out_frames × 声道数 × bits/8`，另有响应头 `X-Preview-Frames: <out_frames>`。源 `data` 块声明的长度超出文件时按文件实际长度计（不完整的末帧忽略）；长度为 0 或 0xFFFFFFFF（未写完或流式录音的占位值）时视为一直到文件末尾。数据超过 4 GiB 时头里的大小写 0xFFFFFFFF（`Content-Length` 仍准确）。
+- **抽取**：输出帧 k 对应源帧 k·n，由以源帧 k·n 为中心的 Kaiser 窗 sinc 低通 FIR（长度 48n+1，β = 7，截止 0.45 × 输出采样率）计算，文件两端之外按 0 处理；线性相位、无延迟，输出帧 k 与源时间 k·n / 源采样率对齐。通带平坦到约 0.40 × 输出采样率（48 kHz 输出约 19.4 kHz，误差 < 0.05 dB），输出奈奎斯特频率以上的成分衰减超过 60 dB（设计约 70 dB），有测试覆盖。n = 1 时不滤波。
+- **量化**：24-bit 四舍五入；16-bit 加 TPDF 抖动（±1 LSB 三角分布），噪声是（输出帧号, 声道）的哈希，**不用运行时随机数**；16-bit 源在 n = 1 且不折叠声道时不加抖动（逐字节等于源）。浮点源样本在抽取滤波之前钳到 ±1（满幅），NaN 按 0 处理，所以损坏文件里的 ±Inf 削波而不会让整段滤波窗口变成静音。
+- **确定性**：输出只由源文件字节和参数决定，因此**任意字节区间都与完整下载的同一段逐字节相同**（有测试）。`ETag` 为强 ETag：源文件的 `/stream` ETag + 参数 + 算法版本，形如 `"<源 ETag 内容>-pcm2-48000-16-2"`（算法改变时版本号递增，ETag 随之变化；`pcm2` 起浮点样本在滤波前钳位）。`Range`、`If-Range`、`If-None-Match`/304、416（附 `Content-Range: bytes */<总长>`）与 §8 完全相同；`Cache-Control: private, no-cache`。
+- **名额**：预览专用的 `max_previews`（服务端配置，默认 8，1..=1024；`pcm` 和 `flac` 共用，与 `/stream` 的 `max_streams` **互不影响**——`/stream` 名额被下载占满时预览照常 200）。满时 503 `BUSY` + `Retry-After: 1`（与 §8 形状相同）。名额一直占用到响应体发完或客户端断开；`pcm` 没有额外的转码名额。
+- 实现：文件头在阻塞线程池解析；正文由一个阻塞线程按约 64 KiB 输出块计算，经有界通道发送；客户端断开后下一次发送失败即停止并释放名额。源数据按 1 MiB 对齐块用 `pread` 读取，并在后台线程**预读后面 2 块**（96 kHz/24-bit 立体声约 3.6 秒音频），NAS 偶发的读取延迟被已缓冲的数据掩盖；输出字节不变（Range 仍与完整下载逐字节相同）。不把整个文件读入内存。
+
+#### `codec=flac`
+
+- **ffmpeg**：配置 `ffmpeg_path`（默认 `/opt/homebrew/bin/ffmpeg`）。不存在或不可执行 → **503 `TRANSCODER_UNAVAILABLE`**（不带 `Retry-After`，需要管理员处理；客户端改用 `pcm` 或 `/stream`），GET 和 HEAD 都检查；服务端照常启动（启动日志一条 WARN）。
+- **名额**：先占一个预览名额 `max_previews`（与 `pcm` 共用，满时立即 503 `BUSY`；不占 `/stream` 名额），真正启动 ffmpeg 前再等转码名额 `max_transcodes`（默认 4，每路占约一个 CPU 核的一小部分）：满时**最多等 0.5 秒**，仍满则 **503 `BUSY` + `Retry-After: 1`**——与 `/stream` 和预览名额满时的状态码、`error_code`、`Retry-After` 完全相同，客户端同样处理。304 和 HEAD 不等转码名额（只在处理期间短暂占用预览名额）。
+- **源格式**：文件头是支持的 WAV 时取自文件头（精确帧数），否则取自库记录（`sample_rate`/`bit_depth`/`channels`/`duration`）；采样率或声道数未知 → 415 `PREVIEW_UNSUPPORTED_FORMAT`。
+- **`t=`**：`start_source_frame = round(t × 源采样率)`；≥ 总帧数（即 `t` ≥ 时长）→ **416 `RANGE_NOT_SATISFIABLE`**（JSON 错误体，不带 `Content-Range`）。ffmpeg 在输入端定位（`-ss` 在 `-i` 之前；PCM WAV 直接跳转到字节位置，再精确裁剪），起点**精确到样本**（测试用斜坡信号逐样本核对）。响应头：`X-Start-Time` = start_source_frame / 源采样率（秒，6 位小数，例如 `12.345677`），`X-Start-Frame` = round(start_source_frame × 输出采样率 / 源采样率)，按**输出**采样率计（采样率成整数比时精确；44.1k 等非整数比时误差小于半个输出样本）。不带 `t` 时为 `0.000000` / `0`。
+- **转码参数**：`-nostdin -hide_banner -loglevel error [-ss <X-Start-Time>] -i <源> -map 0:a:0 -vn -sn -dn -map_metadata -1 -map_chapters -1 -af [pan=…,]aresample=osr=<sr>:osf=s16|s32:dither_method=triangular -c:a flac -compression_level 5 -sample_fmt s16|s32 [-bits_per_raw_sample 24] -flush_packets 1 -f flac pipe:1`。声道折叠规则同 `pcm`（ffmpeg `pan`）。压缩级别 5：生产素材上比 0–2 小约 14%，速度相同（数百倍实时），4096 样本一帧。macOS 上 ffmpeg 通过 stdin 继承服务端已打开、已做根目录和 inode 校验的那个文件描述符（`-i /dev/fd/0`，可 seek），不会自己重新打开 NAS 路径。
+- **响应**：200，`Content-Type: audio/flac`，`Transfer-Encoding: chunked`，**无 `Content-Length`**，`Accept-Ranges: none`，请求里的 `Range` 被忽略（总是 200 + 从 `t` 开始的整段），`Cache-Control: private, no-cache`（以前是 `no-store`；现在可以按 `ETag` 缓存）。
+- **`ETag` / 304**：弱 ETag（ffmpeg 输出不承诺逐字节稳定，且没有 Range），形如 `W/"<源 ETag 内容>-flac1-<ffmpeg 标识>-48000-16-2-<start_source_frame>"`：源文件的 `/stream` ETag + FLAC 算法版本（ffmpeg 参数变化时递增）+ ffmpeg 可执行文件标识（大小 + 修改时间，升级 ffmpeg 后变化）+ 规范化后的 `sr`/`bits`/`ch`/起始帧，任一变化 ETag 都变。`If-None-Match` 匹配（弱比较，或 `*`）→ **304**，带 `ETag`、`X-Start-*`、`X-Preview-*`、`X-Total-Frames`、`X-Duration`，无响应体，**不启动 ffmpeg、不等转码名额**。FLAC STREAMINFO 的总样本数为 0（未知），时长用库元数据。响应头在 ffmpeg 输出第一块数据后才发出，所以 ffmpeg 一启动就失败（文件损坏等）时返回 500 `AUDIO`（JSON），而不是一个坏的 200；中途 ffmpeg 非零退出时连接被中断（chunked 没有正常结尾），客户端按“响应不完整”处理。ffmpeg 的 stderr 读入 16 KiB 有界缓冲（之后丢弃，管道不会堵塞），失败时写入日志。
+- **客户端断开**：立即 SIGKILL ffmpeg 并回收进程（测试中约 20 ms），名额在进程退出后释放。
+- **HEAD**：返回同样的响应头（含 `ETag`、`X-Start-*`、`X-Preview-*`、`X-Total-Frames`、`X-Duration`），**不启动 ffmpeg**（仍按 `/stream` 规则打开文件、检查根，所以 404/503 与 GET 一致）。
+
+#### 两种编码共同的规则
+
+- 选择文件、根目录限制、404、根离线 503 `ROOT_OFFLINE` + `Retry-After: 5`（先即时重查约 2 秒）、慢速 NAS 唤醒（**无 30 秒时间上限**，不会 408）、文件在阻塞线程池中打开、打开超过 10 秒记 WARN：与 `/stream` 完全相同（§6.4）。文件缺失是 404，不会变成一个坏掉的流。
+- 以后可能的扩展：进程内（纯 Rust）FLAC 编码，替代 ffmpeg 并得到确定、可 Range 的 FLAC；Opus（`kbps=`，客户端需另配解码器）；转码结果缓存。
+
+## 9. 波形（已实现）
+
+`GET /audio/{id}/waveform`（也支持 `HEAD`）返回桌面端波形视图使用的同一份数据：服务端用 `audiolib_audio` 的波形算法（`CACHE_VERSION` = 4，与本地 `waveform_cache` 相同）解码文件并计算峰值。
+
+> **可以只取一段（缩放/局部重绘）**：`?start_frame=<起始帧>&end_frame=<结束帧（不含）>` 只计算这一段源帧的波形，`buckets` 列均分这段（例如 `GET /audio/7/waveform?start_frame=480000&end_frame=960000&buckets=1024` 取 96 kHz 文件第 5–10 秒）。帧号按**源**采样率计（与 `total_frames` 相同），不是预览的输出帧；响应的 `start_frame`/`end_frame`/`total_frames` 给出实际范围。规则见下面的查询参数。
+
+- **查询参数**（其他未知参数忽略）：
+  - `buckets`：列数，默认 `1024`，必须在 `64..=8192`，否则 400 `VALIDATION`。
+  - `colors`：`1`/`true`（默认）或 `0`/`false`，是否计算频谱颜色（`colors=0` 时每个峰值的 `color` 为 `null`，计算快约 10 倍）。
+  - `start_frame` / `end_frame`：帧范围（`end_frame` 不含），默认整个文件；`end_frame` 超过文件末尾时截到末尾；`end_frame <= start_frame` 或截断后为空（如 `start_frame` ≥ 总帧数）→ 400 `VALIDATION`。
+  - `samples_per_pixel` = ⌈(end_frame − start_frame) / buckets⌉（至少 1），所以实际列数 ≤ `buckets`（短文件可能少于 `buckets`，最后一列可能不满）。
+- **响应体**（`Content-Type: application/json`）：`audiolib_audio::WaveformData` 原样（`sample_rate`、`channels`、`frames`、`samples_per_pixel`、`peaks`），再加 `start_frame`、`end_frame`、`total_frames`：
+
+```json
+{
+  "sample_rate": 48000,
+  "channels": 2,
+  "frames": 2880000,
+  "samples_per_pixel": 2813,
+  "peaks": [
+    [ { "min": -0.41, "max": 0.43, "rms": 0.21, "color": [255, 196, 64], "dominant_hz": 440.2, "tonality": 0.93 }, "…" ],
+    [ "… 第二声道 …" ]
+  ],
+  "start_frame": 0,
+  "end_frame": 2880000,
+  "total_frames": 2880000
+}
+```
+
+  `frames` = 覆盖的帧数（`end_frame − start_frame`）；`peaks[channel][column]`，每列 `min`/`max`/`rms`（−1..1）、`color`（`[r,g,b]` 或 `null`）、`dominant_hz`、`tonality`，字段含义与桌面端相同。
+- **缓存**：结果存在服务端缓存目录（默认库文件旁的 `waveforms/`，配置 `waveform_cache_dir`；上限 `waveform_cache_mb`，默认 1024 MiB，超出按最近使用淘汰）。缓存键 = 源文件的流 `ETag`（§8：大小、mtime、inode、ctime）+ `CACHE_VERSION` 4 + `buckets` + `colors` + `start_frame` + `end_frame`。命中时只 `stat` 源文件（用于 `ETag`，与 `/stream` 的打开检查相同），**不读音频数据**；文件变化后自动重新计算。
+- **`ETag`**：`W/"wf4-<16 位十六进制>"`，由上面的缓存键计算，任一参数或文件版本变化都会变化；zstd 响应的 `ETag` 另带 `-zstd` 后缀。`If-None-Match` 匹配 → 304（带 `ETag`，无响应体）。`Cache-Control: private, no-cache`。
+- **压缩**：`Accept-Encoding` 含 `zstd`（q ≠ 0）时返回 `Content-Encoding: zstd`（压缩副本同样缓存），`Content-Length` 为压缩后长度。所有响应都带 `Vary: Accept-Encoding`。实测（60 s 立体声 48 kHz/24-bit，Mac 内置盘，release）：`buckets=1024&colors=1` 计算 140 ms，JSON 239 KiB → zstd 24 KiB；`colors=0` 15 ms，199 KiB → 15 KiB；`buckets=8192&colors=1` 1.9 MiB → 192 KiB。计算时间主要是读取 + 解码，NAS 上的长文件按其读取速度计。
+- **并发**：同时最多 `max_waveforms` 个（默认 4）请求在打开/计算，其余**排队等待**（不返回 503）；客户端断开时立即让出名额，正在进行的解码在下一块（4096 帧）处取消，不写缓存。
+- **根离线 / 慢速磁盘**：与 `/stream` 完全相同（§6.4）：根缓存为离线时先即时重查（约 2 秒），仍离线返回 503 `ROOT_OFFLINE` + `Retry-After: 5`；没有 30 秒时间上限，NAS 唤醒期间一直等待；打开超过 10 秒记 WARN。解码途中网络卷断开（超时类错误）同样返回 `ROOT_OFFLINE`。
+- 其他错误：无此记录 / 文件缺失 / 不在根下 → 404 `NOT_FOUND`（同 §8）；无法解码 → 500 `AUDIO`；非整数 id 400 `VALIDATION`。
+
+## 10. 服务端部署
+
+- 部署方式：macOS 原生进程（不用容器），默认监听 `0.0.0.0:8790`，可用 launchd 用户代理常驻。启动时先监听端口，再在后台打开库；打不开时进程不退出而是重试（§6.2）。端口被占用、配置无效或（`auth = true` 时）token 缺失仍会直接退出。可选的原生 TLS 监听（§2.3）起不来时只在日志和管理页报错，不影响 HTTP 端口。管理页：`http://<host>:8790/admin`（§2.3）。
+- 配置：TOML 文件，通过 `--config <path>` 或环境变量 `AUDIOLIB_SERVER_CONFIG` 指定；字段 `bind`、`library_db`、`auth`（默认 `false`；`true` = `auth_mode = "all"`）、`auth_mode`（`off`/`external`/`all`，默认 `external`，§2.2）、`manage_mode`（`all`/`lan`/`off`，默认 `all`，§6.9）、`public_url`（可选，§2.3）、`tls_cert_path` + `tls_key_path` + `tls_port`（可选，三项同时设置，原生 TLS，§2.3）、`token_env`、`revision_poll_secs`、`snapshot_dir`、`max_streams`（默认 16）、`root_check_secs`（默认 300）、`root_offline_secs`（默认 120）、`waveform_cache_dir`（默认库文件旁的 `waveforms/`）、`waveform_cache_mb`（默认 1024）、`max_waveforms`（默认 4）、`ffmpeg_path`（默认 `/opt/homebrew/bin/ffmpeg`，须为绝对路径；不存在时服务端照常启动，只有 `flac` 预览返回 503 `TRANSCODER_UNAVAILABLE`）、`max_transcodes`（默认 4，1..=64）、`max_previews`（默认 8，1..=1024，`/preview` 两种编码共用的并发上限，与 `max_streams` 分开）、`[[roots]] { name, server_path, webdav_url? }`（`server_path` 填真实路径，不经符号链接，与扫描器写入库的路径一致）。示例见 `server/audiolib-server/config.example.toml`。服务端只打开已有的库，不会创建库。
+- token：环境变量 `AUDIOLIB_SERVER_TOKEN`（可用 `token_env` 改名），至少 16 个可见 ASCII 字符；配置文件里写 `token` 会被拒绝。`auth = true` 时必须设置；否则可选，设置了就和管理页生成的 token 一样有效（格式不对时记警告并忽略）。管理页生成的 token 和设置保存在库目录的 `tokens.json` / `admin-settings.json`（§2.3）。
+- macOS 部署：launchd 可通过固定不变的 `audiolib-launcher`（`server/launcher/`，可选，只编译签名一次）用 `posix_spawn` 启动服务端，macOS 的卷访问授权记在启动器上，之后只替换服务端二进制不会再弹授权；通用部署/升级/回滚说明和 systemd、launchd、Docker 示例见 `server/deploy/`。库文件、旁路文件和 `snapshots/`（以及波形缓存 `waveforms/`）建议放在本机磁盘，例如 `/var/lib/audiolib/`（macOS：`/usr/local/var/audiolib/`）。
+- 构建：在 `server/` 目录内运行 cargo（`server/rust-toolchain.toml` 与 `server/.cargo/config.toml` 覆盖仓库根的 Windows MSVC 默认设置），例如 `cargo build --release -p audiolib-server`。详见 `server/README.md`。
+
+## 11. 客户端行为
+
+
+桌面「数据源与音效库 → 服务器音效库」（仅当前服务器，且 `GET /capabilities` 的 `can_manage` 为真）：
+
+- **开始扫描…**：选择根目录、可选子目录（相对路径）、增量或完整；并行数用服务器默认。`POST /scans`，之后每 500 ms `GET /scans/{id}` 直到 `active: false`；打开页面时先看 `GET /scans/current`。**暂停** / **继续** / **取消扫描**：`POST /scans/{id}/pause|resume|cancel`。扫描结束后若 `revision` 高于已打开的快照，按普通快照同步。
+- **移除所选记录…** / **删除目录记录…**：`POST /audio/remove`（主列表勾选的 id）和 `DELETE /folders/{id}`（主窗口目录树所选目录）。确认文案写明只删除库记录、服务器上的 WAV 不改动、重新扫描会以新 id 加回。扫描进行中服务器返回 409 `BUSY`。成功后客户端丢弃按 id 缓存的选择、波形和试听，并在版本号变化后重新同步。
+- `can_manage` 为假时这些按钮不可用，并显示服务器的 `manage_mode`（lan / off）说明。403 `MANAGE_FORBIDDEN`、409 `BUSY` / `SCAN_STATE`、503 `ROOT_OFFLINE`（含 `Retry-After`）按服务器原文提示。
+- 主窗口原有的移除入口（编辑菜单的移除所选记录 / 移除选择记录 / 移除当前目录、结果和目录树右键菜单、列表的「移除」按钮）在服务器模式下，当前服务器 `can_manage` 为真时可用，确认文案和请求与上面相同；否则置灰并附服务器的原因。客户端每次同步后重新读取 `GET /capabilities`。
+- 乐观移除：`POST /audio/remove` 或 `DELETE /folders/{id}` 返回 200 后，客户端立即在内存中隐藏这些 id（目录删除则隐藏该目录子树及其记录），从列表、目录树和记录数中去掉，并清除选择及这些 id 的试听/波形缓存；快照文件不做修改。版本号变化后的重新同步打开新快照时撤销隐藏，以快照为准。
+
+客户端已在 `crates/audiolib-remote` + 桌面「文件 → 数据源设置…」+ `AudioLibCli remote status|test|sync|edit|plays|download` 实现，细节见 [Rust_Remote_Mode.md](../Rust_Remote_Mode.md)。要点：
+
+- 设置：`settings.json` 新增 `data_source { mode: local|server, server_url, webdav { base_url?, username, root_urls } }`，旧设置文件按本地模式加载。token 和 WebDAV 密码不进 `settings.json`，用 Windows DPAPI 加密存于 `<数据目录>/remote/secrets.bin`，不写日志、不进导出。token 可选：留空时客户端所有请求（含快照、音频流、ETag 复核）都不带 `Authorization`，CLI `remote test`/`sync` 和桌面数据源对话框、同步、轮询、试听均可在无 token 的服务器上工作（对话框和 `remote test` 只给出提示）；此时服务器若回 401，提示「服务器要求访问令牌（401）」，而不是「令牌被拒绝」。填写的 token 对所有请求（API、快照、`/stream`、`/preview`、`/waveform`、ETag 复核）都以 `Authorization: Bearer <token>` 发送；局域网直连时服务端忽略它（§2.2），所以同一份保存的设置配上 token 既可用局域网地址也可用外网地址。
+- 地址：对话框可填「完整地址」（如 `https://audiolib.example.com:8443`、`http://192.0.2.10:8790`，可带路径前缀 `https://example.com/audiolib`），或切到「域名 + 端口」分别填协议（默认 `https://`）、域名或 IP、端口（留空 = 443/80）和可选路径前缀。输入去首尾空格后规范化为基础地址 `协议://主机[:端口][/前缀]` 存入 `server_url`（`settings.json` 结构不变）：不写协议时默认 `https://`，协议小写，去掉结尾 `/`，粘贴的 `/api/v1` 去掉后由客户端统一补一次（不会重复）；主机按 DNS 名（每段 1–63 个字母数字/连字符/下划线，总长 ≤ 253）、IPv4 或方括号 IPv6 校验，端口 1–65535，前缀不能含 `.`/`..` 段、空格、`?`、`#`、用户名密码或非 ASCII；错误给出中英文原因。旧设置 `http://192.0.2.10:8790` 原样有效（API 地址与缓存键不变，无需迁移）。对话框实时显示将连接的 API 地址。容忍响应里的多余字段，`/roots` 也接受 `path` 别名，`available`/`reachable` 视同 `online`。
+- HTTPS：所有请求（API、快照、音频流/预览/波形、WebDAV）共用同一 keep-alive 连接池和同一 TLS 配置（见下文「连接复用」）：rustls（ring）+ `rustls-platform-verifier`，用**操作系统信任库**校验证书链和主机名（Windows 证书存储，含企业根证书和按需更新的根）。只接受公共受信任的证书，**不接受自签名证书，也没有跳过校验的选项**。证书错误分类提示：不受信任（提示服务器需使用公共受信任的证书，如 Let's Encrypt）、主机名不匹配（证书未覆盖该域名）、已过期/尚未生效（并提示检查本机时间）、已吊销、握手失败（提示该端口可能只支持 http://）；连接被拒绝、DNS 解析失败、超时也分别提示。
+- 401：缺失和错误的 token 都是 401 `UNAUTHORIZED`（§2.2），客户端按「本次请求是否带了 token」区分「服务器要求访问令牌」与「令牌错误或已被撤销」，不匹配 `message`；两种提示都引导用户在局域网内打开服务器网页管理页面 `http://<服务器局域网地址>:8790/admin` 生成令牌，再填入「数据源设置 → 访问令牌」。客户端从不请求 `/admin`。
+- 连接测试步骤：DNS / TCP 连接（解析结果与耗时）→ TLS 握手 / 证书（https：协议版本、密码套件、证书主体、颁发者、到期时间、信任库；http：注明未加密）→ 服务器在线（`/health`，免鉴权）→ 令牌检查 / 素材库（`/library`）→ 根目录 → 音频流采样 → 试听预览吞吐（`GET /audio/{id}/preview?codec=pcm&sr=48000&bits=16`，`Range: bytes=0-524287`，报告首字节时间与 Mbit/s，可选项）→ 各根 WebDAV。每步给出成功/失败及原因；网络步骤失败时其余步骤跳过。`/health` 带 `public_url` 且与所测地址不同时（如在局域网测试），显示「服务器外网地址：…」，对话框提供「使用服务器外网地址」一键填入。`AudioLibCli remote test --url <地址>` / `remote status --url <地址>` 可临时指定地址（不保存）；`remote test` 的 JSON 含 `server_url`、`tls`（握手详情）和 `public_url`，`remote status` 给出解析后的地址和证书校验策略。
+- 同步：启动（服务器模式）、「切换到此数据源」（或保存当前服务器配置的连接改动）、「立即同步」、F5 刷新时执行。先 `/health`（免鉴权）→ `/library` → `/roots`；`library_id` 与 `revision` 都未变则只更新检查时间，否则以 256 KiB 分块流式下载 `/library/snapshot` 到磁盘临时文件（不在内存中缓冲；首字节前显示「服务器正在准备快照…」，之后显示「正在下载快照 x / y MiB」进度），请求带 `Accept-Encoding: zstd`（服务器压缩时按 `X-Uncompressed-Length` 显示进度并预分配，校验压缩字节数等于 `Content-Length`、解压后字节数等于 `X-Uncompressed-Length`；不压缩时照旧），校验 `Content-Length`、`X-Library-Id`（须与 `/library` 一致）、快照 `user_version` 的兼容范围（读取 `X-Schema-Version` 响应头）、`journal_mode=DELETE`，再对下载文件原地做 `quick_check`、外键、FTS5 integrity-check 和触发器检查（不再整库复制到 %TEMP%；645 MB 快照校验 9.2 秒 → 1.4 秒），必要派生修复只在 owned staging/copy 中执行，通过后原子改名并切换。快照响应超时 240 秒，正文最长 1 小时。`409/503 BUSY` 在首次请求起计的 240 秒窗口内重试，优先使用 `Retry-After`（单次等待最多 10 秒），否则采用指数退避；响应处理完成时判断窗口是否到期，该窗口不是整次同步的绝对期限。`507 INSUFFICIENT_STORAGE` 不重试。
+- 缓存：`<数据目录>/remote/<library_id>/library-r<revision>-<毫秒>.db` + `cache.json`（Windows 无法替换仍被打开的 SQLite 文件，所以不用固定的 `library.db` 文件名；只保留当前打开的一份，旧文件在切换后删除，仍被占用时由轮询重试）。同步本身不删除任何文件：旧快照和被替换的库目录只在提供者切换到新快照之后清理（当前打开的和 `cache.json` 记录的快照永不删除）；超过 1 小时的快照下载暂存文件在启动和切换时清理（试听不再写磁盘，旧版本留下的 `audio-cache/` 目录删除一次）。同一 `server_url` 换成新 `library_id` 后，旧库目录（快照、`cache.json`）在新库安装后删除；其他服务器的缓存保留。拖出下载缓存 `<数据目录>/cache/<library_id>/` 不专门清理，跟随全局 4 GiB LRU 正常淘汰。服务器不可达时用上次缓存离线只读打开；从未同步过则显示空库并提示。
+- `library_id` 变化：提示警告，清空选择与草稿，重新下载快照。401 提示令牌无效；连接失败、超时（连接 3 秒）、`INTERNAL` 等均有明确中英文提示，不会静默显示空库。服务端 408 `TIMEOUT` 按超时处理（可重试，轮询显示离线并继续用缓存），不当作令牌或协议错误。
+- 版本轮询：服务器模式下后台线程每 `poll_interval_secs` 秒（默认 60，0 = 关闭，设置项 `data_source.poll_interval_secs`）调用 `GET /library`，与已打开快照的 `library_id`/`revision` 比对；有变化时在标题栏下方显示非阻塞提示和「同步」按钮（`auto_sync = true` 时自动同步，但要等 revision 稳定：同一 revision 至少保持一个轮询间隔才同步（「重试」、保存设置等额外检查不算），持续变化时最多推迟 15 分钟，避免分批扫描时每批都整库下载；`library_id` 变化或首次同步立即进行）。轮询能连上服务器时同时取 `GET /roots`（§6.4 状态缓存），标题栏显示「根目录离线：X」「磁盘唤醒中：Y」，数据源对话框按根显示状态；离线根的记录照常列出，不标为缺失。根离线提示上的「重试」对每个离线根调用 `POST /roots/{name}/check`（约 2 秒，不阻塞界面），用返回的条目更新状态，仍离线则保留提示；服务器没有该端点（404）时改为对所选记录发 `HEAD /audio/{id}/stream`。切到本地模式、改用离线缓存或保存设置时丢弃旧的根状态（保存设置后立即重新获取，成功同步会带来新的根状态）；只有快照中保存的根列表时不使用其中过时的状态。离线时继续用缓存并显示「离线」，按间隔翻倍退避（最长 15 分钟）；`503` 视为「服务器启动中，稍后重试」（10/20/40 秒…重试，且不早于 `Retry-After`，不当作令牌错误；`/health` 的 `status: starting|error` 在连接测试中单独显示）；401 提示检查令牌。
+- 标注写入（§6.3）：服务器模式下详情面板的收藏、标签、备注，以及右键/菜单的收藏、批量标注均可用，经 `DataProvider`（`audiolib_remote::RemoteProvider`）发到服务器；颜色含清除可通过 CLI 标注，标签支持替换/追加/移除。单条 `PATCH /audio/{id}/metadata`，批量 `POST /audio/metadata/batch {ids, patch, tag_mode}`；0.4.0 不提供评分编辑。**revision 规则**：成功后若本地快照 revision 等于 `revision_before`，把返回的 `file`/`files` 在一个事务中写入已打开的快照（用户标签/备注及其分词列，FTS5 触发器同步更新；收藏、颜色、播放次数），并把本地 revision 设为 `revision`（`cache.json` 与标题栏），不做整库同步；否则（期间有其他客户端写入、无缓存状态等）执行一次完整快照同步。错误映射：`400 VALIDATION` → 值无效（附服务器说明；发送前也做本地校验）；`404` → 记录在服务器上已不存在（批量整体回滚）；`409 BUSY` → 服务器正在扫描，稍后重试；`413 PAYLOAD_TOO_LARGE` → 请求过大（8 MiB 上限，客户端发送前也拦截）；`401` 同读取；`408 TIMEOUT`/超时/断线/响应不可读 → 结果不确定，提示错误并请求完整同步。写入不自动重试；保存失败时草稿保留为「未保存」。快照提供者切换必须先排空 Metadata 写入，排空失败则保留当前提供者与草稿，不安装新快照。
+- 仍只读：扫描/重扫（主窗口入口；扫描在「服务器音效库」页）、维护/还原、relink、导入、新建/打开库、在资源管理器中定位。菜单项置灰并带「（服务器模式只读）」后缀，音效库管理对话框有说明行，控制器（`refuse_remote_write`）和 `RemoteProvider` 都独立拒绝。移除记录或目录见上（需服务器 `can_manage`）。原始 WAV 从不修改。
+- 播放计数：服务器模式下播放历史判定为一次播放时（规则同本地），在独立短线程上 `POST /audio/{id}/plays`（无请求体，失败只记日志，不打扰用户），并应用 revision 规则；不在音频线程执行。
+- 拖出：结果行可拖到资源管理器/DAW（拖动已勾选的行则拖出全部勾选项），原生 OLE `DoDragDrop` + `CF_HDROP` 真实路径，仅 `DROPEFFECT_COPY`；不使用虚拟/延迟文件。本地模式直接提供素材库文件。服务器模式先确保所选文件完整位于下载缓存 `<数据目录>/cache/<library_id>/<file_id>-<ETag 哈希 16 位>/<原文件名>`（状态栏显示进度，可取消；若松开鼠标前未就绪，提示「已准备好，请再次拖动」）。文件名取 §8 `download=1` 的 `Content-Disposition`：优先 `filename*=UTF-8''…`（百分号解码），否则 `filename`，再否则记录文件名；替换 Windows 非法字符、处理保留名（CON/NUL/COM1…）和末尾点/空格，例如 `filename="audio-7.wav"; filename*=UTF-8''%E9%9B%B7%E5%A3%B0%20%E8%BF%91.wav` → `雷声 近.wav`。复用：已有完整文件先 `HEAD …?download=1` 复核 ETag（最多等 2.5 秒；超时、根离线、服务器启动中或忙时直接用该缓存文件，不等磁盘唤醒）；试听内存中已有完整且 ETag（同一 `/audio/{id}/stream`）和长度一致的原始副本则直接复制；否则 `GET …/stream?download=1` 写 `.part`（`Content-Length` 驱动进度，断点用 `Range` + `If-Range` 续传，校验 ETag/长度后改名）。离线时用该文件最新的缓存版本。容量上限 4 GiB，按最近使用淘汰，只作用于带 `.audiolib-downloads` 标记的库目录和其中 `<id>-<16 位十六进制>` 条目目录，不跟随链接，不触碰 `cache/` 下其他内容（如 `cache/waveforms`）。
+- CLI：`remote edit <id[,id…]> [--tags] [--tag-mode replace|append|remove] [--color '#RRGGBB'|''] [--notes] [--favorite]`（单 id + replace 走 PATCH，否则走批量），`remote plays <id>`，`remote download <id[,id…]>`；输出 `revision_before`/`revision` 和缓存结果（`applied` 或执行的同步）。
+- WebDAV：每个扫描根一行，可编辑。有效地址优先级：**用户填写的地址（按根名保存）> 服务端 `/roots.webdav_url`（仅为默认建议）> 全局 `base_url + "/" + 根名`**；留空或与服务端建议相同即表示使用服务端默认。记录路径按最长 `server_path` 前缀（按路径分量匹配）替换为有效地址，剩余部分逐段百分号编码。「测试连接」按根检查有效地址（PROPFIND Depth:0，405/501 时回退 HEAD），并标明来源（用户/服务器/基础地址）。WebDAV 是可选项（试听默认走 §8 服务器流）：未配置地址的根显示「– 未配置 WebDAV，试听走服务器流」，已配置但不可达只算警告（!），都不让测试整体失败。测试另外用本机已同步快照中的一条未缺失记录请求 `GET /audio/{id}/stream`（`Range: bytes=0-0`）：206/200 通过，401、503（含根离线 `ROOT_OFFLINE`）、不可达和超时算失败（超时附「磁盘可能正在唤醒」提示），404（该记录文件缺失）算警告；没有该库快照时跳过。`AudioLibCli remote test` 只在必需步骤失败时返回 `REMOTE_TEST_FAILED`，警告放在 `warnings` 数组。
+- 试听（内存流式，不写磁盘）：选中记录后音频只放在进程内存中（全局 LRU，默认 512 MiB，`data_source.audition_memory_mb` 可设 32–8192；按整条淘汰，正在读的条目不淘汰），键 = 库 id + 记录 id + 文件大小 + 路由（如 `pcm-48000-16-2`）+ 来源（server/webdav），复用时缺失部分用 `If-Range`（强 ETag）续取，版本变化则整条重来，不会混用两个版本。旧版本的磁盘试听缓存 `<library_id>/audio-cache/` 在启动/切换服务器时删除一次。
+  - 是否转码由客户端决定，按服务器配置单独保存：「数据源与音效库」窗口连接页中的「试听时转码（适合外网或低带宽）」（`data_source.profiles[].transcode`），以客户端设置为准，吞吐测量不会自动打开或关闭它。**不勾选**：试听始终 `GET /audio/{id}/stream`（Range、内存 LRU、缓冲状态照常），从不请求 `/preview`。**勾选**：按下面的预览路由。默认值：http 局域网地址（私有/回环/链路本地 IP、`.local`、单段主机名）和新建的局域网配置不勾选；https 或公网主机、以及「使用服务器外网地址」新建的外网配置勾选。旧设置迁移时按地址给默认值，旧版本的 `data_source.audition_original: true` 迁移为不转码；此后 `audition_original` 仅作为当前配置的反值写回，供旧版本读取。`AudioLibCli remote status` 输出 `active_profile.transcode` 和 `audition_transcode`，`remote profiles` 列出每个配置的 `transcode`。连接测试的「试听预览吞吐」一步不受此设置影响，始终抽样 `/preview`。
+  - 预览路由（§8.1，仅勾选转码时）：WAV 用 `GET /audio/{id}/preview?codec=pcm&sr=48000&bits=16`（44.1 kHz 系列用 `sr=44100`，不高于源采样率；超过 2 声道且播放第 1 对声道时加 `ch=2`）；`sr`、`bits` 总是带上（只写 `codec=pcm` 会保持原始 96k/24）；非 WAV 文件仍走 `/stream`。吞吐 < 2.5 Mbit/s 时用 `codec=flac`（同 `sr`、16 bit、立体声；< 0.8 Mbit/s 时 `ch=1`）。`415` → 改用 flac；flac 也失败（`415` 或 `503 TRANSCODER_UNAVAILABLE`）→ 原始 `/stream`；旧服务器无 `/preview`（404/400）→ `/stream`。`503 BUSY` 按 `Retry-After` 重试。吞吐估计 = 各次传输（流、预览、flac、快照）中 ≥ 256 KiB 的分段的指数滑动平均（α 0.35），首次测量前按 4 Mbit/s 保守估计；换服务器时清零。pcm 的 ETag 当作不透明字符串（服务器 0.3.5 为 `"<源>-pcm2-…"`），flac 的弱 ETag（`W/"…-flac1-…"`，随 `t=` 变化）不参与版本判断；flac 长度取首个响应的 `X-Total-Frames`（或 `X-Duration`）加上 `X-Start-Frame`（两者都按输出采样率、从起始位置计），没有这些头的旧服务器用快照中的时长。
+  - 预读：文件 ≤ 64 MiB 时整条尽快读完；更大的文件读到播放位置之前约 60 秒（窗口上限为内存预算的 3/4，播放位置之后保留 1/4），超出后暂停读取（TCP 背压，保持 15 秒后关闭连接，接近时再用 `Range` 续取）。块大小 256 KiB；每次读取等待数据超过 30 秒算断线（不再用整个响应 30 分钟的总时限）。
+  - 播放：解码器只在下一块数据已在内存时才读（`is_buffered`），引擎工作线程从不等待网络，状态、暂停、seek、音量照常响应。开始和 seek 后先缓冲 0.5 秒（或文件剩余部分）；播放中缓冲耗尽时 12 ms 淡出并暂停输出、状态栏 350 ms 后显示「正在缓冲音频…」，攒够 2 秒（或剩余部分）后淡入继续，没有逐帧补静音造成的碎断。播放用的 WAV 头解析读到 `data` 块为止，不为尾部元数据去取文件末尾（以前每次选择要 3 个连接）；Load 只打开一次源。
+  - seek：目标不在内存时立刻新发请求——pcm/原始流用 `Range: bytes=<偏移>-`，flac 用 `t=<秒>`（比目标早一帧，按 `X-Start-Frame` 对齐，前面补静音；`416` 视为文件尾的静音）；距离正在接收的位置不超过约 0.3 秒传输量（64 KiB–1 MiB）时等待现有连接。时长与位置始终按原始记录显示（预览与原始文件秒数相同）。
+  - 快速切换：服务器模式下只有停留 180 ms 的选择才发起网络请求和引擎 Load；新的选择会关闭旧请求的连接（服务器随即释放名额），同一时刻最多一条试听流 + 一个波形请求。拖出始终从下载缓存提供原始全质量 WAV（内存中已有完整且 ETag、长度一致的原始 `/stream` 副本时直接复制）。
+  - 连接复用：所有请求（API、快照、波形、试听流、拖出下载、WebDAV）共用进程内一个 keep-alive 连接池（HTTP/1.1，每个服务器最多保留 4 条空闲连接，空闲 30 秒关闭，复用前探测对端是否已关闭），正常读完的响应把连接放回池中，下一次选择/波形请求不再重新握手（经外网反代 RTT ≈ 175 ms 时新连接到首字节约 0.5 秒）。取消（切换选择、停止）或 seek 放弃的响应会关闭其连接（服务器随即释放名额）；试听流开始和被取消时后台补一条 `GET /api/v1/health` 预热连接放入池中（同一时刻最多两条），供下一次请求使用。取消只关闭该请求当前使用的连接，不会误关池中的空闲连接。首字节等待仍按 NAS 唤醒放宽（最多 100 秒），正文按每次读取 30 秒无数据判断断线，可容忍外网抖动。
+  - 其余规则不变：只有用户为该根配置了 WebDAV 地址时，服务端流失败（含 `503 ROOT_OFFLINE`）才改走 WebDAV（原始文件）；`/roots` 已报该根离线时先试 WebDAV。首个响应最多等 100 秒（NAS 唤醒），1.5 秒后显示「正在唤醒音效库磁盘…」；切换或停止立即取消并关闭连接；`503 ROOT_OFFLINE` 首个响应前立即提示且不循环重试，首个响应后的断线、超时、`503` 重试 3 次（0.5/1/2 秒，不早于 `Retry-After`）。音频回调中没有网络、文件 I/O、锁或分配。
+- 波形：服务器模式下 `GET /audio/{id}/waveform?buckets=<像素宽>&colors=1&start_frame=&end_frame=`（`Accept-Encoding: zstd`，`If-None-Match`），与音频解耦单独绘制：内存缓存（按 revision）→ 磁盘缓存 `cache/waveforms/server/<库>/<键>.json` + `.etag`（有则立即发条件请求，`304` 直接用）→ 无缓存时等音频预缓冲完成（最多 3 秒）再请求，以免拖慢首个声音。服务器拿不到波形时，只有在试听数据已完整在内存中时才本地计算，不会为波形整条下载。
+- 本地专属能力保持本地：播放引擎、ASIO/WASAPI、SoundTouch 试听、命名管道 IPC（仅本机，不监听网络）。
+
+## 12. 待决问题
+
+1. 文件 ID 用数据库 id 还是相对路径？（草案：数据库 id，路径只做显示）
+2. 分页 v1 用 offset 还是游标？（草案：offset，游标预留）
+3. ~~服务端端口、部署方式~~：已定，macOS 原生，端口 8790（§10）。
+4. `audiolib-audio` 拆分：解码 + 元数据（跨平台）和播放（CPAL + `audiolib-windows`，feature 门控）。远程扫描已不再等待这次拆分：服务端为波形早已依赖 `audiolib-audio`，现在直接启用 `audiolib-db` 的 `scanner` feature（从不打开音频设备）；拆分只剩减小服务端体积的意义。
+5. ~~波形 JSON 还是二进制~~：已定 JSON + 可选 zstd（§9，压缩后约为 JSON 的 1/10）。
+6. ~~token 轮换和是否需要 HTTPS~~：已定，局域网 HTTP 免 token，外网经 HTTPS 反代 + 管理页生成/撤销的 token（§2.2–§2.4）。以后可加：管理密码、token 过期时间、客户端信任自签名证书。
+7. 库身份是否迁入未来 schema（§3）。
+8. 增量同步 `GET /library/changes`（§6.5 草案）：变更日志放库内触发器（schema v5）还是服务端旁路；保留多久；410 的阈值。

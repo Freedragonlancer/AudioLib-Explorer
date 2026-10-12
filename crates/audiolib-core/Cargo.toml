@@ -1,0 +1,16 @@
+[package]
+name = "audiolib-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile.workspace = true
+

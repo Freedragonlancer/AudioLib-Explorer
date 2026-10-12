@@ -1,0 +1,160 @@
+# Audio Terminology Dictionary for jieba Chinese Segmentation
+# Format: term [frequency] [pos_tag]
+# Higher frequency = more likely to be recognized as a single term
+# Used for professional audio terminology recognition
+
+# Core Audio Terms (high frequency)
+麦克风 10000 n
+音频 10000 n
+声音 8000 n
+录音 8000 n
+采样率 8000 n
+比特率 7000 n
+声道 7000 n
+立体声 7000 n
+单声道 6000 n
+波形 6000 n
+频谱 6000 n
+混音 6000 n
+母带 6000 n
+
+# Audio Processing
+均衡器 5000 n
+压缩器 5000 n
+混响 5000 n
+延迟 5000 n
+合成器 5000 n
+采样器 5000 n
+音序器 5000 n
+
+# Equipment
+数字音频工作站 4000 n
+声卡 4000 n
+音频接口 4000 n
+话筒 4000 n
+监听 4000 n
+耳机 4000 n
+扬声器 4000 n
+
+# Audio Properties
+低音 4000 n
+高音 4000 n
+中音 4000 n
+音色 4000 n
+音调 4000 n
+音高 4000 n
+位深度 4000 n
+
+# Production
+编曲 4000 n
+作曲 4000 n
+混缩 3000 n
+母带处理 3000 n
+音轨 3000 n
+轨道 3000 n
+通道 3000 n
+总线 3000 n
+
+# Effects & Processing
+插件 3000 n
+效果器 3000 n
+动态 3000 n
+包络 3000 n
+滤波器 3000 n
+失真 3000 n
+过载 3000 n
+饱和 3000 n
+谐波 3000 n
+
+# Measurements
+噪音 3000 n
+底噪 3000 n
+信噪比 3000 n
+动态范围 3000 n
+电平 3000 n
+峰值 3000 n
+响度 3000 n
+音量 3000 n
+增益 3000 n
+衰减 3000 n
+
+# Editing
+淡入 3000 n
+淡出 3000 n
+交叉淡化 3000 n
+剪辑 3000 n
+裁剪 3000 n
+归一化 3000 n
+
+# Sampling
+量化 3000 n
+抖动 3000 n
+采样 3000 n
+重采样 3000 n
+上采样 3000 n
+降采样 3000 n
+
+# File Formats
+音频文件 3000 n
+音频格式 3000 n
+无损 3000 n
+有损 3000 n
+编码 3000 n
+解码 3000 n
+压缩 3000 n
+
+# BWF/Metadata
+广播波形 2000 n
+元数据 2000 n
+时间码 2000 n
+同步 2000 n
+
+# Spatial Audio
+声场 2000 n
+立体声像 2000 n
+全景 2000 n
+左声道 2000 n
+右声道 2000 n
+环绕声 2000 n
+多声道 2000 n
+
+# Acoustics
+声学 2000 n
+音响 2000 n
+回声 2000 n
+共鸣 2000 n
+反射 2000 n
+吸收 2000 n
+
+# Technical
+频率 2000 n
+赫兹 2000 n
+分贝 2000 n
+声压级 2000 n
+频谱分析 2000 n
+傅里叶变换 2000 n
+
+# Production Types
+声音设计 2000 n
+音效 2000 n
+配音 2000 n
+旁白 2000 n
+对白 2000 n
+
+# Music Terms
+音乐 2000 n
+乐器 2000 n
+节奏 2000 n
+旋律 2000 n
+和声 2000 n
+和弦 2000 n
+音符 2000 n
+
+# DAW Software
+Pro Tools 5000 n
+Reaper 4000 n
+Ableton Live 4000 n
+FL Studio 4000 n
+Logic Pro 4000 n
+Cubase 4000 n
+Studio One 4000 n

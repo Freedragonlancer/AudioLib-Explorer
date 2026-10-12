@@ -1,0 +1,1201 @@
+// crates/audiolib-remote/src/client.rs
+//! Blocking HTTP client for the AudioLib server API (`<server_url>/api/v1`).
+use crate::abort::Timeouts;
+use crate::error::{RemoteError, Result};
+use audiolib_core::AudioFile;
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+/// TCP connect budget for every request; a LAN server answers far faster.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const JSON_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+/// `GET /library` computes statistics over the whole table: seconds on a large library,
+/// about 30 s cold. The server cuts it off with `408` at 30 s, the client waits longer.
+const LIBRARY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const LIBRARY_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(240);
+const SNAPSHOT_BODY_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
+/// Metadata writes: the server answers `408 TIMEOUT` after 30 s, so wait a little longer
+/// for that classified reply before giving up locally (both mean "outcome uncertain").
+const WRITE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
+/// The server's request body limit (`413 PAYLOAD_TOO_LARGE` above it).
+pub const MAX_WRITE_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Reply to `PATCH /audio/{id}/metadata` and `POST /audio/{id}/plays` (§6.3): the record
+/// after the write and the library revision before/after it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct FileWrite {
+    pub file: audiolib_core::AudioFile,
+    pub revision_before: u64,
+    pub revision: u64,
+}
+
+/// Reply to `POST /audio/metadata/batch`: `files` in request order, de-duplicated.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BatchWrite {
+    pub report: audiolib_core::BatchMetadataReport,
+    #[serde(default)]
+    pub files: Vec<audiolib_core::AudioFile>,
+    pub revision_before: u64,
+    pub revision: u64,
+}
+
+/// `MetadataPatch` as JSON with omitted (unchanged) fields left out; `color: ""` clears.
+pub(crate) fn patch_json(patch: &audiolib_core::MetadataPatch) -> serde_json::Value {
+    let mut value = serde_json::to_value(patch).unwrap_or_default();
+    if let serde_json::Value::Object(map) = &mut value {
+        map.retain(|_, field| !field.is_null());
+    }
+    value
+}
+
+/// `GET /health` reply.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthInfo {
+    /// `ok`, `starting` (library still opening) or `error` (open failed, retrying).
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub version: String,
+    /// Fixed summary for `error` (never contains paths or secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// External address configured on the server's admin page (§6.2), e.g.
+    /// `https://audiolib.example.com:18086`; `null` when not configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+}
+
+impl HealthInfo {
+    /// The server listens but its library is not open yet (`starting` or `error`).
+    pub fn not_ready(&self) -> bool {
+        matches!(self.status.as_str(), "starting" | "error")
+    }
+}
+
+/// `GET /library` reply: `LibraryInfo`-like fields plus identity and revision.
+/// Unknown fields are ignored; absent optional fields default.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RemoteLibrary {
+    /// Stable identity generated when the server library was created.
+    pub library_id: String,
+    #[serde(default)]
+    pub schema_version: i64,
+    /// Monotonic, conservative revision: any server write, scan, restore or external
+    /// database change bumps it (it may bump without a visible change, never misses one).
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub sqlite_version: String,
+    #[serde(default)]
+    pub database_bytes: u64,
+    #[serde(default)]
+    pub stats: serde_json::Value,
+}
+
+impl RemoteLibrary {
+    /// Present audio record count from `stats.audio_files`, if reported.
+    pub fn audio_files(&self) -> Option<u64> {
+        self.stats
+            .get("audio_files")
+            .and_then(serde_json::Value::as_u64)
+    }
+}
+
+/// One server scan root. `server_path` is the absolute server (macOS) prefix stored in
+/// the snapshot; `webdav_url` is only the server's suggested default.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteRoot {
+    pub name: String,
+    #[serde(default, alias = "path")]
+    pub server_path: String,
+    #[serde(default)]
+    pub webdav_url: Option<String>,
+    #[serde(default)]
+    pub file_count: Option<u64>,
+    /// §6.4 root status (absent on older servers = online); see [`RemoteRoot::state`].
+    /// `available` / `reachable` are accepted as aliases of `online`.
+    #[serde(default, alias = "available", alias = "reachable")]
+    pub online: Option<bool>,
+    /// `checking` | `online` | `waking` | `offline`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Reason when offline (no paths).
+    #[serde(default)]
+    pub status_message: Option<String>,
+    /// Unix seconds of the server's last completed check.
+    #[serde(default)]
+    pub checked_at: Option<u64>,
+    /// API §6.4 (absent on older servers): records under this root whose file is
+    /// missing, the latest scan session of the root (`null` = never scanned) and whether
+    /// a scan of it is running now (also while paused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan: Option<crate::manage::RootScan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanning: Option<bool>,
+}
+
+/// Waveform response body limit (JSON after decompression).
+const MAX_WAVEFORM_BYTES: u64 = 64 * 1024 * 1024;
+/// The server decodes the whole file for an uncached waveform: allow a slow NAS.
+const WAVEFORM_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Parameters of `GET /audio/{id}/waveform` (§9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaveformQuery {
+    /// Columns, clamped to the server's `64..=8192`.
+    pub buckets: u32,
+    pub colors: bool,
+    pub start_frame: Option<u64>,
+    pub end_frame: Option<u64>,
+}
+
+/// Reply of [`RemoteClient::waveform`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaveformReply {
+    /// `304`: the copy with the `If-None-Match` ETag is current.
+    NotModified,
+    /// The JSON body (decompressed) and its ETag.
+    Data { json: Vec<u8>, etag: Option<String> },
+}
+
+/// Identity headers returned with `GET /library/snapshot`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotMeta {
+    pub bytes: u64,
+    /// `X-Library-Id`
+    pub library_id: Option<String>,
+    /// `X-Library-Revision`: the revision the streamed snapshot was taken at.
+    pub revision: Option<u64>,
+    /// `X-Schema-Version`
+    pub schema_version: Option<i64>,
+}
+
+/// Normalize a configured server URL (`http(s)://host[:port][/prefix]`, optionally with a
+/// pasted `/api/v1`) to its API base (`.../api/v1`, no trailing '/'). See
+/// [`audiolib_core::server_url`].
+pub fn api_base_url(server_url: &str) -> Result<String> {
+    audiolib_core::server_url::api_base_url(server_url)
+        .map_err(|error| RemoteError::Validation(error.to_string()))
+}
+
+/// Blocking API client. The bearer token is held privately and never formatted.
+#[derive(Clone)]
+pub struct RemoteClient {
+    pub(crate) api: String,
+    pub(crate) token: String,
+    // Timeout profiles over the shared keep-alive agent ([`crate::abort::shared_agent`]).
+    pub(crate) agent: Timeouts,
+    library: Timeouts,
+    bulk: Timeouts,
+    pub(crate) writes: Timeouts,
+}
+
+impl std::fmt::Debug for RemoteClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteClient")
+            .field("api", &self.api)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// `Retry-After` in delta seconds (HTTP dates are ignored), capped at one hour.
+pub(crate) fn retry_after(headers: &ureq::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| seconds.min(3600))
+}
+
+/// Request timeouts on the shared keep-alive agent: the response head within `response`,
+/// the body within `body`.
+pub(crate) fn agent(response: Duration, body: Duration) -> Timeouts {
+    Timeouts::new(response, Some(body))
+}
+
+/// How often [`call_cancellable`] checks `cancel` and reports the wait.
+pub(crate) const WAIT_TICK: Duration = Duration::from_millis(100);
+
+/// Run a blocking HTTP exchange on a helper thread so the caller can stop waiting at once
+/// when `cancel` is set (a sleeping NAS may take tens of seconds before the first byte)
+/// and can report how long the server has been silent (`waiting`, every [`WAIT_TICK`]).
+/// The exchange builds its agent with [`crate::abort::abortable_agent`] and the given
+/// [`Abort`](crate::abort::Abort): a cancel shuts its connection down, so the helper
+/// thread ends at once and the server sees the request go away.
+pub(crate) fn call_cancellable<T: Send + 'static>(
+    exchange: impl FnOnce(&crate::abort::Abort) -> Result<T> + Send + 'static,
+    cancel: &AtomicBool,
+    waiting: &mut dyn FnMut(Duration),
+) -> Result<T> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(RemoteError::Cancelled);
+    }
+    let abort = crate::abort::Abort::default();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let handle = abort.clone();
+    std::thread::Builder::new()
+        .name("audiolib-http-call".into())
+        .spawn(move || {
+            let _ = sender.send(exchange(&handle));
+        })?;
+    let started = std::time::Instant::now();
+    loop {
+        match receiver.recv_timeout(WAIT_TICK) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::Acquire) {
+                    abort.abort();
+                    return Err(RemoteError::Cancelled);
+                }
+                waiting(started.elapsed());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(RemoteError::Protocol("HTTP request thread failed".into()));
+            }
+        }
+    }
+}
+
+impl RemoteClient {
+    /// Build a client for `server_url` (origin or `/api/v1` base) and bearer token. The
+    /// token is optional: when empty, requests carry no `Authorization` header and a `401`
+    /// is reported as [`RemoteError::TokenRequired`].
+    pub fn new(server_url: &str, token: &str) -> Result<Self> {
+        if token.contains(['\r', '\n']) {
+            return Err(RemoteError::Validation(
+                "Token contains a line break".into(),
+            ));
+        }
+        Ok(Self {
+            api: api_base_url(server_url)?,
+            token: token.trim().to_owned(),
+            agent: agent(RESPONSE_TIMEOUT, JSON_BODY_TIMEOUT),
+            library: agent(LIBRARY_RESPONSE_TIMEOUT, LIBRARY_BODY_TIMEOUT),
+            bulk: agent(SNAPSHOT_RESPONSE_TIMEOUT, SNAPSHOT_BODY_TIMEOUT),
+            writes: agent(WRITE_RESPONSE_TIMEOUT, JSON_BODY_TIMEOUT),
+        })
+    }
+
+    /// API base URL, e.g. `http://host:8790/api/v1`.
+    /// Range stream source for a record: `GET <api>/audio/{id}/stream` with the token.
+    pub fn stream_source(&self, id: i64) -> crate::stream::StreamSource {
+        crate::stream::StreamSource::new(
+            format!("{}/audio/{id}/stream", self.api),
+            if self.token.is_empty() {
+                crate::stream::SourceAuth::None
+            } else {
+                crate::stream::SourceAuth::Bearer(self.token.clone())
+            },
+        )
+    }
+
+    pub fn api_url(&self) -> &str {
+        &self.api
+    }
+
+    fn request(
+        &self,
+        agent: &Timeouts,
+        path: &str,
+        authenticated: bool,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        let url = format!("{}{path}", self.api);
+        let response = crate::abort::call_fresh(|| {
+            let mut request = agent.get(&url);
+            if authenticated && !self.token.is_empty() {
+                request = request.header("Authorization", &format!("Bearer {}", self.token));
+            }
+            request
+        })
+        .map_err(|error| RemoteError::from_transport(error, &url))?;
+        self.checked(response, &format!("GET {path}"))
+    }
+
+    /// Classify an error status (keeping `Retry-After`); a `401` without a configured
+    /// token becomes [`RemoteError::TokenRequired`].
+    pub(crate) fn checked(
+        &self,
+        mut response: ureq::http::Response<ureq::Body>,
+        context: &str,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let retry_after = retry_after(response.headers());
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(64 * 1024)
+                .read_to_string()
+                .unwrap_or_default();
+            let error = RemoteError::from_response(status, &body, context, retry_after);
+            return Err(if self.token.is_empty() {
+                error.without_token()
+            } else {
+                error
+            });
+        }
+        if !(200..300).contains(&status) {
+            return Err(RemoteError::Protocol(format!("{context}: HTTP {status}")));
+        }
+        Ok(response)
+    }
+
+    /// One non-idempotent JSON write (never retried here). A transport failure or an
+    /// unreadable reply leaves the outcome uncertain; see
+    /// [`RemoteError::write_may_have_committed`].
+    fn write<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T> {
+        let url = format!("{}{path}", self.api);
+        let context = format!("{method} {path}");
+        let bytes = match body {
+            Some(body) => {
+                let bytes = serde_json::to_vec(body)
+                    .map_err(|error| RemoteError::Validation(format!("{context}: {error}")))?;
+                if bytes.len() > MAX_WRITE_BODY_BYTES {
+                    return Err(RemoteError::PayloadTooLarge(format!(
+                        "{context}: {} bytes exceeds the {MAX_WRITE_BODY_BYTES}-byte request limit",
+                        bytes.len()
+                    )));
+                }
+                Some(bytes)
+            }
+            None => None,
+        };
+        let authorization = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let result = match method {
+            "PATCH" => {
+                let mut request = self.writes.patch(&url);
+                if let Some(value) = &authorization {
+                    request = request.header("Authorization", value);
+                }
+                request
+                    .header("Content-Type", "application/json")
+                    .send(bytes.unwrap_or_default().as_slice())
+            }
+            _ => {
+                let mut request = self.writes.post(&url);
+                if let Some(value) = &authorization {
+                    request = request.header("Authorization", value);
+                }
+                match bytes {
+                    Some(bytes) => request
+                        .header("Content-Type", "application/json")
+                        .send(bytes.as_slice()),
+                    None => request.send_empty(),
+                }
+            }
+        };
+        let response = result.map_err(|error| RemoteError::from_transport(error, &url))?;
+        let mut response = self.checked(response, &context)?;
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_JSON_BYTES)
+            .read_to_string()
+            .map_err(|error| match RemoteError::from_transport(error, &url) {
+                RemoteError::Timeout(detail) => RemoteError::Timeout(detail),
+                other => RemoteError::Protocol(format!("{context}: {other}")),
+            })?;
+        serde_json::from_str(&text)
+            .map_err(|error| RemoteError::Protocol(format!("{context}: {error}")))
+    }
+
+    /// `PATCH /audio/{id}/metadata`: omitted fields stay unchanged, `color: ""` clears.
+    /// Validated locally first with the server's rules.
+    pub fn patch_metadata(
+        &self,
+        id: i64,
+        patch: &audiolib_core::MetadataPatch,
+    ) -> Result<FileWrite> {
+        patch
+            .validate()
+            .map_err(|error| RemoteError::Validation(error.to_string()))?;
+        if id <= 0 {
+            return Err(RemoteError::Validation(format!("invalid audio id {id}")));
+        }
+        self.write(
+            "PATCH",
+            &format!("/audio/{id}/metadata"),
+            Some(&patch_json(patch)),
+        )
+    }
+
+    /// `POST /audio/metadata/batch` (one server transaction; any unknown id → `404`).
+    pub fn batch_metadata(
+        &self,
+        request: &audiolib_core::BatchMetadataRequest,
+    ) -> Result<BatchWrite> {
+        request
+            .validate()
+            .map_err(|error| RemoteError::Validation(error.to_string()))?;
+        let body = serde_json::json!({
+            "ids": request.ids,
+            "patch": patch_json(&request.patch),
+            "tag_mode": request.tag_mode,
+        });
+        self.write("POST", "/audio/metadata/batch", Some(&body))
+    }
+
+    /// `POST /audio/{id}/plays` (no body): `play_count` + 1 and a play history row.
+    pub fn record_play(&self, id: i64) -> Result<FileWrite> {
+        if id <= 0 {
+            return Err(RemoteError::Validation(format!("invalid audio id {id}")));
+        }
+        self.write("POST", &format!("/audio/{id}/plays"), None)
+    }
+
+    /// Audition source of a record for `route` (§8, §8.1): the original `/stream`, or a
+    /// `/preview` (a FLAC preview is decoded to PCM and needs the record's duration). A
+    /// large file is fetched [`READ_AHEAD_SECONDS`](crate::stream::READ_AHEAD_SECONDS)
+    /// ahead of the player.
+    pub fn audio_source(
+        &self,
+        file: &AudioFile,
+        route: &crate::route::AudioRoute,
+    ) -> crate::stream::StreamSource {
+        let id = file.id;
+        let mut source = self.stream_source(id);
+        source.read_ahead =
+            Some(route.output_bytes_per_second(file) * crate::stream::READ_AHEAD_SECONDS);
+        if let Some(query) = route.preview_query() {
+            source.url = format!("{}/audio/{id}/preview?{query}", self.api);
+            if matches!(route, crate::route::AudioRoute::Flac(_)) {
+                source.flac_duration = Some(Duration::from_secs_f64(file.duration.max(0.0)));
+            }
+        }
+        source
+    }
+
+    /// `GET /audio/{id}/waveform` (§9) with `If-None-Match` and `Accept-Encoding: zstd`.
+    /// `cancel` closes the connection at once.
+    pub fn waveform(
+        &self,
+        id: i64,
+        query: &WaveformQuery,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<WaveformReply> {
+        let mut path = format!(
+            "/audio/{id}/waveform?buckets={}&colors={}",
+            query.buckets.clamp(64, 8192),
+            u8::from(query.colors)
+        );
+        if let Some(start) = query.start_frame {
+            path.push_str(&format!("&start_frame={start}"));
+        }
+        if let Some(end) = query.end_frame {
+            path.push_str(&format!("&end_frame={end}"));
+        }
+        let url = format!("{}{path}", self.api);
+        let token = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let if_none_match = if_none_match.map(str::to_owned);
+        let context = format!("GET {path}");
+        let (status, etag, encoding, body, retry) = call_cancellable(
+            move |abort| {
+                let agent =
+                    crate::abort::abortable_agent(WAVEFORM_TIMEOUT, WAVEFORM_TIMEOUT, abort);
+                let mut response = crate::abort::call_fresh(|| {
+                    let mut request = agent.get(&url).header("Accept-Encoding", "zstd");
+                    if let Some(token) = &token {
+                        request = request.header("Authorization", token);
+                    }
+                    if let Some(etag) = &if_none_match {
+                        request = request.header("If-None-Match", etag);
+                    }
+                    request
+                })
+                .map_err(|error| RemoteError::from_transport(error, &url))?;
+                let header = |name: &str| {
+                    response
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(|value| value.trim().to_owned())
+                };
+                let (etag, encoding) = (header("etag"), header("content-encoding"));
+                let retry = retry_after(response.headers());
+                let body = response
+                    .body_mut()
+                    .with_config()
+                    .limit(MAX_WAVEFORM_BYTES)
+                    .read_to_vec()
+                    .map_err(|error| RemoteError::from_transport(error, &url))?;
+                Ok((response.status().as_u16(), etag, encoding, body, retry))
+            },
+            cancel,
+            &mut |_| {},
+        )?;
+        match status {
+            304 => Ok(WaveformReply::NotModified),
+            200 => {
+                let json = match encoding.as_deref() {
+                    Some(value) if value.eq_ignore_ascii_case("zstd") => {
+                        let mut json = Vec::new();
+                        zstd::stream::read::Decoder::new(body.as_slice())
+                            .and_then(|decoder| {
+                                decoder.take(MAX_WAVEFORM_BYTES).read_to_end(&mut json)
+                            })
+                            .map_err(|error| {
+                                RemoteError::Protocol(format!("{context}: zstd: {error}"))
+                            })?;
+                        json
+                    }
+                    None => body,
+                    Some(value) if value.eq_ignore_ascii_case("identity") => body,
+                    Some(other) => {
+                        return Err(RemoteError::Protocol(format!(
+                            "{context}: unexpected Content-Encoding {other}"
+                        )));
+                    }
+                };
+                Ok(WaveformReply::Data { json, etag })
+            }
+            401 if self.token.is_empty() => Err(RemoteError::TokenRequired(context)),
+            _ => Err(RemoteError::from_audio_response(
+                status,
+                &String::from_utf8_lossy(&body),
+                &context,
+                retry,
+            )),
+        }
+    }
+
+    /// Download source for a record: `GET <api>/audio/{id}/stream?download=1`.
+    pub fn download_source(&self, id: i64) -> crate::stream::StreamSource {
+        let mut source = self.stream_source(id);
+        source.url.push_str("?download=1");
+        source
+    }
+
+    fn json<T: serde::de::DeserializeOwned>(&self, path: &str, authenticated: bool) -> Result<T> {
+        self.json_on(&self.agent, path, authenticated)
+    }
+
+    fn json_on<T: serde::de::DeserializeOwned>(
+        &self,
+        agent: &Timeouts,
+        path: &str,
+        authenticated: bool,
+    ) -> Result<T> {
+        let mut response = self.request(agent, path, authenticated)?;
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_JSON_BYTES)
+            .read_to_string()
+            .map_err(|error| RemoteError::from_transport(error, path))?;
+        serde_json::from_str(&body)
+            .map_err(|error| RemoteError::Protocol(format!("GET {path}: {error}")))
+    }
+
+    /// `GET /health` (no authentication).
+    pub fn health(&self) -> Result<HealthInfo> {
+        self.json("/health", false)
+    }
+
+    /// `GET /library`: identity, schema and revision of the server library.
+    pub fn library(&self) -> Result<RemoteLibrary> {
+        let library: RemoteLibrary = self.json_on(&self.library, "/library", true)?;
+        if library.library_id.trim().is_empty() {
+            return Err(RemoteError::Protocol(
+                "GET /library: library_id is missing".into(),
+            ));
+        }
+        Ok(library)
+    }
+
+    /// `GET /roots`: accepts a bare array or an object with a `roots` array.
+    pub fn roots(&self) -> Result<Vec<RemoteRoot>> {
+        let value: serde_json::Value = self.json("/roots", true)?;
+        let array = match value {
+            serde_json::Value::Object(mut object) => object
+                .remove("roots")
+                .unwrap_or(serde_json::Value::Array(Vec::new())),
+            other => other,
+        };
+        serde_json::from_value(array)
+            .map_err(|error| RemoteError::Protocol(format!("GET /roots: {error}")))
+    }
+
+    /// `POST /roots/{name}/check` (§6.4): re-check one root now (the server answers within
+    /// about 2 s, with the state at that point if the check is still running) and return
+    /// its updated `/roots` entry. [`RemoteError::NotFound`] for an unknown root, and also
+    /// from servers that predate the endpoint.
+    pub fn check_root(&self, name: &str) -> Result<RemoteRoot> {
+        let path = format!("/roots/{}/check", crate::util::encode_path_segment(name));
+        let url = format!("{}{path}", self.api);
+        let context = format!("POST {path}");
+        let mut request = self.agent.post(&url);
+        if !self.token.is_empty() {
+            request = request.header("Authorization", &format!("Bearer {}", self.token));
+        }
+        let response = request
+            .send_empty()
+            .map_err(|error| RemoteError::from_transport(error, &url))?;
+        let mut response = self.checked(response, &context)?;
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_JSON_BYTES)
+            .read_to_string()
+            .map_err(|error| RemoteError::from_transport(error, &url))?;
+        serde_json::from_str(&body)
+            .map_err(|error| RemoteError::Protocol(format!("{context}: {error}")))
+    }
+
+    /// Stream `GET /library/snapshot` into `destination` through a sibling `.part`
+    /// file, then atomically rename. `progress(received, total)` runs per chunk and
+    /// `cancel` is checked between chunks; a failure never leaves a partial target.
+    /// A `409 BUSY` (server snapshot slots exhausted) is returned as [`RemoteError::Busy`]
+    /// so callers can retry with backoff.
+    pub fn download_snapshot(
+        &self,
+        destination: &Path,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+        cancel: &AtomicBool,
+    ) -> Result<SnapshotMeta> {
+        let url = format!("{}/library/snapshot", self.api);
+        let response = crate::abort::call_fresh(|| {
+            let mut request = self.bulk.get(&url).header("Accept-Encoding", "zstd");
+            if !self.token.is_empty() {
+                request = request.header("Authorization", &format!("Bearer {}", self.token));
+            }
+            request
+        })
+        .map_err(|error| RemoteError::from_transport(error, &url))?;
+        let response = self.checked(response, "GET /library/snapshot")?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .map(str::to_owned)
+        };
+        // With `Content-Encoding: zstd`, Content-Length is the compressed size and
+        // X-Uncompressed-Length the database size (progress, preallocation, check).
+        let compressed = match header("content-encoding").as_deref() {
+            None => false,
+            Some(value) if value.eq_ignore_ascii_case("identity") => false,
+            Some(value) if value.eq_ignore_ascii_case("zstd") => true,
+            Some(other) => {
+                return Err(RemoteError::Protocol(format!(
+                    "snapshot: unexpected Content-Encoding {other}"
+                )));
+            }
+        };
+        let wire_length = header("content-length").and_then(|value| value.parse::<u64>().ok());
+        let total = if compressed {
+            header("x-uncompressed-length").and_then(|value| value.parse::<u64>().ok())
+        } else {
+            wire_length
+        };
+        let mut meta = SnapshotMeta {
+            bytes: 0,
+            library_id: header("x-library-id").filter(|value| !value.is_empty()),
+            revision: header("x-library-revision").and_then(|value| value.parse().ok()),
+            schema_version: header("x-schema-version").and_then(|value| value.parse().ok()),
+        };
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        // `<name>.download.part-<pid>`: recognised (and removed once stale) by `prune`.
+        let mut partial = destination.as_os_str().to_owned();
+        partial.push(format!(".part-{}", std::process::id()));
+        let partial = std::path::PathBuf::from(partial);
+        let result = (|| -> Result<u64> {
+            let mut file = std::fs::File::create(&partial)?;
+            if let Some(total) = total.filter(|_| compressed) {
+                // Reserve the space up front (the file is written sequentially over it).
+                file.set_len(total)?;
+            }
+            let wire = Counted::new(response.into_body().into_reader());
+            let wire_count = wire.count.clone();
+            let mut reader: Box<dyn Read> =
+                if compressed {
+                    Box::new(zstd::stream::read::Decoder::new(wire).map_err(|error| {
+                        RemoteError::Protocol(format!("snapshot: zstd: {error}"))
+                    })?)
+                } else {
+                    Box::new(wire)
+                };
+            let mut buffer = vec![0u8; 256 * 1024];
+            let mut received = 0u64;
+            let mut throughput = crate::bandwidth::Throughput::new();
+            let mut counted = 0;
+            progress(0, total);
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(RemoteError::Cancelled);
+                }
+                let read = reader.read(&mut buffer).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::Other && compressed {
+                        RemoteError::Protocol(format!("snapshot: zstd: {error}"))
+                    } else {
+                        RemoteError::Unreachable(format!("snapshot: {error}"))
+                    }
+                })?;
+                let wire_now = wire_count.load(Ordering::Acquire);
+                throughput.add(wire_now - counted, crate::bandwidth::bandwidth());
+                counted = wire_now;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..read])?;
+                received += read as u64;
+                progress(received, total);
+            }
+            throughput.pause(crate::bandwidth::bandwidth());
+            let wire_received = wire_count.load(Ordering::Acquire);
+            if wire_length.is_some_and(|length| length != wire_received) {
+                return Err(RemoteError::Protocol(format!(
+                    "snapshot truncated: received {wire_received} of {} bytes",
+                    wire_length.unwrap_or_default()
+                )));
+            }
+            if total.is_some_and(|total| total != received) {
+                return Err(RemoteError::Protocol(format!(
+                    "snapshot size mismatch: {received} bytes after decompression, {} expected",
+                    total.unwrap_or_default()
+                )));
+            }
+            if received == 0 {
+                return Err(RemoteError::Protocol("snapshot is empty".into()));
+            }
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&partial, destination)?;
+            Ok(received)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        meta.bytes = result?;
+        Ok(meta)
+    }
+}
+
+/// Reader counting the bytes that pass (the compressed size of a zstd snapshot).
+struct Counted<R> {
+    inner: R,
+    count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl<R: Read> Counted<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            count: Default::default(),
+        }
+    }
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.count.fetch_add(read as u64, Ordering::AcqRel);
+        Ok(read)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_server::{TestResponse, TestServer};
+
+    #[test]
+    fn cancelling_a_waiting_call_closes_its_connection() {
+        let (url, closed) = crate::abort::tests::silent_server();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let cancelled_at = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            flag.store(true, Ordering::Release);
+            std::time::Instant::now()
+        });
+        let result = call_cancellable(
+            move |abort| {
+                crate::abort::abortable_agent(
+                    Duration::from_secs(60),
+                    Duration::from_secs(60),
+                    abort,
+                )
+                .get(&url)
+                .call()
+                .map(|_| ())
+                .map_err(|error| RemoteError::Protocol(error.to_string()))
+            },
+            &cancel,
+            &mut |_| {},
+        );
+        assert!(matches!(result, Err(RemoteError::Cancelled)));
+        let cancelled_at = cancelled_at.join().unwrap();
+        let seen = closed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the server must see the connection closed");
+        assert!(seen.duration_since(cancelled_at) < Duration::from_secs(2));
+    }
+
+    fn api_server() -> TestServer {
+        TestServer::start(|request| {
+            let authorized = request.header("authorization") == Some("Bearer secret-token");
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/api/v1/health") => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.3.5","extra":true}"#)
+                }
+                (_, _) if !authorized => TestResponse::json(
+                    401,
+                    r#"{"error_code":"UNAUTHORIZED","message":"Missing or invalid token"}"#,
+                ),
+                ("GET", "/api/v1/library") => TestResponse::json(
+                    200,
+                    r#"{"library_id":"lib-1","schema_version":3,"revision":7,"database":"/srv/library.db","sqlite_version":"3.50","database_bytes":4096,"wal_bytes":0,"stats":{"audio_files":12,"folders":2,"total_duration":1.0,"total_bytes":5,"missing_files":0},"future_field":[1]}"#,
+                ),
+                ("GET", "/api/v1/roots") => TestResponse::json(
+                    200,
+                    r#"[{"name":"SFX","server_path":"/Volumes/Sound/SFX","webdav_url":"http://nas/dav/SFX","file_count":80586,"online":false,"status":"offline","status_message":"Root directory not found (volume not mounted?)","checked_at":1791460727},{"name":"Foley","path":"/Volumes/Sound/Foley","available":true}]"#,
+                ),
+                ("GET", "/api/v1/library/snapshot") => TestResponse::bytes(200, vec![7u8; 300_000])
+                    .with_header("X-Library-Id", "lib-1")
+                    .with_header("X-Library-Revision", "8")
+                    .with_header("X-Schema-Version", "3"),
+                _ => TestResponse::json(404, r#"{"error_code":"NOT_FOUND","message":"no route"}"#),
+            }
+        })
+    }
+
+    #[test]
+    fn api_base_url_appends_version_once_and_rejects_bad_urls() {
+        assert_eq!(
+            api_base_url("http://h:8790").unwrap(),
+            "http://h:8790/api/v1"
+        );
+        assert_eq!(
+            api_base_url("http://h:8790/").unwrap(),
+            "http://h:8790/api/v1"
+        );
+        assert_eq!(api_base_url("http://h/api/v1/").unwrap(), "http://h/api/v1");
+        assert_eq!(
+            api_base_url(" https://audiolib.example.com:18086/audiolib/ ").unwrap(),
+            "https://audiolib.example.com:18086/audiolib/api/v1"
+        );
+        assert!(api_base_url("h:8790").is_err());
+        assert!(api_base_url("https://host:99999").is_err());
+        assert!(RemoteClient::new("http://h", "a\nb").is_err());
+    }
+
+    #[test]
+    fn root_check_posts_and_returns_the_updated_root() {
+        let server = TestServer::start(|request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/roots/%E9%9F%B3%E6%95%88/check") => {
+                    assert_eq!(request.header("authorization"), Some("Bearer secret-token"));
+                    TestResponse::json(
+                        200,
+                        r#"{"name":"音效","path":"/Volumes/SFX","online":true,"status":"online","file_count":3}"#,
+                    )
+                }
+                _ => TestResponse::json(
+                    404,
+                    r#"{"error_code":"NOT_FOUND","message":"Unknown root"}"#,
+                ),
+            }
+        });
+        let client = RemoteClient::new(&server.url, "secret-token").unwrap();
+        let root = client.check_root("音效").unwrap();
+        assert_eq!(root.name, "音效");
+        assert_eq!(root.server_path, "/Volumes/SFX");
+        assert_eq!(root.state(), crate::RootState::Online);
+        assert!(matches!(
+            client.check_root("Nope"),
+            Err(RemoteError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn client_reads_tolerant_dtos_with_bearer_authentication() {
+        let server = api_server();
+        let client = RemoteClient::new(&server.url, "secret-token").unwrap();
+        assert_eq!(client.health().unwrap().version, "0.3.5");
+        let library = client.library().unwrap();
+        assert_eq!(library.library_id, "lib-1");
+        assert_eq!((library.schema_version, library.revision), (3, 7));
+        assert_eq!(library.audio_files(), Some(12));
+        let roots = client.roots().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].webdav_url.as_deref(), Some("http://nas/dav/SFX"));
+        assert_eq!(roots[1].server_path, "/Volumes/Sound/Foley");
+        assert_eq!(roots[0].state(), crate::RootState::Offline);
+        assert_eq!(roots[0].file_count, Some(80586));
+        assert_eq!(roots[0].checked_at, Some(1791460727));
+        assert!(
+            roots[0]
+                .status_message
+                .as_deref()
+                .unwrap()
+                .contains("not mounted")
+        );
+        assert_eq!(roots[1].online, Some(true));
+        assert!(!format!("{client:?}").contains("secret-token"));
+    }
+
+    #[test]
+    fn library_waits_longer_than_other_json_requests() {
+        assert!(LIBRARY_RESPONSE_TIMEOUT >= Duration::from_secs(60));
+        assert!(LIBRARY_RESPONSE_TIMEOUT > RESPONSE_TIMEOUT);
+        let client = RemoteClient::new("http://127.0.0.1:1", "t").unwrap();
+        assert_eq!(client.library.response, LIBRARY_RESPONSE_TIMEOUT);
+        assert_eq!(client.agent.response, RESPONSE_TIMEOUT);
+    }
+
+    #[test]
+    fn unauthorized_and_unreachable_errors_are_classified() {
+        let server = api_server();
+        let client = RemoteClient::new(&server.url, "wrong").unwrap();
+        assert!(client.health().is_ok());
+        let error = client.library().unwrap_err();
+        assert!(
+            matches!(error, RemoteError::Unauthorized(ref message) if message.contains("invalid token"))
+        );
+        assert!(error.localized(true).contains("401"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let offline = RemoteClient::new(&format!("http://127.0.0.1:{port}"), "x").unwrap();
+        let error = offline.health().unwrap_err();
+        assert!(
+            matches!(error, RemoteError::Unreachable(_)),
+            "a refused connection is offline, not slow: {error:?}"
+        );
+    }
+
+    #[test]
+    fn empty_token_sends_no_authorization_and_401_asks_for_a_token() {
+        let headers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let open = {
+            let headers = headers.clone();
+            TestServer::start(move |request| {
+                headers
+                    .lock()
+                    .unwrap()
+                    .push(request.header("authorization").map(str::to_owned));
+                match request.path.as_str() {
+                    "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"1"}"#),
+                    "/api/v1/library" => TestResponse::json(
+                        200,
+                        r#"{"library_id":"open","schema_version":3,"revision":1}"#,
+                    ),
+                    _ => TestResponse::json(404, "{}"),
+                }
+            })
+        };
+        let client = RemoteClient::new(&open.url, "  ").unwrap();
+        assert_eq!(client.library().unwrap().library_id, "open");
+        assert!(headers.lock().unwrap().iter().all(Option::is_none));
+        assert_eq!(
+            client.stream_source(3).auth,
+            crate::stream::SourceAuth::None
+        );
+
+        // A server that does require a token: a clear "token required" hint, not "rejected".
+        let secured = api_server();
+        let error = RemoteClient::new(&secured.url, "")
+            .unwrap()
+            .library()
+            .unwrap_err();
+        assert!(matches!(error, RemoteError::TokenRequired(_)), "{error:?}");
+        assert!(error.is_unauthorized() && !error.is_offline());
+        assert!(error.localized(true).contains("服务器要求访问令牌"));
+        assert!(error.localized(false).contains("requires an access token"));
+        let stream = crate::stream::probe_stream(
+            &RemoteClient::new(&secured.url, "")
+                .unwrap()
+                .stream_source(1),
+        );
+        assert!(
+            matches!(stream, Err(RemoteError::TokenRequired(_))),
+            "{stream:?}"
+        );
+        // A wrong token stays "rejected".
+        let wrong = RemoteClient::new(&secured.url, "wrong")
+            .unwrap()
+            .library()
+            .unwrap_err();
+        assert!(matches!(wrong, RemoteError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn snapshot_download_is_streamed_atomically_and_cancellable() {
+        let server = api_server();
+        let client = RemoteClient::new(&server.url, "secret-token").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("snap.db");
+        let mut calls = 0;
+        let meta = client
+            .download_snapshot(
+                &target,
+                &mut |_, total| {
+                    calls += 1;
+                    assert_eq!(total, Some(300_000));
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(meta.bytes, 300_000);
+        assert_eq!(meta.library_id.as_deref(), Some("lib-1"));
+        assert_eq!((meta.revision, meta.schema_version), (Some(8), Some(3)));
+        assert!(calls >= 2);
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 300_000);
+        let cancelled = directory.path().join("cancelled.db");
+        let error = client
+            .download_snapshot(&cancelled, &mut |_, _| {}, &AtomicBool::new(true))
+            .unwrap_err();
+        assert!(matches!(error, RemoteError::Cancelled));
+        assert!(!cancelled.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    /// Barely compressible bytes, so a cut body is really cut.
+    fn database() -> Vec<u8> {
+        let mut state = 0x1234_5678_u32;
+        (0..700_000)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// `/library/snapshot` honouring `Accept-Encoding: zstd`, with the advertised
+    /// uncompressed length `claimed` (or the real one) and the body cut after `cut`.
+    fn zstd_server(claimed: Option<u64>, cut: Option<usize>) -> TestServer {
+        TestServer::start(move |request| {
+            let plain = database();
+            if request.header("accept-encoding") != Some("zstd") {
+                return TestResponse::bytes(200, plain);
+            }
+            let packed = zstd::encode_all(plain.as_slice(), 3).unwrap();
+            let response = TestResponse::bytes(200, packed)
+                .with_header("Content-Encoding", "zstd")
+                .with_header(
+                    "X-Uncompressed-Length",
+                    &claimed.unwrap_or(plain.len() as u64).to_string(),
+                )
+                .with_header("X-Library-Revision", "9");
+            match cut {
+                Some(bytes) => response.cut_after(bytes),
+                None => response,
+            }
+        })
+    }
+
+    #[test]
+    fn zstd_snapshots_are_decompressed_and_verified() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = zstd_server(None, None);
+        let client = RemoteClient::new(&server.url, "").unwrap();
+        let target = directory.path().join("snap.db");
+        let mut totals = Vec::new();
+        let meta = client
+            .download_snapshot(
+                &target,
+                &mut |received, total| totals.push((received, total)),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(meta.bytes, 700_000);
+        assert_eq!(meta.revision, Some(9));
+        assert_eq!(std::fs::read(&target).unwrap(), database());
+        // Progress counts database bytes against X-Uncompressed-Length.
+        assert!(totals.iter().all(|&(_, total)| total == Some(700_000)));
+        assert_eq!(totals.last().unwrap().0, 700_000);
+
+        // A wrong uncompressed length, or a cut body, fails without a target.
+        for (claimed, cut, label) in [
+            (Some(700_001), None, "size mismatch"),
+            (None, Some(100_000), "truncated"),
+        ] {
+            let server = zstd_server(claimed, cut);
+            let client = RemoteClient::new(&server.url, "").unwrap();
+            let target = directory.path().join(format!("{label}.db"));
+            let error = client
+                .download_snapshot(&target, &mut |_, _| {}, &AtomicBool::new(false))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    RemoteError::Protocol(_) | RemoteError::Unreachable(_)
+                ),
+                "{label}: {error:?}"
+            );
+            assert!(!target.exists(), "{label}");
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn waveforms_use_zstd_and_if_none_match() {
+        let json = br#"{"sample_rate":96000,"channels":2,"frames":100,"samples_per_pixel":2,"peaks":[[],[]],"start_frame":0,"end_frame":100,"total_frames":100}"#;
+        let server = TestServer::start(move |request| {
+            assert!(
+                request
+                    .path
+                    .starts_with("/api/v1/audio/7/waveform?buckets=64&colors=1"),
+                "{}",
+                request.path
+            );
+            if request.header("if-none-match") == Some("W/\"wf4-1\"") {
+                return TestResponse::bytes(304, Vec::new()).with_header("ETag", "W/\"wf4-1\"");
+            }
+            if request.path.contains("end_frame=100") {
+                return TestResponse::bytes(200, json.to_vec()).with_header("ETag", "W/\"wf4-1\"");
+            }
+            assert_eq!(request.header("accept-encoding"), Some("zstd"));
+            TestResponse::bytes(200, zstd::encode_all(&json[..], 3).unwrap())
+                .with_header("Content-Encoding", "zstd")
+                .with_header("ETag", "W/\"wf4-1\"")
+        });
+        let client = RemoteClient::new(&server.url, "").unwrap();
+        let cancel = AtomicBool::new(false);
+        let query = WaveformQuery {
+            buckets: 10,
+            colors: true,
+            start_frame: None,
+            end_frame: None,
+        };
+        let expected = WaveformReply::Data {
+            json: json.to_vec(),
+            etag: Some("W/\"wf4-1\"".into()),
+        };
+        assert_eq!(client.waveform(7, &query, None, &cancel).unwrap(), expected);
+        assert_eq!(
+            client
+                .waveform(7, &query, Some("W/\"wf4-1\""), &cancel)
+                .unwrap(),
+            WaveformReply::NotModified
+        );
+        // Identity encoding (no Content-Encoding) is accepted as is.
+        let plain = WaveformQuery {
+            start_frame: Some(0),
+            end_frame: Some(100),
+            ..query
+        };
+        assert_eq!(client.waveform(7, &plain, None, &cancel).unwrap(), expected);
+    }
+}

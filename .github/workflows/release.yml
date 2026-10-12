@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Windows portable package and publish
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the tag with all tags and history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check release version policy
+        run: ./tools/check-release.ps1 -Tag $env:RELEASE_TAG
+
+      - name: Validate, build (default + ASIO) and verify the portable package
+        run: ./tools/ci-release.ps1 -Tag $env:RELEASE_TAG
+
+      - name: Prepare release assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $latest = 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'
+          $digest = (Get-FileHash -LiteralPath $latest -Algorithm SHA256).Hash
+          $expected = ((Get-Content -LiteralPath ($latest + '.sha256') -Raw) -split '\s+')[0]
+          if ($digest -cne $expected) { throw 'Portable ZIP checksum mismatch.' }
+          New-Item -ItemType Directory -Force -Path dist/release | Out-Null
+          $zipName = "AudioLibExplorer-$($env:RELEASE_TAG)-win-x64-portable.zip"
+          Copy-Item -LiteralPath $latest -Destination "dist/release/$zipName" -Force
+          "$digest  $zipName" | Set-Content -LiteralPath "dist/release/$zipName.sha256" -Encoding ASCII
+          Copy-Item -LiteralPath doc/Rust_CI_Release.json -Destination dist/release/Rust_CI_Release.json -Force
+          $notes = Get-Content -LiteralPath doc/Rust_Release_Notes.md -Raw -Encoding UTF8
+          $notes = $notes.Replace('(Rust_Validation.md)', "(https://github.com/$($env:GITHUB_REPOSITORY)/blob/$($env:RELEASE_TAG)/doc/Rust_Validation.md)")
+          $notes += "`n`nCommit: $($env:GITHUB_SHA)`n`nSHA-256: $digest`n"
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/release/notes.md'), $notes, [Text.UTF8Encoding]::new($false))
+
+      - name: Create GitHub Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ghArgs = @($env:RELEASE_TAG, '--verify-tag', '--title', "AudioLib Explorer $($env:RELEASE_TAG)", '--notes-file', 'dist/release/notes.md')
+          if ($env:RELEASE_TAG.Contains('-')) { $ghArgs += '--prerelease' }
+          $ghArgs += (Get-ChildItem dist/release -File | Where-Object Name -ne 'notes.md' | ForEach-Object { $_.FullName })
+          gh release create @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

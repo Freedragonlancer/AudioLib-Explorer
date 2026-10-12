@@ -1,0 +1,11 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# Prevent asio-sys from implicitly downloading an unpinned SDK when ASIO is enabled.
+# Prepare this fixed directory with tools/prepare-asio.ps1 before an ASIO build.
+CPAL_ASIO_DIR = { value = "tools/.build-tools/asio-2.3.4/ASIOSDK", relative = true }
+

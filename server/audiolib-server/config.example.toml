@@ -1,0 +1,112 @@
+# server/audiolib-server/config.example.toml
+# Example configuration for audiolib-server. Copy it outside the repository and adjust it.
+# Typical locations: /etc/audiolib/config.toml (Linux), /usr/local/var/audiolib/config.toml
+# (macOS). All values below are documentation placeholders (192.0.2.0/24, example.com).
+# Start with:  audiolib-server --config /path/to/server.toml
+# (optional env token:  AUDIOLIB_SERVER_TOKEN='<secret>' audiolib-server --config ...)
+# (AUDIOLIB_SERVER_CONFIG=/path/to/server.toml may replace --config).
+# Relative paths below resolve against the directory containing this file.
+
+# Listen address (default "0.0.0.0:8790": all interfaces, LAN access).
+bind = "0.0.0.0:8790"
+
+# Existing AudioLib library (older schemas are migrated on open; current schema 5). The server never creates a library: create or
+# import one first, e.g. `AudioLibCli db create <path>`. A sidecar
+# `<library_db>.server-state.json` (library_id + revision) is written next to it.
+library_db = "/var/lib/audiolib/library.db"
+
+# Legacy switch: auth = true is the same as auth_mode = "all" and makes the environment
+# token mandatory at startup. Leave it false and use auth_mode instead.
+auth = false
+
+# Authentication mode (doc/api/README.md §2.2; the LAN-only admin page at
+# http://<host>:8790/admin can override it):
+#   "off"      - no endpoint needs a token
+#   "external" - default: LAN-direct requests need no token (Authorization is ignored);
+#                requests through a reverse proxy (X-Forwarded-For, Forwarded, X-Real-IP,
+#                X-Forwarded-Proto/Host) or from a non-private peer need
+#                `Authorization: Bearer <token>` (401 otherwise)
+#   "all"      - every endpoint except /health needs a token
+# Accepted tokens: the environment token below (if set) and tokens generated on the admin
+# page (stored hashed in tokens.json next to library_db, mode 0600).
+# auth_mode = "external"
+
+# Library management (doc/api/README.md §6.9): who may start/pause/resume/cancel scans and
+# remove records (POST /audio/remove) or folders (DELETE /folders/{id}). Removal only
+# makes the library forget records, never touches audio files. The admin page can
+# override it. Metadata writes, play counts and all reads are never affected.
+#   "all" - default: every authorized request
+#   "lan" - only LAN-direct requests (external ones get 403 MANAGE_FORBIDDEN)
+#   "off" - nobody (403 MANAGE_FORBIDDEN); use the server's CLI instead
+# manage_mode = "all"
+
+# Name of the environment variable holding the bearer token (>= 16 visible ASCII chars).
+# Required with auth = true, optional otherwise. Never stored in this file, never logged.
+token_env = "AUDIOLIB_SERVER_TOKEN"
+
+# Public base URL for clients outside the LAN (behind a reverse proxy; may carry a path
+# prefix), reported as `public_url` by /health. Usually set on the admin page instead.
+# public_url = "https://audiolib.example.com:8443"
+
+# Optional native TLS listener next to the HTTP port (all three or none; PEM files; the
+# client only trusts public-CA certificates). Usually a reverse proxy provides HTTPS; the
+# admin page can set, change or disable this without a restart.
+# tls_cert_path = "/path/to/fullchain.pem"
+# tls_key_path = "/path/to/privkey.pem"
+# tls_port = 8791
+
+# Maximum concurrent GET /audio/{id}/stream responses (1..=1024, default 16). Further
+# stream requests get 503 BUSY with Retry-After: 1 until a body finishes.
+# max_streams = 16
+
+# Seconds between background library change checks (PRAGMA data_version + file size/mtime).
+revision_poll_secs = 3
+
+# Optional directory for temporary GET /library/snapshot files (default: system temp dir).
+# snapshot_dir = "/var/lib/audiolib/tmp"
+# A snapshot that must first be prepared (a million-file library: 30-60 s) is waited for
+# at most snapshot_wait_secs (1..=3600, default 90; keep it below client/proxy header
+# timeouts), then GET /library/snapshot answers 503 BUSY with Retry-After while the
+# preparation continues in the background; the retry gets the finished snapshot.
+# snapshot_wait_secs = 90
+
+# Root directories (often a NAS whose disk sleeps) are checked in the background only:
+# one realpath + stat of each root directory (no listing, no file reads) at startup, every
+# root_check_secs (60..=86400, default 300) and when a stream finds the root offline.
+# /roots reports the cached result. A check that has not answered for root_offline_secs
+# (10..=3600, default 120) marks the root offline; shorter waits count as a waking disk.
+# root_check_secs = 300
+# root_offline_secs = 120
+
+# GET /audio/{id}/waveform results are cached in waveform_cache_dir (default: a
+# "waveforms" directory next to library_db), limited to waveform_cache_mb MiB
+# (16..=1048576, default 1024; least recently used entries go first). At most
+# max_waveforms (1..=64, default 4) waveform requests open/decode at once; more wait.
+# waveform_cache_dir = "waveforms"
+# waveform_cache_mb = 1024
+# max_waveforms = 4
+
+# GET /audio/{id}/preview (doc/api/README.md §8.1). Previews of both codecs have their own
+# max_previews slots (1..=1024, default 8; then 503 BUSY with Retry-After: 1), separate
+# from max_streams, so /stream downloads filling up never block previews. codec=pcm (WAV,
+# in-process) needs nothing else. codec=flac runs ffmpeg_path (absolute; default
+# Homebrew's /opt/homebrew/bin/ffmpeg); when it is missing the server still starts and
+# only codec=flac answers 503 TRANSCODER_UNAVAILABLE. At most max_transcodes (1..=64,
+# default 4) ffmpeg processes run at once; a further codec=flac request waits up to 0.5 s
+# for a slot, then gets 503 BUSY with Retry-After: 1.
+# max_previews = 8
+# ffmpeg_path = "/usr/bin/ffmpeg"        # Linux; Homebrew on Apple silicon: /opt/homebrew/bin/ffmpeg
+# max_transcodes = 4
+
+# server_path should be the real path (no symlinks), as stored by the scanner.
+# Roots can also be added and removed on the admin page (/admin -> 库根目录); once changed
+# there, the list in admin-settings.json replaces the [[roots]] below.
+[[roots]]
+name = "SFX_Main"
+server_path = "/srv/audiolib/music/SFX_Main"
+webdav_url = "http://nas.example.lan:8080/SFX_Main"
+
+[[roots]]
+name = "Field_Recordings"
+server_path = "/srv/audiolib/music/Field_Recordings"
+# webdav_url is optional; it is reported as null when absent.

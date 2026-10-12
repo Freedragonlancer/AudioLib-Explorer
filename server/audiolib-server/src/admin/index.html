@@ -1,0 +1,139 @@
+<!doctype html>
+<!-- server/audiolib-server/src/admin/index.html: AudioLib server admin page (LAN only).
+     Embedded in the binary; no build step, no external resources. Logic in admin.js. -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AudioLib 服务端管理</title>
+<style>
+  :root { color-scheme: light dark; --border: #8884; --muted: #888; --accent: #2a6ef5; --bad: #d33; --ok: #2a2; }
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  section { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 14px 0; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .row label.k { min-width: 110px; color: var(--muted); }
+  input[type=text], input[type=number] { flex: 1; min-width: 220px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+  input.mono, code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: inherit; cursor: pointer; font: inherit; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .secret { border: 2px solid var(--ok); border-radius: 8px; padding: 10px; margin: 8px 0; }
+  .warn { color: var(--bad); }
+  .ok { color: var(--ok); }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 10px; border: 1px solid var(--border); font-size: 12px; }
+  #toast { position: fixed; right: 16px; bottom: 16px; padding: 8px 12px; border-radius: 6px; background: #333; color: #fff; display: none; max-width: 70%; }
+  .badge { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--accent); color: #fff; font-size: 11px; margin-left: 4px; }
+  .badge.link { background: var(--muted); }
+  .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin: 4px 0; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; }
+  #modal { position: fixed; inset: 0; background: #0008; display: none; align-items: center; justify-content: center; z-index: 10; }
+  #modal .box { background: Canvas; color: CanvasText; border-radius: 10px; padding: 14px 16px; width: min(720px, 94vw); max-height: 86vh; display: flex; flex-direction: column; }
+  #fs-crumbs { margin: 4px 0; word-break: break-all; }
+  #fs-crumbs a, #fs-list a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  #fs-list { overflow: auto; border: 1px solid var(--border); border-radius: 6px; min-height: 160px; flex: 1; }
+  #fs-list div { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  #fs-list div:hover { background: #8882; }
+  .inline-error { color: var(--bad); min-height: 1.4em; white-space: pre-wrap; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>AudioLib 服务端管理</h1>
+<div class="muted">只能在局域网内直接打开（经反向代理或公网访问一律 403）。版本 <span id="version">…</span> · 库状态 <span id="library">…</span></div>
+<div id="warnings" class="warn"></div>
+
+<section>
+  <h2>库根目录</h2>
+  <div class="muted">服务端扫描并共享给客户端的目录（客户端「根目录」列表即来自这里）。添加后立即生效，无需重启；移除只让库忘记该根目录下的记录（文件夹与音频记录、播放历史等），<b>绝不删除任何音频文件</b>，重新添加并扫描即可恢复。可选择服务器上的本地磁盘或已挂载的网络共享（SMB）。</div>
+  <table>
+    <thead><tr><th>名称</th><th>路径</th><th>状态</th><th>文件</th><th>缺失</th><th>最近扫描</th><th></th></tr></thead>
+    <tbody id="roots"></tbody>
+  </table>
+  <div id="scan-box" class="secret hidden">
+    <div><b>扫描中：<span id="scan-root"></span></b> <span class="muted" id="scan-state"></span></div>
+    <div class="bar"><div id="scan-bar"></div></div>
+    <div class="muted mono" id="scan-detail"></div>
+    <div class="row"><button id="scan-pause">暂停</button><button id="scan-resume">继续</button><button class="danger" id="scan-cancel">取消</button></div>
+  </div>
+  <div class="row"><label class="k">添加根目录</label><input id="root-path" class="mono" type="text" placeholder="服务器上的绝对路径，如 /srv/audiolib/music/Sounds"><button id="root-browse">浏览服务器…</button></div>
+  <div class="row"><label class="k">名称</label><input id="root-name" type="text" maxlength="128" placeholder="客户端看到的名称，默认取文件夹名"><button class="primary" id="root-add">添加</button></div>
+  <div class="inline-error" id="roots-error"></div>
+</section>
+
+<div id="modal"><div class="box">
+  <h2>选择服务器目录</h2>
+  <div id="fs-crumbs"></div>
+  <div class="muted" id="fs-info"></div>
+  <div id="fs-list"></div>
+  <div class="inline-error" id="fs-error"></div>
+  <div class="row"><button class="primary" id="fs-select">选择此文件夹</button><button id="fs-up">上一级</button><button id="fs-home">起点</button><label class="muted"><input type="checkbox" id="fs-hidden"> 显示隐藏目录</label><button id="fs-cancel" style="margin-left:auto">取消</button></div>
+</div></div>
+
+<section>
+  <h2>客户端连接</h2>
+  <div class="muted">客户端「服务器地址」填下面其中一个（只填到端口或路径前缀，不要加 <code>/api/v1</code>）。</div>
+  <div class="row"><label class="k">外网地址</label><input id="conn-public" class="mono" type="text" readonly><button data-copy="conn-public">复制</button></div>
+  <div class="row"><label class="k">局域网地址</label><input id="conn-lan" class="mono" type="text" readonly><button data-copy="conn-lan">复制</button></div>
+  <div class="row"><label class="k">鉴权</label><span id="conn-auth"></span></div>
+</section>
+
+<section>
+  <h2>公网地址</h2>
+  <div class="muted">外网客户端使用的地址，例如 <code>https://audiolib.example.com:8443</code>，可带路径前缀（如 <code>https://example.com/audiolib</code>）。由反向代理转发到本机 8790 端口；反代要求见 API 文档「外网反代要求」。保存后 <code>/api/v1/health</code> 的 <code>public_url</code> 立即更新。</div>
+  <div class="row"><label class="k">公网地址</label><input id="public-url" class="mono" type="text" placeholder="https://audiolib.example.com:8443"><button class="primary" id="save-public">保存</button><button id="clear-public">清除</button></div>
+  <div class="row"><label class="k">局域网地址</label><input id="lan-url" class="mono" type="text" placeholder="留空 = 自动检测"><button id="save-lan">保存</button><button id="clear-lan">自动检测</button></div>
+  <div class="muted" id="lan-candidates"></div>
+  <div class="muted" id="public-source"></div>
+</section>
+
+<section>
+  <h2>鉴权模式</h2>
+  <div class="row"><label><input type="radio" name="mode" value="off"> off：任何请求都不需要令牌</label></div>
+  <div class="row"><label><input type="radio" name="mode" value="external"> external（默认）：局域网直连不需要令牌（带了也忽略）；经反向代理或来自公网的请求需要 <code>Authorization: Bearer &lt;令牌&gt;</code></label></div>
+  <div class="row"><label><input type="radio" name="mode" value="all"> all：除 <code>/health</code> 外全部需要令牌（局域网也要）</label></div>
+  <div class="row"><button class="primary" id="save-mode">保存模式</button><button id="reset-mode">恢复配置文件默认</button><span class="muted" id="mode-source"></span></div>
+  <div class="warn" id="mode-warning"></div>
+</section>
+
+<section>
+  <h2>库管理权限</h2>
+  <div class="muted">控制谁可以远程扫描（开始 / 暂停 / 继续 / 取消）以及「从库中移除」记录或目录（只删除库记录，不删除文件，重新扫描会恢复）。标注编辑和播放计数不受此设置影响（只按上面的鉴权模式）。保存后立即生效。</div>
+  <div class="row"><label><input type="radio" name="manage" value="all"> all（默认）：所有通过鉴权的客户端都可以</label></div>
+  <div class="row"><label><input type="radio" name="manage" value="lan"> lan：仅局域网直连的客户端可以；经反向代理或来自公网的请求返回 403（客户端按钮显示「仅局域网可用」）</label></div>
+  <div class="row"><label><input type="radio" name="manage" value="off"> off：任何客户端都不可以（403），只能在服务端本机操作</label></div>
+  <div class="row"><button class="primary" id="save-manage">保存</button><button id="reset-manage">恢复配置文件默认</button><span class="muted" id="manage-source"></span></div>
+</section>
+
+<section>
+  <h2>访问令牌</h2>
+  <div class="muted">生成后明文只显示这一次，服务端只保存 SHA-256 哈希。撤销立即生效。<span id="env-token"></span></div>
+  <div class="row"><label class="k">名称</label><input id="token-name" type="text" maxlength="64" placeholder="例如：Paul 笔记本"><button class="primary" id="create-token">生成令牌</button></div>
+  <div id="new-secret" class="secret hidden">
+    <div><b>新令牌「<span id="new-secret-name"></span>」</b>（只显示这一次，请立即复制到客户端）：</div>
+    <div class="row"><input id="new-secret-value" class="mono" type="text" readonly><button class="primary" data-copy="new-secret-value">复制</button><button id="hide-secret">我已保存</button></div>
+  </div>
+  <table>
+    <thead><tr><th>名称</th><th>生成时间</th><th>最近使用</th><th></th></tr></thead>
+    <tbody id="tokens"></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>原生 HTTPS（可选）</h2>
+  <div class="muted">一般用反向代理提供 HTTPS，这里不用填。若要服务端自己监听 HTTPS：填证书链 PEM、私钥 PEM 的绝对路径和端口（如 8791），8790 的 HTTP 照常。保存前会校验文件，保存后立即生效，无需重启。<b>注意：本版本客户端只信任公共 CA 签发的证书（如 Let's Encrypt），自签名证书客户端不会接受。</b></div>
+  <div class="row"><label class="k">证书 PEM</label><input id="tls-cert" class="mono" type="text" placeholder="/path/to/fullchain.pem"></div>
+  <div class="row"><label class="k">私钥 PEM</label><input id="tls-key" class="mono" type="text" placeholder="/path/to/privkey.pem"></div>
+  <div class="row"><label class="k">HTTPS 端口</label><input id="tls-port" type="number" min="1" max="65535" placeholder="8791"></div>
+  <div class="row"><button class="primary" id="save-tls">校验并启用</button><button class="danger" id="disable-tls">停用</button><span id="tls-state"></span></div>
+</section>
+
+<div class="muted">根目录改动也保存在设置文件中（一旦在这里改过，就以这里的列表为准，不再读 config.toml 的 [[roots]]）。设置文件：<span id="files" class="mono"></span>（不修改 config.toml；这里的设置覆盖 config.toml 中的同名项）</div>
+<div id="toast"></div>
+<script src="/admin/admin.js"></script>
+</body>
+</html>

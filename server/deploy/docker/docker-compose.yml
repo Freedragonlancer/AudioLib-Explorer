@@ -1,0 +1,31 @@
+# docker compose -f server/deploy/docker/docker-compose.yml up -d --build
+# Run from the repository root. Put the token in an .env file next to this compose file
+# (or export it): AUDIOLIB_SERVER_TOKEN=<a long random secret, >= 16 visible ASCII chars>
+services:
+  audiolib-server:
+    build:
+      context: ../../..            # repository root
+      dockerfile: server/deploy/docker/Dockerfile
+      args:
+        WITH_FFMPEG: "true"        # "false" = slim image, codec=flac previews answer 503
+    image: audiolib-server:local
+    container_name: audiolib-server
+    restart: unless-stopped
+    ports:
+      # Host port 8790 -> container 8790. Bind to 127.0.0.1 and put a TLS reverse proxy in
+      # front for anything reachable from the internet (see deploy/README.md).
+      - "8790:8790"
+    environment:
+      AUDIOLIB_SERVER_TOKEN: ${AUDIOLIB_SERVER_TOKEN:?set AUDIOLIB_SERVER_TOKEN}
+    volumes:
+      - /srv/audiolib/music:/music:ro        # your audio files, read-only
+      - audiolib-data:/data                  # library.db, snapshots, caches, tokens.json
+      # - ./my-config.toml:/config/config.toml:ro   # optional custom configuration
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  audiolib-data:

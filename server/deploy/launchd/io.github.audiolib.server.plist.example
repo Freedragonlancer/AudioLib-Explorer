@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example LaunchAgent for audiolib-server on macOS.
+
+  Install:
+    cp io.github.audiolib.server.plist.example ~/Library/LaunchAgents/io.github.audiolib.server.plist
+    # edit the paths below (this example uses /usr/local/var/audiolib and /opt/audiolib)
+    launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/io.github.audiolib.server.plist
+  Restart after a binary swap:
+    launchctl kickstart -k "gui/$(id -u)/io.github.audiolib.server"
+
+  The token: do NOT put it in this file. /opt/audiolib/run.sh is a tiny wrapper such as
+      #!/bin/sh
+      AUDIOLIB_SERVER_TOKEN="$(cat /usr/local/var/audiolib/token)"; export AUDIOLIB_SERVER_TOKEN
+      exec /opt/audiolib/audiolib-server --config /usr/local/var/audiolib/config.toml
+  (chmod 600 the token file). Optionally start it through the launcher in
+  server/launcher/ (macOS only, avoids repeated volume-access prompts):
+  ProgramArguments = [/opt/audiolib/audiolib-launcher, /bin/sh, /opt/audiolib/run.sh]
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.audiolib.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/opt/audiolib/run.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/audiolib</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/audiolib/log/server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/audiolib/log/server.err.log</string>
+</dict>
+</plist>

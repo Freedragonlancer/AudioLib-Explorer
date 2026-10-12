@@ -1,0 +1,7 @@
+# server/rust-toolchain.toml
+# Overrides the repository's Windows MSVC toolchain when cargo runs inside server/
+# (macOS host builds of audiolib-server). Resolves to the host triple, e.g. aarch64-apple-darwin.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/audiolib-core", "crates/audiolib-db", "crates/audiolib-audio", "crates/audiolib-windows", "crates/audiolib-ipc", "app/audiolib-desktop", "app/audiolib-cli", "crates/audiolib-remote", "server/audiolib-server"]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "chrono"] }
+slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+slint-build = "=1.17.1"
+cpal = "=0.18.2"
+symphonia = { version = "=0.6.1", default-features = false, features = ["wav", "pcm", "adpcm"] }
+rubato = "=5.0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tempfile = "3"
+icu_casemap = "=2.3.0"
+# audiolib-remote (server-mode client; rustls keeps OpenSSL out of Windows/macOS builds)
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+# TLS roots: the OS trust store through rustls-platform-verifier (same rustls/ring as ureq).
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rustls-platform-verifier = "0.7"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+# audiolib-server (LAN HTTP API, see doc/api/README.md)
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-core = "0.3"
+http-body-util = "0.1"
+toml = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

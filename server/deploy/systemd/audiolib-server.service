@@ -1,0 +1,52 @@
+# /etc/systemd/system/audiolib-server.service
+#
+# Setup (as root):
+#   useradd --system --home /var/lib/audiolib --shell /usr/sbin/nologin audiolib
+#   install -d -o audiolib -g audiolib /var/lib/audiolib
+#   install -d /etc/audiolib /opt/audiolib
+#   install -m 755 audiolib-server /opt/audiolib/audiolib-server
+#   install -m 644 config.toml /etc/audiolib/config.toml      # see server/audiolib-server/config.example.toml
+#   # Token (>= 16 visible ASCII characters); keep the file readable by root only:
+#   install -m 600 /dev/null /etc/audiolib/audiolib.env
+#   echo 'AUDIOLIB_SERVER_TOKEN=<replace-with-a-long-random-secret>' >> /etc/audiolib/audiolib.env
+#   systemctl daemon-reload && systemctl enable --now audiolib-server
+[Unit]
+Description=AudioLib server (remote library API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=audiolib
+Group=audiolib
+# Provides AUDIOLIB_SERVER_TOKEN (the variable named by token_env in config.toml).
+EnvironmentFile=/etc/audiolib/audiolib.env
+ExecStart=/opt/audiolib/audiolib-server --config /etc/audiolib/config.toml
+Restart=on-failure
+RestartSec=5
+# Let a large library finish its graceful shutdown.
+TimeoutStopSec=30
+
+# Basic hardening. The library, snapshots and caches live under /var/lib/audiolib;
+# the music directory is mounted read-only (the server never modifies audio files).
+StateDirectory=audiolib
+WorkingDirectory=/var/lib/audiolib
+ReadWritePaths=/var/lib/audiolib
+ReadOnlyPaths=-/srv/audiolib/music
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

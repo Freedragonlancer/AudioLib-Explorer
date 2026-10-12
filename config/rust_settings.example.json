@@ -1,0 +1,22 @@
+{
+  "language": "en",
+  "active_database": null,
+  "audition_play_on_single_click": false,
+  "playback": {
+    "backend": "wasapi",
+    "device_id": null,
+    "buffer_frames": 0,
+    "output_pair": 0,
+    "source_pair": 0,
+    "volume": 0.8,
+    "rate_policy": "device_default"
+  },
+  "allowed_scan_roots": [],
+  "data_source": {
+    "mode": "local",
+    "server_url": "",
+    "webdav": {
+      "username": ""
+    }
+  }
+}

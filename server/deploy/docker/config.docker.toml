@@ -1,0 +1,20 @@
+# Config baked into the image at /config/config.toml; override by mounting your own file.
+# See server/audiolib-server/config.example.toml for every option.
+bind = "0.0.0.0:8790"
+
+# The server never creates a library: place an existing library.db in the data volume.
+library_db = "/data/library.db"
+
+# Every endpoint except /health needs a token (AUDIOLIB_SERVER_TOKEN, see docker-compose.yml).
+auth_mode = "all"
+token_env = "AUDIOLIB_SERVER_TOKEN"
+
+snapshot_dir = "/data/tmp"
+waveform_cache_dir = "/data/waveforms"
+
+# ffmpeg is optional (codec=flac previews); present when the image was built with WITH_FFMPEG=true.
+ffmpeg_path = "/usr/bin/ffmpeg"
+
+[[roots]]
+name = "Music"
+server_path = "/music"

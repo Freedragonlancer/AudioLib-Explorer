@@ -1,0 +1,647 @@
+// crates/audiolib-core/src/config.rs
+//! Portable defaults and one-time, read-only interpretation of legacy YAML settings.
+use crate::{Error, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+pub use crate::profiles::{
+    ACTIVE_LOCAL, ActiveSource, DEFAULT_PROFILE_ID, ProfileKind, ProfileMigration, ServerProfile,
+    TestSummary, default_transcode,
+};
+
+/// Where the desktop reads library data from. Old settings files default to `Local`.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataSourceMode {
+    /// The local SQLite library and local asset paths (the original behaviour).
+    #[default]
+    Local,
+    /// A read-only cached snapshot of an AudioLib server library, audio over WebDAV.
+    Server,
+}
+
+/// Non-secret WebDAV preferences. The password is stored separately by audiolib-remote.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebDavSettings {
+    /// Quick fallback: `<base_url>/<root name>/<relative path>` when neither a user
+    /// override nor a server-provided URL exists for a scan root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub username: String,
+    /// User WebDAV URL per server scan root name. An entry overrides the server's
+    /// suggested `webdav_url`; a missing or empty entry uses the server default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub root_urls: BTreeMap<String, String>,
+}
+
+/// Default seconds between background server revision checks.
+pub const DEFAULT_POLL_INTERVAL_SECS: u32 = 60;
+/// Smallest accepted non-zero revision check interval.
+pub const MIN_POLL_INTERVAL_SECS: u32 = 10;
+/// Largest accepted revision check interval (one day).
+pub const MAX_POLL_INTERVAL_SECS: u32 = 86_400;
+
+fn default_poll_interval() -> u32 {
+    DEFAULT_POLL_INTERVAL_SECS
+}
+
+/// Default memory for server-mode audition streams (MiB).
+pub const DEFAULT_AUDITION_MEMORY_MB: u32 = 512;
+/// Accepted range of [`DataSourceSettings::audition_memory_mb`].
+pub const MIN_AUDITION_MEMORY_MB: u32 = 32;
+pub const MAX_AUDITION_MEMORY_MB: u32 = 8192;
+
+fn default_audition_memory() -> u32 {
+    DEFAULT_AUDITION_MEMORY_MB
+}
+
+/// Data source preferences persisted in settings.json. Secrets (API token and WebDAV
+/// password) are deliberately absent: they live in a protected sidecar file.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataSourceSettings {
+    #[serde(default)]
+    pub mode: DataSourceMode,
+    /// Server base URL such as `http://192.168.1.10:8790` or
+    /// `https://audiolib.example.com:18086/audiolib`; `/api/v1` is appended by clients
+    /// (see [`crate::server_url`]).
+    #[serde(default)]
+    pub server_url: String,
+    #[serde(default)]
+    pub webdav: WebDavSettings,
+    /// Seconds between background `GET /library` revision checks in server mode;
+    /// `0` disables periodic checks (manual refresh still checks).
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u32,
+    /// Download and open a new snapshot automatically when the server revision or
+    /// library identity changes, instead of only showing a notice with a Sync action.
+    #[serde(default)]
+    pub auto_sync: bool,
+    /// Memory (MiB) for server-mode audition: streams are held in memory, least recently
+    /// used first out, never written to disk.
+    #[serde(default = "default_audition_memory")]
+    pub audition_memory_mb: u32,
+    /// Legacy "always audition the original" switch of earlier builds. Superseded by the
+    /// per-profile [`crate::profiles::ServerProfile::transcode`]: read once when profiles
+    /// are migrated (`true` → transcode off), afterwards written as the inverse of the
+    /// active profile's choice so older builds behave the same.
+    #[serde(default)]
+    pub audition_original: bool,
+    /// Active data source: [`ACTIVE_LOCAL`] or a profile id; `None` in settings written
+    /// before profiles existed (see [`DataSourceSettings::migrate_profiles`]). `mode` and
+    /// `server_url` above mirror it for older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// Saved server connections (LAN and external addresses are separate profiles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ServerProfile>,
+}
+
+impl Default for DataSourceSettings {
+    fn default() -> Self {
+        Self {
+            mode: DataSourceMode::default(),
+            server_url: String::new(),
+            webdav: WebDavSettings::default(),
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            auto_sync: false,
+            audition_memory_mb: DEFAULT_AUDITION_MEMORY_MB,
+            audition_original: false,
+            active: None,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+impl DataSourceSettings {
+    /// Validate server-mode fields before they are saved or used for a connection.
+    pub fn validate(&self) -> Result<()> {
+        if self.mode == DataSourceMode::Server {
+            crate::server_url::ServerAddress::parse(&self.server_url)?;
+        }
+        if self.poll_interval_secs != 0
+            && !(MIN_POLL_INTERVAL_SECS..=MAX_POLL_INTERVAL_SECS).contains(&self.poll_interval_secs)
+        {
+            return Err(Error::Validation(format!(
+                "Revision check interval must be 0 (off) or {MIN_POLL_INTERVAL_SECS}..={MAX_POLL_INTERVAL_SECS} seconds"
+            )));
+        }
+        if !(MIN_AUDITION_MEMORY_MB..=MAX_AUDITION_MEMORY_MB).contains(&self.audition_memory_mb) {
+            return Err(Error::Validation(format!(
+                "Audition memory must be {MIN_AUDITION_MEMORY_MB}..={MAX_AUDITION_MEMORY_MB} MiB"
+            )));
+        }
+        if let Some(base) = self
+            .webdav
+            .base_url
+            .as_deref()
+            .filter(|url| !url.is_empty())
+        {
+            validate_http_url(base, "WebDAV base URL")?;
+        }
+        for (name, url) in &self.webdav.root_urls {
+            if !url.trim().is_empty() {
+                validate_http_url(url, &format!("WebDAV URL for {name}"))?;
+            }
+        }
+        if self.webdav.username.len() > 256 || self.webdav.username.contains(['\r', '\n']) {
+            return Err(Error::Validation("WebDAV username is invalid".into()));
+        }
+        self.validate_profiles()?;
+        Ok(())
+    }
+}
+
+/// Validate one set of WebDAV preferences (a profile override has the global shape).
+pub(crate) fn validate_webdav(webdav: &WebDavSettings) -> Result<()> {
+    if let Some(base) = webdav.base_url.as_deref().filter(|url| !url.is_empty()) {
+        validate_http_url(base, "WebDAV base URL")?;
+    }
+    for (name, url) in &webdav.root_urls {
+        if !url.trim().is_empty() {
+            validate_http_url(url, &format!("WebDAV URL for {name}"))?;
+        }
+    }
+    if webdav.username.len() > 256 || webdav.username.contains(['\r', '\n']) {
+        return Err(Error::Validation("WebDAV username is invalid".into()));
+    }
+    Ok(())
+}
+
+/// Accept only absolute http(s) URLs with a host and no embedded credentials.
+pub fn validate_http_url(url: &str, label: &str) -> Result<()> {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .ok_or_else(|| Error::Validation(format!("{label} must start with http:// or https://")))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty()
+        || authority.contains('@')
+        || trimmed.len() > 2048
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(Error::Validation(format!(
+            "{label} requires a host and must not contain spaces or credentials"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppPaths {
+    pub database: PathBuf,
+    pub cache: PathBuf,
+    pub logs: PathBuf,
+    pub settings: PathBuf,
+    pub legacy_database: Option<PathBuf>,
+    pub audio_terms: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub paths: AppPaths,
+    pub language: String,
+    pub playback: serde_json::Value,
+    /// Start preview playback when an audio list item is selected by a single click.
+    /// Disabled by default so established settings retain double-click audition.
+    #[serde(default)]
+    pub audition_play_on_single_click: bool,
+    #[serde(default)]
+    pub allowed_scan_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub data_source: DataSourceSettings,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedPreferences {
+    #[serde(default)]
+    active_database: Option<PathBuf>,
+    #[serde(default = "english")]
+    language: String,
+    #[serde(default = "default_playback")]
+    playback: serde_json::Value,
+    #[serde(default)]
+    audition_play_on_single_click: bool,
+    #[serde(default)]
+    allowed_scan_roots: Vec<PathBuf>,
+    #[serde(default)]
+    data_source: DataSourceSettings,
+}
+fn english() -> String {
+    "en".into()
+}
+fn default_playback() -> serde_json::Value {
+    serde_json::json!({"backend":"wasapi","device_id":null,"buffer_frames":0,
+        "output_pair":0,"source_pair":0,"volume":0.8,"rate_policy":"device_default"})
+}
+
+impl AppConfig {
+    /// Load user preferences, finding legacy settings without modifying the old library.
+    pub fn load_default() -> Result<Self> {
+        Self::load_in(Self::default_root()?)
+    }
+
+    /// The user data root: `AUDIOLIB_DATA_DIR`, else `%LOCALAPPDATA%/AudioLibExplorer/v1`.
+    pub fn default_root() -> Result<PathBuf> {
+        Ok(
+            if let Some(override_path) = std::env::var_os("AUDIOLIB_DATA_DIR") {
+                PathBuf::from(override_path)
+            } else if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                PathBuf::from(local).join("AudioLibExplorer").join("v1")
+            } else {
+                std::env::current_dir()?.join(".audiolib-user")
+            },
+        )
+    }
+
+    /// Directory holding settings.json and all per-user runtime state.
+    pub fn data_root(&self) -> PathBuf {
+        self.paths
+            .settings
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Load settings from an explicit user-data root; useful for isolated validation.
+    pub fn load_in(root: PathBuf) -> Result<Self> {
+        let mut roots = vec![std::env::current_dir()?];
+        if let Ok(exe) = std::env::current_exe() {
+            roots.extend(exe.ancestors().skip(1).take(5).map(PathBuf::from));
+        }
+        Self::load_with_roots(root, &roots)
+    }
+
+    fn load_with_roots(root: PathBuf, roots: &[PathBuf]) -> Result<Self> {
+        let legacy_root = roots
+            .iter()
+            .find(|path| path.join("config/audiolib_config.yaml").is_file())
+            .cloned();
+        let settings = root.join("settings.json");
+        let mut config = Self {
+            paths: AppPaths {
+                database: root.join("library.db"),
+                cache: root.join("cache"),
+                logs: root.join("logs"),
+                settings,
+                legacy_database: None,
+                audio_terms: roots
+                    .iter()
+                    .map(|path| path.join("resources/audio_terms.txt"))
+                    .find(|path| path.is_file()),
+            },
+            language: english(),
+            playback: default_playback(),
+            audition_play_on_single_click: false,
+            allowed_scan_roots: Vec::new(),
+            data_source: DataSourceSettings::default(),
+        };
+        // Established Rust state is independent of legacy YAML validity or presence.
+        if !config.paths.settings.exists()
+            && !config.paths.database.exists()
+            && let Some(legacy_root) = legacy_root
+        {
+            let yaml_path = legacy_root.join("config/audiolib_config.yaml");
+            let yaml: serde_yaml::Value = serde_yaml::from_slice(&std::fs::read(yaml_path)?)
+                .map_err(|error| Error::Validation(format!("Legacy config: {error}")))?;
+            let old_path = yaml["database"]["path"]
+                .as_str()
+                .unwrap_or("data/audiolib.db");
+            let path = PathBuf::from(old_path);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                legacy_root.join(path)
+            };
+            if path.is_file() && path != config.paths.database {
+                config.paths.legacy_database = Some(path);
+            }
+            if let Some(language) = yaml["application"]["language"].as_str() {
+                config.language = language.into();
+            }
+            if let Some(volume) = yaml["playback"]["default_volume"].as_f64()
+                && volume.is_finite()
+                && (0.0..=1.0).contains(&volume)
+            {
+                config.playback["volume"] = serde_json::json!(volume);
+            }
+            if let Some(roots) = yaml["security"]["allowed_scan_roots"].as_sequence() {
+                config.allowed_scan_roots = roots
+                    .iter()
+                    .filter_map(|value| value.as_str().map(PathBuf::from))
+                    .collect();
+            }
+        }
+        if config.paths.settings.exists() {
+            let saved: SavedPreferences =
+                serde_json::from_slice(&std::fs::read(&config.paths.settings)?)
+                    .map_err(|error| Error::Validation(format!("User settings: {error}")))?;
+            config.language = saved.language;
+            config.playback = saved.playback;
+            config.audition_play_on_single_click = saved.audition_play_on_single_click;
+            config.allowed_scan_roots = saved.allowed_scan_roots;
+            config.data_source = saved.data_source;
+            // Single-server settings become one profile; older-client edits of the old
+            // fields are folded into the profiles. Persisted by the next save; the first
+            // migration keeps a one-time copy of the original file.
+            if config.data_source.migrate_profiles() == ProfileMigration::Created {
+                let backup = config.paths.settings.with_extension("json.pre-profiles");
+                if !backup.exists() {
+                    let _ = std::fs::copy(&config.paths.settings, &backup);
+                }
+            }
+            if let Some(path) = saved.active_database {
+                config.paths.database = if path.is_absolute() {
+                    path
+                } else {
+                    root.join(path)
+                };
+                config.paths.legacy_database = None;
+            }
+        }
+        if config.language != "cn" && config.language != "en" {
+            config.language = english();
+        }
+        for directory in [&root, &config.paths.cache, &config.paths.logs] {
+            std::fs::create_dir_all(directory)?;
+        }
+        Ok(config)
+    }
+
+    /// Atomically persist new preferences separately from legacy YAML.
+    pub fn save(&self) -> Result<()> {
+        let saved = SavedPreferences {
+            active_database: Some(if self.paths.database.is_absolute() {
+                self.paths.database.clone()
+            } else {
+                std::env::current_dir()?.join(&self.paths.database)
+            }),
+            language: self.language.clone(),
+            playback: self.playback.clone(),
+            audition_play_on_single_click: self.audition_play_on_single_click,
+            allowed_scan_roots: self.allowed_scan_roots.clone(),
+            data_source: {
+                // Code that edits `mode` / `server_url` directly keeps working: the
+                // profiles follow those fields before they are written.
+                let mut data_source = self.data_source.clone();
+                data_source.migrate_profiles();
+                data_source
+            },
+        };
+        let data = serde_json::to_vec_pretty(&saved)
+            .map_err(|error| Error::Validation(error.to_string()))?;
+        let temporary = self
+            .paths
+            .settings
+            .with_extension(format!("tmp-{}", std::process::id()));
+        let mut file = std::fs::File::create(&temporary)?;
+        use std::io::Write;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, &self.paths.settings)?;
+        Ok(())
+    }
+
+    /// Select an existing, already validated library; saving remains an explicit step.
+    pub fn select_database(&mut self, path: &Path) -> Result<()> {
+        if !path.is_file() {
+            return Err(Error::NotFound(format!(
+                "Library database {}",
+                path.display()
+            )));
+        }
+        self.paths.database = path.canonicalize()?;
+        self.paths.legacy_database = None;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_settings_keep_double_click_audition() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("settings.json"),
+            r#"{"language":"cn","playback":{"volume":0.35},"allowed_scan_roots":[]}"#,
+        )
+        .unwrap();
+        let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        assert!(!config.audition_play_on_single_click);
+        assert_eq!(config.language, "cn");
+        assert_eq!(config.playback["volume"], serde_json::json!(0.35));
+    }
+
+    #[test]
+    fn single_click_audition_preference_survives_enabling_and_disabling() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_owned();
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert!(!config.audition_play_on_single_click);
+        config.language = "cn".into();
+        config.playback["volume"] = serde_json::json!(0.35);
+        for enabled in [true, false] {
+            config.audition_play_on_single_click = enabled;
+            config.save().unwrap();
+            config.save().unwrap();
+            let saved: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.path().join("settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["audition_play_on_single_click"], enabled);
+            config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(config.audition_play_on_single_click, enabled);
+            assert_eq!(config.language, "cn");
+            assert_eq!(config.playback["volume"], serde_json::json!(0.35));
+        }
+    }
+
+    #[test]
+    fn selected_library_is_persisted_independently_of_working_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let library = directory.path().join("another.db");
+        std::fs::write(&library, []).unwrap();
+        let mut config = AppConfig::load_in(directory.path().join("userdata")).unwrap();
+        config.select_database(&library).unwrap();
+        config.save().unwrap();
+        let loaded = AppConfig::load_in(directory.path().join("userdata")).unwrap();
+        assert_eq!(loaded.paths.database, library.canonicalize().unwrap());
+        assert!(loaded.paths.legacy_database.is_none());
+    }
+    #[test]
+    fn old_settings_load_as_local_mode_and_data_source_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("settings.json"),
+            r#"{"language":"cn","active_database":null,"allowed_scan_roots":[]}"#,
+        )
+        .unwrap();
+        let mut config = AppConfig::load_in(directory.path().to_owned()).unwrap();
+        assert_eq!(config.data_source, DataSourceSettings::default());
+        assert_eq!(config.data_source.mode, DataSourceMode::Local);
+        assert_eq!(
+            config.data_source.poll_interval_secs,
+            DEFAULT_POLL_INTERVAL_SECS
+        );
+        assert!(!config.data_source.auto_sync);
+        config.data_source.poll_interval_secs = 120;
+        config.data_source.auto_sync = true;
+        config.data_source.mode = DataSourceMode::Server;
+        config.data_source.server_url = "http://192.168.1.10:8790".into();
+        config.data_source.webdav.username = "sound".into();
+        config
+            .data_source
+            .webdav
+            .root_urls
+            .insert("SFX".into(), "http://nas/dav/SFX".into());
+        config.data_source.validate().unwrap();
+        config.save().unwrap();
+        let saved = std::fs::read_to_string(directory.path().join("settings.json")).unwrap();
+        assert!(saved.contains("\"mode\": \"server\""));
+        assert!(!saved.contains("token") && !saved.contains("password"));
+        let loaded = AppConfig::load_in(directory.path().to_owned()).unwrap();
+        // The server set through the old fields was saved as the active profile.
+        let mut expected = config.data_source.clone();
+        assert_eq!(expected.migrate_profiles(), ProfileMigration::Created);
+        assert_eq!(loaded.data_source, expected);
+        assert_eq!(
+            loaded.data_source.active.as_deref(),
+            Some(DEFAULT_PROFILE_ID)
+        );
+        assert_eq!(
+            loaded.data_source.profiles[0].server_url,
+            "http://192.168.1.10:8790"
+        );
+        assert_eq!(loaded.language, "cn");
+    }
+
+    #[test]
+    fn data_source_urls_are_validated() {
+        let mut settings = DataSourceSettings {
+            mode: DataSourceMode::Server,
+            server_url: "ftp://host".into(),
+            ..Default::default()
+        };
+        assert!(settings.validate().is_err());
+        settings.server_url = "http://user:pw@host:8790".into();
+        assert!(settings.validate().is_err());
+        settings.server_url = "https://host:8790/".into();
+        assert!(settings.validate().is_ok());
+        settings.webdav.base_url = Some("http:// spaced".into());
+        assert!(settings.validate().is_err());
+        settings.webdav.base_url = None;
+        settings.webdav.root_urls.insert("A".into(), String::new());
+        assert!(settings.validate().is_ok());
+        settings.mode = DataSourceMode::Local;
+        settings.server_url.clear();
+        assert!(settings.validate().is_ok());
+        for (interval, valid) in [
+            (0, true),
+            (5, false),
+            (10, true),
+            (86_400, true),
+            (86_401, false),
+        ] {
+            settings.poll_interval_secs = interval;
+            assert_eq!(settings.validate().is_ok(), valid, "interval {interval}");
+        }
+        // A data_source block written by the previous release has no poll fields.
+        let old: DataSourceSettings =
+            serde_json::from_str(r#"{"mode":"server","server_url":"http://h:8790"}"#).unwrap();
+        assert_eq!(old.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert!(!old.auto_sync);
+        assert_eq!(old.audition_memory_mb, DEFAULT_AUDITION_MEMORY_MB);
+        assert!(!old.audition_original);
+        settings.poll_interval_secs = 0;
+        for (megabytes, valid) in [
+            (16, false),
+            (32, true),
+            (512, true),
+            (8192, true),
+            (8193, false),
+        ] {
+            settings.audition_memory_mb = megabytes;
+            assert_eq!(settings.validate().is_ok(), valid, "{megabytes} MiB");
+        }
+        // Saved URLs of earlier releases stay valid and are kept verbatim (no rewrite).
+        let mut legacy = old.clone();
+        assert!(legacy.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["server_url"],
+            "http://h:8790"
+        );
+        legacy.server_url = "https://audiolib.example.com:18086/audiolib".into();
+        assert!(legacy.validate().is_ok());
+        legacy.server_url = "https://host:99999".into();
+        assert!(legacy.validate().is_err());
+    }
+
+    #[test]
+    fn user_settings_survive_repeated_save_and_override_legacy() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::load_in(directory.path().to_owned()).unwrap();
+        config.language = "cn".into();
+        config.playback["volume"] = serde_json::json!(0.3);
+        config.save().unwrap();
+        config.save().unwrap();
+        let loaded = AppConfig::load_in(directory.path().to_owned()).unwrap();
+        assert_eq!(loaded.language, "cn");
+        assert_eq!(loaded.playback["volume"], serde_json::json!(0.3));
+    }
+
+    #[test]
+    fn saved_rust_settings_and_existing_library_ignore_broken_legacy_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("legacy");
+        std::fs::create_dir_all(legacy.join("config")).unwrap();
+        std::fs::write(legacy.join("config/audiolib_config.yaml"), "broken: [").unwrap();
+        let established = temp.path().join("saved");
+        let mut config = AppConfig::load_with_roots(established.clone(), &[]).unwrap();
+        config.language = "cn".into();
+        config.playback["volume"] = serde_json::json!(0.4);
+        config.save().unwrap();
+        let loaded =
+            AppConfig::load_with_roots(established, std::slice::from_ref(&legacy)).unwrap();
+        assert_eq!(loaded.language, "cn");
+        assert_eq!(loaded.playback["volume"], serde_json::json!(0.4));
+        assert!(loaded.paths.legacy_database.is_none());
+        let existing = temp.path().join("existing");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("library.db"), []).unwrap();
+        assert!(AppConfig::load_with_roots(existing, std::slice::from_ref(&legacy)).is_ok());
+        assert!(AppConfig::load_with_roots(temp.path().join("first-run"), &[legacy]).is_err());
+    }
+
+    #[test]
+    fn first_run_still_imports_valid_legacy_paths_and_preferences() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("legacy");
+        std::fs::create_dir_all(legacy.join("config")).unwrap();
+        std::fs::create_dir_all(legacy.join("data")).unwrap();
+        std::fs::write(legacy.join("data/old.db"), []).unwrap();
+        std::fs::write(legacy.join("config/audiolib_config.yaml"),"database:\n  path: data/old.db\napplication:\n  language: cn\nplayback:\n  default_volume: 0.35\nsecurity:\n  allowed_scan_roots: []\n").unwrap();
+        let config = AppConfig::load_with_roots(
+            temp.path().join("first-run"),
+            std::slice::from_ref(&legacy),
+        )
+        .unwrap();
+        assert_eq!(
+            config.paths.legacy_database,
+            Some(legacy.join("data/old.db"))
+        );
+        assert_eq!(config.language, "cn");
+        assert_eq!(config.playback["volume"], serde_json::json!(0.35));
+        config.save().unwrap();
+        std::fs::write(legacy.join("config/audiolib_config.yaml"), "broken: [").unwrap();
+        let loaded = AppConfig::load_with_roots(
+            config.paths.settings.parent().unwrap().to_path_buf(),
+            &[legacy],
+        )
+        .unwrap();
+        assert_eq!(loaded.playback["volume"], serde_json::json!(0.35));
+    }
+}

@@ -1,0 +1,114 @@
+// app/audiolib-desktop/ui/theme.slint
+import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
+
+// Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
+export global Theme {
+    out property <color> bg: #181b20;
+    out property <color> panel: #20242a;
+    out property <color> raised: #2a3037;
+    out property <color> hover: #353d45;
+    out property <color> border: #353d45;
+    out property <color> strong-border: #697581;
+    out property <color> ink: #d9dee3;
+    out property <color> dim: #aab2bd;
+    out property <color> muted: #95a0ac;
+    out property <color> accent: #8faea6;
+    out property <color> accent-hover: #a8c3bb;
+    out property <color> on-accent: #202b28;
+    out property <color> selected: #2b3a38;
+    out property <color> checked: #354744;
+    out property <color> alternate: #22282e;
+    out property <color> warning: #c3b48e;
+    out property <color> player: #232a30;
+    out property <color> player-border: #465059;
+    out property <color> tooltip: #14171c;
+    out property <color> overlay: #000000a8;
+    // Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
+    out property <color> spectral-canvas: #849094;
+    out property <color> normal-canvas: #1d2328;
+}
+
+// Keep the standard input, keyboard and accessibility behavior; paint its accent
+// locally so Windows' system accent cannot compete with frequency colors.
+export component ThemedSlider inherits Rectangle {
+    in property <float> minimum <=> native.minimum;
+    in property <float> maximum <=> native.maximum;
+    in property <float> step <=> native.step;
+    in property <bool> enabled <=> native.enabled;
+    in-out property <float> value <=> native.value;
+    out property <bool> has-focus: native.has-focus;
+    callback changed <=> native.changed;
+    callback released <=> native.released;
+    forward-focus: native;
+    min-height: 20px; min-width: 20px;
+    horizontal-stretch: 1; vertical-stretch: 0;
+    in property <color> surface: Theme.player;
+    native := Slider { width: parent.width; height: parent.height; }
+    Rectangle { background: root.surface; }
+    property <float> fraction: clamp((root.value - root.minimum) / max(0.001, root.maximum - root.minimum), 0, 1);
+    Rectangle {
+        x: 10px; y: (parent.height - self.height) / 2;
+        width: parent.width - 20px; height: 4px; border-radius: 2px;
+        background: Theme.strong-border;
+        opacity: root.enabled ? 0.65 : 0.3;
+        Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * root.fraction; background: Theme.accent; border-radius: 2px; }
+    }
+    Rectangle {
+        x: (parent.width - 20px) * root.fraction; y: (parent.height - self.height) / 2;
+        width: 20px; height: 20px; border-radius: 10px;
+        background: Theme.raised; border-width: 1px;
+        border-color: root.has-focus ? Theme.accent : Theme.strong-border;
+        opacity: root.enabled ? 1 : 0.45;
+        Rectangle { x: 4px; y: 4px; width: 12px; height: 12px; border-radius: 6px; background: Theme.accent; }
+    }
+    // Paint-only rectangles do not intercept the standard pointer/key/accessibility owner.
+}
+
+export component ThemedCheckBox inherits Rectangle {
+    in property <string> text <=> native.text;
+    in property <bool> enabled <=> native.enabled;
+    in-out property <bool> checked <=> native.checked;
+    out property <bool> has-focus: native.has-focus;
+    callback toggled <=> native.toggled;
+    forward-focus: native;
+    in property <color> surface: Theme.panel;
+    HorizontalLayout { padding: 0px; native := CheckBox { } }
+    Rectangle { background: root.surface; }
+    if root.text != "": Text {
+        x: 30px; width: parent.width - self.x; height: parent.height;
+        text: root.text; color: Theme.ink; vertical-alignment: center;
+        opacity: root.enabled ? 1 : 0.45;
+    }
+    Rectangle {
+        x: 0px; width: 18px; height: 18px; y: (parent.height - self.height) / 2;
+        border-radius: 3px; border-width: 1px;
+        background: root.checked ? Theme.accent : Theme.panel;
+        border-color: root.has-focus ? Theme.ink : (root.checked ? Theme.accent : Theme.strong-border);
+        opacity: root.enabled ? 1 : 0.45;
+        // Use explicit vector geometry: a font-dependent glyph may be absent
+        // from the selected UI font and leave checked items as blank squares.
+        if root.checked: Image {
+            source: @image-url("icons/check.svg"); colorize: Theme.on-accent;
+            x: 3px; y: 3px; width: 12px; height: 12px;
+            image-fit: contain; accessible-role: none;
+        }
+    }
+}
+
+export component ThemedLineEdit inherits Rectangle {
+    in property <string> input-label;
+    in property <bool> enabled <=> native.enabled;
+    in property <string> placeholder-text <=> native.placeholder-text;
+    in property <InputType> input-type <=> native.input-type;
+    in-out property <string> text <=> native.text;
+    out property <bool> has-focus: native.has-focus;
+    callback accepted <=> native.accepted;
+    callback edited <=> native.edited;
+    forward-focus: native;
+    horizontal-stretch: 1; vertical-stretch: 0; min-width: 160px;
+    HorizontalLayout { padding: 0px; native := LineEdit { min-width: 0px; accessible-label: root.input-label; } }
+    if root.has-focus && root.enabled: Rectangle {
+        x: 4px; y: parent.height - 2px; height: 2px; width: parent.width - 8px;
+        background: Theme.accent;
+    }
+}

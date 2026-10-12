@@ -1,0 +1,38 @@
+[package]
+name = "audiolib-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "AudioLibExplorer"
+path = "src/main.rs"
+
+[features]
+default = []
+asio = ["audiolib-audio/asio"]
+
+[dependencies]
+anyhow.workspace = true
+audiolib-core = { path = "../../crates/audiolib-core" }
+audiolib-db = { path = "../../crates/audiolib-db" }
+audiolib-audio = { path = "../../crates/audiolib-audio", features = ["playback"] }
+audiolib-ipc = { path = "../../crates/audiolib-ipc" }
+audiolib-windows = { path = "../../crates/audiolib-windows" }
+audiolib-remote = { path = "../../crates/audiolib-remote" }
+chrono.workspace = true
+serde_json.workspace = true
+slint.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
+[build-dependencies]
+slint-build.workspace = true
+winresource = "=0.1.31"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.17.1"

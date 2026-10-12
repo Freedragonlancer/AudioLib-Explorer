@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows (fmt, clippy, test)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        shell: pwsh
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        shell: pwsh
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        shell: pwsh
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        shell: pwsh
+        # Hosted Windows runners have no audio output device; this test needs one.
+        run: cargo test --workspace --locked -- --skip delayed_ipc_reload_play_is_cancelled_by_stop
+
+  server-linux:
+    name: Linux (audiolib-server check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # rust-toolchain.toml pins a Windows host toolchain; use the same Rust version on Linux.
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev pkg-config
+      - name: Install Rust
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Check server without default features
+        # .cargo/config.toml defaults to a Windows target, so pass the host target explicitly.
+        run: cargo check -p audiolib-server --no-default-features --locked --target x86_64-unknown-linux-gnu

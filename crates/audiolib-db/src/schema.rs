@@ -1,0 +1,924 @@
+// crates/audiolib-db/src/schema.rs
+use crate::{db_error, path_key, tokenize};
+use audiolib_core::{Error, Result};
+use jieba_rs::Jieba;
+use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
+use std::sync::Arc;
+
+pub const SCHEMA_VERSION: i64 = 5;
+/// Read-only source snapshots remain compatible across schemas 3..=5. Obsolete
+/// derived search state is repaired only in an owned staging or temporary copy.
+pub const MIN_SNAPSHOT_SCHEMA_VERSION: i64 = 3;
+const SEARCH_TEXT_VERSION: i64 = 1;
+
+fn feature_version(conn: &Connection, feature: &str) -> Result<Option<i64>> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='audiolib_schema_features')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if !exists {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT version FROM audiolib_schema_features WHERE feature=?1",
+        [feature],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+/// Refuse to reinterpret a known newer implementation within a supported schema.
+/// Both writable migrations and read-only revision probes use this guard.
+fn validate_supported_feature_revisions(conn: &Connection) -> Result<()> {
+    for (feature, supported) in [
+        ("stable_audio_ids", 1),
+        ("foreign_key_indexes", 1),
+        ("tokenization", SEARCH_TEXT_VERSION),
+    ] {
+        if let Some(version) = feature_version(conn, feature)?
+            && version > supported
+        {
+            return Err(Error::Database(format!(
+                "Database feature {feature} revision {version} is newer than supported {supported}"
+            )));
+        }
+    }
+    for (key, supported) in [
+        (SOURCE_SEARCH_REV_KEY, 2),
+        ("source_tags_rev", 2),
+        ("source_tags_progress_rev", 2),
+    ] {
+        if let Some(version) = meta_value(conn, key)?.and_then(|value| value.parse::<i64>().ok())
+            && version > supported
+        {
+            return Err(Error::Database(format!(
+                "Database feature {key} revision {version} is newer than supported {supported}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn set_feature_version(conn: &Connection, feature: &str, version: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO audiolib_schema_features(feature,version) VALUES(?1,?2)
+         ON CONFLICT(feature) DO UPDATE SET version=excluded.version",
+        rusqlite::params![feature, version],
+    )
+    .map(drop)
+    .map_err(db_error)
+}
+
+/// Probe additive implementation revisions and indexes before upgrading a library.
+/// Read-only connections can probe this without creating tables or changing the source.
+pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
+    validate_supported_feature_revisions(conn)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version != SCHEMA_VERSION {
+        return Ok(true);
+    }
+    if feature_version(conn, "stable_audio_ids")? != Some(1)
+        || feature_version(conn, "foreign_key_indexes")? != Some(1)
+        || !search_text_is_current(conn)?
+        || !source_tags_ready(conn)?
+    {
+        return Ok(true);
+    }
+    let objects: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE
+         (type='table' AND name='audiolib_audio_id_sequence') OR
+         (type='trigger' AND name='audiolib_audio_id_high_water') OR
+         (type='index' AND name IN ('idx_playlist_items_audio_file','idx_project_references_audio_file',
+          'idx_waveform_cache_audio_file','idx_play_history_audio_file','idx_closure_descendant',
+          'idx_audio_files_not_present'))",
+        [],
+        |row| row.get(0),
+    ).map_err(db_error)?;
+    if objects != 8 {
+        return Ok(true);
+    }
+    let valid_sequence: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM audiolib_audio_id_sequence WHERE singleton=1
+             AND high_water>=COALESCE((SELECT MAX(id) FROM audio_files),0))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    Ok(!valid_sequence)
+}
+
+/// Whether this snapshot's derived text agrees with the plain-text query compiler.
+pub(crate) fn search_text_is_current(conn: &Connection) -> Result<bool> {
+    validate_supported_feature_revisions(conn)?;
+    Ok(
+        feature_version(conn, "tokenization")? == Some(SEARCH_TEXT_VERSION)
+            && source_search_marked(conn)?,
+    )
+}
+
+/// Derived text and the required directory/visibility indexes must all be readable.
+pub(crate) fn search_state_is_current(conn: &Connection) -> Result<bool> {
+    if !search_text_is_current(conn)? || !source_tags_ready(conn)? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT COUNT(*)=2 FROM sqlite_schema WHERE type='index'
+         AND name IN ('idx_closure_descendant','idx_audio_files_not_present')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(db_error)
+}
+
+/// Highest identity already issued, including records removed from this library.
+pub(crate) fn audio_id_high_water(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT MAX(high_water,COALESCE((SELECT MAX(id) FROM audio_files),0))
+         FROM audiolib_audio_id_sequence WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(db_error)
+}
+
+/// Preserve the destination's issued identities when restoring an older owned backup.
+pub(crate) fn retain_audio_id_high_water(conn: &Connection, high_water: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE audiolib_audio_id_sequence SET high_water=MAX(high_water,?1) WHERE singleton=1",
+        [high_water],
+    )
+    .map(drop)
+    .map_err(db_error)
+}
+
+/// Allocate within the caller's write transaction; rollback also rolls back allocation.
+#[cfg(feature = "scanner")]
+pub(crate) fn allocate_audio_id(conn: &Connection) -> Result<i64> {
+    conn.prepare_cached(
+        "UPDATE audiolib_audio_id_sequence SET high_water=high_water+1
+         WHERE singleton=1 AND high_water<9223372036854775807 RETURNING high_water",
+    )
+    .map_err(db_error)?
+    .query_row([], |row| row.get(0))
+    .optional()
+    .map_err(db_error)?
+    .ok_or_else(|| Error::Validation("Audio file identity space is exhausted".into()))
+}
+
+fn add_current_features(conn: &Connection) -> Result<()> {
+    // A legacy AUTOINCREMENT table can remember IDs that no longer have a row.
+    // Read its watermark without creating sqlite_sequence in non-AUTOINCREMENT DBs.
+    let has_sqlite_sequence: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let legacy_high_water: i64 = if has_sqlite_sequence {
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence WHERE name='audio_files'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?
+    } else {
+        0
+    };
+    let has_audio_sequence: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='audiolib_audio_id_sequence')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let existing_sequence: Option<i64> = if has_audio_sequence {
+        conn.query_row(
+            "SELECT high_water FROM audiolib_audio_id_sequence WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+    } else {
+        None
+    };
+    let (existing_max, version): (i64, i64) = conn
+        .query_row(
+            "SELECT MAX(0,COALESCE(MAX(id),0)),(SELECT user_version FROM pragma_user_version)
+             FROM audio_files",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(db_error)?;
+    // The old format cannot reveal a deleted maximum ID. On its first upgrade,
+    // start new allocations in a large namespace rather than the old small row IDs.
+    // This is a conservative baseline, not recovery of arbitrary deleted i64 IDs.
+    // Fresh empty libraries start at 1; existing sequence rows never follow the clock.
+    let initial_high_water = if let Some(high_water) = existing_sequence {
+        high_water.max(existing_max).max(legacy_high_water)
+    } else if version > 0 || existing_max > 0 || legacy_high_water > 0 {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                Error::Validation(format!("Cannot initialize audio identities: {error}"))
+            })?
+            .as_millis();
+        let baseline = millis
+            .checked_mul(1024)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| Error::Validation("Audio identity baseline exceeds i64".into()))?;
+        baseline.max(existing_max).max(legacy_high_water)
+    } else {
+        0
+    };
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS audiolib_schema_features (
+         feature TEXT PRIMARY KEY, version INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS audiolib_audio_id_sequence (
+         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+         high_water INTEGER NOT NULL CHECK(high_water>=0));
+         CREATE TRIGGER IF NOT EXISTS audiolib_audio_id_high_water AFTER INSERT ON audio_files BEGIN
+          UPDATE audiolib_audio_id_sequence SET high_water=MAX(high_water,new.id) WHERE singleton=1;
+         END;
+         CREATE INDEX IF NOT EXISTS idx_playlist_items_audio_file ON playlist_items(audio_file_id);
+         CREATE INDEX IF NOT EXISTS idx_project_references_audio_file ON project_references(audio_file_id);
+         CREATE INDEX IF NOT EXISTS idx_waveform_cache_audio_file ON waveform_cache(audio_file_id);
+         CREATE INDEX IF NOT EXISTS idx_play_history_audio_file ON play_history(audio_file_id);
+         CREATE INDEX IF NOT EXISTS idx_closure_descendant ON folder_closure(descendant_id);
+         CREATE INDEX IF NOT EXISTS idx_audio_files_not_present ON audio_files(id) WHERE missing IS NOT 0;",
+    )
+    .map_err(db_error)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO audiolib_audio_id_sequence(singleton,high_water) VALUES(1,?1)",
+        [initial_high_water],
+    )
+    .map_err(db_error)?;
+    retain_audio_id_high_water(conn, existing_max.max(legacy_high_water))?;
+    set_feature_version(conn, "stable_audio_ids", 1)?;
+    set_feature_version(conn, "foreign_key_indexes", 1)
+}
+
+/// Identify an existing AudioLib source before migrations can create missing tables.
+pub(crate) fn validate_library_identity(conn: &Connection) -> Result<()> {
+    let mut columns = conn
+        .prepare("PRAGMA table_info(audio_files)")
+        .map_err(db_error)?;
+    let names: Vec<String> = columns
+        .query_map([], |row| row.get(1))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db_error)?;
+    if ["id", "file_path", "filename"]
+        .iter()
+        .any(|name| !names.iter().any(|actual| actual == name))
+    {
+        return Err(Error::Validation(
+            "Source is not an AudioLib library: audio_files requires id, file_path and filename"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn fold_case(value: &str) -> String {
+    icu_casemap::CaseMapper::new()
+        .fold_string(value)
+        .into_owned()
+}
+
+/// Marker (in `library_meta`) of the derived-search-text revision a library was built with.
+/// Revision 2 = `source_metadata_search_text` also indexes the extracted tag fields.
+pub(crate) const SOURCE_SEARCH_REV_KEY: &str = "source_search_rev";
+pub(crate) const SOURCE_SEARCH_REV: &str = "2";
+
+const CREATE_LIBRARY_META: &str = "CREATE TABLE IF NOT EXISTS library_meta(
+        key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;";
+
+/// Set whenever search text AND the derived tag column were both recomputed for every row
+/// (fresh library, legacy import, full search rebuild).
+const MARK_SOURCE_SEARCH: &str = "CREATE TABLE IF NOT EXISTS library_meta(
+        key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+    INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_search_rev','2');
+    INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_tags_rev','2');
+    DELETE FROM library_meta WHERE key IN ('source_tags_progress','source_tags_progress_rev');";
+
+/// Revision of the derived `audio_files.source_tags_text` column (casefolded, ', '-joined
+/// extracted tags; '' when none). Revision 2 accepts Unicode-escaped JSON keys and
+/// backfills the full signed range of retained legacy IDs.
+/// An absent or older marker means the column needs a backfill.
+pub(crate) const SOURCE_TAGS_REV: &str = "2";
+const SOURCE_TAGS_BATCH: i64 = 20_000;
+
+/// Derived column text for one `metadata_json`: the extracted tags joined with ', ' and
+/// casefolded (so `tag_contains` needs no per-row folding or JSON parsing).
+pub(crate) fn source_tags_key(json: &str) -> String {
+    if !json_has_source_tags(json) {
+        return String::new();
+    }
+    let value = serde_json::from_str(json).unwrap_or_default();
+    fold_case(&audiolib_core::source_tags(&value).join(", "))
+}
+
+pub(crate) fn has_source_tags_column(conn: &Connection) -> Result<bool> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(audio_files)")
+        .map_err(db_error)?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_error)?;
+    for name in names {
+        if name.map_err(db_error)? == "source_tags_text" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let table: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='library_meta'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if table.is_none() {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT value FROM library_meta WHERE key=?1",
+        [key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+/// True when the derived tag column exists and is fully populated (queries may use it).
+pub(crate) fn source_tags_ready(conn: &Connection) -> Result<bool> {
+    Ok(has_source_tags_column(conn)?
+        && meta_value(conn, "source_tags_rev")?.as_deref() == Some(SOURCE_TAGS_REV))
+}
+
+/// Populate `source_tags_text` in id-ordered batches of 20 000 rows, one short transaction
+/// each, recording the last finished id in `library_meta` so an interrupted run resumes
+/// where it stopped. Idempotent; sets the `source_tags_rev` marker when complete. Returns
+/// the number of rows that received a non-empty value in this call.
+pub(crate) fn backfill_source_tags(conn: &mut Connection) -> Result<u64> {
+    if source_tags_ready(conn)? {
+        return Ok(0);
+    }
+    conn.execute_batch(CREATE_LIBRARY_META).map_err(db_error)?;
+    // Progress belongs to its extraction revision. An older partial backfill may have
+    // skipped escaped keys before its high-water ID, so it must restart at zero.
+    if meta_value(conn, "source_tags_progress_rev")?.as_deref() != Some(SOURCE_TAGS_REV) {
+        let tx = conn.transaction().map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM library_meta WHERE key='source_tags_progress'",
+            [],
+        )
+        .map_err(db_error)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_tags_progress_rev',?1)",
+            [SOURCE_TAGS_REV],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+    }
+    let progress = meta_value(conn, "source_tags_progress")?.and_then(|value| value.parse().ok());
+    let mut low: i64 = progress.unwrap_or(i64::MIN);
+    let mut inclusive = progress.is_none();
+    let mut filled = 0u64;
+    loop {
+        // Keep a primary-key range scan for each batch, including i64::MIN on the
+        // first pass. Imported IDs are retained and need not be positive.
+        let lower_bound = if inclusive { "id>=?1" } else { "id>?1" };
+        let high: Option<i64> = conn
+            .query_row(
+                &format!("SELECT MAX(id) FROM (SELECT id FROM audio_files WHERE {lower_bound} ORDER BY id LIMIT ?2)"),
+                rusqlite::params![low, SOURCE_TAGS_BATCH],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let Some(high) = high else { break };
+        let tx = conn.transaction().map_err(db_error)?;
+        filled += tx
+            .execute(
+                &format!("UPDATE audio_files SET source_tags_text=audiolib_source_tags_key(metadata_json)
+                 WHERE {lower_bound} AND id<=?2 AND audiolib_has_source_tags(metadata_json)"),
+                rusqlite::params![low, high],
+            )
+            .map_err(db_error)? as u64;
+        tx.execute(
+            "INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_tags_progress',?1)",
+            [high.to_string()],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        low = high;
+        inclusive = false;
+    }
+    let tx = conn.transaction().map_err(db_error)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_tags_rev',?1)",
+        [SOURCE_TAGS_REV],
+    )
+    .map_err(db_error)?;
+    tx.execute(
+        "DELETE FROM library_meta WHERE key IN ('source_tags_progress','source_tags_progress_rev')",
+        [],
+    )
+    .map_err(db_error)?;
+    tx.commit().map_err(db_error)?;
+    Ok(filled)
+}
+
+/// True when `metadata_json` yields at least one extracted tag (cheap text pre-check first,
+/// so rows without any of the tag keys are never JSON-parsed).
+fn json_has_source_tags(json: &str) -> bool {
+    // Quoted forms of audiolib_core::SOURCE_TAG_KEYS (kept in sync by a unit test).
+    const QUOTED_KEYS: [&str; 5] = [
+        "\"keywords\"",
+        "\"category\"",
+        "\"subcategory\"",
+        "\"vendor_category\"",
+        "\"cat_id\"",
+    ];
+    // JSON permits every character in a property name to be Unicode-escaped. Keep
+    // the cheap canonical-key rejection only when there are no Unicode escapes.
+    if !QUOTED_KEYS.iter().any(|key| json.contains(key)) && !json.contains("\\u") {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(json)
+        .map(|value| !audiolib_core::source_tags(&value).is_empty())
+        .unwrap_or(false)
+}
+
+pub(crate) fn source_search_marked(conn: &Connection) -> Result<bool> {
+    Ok(meta_value(conn, SOURCE_SEARCH_REV_KEY)?.as_deref() == Some(SOURCE_SEARCH_REV))
+}
+
+pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    conn.create_scalar_function("audiolib_has_source_tags", 1, flags, |context| {
+        let json = context.get::<Option<String>>(0)?.unwrap_or_default();
+        Ok(i64::from(json_has_source_tags(&json)))
+    })
+    .map_err(db_error)?;
+    conn.create_scalar_function("audiolib_source_tags_key", 1, flags, |context| {
+        let json = context.get::<Option<String>>(0)?.unwrap_or_default();
+        Ok(source_tags_key(&json))
+    })
+    .map_err(db_error)?;
+    conn.create_scalar_function("audiolib_source_tags", 1, flags, |context| {
+        let json = context.get::<Option<String>>(0)?.unwrap_or_default();
+        if !json_has_source_tags(&json) {
+            return Ok(String::new());
+        }
+        let value = serde_json::from_str(&json).unwrap_or_default();
+        Ok(audiolib_core::source_tags(&value).join(", "))
+    })
+    .map_err(db_error)?;
+    let mapper = icu_casemap::CaseMapper::new();
+    conn.create_scalar_function(
+        "audiolib_casefold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        move |context| {
+            let mut value = context.get::<Option<String>>(0)?.unwrap_or_default();
+            // ASCII folding is identical to full Unicode folding and avoids ICU
+            // traversal for the common English tag case without another allocation.
+            if value.is_ascii() {
+                value.make_ascii_lowercase();
+                return Ok(value);
+            }
+            match mapper.fold_string(&value) {
+                std::borrow::Cow::Borrowed(_) => Ok(value),
+                std::borrow::Cow::Owned(folded) => Ok(folded),
+            }
+        },
+    )
+    .map_err(db_error)
+}
+
+pub fn register_tokenizer(conn: &Connection, jieba: Arc<Jieba>) -> Result<()> {
+    register_casefold(conn)?;
+    conn.create_scalar_function(
+        "audiolib_source_text",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let description = context.get::<Option<String>>(0)?.unwrap_or_default();
+            let json = context.get::<Option<String>>(1)?.unwrap_or_default();
+            let attributes = serde_json::from_str(&json).unwrap_or_default();
+            Ok(audiolib_core::source_metadata_search_text(
+                &description,
+                &attributes,
+            ))
+        },
+    )
+    .map_err(db_error)?;
+    conn.create_scalar_function(
+        "audiolib_tokenize",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        move |context| {
+            let value = context.get::<Option<String>>(0)?.unwrap_or_default();
+            Ok(tokenize(&jieba, &value))
+        },
+    )
+    .map_err(db_error)?;
+    conn.create_scalar_function(
+        "audiolib_path_key",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| Ok(path_key(&context.get::<String>(0)?)),
+    )
+    .map_err(db_error)
+}
+
+fn ensure_column(conn: &Connection, table: &str, name: &str, definition: &str) -> Result<()> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(db_error)?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_error)?;
+    for item in names {
+        if item.map_err(db_error)? == name {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {name} {definition};"
+    ))
+    .map_err(db_error)
+}
+
+/// Extend legacy tables in place; never reconstruct or discard their user columns.
+pub fn migrate(conn: &mut Connection) -> Result<()> {
+    validate_supported_feature_revisions(conn)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version > SCHEMA_VERSION {
+        return Err(Error::Database(format!(
+            "Database schema {version} is newer than supported {SCHEMA_VERSION}"
+        )));
+    }
+    if version == SCHEMA_VERSION && !needs_upgrade(conn)? {
+        return Ok(());
+    }
+    let tx = conn.transaction().map_err(db_error)?;
+    if (1..=SCHEMA_VERSION).contains(&version) {
+        add_management_schema(&tx)?;
+        apply_indexes(&tx)?;
+        add_current_features(&tx)?;
+        if !search_text_is_current(&tx)? {
+            rebuild_search_in_transaction(&tx)?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(db_error)?;
+        return tx.commit().map_err(db_error);
+    }
+    tx.execute_batch(BASE_SCHEMA).map_err(db_error)?;
+    // Legacy prototypes have slightly different columns. Preserve every original column.
+    for (name, definition) in AUDIO_COLUMNS {
+        ensure_column(&tx, "audio_files", name, definition)?;
+    }
+    for (name, definition) in FOLDER_COLUMNS {
+        ensure_column(&tx, "folders", name, definition)?;
+    }
+    tx.execute_batch("DROP TRIGGER IF EXISTS audio_files_ai; DROP TRIGGER IF EXISTS audio_files_au;
+        DROP TRIGGER IF EXISTS audio_files_ad; DROP TABLE IF EXISTS audio_search;
+        UPDATE audio_files SET path_key=audiolib_path_key(file_path),filename_tokenized=audiolib_tokenize(filename),
+          user_tags_tokenized=audiolib_tokenize(user_tags),
+          user_notes_tokenized=audiolib_tokenize(user_notes),
+          bwf_description_tokenized=audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)),
+          ixml_scene_tokenized=audiolib_tokenize(ixml_scene),
+          ixml_take_tokenized=audiolib_tokenize(ixml_take),
+          source_tags_text=audiolib_source_tags_key(metadata_json);
+        CREATE INDEX IF NOT EXISTS idx_audio_files_folder ON audio_files(folder_id);
+        CREATE INDEX IF NOT EXISTS idx_audio_files_path_key ON audio_files(path_key);
+        CREATE INDEX IF NOT EXISTS idx_sample_rate ON audio_files(sample_rate);
+        CREATE INDEX IF NOT EXISTS idx_duration ON audio_files(duration);
+        CREATE INDEX IF NOT EXISTS idx_audio_files_missing ON audio_files(missing) WHERE missing=1;
+        CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_closure_descendant ON folder_closure(descendant_id);")
+        .map_err(db_error)?;
+    tx.execute_batch(FTS_SCHEMA).map_err(db_error)?;
+    add_management_schema(&tx)?;
+    apply_indexes(&tx)?;
+    add_current_features(&tx)?;
+    tx.execute(
+        "INSERT INTO audio_search(audio_search) VALUES ('rebuild')",
+        [],
+    )
+    .map_err(db_error)?;
+    set_feature_version(&tx, "tokenization", SEARCH_TEXT_VERSION)?;
+    tx.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(db_error)?;
+    tx.commit().map_err(db_error)
+}
+
+fn add_management_schema(conn: &Connection) -> Result<()> {
+    ensure_column(
+        conn,
+        "scan_sessions",
+        "errors_truncated",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS play_history (
+        id INTEGER PRIMARY KEY, audio_file_id INTEGER NOT NULL REFERENCES audio_files(id) ON DELETE CASCADE,
+        played_at TEXT NOT NULL, filename TEXT NOT NULL, file_path TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(played_at DESC,id DESC);")
+        .map_err(db_error)
+}
+
+/// Recreate authoritative triggers and rebuild derived search text transactionally.
+pub(crate) fn rebuild_search(conn: &mut Connection) -> Result<()> {
+    validate_supported_feature_revisions(conn)?;
+    let tx = conn.transaction().map_err(db_error)?;
+    rebuild_search_in_transaction(&tx)?;
+    tx.commit().map_err(db_error)
+}
+
+fn rebuild_search_in_transaction(conn: &Connection) -> Result<()> {
+    conn.execute_batch("DROP TRIGGER IF EXISTS audio_files_ai; DROP TRIGGER IF EXISTS audio_files_au;
+        DROP TRIGGER IF EXISTS audio_files_ad; DROP TABLE IF EXISTS audio_search;
+        UPDATE audio_files SET filename_tokenized=audiolib_tokenize(filename),
+            user_tags_tokenized=audiolib_tokenize(user_tags),user_notes_tokenized=audiolib_tokenize(user_notes),
+            bwf_description_tokenized=audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)),
+            ixml_scene_tokenized=audiolib_tokenize(ixml_scene),ixml_take_tokenized=audiolib_tokenize(ixml_take),
+            source_tags_text=audiolib_source_tags_key(metadata_json);")
+        .map_err(db_error)?;
+    conn.execute_batch(FTS_SCHEMA).map_err(db_error)?;
+    conn.execute(
+        "INSERT INTO audio_search(audio_search) VALUES('rebuild')",
+        [],
+    )
+    .map_err(db_error)?;
+    set_feature_version(conn, "tokenization", SEARCH_TEXT_VERSION)?;
+    conn.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)
+}
+
+pub(crate) fn triggers_match(conn: &Connection) -> Result<bool> {
+    // Compare normalized sqlite_schema definitions to this version's known-good triggers.
+    let expected = Connection::open_in_memory().map_err(db_error)?;
+    expected.execute_batch(BASE_SCHEMA).map_err(db_error)?;
+    for (name, definition) in AUDIO_COLUMNS {
+        ensure_column(&expected, "audio_files", name, definition)?;
+    }
+    expected.execute_batch(FTS_SCHEMA).map_err(db_error)?;
+    let normalize = |sql: String| {
+        sql.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .trim_end_matches(';')
+            .to_string()
+    };
+    for (kind, name) in [
+        ("table", "audio_search"),
+        ("trigger", "audio_files_ai"),
+        ("trigger", "audio_files_au"),
+        ("trigger", "audio_files_ad"),
+    ] {
+        use rusqlite::OptionalExtension;
+        let actual: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type=?1 AND name=?2",
+                [kind, name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let correct: String = expected
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type=?1 AND name=?2",
+                [kind, name],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if actual.is_none_or(|sql| normalize(sql) != normalize(correct)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// v5: ratings are gone from the product. Only indexes change (the `user_rating` column and
+/// its data stay untouched): drop the three rating indexes and the old favorite index that
+/// still carried `user_rating`; PERFORMANCE_INDEXES recreates the favorite index without it.
+/// Every statement is IF EXISTS / IF NOT EXISTS, so a repeated run is harmless.
+const DROP_RATING_INDEXES: &str = "
+ DROP INDEX IF EXISTS idx_audio_visible_tagged;
+ DROP INDEX IF EXISTS idx_audio_visible_rating;
+ DROP INDEX IF EXISTS idx_audio_visible_rating_desc;
+ DROP INDEX IF EXISTS idx_user_rating;
+ DROP INDEX IF EXISTS idx_audio_visible_favorite;";
+
+fn apply_indexes(conn: &Connection) -> Result<()> {
+    // The tag index below needs the derived column; adding it is idempotent.
+    ensure_column(
+        conn,
+        "audio_files",
+        "source_tags_text",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute_batch(DROP_RATING_INDEXES).map_err(db_error)?;
+    conn.execute_batch(PERFORMANCE_INDEXES).map_err(db_error)
+}
+
+const PERFORMANCE_INDEXES:&str="
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_id ON audio_files(id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_name ON audio_files(filename COLLATE NOCASE,id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_folder_name ON audio_files(folder_id,filename COLLATE NOCASE,id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_filter ON audio_files(sample_rate,duration,id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_favorite ON audio_files(filename COLLATE NOCASE,id) WHERE missing=0 AND favorite=1;
+ CREATE INDEX IF NOT EXISTS idx_audio_files_missing ON audio_files(missing) WHERE missing=1;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_stats ON audio_files(folder_id,duration,file_size) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_play_history_audio ON play_history(audio_file_id);
+ CREATE INDEX IF NOT EXISTS idx_playlist_items_audio ON playlist_items(audio_file_id);
+ CREATE INDEX IF NOT EXISTS idx_project_references_audio ON project_references(audio_file_id);
+ CREATE INDEX IF NOT EXISTS idx_waveform_cache_audio ON waveform_cache(audio_file_id);
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_modified ON audio_files(modified_at,id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_modified_desc ON audio_files(modified_at DESC,id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_format ON audio_files(bit_depth,channels) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_format_name ON audio_files(bit_depth,filename COLLATE NOCASE,id) WHERE missing=0;
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_tagged_any ON audio_files(filename COLLATE NOCASE,id,user_tags,source_tags_text) WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'');
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_color ON audio_files(user_color COLLATE NOCASE,id) WHERE missing=0 AND user_color IS NOT NULL;";
+
+const AUDIO_COLUMNS: &[(&str, &str)] = &[
+    ("file_path", "TEXT"),
+    ("filename", "TEXT"),
+    ("file_size", "INTEGER"),
+    ("sample_rate", "INTEGER"),
+    ("bit_depth", "INTEGER"),
+    ("channels", "INTEGER"),
+    ("duration", "REAL"),
+    ("codec", "TEXT"),
+    ("bwf_description", "TEXT"),
+    ("bwf_originator", "TEXT"),
+    ("bwf_originator_reference", "TEXT"),
+    ("bwf_origination_date", "TEXT"),
+    ("bwf_origination_time", "TEXT"),
+    ("bwf_time_reference", "INTEGER"),
+    ("bwf_version", "INTEGER"),
+    ("bwf_umid", "TEXT"),
+    ("ixml_scene", "TEXT"),
+    ("ixml_take", "TEXT"),
+    ("ixml_tape", "TEXT"),
+    ("ixml_circled", "INTEGER"),
+    ("ixml_wild_track", "INTEGER"),
+    ("ixml_no_good", "INTEGER"),
+    ("peak_amplitude", "REAL"),
+    ("rms_level", "REAL"),
+    ("spectral_centroid", "REAL"),
+    ("zero_crossing_rate", "REAL"),
+    ("user_tags", "TEXT"),
+    ("source_tags_text", "TEXT NOT NULL DEFAULT ''"),
+    ("user_rating", "INTEGER"),
+    ("user_color", "TEXT"),
+    ("user_notes", "TEXT"),
+    ("created_at", "TEXT"),
+    ("modified_at", "TEXT"),
+    ("last_played_at", "TEXT"),
+    ("play_count", "INTEGER DEFAULT 0"),
+    ("filename_tokenized", "TEXT"),
+    ("user_tags_tokenized", "TEXT"),
+    ("folder_id", "INTEGER"),
+    ("user_notes_tokenized", "TEXT"),
+    ("bwf_description_tokenized", "TEXT"),
+    ("ixml_scene_tokenized", "TEXT"),
+    ("ixml_take_tokenized", "TEXT"),
+    ("favorite", "INTEGER NOT NULL DEFAULT 0"),
+    ("source_mtime_ns", "INTEGER"),
+    ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("missing", "INTEGER NOT NULL DEFAULT 0"),
+    ("seen_scan_id", "INTEGER"),
+    ("path_key", "TEXT"),
+];
+const FOLDER_COLUMNS: &[(&str, &str)] = &[
+    ("folder_path", "TEXT"),
+    ("folder_name", "TEXT"),
+    ("parent_id", "INTEGER"),
+    ("depth", "INTEGER NOT NULL DEFAULT 0"),
+    ("file_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("total_file_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("total_duration", "REAL DEFAULT 0"),
+    ("total_size", "INTEGER DEFAULT 0"),
+    ("created_at", "TEXT"),
+    ("updated_at", "TEXT"),
+    ("last_scanned", "TEXT"),
+];
+
+const BASE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS audio_files (
+ id INTEGER PRIMARY KEY, file_path TEXT NOT NULL UNIQUE, filename TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS folders (
+ id INTEGER PRIMARY KEY, folder_path TEXT NOT NULL UNIQUE, folder_name TEXT NOT NULL,
+ parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+ depth INTEGER NOT NULL DEFAULT 0, file_count INTEGER NOT NULL DEFAULT 0,
+ total_file_count INTEGER NOT NULL DEFAULT 0, total_duration REAL DEFAULT 0,
+ total_size INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT, last_scanned TEXT);
+CREATE TABLE IF NOT EXISTS folder_closure (
+ ancestor_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+ descendant_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+ depth INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(ancestor_id,descendant_id));
+CREATE TABLE IF NOT EXISTS playlists (
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT, created_at TEXT, modified_at TEXT);
+CREATE TABLE IF NOT EXISTS playlist_items (
+ id INTEGER PRIMARY KEY, playlist_id INTEGER REFERENCES playlists(id),
+ audio_file_id INTEGER REFERENCES audio_files(id), position INTEGER, added_at TEXT, notes TEXT);
+CREATE TABLE IF NOT EXISTS project_references (
+ id INTEGER PRIMARY KEY, audio_file_id INTEGER REFERENCES audio_files(id),
+ project_path TEXT NOT NULL, project_type TEXT, reference_count INTEGER DEFAULT 1, last_seen TEXT);
+CREATE TABLE IF NOT EXISTS waveform_cache (
+ id INTEGER PRIMARY KEY, audio_file_id INTEGER REFERENCES audio_files(id), zoom_level TEXT,
+ samples_per_pixel INTEGER, min_values BLOB, max_values BLOB, rms_values BLOB,
+ color_values BLOB, created_at TEXT);
+CREATE TABLE IF NOT EXISTS scan_sessions (
+ id INTEGER PRIMARY KEY, start_time TEXT, end_time TEXT, scan_path TEXT, scan_type TEXT,
+ files_scanned INTEGER DEFAULT 0, files_added INTEGER DEFAULT 0,
+ files_updated INTEGER DEFAULT 0, files_removed INTEGER DEFAULT 0,
+ files_skipped INTEGER DEFAULT 0, errors INTEGER DEFAULT 0, error_details TEXT,
+ status TEXT);";
+
+const FTS_SCHEMA: &str = "
+CREATE VIRTUAL TABLE audio_search USING fts5(
+ filename,filename_tokenized,user_tags,user_tags_tokenized,
+ bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,
+ ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized,
+ content='audio_files',content_rowid='id',tokenize='porter unicode61 remove_diacritics 2');
+CREATE TRIGGER audio_files_ai AFTER INSERT ON audio_files BEGIN
+ INSERT INTO audio_search(rowid,filename,filename_tokenized,user_tags,user_tags_tokenized,
+ bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,
+ ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized)
+ VALUES(new.id,new.filename,new.filename_tokenized,new.user_tags,new.user_tags_tokenized,
+ new.bwf_description,new.bwf_description_tokenized,new.ixml_scene,new.ixml_scene_tokenized,
+ new.ixml_take,new.ixml_take_tokenized,new.user_notes,new.user_notes_tokenized);
+END;
+CREATE TRIGGER audio_files_au AFTER UPDATE OF filename,filename_tokenized,user_tags,user_tags_tokenized,
+ bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,
+ ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized ON audio_files BEGIN
+ INSERT INTO audio_search(audio_search,rowid,filename,filename_tokenized,user_tags,user_tags_tokenized,
+ bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,
+ ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized)
+ VALUES('delete',old.id,old.filename,old.filename_tokenized,old.user_tags,old.user_tags_tokenized,
+ old.bwf_description,old.bwf_description_tokenized,old.ixml_scene,old.ixml_scene_tokenized,
+ old.ixml_take,old.ixml_take_tokenized,old.user_notes,old.user_notes_tokenized);
+ INSERT INTO audio_search(rowid,filename,filename_tokenized,user_tags,user_tags_tokenized,
+ bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,
+ ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized)
+ VALUES(new.id,new.filename,new.filename_tokenized,new.user_tags,new.user_tags_tokenized,
+ new.bwf_description,new.bwf_description_tokenized,new.ixml_scene,new.ixml_scene_tokenized,
+ new.ixml_take,new.ixml_take_tokenized,new.user_notes,new.user_notes_tokenized);
+END;
+CREATE TRIGGER audio_files_ad AFTER DELETE ON audio_files BEGIN
+ INSERT INTO audio_search(audio_search,rowid,filename,filename_tokenized,user_tags,user_tags_tokenized,
+ bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,
+ ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized)
+ VALUES('delete',old.id,old.filename,old.filename_tokenized,old.user_tags,old.user_tags_tokenized,
+ old.bwf_description,old.bwf_description_tokenized,old.ixml_scene,old.ixml_scene_tokenized,
+ old.ixml_take,old.ixml_take_tokenized,old.user_notes,old.user_notes_tokenized);
+END;";
+
+#[cfg(test)]
+mod source_tag_tests {
+    #[test]
+    fn escaped_property_names_match_decoded_source_tags() {
+        for key in audiolib_core::SOURCE_TAG_KEYS {
+            let escaped = key
+                .chars()
+                .map(|character| format!("\\u{:04x}", character as u32))
+                .collect::<String>();
+            let json = format!(r#"{{"wav_metadata":{{"fields":{{"{escaped}":"OnlySource"}}}}}}"#);
+            assert!(super::json_has_source_tags(&json), "{key}");
+            assert_eq!(super::source_tags_key(&json), "onlysource", "{key}");
+        }
+        assert!(!super::json_has_source_tags(r#"{"other":"\u006beywords"}"#));
+    }
+
+    #[test]
+    fn quoted_keys_match_core_keys() {
+        let mut json = String::new();
+        for key in audiolib_core::SOURCE_TAG_KEYS {
+            json = format!("{{\"wav_metadata\":{{\"fields\":{{\"{key}\":\"x\"}}}}}}");
+            assert!(super::json_has_source_tags(&json), "{key}");
+        }
+        assert!(!super::json_has_source_tags(
+            &json.replace("cat_id", "other")
+        ));
+    }
+}

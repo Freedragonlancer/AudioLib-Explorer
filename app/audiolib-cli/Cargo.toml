@@ -1,0 +1,28 @@
+[package]
+name = "audiolib-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "AudioLibCli"
+path = "src/main.rs"
+
+[dependencies]
+audiolib-core = { path = "../../crates/audiolib-core" }
+audiolib-db = { path = "../../crates/audiolib-db" }
+audiolib-audio = { path = "../../crates/audiolib-audio", features = ["playback"] }
+audiolib-ipc = { path = "../../crates/audiolib-ipc" }
+audiolib-remote = { path = "../../crates/audiolib-remote" }
+anyhow.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+
+[dev-dependencies]
+tempfile.workspace = true
+rusqlite.workspace = true
+
+[features]
+asio = ["audiolib-audio/asio"]

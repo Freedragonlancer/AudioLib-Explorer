@@ -1,0 +1,1448 @@
+// server/audiolib-server/src/routes.rs
+//! `/api/v1` routing, bearer authentication and endpoint handlers.
+use crate::{
+    ApiError, AppState, VERSION,
+    auth::{ConnectionInfo, RequestOrigin, classify},
+    manage::{CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse, RemoveFolderResponse},
+    pcm::{self, PcmPlan, Renderer, WavError},
+    preview::{self, Codec, FlacPlan, FlacStream, PreviewRequest, SourceFormat},
+    scans::{CurrentScanResponse, ScanAction, ScanRequest, ScanResponse},
+    service::{FAILED_MESSAGE, Readiness, Service},
+    state::{
+        AudioWriteResponse, BatchWriteResponse, OpenError, OpenProgress, PreparedSnapshot,
+        SLOW_OPEN_WARNING, ServedAudio, SnapshotEncoding, WaveformReply,
+    },
+    stream::{self, ByteRange},
+    waveform::WaveformParams,
+};
+use audiolib_core::{
+    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, PlayRecord, ScanSession,
+    TagEditMode,
+};
+use axum::{
+    Json, Router,
+    body::{Body, Bytes},
+    extract::{
+        DefaultBodyLimit, Extension, Path, Query, Request, State,
+        rejection::{BytesRejection, QueryRejection},
+    },
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{delete, get, patch, post},
+};
+use futures_core::Stream;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::{
+    convert::Infallible,
+    io::{self, SeekFrom},
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
+use tower_http::{
+    timeout::TimeoutLayer,
+    trace::{DefaultOnFailure, TraceLayer},
+};
+
+/// Base path of every endpoint.
+pub const API_BASE: &str = "/api/v1";
+/// Read size for streaming snapshot and audio files.
+const STREAM_CHUNK_BYTES: usize = 256 * 1024;
+/// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
+/// `/audio/{id}/preview` and `/audio/{id}/waveform`, which legitimately take long (large
+/// bodies, waking disks, decoding); exceeding it yields 408 `TIMEOUT`.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Largest accepted JSON request body (a 1 MiB note may double when JSON-escaped).
+const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// `GET /health` reply (always HTTP 200 while the process serves requests).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthResponse {
+    /// `ok` (library open), `starting` (still opening) or `error` (open failed, retrying).
+    pub status: String,
+    /// Server crate version.
+    pub version: String,
+    /// Short reason for `error`; omitted otherwise. Never contains paths or secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Public base URL for clients outside the LAN (admin page or `config.toml`
+    /// `public_url`); always present, `null` when not configured.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// API version (`v1`, the `/api/v1/` path prefix).
+    #[serde(default)]
+    pub api_version: String,
+    /// Library schema version this build supports (`audiolib_db::SCHEMA_VERSION`).
+    #[serde(default)]
+    pub schema_version: i64,
+    /// Short git commit of the build, `unknown` when it could not be determined.
+    #[serde(default)]
+    pub commit: String,
+}
+
+/// Build the application router. `/health` is public; everything else is authorized per
+/// the authentication mode (`crate::auth`). `/capabilities` only needs that
+/// authorization; every other route also needs an open library (503 `UNAVAILABLE`
+/// before that). Library management (scans and their controls, `POST /audio/remove`,
+/// `DELETE /folders/{id}`) is additionally gated by `manage_mode` (403
+/// `MANAGE_FORBIDDEN`, checked after authentication). The LAN-only admin page lives at
+/// `/admin` (`crate::admin`). Accepts an open [`AppState`] or a [`Service`] that may still
+/// be starting. Request tracing records method, URI and status only, never request
+/// headers. All routes except the snapshot, audio stream, preview, waveform and
+/// `POST /scans` are limited to [`REQUEST_TIMEOUT`].
+pub fn router(service: impl Into<Service>) -> Router {
+    router_with_request_timeout(service, REQUEST_TIMEOUT)
+}
+
+/// [`router`] with another limit for the timed routes (tests use a short one to show that
+/// the stream and snapshot routes are not limited at all).
+#[doc(hidden)]
+pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duration) -> Router {
+    let state: Service = service.into();
+    // Library management (scans, removals) is additionally gated by `manage_mode`; the
+    // layer sits inside the authentication, so 401 comes before 403.
+    let manage = || middleware::from_fn_with_state(state.clone(), require_manage);
+    let timed_protected = with_request_timeout(
+        timeout,
+        Router::new()
+            .route("/roots", get(roots))
+            .route("/roots/{name}/check", post(check_root))
+            .route("/audio/{id}", get(audio))
+            .route("/audio/{id}/metadata", patch(update_metadata))
+            .route("/audio/metadata/batch", post(update_metadata_batch))
+            .route("/audio/{id}/plays", post(record_play))
+            .route("/audio/remove", post(remove_audio).route_layer(manage()))
+            .route("/folders/{id}", delete(remove_folder).route_layer(manage()))
+            .route("/history/scans", get(scan_history))
+            .route("/history/plays", get(play_history))
+            .route("/scans/current", get(current_scan))
+            .route("/scans/{session_id}", get(scan_status))
+            .route(
+                "/scans/{session_id}/pause",
+                post(pause_scan).route_layer(manage()),
+            )
+            .route(
+                "/scans/{session_id}/resume",
+                post(resume_scan).route_layer(manage()),
+            )
+            .route(
+                "/scans/{session_id}/cancel",
+                post(cancel_scan).route_layer(manage()),
+            )
+            .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES)),
+    );
+    let protected = timed_protected
+        // Not time-limited: on a sleeping disk the scan directory may take long to
+        // answer before the session (and its id) exists (doc/api/README.md §6.6).
+        .route(
+            "/scans",
+            post(start_scan)
+                .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+                .route_layer(manage()),
+        )
+        // Not time-limited either: on a million-row library the first request after a
+        // restart may still wait for the statistics (doc/api/README.md §6.1).
+        .route("/library", get(library))
+        .route(
+            "/library/snapshot",
+            get(snapshot).route_layer(middleware::map_response(vary_accept_encoding)),
+        )
+        .route("/audio/{id}/stream", get(audio_stream))
+        .route("/audio/{id}/preview", get(audio_preview))
+        .route(
+            "/audio/{id}/waveform",
+            get(audio_waveform).route_layer(middleware::map_response(vary_accept_encoding)),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
+    // `/capabilities` needs authentication but not the library, so it also answers
+    // while the library is still opening.
+    let open = Router::new().route("/health", get(health)).merge(
+        Router::new()
+            .route("/capabilities", get(capabilities))
+            .route_layer(middleware::from_fn_with_state(state.clone(), require_token)),
+    );
+    let api = with_request_timeout(timeout, open).merge(protected);
+    Router::new()
+        .nest(API_BASE, api)
+        .merge(with_request_timeout(timeout, crate::admin::router()))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        // `ApiError` already logs every 5xx it produces (503 `UNAVAILABLE` at debug); the
+        // default ERROR-level failure event would duplicate it on every client poll.
+        .layer(
+            TraceLayer::new_for_http()
+                .on_failure(DefaultOnFailure::new().level(tracing::Level::DEBUG)),
+        )
+        .with_state(state)
+}
+
+/// Check the bearer token, then attach the open [`AppState`] as a request extension.
+/// Apply `timeout` to the routes added so far, answering 408 `TIMEOUT` as JSON.
+fn with_request_timeout<S: Clone + Send + Sync + 'static>(
+    timeout: Duration,
+    router: Router<S>,
+) -> Router<S> {
+    router
+        .route_layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            timeout,
+        ))
+        .route_layer(middleware::map_response(timeout_as_json))
+}
+
+/// Replace tower-http's empty 408 body with the JSON error shape.
+async fn timeout_as_json(response: Response) -> Response {
+    if response.status() == StatusCode::REQUEST_TIMEOUT
+        && !response.headers().contains_key(header::CONTENT_TYPE)
+    {
+        ApiError::timeout().into_response()
+    } else {
+        response
+    }
+}
+
+/// Authorize the request per the authentication mode (401 `UNAUTHORIZED` when a token is
+/// needed and missing or invalid; requests that need none ignore `Authorization`), then
+/// attach the open [`AppState`].
+async fn require_bearer(
+    State(service): State<Service>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let connection = request.extensions().get::<ConnectionInfo>().copied();
+    if let Err(error) = service
+        .security()
+        .authorize(request.headers(), connection.as_ref())
+    {
+        return error.into_response();
+    }
+    match service.app_state() {
+        Ok(state) => {
+            request.extensions_mut().insert(state);
+            next.run(request).await
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Authorize the request per the authentication mode only (no library needed).
+async fn require_token(State(service): State<Service>, request: Request, next: Next) -> Response {
+    let connection = request.extensions().get::<ConnectionInfo>().copied();
+    match service
+        .security()
+        .authorize(request.headers(), connection.as_ref())
+    {
+        Ok(()) => next.run(request).await,
+        Err(error) => error.into_response(),
+    }
+}
+
+/// 403 `MANAGE_FORBIDDEN` unless `manage_mode` allows this (authorized) request to
+/// manage the library.
+async fn require_manage(State(service): State<Service>, request: Request, next: Next) -> Response {
+    let connection = request.extensions().get::<ConnectionInfo>().copied();
+    match service
+        .security()
+        .authorize_manage(request.headers(), connection.as_ref())
+    {
+        Ok(()) => next.run(request).await,
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `GET /capabilities`: the effective `manage_mode`, whether this request counts as
+/// external and whether it may manage the library.
+async fn capabilities(
+    State(service): State<Service>,
+    request: Request,
+) -> Json<CapabilitiesResponse> {
+    let connection = request.extensions().get::<ConnectionInfo>().copied();
+    let origin = classify(request.headers(), connection.as_ref());
+    let manage_mode = service.security().manage_mode();
+    Json(CapabilitiesResponse {
+        manage_mode,
+        external: origin == RequestOrigin::External,
+        can_manage: manage_mode.allows(origin),
+    })
+}
+
+/// Run blocking library work off the async executor.
+async fn blocking<T, F>(work: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> audiolib_core::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| ApiError::internal(format!("Library task failed: {error}")))?
+        .map_err(ApiError::from)
+}
+
+async fn health(State(service): State<Service>) -> Json<HealthResponse> {
+    let (status, message) = match service.readiness() {
+        Readiness::Ready(_) => ("ok", None),
+        Readiness::Starting => ("starting", None),
+        // Details (which may include paths) stay in the log and authenticated 503 replies.
+        Readiness::Failed(_) => ("error", Some(FAILED_MESSAGE.to_string())),
+    };
+    Json(HealthResponse {
+        status: status.into(),
+        version: VERSION.into(),
+        message,
+        public_url: service.security().public_url(),
+        api_version: crate::API_VERSION.into(),
+        schema_version: audiolib_db::SCHEMA_VERSION,
+        commit: crate::COMMIT.into(),
+    })
+}
+
+async fn library(Extension(state): Extension<AppState>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(blocking(move || state.library_response()).await?))
+}
+
+async fn roots(Extension(state): Extension<AppState>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(blocking(move || state.roots_response()).await?))
+}
+
+/// `POST /roots/{name}/check`: bounded inline recheck (about 2 s), then the root's
+/// `/roots` entry; unknown names are 404 `NOT_FOUND`.
+async fn check_root(
+    Extension(state): Extension<AppState>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(blocking(move || state.check_root(&name)).await?))
+}
+
+/// Parse an `{id}` path segment; a JSON `VALIDATION` error instead of axum's plain-text one.
+fn parse_id(raw: &str) -> Result<i64, ApiError> {
+    raw.parse()
+        .map_err(|_| ApiError::validation(format!("Audio id must be an integer, got {raw:?}")))
+}
+
+/// Parse a folder `{id}` path segment like [`parse_id`].
+fn parse_folder_id(raw: &str) -> Result<i64, ApiError> {
+    raw.parse()
+        .map_err(|_| ApiError::validation(format!("Folder id must be an integer, got {raw:?}")))
+}
+
+async fn audio(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<AudioFile>, ApiError> {
+    let id = parse_id(&raw_id)?;
+    Ok(Json(blocking(move || state.audio(id)).await?))
+}
+
+/// Decode a JSON request body; malformed JSON or wrong field types are 400 `VALIDATION`,
+/// an oversized body 413 `PAYLOAD_TOO_LARGE`. The `Content-Type` header is not checked.
+pub(crate) fn json_body<T: DeserializeOwned>(
+    body: Result<Bytes, BytesRejection>,
+) -> Result<T, ApiError> {
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+                format!("Request body exceeds {MAX_JSON_BODY_BYTES} bytes"),
+            )
+        } else {
+            ApiError::validation(format!(
+                "Cannot read request body: {}",
+                rejection.body_text()
+            ))
+        }
+    })?;
+    serde_json::from_slice(&body)
+        .map_err(|error| ApiError::validation(format!("Invalid JSON body: {error}")))
+}
+
+/// True when `value` is a JSON object carrying a legacy `rating` key and no current
+/// annotation field (`tags`, `color`, `notes`, `favorite`) with a non-null value: what a
+/// pre-v5 client sends to change only the rating (removed in schema v5).
+fn is_legacy_rating_only(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.contains_key("rating")
+        && ["tags", "color", "notes", "favorite"]
+            .iter()
+            .all(|key| object.get(*key).is_none_or(serde_json::Value::is_null))
+}
+
+/// `PATCH /audio/{id}/metadata`: apply a `MetadataPatch`, reply with the record after
+/// the write and the revisions around it. A legacy rating-only patch (pre-v5 clients) is
+/// a 200 no-op that returns the current record with `revision_before == revision`.
+async fn update_metadata(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<AudioWriteResponse>, ApiError> {
+    let id = parse_id(&raw_id)?;
+    let raw: serde_json::Value = json_body(body)?;
+    if is_legacy_rating_only(&raw) {
+        return Ok(Json(
+            blocking(move || {
+                let revision = state.poll_revision()?.revision;
+                Ok(AudioWriteResponse {
+                    file: state.audio(id)?,
+                    revision_before: revision,
+                    revision,
+                })
+            })
+            .await?,
+        ));
+    }
+    let patch: MetadataPatch = serde_json::from_value(raw)
+        .map_err(|error| ApiError::validation(format!("Invalid JSON body: {error}")))?;
+    Ok(Json(
+        blocking(move || state.update_metadata(id, &patch)).await?,
+    ))
+}
+
+/// Wire form of `BatchMetadataRequest`; `tag_mode` may be omitted (`replace`).
+#[derive(Deserialize)]
+struct BatchMetadataBody {
+    ids: Vec<i64>,
+    patch: MetadataPatch,
+    #[serde(default)]
+    tag_mode: TagEditMode,
+}
+
+/// `POST /audio/metadata/batch`: apply a `BatchMetadataRequest`, reply with the report,
+/// the changed records and the revisions around the write. A legacy rating-only `patch`
+/// (pre-v5 clients) changes nothing: 200 with `updated: 0`, the current records and
+/// `revision_before == revision` (ids are still validated).
+async fn update_metadata_batch(
+    Extension(state): Extension<AppState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<BatchWriteResponse>, ApiError> {
+    let raw: serde_json::Value = json_body(body)?;
+    if raw.get("patch").is_some_and(is_legacy_rating_only) {
+        let ids: Vec<i64> = raw
+            .get("ids")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| ApiError::validation(format!("Invalid JSON body: {error}")))?
+            .ok_or_else(|| ApiError::validation("Invalid JSON body: missing field `ids`"))?;
+        return Ok(Json(
+            blocking(move || {
+                if ids.is_empty() || ids.len() > 10_000 || ids.iter().any(|id| *id <= 0) {
+                    return Err(audiolib_core::Error::Validation(
+                        "Batch requires 1..=10000 positive IDs".into(),
+                    ));
+                }
+                let mut seen = std::collections::HashSet::new();
+                let files = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| seen.insert(*id))
+                    .map(|id| state.audio(id))
+                    .collect::<audiolib_core::Result<Vec<_>>>()?;
+                let revision = state.poll_revision()?.revision;
+                Ok(BatchWriteResponse {
+                    report: audiolib_core::BatchMetadataReport { updated: 0 },
+                    files,
+                    revision_before: revision,
+                    revision,
+                })
+            })
+            .await?,
+        ));
+    }
+    let body: BatchMetadataBody = serde_json::from_value(raw)
+        .map_err(|error| ApiError::validation(format!("Invalid JSON body: {error}")))?;
+    let request = BatchMetadataRequest {
+        ids: body.ids,
+        patch: body.patch,
+        tag_mode: body.tag_mode,
+    };
+    Ok(Json(
+        blocking(move || state.update_metadata_batch(&request)).await?,
+    ))
+}
+
+/// `POST /audio/{id}/plays`: count one play (body ignored), reply like the metadata patch.
+async fn record_play(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<AudioWriteResponse>, ApiError> {
+    let id = parse_id(&raw_id)?;
+    Ok(Json(blocking(move || state.record_play(id)).await?))
+}
+
+/// `POST /audio/remove`: remove library records (never files); see `crate::manage`.
+async fn remove_audio(
+    Extension(state): Extension<AppState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<RemoveAudioResponse>, ApiError> {
+    let request: RemoveAudioRequest = json_body(body)?;
+    Ok(Json(
+        blocking_api(move || state.remove_audio(&request.ids)).await?,
+    ))
+}
+
+/// `DELETE /folders/{id}`: remove a folder subtree's records (never files).
+async fn remove_folder(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<RemoveFolderResponse>, ApiError> {
+    let id = parse_folder_id(&raw_id)?;
+    Ok(Json(blocking_api(move || state.remove_folder(id)).await?))
+}
+
+/// `limit` + `offset` of the history lists (doc/api/README.md §5).
+#[derive(Deserialize)]
+struct PageQuery {
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+/// Default page size of `/history/...` (the library allows 1..=10000).
+const DEFAULT_HISTORY_LIMIT: usize = 100;
+
+fn page(query: Result<Query<PageQuery>, QueryRejection>) -> Result<(usize, usize), ApiError> {
+    let Query(query) = query.map_err(|rejection| {
+        ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
+    })?;
+    let number = |name: &str, raw: Option<&str>, default: usize| match raw {
+        None => Ok(default),
+        Some(raw) => raw.parse::<usize>().map_err(|_| {
+            ApiError::validation(format!(
+                "{name} must be a non-negative integer, got {raw:?}"
+            ))
+        }),
+    };
+    let limit = number("limit", query.limit.as_deref(), DEFAULT_HISTORY_LIMIT)?;
+    let offset = number("offset", query.offset.as_deref(), 0)?;
+    if limit == 0 || limit > 10_000 {
+        return Err(ApiError::validation("History limit must be 1..=10000"));
+    }
+    if i64::try_from(offset).is_err() {
+        return Err(ApiError::validation("History offset is too large"));
+    }
+    Ok((limit, offset))
+}
+
+/// `GET /history/scans?limit=&offset=`: `ScanSession[]`, newest first.
+async fn scan_history(
+    Extension(state): Extension<AppState>,
+    query: Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Json<Vec<ScanSession>>, ApiError> {
+    let (limit, offset) = page(query)?;
+    Ok(Json(
+        blocking(move || state.provider().scan_history(limit, offset)).await?,
+    ))
+}
+
+/// `GET /history/plays?limit=&offset=`: `PlayRecord[]`, newest first.
+async fn play_history(
+    Extension(state): Extension<AppState>,
+    query: Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Json<Vec<PlayRecord>>, ApiError> {
+    let (limit, offset) = page(query)?;
+    Ok(Json(
+        blocking(move || state.provider().play_history(limit, offset)).await?,
+    ))
+}
+
+/// Run blocking work that already answers with [`ApiError`].
+async fn blocking_api<T, F>(work: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| ApiError::internal(format!("Library task failed: {error}")))?
+}
+
+/// Parse a `{session_id}` path segment.
+fn parse_session_id(raw: &str) -> Result<i64, ApiError> {
+    raw.parse::<i64>().ok().filter(|id| *id > 0).ok_or_else(|| {
+        ApiError::validation(format!(
+            "Scan session id must be a positive integer, got {raw:?}"
+        ))
+    })
+}
+
+/// `POST /scans`: start a scan of a configured root (or a directory below it) and
+/// answer with its first progress once the library session exists.
+async fn start_scan(
+    Extension(state): Extension<AppState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    let request: ScanRequest = json_body(body)?;
+    let started = blocking_api(move || state.start_scan(request)).await?;
+    // If the client gives up while the directory is still resolving, the scan still
+    // starts; `GET /scans/current` shows it.
+    match started.await {
+        Ok(result) => result.map(Json),
+        Err(_) => Err(ApiError::internal("The scan thread ended unexpectedly")),
+    }
+}
+
+/// `GET /scans/current`: `{"scan": ScanResponse | null}` (always 200).
+async fn current_scan(Extension(state): Extension<AppState>) -> Json<CurrentScanResponse> {
+    Json(CurrentScanResponse {
+        scan: state.scans().current(),
+    })
+}
+
+/// `GET /scans/{session_id}`.
+async fn scan_status(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    let id = parse_session_id(&raw_id)?;
+    Ok(Json(blocking_api(move || state.scan_status(id)).await?))
+}
+
+async fn control_scan(
+    state: AppState,
+    raw_id: &str,
+    action: ScanAction,
+) -> Result<Json<ScanResponse>, ApiError> {
+    let id = parse_session_id(raw_id)?;
+    Ok(Json(
+        blocking_api(move || state.control_scan(id, action)).await?,
+    ))
+}
+
+/// `POST /scans/{session_id}/pause`.
+async fn pause_scan(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    control_scan(state, &raw_id, ScanAction::Pause).await
+}
+
+/// `POST /scans/{session_id}/resume`.
+async fn resume_scan(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    control_scan(state, &raw_id, ScanAction::Resume).await
+}
+
+/// `POST /scans/{session_id}/cancel`.
+async fn cancel_scan(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    control_scan(state, &raw_id, ScanAction::Cancel).await
+}
+
+/// Open the file on the blocking pool. No time limit applies (a sleeping NAS disk may
+/// need 20-30 s or more); if the client disconnects meanwhile, the handler future and
+/// with it the stream slot are dropped while the blocking open finishes on its own (the
+/// root monitor bounds such leftovers, see `AppState::open_audio`). An open still
+/// running after [`SLOW_OPEN_WARNING`] is logged with its root and path.
+async fn open_for_stream(state: AppState, id: i64) -> Result<ServedAudio, ApiError> {
+    let progress = OpenProgress::default();
+    let reporter = progress.clone();
+    let task = tokio::task::spawn_blocking(move || state.open_audio_reporting(id, &reporter));
+    watch_open(id, "Stream", task, &progress).await
+}
+
+/// Await blocking file work, warning once if its file open (while `progress` names a
+/// target) is still running after [`SLOW_OPEN_WARNING`]; map open errors to API errors.
+async fn watch_open<T>(
+    id: i64,
+    what: &'static str,
+    mut task: tokio::task::JoinHandle<Result<T, OpenError>>,
+    progress: &OpenProgress,
+) -> Result<T, ApiError> {
+    let joined = tokio::select! {
+        joined = &mut task => joined,
+        () = tokio::time::sleep(SLOW_OPEN_WARNING) => {
+            if let Some((root, path)) = progress.target() {
+                tracing::warn!(
+                    id,
+                    root = %root,
+                    path = %path,
+                    "{what} file open has been waiting for 10 s (sleeping disk or pending macOS permission prompt?)"
+                );
+            }
+            task.await
+        }
+    };
+    match joined {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(open_error(error)),
+        Err(error) => Err(ApiError::internal(format!("Library task failed: {error}"))),
+    }
+}
+
+fn open_error(error: OpenError) -> ApiError {
+    match error {
+        OpenError::Library(error) => error.into(),
+        OpenError::RootOffline { root, reason } => {
+            ApiError::root_offline(format!("Library root {root:?} is offline: {reason}"))
+        }
+    }
+}
+
+/// Query string of `/audio/{id}/stream`; other parameters are ignored.
+#[derive(Deserialize)]
+struct StreamQuery {
+    download: Option<String>,
+}
+
+/// `download=1`/`true` (case-insensitive) asks for an attachment; absent means inline;
+/// any other value (or a malformed query string) is 400 `VALIDATION`.
+fn wants_download(query: Result<Query<StreamQuery>, QueryRejection>) -> Result<bool, ApiError> {
+    let Query(query) = query.map_err(|rejection| {
+        ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
+    })?;
+    match query.download.as_deref() {
+        None => Ok(false),
+        Some(value) if value == "1" || value.eq_ignore_ascii_case("true") => Ok(true),
+        Some(value) => Err(ApiError::validation(format!(
+            "download must be 1 or true, got {value:?}"
+        ))),
+    }
+}
+
+/// `GET`/`HEAD /audio/{id}/stream`: raw file bytes with single-range and ETag support
+/// (see [`crate::stream`]). axum answers `HEAD` through this handler without a body.
+async fn audio_stream(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+    query: Result<Query<StreamQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(&raw_id)?;
+    let download = wants_download(query)?;
+    // The permit travels with the response body, so it counts streams until fully sent
+    // or dropped by the client.
+    let permit = state
+        .stream_slots()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::stream_busy())?;
+    let ServedAudio {
+        file,
+        path,
+        len,
+        etag,
+        filename,
+        ..
+    } = open_for_stream(state, id).await?;
+    // Same file, same ETag: the disposition never enters the validator.
+    let disposition = download
+        .then(|| HeaderValue::try_from(stream::attachment_disposition(&filename, id)).ok())
+        .flatten();
+    let header_text = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    let common = |response: &mut Response| {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+        if let Ok(value) = HeaderValue::from_str(&etag) {
+            headers.insert(header::ETAG, value);
+        }
+    };
+    let attach = |response: &mut Response| {
+        if let Some(value) = &disposition {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, value.clone());
+        }
+    };
+    if header_text(header::IF_NONE_MATCH).is_some_and(|value| stream::none_match(value, &etag)) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        common(&mut response);
+        attach(&mut response);
+        return Ok(response);
+    }
+    let range = stream::select_range(
+        header_text(header::RANGE),
+        header_text(header::IF_RANGE),
+        &etag,
+        len,
+    );
+    let Some(body_len) = range.body_len(len) else {
+        let mut response = ApiError::range_not_satisfiable(format!(
+            "Requested range is outside the {len}-byte file"
+        ))
+        .into_response();
+        common(&mut response);
+        if let Ok(value) = HeaderValue::try_from(format!("bytes */{len}")) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
+        return Ok(response);
+    };
+    let mut file = tokio::fs::File::from_std(file);
+    let (status, content_range) = match range {
+        ByteRange::Partial { start, end } => {
+            file.seek(SeekFrom::Start(start))
+                .await
+                .map_err(|error| ApiError::from(audiolib_core::Error::Io(error)))?;
+            (
+                StatusCode::PARTIAL_CONTENT,
+                Some(format!("bytes {start}-{end}/{len}")),
+            )
+        }
+        _ => (StatusCode::OK, None),
+    };
+    let body = GuardedStream {
+        inner: ReaderStream::with_capacity(file.take(body_len), STREAM_CHUNK_BYTES),
+        _guard: permit,
+    };
+    let mut response = Response::new(Body::from_stream(body));
+    *response.status_mut() = status;
+    common(&mut response);
+    attach(&mut response);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(stream::content_type(&path)),
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body_len));
+    if let Some(value) = content_range.and_then(|value| HeaderValue::try_from(value).ok()) {
+        headers.insert(header::CONTENT_RANGE, value);
+    }
+    Ok(response)
+}
+
+/// Query string of `/audio/{id}/preview`; other parameters are ignored.
+#[derive(Deserialize)]
+struct PreviewQuery {
+    codec: Option<String>,
+    sr: Option<String>,
+    bits: Option<String>,
+    ch: Option<String>,
+    t: Option<String>,
+}
+
+/// `GET`/`HEAD /audio/{id}/preview?codec=pcm|flac&sr=&bits=&ch=[&t=]`: a smaller
+/// rendition for low-bandwidth playback (doc/api/README.md §8.1). `pcm` is an
+/// in-process, sized and rangeable WAV; `flac` a live ffmpeg transcode. Not time-limited.
+async fn audio_preview(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+    method: Method,
+    query: Result<Query<PreviewQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(&raw_id)?;
+    let Query(query) = query.map_err(|rejection| {
+        ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
+    })?;
+    let request = PreviewRequest::parse(
+        query.codec.as_deref(),
+        query.sr.as_deref(),
+        query.bits.as_deref(),
+        query.ch.as_deref(),
+        query.t.as_deref(),
+    )?;
+    let head = method == Method::HEAD;
+    match request.codec {
+        Codec::Pcm => pcm_preview(state, id, &request, head, &headers).await,
+        Codec::Flac => flac_preview(state, id, &request, head, &headers).await,
+    }
+}
+
+/// Open audio `id` like `/stream` (root checks, no time limit), then parse its WAV
+/// header on the blocking pool.
+async fn open_wav(
+    state: &AppState,
+    id: i64,
+) -> Result<(ServedAudio, Result<pcm::WavInfo, WavError>), ApiError> {
+    let served = open_for_stream(state.clone(), id).await?;
+    let task = tokio::task::spawn_blocking(move || {
+        let info = pcm::parse_wav(&served.file, served.len);
+        (served, info)
+    });
+    let (served, info) = task
+        .await
+        .map_err(|error| ApiError::internal(format!("Library task failed: {error}")))?;
+    let info = match info {
+        Err(WavError::Io(error)) => {
+            return Err(open_error(
+                state.decode_failure(&served.path, audiolib_core::Error::Io(error)),
+            ));
+        }
+        other => other,
+    };
+    Ok((served, info))
+}
+
+fn preview_format_headers(headers: &mut HeaderMap, rate: u32, bits: u16, channels: u16) {
+    headers.insert("x-preview-sample-rate", HeaderValue::from(rate));
+    headers.insert("x-preview-bits", HeaderValue::from(bits));
+    headers.insert("x-preview-channels", HeaderValue::from(channels));
+}
+
+/// `X-Total-Frames` (output frames from the start, at the output rate) and `X-Duration`
+/// (their length in seconds, 6 decimals), the same on both codecs.
+fn preview_length_headers(headers: &mut HeaderMap, frames: u64, rate: u32) {
+    headers.insert("x-total-frames", HeaderValue::from(frames));
+    let seconds = frames as f64 / f64::from(rate.max(1));
+    if let Ok(value) = HeaderValue::try_from(format!("{seconds:.6}")) {
+        headers.insert("x-duration", value);
+    }
+}
+
+/// `codec=pcm`: one of the `max_previews` slots (else 503 `BUSY`), Range/ETag rules as
+/// `/stream`.
+async fn pcm_preview(
+    state: AppState,
+    id: i64,
+    request: &PreviewRequest,
+    head: bool,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let permit = state
+        .preview_slots()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::preview_busy())?;
+    let (served, info) = open_wav(&state, id).await?;
+    let info = info.map_err(|error| {
+        let reason = match error {
+            WavError::Unsupported(reason) => reason,
+            WavError::Io(error) => error.to_string(),
+        };
+        ApiError::preview_unsupported(format!(
+            "Audio {id} cannot be previewed with codec=pcm ({reason}); use codec=flac or /stream"
+        ))
+    })?;
+    let Some(factor) = pcm::decimation_factor(info.sample_rate, request.sample_rate) else {
+        return Err(ApiError::preview_unsupported(format!(
+            "Audio {id} cannot be previewed with codec=pcm at sr={}: {} Hz has no integer \
+             factor up to {} reaching it; use codec=flac, a higher sr, or /stream",
+            request.sample_rate.unwrap_or_default(),
+            info.sample_rate,
+            pcm::MAX_DECIMATION_FACTOR
+        )));
+    };
+    let bits = preview::resolve_bits(request.bits, info.format.bits(), info.format.is_float());
+    let (channels, mix) = preview::resolve_channels(request.channels, info.channels)?;
+    let plan = PcmPlan::new(info, factor, bits, channels, mix);
+    let etag = plan.etag(&served.etag);
+    let total = plan.total_len();
+    let common = |response: &mut Response| {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+        if let Ok(value) = HeaderValue::from_str(&etag) {
+            headers.insert(header::ETAG, value);
+        }
+        preview_format_headers(headers, plan.sample_rate, plan.bits, plan.channels);
+        headers.insert("x-preview-frames", HeaderValue::from(plan.frames));
+        preview_length_headers(headers, plan.frames, plan.sample_rate);
+    };
+    let header_text = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    if header_text(header::IF_NONE_MATCH).is_some_and(|value| stream::none_match(value, &etag)) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        common(&mut response);
+        return Ok(response);
+    }
+    let range = stream::select_range(
+        header_text(header::RANGE),
+        header_text(header::IF_RANGE),
+        &etag,
+        total,
+    );
+    let Some(body_len) = range.body_len(total) else {
+        let mut response = ApiError::range_not_satisfiable(format!(
+            "Requested range is outside the {total}-byte preview"
+        ))
+        .into_response();
+        common(&mut response);
+        if let Ok(value) = HeaderValue::try_from(format!("bytes */{total}")) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
+        return Ok(response);
+    };
+    let (status, first, last) = match range {
+        ByteRange::Partial { start, end } => (StatusCode::PARTIAL_CONTENT, start, end),
+        _ => (StatusCode::OK, 0, total.saturating_sub(1)),
+    };
+    let body = if head || body_len == 0 {
+        headers_only_body()
+    } else {
+        let renderer = Renderer::new(plan.clone());
+        // 1 MiB source reads with two blocks loading ahead hide NAS latency spikes.
+        let file = pcm::ReadAhead::new(Arc::new(served.file), served.len);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<io::Result<Bytes>>(4);
+        tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let (mut sent, mut gone) = (0_u64, false);
+            let result = renderer.render_range(&file, first, last, |chunk| {
+                sent += chunk.len() as u64;
+                gone = sender.blocking_send(Ok(Bytes::from(chunk))).is_err();
+                !gone
+            });
+            if let Err(error) = result {
+                tracing::warn!(id, %error, "PCM preview stopped: reading the source failed");
+                let _ = sender.blocking_send(Err(error));
+                return;
+            }
+            tracing::info!(
+                id,
+                bytes = sent,
+                millis = started.elapsed().as_millis() as u64,
+                complete = !gone,
+                "PCM preview sent"
+            );
+        });
+        Body::from_stream(ChannelBody {
+            receiver,
+            _permit: permit,
+        })
+    };
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    common(&mut response);
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body_len));
+    if status == StatusCode::PARTIAL_CONTENT
+        && let Ok(value) = HeaderValue::try_from(format!("bytes {first}-{last}/{total}"))
+    {
+        headers.insert(header::CONTENT_RANGE, value);
+    }
+    Ok(response)
+}
+
+/// `codec=flac`: takes one of the `max_previews` slots (else 503 `BUSY`), opens the file
+/// like `/stream`, answers `If-None-Match` (304) and `HEAD` without ffmpeg, then waits up
+/// to [`preview::TRANSCODE_SLOT_WAIT`] for one of `max_transcodes` slots (then 503
+/// `BUSY`) and streams ffmpeg's stdout (chunked, no Range).
+async fn flac_preview(
+    state: AppState,
+    id: i64,
+    request: &PreviewRequest,
+    head: bool,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let ffmpeg = state.ffmpeg_path().to_path_buf();
+    if !preview::ffmpeg_available(&ffmpeg) {
+        tracing::warn!(path = %ffmpeg.display(), "ffmpeg is not available for a FLAC preview");
+        return Err(ApiError::transcoder_unavailable(
+            "ffmpeg is not available on the server; use codec=pcm or /stream",
+        ));
+    }
+    let preview_permit = state
+        .preview_slots()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::preview_busy())?;
+    let (served, info) = open_wav(&state, id).await?;
+    let source = match &info {
+        Ok(info) => SourceFormat::from_wav(info),
+        Err(_) => SourceFormat::from_record(&served.record),
+    };
+    let plan = FlacPlan::new(&source, request)?;
+    let etag = plan.etag(&served.etag, &preview::ffmpeg_tag(&ffmpeg));
+    let set_headers = |headers: &mut HeaderMap| -> Result<(), ApiError> {
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/flac"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+        headers.insert(header::ETAG, header_value(etag.clone())?);
+        if let Some(frames) = plan.total_frames() {
+            preview_length_headers(headers, frames, plan.sample_rate);
+        }
+        headers.insert(
+            HeaderName::from_static("x-start-time"),
+            header_value(plan.start_time())?,
+        );
+        headers.insert("x-start-frame", HeaderValue::from(plan.start_frame));
+        preview_format_headers(headers, plan.sample_rate, plan.bits, plan.channels);
+        Ok(())
+    };
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
+    if if_none_match.is_some_and(|value| stream::none_match(value, &etag)) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        set_headers(response.headers_mut())?;
+        response.headers_mut().remove(header::CONTENT_TYPE);
+        return Ok(response);
+    }
+    if head {
+        let mut response = Response::new(headers_only_body());
+        set_headers(response.headers_mut())?;
+        return Ok(response);
+    }
+    // Waiting for a transcode slot holds only this preview slot, never a /stream slot.
+    let transcode_permit = tokio::time::timeout(
+        preview::TRANSCODE_SLOT_WAIT,
+        state.transcode_slots().acquire_owned(),
+    )
+    .await
+    .map_err(|_| ApiError::transcode_busy())?
+    .map_err(|_| ApiError::internal("Transcode slots closed"))?;
+    let ServedAudio { file, path, .. } = served;
+    tracing::debug!(id, path = %path.display(), start = %plan.start_time(), "Starting FLAC preview");
+    // On Unix ffmpeg reads the very file that passed the root checks through its stdin
+    // descriptor (seekable: /dev/fd/0 is the regular file), never reopening the path.
+    #[cfg(unix)]
+    let (input, stdin) = ("/dev/fd/0".to_string(), std::process::Stdio::from(file));
+    #[cfg(not(unix))]
+    let (input, stdin) = {
+        drop(file);
+        (
+            path.to_string_lossy().into_owned(),
+            std::process::Stdio::null(),
+        )
+    };
+    let args = plan.ffmpeg_args(&input);
+    let mut body = FlacStream::spawn(
+        &ffmpeg,
+        &args,
+        stdin,
+        vec![preview_permit, transcode_permit],
+        state.transcodes(),
+        id,
+    )?;
+    body.first_chunk().await?;
+    let mut response = Response::new(Body::from_stream(body));
+    set_headers(response.headers_mut())?;
+    Ok(response)
+}
+
+/// Body of a `HEAD` reply: no data and no size hint, so no `Content-Length: 0` is added
+/// over the real one (or to a chunked FLAC reply).
+fn headers_only_body() -> Body {
+    Body::from_stream(NoData)
+}
+
+struct NoData;
+
+impl Stream for NoData {
+    type Item = Result<Bytes, Infallible>;
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(None)
+    }
+}
+
+/// Chunks produced on the blocking pool; holds the preview slot until sent or dropped.
+/// Dropping it (client gone) makes the producer's next send fail, which stops it.
+struct ChannelBody {
+    receiver: tokio::sync::mpsc::Receiver<io::Result<Bytes>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Stream for ChannelBody {
+    type Item = io::Result<Bytes>;
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().receiver.poll_recv(context)
+    }
+}
+
+/// Query string of `/audio/{id}/waveform`; other parameters are ignored.
+#[derive(Deserialize)]
+struct WaveformQuery {
+    buckets: Option<String>,
+    colors: Option<String>,
+    start_frame: Option<String>,
+    end_frame: Option<String>,
+}
+
+/// Sets the flag when dropped: the handler future is dropped when the client goes away,
+/// which stops the decode at its next check.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// `GET`/`HEAD /audio/{id}/waveform`: cached peak summary of the file
+/// (doc/api/README.md §9). Waits for one of `max_waveforms` slots; not time-limited.
+async fn audio_waveform(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+    query: Result<Query<WaveformQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(&raw_id)?;
+    let Query(query) = query.map_err(|rejection| {
+        ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
+    })?;
+    let params = WaveformParams::parse(
+        query.buckets.as_deref(),
+        query.colors.as_deref(),
+        query.start_frame.as_deref(),
+        query.end_frame.as_deref(),
+    )?;
+    let zstd = accepts_zstd(&headers);
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let _permit = state
+        .waveform_slots()
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError::internal("Waveform slots closed"))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    let progress = OpenProgress::default();
+    let reporter = progress.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        state.waveform(
+            id,
+            &params,
+            zstd,
+            if_none_match.as_deref(),
+            &cancel,
+            &reporter,
+        )
+    });
+    let reply = watch_open(id, "Waveform", task, &progress).await?;
+    let cache_control = HeaderValue::from_static("private, no-cache");
+    Ok(match reply {
+        WaveformReply::NotModified { etag } => {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            let headers = response.headers_mut();
+            headers.insert(header::ETAG, header_value(etag)?);
+            headers.insert(header::CACHE_CONTROL, cache_control);
+            response
+        }
+        WaveformReply::Body { etag, bytes, zstd } => {
+            let len = bytes.len();
+            let mut response = Response::new(Body::from(bytes));
+            let headers = response.headers_mut();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+            headers.insert(header::ETAG, header_value(etag)?);
+            headers.insert(header::CACHE_CONTROL, cache_control);
+            if zstd {
+                headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+            }
+            response
+        }
+    })
+}
+
+/// `Vary: Accept-Encoding` on every `/library/snapshot` and `/audio/{id}/waveform`
+/// reply (errors and 304 too).
+async fn vary_accept_encoding(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    response
+}
+
+/// Whether `Accept-Encoding` accepts `zstd` (any `q` other than 0).
+fn accepts_zstd(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|item| {
+            let mut parts = item.split(';').map(str::trim);
+            let coding = parts.next().unwrap_or_default();
+            let zero = parts.any(|param| {
+                param
+                    .strip_prefix("q=")
+                    .or_else(|| param.strip_prefix("Q="))
+                    .and_then(|q| q.trim().parse::<f32>().ok())
+                    .is_some_and(|q| q <= 0.0)
+            });
+            coding.eq_ignore_ascii_case("zstd") && !zero
+        })
+}
+
+/// `GET /library/snapshot`: the SQLite snapshot of the current revision, zstd-compressed
+/// when `Accept-Encoding` allows it. See doc/api/README.md §6.1.
+async fn snapshot(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let encoding = if accepts_zstd(&headers) {
+        SnapshotEncoding::Zstd
+    } else {
+        SnapshotEncoding::Identity
+    };
+    // A client that already holds this revision in this encoding needs no body.
+    if let Some(value) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        let poll_state = state.clone();
+        let revision = blocking(move || poll_state.poll_revision()).await?;
+        let etag = PreparedSnapshot::etag(&revision.library_id, revision.revision, encoding);
+        if stream::none_match(value, &etag) {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            let headers = response.headers_mut();
+            headers.insert(header::ETAG, header_value(etag)?);
+            headers.insert("x-library-id", header_value(revision.library_id)?);
+            headers.insert(
+                "x-library-revision",
+                header_value(revision.revision.to_string())?,
+            );
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return Ok(response);
+        }
+    }
+    let permit = state.snapshot_slots().try_acquire_owned().map_err(|_| {
+        ApiError::from(audiolib_core::Error::Busy(
+            "Too many library snapshots are being prepared; retry shortly".into(),
+        ))
+    })?;
+    // The preparation runs detached (single flight per encoding); past the wait budget the
+    // client gets 503 BUSY + Retry-After instead of a response that never starts, and the
+    // retry joins the finished or still running preparation.
+    let (prepared, file) = state
+        .snapshot_within_budget(encoding == SnapshotEncoding::Zstd)
+        .await
+        .ok_or_else(ApiError::snapshot_preparing)??;
+    let path = file
+        .as_ref()
+        .map_or(&prepared.plain.path, |file| &file.path);
+    let file_handle = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| ApiError::from(audiolib_core::Error::Io(error)))?;
+    let length = file_handle
+        .metadata()
+        .await
+        .map_err(|error| ApiError::from(audiolib_core::Error::Io(error)))?
+        .len();
+    let etag = PreparedSnapshot::etag(&prepared.library_id, prepared.revision, encoding);
+    let disposition = header_value(format!(
+        "attachment; filename=\"audiolib-{}-r{}.db\"",
+        filename_token(&prepared.library_id),
+        prepared.revision
+    ))?;
+    tracing::info!(
+        bytes = length,
+        revision = prepared.revision,
+        encoding = ?encoding,
+        "Streaming library snapshot"
+    );
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    response_headers.insert(header::CONTENT_DISPOSITION, disposition);
+    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(header::ETAG, header_value(etag)?);
+    response_headers.insert("x-library-id", header_value(prepared.library_id.clone())?);
+    response_headers.insert(
+        "x-library-revision",
+        header_value(prepared.revision.to_string())?,
+    );
+    response_headers.insert(
+        "x-schema-version",
+        header_value(prepared.schema_version.to_string())?,
+    );
+    response_headers.insert(
+        "x-uncompressed-length",
+        HeaderValue::from(prepared.plain.bytes),
+    );
+    if encoding == SnapshotEncoding::Zstd {
+        response_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+    }
+    // The snapshot entry (files) and the slot permit live until the body is fully sent
+    // or dropped; a cached entry stays for later requests of the same revision.
+    let stream = GuardedStream {
+        inner: ReaderStream::with_capacity(file_handle, STREAM_CHUNK_BYTES),
+        _guard: (prepared, file, permit),
+    };
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().extend(response_headers);
+    Ok(response)
+}
+
+fn header_value(value: String) -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(&value).map_err(|error| ApiError::internal(error.to_string()))
+}
+
+async fn not_found() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "No such endpoint")
+}
+
+/// 405 as JSON; axum still adds the route's `Allow` header to this reply.
+async fn method_not_allowed() -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "METHOD_NOT_ALLOWED",
+        "Method not allowed for this endpoint",
+    )
+}
+
+/// Restrict a value to `[A-Za-z0-9._-]` (max 64 chars) for use inside a quoted
+/// `Content-Disposition` filename, so the header can never be invalid.
+fn filename_token(value: &str) -> String {
+    let token: String = value
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if token.is_empty() {
+        "library".into()
+    } else {
+        token
+    }
+}
+
+/// A byte stream that keeps `_guard` (temporary files, permits) alive until it is dropped.
+struct GuardedStream<S, G> {
+    inner: S,
+    _guard: G,
+}
+
+impl<S: Stream + Unpin, G: Unpin> Stream for GuardedStream<S, G> {
+    type Item = S::Item;
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        Pin::new(&mut self.get_mut().inner).poll_next(context)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_tokens_are_header_safe() {
+        assert_eq!(
+            filename_token("c8385998-114b-45b0-9949-9e79ae7c08cc"),
+            "c8385998-114b-45b0-9949-9e79ae7c08cc"
+        );
+        assert_eq!(filename_token("a\"b\r\nc/é"), "a_b__c__");
+        assert_eq!(filename_token(""), "library");
+        assert_eq!(filename_token(&"x".repeat(200)).len(), 64);
+        let header = format!(
+            "attachment; filename=\"{}\"",
+            filename_token("\u{7f}\0\"\n")
+        );
+        assert!(HeaderValue::from_str(&header).is_ok());
+    }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "audiolib-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+audiolib-core = { path = "../audiolib-core" }
+audiolib-db = { path = "../audiolib-db", default-features = false }
+audiolib-windows = { path = "../audiolib-windows" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# FLAC previews are decoded to PCM on the stream thread (the engine plays WAV only).
+symphonia = { workspace = true, features = ["flac"] }
+thiserror.workspace = true
+tracing.workspace = true
+zstd = "0.13"
+# `platform-verifier`: certificates are checked against the OS trust store (Windows
+# certificate store, macOS keychain), so corporate and Windows-installed roots work.
+ureq = { workspace = true, features = ["platform-verifier"] }
+# Same rustls as ureq: TLS error classification and the connection test's handshake step.
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# Local TLS integration tests: a throwaway CA trusted only inside tests.
+rcgen.workspace = true

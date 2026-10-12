@@ -1,0 +1,60 @@
+[package]
+name = "audiolib-server"
+description = "LAN HTTP server exposing one AudioLib library to remote clients (/api/v1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+readme = "../README.md"
+# repository = "https://github.com/<owner>/<repo>"   # set when the public repository exists
+keywords = ["audio", "library", "server", "http-api"]
+categories = ["multimedia::audio"]
+
+[[bin]]
+name = "audiolib-server"
+path = "src/main.rs"
+
+[dependencies]
+audiolib-core = { path = "../../crates/audiolib-core" }
+# Remote scans (POST /scans) run the workspace scanner. Its audiolib-audio dependency is
+# already needed for waveforms; no playback device is ever opened.
+audiolib-db = { path = "../../crates/audiolib-db", features = ["scanner"] }
+# Waveform peaks for GET /audio/{id}/waveform (decode only; no playback device is opened).
+audiolib-audio = { path = "../../crates/audiolib-audio", default-features = false }
+anyhow.workspace = true
+axum.workspace = true
+futures-core.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "signal", "process"] }
+tokio-util.workspace = true
+toml.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+# Compressed `/library/snapshot` (`Accept-Encoding: zstd`), multithreaded encoder.
+zstd = { version = "0.13", features = ["zstdmt"] }
+# Per-connection request extensions (peer address, listener) in the accept loop.
+tower.workspace = true
+# Admin tokens: SHA-256 hashes and random secrets (ring is already the rustls provider).
+ring = "0.17"
+# Optional native TLS listener (admin page, doc/api/README.md §2.2); ring provider only,
+# so no aws-lc / C toolchain requirement.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+
+[target.'cfg(unix)'.dependencies]
+# getifaddrs: LAN addresses shown on the admin page.
+libc = "0.2"
+
+[dev-dependencies]
+audiolib-db = { path = "../../crates/audiolib-db", features = ["scanner"] }
+http-body-util.workspace = true
+# Self-signed certificate for the native TLS listener test.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
