@@ -736,4 +736,6 @@ Windows 最新源码的全工作区 ASIO release build、review-fixes（CleanChe
 
 `v0.4.5` 的 [Release 检查](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/38374086093) 中，原生 Linux Clippy、服务器和数据库测试、release 构建、归档及 health/library 验证已通过，但 validator 的进程清理失败，未发布该版本。Ubuntu 的 PATH 同时解析到 `/usr/bin/kill` 和 `/bin/kill`，原写法把 `.Source` 数组作为一个命令路径传入。validator 现在对 native kill 和 Cargo 都先取首个应用命令再读取路径；继续只停止该次验证启动的进程，保留有界终止 fallback。
 
+同轮 Windows 检查还发现远程 raw route 测试的路径前提错误：测试根目录使用原始临时路径，扫描记录则使用规范路径；机器临时目录采用别名时两者无法匹配，提前选用了 server raw route。该测试现在显式使用 `sounds/../sounds` 扫描输入，确认旧根身份无法匹配，再从扫描记录的父目录构造服务器根，并在播放前核验根身份与精确 WebDAV 映射。原注册身份、路由替换、失败回滚、共享缓冲与 Stop 取消断言保留；这不改变应用路由行为。
+
 已推送的标签保留，发布目标改为 `v0.4.6`。程序版本统一更新，API v1、schema 5 与 snapshot 3..=5 不变。此前 `v0.4.5` 本机最终提交的客户端与服务器打包、隔离 portable 和健康验收通过；新标签将执行完整 Windows/ASIO 与原生 Linux 发布检查，最终身份和结果见该标签的公开 workflow/报告。本机续验日志位于忽略的 `.rust-validation/release-v0.4.6/`。

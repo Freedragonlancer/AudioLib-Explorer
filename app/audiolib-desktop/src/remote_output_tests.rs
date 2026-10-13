@@ -465,6 +465,9 @@ fn child_raw_route_replacement() {
         let sounds = directory.join("sounds");
         std::fs::create_dir_all(&sounds).unwrap();
         std::fs::write(sounds.join("raw.wav"), wav_frames(channels, 100_000)).unwrap();
+        // Hosted Windows TEMP may use a short-name alias. An explicit parent
+        // component makes the same raw/canonical mismatch deterministic locally.
+        let sounds = sounds.join("..").join("sounds");
         let provider = Arc::new(SqliteProvider::open(&directory.join("library.db")).unwrap());
         ScanService::new(provider.clone())
             .scan(
@@ -543,11 +546,39 @@ fn child_raw_route_replacement() {
             .insert("SFX".into(), format!("{url}/dav"));
         let offline_root = audiolib_remote::RemoteRoot {
             name: "SFX".into(),
-            server_path: sounds.to_string_lossy().into_owned(),
+            // Server roots and indexed files share the scanner's canonical
+            // identity; the client must not resolve a server path locally.
+            server_path: Path::new(&file.file_path)
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
             online: Some(false),
             status: Some("offline".into()),
             ..Default::default()
         };
+        let mut alias_root = offline_root.clone();
+        alias_root.server_path = sounds.to_string_lossy().into_owned();
+        assert!(
+            audiolib_remote::root_for_path(&file.file_path, std::slice::from_ref(&alias_root))
+                .is_none(),
+            "the raw fixture alias must differ from the indexed path identity"
+        );
+        assert!(
+            audiolib_remote::root_for_path(&file.file_path, std::slice::from_ref(&offline_root))
+                .is_some()
+        );
+        assert_eq!(
+            audiolib_remote::map_server_path(
+                &file.file_path,
+                &audiolib_remote::effective_roots(
+                    std::slice::from_ref(&offline_root),
+                    &config.data_source.webdav,
+                ),
+            )
+            .unwrap(),
+            format!("{url}/dav/raw.wav")
+        );
         let playback = PlaybackConfig::default();
         let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
         let ui = AppWindow::new().unwrap();
