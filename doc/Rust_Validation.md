@@ -726,4 +726,8 @@ Windows 检查中的预取消断言失败；确定性回归进一步复现同目
 
 Windows server 包按实际 workspace ASIO features 生成 normal/build 依赖闭包，并包含 `asio-sys` 与固定 SDK 2.3.4 通知；Unix 不启用 ASIO。打包核验已准备 SDK 的固定 ZIP 校验和及精确许可证内容，无 SDK 下载或校验绕过接口。独立 validator 校验官方通知 SHA256。隔离 fake 回归覆盖参数、SDK 缺失/篡改、feature 模式错误、通知清单及失败保留原归档；假 ZIP 校验和仅在测试夹具中模拟，实际 SDK ZIP 和许可证亦独立核验。
 
-本机最终 `cargo fmt --all -- --check`、默认及 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试通过。两份测试日志各汇总 777 passed、69 ignored（包含子进程测试的结果汇总）；检查期间应用源码身份保持一致。版本门禁确认 program 0.4.5、API v1、schema 5、snapshot 3..=5。发布构建、真实归档验收与原生 Linux 结果继续由对应标签 workflow 和公开报告记录；本机日志位于忽略的 `.rust-validation/release-v0.4.5/`，不随发布上传。
+`asio-sys 0.4.0` 的上游 crate 没有独立许可证文件，引用同仓库的 CPAL 根许可证。真实包包含 `cpal 0.18.2` 的该文件；validator 仅在两者版本、仓库和 `Apache-2.0` 声明匹配，且 CPAL LICENSE 的固定 SHA256 匹配时接受此来源。独立通知路径与 SDK 的固定 SHA256 校验继续保留，不提供运行参数绕过。
+
+本机最终 `cargo fmt --all -- --check`、默认及 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试通过。两份测试日志各汇总 777 passed、69 ignored（包含子进程测试的结果汇总）；检查期间应用源码身份保持一致。版本门禁确认 program 0.4.5、API v1、schema 5、snapshot 3..=5。
+
+Windows 最新源码的全工作区 ASIO release build、review-fixes（CleanCheckout）、library-management、desktop-close（三轮）和 playback-ipc（CleanCheckout）均通过。客户端打包及 `dist/latest/portable` 的隔离验收通过；真实 ASIO server ZIP 的归档校验和、通知来源、解压 EXE 版本/哈希、health API v1/schema 5/实际提交，以及一条记录测试库读取亦通过。所有测试使用独立临时数据，没有打开工作库；Windows 测试进程终止不计为服务端 graceful drain 验证。本机未执行原生 Linux，最终发布的两个平台结果及提交/资产身份由对应标签 workflow 和公开报告记录。本机日志位于忽略的 `.rust-validation/release-v0.4.5/`，不随发布上传。

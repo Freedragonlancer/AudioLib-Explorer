@@ -1,6 +1,6 @@
 # tools/validate-server-package.ps1
 # Validate the native server archive and smoke-test its extracted executable against
-# an owned synthetic library. Requires PowerShell 7.2; never uses normal runtime data.
+# an owned synthetic library. Requires PowerShell 7.3; never uses normal runtime data.
 # ./tools/validate-server-package.ps1 -Tag v0.4.5 -Target x86_64-pc-windows-msvc -Asio
 [CmdletBinding()]
 param(
@@ -12,7 +12,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-if ($PSVersionTable.PSVersion -lt [version]'7.2') { throw 'Server validation requires PowerShell 7.2 or newer.' }
+if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server validation requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
 $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
@@ -190,7 +190,23 @@ try {
         $expectedLicenseHash = '61E56814F24B32216884B2DB0B4DCC317111A5AB354D54D19DD9FC13D71B1C7A'
         if ((Get-FileHash -LiteralPath (Join-Path $extractRoot $sdkLicenseRelative) -Algorithm SHA256).Hash -cne $expectedLicenseHash) { throw 'Packaged ASIO SDK notice differs from the pinned SDK 2.3.4 license.' }
         $asioNotices = @($archiveFiles | Where-Object { $_ -cmatch '^licenses/asio-sys-[^/]+/(?:LICENSE|COPYING|NOTICE)' })
-        if (!$asioNotices.Count) { throw 'Packaged asio-sys license notice is missing.' }
+        if (!$asioNotices.Count) {
+            # asio-sys 0.4.0 is the `asio-sys/` subdirectory of CPAL's repository;
+            # its published README explicitly refers to ../LICENSE. Both published
+            # crates identify source commit e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7.
+            # Accept that available root notice only for this audited identity.
+            $asioIdentity = @($dependencies | Where-Object { $_.name -ceq 'asio-sys' })
+            $cpalIdentity = @($dependencies | Where-Object { $_.name -ceq 'cpal' })
+            $cpalNotice = 'licenses/cpal-0.18.2/LICENSE'
+            $repository = 'https://github.com/RustAudio/cpal'
+            if ($asioIdentity.Count -ne 1 -or $cpalIdentity.Count -ne 1 -or
+                $asioIdentity[0].version -cne '0.4.0' -or $cpalIdentity[0].version -cne '0.18.2' -or
+                $asioIdentity[0].repository -cne $repository -or $cpalIdentity[0].repository -cne $repository -or
+                $asioIdentity[0].license -cne 'Apache-2.0' -or $cpalIdentity[0].license -cne 'Apache-2.0' -or
+                !$archiveFiles.Contains($cpalNotice)) { throw 'Packaged asio-sys shared CPAL license identity is invalid or missing.' }
+            $expectedCpalHash = 'C71D239DF91726FC519C6EB72D318EC65820627232B2F796219E87DCF35D0AB4'
+            if ((Get-FileHash -LiteralPath (Join-Path $extractRoot $cpalNotice) -Algorithm SHA256).Hash -cne $expectedCpalHash) { throw 'Packaged asio-sys shared CPAL license differs from the audited upstream notice.' }
+        }
     }
     $privatePrefixes = @($taskRoot, $env:USERPROFILE, $env:HOME, $env:CARGO_HOME, $env:RUSTUP_HOME, $env:CARGO_TARGET_DIR) | Where-Object { $_ }
     foreach ($file in $files) {
