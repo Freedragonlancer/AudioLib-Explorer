@@ -707,3 +707,13 @@ validate-playback-ipc：第一次运行（无桌面实例）在 tools/validate-p
 - audiolib-server.exe：`F99E708B39DA2AAB623AF194D53848AE75FBE582AD6EC065ED5EDE7D996DECC0`
 
 本机日志与源码身份清单位于 `.rust-validation/debug-review/`，Debug 界面截图与报告位于 `.rust-validation/debug-feedback/`；均为忽略的验证产物，不随 Git 或便携包上传。此验证记录更新只改变文档，随后使用相同 EXE 重新打包和验证。固定 `local_release/` 安装使用经验证的包文件、核对两个 EXE 的 SHA256，并以独立临时数据运行 portable validator，保留正常工作数据目录与配置。
+
+## 2026-10-13 v0.4.4 客户端与服务端发布准备
+
+发布准备基于 `a0a1733`，应用 Rust/Slint 源码与上述默认及 ASIO 工作区检查保持一致。新增独立 server 文件清单、原生 Unix 构建、server 归档边界回归和解压产物健康验证；发布 workflow 等 Windows 与 Linux 构建均通过后，核对固定资产、SHA256、平台及标签/提交身份，再统一创建 Release。Linux GNU 构建基线固定为 Ubuntu 22.04。
+
+Windows 本机预检通过：server 新建 staging、运行数据排除、依赖许可证闭包、私有路径及目录链接拒绝回归；`v0.4.4` 版本门禁；最新 ASIO workspace release build；真实 server ZIP 的 SHA256、报告格式、解压后二进制版本/哈希，以及独立一条记录测试库的 `/api/v1/health`（status、version、API v1、schema 5、实际短提交）和 `/api/v1/library`。测试只启动自己的 loopback server；Windows 子进程终止不作为 graceful drain 验证。本机未执行原生 Linux 构建，Linux 结果由发布 workflow 的实际检查和报告记录。
+
+portable validator 的新发布报告模式拒绝错误提交身份和 EXE 哈希；匹配报告下的独立首次启动、CLI、中文 UI 和启动错误诊断通过。该模式要求 `pwsh` 7.3 以上、显式标签/完整提交及 `CleanCheckout`，先核验下载的归档校验和，再以公开 CI 报告中的 EXE 哈希作为安装基准；原有默认模式继续核对本机 release 输出，不覆盖或伪装本机构建来满足身份检查。发布成功后，固定 `local_release/` 按已发布资产核验并安装，正常数据目录和配置保持原位。
+
+本轮准备日志位于忽略的 `.rust-validation/release-v0.4.4/`，不随发布资产上传。最终发布身份及平台执行结果以对应标签的公开 CI 报告和 GitHub Actions 为准。

@@ -25,6 +25,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $commit) { throw 'Build must check out the tagged commit.' }
     Invoke-Check 'format' { cargo fmt --all -- --check }
     Invoke-Check 'package-boundary' { & (Join-Path $PSScriptRoot 'test-package-boundary.ps1') }
+    Invoke-Check 'server-package-boundary' { & (Join-Path $PSScriptRoot 'test-server-package.ps1') }
     Invoke-Check 'clippy' { cargo clippy --workspace --all-targets --locked -- -D warnings }
     # Hosted runners have no audio output device; substring skip also covers the child_ variant.
     $skipArgs = @('--skip', 'delayed_ipc_reload_play_is_cancelled_by_stop')
@@ -46,7 +47,7 @@ try {
     $report = @{
         success = $true; tag = $Tag; commit = $commit; version = $desktop.version
         checked_at = [DateTime]::UtcNow.ToString('o')
-        checks = @('format','package boundary regression','default strict Clippy','default workspace tests','ASIO strict Clippy','ASIO workspace tests','ASIO release build','synthetic review regressions (real legacy fixture excluded)','clean-checkout portable validation','publication privacy boundary')
+        checks = @('format','package boundary regression','server package boundary regression','default strict Clippy','default workspace tests','ASIO strict Clippy','ASIO workspace tests','ASIO release build','synthetic review regressions (real legacy fixture excluded)','clean-checkout portable validation','publication privacy boundary')
         binaries = $binaries
         portable = @{
             success = [bool]$portable.success

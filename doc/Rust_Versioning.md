@@ -26,7 +26,7 @@
 
 ## 发布流程
 
-当前源码版本为 **0.4.4**，最新已发布版本为 **0.4.3**。0.4.4 收紧远程写入的库身份和来源检查；客户端与服务端须一起升级才能写入，旧版本读取仍兼容，schema 和快照范围不变。
+本次发布版本为 **0.4.4**，基准发布标签为 **v0.4.3**。0.4.4 收紧远程写入的库身份和来源检查，增加 Debug 报告、同库快照状态保留和服务器资源路径管理；客户端与服务端须一起升级才能写入，旧版本读取仍兼容，schema 和快照范围不变。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
@@ -35,7 +35,8 @@
    省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
 4. 运行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --all-targets --locked`；ASIO 配置按 AGENTS.md 的准备和验证流程执行。
 5. 合并后在发布提交上打标签 `v0.4.4`（或 `v0.4.4-rc.1`）并推送。
-6. GitHub Actions（`.github/workflows/release.yml`）在 Windows runner 上：检出标签，拉取其他 `v*` 标签，运行 `check-release.ps1`，再执行 `ci-release.ps1`（校验、构建、打包），最后创建 GitHub Release 并上传 ZIP、SHA256 与报告。
+6. GitHub Actions（`.github/workflows/release.yml`）分别构建 Windows 客户端/服务端和 Linux x64 服务端。Windows 运行 `check-release.ps1`、`ci-release.ps1`；Linux 运行服务端和数据库严格 Clippy、全部 targets 测试及原生 release 构建。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件。所有构建成功后，发布 job 核验归档校验和及报告的标签/提交身份，再创建 GitHub Release，上传客户端和服务端归档、SHA256 与报告。
+7. 从已发布 Release 下载客户端包、SHA256 和 `Rust_CI_Release.json`，核验归档及报告的标签/提交，再按 AGENTS.md 更新固定 `local_release/` 并核对两个 EXE。CI 产物作为安装身份基准，不以不同本机构建的哈希替代。使用 `pwsh`（PowerShell 7.3 以上）执行 portable validator，传入 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 核对已发布报告中的 EXE 哈希，并运行隔离首次启动、CLI/UI 和诊断检查；省略报告时仍要求本机 release 输出一致。
 
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：
 

@@ -1,0 +1,14 @@
+[
+  "LICENSE",
+  "THIRD_PARTY.md",
+  "server/README.md",
+  "server/README.zh-CN.md",
+  "server/audiolib-server/config.example.toml",
+  "server/deploy/README.md",
+  "server/deploy/redeploy-server.sh",
+  "server/deploy/systemd/audiolib-server.service",
+  "server/deploy/launchd/io.github.audiolib.server.plist.example",
+  "server/launcher/README.md",
+  "doc/api/README.md",
+  "doc/Rust_Remote_Mode.md"
+]

@@ -5,11 +5,11 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Build Windows portable package and publish
+  windows:
+    name: Validate and build Windows client and server
     runs-on: windows-latest
     timeout-minutes: 120
     defaults:
@@ -17,7 +17,6 @@ jobs:
         shell: pwsh
     env:
       RELEASE_TAG: ${{ github.ref_name }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out the tag with all tags and history
         uses: actions/checkout@v4
@@ -47,19 +46,143 @@ jobs:
           Copy-Item -LiteralPath $latest -Destination "dist/release/$zipName" -Force
           "$digest  $zipName" | Set-Content -LiteralPath "dist/release/$zipName.sha256" -Encoding ASCII
           Copy-Item -LiteralPath doc/Rust_CI_Release.json -Destination dist/release/Rust_CI_Release.json -Force
+          ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc
+          ./tools/validate-server-package.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc
+
+      - name: Upload validated Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          if-no-files-found: error
+          path: |
+            dist/release/AudioLibExplorer-${{ github.ref_name }}-win-x64-portable.zip
+            dist/release/AudioLibExplorer-${{ github.ref_name }}-win-x64-portable.zip.sha256
+            dist/release/Rust_CI_Release.json
+            dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64.zip
+            dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64.zip.sha256
+            dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64-report.json
+
+  server-unix:
+    name: Validate and build server (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x64
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+      RELEASE_TAG: ${{ github.ref_name }}
+      SERVER_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev pkg-config
+      - name: Install pinned Rust with Clippy
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-${{ matrix.target }}
+      - name: Validate server and database
+        run: |
+          cargo clippy -p audiolib-server -p audiolib-db --all-targets --locked --target $env:SERVER_TARGET -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Server Clippy failed.' }
+          cargo test -p audiolib-server -p audiolib-db --all-targets --locked --target $env:SERVER_TARGET
+          if ($LASTEXITCODE -ne 0) { throw 'Server/database tests failed.' }
+      - name: Build and package server
+        run: |
+          ./tools/build-server-release.ps1 -Target $env:SERVER_TARGET
+          ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target $env:SERVER_TARGET
+          ./tools/validate-server-package.ps1 -Tag $env:RELEASE_TAG -Target $env:SERVER_TARGET
+      - name: Upload validated server assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          if-no-files-found: error
+          path: |
+            dist/latest/AudioLibServer-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz
+            dist/latest/AudioLibServer-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz.sha256
+            dist/latest/AudioLibServer-${{ github.ref_name }}-${{ matrix.suffix }}-report.json
+
+  publish:
+    name: Publish verified client and server assets
+    needs: [windows, server-unix]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/downloads
+          merge-multiple: true
+          pattern: release-*
+      - name: Verify all release assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist/publish | Out-Null
+          # Flatten only named assets; fail on duplicates or missing files.
+          $names = @("AudioLibExplorer-$env:RELEASE_TAG-win-x64-portable.zip", "AudioLibExplorer-$env:RELEASE_TAG-win-x64-portable.zip.sha256", 'Rust_CI_Release.json')
+          foreach ($platform in @('win-x64', 'linux-x64')) {
+            $extension = if ($platform -eq 'win-x64') { 'zip' } else { 'tar.gz' }
+            $base = "AudioLibServer-$env:RELEASE_TAG-$platform"
+            $names += @("$base.$extension", "$base.$extension.sha256", "$base-report.json")
+          }
+          foreach ($name in $names) {
+            $matches = @(Get-ChildItem -LiteralPath dist/downloads -Recurse -File | Where-Object Name -ceq $name)
+            if ($matches.Count -ne 1) { throw "Missing or duplicate validated release asset: $name" }
+            Copy-Item -LiteralPath $matches[0].FullName -Destination (Join-Path dist/publish $name)
+          }
+          foreach ($checksum in Get-ChildItem -LiteralPath dist/publish -Filter '*.sha256') {
+            $archive = $checksum.FullName.Substring(0, $checksum.FullName.Length - '.sha256'.Length)
+            $parts = (Get-Content -LiteralPath $checksum.FullName -Raw).Trim() -split '\s+'
+            if ($parts.Count -ne 2 -or $parts[1] -cne [IO.Path]::GetFileName($archive) -or $parts[0] -notmatch '^[0-9A-Fa-f]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $parts[0]) { throw 'Release archive checksum mismatch.' }
+          }
+          foreach ($reportName in @('Rust_CI_Release.json', "AudioLibServer-$env:RELEASE_TAG-win-x64-report.json", "AudioLibServer-$env:RELEASE_TAG-linux-x64-report.json")) {
+            $report = Get-Content -LiteralPath (Join-Path dist/publish $reportName) -Raw | ConvertFrom-Json
+            if (!$report.success -or $report.tag -cne $env:RELEASE_TAG -or $report.commit -cne $env:GITHUB_SHA) { throw 'Release report/tag commit mismatch.' }
+            if ($reportName -ne 'Rust_CI_Release.json') {
+              $platform = if ($reportName.EndsWith('-win-x64-report.json')) { 'win-x64' } else { 'linux-x64' }
+              $target = if ($platform -eq 'win-x64') { 'x86_64-pc-windows-msvc' } else { 'x86_64-unknown-linux-gnu' }
+              $extension = if ($platform -eq 'win-x64') { 'zip' } else { 'tar.gz' }
+              $archive = Join-Path dist/publish "AudioLibServer-$env:RELEASE_TAG-$platform.$extension"
+              $checkNames = @('version','allowlist','unlinked_paths','privacy','archive_contents','executable_mode')
+              if ($report.target -cne $target -or $report.archive_sha256 -ine (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -or @($report.checks.PSObject.Properties).Count -ne $checkNames.Count) { throw 'Server report/archive identity mismatch.' }
+              foreach ($checkName in $checkNames) {
+                if ($report.checks.$checkName -isnot [bool] -or !$report.checks.$checkName) { throw 'Server package validation did not pass.' }
+              }
+            }
+          }
           $notes = Get-Content -LiteralPath doc/Rust_Release_Notes.md -Raw -Encoding UTF8
           $notes = $notes.Replace('(Rust_Validation.md)', "(https://github.com/$($env:GITHUB_REPOSITORY)/blob/$($env:RELEASE_TAG)/doc/Rust_Validation.md)")
-          $notes += "`n`nCommit: $($env:GITHUB_SHA)`n`nSHA-256: $digest`n"
-          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/release/notes.md'), $notes, [Text.UTF8Encoding]::new($false))
+          $notes += "`n`nCommit: $env:GITHUB_SHA`n`nAssets include the Windows x64 ASIO client and Windows/Linux x64 servers; SHA-256 files accompany each archive.`n"
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/notes.md'), $notes, [Text.UTF8Encoding]::new($false))
 
       - name: Create GitHub Release
         run: |
           $ErrorActionPreference = 'Stop'
-          $ghArgs = @($env:RELEASE_TAG, '--verify-tag', '--title', "AudioLib Explorer $($env:RELEASE_TAG)", '--notes-file', 'dist/release/notes.md')
+          $ghArgs = @($env:RELEASE_TAG, '--verify-tag', '--title', "AudioLib Explorer $($env:RELEASE_TAG)", '--notes-file', 'dist/notes.md')
           if ($env:RELEASE_TAG.Contains('-')) { $ghArgs += '--prerelease' }
-          # Publish only the three validated assets, even if this output directory
-          # contains unrelated files from a previous invocation.
-          $zipName = "AudioLibExplorer-$($env:RELEASE_TAG)-win-x64-portable.zip"
-          $ghArgs += @("dist/release/$zipName", "dist/release/$zipName.sha256", 'dist/release/Rust_CI_Release.json')
+          $ghArgs += @(Get-ChildItem -LiteralPath dist/publish -File | ForEach-Object FullName)
           gh release create @ghArgs
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

@@ -27,6 +27,10 @@ page. It never modifies audio files.
   admin page (stored hashed), optional native TLS listener.
 - Embedded admin page (`/admin`, LAN only): public URL, auth mode, tokens, library roots.
 
+## Download a prebuilt server
+
+[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) provide Windows x64 ZIP and Linux x64 GNU tar.gz archives with SHA256 files. Verify the checksum, extract, then use the executable at the archive root with your own configuration (`--config <path>`). Public configuration examples are under `server/audiolib-server/`; the Linux archive is built on Ubuntu 22.04. Keep your existing library, roots, configuration and credentials when upgrading. See the [deployment guide](deploy/README.md) for installation and rollback. Other platforms can build from source below.
+
 ## Quick start: build from source
 
 The repository root `rust-toolchain.toml` and `.cargo/config.toml` default to a **Windows**

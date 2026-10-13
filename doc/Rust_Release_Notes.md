@@ -1,6 +1,6 @@
 # AudioLib Explorer v0.4.4
 
-目标版本：0.4.4，当前为本地修复版本，尚未发布 GitHub Release。
+发布版本：0.4.4；客户端、CLI 与服务端使用相同程序版本。
 
 版本：程序 0.4.4 | API /api/v1/ | schema 5 | 快照兼容 3..=5
 
@@ -32,6 +32,8 @@
 客户端和服务端须一起升级才能继续远程写入。新客户端仍可读取旧服务端，但旧服务端未声明音效库身份写保护时会拒绝写入；新服务端拒绝缺少 `X-AudioLib-Library-Id` 的库写请求。API 路径、数据库 schema 和快照读取范围保持不变。
 
 升级保留资料库、Metadata、标注、扫描历史与偏好设置，运行状态继续保存在 `%LOCALAPPDATA%/AudioLibExplorer/v1` 或原有显式配置路径。Windows x64 便携包包含 WASAPI 与 ASIO。
+
+Release 同时提供 Windows x64 客户端便携包，以及 Windows x64、Linux x64 独立服务端包。每个归档附 SHA256 和允许字段的验证报告。Linux GNU 版在 Ubuntu 22.04 构建；使用更旧发行版或其他架构时请按服务端文档从源码构建。服务端包只包含程序、公共文档、配置示例与许可证，升级时保留原配置、库与凭据。
 
 ## 公开资料与发布包
 

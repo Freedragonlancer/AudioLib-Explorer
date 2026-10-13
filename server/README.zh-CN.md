@@ -18,6 +18,10 @@
 - Token 鉴权三种模式（`off`、`external`、`all`），token 在管理页生成（只保存哈希）或来自环境变量，可选原生 TLS 监听。
 - 内置管理页（`/admin`，仅局域网）：公网地址、鉴权模式、token、库根目录。
 
+## 下载预编译服务端
+
+[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) 提供 Windows x64 ZIP 和 Linux x64 GNU tar.gz，均附 SHA256 文件。核验校验和后解压，使用根目录的程序及自己的配置启动（`--config <path>`）；公共配置示例位于 `server/audiolib-server/`。Linux 包在 Ubuntu 22.04 构建，其他平台可按下文从源码构建。升级保留原有资料库、资源路径、配置和凭据，安装与回滚见[部署指南](deploy/README.md)。
+
 ## 快速开始：从源码构建
 
 仓库根目录的 `rust-toolchain.toml` 与 `.cargo/config.toml` 默认是 **Windows** 目标，请始终显式传入 `--target`。服务端构建 `audiolib-audio` 时不启用 `playback` feature，不需要音频设备库。

@@ -1,7 +1,14 @@
 # tools/validate-portable.ps1
 [CmdletBinding()]
-param([string]$BinaryDirectory = 'dist/latest/portable', [switch]$CleanCheckout)
+param(
+    [string]$BinaryDirectory = 'dist/latest/portable',
+    [switch]$CleanCheckout,
+    [string]$PublishedReleaseReport,
+    [string]$ExpectedTag,
+    [string]$ExpectedCommit
+)
 $ErrorActionPreference = 'Stop'
+if ($PublishedReleaseReport -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Published release validation requires pwsh (PowerShell 7.3 or newer).' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $cli = Join-Path $binaryRoot 'AudioLibCli.exe'
@@ -41,10 +48,25 @@ try {
             ConvertTo-Json -Depth 4
         [IO.File]::WriteAllText((Join-Path $env:AUDIOLIB_DATA_DIR 'settings.json'), $settingsJson, [Text.UTF8Encoding]::new($false))
     }
-    foreach ($binary in @('AudioLibExplorer.exe','AudioLibCli.exe')) {
-        $sourceHash = (Get-FileHash -LiteralPath (Join-Path $taskRoot ('target/x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
-        $packageHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binary) -Algorithm SHA256).Hash
-        if ($sourceHash -ne $packageHash) { throw "Packaged binary differs from release: $binary" }
+    $identityCheck = 'packaged EXE hashes match release'
+    if ($PublishedReleaseReport) {
+        # Download and verify the published archive/checksum first. CI builds may
+        # differ from a local build; retain the published report as their baseline
+        # instead of replacing local build outputs to satisfy the default check.
+        if (!$CleanCheckout -or $ExpectedCommit -notmatch '^[0-9a-f]{40}$' -or $ExpectedTag -notmatch '^v\d+\.\d+\.\d+(?:-rc\.\d+)?$') { throw 'Published validation requires CleanCheckout and an explicit tag/commit identity.' }
+        & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $binaryRoot -ReleaseReport $PublishedReleaseReport
+        $published = Get-Content -LiteralPath $PublishedReleaseReport -Raw | ConvertFrom-Json
+        if ($published.tag -cne $ExpectedTag -or $published.commit -cne $ExpectedCommit) { throw 'Published release report does not match the expected tag/commit.' }
+        $versionText = & $cli --version | Out-String
+        if ($LASTEXITCODE -ne 0 -or $versionText.Trim() -cne ('AudioLibCli ' + $published.version)) { throw 'Published CLI version does not match its release report.' }
+        $identityCheck = 'packaged EXE hashes match published release report'
+    } else {
+        if ($ExpectedTag -or $ExpectedCommit) { throw 'Expected tag/commit requires a published release report.' }
+        foreach ($binary in @('AudioLibExplorer.exe','AudioLibCli.exe')) {
+            $sourceHash = (Get-FileHash -LiteralPath (Join-Path $taskRoot ('target/x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
+            $packageHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binary) -Algorithm SHA256).Hash
+            if ($sourceHash -ne $packageHash) { throw "Packaged binary differs from release: $binary" }
+        }
     }
     $initial = Invoke-DesktopSmoke @('--headless-smoke') 'headless'
     if ($initial.ExitCode -ne 0) { throw "Portable headless startup failed: $($initial.Error)" }
@@ -99,7 +121,7 @@ try {
     $report = [PSCustomObject]@{
         success=$true
         mode=$(if ($CleanCheckout) { 'clean-checkout-synthetic' } else { 'legacy-import' })
-        checks=@('packaged EXE hashes match release',$(if ($CleanCheckout) { 'isolated empty first launch and synthetic WAV scan' } else { 'headless first launch imports 34 records' }),'packaged CLI statistics','Chinese UI snapshot and clean exit','invalid preferences return failure and synchronous diagnostic','Slint, SoundTouch and ASIO license materials','source unchanged')
+        checks=@($identityCheck,$(if ($CleanCheckout) { 'isolated empty first launch and synthetic WAV scan' } else { 'headless first launch imports 34 records' }),'packaged CLI statistics','Chinese UI snapshot and clean exit','invalid preferences return failure and synchronous diagnostic','Slint, SoundTouch and ASIO license materials','source unchanged')
         records=$expectedCount
         screenshot='.rust-validation/portable-smoke/chinese.png'
         original_database_unchanged=$(if ($CleanCheckout) { $null } else { $unchanged })
