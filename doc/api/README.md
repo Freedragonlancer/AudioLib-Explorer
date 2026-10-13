@@ -351,7 +351,7 @@ audiolib.example.com:8443 {
 
 ### 6.3 Metadata 写入（已实现）
 
-三个写入端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。请求体为 JSON（不检查 `Content-Type`），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。成功后 `revision == revision_before + 1`，客户端按 §4 的规则应用返回的记录。
+三个写入端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。请求体为 JSON，必须声明 `Content-Type: application/json`（可带 `charset`，见 §2），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。成功后 `revision == revision_before + 1`，客户端按 §4 的规则应用返回的记录。
 
 `PATCH /audio/{id}/metadata`，请求体 `MetadataPatch`，省略的字段不变（`color` 传 `""` 清除颜色）：
 
@@ -484,7 +484,7 @@ audiolib.example.com:8443 {
 
 #### `POST /scans`
 
-请求体（JSON，最大 8 MiB，不检查 `Content-Type`）：
+请求体（JSON，最大 8 MiB，必须声明 `Content-Type: application/json`，可带 `charset`）：
 
 ```json
 { "root": "SFX_Main", "subpath": "Foley/Doors", "mode": "incremental", "workers": null }

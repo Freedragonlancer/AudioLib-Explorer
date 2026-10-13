@@ -286,6 +286,25 @@ impl Controller {
         ui.set_sm_manage_busy(self.remote.lock().unwrap().manager.manage_pending.is_some());
     }
 
+    /// Reconcile the visible manager after the worker invalidated its snapshot requests.
+    /// Keep the selected profile, page, form and any newer management request intact.
+    pub(in crate::controller) fn reconcile_source_manager_after_swap(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+    ) {
+        self.publish_manage_busy(ui);
+        if !ui.get_library_visible() || self.selected_profile().is_none() {
+            return;
+        }
+        match ui.get_sm_page() {
+            // Reattach to the selected server's current scan and refresh roots/history
+            // using the generation established by the successful provider swap.
+            PAGE_LIBRARY => self.load_server_library(ui),
+            PAGE_CACHE => self.publish_cache_info(ui),
+            _ => {}
+        }
+    }
+
     /// Refresh the list and refill the form and current page from the saved settings.
     fn reload_selection(self: &Arc<Self>) {
         let Some(ui) = self.ui.upgrade() else { return };
@@ -547,7 +566,22 @@ impl Controller {
             }
         };
         let generation = self.remote.lock().unwrap().manager.form_generation;
-        let barrier = match self.begin_source_change(&ui) {
+        let settings = self.config.lock().unwrap().data_source.clone();
+        let active = settings.active_source();
+        let changes_source = profile_save_changes_source(
+            &active,
+            id.as_deref(),
+            id.as_deref()
+                .and_then(|id| settings.profile(id))
+                .map(|profile| profile.server_url.as_str()),
+            &input.url,
+            after,
+        );
+        let barrier = match if changes_source {
+            self.begin_source_change(&ui)
+        } else {
+            self.begin_source_change_for_settings(&ui)
+        } {
             Ok(barrier) => barrier,
             Err(error) => {
                 ui.set_ds_message(error.into());
@@ -558,9 +592,12 @@ impl Controller {
         ui.set_ds_message(cn_or(chinese, "正在保存…", "Saving…").into());
         let c = self.clone();
         std::thread::spawn(move || {
-            let saved = c
-                .wait_metadata(barrier, true)
-                .and_then(|_| c.store_profile(id.as_deref(), &input, chinese));
+            let drained = if changes_source {
+                c.wait_transition_metadata(barrier)
+            } else {
+                c.wait_metadata(barrier, true).map(|_| ())
+            };
+            let saved = drained.and_then(|_| c.store_profile(id.as_deref(), &input, chinese));
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 let (id, resync) = match saved {
@@ -568,6 +605,7 @@ impl Controller {
                     Err(error) => {
                         ui.set_ds_message(error.into());
                         c2.finish_source_change(&ui, false);
+                        c2.publish_metadata_recovery_notice(&ui);
                         return;
                     }
                 };
@@ -622,6 +660,7 @@ impl Controller {
                     }
                 }
                 c2.publish_data_source(&ui);
+                c2.publish_metadata_recovery_notice(&ui);
                 if !resync
                     && !matches!(after, AfterSave::Switch)
                     && c2.close_after_operation.swap(false, Ordering::AcqRel)
@@ -1604,6 +1643,34 @@ impl Controller {
     }
 }
 
+/// Settings-only edits still require ordinary Metadata persistence. Recovery is for
+/// switching profiles or changing the active profile's endpoint, which replaces its provider.
+fn profile_save_changes_source(
+    active: &ActiveSource,
+    id: Option<&str>,
+    old_url: Option<&str>,
+    new_url: &str,
+    after: AfterSave,
+) -> bool {
+    let selected_is_active = id.is_some_and(|id| active == &ActiveSource::Profile(id.to_owned()));
+    (matches!(after, AfterSave::Switch) && !selected_is_active)
+        || (selected_is_active && old_url.is_some_and(|url| !same_source_endpoint(url, new_url)))
+}
+
+/// The address parser removes the API suffix but preserves an explicit default port.
+/// Source identity follows the effective connection endpoint, with case-sensitive paths.
+fn same_source_endpoint(old_url: &str, new_url: &str) -> bool {
+    match (ServerAddress::parse(old_url), ServerAddress::parse(new_url)) {
+        (Ok(old), Ok(new)) => {
+            old.scheme == new.scheme
+                && old.host.eq_ignore_ascii_case(&new.host)
+                && old.effective_port() == new.effective_port()
+                && old.prefix == new.prefix
+        }
+        _ => old_url.trim() == new_url.trim(),
+    }
+}
+
 /// List status of a profile from its latest test: text and kind (0 none, 1 ok, 3 failed).
 fn test_status(test: Option<&TestSummary>, chinese: bool) -> (String, i32) {
     match test {
@@ -1939,7 +2006,294 @@ fn history_line(scan: &ScanSession, chinese: bool) -> String {
 mod tests {
     use super::super::RemoteRuntime;
     use super::*;
-    use audiolib_core::ScanProgress;
+    use audiolib_core::{DataProvider, ScanProgress};
+
+    #[test]
+    fn snapshot_swaps_refresh_the_visible_server_manager_and_resume_scan_polling() {
+        let root = std::env::temp_dir().join(format!(
+            "audiolib-manager-swap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::remote_mode::source_manager::tests::child_snapshot_swap_refresh",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("AUDIOLIB_MANAGER_SWAP_TEST_ROOT", &root)
+            .output()
+            .unwrap();
+        if root.exists() {
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "Manager snapshot-swap regression failed: {stdout}\n{stderr}"
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Slint event loop invoked by the manager snapshot-swap regression"]
+    fn child_snapshot_swap_refresh() {
+        use audiolib_audio::{AudioEngine, PlaybackConfig};
+        use audiolib_core::config::AppConfig;
+        use audiolib_db::SqliteProvider;
+        use slint::ComponentHandle;
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let roots = Arc::new(AtomicUsize::new(0));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (initial_page, initial_loaded) = std::sync::mpsc::sync_channel(1);
+        let (server_roots, server_polls, server_finished) =
+            (roots.clone(), polls.clone(), finished.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                assert!(first.starts_with("GET "), "unexpected mutation: {first}");
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let path = first.split_whitespace().nth(1).unwrap();
+                let response = match path {
+                    "/api/v1/roots" => {
+                        let request = server_roots.fetch_add(1, Ordering::AcqRel);
+                        let name = if request == 0 {
+                            "Stale"
+                        } else if server_finished.load(Ordering::Acquire) {
+                            "Finished"
+                        } else {
+                            "Fresh"
+                        };
+                        serde_json::to_string(&vec![root(name)]).unwrap()
+                    }
+                    "/api/v1/capabilities" => {
+                        r#"{"manage_mode":"all","can_manage":true}"#.to_owned()
+                    }
+                    "/api/v1/scans/current" => {
+                        server_polls.fetch_add(1, Ordering::AcqRel);
+                        let scan =
+                            (!server_finished.load(Ordering::Acquire)).then_some(ServerScan {
+                                progress: ScanProgress {
+                                    session_id: 7,
+                                    ..Default::default()
+                                },
+                                active: true,
+                                ..Default::default()
+                            });
+                        serde_json::json!({ "scan": scan }).to_string()
+                    }
+                    "/api/v1/scans/7" => serde_json::to_string(&ServerScan::default()).unwrap(),
+                    "/api/v1/history/scans?limit=20&offset=0" => "[]".to_owned(),
+                    _ => panic!("unexpected request: {first}"),
+                };
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+                if path.starts_with("/api/v1/history/scans") {
+                    let _ = initial_page.try_send(());
+                }
+            }
+        });
+
+        let root =
+            std::path::PathBuf::from(std::env::var_os("AUDIOLIB_MANAGER_SWAP_TEST_ROOT").unwrap());
+        let mut config = AppConfig::load_in(root.clone()).unwrap();
+        config.data_source.profiles = vec![
+            ServerProfile {
+                id: "active".into(),
+                name: "Active server".into(),
+                server_url: "http://127.0.0.1:9".into(),
+                ..Default::default()
+            },
+            ServerProfile {
+                id: "viewed".into(),
+                name: "Viewed server".into(),
+                server_url: url,
+                ..Default::default()
+            },
+        ];
+        config.data_source.active = Some("active".into());
+        config.data_source.mirror_active();
+        config.data_source.poll_interval_secs = 0;
+        let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let snapshot = root.join("snapshot.db");
+        provider.backup_library(&snapshot).unwrap();
+        let playback = PlaybackConfig::default();
+        let engine = AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
+        controller.set_selection(Selection::Profile("viewed".into()));
+        controller.publish_sources(&ui);
+        ui.set_library_visible(true);
+        ui.set_sm_page(PAGE_LIBRARY);
+        ui.set_ds_name("Unsaved name".into());
+        ui.set_ds_token("Unsaved token".into());
+        ui.set_ds_dirty(true);
+        controller.show_page(PAGE_LIBRARY);
+        initial_loaded.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(ui.get_sm_library_loading());
+        let previous_generation = controller.remote.lock().unwrap().manager.library_generation;
+        controller
+            .switch_data_source(&super::super::DataSourceSwitch::Server {
+                database: snapshot,
+                state: None,
+            })
+            .unwrap();
+        assert!(!controller.library_current(previous_generation));
+        controller.publish_data_source(&ui);
+        let (generation, request) = controller.begin_manage_request(&ui);
+        controller.reconcile_source_manager_after_swap(&ui);
+        assert!(controller.library_current(generation));
+        assert!(ui.get_sm_manage_busy());
+
+        let refreshed_and_polled = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = refreshed_and_polled.clone();
+        let weak = ui.as_weak();
+        let started = std::time::Instant::now();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(10),
+            move || {
+                let ui = weak.upgrade().unwrap();
+                let name = ui.get_sm_root_names().row_data(0).unwrap_or_default();
+                if !ui.get_sm_library_loading()
+                    && ui.get_sm_scan_active()
+                    && name == "Fresh"
+                    && polls.load(Ordering::Acquire) >= 3
+                {
+                    observed.set(true);
+                    finished.store(true, Ordering::Release);
+                }
+                if (observed.get() && !ui.get_sm_scan_active() && name == "Finished")
+                    || started.elapsed() > Duration::from_secs(8)
+                {
+                    slint::quit_event_loop().unwrap();
+                }
+            },
+        );
+        slint::run_event_loop().unwrap();
+        timer.stop();
+        assert!(
+            refreshed_and_polled.get(),
+            "the scan poller did not restart"
+        );
+        assert!(!ui.get_sm_library_loading());
+        assert!(!ui.get_sm_library_error(), "{}", ui.get_sm_library_status());
+        assert!(
+            !ui.get_sm_scan_active(),
+            "scan completion was not published"
+        );
+        assert_eq!(ui.get_sm_root_names().row_data(0).unwrap(), "Finished");
+        assert_eq!(controller.selection(), Selection::Profile("viewed".into()));
+        assert_eq!(ui.get_sm_selected(), 2);
+        assert_eq!(ui.get_sm_page(), PAGE_LIBRARY);
+        assert_eq!(ui.get_ds_name(), "Unsaved name");
+        assert_eq!(ui.get_ds_token(), "Unsaved token");
+        assert!(ui.get_ds_dirty());
+        assert!(ui.get_sm_manage_busy(), "refresh released a newer request");
+        assert!(controller.finish_manage_request(&ui, request));
+
+        let requests = roots.load(Ordering::Acquire);
+        ui.set_library_visible(false);
+        controller.reconcile_source_manager_after_swap(&ui);
+        assert!(!ui.get_sm_library_loading());
+        assert_eq!(roots.load(Ordering::Acquire), requests);
+        ui.set_library_visible(true);
+        ui.set_sm_page(PAGE_CONNECTION);
+        controller.reconcile_source_manager_after_swap(&ui);
+        assert_eq!(ui.get_sm_page(), PAGE_CONNECTION);
+        assert!(!ui.get_sm_library_loading());
+        ui.set_sm_page(PAGE_CACHE);
+        ui.set_sm_cache_info("Stale cache info".into());
+        controller.reconcile_source_manager_after_swap(&ui);
+        assert_ne!(ui.get_sm_cache_info(), "Stale cache info");
+        assert_eq!(controller.selection(), Selection::Profile("viewed".into()));
+    }
+
+    #[test]
+    fn profile_settings_recover_metadata_only_when_the_source_changes() {
+        let active = ActiveSource::Profile("active".into());
+        for (old_url, new_url) in [
+            ("http://server", "http://server"),
+            ("http://server:80", "http://server/api/v1"),
+            (
+                "https://SERVER:443/prefix/",
+                "https://server/prefix/api/v1/",
+            ),
+        ] {
+            for after in [AfterSave::Nothing, AfterSave::Close, AfterSave::Switch] {
+                assert!(!profile_save_changes_source(
+                    &active,
+                    Some("active"),
+                    Some(old_url),
+                    new_url,
+                    after,
+                ));
+            }
+        }
+        for (old_url, new_url) in [
+            ("http://server", "https://server"),
+            ("http://server", "http://server:81"),
+            ("http://server/Library", "http://server/library"),
+        ] {
+            assert!(profile_save_changes_source(
+                &active,
+                Some("active"),
+                Some(old_url),
+                new_url,
+                AfterSave::Nothing,
+            ));
+        }
+        assert!(profile_save_changes_source(
+            &active,
+            Some("active"),
+            Some("http://old-server"),
+            "http://new-server",
+            AfterSave::Nothing,
+        ));
+        assert!(!profile_save_changes_source(
+            &active,
+            Some("other"),
+            Some("http://old-server"),
+            "http://new-server",
+            AfterSave::Nothing,
+        ));
+        assert!(profile_save_changes_source(
+            &active,
+            Some("other"),
+            Some("http://server"),
+            "http://server",
+            AfterSave::Switch,
+        ));
+        assert!(profile_save_changes_source(
+            &ActiveSource::Local,
+            None,
+            None,
+            "http://server",
+            AfterSave::Switch,
+        ));
+    }
 
     #[test]
     fn close_after_save_preserves_webdav_and_waits_for_persistence() {

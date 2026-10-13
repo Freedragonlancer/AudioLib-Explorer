@@ -12,13 +12,31 @@ use std::sync::atomic::Ordering;
 
 impl Controller {
     /// Freeze new GUI writes before draining the old source; its connection stays
-    /// published until every requested annotation has successfully persisted.
+    /// published until requested annotations persist or their replaced-library
+    /// drafts are retained in a durable local recovery file.
     pub(super) fn begin_source_change(&self, ui: &AppWindow) -> Result<u64, String> {
+        self.begin_source_change_guarded(ui, true)
+    }
+
+    /// Preference-only saves keep the ordinary successful-write barrier.
+    pub(super) fn begin_source_change_for_settings(&self, ui: &AppWindow) -> Result<u64, String> {
+        self.begin_source_change_guarded(ui, false)
+    }
+
+    fn begin_source_change_guarded(
+        &self,
+        ui: &AppWindow,
+        recover_replaced_library: bool,
+    ) -> Result<u64, String> {
         if !self.available() {
             return Err("The library is busy".into());
         }
         self.capture_metadata(ui);
-        let barrier = self.metadata.lock().unwrap().enqueue_all()?;
+        let barrier = if recover_replaced_library {
+            self.enqueue_transition_metadata()?
+        } else {
+            self.metadata.lock().unwrap().enqueue_all()?
+        };
         let old_settings = self.config.lock().unwrap().data_source.clone();
         let old_secrets = self.secrets();
         self.remote.lock().unwrap().source_rollback = Some((old_settings, old_secrets));
@@ -181,7 +199,7 @@ impl Controller {
         let c = self.clone();
         std::thread::spawn(move || {
             let saved = c
-                .wait_metadata(barrier, true)
+                .wait_transition_metadata(barrier)
                 .and_then(|_| c.save_data_source(settings, secrets, chinese));
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
@@ -190,12 +208,14 @@ impl Controller {
                     c2.remote.lock().unwrap().last_error = Some(error);
                     c2.publish_data_source(&ui);
                     c2.finish_source_change(&ui, false);
+                    c2.publish_metadata_recovery_notice(&ui);
                     return;
                 }
                 if ui.get_library_visible() {
                     ui.set_ds_message("".into());
                     c2.publish_sources(&ui);
                 }
+                c2.publish_metadata_recovery_notice(&ui);
                 match mode {
                     DataSourceMode::Local => {
                         if c2.remote_read_only() {

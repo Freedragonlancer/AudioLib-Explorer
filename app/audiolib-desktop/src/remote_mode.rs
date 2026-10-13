@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,9 @@ const WAVEFORM_AFTER_AUDIO: Duration = Duration::from_secs(3);
 /// Server mode: a selection starts its network audio only after resting this long, so
 /// arrowing through rows does not open a request per row.
 pub(super) const SELECTION_SETTLE: Duration = Duration::from_millis(180);
+/// Every new in-memory registration owns its path, including server/WebDAV
+/// representations of the same record and route. Reused streams keep their path.
+static STREAM_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One sync worker owns the busy flag until all of its cache work has drained.
 /// Releasing it cannot depend on UI delivery or the request generation: cancellation
@@ -700,6 +703,19 @@ impl Controller {
         Ok(())
     }
 
+    /// Snapshot owning edits that cannot be retried after a server library replacement.
+    /// The caller must drain Metadata writes before using this for recovery.
+    pub(super) fn remote_recovery_snapshot(&self) -> Option<CacheState> {
+        if !self.remote_read_only() {
+            return None;
+        }
+        let remote = self.remote.lock().unwrap();
+        remote
+            .library_changed
+            .then(|| remote.state.clone())
+            .flatten()
+    }
+
     /// A rejected bound management request is also a known identity replacement.
     pub(super) fn note_remote_identity_error(
         &self,
@@ -763,6 +779,24 @@ impl Controller {
 
     pub(super) fn remote_wave_file(&self, path: &Path) -> Option<AudioFile> {
         self.remote.lock().unwrap().audio_files.get(path).cloned()
+    }
+
+    /// Set the live root status for isolated playback transition fixtures.
+    #[cfg(test)]
+    pub(super) fn set_remote_live_roots_for_test(&self, roots: Vec<RemoteRoot>) {
+        self.remote.lock().unwrap().live_roots = Some(roots);
+    }
+
+    /// Registration identities retained for isolated playback cleanup assertions.
+    #[cfg(test)]
+    pub(super) fn remote_playback_paths_for_test(&self) -> Vec<PathBuf> {
+        self.remote
+            .lock()
+            .unwrap()
+            .audio_files
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Name shown for the file the engine has loaded: the record's original file name for
@@ -1742,6 +1776,7 @@ impl Controller {
                     };
                     ui.set_status(message.into());
                     self.publish_data_source(ui);
+                    self.publish_metadata_recovery_notice(ui);
                     if self.close_after_operation.swap(false, Ordering::AcqRel) {
                         self.request_close(ui);
                     }
@@ -1784,6 +1819,7 @@ impl Controller {
                     ui.set_ds_message(message.clone().into());
                     ui.set_status(message.into());
                     self.finish_source_change(ui, false);
+                    self.publish_metadata_recovery_notice(ui);
                     return;
                 }
                 // Reflect the failure in the server notice / header (offline, starting…).
@@ -1858,6 +1894,7 @@ impl Controller {
                 self.publish_data_source(ui);
             }
         }
+        self.publish_metadata_recovery_notice(ui);
     }
 
     fn swap_to(self: &Arc<Self>, ui: &AppWindow, target: DataSourceSwitch) {
@@ -1968,7 +2005,7 @@ impl Controller {
     /// disk): the server's `/audio/{id}/stream` or a `/preview` chosen from the record's
     /// format and the measured bandwidth ([`choose_route`]), falling back to WebDAV when the
     /// user configured a WebDAV address for the record's root. The stream is registered
-    /// under a virtual path `<data dir>/remote/<library>/stream/<id>-<route>.wav` together
+    /// under a virtual path `<data dir>/remote/<library>/stream/<id>-<route>-<registration>.wav` together
     /// with its buffer state, so the decoder (on the engine worker, never the output
     /// callback) reads it while it arrives and the engine pauses ("buffering") instead of
     /// waiting on the network.
@@ -2026,9 +2063,12 @@ impl Controller {
         };
         let mut route = choose_route(file, bandwidth().estimate_bps(), options);
         let playback_path = |route: &AudioRoute| {
-            library_dir
-                .join("stream")
-                .join(format!("{}-{}.wav", file.id, route.tag()))
+            library_dir.join("stream").join(format!(
+                "{}-{}-{}.wav",
+                file.id,
+                route.tag(),
+                STREAM_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed),
+            ))
         };
         let memory_key = |route: &AudioRoute, source: &str| {
             format!(
@@ -3853,11 +3893,19 @@ mod tests {
         });
         let path = controller.playable_path(&file, &cancel, 0).unwrap();
         assert!(is_remote_cache_path(&preferences, &path));
-        // The player shows the record's name, not the stream's virtual `<id>-<route>.wav`.
+        // The player shows the record's name, not its virtual registration name.
         assert_ne!(path.file_name().unwrap().to_string_lossy(), file.filename);
         assert_eq!(controller.playback_display_name(&path), file.filename);
         assert!(audiolib_audio::is_stream_source(&path));
         assert_eq!(audiolib_audio::probe(&path).unwrap().sample_rate, 48000);
+        let original_stream = controller
+            .remote_stream
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .stream
+            .clone();
         let deadline = Instant::now() + Duration::from_secs(5);
         let stream = loop {
             // Re-selecting the record reuses its in-memory stream.
@@ -3871,6 +3919,7 @@ mod tests {
                 .unwrap()
                 .stream
                 .clone();
+            assert!(stream.shares_buffer_with(&original_stream));
             if stream.is_complete() || Instant::now() > deadline {
                 break stream;
             }
@@ -3882,6 +3931,12 @@ mod tests {
         std::io::Read::read_to_end(&mut stream.reader().unwrap(), &mut held).unwrap();
         assert_eq!(held, served);
         drop(stream);
+        drop(original_stream);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "reuse must not refetch audio"
+        );
         let stream_path = format!("/api/v1/audio/{}/stream", file.id);
         assert!(
             requests
@@ -4045,15 +4100,44 @@ mod tests {
             "cancelled after {:?}",
             started.elapsed()
         );
+        let woken_requests = Arc::new(Mutex::new(Vec::new()));
         controller.config.lock().unwrap().data_source.server_url =
-            serve_stream_after(served.clone(), Arc::new(Mutex::new(Vec::new())), wake);
+            serve_stream_after(served.clone(), woken_requests.clone(), wake);
         let started = Instant::now();
         let generation = controller.selection_generation.load(Ordering::Acquire);
         let woken = controller
             .playable_path(&file, &AtomicBool::new(false), generation)
             .unwrap();
         assert!(started.elapsed() >= wake - Duration::from_millis(200));
-        assert_eq!(woken, path);
+        // Stop removed the previous registration and the owned cache was cleared.
+        // This fresh response owns a new path; selecting it again must still reuse
+        // the same bytes and registration without another network request.
+        assert_ne!(woken, path);
+        assert!(!audiolib_audio::is_stream_source(&path));
+        assert!(audiolib_audio::is_stream_source(&woken));
+        assert_eq!(controller.remote_audio_id(&woken), Some(file.id));
+        assert_eq!(controller.playback_display_name(&woken), file.filename);
+        let woken_stream = controller.remote_stream.lock().unwrap().clone().unwrap();
+        let reused = controller
+            .playable_path(&file, &AtomicBool::new(false), generation)
+            .unwrap();
+        assert_eq!(reused, woken);
+        assert!(
+            controller
+                .remote_stream
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .stream
+                .shares_buffer_with(&woken_stream.stream)
+        );
+        assert_eq!(
+            woken_requests.lock().unwrap().len(),
+            1,
+            "reuse must not refetch audio"
+        );
+        drop(woken_stream);
         // A slow first byte is waited for: it neither records a failed check nor asks the
         // poller to re-check the server or its roots (only ROOT_OFFLINE does that).
         assert_eq!(

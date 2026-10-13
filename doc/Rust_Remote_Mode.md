@@ -393,7 +393,21 @@ is opened. Offline checks cannot re-enable stale IDs, and delayed events from a 
 library/snapshot cannot disable the new provider. Identity rejection leaves drafts and
 cached bytes intact and is distinct from authentication, busy and uncertain write errors.
 
-Annotations are edited directly on the server; everything structural stays read-only.
+When a confirmed replacement prevents saving old drafts, switching sources, opening the
+replacement snapshot or closing first drains requested writes and preserves those drafts
+in `<data dir>/recovery/server-metadata/*.json`. Each recovery file binds the original
+library ID and snapshot, WAV paths, Metadata patches and failed quick actions. It is
+published only after its contents are flushed; a read or write failure keeps the old
+provider and drafts available for retry. Failed target opening also retains the in-memory
+drafts. The UI reports the recovery location and surfaces it again after restart.
+Recovery files are outside the pruned snapshot/audio cache, remain local, contain no
+credentials, and are never automatically imported or uploaded. Review their annotations
+against the original library and WAV paths; record IDs must never be applied to a
+replacement library. Ordinary network or validation save failures still block handoff
+and close until corrected; they do not activate this recovery exception.
+
+Annotations and permitted management changes are sent to the server; the opened
+snapshot remains a read-only search provider.
 
 **Allowed (sent to the server).** Inspector edits (favorite, tags, color including
 clearing it, notes), quick edits from the context menu and the menu bar, and
@@ -429,12 +443,14 @@ own writes as "new revision".
 | `401` | token required / rejected, as for reads |
 | `408 TIMEOUT`, timeout, connection lost, unreadable response | outcome uncertain: shown as an error **and** a full sync runs |
 
-A failed inspector save keeps the draft (shown as unsaved) like a failed local save. A
-failed server write never blocks the snapshot swap of a following sync.
+A failed inspector save keeps the draft (shown as unsaved) like a failed local save.
+Snapshot handoff requires successful persistence, except for the confirmed replacement
+recovery described above.
 
 **Refused (still read-only).** Scans and folder rescans, maintenance and restore, relinking,
-removal of records or folders, legacy import and annotation import, new/open library and
-reveal in Explorer. The UI disables them with the suffix "(read-only in server mode)" /
+legacy import and annotation import, new/open local library and reveal in Explorer.
+Permitted record/folder removals and server scans instead use the management API below.
+The UI disables unsupported local operations with the suffix "(read-only in server mode)" /
 "（服务器模式只读）" (Slint 1.17 has no tooltip widget), the library dialog shows an
 explanatory line, and the controller refuses them independently of the UI
 (`refuse_remote_write`; `RemoteProvider` also refuses them as a `DataProvider`). The
@@ -513,6 +529,10 @@ writes (`POST`, `DELETE`) never are.
 Audition never writes to disk. `audiolib_remote::MemoryStream` fetches the selected
 record into a process-wide `MemoryCache` and the engine reads it through a registered
 byte source; the drag-out still copies the original from the download cache.
+Each new byte-source registration receives a distinct virtual path even when WebDAV and
+the server use the same raw route. A failed source-pair change can therefore restore the
+old registration; successful handoff removes only the superseded registration and keeps
+any shared cache entry alive.
 
 1. **Route** (`route::choose_route`, §8.1). Transcoding is the user's choice per server
    profile ("试听时转码（适合外网或低带宽）" on the connection page,

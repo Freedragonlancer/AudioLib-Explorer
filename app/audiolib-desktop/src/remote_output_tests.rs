@@ -422,3 +422,279 @@ fn child_stop_queued_route() {
     assert!(!audiolib_audio::is_stream_source(&old.path));
     let _ = release_tx.send(());
 }
+
+#[test]
+fn raw_route_replacement_owns_distinct_registrations_and_rolls_back_failure() {
+    let root = std::env::temp_dir().join(format!(
+        "audiolib-raw-route-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "controller::remote_output_tests::child_raw_route_replacement",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env(ROOT_ENV, &root)
+        .output()
+        .unwrap();
+    assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+    if root.exists() {
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "isolated same-record raw server/WebDAV registration regression"]
+fn child_raw_route_replacement() {
+    i_slint_backend_testing::init_no_event_loop();
+    let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
+    for channels in [2, 4] {
+        let directory = root.join(format!("channels-{channels}"));
+        let sounds = directory.join("sounds");
+        std::fs::create_dir_all(&sounds).unwrap();
+        std::fs::write(sounds.join("raw.wav"), wav_frames(channels, 100_000)).unwrap();
+        let provider = Arc::new(SqliteProvider::open(&directory.join("library.db")).unwrap());
+        ScanService::new(provider.clone())
+            .scan(
+                &sounds,
+                &ScanOptions::default(),
+                &ScanCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+        let file = provider.search(&SearchRequest::default()).unwrap().results[0].clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let seen = seen.clone();
+                let release_rx = release_rx.clone();
+                std::thread::spawn(move || {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut head = String::new();
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                            break;
+                        }
+                        head.push_str(&line);
+                    }
+                    if head.is_empty() {
+                        return;
+                    }
+                    seen.lock().unwrap().push(head.clone());
+                    let webdav = head.starts_with("GET /dav/");
+                    let body = wav_frames(channels, 100_000);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    if webdav || channels == 4 {
+                        let _ = stream.write_all(&body[..32_768]);
+                        // Keep a real incomplete WebDAV response alive while the
+                        // same record is prepared from the server's raw route.
+                        let _ = release_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(15));
+                    } else {
+                        let _ = stream.write_all(&body);
+                    }
+                });
+            }
+        });
+        let mut config = AppConfig::load_in(directory.join("preferences")).unwrap();
+        config.data_source.server_url = url.clone();
+        config.data_source.active = Some("fixture".into());
+        config
+            .data_source
+            .profiles
+            .push(audiolib_core::config::ServerProfile {
+                id: "fixture".into(),
+                server_url: url.clone(),
+                transcode: Some(false),
+                ..Default::default()
+            });
+        config
+            .data_source
+            .webdav
+            .root_urls
+            .insert("SFX".into(), format!("{url}/dav"));
+        let offline_root = audiolib_remote::RemoteRoot {
+            name: "SFX".into(),
+            server_path: sounds.to_string_lossy().into_owned(),
+            online: Some(false),
+            status: Some("offline".into()),
+            ..Default::default()
+        };
+        let playback = PlaybackConfig::default();
+        let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider, engine.handle(), config, playback.clone());
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.remote.lock().unwrap().state = Some(audiolib_remote::CacheState {
+            library_id: format!("raw-route-{channels}"),
+            database_file: "fixture.db".into(),
+            roots: vec![offline_root.clone()],
+            ..Default::default()
+        });
+        controller.set_remote_live_roots_for_test(vec![offline_root.clone()]);
+        let first = controller
+            .playable_path(&file, &AtomicBool::new(false), 0)
+            .unwrap();
+        engine
+            .handle()
+            .send_and_wait(AudioCommand::Load(first.clone()), Duration::from_secs(4))
+            .unwrap();
+        let before = engine.handle().status();
+        let old = controller.remote_stream.lock().unwrap().clone().unwrap();
+        assert!(!old.stream.is_complete());
+        assert!(old.stream.key().contains("/stream/webdav/"));
+        controller.set_remote_live_roots_for_test(vec![audiolib_remote::RemoteRoot {
+            online: Some(true),
+            status: Some("online".into()),
+            ..offline_root
+        }]);
+        let result = controller.configure_output(PlaybackConfig {
+            source_pair: 1,
+            ..playback
+        });
+        let prepared = controller
+            .remote_playback_paths_for_test()
+            .into_iter()
+            .find(|path| path != &first)
+            .expect("a new raw stream must own a distinct virtual registration");
+        assert_eq!(controller.remote_audio_id(&first), Some(file.id));
+        assert_eq!(controller.remote_audio_id(&prepared), Some(file.id));
+        assert!(controller.remote_retained_stream.lock().unwrap().is_none());
+        let after = engine.handle().status();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.play_session_id, before.play_session_id);
+        if channels == 2 {
+            assert!(result.is_err(), "a stereo source must reject pair 1");
+            assert_eq!(after.file_path, Some(first.clone()));
+            assert_eq!(controller.playback.lock().unwrap().source_pair, 0);
+            assert_eq!(
+                controller
+                    .remote_stream
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .path,
+                first
+            );
+            assert!(audiolib_audio::is_stream_source(&first));
+            assert!(!audiolib_audio::is_stream_source(&prepared));
+            // Force an actual decoder open to wait on missing bytes in the
+            // retained WebDAV source. Stop must still reach that source after
+            // the replacement was rejected, without a physical audio device.
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let source = old.stream.clone();
+            audiolib_audio::register_stream_source(
+                &first,
+                Arc::new(move || {
+                    let mut reader = source.reader()?;
+                    reader.seek(SeekFrom::Start(60_000))?;
+                    entered_tx.send(()).unwrap();
+                    reader.read_exact(&mut [0; 16])?;
+                    reader.seek(SeekFrom::Start(0))?;
+                    Ok((Box::new(reader), 400_044))
+                }),
+            );
+            let loading = engine
+                .handle()
+                .enqueue_with_ack(AudioCommand::Load(first.clone()))
+                .unwrap();
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            let stopped = controller
+                .enqueue_stop()
+                .unwrap()
+                .wait(Duration::from_secs(2))
+                .unwrap();
+            assert!(loading.wait_until_completed().is_err());
+            assert_eq!(stopped.state, PlaybackState::Empty);
+        } else {
+            result.unwrap();
+            assert_eq!(after.file_path, Some(prepared.clone()));
+            assert_eq!(controller.playback.lock().unwrap().source_pair, 1);
+            assert!(!old.stream.is_active());
+            assert!(!audiolib_audio::is_stream_source(&first));
+            assert!(audiolib_audio::is_stream_source(&prepared));
+            let reused = controller
+                .playable_path(&file, &AtomicBool::new(false), 0)
+                .unwrap();
+            assert_eq!(reused, prepared);
+            let previous = controller.remote_stream.lock().unwrap().clone().unwrap();
+            assert!(!previous.stream.is_complete());
+            previous.stream.cancel();
+            controller
+                .configure_output(PlaybackConfig::default())
+                .unwrap();
+            let restarted = controller.remote_stream.lock().unwrap().clone().unwrap();
+            assert_ne!(restarted.path, previous.path);
+            assert!(restarted.stream.shares_buffer_with(&previous.stream));
+            assert!(restarted.stream.is_active());
+            assert!(!audiolib_audio::is_stream_source(&previous.path));
+            assert!(audiolib_audio::is_stream_source(&restarted.path));
+            // Failure while preparing another registration of this same entry
+            // must restore the old registration without cancelling its bytes.
+            restarted.stream.cancel();
+            assert!(
+                controller
+                    .configure_output(PlaybackConfig {
+                        source_pair: 2,
+                        ..Default::default()
+                    })
+                    .is_err()
+            );
+            let restored = controller.remote_stream.lock().unwrap().clone().unwrap();
+            assert_eq!(restored.path, restarted.path);
+            assert!(restored.stream.shares_buffer_with(&restarted.stream));
+            assert!(restored.stream.is_active());
+            assert!(audiolib_audio::is_stream_source(&restored.path));
+            let registered = controller.remote_playback_paths_for_test();
+            for path in registered {
+                assert_eq!(
+                    audiolib_audio::is_stream_source(&path),
+                    path == restored.path
+                );
+            }
+        }
+        let heads = requests.lock().unwrap();
+        assert!(heads.len() >= 2);
+        assert!(heads[0].starts_with("GET /dav/raw.wav "));
+        assert!(heads[1].starts_with(&format!("GET /api/v1/audio/{}/stream ", file.id)));
+        drop(heads);
+        controller.shutdown();
+        assert!(!audiolib_audio::is_stream_source(&first));
+        assert!(!audiolib_audio::is_stream_source(&prepared));
+        let _ = release_tx.send(());
+        drop(release_tx);
+        drop(controller);
+        drop(ui);
+        drop(engine);
+    }
+}

@@ -32,6 +32,8 @@ mod click_preview_tests;
 #[cfg(test)]
 #[path = "folder_search_tests.rs"]
 mod folder_search_tests;
+#[path = "metadata_recovery.rs"]
+mod metadata_recovery;
 #[path = "remote_mode.rs"]
 mod remote_mode;
 #[cfg(test)]
@@ -486,6 +488,8 @@ pub struct Controller {
     selected: Mutex<Option<AudioFile>>,
     metadata: Mutex<MetadataState>,
     metadata_wake: Condvar,
+    /// Durable recovery artifact for drafts bound to a replaced server library.
+    metadata_recovery_notice: Mutex<Option<PathBuf>>,
     closing: AtomicBool,
     /// Background drain completion is retained until the closing UI timer consumes
     /// it; a rejected cross-thread event-loop notification must not lose it.
@@ -646,6 +650,7 @@ impl Controller {
             selected: Mutex::new(None),
             metadata: Mutex::new(MetadataState::default()),
             metadata_wake: Condvar::new(),
+            metadata_recovery_notice: Mutex::new(None),
             closing: AtomicBool::new(false),
             close_completion: Mutex::new(None),
             tree: Mutex::new(TreeState::default()),
@@ -709,6 +714,7 @@ impl Controller {
         controller.reload_tree();
         controller.request_search(ui, true, true);
         controller.init_remote(remote);
+        controller.find_metadata_recovery();
         controller
     }
 
@@ -1506,7 +1512,12 @@ impl Controller {
         }
         let Some(ui) = self.ui.upgrade() else { return };
         self.capture_metadata(&ui);
-        let barrier = match self.metadata.lock().unwrap().enqueue_all() {
+        let recovering_handoff = matches!(operation, LibraryOperation::DataSource(_));
+        let barrier = match if recovering_handoff {
+            self.enqueue_transition_metadata()
+        } else {
+            self.metadata.lock().unwrap().enqueue_all()
+        } {
             Ok(sequence) => sequence,
             Err(error) => {
                 ui.set_status(error.clone().into());
@@ -1557,7 +1568,11 @@ impl Controller {
             let result = (|| -> Result<String, String> {
                 // Keep the old snapshot and its drafts when a save fails. A refresh
                 // must never discard an annotation merely because a newer snapshot exists.
-                c.wait_metadata(barrier, true)?;
+                if recovering_handoff {
+                    c.wait_transition_metadata(barrier)?;
+                } else {
+                    c.wait_metadata(barrier, true)?;
+                }
                 while c.scan_cancel.lock().unwrap().is_some() {
                     if c.shutdown.load(Ordering::Acquire) {
                         return Err("Desktop is shutting down".into());
@@ -1796,6 +1811,10 @@ impl Controller {
                 }
                 if matches!(operation, LibraryOperation::DataSource(_)) {
                     c2.publish_data_source(&ui);
+                    if succeeded {
+                        c2.reconcile_source_manager_after_swap(&ui);
+                    }
+                    c2.publish_metadata_recovery_notice(&ui);
                 }
                 if !operation.changes_records() || !succeeded {
                     c2.sync_editor(&ui);
@@ -3682,7 +3701,7 @@ impl Controller {
             return;
         }
         self.capture_metadata(ui);
-        let barrier = match self.metadata.lock().unwrap().enqueue_all() {
+        let barrier = match self.enqueue_transition_metadata() {
             Ok(sequence) => sequence,
             Err(error) => {
                 ui.set_status(error.into());
@@ -3700,7 +3719,7 @@ impl Controller {
         self.schedule_close_poll(Some(Instant::now() + Duration::from_secs(5)));
         let c = self.clone();
         std::thread::spawn(move || {
-            let mut result = c.wait_metadata(barrier, true).and_then(|_| {
+            let mut result = c.wait_transition_metadata(barrier).and_then(|_| {
                 tracing::info!("Desktop Metadata drained; cancelling scan");
                 if let Some(cancel) = c.scan_cancel.lock().unwrap().as_ref() {
                     cancel.cancel();
@@ -3766,6 +3785,7 @@ impl Controller {
     }
 
     fn finish_close(self: &Arc<Self>, ui: &AppWindow, result: Result<(), String>) {
+        self.publish_metadata_recovery_notice(ui);
         let result = result.and_then(|_| {
             // KeepWindowShown rejects the native close. After safely draining,
             // explicitly hide the retained window before requesting loop exit.
@@ -3786,6 +3806,7 @@ impl Controller {
                 self.request_history_page(offset);
             }
             resume_after_failed_close(ui, &error, scanning);
+            self.publish_metadata_recovery_notice(ui);
             ui.set_scan_validating(scanning && self.scan_validating.load(Ordering::Acquire));
             if let Err(error) = ui.show() {
                 tracing::error!(%error, "Restore desktop after failed close");
@@ -4482,20 +4503,37 @@ impl Controller {
     ) {
         *self.remote_retained_stream.lock().unwrap() = None;
         if retained.as_ref().is_some_and(|old| old.path == path) {
+            // New registrations always have distinct paths, even when server and
+            // WebDAV both use the raw route. Equality therefore means reuse.
             return;
         }
         let mut current = self.remote_stream.lock().unwrap();
         if committed {
             if let Some(old) = retained {
-                old.stream.cancel();
+                // Restarting an incomplete source can retain its cache entry.
+                // Its old registration can go, but cancelling the shared entry
+                // would also cancel the acknowledged replacement.
+                if !current
+                    .as_ref()
+                    .is_some_and(|new| old.stream.shares_buffer_with(&new.stream))
+                {
+                    old.stream.cancel();
+                }
                 audiolib_audio::unregister_stream_source(&old.path);
             }
         } else if current.as_ref().is_some_and(|new| new.path == path) {
+            let restoring = self.available();
             if let Some(new) = current.take() {
-                new.stream.cancel();
+                if !restoring
+                    || !retained
+                        .as_ref()
+                        .is_some_and(|old| old.stream.shares_buffer_with(&new.stream))
+                {
+                    new.stream.cancel();
+                }
                 audiolib_audio::unregister_stream_source(&new.path);
             }
-            if self.available() {
+            if restoring {
                 *current = retained;
             } else if let Some(old) = retained {
                 old.stream.cancel();

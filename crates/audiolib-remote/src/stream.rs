@@ -871,6 +871,13 @@ impl MemoryStream {
         &self.entry().source
     }
 
+    /// Whether both handles own the same cached bytes and cancellation state.
+    /// Restarting an incomplete source can reuse its entry, even when a caller
+    /// gives the new playback registration a different virtual path.
+    pub fn shares_buffer_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.handle.entry, &other.handle.entry)
+    }
+
     /// Wait for the first response: the total length, or why the stream failed.
     pub fn wait_ready(&self, cancel: &AtomicBool, timeout: Duration) -> Result<u64> {
         self.wait_ready_with(cancel, timeout, &mut |_| {})

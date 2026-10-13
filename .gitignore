@@ -13,6 +13,7 @@
 *.sqlite
 *.sqlite3
 /logs/
+**/recovery/server-metadata/
 /.audiolib-user/
 *.log
 /config/audiolib_config.yaml
