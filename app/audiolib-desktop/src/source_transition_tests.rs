@@ -1353,8 +1353,12 @@ fn rejected_snapshot_cache(unsupported: bool) {
         deferred,
     );
     let c = controller.clone();
+    let window = ui.as_weak();
     run_until(&ui, move || {
-        !c.remote_busy.load(Ordering::Acquire) && !c.library_busy.load(Ordering::Acquire)
+        // Worker drain precedes the queued UI completion and provider handoff.
+        !c.remote_busy.load(Ordering::Acquire)
+            && !c.library_busy.load(Ordering::Acquire)
+            && window.upgrade().is_some_and(|ui| !ui.get_ds_syncing())
     });
     assert_eq!(
         controller.remote.lock().unwrap().state.as_ref(),

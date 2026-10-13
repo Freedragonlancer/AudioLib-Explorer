@@ -1,5 +1,21 @@
 # Rust 验证报告
 
+## 退出保存卡住补修（2026-10-13，0.4.4）
+
+源码基于 `1c2aaeab948269bbf32597c2ae4b79596c05dc2a` 加本轮修复；版本仍为尚未发布的 0.4.4，schema/API 不变。关闭结果邮箱、UI 关闭期间的 timer、远程 worker 的一次性 busy guard 和保存失败恢复见 [审查修复](Rust_Review_Fixes.md)。
+
+格式、默认与 ASIO 严格 Clippy 全部通过。两种配置各完成 49 个顶层目标、715 passed、0 failed、53 ignored，隔离子进程仅累计一次。故障注入拒绝全部跨线程 UI 通知，实际无效端点同步仍释放 busy；草稿保存、扫描排空及 UI 响应通过。真实管理锁使首次保存失败，窗口、草稿及同步指示恢复后能重复关闭并成功保存，源 WAV 字节不变。
+
+额外选择执行两项真实 Windows native 测试，各 1 passed：完整启动事件循环到主事件循环的空库关闭，以及未保存备注的重复关闭、持久化和最终隐藏。新同步语义将 worker 排空与 UI/provider 交接分开；旧缓存回退测试最初仅等待后台 busy，在 UI 回调之前提前断言。补上管理页完成条件后，完整默认/ASIO 重跑通过，旧状态、provider、active cache 与快照字节断言均保留。
+
+最终 ASIO release 使用已验证 Steinberg SDK 2.3.4，构建耗时 4 分 22 秒。195 个非文档源码、配置和资源输入在最终检查、构建和新二进制回归期间 SHA256 不变。`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1`、`validate-playback-ipc.ps1 -CleanCheckout` 和公开包边界回归通过；缺失的旧数据库及 WAV 验证没有计入通过。播放仍用 owned 静音合成素材，不代表物理音频延迟。
+
+`validate-desktop-close.ps1 -Cycles 10` 对最终 release 完成 20 次原生关闭：WM_CLOSE 与 SC_CLOSE 各十次、每次连续两条请求。每次自然退出、窗口消失、正常 shutdown 日志及空库重新打开均通过；本机消息投递到自然退出实测 90.77–105.04ms。此测量针对隔离空库，不代表大型缓存或实际写入时的等待时间。
+
+日常安装目录继续为 `local_release/`，只覆盖经便携验证的包内文件，保留原有运行数据。六项已有数据库、sidecar 和偏好输入在新二进制回归后 SHA256 不变，正常数据目录环境保持。源输入、完整测试和回归日志、便携包与固定安装的验证及 EXE 哈希记录保留于本机忽略目录 `.rust-validation/fix-all-v0.4.4/`，不随 Git 或 ZIP 分发。
+
+现场 Saving changes 停滞尚未稳定复现，本轮证明并修复通知失败导致的等待路径，不宣称已确认现场同根因。UI-001 的完整前台失焦/聚焦验收仍未完成：input desktop 可读取，但测试窗口没有取得前台焦点，computer-use 捕获返回桌面合成禁用（0x80263001）；未修改 Windows 设置。此限制不影响以上原生关闭事件回归。
+
 ## 客户端、服务端与隐私审查修复（2026-10-13，0.4.4）
 
 源码基于 `6f30d713aadc1927f37bab013a2935fc4e0258c0` 加本轮修复；逐项变化见 [审查修复](Rust_Review_Fixes.md)。194 个非文档源码、配置和资源输入在最终检查与构建期间 SHA256 保持一致。程序版本 0.4.4，API v1、schema 5、snapshot 3..=5 不变。

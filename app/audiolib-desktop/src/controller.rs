@@ -487,6 +487,9 @@ pub struct Controller {
     metadata: Mutex<MetadataState>,
     metadata_wake: Condvar,
     closing: AtomicBool,
+    /// Background drain completion is retained until the closing UI timer consumes
+    /// it; a rejected cross-thread event-loop notification must not lose it.
+    close_completion: Mutex<Option<Result<(), String>>>,
     tree: Mutex<TreeState>,
     tree_generation: AtomicU64,
     selection_generation: AtomicU64,
@@ -644,6 +647,7 @@ impl Controller {
             metadata: Mutex::new(MetadataState::default()),
             metadata_wake: Condvar::new(),
             closing: AtomicBool::new(false),
+            close_completion: Mutex::new(None),
             tree: Mutex::new(TreeState::default()),
             tree_generation: AtomicU64::new(0),
             selection_generation: AtomicU64::new(0),
@@ -3666,6 +3670,9 @@ impl Controller {
 
     /// Keep the window alive until dirty drafts persist and cancelled scanning drains.
     pub fn request_close(self: &Arc<Self>, ui: &AppWindow) {
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
         if self.library_busy.load(Ordering::Acquire) || self.source_changing.load(Ordering::Acquire)
         {
             self.close_after_operation.store(true, Ordering::Release);
@@ -3682,6 +3689,7 @@ impl Controller {
                 return;
             }
         };
+        *self.close_completion.lock().unwrap() = None;
         self.closing.store(true, Ordering::Release);
         self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
@@ -3689,9 +3697,10 @@ impl Controller {
         ui.set_searching(false);
         ui.set_closing(true);
         self.metadata_wake.notify_all();
+        self.schedule_close_poll(Some(Instant::now() + Duration::from_secs(5)));
         let c = self.clone();
         std::thread::spawn(move || {
-            let result = c.wait_metadata(barrier, true).and_then(|_| {
+            let mut result = c.wait_metadata(barrier, true).and_then(|_| {
                 tracing::info!("Desktop Metadata drained; cancelling scan");
                 if let Some(cancel) = c.scan_cancel.lock().unwrap().as_ref() {
                     cancel.cancel();
@@ -3704,43 +3713,84 @@ impl Controller {
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                // Cache preparation can be in a non-cancellable SQLite upgrade.
-                // Keep the event loop and instance lease alive until its worker drains.
-                while c.remote_busy.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+                tracing::info!("Desktop scan drained");
                 Ok(())
             });
-            let c2 = c.clone();
-            post(c.ui.clone(), move |ui| {
-                let result = result.and_then(|_| {
-                    // KeepWindowShown rejects the original native close. Once writes
-                    // and scanning have drained, explicitly hide that window too:
-                    // posting a loop-exit request alone can leave it visible if the
-                    // backend discards the request across an event-loop transition.
-                    ui.hide().map_err(|error| error.to_string())?;
-                    tracing::info!("Desktop writes and scan drained; window hidden");
-                    slint::quit_event_loop().map_err(|error| error.to_string())
-                });
-                if let Err(error) = result {
-                    tracing::warn!(%error, "Desktop close failed; retaining drafts");
-                    c2.closing.store(false, Ordering::Release);
-                    let scanning = c2.scan_cancel.lock().unwrap().is_some();
-                    c2.resume_source_selection(false);
-                    c2.refresh_library_info();
-                    c2.resume_search(&ui, Some(error.clone()));
-                    if ui.get_library_visible() {
-                        let offset = *c2.history_offset.lock().unwrap();
-                        c2.request_history_page(offset);
-                    }
-                    resume_after_failed_close(&ui, &error, scanning);
-                    ui.set_scan_validating(scanning && c2.scan_validating.load(Ordering::Acquire));
-                    if let Err(error) = ui.show() {
-                        tracing::error!(%error, "Restore desktop after failed close");
-                    }
+            // Closing has cancelled sync even if Metadata saving failed. Drain
+            // its owned cache work before either hiding or restoring the window;
+            // the cancelled generation cannot publish its final UI state.
+            while c.remote_busy.load(Ordering::Acquire) {
+                if c.shutdown.load(Ordering::Acquire) {
+                    result = Err("Desktop is shutting down".into());
+                    break;
                 }
-            });
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !c.remote_busy.load(Ordering::Acquire) {
+                tracing::info!("Desktop remote preparation drained");
+            }
+            tracing::info!(
+                success = result.is_ok(),
+                "Desktop close preparation complete"
+            );
+            let mut completion = c.close_completion.lock().unwrap();
+            if !c.shutdown.load(Ordering::Acquire) {
+                *completion = Some(result);
+            }
         });
+    }
+
+    /// Called only on the UI thread, and only while a close drain is in progress.
+    /// Single-shot timers retain no non-Send timer handle inside the controller.
+    fn schedule_close_poll(self: &Arc<Self>, warn_after: Option<Instant>) {
+        let c = self.clone();
+        slint::Timer::single_shot(Duration::from_millis(50), move || {
+            if c.shutdown.load(Ordering::Acquire) || !c.closing.load(Ordering::Acquire) {
+                return;
+            }
+            let Some(ui) = c.ui.upgrade() else { return };
+            // Release the mailbox mutex before hiding the window or restoring drafts.
+            let result = c.close_completion.lock().unwrap().take();
+            let Some(result) = result else {
+                let warn_after = if warn_after.is_some_and(|deadline| Instant::now() >= deadline) {
+                    tracing::warn!("Desktop close still draining; retaining window and drafts");
+                    None
+                } else {
+                    warn_after
+                };
+                c.schedule_close_poll(warn_after);
+                return;
+            };
+            c.finish_close(&ui, result);
+        });
+    }
+
+    fn finish_close(self: &Arc<Self>, ui: &AppWindow, result: Result<(), String>) {
+        let result = result.and_then(|_| {
+            // KeepWindowShown rejects the native close. After safely draining,
+            // explicitly hide the retained window before requesting loop exit.
+            tracing::info!("Desktop close completion consumed; hiding window");
+            ui.hide().map_err(|error| error.to_string())?;
+            tracing::info!("Desktop writes and scan drained; window hidden");
+            slint::quit_event_loop().map_err(|error| error.to_string())
+        });
+        if let Err(error) = result {
+            tracing::warn!(%error, "Desktop close failed; retaining drafts");
+            self.closing.store(false, Ordering::Release);
+            let scanning = self.scan_cancel.lock().unwrap().is_some();
+            self.resume_source_selection(false);
+            self.refresh_library_info();
+            self.resume_search(ui, Some(error.clone()));
+            if ui.get_library_visible() {
+                let offset = *self.history_offset.lock().unwrap();
+                self.request_history_page(offset);
+            }
+            resume_after_failed_close(ui, &error, scanning);
+            ui.set_scan_validating(scanning && self.scan_validating.load(Ordering::Acquire));
+            if let Err(error) = ui.show() {
+                tracing::error!(%error, "Restore desktop after failed close");
+            }
+        }
     }
 
     fn scan(self: &Arc<Self>, path: PathBuf) {
@@ -4804,6 +4854,7 @@ impl Controller {
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        *self.close_completion.lock().unwrap() = None;
         *self.latest_selection.lock().unwrap() = None;
         // Use the predicate lock when waking an idle preference worker, so shutdown
         // cannot race its transition into a condition-variable wait.
@@ -5302,6 +5353,10 @@ fn resume_after_failed_close(ui: &AppWindow, error: &str, scanning: bool) {
     // Scan completion publications are skipped during closing. Reconcile the
     // indicator with the worker token so a failed save cannot freeze scan menus.
     ui.set_scanning(scanning);
+    // The close worker also drains cancelled remote work on a save failure.
+    // Its obsolete/rejected publication cannot restore these indicators.
+    ui.set_ds_syncing(false);
+    ui.set_ds_progress(0.0);
     ui.set_status(error.into());
 }
 
@@ -5593,6 +5648,67 @@ impl PlaybackHistoryTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Timers and loop exit work, but every cross-thread UI notification fails.
+    /// This reproduces the lost close-completion path without a native user window.
+    fn init_close_without_post_delivery() -> Arc<AtomicU64> {
+        use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+        use slint::platform::{EventLoopProxy, Platform, PlatformError, WindowAdapter};
+        use std::rc::Rc;
+
+        struct RejectPosts {
+            backend: TestingBackend,
+            rejected: Arc<AtomicU64>,
+        }
+        struct RejectPostProxy {
+            inner: Box<dyn EventLoopProxy>,
+            rejected: Arc<AtomicU64>,
+        }
+        impl EventLoopProxy for RejectPostProxy {
+            fn quit_event_loop(&self) -> Result<(), slint::EventLoopError> {
+                self.inner.quit_event_loop()
+            }
+            fn invoke_from_event_loop(
+                &self,
+                _event: Box<dyn FnOnce() + Send>,
+            ) -> Result<(), slint::EventLoopError> {
+                self.rejected.fetch_add(1, Ordering::AcqRel);
+                Err(slint::EventLoopError::EventLoopTerminated)
+            }
+        }
+        impl Platform for RejectPosts {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+                self.backend.create_window_adapter()
+            }
+            fn run_event_loop(&self) -> Result<(), PlatformError> {
+                self.backend.run_event_loop()
+            }
+            fn duration_since_start(&self) -> Duration {
+                self.backend.duration_since_start()
+            }
+            fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
+                self.backend.new_event_loop_proxy().map(|inner| {
+                    Box::new(RejectPostProxy {
+                        inner,
+                        rejected: self.rejected.clone(),
+                    }) as Box<dyn EventLoopProxy>
+                })
+            }
+        }
+        let rejected = Arc::new(AtomicU64::new(0));
+        slint::platform::set_platform(Box::new(RejectPosts {
+            backend: TestingBackend::new(TestingBackendOptions {
+                threading: true,
+                ..Default::default()
+            }),
+            rejected: rejected.clone(),
+        }))
+        .unwrap();
+        assert!(
+            slint::invoke_from_event_loop(|| panic!("Rejected UI event was delivered")).is_err()
+        );
+        rejected
+    }
 
     #[test]
     fn play_retains_the_selected_reload_until_its_load_succeeds() {
@@ -6097,7 +6213,7 @@ mod tests {
     #[test]
     #[ignore = "helper invoked by the close/scan-drain regression in an isolated process"]
     fn child_close_saves_drafts_and_waits_for_scan_drain() {
-        i_slint_backend_testing::init_integration_test_with_system_time();
+        let rejected = init_close_without_post_delivery();
         let root = std::env::temp_dir().join(format!(
             "audiolib-desktop-close-scan-{}-{}",
             std::process::id(),
@@ -6202,6 +6318,9 @@ mod tests {
             },
         );
         ui.show().unwrap();
+        // A real failed sync has no valid endpoint. Its final publication is
+        // rejected by this backend, so worker-owned busy release must unblock close.
+        controller.start_sync(false, false);
         controller.request_close(&ui);
         slint::run_event_loop().unwrap();
         timer.stop();
@@ -6209,6 +6328,7 @@ mod tests {
             && responsive_ticks.get() == 5
             && controller.scan_cancel.lock().unwrap().is_none();
         let was_hidden_before_quit = !ui.window().is_visible();
+        let remote_drained_before_quit = !controller.remote_busy.load(Ordering::Acquire);
         // Release the simulated worker even if an early-quit regression failed.
         release_tx.send(()).ok();
         scan_worker.join().unwrap();
@@ -6225,12 +6345,198 @@ mod tests {
             was_hidden_before_quit,
             "Successful close must hide the window that rejected the native close request"
         );
+        assert!(rejected.load(Ordering::Acquire) > 1);
+        assert!(remote_drained_before_quit);
         assert_eq!(
             provider.get_audio(file_id).unwrap().notes,
             "save before scan cancellation"
         );
         assert_eq!(std::fs::read(source).unwrap(), wav);
         drop(provider);
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn close_failure_preserves_drafts_and_retries_without_ui_notifications() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::tests::child_close_failure_retries_without_ui_notifications",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated close failure/retry helper with rejected UI notifications"]
+    fn child_close_failure_retries_without_ui_notifications() {
+        use audiolib_core::config::AppPaths;
+        use std::{cell::Cell, cell::RefCell, rc::Rc};
+
+        let rejected = init_close_without_post_delivery();
+        let root = std::env::temp_dir().join(format!(
+            "audiolib-close-mailbox-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for name in ["sounds", "cache", "logs"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let mut wav = Vec::new();
+        wav.extend(b"RIFF");
+        wav.extend(38u32.to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(48000u32.to_le_bytes());
+        wav.extend(96000u32.to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend(2u32.to_le_bytes());
+        wav.extend(0i16.to_le_bytes());
+        let source = root.join("sounds/mailbox.wav");
+        std::fs::write(&source, &wav).unwrap();
+        let provider = Arc::new(SqliteProvider::open(&root.join("library.db")).unwrap());
+        ScanService::new(provider.clone())
+            .scan(
+                &root.join("sounds"),
+                &ScanOptions::default(),
+                &ScanCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+        let file = provider.search(&SearchRequest::default()).unwrap().results[0].clone();
+        let file_id = file.id;
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            ..Default::default()
+        };
+        let config = AppConfig {
+            paths: AppPaths {
+                database: root.join("library.db"),
+                cache: root.join("cache"),
+                logs: root.join("logs"),
+                settings: root.join("settings.json"),
+                legacy_database: None,
+                audio_terms: None,
+            },
+            language: "en".into(),
+            playback: serde_json::to_value(&playback).unwrap(),
+            audition_play_on_single_click: false,
+            allowed_scan_roots: Vec::new(),
+            data_source: Default::default(),
+        };
+        config.save().unwrap();
+        let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+        *controller.selected.lock().unwrap() = Some(file.clone());
+        present_file(&ui, &file);
+        ui.set_edit_notes("draft retained after failed close".into());
+        ui.set_metadata_dirty(true);
+        // Real cross-instance administration exclusion rejects the first save.
+        // Release only after the UI has consumed the failed close completion.
+        let lease = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("library.db.admin.lock"))
+            .unwrap();
+        lease.try_lock().unwrap();
+        let lease = Rc::new(RefCell::new(Some(lease)));
+        let retry_lease = lease.clone();
+        let retried = Rc::new(Cell::new(false));
+        let observed_retry = retried.clone();
+        let failure = Rc::new(RefCell::new(None::<String>));
+        let errors = failure.clone();
+        let c = controller.clone();
+        let check_provider = provider.clone();
+        let weak = ui.as_weak();
+        let started = Instant::now();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(15),
+            move || {
+                if started.elapsed() > Duration::from_secs(5) {
+                    *errors.borrow_mut() = Some("Close failure/retry did not complete".into());
+                    slint::quit_event_loop().unwrap();
+                    return;
+                }
+                if observed_retry.get() || c.closing.load(Ordering::Acquire) {
+                    return;
+                }
+                let ui = weak.upgrade().unwrap();
+                let state = c.metadata.lock().unwrap();
+                let preserved = state.failure().is_some() && state.drafts.contains_key(&file_id);
+                drop(state);
+                if !preserved
+                    || !ui.window().is_visible()
+                    || ui.get_closing()
+                    || !ui.get_metadata_dirty()
+                    || ui.get_ds_syncing()
+                    || ui.get_ds_progress() != 0.0
+                    || c.remote_busy.load(Ordering::Acquire)
+                    || ui.get_edit_notes() != "draft retained after failed close"
+                    || check_provider.get_audio(file_id).unwrap().notes
+                        == "draft retained after failed close"
+                    || c.close_completion.lock().unwrap().is_some()
+                {
+                    *errors.borrow_mut() = Some("Failed close lost its draft or window".into());
+                    slint::quit_event_loop().unwrap();
+                    return;
+                }
+                retry_lease.borrow_mut().take().unwrap().unlock().unwrap();
+                observed_retry.set(true);
+                c.request_close(&ui);
+                c.request_close(&ui);
+            },
+        );
+        ui.show().unwrap();
+        controller.start_sync(false, false);
+        controller.request_close(&ui);
+        controller.request_close(&ui);
+        slint::run_event_loop().unwrap();
+        timer.stop();
+        let hidden = !ui.window().is_visible();
+        let state = controller.metadata.lock().unwrap();
+        let saved = state.failure().is_none()
+            && !state.drafts.contains_key(&file_id)
+            && state.sequence == 2
+            && state.completed == 2;
+        drop(state);
+        controller.shutdown();
+        ui.hide().unwrap();
+        drop(engine);
+        assert!(failure.borrow().is_none(), "{:?}", failure.borrow());
+        assert!(retried.get() && hidden && saved);
+        assert!(rejected.load(Ordering::Acquire) > 1);
+        assert!(controller.close_completion.lock().unwrap().is_none());
+        assert_eq!(
+            provider.get_audio(file_id).unwrap().notes,
+            "draft retained after failed close"
+        );
+        assert_eq!(std::fs::read(source).unwrap(), wav);
+        drop(ui);
+        drop(controller);
+        drop(provider);
+        drop(lease);
         assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
         std::thread::sleep(Duration::from_millis(100));
         std::fs::remove_dir_all(root).ok();
@@ -7209,10 +7515,14 @@ mod tests {
         );
         ui.set_closing(true);
         ui.set_scanning(true);
+        ui.set_ds_syncing(true);
+        ui.set_ds_progress(0.5);
         resume_after_failed_close(&ui, "database is busy", false);
         assert!(ui.window().is_visible());
         assert!(!ui.get_closing());
         assert!(!ui.get_scanning());
+        assert!(!ui.get_ds_syncing());
+        assert_eq!(ui.get_ds_progress(), 0.0);
         assert!(ui.get_metadata_dirty());
         assert_eq!(ui.get_edit_notes(), "B draft after publication");
         // A still-running scan must retain its cancellation action on retry.

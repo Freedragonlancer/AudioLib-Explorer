@@ -36,6 +36,7 @@ public static class AudioLibRepaintNative {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int z, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
@@ -49,6 +50,21 @@ public static class AudioLibRepaintNative {
     [DllImport("gdi32.dll", SetLastError=true)] public static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
     [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr desktop);
+    public static bool IsOwnedWindow(IntPtr window, uint expectedProcess) {
+        uint owner;
+        return IsWindow(window) && GetWindowThreadProcessId(window,out owner)!=0 && owner==expectedProcess;
+    }
+    public static void AssertOwnedWindow(IntPtr window, uint expectedProcess) {
+        if (!IsOwnedWindow(window,expectedProcess)) throw new Exception("Target is not an owned test window");
+    }
+    public static bool FocusOwnedWindow(IntPtr window, uint expectedProcess) {
+        AssertOwnedWindow(window,expectedProcess);
+        return SetForegroundWindow(window);
+    }
+    public static bool CloseOwnedWindow(IntPtr window, uint expectedProcess) {
+        if (!IsOwnedWindow(window,expectedProcess)) return false;
+        return PostMessage(window,0x0010,IntPtr.Zero,IntPtr.Zero);
+    }
     public static string CaptureEnvironment() {
         IntPtr desktop = OpenInputDesktop(0,false,1);
         if (desktop==IntPtr.Zero) return "Input-desktop READOBJECTS unavailable; Win32="+Marshal.GetLastWin32Error();
@@ -114,6 +130,7 @@ public static class AudioLibRepaintNative {
 }
 $savedData = $env:AUDIOLIB_DATA_DIR
 $savedBackend = $env:SLINT_BACKEND
+$savedLog = $env:RUST_LOG
 $process = $null
 $before = $null
 $savedDpiContext = [IntPtr]::Zero
@@ -128,6 +145,7 @@ try {
     }
     $env:AUDIOLIB_DATA_DIR = $testRoot
     $env:SLINT_BACKEND = 'winit-software'
+    $env:RUST_LOG = 'info'
     # Persist the owned library before any CLI/GUI startup can discover legacy inputs.
     $settings = @{ active_database=(Join-Path $testRoot 'library.db'); language='en'; playback=@{volume=0.0}; allowed_scan_roots=@(); data_source=@{mode='local';server_url=''} } | ConvertTo-Json -Depth 5
     [IO.File]::WriteAllText((Join-Path $testRoot 'settings.json'),$settings,[Text.UTF8Encoding]::new($false))
@@ -144,13 +162,20 @@ try {
     } while ($process.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
     $handle = $process.MainWindowHandle
     if ($handle -eq 0) { throw 'Isolated desktop window did not open.' }
+    [AudioLibRepaintNative]::AssertOwnedWindow($handle,$process.Id)
     [AudioLibRepaintNative]::ShowWindow($handle,9) | Out-Null
+    [AudioLibRepaintNative]::AssertOwnedWindow($handle,$process.Id)
     [AudioLibRepaintNative]::SetWindowPos($handle,[IntPtr](-1),30,30,1120,740,0x0040) | Out-Null
-    $initialFocusRequested = [AudioLibRepaintNative]::SetForegroundWindow($handle)
+    $initialFocusRequested = [AudioLibRepaintNative]::FocusOwnedWindow($handle,$process.Id)
     Start-Sleep -Milliseconds 1800
     $inputDesktopAvailable = [AudioLibRepaintNative]::InputDesktopAvailable()
     $initialForeground = [AudioLibRepaintNative]::GetForegroundWindow() -eq $handle
-    if ($inputDesktopAvailable -and !$initialForeground) { throw 'The available input desktop did not give the owned test window foreground focus.' }
+    if ($inputDesktopAvailable -and !$initialForeground) {
+        $foregroundHandle = [AudioLibRepaintNative]::GetForegroundWindow()
+        [uint32]$foregroundOwner = 0
+        $foregroundThread = [AudioLibRepaintNative]::GetWindowThreadProcessId($foregroundHandle,[ref]$foregroundOwner)
+        throw "The available input desktop did not give the owned test window foreground focus: requested=$initialFocusRequested; owned HWND=$handle; foreground HWND=$foregroundHandle; foreground PID=$foregroundOwner; foreground TID=$foregroundThread; owned visible=$([AudioLibRepaintNative]::IsWindowVisible($handle))."
+    }
     $before = [AudioLibRepaintNative]::Capture($handle)
     if (![AudioLibRepaintNative]::HasContent($before)) { throw 'The baseline client did not contain visible application controls.' }
     $before.Save((Join-Path $artifacts 'before.png'))
@@ -166,9 +191,11 @@ try {
         $appForegroundWhileCovered = $null
         $minimizeLostForeground = $null
         if ($action -eq 'minimize-restore') {
+            [AudioLibRepaintNative]::AssertOwnedWindow($handle,$process.Id)
             [AudioLibRepaintNative]::ShowWindow($handle,6) | Out-Null
             Start-Sleep -Milliseconds 250
             $minimizeLostForeground = [AudioLibRepaintNative]::GetForegroundWindow() -ne $handle
+            [AudioLibRepaintNative]::AssertOwnedWindow($handle,$process.Id)
             [AudioLibRepaintNative]::ShowWindow($handle,9) | Out-Null
         } else {
             $cover = [AudioLibRepaintCover]::new()
@@ -181,7 +208,7 @@ try {
                 $cover.Show()
                 [Windows.Forms.Application]::DoEvents()
                 if ($action -eq 'refocus') {
-                    $coverFocusRequested = [AudioLibRepaintNative]::SetForegroundWindow($cover.Handle)
+                    $coverFocusRequested = [AudioLibRepaintNative]::FocusOwnedWindow($cover.Handle,[Diagnostics.Process]::GetCurrentProcess().Id)
                     [Windows.Forms.Application]::DoEvents()
                 }
                 Start-Sleep -Milliseconds 250
@@ -192,7 +219,7 @@ try {
                 [Windows.Forms.Application]::DoEvents()
             } finally { $cover.Dispose() }
         }
-        $appFocusRequested = [AudioLibRepaintNative]::SetForegroundWindow($handle)
+        $appFocusRequested = [AudioLibRepaintNative]::FocusOwnedWindow($handle,$process.Id)
         Start-Sleep -Milliseconds 400
         $appForegroundAfter = [AudioLibRepaintNative]::GetForegroundWindow() -eq $handle
         $caseInputAvailable = $inputBefore -and [AudioLibRepaintNative]::InputDesktopAvailable()
@@ -211,7 +238,7 @@ try {
       }
     }
     # WM_CLOSE uses the application's drain path; never terminate a user instance.
-    [AudioLibRepaintNative]::PostMessage($handle,0x0010,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null
+    if (![AudioLibRepaintNative]::CloseOwnedWindow($handle,$process.Id)) { throw 'Could not close the owned test window.' }
     if (!$process.WaitForExit(12000)) { throw 'The isolated test window did not close gracefully; its data is retained.' }
     if ($process.ExitCode -ne 0) { throw "The isolated desktop failed: $($process.ExitCode)" }
     $foregroundExposureVerified = @($cases | Where-Object { !$_.foreground_exposure_verified }).Count -eq 0
@@ -220,6 +247,9 @@ try {
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifacts 'report.json') -Encoding UTF8
     $report | ConvertTo-Json -Depth 5
 } catch {
+    if (Test-Path -LiteralPath (Join-Path $testRoot 'logs')) {
+        foreach ($logFile in @(Get-ChildItem -LiteralPath (Join-Path $testRoot 'logs') -File)) { Copy-Item -LiteralPath $logFile.FullName -Destination (Join-Path $artifacts ('failed-' + $logFile.Name)) -Force }
+    }
     Write-Warning ('Native exposure regression failed: ' + $_.Exception.ToString())
     Write-Warning ([AudioLibRepaintNative]::CaptureEnvironment())
     throw
@@ -229,11 +259,11 @@ try {
     }
     if ($before) { $before.Dispose() }
     if ($process -and !$process.HasExited -and $process.MainWindowHandle -ne 0) {
-        [AudioLibRepaintNative]::PostMessage($process.MainWindowHandle,0x0010,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null
-        $process.WaitForExit(12000) | Out-Null
+        if ([AudioLibRepaintNative]::CloseOwnedWindow($process.MainWindowHandle,$process.Id)) { $process.WaitForExit(12000) | Out-Null }
     }
     $env:AUDIOLIB_DATA_DIR = $savedData
     $env:SLINT_BACKEND = $savedBackend
+    $env:RUST_LOG = $savedLog
     if (!$process -or $process.HasExited) {
         $resolvedTest = [IO.Path]::GetFullPath($testRoot)
         if (!$resolvedTest.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the owned temporary root.' }

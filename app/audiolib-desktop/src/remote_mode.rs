@@ -40,6 +40,19 @@ const WAVEFORM_AFTER_AUDIO: Duration = Duration::from_secs(3);
 /// arrowing through rows does not open a request per row.
 pub(super) const SELECTION_SETTLE: Duration = Duration::from_millis(180);
 
+/// One sync worker owns the busy flag until all of its cache work has drained.
+/// Releasing it cannot depend on UI delivery or the request generation: cancellation
+/// invalidates that generation while the same worker still owns its cache work.
+struct RemoteSyncBusyGuard(Option<Arc<Controller>>);
+
+impl Drop for RemoteSyncBusyGuard {
+    fn drop(&mut self) {
+        if let Some(controller) = self.0.take() {
+            controller.remote_busy.store(false, Ordering::Release);
+        }
+    }
+}
+
 #[path = "server_removal.rs"]
 mod server_removal;
 #[cfg(test)]
@@ -1507,6 +1520,8 @@ impl Controller {
             }
             return;
         }
+        // Establish ownership before settings preparation or spawning can fail.
+        let busy_guard = RemoteSyncBusyGuard(Some(self.clone()));
         let chinese = self.chinese.load(Ordering::Acquire);
         let generation = self.remote_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1523,6 +1538,8 @@ impl Controller {
         }
         let c = self.clone();
         std::thread::spawn(move || {
+            // On unwind, later cache locals drain before this guard releases busy.
+            let sync_busy_guard = busy_guard;
             let cache = RemoteCache::new(&data_root);
             let mut last_post = Instant::now() - Duration::from_secs(1);
             let cached_preparation_incomplete = std::cell::Cell::new(false);
@@ -1655,17 +1672,19 @@ impl Controller {
             } else {
                 None
             };
+            // Cache preparation and any owned fallback are finished. Close may now
+            // drain even if posting this result is rejected or never delivered.
+            drop(sync_busy_guard);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
-                c2.remote_busy.store(false, Ordering::Release);
-                ui.set_ds_syncing(false);
-                ui.set_ds_progress(0.0);
                 if c2.remote_generation.load(Ordering::Acquire) != generation
                     || c2.shutdown.load(Ordering::Acquire)
                     || c2.closing.load(Ordering::Acquire)
                 {
                     return;
                 }
+                ui.set_ds_syncing(false);
+                ui.set_ds_progress(0.0);
                 c2.complete_sync(&ui, result, fallback, &cache);
             });
         });
@@ -3748,10 +3767,13 @@ mod tests {
         // auto_sync with a revision that has not settled yet (AutoSyncGate not due): no
         // sync starts, and the notice says it waits for the server to stop changing.
         controller.config.lock().unwrap().data_source.auto_sync = true;
-        // The startup sync's completion is posted to an event loop this test never runs,
-        // so it stays "busy"; clear that for this check, so a wrongly started sync would
-        // show up as a new sync generation.
-        let was_busy = controller.remote_busy.swap(false, Ordering::AcqRel);
+        // Wait for the real startup worker; busy must clear even though this test
+        // never runs the event loop that would consume its completion publication.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while controller.remote_busy.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!controller.remote_busy.load(Ordering::Acquire));
         let generation = controller.remote_generation.load(Ordering::Acquire);
         controller.apply_revision_check(
             &ui,
@@ -3776,7 +3798,6 @@ mod tests {
             ui.get_remote_notice()
         );
         controller.config.lock().unwrap().data_source.auto_sync = false;
-        controller.remote_busy.store(was_busy, Ordering::Release);
         // A result checked against another snapshot than the open one is stale.
         controller.apply_revision_check(
             &ui,

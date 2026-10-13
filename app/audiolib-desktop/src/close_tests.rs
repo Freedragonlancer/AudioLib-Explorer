@@ -4,6 +4,142 @@
 #[cfg(windows)]
 #[test]
 #[ignore = "requires an interactive Windows desktop and the real Slint backend"]
+fn real_windows_empty_library_closes_after_startup_event_loop() {
+    use super::*;
+    use audiolib_core::config::AppPaths;
+    use std::{cell::Cell, rc::Rc};
+
+    let root = std::env::temp_dir().join(format!(
+        "audiolib-native-startup-close-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for directory in [&root, &root.join("cache"), &root.join("logs")] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    // Construct every path explicitly: this native regression must not discover
+    // production preferences or migration inputs through the repository/executable.
+    let config = AppConfig {
+        paths: AppPaths {
+            database: root.join("library.db"),
+            cache: root.join("cache"),
+            logs: root.join("logs"),
+            settings: root.join("settings.json"),
+            legacy_database: None,
+            audio_terms: None,
+        },
+        language: "en".into(),
+        playback: serde_json::to_value(&playback).unwrap(),
+        audition_play_on_single_click: false,
+        allowed_scan_roots: Vec::new(),
+        data_source: Default::default(),
+    };
+    config.save().unwrap();
+    let instance = DesktopInstanceGuard::acquire(&config.paths.settings).unwrap();
+    drop(SqliteProvider::open(&config.paths.database).unwrap());
+    let ui = AppWindow::new().unwrap();
+    window_repaint::install(ui.window());
+    // Exercise the actual first event-loop run, retaining the same window for
+    // the controller's second run, as normal local startup does.
+    let (provider, remote) = startup::show_while_opening(&ui, config.clone())
+        .unwrap()
+        .expect("isolated startup was not closed");
+    assert!(remote.is_none());
+    assert!(!ui.get_startup_busy());
+    assert!(ui.window().is_visible());
+    assert_eq!(
+        provider
+            .search(&audiolib_core::SearchRequest::default())
+            .unwrap()
+            .total_count,
+        0
+    );
+    let engine = AudioEngine::new(playback.clone()).unwrap();
+    let controller = controller::Controller::new_with_source(
+        &ui,
+        provider.clone(),
+        engine.handle(),
+        config,
+        playback,
+        remote,
+    );
+    let close_count = Rc::new(Cell::new(0));
+    let observed = close_count.clone();
+    let close_control = controller.clone();
+    let weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        observed.set(observed.get() + 1);
+        close_control.request_close(&weak.upgrade().unwrap());
+        slint::CloseRequestResponse::KeepWindowShown
+    });
+    let close_timer = slint::Timer::default();
+    let weak = ui.as_weak();
+    close_timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(150),
+        move || {
+            let ui = weak.upgrade().unwrap();
+            assert!(!ui.get_metadata_dirty());
+            // Duplicate close requests must keep the same drain, even with no
+            // Metadata jobs to wake its completion callback.
+            for _ in 0..2 {
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::CloseRequested);
+            }
+        },
+    );
+    let timed_out = Rc::new(Cell::new(false));
+    let failure = timed_out.clone();
+    let watchdog = slint::Timer::default();
+    watchdog.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_secs(5),
+        move || {
+            failure.set(true);
+            slint::quit_event_loop().unwrap();
+        },
+    );
+    ui.show().unwrap();
+    slint::run_event_loop().unwrap();
+    close_timer.stop();
+    watchdog.stop();
+    let hidden = !ui.window().is_visible();
+    controller.shutdown();
+    ui.hide().unwrap();
+    drop(engine);
+    assert_eq!(close_count.get(), 2);
+    assert!(
+        !timed_out.get(),
+        "Empty-library close stalled after the startup event-loop transition"
+    );
+    assert!(hidden, "Empty-library close left Saving changes visible");
+    assert_eq!(
+        provider
+            .search(&audiolib_core::SearchRequest::default())
+            .unwrap()
+            .total_count,
+        0
+    );
+    assert!(provider.play_history(10, 0).unwrap().is_empty());
+    drop(ui);
+    drop(controller);
+    drop(provider);
+    drop(instance);
+    assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an interactive Windows desktop and the real Slint backend"]
 fn real_windows_close_hides_drained_window_and_exits() {
     use super::*;
     use std::{cell::Cell, rc::Rc};

@@ -100,6 +100,8 @@ Local library initialization runs behind a responsive startup panel with bilingu
 
 Playback CLI commands use a per-user Windows named pipe. It rejects remote clients, bounds messages to 64 KiB and times out stalled requests. The control protocol carries JSON commands/status only, never PCM. No HTTP service is created.
 
+Desktop close captures all outstanding Metadata drafts, then drains their FIFO before cancelling and draining scanning and remote cache preparation. The worker retains its completion in an owned mailbox. Only while closing, UI-thread single-shot timers consume that result; a failed cross-thread event-loop notification cannot strand the Saving changes window. Remote sync owns its busy guard on the worker and releases it after cache work, independently of UI delivery and cancelled generations. A failed Metadata save also waits for cancelled remote preparation before restoring the window and sync indicators. Success hides the retained window before exiting the loop, while a failed save restores drafts and the usable window for retry. Polling stops after completion, shutdown or window destruction and adds no idle activity. A five-second diagnostic warning does not abandon pending writes.
+
 The JSON envelope retains success, error, error_code, warnings, metadata, execution_time_ms, timestamp and data. An unavailable desktop or invalid playback operation returns an error instead of a fictitious successful zero-value status.
 
 ## Delivery boundaries
