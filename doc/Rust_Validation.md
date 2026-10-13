@@ -739,3 +739,15 @@ Windows 最新源码的全工作区 ASIO release build、review-fixes（CleanChe
 同轮 Windows 检查还发现远程 raw route 测试的路径前提错误：测试根目录使用原始临时路径，扫描记录则使用规范路径；机器临时目录采用别名时两者无法匹配，提前选用了 server raw route。该测试现在显式使用 `sounds/../sounds` 扫描输入，确认旧根身份无法匹配，再从扫描记录的父目录构造服务器根，并在播放前核验根身份与精确 WebDAV 映射。原注册身份、路由替换、失败回滚、共享缓冲与 Stop 取消断言保留；这不改变应用路由行为。
 
 已推送的标签保留，发布目标改为 `v0.4.6`。程序版本统一更新，API v1、schema 5 与 snapshot 3..=5 不变。此前 `v0.4.5` 本机最终提交的客户端与服务器打包、隔离 portable 和健康验收通过；新标签将执行完整 Windows/ASIO 与原生 Linux 发布检查，最终身份和结果见该标签的公开 workflow/报告。本机续验日志位于忽略的 `.rust-validation/release-v0.4.6/`。
+
+## 2026-10-13 v0.4.7 扫描失败回信与取消耗时检查
+
+`v0.4.6` 的 [Release 检查](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/38376629548) 中，原生 Linux 严格 Clippy、服务器和数据库测试、构建、打包、health/library 验证及临时进程清理全部通过；Windows 检查失败，未创建 Release。该标签保留，新的发布目标为 `v0.4.7`，API v1、schema 5 和 snapshot 3..=5 保持不变。
+
+Windows 主分支 CI 暴露扫描启动失败的回信竞态：目录解析失败先发送错误，外层清理稍后才释放设置 lease 与扫描 slot，紧接着的管理请求可能收到 409 BUSY。`workers` 上限固定为 16，并非硬件差异。修复统一在启动失败完成资源释放后才回信，覆盖目录解析、revision hold、scanner 启动及 panic 路径；保留成功扫描的数据库 lease 交接顺序。回归继续检查无效请求的原状态码、空扫描历史、空活动 slot 及 revision 不变。
+
+Windows 发布检查的快照回归已正确返回 `Cancelled`，失败的是 `<1s` 总耗时断言：计时包含发出取消前的复制和 SQLite 验证。回归改为在阶段回调实际请求取消时开始测量，仍要求取消到返回小于一秒，并确认回调到达、原始缓存及状态字节、已有 reader 和 staging 清理不变；没有放大超时或跳过取消断言。
+
+两处修改经独立复核，无阻断问题。本机扫描模块六项单元回归、七项 HTTP 扫描集成回归及服务端严格 Clippy 通过；远程取消 filter 的三项回归在默认配置连续三轮通过。完整工作区、ASIO、重建打包及各平台发布检查继续由本次流水线和公开报告记录。
+
+此前 `v0.4.6` 本机 fmt、默认及 ASIO 严格 Clippy、两种完整 workspace/all-targets 测试、最新 ASIO release 构建、review-fixes、library-management、desktop-close（三轮）、playback-ipc、客户端打包及隔离 portable 验收通过。替换旧 server 生成目录时，本机 SMB 文件系统的递归删除报告目录非空；续验先将已核验的生成输出移动到仓库内私有备份，再重新打包，不涉及工作库或固定安装。`v0.4.7` 的续验日志在忽略的 `.rust-validation/release-v0.4.7/`；最终平台检查、提交与资产身份以新标签的公开 workflow 和报告为准。

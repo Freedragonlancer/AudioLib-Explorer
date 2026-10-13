@@ -560,6 +560,10 @@ async fn scan_requests_are_validated_before_anything_runs() {
         assert_eq!(response.status(), *status, "{body}");
         let body_text: ErrorBody = json(response).await;
         assert_eq!(body_text.error_code, *code, "{body}: {}", body_text.message);
+        assert!(
+            state.scans().current().is_none(),
+            "{body}: rejected startup must release its slot before replying"
+        );
     }
     let history: Vec<audiolib_core::ScanSession> = get(state, "/history/scans").await;
     assert!(history.is_empty(), "rejected requests create no session");

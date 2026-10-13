@@ -6,7 +6,7 @@
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.4.6 (workspace `Cargo.toml`)
+- **Program version:** 0.4.7 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 5 (snapshot compatibility range 3..=5)
 - **License:** [GPL-3.0-only](LICENSE)
@@ -79,7 +79,7 @@ Three independent versions: the program version (workspace `Cargo.toml`, `MAJOR.
 
 ## Releases and CI
 
-The current release target is v0.4.6. The last successfully published release is v0.4.3; the v0.4.4 and v0.4.5 tags are retained after failed release validation.
+The v0.4.7 release includes changes since the previously published v0.4.3; the v0.4.4 through v0.4.6 tags are retained after failed release validation.
 
 GitHub Actions run formatting, Clippy and tests on `main` pushes and pull requests (`.github/workflows/ci.yml`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies the version policy and builds the Windows x64 ASIO client, Windows x64 server and Linux x64 server. The release is published only after all build jobs pass; each archive has a SHA-256 file and a public validation report. Linux GNU server binaries are built on Ubuntu 22.04.
 

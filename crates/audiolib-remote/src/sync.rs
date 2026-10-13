@@ -1009,10 +1009,17 @@ mod tests {
                 std::fs::read(&active_path).unwrap(),
             ];
             let cancel = AtomicBool::new(false);
-            let started = Instant::now();
+            let mut cancelled_at = None;
             let result = cache.prepare_cached_state_with_progress_cancellable(
                 &state,
                 &mut |current| {
+                    // Preparation can take longer than the cancellation budget before
+                    // anyone requests cancellation. Exercise that distinction even on
+                    // fast machines rather than depending on CI copy/check latency.
+                    if stage == CachePreparation::Upgrading && current == CachePreparation::Checking
+                    {
+                        std::thread::sleep(Duration::from_millis(1100));
+                    }
                     let matches = match (stage, current) {
                         (
                             CachePreparation::Copying { .. },
@@ -1021,6 +1028,7 @@ mod tests {
                         _ => stage == current,
                     };
                     if matches {
+                        cancelled_at.get_or_insert_with(Instant::now);
                         cancel.store(true, Ordering::Release);
                     }
                 },
@@ -1030,7 +1038,13 @@ mod tests {
                 matches!(result, Err(RemoteError::Cancelled)),
                 "{stage:?}: {result:?}"
             );
-            assert!(started.elapsed() < Duration::from_secs(1), "{stage:?}");
+            let cancellation_elapsed = cancelled_at
+                .expect("the requested cancellation stage must be reached")
+                .elapsed();
+            assert!(
+                cancellation_elapsed < Duration::from_secs(1),
+                "{stage:?}: cancellation took {cancellation_elapsed:?}"
+            );
             assert_eq!(cache.active().unwrap(), state);
             assert_eq!(
                 [
@@ -1093,12 +1107,13 @@ mod tests {
             ];
             let cancel = AtomicBool::new(false);
             let client = RemoteClient::new(&server.url, "").unwrap();
-            let started = Instant::now();
+            let mut cancelled_at = None;
             let result = sync_library(
                 &client,
                 &cache,
                 &mut |current| {
                     if current == SyncProgress::Preparing(stage) {
+                        cancelled_at.get_or_insert_with(Instant::now);
                         cancel.store(true, Ordering::Release);
                     }
                 },
@@ -1109,7 +1124,13 @@ mod tests {
                 matches!(result, Err(RemoteError::Cancelled)),
                 "{stage:?}: {result:?}"
             );
-            assert!(started.elapsed() < Duration::from_secs(1), "{stage:?}");
+            let cancellation_elapsed = cancelled_at
+                .expect("the requested cancellation stage must be reached")
+                .elapsed();
+            assert!(
+                cancellation_elapsed < Duration::from_secs(1),
+                "{stage:?}: cancellation took {cancellation_elapsed:?}"
+            );
             assert_eq!(cache.active().unwrap(), state);
             assert_eq!(
                 [

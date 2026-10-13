@@ -714,14 +714,22 @@ fn run_scan(
             &mut cleanup,
         )
     }));
-    if outcome.is_err() {
+    let result = outcome.unwrap_or_else(|_| {
         let mut status = job.status();
         status.progress.state = ScanState::Failed;
         status.progress.message = "The scan thread panicked".into();
         drop(status);
-        if let Some(sender) = sender.take() {
-            let _ = sender.send(Err(ApiError::internal("The scan thread panicked")));
-        }
+        Err(ApiError::internal("The scan thread panicked"))
+    });
+    // An unsuccessful start becomes observable only after all its reservations
+    // are released. Otherwise an immediate retry can hit the old settings lease
+    // or scan slot even though the preceding request already reported failure.
+    drop(cleanup);
+    if let Some(sender) = sender.take() {
+        let error = result
+            .err()
+            .unwrap_or_else(|| ApiError::internal("The scan ended without reporting a session"));
+        let _ = sender.send(Err(error));
     }
 }
 
@@ -761,24 +769,11 @@ fn run_scan_inner(
     workers: usize,
     sender: &mut Option<oneshot::Sender<Result<ScanResponse, ApiError>>>,
     cleanup: &mut ScanCleanup<'_>,
-) {
-    let (root, target) = match resolve_directories(monitor, index, job) {
-        Ok(paths) => paths,
-        Err(error) => {
-            if let Some(sender) = sender.take() {
-                let _ = sender.send(Err(error));
-            }
-            return;
-        }
-    };
+) -> Result<(), ApiError> {
+    let (root, target) = resolve_directories(monitor, index, job)?;
     let started = Instant::now();
     let provider = state.provider().clone();
-    if let Err(error) = state.tracker().begin_hold() {
-        if let Some(sender) = sender.take() {
-            let _ = sender.send(Err(error.into()));
-        }
-        return;
-    }
+    state.tracker().begin_hold()?;
     cleanup.holding_revision = true;
     let shape_before = library_shape(state);
     let foreign_before = provider.foreign_data_version().ok();
@@ -873,18 +868,132 @@ fn run_scan_inner(
             "Scan finished"
         );
     }
-    if let Some(sender) = sender.take() {
+    if sender.is_some() {
         let error = match result {
             Err(error) => start_failure(error, &job.root),
             Ok(_) => ApiError::internal("The scan ended without reporting a session"),
         };
-        let _ = sender.send(Err(error));
+        return Err(error);
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_errors_wait_until_reservations_are_released() {
+        for (subpath, index, expected, database_busy) in [
+            ("absent", 0, "NOT_FOUND", false),
+            ("notes.txt", 0, "NOT_FOUND", false),
+            ("", 0, "BUSY", true),
+            ("", usize::MAX, "INTERNAL", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = dir.path().join("library.db");
+            drop(audiolib_db::SqliteProvider::open(&database).unwrap());
+            fs::write(dir.path().join("notes.txt"), b"not a directory").unwrap();
+            let config = crate::ServerConfig::from_toml_str(
+                &format!(
+                    "library_db='library.db'\n[[roots]]\nname='SFX'\nserver_path='{}'\n",
+                    dir.path().display()
+                ),
+                dir.path(),
+            )
+            .unwrap();
+            let state = AppState::open(&config, None).unwrap();
+            let second = AppState::open(&config, None).unwrap();
+            let database_lease = database_busy.then(|| {
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(dir.path().join("library.db.scan.lock"))
+                    .unwrap();
+                file.try_lock().unwrap();
+                file
+            });
+            let before = state.revision().unwrap().revision;
+            let job = Arc::new(ScanJob {
+                root: "SFX".into(),
+                subpath: subpath.into(),
+                mode: ScanMode::Incremental,
+                control: ScanCancellation::default(),
+                status: Mutex::new(JobStatus {
+                    progress: ScanProgress::default(),
+                    active: true,
+                    revision: None,
+                    shutdown: false,
+                }),
+            });
+            let lease = state.security().settings_lease().unwrap();
+            assert!(matches!(
+                second.security().settings_lease(),
+                Err(Error::Busy(_))
+            ));
+            let mut jobs = state.scans().jobs();
+            jobs.active = Some(job.clone());
+            let (sender, mut receiver) = oneshot::channel();
+            let thread_state = state.clone();
+            let thread_job = job.clone();
+            let thread = std::thread::spawn(move || {
+                run_scan(
+                    &thread_state,
+                    &thread_job,
+                    thread_state.root_monitor(),
+                    index,
+                    1,
+                    sender,
+                    Some(lease),
+                )
+            });
+            // The jobs mutex holds cleanup at its final step. Reacquiring the
+            // settings lease proves cleanup has started, without depending on
+            // whether the receiver or the scan thread wins a scheduling race.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let settings_released = loop {
+                match second.security().settings_lease() {
+                    Ok(lease) => {
+                        drop(lease);
+                        break true;
+                    }
+                    Err(Error::Busy(_)) if Instant::now() < deadline => {
+                        std::thread::yield_now();
+                    }
+                    Err(_) => break false,
+                }
+            };
+            let response_pending = matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            );
+            // Unblock and join before asserting, including on regression failure.
+            drop(jobs);
+            thread.join().unwrap();
+            assert!(
+                settings_released,
+                "{subpath:?}: settings lease not released"
+            );
+            assert!(
+                response_pending,
+                "{subpath:?}: error published before cleanup"
+            );
+            assert_eq!(
+                receiver.blocking_recv().unwrap().unwrap_err().code(),
+                expected,
+                "{subpath:?}"
+            );
+            assert!(state.scans().current().is_none());
+            assert!(!job.response().active);
+            assert!(second.security().settings_lease().is_ok());
+            assert_eq!(state.revision().unwrap().revision, before);
+            assert!(state.provider().scan_history(10, 0).unwrap().is_empty());
+            drop(database_lease);
+            assert!(second.provider().ensure_library_idle().is_ok());
+        }
+    }
 
     #[test]
     fn scan_admission_hands_settings_exclusion_to_the_database_lease() {
