@@ -465,6 +465,9 @@ impl MetadataState {
     }
 }
 
+/// How long closing waits for cancelled remote cache work before exiting anyway.
+const REMOTE_CLOSE_GRACE: Duration = Duration::from_secs(15);
+
 pub struct Controller {
     ui: slint::Weak<AppWindow>,
     sqlite: RwLock<Arc<SqliteProvider>>,
@@ -537,6 +540,9 @@ pub struct Controller {
     remote_mode: AtomicBool,
     remote_generation: AtomicU64,
     remote_busy: AtomicBool,
+    /// Longest wait for cancelled remote cache work while closing (injectable for tests);
+    /// past it the window closes anyway and the process exit abandons the worker.
+    remote_close_grace: Mutex<Duration>,
     /// Registered play workers include their reply and listener/cache settlement.
     remote_plays: Mutex<remote_mode::RemotePlayState>,
     remote_plays_wake: Condvar,
@@ -695,6 +701,7 @@ impl Controller {
             remote_mode: AtomicBool::new(false),
             remote_generation: AtomicU64::new(0),
             remote_busy: AtomicBool::new(false),
+            remote_close_grace: Mutex::new(REMOTE_CLOSE_GRACE),
             remote_plays: Mutex::new(remote_mode::RemotePlayState::default()),
             remote_plays_wake: Condvar::new(),
             remote_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
@@ -3787,9 +3794,21 @@ impl Controller {
             // Closing has cancelled sync even if Metadata saving failed. Drain
             // its owned cache work before either hiding or restoring the window;
             // the cancelled generation cannot publish its final UI state.
+            let grace = *c.remote_close_grace.lock().unwrap();
+            let remote_deadline = Instant::now() + grace;
             while c.remote_busy.load(Ordering::Acquire) {
                 if c.shutdown.load(Ordering::Acquire) {
                     result = Err("Desktop is shutting down".into());
+                    break;
+                }
+                if Instant::now() >= remote_deadline {
+                    // Cancelled cache work only touches its own staging file; exiting
+                    // without it leaves the active cache intact (stale staging is
+                    // pruned on a later start).
+                    tracing::warn!(
+                        grace_ms = grace.as_millis() as u64,
+                        "Desktop remote preparation did not drain; closing anyway"
+                    );
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -6273,6 +6292,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(writes, vec![PathBuf::from("new.wav")]);
+    }
+
+    #[test]
+    fn close_finishes_within_remote_grace_when_remote_work_never_drains() {
+        let root = std::env::temp_dir().join(format!(
+            "audiolib-desktop-close-grace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = Arc::new(SqliteProvider::open(&root.join("library.db")).unwrap());
+        let engine = audiolib_audio::AudioEngine::new(PlaybackConfig::default()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(
+            &ui,
+            provider,
+            engine.handle(),
+            AppConfig::load_in(root.join("preferences")).unwrap(),
+            PlaybackConfig::default(),
+        );
+        let grace = Duration::from_millis(200);
+        *controller.remote_close_grace.lock().unwrap() = grace;
+        // A remote worker which never releases its busy flag.
+        controller.remote_busy.store(true, Ordering::Release);
+        let started = Instant::now();
+        controller.request_close(&ui);
+        while controller.close_completion.lock().unwrap().is_none()
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let elapsed = started.elapsed();
+        let completion = controller.close_completion.lock().unwrap().take();
+        assert!(matches!(completion, Some(Ok(()))), "{completion:?}");
+        assert!(elapsed >= grace, "close waited for the grace period");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert!(controller.remote_busy.load(Ordering::Acquire));
+        controller.shutdown();
+        ui.hide().ok();
+        drop(controller);
+        drop(engine);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
