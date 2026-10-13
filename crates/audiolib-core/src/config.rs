@@ -151,6 +151,42 @@ impl DataSourceSettings {
         self.validate_profiles()?;
         Ok(())
     }
+
+    /// Why server mode cannot start from these settings, or `None` when it can: server
+    /// mode needs `active` to name an existing profile whose `server_url` is non-empty
+    /// and parses as a server address. Local mode always passes.
+    pub fn server_mode_problem(&self) -> Option<String> {
+        if self.mode != DataSourceMode::Server {
+            return None;
+        }
+        let Some(active) = self.active.as_deref() else {
+            return Some("no active server profile is selected".into());
+        };
+        let Some(profile) = self.active_profile() else {
+            return Some(format!("active server profile {active:?} does not exist"));
+        };
+        let url = profile.server_url.trim();
+        if url.is_empty() {
+            return Some(format!("server profile {:?} has no server URL", profile.id));
+        }
+        crate::server_url::ServerAddress::parse(url)
+            .err()
+            .map(|error| {
+                format!(
+                    "server profile {:?} has an invalid URL: {error}",
+                    profile.id
+                )
+            })
+    }
+
+    /// Startup guard: switch an unusable server selection to local mode in memory and
+    /// return the reason for the caller to log. Settings on disk and saved profiles are
+    /// not changed here.
+    pub fn guard_server_mode(&mut self) -> Option<String> {
+        let problem = self.server_mode_problem()?;
+        self.mode = DataSourceMode::Local;
+        Some(problem)
+    }
 }
 
 /// Validate one set of WebDAV preferences (a profile override has the global shape).
@@ -212,6 +248,17 @@ pub struct AppConfig {
     pub allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
     pub data_source: DataSourceSettings,
+    /// Set by [`AppConfig::guard_server_mode`] when an unusable server selection was
+    /// opened as local for this session only. Never persisted; see [`AppConfig::save`].
+    #[serde(skip)]
+    pub data_source_fallback: Option<DataSourceFallback>,
+}
+
+/// The persisted data-source selection replaced in memory by the startup guard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataSourceFallback {
+    pub mode: DataSourceMode,
+    pub active: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,6 +344,7 @@ impl AppConfig {
             audition_play_on_single_click: false,
             allowed_scan_roots: Vec::new(),
             data_source: DataSourceSettings::default(),
+            data_source_fallback: None,
         };
         // Established Rust state is independent of legacy YAML validity or presence.
         if !config.paths.settings.exists()
@@ -385,7 +433,7 @@ impl AppConfig {
             data_source: {
                 // Code that edits `mode` / `server_url` directly keeps working: the
                 // profiles follow those fields before they are written.
-                let mut data_source = self.data_source.clone();
+                let mut data_source = self.persisted_data_source();
                 data_source.migrate_profiles();
                 data_source
             },
@@ -403,6 +451,34 @@ impl AppConfig {
         drop(file);
         std::fs::rename(&temporary, &self.paths.settings)?;
         Ok(())
+    }
+
+    /// Startup guard: open an unusable server selection as local for this session (see
+    /// [`DataSourceSettings::server_mode_problem`]) and return the reason to log. The
+    /// original `mode` / `active` are remembered so [`AppConfig::save`] keeps them on disk.
+    pub fn guard_server_mode(&mut self) -> Option<String> {
+        let fallback = DataSourceFallback {
+            mode: self.data_source.mode,
+            active: self.data_source.active.clone(),
+        };
+        let problem = self.data_source.guard_server_mode()?;
+        self.data_source_fallback = Some(fallback);
+        Some(problem)
+    }
+
+    /// The data source to write: while the startup fallback is in effect and the user has
+    /// not selected a source in this session (still local with the original `active`), the
+    /// original `mode` / `active` are written instead of the in-memory local fallback.
+    fn persisted_data_source(&self) -> DataSourceSettings {
+        let mut data_source = self.data_source.clone();
+        if let Some(fallback) = &self.data_source_fallback
+            && data_source.mode == DataSourceMode::Local
+            && data_source.active == fallback.active
+        {
+            data_source.mode = fallback.mode;
+            data_source.active = fallback.active.clone();
+        }
+        data_source
     }
 
     /// Select an existing, already validated library; saving remains an explicit step.
@@ -643,5 +719,96 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loaded.playback["volume"], serde_json::json!(0.35));
+    }
+
+    #[test]
+    fn server_mode_guard_requires_existing_profile_with_valid_url() {
+        let mut settings = DataSourceSettings {
+            mode: DataSourceMode::Server,
+            server_url: "http://192.0.2.10:8790".into(),
+            ..Default::default()
+        };
+        // Never migrated: no active profile at all.
+        assert!(settings.clone().guard_server_mode().is_some());
+        settings.migrate_profiles();
+        assert_eq!(settings.server_mode_problem(), None);
+        let mut usable = settings.clone();
+        assert_eq!(usable.guard_server_mode(), None);
+        assert_eq!(usable.mode, DataSourceMode::Server);
+
+        let mut dangling = settings.clone();
+        dangling.active = Some("missing".into());
+        let reason = dangling.guard_server_mode().unwrap();
+        assert!(reason.contains("does not exist"), "{reason}");
+        assert_eq!(dangling.mode, DataSourceMode::Local);
+        assert_eq!(dangling.profiles, settings.profiles, "profiles are kept");
+
+        let mut empty = settings.clone();
+        empty.profiles[0].server_url = "  ".into();
+        assert!(empty.guard_server_mode().unwrap().contains("no server URL"));
+        assert_eq!(empty.mode, DataSourceMode::Local);
+
+        let mut invalid = settings.clone();
+        invalid.profiles[0].server_url = "htp:/oops".into();
+        assert!(invalid.guard_server_mode().unwrap().contains("invalid URL"));
+        assert_eq!(invalid.mode, DataSourceMode::Local);
+
+        let mut local = DataSourceSettings::default();
+        assert_eq!(local.guard_server_mode(), None);
+        assert_eq!(local.mode, DataSourceMode::Local);
+    }
+
+    #[test]
+    fn guarded_server_mode_is_not_persisted_as_local() {
+        let root = std::env::temp_dir().join(format!(
+            "audiolib-guard-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = AppConfig::load_in(root.clone()).unwrap();
+        config.data_source.mode = DataSourceMode::Server;
+        config.data_source.server_url = "http://192.0.2.10:8790".into();
+        config.save().unwrap();
+        // Corrupt the active profile's URL on disk, as an older client or hand edit might.
+        let mut on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+        on_disk["data_source"]["profiles"][0]["server_url"] = "htp:/broken".into();
+        on_disk["data_source"]["server_url"] = "htp:/broken".into();
+        std::fs::write(
+            &config.paths.settings,
+            serde_json::to_vec(&on_disk).unwrap(),
+        )
+        .unwrap();
+        let original = AppConfig::load_in(root.clone()).unwrap().data_source;
+        assert_eq!(original.mode, DataSourceMode::Server);
+
+        let mut guarded = AppConfig::load_in(root.clone()).unwrap();
+        assert!(guarded.guard_server_mode().is_some());
+        assert_eq!(guarded.data_source.mode, DataSourceMode::Local);
+        // Unrelated preference saves (language, playback, close) keep the server selection.
+        guarded.language = "cn".into();
+        guarded.save().unwrap();
+        let reloaded = AppConfig::load_in(root.clone()).unwrap();
+        assert_eq!(reloaded.language, "cn");
+        assert_eq!(reloaded.data_source.mode, original.mode);
+        assert_eq!(reloaded.data_source.active, original.active);
+        assert_eq!(reloaded.data_source.profiles, original.profiles);
+
+        // An explicit source choice in this session is written as chosen.
+        guarded
+            .data_source
+            .set_active(&ActiveSource::Local)
+            .unwrap();
+        guarded.save().unwrap();
+        let chosen = AppConfig::load_in(root.clone()).unwrap();
+        assert_eq!(chosen.data_source.mode, DataSourceMode::Local);
+        assert_eq!(chosen.data_source.active.as_deref(), Some(ACTIVE_LOCAL));
+        assert_eq!(chosen.data_source.profiles, original.profiles);
+        if root.parent() == Some(std::env::temp_dir().as_path()) {
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 }

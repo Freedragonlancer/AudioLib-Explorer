@@ -1322,6 +1322,7 @@ mod tests {
             playback: json!({"backend":"wasapi","volume":0.25}),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
+            data_source_fallback: None,
         }
     }
 

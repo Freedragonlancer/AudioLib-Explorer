@@ -40,6 +40,7 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
         audition_play_on_single_click: false,
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
+        data_source_fallback: None,
     };
     config.save().unwrap();
     let instance = DesktopInstanceGuard::acquire(&config.paths.settings).unwrap();

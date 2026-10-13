@@ -69,6 +69,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         audition_play_on_single_click: false,
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
+        data_source_fallback: None,
     };
     config.save().unwrap();
     config
