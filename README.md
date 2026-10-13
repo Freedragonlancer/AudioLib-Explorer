@@ -6,7 +6,7 @@
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.4.5 (workspace `Cargo.toml`)
+- **Program version:** 0.4.6 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 5 (snapshot compatibility range 3..=5)
 - **License:** [GPL-3.0-only](LICENSE)
@@ -78,6 +78,8 @@ audiolib-server --config /etc/audiolib/config.toml
 Three independent versions: the program version (workspace `Cargo.toml`, `MAJOR.MINOR.PATCH`, shared by client, CLI and server), the API version (URL prefix `/api/v1/`) and the database schema version (`SCHEMA_VERSION`, currently 5). A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z` or `vX.Y.Z-rc.N` and must match `Cargo.toml`; `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
 
 ## Releases and CI
+
+The current release target is v0.4.6. The last successfully published release is v0.4.3; the v0.4.4 and v0.4.5 tags are retained after failed release validation.
 
 GitHub Actions run formatting, Clippy and tests on `main` pushes and pull requests (`.github/workflows/ci.yml`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies the version policy and builds the Windows x64 ASIO client, Windows x64 server and Linux x64 server. The release is published only after all build jobs pass; each archive has a SHA-256 file and a public validation report. Linux GNU server binaries are built on Ubuntu 22.04.
 

@@ -4,7 +4,7 @@
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.5 | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.6 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 5 | SQLite 资料库结构（`user_version`） |
 
@@ -26,19 +26,19 @@
 
 ## 发布流程
 
-本次发布版本为 **0.4.5**，基准标签为 **v0.4.4**（发布检查失败，未创建 Release）；上一个成功发布版本为 v0.4.3。0.4.5 包含此前的远程写入身份保护、Debug 报告、同库快照状态保留和服务器资源路径管理，并修复原生 Linux 检查发现的目录重定位尾分隔符误判。已推送的 v0.4.4 标签保留；客户端与服务端须一起升级才能写入，旧版本读取仍兼容，schema 和快照范围不变。
+本次计划发布版本为 **0.4.6**，基准标签为 **v0.4.5**（发布验证最终清理失败，未创建 Release）；上一个成功发布版本仍为 v0.4.3。0.4.6 包含此前的远程写入身份保护、Debug 报告、同库快照状态保留、服务器资源路径管理和原生 Linux 目录重定位尾分隔符修复，并修复服务端验证工具找到多个 `kill` 程序路径时的临时进程清理。v0.4.5 已通过 Linux 构建、打包、健康及合成库读取检查；已推送的 v0.4.4 和 v0.4.5 标签保留。客户端与服务端须一起升级才能写入，旧版本读取仍兼容，schema 和快照范围不变。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
 3. 本地预检（不创建标签，标签用参数传入）：
-   `pwsh tools/check-release.ps1 -Tag v0.4.5 -BaseTag v0.4.4`
+   `pwsh tools/check-release.ps1 -Tag v0.4.6 -BaseTag v0.4.5`
    省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
 4. 运行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --all-targets --locked`；ASIO 配置按 AGENTS.md 的准备和验证流程执行。
-5. 合并后在发布提交上打标签 `v0.4.5`（或 `v0.4.5-rc.1`）并推送。
+5. 合并后在发布提交上打标签 `v0.4.6`（或 `v0.4.6-rc.1`）并推送。
 6. GitHub Actions（`.github/workflows/release.yml`）分别构建 Windows 客户端/服务端和 Linux x64 服务端。Windows 运行 `check-release.ps1`、`ci-release.ps1`；Linux 运行服务端和数据库严格 Clippy、全部 targets 测试及原生 release 构建。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件。默认 Windows workspace 使用 ASIO 构建，server 打包及验证也传入 `-Asio`，以同一 feature 闭包生成依赖通知，并核验已准备的固定 SDK 许可证；无 ASIO 构建及 Unix 不传该选项。所有构建成功后，发布 job 核验归档校验和及报告的标签/提交身份，再创建 GitHub Release，上传客户端和服务端归档、SHA256 与报告。
 7. 从已发布 Release 下载客户端包、SHA256 和 `Rust_CI_Release.json`，核验归档及报告的标签/提交，再按 AGENTS.md 更新固定 `local_release/` 并核对两个 EXE。CI 产物作为安装身份基准，不以不同本机构建的哈希替代。使用 `pwsh`（PowerShell 7.3 以上）执行 portable validator，传入 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 核对已发布报告中的 EXE 哈希，并运行隔离首次启动、CLI/UI 和诊断检查；省略报告时仍要求本机 release 输出一致。
 
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：
 
-- 通过：Cargo 0.4.5 + 版本行 + `-Tag v0.4.5 -BaseTag v0.4.4`
-- 失败：`-Tag v0.4.6`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
+- 通过：Cargo 0.4.6 + 版本行 + `-Tag v0.4.6 -BaseTag v0.4.5`
+- 失败：`-Tag v0.4.7`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。

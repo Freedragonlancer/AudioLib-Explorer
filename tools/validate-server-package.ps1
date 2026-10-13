@@ -1,7 +1,7 @@
 # tools/validate-server-package.ps1
 # Validate the native server archive and smoke-test its extracted executable against
 # an owned synthetic library. Requires PowerShell 7.3; never uses normal runtime data.
-# ./tools/validate-server-package.ps1 -Tag v0.4.5 -Target x86_64-pc-windows-msvc -Asio
+# ./tools/validate-server-package.ps1 -Tag v0.4.6 -Target x86_64-pc-windows-msvc -Asio
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Tag,
@@ -248,7 +248,7 @@ try {
         Assert-UnlinkedTree $benchmark
         $seed = Start-OwnedProcess $benchmark @('--db', $database, '--records', '1', '--queries', '100') 'seed' $testRoot
     } else {
-        $cargo = (Get-Command cargo -CommandType Application -ErrorAction Stop).Source
+        $cargo = (Get-Command cargo -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
         $seed = Start-OwnedProcess $cargo @('run', '-p', 'audiolib-db', '--bin', 'search-benchmark', '--locked', '--target', $Target, '--', '--db', $database, '--records', '1', '--queries', '100') 'seed' $taskRoot
     }
     Wait-OwnedProcess $seed 600000 'Synthetic server library generation failed or timed out.'
@@ -300,7 +300,7 @@ try {
             if (!$process.HasExited) {
                 if (!$IsWindows -and $process -eq $server) {
                     # PowerShell's `kill` alias is Stop-Process; select native kill.
-                    $nativeKill = (Get-Command kill -CommandType Application -ErrorAction Stop).Source
+                    $nativeKill = (Get-Command kill -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
                     & $nativeKill -TERM $process.Id 2>$null
                     $null = $process.WaitForExit(10000)
                 }

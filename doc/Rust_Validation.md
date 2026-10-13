@@ -731,3 +731,9 @@ Windows server 包按实际 workspace ASIO features 生成 normal/build 依赖�
 本机最终 `cargo fmt --all -- --check`、默认及 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试通过。两份测试日志各汇总 777 passed、69 ignored（包含子进程测试的结果汇总）；检查期间应用源码身份保持一致。版本门禁确认 program 0.4.5、API v1、schema 5、snapshot 3..=5。
 
 Windows 最新源码的全工作区 ASIO release build、review-fixes（CleanCheckout）、library-management、desktop-close（三轮）和 playback-ipc（CleanCheckout）均通过。客户端打包及 `dist/latest/portable` 的隔离验收通过；真实 ASIO server ZIP 的归档校验和、通知来源、解压 EXE 版本/哈希、health API v1/schema 5/实际提交，以及一条记录测试库读取亦通过。所有测试使用独立临时数据，没有打开工作库；Windows 测试进程终止不计为服务端 graceful drain 验证。本机未执行原生 Linux，最终发布的两个平台结果及提交/资产身份由对应标签 workflow 和公开报告记录。本机日志位于忽略的 `.rust-validation/release-v0.4.5/`，不随发布上传。
+
+## 2026-10-13 v0.4.6 Unix 验证进程清理修复
+
+`v0.4.5` 的 [Release 检查](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/38374086093) 中，原生 Linux Clippy、服务器和数据库测试、release 构建、归档及 health/library 验证已通过，但 validator 的进程清理失败，未发布该版本。Ubuntu 的 PATH 同时解析到 `/usr/bin/kill` 和 `/bin/kill`，原写法把 `.Source` 数组作为一个命令路径传入。validator 现在对 native kill 和 Cargo 都先取首个应用命令再读取路径；继续只停止该次验证启动的进程，保留有界终止 fallback。
+
+已推送的标签保留，发布目标改为 `v0.4.6`。程序版本统一更新，API v1、schema 5 与 snapshot 3..=5 不变。此前 `v0.4.5` 本机最终提交的客户端与服务器打包、隔离 portable 和健康验收通过；新标签将执行完整 Windows/ASIO 与原生 Linux 发布检查，最终身份和结果见该标签的公开 workflow/报告。本机续验日志位于忽略的 `.rust-validation/release-v0.4.6/`。
