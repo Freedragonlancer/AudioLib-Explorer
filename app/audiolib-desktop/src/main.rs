@@ -116,7 +116,10 @@ fn run() -> Result<()> {
     let _instance = DesktopInstanceGuard::acquire(&config.paths.settings)?;
     // Read the snapshot under the instance lock as a CLI library selection may have
     // completed between the initial path discovery and acquiring this guard.
-    let config = AppConfig::load_default().context("Reload locked AudioLib preferences")?;
+    let mut config = AppConfig::load_default().context("Reload locked AudioLib preferences")?;
+    // Server mode only with a usable active profile: otherwise open local for this
+    // session while saves keep the persisted selection. Logged once tracing is ready.
+    let server_fallback = config.guard_server_mode();
     let default_database = config
         .paths
         .settings
@@ -140,6 +143,9 @@ fn run() -> Result<()> {
         .with_writer(writer)
         .try_init()
         .ok();
+    if let Some(reason) = server_fallback {
+        tracing::warn!(%reason, "Server data source unusable; starting in local mode");
+    }
     if arguments
         .iter()
         .any(|argument| argument == "--headless-smoke")
