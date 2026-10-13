@@ -1,5 +1,19 @@
 # Rust 验证报告
 
+## 推送前复审补修（2026-10-13，0.4.4）
+
+最终代码提交为 `9cbd54d4a1482f919121cab3fe1bbc81a86494b5`，覆盖此前尚未推送的客户端、服务端、关闭与公开包修复。另一个进行中的服务器目录功能保留在原工作区，本轮使用独立工作目录；版本、schema 与 API 不变。三项新增功能修复见 [审查修复](Rust_Review_Fixes.md)。
+
+格式检查、默认与 ASIO 严格 Clippy 均通过。两种配置各完成 49 个顶层目标、722 passed、0 failed、59 ignored，隔离子进程结果只累计一次。新回归覆盖已确认服务器换库后的旧 Metadata 草稿恢复、目标打开失败及恢复文件写入失败后的重试、切回 Local、关闭后重新启动发现恢复文件，以及普通网络保存失败仍阻止切库和退出。恢复记录保留原库身份和源路径，不导出凭据、不自动重放到替换库；新增 Git 忽略规则覆盖仓库内自定义数据目录的恢复文件。
+
+管理页回归验证 snapshot 交接后的可见页面重新加载和扫描轮询，保留表单草稿及新请求的 busy 所有权；同一端点的默认端口、尾斜线及 `/api/v1` 地址别名仍按普通保存处理。试听流回归使用未完成的受控服务器/WebDAV 响应，验证失败的声道切换恢复原注册、成功替换后解除旧注册、Stop 后新注册，以及共享 buffer 真正复用时不取消新流。测试没有跳过原有 ID、请求计数、provider 身份、草稿与持久化断言。
+
+两项额外 Windows native 关闭测试各 1 passed。最终 ASIO release 使用已验证 Steinberg SDK 2.3.4，构建耗时 4 分 23 秒；197 个非文档源码、配置与资源输入在完整检查、构建及发布回归期间 SHA256 不变。`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1`、`validate-playback-ipc.ps1 -CleanCheckout`、`validate-desktop-close.ps1 -Cycles 10` 和 `test-package-boundary.ps1` 全部通过。缺失的旧数据库与真实 WAV 验证没有计入通过。
+
+最终 release 完成 20 次原生关闭：WM_CLOSE 与 SC_CLOSE 各十次、每次连续两条请求。所有进程自然退出、窗口消失、正常 shutdown 及隔离空库重新打开均通过；本机消息投递到自然退出为 98.68–113.67ms，不代表大型缓存或实际写入的等待时间。播放回归使用 owned 静音合成素材，不代表物理音频延迟。六项已有数据库、sidecar 与偏好输入在回归后 SHA256 不变，正常数据目录环境保持。
+
+源输入、完整日志和后续便携包、固定 `local_release/` 安装的 EXE 哈希与隔离验证记录保留于本机忽略目录 `.rust-validation/push-cr/`。本轮不发布新 GitHub Release，不改写已公开的 Git 历史或删除旧附件。现场 Saving changes 停滞仍未稳定复现；UI-001 完整前台失焦/聚焦验收仍受既有报告记录的 Windows 捕获和前台焦点限制影响。本轮未测生产服务端写入/全量同步、Linux 实机、百万条性能或物理音频启动延迟；主指标仍为 **P95 latency <500ms for 1M+ records**。
+
 ## 退出保存卡住补修（2026-10-13，0.4.4）
 
 源码基于 `1c2aaeab948269bbf32597c2ae4b79596c05dc2a` 加本轮修复；版本仍为尚未发布的 0.4.4，schema/API 不变。关闭结果邮箱、UI 关闭期间的 timer、远程 worker 的一次性 busy guard 和保存失败恢复见 [审查修复](Rust_Review_Fixes.md)。
