@@ -647,3 +647,63 @@ validate-playback-ipc：第一次运行（无桌面实例）在 tools/validate-p
 - portable/AudioLibExplorer.exe: F51AB208B5C388EF5311B654F0BEC8371BFD7008B894A8BB54007B3ECF945ECB
 - portable/AudioLibCli.exe: D38DFFB8A79A36353C5232CBFFB127D3DE8EF4E46831912B0CB366AD0018676E
 - AudioLibExplorer-latest-win-x64-portable.zip: B79D5DA35320C8B40E1493E448AA46802833C24D0F22E2B1342FCDA7352FEA72
+
+## 2026-10-13 v0.4.4 远程资源路径管理与同期修复
+
+本轮覆盖服务器音效库根目录新增、修改资源路径、删除、远程目录选择器，以及同工作区的 Debug 报告、快照刷新与关闭取消修复。基础提交为 `4f4d8ab03e209d0fedad7d297494044fc6b267be`，发布构建包含当前未提交工作区源码。检查与构建前后比较全部应用、crate、服务端和资源文件的 SHA256，确认源码保持一致；本机构建检查点清单的 SHA256 为 `0A4F58A5736CFFAB92B59B7E5A20E466A5E7C59D3753739E32F979F324153558`。
+
+环境：Windows x64、Rust 1.97.1 MSVC；ASIO 使用 preparation 工具校验的 Steinberg SDK 2.3.4。共享盘编译缓存出现覆盖拒绝后，使用本机 Cargo 缓存；发布 EXE 复制回标准 release 输出目录并逐一核对 SHA256。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| 默认及 ASIO 工作区、全部 targets 的严格 Clippy | 均通过，`-D warnings` |
+| 默认及 ASIO 工作区、全部 targets 的 tests | 各 752 passed、58 ignored；忽略项不计入通过数，隔离 GUI 子测试由对应父回归调用 |
+| 全工作区 ASIO release build | 通过 |
+| `validate-review-fixes.ps1 -CleanCheckout` | 通过，2,000 条重叠扫描合成记录，源音频不变 |
+| `validate-library-management.ps1` | 通过，备份/恢复、批量标注、导入导出、重定位及数据库删除；源 WAV 字节不变 |
+| `validate-playback-ipc.ps1 -CleanCheckout` | 通过，静音合成 WAV、播放会话、变换、重复和设置保留；没有声学延迟测量 |
+| `validate-desktop-close.ps1 -Cycles 3` | 通过，WM_CLOSE 和 SC_CLOSE 各三轮，重复关闭请求、正常退出和库重新打开 |
+| 发布版中文及英文 UI | 服务器根目录页、远程目录选择器共四张软件渲染截图，已检查布局 |
+
+服务器回归覆盖管理权限与库身份保护、实际目标 WAV 校验、路径事务的 ID/Metadata/标注保留、源文件不删除、提交前后恢复、跨实例设置锁、旧实例读取最新根配置，以及提交后设置落盘失败时的正确根监控。客户端回归覆盖 Metadata 排空、延迟目录回复丢弃、精确路径字符、状态更新保留草稿及结构性根变化使旧表单失效。集成 HTTP 与 SQLite 均使用本机 loopback 和独立临时数据。
+
+本轮没有导入或打开用户工作库，也未部署实际远程服务器。当前检出没有旧库/WAV fixture，因此 release 回归使用显式 `CleanCheckout` 的合成数据；没有执行要求真实旧 fixture 的 runtime 和 ACL 脚本，不能将其计为通过。上述测试不替代实际公网、百万记录生产库性能或按钮到音频输出延迟验收；性能目标仍为 **P95 latency <500ms for 1M+ records**。
+
+发布 EXE SHA256：
+
+- AudioLibExplorer.exe：`AB92F195C4DD59BC35069326EE66B1B668FB1656AF6055EFAC1ACB5EBBE9A19F`
+- AudioLibCli.exe：`00F9605946D68ECE808DC1F47FF5CCEFB3E4779E4BC2AC53EDD1FA74F87A58C9`
+- audiolib-server.exe：`152DF3E350071FF70A7BDFA5B63F4A184B36E8BB3759FECFF6190734044AE9A1`
+
+## 2026-10-13 v0.4.4 Debug、快照刷新与资源路径管理集成 review
+
+分支为 `codex/debug-snapshot-reports`，基于 `2950dc9` 整合最新主线。以下是完成 review 修复后的重新验证，前一节保留修复前的构建记录。检查、构建和 release 回归前后核对 205 个应用、crate、服务端及资源文件，源码清单 SHA256 为 `DA14076A62FC4A8AA35AAD97882B2FAF511FA71E9E4000CF7815FAA293780060`。环境仍为 Windows x64、Rust 1.97.1 MSVC、经 preparation 工具校验的 Steinberg SDK 2.3.4。
+
+本次修复六项 review 问题：诊断区分下载同步与快照应用；延迟写回不能降低已知 revision；根目录身份按平台原生路径规则判定；已发送的播放历史请求完成后才切换配置、provider 或关闭；跨实例扫描准入重新读取根配置且锁交接无空隙；跨实例管理请求在同一 settings lease 内读取最新鉴权和管理权限。具体原因和回归见 [review 修复记录](Rust_Review_Fixes.md)。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| 默认及 ASIO 工作区、全部 targets 的严格 Clippy | 均通过，`--locked -- -D warnings` |
+| 默认及 ASIO 工作区、全部 targets 的 tests | 各 774 passed、69 ignored、0 failed；只汇总没有 filtered 项的顶层结果，子测试不重复计数 |
+| 最新源码全工作区 ASIO release build | 通过，发布输出与本机编译缓存的三个 EXE 逐一核对 SHA256 |
+| `validate-review-fixes.ps1 -CleanCheckout` | 通过，2,000 条合成记录及重叠扫描 |
+| `validate-library-management.ps1` | 通过，数据库维护及源 WAV 保留回归 |
+| `validate-desktop-close.ps1 -Cycles 3` | 通过，WM_CLOSE 和 SC_CLOSE 各三轮 |
+| `validate-playback-ipc.ps1 -CleanCheckout` | 通过，独立临时库和静音合成 WAV |
+| `package-portable.ps1 -SkipBuild` 与便携包隐私边界 | 通过，清单允许文件且没有工作数据库、日志、缓存或本机构建路径 |
+| `validate-portable.ps1 -BinaryDirectory dist/latest/portable -CleanCheckout` | 通过，EXE 身份、隔离首次启动及 CLI/UI 检查 |
+| 发布版 Debug 中文及英文 UI/report smoke | 均通过，报告版本 0.4.4、ASIO build true，两张截图已检查布局 |
+
+延迟 HTTP 回归覆盖配置切换、活动 endpoint 编辑、provider 替换和关闭；验证原 provider 在排空时保持有效，旧响应不能覆盖新快照。两实例服务端回归覆盖保留旧 WAV 后重定位不重复入库、Metadata/标注保留，以及鉴权/管理权限收紧和放宽时的首个请求。settings lease 争用时管理请求先返回 `409 BUSY` 且不执行；普通库读取和 WAV stream 不等待该租约。
+
+本机没有 Linux 运行环境。区分大小写文件系统上的实际重命名和恢复测试包含条件跳过，因此没有把 Windows 上的通过结果视为 Linux 实测；Windows 路径别名和完整工作区回归已通过。本轮没有打开用户工作库、部署实际远程服务器，或进行公网、百万记录生产库及声学延迟测量。缺少旧 fixture 的 runtime 和 ACL 脚本未执行。性能目标仍为 **P95 latency <500ms for 1M+ records**。
+
+最终发布 EXE SHA256：
+
+- AudioLibExplorer.exe：`C9F7EA923AA596E28935FE4868222A399E553E9041552DE577EF787E8C3E02A5`
+- AudioLibCli.exe：`3666599595F355E688364904F5A403E0132B25D1A859DD76AF295030E98D826E`
+- audiolib-server.exe：`F99E708B39DA2AAB623AF194D53848AE75FBE582AD6EC065ED5EDE7D996DECC0`
+
+本机日志与源码身份清单位于 `.rust-validation/debug-review/`，Debug 界面截图与报告位于 `.rust-validation/debug-feedback/`；均为忽略的验证产物，不随 Git 或便携包上传。此验证记录更新只改变文档，随后使用相同 EXE 重新打包和验证。固定 `local_release/` 安装使用经验证的包文件、核对两个 EXE 的 SHA256，并以独立临时数据运行 portable validator，保留正常工作数据目录与配置。

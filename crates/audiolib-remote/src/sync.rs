@@ -13,7 +13,9 @@
 use crate::client::{RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta};
 use crate::error::{RemoteError, Result};
 use crate::util::{fnv64, unix_now, write_atomic};
-use audiolib_core::{DataProvider, server_url::ServerAddress};
+#[cfg(test)]
+use audiolib_core::DataProvider;
+use audiolib_core::server_url::ServerAddress;
 use audiolib_db::{
     MAX_SNAPSHOT_SCHEMA, MIN_SNAPSHOT_SCHEMA, SqliteProvider, snapshot_schema_supported,
 };
@@ -93,6 +95,14 @@ fn wait_unless_cancelled(wait: Duration, cancel: &AtomicBool) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
+}
+
+fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Acquire) {
+        Err(RemoteError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// Fetch `GET /roots`, returning them even if the current library is not confirmed.
@@ -326,9 +336,28 @@ impl RemoteCache {
         state: &CacheState,
         progress: &mut dyn FnMut(CachePreparation),
     ) -> Result<CacheState> {
+        self.prepare_cached_state_with_progress_cancellable(
+            state,
+            progress,
+            &AtomicBool::new(false),
+        )
+    }
+
+    /// Prepare a cache in an owned copy, cancelling copy, validation and index SQL.
+    /// Cancellation removes only this preparation's staging file and preserves the
+    /// active cache and any read-only provider which already owns its snapshot.
+    pub fn prepare_cached_state_with_progress_cancellable(
+        &self,
+        state: &CacheState,
+        progress: &mut dyn FnMut(CachePreparation),
+        cancel: &AtomicBool,
+    ) -> Result<CacheState> {
+        check_cancelled(cancel)?;
         progress(CachePreparation::Checking);
+        check_cancelled(cancel)?;
         let source = self.database_path(state);
         if SqliteProvider::has_current_search_state(&source)? {
+            check_cancelled(cancel)?;
             return Ok(state.clone());
         }
         let directory = self.library_dir(&state.library_id);
@@ -369,6 +398,7 @@ impl RemoteCache {
             let backup = rusqlite::backup::Backup::new(&source, &mut target)
                 .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
             loop {
+                check_cancelled(cancel)?;
                 let step = backup
                     .step(4096)
                     .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
@@ -377,6 +407,7 @@ impl RemoteCache {
                     completed: (copied.pagecount - copied.remaining).max(0) as u64,
                     total: copied.pagecount.max(0) as u64,
                 });
+                check_cancelled(cancel)?;
                 match step {
                     rusqlite::backup::StepResult::Done => break,
                     rusqlite::backup::StepResult::More => {}
@@ -386,7 +417,7 @@ impl RemoteCache {
             drop(backup);
             drop(target);
             drop(source);
-            validate_snapshot_with_progress(&staging, progress)
+            validate_snapshot_with_progress_cancellable(&staging, progress, cancel)
         })();
         let info = match result {
             Ok(info) => info,
@@ -396,6 +427,10 @@ impl RemoteCache {
             }
         };
         progress(CachePreparation::Saving);
+        if let Err(error) = check_cancelled(cancel) {
+            remove_owned_staging(&staging);
+            return Err(error);
+        }
         let target = directory.join(&name);
         if let Err(error) = std::fs::rename(&staging, &target) {
             remove_owned_staging(&staging);
@@ -406,6 +441,10 @@ impl RemoteCache {
         prepared.schema_version = info.schema_version;
         prepared.audio_files = info.stats.audio_files;
         prepared.snapshot_bytes = std::fs::metadata(&target)?.len();
+        if let Err(error) = check_cancelled(cancel) {
+            remove_owned_staging(&target);
+            return Err(error);
+        }
         self.save_state(&prepared)?;
         Ok(prepared)
     }
@@ -581,7 +620,17 @@ fn validate_snapshot_with_progress(
     path: &Path,
     progress: &mut dyn FnMut(CachePreparation),
 ) -> Result<audiolib_core::LibraryInfo> {
+    validate_snapshot_with_progress_cancellable(path, progress, &AtomicBool::new(false))
+}
+
+fn validate_snapshot_with_progress_cancellable(
+    path: &Path,
+    progress: &mut dyn FnMut(CachePreparation),
+    cancel: &AtomicBool,
+) -> Result<audiolib_core::LibraryInfo> {
+    check_cancelled(cancel)?;
     progress(CachePreparation::Validating);
+    check_cancelled(cancel)?;
     {
         let conn = rusqlite::Connection::open(path)
             .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
@@ -600,7 +649,7 @@ fn validate_snapshot_with_progress(
     }
     // The staging file belongs to this sync alone: check it in place (one quick_check, no
     // temporary copy of a possibly several-hundred-MB library).
-    let report = SqliteProvider::check_owned_file(path)?;
+    let report = SqliteProvider::check_owned_file_cancellable(path, cancel)?;
     if !report.is_ok() {
         return Err(RemoteError::Snapshot(format!(
             "integrity check failed: {}",
@@ -611,9 +660,11 @@ fn validate_snapshot_with_progress(
     // or missing FTS trigger cannot be hidden by a successful rebuild. This file is
     // owned staging, not a live/user library; upgrade without creating WAL sidecars.
     progress(CachePreparation::Upgrading);
-    if SqliteProvider::upgrade_owned_snapshot(path)? {
+    check_cancelled(cancel)?;
+    if SqliteProvider::upgrade_owned_snapshot_cancellable(path, cancel)? {
         progress(CachePreparation::Validating);
-        let upgraded = SqliteProvider::check_owned_file(path)?;
+        check_cancelled(cancel)?;
+        let upgraded = SqliteProvider::check_owned_file_cancellable(path, cancel)?;
         if !upgraded.is_ok() {
             return Err(RemoteError::Snapshot(format!(
                 "upgraded snapshot integrity check failed: {}",
@@ -621,10 +672,8 @@ fn validate_snapshot_with_progress(
             )));
         }
     }
-    let provider = SqliteProvider::open_read_only(path)?;
-    let info = provider.library_info()?;
-    drop(provider);
-    Ok(info)
+    check_cancelled(cancel)?;
+    SqliteProvider::owned_snapshot_info_cancellable(path, cancel).map_err(Into::into)
 }
 
 fn remove_owned_staging(staging: &Path) {
@@ -698,9 +747,11 @@ pub fn sync_library(
             .clone()
             .filter(|state| state.revision == library.revision)
     {
-        state = cache.prepare_cached_state_with_progress(&state, &mut |stage| {
-            progress(SyncProgress::Preparing(stage))
-        })?;
+        state = cache.prepare_cached_state_with_progress_cancellable(
+            &state,
+            &mut |stage| progress(SyncProgress::Preparing(stage)),
+            cancel,
+        )?;
         if let Some(roots) = roots {
             state.roots = roots;
         }
@@ -784,9 +835,11 @@ pub fn sync_library(
             return Err(RemoteError::Cancelled);
         }
         progress(SyncProgress::Validating);
-        let info = validate_snapshot_with_progress(&staging, &mut |stage| {
-            progress(SyncProgress::Preparing(stage))
-        })?;
+        let info = validate_snapshot_with_progress_cancellable(
+            &staging,
+            &mut |stage| progress(SyncProgress::Preparing(stage)),
+            cancel,
+        )?;
         Ok((meta, info))
     })();
     let (meta, info) = match result {
@@ -918,6 +971,162 @@ mod tests {
                     .join(format!("download.db.download{suffix}"))
                     .exists()
             );
+        }
+    }
+
+    #[test]
+    fn cancelling_owned_cache_preparation_keeps_original_bytes_and_reader() {
+        for stage in [
+            CachePreparation::Copying {
+                completed: 1,
+                total: 1,
+            },
+            CachePreparation::Validating,
+            CachePreparation::Upgrading,
+            CachePreparation::Saving,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let cache = RemoteCache::new(&directory.path().join("data"));
+            let state = CacheState {
+                library_id: "lib-cancel-owned".into(),
+                revision: 7,
+                schema_version: 3,
+                database_file: "library-r7-original.db".into(),
+                server_url: "http://offline.test".into(),
+                ..Default::default()
+            };
+            std::fs::create_dir_all(cache.library_dir(&state.library_id)).unwrap();
+            let database = cache.database_path(&state);
+            std::fs::write(&database, old_unicode_snapshot(directory.path())).unwrap();
+            cache.save_state(&state).unwrap();
+            let reader = SqliteProvider::open_read_only(&database).unwrap();
+            let reader_path = reader.database_path().to_path_buf();
+            let state_path = cache.library_dir(&state.library_id).join(STATE_FILE);
+            let active_path = cache.root.join(ACTIVE_FILE);
+            let before = [
+                std::fs::read(&database).unwrap(),
+                std::fs::read(&state_path).unwrap(),
+                std::fs::read(&active_path).unwrap(),
+            ];
+            let cancel = AtomicBool::new(false);
+            let started = Instant::now();
+            let result = cache.prepare_cached_state_with_progress_cancellable(
+                &state,
+                &mut |current| {
+                    let matches = match (stage, current) {
+                        (
+                            CachePreparation::Copying { .. },
+                            CachePreparation::Copying { completed, .. },
+                        ) => completed > 0,
+                        _ => stage == current,
+                    };
+                    if matches {
+                        cancel.store(true, Ordering::Release);
+                    }
+                },
+                &cancel,
+            );
+            assert!(
+                matches!(result, Err(RemoteError::Cancelled)),
+                "{stage:?}: {result:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(1), "{stage:?}");
+            assert_eq!(cache.active().unwrap(), state);
+            assert_eq!(
+                [
+                    std::fs::read(&database).unwrap(),
+                    std::fs::read(&state_path).unwrap(),
+                    std::fs::read(&active_path).unwrap()
+                ],
+                before
+            );
+            assert_eq!(reader.database_path(), reader_path);
+            assert_unicode_source(&reader);
+            let mut files: Vec<_> = std::fs::read_dir(cache.library_dir(&state.library_id))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            files.sort();
+            assert_eq!(files, [STATE_FILE, "library-r7-original.db"], "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn cancelling_downloaded_snapshot_validation_preserves_active_cache() {
+        for stage in [CachePreparation::Validating, CachePreparation::Upgrading] {
+            let directory = tempfile::tempdir().unwrap();
+            let bytes = old_unicode_snapshot(directory.path());
+            let server = TestServer::start(move |request| match request.path.as_str() {
+                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"test"}"#),
+                "/api/v1/library" => TestResponse::json(200, &library_json(8)),
+                "/api/v1/roots" => TestResponse::json(200, "[]"),
+                "/api/v1/library/snapshot" => TestResponse::bytes(200, bytes.clone())
+                    .with_header("X-Library-Id", "lib-r")
+                    .with_header("X-Library-Revision", "8")
+                    .with_header("X-Schema-Version", "3"),
+                _ => panic!("unexpected request {}", request.path),
+            });
+            let cache = RemoteCache::new(&directory.path().join("data"));
+            let state = CacheState {
+                library_id: "lib-r".into(),
+                revision: 7,
+                schema_version: 5,
+                database_file: "library-r7-original.db".into(),
+                server_url: server.url.clone(),
+                ..Default::default()
+            };
+            std::fs::create_dir_all(cache.library_dir(&state.library_id)).unwrap();
+            let database = cache.database_path(&state);
+            std::fs::write(
+                &database,
+                std::fs::read(directory.path().join("backup.db")).unwrap(),
+            )
+            .unwrap();
+            cache.save_state(&state).unwrap();
+            let reader = SqliteProvider::open_read_only(&database).unwrap();
+            let state_path = cache.library_dir(&state.library_id).join(STATE_FILE);
+            let active_path = cache.root.join(ACTIVE_FILE);
+            let before = [
+                std::fs::read(&database).unwrap(),
+                std::fs::read(&state_path).unwrap(),
+                std::fs::read(&active_path).unwrap(),
+            ];
+            let cancel = AtomicBool::new(false);
+            let client = RemoteClient::new(&server.url, "").unwrap();
+            let started = Instant::now();
+            let result = sync_library(
+                &client,
+                &cache,
+                &mut |current| {
+                    if current == SyncProgress::Preparing(stage) {
+                        cancel.store(true, Ordering::Release);
+                    }
+                },
+                &cancel,
+                false,
+            );
+            assert!(
+                matches!(result, Err(RemoteError::Cancelled)),
+                "{stage:?}: {result:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(1), "{stage:?}");
+            assert_eq!(cache.active().unwrap(), state);
+            assert_eq!(
+                [
+                    std::fs::read(&database).unwrap(),
+                    std::fs::read(&state_path).unwrap(),
+                    std::fs::read(&active_path).unwrap()
+                ],
+                before
+            );
+            assert_eq!(reader.database_path(), database);
+            assert_eq!(reader.stats().unwrap().audio_files, 0);
+            let mut files: Vec<_> = std::fs::read_dir(cache.library_dir(&state.library_id))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            files.sort();
+            assert_eq!(files, [STATE_FILE, "library-r7-original.db"], "{stage:?}");
         }
     }
 

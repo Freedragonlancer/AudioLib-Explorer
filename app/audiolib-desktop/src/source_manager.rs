@@ -44,6 +44,10 @@ const PAGE_CACHE: i32 = 2;
 const FOCUS_LIBRARY: i32 = 1;
 const FOCUS_HISTORY: i32 = 2;
 
+#[path = "source_roots.rs"]
+mod source_roots;
+pub(in crate::controller) use source_roots::RootOperation;
+
 /// Row selected in the source list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum Selection {
@@ -79,13 +83,39 @@ pub(super) struct SourceManager {
     /// delayed completion cannot release a newer request's indicator.
     manage_sequence: u64,
     manage_pending: Option<u64>,
+    /// Verified root list and edit identity belong to the displayed server page.
+    roots: Vec<RemoteRoot>,
+    root_edit_target: Option<String>,
+    /// Each navigation or close supersedes pending directory listings.
+    browser_sequence: u64,
+    /// A structural roots refresh waits for the current management completion before
+    /// replacing its page generation and request ownership.
+    root_refresh_pending: bool,
 }
 
 impl SourceManager {
     pub(super) fn invalidate_library(&mut self) {
         self.library_generation += 1;
         self.manage_pending = None;
+        self.browser_sequence += 1;
+        self.roots.clear();
+        self.root_edit_target = None;
+        self.root_refresh_pending = false;
     }
+}
+
+/// Root editor identity follows names and exact server paths. Health/count updates,
+/// WebDAV suggestions and response ordering do not supersede a user's path draft.
+pub(super) fn root_configuration_changed(before: &[RemoteRoot], after: &[RemoteRoot]) -> bool {
+    fn identities(roots: &[RemoteRoot]) -> Vec<(&str, &str)> {
+        let mut identities: Vec<_> = roots
+            .iter()
+            .map(|root| (root.name.as_str(), root.server_path.as_str()))
+            .collect();
+        identities.sort_unstable();
+        identities
+    }
+    identities(before) != identities(after)
 }
 
 /// Everything the 服务器音效库 page shows, fetched together off the UI thread.
@@ -127,6 +157,7 @@ struct FormInput {
 
 impl Controller {
     pub(super) fn bind_source_manager(self: &Arc<Self>, ui: &AppWindow) {
+        self.bind_source_roots(ui);
         let c = self.clone();
         ui.on_sm_open_requested(move |focus| c.open_source_manager(focus));
         let c = self.clone();
@@ -172,6 +203,9 @@ impl Controller {
             drop(remote);
             // A typed but unsaved token does not outlive the window.
             if let Some(ui) = c.ui.upgrade() {
+                ui.set_sm_fs_visible(false);
+                ui.set_sm_fs_busy(false);
+                ui.set_sm_root_form(false);
                 ui.set_ds_token("".into());
                 c.publish_manage_busy(&ui);
             }
@@ -270,14 +304,26 @@ impl Controller {
         (generation, request)
     }
 
-    fn finish_manage_request(&self, ui: &AppWindow, request: u64) -> bool {
+    fn finish_manage_request(self: &Arc<Self>, ui: &AppWindow, request: u64) -> bool {
         let mut remote = self.remote.lock().unwrap();
         if remote.manager.manage_pending != Some(request) {
             return false;
         }
         remote.manager.manage_pending = None;
+        let refresh_roots = std::mem::take(&mut remote.manager.root_refresh_pending);
+        let generation = remote.manager.library_generation;
         drop(remote);
         ui.set_sm_manage_busy(false);
+        if refresh_roots {
+            // The caller still owns its completion callback and captured generation.
+            // Refresh on the next UI turn so its success/error is handled first.
+            let c = self.clone();
+            post(self.ui.clone(), move |ui| {
+                if c.library_current(generation) {
+                    c.refresh_source_manager_roots(&ui);
+                }
+            });
+        }
         true
     }
 
@@ -437,10 +483,71 @@ impl Controller {
         let Some(ui) = self.ui.upgrade() else { return };
         self.remote.lock().unwrap().manager.invalidate_library();
         self.publish_manage_busy(&ui);
+        ui.set_sm_root_controls(false);
+        ui.set_sm_root_selected(-1);
+        ui.set_sm_root_form(false);
+        ui.set_sm_fs_visible(false);
+        ui.set_sm_fs_busy(false);
         match page {
             PAGE_LIBRARY => self.load_server_library(&ui),
             PAGE_CACHE => self.publish_cache_info(&ui),
             _ => {}
+        }
+    }
+
+    /// Clear root dialogs invalidated by the worker's provider swap. The manager
+    /// reconciliation refills the page without invalidating a newer request.
+    pub(in crate::controller) fn refresh_source_manager_after_swap(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+    ) {
+        ui.set_sm_root_form(false);
+        ui.set_sm_fs_visible(false);
+        ui.set_sm_fs_busy(false);
+        ui.set_sm_root_controls(false);
+        ui.set_sm_root_selected(-1);
+    }
+
+    /// Root configuration can change without a new snapshot file or audio revision.
+    /// Immediately discard the old editor/browser identity, then refill the page. An
+    /// in-flight management request keeps its captured generation until completion.
+    pub(super) fn refresh_source_manager_roots(self: &Arc<Self>, ui: &AppWindow) {
+        let deferred = {
+            let mut remote = self.remote.lock().unwrap();
+            let manager = &mut remote.manager;
+            if manager.manage_pending.is_some() {
+                manager.browser_sequence += 1;
+                manager.root_edit_target = None;
+                manager.root_refresh_pending = true;
+                true
+            } else {
+                manager.invalidate_library();
+                false
+            }
+        };
+        ui.set_sm_root_controls(false);
+        ui.set_sm_root_selected(-1);
+        ui.set_sm_root_form(false);
+        ui.set_sm_root_editing(false);
+        ui.set_sm_root_name("".into());
+        ui.set_sm_root_path("".into());
+        ui.set_sm_root_message("".into());
+        ui.set_sm_fs_visible(false);
+        ui.set_sm_fs_busy(false);
+        ui.set_sm_fs_can_select(false);
+        ui.set_sm_fs_path("".into());
+        ui.set_sm_fs_parent("".into());
+        ui.set_sm_fs_error("".into());
+        ui.set_sm_fs_rows(ModelRc::default());
+        ui.set_sm_fs_breadcrumbs(ModelRc::default());
+        if ui.get_sm_confirm() == 5 {
+            ui.set_sm_confirm(0);
+        }
+        if !deferred {
+            self.publish_manage_busy(ui);
+            if ui.get_library_visible() && ui.get_sm_page() == PAGE_LIBRARY {
+                self.load_server_library(ui);
+            }
         }
     }
 
@@ -597,7 +704,9 @@ impl Controller {
             } else {
                 c.wait_metadata(barrier, true).map(|_| ())
             };
-            let saved = drained.and_then(|_| c.store_profile(id.as_deref(), &input, chinese));
+            let saved = drained
+                .and_then(|_| c.wait_remote_plays())
+                .and_then(|_| c.store_profile(id.as_deref(), &input, chinese));
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 let (id, resync) = match saved {
@@ -1566,11 +1675,15 @@ impl Controller {
                     ui.set_sm_can_manage(
                         capabilities.may_manage() && c.require_remote_write_identity().is_ok(),
                     );
+                    ui.set_sm_root_controls(
+                        capabilities.may_manage_roots() && c.active_manage_client().is_ok(),
+                    );
                 }
                 Err(error) => {
                     note(&cn_or(chinese, "权限信息", "capabilities"), error);
                     ui.set_sm_capabilities("".into());
                     ui.set_sm_can_manage(false);
+                    ui.set_sm_root_controls(false);
                 }
             }
             match &page.scan {
@@ -1611,6 +1724,12 @@ impl Controller {
                 .map(|root| SharedString::from(root.name.clone()))
                 .collect();
             ui.set_sm_roots(ModelRc::new(VecModel::from(rows)));
+            c.remote.lock().unwrap().manager.roots = page.roots.clone();
+            if ui.get_sm_root_selected() < 0
+                || ui.get_sm_root_selected() as usize >= page.roots.len()
+            {
+                ui.set_sm_root_selected(if page.roots.is_empty() { -1 } else { 0 });
+            }
             let previous = ui.get_sm_scan_root();
             ui.set_sm_root_names(ModelRc::new(VecModel::from(names)));
             if previous >= 0 && (previous as usize) < page.roots.len() {
@@ -1882,6 +2001,7 @@ fn root_row(root: &RemoteRoot, chinese: bool) -> ServerRootRow {
     let count = |value: Option<u64>| value.map(|value| value.to_string()).unwrap_or("–".into());
     ServerRootRow {
         name: root.name.clone().into(),
+        path: root.server_path.clone().into(),
         status: if scanning {
             cn_or(chinese, "扫描中", "scanning")
         } else if offline {
@@ -2162,9 +2282,16 @@ mod tests {
         assert!(!controller.library_current(previous_generation));
         controller.publish_data_source(&ui);
         let (generation, request) = controller.begin_manage_request(&ui);
+        ui.set_sm_root_form(true);
+        ui.set_sm_fs_visible(true);
+        ui.set_sm_fs_busy(true);
+        controller.refresh_source_manager_after_swap(&ui);
         controller.reconcile_source_manager_after_swap(&ui);
         assert!(controller.library_current(generation));
         assert!(ui.get_sm_manage_busy());
+        assert!(!ui.get_sm_root_form());
+        assert!(!ui.get_sm_fs_visible());
+        assert!(!ui.get_sm_fs_busy());
 
         let refreshed_and_polled = std::rc::Rc::new(std::cell::Cell::new(false));
         let observed = refreshed_and_polled.clone();
@@ -2443,6 +2570,187 @@ mod tests {
     }
 
     #[test]
+    fn root_configuration_identity_ignores_status_and_order_but_keeps_exact_paths() {
+        let initial = vec![root("SFX"), root("Music")];
+        let mut refreshed = vec![initial[1].clone(), initial[0].clone()];
+        refreshed[1].online = Some(false);
+        refreshed[1].status = Some("offline".into());
+        refreshed[1].checked_at = Some(123);
+        refreshed[1].file_count = Some(17);
+        refreshed[1].webdav_url = Some("https://example.com/new-suggestion".into());
+        assert!(!root_configuration_changed(&initial, &refreshed));
+        refreshed[1].server_path = "/Volumes/sfx".into();
+        assert!(root_configuration_changed(&initial, &refreshed));
+        refreshed[1].server_path = "/Volumes/SFX ".into();
+        assert!(root_configuration_changed(&initial, &refreshed));
+        assert!(root_configuration_changed(&initial, &initial[..1]));
+        refreshed = initial.clone();
+        refreshed[1].name = "Replacement".into();
+        assert!(root_configuration_changed(&initial, &refreshed));
+    }
+
+    #[test]
+    fn unchanged_snapshot_root_updates_preserve_status_drafts_and_drain_management() {
+        super::super::source_transition_tests::isolated_module(
+            "source_manager::tests",
+            "child_root_config_refresh",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Slint root configuration refresh regression"]
+    fn child_root_config_refresh() {
+        use super::super::source_transition_tests::{configuration, root as test_root, run_until};
+        use super::super::{RevisionCheck, RevisionPoll};
+        use audiolib_audio::{AudioEngine, PlaybackConfig};
+        use audiolib_db::SqliteProvider;
+        use audiolib_remote::{CachedIdentity, SyncOutcome};
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let mut config = configuration(&test_root().join("preferences"));
+        config.data_source.mode = DataSourceMode::Server;
+        config.data_source.server_url = "http://127.0.0.1:9".into();
+        config.data_source.poll_interval_secs = 0;
+        let cache = RemoteCache::new(&config.data_root());
+        let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let playback = PlaybackConfig::default();
+        let engine = AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
+        controller.remote_mode.store(true, Ordering::Release);
+        let state = CacheState {
+            library_id: "roots-refresh-library".into(),
+            server_url: "http://127.0.0.1:9".into(),
+            revision: 7,
+            database_file: "unchanged-snapshot.db".into(),
+            roots: vec![root("SFX")],
+            ..Default::default()
+        };
+        {
+            let mut remote = controller.remote.lock().unwrap();
+            remote.state = Some(state.clone());
+            remote.live_roots = Some(state.roots.clone());
+        }
+        ui.set_library_visible(true);
+        ui.set_sm_page(PAGE_LIBRARY);
+        let arm_draft = |roots: &[RemoteRoot]| {
+            let mut remote = controller.remote.lock().unwrap();
+            remote.manager.roots = roots.to_vec();
+            remote.manager.root_edit_target = Some("SFX".into());
+            let identity = (
+                remote.manager.library_generation,
+                remote.manager.browser_sequence,
+            );
+            drop(remote);
+            ui.set_sm_root_controls(true);
+            ui.set_sm_root_selected(0);
+            ui.set_sm_root_form(true);
+            ui.set_sm_root_editing(true);
+            ui.set_sm_root_name("SFX".into());
+            ui.set_sm_root_path("/user/path draft ".into());
+            ui.set_sm_fs_visible(true);
+            ui.set_sm_fs_busy(true);
+            ui.set_sm_fs_path("/old/browser".into());
+            ui.set_sm_confirm(5);
+            identity
+        };
+        let checked = Some(CachedIdentity {
+            library_id: state.library_id.clone(),
+            revision: state.revision,
+        });
+        let poll = |roots| RevisionPoll {
+            source_generation: controller.source_generation.load(Ordering::Acquire),
+            checked: checked.clone(),
+            check: RevisionCheck::UpToDate { revision: 7 },
+            roots: Some(roots),
+            next_check: None,
+            auto_due: false,
+        };
+        let generation = arm_draft(&state.roots);
+        let mut health_update = state.roots.clone();
+        health_update[0].online = Some(false);
+        health_update[0].status = Some("waking".into());
+        health_update[0].file_count = Some(42);
+        controller.apply_revision_poll(&ui, poll(health_update.clone()));
+        assert!(ui.get_sm_root_form() && ui.get_sm_fs_visible());
+        assert_eq!(ui.get_sm_root_path(), "/user/path draft ");
+        {
+            let remote = controller.remote.lock().unwrap();
+            assert_eq!(remote.manager.library_generation, generation.0);
+            assert_eq!(remote.manager.browser_sequence, generation.1);
+            assert_eq!(remote.manager.root_edit_target.as_deref(), Some("SFX"));
+        }
+        let mut next = state.clone();
+        next.roots = health_update;
+        let outcome = |state| {
+            Ok(SyncOutcome {
+                state,
+                downloaded: false,
+                library_changed: false,
+                previous: None,
+                elapsed_ms: 0,
+            })
+        };
+        controller.complete_sync(&ui, outcome(next.clone()), None, &cache);
+        assert!(ui.get_sm_root_form() && ui.get_sm_fs_visible());
+        assert_eq!(ui.get_sm_root_path(), "/user/path draft ");
+
+        next.roots[0].server_path = "/Volumes/Replacement".into();
+        controller.apply_revision_poll(&ui, poll(next.roots.clone()));
+        assert!(!ui.get_sm_root_form() && !ui.get_sm_fs_visible());
+        assert!(!ui.get_sm_fs_busy() && !ui.get_sm_root_controls());
+        assert!(ui.get_sm_root_name().is_empty() && ui.get_sm_root_path().is_empty());
+        assert!(ui.get_sm_fs_path().is_empty());
+        assert_eq!(ui.get_sm_confirm(), 0);
+        assert!(!controller.library_current(generation.0));
+        assert!(
+            controller
+                .remote
+                .lock()
+                .unwrap()
+                .manager
+                .root_edit_target
+                .is_none()
+        );
+
+        // The poll already invalidated this exact configuration. Publishing its
+        // unchanged snapshot must retain a newly entered, current draft.
+        let generation = arm_draft(&next.roots);
+        controller.complete_sync(&ui, outcome(next.clone()), None, &cache);
+        assert!(ui.get_sm_root_form() && ui.get_sm_fs_visible());
+        assert!(controller.library_current(generation.0));
+
+        // A structural same-snapshot sync clears stale editing immediately, but
+        // preserves ownership until the current management callback drains.
+        let (request_generation, request) = controller.begin_manage_request(&ui);
+        next.roots.push(root("New"));
+        controller.complete_sync(&ui, outcome(next), None, &cache);
+        assert!(!ui.get_sm_root_form() && !ui.get_sm_fs_visible());
+        assert!(ui.get_sm_manage_busy());
+        assert!(controller.library_current(request_generation));
+        {
+            let remote = controller.remote.lock().unwrap();
+            assert_eq!(remote.manager.manage_pending, Some(request));
+            assert!(remote.manager.root_refresh_pending);
+            assert_ne!(remote.manager.browser_sequence, generation.1);
+        }
+        assert!(controller.finish_manage_request(&ui, request));
+        assert!(controller.library_current(request_generation));
+        let c = controller.clone();
+        run_until(&ui, move || !c.library_current(request_generation));
+        assert!(!ui.get_sm_manage_busy());
+        assert!(controller.remote.lock().unwrap().manager.roots.is_empty());
+        assert!(
+            !controller
+                .remote
+                .lock()
+                .unwrap()
+                .manager
+                .root_refresh_pending
+        );
+    }
+
+    #[test]
     fn root_rows_show_counts_last_scan_and_offline_reason() {
         let mut online = root("SFX");
         online.online = Some(true);
@@ -2522,6 +2830,7 @@ mod tests {
             manage_mode: ManageMode::Lan,
             external: Some(true),
             can_manage: Some(false),
+            ..Capabilities::default()
         };
         let text = capabilities_text(&lan, true);
         assert!(text.contains("仅局域网直连（manage_mode = lan）"), "{text}");

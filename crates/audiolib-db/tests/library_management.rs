@@ -641,3 +641,185 @@ fn administration_shares_scan_lock_while_snapshot_reads_continue() {
     lock.unlock().unwrap();
     assert_eq!(f.provider.remove_audio(&[f.ids[0]]).unwrap(), 1);
 }
+
+#[test]
+fn root_relocation_refuses_existing_indexed_destinations_and_precommit_cancellation() {
+    let f = fixture();
+    let source = f.temp.path().join("audio");
+    let destination = f.temp.path().join("destination");
+    fs::create_dir_all(destination.join("child")).unwrap();
+    fs::copy(&f.paths[0], destination.join("metal.wav")).unwrap();
+    fs::copy(&f.paths[1], destination.join("child").join("wood.wav")).unwrap();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    assert!(matches!(
+        f.provider
+            .relink_folder_cancellable(&source, &destination, cancel),
+        Err(Error::Cancelled)
+    ));
+    ScanService::new(f.provider.clone())
+        .scan(
+            &destination,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    assert!(matches!(
+        f.provider.relink_folder(&source, &destination),
+        Err(Error::Validation(_))
+    ));
+    for (id, path) in f.ids.iter().zip(&f.paths) {
+        assert_eq!(
+            f.provider.get_audio(*id).unwrap().file_path,
+            audiolib_db::display_path(&path.canonicalize().unwrap())
+        );
+    }
+    assert_eq!(f.provider.stats().unwrap().audio_files, 4);
+}
+
+#[test]
+fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio() {
+    let f = fixture();
+    let source = f.temp.path().join("audio");
+    let target = f.temp.path().join("Audio");
+    if target.exists() {
+        // The regression requires a case-sensitive directory. Windows and some
+        // macOS volumes treat these paths as aliases; the Windows no-op test covers it.
+        return;
+    }
+    let original: Vec<_> = f.paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    let first = f.provider.get_audio(f.ids[0]).unwrap();
+    f.provider
+        .update_metadata(
+            first.id,
+            &MetadataPatch {
+                tags: Some("retained tag".into()),
+                notes: Some("retained note".into()),
+                favorite: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.provider.record_play(first.id).unwrap();
+    let conn = Connection::open(f.provider.database_path()).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension','keep') WHERE id=?1",
+        [first.id],
+    )
+    .unwrap();
+    drop(conn);
+    let root_id = f.provider.folders(None).unwrap()[0].id;
+    let child_id = f.provider.folders(Some(root_id)).unwrap()[0].id;
+
+    fs::rename(&source, &target).unwrap();
+    assert!(!source.exists());
+    assert_eq!(f.provider.relink_folder(&source, &target).unwrap(), 2);
+    for ((id, relative), bytes) in f
+        .ids
+        .iter()
+        .zip(["metal.wav", "child/wood.wav"])
+        .zip(original)
+    {
+        let moved = target.join(relative);
+        let audio = f.provider.get_audio(*id).unwrap();
+        assert_eq!(
+            audio.file_path,
+            audiolib_db::display_path(&moved.canonicalize().unwrap())
+        );
+        assert_eq!(fs::read(&moved).unwrap(), bytes);
+    }
+    let moved = f.provider.get_audio(first.id).unwrap();
+    assert_eq!(moved.folder_id, first.folder_id);
+    assert_eq!(
+        (
+            moved.tags.as_str(),
+            moved.notes.as_str(),
+            moved.favorite,
+            moved.play_count
+        ),
+        ("retained tag", "retained note", true, 1)
+    );
+    assert_eq!(moved.attributes["unknown_extension"], "keep");
+    assert_eq!(
+        f.provider.get_folder(root_id).unwrap().path,
+        audiolib_db::folder_path_text(&target.canonicalize().unwrap())
+    );
+    assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
+    assert_eq!(f.provider.stats().unwrap().audio_files, 2);
+    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 1);
+    let rescanned = ScanService::new(f.provider.clone())
+        .scan(
+            &target,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(rescanned.added, 0);
+    assert_eq!(
+        f.provider.get_audio(first.id).unwrap().notes,
+        "retained note"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn root_relocation_keeps_windows_case_aliases_as_a_noop() {
+    let f = fixture();
+    let source = f.temp.path().join("audio");
+    let equivalent = std::path::PathBuf::from(source.to_string_lossy().to_uppercase());
+    assert!(equivalent.is_dir());
+    let before: Vec<_> = f
+        .ids
+        .iter()
+        .map(|id| f.provider.get_audio(*id).unwrap().file_path)
+        .collect();
+    assert_eq!(f.provider.relink_folder(&source, &equivalent).unwrap(), 0);
+    assert_eq!(f.provider.stats().unwrap().audio_files, 2);
+    for (id, path) in f.ids.iter().zip(before) {
+        assert_eq!(f.provider.get_audio(*id).unwrap().file_path, path);
+    }
+}
+
+#[test]
+fn root_relocation_obeys_cross_process_scan_and_administration_leases() {
+    let f = fixture();
+    let source = f.temp.path().join("audio");
+    let target = f.temp.path().join("target");
+    fs::create_dir_all(&target).unwrap();
+    for suffix in [".scan.lock", ".admin.lock"] {
+        let database = f.provider.database_path().canonicalize().unwrap();
+        let mut name = database.file_name().unwrap().to_os_string();
+        name.push(suffix);
+        let lock = fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(database.with_file_name(name))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert!(
+            matches!(
+                f.provider.relink_folder(&source, &target),
+                Err(Error::Busy(_))
+            ),
+            "{suffix}"
+        );
+        lock.unlock().unwrap();
+    }
+    assert!(source.join("metal.wav").is_file());
+    assert_eq!(f.provider.stats().unwrap().audio_files, 2);
+}
+
+#[test]
+fn root_relocation_rejects_volume_roots_before_changing_any_paths() {
+    let f = fixture();
+    let filesystem_root = f.paths[0].ancestors().last().unwrap();
+    assert!(matches!(
+        f.provider
+            .relink_folder(filesystem_root, &f.temp.path().join("audio")),
+        Err(Error::Validation(_))
+    ));
+    assert_eq!(f.provider.stats().unwrap().audio_files, 2);
+}

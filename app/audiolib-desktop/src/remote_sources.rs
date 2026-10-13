@@ -40,8 +40,11 @@ impl Controller {
         let old_settings = self.config.lock().unwrap().data_source.clone();
         let old_secrets = self.secrets();
         self.remote.lock().unwrap().source_rollback = Some((old_settings, old_secrets));
-        self.source_changing.store(true, Ordering::Release);
-        self.source_generation.fetch_add(1, Ordering::AcqRel);
+        {
+            let _plays = self.remote_plays.lock().unwrap();
+            self.source_changing.store(true, Ordering::Release);
+            self.source_generation.fetch_add(1, Ordering::AcqRel);
+        }
         self.drag_cancel
             .lock()
             .unwrap()
@@ -69,22 +72,26 @@ impl Controller {
             return;
         }
         if !committed && let Some((settings, secrets)) = rollback {
-            let previous_state = self.remote.lock().unwrap().state.clone();
             let c = self.clone();
             std::thread::spawn(move || {
-                let settings_result = c.save_data_source(
-                    settings.clone(),
-                    secrets.clone(),
-                    c.chinese.load(Ordering::Acquire),
-                );
-                // Sync publishes its cache state before the provider is opened. Restore
-                // the old active cache too, so a restart cannot open B with A's URL.
-                let cache_result = previous_state.as_ref().map_or(Ok(()), |state| {
-                    audiolib_remote::RemoteCache::new(&c.data_root())
-                        .save_state(state)
-                        .map_err(|error| error.localized(c.chinese.load(Ordering::Acquire)))
+                let result = c.wait_remote_plays().and_then(|_| {
+                    // An old play may have advanced this state while the failed
+                    // operation drained. Capture and restore it only afterwards.
+                    let previous_state = c.remote.lock().unwrap().state.clone();
+                    let settings_result = c.save_data_source(
+                        settings.clone(),
+                        secrets.clone(),
+                        c.chinese.load(Ordering::Acquire),
+                    );
+                    // Sync publishes cache state before opening the provider.
+                    // Restore the old cache so restart cannot open B with A's URL.
+                    let cache_result = previous_state.as_ref().map_or(Ok(()), |state| {
+                        audiolib_remote::RemoteCache::new(&c.data_root())
+                            .save_state(state)
+                            .map_err(|error| error.localized(c.chinese.load(Ordering::Acquire)))
+                    });
+                    settings_result.and(cache_result)
                 });
-                let result = settings_result.and(cache_result);
                 if result.is_err() {
                     // Disk failure must not leave the old snapshot using new credentials.
                     c.config.lock().unwrap().data_source = settings;
@@ -200,6 +207,7 @@ impl Controller {
         std::thread::spawn(move || {
             let saved = c
                 .wait_transition_metadata(barrier)
+                .and_then(|_| c.wait_remote_plays())
                 .and_then(|_| c.save_data_source(settings, secrets, chinese));
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {

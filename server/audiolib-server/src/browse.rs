@@ -1,5 +1,5 @@
 // server/audiolib-server/src/browse.rs
-//! Read-only directory browser behind `GET /admin/api/fs` (admin page, LAN only): lists
+//! Read-only directory browser behind `GET /api/v1/fs` and `GET /admin/api/fs`: lists
 //! the sub-directories of a server directory so an administrator can pick a library
 //! root. It never writes, deletes or recurses; every listing is one `read_dir` of the
 //! requested directory (cheap on SMB mounts) with a cap on the entries returned.
@@ -222,6 +222,7 @@ pub fn places(library_roots: &[(String, PathBuf)]) -> FsPlaces {
         });
         if let Ok(reader) = fs::read_dir("/Volumes") {
             let mut volumes: Vec<(String, PathBuf)> = reader
+                .take(MAX_ENTRIES)
                 .flatten()
                 .map(|entry| {
                     (

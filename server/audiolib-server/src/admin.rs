@@ -320,7 +320,7 @@ const FS_WAIT: Duration = Duration::from_secs(15);
 /// Await blocking file-system work for at most [`FS_WAIT`]. A hung `opendir` (sleeping
 /// disk, dead network share, pending macOS privacy prompt) stays blocked on its own
 /// thread; the admin page gets a clear 504 instead of a generic timeout.
-async fn with_fs_timeout<T>(
+pub(crate) async fn with_fs_timeout<T>(
     path: &str,
     work: impl std::future::Future<Output = Result<T, ApiError>>,
 ) -> Result<T, ApiError> {
@@ -341,7 +341,7 @@ static FS_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(FS_S
 
 /// [`run_blocking`] holding one of the [`FS_SLOTS`] for as long as `work` runs; 503
 /// `BUSY` when all are taken.
-async fn run_fs_blocking<T: Send + 'static>(
+pub(crate) async fn run_fs_blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     let permit = FS_SLOTS.try_acquire().map_err(|_| {
@@ -356,7 +356,7 @@ async fn run_fs_blocking<T: Send + 'static>(
     .await
 }
 
-async fn run_blocking<T: Send + 'static>(
+pub(crate) async fn run_blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(work)
@@ -509,7 +509,11 @@ async fn browse_fs(
                     .collect(),
                 Err(_) => Vec::new(),
             };
-            let places = run_blocking(move || Ok(crate::browse::places(&roots))).await?;
+            let places = with_fs_timeout(
+                "starting places",
+                run_fs_blocking(move || Ok(crate::browse::places(&roots))),
+            )
+            .await?;
             Ok(Json(places).into_response())
         }
         Some(path) => {

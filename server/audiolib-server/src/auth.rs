@@ -33,6 +33,8 @@ use tokio::sync::watch;
 
 /// File name of the admin settings (public URL, auth mode, TLS) beside the library.
 pub const SETTINGS_FILE: &str = "admin-settings.json";
+/// Persistent lock sidecar for settings writes and root-journal reconciliation.
+const SETTINGS_LOCK_FILE: &str = ".admin-settings.lock";
 /// File name of the generated-token hashes beside the library.
 pub const TOKENS_FILE: &str = "tokens.json";
 /// `last_used_at` of a token is updated (and written) at most this often.
@@ -41,6 +43,18 @@ pub const LAST_USED_RESOLUTION_SECS: i64 = 60;
 pub const MAX_TOKENS: usize = 256;
 /// Prefix of generated tokens (`al_` + 64 hex characters).
 pub const TOKEN_PREFIX: &str = "al_";
+
+/// Cross-instance exclusion for root edits, scan admission or one settings write.
+/// The sidecar stays in place after unlocking to prevent file replacement races.
+pub(crate) struct SettingsLease(Option<std::fs::File>);
+
+impl Drop for SettingsLease {
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            let _ = file.unlock();
+        }
+    }
+}
 /// Request headers that mark a request as forwarded by a proxy.
 pub const FORWARDING_HEADERS: [&str; 5] = [
     "x-forwarded-for",
@@ -402,6 +416,12 @@ pub struct AdminSettings {
     /// replaces the `[[roots]]` of `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roots: Option<Vec<crate::config::RootConfig>>,
+    /// Recovery journal for an atomic indexed-root relocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_relink: Option<crate::manage::RootRelinkJournal>,
+    /// Recovery journal for one atomic root removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_removal: Option<crate::manage::RootRemovalJournal>,
 }
 
 fn format_version() -> u32 {
@@ -517,6 +537,50 @@ impl fmt::Debug for Security {
 }
 
 impl Security {
+    /// Lock the settings directory and reload its latest values before reconciliation.
+    /// Root edits hold this lease across settings writes and the database commit.
+    /// Scan admission holds it until the scanner acquires the database scan lease;
+    /// always acquire this settings lease before a database scan/administration lease.
+    pub(crate) fn settings_lease(&self) -> audiolib_core::Result<SettingsLease> {
+        let Some(dir) = &self.dir else {
+            return Ok(SettingsLease(None));
+        };
+        std::fs::create_dir_all(dir)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(dir.join(SETTINGS_LOCK_FILE))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(audiolib_core::Error::Busy(
+                    "Another server instance is editing library roots or settings".into(),
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        let lease = SettingsLease(Some(file));
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let loaded = match std::fs::read(dir.join(SETTINGS_FILE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                audiolib_core::Error::Validation(format!(
+                    "Cannot reload admin settings for root recovery: {error}"
+                ))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => AdminSettings::default(),
+            Err(error) => return Err(error.into()),
+        };
+        self.apply_settings(loaded);
+        Ok(lease)
+    }
+
     /// Security from `config.toml` plus the admin files beside the library database
     /// (created on the first admin change). `env_token` is the `token_env` token, if set.
     /// Unreadable admin files are renamed to `*.corrupt` and reported on the admin page.
@@ -656,6 +720,16 @@ impl Security {
     /// Library roots set on the admin page (replacing `config.toml`'s), if any.
     pub fn roots_override(&self) -> Option<Vec<crate::config::RootConfig>> {
         self.read().settings.roots.clone()
+    }
+
+    /// Pending indexed-root relocation, absent after successful final persistence.
+    pub(crate) fn root_relink(&self) -> Option<crate::manage::RootRelinkJournal> {
+        self.read().settings.root_relink.clone()
+    }
+
+    /// Pending root removal, absent after successful final persistence.
+    pub(crate) fn root_removal(&self) -> Option<crate::manage::RootRemovalJournal> {
+        self.read().settings.root_removal.clone()
     }
 
     /// Effective library management mode.
@@ -938,6 +1012,16 @@ impl Security {
         &self,
         change: impl FnOnce(&mut AdminSettings),
     ) -> Result<AdminSettings, ApiError> {
+        let lease = self.settings_lease()?;
+        self.update_settings_locked(&lease, change)
+    }
+
+    /// Persist settings while reusing a root edit's held cross-instance lease.
+    pub(crate) fn update_settings_locked(
+        &self,
+        _lease: &SettingsLease,
+        change: impl FnOnce(&mut AdminSettings),
+    ) -> Result<AdminSettings, ApiError> {
         let _guard = self
             .write_lock
             .lock()
@@ -948,6 +1032,11 @@ impl Security {
         if let Some(dir) = &self.dir {
             write_private_json(&dir.join(SETTINGS_FILE), &next)?;
         }
+        self.apply_settings(next.clone());
+        Ok(next)
+    }
+
+    fn apply_settings(&self, next: AdminSettings) {
         let tls_changed = {
             let mut state = self.write();
             let changed = state.settings.tls != next.tls;
@@ -961,7 +1050,6 @@ impl Security {
                 *tls = effective;
             });
         }
-        Ok(next)
     }
 
     fn persist_tokens(&self) -> Result<(), ApiError> {

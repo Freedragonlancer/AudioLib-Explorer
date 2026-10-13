@@ -27,8 +27,10 @@ export struct CrumbRow { name: string }
 // 1 = a saved server profile. status-kind: 0 unknown, 1 ok, 3 failed.
 export struct SourceRow { id: string, name: string, subtitle: string, kind: int, active: bool, status: string, status-kind: int }
 // One server root on the 服务器音效库 page (GET /roots).
-export struct ServerRootRow { name: string, status: string, offline: bool, scanning: bool, file-count: string, missing: string, last-scan: string, message: string }
+export struct ServerRootRow { name: string, path: string, status: string, offline: bool, scanning: bool, file-count: string, missing: string, last-scan: string, message: string }
 export struct DataRootRow { name: string, server-path: string, server-url: string, url: string, source: string, status: string, offline: bool }
+export struct RemoteFolderRow { name: string, path: string }
+export struct RemoteBreadcrumbRow { name: string, path: string }
 
 component Action inherits Rectangle {
     in property <string> label;
@@ -66,6 +68,37 @@ component Action inherits Rectangle {
 }
 
 component Label inherits Text { color: Theme.dim; font-size: 11px; vertical-alignment: center; }
+
+// A remote directory is a keyboard-accessible navigation action, never a local path.
+component RemoteFolderAction inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 36px;
+    min-width: 180px;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: folder-focus;
+    border-radius: 4px;
+    background: folder-hit.has-hover || folder-focus.has-focus ? Theme.hover : transparent;
+    border-width: folder-focus.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    opacity: root.enabled ? 1 : 0.42;
+    Rectangle { x: 12px; y: 12px; width: 7px; height: 4px; border-width: 1px; border-color: Theme.dim; border-radius: 1px; }
+    Rectangle { x: 12px; y: 15px; width: 16px; height: 11px; background: Theme.panel; border-width: 1px; border-color: Theme.dim; border-radius: 2px; }
+    Text { x: 40px; width: parent.width - 52px; height: parent.height; text: root.label; color: Theme.ink; font-size: 12px; vertical-alignment: center; overflow: elide; }
+    folder-focus := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            reject
+        }
+    }
+    folder-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { folder-focus.focus(); root.clicked(); } }
+}
 
 // Source tags remain selectable while compact views avoid TextEdit's large padding.
 component SourceTags inherits Rectangle {
@@ -341,6 +374,16 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-visible: false;
     in-out property <bool> about-visible: false;
     in-out property <bool> help-visible: false;
+    in property <bool> debug-enabled: false;
+    in-out property <bool> debug-visible: false;
+    in property <bool> debug-busy: false;
+    in-out property <string> debug-title: "";
+    in-out property <string> debug-steps: "";
+    in-out property <string> debug-report: "";
+    in-out property <string> debug-issue-url: "";
+    in property <string> debug-feedback: "";
+    callback debug-mode-requested(bool);
+    callback debug-action-requested(int);
     in-out property <int> backend-index: 0;
     in property <[string]> device-names;
     in-out property <int> device-index: 0;
@@ -472,7 +515,7 @@ export component AppWindow inherits Window {
     in-out property <bool> ds-token-clear: false;
     in-out property <bool> ds-dirty: false;
     in property <string> ds-last-test: "";
-    // 服务器音效库 page (read-only this round).
+    // 服务器音效库 page, including paths owned by the selected server.
     in property <[ServerRootRow]> sm-roots;
     in property <string> sm-library-status: "";
     in property <bool> sm-library-error: false;
@@ -485,6 +528,25 @@ export component AppWindow inherits Window {
     // Server management on 服务器音效库 (B2): active server only, gated on can_manage.
     in property <[string]> sm-root-names;
     in property <bool> sm-scan-paused: false;
+    in property <bool> sm-root-controls: false;
+    in-out property <int> sm-root-selected: -1;
+    in-out property <bool> sm-root-form: false;
+    in-out property <bool> sm-root-editing: false;
+    in-out property <string> sm-root-name: "";
+    in-out property <string> sm-root-path: "";
+    in property <string> sm-root-message: "";
+    in-out property <bool> sm-fs-visible: false;
+    in property <bool> sm-fs-busy: false;
+    in property <string> sm-fs-path: "";
+    in property <string> sm-fs-parent: "";
+    in property <string> sm-fs-error: "";
+    in property <[RemoteFolderRow]> sm-fs-rows;
+    in property <[RemoteBreadcrumbRow]> sm-fs-breadcrumbs;
+    in property <bool> sm-fs-can-select: false;
+    private property <string> sm-fs-path-draft: "";
+    changed sm-fs-path => { root.sm-fs-path-draft = root.sm-fs-path; }
+    property <bool> sm-root-ready: root.sm-manageable && root.sm-root-controls && !root.sm-manage-busy && !root.sm-scan-active && !root.library-busy && !root.ds-syncing;
+    property <bool> sm-root-has-selection: root.sm-root-selected >= 0 && root.sm-root-selected < root.sm-roots.length;
     // A scan start/control request is in flight.
     in property <bool> sm-manage-busy: false;
     in property <string> sm-manage-message: "";
@@ -494,7 +556,7 @@ export component AppWindow inherits Window {
     in-out property <string> sm-scan-subpath: "";
     // 0 增量 (incremental), 1 完整 (full).
     in-out property <int> sm-scan-mode: 0;
-    // Inline removal confirmation: 0 none, 1 移除所选记录, 2 删除目录记录.
+    // Inline removal confirmation: 0 none, 1 records, 2 folder records, 5 root.
     in-out property <int> sm-confirm: 0;
     property <bool> sm-manageable: root.sm-active && root.remote-mode && root.sm-can-manage && !root.remote-writes-blocked;
     property <string> sm-manage-note: !root.sm-active ? (root.chinese ? "只有当前数据源可以管理；请先切换到此数据源。" : "Only the active source can be managed; switch to this source first.") : (!root.remote-mode ? (root.chinese ? "快照尚未打开：同步完成后才能管理。" : "The snapshot is not open yet: manage after the sync.") : (!root.sm-can-manage ? (root.sm-capabilities != "" ? (root.chinese ? "服务器不允许本机管理，只能查看。" : "The server does not allow management from this PC; view only.") + " " + root.sm-capabilities : (root.chinese ? "尚未取得服务器的管理权限信息（/capabilities），只能查看。" : "No management information from the server (/capabilities) yet; view only.")) : ""));
@@ -521,10 +583,17 @@ export component AppWindow inherits Window {
     callback sm-scan-control-requested(int);
     callback sm-remove-records-requested();
     callback sm-remove-folder-requested();
+    callback sm-root-add-requested();
+    callback sm-root-edit-requested();
+    callback sm-root-save-requested();
+    callback sm-root-delete-requested();
+    callback sm-fs-open-requested();
+    callback sm-fs-navigate(string);
+    callback sm-fs-closed();
     // [保存] in the unsaved-edit prompt; the argument is the row to open afterwards.
     callback sm-pending-save-requested(int);
     public function close-library-manager() {
-        if root.ds-applying || root.library-busy || root.closing { return; }
+        if root.ds-applying || root.library-busy || root.sm-manage-busy || root.closing { return; }
         if root.ds-dirty && root.sm-server {
             root.sm-pending-select = -3;
         } else {
@@ -542,7 +611,7 @@ export component AppWindow inherits Window {
     }
     // Select a source row (click, Up/Down, 添加服务器): unsaved 连接 edits prompt first.
     public function sm-select-row(index: int) {
-        if index == root.sm-selected || root.ds-applying || root.library-busy {
+        if index == root.sm-selected || root.ds-applying || root.library-busy || root.sm-manage-busy {
             return;
         }
         if root.ds-dirty && root.sm-server {
@@ -556,6 +625,9 @@ export component AppWindow inherits Window {
         root.sm-confirm-delete = false;
         root.sm-confirm = 0;
         root.sm-scan-form = false;
+        root.sm-root-form = false;
+        root.sm-root-selected = -1;
+        root.close-remote-folder();
         root.sm-selected = index;
         root.sm-page = 0;
         if index < 0 {
@@ -586,6 +658,8 @@ export component AppWindow inherits Window {
         root.sm-pending-select = -2;
         root.sm-confirm = 0;
         root.sm-scan-form = false;
+        root.sm-root-form = false;
+        root.close-remote-folder();
         root.library-visible = true;
         root.sm-open-requested(0);
         root.schedule-modal-focus();
@@ -614,8 +688,8 @@ export component AppWindow inherits Window {
     changed selected-id => { root.notes-visible = false; root.source-metadata-visible = false; }
     // A native menu remains outside the in-window overlays. Guard its items and
     // shortcuts too, so modal dialogs cannot launch overlapping operations.
-    property <bool> menu-ready: !root.startup-busy && !root.closing && !root.library-busy && !root.library-visible && !root.confirmation-visible && !root.batch-visible && !root.import-visible && !root.settings-visible && !root.peaks-visible && !root.about-visible && !root.help-visible;
-    property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible;
+    property <bool> menu-ready: !root.startup-busy && !root.closing && !root.library-busy && !root.library-visible && !root.confirmation-visible && !root.batch-visible && !root.import-visible && !root.settings-visible && !root.peaks-visible && !root.about-visible && !root.help-visible && !root.debug-visible;
+    property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible;
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
@@ -633,6 +707,8 @@ export component AppWindow inherits Window {
         root.sm-pending-select = -2;
         root.sm-confirm = 0;
         root.sm-scan-form = false;
+        root.sm-root-form = false;
+        root.close-remote-folder();
         root.library-visible = true;
         root.library-action(0);
         root.sm-open-requested(focus);
@@ -655,7 +731,10 @@ export component AppWindow inherits Window {
     }
     function dismiss-modal() {
         if root.closing || root.library-busy { return; }
-        if root.peaks-visible { root.peaks-visible = false; }
+        if root.sm-fs-visible { root.close-remote-folder(); }
+        else if root.library-visible && root.sm-root-form && !root.sm-manage-busy { root.sm-root-form = false; }
+        else if root.library-visible && root.sm-confirm == 5 && !root.sm-manage-busy { root.sm-confirm = 0; }
+        else if root.peaks-visible { root.peaks-visible = false; }
         else if root.confirmation-visible { root.confirmation-requested(false); }
         else if root.batch-visible { root.batch-visible = false; }
         else if root.library-visible && !root.ds-applying {
@@ -665,17 +744,28 @@ export component AppWindow inherits Window {
         else if root.import-visible { root.cancel-scan-dialog(); }
         else if root.about-visible { root.about-visible = false; }
         else if root.help-visible { root.help-visible = false; }
+        else if root.debug-visible { root.debug-visible = false; }
         else if root.settings-visible && !root.output-applying { root.settings-visible = false; }
         else { root.filters-visible = false; }
     }
     function focus-library-modal() {
-        if root.confirmation-visible && !root.library-busy && !root.closing {
+        if root.debug-visible && !root.closing {
+            debug-close-action.focus();
+        } else if root.sm-fs-visible && !root.closing {
+            remote-folder-cancel-action.focus();
+        } else if root.confirmation-visible && !root.library-busy && !root.closing {
             confirmation-cancel-action.focus();
         } else if root.import-visible && !root.library-busy && !root.closing {
             if root.scanning || root.scan-browse-busy { scan-cancel-action.focus(); }
             else { scan-path-input.focus(); }
         } else if root.library-visible && !root.confirmation-visible && !root.library-busy && !root.closing {
             library-close-action.focus();
+        }
+    }
+    function close-remote-folder() {
+        if root.sm-fs-visible {
+            root.sm-fs-visible = false;
+            root.sm-fs-closed();
         }
     }
     public function show-missing-files() {
@@ -717,15 +807,23 @@ export component AppWindow inherits Window {
     changed selected-row => { root.reveal-selected-row(); }
     changed rows => { result-list.viewport-y = 0px; root.reveal-selected-row(); }
     changed help-visible => { if !root.help-visible && !root.background-blocked { results-focus.focus(); } }
+    changed debug-visible => { if root.debug-visible { root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed import-visible => { if root.import-visible { root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed library-visible => {
         if root.library-visible { root.schedule-modal-focus(); }
         else {
             root.sm-confirm-delete = false;
+            root.sm-root-form = false;
+            root.close-remote-folder();
             root.sm-closed();
             if !root.background-blocked { results-focus.focus(); }
         }
     }
+    changed sm-fs-visible => {
+        if root.sm-fs-visible { root.sm-fs-path-draft = root.sm-fs-path; }
+        if root.library-visible { root.schedule-modal-focus(); }
+    }
+    changed sm-root-form => { if root.library-visible { root.schedule-modal-focus(); } }
     changed confirmation-visible => {
         if root.confirmation-visible {
             // Controller confirmations arrive outside menu activation. Focus safe
@@ -758,6 +856,10 @@ export component AppWindow inherits Window {
     init => { Palette.color-scheme = ColorScheme.dark; root.content-width = self.width - 32px; }
     MenuBar {
         Menu { title: root.chinese ? "文件" : "File"; enabled: root.menu-ready;
+            MenuItem { title: root.chinese ? "Debug 模式 · 记录诊断" : "Debug mode · capture diagnostics"; enabled: root.menu-ready && !root.debug-busy; checkable: true; checked: root.debug-enabled; activated => { root.debug-mode-requested(!root.debug-enabled); } }
+            MenuItem { title: root.chinese ? "反馈问题 / 诊断报告…" : "Report a bug / diagnostics…"; enabled: root.menu-ready; activated => { root.debug-visible = true; } }
+            MenuItem { title: root.chinese ? "打开日志目录" : "Open log folder"; enabled: root.menu-ready; activated => { root.debug-action-requested(2); } }
+            MenuSeparator { }
             MenuItem { title: root.chinese ? "退出" : "Exit"; enabled: root.menu-ready; shortcut: @keys(Control + Q); activated => { root.exit-requested(); } }
         }
         Menu { title: root.chinese ? "编辑" : "Edit"; enabled: root.menu-ready;
@@ -1338,6 +1440,46 @@ export component AppWindow inherits Window {
             }
         }
     }
+    debug-dialog := FocusScope {
+        visible: root.debug-visible;
+        enabled: root.debug-visible;
+        focus-on-click: false;
+        capture-key-pressed(event) => {
+            if event.text == Key.Escape { root.debug-visible = false; return accept; }
+            reject
+        }
+        key-pressed(event) => { accept }
+        key-released(event) => { accept }
+        Rectangle { background: Theme.overlay;
+            TouchArea { }
+            Rectangle { width: min(740px, parent.width - 32px); height: min(640px, parent.height - 32px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px; border-width: 1px; border-color: Theme.border;
+                VerticalLayout { padding: 20px; spacing: 8px;
+                    Text { text: root.chinese ? "反馈问题与诊断日志" : "Bug report and diagnostics"; color: Theme.ink; font-size: 22px; font-weight: 600; }
+                    Label { height: 36px; wrap: word-wrap; text: root.chinese ? "1. 开启 Debug → 关闭此窗口并复现 → 2. 返回生成报告 → 3. 检查并提交。开关仅在本次运行有效。" : "1. Enable Debug, close this panel and reproduce → 2. Generate a report → 3. Review and submit. Capture lasts for this run only."; }
+                    HorizontalLayout { height: 32px; spacing: 10px;
+                        Action { width: 190px; enabled: !root.debug-busy; active: root.debug-enabled; label: root.debug-enabled ? (root.chinese ? "Debug 已开启 · 停止记录" : "Debug on · stop capture") : (root.chinese ? "开启 Debug 记录" : "Enable Debug capture"); clicked => { root.debug-mode-requested(!root.debug-enabled); } }
+                        Label { horizontal-stretch: 1; wrap: word-wrap; text: root.chinese ? "仅记录脱敏状态；不自动上传普通日志。" : "Captures safe state fields; raw logs are not uploaded."; }
+                    }
+                    LineEdit { height: 32px; enabled: !root.debug-busy; input-label: root.chinese ? "问题标题" : "Issue title"; text <=> root.debug-title; placeholder-text: root.chinese ? "例如：播放后搜索结果丢失" : "e.g. Search results disappear after playback"; edited => { root.debug-report = ""; root.debug-issue-url = ""; } }
+                    Label { text: root.chinese ? "复现步骤、预期行为和实际行为（会公开到 GitHub，请勿填写凭据或私密路径）" : "Steps, expected and actual behavior (public on GitHub; omit credentials and private paths)"; wrap: word-wrap; }
+                    TextEdit { height: 64px; enabled: !root.debug-busy; accessible-label: root.chinese ? "复现步骤" : "Reproduction steps"; text <=> root.debug-steps; edited => { root.debug-report = ""; root.debug-issue-url = ""; } }
+                    HorizontalLayout { height: 32px; spacing: 8px;
+                        Action { width: 170px; enabled: !root.debug-busy; label: root.debug-busy ? (root.chinese ? "正在生成…" : "Generating…") : (root.chinese ? "生成并保存脱敏报告" : "Generate and save report"); clicked => { root.debug-action-requested(0); } }
+                        Action { width: 126px; label: root.chinese ? "打开日志目录" : "Open log folder"; clicked => { root.debug-action-requested(2); } }
+                        Label { horizontal-stretch: 1; text: root.debug-enabled ? (root.chinese ? "正在记录" : "Capturing") : (root.chinese ? "Debug 已关闭" : "Debug off"); color: root.debug-enabled ? Theme.accent : Theme.dim; }
+                    }
+                    TextEdit { vertical-stretch: 1; min-height: 70px; accessible-label: root.chinese ? "脱敏报告预览" : "Diagnostic report preview"; read-only: true; font-size: 11px; text: root.debug-report; }
+                    Label { height: 40px; wrap: word-wrap; text: root.debug-feedback == "" ? (root.chinese ? "报告不包含数据库、WAV、搜索原文或服务器凭据。GitHub 页面需登录并最后点击创建 Issue。" : "No database, WAV, search text or server credentials are included. Sign in on GitHub and click Create issue to submit.") : root.debug-feedback; }
+                    HorizontalLayout { height: 34px; spacing: 8px;
+                        Action { width: 120px; enabled: root.debug-report != "" && !root.debug-busy; label: root.chinese ? "复制完整报告" : "Copy full report"; clicked => { root.copy-text(root.debug-report); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        debug-close-action := Action { width: 84px; label: root.chinese ? "关闭" : "Close"; clicked => { root.debug-visible = false; } }
+                        Action { width: 180px; primary: true; enabled: root.debug-report != "" && root.debug-issue-url != "" && !root.debug-busy; label: root.chinese ? "在 GitHub 提交问题…" : "Open GitHub issue…"; clicked => { root.copy-text(root.debug-report); root.debug-action-requested(1); } }
+                    }
+                }
+            }
+        }
+    }
     if root.help-visible: HelpPanel {
         chinese: root.chinese;
         close => { root.help-visible = false; }
@@ -1358,7 +1500,7 @@ export component AppWindow inherits Window {
     }
     library-dialog := FocusScope {
         visible: root.library-visible;
-        enabled: root.library-visible;
+        enabled: root.library-visible && !root.sm-fs-visible;
         focus-on-click: false;
         focus-on-tab-navigation: false;
         property <bool> reverse-wrap: false;
@@ -1386,7 +1528,7 @@ export component AppWindow inherits Window {
             VerticalLayout { padding: 20px; spacing: 10px;
                 HorizontalLayout { height: 32px; spacing: 8px;
                     Text { horizontal-stretch: 1; vertical-alignment: center; text: root.chinese ? "音效库管理" : "Sound library management"; color: Theme.ink; font-size: 22px; font-weight: 600; }
-                    library-close-action := Action { width: 60px; enabled: !root.library-busy && !root.ds-applying; label: root.chinese ? "关闭" : "Close"; clicked => { root.close-library-manager(); } }
+                    library-close-action := Action { width: 60px; enabled: !root.library-busy && !root.ds-applying && !root.sm-manage-busy; label: root.chinese ? "关闭" : "Close"; clicked => { root.close-library-manager(); } }
                 }
                 HorizontalLayout { height: 34px; spacing: 8px;
                     Action { width: 160px; active: !root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "本地设置" : "Local settings"; clicked => { root.sm-select-row(0); } }
@@ -1643,7 +1785,7 @@ export component AppWindow inherits Window {
                             if root.library-visible && root.sm-server && root.sm-page == 1: VerticalLayout { width: parent.width; height: parent.height; spacing: 8px;
                                 HorizontalLayout { height: 30px; spacing: 8px;
                                     Label { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; font-size: 11px; color: root.sm-library-error ? Theme.warning : Theme.dim; text: root.sm-library-status; }
-                                    Action { width: 84px; enabled: !root.sm-library-loading; label: root.sm-library-loading ? (root.chinese ? "读取中…" : "Loading…") : (root.chinese ? "刷新" : "Reload"); clicked => { root.sm-library-refresh-requested(); } }
+                                    Action { width: 84px; enabled: !root.sm-library-loading && !root.sm-manage-busy && !root.sm-root-form && root.sm-confirm == 0; label: root.sm-library-loading ? (root.chinese ? "读取中…" : "Loading…") : (root.chinese ? "刷新" : "Reload"); clicked => { root.sm-library-refresh-requested(); } }
                                 }
                                 Label { wrap: word-wrap; font-size: 11px; color: root.sm-can-manage ? Theme.ink : Theme.dim; text: root.sm-capabilities; }
                                 ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
@@ -1656,23 +1798,78 @@ export component AppWindow inherits Window {
                                             Text { width: 56px; text: root.chinese ? "缺失" : "Missing"; color: Theme.muted; font-size: 10px; }
                                             Text { horizontal-stretch: 1; text: root.chinese ? "上次扫描" : "Last scan"; color: Theme.muted; font-size: 10px; }
                                         }
-                                        for row in root.sm-roots: VerticalLayout { spacing: 1px;
-                                            HorizontalLayout { height: 22px; spacing: 8px;
-                                                Text { width: 150px; text: row.name; color: Theme.ink; font-size: 11px; overflow: elide; vertical-alignment: center; }
-                                                Text { width: 96px; text: row.status; color: row.offline ? Theme.warning : (row.scanning ? Theme.accent : Theme.ink); font-size: 11px; overflow: elide; vertical-alignment: center; }
-                                                Text { width: 72px; text: row.file-count; color: Theme.ink; font-size: 11px; vertical-alignment: center; }
-                                                Text { width: 56px; text: row.missing; color: Theme.ink; font-size: 11px; vertical-alignment: center; }
-                                                Text { horizontal-stretch: 1; text: row.last-scan; color: Theme.dim; font-size: 11px; overflow: elide; vertical-alignment: center; }
+                                        for row[index] in root.sm-roots: VerticalLayout { spacing: 2px;
+                                            Rectangle { height: 52px; border-radius: 4px; background: root.sm-root-selected == index ? Theme.selected : (root-hit.has-hover ? Theme.hover : Theme.raised);
+                                                accessible-role: button;
+                                                accessible-label: row.name + " · " + row.path;
+                                                accessible-enabled: !root.sm-manage-busy && !root.sm-root-form && root.sm-confirm == 0;
+                                                accessible-action-default => { if !root.sm-manage-busy && !root.sm-root-form && root.sm-confirm == 0 { root.sm-root-selected = index; } }
+                                                forward-focus: root-row-focus;
+                                                border-width: root-row-focus.has-focus ? 1px : 0px;
+                                                border-color: Theme.accent;
+                                                VerticalLayout { padding-left: 8px; padding-right: 8px; padding-top: 4px; padding-bottom: 4px; spacing: 3px;
+                                                    HorizontalLayout { height: 22px; spacing: 8px;
+                                                        Text { width: 142px; text: row.name; color: Theme.ink; font-size: 11px; overflow: elide; vertical-alignment: center; }
+                                                        Text { width: 96px; text: row.status; color: row.offline ? Theme.warning : (row.scanning ? Theme.accent : Theme.ink); font-size: 11px; overflow: elide; vertical-alignment: center; }
+                                                        Text { width: 72px; text: row.file-count; color: Theme.ink; font-size: 11px; vertical-alignment: center; }
+                                                        Text { width: 56px; text: row.missing; color: Theme.ink; font-size: 11px; vertical-alignment: center; }
+                                                        Text { horizontal-stretch: 1; text: row.last-scan; color: Theme.dim; font-size: 11px; overflow: elide; vertical-alignment: center; }
+                                                    }
+                                                    Text { height: 16px; text: row.path; color: Theme.dim; font-size: 10px; overflow: elide; }
+                                                }
+                                                root-row-focus := FocusScope {
+                                                    enabled: !root.sm-manage-busy && !root.sm-root-form && root.sm-confirm == 0;
+                                                    focus-on-click: false;
+                                                    key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.sm-root-selected = index; return accept; } reject }
+                                                }
+                                                root-hit := TouchArea { enabled: !root.sm-manage-busy && !root.sm-root-form && root.sm-confirm == 0; mouse-cursor: pointer; clicked => { root-row-focus.focus(); root.sm-root-selected = index; } }
                                             }
                                             if row.message != "": Text { text: row.message; color: Theme.warning; font-size: 10px; wrap: word-wrap; }
                                         }
                                         if root.sm-roots.length == 0: Label { font-size: 11px; text: root.sm-library-loading ? (root.chinese ? "正在读取服务器根目录…" : "Loading server roots…") : (root.chinese ? "没有根目录信息。" : "No root information."); }
+                                        if root.sm-root-controls && !root.sm-root-form && root.sm-confirm != 5: HorizontalLayout { height: 30px; spacing: 6px;
+                                            Action { width: 124px; primary: true; enabled: root.sm-root-ready; label: root.chinese ? "＋ 添加音效库" : "+ Add sound root"; clicked => { root.sm-confirm = 0; root.sm-scan-form = false; root.sm-root-add-requested(); } }
+                                            Action { width: 130px; enabled: root.sm-root-ready && root.sm-root-has-selection; label: root.chinese ? "修改资源路径…" : "Edit resource path…"; clicked => { root.sm-confirm = 0; root.sm-scan-form = false; root.sm-root-edit-requested(); } }
+                                            Action { width: 128px; enabled: root.sm-root-ready && root.sm-root-has-selection; label: root.chinese ? "删除音效库…" : "Delete sound root…"; clicked => { root.sm-scan-form = false; root.sm-confirm = 5; } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                        if root.sm-root-form: Rectangle { border-radius: 5px; background: Theme.raised;
+                                            VerticalLayout { padding: 12px; spacing: 7px;
+                                                Text { height: 22px; text: root.sm-root-editing ? (root.chinese ? "修改音效库资源路径" : "Edit sound root resource path") : (root.chinese ? "添加服务器音效库" : "Add server sound root"); color: Theme.ink; font-size: 13px; font-weight: 600; }
+                                                HorizontalLayout { height: 30px; spacing: 8px;
+                                                    Label { width: 76px; text: root.chinese ? "音效库名称" : "Root name"; }
+                                                    remote-root-name-input := LineEdit { horizontal-stretch: 1; enabled: !root.sm-manage-busy && !root.sm-root-editing; input-label: root.chinese ? "音效库名称" : "Root name"; text <=> root.sm-root-name; placeholder-text: root.chinese ? "例如 Foley、Ambience" : "For example Foley, Ambience"; }
+                                                }
+                                                HorizontalLayout { height: 30px; spacing: 8px;
+                                                    Label { width: 76px; text: root.chinese ? "服务器目录" : "Server folder"; }
+                                                    remote-root-path-input := LineEdit { horizontal-stretch: 1; enabled: !root.sm-manage-busy; input-label: root.chinese ? "服务器上的音效资源目录" : "Audio resource folder on the server"; text <=> root.sm-root-path; placeholder-text: root.chinese ? "输入服务器上的绝对目录路径，或浏览选择" : "Enter an absolute server folder path or browse"; }
+                                                    Action { width: 82px; enabled: root.sm-root-ready; label: root.chinese ? "浏览…" : "Browse…"; clicked => { root.sm-fs-open-requested(); } }
+                                                }
+                                                Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.sm-root-editing ? (root.chinese ? "目标目录必须已有相同相对路径的 WAV 文件。服务器验证后更新数据库资源路径，保留文件 id、Metadata 和标注。" : "The target must already contain the WAV files at the same relative paths. After verification, the server updates database resource paths and retains file ids, Metadata and annotations.") : (root.chinese ? "选择远程服务器上的现有目录。添加后可开始扫描，将 WAV 文件索引到服务器音效库。" : "Select an existing folder on the remote server. After adding it, start a scan to index its WAV files into the server library."); }
+                                                if root.sm-root-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.sm-root-message; }
+                                                HorizontalLayout { height: 30px; spacing: 6px;
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                    Action { width: 72px; enabled: !root.sm-manage-busy; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-root-form = false; } }
+                                                    Action { width: 110px; primary: true; enabled: root.sm-root-ready && root.sm-root-name != "" && root.sm-root-path != ""; label: root.sm-manage-busy ? (root.chinese ? "保存中…" : "Saving…") : (root.chinese ? "保存音效库" : "Save sound root"); clicked => { root.sm-root-save-requested(); } }
+                                                }
+                                            }
+                                        }
+                                        if root.sm-confirm == 5: Rectangle { border-radius: 5px; background: Theme.raised;
+                                            VerticalLayout { padding: 12px; spacing: 7px;
+                                                Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.sm-root-has-selection ? (root.chinese ? "删除服务器音效库「" + root.sm-roots[root.sm-root-selected].name + "」？将删除根目录配置、该目录下的数据库记录及标注。服务器上的目录和 WAV 文件不会改动。" : "Delete the server sound root \"" + root.sm-roots[root.sm-root-selected].name + "\"? Its root configuration, indexed records and annotations will be removed. Folders and WAV files on the server are untouched.") : (root.chinese ? "请选择要删除的音效库。" : "Select a sound root to delete."); }
+                                                HorizontalLayout { height: 30px; spacing: 6px;
+                                                    Action { width: 126px; primary: true; enabled: root.sm-root-ready && root.sm-root-has-selection; label: root.chinese ? "确认删除音效库" : "Delete sound root"; clicked => { root.sm-root-delete-requested(); root.sm-confirm = 0; } }
+                                                    Action { width: 72px; enabled: !root.sm-manage-busy; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-confirm = 0; } }
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                }
+                                            }
+                                        }
                                         Rectangle { height: 1px; background: Theme.border; }
                                         Text { height: 22px; text: root.chinese ? "服务器扫描" : "Server scan"; color: Theme.ink; font-size: 14px; font-weight: 600; }
                                         Text { text: root.sm-scan-text; color: root.sm-scan-active ? Theme.accent : Theme.dim; font-size: 11px; wrap: word-wrap; }
                                         if root.sm-manage-note != "": Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.sm-manage-note; }
                                         if !root.sm-scan-form: HorizontalLayout { height: 30px; spacing: 6px;
-                                            Action { width: 104px; enabled: root.sm-manageable && !root.sm-scan-active && !root.sm-manage-busy && !root.library-busy && root.sm-root-names.length > 0; label: root.chinese ? "开始扫描…" : "Start a scan…"; clicked => { root.sm-confirm = 0; root.sm-scan-form = true; } }
+                                            Action { width: 104px; enabled: root.sm-manageable && !root.sm-scan-active && !root.sm-manage-busy && !root.library-busy && !root.sm-root-form && root.sm-root-names.length > 0; label: root.chinese ? "开始扫描…" : "Start a scan…"; clicked => { root.sm-confirm = 0; root.sm-scan-form = true; } }
                                             Action { width: 72px; enabled: root.sm-manageable && root.sm-scan-active && !root.sm-manage-busy; label: root.sm-scan-paused ? (root.chinese ? "继续" : "Resume") : (root.chinese ? "暂停" : "Pause"); clicked => { root.sm-scan-control-requested(root.sm-scan-paused ? 1 : 0); } }
                                             Action { width: 84px; enabled: root.sm-manageable && root.sm-scan-active && !root.sm-manage-busy; label: root.chinese ? "取消扫描" : "Cancel scan"; clicked => { root.sm-scan-control-requested(2); } }
                                             Rectangle { horizontal-stretch: 1; }
@@ -1708,11 +1905,11 @@ export component AppWindow inherits Window {
                                         Label { wrap: word-wrap; font-size: 11px; text: root.chinese ? "只删除服务器音效库里的记录（含标签、备注等标注），服务器上的 WAV 文件不会改动；重新扫描会以新的 id 把它们加回。扫描进行中不能移除。" : "Only removes records (with their tags and notes) from the server library; WAV files on the server are untouched, and a rescan adds them back with new ids. Not possible while a scan runs."; }
                                         Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: (root.chinese ? "主列表已选 " + root.checked-count + " 个记录 · 目录：" : "Main list: " + root.checked-count + " records selected · Folder: ") + (root.selected-folder-path != "" ? root.selected-folder-path : (root.chinese ? "未在目录树中选择" : "none selected in the folder tree")); }
                                         if root.sm-confirm == 0: HorizontalLayout { height: 30px; spacing: 6px;
-                                            Action { width: 140px; enabled: root.sm-manageable && !root.sm-scan-active && !root.library-busy && root.checked-count > 0; label: root.chinese ? "移除所选记录…" : "Remove checked records…"; clicked => { root.sm-scan-form = false; root.sm-confirm = 1; } }
-                                            Action { width: 120px; enabled: root.sm-manageable && !root.sm-scan-active && !root.library-busy && root.selected-folder-path != ""; label: root.chinese ? "删除目录记录…" : "Remove folder records…"; clicked => { root.sm-scan-form = false; root.sm-confirm = 2; } }
+                                            Action { width: 140px; enabled: root.sm-manageable && !root.sm-scan-active && !root.sm-manage-busy && !root.sm-root-form && !root.library-busy && root.checked-count > 0; label: root.chinese ? "移除所选记录…" : "Remove checked records…"; clicked => { root.sm-scan-form = false; root.sm-confirm = 1; } }
+                                            Action { width: 120px; enabled: root.sm-manageable && !root.sm-scan-active && !root.sm-manage-busy && !root.sm-root-form && !root.library-busy && root.selected-folder-path != ""; label: root.chinese ? "删除目录记录…" : "Remove folder records…"; clicked => { root.sm-scan-form = false; root.sm-confirm = 2; } }
                                             Rectangle { horizontal-stretch: 1; }
                                         }
-                                        if root.sm-confirm != 0: VerticalLayout { spacing: 6px;
+                                        if root.sm-confirm == 1 || root.sm-confirm == 2: VerticalLayout { spacing: 6px;
                                             Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.sm-confirm == 1 ? (root.chinese ? "从服务器音效库移除所选的 " + root.checked-count + " 个记录？只删除库记录及其标注，服务器上的 WAV 文件不会改动；重新扫描会以新的 id 把它们加回（标注不会恢复）。" : "Remove the " + root.checked-count + " selected records from the server library? Only the library records and their annotations are removed; WAV files on the server are untouched, and a rescan adds them back with new ids (annotations are not restored).") : (root.chinese ? "删除目录「" + root.selected-folder-path + "」及其子目录在服务器音效库中的全部记录？只删除库记录及其标注，服务器上的目录和 WAV 文件不会改动；重新扫描会以新的 id 把它们加回（标注不会恢复）。" : "Remove all records of the folder \"" + root.selected-folder-path + "\" and its subfolders from the server library? Only the library records and their annotations are removed; folders and WAV files on the server are untouched, and a rescan adds them back with new ids (annotations are not restored)."); }
                                             HorizontalLayout { height: 30px; spacing: 6px;
                                                 Action { width: 120px; primary: true; enabled: root.sm-manageable && !root.sm-scan-active && !root.library-busy; label: root.sm-confirm == 1 ? (root.chinese ? "确认移除" : "Remove records") : (root.chinese ? "确认删除" : "Remove folder records"); clicked => { if root.sm-confirm == 1 { root.sm-remove-records-requested(); } else { root.sm-remove-folder-requested(); } root.sm-confirm = 0; } }
@@ -1731,6 +1928,75 @@ export component AppWindow inherits Window {
         }
         // Wrap forward traversal after all library controls, including expanded maintenance.
         library-tab-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !library-dialog.reverse-wrap { library-close-action.focus(); } } }
+    }
+    remote-folder-dialog := FocusScope {
+        visible: root.library-visible && root.sm-fs-visible;
+        enabled: root.library-visible && root.sm-fs-visible;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        property <bool> reverse-wrap: false;
+        capture-key-pressed(event) => {
+            if event.text == Key.Escape { root.close-remote-folder(); return accept; }
+            if root.closing { return accept; }
+            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && remote-folder-close-action.has-focus {
+                self.reverse-wrap = true;
+                remote-folder-tab-end.focus();
+                self.reverse-wrap = false;
+                return reject;
+            }
+            reject
+        }
+        key-pressed(event) => {
+            if event.text == Key.Tab || event.text == Key.Backtab { return reject; }
+            accept
+        }
+        key-released(event) => { accept }
+        Rectangle { background: Theme.overlay;
+            TouchArea { }
+            Rectangle { width: min(root.width - 64px, 760px); height: min(root.height - 80px, 570px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 8px; border-width: 1px; border-color: Theme.border;
+                VerticalLayout { padding: 18px; spacing: 10px;
+                    HorizontalLayout { height: 30px; spacing: 10px;
+                        Text { horizontal-stretch: 1; text: root.chinese ? "选择远程文件夹" : "Choose remote folder"; color: Theme.ink; font-size: 18px; font-weight: 600; vertical-alignment: center; }
+                        remote-folder-close-action := Action { width: 36px; subtle: true; label: "×"; action-label: root.chinese ? "关闭远程文件夹选择" : "Close remote folder picker"; clicked => { root.close-remote-folder(); } }
+                    }
+                    Label { height: 18px; text: root.chinese ? "浏览已连接服务器上的文件夹。" : "Browse folders on the connected server."; color: Theme.muted; font-size: 11px; }
+                    Rectangle { height: 1px; background: Theme.border; }
+                    ScrollView { height: 34px; viewport-height: self.visible-height;
+                        HorizontalLayout { padding: 0px; spacing: 4px; alignment: start;
+                            Action { width: 70px; height: 30px; subtle: true; enabled: !root.sm-fs-busy; label: root.chinese ? "位置" : "Locations"; clicked => { root.sm-fs-navigate(""); } }
+                            for crumb in root.sm-fs-breadcrumbs: HorizontalLayout { spacing: 3px;
+                                Label { width: 10px; text: "›"; color: Theme.muted; }
+                                Action { width: max(36px, crumb-measure.preferred-width + 18px); height: 30px; subtle: true; enabled: !root.sm-fs-busy; label: crumb.name; clicked => { root.sm-fs-navigate(crumb.path); }
+                                    crumb-measure := Text { visible: false; text: crumb.name; font-size: 12px; }
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout { height: 30px; spacing: 6px;
+                        Action { width: 82px; enabled: !root.sm-fs-busy && root.sm-fs-parent != ""; label: root.chinese ? "↑ 上级" : "↑ Parent"; clicked => { root.sm-fs-navigate(root.sm-fs-parent); } }
+                        LineEdit { horizontal-stretch: 1; enabled: !root.sm-fs-busy; input-label: root.chinese ? "远程目录路径" : "Remote folder path"; text <=> root.sm-fs-path-draft; placeholder-text: root.chinese ? "服务器上的绝对目录路径" : "Absolute folder path on the server"; accepted => { if !root.sm-fs-busy && root.sm-fs-path-draft != "" { root.sm-fs-navigate(root.sm-fs-path-draft); } } }
+                        Action { width: 54px; enabled: !root.sm-fs-busy && root.sm-fs-path-draft != ""; label: root.chinese ? "前往" : "Go"; clicked => { root.sm-fs-navigate(root.sm-fs-path-draft); } }
+                    }
+                    Rectangle { height: 1px; background: Theme.border; }
+                    ScrollView { vertical-stretch: 1; min-height: 120px; viewport-width: self.visible-width;
+                        VerticalLayout { padding: 0px; spacing: 2px; alignment: start;
+                            if root.sm-fs-parent != "": RemoteFolderAction { label: ".."; enabled: !root.sm-fs-busy; clicked => { root.sm-fs-navigate(root.sm-fs-parent); } }
+                            for folder in root.sm-fs-rows: RemoteFolderAction { label: folder.name; enabled: !root.sm-fs-busy; clicked => { root.sm-fs-navigate(folder.path); } }
+                            if root.sm-fs-busy: Label { height: 32px; text: root.chinese ? "正在读取远程目录…" : "Loading remote folders…"; color: Theme.muted; }
+                            if !root.sm-fs-busy && root.sm-fs-rows.length == 0 && root.sm-fs-error == "": Label { height: 32px; text: root.chinese ? "此位置没有子文件夹。" : "No child folders at this location."; color: Theme.muted; }
+                        }
+                    }
+                    if root.sm-fs-error != "": Label { wrap: word-wrap; text: root.sm-fs-error; color: Theme.warning; font-size: 11px; }
+                    Rectangle { height: 1px; background: Theme.border; }
+                    HorizontalLayout { height: 32px; spacing: 8px;
+                        Text { horizontal-stretch: 1; text: root.sm-fs-path == "" ? (root.chinese ? "选择服务器位置" : "Choose a server location") : root.sm-fs-path; color: Theme.muted; font-size: 11px; overflow: elide; vertical-alignment: center; }
+                        remote-folder-cancel-action := Action { width: 72px; subtle: true; label: root.chinese ? "取消" : "Cancel"; clicked => { root.close-remote-folder(); } }
+                        Action { width: 112px; primary: true; enabled: root.sm-fs-can-select && !root.sm-fs-busy && root.sm-fs-path != ""; label: root.chinese ? "选择文件夹" : "Select folder"; clicked => { root.sm-root-path = root.sm-fs-path; root.close-remote-folder(); } }
+                    }
+                }
+            }
+        }
+        remote-folder-tab-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !remote-folder-dialog.reverse-wrap { remote-folder-close-action.focus(); } } }
     }
     if root.batch-visible: Rectangle { background: Theme.overlay;
         TouchArea { }

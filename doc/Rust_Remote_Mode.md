@@ -278,11 +278,12 @@ checks and owned-copy safety are retained;
 an unchanged prepared snapshot is reused without copying, downloading or rebuilding.
 
 Timeouts: connect 3 s, ordinary JSON responses 15 s (bodies 30 s), library statistics
-response/body 60 s, snapshot response 240 s and body
+response/body 60 s, root path PATCH and root DELETE responses up to 1 h (bodies 30 s),
+snapshot response 240 s and body
 up to 1 h, audio stream first byte 100 s (a NAS disk spinning up, see *Playback*). Errors map to localized messages for unreachable server, timeout, 401
 (invalid token, or "token required" when none is configured), 404, BUSY, validation and
-server `INTERNAL` errors. A server `408 TIMEOUT` (a non-streaming request that ran longer
-than the server's 30 s limit) is treated exactly like a client timeout: transient, shown as
+server `INTERNAL` errors. Root PATCH/DELETE have no generic server 30 s request limit.
+A server `408 TIMEOUT` (a request exceeding its applicable server time limit) is treated exactly like a client timeout: transient, shown as
 offline in polling (the cache stays in use and the check is retried), retried by the audio
 stream after its first response, never reported as a token or protocol problem.
 
@@ -447,13 +448,13 @@ A failed inspector save keeps the draft (shown as unsaved) like a failed local s
 Snapshot handoff requires successful persistence, except for the confirmed replacement
 recovery described above.
 
-**Refused (still read-only).** Scans and folder rescans, maintenance and restore, relinking,
-legacy import and annotation import, new/open local library and reveal in Explorer.
-Permitted record/folder removals and server scans instead use the management API below.
-The UI disables unsupported local operations with the suffix "(read-only in server mode)" /
+**Refused (still read-only).** Local scan workflows, maintenance and restore, individual
+file relinking, legacy import and annotation import, new/open local library and
+reveal in Explorer. Remote scans, removals and root path changes use the authorized
+server-management workflow below. The UI disables unavailable local actions with the suffix "(read-only in server mode)" /
 "（服务器模式只读）" (Slint 1.17 has no tooltip widget), the library dialog shows an
 explanatory line, and the controller refuses them independently of the UI
-(`refuse_remote_write`; `RemoteProvider` also refuses them as a `DataProvider`). The
+(`refuse_remote_write`; `RemoteProvider` also refuses local-only operations as a `DataProvider`). The
 inspector shows "Server mode: … saved to the server (source WAV unchanged)" and the save
 label reads "Saved to server". Source WAV files are never modified.
 
@@ -464,7 +465,7 @@ record is identified by the playback cache path it was played from. Nothing of t
 on the audio thread.
 ## Server management (scans, history, removals)
 
-`audiolib_remote::RemoteClient` has typed calls for API §6.6–§6.9; the CLI exposes the
+`audiolib_remote::RemoteClient` has typed calls for API §6.6–§6.10; the CLI exposes the
 read-only ones. The desktop's 服务器音效库 page (design B1/B2) uses `roots`,
 `capabilities`, `current_scan` (polled every 500 ms while the page is open and a scan is
 active) and `scan_history(20)` with the profile's saved address and token. For the
@@ -502,7 +503,11 @@ of that page, and folder counts stay as in the snapshot.
 | `scan_status` | `GET /scans/{id}` | poll about every 500 ms until `active` is false; a changed `revision` means sync |
 | `control_scan` | `POST /scans/{id}/pause\|resume\|cancel` | idempotent; `409 SCAN_STATE` → `RemoteError::ScanState` |
 | `scan_history` / `play_history` | `GET /history/scans\|plays?limit=&offset=` | newest first, limit clamped to 1–10000; prefer over the snapshot copy |
-| `capabilities` | `GET /capabilities` → `{manage_mode, external, can_manage}` | `may_manage()` = `can_manage` (never inferred locally); `404` (older server) → no management |
+| `capabilities` | `GET /capabilities` → `{manage_mode, external, can_manage, root_management}` | `may_manage()` = `can_manage` (never inferred locally); missing `root_management` disables root editing; `404` (older server) → no management |
+| `browse_directory` | `GET /fs` or `GET /fs?path=&hidden=0` | no path returns server locations; absolute server path returns one bounded, non-recursive directory listing |
+| `add_root` | `POST /roots {name,path}` | register an existing server folder; no implicit scan |
+| `update_root_path` | `PATCH /roots/{name} {path}` | validate all matching target WAV files before an atomic database path update; retains record IDs and annotations |
+| `remove_root` | `DELETE /roots/{name}` | remove root configuration and database records/annotations; preserve folders and WAV files |
 | `remove_audio` | `POST /audio/remove {ids}` → `{removed, not_found, revision_before, revision}` | ids de-duplicated, 1–10000 positive; DB records only |
 | `remove_folder` | `DELETE /folders/{id}` → `{removed, folders_removed, revision_before, revision}` | whole subtree, DB records only; `404` unknown, `400` for a root's top folder (or one containing a root) |
 
@@ -511,18 +516,26 @@ of that page, and folder counts stay as in the snapshot.
 `Forbidden`, `409 BUSY` → `Busy` (any other 409 too), `409 SCAN_STATE` → `ScanState`,
 `503 ROOT_OFFLINE` → `RootOffline`; a server without the endpoint (`404 "No such endpoint"`
 or `405`) → `Unsupported`. The `403` text names the reason (LAN only / disabled) and
-includes the server's message. `manage_mode` gates scan control and removals only.
+includes the server's message. `manage_mode` gates scan control, removals, remote disk
+browsing and root management; Metadata edits and play counts keep their existing policy.
 
 Removals make the library forget records; a rescan re-adds files still on disk with new
 ids. Both are `409 BUSY` while a scan runs or is paused. `RemoteProvider::remove_audio` /
 `remove_folder` resync the snapshot when the revision moved (a folder removal always
 moves it, an audio removal only if something existed); a UI built on them must also drop
-cached ids (selection, waveform/preview keys). The desktop still refuses structural writes
-in server mode.
+cached ids (selection, waveform/preview keys). Root configuration and resource path changes
+use the explicit server endpoints above; the client snapshot remains read-only. Restore,
+maintenance and annotation import remain unavailable in server mode.
+
+Root relocation and removal create a rollback backup before changing database records.
+Durable journals reconcile database and root-settings changes after an interruption;
+the server recovers them before accepting another root edit. See the API contract
+[§6.10](api/README.md) for validation, recovery and cancellation details.
 
 The management calls go through the same keep-alive connection pool as everything else
 (see "Connections" below): reads (`GET`) are sent once more on a stale pooled connection,
-writes (`POST`, `DELETE`) never are.
+writes (`POST`, `PATCH`, `DELETE`) never are. A lost mutation response can mean the server
+committed the operation; the desktop refreshes its snapshot rather than resending it.
 
 ## Playback (in-memory streaming)
 
@@ -760,15 +773,17 @@ fixtures; production-library counts and capacity are omitted from public documen
 | single `PATCH` (HTTP + apply to the open snapshot) | 3.4 + 37.5 ms | — |
 
 Result lists are paged (200 rows) and the folder tree loads lazily, so the UI never holds
-all rows. Sync, polling and streaming run on worker threads. There is no incremental
-sync: every revision change downloads the full snapshot. The auto-sync gate keeps batched
+all rows. Sync, polling and streaming run on worker threads. When synchronization is
+required it downloads a full validated snapshot; known write replies can advance the
+cache directly when their revision matches. The auto-sync gate keeps batched
 scans from causing repeated downloads. `cargo run --release -p audiolib-remote --example
 scale-probe -- --server URL --data DIR` reproduces the timings (use a temporary `DIR`: the
 real `%LOCALAPPDATA%\AudioLibExplorer` is refused; the optional PATCH timing,
 `--patch-id ID`, writes to the server and needs `--allow-write`, so test servers only).
 
-Limits: the snapshot read checks cancellation between reads, so a connection that stalls
-mid-body waits for the 1 h body timeout (the worker thread, not the UI, waits). Search is
+Limits: snapshot cancellation closes the scoped connection and polls blocked reads at
+most every 100 ms, then drains the watcher and owned preparation/cleanup before returning.
+An uncancelled slow body retains the configured 1 h timeout. Search is
 token-based FTS: a partial word ("expl") does not match "explosion".
 
 ## Desktop usage
@@ -794,7 +809,19 @@ on server notices open the active connection page.
   (name, address, token, transcode, revision checks, disabled blank 「WebDAV 设置（功能未开发）」,
   test, 还原 / 保存; a 401 focuses the token field with a hint), **服务器音效库**
   (roots with status, file count, missing count and last scan; management permission;
-  active scan progress; latest 20 scans; for the active server with management
+  active scan progress; latest 20 scans; for servers advertising `root_management`,
+  the active source also offers **添加音效库 / Add sound root**, **修改资源路径 / Edit resource path**
+  and **删除音效库 / Delete sound root**. The selected row shows its server resource path.
+  Browse opens **选择远程文件夹 / Choose remote folder**, with server locations,
+  breadcrumbs, parent navigation and an absolute-path field; it never opens a local
+  Windows folder picker. Add registers an existing folder; start a scan explicitly to
+  index its WAV files. Editing a path requires matching WAV files at the same relative
+  paths in the destination and preserves record IDs, Metadata and annotations. Delete
+  confirms removal of the root configuration and indexed records/annotations, preserving
+  source folders and WAV files. These operations drain requested Metadata writes and
+  refresh the snapshot and root mappings; scans and paused scans exclude them. Older
+  servers without the capability keep their existing scan/removal controls and require
+  a server upgrade for root management. For the active server with management
   permission: 开始扫描… / 暂停 / 继续 / 取消扫描, and 移除所选记录… / 删除目录记录…,
   each confirmed inline — only library records are removed, WAV files on the server
   stay, a rescan re-adds them with new ids) and **缓存与导出** (the

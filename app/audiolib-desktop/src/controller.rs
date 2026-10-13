@@ -68,6 +68,8 @@ enum LibraryOperation {
     Batch(BatchMetadataRequest),
     /// Swap between the local library and a read-only server snapshot.
     DataSource(remote_mode::DataSourceSwitch),
+    /// Server root mutations share the Metadata drain and library operation gate.
+    ServerRoot(Box<remote_mode::RootOperation>),
 }
 
 impl LibraryOperation {
@@ -93,6 +95,7 @@ impl LibraryOperation {
                 | Self::Relink(..)
                 | Self::Batch(_)
                 | Self::DataSource(_)
+                | Self::ServerRoot(_)
         )
     }
 
@@ -534,6 +537,9 @@ pub struct Controller {
     remote_mode: AtomicBool,
     remote_generation: AtomicU64,
     remote_busy: AtomicBool,
+    /// Registered play workers include their reply and listener/cache settlement.
+    remote_plays: Mutex<remote_mode::RemotePlayState>,
+    remote_plays_wake: Condvar,
     remote_cancel: Mutex<Arc<AtomicBool>>,
     remote_audio_cancel: Mutex<Arc<AtomicBool>>,
     /// The selected record whose Load has not been confirmed. Local or server
@@ -689,6 +695,8 @@ impl Controller {
             remote_mode: AtomicBool::new(false),
             remote_generation: AtomicU64::new(0),
             remote_busy: AtomicBool::new(false),
+            remote_plays: Mutex::new(remote_mode::RemotePlayState::default()),
+            remote_plays_wake: Condvar::new(),
             remote_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             remote_audio_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             audio_reload: Mutex::new(None),
@@ -1511,6 +1519,8 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        let retain_search = matches!(&operation, LibraryOperation::DataSource(target)
+            if self.is_same_library_snapshot_refresh(target));
         self.capture_metadata(&ui);
         let recovering_handoff = matches!(operation, LibraryOperation::DataSource(_));
         let barrier = match if recovering_handoff {
@@ -1525,7 +1535,11 @@ impl Controller {
                 return;
             }
         };
-        if self.library_busy.swap(true, Ordering::AcqRel) {
+        let already_busy = {
+            let _plays = self.remote_plays.lock().unwrap();
+            self.library_busy.swap(true, Ordering::AcqRel)
+        };
+        if already_busy {
             return;
         }
         ui.set_library_busy(true);
@@ -1573,6 +1587,7 @@ impl Controller {
                 } else {
                     c.wait_metadata(barrier, true)?;
                 }
+                c.wait_remote_plays()?;
                 while c.scan_cancel.lock().unwrap().is_some() {
                     if c.shutdown.load(Ordering::Acquire) {
                         return Err("Desktop is shutting down".into());
@@ -1677,6 +1692,7 @@ impl Controller {
                             .map_err(|e| e.to_string())?
                     )),
                     LibraryOperation::DataSource(target) => c.switch_data_source(target)?,
+                    LibraryOperation::ServerRoot(root) => c.execute_server_root(root)?,
                     LibraryOperation::Switch { path, create } => {
                         if *create && path.exists() {
                             return Err(
@@ -1768,8 +1784,14 @@ impl Controller {
                                     LibraryOperation::Switch { .. }
                                         | LibraryOperation::Restore(_)
                                         | LibraryOperation::DataSource(_)
-                                ),
+                                ) && !retain_search,
+                                retain_search,
                             );
+                            crate::diagnostics::record(if retain_search {
+                                crate::diagnostics::Event::SnapshotRefreshed
+                            } else {
+                                crate::diagnostics::Event::LibraryViewReset
+                            });
                         }
                         ui.set_management_report(report.clone().into());
                         if matches!(
@@ -1812,6 +1834,7 @@ impl Controller {
                 if matches!(operation, LibraryOperation::DataSource(_)) {
                     c2.publish_data_source(&ui);
                     if succeeded {
+                        c2.refresh_source_manager_after_swap(&ui);
                         c2.reconcile_source_manager_after_swap(&ui);
                     }
                     c2.publish_metadata_recovery_notice(&ui);
@@ -1824,6 +1847,9 @@ impl Controller {
                 c2.request_search(&ui, true, false);
                 if ui.get_library_visible() {
                     c2.load_history(0);
+                }
+                if let LibraryOperation::ServerRoot(root) = &operation {
+                    c2.server_root_finished(&ui, root, succeeded);
                 }
                 if c2.close_after_operation.swap(false, Ordering::AcqRel) && succeeded {
                     c2.request_close(&ui);
@@ -1844,16 +1870,25 @@ impl Controller {
         }
     }
 
-    fn reset_library_view(&self, ui: &AppWindow, reset_request: bool) {
+    fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
         *self.latest_selection.lock().unwrap() = None;
         self.metadata.lock().unwrap().reset_library();
         *self.selected.lock().unwrap() = None;
         self.records.lock().unwrap().clear();
         self.multi_selection.lock().unwrap().clear();
         *self.selection_anchor.lock().unwrap() = None;
-        *self.tree.lock().unwrap() = TreeState::default();
-        self.request.lock().unwrap().folder_id = None;
-        self.request.lock().unwrap().offset = 0;
+        if retain_navigation {
+            // IDs remain scoped to this server library. Discard derived rows/counts,
+            // retaining the folder, expansion and page the user was browsing.
+            let mut tree = self.tree.lock().unwrap();
+            tree.matches = Arc::default();
+            tree.visible = Arc::default();
+            tree.stats = None;
+        } else {
+            *self.tree.lock().unwrap() = TreeState::default();
+            self.request.lock().unwrap().folder_id = None;
+            self.request.lock().unwrap().offset = 0;
+        }
         self.plays.lock().unwrap().clear();
         self.scans.lock().unwrap().clear();
         ui.set_selected_row(-1);
@@ -2666,9 +2701,15 @@ impl Controller {
                         }
                         if let Some(file) = found {
                             provider.record_play(file.id)?;
+                            crate::diagnostics::record(
+                                crate::diagnostics::Event::PlaybackHistoryRecorded,
+                            );
                         }
                         Ok(true)
                     }) {
+                        crate::diagnostics::record(
+                            crate::diagnostics::Event::PlaybackHistoryFailed,
+                        );
                         c.status(error.to_string());
                     }
                     // The engine pauses itself while a network stream runs dry; the hint
@@ -3709,7 +3750,10 @@ impl Controller {
             }
         };
         *self.close_completion.lock().unwrap() = None;
-        self.closing.store(true, Ordering::Release);
+        {
+            let _plays = self.remote_plays.lock().unwrap();
+            self.closing.store(true, Ordering::Release);
+        }
         self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
         self.invalidate_library_reads();
@@ -3735,6 +3779,11 @@ impl Controller {
                 tracing::info!("Desktop scan drained");
                 Ok(())
             });
+            // Admission is closed before this drain. A sent play retains its
+            // reply/cache settlement; queued unsent plays cancel themselves.
+            if let Err(error) = c.wait_remote_plays() {
+                result = Err(error);
+            }
             // Closing has cancelled sync even if Metadata saving failed. Drain
             // its owned cache work before either hiding or restoring the window;
             // the cancelled generation cannot publish its final UI state.

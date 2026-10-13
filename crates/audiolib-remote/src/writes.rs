@@ -20,11 +20,40 @@ use audiolib_core::{
 };
 use audiolib_db::SqliteProvider;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::Duration;
 
 /// Serializes read-modify-write of `cache.json` + snapshot between concurrent writes
 /// (an edit and a play finishing at the same time).
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
+
+/// Order this process's non-idempotent write requests through their cache publication.
+/// Locking only application permits a faster later reply to outrun an earlier one and
+/// falsely request a full snapshot. Separate `RemoteWriter`s share this gate; network
+/// reads, UI work and audio callbacks never acquire it. Other clients' writes still
+/// produce an ordinary revision mismatch and require a validated snapshot sync.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn play_write_lease(still_current: impl Fn() -> bool) -> Result<MutexGuard<'static, ()>> {
+    loop {
+        if !still_current() {
+            return Err(RemoteError::Cancelled);
+        }
+        let guard = match WRITE_LOCK.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
+        return if still_current() {
+            Ok(guard)
+        } else {
+            Err(RemoteError::Cancelled)
+        };
+    }
+}
 
 /// What happened to the local snapshot after a successful server write.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,11 +175,17 @@ impl RemoteWriter {
 
     /// `POST /audio/remove`: database records only (files untouched), then a sync.
     pub fn remove_audio(&self, ids: &[i64]) -> Result<WriteOutcome<RemoveReport>> {
+        let _write = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(self.removed(self.client.remove_audio(ids)?))
     }
 
     /// `DELETE /folders/{id}`: database records only (files untouched), then a sync.
     pub fn remove_folder(&self, id: i64) -> Result<WriteOutcome<RemoveReport>> {
+        let _write = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(self.removed(self.client.remove_folder(id)?))
     }
 
@@ -173,6 +208,9 @@ impl RemoteWriter {
         id: i64,
         patch: &MetadataPatch,
     ) -> Result<WriteOutcome<AudioFile>> {
+        let _write = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let FileWrite {
             file,
             revision_before,
@@ -192,6 +230,9 @@ impl RemoteWriter {
         &self,
         request: &BatchMetadataRequest,
     ) -> Result<WriteOutcome<(BatchMetadataReport, Vec<AudioFile>)>> {
+        let _write = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let BatchWrite {
             report,
             files,
@@ -209,6 +250,17 @@ impl RemoteWriter {
 
     /// `POST /audio/{id}/plays`, then the revision rule.
     pub fn record_play(&self, id: i64) -> Result<WriteOutcome<AudioFile>> {
+        self.record_play_while(id, || true)
+    }
+
+    /// Cancellation applies only before dispatch. Once a non-idempotent request has
+    /// been sent, retain its reply and existing bounded outcome/uncertainty handling.
+    fn record_play_while(
+        &self,
+        id: i64,
+        still_current: impl Fn() -> bool,
+    ) -> Result<WriteOutcome<AudioFile>> {
+        let _write = play_write_lease(still_current)?;
         let FileWrite {
             file,
             revision_before,
@@ -269,6 +321,18 @@ impl RemoteProvider {
 
     pub fn writer(&self) -> &RemoteWriter {
         &self.writer
+    }
+
+    /// Record a play only while its source/library is current. A queued, unsent play
+    /// may be cancelled during close or a source switch without delaying Metadata.
+    /// An already dispatched write still completes normally to preserve its outcome.
+    pub fn record_play_if(
+        &self,
+        id: i64,
+        still_current: impl Fn() -> bool,
+    ) -> audiolib_core::Result<()> {
+        self.settle(self.writer.record_play_while(id, still_current))
+            .map(drop)
     }
 
     fn emit(&self, event: WriteEvent) {
@@ -1122,5 +1186,111 @@ mod tests {
         );
         assert_eq!(provider.get_audio(3).unwrap().play_count, 1);
         assert_eq!(cache.state(LIBRARY).unwrap().revision, 44);
+    }
+
+    #[test]
+    fn concurrent_play_writers_publish_each_reply_before_sending_the_next_write() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 43);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let second_cached_revision = Arc::new(AtomicU64::new(0));
+        let (first_seen_tx, first_seen_rx) = std::sync::mpsc::sync_channel(1);
+        let (first_release_tx, first_release_rx) = std::sync::mpsc::sync_channel(1);
+        let first_release_rx = StdMutex::new(first_release_rx);
+        let server = {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            let second_cached_revision = second_cached_revision.clone();
+            server(Arc::new(StdMutex::new(Vec::new())), move |method, path| {
+                assert_eq!((method, path), ("POST", "/api/v1/audio/3/plays"));
+                let call = calls.fetch_add(1, Ordering::AcqRel);
+                let (before, after) = if call < 2 {
+                    (43 + call as u64, 44 + call as u64)
+                } else {
+                    // Another client changed the server: serialization must not hide it.
+                    (48, 49)
+                };
+                if call == 1 {
+                    second_cached_revision
+                        .store(cache.state(LIBRARY).unwrap().revision, Ordering::Release);
+                }
+                let reply = TestResponse::json(
+                    200,
+                    &format!(
+                        r#"{{"file":{},"revision_before":{before},"revision":{after}}}"#,
+                        file_json(3, "", 0, "", call as u64 + 1)
+                    ),
+                );
+                if call == 0 {
+                    first_seen_tx.send(()).unwrap();
+                    first_release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    // The previous implementation sends its second request during this
+                    // delay, applies revision 45 against cache 43 and requests a resync.
+                    reply.delayed(Duration::from_millis(400))
+                } else {
+                    reply
+                }
+            })
+        };
+        let writer = || {
+            RemoteWriter::new(
+                RemoteClient::new(&server.url, "").unwrap(),
+                cache.clone(),
+                LIBRARY,
+            )
+        };
+        let first = writer();
+        let first = std::thread::spawn(move || first.record_play(3).unwrap());
+        first_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Closing cancels an unsent play waiting behind an in-flight write. The
+        // requested write's reply must still drain; the waiting play sends nothing.
+        let current = Arc::new(AtomicBool::new(true));
+        let waiting_current = current.clone();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(1);
+        let waiting_writer = writer();
+        let waiting = std::thread::spawn(move || {
+            let first_check = AtomicBool::new(true);
+            waiting_writer.record_play_while(3, || {
+                if first_check.swap(false, Ordering::AcqRel) {
+                    waiting_tx.send(()).unwrap();
+                }
+                waiting_current.load(Ordering::Acquire)
+            })
+        });
+        waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        current.store(false, Ordering::Release);
+        assert!(matches!(
+            waiting.join().unwrap(),
+            Err(RemoteError::Cancelled)
+        ));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        // Desktop playback dispatch creates a new writer per event, so this must
+        // exercise independent instances rather than a cloned instance's mutex.
+        let second = writer();
+        let second = std::thread::spawn(move || second.record_play(3).unwrap());
+        first_release_tx.send(()).unwrap();
+        assert_eq!(
+            first.join().unwrap().cache,
+            CacheUpdate::Applied { revision: 44 }
+        );
+        assert_eq!(
+            second.join().unwrap().cache,
+            CacheUpdate::Applied { revision: 45 }
+        );
+        assert_eq!(second_cached_revision.load(Ordering::Acquire), 44);
+        assert_eq!(cache.state(LIBRARY).unwrap().revision, 45);
+        assert_eq!(snapshot(&cache).get_audio(3).unwrap().play_count, 2);
+        assert!(matches!(
+            writer().record_play(3).unwrap().cache,
+            CacheUpdate::Resync { .. }
+        ));
+        assert_eq!(cache.state(LIBRARY).unwrap().revision, 45);
     }
 }

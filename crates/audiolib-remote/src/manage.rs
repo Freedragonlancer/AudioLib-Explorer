@@ -18,8 +18,9 @@
 //! cached id (selection, cached playlists, waveform/preview keys); an unchanged revision
 //! means nothing was removed.
 //!
-//! `manage_mode` (§6.9) gates scan control and both removals only (metadata edits, plays
-//! and reads are not gated); refusals are `403 MANAGE_FORBIDDEN`
+//! `manage_mode` (§6.9) gates scan control, database removals, directory browsing and
+//! root management (metadata edits, plays and ordinary library reads are not gated);
+//! refusals are `403 MANAGE_FORBIDDEN`
 //! ([`RemoteError::Forbidden`], show the server's message). [`RemoteClient::capabilities`]
 //! reports `can_manage` for this request's network path; a server without the endpoint
 //! (`404`) offers no management ([`Capabilities::unknown`]). Server check order: 401 token
@@ -47,7 +48,7 @@ pub const MAX_HISTORY_LIMIT: usize = 10_000;
 /// starts and [`RemoteClient::current_scan`] finds it.
 const START_SCAN_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Who may manage the library (scan control, removals) through the API: the server's
+/// Who may manage the library (scan control, roots and removals) through the API: the server's
 /// `manage_mode` (§6.9).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -78,6 +79,10 @@ pub struct Capabilities {
     /// Management endpoints would accept this request (same network path), when reported.
     #[serde(default)]
     pub can_manage: Option<bool>,
+    /// This server supports authenticated directory browsing and root add/path/remove
+    /// endpoints. Older servers omit it: keep these controls unavailable.
+    #[serde(default)]
+    pub root_management: bool,
 }
 
 fn known() -> bool {
@@ -91,6 +96,7 @@ impl Default for Capabilities {
             manage_mode: ManageMode::All,
             external: None,
             can_manage: None,
+            root_management: false,
         }
     }
 }
@@ -114,6 +120,12 @@ impl Capabilities {
             && self
                 .can_manage
                 .unwrap_or(self.manage_mode == ManageMode::All)
+    }
+
+    /// Whether to offer remote folder browsing and root management on this route.
+    /// The server still checks its current policy for every request.
+    pub fn may_manage_roots(&self) -> bool {
+        self.root_management && self.may_manage()
     }
 }
 
@@ -364,7 +376,7 @@ impl RemoteClient {
                 }
             }),
             "DELETE" => {
-                let mut request = self.writes.delete(&url).header(
+                let mut request = agent.unwrap_or(&self.writes).delete(&url).header(
                     crate::client::LIBRARY_ID_HEADER,
                     library_id.as_deref().unwrap_or_default(),
                 );
@@ -374,7 +386,12 @@ impl RemoteClient {
                 request.call()
             }
             _ => {
-                let mut request = agent.unwrap_or(&self.writes).post(&url).header(
+                let agent = agent.unwrap_or(&self.writes);
+                let mut request = match method {
+                    "PATCH" => agent.patch(&url),
+                    _ => agent.post(&url),
+                }
+                .header(
                     crate::client::LIBRARY_ID_HEADER,
                     library_id.as_deref().unwrap_or_default(),
                 );
@@ -412,15 +429,27 @@ impl RemoteClient {
         Ok((status != 204 && !empty).then_some(text))
     }
 
-    fn manage_json<T: serde::de::DeserializeOwned>(
+    pub(crate) fn manage_json<T: serde::de::DeserializeOwned>(
         &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T> {
+        self.manage_json_with(None, method, path, body)
+    }
+
+    /// A management JSON call with a specialized response/body budget. Mutations
+    /// retain identity binding and are sent once, regardless of the budget.
+    pub(crate) fn manage_json_with<T: serde::de::DeserializeOwned>(
+        &self,
+        agent: Option<&crate::abort::Timeouts>,
         method: &str,
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<T> {
         let context = format!("{method} {path}");
         let text = self
-            .manage_call(method, path, body)?
+            .manage_call_with(agent, method, path, body)?
             .ok_or_else(|| RemoteError::Protocol(format!("{context}: empty reply")))?;
         serde_json::from_str(&text)
             .map_err(|error| RemoteError::Protocol(format!("{context}: {error}")))

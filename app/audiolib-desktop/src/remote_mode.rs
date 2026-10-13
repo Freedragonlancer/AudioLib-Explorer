@@ -12,7 +12,6 @@ use super::{Controller, LibraryOperation, post};
 use crate::{AppWindow, DataRootRow};
 use audiolib_audio::{WaveformData, WaveformRequest};
 use audiolib_core::AudioFile;
-use audiolib_core::DataProvider;
 use audiolib_core::config::{AppConfig, DataSourceMode, DataSourceSettings};
 use audiolib_core::server_url::{Scheme, ServerAddress, ServerUrlError};
 use audiolib_db::SqliteProvider;
@@ -56,6 +55,34 @@ impl Drop for RemoteSyncBusyGuard {
     }
 }
 
+/// Play admission and worker completion share one predicate lock, so a source
+/// gate followed by a drain cannot miss a concurrently registering worker.
+#[derive(Default)]
+pub(super) struct RemotePlayState {
+    workers: usize,
+    publication_gates: usize,
+}
+
+struct RemotePlayWorker(Arc<Controller>);
+
+impl Drop for RemotePlayWorker {
+    fn drop(&mut self) {
+        let mut plays = self.0.remote_plays.lock().unwrap();
+        plays.workers -= 1;
+        self.0.remote_plays_wake.notify_all();
+    }
+}
+
+/// Cache promotion finishes on the sync worker before its UI/provider publication.
+/// Keep new play writes out of that interval without making close wait for UI delivery.
+struct RemotePlayPublicationGate(Arc<Controller>);
+
+impl Drop for RemotePlayPublicationGate {
+    fn drop(&mut self) {
+        self.0.remote_plays.lock().unwrap().publication_gates -= 1;
+    }
+}
+
 #[path = "server_removal.rs"]
 mod server_removal;
 #[cfg(test)]
@@ -63,6 +90,10 @@ mod server_removal;
 mod source_consistency_tests;
 #[path = "source_manager.rs"]
 mod source_manager;
+pub(super) use source_manager::RootOperation;
+#[cfg(test)]
+#[path = "snapshot_refresh_tests.rs"]
+mod snapshot_refresh_tests;
 #[cfg(test)]
 #[path = "source_transition_tests.rs"]
 mod source_transition_tests;
@@ -216,6 +247,8 @@ pub(super) struct RemoteRuntime {
     /// Earliest automatic re-check requested outside the schedule (a sync that failed
     /// because the server was still starting).
     retry_hint: Option<Instant>,
+    /// One write-triggered resync waits for playback to finish per source generation.
+    resync_pending: Option<u64>,
     /// Record id of each playback-cache path handed to the engine, so a finished play of
     /// a cached copy is counted for the right server record.
     audio_ids: HashMap<PathBuf, i64>,
@@ -314,11 +347,11 @@ pub(super) fn revision_notice(
         AutoSync::Off => text,
         AutoSync::Now if chinese => format!("{text}，正在自动同步…"),
         AutoSync::Now => format!("{text}; syncing automatically…"),
-        AutoSync::Deferred if chinese => format!(
-            "{text}；服务器仍在更新（例如分批扫描），变化停止后自动同步，也可点击“同步”立即更新"
-        ),
+        AutoSync::Deferred if chinese => {
+            format!("{text}；等待服务器更新稳定及当前试听结束后自动同步，也可点击“同步”立即更新")
+        }
         AutoSync::Deferred => format!(
-            "{text}; the server is still changing (e.g. a batched scan): syncing automatically once it settles, or Sync now"
+            "{text}; syncing automatically once the server settles and the current audition finishes, or Sync now"
         ),
     };
     Some(match check {
@@ -641,7 +674,11 @@ impl Controller {
                     self.post_remote_resync("snapshot replaced during a write");
                     return;
                 };
-                state.revision = revision;
+                // The writer releases its request/cache lock before invoking this
+                // listener. A later reply can therefore publish first; an older
+                // callback must not move the open snapshot's revision backwards.
+                state.revision = state.revision.max(revision);
+                let revision = state.revision;
                 // Our own write is not "a newer revision on the server".
                 if matches!(
                     remote.check,
@@ -753,23 +790,101 @@ impl Controller {
     }
 
     /// Start a normal snapshot sync once the library is idle (a batch edit is itself a
-    /// library operation, and a busy library cannot swap snapshots).
+    /// library operation, and a busy library cannot swap snapshots). A play-count write
+    /// must not stop the audition which triggered it merely to refresh its snapshot.
     fn post_remote_resync(self: &Arc<Self>, reason: &str) {
+        crate::diagnostics::record(crate::diagnostics::Event::RemoteResyncRequested);
+        let category = if reason.starts_with("cached revision ") {
+            Some(crate::diagnostics::Event::CacheRevisionMismatch)
+        } else if reason.starts_with("could not update the cached snapshot:") {
+            Some(crate::diagnostics::Event::CachePatchFailed)
+        } else if reason == "no cached snapshot for this library" {
+            Some(crate::diagnostics::Event::CacheMissing)
+        } else if reason.starts_with("could not record the new revision:") {
+            Some(crate::diagnostics::Event::CacheRevisionSaveFailed)
+        } else if reason.starts_with("write outcome uncertain:") {
+            Some(crate::diagnostics::Event::RemoteWriteOutcomeUnknown)
+        } else {
+            None
+        };
+        if let Some(category) = category {
+            crate::diagnostics::record(category);
+        }
+        let source_generation = self.source_generation.load(Ordering::Acquire);
+        {
+            let mut remote = self.remote.lock().unwrap();
+            if remote.resync_pending == Some(source_generation) {
+                return;
+            }
+            remote.resync_pending = Some(source_generation);
+        }
         tracing::info!(%reason, "server write: running a full snapshot sync");
         let c = self.clone();
         std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while !c.available() && !c.shutdown.load(Ordering::Acquire) && Instant::now() < deadline
+            while !c.shutdown.load(Ordering::Acquire)
+                && !c.closing.load(Ordering::Acquire)
+                && c.remote_read_only()
+                && c.source_generation.load(Ordering::Acquire) == source_generation
+                && (!c.available() || c.snapshot_refresh_interrupts_playback())
             {
                 std::thread::sleep(Duration::from_millis(100));
             }
             let c2 = c.clone();
             post(c.ui.clone(), move |_| {
-                if c2.remote_read_only() {
-                    c2.start_sync(false, false);
+                {
+                    let mut remote = c2.remote.lock().unwrap();
+                    if remote.resync_pending != Some(source_generation) {
+                        return;
+                    }
+                    remote.resync_pending = None;
+                }
+                if c2.remote_read_only()
+                    && !c2.shutdown.load(Ordering::Acquire)
+                    && !c2.closing.load(Ordering::Acquire)
+                    && c2.source_generation.load(Ordering::Acquire) == source_generation
+                {
+                    if c2.snapshot_refresh_interrupts_playback() || !c2.available() {
+                        // Playback or a library operation can begin after worker admission.
+                        c2.post_remote_resync("waiting for the current audition to finish");
+                    } else {
+                        c2.start_sync(false, false);
+                    }
                 }
             });
         });
+    }
+
+    /// Only a refresh of the same endpoint and library may retain navigation IDs.
+    pub(super) fn is_same_library_snapshot_refresh(&self, target: &DataSourceSwitch) -> bool {
+        let DataSourceSwitch::Server {
+            state: Some(next), ..
+        } = target
+        else {
+            return false;
+        };
+        self.remote_read_only()
+            && !self.source_changing.load(Ordering::Acquire)
+            && self
+                .remote
+                .lock()
+                .unwrap()
+                .state
+                .as_ref()
+                .is_some_and(|current| {
+                    current.library_id == next.library_id
+                        && cached_source_matches(&current.server_url, &next.server_url)
+                })
+    }
+
+    /// Automatic refresh waits for an active, paused or still-loading audition.
+    /// Stop/Ended ends that audition and allows releasing its snapshot stream.
+    fn snapshot_refresh_interrupts_playback(&self) -> bool {
+        matches!(
+            self.audio.status().state,
+            audiolib_audio::PlaybackState::Loading
+                | audiolib_audio::PlaybackState::Playing
+                | audiolib_audio::PlaybackState::Paused
+        )
     }
 
     /// Server record id of a playback-cache path handed to the engine.
@@ -806,32 +921,82 @@ impl Controller {
         playback_name(path, remote.audio_names.get(path).map(String::as_str))
     }
 
-    /// Count one finished play on the server (`POST /audio/{id}/plays`): off the audio and
-    /// UI threads, fire-and-forget; failures are logged only. The snapshot follows by the
-    /// revision rule.
+    /// Wait off the UI thread after source/library/close admission has been closed.
+    /// Sent plays finish their reply and settlement; queued unsent plays cancel.
+    pub(super) fn wait_remote_plays(&self) -> Result<(), String> {
+        let mut plays = self.remote_plays.lock().unwrap();
+        while plays.workers != 0 {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err("Desktop is shutting down".into());
+            }
+            plays = self
+                .remote_plays_wake
+                .wait_timeout(plays, Duration::from_millis(100))
+                .unwrap()
+                .0;
+        }
+        Ok(())
+    }
+
+    fn remote_play_current(&self, generation: u64, source_generation: u64) -> bool {
+        self.available()
+            && !self.remote_busy.load(Ordering::Acquire)
+            && self.library_generation.load(Ordering::Acquire) == generation
+            && self.source_generation.load(Ordering::Acquire) == source_generation
+            && self.remote_plays.lock().unwrap().publication_gates == 0
+    }
+
+    /// Count one finished play off the audio and UI threads. Source/provider changes
+    /// and close drain registered workers through their reply and listener settlement.
     pub(super) fn remote_record_play(self: &Arc<Self>, id: i64, generation: u64) {
         let source_generation = self.source_generation.load(Ordering::Acquire);
-        if !self.available() || self.library_generation.load(Ordering::Acquire) != generation {
-            return;
-        }
+        let worker = {
+            let mut plays = self.remote_plays.lock().unwrap();
+            if !self.available()
+                || self.remote_busy.load(Ordering::Acquire)
+                || plays.publication_gates != 0
+                || self.library_generation.load(Ordering::Acquire) != generation
+                || self.source_generation.load(Ordering::Acquire) != source_generation
+            {
+                return;
+            }
+            plays.workers += 1;
+            RemotePlayWorker(self.clone())
+        };
         // Bind the destination before dispatch; a later source switch cannot retarget it.
         let provider = self.remote_provider();
         let c = self.clone();
         let spawned = std::thread::Builder::new()
             .name("audiolib-remote-play".into())
-            .spawn(move || match provider {
-                Ok(provider) => {
-                    if !c.available()
-                        || c.library_generation.load(Ordering::Acquire) != generation
-                        || c.source_generation.load(Ordering::Acquire) != source_generation
-                    {
-                        return;
+            .spawn(move || {
+                // Drop only after the reply and synchronous listener have settled.
+                let _worker = worker;
+                match provider {
+                    Ok(provider) => {
+                        if !c.remote_play_current(generation, source_generation) {
+                            return;
+                        }
+                        match provider.record_play_if(id, || {
+                            c.remote_play_current(generation, source_generation)
+                        }) {
+                            Ok(()) => crate::diagnostics::record(
+                                crate::diagnostics::Event::PlaybackHistoryRecorded,
+                            ),
+                            Err(error) => {
+                                crate::diagnostics::record(
+                                    crate::diagnostics::Event::PlaybackHistoryFailed,
+                                );
+                                tracing::warn!(id, %error, "server play count was not recorded");
+                            }
+                        }
                     }
-                    if let Err(error) = provider.record_play(id) {
+                    Err(error) => {
+                        crate::diagnostics::record(
+                            crate::diagnostics::Event::PlaybackHistoryFailed,
+                        );
                         tracing::warn!(id, %error, "server play count was not recorded");
                     }
                 }
-                Err(error) => tracing::warn!(id, %error, "server play count was not recorded"),
             });
         if let Err(error) = spawned {
             tracing::warn!(id, %error, "could not start the play count request");
@@ -1197,7 +1362,7 @@ impl Controller {
         {
             return;
         }
-        {
+        let roots_changed = {
             let mut remote = self.remote.lock().unwrap();
             let current = remote.state.as_ref().map(|state| CachedIdentity {
                 library_id: state.library_id.clone(),
@@ -1206,7 +1371,20 @@ impl Controller {
             if current != poll.checked {
                 return;
             }
+            let roots_changed = poll.roots.as_deref().is_some_and(|roots| {
+                remote
+                    .live_roots
+                    .as_deref()
+                    .or_else(|| remote.state.as_ref().map(|state| state.roots.as_slice()))
+                    .is_some_and(|previous| {
+                        source_manager::root_configuration_changed(previous, roots)
+                    })
+            });
             remote.live_roots = poll.roots;
+            roots_changed
+        };
+        if roots_changed {
+            self.refresh_source_manager_roots(ui);
         }
         self.apply_revision_check(ui, poll.checked, poll.check, poll.next_check, poll.auto_due);
     }
@@ -1240,6 +1418,7 @@ impl Controller {
         }
         let auto_sync = self.config.lock().unwrap().data_source.auto_sync;
         let update = check.update_available();
+        let audition_active = self.snapshot_refresh_interrupts_playback();
         {
             let mut remote = self.remote.lock().unwrap();
             if matches!(check, RevisionCheck::LibraryChanged { .. }) {
@@ -1247,11 +1426,12 @@ impl Controller {
             }
             remote.check = Some(check);
             remote.next_check = next_check;
-            remote.auto_deferred = update && auto_sync && !auto_due;
+            remote.auto_deferred = update && auto_sync && (!auto_due || audition_active);
         }
         if update
             && auto_sync
             && auto_due
+            && !audition_active
             && self.available()
             && !self.remote_busy.load(Ordering::Acquire)
         {
@@ -1539,7 +1719,11 @@ impl Controller {
         if self.shutdown.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
             return;
         }
-        if self.remote_busy.swap(true, Ordering::AcqRel) {
+        let already_busy = {
+            let _plays = self.remote_plays.lock().unwrap();
+            self.remote_busy.swap(true, Ordering::AcqRel)
+        };
+        if already_busy {
             if apply {
                 // A running sync would be superseded; restart after it notices cancel.
                 let c = self.clone();
@@ -1556,6 +1740,11 @@ impl Controller {
         }
         // Establish ownership before settings preparation or spawning can fail.
         let busy_guard = RemoteSyncBusyGuard(Some(self.clone()));
+        let play_publication_gate = {
+            let mut plays = self.remote_plays.lock().unwrap();
+            plays.publication_gates += 1;
+            RemotePlayPublicationGate(self.clone())
+        };
         let chinese = self.chinese.load(Ordering::Acquire);
         let generation = self.remote_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1677,7 +1866,10 @@ impl Controller {
                     }
                 });
             };
-            let result = RemoteClient::new(&settings.server_url, &secrets.token)
+            let result = c
+                .wait_remote_plays()
+                .map_err(|_| RemoteError::Cancelled)
+                .and_then(|_| RemoteClient::new(&settings.server_url, &secrets.token))
                 .and_then(|client| sync_library(&client, &cache, &mut report, &cancel, force));
             let fallback = if result
                 .as_ref()
@@ -1694,9 +1886,11 @@ impl Controller {
                     .filter(|state| cached_source_matches(&state.server_url, &settings.server_url))
                     .and_then(|state| {
                         cache
-                            .prepare_cached_state_with_progress(&state, &mut |stage| {
-                                report(SyncProgress::Preparing(stage))
-                            })
+                            .prepare_cached_state_with_progress_cancellable(
+                                &state,
+                                &mut |stage| report(SyncProgress::Preparing(stage)),
+                                &cancel,
+                            )
                             .map(|state| (cache.database_path(&state), Some(state)))
                             .map_err(
                                 |error| tracing::warn!(%error, "Offline cache preparation failed"),
@@ -1711,6 +1905,7 @@ impl Controller {
             drop(sync_busy_guard);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
+                let _play_publication_gate = play_publication_gate;
                 if c2.remote_generation.load(Ordering::Acquire) != generation
                     || c2.shutdown.load(Ordering::Acquire)
                     || c2.closing.load(Ordering::Acquire)
@@ -1737,14 +1932,25 @@ impl Controller {
         }
         match result {
             Ok(outcome) => {
-                {
+                let roots_changed = {
                     let mut remote = self.remote.lock().unwrap();
+                    let roots_changed = remote
+                        .live_roots
+                        .as_deref()
+                        .or_else(|| remote.state.as_ref().map(|state| state.roots.as_slice()))
+                        .is_some_and(|previous| {
+                            source_manager::root_configuration_changed(
+                                previous,
+                                &outcome.state.roots,
+                            )
+                        });
                     remote.last_error = None;
                     // The sync was a successful revision check: clear stale notices.
                     remote.check = None;
                     remote.dismissed_notice = None;
                     remote.live_roots = Some(outcome.state.roots.clone());
-                }
+                    roots_changed
+                };
                 ui.set_ds_message("".into());
                 // The menus' removal gate follows the server's current `/capabilities`.
                 self.refresh_server_manage();
@@ -1759,6 +1965,9 @@ impl Controller {
                     let resume_reads = self.source_changing.load(Ordering::Acquire);
                     self.finish_source_change(ui, true);
                     self.remote.lock().unwrap().state = Some(outcome.state.clone());
+                    if roots_changed {
+                        self.refresh_source_manager_roots(ui);
+                    }
                     let hidden_settled = self.settle_hidden();
                     if resume_reads {
                         self.resume_source_reads(ui, true);
@@ -3546,7 +3755,7 @@ mod tests {
         .unwrap();
         assert_eq!(kind, NOTICE_UPDATE);
         assert!(
-            text.contains("变化停止后自动同步") && text.contains("r9"),
+            text.contains("试听结束后自动同步") && text.contains("r9"),
             "{text}"
         );
         let (text, _) = revision_notice(
@@ -3833,7 +4042,7 @@ mod tests {
         );
         assert_eq!(ui.get_remote_notice_kind(), super::NOTICE_UPDATE);
         assert!(
-            ui.get_remote_notice().contains("once it settles"),
+            ui.get_remote_notice().contains("once the server settles"),
             "{}",
             ui.get_remote_notice()
         );

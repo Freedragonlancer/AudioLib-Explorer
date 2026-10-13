@@ -1,6 +1,6 @@
 # AudioLib 远程 API（v1，讨论稿）
 
-> 状态：讨论稿。里程碑 1（`/health`、`/library`、`/library/snapshot`、`/roots`）和里程碑 2（`/audio/{id}`、`/audio/{id}/stream`，以及启动期 `/health` 状态 + 503 `UNAVAILABLE`）、里程碑 3（metadata 写入：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`，§6.3）以及波形（§9）、试听预览 `/audio/{id}/preview`（§8.1）、远程扫描 `/scans`（§6.6）、历史列表 `/history/...`（§6.7）、从库中移除记录/文件夹 `POST /audio/remove`、`DELETE /folders/{id}`（§6.8）以及库管理权限 `manage_mode` + `GET /capabilities`（§6.9）已在 `server/audiolib-server` 实现；其余端点仍为计划，等服务端确认、用户拍板后再定稿。改任何路由或字段先在「AudioLib 开发组」群里通知对方。
+> 状态：讨论稿。里程碑 1（`/health`、`/library`、`/library/snapshot`、`/roots`）和里程碑 2（`/audio/{id}`、`/audio/{id}/stream`，以及启动期 `/health` 状态 + 503 `UNAVAILABLE`）、里程碑 3（metadata 写入：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`，§6.3）以及波形（§9）、试听预览 `/audio/{id}/preview`（§8.1）、远程扫描 `/scans`（§6.6）、历史列表 `/history/...`（§6.7）、从库中移除记录/文件夹 `POST /audio/remove`、`DELETE /folders/{id}`（§6.8）以及库管理权限 `manage_mode` + `GET /capabilities`（§6.9）及客户端远程目录浏览与根目录新增/改路径/删除（§6.10）已在 `server/audiolib-server` 实现；其余端点仍为计划，等服务端确认、用户拍板后再定稿。改任何路由或字段先在「AudioLib 开发组」群里通知对方。
 
 ## 1. 目标与边界
 
@@ -33,10 +33,10 @@
 | 需要 token 时（§2.2）token 缺失、错误或已撤销 | 401 | `UNAUTHORIZED`（附 `WWW-Authenticate: Bearer`；缺失和错误同一个码，只有 `message` 不同） |
 | 管理页 `/admin` 经反代、从公网或用非局域网主机名访问（§2.3） | 403 | `ADMIN_LAN_ONLY` |
 | 管理页的修改请求缺少 `X-AudioLib-Admin: 1` 或来自其他源（§2.3） | 403 | `ADMIN_HEADER_REQUIRED` |
-| 库管理（扫描及其暂停/继续/取消、`POST /audio/remove`、`DELETE /folders/{id}`）被 `manage_mode` 拒绝：`lan` 模式下的外部请求，或 `off` 模式下的任何请求（§6.9）；先过鉴权，缺 token 仍是 401 | 403 | `MANAGE_FORBIDDEN` |
+| 库管理（扫描及其暂停/继续/取消、记录/文件夹移除、远程目录浏览和根目录管理）被 `manage_mode` 拒绝：`lan` 模式下的外部请求，或 `off` 模式下的任何请求（§6.9–§6.10）；先过鉴权，缺 token 仍是 401 | 403 | `MANAGE_FORBIDDEN` |
 | `NotFound` / 未知路由 / 音频文件缺失或不在配置的根下 | 404 | `NOT_FOUND` |
 | 路由存在但方法不对（如 `POST /library`） | 405 | `METHOD_NOT_ALLOWED`（JSON 错误体，保留 `Allow` 头） |
-| 非流式端点超过 30 秒未完成 | 408 | `TIMEOUT` |
+| 受通用请求超时控制的端点超过 30 秒未完成（根目录 PATCH/DELETE 例外，§6.10；目录浏览另有 15 秒上限） | 408 | `TIMEOUT` |
 | `Busy`（扫描/维护/快照并发占用；已有扫描时再 `POST /scans`，§6.6；扫描进行中或暂停中、或其他进程扫描/维护同一个库时 `POST /audio/remove`、`DELETE /folders/{id}`，§6.8） | 409 | `BUSY` |
 | 库修改请求缺少 `X-AudioLib-Library-Id` 或包含重复/空值；读取端点、管理页和根检查除外 | 409 | `LIBRARY_ID_REQUIRED` |
 | `X-AudioLib-Library-Id` 与处理该请求的库身份不一致 | 409 | `LIBRARY_CHANGED` |
@@ -67,7 +67,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 
 500 的 `message` 可能包含服务端路径；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
 
-连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这六个端点没有任何时间上限，见 §6.4、§6.6；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
+连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
 
 ### 2.2 鉴权模式与 token
 
@@ -105,7 +105,9 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - 修改请求（`PUT`/`POST`/`DELETE`）必须带 `X-AudioLib-Admin: 1`，浏览器带 `Origin` 时必须与 `Host` 同源，否则 403 `ADMIN_HEADER_REQUIRED`（自定义头使跨站网页无法静默发起修改）。
 - 管理响应都带 `Cache-Control: no-store`、`X-Frame-Options: DENY`，页面另有严格的 `Content-Security-Policy`。
 
-**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。所有设置都即时生效，没有需要重启的项。
+**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。设置在处理该管理页请求的实例中即时生效，没有需要重启的项。
+
+共享同一设置目录时，受 `manage_mode` 保护的 API 在准入时取得跨实例设置锁、重读最新设置，并在同一锁内依次检查 bearer 和管理权限，随后检查库身份。设置锁被另一操作占用时先返回 409 `BUSY`，不使用旧策略放行。另一实例已收紧或放宽策略后，首次获准进入权限核验的管理请求就使用新策略；已准入请求不因之后的策略更改撤回。普通读取、音频流及非管理写入使用该实例当前的鉴权状态，不等待耗时根目录编辑的设置锁；这不承诺所有设置与 token 在所有实例间实时广播。局域网 `/admin` 入口继续使用独立的 LAN、Host 与同源检查。
 
 管理接口（页面自己使用，JSON；错误同 §2.1）：
 
@@ -286,7 +288,11 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/audio/metadata/batch` | `update_metadata_batch` | `BatchMetadataRequest`（`tag_mode` 可省略，默认 `replace`） | `{ "report": BatchMetadataReport, "files": AudioFile[], "revision_before": n, "revision": n+1 }`，见 §6.3 |
 | ✅ | POST | `/audio/remove` | `remove_audio` | `{ "ids": [n, …] }`（1..=10000 个） | 200 `{ "removed": n, "not_found": [id…], "revision_before": n, "revision": n \| n+1 }`；只删库记录，不删文件；受 `manage_mode` 限制，扫描中 409 `BUSY`，见 §6.8 |
 | ✅ | DELETE | `/folders/{id}` | `remove_folder` | 无请求体 | 200 `{ "removed": n, "folders_removed": n, "revision_before": n, "revision": n+1 }`（整个子树）；未知 404，库根顶层文件夹 400，见 §6.8 |
-| ✅ | GET | `/capabilities` | — | — | `{ "manage_mode": "all" \| "lan" \| "off", "external": bool, "can_manage": bool }`；需鉴权，库启动中也可用，见 §6.9 |
+| ✅ | GET | `/capabilities` | — | — | `{ "manage_mode": "all" \| "lan" \| "off", "external": bool, "can_manage": bool, "root_management": true }`；需鉴权，库启动中也可用，见 §6.9 |
+| ✅ | GET | `/fs` | 服务端目录（有界只读浏览） | `path?`、`hidden?` | 起点或目录列表；受 `manage_mode` 限制，见 §6.10 |
+| ✅ | POST | `/roots` | 持久化根目录设置 | `{ "name", "path" }` | 201 根目录条目；受 `manage_mode` 限制，见 §6.10 |
+| ✅ | PATCH | `/roots/{name}` | 原子重定位根目录记录 + 持久化设置 | `{ "path" }` | 200 根目录条目；保留 ID、Metadata 与标注，见 §6.10 |
+| ✅ | DELETE | `/roots/{name}` | 数据库记录移除 + 持久化设置 | — | 200 `{ "name", "removed", "folders_removed", "revision_before", "revision" }`；不删除源 WAV，见 §6.10 |
 | ✅ | POST | `/audio/{id}/plays` | `record_play` | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n+1 }`（`play_count` 在快照里，所以也走 revision 规则），见 §6.3 |
 | ✅ | GET | `/history/plays?limit=&offset=` | `play_history` | `limit` 默认 100（1..=10000），`offset` 默认 0 | `PlayRecord[]`，新的在前，见 §6.7 |
 | ✅ | GET | `/history/scans?limit=&offset=` | `scan_history` | 同上 | `ScanSession[]`，新的在前，见 §6.7 |
@@ -300,7 +306,7 @@ audiolib.example.com:8443 {
 
 管理页 `/admin` 和 `/admin/api/...` 不在 `/api/v1` 下，只供局域网浏览器使用，见 §2.3。
 
-所有针对库记录或扫描会话的修改请求必须带 `X-AudioLib-Library-Id: <客户端已打开快照的 library_id>`：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`、`POST /audio/remove`、`DELETE /folders/{id}`、`POST /scans` 及其 pause/resume/cancel 控制。服务端校验后固定该请求使用的 AppState（库身份及 DataProvider），直到操作结束；不能只先读取当前库 ID 再向可能切换的提供者写入。缺失返回 409 `LIBRARY_ID_REQUIRED`，不匹配返回 409 `LIBRARY_CHANGED`，均不写入且不递增 revision。`POST /roots/{name}/check` 和 `/admin/api/...` 不要求该客户端头。
+所有针对库记录或扫描会话的修改请求必须带 `X-AudioLib-Library-Id: <客户端已打开快照的 library_id>`：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`、`POST /audio/remove`、`DELETE /folders/{id}`、`POST /scans` 及其 pause/resume/cancel 控制，以及 `POST /roots`、`PATCH /roots/{name}`、`DELETE /roots/{name}`。服务端校验后固定该请求使用的 AppState（库身份及 DataProvider），直到操作结束；不能只先读取当前库 ID 再向可能切换的提供者写入。缺失返回 409 `LIBRARY_ID_REQUIRED`，不匹配返回 409 `LIBRARY_CHANGED`，均不写入且不递增 revision。`POST /roots/{name}/check` 和 `/admin/api/...` 不要求该客户端头。
 
 `GET /library` 新增 `identity_bound_writes: true`，表示服务端强制上述库身份约束。旧服务器缺少该字段（视为 false）仍可同步、试听，但新版客户端拒绝向它写入；不能用写入前 GET /library 代替原子身份约束。收到上述 409 时客户端停止写入，保留未保存草稿，提示同步并切换到新库后再编辑。旧客户端缺少请求头时写入被拒绝，读取不受影响。
 
@@ -613,7 +619,7 @@ audiolib.example.com:8443 {
 
 - 移除该文件夹**整个子树**：其中（含所有子文件夹）的全部音频记录、这些文件夹记录本身，以及文件夹闭包表；之后刷新文件夹统计（`/roots.file_count` 随之变化）。`id` 来自 `Folder.id`（快照中的 `folders` 表）。
 - 非整数 id → 400 `VALIDATION`（同 `/audio/abc`）；不存在 → 404 `NOT_FOUND`。
-- **库根的顶层文件夹**（`[[roots]].server_path` 对应的文件夹），以及包含某个库根的上级文件夹 → 400 `VALIDATION`：库根不能经 API 删除：库根的添加和移除由服务端管理员在管理页 `/admin` 的「库根目录」中完成（§2.3.1），或编辑服务端配置。
+- **库根的顶层文件夹**（`[[roots]].server_path` 对应的文件夹），以及包含某个库根的上级文件夹 → 400 `VALIDATION`：库根不能经 `DELETE /folders/{id}` 删除；使用 §6.10 的 `DELETE /roots/{name}` 或管理页 `/admin` 的「库根目录」（§2.3.1）。
 - 响应 200（`folders_removed` = 删除的文件夹数，含它自己）：
 
 ```json
@@ -632,7 +638,7 @@ audiolib.example.com:8443 {
 
 ### 6.9 库管理权限 `manage_mode` 与 `GET /capabilities`（已实现）
 
-服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和所有 GET 不受影响。
+服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`，以及 §6.10 的 `GET /fs`、`POST /roots`、`PATCH /roots/{name}`、`DELETE /roots/{name}`。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和其他 GET 不受影响。
 
 | `manage_mode` | 局域网直连 | 外部请求（经反代 / 公网对端，判定同 §2.2） |
 |---|---|---|
@@ -650,7 +656,7 @@ audiolib.example.com:8443 {
 - 响应 200：
 
 ```json
-{ "manage_mode": "lan", "external": true, "can_manage": false }
+{ "manage_mode": "lan", "external": true, "can_manage": false, "root_management": true }
 ```
 
 | 字段 | 含义 |
@@ -658,8 +664,23 @@ audiolib.example.com:8443 {
 | `manage_mode` | 当前生效的 `all` \| `lan` \| `off` |
 | `external` | 服务端是否把**这个请求**当作外部请求（§2.2 的判定） |
 | `can_manage` | 这个请求（同样的网络路径）调用上述管理端点是否会被允许 |
+| `root_management` | 本服务端提供 §6.10 的稳定根目录管理接口；缺字段的旧版本按 `false`，客户端隐藏目录浏览及根目录新增、改路径、删除按钮 |
 
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
+
+### 6.10 客户端远程目录浏览与音效库根目录管理（已实现）
+
+客户端使用 `/api/v1` 的本节接口，管理页继续使用 §2.3.1 的 LAN 专用接口。所有本节接口先按 §2.2 鉴权，再检查 `manage_mode`（拒绝为 403 `MANAGE_FORBIDDEN`）；新增、改路径、删除还必须携带当前快照的 `X-AudioLib-Library-Id`，缺失为 409 `LIBRARY_ID_REQUIRED`、与服务器当前库不一致为 409 `LIBRARY_CHANGED`。浏览器修改请求仍须同源。只管理当前连接所选服务器的音效库根目录，不移动服务器数据库文件。
+
+`GET /fs` 不带 `path` 返回 `{"places":[{"kind":"root|volume|home|library_root","name","path","network":true|false|null}]}`。`GET /fs?path=<绝对路径>[&hidden=1]` 返回 §2.3.1 相同的目录列表：`path`、`parent`、`network`、`entries[{name,path,is_symlink}]`、`truncated`、`wav_files`、`other_files`、`counts_truncated`。进入目录前解析真实路径；只列直接子目录，从不写入文件、创建目录或递归扫描。每次最多返回 2000 个子目录、检查 50000 个条目；起点的 `/Volumes` 枚举也最多检查 2000 项。浏览和根目录路径检查共用 4 个阻塞任务名额；浏览等待 15 秒后返回 504 `FS_TIMEOUT`，卡住的系统调用继续占其名额，名额满时 503 `BUSY` + `Retry-After: 1`。相对/空路径或非目录为 400 `VALIDATION`，目录不存在为 404 `NOT_FOUND`，拒绝读取为 403 `FS_FORBIDDEN`。
+
+`POST /roots` 请求 `{"name":"SFX_New","path":"/Volumes/Sounds/New"}`，成功 201，返回 `GET /roots` 的一个条目。名称和路径校验、根目录互不重叠规则同 §2.3.1；路径原样处理，保留有效文件名空格。根目录设置写入 `admin-settings.json`，即时生效并覆盖 `config.toml` 根列表；不会自动扫描。扫描运行/暂停时返回 409 `BUSY`。路径检查仍有 15 秒上限，超时或请求取消后不会迟到登记根目录。
+
+`PATCH /roots/{name}` 请求 `{"path":"/Volumes/Relocated/SFX"}`，成功 200 返回更新条目，名称保持不变。未扫描过的根只更新配置；已入库的根按原相对路径逐一验证目标目录和 WAV：每个目标必须真实存在、处于所选新根内、不经过目录链接、不占用其他记录，WAV 文件大小及采样率、声道、位深、时长须匹配已索引 Metadata。缺失/无效/不匹配目标会在提交前拒绝整个请求；此校验不声称验证 WAV 全部 PCM 字节相同。文件系统根和 Windows 盘符根不支持改路径，旧根存在多个存储路径身份时也拒绝，均为 400 `VALIDATION`。改路径前创建库目录 `backups/before-root-relink-*.db` 回滚备份，并持有扫描和独占管理 OS 锁；文件路径、文件夹路径在同一事务中更新，保留音频及文件夹 ID、Metadata、用户标注、歌单、项目引用、扫描及播放历史，历史路径保留当时记录。清除 Waveform 数据库缓存、刷新目录统计，库 revision 增加一次；实际路径改变后旧 `webdav_url` 清空，避免继续指向原资源。源 WAV 始终只读。
+
+`DELETE /roots/{name}` 回复同 §2.3.1 的移除报告。数据库单次事务清理根目录下的音频、文件夹及依赖记录，随后更新根列表；源 WAV 永不删除。移除已索引根之前保存 `backups/before-root-remove-*.db` 回滚备份。扫描运行/暂停时 409 `BUSY`，未知根 404；多个旧路径身份的根拒绝为 400。未扫描根没有记录可移除，revision 不变。
+
+SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.json` 的 `root_relink` / `root_removal` 在事务前保存，成功后清除；进程中断或最后设置写盘失败时，重启及下一次根修改根据保存的文件夹 ID 与数据库已提交状态恢复正确根列表。根修改、恢复及普通管理设置写入共用设置目录的 `.admin-settings.lock` OS 锁，侧文件解锁后保留；占用时返回 409 `BUSY`，另一实例不会清除进行中操作的日志。持锁后重新读取最新根列表，避免旧实例覆盖新配置。即使恢复设置仍无法写盘，已运行服务器也按数据库提交状态更新根监控，日志保留供后续重试。PATCH 与 DELETE 没有通用 30 秒请求上限：大量记录的验证、备份或删除可耗时更长。PATCH 请求取消会在提交前回滚；DELETE 在开始数据库写入前检查取消，开始后排空已请求的移除。客户端对可能已提交的失败也重新同步当前服务器快照与根列表，不能将超时当作确定未写入。
 
 ## 7. WebDAV 与音频访问
 

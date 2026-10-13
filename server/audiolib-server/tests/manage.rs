@@ -651,7 +651,8 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
         CapabilitiesResponse {
             manage_mode: ManageMode::All,
             external: false,
-            can_manage: true
+            can_manage: true,
+            root_management: true
         }
     );
     assert_eq!(
@@ -659,7 +660,8 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
         CapabilitiesResponse {
             manage_mode: ManageMode::All,
             external: true,
-            can_manage: true
+            can_manage: true,
+            root_management: true
         }
     );
     // Authentication still comes first.
@@ -732,7 +734,8 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
         CapabilitiesResponse {
             manage_mode: ManageMode::Lan,
             external: true,
-            can_manage: false
+            can_manage: false,
+            root_management: true
         }
     );
     assert_eq!(
@@ -740,7 +743,8 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
         CapabilitiesResponse {
             manage_mode: ManageMode::Lan,
             external: true,
-            can_manage: false
+            can_manage: false,
+            root_management: true
         }
     );
     assert_eq!(
@@ -748,7 +752,8 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
         CapabilitiesResponse {
             manage_mode: ManageMode::Lan,
             external: false,
-            can_manage: true
+            can_manage: true,
+            root_management: true
         }
     );
     for (method, path, body) in &managed {
@@ -814,7 +819,8 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
         CapabilitiesResponse {
             manage_mode: ManageMode::Off,
             external: false,
-            can_manage: false
+            can_manage: false,
+            root_management: true
         }
     );
     for (method, path, body) in &managed {

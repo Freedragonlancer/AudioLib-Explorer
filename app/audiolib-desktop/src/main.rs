@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod close_tests;
 mod controller;
+mod diagnostics;
 mod dialogs;
 #[cfg(test)]
 mod pane_review_tests;
@@ -161,6 +162,7 @@ fn run() -> Result<()> {
     let playback =
         serde_json::from_value::<PlaybackConfig>(config.playback.clone()).unwrap_or_default();
     let engine = AudioEngine::new(playback.clone()).context("Initialize audio engine")?;
+    let _diagnostics = diagnostics::install(&ui, config.paths.logs.clone(), engine.handle());
     let controller = controller::Controller::new_with_source(
         &ui,
         sqlite,
@@ -216,6 +218,27 @@ fn run() -> Result<()> {
                 }
                 "about" => ui.set_about_visible(true),
                 "help" => ui.set_help_visible(true),
+                "debug" => {
+                    ui.set_debug_visible(true);
+                    ui.set_debug_title(
+                        if ui.get_chinese() {
+                            "播放后搜索结果丢失"
+                        } else {
+                            "Search results disappear after playback"
+                        }
+                        .into(),
+                    );
+                    ui.set_debug_steps(
+                        if ui.get_chinese() {
+                            "搜索 → 播放 → 检查结果是否保留。"
+                        } else {
+                            "Search → Play → Check that results remain."
+                        }
+                        .into(),
+                    );
+                    ui.invoke_debug_mode_requested(true);
+                    ui.invoke_debug_action_requested(0);
+                }
                 "peaks" => ui.set_peaks_visible(true),
                 "normal" => {
                     ui.set_peak_mode(0);
@@ -236,6 +259,91 @@ fn run() -> Result<()> {
                 "server-settings" => {
                     ui.invoke_open_data_source();
                     ui.invoke_sm_select_row(-1);
+                }
+                "server-roots" | "remote-folder" => {
+                    // Synthetic presentation-only fixture; never connects to a server
+                    // or changes a working library. Smoke runs use an isolated data dir.
+                    ui.set_library_visible(true);
+                    ui.set_remote_mode(true);
+                    ui.set_sm_sources(slint::ModelRc::new(slint::VecModel::from(vec![
+                        SourceRow {
+                            name: "本地素材库".into(),
+                            ..Default::default()
+                        },
+                        SourceRow {
+                            name: "Sound server".into(),
+                            subtitle: "https://example.invalid".into(),
+                            kind: 1,
+                            active: true,
+                            ..Default::default()
+                        },
+                    ])));
+                    ui.set_sm_selected(1);
+                    ui.set_sm_page(1);
+                    ui.set_sm_can_manage(true);
+                    ui.set_sm_root_controls(true);
+                    ui.set_sm_roots(slint::ModelRc::new(slint::VecModel::from(vec![
+                        ServerRootRow {
+                            name: "Foley".into(),
+                            path: "/Volumes/Sounds/Foley".into(),
+                            status: "在线 / Online".into(),
+                            file_count: "1200".into(),
+                            missing: "0".into(),
+                            last_scan: "2026-10-13 09:30".into(),
+                            ..Default::default()
+                        },
+                        ServerRootRow {
+                            name: "Ambience".into(),
+                            path: "/Volumes/Sounds/Ambience".into(),
+                            status: "在线 / Online".into(),
+                            file_count: "3400".into(),
+                            missing: "2".into(),
+                            last_scan: "2026-10-13 09:32".into(),
+                            ..Default::default()
+                        },
+                    ])));
+                    ui.set_sm_root_selected(0);
+                    ui.set_sm_library_status("Sound server · 2 roots".into());
+                    if smoke_view == "remote-folder" {
+                        ui.set_sm_root_form(true);
+                        ui.set_sm_root_name("New sounds".into());
+                        ui.set_sm_fs_path("/Volumes/Sounds".into());
+                        ui.set_sm_fs_parent("/Volumes".into());
+                        ui.set_sm_fs_can_select(true);
+                        ui.set_sm_fs_breadcrumbs(slint::ModelRc::new(slint::VecModel::from(vec![
+                            RemoteBreadcrumbRow {
+                                name: "/".into(),
+                                path: "/".into(),
+                            },
+                            RemoteBreadcrumbRow {
+                                name: "Volumes".into(),
+                                path: "/Volumes".into(),
+                            },
+                            RemoteBreadcrumbRow {
+                                name: "Sounds".into(),
+                                path: "/Volumes/Sounds".into(),
+                            },
+                        ])));
+                        ui.set_sm_fs_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+                            RemoteFolderRow {
+                                name: "Foley".into(),
+                                path: "/Volumes/Sounds/Foley".into(),
+                            },
+                            RemoteFolderRow {
+                                name: "Ambience".into(),
+                                path: "/Volumes/Sounds/Ambience".into(),
+                            },
+                            RemoteFolderRow {
+                                name: "Vehicles".into(),
+                                path: "/Volumes/Sounds/Vehicles".into(),
+                            },
+                            RemoteFolderRow {
+                                name: "木门与脚步".into(),
+                                path: "/Volumes/Sounds/木门与脚步".into(),
+                            },
+                        ])));
+                        ui.set_sm_fs_visible(true);
+                    }
                 }
                 "window-repaint" => {
                     ui.invoke_open_data_source();

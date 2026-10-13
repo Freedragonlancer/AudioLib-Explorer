@@ -7,6 +7,20 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
 };
 
+// Stored POSIX paths retain case even though the library's search keys fold it.
+// Windows comparisons also normalize drive/UNC prefixes and directory separators.
+#[cfg(feature = "scanner")]
+fn relocation_path_matches(left: &str, right: &str) -> bool {
+    #[cfg(windows)]
+    {
+        path_key(left) == path_key(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 /// Persistent lock identity shared with scanning, including builds without scanner support.
 pub(crate) struct LibraryLease(fs::File);
 impl LibraryLease {
@@ -420,11 +434,65 @@ impl SqliteProvider {
     /// file of several hundred MB that copy doubles the disk use and the time. The FTS5
     /// integrity-check statement needs a writable connection but changes nothing.
     pub fn check_owned_file(path: &Path) -> Result<IntegrityReport> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        Self::check_owned_file_cancellable(path, &AtomicBool::new(false))
+    }
+
+    /// Check an exclusively owned snapshot, interrupting integrity SQL on cancellation.
+    pub fn check_owned_file_cancellable(
+        path: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<IntegrityReport> {
+        let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(db_error)?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
-        check_connection(&conn)
+        owned_cancellation::run(&mut conn, cancel, |conn| check_connection(conn))
+    }
+
+    /// Read statistics from a validated, upgraded owned snapshot with cancellable SQL.
+    /// This never opens a live provider or creates a second derived-state copy.
+    pub fn owned_snapshot_info_cancellable(
+        path: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<LibraryInfo> {
+        let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(db_error)?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(db_error)?;
+        owned_cancellation::run(&mut conn, cancel, |conn| {
+            schema::validate_library_identity(conn)?;
+            let stats = conn
+                .query_row(
+                    "SELECT COUNT(*),COALESCE(SUM(duration),0),COALESCE(SUM(file_size),0),
+                 (SELECT COUNT(*) FROM folders),(SELECT COUNT(*) FROM audio_files WHERE missing=1)
+                 FROM audio_files WHERE missing=0",
+                    [],
+                    |row| {
+                        Ok(LibraryStats {
+                            audio_files: unsigned(row, 0)?,
+                            total_duration: row.get(1)?,
+                            total_bytes: unsigned(row, 2)?,
+                            folders: unsigned(row, 3)?,
+                            missing_files: unsigned(row, 4)?,
+                        })
+                    },
+                )
+                .map_err(db_error)?;
+            let schema_version = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(db_error)?;
+            let sqlite_version = conn
+                .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+                .map_err(db_error)?;
+            Ok(LibraryInfo {
+                database: path.to_path_buf(),
+                schema_version,
+                sqlite_version,
+                database_bytes: fs::metadata(path)?.len(),
+                wal_bytes: 0,
+                stats,
+            })
+        })
     }
     pub(crate) fn management_backup(&self, destination: &Path) -> Result<BackupReport> {
         let mut reader = self.reader()?;
@@ -679,6 +747,242 @@ impl SqliteProvider {
         let (limit, offset) = check_page(limit, offset)?;
         self.reader()?.prepare("SELECT ph.id,ph.audio_file_id,ph.played_at,ph.filename,ph.file_path,(af.missing IS NOT 0) FROM play_history ph JOIN audio_files af ON af.id=ph.audio_file_id ORDER BY ph.played_at DESC,ph.id DESC LIMIT ?1 OFFSET ?2").map_err(db_error)?
             .query_map(params![limit,offset],|r|Ok(PlayRecord{id:r.get(0)?,audio_file_id:r.get(1)?,played_at:r.get(2)?,filename:r.get(3)?,file_path:r.get(4)?,missing:r.get(5)?})).map_err(db_error)?.collect::<rusqlite::Result<_>>().map_err(db_error)
+    }
+
+    /// Relocate an indexed root in one transaction. Validation and the rollback
+    /// backup happen under both OS leases, so scans and other writers cannot alter
+    /// the records between validation and commit. Source audio is never modified.
+    #[cfg(feature = "scanner")]
+    pub(crate) fn management_relink_folder(
+        &self,
+        source: &Path,
+        target: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<u64> {
+        self.require_writable()?;
+        if !source.is_absolute() || !target.is_absolute() {
+            return Err(validation("Folder relocation requires absolute paths"));
+        }
+        if source.file_name().is_none() || target.file_name().is_none() {
+            return Err(validation("File system or drive roots cannot be relocated"));
+        }
+        let _scan = LibraryLease::acquire(&self.path)?;
+        let _administration = AdministrationLease::exclusive(&self.path)?;
+        let target = audiolib_core::validate_scan_root(target, &[])?;
+        let target_text = folder_path_text(&target);
+        let source_text = folder_path_text(source).trim_end_matches('/').to_string();
+        let source_key = path_key(&source_text);
+        let target_key = path_key(&target_text);
+        // Search keys fold case on every platform; a POSIX case-only rename is
+        // still a different stored source path. Windows aliases remain a no-op.
+        if relocation_path_matches(&source_text, &target_text) {
+            return Ok(0);
+        }
+        if source_key.starts_with(&format!("{target_key}/"))
+            || target_key.starts_with(&format!("{source_key}/"))
+        {
+            return Err(validation("Relocation paths must not overlap"));
+        }
+        let mut writer = self.writer_unlocked()?;
+        let root: Option<(i64, Option<i64>)> = writer
+            .query_row(
+                "SELECT id,parent_id FROM folders WHERE folder_path=?1 COLLATE NOCASE",
+                [&source_text],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let Some((root, parent)) = root else {
+            return Ok(0);
+        };
+        if parent.is_some() {
+            return Err(validation(
+                "Only an indexed top-level folder may be relocated",
+            ));
+        }
+        let folders: Vec<(i64, String)> = writer
+            .prepare("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION SELECT f.id FROM folders f JOIN tree ON f.parent_id=tree.id) SELECT id,folder_path FROM folders WHERE id IN (SELECT id FROM tree)")
+            .map_err(db_error)?
+            .query_map([root], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(db_error)?;
+        let suffix = |text: &str| -> Result<String> {
+            let text = text.replace('\\', "/");
+            let prefix = text
+                .get(..source_text.len())
+                .ok_or_else(|| validation("Stored folder path is outside the relocation root"))?;
+            if !relocation_path_matches(prefix, &source_text)
+                || (text.len() > source_text.len() && text.as_bytes()[source_text.len()] != b'/')
+            {
+                return Err(validation(
+                    "Stored folder path is outside the relocation root",
+                ));
+            }
+            let relative = text[source_text.len()..].trim_start_matches('/');
+            if Path::new(relative)
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(validation(
+                    "Stored relocation path contains invalid components",
+                ));
+            }
+            Ok(relative.to_string())
+        };
+        let check_cancel = || -> Result<()> {
+            if cancel.load(Ordering::Acquire) {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let mut moved_folders = Vec::with_capacity(folders.len());
+        for (id, path) in &folders {
+            check_cancel()?;
+            let desired = target.join(suffix(path)?);
+            let real = audiolib_core::validate_scan_root(&desired, std::slice::from_ref(&target))
+                .map_err(|error| {
+                validation(format!(
+                    "Invalid corresponding relocation folder {}: {error}",
+                    desired.display()
+                ))
+            })?;
+            if !relocation_path_matches(&display_path(&real), &display_path(&desired)) {
+                return Err(validation(
+                    "Relocation folders must use real paths without directory links",
+                ));
+            }
+            let new_path = folder_path_text(&real);
+            let occupied: bool = writer.query_row(
+                "SELECT EXISTS(SELECT 1 FROM folders WHERE folder_path=?1 COLLATE NOCASE AND id<>?2)",
+                params![new_path, id], |row| row.get(0),
+            ).map_err(db_error)?;
+            if occupied {
+                return Err(validation("Relocation target contains an indexed folder"));
+            }
+            moved_folders.push((*id, new_path));
+        }
+        let mut statement = writer
+            .prepare(&format!("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION SELECT f.id FROM folders f JOIN tree ON f.parent_id=tree.id) SELECT {AUDIO_SELECT} FROM audio_files af WHERE af.folder_id IN (SELECT id FROM tree)"))
+            .map_err(db_error)?;
+        let files = statement
+            .query_map([root], audio_from_row)
+            .map_err(db_error)?;
+        let mut moved_files = Vec::new();
+        let mut keys = HashSet::new();
+        for audio in files {
+            let audio = audio.map_err(db_error)?;
+            check_cancel()?;
+            let desired = target.join(suffix(&audio.file_path)?);
+            let real = audiolib_core::validate_wav_path(&desired, std::slice::from_ref(&target))
+                .map_err(|error| {
+                    validation(format!(
+                        "Invalid corresponding relocation WAV {}: {error}",
+                        desired.display()
+                    ))
+                })?;
+            // A directory link must not move the record out of its preserved tree.
+            if !relocation_path_matches(&display_path(&real), &display_path(&desired)) {
+                return Err(validation(
+                    "Relocation targets must use real paths without directory links",
+                ));
+            }
+            let before = fs::metadata(&real)?;
+            let metadata = audiolib_audio::probe(&real).map_err(validation)?;
+            let after = fs::metadata(&real)?;
+            if before.len() != after.len() || before.modified()? != after.modified()? {
+                return Err(validation(
+                    "Relocation target changed while reading Metadata; retry",
+                ));
+            }
+            if after.len() != audio.file_size
+                || metadata.sample_rate != audio.sample_rate
+                || metadata.channels != audio.channels
+                || metadata.bit_depth != audio.bit_depth
+                || (metadata.duration - audio.duration).abs() > 0.000_001
+            {
+                return Err(validation(format!(
+                    "Relocation target does not match indexed WAV Metadata: {}",
+                    desired.display()
+                )));
+            }
+            let text = display_path(&real);
+            let key = path_key(&text);
+            let occupied: bool = writer
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM audio_files WHERE path_key=?1 AND id<>?2)",
+                    params![key, audio.id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if occupied || !keys.insert(key.clone()) {
+                return Err(validation(
+                    "Relocation target is occupied by another audio record",
+                ));
+            }
+            let mtime_ns = i64::try_from(
+                after
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(validation)?
+                    .as_nanos(),
+            )
+            .map_err(validation)?;
+            moved_files.push((audio.id, text, key, mtime_ns));
+        }
+        drop(statement);
+        check_cancel()?;
+        let backup_dir = self.path.parent().unwrap_or(Path::new(".")).join("backups");
+        fs::create_dir_all(&backup_dir)?;
+        let mut backup = tempfile::Builder::new()
+            .prefix("before-root-relink-")
+            .suffix(".db")
+            .tempfile_in(&backup_dir)?;
+        let used = writer.query_row("SELECT (SELECT page_count FROM pragma_page_count)*(SELECT page_size FROM pragma_page_size)", [], |row| row.get::<_, i64>(0)).map_err(db_error)?;
+        ensure_free_space(&backup_dir, used.try_into().unwrap_or(0))?;
+        let mut backup_conn = Connection::open(backup.path()).map_err(db_error)?;
+        copy_database(&writer, &mut backup_conn)?;
+        drop(backup_conn);
+        backup.as_file_mut().sync_all()?;
+        // Keep the complete rollback copy even if a later transaction is cancelled.
+        backup.keep().map_err(|error| Error::Io(error.error))?;
+        check_cancel()?;
+        let tx = writer.transaction().map_err(db_error)?;
+        for (id, path) in &moved_folders {
+            tx.execute("UPDATE folders SET folder_path=?2,updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1", params![id,path]).map_err(db_error)?;
+        }
+        tx.execute(
+            "UPDATE folders SET folder_name=?2 WHERE id=?1",
+            params![
+                root,
+                target
+                    .file_name()
+                    .unwrap_or(target.as_os_str())
+                    .to_string_lossy()
+            ],
+        )
+        .map_err(db_error)?;
+        for (id, text, key, mtime) in &moved_files {
+            check_cancel()?;
+            tx.execute("UPDATE audio_files SET file_path=?2,path_key=?3,source_mtime_ns=?4,missing=0,modified_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1", params![id,text,key,mtime]).map_err(db_error)?;
+            tx.execute("DELETE FROM waveform_cache WHERE audio_file_id=?1", [id])
+                .map_err(db_error)?;
+        }
+        refresh_folder_statistics(&tx)?;
+        check_cancel()?;
+        tx.commit().map_err(db_error)?;
+        Ok(moved_files.len() as u64)
+    }
+
+    #[cfg(not(feature = "scanner"))]
+    pub(crate) fn management_relink_folder(
+        &self,
+        _source: &Path,
+        _target: &Path,
+        _cancel: &AtomicBool,
+    ) -> Result<u64> {
+        Err(validation("Folder relocation requires the scanner feature"))
     }
 
     #[cfg(feature = "scanner")]

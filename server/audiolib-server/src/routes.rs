@@ -3,7 +3,10 @@
 use crate::{
     ApiError, AppState, VERSION,
     auth::{ConnectionInfo, RequestOrigin, classify, same_request_origin},
-    manage::{CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse, RemoveFolderResponse},
+    manage::{
+        AddRootRequest, CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse,
+        RemoveFolderResponse, RootPathRequest,
+    },
     pcm::{self, PcmPlan, Renderer, WavError},
     preview::{self, Codec, FlacPlan, FlacStream, PreviewRequest, SourceFormat},
     scans::{CurrentScanResponse, ScanAction, ScanRequest, ScanResponse},
@@ -62,6 +65,11 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest accepted JSON request body (a 1 MiB note may double when JSON-escaped).
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// This request passed bearer and management checks against one fresh settings
+/// snapshot. Later policy changes do not withdraw an already admitted request.
+#[derive(Clone, Copy)]
+struct ManagedAdmission;
+
 /// `GET /health` reply (always HTTP 200 while the process serves requests).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
@@ -113,6 +121,8 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
         timeout,
         Router::new()
             .route("/roots", get(roots))
+            .route("/fs", get(browse_fs).route_layer(manage()))
+            .route("/roots", post(add_root).route_layer(manage()))
             .route("/roots/{name}/check", post(check_root))
             .route("/audio/{id}", get(audio))
             .route("/audio/{id}/metadata", patch(update_metadata))
@@ -139,6 +149,15 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES)),
     );
     let protected = timed_protected
+        // A populated root relocation validates all indexed targets and creates a
+        // rollback backup before a single atomic commit. It may take longer than
+        // 30 seconds; dropping the HTTP request cancels before that commit.
+        .route(
+            "/roots/{name}",
+            patch(update_root_path)
+                .delete(remove_root)
+                .route_layer(manage()),
+        )
         // Not time-limited: on a sleeping disk the scan directory may take long to
         // answer before the session (and its id) exists (doc/api/README.md §6.6).
         .route(
@@ -222,11 +241,31 @@ async fn require_bearer(
     next: Next,
 ) -> Response {
     let connection = request.extensions().get::<ConnectionInfo>().copied();
-    if let Err(error) = service
-        .security()
-        .authorize(request.headers(), connection.as_ref())
-    {
+    let managed = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|path| managed_route(request.method(), path.as_str()));
+    let authorized = if managed {
+        // Delegate before the old in-memory bearer check: another instance may
+        // have either tightened or relaxed both policies since this one loaded them.
+        authorize_managed(
+            service.security().clone(),
+            request.headers().clone(),
+            connection,
+        )
+        .await
+    } else {
+        // Ordinary reads, streams and non-management writes keep their existing
+        // admission path; a long root edit must not make them wait for its lease.
+        service
+            .security()
+            .authorize(request.headers(), connection.as_ref())
+    };
+    if let Err(error) = authorized {
         return error.into_response();
+    }
+    if managed {
+        request.extensions_mut().insert(ManagedAdmission);
     }
     match service.app_state() {
         Ok(state) => {
@@ -264,15 +303,53 @@ async fn require_bearer(
 /// Snapshot identity required by protected library mutations.
 pub const LIBRARY_ID_HEADER: &str = "x-audiolib-library-id";
 
+/// Exact methods of every client route carrying `require_manage`, including HEAD
+/// for the GET filesystem browser. Match the router's path template, never a raw URI.
+fn managed_route(method: &Method, path: &str) -> bool {
+    match *method {
+        Method::GET | Method::HEAD => path.ends_with("/fs"),
+        Method::PATCH => path.ends_with("/roots/{name}"),
+        Method::DELETE => path.ends_with("/folders/{id}") || path.ends_with("/roots/{name}"),
+        Method::POST => [
+            "/roots",
+            "/audio/remove",
+            "/scans",
+            "/scans/{session_id}/pause",
+            "/scans/{session_id}/resume",
+            "/scans/{session_id}/cancel",
+        ]
+        .iter()
+        .any(|managed| path.ends_with(*managed)),
+        _ => false,
+    }
+}
+
+/// Managed API admission owns the settings lease only while reloading and checking
+/// bearer then management policy. The settings file and secret headers stay on the
+/// blocking worker; admitted operations need not be revoked by later policy changes.
+async fn authorize_managed(
+    security: Arc<crate::Security>,
+    headers: HeaderMap,
+    connection: Option<ConnectionInfo>,
+) -> Result<(), ApiError> {
+    blocking_api(move || {
+        let _lease = security.settings_lease()?;
+        security.authorize(&headers, connection.as_ref())?;
+        security.authorize_manage(&headers, connection.as_ref())
+    })
+    .await
+}
+
 fn library_mutation(request: &Request) -> bool {
     let Some(path) = request.extensions().get::<axum::extract::MatchedPath>() else {
         return false;
     };
     let path = path.as_str();
     match *request.method() {
-        Method::PATCH => path.ends_with("/audio/{id}/metadata"),
-        Method::DELETE => path.ends_with("/folders/{id}"),
+        Method::PATCH => path.ends_with("/audio/{id}/metadata") || path.ends_with("/roots/{name}"),
+        Method::DELETE => path.ends_with("/folders/{id}") || path.ends_with("/roots/{name}"),
         Method::POST => [
+            "/roots",
             "/audio/metadata/batch",
             "/audio/{id}/plays",
             "/audio/remove",
@@ -320,14 +397,21 @@ async fn require_token(State(service): State<Service>, request: Request, next: N
 /// 403 `MANAGE_FORBIDDEN` unless `manage_mode` allows this (authorized) request to
 /// manage the library.
 async fn require_manage(State(service): State<Service>, request: Request, next: Next) -> Response {
-    let connection = request.extensions().get::<ConnectionInfo>().copied();
-    match service
-        .security()
-        .authorize_manage(request.headers(), connection.as_ref())
-    {
-        Ok(()) => next.run(request).await,
-        Err(error) => error.into_response(),
+    if request.extensions().get::<ManagedAdmission>().is_none() {
+        // Defensive admission for a management route added without updating the
+        // outer predicate. Existing managed requests were checked before library ID.
+        let connection = request.extensions().get::<ConnectionInfo>().copied();
+        if let Err(error) = authorize_managed(
+            service.security().clone(),
+            request.headers().clone(),
+            connection,
+        )
+        .await
+        {
+            return error.into_response();
+        }
     }
+    next.run(request).await
 }
 
 /// `GET /capabilities`: the effective `manage_mode`, whether this request counts as
@@ -343,6 +427,7 @@ async fn capabilities(
         manage_mode,
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
+        root_management: true,
     })
 }
 
@@ -382,6 +467,85 @@ async fn library(Extension(state): Extension<AppState>) -> Result<impl IntoRespo
 
 async fn roots(Extension(state): Extension<AppState>) -> Result<impl IntoResponse, ApiError> {
     Ok(Json(blocking(move || state.roots_response()).await?))
+}
+
+/// Directory browser shared with the admin UI, protected by normal API permissions.
+#[derive(Deserialize)]
+struct FsQuery {
+    path: Option<String>,
+    hidden: Option<String>,
+}
+
+async fn browse_fs(
+    Extension(state): Extension<AppState>,
+    query: Result<Query<FsQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query.map_err(|error| ApiError::validation(error.body_text()))?;
+    let shown = query
+        .path
+        .clone()
+        .unwrap_or_else(|| "starting places".into());
+    let work = crate::admin::run_fs_blocking(move || match query.path {
+        Some(path) => Ok(Json(crate::browse::list_directory(
+            &path,
+            matches!(query.hidden.as_deref(), Some("1" | "true")),
+        )?)
+        .into_response()),
+        None => {
+            let roots = state
+                .root_monitor()
+                .roots()
+                .iter()
+                .map(|root| (root.name.clone(), root.server_path.clone()))
+                .collect::<Vec<_>>();
+            Ok(Json(crate::browse::places(&roots)).into_response())
+        }
+    });
+    crate::admin::with_fs_timeout(&shown, work).await
+}
+
+async fn add_root(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let request: AddRootRequest = json_body(&headers, body)?;
+    let shown = request.path.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _on_drop = CancelOnDrop(cancel.clone());
+    let root = crate::admin::with_fs_timeout(
+        &shown,
+        crate::admin::run_fs_blocking(move || state.add_root_cancellable(request, cancel)),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(root)).into_response())
+}
+
+async fn remove_root(
+    Extension(state): Extension<AppState>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _on_drop = CancelOnDrop(cancel.clone());
+    Ok(Json(
+        crate::admin::run_blocking(move || state.remove_root_cancellable(&name, cancel)).await?,
+    )
+    .into_response())
+}
+
+async fn update_root_path(
+    Extension(state): Extension<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let request: RootPathRequest = json_body(&headers, body)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _on_drop = CancelOnDrop(cancel.clone());
+    let root =
+        crate::admin::run_fs_blocking(move || state.update_root_path(&name, request, cancel))
+            .await?;
+    Ok(Json(root).into_response())
 }
 
 /// `POST /roots/{name}/check`: bounded inline recheck (about 2 s), then the root's
@@ -1518,6 +1682,56 @@ impl<S: Stream + Unpin, G: Unpin> Stream for GuardedStream<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_admission_matches_every_managed_route_and_exact_method() {
+        // Keep this table aligned with all route_layer(manage()) registrations above.
+        for (method, path) in [
+            (Method::GET, "/fs"),
+            (Method::HEAD, "/fs"),
+            (Method::POST, "/roots"),
+            (Method::PATCH, "/roots/{name}"),
+            (Method::DELETE, "/roots/{name}"),
+            (Method::POST, "/audio/remove"),
+            (Method::DELETE, "/folders/{id}"),
+            (Method::POST, "/scans"),
+            (Method::POST, "/scans/{session_id}/pause"),
+            (Method::POST, "/scans/{session_id}/resume"),
+            (Method::POST, "/scans/{session_id}/cancel"),
+        ] {
+            assert!(managed_route(&method, path), "{method} {path}");
+            assert!(
+                managed_route(&method, &format!("{API_BASE}{path}")),
+                "nested {method} {path}"
+            );
+        }
+        for (method, path) in [
+            (Method::GET, "/roots"),
+            (Method::HEAD, "/roots"),
+            (Method::POST, "/roots/{name}/check"),
+            (Method::GET, "/library"),
+            (Method::GET, "/library/snapshot"),
+            (Method::GET, "/capabilities"),
+            (Method::GET, "/audio/{id}/stream"),
+            (Method::HEAD, "/audio/{id}/stream"),
+            (Method::GET, "/audio/{id}/preview"),
+            (Method::GET, "/audio/{id}/waveform"),
+            (Method::PATCH, "/audio/{id}/metadata"),
+            (Method::POST, "/audio/metadata/batch"),
+            (Method::POST, "/audio/{id}/plays"),
+            (Method::GET, "/history/scans"),
+            (Method::GET, "/history/plays"),
+            (Method::GET, "/scans/current"),
+            (Method::GET, "/scans/{session_id}"),
+            (Method::GET, "/scans/{session_id}/pause"),
+            (Method::GET, "/audio/remove"),
+            (Method::POST, "/fs"),
+            (Method::POST, "/folders/{id}"),
+            (Method::PUT, "/roots/{name}"),
+        ] {
+            assert!(!managed_route(&method, path), "{method} {path}");
+        }
+    }
 
     #[test]
     fn filename_tokens_are_header_safe() {

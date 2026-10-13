@@ -535,10 +535,11 @@ impl AppState {
         // The root checkers start only once the library is open, so failed (retried)
         // opens never leave checker threads behind on a hung volume.
         // Roots changed on the admin page replace the `config.toml` list.
-        let roots = security
-            .roots_override()
-            .unwrap_or_else(|| config.roots.clone());
+        let root_security = security.clone();
         Self::open_inner(config, security, || {
+            let roots = root_security
+                .roots_override()
+                .unwrap_or_else(|| config.roots.clone());
             RootMonitor::start(&roots, config.root_policy())
         })
     }
@@ -571,6 +572,7 @@ impl AppState {
             remove_stale_snapshots(&std::env::temp_dir(), Some(SHARED_TEMP_SNAPSHOT_AGE));
         }
         let provider = Arc::new(SqliteProvider::open_existing(&config.library_db)?);
+        crate::manage::recover_root_relink(&provider, &security)?;
         let tracker = RevisionTracker::open(provider.database_path())?;
         let library_id = tracker.current()?.library_id;
         let provider_path = provider.database_path().to_path_buf();

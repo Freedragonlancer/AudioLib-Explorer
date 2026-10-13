@@ -349,6 +349,23 @@ pub trait DataProvider: Send + Sync {
     }
     fn get_audio(&self, id: i64) -> Result<AudioFile>;
     fn folders(&self, parent_id: Option<i64>) -> Result<Vec<Folder>>;
+    /// Retrieve one owned folder by its stable identity; absence is `NotFound`.
+    /// Providers may implement a direct indexed lookup instead of the tree fallback.
+    fn get_folder(&self, id: i64) -> Result<Folder> {
+        let mut parents = vec![None];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(parent) = parents.pop() {
+            for folder in self.folders(parent)? {
+                if folder.id == id {
+                    return Ok(folder);
+                }
+                if seen.insert(folder.id) {
+                    parents.push(Some(folder.id));
+                }
+            }
+        }
+        Err(Error::NotFound(format!("Folder {id}")))
+    }
     fn update_metadata(&self, id: i64, patch: &MetadataPatch) -> Result<AudioFile>;
     fn record_play(&self, id: i64) -> Result<()>;
     fn stats(&self) -> Result<LibraryStats>;
@@ -360,6 +377,26 @@ pub trait DataProvider: Send + Sync {
     fn update_metadata_batch(&self, request: &BatchMetadataRequest) -> Result<BatchMetadataReport>;
     fn find_audio_by_path(&self, path: &Path) -> Result<Option<AudioFile>>;
     fn relink_audio(&self, id: i64, path: &Path) -> Result<AudioFile>;
+    /// Relocate an indexed top-level folder as one operation while retaining record
+    /// identities and annotations. Every indexed WAV must have a valid corresponding
+    /// target beneath `target`; providers without this facility refuse the operation.
+    fn relink_folder(&self, _source: &Path, _target: &Path) -> Result<u64> {
+        Err(Error::Validation(
+            "This data provider cannot relocate library folders".into(),
+        ))
+    }
+    /// Relocation that stops before its atomic commit when the request is abandoned.
+    fn relink_folder_cancellable(
+        &self,
+        source: &Path,
+        target: &Path,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<u64> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        self.relink_folder(source, target)
+    }
     fn remove_audio(&self, ids: &[i64]) -> Result<u64>;
     fn remove_folder(&self, id: i64) -> Result<u64>;
     fn scan_history(&self, limit: usize, offset: usize) -> Result<Vec<ScanSession>>;

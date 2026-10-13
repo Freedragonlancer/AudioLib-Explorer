@@ -14,6 +14,7 @@
 //! once if the scan changed anything (or another process wrote meanwhile), otherwise not.
 use crate::{
     ApiError, AppState,
+    auth::SettingsLease,
     roots::{
         RootMonitor, RootState, describe_io_error, is_transient_network_error, probe_root,
         without_verbatim,
@@ -376,9 +377,12 @@ impl AppState {
                 "workers must be 1..={MAX_SCAN_WORKERS} (or null for automatic)"
             )));
         }
-        // Root edits and reservation share this lock. Once reserved, root removal
-        // sees BUSY; resolution keeps this exact monitor even after later additions.
+        // Match root edits' lock order: local root-edit lock, OS settings lease,
+        // then the scanner's per-database OS lease. Reload before taking the fixed
+        // monitor snapshot, including edits committed by another server instance.
         let edit = self.roots_edit_lock();
+        let settings_lease = self.security().settings_lease()?;
+        self.refresh_roots_locked(&settings_lease)?;
         let monitor = self.root_monitor();
         let index = monitor
             .roots()
@@ -438,6 +442,7 @@ impl AppState {
                     index,
                     workers as usize,
                     sender,
+                    Some(settings_lease),
                 )
             });
         if let Err(error) = spawned {
@@ -687,12 +692,14 @@ fn run_scan(
     index: usize,
     workers: usize,
     sender: oneshot::Sender<Result<ScanResponse, ApiError>>,
+    settings_lease: Option<SettingsLease>,
 ) {
     let mut sender = Some(sender);
     let mut cleanup = ScanCleanup {
         state,
         job,
         holding_revision: false,
+        settings_lease,
     };
     // Includes root resolution and completion bookkeeping, not only ScanService.
     // The cleanup guard also runs if panic recovery itself unwinds.
@@ -718,15 +725,20 @@ fn run_scan(
     }
 }
 
-/// Releases both reservations on every exit, including a panic before session creation.
+/// Releases settings, scan-slot and revision reservations on every exit, including
+/// a panic before session creation.
 struct ScanCleanup<'a> {
     state: &'a AppState,
     job: &'a Arc<ScanJob>,
     holding_revision: bool,
+    // Keep cross-instance root edits excluded until ScanService's first callback
+    // confirms its database scan lease. Errors and panics release it as well.
+    settings_lease: Option<SettingsLease>,
 }
 
 impl Drop for ScanCleanup<'_> {
     fn drop(&mut self) {
+        drop(self.settings_lease.take());
         if self.holding_revision {
             let _ = self.state.tracker().end_hold(true);
         }
@@ -784,6 +796,9 @@ fn run_scan_inner(
             provider.ensure_scan_folder(&target, &root)?;
         }
         ScanService::new(provider.clone()).scan(&target, &options, &job.control, |progress| {
+            // ScanService calls back only after acquiring its OS scan lease and
+            // creating the session. Hand off exclusion without a root-edit gap.
+            drop(cleanup.settings_lease.take());
             let first = {
                 let mut status = job.status();
                 let first = status.progress.session_id == 0;
@@ -872,6 +887,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scan_admission_hands_settings_exclusion_to_the_database_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(audiolib_db::SqliteProvider::open(&dir.path().join("library.db")).unwrap());
+        let config = crate::ServerConfig::from_toml_str(
+            &format!(
+                "library_db='library.db'\n[[roots]]\nname='SFX'\nserver_path='{}'\n",
+                dir.path().display()
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        let state = AppState::open(&config, None).unwrap();
+        let second = AppState::open(&config, None).unwrap();
+        let edit = state.roots_edit_lock();
+        let lease = state.security().settings_lease().unwrap();
+        state.refresh_roots_locked(&lease).unwrap();
+        let monitor = state.root_monitor();
+        let error = second
+            .start_scan(ScanRequest {
+                root: "SFX".into(),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "BUSY");
+        assert!(second.scans().current().is_none());
+        let control = ScanCancellation::default();
+        assert!(control.pause());
+        let job = Arc::new(ScanJob {
+            root: "SFX".into(),
+            subpath: String::new(),
+            mode: ScanMode::Incremental,
+            control,
+            status: Mutex::new(JobStatus {
+                progress: ScanProgress::default(),
+                active: true,
+                revision: None,
+                shutdown: false,
+            }),
+        });
+        state.scans().jobs().active = Some(job.clone());
+        drop(edit);
+        let (sender, receiver) = oneshot::channel();
+        let thread_state = state.clone();
+        let thread_job = job.clone();
+        let thread = std::thread::spawn(move || {
+            run_scan(
+                &thread_state,
+                &thread_job,
+                monitor,
+                0,
+                1,
+                sender,
+                Some(lease),
+            )
+        });
+        let started = receiver.blocking_recv().unwrap();
+        let settings_released = second.security().settings_lease().is_ok();
+        let database_reserved =
+            matches!(second.provider().ensure_library_idle(), Err(Error::Busy(_)));
+        // Always wake and join the paused scanner before assertions can unwind.
+        job.control.cancel();
+        thread.join().unwrap();
+        assert!(started.is_ok());
+        assert!(settings_released);
+        assert!(database_reserved);
+        assert!(state.scans().current().is_none());
+        assert!(second.provider().ensure_library_idle().is_ok());
+    }
+
+    #[test]
     fn a_resolution_panic_releases_the_scan_slot_and_answers_the_request() {
         let dir = tempfile::tempdir().unwrap();
         drop(audiolib_db::SqliteProvider::open(&dir.path().join("library.db")).unwrap());
@@ -899,13 +984,22 @@ mod tests {
         state.scans().jobs().active = Some(job.clone());
         let (sender, receiver) = oneshot::channel();
         // Simulate an unexpected failure before ScanService creates a session.
-        run_scan(&state, &job, state.root_monitor(), usize::MAX, 1, sender);
+        run_scan(
+            &state,
+            &job,
+            state.root_monitor(),
+            usize::MAX,
+            1,
+            sender,
+            Some(state.security().settings_lease().unwrap()),
+        );
         assert_eq!(
             receiver.blocking_recv().unwrap().unwrap_err().code(),
             "INTERNAL"
         );
         assert!(state.scans().current().is_none());
         assert!(!job.response().active);
+        assert!(state.security().settings_lease().is_ok());
         // The following reservation is usable instead of becoming permanently BUSY.
         let started = state
             .start_scan(ScanRequest {
@@ -950,6 +1044,7 @@ mod tests {
                 state: &state,
                 job: &job,
                 holding_revision: true,
+                settings_lease: Some(state.security().settings_lease().unwrap()),
             };
             panic!("completion failure after beginning the hold");
         }));
@@ -957,6 +1052,7 @@ mod tests {
         assert!(state.scans().current().is_none());
         assert!(!job.response().active);
         assert!(state.revision().unwrap().revision > before);
+        assert!(state.security().settings_lease().is_ok());
     }
 
     #[test]

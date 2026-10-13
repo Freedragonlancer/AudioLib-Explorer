@@ -4,6 +4,7 @@
 mod folder_rollup_tests;
 mod id_membership;
 mod management;
+mod owned_cancellation;
 #[cfg(feature = "scanner")]
 pub mod scanner;
 mod schema;
@@ -413,36 +414,45 @@ impl SqliteProvider {
     /// This method never creates a missing file and keeps rollback-journal mode, so a
     /// downloaded staging file can be atomically published without WAL/SHM dependencies.
     pub fn upgrade_owned_snapshot(path: &Path) -> Result<bool> {
+        Self::upgrade_owned_snapshot_cancellable(path, &AtomicBool::new(false))
+    }
+
+    /// Upgrade only an exclusively owned snapshot, interrupting SQLite work on cancellation.
+    /// The caller removes the cancelled staging copy; live libraries must use their
+    /// administration workflow and must never be passed to this operation.
+    pub fn upgrade_owned_snapshot_cancellable(path: &Path, cancel: &AtomicBool) -> Result<bool> {
         let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(db_error)?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
-        schema::validate_library_identity(&conn)?;
-        let version: i64 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(db_error)?;
-        if !snapshot_schema_supported(version) {
-            return Err(Error::Database(format!(
-                "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
-            )));
-        }
-        if !schema::needs_upgrade(&conn)? {
-            return Ok(false);
-        }
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
-            .map_err(db_error)?;
-        if !mode.eq_ignore_ascii_case("delete") {
-            return Err(Error::Database(
-                "Owned snapshot must use rollback-journal mode".into(),
-            ));
-        }
-        conn.execute_batch("PRAGMA foreign_keys=ON;")
-            .map_err(db_error)?;
-        schema::register_tokenizer(&conn, load_tokenizer())?;
-        schema::migrate(&mut conn)?;
-        schema::backfill_source_tags(&mut conn)?;
-        Ok(true)
+        owned_cancellation::run(&mut conn, cancel, |conn| {
+            schema::validate_library_identity(conn)?;
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(db_error)?;
+            if !snapshot_schema_supported(version) {
+                return Err(Error::Database(format!(
+                    "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
+                )));
+            }
+            if !schema::needs_upgrade(conn)? {
+                return Ok(false);
+            }
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .map_err(db_error)?;
+            if !mode.eq_ignore_ascii_case("delete") {
+                return Err(Error::Database(
+                    "Owned snapshot must use rollback-journal mode".into(),
+                ));
+            }
+            conn.execute_batch("PRAGMA foreign_keys=ON;")
+                .map_err(db_error)?;
+            schema::register_tokenizer(conn, load_tokenizer())?;
+            schema::migrate(conn)?;
+            schema::backfill_source_tags(conn)?;
+            Ok(true)
+        })
     }
 
     /// `PRAGMA data_version` of this provider's writer connection. SQLite changes it only
@@ -1544,6 +1554,12 @@ impl DataProvider for SqliteProvider {
             .collect::<rusqlite::Result<_>>()
             .map_err(db_error)
     }
+    fn get_folder(&self, id: i64) -> Result<Folder> {
+        self.reader()?.query_row(
+            "SELECT id,folder_path,folder_name,parent_id,total_file_count FROM folders WHERE id=?1",
+            [id], |row| Ok(Folder { id:row.get(0)?, path:row.get(1)?, name:row.get(2)?, parent_id:row.get(3)?, file_count:unsigned(row,4)? }),
+        ).optional().map_err(db_error)?.ok_or_else(|| Error::NotFound(format!("Folder {id}")))
+    }
 
     fn update_metadata(&self, id: i64, patch: &MetadataPatch) -> Result<AudioFile> {
         patch.validate()?;
@@ -1664,6 +1680,17 @@ impl DataProvider for SqliteProvider {
     }
     fn relink_audio(&self, id: i64, path: &Path) -> Result<AudioFile> {
         self.management_relink(id, path)
+    }
+    fn relink_folder(&self, source: &Path, target: &Path) -> Result<u64> {
+        self.management_relink_folder(source, target, &AtomicBool::new(false))
+    }
+    fn relink_folder_cancellable(
+        &self,
+        source: &Path,
+        target: &Path,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<u64> {
+        self.management_relink_folder(source, target, &cancel)
     }
     fn remove_audio(&self, ids: &[i64]) -> Result<u64> {
         self.management_remove(ids)

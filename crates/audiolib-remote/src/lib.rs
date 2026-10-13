@@ -25,6 +25,9 @@
 //! * Server library management (`manage` module): [`Capabilities`] (`manage_mode`),
 //!   server scans ([`ScanRequest`] / [`ServerScan`]) and database-only removals
 //!   ([`RemoveReport`]); typed `403`/`409`/`503` errors ([`manage_error_text`]).
+//! * Remote folder browsing ([`RemoteDirectory`]) and sound-library root registration,
+//!   path changes and database-only root removal ([`RootRemoveReport`]), guarded by
+//!   [`Capabilities::may_manage_roots`].
 //! * Server profiles (`profiles` module): the data source dialog saved against the
 //!   active profile, "use the external address" as a sibling profile, switching and
 //!   removal, with per-profile tokens in [`RemoteSecrets`].
@@ -38,6 +41,7 @@ mod mapping;
 mod poll;
 mod probe;
 mod profiles;
+mod roots;
 mod route;
 mod secrets;
 mod stream;
@@ -77,6 +81,9 @@ pub use probe::{ConnectionReport, ProbeStep, StepReport, probe_webdav, test_conn
 pub use profiles::{
     ConnectionForm, ProfileEdit, activate_source, apply_connection_form, edit_transcode,
     remove_server_profile, save_profile_edit, untouched_transcode, use_external_address,
+};
+pub use roots::{
+    RemoteDirectory, RemoteDirectoryEntry, RemotePlace, RootCreateRequest, RootRemoveReport,
 };
 pub use route::{
     AudioRoute, CONSERVATIVE_BANDWIDTH_BPS, FLAC_BELOW_BPS, MONO_BELOW_BPS, PreviewParams,
