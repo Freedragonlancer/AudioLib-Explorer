@@ -8,6 +8,9 @@ use std::{
 };
 
 // Stored POSIX paths retain case even though the library's search keys fold it.
+// Compare native components so an empty suffix joined to a root (which adds a
+// trailing separator) still matches its canonical path. This does not resolve
+// links: a linked child and its canonical target retain different components.
 // Windows comparisons also normalize drive/UNC prefixes and directory separators.
 #[cfg(feature = "scanner")]
 fn relocation_path_matches(left: &str, right: &str) -> bool {
@@ -17,7 +20,7 @@ fn relocation_path_matches(left: &str, right: &str) -> bool {
     }
     #[cfg(not(windows))]
     {
-        left == right
+        Path::new(left) == Path::new(right)
     }
 }
 
@@ -766,9 +769,36 @@ impl SqliteProvider {
         if source.file_name().is_none() || target.file_name().is_none() {
             return Err(validation("File system or drive roots cannot be relocated"));
         }
+        let check_cancel = || -> Result<()> {
+            if cancel.load(Ordering::Acquire) {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        // A cancelled request must not acquire leases or turn into a successful
+        // no-op merely because the source is an alias or is not indexed.
+        check_cancel()?;
         let _scan = LibraryLease::acquire(&self.path)?;
         let _administration = AdministrationLease::exclusive(&self.path)?;
         let target = audiolib_core::validate_scan_root(target, &[])?;
+        if target.file_name().is_none() {
+            return Err(validation("File system or drive roots cannot be relocated"));
+        }
+        // Scanning stores canonical Windows paths. Resolve existing source
+        // aliases (including short names), but retain a missing old path after
+        // the user physically moves a directory. Other I/O failures are errors.
+        #[cfg(windows)]
+        let resolved_source = match source.canonicalize() {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => source.to_path_buf(),
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(windows)]
+        let source = resolved_source.as_path();
+        if source.file_name().is_none() {
+            return Err(validation("File system or drive roots cannot be relocated"));
+        }
         let target_text = folder_path_text(&target);
         let source_text = folder_path_text(source).trim_end_matches('/').to_string();
         let source_key = path_key(&source_text);
@@ -829,13 +859,6 @@ impl SqliteProvider {
                 ));
             }
             Ok(relative.to_string())
-        };
-        let check_cancel = || -> Result<()> {
-            if cancel.load(Ordering::Acquire) {
-                Err(Error::Cancelled)
-            } else {
-                Ok(())
-            }
         };
         let mut moved_folders = Vec::with_capacity(folders.len());
         for (id, path) in &folders {

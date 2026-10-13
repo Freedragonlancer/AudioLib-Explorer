@@ -23,7 +23,7 @@ $binaryName = if ($IsWindows) { 'audiolib-server.exe' } else { 'audiolib-server'
 $extension = if ($IsWindows) { 'zip' } else { 'tar.gz' }
 New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
 try {
-    foreach ($file in @('package-server.ps1', 'server-files.json')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $testRoot 'tools') }
+    foreach ($file in @('package-server.ps1', 'validate-server-package.ps1', 'server-files.json')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $testRoot 'tools') }
     $files = @(Get-Content -LiteralPath (Join-Path $testRoot 'tools/server-files.json') -Raw | ConvertFrom-Json)
     foreach ($file in $files) {
         $destination = Join-Path $testRoot $file
@@ -59,10 +59,34 @@ try {
             @{ id='normal'; deps=@() }, @{ id='dev'; deps=@() }
         ) }
     }
+    $fakeAsioMetadata = $fakeMetadata | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $asioSource = Join-Path $testRoot 'asio-dependency'
+    $asioBuildSource = Join-Path $testRoot 'asio-build-dependency'
+    foreach ($source in @($asioSource, $asioBuildSource)) {
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source 'LICENSE-APACHE') -Value 'Synthetic public Apache license notice.' -Encoding utf8NoBOM
+    }
+    $fakeAsioMetadata.packages += @(
+        @{ id='cpal'; name='cpal'; version='0.18.2'; source='registry+public'; license='Apache-2.0'; license_file=$null; repository=$null; manifest_path=(Join-Path $licenseRoot 'Cargo.toml') },
+        @{ id='asio'; name='asio-sys'; version='0.4.0'; source='registry+public'; license='Apache-2.0'; license_file=$null; repository=$null; manifest_path=(Join-Path $asioSource 'Cargo.toml') },
+        @{ id='asio-build'; name='asio-build-dependency'; version='1.0.0'; source='registry+public'; license='Apache-2.0'; license_file=$null; repository=$null; manifest_path=(Join-Path $asioBuildSource 'Cargo.toml') }
+    )
+    $fakeAsioMetadata.resolve.nodes[0].deps += @{pkg='cpal'; dep_kinds=@(@{kind=$null})}
+    $fakeAsioMetadata.resolve.nodes += @(
+        @{ id='cpal'; deps=@(@{pkg='asio'; dep_kinds=@(@{kind=$null})}) },
+        @{ id='asio'; deps=@(@{pkg='asio-build'; dep_kinds=@(@{kind='build'})}, @{pkg='dev'; dep_kinds=@(@{kind='dev'})}) },
+        @{ id='asio-build'; deps=@() }
+    )
+    $metadataState = @{ AsioRequests=0 }
     # These functions mask only the external commands in this invocation's child scope.
     $metadataCommand = {
         if ($args -notcontains '--locked' -or $args -notcontains '--filter-platform') { throw 'Package metadata must use the locked target filter.' }
-        $fakeMetadata | ConvertTo-Json -Depth 8 -Compress
+        if ($args -contains '--features') {
+            $position = [array]::IndexOf($args, '--features')
+            if ($args[$position + 1] -cne 'audiolib-desktop/asio,audiolib-cli/asio') { throw 'ASIO metadata must match the workspace release features.' }
+            $metadataState.AsioRequests++
+            $fakeAsioMetadata | ConvertTo-Json -Depth 8 -Compress
+        } else { $fakeMetadata | ConvertTo-Json -Depth 8 -Compress }
         $global:LASTEXITCODE = 0
     }.GetNewClosure()
     Set-Item -LiteralPath Function:cargo -Value $metadataCommand
@@ -77,6 +101,9 @@ try {
         Set-Content -LiteralPath $path -Value 'Owned sentinel.'
     }
     $packager = Join-Path $testRoot 'tools/package-server.ps1'
+    $validator = Join-Path $testRoot 'tools/validate-server-package.ps1'
+    Expect-Rejection { & $packager -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
+    Expect-Rejection { & $validator -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
     & $packager -Tag v0.4.4 -Target $target
     if (Test-Path -LiteralPath (Join-Path $payload 'settings.json')) { throw 'Stale server runtime file survived packaging.' }
     foreach ($protected in @('dist/latest/portable/preserve.txt', 'local_release/preserve.txt', 'doc/unlisted-private-report.json')) {
@@ -99,6 +126,62 @@ try {
         & tar -xzf $archive -C $extracted
         if ($LASTEXITCODE -ne 0 -or ([int][IO.File]::GetUnixFileMode((Join-Path $extracted $binaryName)) -band 73) -ne 73 -or
             ([int][IO.File]::GetUnixFileMode((Join-Path $extracted 'server/deploy/redeploy-server.sh')) -band 73) -ne 73) { throw 'Unix archive did not preserve executable permissions.' }
+    }
+    if ($IsWindows) {
+        # Test ASIO before CI prepares the real SDK. The pinned ZIP checksum is
+        # mocked ONLY for this synthetic owned ZIP; every notice/release hash
+        # still uses the real SHA256 cmdlet. Production has no checksum override.
+        Expect-Rejection { & $packager -Tag v0.4.4 -Target $target -Asio } 'prepared ASIO SDK archive/license is missing'
+        $sdkDirectory = Join-Path $testRoot 'tools/.build-tools/asio-2.3.4/ASIOSDK'
+        New-Item -ItemType Directory -Path $sdkDirectory -Force | Out-Null
+        $sdkLicense = Join-Path $sdkDirectory 'LICENSE.txt'
+        $sdkText = 'Synthetic prepared SDK notice.'
+        [IO.File]::WriteAllText($sdkLicense, $sdkText, [Text.UTF8Encoding]::new($false))
+        $sdkArchive = Join-Path $testRoot 'tools/.build-tools/ASIO-SDK_2.3.4_2025-10-15.zip'
+        $sdkZip = [IO.Compression.ZipFile]::Open($sdkArchive, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $stream = $sdkZip.CreateEntry('ASIOSDK/LICENSE.txt').Open()
+            try { $bytes = [Text.Encoding]::UTF8.GetBytes($sdkText); $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        } finally { $sdkZip.Dispose() }
+        $sdkState = @{ Pinned=$true }
+        $hashCommand = {
+            param([string]$LiteralPath, [string]$Algorithm='SHA256')
+            if ([IO.Path]::GetFullPath($LiteralPath).Equals($sdkArchive, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($Algorithm -cne 'SHA256') { throw 'SDK pin must be SHA256.' }
+                return [pscustomobject]@{ Hash=$(if ($sdkState.Pinned) { 'D5EBF0C20DD2C5F43771FD0C1418F4B361BF52434EE670097CFA6B3A335E2ECA' } else { '0' * 64 }) }
+            }
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
+        }.GetNewClosure()
+        Set-Item -LiteralPath Function:Get-FileHash -Value $hashCommand
+        & $packager -Tag v0.4.4 -Target $target -Asio
+        $asioManifest = @(Get-Content -LiteralPath (Join-Path $payload 'licenses/dependencies.json') -Raw | ConvertFrom-Json)
+        if ($metadataState.AsioRequests -ne 1 -or !($asioManifest | Where-Object name -CEQ 'asio-sys') -or
+            !($asioManifest | Where-Object name -CEQ 'asio-build-dependency') -or ($asioManifest | Where-Object name -CEQ 'private-dev-dependency')) { throw 'ASIO normal/build closure failed to match release features.' }
+        $sdkRelative = 'licenses/Steinberg-ASIO-SDK-2.3.4.txt'
+        $packagedSdk = Join-Path $payload $sdkRelative
+        if ((Get-FileHash -LiteralPath $packagedSdk).Hash -cne (Get-FileHash -LiteralPath $sdkLicense).Hash -or
+            !(Test-Path -LiteralPath (Join-Path $payload 'licenses/asio-sys-0.4.0/LICENSE-APACHE') -PathType Leaf)) { throw 'ASIO SDK/crate notices were not copied from their verified sources.' }
+        $asioArchiveHash = (Get-FileHash -LiteralPath $archive).Hash
+        $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+        try { if ($null -eq $zip.GetEntry($sdkRelative) -or $null -eq $zip.GetEntry('licenses/asio-sys-0.4.0/LICENSE-APACHE')) { throw 'ASIO notices are missing from the release archive.' } }
+        finally { $zip.Dispose() }
+        Expect-Rejection { & $validator -Tag v0.4.4 -Target $target } 'ASIO notices differ'
+        # Synthetic bytes cannot pass the official SDK notice hash: rejection
+        # must happen before invoking a benchmark or starting the server fixture.
+        Expect-Rejection { & $validator -Tag v0.4.4 -Target $target -Asio } 'SDK notice differs from the pinned SDK'
+        $sdkState.Pinned = $false
+        Expect-Rejection { & $packager -Tag v0.4.4 -Target $target -Asio } 'archive checksum mismatch'
+        $sdkState.Pinned = $true
+        [IO.File]::WriteAllText($sdkLicense, 'Modified prepared SDK notice.', [Text.UTF8Encoding]::new($false))
+        Expect-Rejection { & $packager -Tag v0.4.4 -Target $target -Asio } 'license differs from the pinned archive'
+        [IO.File]::WriteAllText($sdkLicense, $sdkText, [Text.UTF8Encoding]::new($false))
+        Remove-Item -LiteralPath $sdkLicense
+        Expect-Rejection { & $packager -Tag v0.4.4 -Target $target -Asio } 'prepared ASIO SDK archive/license is missing'
+        if ((Get-FileHash -LiteralPath $archive).Hash -cne $asioArchiveHash) { throw 'An ASIO rejection replaced the verified archive.' }
+        & $packager -Tag v0.4.4 -Target $target
+        $archiveHash = (Get-FileHash -LiteralPath $archive).Hash
+        if (Test-Path -LiteralPath (Join-Path $payload $sdkRelative)) { throw 'A non-ASIO package retained the previous SDK notice.' }
+        Expect-Rejection { & $validator -Tag v0.4.4 -Target $target -Asio } 'public file allowlist'
     }
     Expect-Rejection { & $packager -Tag v0.4.5 -Target $target } 'version does not match'
     $document = Join-Path $testRoot $files[0]
@@ -124,7 +207,7 @@ try {
         $link = Get-Item -LiteralPath $dist -Force -ErrorAction SilentlyContinue
         if ($null -ne $link -and ($link.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Assert-TestPath $dist; Remove-Item -LiteralPath $dist -Force }
     }
-    Write-Host 'Server package boundary regression passed: allowlist, dependency closure, safe report/checksums, rejection preservation and linked-path guard.'
+    Write-Host 'Server package boundary regression passed: allowlist, dependency closure, safe report/checksums, rejection preservation, linked-path guard and ASIO target/SDK boundary (positive ASIO fixture on Windows).'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         if (!(Split-Path -Leaf $testRoot).StartsWith('AudioLibServerPackage-', [StringComparison]::Ordinal) -or

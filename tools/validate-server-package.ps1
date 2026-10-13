@@ -1,13 +1,14 @@
 # tools/validate-server-package.ps1
 # Validate the native server archive and smoke-test its extracted executable against
 # an owned synthetic library. Requires PowerShell 7.2; never uses normal runtime data.
-# ./tools/validate-server-package.ps1 -Tag v0.4.4 -Target x86_64-pc-windows-msvc
+# ./tools/validate-server-package.ps1 -Tag v0.4.5 -Target x86_64-pc-windows-msvc -Asio
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)]
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')]
-    [string]$Target
+    [string]$Target,
+    [switch]$Asio
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -17,6 +18,7 @@ $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [
 $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
 if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N.' }
 $version = $tagMatch.Groups[1].Value
+if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
 switch ($Target) {
     'x86_64-pc-windows-msvc' {
         if (!$IsWindows) { throw 'Validate the Windows package on Windows.' }
@@ -113,6 +115,8 @@ $publicFiles = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'server-files
 $required = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $null = $required.Add($binaryName)
 $null = $required.Add('licenses/dependencies.json')
+$sdkLicenseRelative = 'licenses/Steinberg-ASIO-SDK-2.3.4.txt'
+if ($Asio) { $null = $required.Add($sdkLicenseRelative) }
 foreach ($relative in $publicFiles) {
     if ($relative -isnot [string]) { throw 'Server allowlist must contain strings.' }
     Assert-Relative $relative
@@ -178,6 +182,16 @@ try {
             !$licenseRoots.Add('licenses/' + $dependency.name + '-' + $dependency.version + '/')) { throw 'Server dependency notice schema is invalid.' }
     }
     if (!$dependencies.Count -or !($dependencies | Where-Object { $_.name -ceq 'audiolib-server' -and $_.version -ceq $version })) { throw 'Server dependency notice identity is missing.' }
+    $hasAsio = @($dependencies | Where-Object { $_.name -ceq 'asio-sys' }).Count -gt 0
+    if ($hasAsio -ne [bool]$Asio -or (!$Asio -and $archiveFiles.Contains($sdkLicenseRelative))) { throw 'Server ASIO notices differ from the selected -Asio mode.' }
+    if ($Asio) {
+        # SHA256 of ASIOSDK/LICENSE.txt from the pinned SDK 2.3.4 archive
+        # D5EBF0C20DD2C5F43771FD0C1418F4B361BF52434EE670097CFA6B3A335E2ECA.
+        $expectedLicenseHash = '61E56814F24B32216884B2DB0B4DCC317111A5AB354D54D19DD9FC13D71B1C7A'
+        if ((Get-FileHash -LiteralPath (Join-Path $extractRoot $sdkLicenseRelative) -Algorithm SHA256).Hash -cne $expectedLicenseHash) { throw 'Packaged ASIO SDK notice differs from the pinned SDK 2.3.4 license.' }
+        $asioNotices = @($archiveFiles | Where-Object { $_ -cmatch '^licenses/asio-sys-[^/]+/(?:LICENSE|COPYING|NOTICE)' })
+        if (!$asioNotices.Count) { throw 'Packaged asio-sys license notice is missing.' }
+    }
     $privatePrefixes = @($taskRoot, $env:USERPROFILE, $env:HOME, $env:CARGO_HOME, $env:RUSTUP_HOME, $env:CARGO_TARGET_DIR) | Where-Object { $_ }
     foreach ($file in $files) {
         Assert-Within $file.FullName $extractRoot

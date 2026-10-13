@@ -717,3 +717,13 @@ Windows 本机预检通过：server 新建 staging、运行数据排除、依赖
 portable validator 的新发布报告模式拒绝错误提交身份和 EXE 哈希；匹配报告下的独立首次启动、CLI、中文 UI 和启动错误诊断通过。该模式要求 `pwsh` 7.3 以上、显式标签/完整提交及 `CleanCheckout`，先核验下载的归档校验和，再以公开 CI 报告中的 EXE 哈希作为安装基准；原有默认模式继续核对本机 release 输出，不覆盖或伪装本机构建来满足身份检查。发布成功后，固定 `local_release/` 按已发布资产核验并安装，正常数据目录和配置保持原位。
 
 本轮准备日志位于忽略的 `.rust-validation/release-v0.4.4/`，不随发布资产上传。最终发布身份及平台执行结果以对应标签的公开 CI 报告和 GitHub Actions 为准。
+
+## 2026-10-13 v0.4.5 原生发布检查补修
+
+`v0.4.4` 的 [Release 检查](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/38368502269) 失败，未创建 GitHub Release；该标签保留，新的发布目标为 `v0.4.5`。Linux 原生回归发现根目录的空 suffix 经 `join("")` 产生末尾分隔符，被字符串比较误判为目录链接。现在按原生路径组件比较，保留 POSIX 大小写及真实链接校验；新增 Unix 回归验证链接拒绝后数据不变、移除测试链接后正常迁移并保留 WAV、ID 和 Metadata。
+
+Windows 检查中的预取消断言失败；确定性回归进一步复现同目录、未索引目录以及 Windows `audio/../audio` 源别名的入口缺口。重定位在获取 OS lease 前检查预取消，Windows 现有源路径按扫描所用的 canonical 身份查找，只有 `NotFound` 回退到已物理移走的旧路径，其他 I/O 错误保持可见。规范源和目标仍拒绝磁盘根目录。回归覆盖锁争用时预取消、目标冲突拒绝、实际迁移和第二次物理改名，确认源 WAV、文件及目录 ID、标注、播放记录和未知扩展 Metadata 保留；派生 `modified_at` 允许随成功迁移更新。
+
+Windows server 包按实际 workspace ASIO features 生成 normal/build 依赖闭包，并包含 `asio-sys` 与固定 SDK 2.3.4 通知；Unix 不启用 ASIO。打包核验已准备 SDK 的固定 ZIP 校验和及精确许可证内容，无 SDK 下载或校验绕过接口。独立 validator 校验官方通知 SHA256。隔离 fake 回归覆盖参数、SDK 缺失/篡改、feature 模式错误、通知清单及失败保留原归档；假 ZIP 校验和仅在测试夹具中模拟，实际 SDK ZIP 和许可证亦独立核验。
+
+本机最终 `cargo fmt --all -- --check`、默认及 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试通过。两份测试日志各汇总 777 passed、69 ignored（包含子进程测试的结果汇总）；检查期间应用源码身份保持一致。版本门禁确认 program 0.4.5、API v1、schema 5、snapshot 3..=5。发布构建、真实归档验收与原生 Linux 结果继续由对应标签 workflow 和公开报告记录；本机日志位于忽略的 `.rust-validation/release-v0.4.5/`，不随发布上传。

@@ -678,6 +678,79 @@ fn root_relocation_refuses_existing_indexed_destinations_and_precommit_cancellat
 }
 
 #[test]
+fn root_relocation_honors_precancelled_aliases_and_unindexed_roots() {
+    let f = fixture();
+    let source = f.temp.path().join("audio").canonicalize().unwrap();
+    let alias = source.join("");
+    assert!(alias.is_dir());
+    let unindexed = f.temp.path().join("unindexed");
+    let destination = f.temp.path().join("destination");
+    fs::create_dir_all(&unindexed).unwrap();
+    fs::create_dir_all(&destination).unwrap();
+    f.provider
+        .update_metadata(
+            f.ids[0],
+            &MetadataPatch {
+                notes: Some("keep after cancellation".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let before: Vec<_> = f
+        .ids
+        .iter()
+        .map(|id| f.provider.get_audio(*id).unwrap())
+        .collect();
+    let roots = f.provider.folders(None).unwrap();
+    let root_id = roots[0].id;
+    let children = f.provider.folders(Some(root_id)).unwrap();
+    let original: Vec<_> = f.paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    for (source, target) in [(&source, &alias), (&unindexed, &destination)] {
+        let result = f.provider.relink_folder_cancellable(
+            source,
+            target,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    }
+    // A request cancelled before admission must also avoid acquiring OS leases.
+    let database = f.provider.database_path().canonicalize().unwrap();
+    let mut name = database.file_name().unwrap().to_os_string();
+    name.push(".scan.lock");
+    let lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(database.with_file_name(name))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let result = f.provider.relink_folder_cancellable(
+        &source,
+        &destination,
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    );
+    lock.unlock().unwrap();
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    for (old, bytes) in before.iter().zip(original) {
+        assert_eq!(
+            serde_json::to_value(f.provider.get_audio(old.id).unwrap()).unwrap(),
+            serde_json::to_value(old).unwrap()
+        );
+        assert_eq!(fs::read(&old.file_path).unwrap(), bytes);
+    }
+    assert_eq!(
+        serde_json::to_value(f.provider.folders(None).unwrap()).unwrap(),
+        serde_json::to_value(roots).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(f.provider.folders(Some(root_id)).unwrap()).unwrap(),
+        serde_json::to_value(children).unwrap()
+    );
+    assert!(!f.temp.path().join("backups").exists());
+}
+
+#[test]
 fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio() {
     let f = fixture();
     let source = f.temp.path().join("audio");
@@ -779,6 +852,221 @@ fn root_relocation_keeps_windows_case_aliases_as_a_noop() {
     for (id, path) in f.ids.iter().zip(before) {
         assert_eq!(f.provider.get_audio(*id).unwrap().file_path, path);
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn root_relocation_resolves_existing_windows_source_aliases() {
+    let f = fixture();
+    // This alias reproduces the raw/canonical identity mismatch without relying
+    // on 8.3 short-name generation being enabled on the runner's volume.
+    let source = f.temp.path().join("audio").join("..").join("audio");
+    assert!(source.is_dir());
+    let canonical_source = source.canonicalize().unwrap();
+    assert_ne!(
+        audiolib_db::folder_path_text(&source),
+        audiolib_db::folder_path_text(&canonical_source)
+    );
+    let root_id = f.provider.folders(None).unwrap()[0].id;
+    let child_id = f.provider.folders(Some(root_id)).unwrap()[0].id;
+    f.provider
+        .update_metadata(
+            f.ids[0],
+            &MetadataPatch {
+                tags: Some("retained tag".into()),
+                notes: Some("retained alias note".into()),
+                favorite: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.provider.record_play(f.ids[0]).unwrap();
+    let extension = serde_json::json!({ "marker": "keep", "values": [1, 2] });
+    let conn = Connection::open(f.provider.database_path()).unwrap();
+    for id in &f.ids {
+        conn.execute(
+            "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension',json(?1)) WHERE id=?2",
+            rusqlite::params![extension.to_string(), id],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let preserved_attributes = |audio: &AudioFile| {
+        let mut attributes = audio.attributes.clone();
+        // Relocation updates this derived library timestamp; every other source
+        // and extension Metadata field must remain unchanged.
+        assert!(
+            attributes
+                .as_object_mut()
+                .unwrap()
+                .remove("modified_at")
+                .is_some()
+        );
+        attributes
+    };
+    let before: Vec<_> = f
+        .ids
+        .iter()
+        .map(|id| f.provider.get_audio(*id).unwrap())
+        .collect();
+    let original: Vec<_> = f.paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    let occupied = f.temp.path().join("occupied");
+    let target = f.temp.path().join("relocated");
+    for destination in [&occupied, &target] {
+        fs::create_dir_all(destination.join("child")).unwrap();
+        fs::copy(&f.paths[0], destination.join("metal.wav")).unwrap();
+        fs::copy(&f.paths[1], destination.join("child/wood.wav")).unwrap();
+    }
+    ScanService::new(f.provider.clone())
+        .scan(
+            &occupied,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let result = f.provider.relink_folder(&source, &occupied);
+    assert!(matches!(result, Err(Error::Validation(_))), "{result:?}");
+    for old in &before {
+        assert_eq!(
+            serde_json::to_value(f.provider.get_audio(old.id).unwrap()).unwrap(),
+            serde_json::to_value(old).unwrap()
+        );
+    }
+    assert_eq!(f.provider.relink_folder(&source, &target).unwrap(), 2);
+    for ((old, relative), bytes) in before
+        .iter()
+        .zip(["metal.wav", "child/wood.wav"])
+        .zip(original)
+    {
+        let moved = target.join(relative);
+        let current = f.provider.get_audio(old.id).unwrap();
+        assert_eq!(
+            current.file_path,
+            audiolib_db::display_path(&moved.canonicalize().unwrap())
+        );
+        assert_eq!(current.folder_id, old.folder_id);
+        assert_eq!(current.tags, old.tags);
+        assert_eq!(current.notes, old.notes);
+        assert_eq!(current.favorite, old.favorite);
+        assert_eq!(current.play_count, old.play_count);
+        assert_eq!(preserved_attributes(&current), preserved_attributes(old));
+        assert_eq!(current.attributes["unknown_extension"], extension);
+        assert_eq!(fs::read(&old.file_path).unwrap(), bytes);
+        assert_eq!(fs::read(moved).unwrap(), bytes);
+    }
+    assert_eq!(
+        f.provider.get_folder(root_id).unwrap().path,
+        audiolib_db::folder_path_text(&target.canonicalize().unwrap())
+    );
+    assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
+    assert_eq!(f.provider.stats().unwrap().audio_files, 4);
+    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 1);
+    // A subsequent physical move leaves the stored canonical source missing.
+    // It must still be usable to relocate the same records rather than fail its
+    // canonicalization or silently return zero.
+    let old_target = target.canonicalize().unwrap();
+    let moved_again = f.temp.path().join("moved-again");
+    fs::rename(&target, &moved_again).unwrap();
+    assert!(!old_target.exists());
+    assert_eq!(
+        f.provider.relink_folder(&old_target, &moved_again).unwrap(),
+        2
+    );
+    for (old, relative) in before.iter().zip(["metal.wav", "child/wood.wav"]) {
+        let current = f.provider.get_audio(old.id).unwrap();
+        assert_eq!(
+            current.file_path,
+            audiolib_db::display_path(&moved_again.join(relative).canonicalize().unwrap())
+        );
+        assert_eq!(current.folder_id, old.folder_id);
+        assert_eq!(current.tags, old.tags);
+        assert_eq!(current.notes, old.notes);
+        assert_eq!(current.favorite, old.favorite);
+        assert_eq!(current.play_count, old.play_count);
+        assert_eq!(preserved_attributes(&current), preserved_attributes(old));
+        assert_eq!(current.attributes["unknown_extension"], extension);
+    }
+    assert_eq!(
+        f.provider.get_folder(root_id).unwrap().path,
+        audiolib_db::folder_path_text(&moved_again.canonicalize().unwrap())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn root_relocation_accepts_native_separators_but_rejects_linked_children() {
+    let f = fixture();
+    let source = f.temp.path().join("audio").canonicalize().unwrap();
+    let target = source.parent().unwrap().join("relocated");
+    let original: Vec<_> = f.paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    f.provider
+        .update_metadata(
+            f.ids[0],
+            &MetadataPatch {
+                notes: Some("preserved after link rejection".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let before: Vec<_> = f
+        .ids
+        .iter()
+        .map(|id| f.provider.get_audio(*id).unwrap())
+        .collect();
+    let root_id = f.provider.folders(None).unwrap()[0].id;
+    let child_id = f.provider.folders(Some(root_id)).unwrap()[0].id;
+    fs::create_dir_all(target.join("actual-child")).unwrap();
+    fs::copy(&f.paths[0], target.join("metal.wav")).unwrap();
+    fs::copy(&f.paths[1], target.join("actual-child/wood.wav")).unwrap();
+    std::os::unix::fs::symlink("actual-child", target.join("child")).unwrap();
+    // The link stays inside the allowed root, but cannot change the stored tree's
+    // identity. Reject it before committing any root or audio path updates.
+    assert!(matches!(
+        f.provider.relink_folder(&source, &target),
+        Err(Error::Validation(message))
+            if message == "Relocation folders must use real paths without directory links"
+    ));
+    for old in &before {
+        let current = f.provider.get_audio(old.id).unwrap();
+        assert_eq!(current.file_path, old.file_path);
+        assert_eq!(current.folder_id, old.folder_id);
+        assert_eq!(current.notes, old.notes);
+    }
+    assert_eq!(
+        f.provider.get_folder(root_id).unwrap().path,
+        audiolib_db::folder_path_text(&source)
+    );
+    // Unlink only the owned fixture link; no source WAV is removed or changed.
+    fs::remove_file(target.join("child")).unwrap();
+    fs::rename(target.join("actual-child"), target.join("child")).unwrap();
+    assert_eq!(
+        f.provider.relink_folder(&source, &target.join("")).unwrap(),
+        2
+    );
+    for (((old, relative), path), bytes) in before
+        .iter()
+        .zip(["metal.wav", "child/wood.wav"])
+        .zip(&f.paths)
+        .zip(original)
+    {
+        let moved = target.join(relative);
+        let current = f.provider.get_audio(old.id).unwrap();
+        assert_eq!(
+            current.file_path,
+            audiolib_db::display_path(&moved.canonicalize().unwrap())
+        );
+        assert_eq!(current.folder_id, old.folder_id);
+        assert_eq!(current.notes, old.notes);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert_eq!(fs::read(moved).unwrap(), bytes);
+    }
+    assert_eq!(
+        f.provider.get_folder(root_id).unwrap().path,
+        audiolib_db::folder_path_text(&target.canonicalize().unwrap())
+    );
+    assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
+    assert_eq!(f.provider.stats().unwrap().audio_files, 2);
 }
 
 #[test]

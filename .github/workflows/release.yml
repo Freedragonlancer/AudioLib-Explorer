@@ -46,8 +46,8 @@ jobs:
           Copy-Item -LiteralPath $latest -Destination "dist/release/$zipName" -Force
           "$digest  $zipName" | Set-Content -LiteralPath "dist/release/$zipName.sha256" -Encoding ASCII
           Copy-Item -LiteralPath doc/Rust_CI_Release.json -Destination dist/release/Rust_CI_Release.json -Force
-          ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc
-          ./tools/validate-server-package.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc
+          ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc -Asio
+          ./tools/validate-server-package.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc -Asio
 
       - name: Upload validated Windows assets
         uses: actions/upload-artifact@v4

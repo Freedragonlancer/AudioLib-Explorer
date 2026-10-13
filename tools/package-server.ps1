@@ -1,7 +1,7 @@
 # tools/package-server.ps1
 # Package an already-built server on its native host. No server/database is opened:
 # the executable is invoked only with --version. Requires PowerShell 7.3 or newer.
-# ./tools/package-server.ps1 -Tag v0.4.4 -Target x86_64-pc-windows-msvc
+# ./tools/package-server.ps1 -Tag v0.4.5 -Target x86_64-pc-windows-msvc -Asio
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Tag,
@@ -9,7 +9,9 @@ param(
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')]
     [string]$Target,
     # A directory containing the target binary, or the binary itself.
-    [string]$BinaryPath
+    [string]$BinaryPath,
+    # Match the Windows workspace release build's unified ASIO features.
+    [switch]$Asio
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -19,6 +21,7 @@ $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else
 $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
 if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N.' }
 $version = $tagMatch.Groups[1].Value
+if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
 switch ($Target) {
     'x86_64-pc-windows-msvc' {
         if (!$IsWindows) { throw 'The Windows server must be packaged on Windows.' }
@@ -80,6 +83,30 @@ function Copy-LicenseTree([string]$Source, [string]$Relative) {
     }
 }
 
+# Packaging consumes the SDK already prepared by the release build. It never
+# downloads or extracts an implicit SDK, and a modified extracted notice is refused.
+$sdkLicenseSource = Join-Path $taskRoot 'tools/.build-tools/asio-2.3.4/ASIOSDK/LICENSE.txt'
+$sdkLicenseRelative = 'licenses/Steinberg-ASIO-SDK-2.3.4.txt'
+if ($Asio) {
+    $sdkArchive = Join-Path $taskRoot 'tools/.build-tools/ASIO-SDK_2.3.4_2025-10-15.zip'
+    foreach ($sdkPath in @($sdkArchive, $sdkLicenseSource)) {
+        Assert-Within $sdkPath $taskRoot
+        Assert-Unlinked $sdkPath
+        if (!(Test-Path -LiteralPath $sdkPath -PathType Leaf)) { throw 'The prepared ASIO SDK archive/license is missing; run prepare-asio.ps1 before packaging.' }
+    }
+    $expectedSdkHash = 'D5EBF0C20DD2C5F43771FD0C1418F4B361BF52434EE670097CFA6B3A335E2ECA'
+    if ((Get-FileHash -LiteralPath $sdkArchive -Algorithm SHA256).Hash -cne $expectedSdkHash) { throw 'Prepared ASIO SDK archive checksum mismatch.' }
+    $sdkZip = [IO.Compression.ZipFile]::OpenRead($sdkArchive)
+    try {
+        $notices = @($sdkZip.Entries | Where-Object { $_.FullName -ceq 'ASIOSDK/LICENSE.txt' })
+        if ($notices.Count -ne 1) { throw 'Pinned ASIO SDK archive license entry is missing or duplicated.' }
+        $noticeStream = $notices[0].Open()
+        try { $sdkLicenseHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($noticeStream)) }
+        finally { $noticeStream.Dispose() }
+    } finally { $sdkZip.Dispose() }
+    if ((Get-FileHash -LiteralPath $sdkLicenseSource -Algorithm SHA256).Hash -cne $sdkLicenseHash) { throw 'Prepared ASIO SDK license differs from the pinned archive.' }
+}
+
 Assert-Unlinked $taskRoot
 $manifestPath = Join-Path $PSScriptRoot 'server-files.json'
 Assert-Unlinked $manifestPath
@@ -106,7 +133,9 @@ $binaryHash = (Get-FileHash -LiteralPath $binarySource -Algorithm SHA256).Hash
 # Resolve normal/build dependency edges from the server, excluding dev-only edges.
 Push-Location -LiteralPath $taskRoot
 try {
-    $metadataText = (& cargo metadata --format-version 1 --locked --filter-platform $Target 2>$null | Out-String)
+    $metadataArguments = @('metadata', '--format-version', '1', '--locked', '--filter-platform', $Target)
+    if ($Asio) { $metadataArguments += @('--features', 'audiolib-desktop/asio,audiolib-cli/asio') }
+    $metadataText = (& cargo @metadataArguments 2>$null | Out-String)
     if ($LASTEXITCODE -ne 0) { throw 'Server dependency metadata generation failed.' }
     $metadata = $metadataText | ConvertFrom-Json
     $commit = (& git -c ('safe.directory=' + $taskRoot.Replace('\', '/')) rev-parse HEAD 2>$null | Out-String).Trim()
@@ -129,6 +158,8 @@ while ($queue.Count) {
 }
 $packages = @($metadata.packages | Where-Object { $included.Contains($_.id) } | Sort-Object name, version)
 if ($packages.Count -ne $included.Count) { throw 'Server dependency package list is incomplete.' }
+$hasAsio = @($packages | Where-Object { $_.name -ceq 'asio-sys' }).Count -gt 0
+if ($hasAsio -ne [bool]$Asio) { throw 'Server ASIO dependency closure differs from the selected -Asio mode.' }
 
 $latestRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot 'dist/latest'))
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $latestRoot "server-$platformName"))
@@ -149,6 +180,10 @@ try {
     New-Item -ItemType Directory -Path $payloadRoot | Out-Null
     Copy-PublicFile $binarySource $binaryName
     foreach ($relative in $publicFiles) { Copy-PublicFile (Join-Path $taskRoot $relative) $relative }
+    if ($Asio) {
+        Copy-PublicFile $sdkLicenseSource $sdkLicenseRelative
+        if ((Get-FileHash -LiteralPath (Join-Path $payloadRoot $sdkLicenseRelative) -Algorithm SHA256).Hash -cne $sdkLicenseHash) { throw 'Packaged ASIO SDK notice identity changed.' }
+    }
     $licenseManifest = @()
     foreach ($package in $packages) {
         if ($package.name -notmatch '^[A-Za-z0-9_-]+$' -or $package.version -notmatch '^[A-Za-z0-9.+_-]+$') { throw 'Unsafe dependency identity.' }
