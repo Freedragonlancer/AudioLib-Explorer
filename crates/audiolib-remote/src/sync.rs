@@ -543,6 +543,17 @@ impl RemoteCache {
     /// files of a download are removed only once stale ([`STALE_STAGING_AGE`]), so a sync
     /// running in another process is never disturbed.
     pub fn prune(&self, library_id: &str, keep: &[&str]) {
+        self.prune_files(library_id, keep, true);
+    }
+
+    /// Remove only this library's stale staging files (older than [`STALE_STAGING_AGE`]),
+    /// left behind by a preparation or download that was abandoned, for example by a
+    /// forced exit. Snapshots are never touched, so this is safe before any swap.
+    pub fn prune_stale_staging(&self, library_id: &str) {
+        self.prune_files(library_id, &[], false);
+    }
+
+    fn prune_files(&self, library_id: &str, keep: &[&str], snapshots: bool) {
         let Ok(entries) = std::fs::read_dir(self.library_dir(library_id)) else {
             return;
         };
@@ -567,7 +578,7 @@ impl RemoteCache {
                 if stale {
                     let _ = std::fs::remove_file(entry.path());
                 }
-            } else if base.ends_with(".db") {
+            } else if snapshots && base.ends_with(".db") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -1947,6 +1958,33 @@ mod tests {
         cache.cleanup_after_swap(&replacement);
         assert!(!cache.library_dir("lib-a").exists());
         assert!(cache.database_path(&replacement).is_file());
+    }
+
+    #[test]
+    fn startup_staging_prune_keeps_snapshots_and_fresh_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = RemoteCache::new(directory.path());
+        let dir = cache.library_dir("lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "library-r1-1.db",
+            "library-r2-2.db.download",
+            "library-r3-3.db.download",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let old = std::time::SystemTime::now() - STALE_STAGING_AGE - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("library-r2-2.db.download"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        cache.prune_stale_staging("lib");
+        assert!(dir.join("library-r1-1.db").exists());
+        assert!(!dir.join("library-r2-2.db.download").exists());
+        assert!(dir.join("library-r3-3.db.download").exists());
+        cache.prune_stale_staging("missing-library");
     }
 
     #[test]

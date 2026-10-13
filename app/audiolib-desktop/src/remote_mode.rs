@@ -142,6 +142,11 @@ pub fn open_remote_startup_with_progress(
     if removed > 0 {
         tracing::info!(removed, "old disk audition caches removed");
     }
+    // Staging copies older than an hour belong to no running preparation (a forced
+    // close may abandon one); remove them before preparing a new one.
+    if let Some(library_id) = cache.active_library_id() {
+        cache.prune_stale_staging(&library_id);
+    }
     if let Some(state) = cache
         .active()
         .filter(|state| cached_source_matches(&state.server_url, &config.data_source.server_url))
