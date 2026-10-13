@@ -6296,6 +6296,29 @@ mod tests {
 
     #[test]
     fn close_finishes_within_remote_grace_when_remote_work_never_drains() {
+        // Slint binds its platform to the first thread that creates a window; run the
+        // flow in its own process like the other close regressions.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::tests::child_close_finishes_within_remote_grace",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "Isolated close-grace regression failed: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+    }
+
+    #[test]
+    #[ignore = "helper invoked by the close-grace regression in an isolated process"]
+    fn child_close_finishes_within_remote_grace() {
         let root = std::env::temp_dir().join(format!(
             "audiolib-desktop-close-grace-{}-{}",
             std::process::id(),
