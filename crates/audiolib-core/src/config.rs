@@ -1,6 +1,6 @@
 // crates/audiolib-core/src/config.rs
 //! Portable defaults and one-time, read-only interpretation of legacy YAML settings.
-use crate::{Error, Result};
+use crate::{Error, Result, SortOrder};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -199,6 +199,120 @@ pub struct AppPaths {
     pub audio_terms: Option<PathBuf>,
 }
 
+/// Audio result table widths in logical pixels and the library-wide search sort.
+/// Missing preferences retain the default layout, while all widths stay within safe bounds.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AudioTablePreferences {
+    /// File name column width, at least 120 logical pixels.
+    #[serde(deserialize_with = "deserialize_name_width")]
+    pub name_width: f32,
+    /// Duration column width, at least 60 logical pixels.
+    #[serde(deserialize_with = "deserialize_duration_width")]
+    pub duration_width: f32,
+    /// Sample rate and bit depth column width, at least 82 logical pixels.
+    #[serde(deserialize_with = "deserialize_format_width")]
+    pub format_width: f32,
+    /// Channel count column width, at least 48 logical pixels.
+    #[serde(deserialize_with = "deserialize_channels_width")]
+    pub channels_width: f32,
+    /// Tags column width, at least 80 logical pixels.
+    #[serde(deserialize_with = "deserialize_tags_width")]
+    pub tags_width: f32,
+    /// Search ordering; this includes the existing Modified ordering.
+    pub order_by: SortOrder,
+    /// Reverse the selected ordering when true.
+    pub descending: bool,
+}
+
+impl Default for AudioTablePreferences {
+    fn default() -> Self {
+        Self {
+            name_width: 360.0,
+            duration_width: 80.0,
+            format_width: 100.0,
+            channels_width: 64.0,
+            tags_width: 160.0,
+            order_by: SortOrder::Relevance,
+            descending: false,
+        }
+    }
+}
+
+impl AudioTablePreferences {
+    /// Return safe widths for UI use or persistence: finite values are clamped to
+    /// each column's minimum and 2000 pixels, and non-finite values use its default.
+    pub fn normalized(&self) -> Self {
+        let defaults = Self::default();
+        Self {
+            name_width: normalize_table_width(self.name_width, 120.0, defaults.name_width),
+            duration_width: normalize_table_width(
+                self.duration_width,
+                60.0,
+                defaults.duration_width,
+            ),
+            format_width: normalize_table_width(self.format_width, 82.0, defaults.format_width),
+            channels_width: normalize_table_width(
+                self.channels_width,
+                48.0,
+                defaults.channels_width,
+            ),
+            tags_width: normalize_table_width(self.tags_width, 80.0, defaults.tags_width),
+            order_by: self.order_by,
+            descending: self.descending,
+        }
+    }
+}
+
+fn normalize_table_width(width: f32, minimum: f32, default: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(minimum, 2000.0)
+    } else {
+        default
+    }
+}
+
+fn deserialize_table_width<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    minimum: f32,
+    default: f32,
+) -> std::result::Result<f32, D::Error> {
+    // Recover malformed UI-only widths without discarding otherwise valid library preferences.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let width = value.as_f64().map(|value| value as f32).unwrap_or(default);
+    Ok(normalize_table_width(width, minimum, default))
+}
+
+fn deserialize_name_width<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<f32, D::Error> {
+    deserialize_table_width(deserializer, 120.0, 360.0)
+}
+
+fn deserialize_duration_width<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<f32, D::Error> {
+    deserialize_table_width(deserializer, 60.0, 80.0)
+}
+
+fn deserialize_format_width<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<f32, D::Error> {
+    deserialize_table_width(deserializer, 82.0, 100.0)
+}
+
+fn deserialize_channels_width<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<f32, D::Error> {
+    deserialize_table_width(deserializer, 48.0, 64.0)
+}
+
+fn deserialize_tags_width<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<f32, D::Error> {
+    deserialize_table_width(deserializer, 80.0, 160.0)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     pub paths: AppPaths,
@@ -208,6 +322,9 @@ pub struct AppConfig {
     /// Disabled by default so established settings retain double-click audition.
     #[serde(default)]
     pub audition_play_on_single_click: bool,
+    /// Persistent table layout and sorting, applied to every search page.
+    #[serde(default)]
+    pub audio_table: AudioTablePreferences,
     #[serde(default)]
     pub allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
@@ -224,6 +341,8 @@ struct SavedPreferences {
     playback: serde_json::Value,
     #[serde(default)]
     audition_play_on_single_click: bool,
+    #[serde(default)]
+    audio_table: AudioTablePreferences,
     #[serde(default)]
     allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
@@ -295,6 +414,7 @@ impl AppConfig {
             language: english(),
             playback: default_playback(),
             audition_play_on_single_click: false,
+            audio_table: AudioTablePreferences::default(),
             allowed_scan_roots: Vec::new(),
             data_source: DataSourceSettings::default(),
         };
@@ -341,6 +461,7 @@ impl AppConfig {
             config.language = saved.language;
             config.playback = saved.playback;
             config.audition_play_on_single_click = saved.audition_play_on_single_click;
+            config.audio_table = saved.audio_table.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
             config.data_source = saved.data_source;
             // Single-server settings become one profile; older-client edits of the old
@@ -381,6 +502,7 @@ impl AppConfig {
             language: self.language.clone(),
             playback: self.playback.clone(),
             audition_play_on_single_click: self.audition_play_on_single_click,
+            audio_table: self.audio_table.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),
             data_source: {
                 // Code that edits `mode` / `server_url` directly keeps working: the
@@ -432,8 +554,126 @@ mod tests {
         .unwrap();
         let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
         assert!(!config.audition_play_on_single_click);
+        assert_eq!(config.audio_table, AudioTablePreferences::default());
         assert_eq!(config.language, "cn");
         assert_eq!(config.playback["volume"], serde_json::json!(0.35));
+        config.save().unwrap();
+        let loaded = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        assert_eq!(loaded.audio_table, AudioTablePreferences::default());
+        assert_eq!(loaded.language, config.language);
+        assert_eq!(loaded.playback, config.playback);
+    }
+
+    #[test]
+    fn table_preferences_round_trip_without_changing_existing_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let library = directory.path().join("selected.db");
+        std::fs::write(&library, []).unwrap();
+        let root = directory.path().join("userdata");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        config.select_database(&library).unwrap();
+        config.language = "cn".into();
+        config.playback = serde_json::json!({"volume":0.35,"device_id":"custom-device"});
+        config.audition_play_on_single_click = true;
+        config.allowed_scan_roots = vec![directory.path().join("sounds")];
+        config.data_source.webdav.username = "existing-user".into();
+        config.audio_table = AudioTablePreferences {
+            name_width: 452.5,
+            duration_width: 90.0,
+            format_width: 115.5,
+            channels_width: 72.0,
+            tags_width: 245.0,
+            order_by: SortOrder::Modified,
+            descending: true,
+        };
+        config.save().unwrap();
+        let loaded = AppConfig::load_with_roots(root, &[]).unwrap();
+        assert_eq!(loaded.audio_table, config.audio_table);
+        assert_eq!(loaded.paths.database, library.canonicalize().unwrap());
+        assert_eq!(loaded.language, config.language);
+        assert_eq!(loaded.playback, config.playback);
+        assert_eq!(
+            loaded.audition_play_on_single_click,
+            config.audition_play_on_single_click
+        );
+        assert_eq!(loaded.allowed_scan_roots, config.allowed_scan_roots);
+        assert_eq!(loaded.data_source, config.data_source);
+    }
+
+    #[test]
+    fn malformed_and_extreme_table_widths_recover_without_losing_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("settings.json"),
+            r#"{"language":"cn","playback":{"volume":0.35},"audio_table":{
+                "name_width":"wide","duration_width":null,"format_width":-15,
+                "channels_width":10000000000,"tags_width":{},
+                "order_by":"modified","descending":true}}"#,
+        )
+        .unwrap();
+        let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        assert_eq!(
+            config.audio_table,
+            AudioTablePreferences {
+                name_width: 360.0,
+                duration_width: 80.0,
+                format_width: 82.0,
+                channels_width: 2000.0,
+                tags_width: 160.0,
+                order_by: SortOrder::Modified,
+                descending: true,
+            }
+        );
+        assert_eq!(config.language, "cn");
+        assert_eq!(config.playback["volume"], serde_json::json!(0.35));
+        config.save().unwrap();
+        let reloaded = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        assert_eq!(reloaded.audio_table, config.audio_table);
+    }
+
+    #[test]
+    fn table_width_normalization_caps_all_columns_and_nonfinite_values_before_save() {
+        let undersized = AudioTablePreferences {
+            name_width: -1.0,
+            duration_width: -1.0,
+            format_width: -1.0,
+            channels_width: -1.0,
+            tags_width: -1.0,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(undersized.name_width, 120.0);
+        assert_eq!(undersized.duration_width, 60.0);
+        assert_eq!(undersized.format_width, 82.0);
+        assert_eq!(undersized.channels_width, 48.0);
+        assert_eq!(undersized.tags_width, 80.0);
+        let oversized = AudioTablePreferences {
+            name_width: f32::MAX,
+            duration_width: f32::MAX,
+            format_width: f32::MAX,
+            channels_width: f32::MAX,
+            tags_width: f32::MAX,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(oversized.name_width, 2000.0);
+        assert_eq!(oversized.duration_width, 2000.0);
+        assert_eq!(oversized.format_width, 2000.0);
+        assert_eq!(oversized.channels_width, 2000.0);
+        assert_eq!(oversized.tags_width, 2000.0);
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        config.audio_table = AudioTablePreferences {
+            name_width: f32::NAN,
+            duration_width: f32::INFINITY,
+            format_width: f32::NEG_INFINITY,
+            channels_width: f32::NAN,
+            tags_width: f32::INFINITY,
+            ..Default::default()
+        };
+        config.save().unwrap();
+        let loaded = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        assert_eq!(loaded.audio_table, AudioTablePreferences::default());
     }
 
     #[test]

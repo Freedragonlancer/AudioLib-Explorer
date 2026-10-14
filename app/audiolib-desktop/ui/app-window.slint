@@ -186,6 +186,113 @@ component PaneDivider inherits Rectangle {
     }
 }
 
+// Sortable column actions keep the same keyboard behavior as ordinary actions.
+component TableHeader inherits Rectangle {
+    in property <string> label;
+    in property <string> action-label;
+    in property <string> help;
+    in property <bool> active: false;
+    in property <bool> descending: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    callback context-requested(Point);
+    accessible-role: button;
+    accessible-label: root.action-label;
+    accessible-value: root.active ? (root.descending ? "descending" : "ascending") : "";
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: header-focus;
+    background: header-hit.has-hover ? Theme.hover : transparent;
+    border-width: header-focus.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    Text {
+        x: 8px; width: max(0px, parent.width - (root.active ? 26px : 16px)); height: parent.height;
+        text: root.label; font-size: 10px; font-weight: root.active ? 600 : 400;
+        color: root.active ? Theme.ink : Theme.dim; overflow: elide; vertical-alignment: center;
+    }
+    if root.active: Text {
+        x: parent.width - 14px; width: 10px; height: parent.height;
+        text: root.descending ? "▼" : "▲"; color: Theme.accent;
+        font-size: 9px; vertical-alignment: center; horizontal-alignment: center;
+    }
+    Tooltip { text: @markdown("\{root.help}"); }
+    header-focus := FocusScope {
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            if event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift) {
+                root.context-requested({x: self.absolute-position.x, y: self.absolute-position.y + self.height});
+                return accept;
+            }
+            reject
+        }
+    }
+    header-hit := TouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { header-focus.focus(); root.clicked(); }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                header-focus.focus();
+                root.context-requested({x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y});
+            }
+        }
+    }
+}
+
+// Store the absolute press position because a resized column moves its divider.
+component TableDivider inherits Rectangle {
+    in property <length> column-width;
+    in property <string> label;
+    in property <string> help;
+    in property <bool> enabled: true;
+    callback resized(length);
+    callback finished();
+    callback reset();
+    private property <length> pressed-pointer-x;
+    private property <length> pressed-column-width;
+    width: 8px;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-value: root.column-width / 1px + " px";
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.reset(); } }
+    forward-focus: divider-focus;
+    Rectangle {
+        x: 3px; width: 1px; y: 7px; height: max(0px, parent.height - 14px);
+        background: drag-area.pressed || divider-focus.has-focus ? Theme.accent : (drag-area.has-hover ? Theme.dim : Theme.border);
+    }
+    Tooltip { text: @markdown("\{root.label}. \{root.help}"); }
+    divider-focus := FocusScope {
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                root.resized(root.column-width + (event.text == Key.LeftArrow ? -16px : 16px));
+                root.finished();
+                return accept;
+            }
+            if event.text == Key.Home { root.reset(); return accept; }
+            reject
+        }
+    }
+    drag-area := TouchArea {
+        enabled: root.enabled; mouse-cursor: ew-resize;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                divider-focus.focus();
+                root.pressed-pointer-x = self.absolute-position.x + self.mouse-x;
+                root.pressed-column-width = root.column-width;
+            }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.column-width != root.pressed-column-width { root.finished(); }
+        }
+        moved => {
+            if self.pressed {
+                root.resized(root.pressed-column-width + self.absolute-position.x + self.mouse-x - root.pressed-pointer-x);
+            }
+        }
+        double-clicked => { root.reset(); }
+    }
+}
+
 component HelpPanel inherits FocusScope {
     in property <bool> chinese;
     callback close();
@@ -277,6 +384,24 @@ export component AppWindow inherits Window {
     in-out property <int> bit-filter: 0;
     in-out property <int> channel-filter: 0;
     in-out property <int> sort-index: 0;
+    in-out property <bool> sort-descending: false;
+    // Preferred widths are logical pixels and remain directly customizable.
+    in-out property <float> table-name-width: 360;
+    in-out property <float> table-duration-width: 80;
+    in-out property <float> table-format-width: 100;
+    in-out property <float> table-channels-width: 64;
+    in-out property <float> table-tags-width: 160;
+    private property <length> table-duration-size: clamp(root.table-duration-width, 60, 2000) * 1px;
+    private property <length> table-format-size: clamp(root.table-format-width, 82, 2000) * 1px;
+    private property <length> table-channels-size: clamp(root.table-channels-width, 48, 2000) * 1px;
+    private property <length> table-tags-size: clamp(root.table-tags-width, 80, 2000) * 1px;
+    private property <length> table-name-size: clamp(root.table-name-width, 120, 2000) * 1px;
+    private property <length> table-columns-size: root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
+    private property <length> table-content-size: max(root.table-columns-size, result-list.visible-width);
+    private property <bool> table-empty: root.rows.length == 0;
+    private property <length> table-viewport-x;
+    private property <string> table-resize-help: root.chinese ? "拖动调整列宽；双击或 Home 恢复默认；方向键微调" : "Drag to resize; double-click or Home to reset; arrow keys adjust width";
+    callback table-layout-changed();
     in-out property <string> duration-min: "";
     in-out property <string> duration-max: "";
 
@@ -788,6 +913,32 @@ export component AppWindow inherits Window {
         root.context-file = row;
         file-menu.show({x: position.x - file-menu.absolute-position.x, y: position.y - file-menu.absolute-position.y});
     }
+    function sort-table(index: int) {
+        root.sort-descending = index != 0 && root.sort-index == index ? !root.sort-descending : false;
+        root.sort-index = index;
+        root.filter-requested();
+        root.table-layout-changed();
+    }
+    function resize-table-column(index: int, width: length) {
+        if index == 1 { root.table-name-width = clamp(width / 1px, 120, 2000); }
+        if index == 2 { root.table-duration-width = clamp(width / 1px, 60, 2000); }
+        if index == 3 { root.table-format-width = clamp(width / 1px, 82, 2000); }
+        if index == 4 { root.table-channels-width = clamp(width / 1px, 48, 2000); }
+        if index == 5 { root.table-tags-width = clamp(width / 1px, 80, 2000); }
+    }
+    function reset-table-widths() {
+        root.table-name-width = 360;
+        root.table-duration-width = 80;
+        root.table-format-width = 100;
+        root.table-channels-width = 64;
+        root.table-tags-width = 160;
+        root.table-viewport-x = 0px;
+        root.sync-table-viewport();
+        root.table-layout-changed();
+    }
+    function show-table-menu(position: Point) {
+        table-menu.show({x: position.x - table-menu.absolute-position.x, y: position.y - table-menu.absolute-position.y});
+    }
     public function show-folder-menu(folder: FolderRow, position: Point) {
         root.context-folder = folder;
         folder-menu.show({x: position.x - folder-menu.absolute-position.x, y: position.y - folder-menu.absolute-position.y});
@@ -806,6 +957,20 @@ export component AppWindow inherits Window {
     }
     changed selected-row => { root.reveal-selected-row(); }
     changed rows => { result-list.viewport-y = 0px; root.reveal-selected-row(); }
+    function sync-table-viewport() {
+        // Avoid writing an unchanged value back during the wheel animation.
+        if root.table-empty {
+            if empty-result-list.viewport-x != root.table-viewport-x { empty-result-list.viewport-x = root.table-viewport-x; }
+        } else {
+            if result-list.viewport-x != root.table-viewport-x { result-list.viewport-x = root.table-viewport-x; }
+        }
+    }
+    changed table-empty => { root.sync-table-viewport(); }
+    changed table-viewport-x => { root.sync-table-viewport(); }
+    changed table-content-size => {
+        root.table-viewport-x = clamp(root.table-viewport-x, min(0px, result-list.visible-width - root.table-content-size), 0px);
+        root.sync-table-viewport();
+    }
     changed help-visible => { if !root.help-visible && !root.background-blocked { results-focus.focus(); } }
     changed debug-visible => { if root.debug-visible { root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed import-visible => { if root.import-visible { root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
@@ -1063,7 +1228,12 @@ export component AppWindow inherits Window {
                     if root.checked-count > 1: Rectangle { horizontal-stretch: 1; }
                     ComboBox { width: 116px; model: root.chinese ? ["存在的文件", "缺失的文件", "全部记录"] : ["Present files", "Missing files", "All records"]; current-index <=> root.visibility-index; selected => { root.filter-requested(); } }
                     Action { width: 82px; subtle: true; active: root.filters-visible || root.filter-count > 0; label: (root.chinese ? "筛选" : "Filters") + (root.filter-count > 0 ? " · " + root.filter-count : "") + (root.filters-visible ? " −" : " +"); clicked => { root.filters-visible = !root.filters-visible; } }
-                    ComboBox { width: 116px; model: root.chinese ? ["相关度", "文件名", "时长", "采样率"] : ["Relevance", "Filename", "Duration", "Sample rate"]; current-index <=> root.sort-index; selected => { root.filter-requested(); } }
+                    ComboBox {
+                        width: 116px;
+                        model: root.chinese ? ["相关度", "文件名", "时长", "采样率", "声道", "标签", "修改时间"] : ["Relevance", "Filename", "Duration", "Sample rate", "Channels", "Tags", "Modified"];
+                        current-index <=> root.sort-index;
+                        selected => { root.sort-descending = false; root.filter-requested(); root.table-layout-changed(); }
+                    }
                     Action { width: 62px; subtle: true; active: root.inspector-visible; label: root.chinese ? "详情" : "Details"; clicked => { root.inspector-visible = !root.inspector-visible; } }
                 }
                 if root.crumbs.length > 0: HorizontalLayout { height: 30px; spacing: 4px;
@@ -1107,13 +1277,79 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { vertical-stretch: 1; min-height: 0px; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px; background: Theme.panel;
                     VerticalLayout { spacing: 0px;
-                        Rectangle { height: 33px; background: Theme.raised;
-                            HorizontalLayout { padding-left: 12px; padding-right: 18px; spacing: 10px;
-                                Label { horizontal-stretch: 1; min-width: 0px; text: root.chinese ? "文件名" : "NAME"; font-size: 10px; }
-                                Label { width: 60px; text: root.chinese ? "时长" : "TIME"; horizontal-alignment: right; font-size: 10px; }
-                                Label { width: 82px; text: root.chinese ? "格式" : "FORMAT"; font-size: 10px; }
-                                Label { width: 24px; text: "CH"; font-size: 10px; }
-                                if root.wide-layout: Label { width: 124px; text: root.chinese ? "标签" : "TAGS"; font-size: 10px; }
+                        Rectangle { height: 33px; background: Theme.raised; clip: true;
+                            // Both empty and populated results share the header's horizontal position.
+                            Rectangle { x: root.table-viewport-x; width: root.table-content-size; height: parent.height;
+                                table-name-header := TableHeader {
+                                    x: 0px; width: root.table-name-size - 8px; height: parent.height;
+                                    label: root.chinese ? "文件名" : "NAME";
+                                    action-label: root.chinese ? "按文件名排序" : "Sort by filename";
+                                    help: root.chinese ? "按文件名排序；再次点击切换升序 / 降序" : "Sort by filename; click again to reverse ascending / descending";
+                                    active: root.sort-index == 1; descending: root.sort-descending; enabled: !root.background-blocked;
+                                    clicked => { root.sort-table(1); } context-requested(position) => { root.show-table-menu(position); }
+                                }
+                                table-duration-header := TableHeader {
+                                    x: root.table-name-size; width: root.table-duration-size - 8px; height: parent.height;
+                                    label: root.chinese ? "时长" : "TIME";
+                                    action-label: root.chinese ? "按时长排序" : "Sort by duration";
+                                    help: root.chinese ? "按时长排序；再次点击切换升序 / 降序" : "Sort by duration; click again to reverse ascending / descending";
+                                    active: root.sort-index == 2; descending: root.sort-descending; enabled: !root.background-blocked;
+                                    clicked => { root.sort-table(2); } context-requested(position) => { root.show-table-menu(position); }
+                                }
+                                table-format-header := TableHeader {
+                                    x: root.table-name-size + root.table-duration-size; width: root.table-format-size - 8px; height: parent.height;
+                                    label: root.chinese ? "格式" : "FORMAT";
+                                    action-label: root.chinese ? "按采样率排序" : "Sort by sample rate";
+                                    help: root.chinese ? "按采样率排序；再次点击切换升序 / 降序" : "Sort by sample rate; click again to reverse ascending / descending";
+                                    active: root.sort-index == 3; descending: root.sort-descending; enabled: !root.background-blocked;
+                                    clicked => { root.sort-table(3); } context-requested(position) => { root.show-table-menu(position); }
+                                }
+                                table-channels-header := TableHeader {
+                                    x: root.table-name-size + root.table-duration-size + root.table-format-size; width: root.table-channels-size - 8px; height: parent.height;
+                                    label: root.chinese ? "声道" : "CH";
+                                    action-label: root.chinese ? "按声道排序" : "Sort by channels";
+                                    help: root.chinese ? "按声道数排序；再次点击切换升序 / 降序" : "Sort by channel count; click again to reverse ascending / descending";
+                                    active: root.sort-index == 4; descending: root.sort-descending; enabled: !root.background-blocked;
+                                    clicked => { root.sort-table(4); } context-requested(position) => { root.show-table-menu(position); }
+                                }
+                                table-tags-header := TableHeader {
+                                    x: root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size; width: root.table-tags-size - 8px; height: parent.height;
+                                    label: root.chinese ? "标签" : "TAGS";
+                                    action-label: root.chinese ? "按标签排序" : "Sort by tags";
+                                    help: root.chinese ? "按素材库标签排序，空白时使用源标签；再次点击切换升序 / 降序" : "Sort by library tags, using source tags when empty; click again to reverse ascending / descending";
+                                    active: root.sort-index == 5; descending: root.sort-descending; enabled: !root.background-blocked;
+                                    clicked => { root.sort-table(5); } context-requested(position) => { root.show-table-menu(position); }
+                                }
+                                table-name-divider := TableDivider {
+                                    x: root.table-name-size - 8px; height: parent.height; column-width: root.table-name-size;
+                                    label: root.chinese ? "调整文件名列宽" : "Resize Filename column"; help: root.table-resize-help; enabled: !root.background-blocked;
+                                    resized(width) => { root.resize-table-column(1, width); } finished => { root.table-layout-changed(); }
+                                    reset => { root.table-name-width = 360; root.table-layout-changed(); }
+                                }
+                                table-duration-divider := TableDivider {
+                                    x: root.table-name-size + root.table-duration-size - 8px; height: parent.height; column-width: root.table-duration-size;
+                                    label: root.chinese ? "调整时长列宽" : "Resize Duration column"; help: root.table-resize-help; enabled: !root.background-blocked;
+                                    resized(width) => { root.resize-table-column(2, width); } finished => { root.table-layout-changed(); }
+                                    reset => { root.table-duration-width = 80; root.table-layout-changed(); }
+                                }
+                                table-format-divider := TableDivider {
+                                    x: root.table-name-size + root.table-duration-size + root.table-format-size - 8px; height: parent.height; column-width: root.table-format-size;
+                                    label: root.chinese ? "调整格式列宽" : "Resize Format column"; help: root.table-resize-help; enabled: !root.background-blocked;
+                                    resized(width) => { root.resize-table-column(3, width); } finished => { root.table-layout-changed(); }
+                                    reset => { root.table-format-width = 100; root.table-layout-changed(); }
+                                }
+                                table-channels-divider := TableDivider {
+                                    x: root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size - 8px; height: parent.height; column-width: root.table-channels-size;
+                                    label: root.chinese ? "调整声道列宽" : "Resize Channels column"; help: root.table-resize-help; enabled: !root.background-blocked;
+                                    resized(width) => { root.resize-table-column(4, width); } finished => { root.table-layout-changed(); }
+                                    reset => { root.table-channels-width = 64; root.table-layout-changed(); }
+                                }
+                                table-tags-divider := TableDivider {
+                                    x: root.table-columns-size - 8px; height: parent.height; column-width: root.table-tags-size;
+                                    label: root.chinese ? "调整标签列宽" : "Resize Tags column"; help: root.table-resize-help; enabled: !root.background-blocked;
+                                    resized(width) => { root.resize-table-column(5, width); } finished => { root.table-layout-changed(); }
+                                    reset => { root.table-tags-width = 160; root.table-layout-changed(); }
+                                }
                             }
                         }
                         results-focus := FocusScope { vertical-stretch: 1; min-height: 0px; focus-on-click: false;
@@ -1134,15 +1370,23 @@ export component AppWindow inherits Window {
                             }
                             // Keep the delegate directly under ListView for virtualization.
                             result-list := ListView {
-                                for row[index] in root.rows: Rectangle { height: root.result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                visible: !root.table-empty;
+                                viewport-width: root.table-content-size;
+                                viewport-x: root.table-viewport-x;
+                                // A newly populated repeater measures its width after becoming
+                                // visible. Ignore its temporary empty-range clamp until then.
+                                changed viewport-x => { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.table-viewport-x = self.viewport-x; } }
+                                changed viewport-width => { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } }
+                                // Fixed child layout widths let ListView measure its horizontal scroll extent.
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.result-row-height; accessible-role: list-item; accessible-label: row.name;
                                     background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px; background: root.selected-row == index ? Theme.accent : row.marker; }
-                                    HorizontalLayout { padding-left: 12px; padding-right: 18px; spacing: 10px;
-                                        Text { horizontal-stretch: 1; min-width: 0px; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : Theme.ink; font-size: 12px; overflow: elide; vertical-alignment: center; }
-                                        Text { width: 60px; text: row.duration; color: Theme.ink; horizontal-alignment: right; vertical-alignment: center; font-size: 11px; }
-                                        Text { width: 82px; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: 10px; }
-                                        Text { width: 24px; text: row.channels; color: Theme.dim; vertical-alignment: center; font-size: 11px; }
-                                        if root.wide-layout: Text { width: 124px; text: row.tags; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: 10px; }
+                                    HorizontalLayout { alignment: start; padding-left: 12px; padding-right: 12px; spacing: 24px;
+                                        table-name-cell := Text { width: root.table-name-size - 24px; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : Theme.ink; font-size: 12px; overflow: elide; vertical-alignment: center; }
+                                        table-duration-cell := Text { width: root.table-duration-size - 24px; text: row.duration; color: Theme.ink; horizontal-alignment: right; vertical-alignment: center; font-size: 11px; overflow: elide; }
+                                        table-format-cell := Text { width: root.table-format-size - 24px; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: 10px; overflow: elide; }
+                                        table-channels-cell := Text { width: root.table-channels-size - 24px; text: row.channels; color: Theme.dim; vertical-alignment: center; font-size: 11px; overflow: elide; }
+                                        table-tags-cell := Text { width: root.table-tags-size - 24px; text: row.tags; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: 10px; }
                                     }
                                     result-hit := TouchArea { mouse-cursor: pointer;
                                         property <bool> toggle-selection;
@@ -1173,6 +1417,17 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                            // Slint 1.17's empty ListView repeater resets its viewport width to
+                            // the visible width. A separate viewport preserves the real column
+                            // extent without adding a synthetic AudioRow to the result model.
+                            empty-result-list := ScrollView {
+                                visible: root.table-empty;
+                                viewport-width: root.table-content-size;
+                                viewport-height: self.visible-height;
+                                viewport-x: root.table-viewport-x;
+                                changed viewport-x => { if root.table-empty { root.table-viewport-x = self.viewport-x; } }
+                                Rectangle { width: root.table-content-size; height: empty-result-list.visible-height; }
+                            }
                             if root.rows.length == 0 && root.short-layout && root.filters-visible: Text { text: root.chinese ? "没有匹配声音 · 调整或重置筛选" : "No matching sounds · Adjust or reset filters"; color: Theme.dim; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
                             if root.rows.length == 0 && (!root.short-layout || !root.filters-visible): VerticalLayout { padding: 24px; alignment: center; spacing: 12px;
                                 Text { text: root.searching ? (root.chinese ? "正在搜索…" : "Searching…") : (root.chinese ? "这里还没有声音" : "No sounds in this view"); color: Theme.ink; horizontal-alignment: center; font-size: 18px; }
@@ -1184,6 +1439,12 @@ export component AppWindow inherits Window {
                             HorizontalLayout { padding-left: 10px; padding-right: 5px; spacing: 5px;
                                 Action { width: 84px; subtle: true; enabled: root.rows.length > 0; label: root.chinese ? "选择本页" : "Select page"; clicked => { root.check-page-requested(true); } }
                                 CheckBox { width: root.chinese ? 104px : 142px; enabled: !root.background-blocked; surface: Theme.raised; text: root.chinese ? "单击播放" : "Single-click play"; checked <=> root.audition-play-on-single-click; toggled => { root.single-click-play-requested(self.checked); } }
+                                table-columns-action := Action {
+                                    width: root.chinese ? 54px : 78px; subtle: true; dropdown: true; enabled: !root.background-blocked;
+                                    label: root.chinese ? "列" : "Columns";
+                                    action-label: root.chinese ? "自定义表格列" : "Customize table columns";
+                                    clicked => { root.show-table-menu({x: self.absolute-position.x, y: self.absolute-position.y + self.height}); }
+                                }
                                 Label { horizontal-stretch: 1; min-width: 0px; text: root.result-summary; overflow: elide; font-size: 10px; }
                                 Action { width: 30px; enabled: root.can-previous; label: "‹"; clicked => { root.page-requested(-1); } }
                                 Label { width: 44px; text: root.page-label; horizontal-alignment: center; }
@@ -1300,6 +1561,15 @@ export component AppWindow inherits Window {
     }
     // Top-level focus scope also contains modal input, keeping shortcuts scoped to this window.
 
+    table-menu := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
+        Menu {
+            MenuItem { title: root.chinese ? "恢复默认列宽" : "Reset column widths"; enabled: !root.background-blocked; activated => { root.reset-table-widths(); } }
+            MenuSeparator { }
+            MenuItem { title: root.chinese ? "升序 ↑" : "Ascending ↑"; enabled: !root.background-blocked && root.sort-index != 0; activated => { root.sort-descending = false; root.filter-requested(); root.table-layout-changed(); } }
+            MenuItem { title: root.chinese ? "降序 ↓" : "Descending ↓"; enabled: !root.background-blocked && root.sort-index != 0; activated => { root.sort-descending = true; root.filter-requested(); root.table-layout-changed(); } }
+            MenuItem { title: root.chinese ? "恢复相关度排序" : "Reset to relevance sort"; enabled: !root.background-blocked; activated => { root.sort-table(0); } }
+        }
+    }
     selection-menu := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
         Menu {
             MenuItem { title: root.chinese ? "批量标注" : "Batch edit"; enabled: root.checked-count > 1 && !root.background-blocked && !root.remote-writes-blocked; activated => { root.open-batch(); } }

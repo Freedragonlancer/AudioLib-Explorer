@@ -38,6 +38,7 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
         language: "en".into(),
         playback: serde_json::to_value(&playback).unwrap(),
         audition_play_on_single_click: false,
+        audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
     };

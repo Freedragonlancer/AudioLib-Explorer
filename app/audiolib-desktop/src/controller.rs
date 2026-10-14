@@ -14,7 +14,7 @@ use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
 };
-use audiolib_core::config::AppConfig;
+use audiolib_core::config::{AppConfig, AudioTablePreferences};
 use audiolib_core::{
     AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder, LibraryExportFormat,
     MaintenanceAction, MetadataPatch, PlayRecord, ScanSession, SearchFilters, SearchRequest,
@@ -25,6 +25,43 @@ use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffe
 
 const PAGE_SIZE: usize = 200;
 const HISTORY_SIZE: usize = 50;
+
+fn table_sort_order(index: i32) -> SortOrder {
+    match index {
+        1 => SortOrder::Filename,
+        2 => SortOrder::Duration,
+        3 => SortOrder::SampleRate,
+        4 => SortOrder::Channels,
+        5 => SortOrder::Tags,
+        6 => SortOrder::Modified,
+        _ => SortOrder::Relevance,
+    }
+}
+
+fn sort_index(order: SortOrder) -> i32 {
+    match order {
+        SortOrder::Relevance => 0,
+        SortOrder::Filename => 1,
+        SortOrder::Duration => 2,
+        SortOrder::SampleRate => 3,
+        SortOrder::Channels => 4,
+        SortOrder::Tags => 5,
+        SortOrder::Modified => 6,
+    }
+}
+
+fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
+    AudioTablePreferences {
+        name_width: ui.get_table_name_width(),
+        duration_width: ui.get_table_duration_width(),
+        format_width: ui.get_table_format_width(),
+        channels_width: ui.get_table_channels_width(),
+        tags_width: ui.get_table_tags_width(),
+        order_by: table_sort_order(ui.get_sort_index()),
+        descending: ui.get_sort_descending(),
+    }
+    .normalized()
+}
 
 #[cfg(test)]
 #[path = "click_preview_tests.rs"]
@@ -48,6 +85,9 @@ mod result_rows_tests;
 #[cfg(test)]
 #[path = "single_click_play_tests.rs"]
 mod single_click_play_tests;
+#[cfg(test)]
+#[path = "table_tests.rs"]
+mod table_tests;
 pub use remote_mode::{RemoteStartup, open_remote_placeholder, open_remote_startup_with_progress};
 
 #[derive(Clone)]
@@ -484,6 +524,8 @@ pub struct Controller {
     config: Arc<Mutex<AppConfig>>,
     /// Latest GUI preference; its worker serializes disk writes with other settings.
     single_click_play: AtomicBool,
+    /// Latest table layout, captured on the event loop and saved by the preferences worker.
+    audio_table: Mutex<AudioTablePreferences>,
     single_click_play_pending: Mutex<bool>,
     single_click_play_wake: Condvar,
     playback: Mutex<PlaybackConfig>,
@@ -614,6 +656,14 @@ impl Controller {
         let chinese = config.language == "cn";
         ui.set_chinese(chinese);
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
+        let table = config.audio_table.normalized();
+        ui.set_table_name_width(table.name_width);
+        ui.set_table_duration_width(table.duration_width);
+        ui.set_table_format_width(table.format_width);
+        ui.set_table_channels_width(table.channels_width);
+        ui.set_table_tags_width(table.tags_width);
+        ui.set_sort_index(sort_index(table.order_by));
+        ui.set_sort_descending(table.descending);
         ui.set_volume(playback.volume);
         publish_audition(ui, playback.audition);
         publish_volume(ui, playback.volume);
@@ -648,6 +698,7 @@ impl Controller {
             scans: Mutex::new(Vec::new()),
             audio,
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
+            audio_table: Mutex::new(table),
             single_click_play_pending: Mutex::new(false),
             single_click_play_wake: Condvar::new(),
             config: Arc::new(Mutex::new(config)),
@@ -773,6 +824,16 @@ impl Controller {
             c.single_click_play.store(enabled, Ordering::Release);
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_table_layout_changed(move || {
+            if c.available()
+                && let Some(ui) = c.ui.upgrade()
+            {
+                *c.audio_table.lock().unwrap() = table_preferences(&ui);
+                *c.single_click_play_pending.lock().unwrap() = true;
+                c.single_click_play_wake.notify_one();
+            }
         });
         let c = self.clone();
         ui.on_check_page_requested(move |checked| {
@@ -1934,7 +1995,6 @@ impl Controller {
             ui.set_duration_min("".into());
             ui.set_duration_max("".into());
             ui.set_visibility_index(0);
-            ui.set_sort_index(0);
         }
     }
 
@@ -2216,7 +2276,7 @@ impl Controller {
             .expect("spawn selection audio worker");
         let c = self.clone();
         std::thread::Builder::new()
-            .name("audiolib-click-preference".into())
+            .name("audiolib-preferences".into())
             .spawn(move || {
                 loop {
                     let mut pending = c.single_click_play_pending.lock().unwrap();
@@ -2237,6 +2297,7 @@ impl Controller {
                         }
                         config.audition_play_on_single_click =
                             c.single_click_play.load(Ordering::Acquire);
+                        config.audio_table = c.audio_table.lock().unwrap().clone();
                         config.save()
                     };
                     if let Err(error) = result {
@@ -2244,7 +2305,7 @@ impl Controller {
                     }
                 }
             })
-            .expect("spawn click preference worker");
+            .expect("spawn preferences worker");
 
         let c = self.clone();
         std::thread::Builder::new()
@@ -2937,13 +2998,8 @@ impl Controller {
             color: (!ui.get_color_filter().trim().is_empty())
                 .then(|| ui.get_color_filter().trim().to_owned()),
         };
-        request.order_by = match ui.get_sort_index() {
-            1 => SortOrder::Filename,
-            2 => SortOrder::Duration,
-            3 => SortOrder::SampleRate,
-            _ => SortOrder::Relevance,
-        };
-        request.descending = false;
+        request.order_by = table_sort_order(ui.get_sort_index());
+        request.descending = ui.get_sort_descending();
         if let Err(error) = request.validate() {
             ui.set_status(error.to_string().into());
             return;
@@ -3741,6 +3797,7 @@ impl Controller {
         if self.closing.load(Ordering::Acquire) {
             return;
         }
+        *self.audio_table.lock().unwrap() = table_preferences(ui);
         self.capture_metadata(ui);
         let barrier = match self.enqueue_transition_metadata() {
             Ok(sequence) => sequence,
@@ -5009,6 +5066,7 @@ impl Controller {
             .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4));
         let mut config = self.config.lock().unwrap();
         config.audition_play_on_single_click = self.single_click_play.load(Ordering::Acquire);
+        config.audio_table = self.audio_table.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
         }
@@ -6525,6 +6583,7 @@ mod tests {
             language: "en".into(),
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
+            audio_table: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
         };

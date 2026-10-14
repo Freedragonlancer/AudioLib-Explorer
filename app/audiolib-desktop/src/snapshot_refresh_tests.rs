@@ -154,6 +154,7 @@ fn child_search_retention() {
     ui.set_duration_min("0".into());
     ui.set_duration_max("1".into());
     ui.set_sort_index(1);
+    ui.set_sort_descending(true);
     {
         let mut tree = controller.tree.lock().unwrap();
         tree.selected = Some(folder.id);
@@ -178,6 +179,7 @@ fn child_search_retention() {
     assert!(!Arc::ptr_eq(&old_provider, &controller.provider()));
     assert_eq!(ui.get_query(), "metal");
     assert_eq!(ui.get_sort_index(), 1);
+    assert!(ui.get_sort_descending());
     assert_eq!(ui.get_sample_filter(), 2);
     assert!(ui.get_favorites_only() && ui.get_tagged_only());
     assert_eq!(ui.get_tag_filter(), "reviewed");
@@ -188,6 +190,7 @@ fn child_search_retention() {
     assert_eq!(after.folder_id, before.folder_id);
     assert_eq!(after.offset, before.offset);
     assert_eq!(after.order_by, before.order_by);
+    assert_eq!(after.descending, before.descending);
     assert_eq!(controller.tree.lock().unwrap().selected, Some(folder.id));
     assert!(
         controller
@@ -231,7 +234,14 @@ fn child_search_retention() {
     assert_eq!(ui.get_query(), "");
     assert_eq!(controller.request.lock().unwrap().folder_id, None);
     assert_eq!(controller.request.lock().unwrap().offset, 0);
-    assert_eq!(ui.get_sort_index(), 0);
+    // Sorting is now a global table preference, independent of library query and IDs.
+    assert_eq!(ui.get_sort_index(), 1);
+    assert!(ui.get_sort_descending());
+    assert_eq!(
+        controller.request.lock().unwrap().order_by,
+        SortOrder::Filename
+    );
+    assert!(controller.request.lock().unwrap().descending);
     assert!(!ui.get_favorites_only());
     controller.shutdown();
     ui.hide().unwrap();

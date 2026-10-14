@@ -1351,6 +1351,15 @@ impl SqliteProvider {
             SortOrder::Duration => "af.duration",
             SortOrder::SampleRate => "af.sample_rate",
             SortOrder::Modified => "af.modified_at",
+            SortOrder::Channels => "af.channels",
+            // Library and source tags share Unicode trimming and ICU folding. Blank
+            // annotations use the precomputed source key without parsing source JSON.
+            SortOrder::Tags if self.derived_tags.load(Ordering::Acquire) => {
+                "COALESCE(audiolib_user_tags_key(af.user_tags),af.source_tags_text) COLLATE NOCASE"
+            }
+            SortOrder::Tags => {
+                "COALESCE(audiolib_user_tags_key(af.user_tags),audiolib_source_tags_key(af.metadata_json)) COLLATE NOCASE"
+            }
         };
         let descending = request.descending && request.order_by != SortOrder::Relevance;
         values.push(Value::Integer(request.limit as i64));
@@ -2380,6 +2389,184 @@ mod search_cancellation_tests {
                 .unwrap()
                 .total_count,
             0
+        );
+    }
+
+    #[test]
+    fn source_tag_sort_keeps_unicode_order_when_derived_keys_become_available() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("library.db");
+        let provider = SqliteProvider::open(&path).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        schema::register_casefold(&connection).unwrap();
+        for (id, tag) in [(1, "Straße"), (2, "strassz")] {
+            let metadata =
+                serde_json::json!({"wav_metadata": {"fields": {"category": tag}}}).to_string();
+            connection.execute(
+                "INSERT INTO audio_files(id,file_path,filename,metadata_json,missing,source_tags_text)
+                 VALUES(?1,?2,'sound.wav',?3,0,audiolib_source_tags_key(?3))",
+                params![id, format!("{id}.wav"), metadata],
+            ).unwrap();
+        }
+        drop(connection);
+        for ready in [false, true] {
+            provider.derived_tags.store(ready, Ordering::Release);
+            for (descending, expected) in [(false, vec![1, 2]), (true, vec![2, 1])] {
+                let page = provider
+                    .search(&SearchRequest {
+                        order_by: SortOrder::Tags,
+                        descending,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    page.results.iter().map(|row| row.id).collect::<Vec<_>>(),
+                    expected,
+                    "Unicode source tag ordering changed with derived readiness {ready}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tag_sort_shares_unicode_keys_and_blank_fallback_across_stable_fts_pages() {
+        const INITIAL_MODIFIED: &str = "2000-01-01 00:00:00.000";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unicode-tags.db");
+        let provider = SqliteProvider::open(&path).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        schema::register_casefold(&connection).unwrap();
+        for (id, tags, source, missing) in [
+            (1, None, "Straße", false),
+            (2, Some(""), "strassz", false),
+            (3, Some("  STRASSE\u{3000}"), "zulu", false),
+            (4, Some("\u{3000}\u{2003}\t\r\n"), "alpha", false),
+            (5, Some("\u{a0}\u{2028}"), "", false),
+            (6, Some("Zulu"), "aardvark", false),
+            (7, None, "aardvark", true),
+            (8, Some("\u{3000}Straße\u{3000}"), "zulu", false),
+        ] {
+            let metadata = serde_json::json!({
+                "wav_metadata": {"fields": {"category": source}},
+                "private": {"retained": id}
+            })
+            .to_string();
+            connection
+                .execute(
+                    "INSERT INTO audio_files(id,file_path,filename,user_tags,metadata_json,
+                     missing,source_tags_text,modified_at) VALUES(?1,?2,'metal.wav',?3,?4,?5,
+                     audiolib_source_tags_key(?4),?6)",
+                    params![
+                        id,
+                        format!("{id}.wav"),
+                        tags,
+                        metadata,
+                        missing,
+                        INITIAL_MODIFIED
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let original = provider.get_audio(1).unwrap().attributes;
+        // Copying the displayed source tag into the editable annotation must not
+        // change its key. Both kinds of blank annotations must select the source.
+        for tags in [
+            "",
+            "Straße",
+            "\u{3000}Straße\u{3000}",
+            "\u{3000}\u{2003}\t\r\n",
+        ] {
+            provider
+                .update_metadata(
+                    1,
+                    &MetadataPatch {
+                        tags: Some(tags.into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let file = provider.get_audio(1).unwrap();
+            assert_eq!(file.tags, tags);
+            let modified_at = file.attributes["modified_at"].as_str().unwrap();
+            let modified =
+                chrono::NaiveDateTime::parse_from_str(modified_at, "%Y-%m-%d %H:%M:%S%.f").unwrap();
+            let initial =
+                chrono::NaiveDateTime::parse_from_str(INITIAL_MODIFIED, "%Y-%m-%d %H:%M:%S%.f")
+                    .unwrap();
+            assert!(modified > initial);
+            // The DTO includes the library edit timestamp; every original Metadata
+            // value, including unknown extension fields, must otherwise be retained.
+            let mut expected_attributes = original.clone();
+            expected_attributes["modified_at"] = modified_at.into();
+            assert_eq!(file.attributes, expected_attributes);
+            assert_eq!(
+                audiolib_core::display_tags(&file.tags, &file.attributes),
+                "Straße"
+            );
+            let after_edit = file.attributes.clone();
+            for ready in [false, true] {
+                provider.derived_tags.store(ready, Ordering::Release);
+                for query in ["", "metal"] {
+                    for (descending, expected) in [
+                        (false, vec![5, 4, 1, 3, 8, 2, 6]),
+                        (true, vec![6, 2, 1, 3, 8, 4, 5]),
+                    ] {
+                        let mut actual = Vec::new();
+                        for offset in [0, 2, 4, 6, 8] {
+                            let request = SearchRequest {
+                                query: query.into(),
+                                order_by: SortOrder::Tags,
+                                descending,
+                                limit: 2,
+                                offset,
+                                ..Default::default()
+                            };
+                            let page = provider.search(&request).unwrap();
+                            let repeated = provider.search(&request).unwrap();
+                            let expected_page = expected
+                                .iter()
+                                .copied()
+                                .skip(offset)
+                                .take(2)
+                                .collect::<Vec<_>>();
+                            let ids = page.results.iter().map(|file| file.id).collect::<Vec<_>>();
+                            assert_eq!(page.total_count, 7);
+                            assert_eq!(page.returned_count, expected_page.len());
+                            assert_eq!(
+                                ids, expected_page,
+                                "tags={tags:?}, ready={ready}, {request:?}"
+                            );
+                            assert_eq!(
+                                ids,
+                                repeated
+                                    .results
+                                    .iter()
+                                    .map(|file| file.id)
+                                    .collect::<Vec<_>>()
+                            );
+                            for file in &page.results {
+                                assert_eq!(file.attributes["private"]["retained"], file.id);
+                                assert!(!file.missing);
+                            }
+                            actual.extend(ids);
+                        }
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+            let after_queries = provider.get_audio(1).unwrap();
+            assert_eq!(after_queries.tags, tags);
+            assert_eq!(after_queries.attributes, after_edit);
+        }
+        assert_eq!(
+            provider.get_audio(4).unwrap().tags,
+            "\u{3000}\u{2003}\t\r\n"
+        );
+        assert_eq!(provider.get_audio(5).unwrap().tags, "\u{a0}\u{2028}");
+        assert_eq!(
+            provider.get_audio(8).unwrap().tags,
+            "\u{3000}Straße\u{3000}"
         );
     }
 

@@ -106,6 +106,7 @@ enum Command {
         limit: usize,
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        /// Sort by relevance, filename, duration, sample_rate, channels, tags or modified.
         #[arg(long, default_value = "relevance")]
         sort: String,
         #[arg(long)]
@@ -589,6 +590,8 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
                 "duration" => SortOrder::Duration,
                 "sample_rate" => SortOrder::SampleRate,
                 "modified" => SortOrder::Modified,
+                "channels" => SortOrder::Channels,
+                "tags" => SortOrder::Tags,
                 _ => anyhow::bail!("Unknown sort field: {sort}"),
             };
             let request = SearchRequest {
@@ -1319,6 +1322,7 @@ mod tests {
             },
             language: "cn".into(),
             audition_play_on_single_click: false,
+            audio_table: Default::default(),
             playback: json!({"backend":"wasapi","volume":0.25}),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),

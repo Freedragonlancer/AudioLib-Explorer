@@ -468,8 +468,36 @@ pub(crate) fn source_search_marked(conn: &Connection) -> Result<bool> {
     Ok(meta_value(conn, SOURCE_SEARCH_REV_KEY)?.as_deref() == Some(SOURCE_SEARCH_REV))
 }
 
+/// Register deterministic Unicode folding and tag-query functions without rewriting
+/// the stored annotations or original Metadata.
 pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    let tags_mapper = icu_casemap::CaseMapper::new();
+    conn.create_scalar_function("audiolib_user_tags_key", 1, flags, move |context| {
+        let mut value = context.get::<Option<String>>(0)?.unwrap_or_default();
+        // Match display_tags' Rust Unicode trim, then use the exact same folding
+        // as source_tags_key. NULL lets blank annotations fall back to source tags.
+        let leading = value.len() - value.trim_start().len();
+        if leading == value.len() {
+            return Ok(None);
+        }
+        value.truncate(value.trim_end().len());
+        if leading != 0 {
+            drop(value.drain(..leading));
+        }
+        // Reuse the owned SQL argument for ASCII keys, including Unicode-trimmed
+        // boundaries, so the common English case needs no second allocation.
+        if value.is_ascii() {
+            value.make_ascii_lowercase();
+            return Ok(Some(value));
+        }
+        let key = match tags_mapper.fold_string(&value) {
+            std::borrow::Cow::Borrowed(_) => value,
+            std::borrow::Cow::Owned(folded) => folded,
+        };
+        Ok(Some(key))
+    })
+    .map_err(db_error)?;
     conn.create_scalar_function("audiolib_has_source_tags", 1, flags, |context| {
         let json = context.get::<Option<String>>(0)?.unwrap_or_default();
         Ok(i64::from(json_has_source_tags(&json)))
