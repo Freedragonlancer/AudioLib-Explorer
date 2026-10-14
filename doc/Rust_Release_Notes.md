@@ -1,49 +1,21 @@
-# AudioLib Explorer v0.4.7
+# AudioLib Explorer v0.4.8
 
-发布版本：0.4.7；客户端、CLI 与服务端使用相同程序版本。包含此前尚未发布的 0.4.4 至 0.4.6 功能与修复。已有标签保留；上一个成功发布的版本为 v0.4.3。
+Release 0.4.8; the client, CLI and server share the same program version. Patch release on top of the published v0.4.7.
 
-版本：程序 0.4.7 | API /api/v1/ | schema 5 | 快照兼容 3..=5
+Versions: program 0.4.8 | API /api/v1/ | schema 5 | snapshot compat 3..=5
 
-本次修复服务端扫描启动失败先回信、后释放资源的竞态，避免紧接着的请求误报忙碌。此前的 Linux 发布验证进程清理修复已在 v0.4.6 原生构建、打包、健康检查和合成库读取中验证通过；本版继续执行全部发布检查。
+## Changelog
 
-## 远程音效库资源路径管理
+### Server-mode startup and close
 
-- 在当前服务器的「服务器音效库」页添加音效库、修改资源路径和删除音效库。远程目录选择器支持服务器位置、面包屑、上级目录、中文目录和绝对路径导航。
-- 添加已有目录后手动开始扫描；修改路径先核验对应 WAV，再原子更新数据库路径，保留文件 ID、Metadata 和标注。删除会移除根目录配置、库记录及其标注，保留服务器上的目录和 WAV。
-- 路径修改和删除先创建回滚备份，恢复日志协调数据库与根目录配置；桌面先排空请求的 Metadata 写入，再执行操作，响应丢失后同步核对状态。
-- 该功能要求服务端声明 `root_management` 并允许当前连接管理；旧服务端继续支持已有读取流程。
+- Preparing an offline cache copy now bounds Busy/Locked SQLite backup steps to 5 seconds and reports an unknown backup step result as an error instead of retrying forever. The owned staging connection no longer waits inside SQLite for its own lock.
+- Closing the window waits at most 15 seconds for cancelled remote cache work, then closes anyway. The active cache is never modified by the abandoned work; its staging copy is removed on a later start.
+- Server-mode startup removes this library's cache staging files that are older than one hour (left behind by an interrupted preparation or download). Snapshots and fresh staging files are kept.
+- An unusable server selection (no active profile, a missing profile, or an empty or invalid server URL) opens the local library for the session. Saving preferences keeps the original server selection on disk unless you explicitly choose a data source. Without an openable local library, server mode is kept so the profile can be fixed.
+- Library management checks that the selected local library exists before switching to local mode and explains the problem instead of saving a switch that cannot open.
 
-## 客户端与服务端修复
+## Compatibility
 
-- 修复 Linux/macOS 资源目录重定位把末尾分隔符误判为目录链接的问题；保留区分大小写及真实目录链接校验，迁移仍保留文件 ID、Metadata 和源 WAV。
-- 资源目录重定位在获取锁前响应预取消；Windows 现有源目录别名先规范到扫描记录的真实路径，物理移走后仍可使用旧路径更新记录，规范路径指向磁盘根目录时明确拒绝。
-- 同一服务器音效库的快照更新保留搜索、筛选、排序和分页；播放历史触发的自动同步等待当前试听结束，避免播放后突然刷新并丢失搜索。
-- 远程写入按请求、响应和缓存应用顺序执行，合并重复同步请求；退出取消快照复制、完整性校验、索引升级和统计，保留原缓存与未保存草稿。已发送 Metadata 写入仍等待明确结果或既有超时。
-- 切换服务器、修改活动连接、发布快照及关闭前排空已发送的播放记录回复，防止旧服务器回复覆盖新缓存；延迟写入回调不会回退当前 revision。
-- 文件菜单新增会话级 Debug 模式、脱敏诊断报告预览和 GitHub Issue 入口。报告不打包原始日志、音频、数据库、完整路径或服务器凭据，提交前在浏览器检查并确认。
-- 远程修改绑定快照对应的音效库身份；服务器更换资料库后拒绝旧缓存的 Metadata、播放历史和管理写入。客户端检测到换库时保留草稿并停用写入，重新同步后才恢复。
-- 扫描启动与根目录编辑共用预留锁，并固定扫描使用的根目录状态；异常退出也释放活动任务，避免扫描和删除目录永久显示忙碌。
-- 扫描启动失败完成资源释放后才返回错误，连续的无效请求不会被上一请求遗留的设置锁误判为忙碌。
-- 共享库的扫描准入重读已保存的根目录，并将跨实例设置锁交接给数据库扫描锁，防止另一实例继续扫描旧资源路径。区分大小写的服务端支持仅改变目录大小写的重定位及其恢复。
-- 共享设置的管理 API 准入重读权限后再鉴权，另一实例收紧或放宽权限时首次管理请求就使用新策略；普通读取与音频流不等待根目录编辑的设置锁。
-- 服务端 Waveform 缓存包含资料库和文件身份，大小、修改时间相同的不同 WAV 不再共用峰值。
-- 更换源声道对时重新准备匹配的服务器试听文件，并保留播放位置和播放会话；暂停状态不会因应用设置而自动播放。
-- 快照下载与同步前置检查支持在等待 HTTP 响应头或正文时取消，关闭窗口不再等待长时间网络超时。
-- Windows 窗口恢复和原生重绘执行完整帧刷新，保留表单草稿、选择和资料库状态。
-- 服务端拒绝不同源的写请求，并要求 JSON 写入使用正确的内容类型。
+API paths, the database schema and the snapshot compatibility range are unchanged, and the settings file format is unchanged. Upgrading keeps libraries, Metadata, annotations, scan history and preferences; runtime state stays in `%LOCALAPPDATA%/AudioLibExplorer/v1` or the existing explicit data directory. The Windows x64 portable package includes WASAPI and ASIO.
 
-## 升级与兼容
-
-客户端和服务端须一起升级才能继续远程写入。新客户端仍可读取旧服务端，但旧服务端未声明音效库身份写保护时会拒绝写入；新服务端拒绝缺少 `X-AudioLib-Library-Id` 的库写请求。API 路径、数据库 schema 和快照读取范围保持不变。
-
-升级保留资料库、Metadata、标注、扫描历史与偏好设置，运行状态继续保存在 `%LOCALAPPDATA%/AudioLibExplorer/v1` 或原有显式配置路径。Windows x64 便携包包含 WASAPI 与 ASIO。
-
-Release 同时提供 Windows x64 客户端便携包，以及 Windows x64、Linux x64 独立服务端包。每个归档附 SHA256 和允许字段的验证报告。Linux GNU 版在 Ubuntu 22.04 构建；使用更旧发行版或其他架构时请按服务端文档从源码构建。服务端包只包含程序、公共文档、配置示例与许可证，升级时保留原配置、库与凭据。
-
-## 公开资料与发布包
-
-移除公开文档中的生产库身份及统计信息，以及含私人信息的问题截图。打包使用明确文件清单和新建暂存目录，排除生成报告、截图和运行数据；公开 CI 报告只输出允许字段。Release 构建对编译路径进行映射，发布前检查包内本机路径。
-
-普通提交不会清除历史 Git 对象或已发布附件中的信息。历史资料仍需单独处理；本次不改写远程历史或删除已有 Release。
-
-实际检查、发布回归和固定本地安装结果见 [Rust 验证记录](Rust_Validation.md)。
+The Release provides the Windows x64 client portable package and Windows x64 and Linux x64 standalone server packages, each with a SHA-256 file and an allowed-field validation report.

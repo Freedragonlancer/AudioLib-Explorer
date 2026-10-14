@@ -751,3 +751,9 @@ Windows 发布检查的快照回归已正确返回 `Cancelled`，失败的是 `<
 两处修改经独立复核，无阻断问题。本机扫描模块六项单元回归、七项 HTTP 扫描集成回归及服务端严格 Clippy 通过；远程取消 filter 的三项回归在默认配置连续三轮通过。完整工作区、ASIO、重建打包及各平台发布检查继续由本次流水线和公开报告记录。
 
 此前 `v0.4.6` 本机 fmt、默认及 ASIO 严格 Clippy、两种完整 workspace/all-targets 测试、最新 ASIO release 构建、review-fixes、library-management、desktop-close（三轮）、playback-ipc、客户端打包及隔离 portable 验收通过。替换旧 server 生成目录时，本机 SMB 文件系统的递归删除报告目录非空；续验先将已核验的生成输出移动到仓库内私有备份，再重新打包，不涉及工作库或固定安装。`v0.4.7` 的续验日志在忽略的 `.rust-validation/release-v0.4.7/`；最终平台检查、提交与资产身份以新标签的公开 workflow 和报告为准。
+
+## 2026-10-14 v0.4.8 服务器模式启动与关闭后续修复
+
+本版基于已发布的 `v0.4.7`。缓存准备的 Busy/Locked 备份步骤有 5 秒上限，未知步骤结果直接报错；关窗等待远端缓存任务最多 15 秒；服务器模式启动清理超过 1 小时的 staging；服务器配置无效时本次会话回退本地，保存时保留原服务器选择（用户显式选择数据源除外），无可用本地库时保持服务器模式；管理器切回本地前检查本地库存在。
+
+本机 Windows MSVC 1.97.1：`cargo fmt --all -- --check`、严格 Clippy、`cargo test --workspace --all-targets --locked`（786 passed）通过；validate-desktop-close、validate-review-fixes、validate-library-management 通过。validate-runtime 在 BOOM SMED Metadata 解码处失败，为既有问题，与本版改动无关。API v1、schema 5、snapshot 3..=5 不变；最终平台检查与资产身份以 `v0.4.8` 标签的公开 workflow 和报告为准。
