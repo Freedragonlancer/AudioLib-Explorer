@@ -817,7 +817,7 @@ impl Controller {
             || self.secrets().webdav_password != secrets.webdav_password;
         if active && (connection_changed || shared_changed) {
             // Same path as a switch: the old server's runtime state goes.
-            self.save_data_source(settings, secrets, chinese)?;
+            self.save_data_source(settings, secrets, chinese, false)?;
         } else {
             self.update_sources(chinese, true, move |stored, stored_secrets| {
                 *stored = settings;

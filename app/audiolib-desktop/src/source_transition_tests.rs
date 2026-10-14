@@ -1597,7 +1597,7 @@ fn child_invalid_snapshot_rollback() {
     let mut settings_b = controller.config.lock().unwrap().data_source.clone();
     settings_b.server_url = "http://127.0.0.1:18791".into();
     controller
-        .save_data_source(settings_b, RemoteSecrets::default(), false)
+        .save_data_source(settings_b, RemoteSecrets::default(), false, false)
         .unwrap();
     let state_b = cached_library(
         &controller.config.lock().unwrap(),
