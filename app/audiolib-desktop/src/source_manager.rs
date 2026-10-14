@@ -817,7 +817,7 @@ impl Controller {
             || self.secrets().webdav_password != secrets.webdav_password;
         if active && (connection_changed || shared_changed) {
             // Same path as a switch: the old server's runtime state goes.
-            self.save_data_source(settings, secrets, chinese)?;
+            self.save_data_source(settings, secrets, chinese, false)?;
         } else {
             self.update_sources(chinese, true, move |stored, stored_secrets| {
                 *stored = settings;
@@ -836,6 +836,19 @@ impl Controller {
         match self.selection() {
             Selection::New => {}
             Selection::Local => {
+                let (path, default_database) = {
+                    let config = self.config.lock().unwrap();
+                    (
+                        config.paths.database.clone(),
+                        config.data_root().join("library.db"),
+                    )
+                };
+                if let Some(problem) = missing_local_library(&path, &default_database, chinese) {
+                    // Checked before settings are saved: a missing library keeps the
+                    // current source and its persisted selection unchanged.
+                    ui.set_ds_message(problem.into());
+                    return;
+                }
                 ui.set_ds_message(
                     cn_or(
                         chinese,
@@ -2093,6 +2106,30 @@ fn scan_text(scan: Option<&ServerScan>, chinese: bool) -> String {
     text
 }
 
+/// Why switching to the configured local library cannot start, or `None` when it can.
+/// The default library may be absent (it is created empty, as on a first start); any
+/// other selected library must still exist.
+fn missing_local_library(
+    path: &std::path::Path,
+    default_database: &std::path::Path,
+    chinese: bool,
+) -> Option<String> {
+    if path.is_file() || path == default_database {
+        return None;
+    }
+    Some(if chinese {
+        format!(
+            "本地素材库不存在：{}。请先在「音效库管理」中重新选择本地素材库。",
+            path.display()
+        )
+    } else {
+        format!(
+            "The local library does not exist: {}. Select a local library in library management first.",
+            path.display()
+        )
+    })
+}
+
 /// One scan history row, in the local history's format.
 fn history_line(scan: &ScanSession, chinese: bool) -> String {
     let mode = if chinese {
@@ -2900,6 +2937,34 @@ mod tests {
         };
         let text = cache_info(Some("11111111-5e97"), Some("D:/x"), Some(&state), true);
         assert!(text.contains("快照：r6 · 3009 个音效 · 2.0 MiB"), "{text}");
+    }
+
+    #[test]
+    fn switching_to_a_missing_local_library_is_refused_with_a_message() {
+        let directory = std::env::temp_dir().join(format!(
+            "audiolib-missing-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let default_database = directory.join("library.db");
+        assert_eq!(
+            missing_local_library(&default_database, &default_database, true),
+            None
+        );
+        let other = directory.join("other.db");
+        let message = missing_local_library(&other, &default_database, true).unwrap();
+        assert!(message.contains("本地素材库不存在"), "{message}");
+        let message = missing_local_library(&other, &default_database, false).unwrap();
+        assert!(message.contains("does not exist"), "{message}");
+        std::fs::write(&other, b"").unwrap();
+        assert_eq!(
+            missing_local_library(&other, &default_database, false),
+            None
+        );
     }
 
     #[test]

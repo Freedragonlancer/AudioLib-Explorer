@@ -82,6 +82,7 @@ impl Controller {
                         settings.clone(),
                         secrets.clone(),
                         c.chinese.load(Ordering::Acquire),
+                        false,
                     );
                     // Sync publishes cache state before opening the provider.
                     // Restore the old cache so restart cannot open B with A's URL.
@@ -139,10 +140,16 @@ impl Controller {
         settings: DataSourceSettings,
         secrets: RemoteSecrets,
         chinese: bool,
+        explicit_choice: bool,
     ) -> Result<(), String> {
         let mut config = self.config.lock().unwrap();
         let mut preferences = config.clone();
         preferences.data_source = settings;
+        if explicit_choice {
+            // The user chose a source in this session: write it exactly as chosen, even
+            // when it equals the selection a startup fallback replaced.
+            preferences.data_source_fallback = None;
+        }
         save_secrets(&preferences.data_root(), &secrets)
             .map_err(|error| error.localized(chinese))?;
         preferences.save().map_err(|error| error.to_string())?;
@@ -208,7 +215,7 @@ impl Controller {
             let saved = c
                 .wait_transition_metadata(barrier)
                 .and_then(|_| c.wait_remote_plays())
-                .and_then(|_| c.save_data_source(settings, secrets, chinese));
+                .and_then(|_| c.save_data_source(settings, secrets, chinese, true));
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 if let Err(error) = saved {

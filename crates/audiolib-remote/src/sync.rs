@@ -97,6 +97,66 @@ fn wait_unless_cancelled(wait: Duration, cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
+/// Longest continuous run of Busy/Locked backup steps tolerated while preparing a cache.
+const BACKUP_BUSY_RETRY_LIMIT: Duration = Duration::from_secs(5);
+
+/// Classified outcome of one `sqlite3_backup_step`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BackupStep {
+    Done,
+    More,
+    Busy,
+    Unknown(String),
+}
+
+impl From<rusqlite::backup::StepResult> for BackupStep {
+    fn from(step: rusqlite::backup::StepResult) -> Self {
+        use rusqlite::backup::StepResult;
+        match step {
+            StepResult::Done => Self::Done,
+            StepResult::More => Self::More,
+            StepResult::Busy | StepResult::Locked => Self::Busy,
+            #[allow(unreachable_patterns)]
+            other => Self::Unknown(format!("{other:?}")),
+        }
+    }
+}
+
+/// Run backup steps until done, checking `cancel` before and after every step.
+/// Busy/Locked steps are retried for at most `busy_limit` in a row; an unknown step
+/// result is an error instead of an unbounded retry.
+fn drive_backup_steps(
+    cancel: &AtomicBool,
+    busy_limit: Duration,
+    step: &mut dyn FnMut() -> Result<BackupStep>,
+) -> Result<()> {
+    let mut busy_since: Option<Instant> = None;
+    loop {
+        check_cancelled(cancel)?;
+        let result = step()?;
+        check_cancelled(cancel)?;
+        match result {
+            BackupStep::Done => return Ok(()),
+            BackupStep::More => busy_since = None,
+            BackupStep::Busy => {
+                let since = *busy_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= busy_limit {
+                    return Err(RemoteError::Snapshot(format!(
+                        "cache snapshot copy stayed busy or locked for {} ms",
+                        busy_limit.as_millis()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            BackupStep::Unknown(result) => {
+                return Err(RemoteError::Snapshot(format!(
+                    "unexpected SQLite backup step result: {result}"
+                )));
+            }
+        }
+    }
+}
+
 fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Acquire) {
         Err(RemoteError::Cancelled)
@@ -385,6 +445,11 @@ impl RemoteCache {
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
             )
             .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
+            // The staging file is owned by this preparation: never wait inside SQLite
+            // for its lock, so Busy/Locked is reported per step and bounded below.
+            target
+                .busy_timeout(Duration::ZERO)
+                .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
             // Pin one consistent read snapshot, including committed WAL contents.
             // This owned startup copy needs no per-step throttle: at 4 KiB pages,
             // sleeping 5 ms per 256 pages adds about 50 seconds to a 10 GiB cache.
@@ -397,8 +462,7 @@ impl RemoteCache {
             });
             let backup = rusqlite::backup::Backup::new(&source, &mut target)
                 .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
-            loop {
-                check_cancelled(cancel)?;
+            drive_backup_steps(cancel, BACKUP_BUSY_RETRY_LIMIT, &mut || {
                 let step = backup
                     .step(4096)
                     .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
@@ -407,13 +471,8 @@ impl RemoteCache {
                     completed: (copied.pagecount - copied.remaining).max(0) as u64,
                     total: copied.pagecount.max(0) as u64,
                 });
-                check_cancelled(cancel)?;
-                match step {
-                    rusqlite::backup::StepResult::Done => break,
-                    rusqlite::backup::StepResult::More => {}
-                    _ => std::thread::sleep(Duration::from_millis(5)),
-                }
-            }
+                Ok(BackupStep::from(step))
+            })?;
             drop(backup);
             drop(target);
             drop(source);
@@ -484,6 +543,17 @@ impl RemoteCache {
     /// files of a download are removed only once stale ([`STALE_STAGING_AGE`]), so a sync
     /// running in another process is never disturbed.
     pub fn prune(&self, library_id: &str, keep: &[&str]) {
+        self.prune_files(library_id, keep, true);
+    }
+
+    /// Remove only this library's stale staging files (older than [`STALE_STAGING_AGE`]),
+    /// left behind by a preparation or download that was abandoned, for example by a
+    /// forced exit. Snapshots are never touched, so this is safe before any swap.
+    pub fn prune_stale_staging(&self, library_id: &str) {
+        self.prune_files(library_id, &[], false);
+    }
+
+    fn prune_files(&self, library_id: &str, keep: &[&str], snapshots: bool) {
         let Ok(entries) = std::fs::read_dir(self.library_dir(library_id)) else {
             return;
         };
@@ -508,7 +578,7 @@ impl RemoteCache {
                 if stale {
                     let _ = std::fs::remove_file(entry.path());
                 }
-            } else if base.ends_with(".db") {
+            } else if snapshots && base.ends_with(".db") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -890,6 +960,67 @@ pub fn sync_library(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backup_busy_beyond_limit_is_an_error() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut steps = 0;
+        let started = std::time::Instant::now();
+        let error =
+            super::drive_backup_steps(&cancel, std::time::Duration::from_millis(60), &mut || {
+                steps += 1;
+                Ok(super::BackupStep::Busy)
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, super::RemoteError::Snapshot(ref m) if m.contains("busy")),
+            "{error:?}"
+        );
+        assert!(steps > 1, "busy steps are retried");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Progress between busy steps restarts the window; Done finishes.
+        let mut script = vec![
+            super::BackupStep::Done,
+            super::BackupStep::More,
+            super::BackupStep::Busy,
+        ];
+        super::drive_backup_steps(&cancel, std::time::Duration::from_secs(5), &mut || {
+            Ok(script.pop().unwrap())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn unknown_backup_step_is_an_error_not_a_retry() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut steps = 0;
+        let error =
+            super::drive_backup_steps(&cancel, std::time::Duration::from_secs(5), &mut || {
+                steps += 1;
+                Ok(super::BackupStep::Unknown("Future".into()))
+            })
+            .unwrap_err();
+        assert_eq!(steps, 1);
+        assert!(
+            matches!(error, super::RemoteError::Snapshot(ref m) if m.contains("Future")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn backup_steps_observe_cancellation_after_each_step() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut steps = 0;
+        let error =
+            super::drive_backup_steps(&cancel, std::time::Duration::from_secs(5), &mut || {
+                steps += 1;
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                Ok(super::BackupStep::More)
+            })
+            .unwrap_err();
+        assert!(matches!(error, super::RemoteError::Cancelled));
+        assert_eq!(steps, 1);
+    }
+
     use super::*;
     use crate::test_server::{TestResponse, TestServer};
     use std::sync::{Arc, Mutex};
@@ -1827,6 +1958,33 @@ mod tests {
         cache.cleanup_after_swap(&replacement);
         assert!(!cache.library_dir("lib-a").exists());
         assert!(cache.database_path(&replacement).is_file());
+    }
+
+    #[test]
+    fn startup_staging_prune_keeps_snapshots_and_fresh_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = RemoteCache::new(directory.path());
+        let dir = cache.library_dir("lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "library-r1-1.db",
+            "library-r2-2.db.download",
+            "library-r3-3.db.download",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let old = std::time::SystemTime::now() - STALE_STAGING_AGE - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("library-r2-2.db.download"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        cache.prune_stale_staging("lib");
+        assert!(dir.join("library-r1-1.db").exists());
+        assert!(!dir.join("library-r2-2.db.download").exists());
+        assert!(dir.join("library-r3-3.db.download").exists());
+        cache.prune_stale_staging("missing-library");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.7 | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.8 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 5 | SQLite 资料库结构（`user_version`） |
 
@@ -26,7 +26,7 @@
 
 ## 发布流程
 
-本次计划发布版本为 **0.4.7**，基准标签为 **v0.4.6**（Windows 发布验证失败，未创建 Release）；上一个成功发布版本仍为 v0.4.3。0.4.7 包含此前的远程写入身份保护、Debug 报告、同库快照状态保留、服务器资源路径管理、原生目录重定位和发布工具清理修复，并修复扫描启动失败回信与资源释放的竞态。v0.4.6 的原生 Linux 严格检查、构建、打包和 health/library 验证均通过；已推送的 v0.4.4 至 v0.4.6 标签保留。客户端与服务端须一起升级才能写入，旧版本读取仍兼容，schema 和快照范围不变。
+本次计划发布版本为 **0.4.8**，基准标签为 **v0.4.7**（已成功发布）。0.4.8 是补丁版本：服务器模式启动与关闭的后续修复，API、schema 和快照范围不变。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
@@ -41,4 +41,4 @@
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：
 
 - 通过：Cargo 0.4.6 + 版本行 + `-Tag v0.4.6 -BaseTag v0.4.5`
-- 失败：`-Tag v0.4.7`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
+- 失败：`-Tag v0.4.9`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
