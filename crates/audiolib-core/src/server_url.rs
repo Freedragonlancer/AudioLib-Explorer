@@ -1,11 +1,11 @@
 // crates/audiolib-core/src/server_url.rs
 //! Server address entry and normalisation for server mode.
 //!
-//! The user enters either a full URL (`https://audiolib.example.com:18086/audiolib`) or a
+//! The user enters either a full URL (`https://audiolib.example.com:8443/audiolib`) or a
 //! scheme + host + port (+ optional path prefix). Both normalise to one base URL, which is
 //! what `data_source.server_url` stores; the API base is that URL plus `/api/v1`. A pasted
 //! `/api/v1` suffix is accepted and not doubled. Saved values from earlier versions (such
-//! as `http://192.168.1.10:8790`) parse to the same base URL and the same API base, so no
+//! as `http://server.example.lan:8790`) parse to the same base URL and the same API base, so no
 //! settings migration is needed.
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -77,7 +77,7 @@ impl ServerUrlError {
             return self.to_string();
         }
         match self {
-            Self::Empty => "请填写服务器地址，例如 https://audiolib.example.com:18086 或 http://192.168.1.10:8790".into(),
+            Self::Empty => "请填写服务器地址，例如 https://audiolib.example.com:8443 或 http://server.example.lan:8790".into(),
             Self::MissingScheme => "服务器地址需以 http:// 或 https:// 开头".into(),
             Self::UnsupportedScheme(scheme) => {
                 format!("不支持的协议“{scheme}”：只能使用 http 或 https")
@@ -93,7 +93,7 @@ impl ServerUrlError {
                 "主机名“{host}”无效：只能包含字母、数字、连字符和点（每段 1–63 个字符），例如 audiolib.example.com；IPv6 地址需加方括号"
             ),
             Self::InvalidIpv4(host) => {
-                format!("IPv4 地址“{host}”无效：应为 4 段 0–255 的数字，例如 192.168.1.10")
+                format!("IPv4 地址“{host}”无效：应为 4 段 0–255 的数字，例如 192.0.2.10")
             }
             Self::NonAsciiHost(host) => {
                 format!("主机名“{host}”包含非 ASCII 字符：请使用 Punycode 形式（xn--…）")
@@ -110,7 +110,7 @@ impl fmt::Display for ServerUrlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str(
-                "Enter the server address, e.g. https://audiolib.example.com:18086 or http://192.168.1.10:8790",
+                "Enter the server address, e.g. https://audiolib.example.com:8443 or http://server.example.lan:8790",
             ),
             Self::MissingScheme => {
                 formatter.write_str("The server URL must start with http:// or https://")
@@ -136,7 +136,7 @@ impl fmt::Display for ServerUrlError {
             ),
             Self::InvalidIpv4(host) => write!(
                 formatter,
-                "Invalid IPv4 address \"{host}\": use four numbers 0-255, e.g. 192.168.1.10"
+                "Invalid IPv4 address \"{host}\": use four numbers 0-255, e.g. 192.0.2.10"
             ),
             Self::NonAsciiHost(host) => write!(
                 formatter,
@@ -169,7 +169,7 @@ impl ServerAddress {
     }
 
     /// Parse user input from the URL field: like [`ServerAddress::parse`], but an input
-    /// without `scheme://` (e.g. `audiolib.example.com:18086`) uses `default` (HTTPS in
+    /// without `scheme://` (e.g. `audiolib.example.com:8443`) uses `default` (HTTPS in
     /// the dialog).
     pub fn parse_input(input: &str, default: Scheme) -> Result<Self, ServerUrlError> {
         Self::parse_with_default(input, Some(default))
@@ -475,12 +475,12 @@ mod tests {
     #[test]
     fn full_urls_normalise_to_a_base_url_and_api_base() {
         assert_eq!(
-            base("https://audiolib.example.com:18086"),
-            "https://audiolib.example.com:18086"
+            base("https://audiolib.example.com:8443"),
+            "https://audiolib.example.com:8443"
         );
         assert_eq!(
-            api_base_url("https://audiolib.example.com:18086").unwrap(),
-            "https://audiolib.example.com:18086/api/v1"
+            api_base_url("https://audiolib.example.com:8443").unwrap(),
+            "https://audiolib.example.com:8443/api/v1"
         );
         // Surrounding whitespace and a mixed-case scheme are tolerated.
         assert_eq!(
@@ -493,27 +493,27 @@ mod tests {
     #[test]
     fn path_prefix_trailing_slash_and_pasted_api_suffix() {
         assert_eq!(
-            base("https://host:18086/audiolib"),
-            "https://host:18086/audiolib"
+            base("https://host:8443/audiolib"),
+            "https://host:8443/audiolib"
         );
         assert_eq!(
-            base("https://host:18086/audiolib/"),
-            "https://host:18086/audiolib"
+            base("https://host:8443/audiolib/"),
+            "https://host:8443/audiolib"
         );
         assert_eq!(
-            base("https://host:18086/audiolib//"),
-            "https://host:18086/audiolib"
+            base("https://host:8443/audiolib//"),
+            "https://host:8443/audiolib"
         );
         // Pasted API URLs are not doubled.
         for pasted in [
-            "https://host:18086/audiolib/api/v1",
-            "https://host:18086/audiolib/api/v1/",
-            "https://host:18086/audiolib/API/V1",
+            "https://host:8443/audiolib/api/v1",
+            "https://host:8443/audiolib/api/v1/",
+            "https://host:8443/audiolib/API/V1",
         ] {
-            assert_eq!(base(pasted), "https://host:18086/audiolib", "{pasted}");
+            assert_eq!(base(pasted), "https://host:8443/audiolib", "{pasted}");
             assert_eq!(
                 api_base_url(pasted).unwrap(),
-                "https://host:18086/audiolib/api/v1"
+                "https://host:8443/audiolib/api/v1"
             );
         }
         assert_eq!(base("http://h:8790/api/v1"), "http://h:8790");
@@ -530,12 +530,12 @@ mod tests {
         // Exactly what earlier clients derived (so cache.json server identities match).
         for (saved, api) in [
             (
-                "http://192.168.1.10:8790",
-                "http://192.168.1.10:8790/api/v1",
+                "http://server.example.lan:8790",
+                "http://server.example.lan:8790/api/v1",
             ),
             (
-                "http://192.168.1.10:8790/",
-                "http://192.168.1.10:8790/api/v1",
+                "http://server.example.lan:8790/",
+                "http://server.example.lan:8790/api/v1",
             ),
             ("http://h/api/v1/", "http://h/api/v1"),
             (
@@ -547,38 +547,39 @@ mod tests {
         ] {
             assert_eq!(api_base_url(saved).unwrap(), api, "{saved}");
         }
-        let legacy = ServerAddress::parse("http://192.168.1.10:8790").unwrap();
+        let legacy = ServerAddress::parse("http://10.0.0.10:8790").unwrap();
         assert_eq!(legacy.scheme, Scheme::Http);
-        assert_eq!(legacy.host, "192.168.1.10");
+        assert_eq!(legacy.host, "10.0.0.10");
         assert_eq!(legacy.port, Some(8790));
         assert!(legacy.host_is_ip());
-        assert_eq!(legacy.base_url(), "http://192.168.1.10:8790");
+        assert_eq!(legacy.base_url(), "http://10.0.0.10:8790");
     }
 
     #[test]
     fn domain_and_port_fields_compose_a_base_url() {
         let address =
-            ServerAddress::from_parts(Scheme::Https, " audiolib.example.com ", " 18086 ", "")
+            ServerAddress::from_parts(Scheme::Https, " audiolib.example.com ", " 8443 ", "")
                 .unwrap();
-        assert_eq!(address.base_url(), "https://audiolib.example.com:18086");
-        assert_eq!(address.effective_port(), 18086);
+        assert_eq!(address.base_url(), "https://audiolib.example.com:8443");
+        assert_eq!(address.effective_port(), 8443);
         let prefixed =
-            ServerAddress::from_parts(Scheme::Https, "host", "18086", "audiolib/").unwrap();
-        assert_eq!(prefixed.base_url(), "https://host:18086/audiolib");
+            ServerAddress::from_parts(Scheme::Https, "host", "8443", "audiolib/").unwrap();
+        assert_eq!(prefixed.base_url(), "https://host:8443/audiolib");
         let pasted =
-            ServerAddress::from_parts(Scheme::Https, "host", "18086", "/audiolib/api/v1").unwrap();
-        assert_eq!(pasted.api_url(), "https://host:18086/audiolib/api/v1");
+            ServerAddress::from_parts(Scheme::Https, "host", "8443", "/audiolib/api/v1").unwrap();
+        assert_eq!(pasted.api_url(), "https://host:8443/audiolib/api/v1");
         // Empty port = scheme default; nothing is written into the URL.
         let default = ServerAddress::from_parts(Scheme::Https, "example.com", "", "").unwrap();
         assert_eq!(default.base_url(), "https://example.com");
         assert_eq!(default.effective_port(), 443);
-        let lan = ServerAddress::from_parts(Scheme::Http, "192.168.1.10", "8790", "").unwrap();
-        assert_eq!(lan.base_url(), "http://192.168.1.10:8790");
+        let lan =
+            ServerAddress::from_parts(Scheme::Http, "server.example.lan", "8790", "").unwrap();
+        assert_eq!(lan.base_url(), "http://server.example.lan:8790");
         let v6 = ServerAddress::from_parts(Scheme::Http, "::1", "8790", "").unwrap();
         assert_eq!(v6.base_url(), "http://[::1]:8790");
         assert_eq!(v6.bare_host(), "::1");
         // Round trip: a parsed URL fills the fields that compose it again.
-        let parsed = ServerAddress::parse("https://host:18086/audiolib").unwrap();
+        let parsed = ServerAddress::parse("https://host:8443/audiolib").unwrap();
         let port = parsed.port.map(|port| port.to_string()).unwrap_or_default();
         let again =
             ServerAddress::from_parts(parsed.scheme, &parsed.host, &port, &parsed.prefix).unwrap();
@@ -588,8 +589,8 @@ mod tests {
     #[test]
     fn bare_input_defaults_to_https_but_stored_urls_need_a_scheme() {
         assert_eq!(
-            base("audiolib.example.com:18086"),
-            "https://audiolib.example.com:18086"
+            base("audiolib.example.com:8443"),
+            "https://audiolib.example.com:8443"
         );
         assert_eq!(
             ServerAddress::parse_input("10.0.0.2:8790", Scheme::Http)
@@ -607,11 +608,11 @@ mod tests {
     fn ipv4_and_ipv6_hosts() {
         assert_eq!(base("http://10.0.0.1:1"), "http://10.0.0.1:1");
         assert_eq!(
-            base("https://[2001:db8::1]:18086"),
-            "https://[2001:db8::1]:18086"
+            base("https://[2001:db8::1]:8443"),
+            "https://[2001:db8::1]:8443"
         );
         assert!(matches!(
-            normalize_server_url("http://192.168.1.300:8790"),
+            normalize_server_url("http://192.0.2.300:8790"),
             Err(ServerUrlError::InvalidIpv4(_))
         ));
         assert!(matches!(

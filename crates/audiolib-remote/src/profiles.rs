@@ -357,7 +357,7 @@ mod tests {
         // A new profile: not activated, its own token, transcode as ticked.
         let edit = ProfileEdit {
             name: " 家里 Mac（外网） ",
-            server_url: "audiolib.example.com:18086",
+            server_url: "audiolib.example.com:8443",
             token: Some(" ext "),
             transcode: true,
         };
@@ -379,7 +379,7 @@ mod tests {
         // An address saved in another profile is refused; nothing changes.
         let before = (settings.clone(), secrets.clone());
         let duplicate = ProfileEdit {
-            server_url: "http://192.168.1.10:8790/",
+            server_url: "http://server.example.lan:8790/",
             ..edit
         };
         assert!(save_profile_edit(&mut settings, &mut secrets, Some(&id), &duplicate).is_err());
@@ -468,8 +468,8 @@ mod tests {
         assert!(!edit_transcode(None, ""));
     }
 
-    const LAN: &str = "http://192.168.1.10:8790";
-    const EXT: &str = "https://audiolib.example.com:18086";
+    const LAN: &str = "http://server.example.lan:8790";
+    const EXT: &str = "https://audiolib.example.com:8443";
 
     fn form(previous: &DataSourceSettings, mode: DataSourceMode, url: &str) -> DataSourceSettings {
         DataSourceSettings {
@@ -550,7 +550,7 @@ mod tests {
             form(
                 &previous,
                 DataSourceMode::Server,
-                "http://192.168.1.11:8790",
+                "http://server2.example.lan:8790",
             ),
             &input("lan"),
         )
@@ -558,8 +558,8 @@ mod tests {
         assert_eq!(moved.profiles.len(), 1);
         let profile = moved.active_profile().unwrap();
         assert_eq!(profile.id, DEFAULT_PROFILE_ID);
-        assert_eq!(profile.server_url, "http://192.168.1.11:8790");
-        assert_eq!(profile.name, "192.168.1.11:8790");
+        assert_eq!(profile.server_url, "http://server2.example.lan:8790");
+        assert_eq!(profile.name, "server2.example.lan:8790");
         assert_eq!(moved_secrets.token_for(DEFAULT_PROFILE_ID), "lan");
         consistent(&moved);
         // "Use external address" then save: a sibling, the LAN profile untouched.

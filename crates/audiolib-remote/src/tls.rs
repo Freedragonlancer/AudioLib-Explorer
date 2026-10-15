@@ -719,7 +719,7 @@ pub(crate) mod tests {
             eprintln!("skipping the DNS checks: this network resolves every name");
             return;
         }
-        let dns = RemoteClient::new("https://audiolib-test.invalid:18086", "")
+        let dns = RemoteClient::new("https://audiolib-test.invalid:8443", "")
             .unwrap()
             .health()
             .unwrap_err();

@@ -69,7 +69,7 @@ pub struct HealthInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// External address configured on the server's admin page (§6.2), e.g.
-    /// `https://audiolib.example.com:18086`; `null` when not configured.
+    /// `https://audiolib.example.com:8443`; `null` when not configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
 }
@@ -1075,8 +1075,8 @@ mod tests {
         );
         assert_eq!(api_base_url("http://h/api/v1/").unwrap(), "http://h/api/v1");
         assert_eq!(
-            api_base_url(" https://audiolib.example.com:18086/audiolib/ ").unwrap(),
-            "https://audiolib.example.com:18086/audiolib/api/v1"
+            api_base_url(" https://audiolib.example.com:8443/audiolib/ ").unwrap(),
+            "https://audiolib.example.com:8443/audiolib/api/v1"
         );
         assert!(api_base_url("h:8790").is_err());
         assert!(api_base_url("https://host:99999").is_err());

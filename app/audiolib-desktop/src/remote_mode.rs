@@ -584,8 +584,8 @@ fn address_hint(address: &Result<ServerAddress, ServerUrlError>, chinese: bool) 
         Err(ServerUrlError::Empty) => (
             cn_or(
                 chinese,
-                "例如 https://audiolib.example.com:18086（外网）或 http://192.168.1.10:8790（局域网）；不写协议时默认 https://，/api/v1 会自动补全",
-                "e.g. https://audiolib.example.com:18086 (internet) or http://192.168.1.10:8790 (LAN); https:// is assumed without a scheme and /api/v1 is added automatically",
+                "例如 https://audiolib.example.com:8443（外网）或 http://server.example.lan:8790（局域网）；不写协议时默认 https://，/api/v1 会自动补全",
+                "e.g. https://audiolib.example.com:8443 (internet) or http://server.example.lan:8790 (LAN); https:// is assumed without a scheme and /api/v1 is added automatically",
             ),
             false,
         ),
@@ -3583,39 +3583,39 @@ mod tests {
             ..Default::default()
         };
         // Legacy value: saved verbatim, same API base as before.
-        let legacy = url(" http://192.168.1.10:8790 ").address().unwrap();
-        assert_eq!(legacy.base_url(), "http://192.168.1.10:8790");
-        assert_eq!(legacy.api_url(), "http://192.168.1.10:8790/api/v1");
+        let legacy = url(" http://server.example.lan:8790 ").address().unwrap();
+        assert_eq!(legacy.base_url(), "http://server.example.lan:8790");
+        assert_eq!(legacy.api_url(), "http://server.example.lan:8790/api/v1");
         // No scheme means https; a pasted /api/v1 is not doubled.
-        let bare = url("audiolib.example.com:18086/audiolib/api/v1/")
+        let bare = url("audiolib.example.com:8443/audiolib/api/v1/")
             .address()
             .unwrap();
         assert_eq!(
             bare.base_url(),
-            "https://audiolib.example.com:18086/audiolib"
+            "https://audiolib.example.com:8443/audiolib"
         );
         let parts = AddressForm {
             parts: true,
             scheme: 0,
             host: " audiolib.example.com ".into(),
-            port: "18086".into(),
+            port: "8443".into(),
             prefix: "audiolib/".into(),
             ..Default::default()
         };
         assert_eq!(
             parts.address().unwrap().api_url(),
-            "https://audiolib.example.com:18086/audiolib/api/v1"
+            "https://audiolib.example.com:8443/audiolib/api/v1"
         );
         let http = AddressForm {
             scheme: 1,
-            host: "192.168.1.10".into(),
+            host: "server.example.lan".into(),
             port: "8790".into(),
             prefix: String::new(),
             ..parts.clone()
         };
         assert_eq!(
             http.address().unwrap().base_url(),
-            "http://192.168.1.10:8790"
+            "http://server.example.lan:8790"
         );
         // Invalid input explains itself.
         let bad = AddressForm {
@@ -3626,7 +3626,7 @@ mod tests {
         let (hint, is_error) = address_hint(&Err(error), true);
         assert!(is_error && hint.contains("端口"), "{hint}");
         let (hint, is_error) = address_hint(&Ok(bare), false);
-        assert!(!is_error && hint.contains("https://audiolib.example.com:18086/audiolib/api/v1"));
+        assert!(!is_error && hint.contains("https://audiolib.example.com:8443/audiolib/api/v1"));
         let (hint, _) = address_hint(&Ok(legacy), true);
         assert!(hint.contains("不加密"), "{hint}");
         let (hint, is_error) = address_hint(&url("  ").address(), true);

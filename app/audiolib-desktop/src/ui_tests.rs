@@ -2881,7 +2881,7 @@ fn source_rows(server_active: bool) -> ModelRc<SourceRow> {
         SourceRow {
             id: "home".into(),
             name: "Home Mac".into(),
-            subtitle: "http://192.168.1.10:8799".into(),
+            subtitle: "http://server.example.lan:8799".into(),
             kind: 1,
             active: server_active,
             status: "not tested".into(),
