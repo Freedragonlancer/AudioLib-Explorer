@@ -1,6 +1,6 @@
 """Throttling HTTP proxy for audition-streaming measurements (read-only by design).
 
-    python tools/throttle_proxy.py --listen 127.0.0.1:18790 --upstream 192.168.1.10:8790 \
+    python tools/throttle_proxy.py --listen 127.0.0.1:18790 --upstream server.example.lan:8790 \
         --mbps 5 --latency-ms 175 --connect-ms 350 --log proxy.jsonl
 
 * Every response byte (server -> client) passes one shared token bucket of `--mbps`

@@ -851,7 +851,7 @@ mod tests {
     fn transport_failures_name_dns_and_refused_connections() {
         let refused = RemoteError::from_io(
             &std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
-            "https://h:18086/api/v1/health",
+            "https://h:8443/api/v1/health",
         );
         assert_eq!(
             refused.network_failure(),

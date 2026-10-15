@@ -433,12 +433,16 @@ mod tests {
     #[test]
     fn the_menu_gate_belongs_to_the_server_it_came_from() {
         let manage = ServerManage {
-            url: "http://192.168.1.10:8799".into(),
+            url: "http://server.example.lan:8799".into(),
             can_manage: true,
             note: String::new(),
         };
-        assert!(manage.for_server("http://192.168.1.10:8799").can_manage);
-        let other = manage.for_server("http://192.168.1.10:8790");
+        assert!(
+            manage
+                .for_server("http://server.example.lan:8799")
+                .can_manage
+        );
+        let other = manage.for_server("http://server.example.lan:8790");
         assert!(!other.can_manage && other.note.is_empty());
     }
 

@@ -2932,7 +2932,7 @@ mod tests {
             revision: 6,
             audio_files: 3009,
             snapshot_bytes: 2 * 1_048_576,
-            server_url: "http://192.168.1.10:8790".into(),
+            server_url: "http://server.example.lan:8790".into(),
             ..CacheState::default()
         };
         let text = cache_info(Some("11111111-5e97"), Some("D:/x"), Some(&state), true);

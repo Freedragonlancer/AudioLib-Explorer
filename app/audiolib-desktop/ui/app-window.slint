@@ -1714,7 +1714,7 @@ export component AppWindow inherits Window {
                                         }
                                         if root.ds-address-form == 0: HorizontalLayout { height: 30px; spacing: 12px;
                                             Rectangle { width: 118px; }
-                                            LineEdit { input-label: root.chinese ? "服务器地址" : "Server URL"; enabled: !root.ds-applying; text <=> root.ds-server-url; placeholder-text: "https://audiolib.example.com:18086 · http://192.168.1.10:8790"; edited => { root.ds-dirty = true; root.data-source-address-edited(); } }
+                                            LineEdit { input-label: root.chinese ? "服务器地址" : "Server URL"; enabled: !root.ds-applying; text <=> root.ds-server-url; placeholder-text: "https://audiolib.example.com:8443 · http://server.example.lan:8790"; edited => { root.ds-dirty = true; root.data-source-address-edited(); } }
                                         }
                                         if root.ds-address-form == 1: HorizontalLayout { height: 30px; spacing: 8px;
                                             Rectangle { width: 114px; }

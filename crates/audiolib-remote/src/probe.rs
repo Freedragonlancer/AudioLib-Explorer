@@ -1099,7 +1099,7 @@ mod tests {
         let api = TestServer::start(move |request| match request.path.as_str() {
             "/api/v1/health" => TestResponse::json(
                 200,
-                r#"{"status":"ok","version":"1.0","public_url":"https://AudioLib.Example.com:18086/"}"#,
+                r#"{"status":"ok","version":"1.0","public_url":"https://AudioLib.Example.com:8443/"}"#,
             ),
             _ if request.header("authorization") != Some("Bearer tok") => TestResponse::json(
                 401,
@@ -1162,18 +1162,18 @@ mod tests {
         // §6.2 `public_url`: shown (normalised) when testing another address.
         assert_eq!(
             report.public_url.as_deref(),
-            Some("https://AudioLib.Example.com:18086")
+            Some("https://AudioLib.Example.com:8443")
         );
         assert_eq!(
             report.other_public_url(),
-            Some("https://AudioLib.Example.com:18086")
+            Some("https://AudioLib.Example.com:8443")
         );
         assert!(
-            summary.contains("server external address: https://AudioLib.Example.com:18086"),
+            summary.contains("server external address: https://AudioLib.Example.com:8443"),
             "{summary}"
         );
         let mut same = report.clone();
-        same.server_url = Some("https://audiolib.example.com:18086/api/v1".into());
+        same.server_url = Some("https://audiolib.example.com:8443/api/v1".into());
         assert_eq!(same.other_public_url(), None);
         assert!(
             summary.contains("– WebDAV Music · no WebDAV URL configured"),
@@ -1490,7 +1490,7 @@ mod tests {
             ..Default::default()
         };
         let report = test_connection(
-            &settings("https://audiolib-test.invalid:18086"),
+            &settings("https://audiolib-test.invalid:8443"),
             &RemoteSecrets::default(),
             &[],
             None,
