@@ -10,7 +10,7 @@ Versions: program 0.4.9 | API /api/v1/ | schema 5 | snapshot compat 3..=5
 
 - Example server addresses in the README, CLI help, client UI and tooling now use neutral values such as `https://audiolib.example.com:8443` and `http://server.example.lan:8790`.
 - The server admin page's token-name placeholder now uses a neutral example.
-- The package privacy check now also rejects packaged files containing the port `18086`, concrete `192.168.x.x` addresses (CIDR ranges such as `192.168.0.0/16` stay allowed) and a standalone personal name, except under `licenses/`.
+- The package privacy check now also rejects packaged files containing the operator's real public port, concrete private LAN addresses (CIDR ranges stay allowed) and a standalone personal name, except under `licenses/`.
 
 ## Compatibility
 
