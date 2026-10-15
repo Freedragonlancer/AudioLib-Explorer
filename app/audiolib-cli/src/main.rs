@@ -245,7 +245,7 @@ enum RemoteCommand {
     /// Check DNS/TCP, the TLS handshake (https), health, the token, library, roots, a
     /// stream and preview sample and each root's WebDAV URL.
     Test {
-        /// Test this server address (e.g. https://audiolib.example.com:18086) instead of
+        /// Test this server address (e.g. https://audiolib.example.com:8443) instead of
         /// the saved one; not saved. The saved token is still sent.
         #[arg(long)]
         url: Option<String>,

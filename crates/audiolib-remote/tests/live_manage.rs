@@ -4,7 +4,7 @@
 //! `AUDIOLIB_LIVE_MANAGE_URL`; it refuses the production port 8790.
 //!
 //! ```text
-//! $env:AUDIOLIB_LIVE_MANAGE_URL = "http://192.168.1.10:8799"
+//! $env:AUDIOLIB_LIVE_MANAGE_URL = "http://server.example.lan:8799"
 //! cargo test -p audiolib-remote --test live_manage -- --ignored --nocapture
 //! ```
 //!

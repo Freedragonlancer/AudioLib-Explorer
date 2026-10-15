@@ -25,6 +25,19 @@ function Assert-NoPrivatePath([string]$Text, [string]$Name) {
             $Text.IndexOf($prefix.Replace('\', '\\'), [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "Local build/user path found in public payload: $Name" }
     }
 }
+# Example values that look like real deployment details must not ship in the payload.
+# Public licenses may legitimately name people, so the name check skips licenses/.
+$placeholderPatterns = @(
+    @{ Pattern = '(?<![0-9])18086(?![0-9])'; Label = 'private example port 18086'; Licenses = $true },
+    @{ Pattern = '(?<![0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}(?![0-9]|/[0-9])'; Label = 'private LAN address 192.168.x.x (CIDR ranges allowed)'; Licenses = $true },
+    @{ Pattern = '\bPaul\b'; Label = 'personal-name placeholder'; Licenses = $false }
+)
+function Assert-NoPrivatePlaceholder([string]$Text, [string]$Name, [bool]$IsLicense) {
+    foreach ($check in $placeholderPatterns) {
+        if ($IsLicense -and !$check.Licenses) { continue }
+        if ([regex]::IsMatch($Text, $check.Pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)) { throw "Private-looking example value ($($check.Label)) found in public payload: $Name" }
+    }
+}
 if (!(Test-Path -LiteralPath $payloadRoot -PathType Container)) { throw 'Portable payload is missing.' }
 if ((Get-Item -LiteralPath $payloadRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
     @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Attributes ReparsePoint).Count -gt 0) { throw 'Linked payload is not supported.' }
@@ -34,9 +47,13 @@ foreach ($file in (Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File
     if ($file.Extension -in @('.db', '.sqlite', '.sqlite3', '.log') -or $file.Name -in @('settings.json', '.env')) { throw "Runtime state found in payload: $relative" }
     $bytes = [IO.File]::ReadAllBytes($file.FullName)
     Assert-NoPrivatePath ([Text.Encoding]::UTF8.GetString($bytes)) $relative
+    $isLicense = $relative.StartsWith('licenses/', [StringComparison]::Ordinal)
+    Assert-NoPrivatePlaceholder ([Text.Encoding]::UTF8.GetString($bytes)) $relative $isLicense
     if ($file.Extension -eq '.exe') {
         Assert-NoPrivatePath ([Text.Encoding]::Unicode.GetString($bytes)) $relative
+        Assert-NoPrivatePlaceholder ([Text.Encoding]::Unicode.GetString($bytes)) $relative $false
         if ($bytes.Length -gt 1) { Assert-NoPrivatePath ([Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)) $relative }
+        if ($bytes.Length -gt 1) { Assert-NoPrivatePlaceholder ([Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)) $relative $false }
     }
 }
 foreach ($file in $allowedFiles) {
@@ -61,4 +78,4 @@ if ($ReleaseReport) {
         if ($report.binaries.$binary -cne (Get-FileHash -LiteralPath (Join-Path $payloadRoot $binary) -Algorithm SHA256).Hash) { throw "Release report binary identity mismatch: $binary" }
     }
 }
-Write-Host 'Portable publication boundary passed: allowlisted files, no local build/user paths, public report schema (when provided).'
+Write-Host 'Portable publication boundary passed: allowlisted files, no local build/user paths, no private example values, public report schema (when provided).'

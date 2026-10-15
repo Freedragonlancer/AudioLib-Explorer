@@ -63,8 +63,8 @@ fn default_audition_memory() -> u32 {
 pub struct DataSourceSettings {
     #[serde(default)]
     pub mode: DataSourceMode,
-    /// Server base URL such as `http://192.168.1.10:8790` or
-    /// `https://audiolib.example.com:18086/audiolib`; `/api/v1` is appended by clients
+    /// Server base URL such as `http://server.example.lan:8790` or
+    /// `https://audiolib.example.com:8443/audiolib`; `/api/v1` is appended by clients
     /// (see [`crate::server_url`]).
     #[serde(default)]
     pub server_url: String,
@@ -567,7 +567,7 @@ mod tests {
         config.data_source.poll_interval_secs = 120;
         config.data_source.auto_sync = true;
         config.data_source.mode = DataSourceMode::Server;
-        config.data_source.server_url = "http://192.168.1.10:8790".into();
+        config.data_source.server_url = "http://server.example.lan:8790".into();
         config.data_source.webdav.username = "sound".into();
         config
             .data_source
@@ -590,7 +590,7 @@ mod tests {
         );
         assert_eq!(
             loaded.data_source.profiles[0].server_url,
-            "http://192.168.1.10:8790"
+            "http://server.example.lan:8790"
         );
         assert_eq!(loaded.language, "cn");
     }
@@ -650,7 +650,7 @@ mod tests {
             serde_json::to_value(&legacy).unwrap()["server_url"],
             "http://h:8790"
         );
-        legacy.server_url = "https://audiolib.example.com:18086/audiolib".into();
+        legacy.server_url = "https://audiolib.example.com:8443/audiolib".into();
         assert!(legacy.validate().is_ok());
         legacy.server_url = "https://host:99999".into();
         assert!(legacy.validate().is_err());
