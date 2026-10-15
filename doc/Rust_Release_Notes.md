@@ -1,18 +1,16 @@
-# AudioLib Explorer v0.4.8
+# AudioLib Explorer v0.4.9
 
-Release 0.4.8; the client, CLI and server share the same program version. Patch release on top of the published v0.4.7.
+Release 0.4.9; the client, CLI and server share the same program version. Patch release on top of the published v0.4.8.
 
-Versions: program 0.4.8 | API /api/v1/ | schema 5 | snapshot compat 3..=5
+Versions: program 0.4.9 | API /api/v1/ | schema 5 | snapshot compat 3..=5
 
 ## Changelog
 
-### Server-mode startup and close
+### Neutral example values and package privacy check
 
-- Preparing an offline cache copy now bounds Busy/Locked SQLite backup steps to 5 seconds and reports an unknown backup step result as an error instead of retrying forever. The owned staging connection no longer waits inside SQLite for its own lock.
-- Closing the window waits at most 15 seconds for cancelled remote cache work, then closes anyway. The active cache is never modified by the abandoned work; its staging copy is removed on a later start.
-- Server-mode startup removes this library's cache staging files that are older than one hour (left behind by an interrupted preparation or download). Snapshots and fresh staging files are kept.
-- An unusable server selection (no active profile, a missing profile, or an empty or invalid server URL) opens the local library for the session. Saving preferences keeps the original server selection on disk unless you explicitly choose a data source. Without an openable local library, server mode is kept so the profile can be fixed.
-- Library management checks that the selected local library exists before switching to local mode and explains the problem instead of saving a switch that cannot open.
+- Example server addresses in the README, CLI help, client UI and tooling now use neutral values such as `https://audiolib.example.com:8443` and `http://server.example.lan:8790`.
+- The server admin page's token-name placeholder now uses a neutral example.
+- The package privacy check now also rejects packaged files containing the port `18086`, concrete `192.168.x.x` addresses (CIDR ranges such as `192.168.0.0/16` stay allowed) and a standalone personal name, except under `licenses/`.
 
 ## Compatibility
 
