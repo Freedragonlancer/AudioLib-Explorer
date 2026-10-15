@@ -3471,7 +3471,7 @@ async fn external_mode_needs_tokens_only_for_proxied_or_public_requests() {
     let f = fixture_with("");
     let id = audio_id(&f, "door.wav");
     let (revoked_id, revoked) = admin_token(&f.state, "old laptop").await;
-    let (_, good) = admin_token(&f.state, "Paul laptop").await;
+    let (_, good) = admin_token(&f.state, "office laptop").await;
     let response = call(
         &f.state,
         Method::DELETE,
@@ -3636,7 +3636,7 @@ async fn external_mode_needs_tokens_only_for_proxied_or_public_requests() {
         json(call(&f.state, Method::GET, "/admin/api/tokens", &[], None, None).await).await;
     let tokens = list["tokens"].as_array().unwrap();
     assert_eq!(tokens.len(), 1, "revoked token is gone: {list}");
-    assert_eq!(tokens[0]["name"], "Paul laptop");
+    assert_eq!(tokens[0]["name"], "office laptop");
     assert!(tokens[0]["last_used_at"].is_i64(), "{list}");
     assert!(
         tokens[0].get("sha256").is_none(),
