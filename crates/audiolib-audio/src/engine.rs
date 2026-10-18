@@ -545,9 +545,18 @@ struct SourceTransition {
     fade_out: AtomicBool,
     faded_out: AtomicU64,
     fade_in_revision: AtomicU64,
+    /// Full silent buffers submitted after the most recent audible frame.
+    silent_callbacks: AtomicUsize,
 }
 
 impl Realtime {
+    fn arm_fade_in(&self) {
+        self.transition.fade_out.store(false, Ordering::Release);
+        self.transition
+            .fade_in_revision
+            .fetch_add(1, Ordering::Release);
+    }
+
     /// Wait only on the control worker. The callback acknowledges a fully muted
     /// buffer and holds silence until the replacement source has been published.
     fn fade_out_before_reset(&self) -> Result<()> {
@@ -619,6 +628,9 @@ enum Buffering {
 
 struct Output {
     stream: Option<cpal::Stream>,
+    /// Hardware-free control tests can opt into the real callback handshake.
+    #[cfg(test)]
+    callback_available: bool,
     asio: bool,
     realtime: Arc<Realtime>,
     decoder: AuditionDecoder,
@@ -701,6 +713,9 @@ impl Output {
     /// Start (or resume) the output: at once when the source has the prebuffer in memory,
     /// otherwise silent until it has ([`Buffering::Waiting`]).
     fn start_running(&mut self) -> Result<()> {
+        if self.realtime.transition.fade_out.load(Ordering::Acquire) {
+            self.realtime.arm_fade_in();
+        }
         if self.eof || self.decoder.is_buffered(self.frames_for(PREBUFFER_SECONDS)) {
             self.realtime
                 .gain
@@ -763,19 +778,14 @@ impl Output {
             + self.realtime.consumed.load(Ordering::Relaxed) as f64 / f64::from(self.sample_rate)
                 * f64::from(self.decoder.settings.rate)
     }
-    fn reset_source(
-        &mut self,
-        decoder: Decoder,
-        position: f64,
-        source_pair: u16,
-        playing: bool,
-        audition: AuditionSettings,
-    ) -> Result<()> {
+    /// Silence and quiesce the consumer before any potentially blocking source
+    /// operation. The stream keeps submitting silence while the worker does I/O.
+    fn quiesce_source(&self) -> Result<Option<std::time::Instant>> {
         let mut fade_drain_deadline = None;
         if self.realtime.running.load(Ordering::Acquire) {
             // Hardware-free transport fixtures have no callback to acknowledge.
             #[cfg(test)]
-            let has_callback = self.stream.is_some();
+            let has_callback = self.callback_available;
             #[cfg(not(test))]
             let has_callback = true;
             if has_callback {
@@ -787,11 +797,19 @@ impl Output {
                         ),
                 );
             }
+        } else if self.is_waiting() {
+            // Network rebuffering keeps the device playing silence even though
+            // PCM consumption is stopped. Its previously queued audio must drain.
+            fade_drain_deadline = Some(
+                std::time::Instant::now()
+                    + Duration::from_nanos(
+                        self.realtime.callback_latency_nanos.load(Ordering::Relaxed),
+                    ),
+            );
         }
         self.realtime.running.store(false, Ordering::SeqCst);
         // Keep an active device emitting silence: pausing here can discard its
         // queued fade tail. A previously paused device remains paused until Play.
-        self.buffering = Buffering::Off;
         let deadline = std::time::Instant::now() + Duration::from_millis(100);
         while self.realtime.active.load(Ordering::SeqCst) {
             if std::time::Instant::now() >= deadline {
@@ -799,55 +817,101 @@ impl Output {
             }
             thread::yield_now();
         }
-        let source_channels = usize::from(decoder.info.metadata.channels);
-        if usize::from(source_pair) * 2 >= source_channels {
-            return Err(Error::Audio(
-                "Source channel pair is outside the loaded WAV channels".into(),
-            ));
-        }
-        let start_frame = (position * f64::from(decoder.info.metadata.sample_rate)) as u64;
-        self.decoder = AuditionDecoder::new(
-            decoder,
-            self.sample_rate,
-            start_frame,
-            source_pair,
-            audition,
-        )?;
-        self.realtime.ring.clear_suspended();
-        self.realtime.consumed.store(0, Ordering::Relaxed);
-        self.realtime
-            .source_finished
-            .store(false, Ordering::Release);
-        self.realtime.underruns.store(0, Ordering::Relaxed);
-        self.pending.clear();
-        self.pending_offset = 0;
-        self.eof = false;
-        self.pending_last = false;
-        self.drain_deadline = None;
-        self.start_position = position;
-        self.fill()?;
-        self.realtime
-            .transition
-            .fade_out
-            .store(false, Ordering::Release);
-        // Publish after releasing the old mute, so its late acknowledgment can
-        // never carry the revision of the new source.
-        self.realtime
-            .transition
-            .fade_in_revision
-            .fetch_add(1, Ordering::Release);
-        if playing {
-            self.start_running()?;
-        } else {
-            // Stop must leave the device paused (including before an ASIO panel).
-            // Wait only on the worker, after decoder preparation has already used
-            // part of the drain time, so pause cannot discard the queued fade tail.
-            if let Some(deadline) = fade_drain_deadline {
-                thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+        Ok(fade_drain_deadline)
+    }
+
+    fn pause_after_drain(&self, deadline: Option<std::time::Instant>) -> Result<()> {
+        if let Some(deadline) = deadline {
+            if self.asio {
+                // CPAL's ASIO pause stops filling, rather than clearing, its two
+                // hardware buffers. Both must contain silence before pausing.
+                let timeout = std::time::Instant::now()
+                    + Duration::from_nanos(
+                        self.realtime.callback_latency_nanos.load(Ordering::Relaxed),
+                    )
+                    .saturating_mul(2)
+                    .saturating_add(Duration::from_millis(100));
+                while self
+                    .realtime
+                    .transition
+                    .silent_callbacks
+                    .load(Ordering::Acquire)
+                    < 2
+                {
+                    if self.realtime.failed.load(Ordering::Acquire)
+                        || std::time::Instant::now() >= timeout
+                    {
+                        return Err(Error::Audio("Output did not drain silent buffers".into()));
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
-            self.pause_stream()?;
+            thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
         }
-        Ok(())
+        self.pause_stream()
+    }
+
+    fn reset_source(
+        &mut self,
+        open_decoder: impl FnOnce() -> Result<Decoder>,
+        position: f64,
+        source_pair: u16,
+        playing: bool,
+        audition: AuditionSettings,
+    ) -> Result<()> {
+        let fade_drain_deadline = self.quiesce_source()?;
+        self.buffering = Buffering::Off;
+        let result = (|| {
+            // Opening a WAV (including its headers on a NAS) can block longer than
+            // the old PCM ring lasts. Never open it before the callback fades out.
+            let decoder = open_decoder()?;
+            let source_channels = usize::from(decoder.info.metadata.channels);
+            if usize::from(source_pair) * 2 >= source_channels {
+                return Err(Error::Audio(
+                    "Source channel pair is outside the loaded WAV channels".into(),
+                ));
+            }
+            let start_frame = (position * f64::from(decoder.info.metadata.sample_rate)) as u64;
+            self.decoder = AuditionDecoder::new(
+                decoder,
+                self.sample_rate,
+                start_frame,
+                source_pair,
+                audition,
+            )?;
+            self.realtime.ring.clear_suspended();
+            self.realtime.consumed.store(0, Ordering::Relaxed);
+            self.realtime
+                .source_finished
+                .store(false, Ordering::Release);
+            self.realtime.underruns.store(0, Ordering::Relaxed);
+            self.pending.clear();
+            self.pending_offset = 0;
+            self.eof = false;
+            self.pending_last = false;
+            self.drain_deadline = None;
+            self.start_position = position;
+            self.fill()?;
+            // Publish after releasing the old mute, so its late acknowledgment can
+            // never carry the revision of the new source.
+            self.realtime.arm_fade_in();
+            if playing {
+                self.start_running()?;
+            } else {
+                // Stop must leave the device paused (including before an ASIO panel).
+                // Wait only on the worker, after decoder preparation has already used
+                // part of the drain time, so pause cannot discard the queued fade tail.
+                self.pause_after_drain(fade_drain_deadline)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            // Command failure closes the stream next. Preserve its queued fade
+            // even when reopening, seeking or filling the source failed.
+            self.realtime.running.store(false, Ordering::SeqCst);
+            let _ = self.pause_after_drain(fade_drain_deadline);
+        }
+        result
     }
 }
 impl Drop for Output {
@@ -941,6 +1005,7 @@ impl RenderCallback {
         let target = f32::from_bits(self.realtime.gain.load(Ordering::Relaxed));
         let mut underrun = false;
         let mut faded_out = false;
+        let mut silent = true;
         let mut consumed = 0_u64;
         for frame in output.chunks_mut(self.channels) {
             self.gain += (target - self.gain).clamp(-self.ramp_step, self.ramp_step);
@@ -969,6 +1034,7 @@ impl RenderCallback {
                 [0.0; 2]
             };
             let [left, right] = pcm.map(|sample| sample * gain);
+            silent &= left == 0.0 && right == 0.0;
             if fade_out {
                 self.envelope.level = self.envelope.level.saturating_sub(1);
             } else if complete {
@@ -990,6 +1056,17 @@ impl RenderCallback {
             .fetch_add(consumed, Ordering::Relaxed);
         if underrun && !self.realtime.source_finished.load(Ordering::Acquire) {
             self.realtime.underruns.fetch_add(1, Ordering::Relaxed);
+        }
+        if silent && !output.is_empty() {
+            self.realtime
+                .transition
+                .silent_callbacks
+                .fetch_add(1, Ordering::Release);
+        } else {
+            self.realtime
+                .transition
+                .silent_callbacks
+                .store(0, Ordering::Release);
         }
         if faded_out {
             self.realtime
@@ -1139,10 +1216,8 @@ impl Worker {
     }
     fn suspend_output(&self) -> Result<()> {
         if let Some(output) = &self.output {
-            output.realtime.running.store(false, Ordering::Release);
-            if let Some(stream) = &output.stream {
-                stream.pause().map_err(audio_error)?;
-            }
+            let deadline = output.quiesce_source()?;
+            output.pause_after_drain(deadline)?;
         }
         Ok(())
     }
@@ -1457,6 +1532,8 @@ impl Worker {
         }
         let mut output = Output {
             stream: Some(stream),
+            #[cfg(test)]
+            callback_available: true,
             asio,
             realtime,
             decoder,
@@ -1528,7 +1605,7 @@ impl Worker {
                         || output.sample_rate == metadata.sample_rate
                 }) {
                     self.output.as_mut().unwrap().reset_source(
-                        decoder,
+                        || Ok(decoder),
                         0.0,
                         self.config.source_pair,
                         false,
@@ -1570,7 +1647,7 @@ impl Worker {
                     let path = self.snapshot().file_path.unwrap();
                     if let Some(output) = &mut self.output {
                         output.reset_source(
-                            Decoder::open(&path)?,
+                            || Decoder::open(&path),
                             0.0,
                             self.config.source_pair,
                             false,
@@ -1628,7 +1705,7 @@ impl Worker {
                         .clone()
                         .unwrap();
                     output.reset_source(
-                        Decoder::open(&path)?,
+                        || Decoder::open(&path),
                         0.0,
                         self.config.source_pair,
                         false,
@@ -1653,7 +1730,7 @@ impl Worker {
                 let position = seconds.clamp(0.0, status.duration);
                 if let Some(output) = &mut self.output {
                     output.reset_source(
-                        Decoder::open(status.file_path.as_ref().unwrap())?,
+                        || Decoder::open(status.file_path.as_ref().unwrap()),
                         position,
                         self.config.source_pair,
                         playing,
@@ -1705,7 +1782,7 @@ impl Worker {
                         .min(status.duration);
                     if let Some(output) = &mut self.output {
                         output.reset_source(
-                            Decoder::open(status.file_path.as_ref().unwrap())?,
+                            || Decoder::open(status.file_path.as_ref().unwrap()),
                             position,
                             self.config.source_pair,
                             status.state == PlaybackState::Playing,
@@ -1943,6 +2020,10 @@ impl Worker {
 mod seek_tests;
 
 #[cfg(test)]
+#[path = "transport_tests.rs"]
+mod transport_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1978,6 +2059,7 @@ mod tests {
         crate::tests::write_wav(path, 1000, 1, 16, 1, &vec![0; 2000], false, false);
         Output {
             stream: None,
+            callback_available: false,
             asio: false,
             realtime: Arc::new(Realtime {
                 ring: Ring::new(16),

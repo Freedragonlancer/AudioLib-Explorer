@@ -397,3 +397,201 @@ fn seek_source_revision_discards_the_previous_tail_before_any_new_pcm_is_availab
     assert_eq!(realtime.consumed.load(Ordering::Relaxed), 0);
     assert_eq!(realtime.transition.faded_out.load(Ordering::Acquire), 1);
 }
+
+fn seek_through_worker_with_simulated_callbacks(
+    sample_rate: u32,
+    stall_open: bool,
+) -> Vec<[f32; 2]> {
+    use crate::source::{
+        ByteSource, SourceOpener, register_stream_source, unregister_stream_source,
+    };
+
+    struct Registration(std::path::PathBuf);
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            unregister_stream_source(&self.0);
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("source.wav");
+    let virtual_path = temp.path().join("registered.wav");
+    let pcm: Vec<u8> = (0..sample_rate)
+        .flat_map(|frame| {
+            // At either rate the requested 0.25 s starts exactly at the sign change.
+            let pcm = if frame < sample_rate / 4 {
+                [0.65_f32, -0.3]
+            } else {
+                [-0.7_f32, 0.4]
+            };
+            pcm.into_iter().flat_map(f32::to_le_bytes)
+        })
+        .collect();
+    crate::tests::write_wav(&path, sample_rate, 2, 32, 3, &pcm, false, false);
+    let bytes = Arc::new(std::fs::read(&path).unwrap());
+    let realtime = realtime(0.8);
+    realtime
+        .callback_latency_nanos
+        .store(50_000_000, Ordering::Relaxed);
+    push_frames(&realtime, [0.75, -0.5], 1024);
+    let output = Output {
+        stream: None,
+        callback_available: true,
+        asio: false,
+        realtime: realtime.clone(),
+        decoder: AuditionDecoder::new(
+            Decoder::open(&path).unwrap(),
+            sample_rate,
+            0,
+            0,
+            AuditionSettings::default(),
+        )
+        .unwrap(),
+        sample_rate,
+        volume: 0.8,
+        buffering: Buffering::Off,
+        pending: Vec::new(),
+        pending_offset: 0,
+        eof: false,
+        pending_last: false,
+        start_position: 0.0,
+        drain_deadline: None,
+    };
+    let rendered_blocks = Arc::new(AtomicU64::new(0));
+    let opens = Arc::new(AtomicU64::new(0));
+    let opener: SourceOpener = {
+        let realtime = realtime.clone();
+        let rendered_blocks = rendered_blocks.clone();
+        let opens = opens.clone();
+        Arc::new(move || {
+            if opens.fetch_add(1, Ordering::Relaxed) == 0 {
+                if !realtime.transition.fade_out.load(Ordering::Acquire)
+                    || realtime.transition.faded_out.load(Ordering::Acquire) != 0
+                    || realtime.running.load(Ordering::SeqCst)
+                {
+                    return Err(std::io::Error::other(
+                        "seek opened the decoder before the old callback faded and stopped consuming",
+                    ));
+                }
+                if stall_open {
+                    let consumed = realtime.consumed.load(Ordering::Relaxed);
+                    let buffered = realtime.ring.len();
+                    let target = rendered_blocks.load(Ordering::Acquire) + 20;
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    while rendered_blocks.load(Ordering::Acquire) < target {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(std::io::Error::other(
+                                "simulated callbacks stopped while the source opener was blocked",
+                            ));
+                        }
+                        thread::yield_now();
+                    }
+                    if realtime.consumed.load(Ordering::Relaxed) != consumed
+                        || realtime.ring.len() != buffered
+                    {
+                        return Err(std::io::Error::other(
+                            "source I/O consumed the old ring after the fade acknowledgment",
+                        ));
+                    }
+                }
+            }
+            let source: Box<dyn ByteSource> = Box::new(std::io::Cursor::new((*bytes).clone()));
+            Ok((source, bytes.len() as u64))
+        })
+    };
+    register_stream_source(&virtual_path, opener);
+    let _registration = Registration(virtual_path.clone());
+    let mut worker = Worker::new(
+        PlaybackConfig::default(),
+        Arc::new(Mutex::new(PlaybackStatus {
+            generation: 7,
+            play_session_id: 11,
+            state: PlaybackState::Playing,
+            file_path: Some(virtual_path),
+            duration: 1.0,
+            sample_rate,
+            device_sample_rate: sample_rate,
+            channels: 2,
+            volume: 0.8,
+            ..Default::default()
+        })),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    worker.output = Some(output);
+    let stop = Arc::new(AtomicBool::new(false));
+    let render_thread = {
+        let realtime = realtime.clone();
+        let stop = stop.clone();
+        thread::spawn(move || {
+            let mut callback = callback(realtime, 2, 0, 0.8);
+            let mut rendered = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                let mut block = [0.0_f32; 16];
+                callback.render(&mut block);
+                rendered.extend(block.chunks_exact(2).map(|frame| [frame[0], frame[1]]));
+                rendered_blocks.fetch_add(1, Ordering::Release);
+                thread::sleep(Duration::from_millis(1));
+            }
+            rendered
+        })
+    };
+    let result = worker.execute_command(AudioCommand::Seek(0.25));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while result.is_ok()
+        && realtime.consumed.load(Ordering::Relaxed) < u64::from(SEEK_FADE_FRAMES) + 8
+        && std::time::Instant::now() < deadline
+    {
+        thread::yield_now();
+    }
+    stop.store(true, Ordering::Release);
+    let rendered = render_thread.join().unwrap();
+    result.unwrap();
+    assert!(opens.load(Ordering::Relaxed) >= 2);
+    assert!(realtime.consumed.load(Ordering::Relaxed) >= u64::from(SEEK_FADE_FRAMES) + 8);
+    let status = worker.snapshot();
+    assert_eq!(status.state, PlaybackState::Playing);
+    assert_eq!(status.generation, 7);
+    assert_eq!(status.play_session_id, 11);
+    assert_eq!(status.position, 0.25);
+    assert_eq!(status.sample_rate, sample_rate);
+    assert_eq!(status.device_sample_rate, sample_rate);
+    let output = worker.output.as_ref().unwrap();
+    assert_eq!(output.sample_rate, sample_rate);
+    assert_eq!(output.start_position, 0.25);
+    let expected_position =
+        0.25 + realtime.consumed.load(Ordering::Relaxed) as f64 / f64::from(sample_rate);
+    assert!((output.position() - expected_position).abs() < 1e-12);
+    rendered
+}
+
+#[test]
+fn seek_fades_and_stops_consumption_before_a_slow_decoder_open() {
+    for sample_rate in [48_000, 96_000] {
+        let rendered = seek_through_worker_with_simulated_callbacks(sample_rate, true);
+        let last_old = rendered.iter().rposition(|frame| frame[0] > 0.0).unwrap();
+        let first_new = rendered.iter().position(|frame| frame[0] < 0.0).unwrap();
+        assert!(first_new > last_old + 20 * 8);
+        assert!(
+            rendered[last_old + 1..first_new]
+                .iter()
+                .all(|frame| *frame == [0.0; 2])
+        );
+    }
+}
+
+#[test]
+fn seek_worker_replaces_real_pcm_through_the_actual_callback_handshake() {
+    for sample_rate in [48_000, 96_000] {
+        let rendered = seek_through_worker_with_simulated_callbacks(sample_rate, false);
+        let first_new = rendered.iter().position(|frame| frame[0] < 0.0).unwrap();
+        assert!(first_new > 0);
+        assert_eq!(rendered[first_new - 1], [0.0; 2]);
+        for index in 0..SEEK_FADE_FRAMES as usize - 1 {
+            let envelope = (index + 1) as f32 / (SEEK_FADE_FRAMES - 1) as f32;
+            assert_near(rendered[first_new + index][0], -0.7 * 0.8 * envelope);
+            assert_near(rendered[first_new + index][1], 0.4 * 0.8 * envelope);
+        }
+        assert!(rendered[first_new..].iter().all(|frame| frame[0] <= 0.0));
+    }
+}
