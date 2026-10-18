@@ -21,6 +21,13 @@
 
 Rust 1.97.1 MSVC 的格式检查、默认与 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试均通过。每种配置各 50 个顶层目标、806 passed、70 ignored、0 failed，音频模块为 72 passed、1 ignored；隔离子进程不重复计数。209 个应用、crate、服务端、配置及资源输入在检查前后 SHA256 一致。ASIO 使用准备脚本校验的 SDK 2.3.4。
 
+2026-10-19 完成源码提交 `4ec211a` 的 ASIO release 构建，耗时 4 分 54 秒，构建及发布回归期间上述 209 个输入保持一致。播放 IPC 17 项通过，默认 WASAPI 实际输出为 96 kHz、960 帧；隔离空库 WM_CLOSE/SC_CLOSE 各 3 次全部正常退出并重新打开库。便携包的隐私边界和 `validate-portable.ps1 -CleanCheckout` 通过。
+
+固定 `local_release/` 已用本轮验证过的 1,213 个包内文件覆盖更新，两个 EXE 与包 SHA256 一致，安装后的独立临时数据 portable 验收通过，CLI 版本为 0.4.7。正常 `%LOCALAPPDATA%/AudioLibExplorer/v1` 的现有数据库、SQLite sidecar 和设置共 6 个基线文件 SHA256 未变，正常数据目录环境保留。旧库/WAV fixture 不可用的检查采用明确的 CleanCheckout，未执行依赖旧 fixture 的 runtime/ACL 验收。该段为构建完成后的文档记录，不改变已验收的二进制。
+
+- AudioLibExplorer.exe：`B00D3255FB1DBEB0E797A611B13D2FA0FA15EFBB147D0D9788C9F71AEF1F69C2`
+- AudioLibCli.exe：`4165BC7C09BDE6A47041983EF418357C8ACBC5CD9C804C932E870CAF31ED5411`
+
 ## Seek 淡入淡出复审补修（2026-10-14，0.4.7）
 
 复审补齐短尾缓冲：旧 PCM 不足或为空时，用当前源最近真实立体声样本完成有界衰减，合成帧不推进播放位置；普通静音及源修订变化清除尾样本。Stop 在已排队的淡出尾段排空后暂停 CPAL 流，播放中的 seek 继续保持流运行。问题与修复对应见 [审查修复](Rust_Review_Fixes.md)。
