@@ -105,8 +105,10 @@ mod tests {
         *state >> 8
     }
 
-    /// Fixture files: (name, rate, channels, bits, format tag, sample bytes).
-    fn fixtures() -> Vec<(&'static str, u32, u16, u16, u16, Vec<u8>)> {
+    /// A fixture file: (name, rate, channels, bits, format tag, sample bytes).
+    type Fixture = (&'static str, u32, u16, u16, u16, Vec<u8>);
+
+    fn fixtures() -> Vec<Fixture> {
         let mut state = 0x5eed_u32;
         let mut stereo = Vec::new();
         for frame in 0..6000_u32 {
@@ -284,8 +286,8 @@ mod tests {
         assert_eq!((mono.samples_per_pixel, mono.columns()), (8, 125));
         let float = get("float32_300");
         assert_eq!((float.samples_per_pixel, float.columns()), (3, 100));
-        assert!(float.values.iter().any(|value| *value == 32767));
-        assert!(float.values.iter().any(|value| *value == -32767));
+        assert!(float.values.contains(&32767));
+        assert!(float.values.contains(&-32767));
         let stereo = get("stereo16_6000");
         assert_eq!((stereo.samples_per_pixel, stereo.columns()), (47, 128));
         for column in 0..stereo.columns() {
