@@ -701,6 +701,76 @@ files never stalled. Waveform JSON is 364 KB–1.07 MB decompressed (zstd on the
 revalidation is one round trip. The spare-connection requests (`/health`, about two per
 selection) are tiny.
 
+## List thumbnail Waveforms (§9.1–§9.3, client side)
+
+The Waveform column of the result table uses the batch API in server mode; the server
+spec and its deviations live in `doc/api/README.md` §9. This section describes what the
+client does.
+
+- **Capability.** The column exists only when `/capabilities` has `list_waveforms` with
+  `version` 1, `buckets` containing 128 and `encoding` `i16le-minmax-base64`. The client
+  reuses the `/capabilities` answer read after each sync (the same read that gates
+  removal menus) and makes no request of its own. Until that answer arrives, or when it
+  lacks the capability, the column is hidden. There is never a fallback to per-item
+  `GET /audio/{id}/waveform`, and the snapshot's `waveform_cache` rows are never read:
+  `RemoteProvider::list_waveforms` answers only from the server.
+- **Requests.** `POST /api/v1/waveforms` sends up to `max_ids` (at most 200) visible ids,
+  plus the ids one screen above and below. Each id carries the `known` etag from the
+  client cache. Requests send `Accept-Encoding: zstd` and use the shared keep-alive agent
+  and authentication. At most one POST is in flight per client (one worker, plus a mutex
+  in `RemoteListWaveforms`). The worker runs in background thread mode. It sends no POST
+  during the first 3 s after an audition stream or preview starts (Load/Play/Seek), using
+  the same yield hooks as local decoding. A reply whose `library_id` differs from the
+  open snapshot's is discarded (`LibraryChanged`) and nothing is cached. A `503 BUSY`
+  defers every lookup by its `Retry-After`, or 1 s when the header is absent. Other
+  failures pause lookups for 5 s.
+- **Statuses.**
+  - `ok`: shown and stored.
+  - `not_modified`: shown from the client cache.
+  - `pending`: shows an older copy if one exists. The id is asked again after
+    `retry_after` (clamped to 1–30 s, 2 s if absent), only while the row is still among
+    the visible rows (not the ±1-screen margin), and at most 5 times per id.
+  - `missing`: the "no Waveform" placeholder, never retried.
+  - `root_offline`: keeps the stale copy, dimmed under the warning tint, or shows an
+    offline placeholder. The ids are asked again once a revision poll or a root check
+    reports that root `online`.
+  - `error`: the "no Waveform" placeholder, with no automatic retry.
+  - A status the client does not know is treated as `pending`.
+  - A new snapshot, library or source clears all of this state.
+- **Client disk cache.**
+  - Location: `<data dir>/cache/waveforms/server/<fnv1a64(library_id) as 16 hex>/list/`.
+  - Format: client-private shards of 1024 ids each (`<id / 1024>.lws`), holding id, etag
+    and peaks, protected by a checksum.
+  - Writes: each touched shard is written atomically (temporary file, then rename).
+  - Eviction: least recently used shards are evicted past 640 MiB. Shards written by the
+    current batch are never evicted.
+  - Damaged shards and leftover temporary files are dropped on scan.
+  - Memory: one memory cache holds the cells of recently visible rows (4096 entries).
+  - Server items carry no `samples_per_pixel`, so the client stores 1.
+- **Settings page.** The 服务器音效库 page shows the 「列表缩略波形」 section only when
+  the capability is usable.
+  - The `pregenerate_list_waveforms` toggle reads `GET /api/v1/settings`. It is disabled
+    when `can_change` is false, and changes go through `PATCH /api/v1/settings` with the
+    usual library-identity check.
+  - Progress comes from `GET /api/v1/waveforms/status`, read with the page and then
+    every 5 s, only while the page stays open on that server.
+
+Read-only measurements (2026-10-19, LAN test server, about 0.9 M records, pre-generation
+off, release build; ids and server identity omitted). Each page held 200 consecutive ids
+that had not been generated:
+
+| Request | Result | Latency |
+|---|---|---|
+| First POST, cold range | 200 `pending`, `retry_after` 30 | 0.5–2.0 s |
+| Repeated POST right after | 200 `pending` | 6 ms (one run: 2.0 s) |
+| Retry after 30 s | 200 `ok` | 11 ms |
+| Retry every 2 s | 25→18 ids `ok` per poll; all 200 after 7 polls (about 14 s) | 2–6 ms |
+| POST with 200 `known` etags | 200 `not_modified` | 5–6 ms |
+| Lookup through the provider, warm disk cache | 200 ready | 6–9 ms |
+
+The zstd reply for 200 `ok` items was 88.9 KB, against 154.7 KB uncompressed. The disk
+cache for 200 items was 108 KiB.
+
 ## Drag-out (files to other programs)
 
 Result rows can be dragged to Explorer, a DAW or any program that accepts dropped files.
