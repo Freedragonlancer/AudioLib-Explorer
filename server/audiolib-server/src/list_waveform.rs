@@ -956,6 +956,7 @@ pub struct ListWaveforms {
     hints: Mutex<HashMap<i64, StatHint>>,
     workers: usize,
     rate: u32,
+    pause_stats_on_playback: bool,
     last_playback_start: Mutex<Option<Instant>>,
     stop: AtomicBool,
     db_path: PathBuf,
@@ -1059,6 +1060,8 @@ pub struct ListOptions {
     pub workers: usize,
     /// `list_waveform_rate`.
     pub rate: u32,
+    /// `list_waveform_pause_stats_on_playback`.
+    pub pause_stats_on_playback: bool,
 }
 
 impl ListWaveforms {
@@ -1078,6 +1081,7 @@ impl ListWaveforms {
             hints: Mutex::new(HashMap::new()),
             workers: options.workers.max(1),
             rate: options.rate.max(1),
+            pause_stats_on_playback: options.pause_stats_on_playback,
             last_playback_start: Mutex::new(None),
             stop: AtomicBool::new(false),
             db_path: db_path.to_path_buf(),
@@ -1107,6 +1111,21 @@ impl ListWaveforms {
             .last_playback_start
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// With `list_waveform_pause_stats_on_playback`: the rest of the prebuffer window of
+    /// the latest stream/preview start, during which `POST /waveforms` reads no metadata.
+    pub fn stat_pause_remaining(&self) -> Option<Duration> {
+        if !self.pause_stats_on_playback {
+            return None;
+        }
+        let started = (*self
+            .last_playback_start
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner))?;
+        PREBUFFER_YIELD
+            .checked_sub(started.elapsed())
+            .filter(|left| !left.is_zero())
     }
 
     fn playback_started_within(&self, window: Duration) -> bool {
@@ -2058,6 +2077,8 @@ pub async fn batch(
     let mut open_limited = 0_usize;
     let mut deduped = 0_usize;
     let mut capped = 0_usize;
+    let mut paused_for_playback = 0_usize;
+    let pause_at_start = list.stat_pause_remaining();
     // Diagnostics (one log line per batch): records per root name.
     let mut per_root: BTreeMap<String, usize> = BTreeMap::new();
     // Reads run as detached tasks: those unfinished when the budget runs out keep going
@@ -2093,6 +2114,12 @@ pub async fn batch(
                 continue;
             }
         }
+        if pause_at_start.is_some() {
+            // Prebuffer window of a starting stream/preview: no metadata reads now.
+            paused_for_playback += 1;
+            items[position] = Some(BatchItem::bare(id, ItemStatus::Pending));
+            continue;
+        }
         if list.stats.contains(id) {
             // Already being read (an earlier request's background read).
             deduped += 1;
@@ -2118,6 +2145,10 @@ pub async fn batch(
             let Ok(_slot) = claim.list.stat_slots.clone().acquire_owned().await else {
                 return;
             };
+            // A stream/preview started meanwhile: wait out its prebuffer window.
+            while let Some(left) = claim.list.stat_pause_remaining() {
+                tokio::time::sleep(left).await;
+            }
             if let Some(index) = index
                 && state.root_monitor().opens_in_progress(index) >= unfinished_limit
             {
@@ -2181,6 +2212,9 @@ pub async fn batch(
         .map(|item| item.id)
         .collect();
     list.enqueue_on_demand(&pending);
+    let pause_wait = pause_at_start
+        .or_else(|| list.stat_pause_remaining())
+        .map(|left| left.as_secs_f64());
     let stat_wait = if budget_pending {
         // A root hit its unfinished-open limit: give it the longest interval.
         Some(f64::INFINITY)
@@ -2188,6 +2222,10 @@ pub async fn batch(
         Some(stat_wait(unfinished, finished, stat_elapsed))
     } else {
         None
+    };
+    let stat_wait = match (stat_wait, pause_wait) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
     };
     let retry_after = (!pending.is_empty()).then(|| list.retry_after_for(&pending, stat_wait));
     let count = |status: ItemStatus| items.iter().filter(|item| item.status == status).count();
@@ -2200,6 +2238,7 @@ pub async fn batch(
         unfinished_stats = unfinished,
         deduped,
         capped,
+        paused_for_playback,
         outstanding_stats = list.outstanding_stats(),
         budget_exhausted,
         open_limited,
