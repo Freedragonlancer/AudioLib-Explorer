@@ -17,8 +17,10 @@
 //! `Retry-After`.
 //!
 //! Zero-latency rules: the worker never runs on the event loop or in the audio
-//! callback; it takes no new decode (and, in server mode, sends no `POST /waveforms`)
-//! during the first [`PREBUFFER_YIELD`] after an audition starts (Load/Play/Seek), uses at
+//! callback; it takes no new decode (and, in server mode with the "hold list-waveform
+//! batch requests" setting on, sends no new `POST /waveforms`, deferring rather than
+//! dropping them) during the first [`PREBUFFER_YIELD`] after the latest audition start
+//! (Load/Play/Seek), uses at
 //! most one decode or request at a time, and the backfill pauses for the whole audition
 //! and while a scan runs.
 use audiolib_core::{
@@ -160,6 +162,9 @@ pub(crate) struct State {
     offline: HashMap<i64, String>,
     /// Server mode: no request before this (a busy or failing server).
     defer_until: Option<Instant>,
+    /// Server mode: hold new batches during the first [`PREBUFFER_YIELD`] after the latest
+    /// audition start (client setting, default off).
+    hold_after_audition: bool,
 }
 
 impl State {
@@ -285,8 +290,10 @@ impl State {
     }
 
     /// Server mode: one `POST /waveforms` for still-visible ids due for a retry and window
-    /// ids not asked yet; never during the first [`PREBUFFER_YIELD`] of an audition.
+    /// ids not asked yet. With [`State::hold_after_audition`] the batch is held (not
+    /// dropped) until [`PREBUFFER_YIELD`] after the latest audition start.
     fn next_server_step(&mut self, now: Instant, prebuffering: Option<Duration>) -> Step {
+        let prebuffering = prebuffering.filter(|_| self.hold_after_audition);
         if let Some(until) = self.defer_until {
             if now < until {
                 return Step::Wait(Some(until - now));
@@ -599,6 +606,18 @@ impl ListWaveforms {
         let mut state = self.lock();
         change(&mut state);
         self.shared.wake.notify_all();
+    }
+
+    /// Server mode: start with the "hold list-waveform batch requests" setting.
+    pub(crate) fn with_hold_after_audition(self, enabled: bool) -> Self {
+        self.set_hold_after_audition(enabled);
+        self
+    }
+
+    /// The "hold list-waveform batch requests during the first 3 s after audition start"
+    /// setting changed. Cheap and non-blocking; safe on the event loop.
+    pub(crate) fn set_hold_after_audition(&self, enabled: bool) {
+        self.update(|state| state.hold_after_audition = enabled);
     }
 
     /// Start the worker thread; it ends on [`ListWaveforms::shutdown`] or when the host
@@ -1244,9 +1263,10 @@ mod tests {
         let service = ListWaveforms::new(false);
         // Rows 1 and 2 are on screen, 3 is one screen below.
         service.set_window(vec![1, 2, 3], 2);
+        service.set_hold_after_audition(true);
         let mut state = std::mem::take(&mut *service.lock());
         let mut now = Instant::now();
-        // No POST during the first 3 s of an audition.
+        // With the hold setting on, no POST during the first 3 s of an audition.
         state.playback_start = Some(now - Duration::from_secs(1));
         assert_eq!(
             state.next_step(now, false, ListWaveformSource::Server),
@@ -1319,6 +1339,58 @@ mod tests {
             state.next_step(now, false, ListWaveformSource::Server),
             Step::Wait(None)
         );
+    }
+
+    #[test]
+    fn server_batches_are_not_held_after_audition_start_by_default() {
+        let service = ListWaveforms::new(false);
+        service.set_window(vec![1, 2, 3], 2);
+        let mut state = std::mem::take(&mut *service.lock());
+        assert!(!state.hold_after_audition, "default off");
+        let now = Instant::now();
+        state.playback_start = Some(now);
+        let request = server_lookup(&mut state, now);
+        assert_eq!(request.1, vec![1, 2, 3], "sent at once, visible rows first");
+    }
+
+    #[test]
+    fn held_server_batches_wait_for_the_latest_audition_start_and_are_not_dropped() {
+        let service = ListWaveforms::new(false).with_hold_after_audition(true);
+        service.set_window(vec![1, 2, 3], 2);
+        let mut state = std::mem::take(&mut *service.lock());
+        assert!(state.hold_after_audition);
+        let mut now = Instant::now();
+        state.playback_start = Some(now);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(Some(PREBUFFER_YIELD))
+        );
+        assert!(
+            state.task.is_none() && state.looked_up.is_empty(),
+            "nothing sent"
+        );
+        // A second audition 2 s later restarts the hold from that start.
+        now += Duration::from_secs(2);
+        state.playback_start = Some(now);
+        now += Duration::from_millis(2500);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(Some(Duration::from_millis(500)))
+        );
+        // Rows scrolled in while held join the deferred batch; nothing was dropped.
+        state.window.push(4);
+        state.in_window.insert(4);
+        now += Duration::from_millis(500);
+        let request = server_lookup(&mut state, now);
+        assert_eq!(request.1, vec![1, 2, 3, 4], "deferred, visible rows first");
+        // Turning the setting off releases a held batch at once.
+        let service = ListWaveforms::new(false).with_hold_after_audition(true);
+        service.set_window(vec![7], 1);
+        service.set_hold_after_audition(false);
+        let mut state = std::mem::take(&mut *service.lock());
+        let now = Instant::now();
+        state.playback_start = Some(now);
+        assert_eq!(server_lookup(&mut state, now).1, vec![7]);
     }
 
     #[test]

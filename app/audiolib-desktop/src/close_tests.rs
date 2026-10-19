@@ -39,6 +39,7 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
         playback: serde_json::to_value(&playback).unwrap(),
         audition_play_on_single_click: false,
         pregenerate_list_waveforms: false,
+        hold_list_waveform_batches_after_audition: false,
         audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),

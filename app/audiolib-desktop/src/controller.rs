@@ -613,6 +613,9 @@ pub struct Controller {
     list_waveforms: ListWaveforms,
     /// The "pre-generate list Waveforms" preference (local mode).
     pregenerate_list_waveforms: AtomicBool,
+    /// The "hold list-waveform batch requests during the first 3 s after audition start"
+    /// preference (server mode).
+    hold_list_waveform_batches: AtomicBool,
 }
 
 fn post(ui: slint::Weak<AppWindow>, action: impl FnOnce(AppWindow) + Send + 'static) {
@@ -670,6 +673,7 @@ impl Controller {
         ui.set_chinese(chinese);
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
+        ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
         let table = config.audio_table.normalized();
         ui.set_table_name_width(table.name_width);
         ui.set_table_duration_width(table.duration_width);
@@ -712,8 +716,12 @@ impl Controller {
             scans: Mutex::new(Vec::new()),
             audio,
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
-            list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms),
+            list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms)
+                .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
             pregenerate_list_waveforms: AtomicBool::new(config.pregenerate_list_waveforms),
+            hold_list_waveform_batches: AtomicBool::new(
+                config.hold_list_waveform_batches_after_audition,
+            ),
             audio_table: Mutex::new(table),
             single_click_play_pending: Mutex::new(false),
             single_click_play_wake: Condvar::new(),
@@ -854,6 +862,14 @@ impl Controller {
             c.pregenerate_list_waveforms
                 .store(enabled, Ordering::Release);
             c.list_waveforms.set_pregenerate(enabled);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_hold_list_waveform_batches_requested(move |enabled| {
+            c.hold_list_waveform_batches
+                .store(enabled, Ordering::Release);
+            c.list_waveforms.set_hold_after_audition(enabled);
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
         });
@@ -2340,6 +2356,8 @@ impl Controller {
                             c.single_click_play.load(Ordering::Acquire);
                         config.pregenerate_list_waveforms =
                             c.pregenerate_list_waveforms.load(Ordering::Acquire);
+                        config.hold_list_waveform_batches_after_audition =
+                            c.hold_list_waveform_batches.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
                         config.save()
                     };
@@ -5165,6 +5183,8 @@ impl Controller {
         let mut config = self.config.lock().unwrap();
         config.audition_play_on_single_click = self.single_click_play.load(Ordering::Acquire);
         config.pregenerate_list_waveforms = self.pregenerate_list_waveforms.load(Ordering::Acquire);
+        config.hold_list_waveform_batches_after_audition =
+            self.hold_list_waveform_batches.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
@@ -6841,6 +6861,7 @@ mod tests {
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
             pregenerate_list_waveforms: false,
+            hold_list_waveform_batches_after_audition: false,
             audio_table: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),

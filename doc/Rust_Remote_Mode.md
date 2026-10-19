@@ -718,9 +718,11 @@ client does.
   plus the ids one screen above and below. Each id carries the `known` etag from the
   client cache. Requests send `Accept-Encoding: zstd` and use the shared keep-alive agent
   and authentication. At most one POST is in flight per client (one worker, plus a mutex
-  in `RemoteListWaveforms`). The worker runs in background thread mode. It sends no POST
-  during the first 3 s after an audition stream or preview starts (Load/Play/Seek), using
-  the same yield hooks as local decoding. A reply whose `library_id` differs from the
+  in `RemoteListWaveforms`). The worker runs in background thread mode. With the client
+  setting "hold list-waveform batch requests during first 3 s after audition start"
+  (`hold_list_waveform_batches_after_audition`, default off) it sends no new POST until
+  3 s after the latest audition stream or preview start (Load/Play/Seek), using the same
+  yield hooks as local decoding; held rows are deferred, not dropped. A reply whose `library_id` differs from the
   open snapshot's is discarded (`LibraryChanged`) and nothing is cached. A `503 BUSY`
   defers every lookup by its `Retry-After`, or 1 s when the header is absent. Other
   failures pause lookups for 5 s.
