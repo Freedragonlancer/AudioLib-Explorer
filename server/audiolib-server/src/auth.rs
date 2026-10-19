@@ -416,6 +416,9 @@ pub struct AdminSettings {
     /// replaces the `[[roots]]` of `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roots: Option<Vec<crate::config::RootConfig>>,
+    /// Pre-generate list thumbnail waveforms (doc/api/README.md §9.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pregenerate_list_waveforms: Option<bool>,
     /// Recovery journal for an atomic indexed-root relocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_relink: Option<crate::manage::RootRelinkJournal>,
@@ -471,7 +474,7 @@ struct StoredToken {
 }
 
 /// Where a setting's effective value comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Built-in default.
@@ -503,6 +506,8 @@ struct Defaults {
     auth_mode_source: Source,
     manage_mode: ManageMode,
     manage_mode_source: Source,
+    pregenerate_list_waveforms: bool,
+    pregenerate_list_waveforms_source: Source,
     public_url: Option<String>,
     tls: Option<TlsSettings>,
 }
@@ -610,11 +615,18 @@ impl Security {
             Some(mode) => (mode, Source::Config),
             None => (ManageMode::All, Source::Default),
         };
+        let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
+            match config.pregenerate_list_waveforms {
+                Some(value) => (value, Source::Config),
+                None => (false, Source::Default),
+            };
         let defaults = Defaults {
             auth_mode,
             auth_mode_source,
             manage_mode,
             manage_mode_source,
+            pregenerate_list_waveforms,
+            pregenerate_list_waveforms_source,
             public_url: config.public_url.clone(),
             tls: config.tls(),
         };
@@ -642,6 +654,8 @@ impl Security {
             auth_mode_source: Source::Config,
             manage_mode: ManageMode::All,
             manage_mode_source: Source::Default,
+            pregenerate_list_waveforms: false,
+            pregenerate_list_waveforms_source: Source::Default,
             public_url: None,
             tls: None,
         };
@@ -715,6 +729,22 @@ impl Security {
             Some(mode) => (mode, Source::Admin),
             None => (self.defaults.manage_mode, self.defaults.manage_mode_source),
         }
+    }
+
+    /// Effective `pregenerate_list_waveforms` and its source.
+    pub fn pregenerate_list_waveforms_with_source(&self) -> (bool, Source) {
+        match self.read().settings.pregenerate_list_waveforms {
+            Some(value) => (value, Source::Admin),
+            None => (
+                self.defaults.pregenerate_list_waveforms,
+                self.defaults.pregenerate_list_waveforms_source,
+            ),
+        }
+    }
+
+    /// Effective `pregenerate_list_waveforms`.
+    pub fn pregenerate_list_waveforms(&self) -> bool {
+        self.pregenerate_list_waveforms_with_source().0
     }
 
     /// Library roots set on the admin page (replacing `config.toml`'s), if any.
