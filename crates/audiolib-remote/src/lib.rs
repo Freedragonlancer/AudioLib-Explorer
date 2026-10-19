@@ -25,6 +25,9 @@
 //! * Server library management (`manage` module): [`Capabilities`] (`manage_mode`),
 //!   server scans ([`ScanRequest`] / [`ServerScan`]) and database-only removals
 //!   ([`RemoveReport`]); typed `403`/`409`/`503` errors ([`manage_error_text`]).
+//! * List thumbnail Waveforms (`list_waveforms` module, §9.1–§9.3): [`RemoteListWaveforms`]
+//!   (`POST /waveforms` with `known` entity tags) over the [`ListWaveformStore`] disk cache,
+//!   plugged into [`RemoteProvider`]; `GET`/`PATCH /settings` and `GET /waveforms/status`.
 //! * Remote folder browsing ([`RemoteDirectory`]) and sound-library root registration,
 //!   path changes and database-only root removal ([`RootRemoveReport`]), guarded by
 //!   [`Capabilities::may_manage_roots`].
@@ -36,6 +39,7 @@ mod bandwidth;
 mod client;
 mod download;
 mod error;
+mod list_waveforms;
 mod manage;
 mod mapping;
 mod poll;
@@ -64,6 +68,11 @@ pub use download::{
     MARKER_FILE, content_disposition_filename, etag_token, probe_download, sanitize_filename,
 };
 pub use error::{NetworkFailure, RemoteError, Result, TlsFailure};
+pub use list_waveforms::{
+    BatchItem, BatchReply, BatchStatus, DEFAULT_LIST_WAVEFORM_CACHE_BYTES, LIST_WAVEFORM_ENCODING,
+    LIST_WAVEFORM_SHARD_IDS, ListWaveformStatus, ListWaveformStore, ListWaveformsCapability,
+    RemoteListWaveforms, ServerSettings, StoredListWaveform,
+};
 pub use manage::{
     Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS, ManageMode, RemoveReport,
     RootScan, ScanControl, ScanMode, ScanRequest, ServerScan, manage_error_text,

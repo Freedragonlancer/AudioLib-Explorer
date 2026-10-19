@@ -83,6 +83,12 @@ pub struct Capabilities {
     /// endpoints. Older servers omit it: keep these controls unavailable.
     #[serde(default)]
     pub root_management: bool,
+    /// List thumbnail Waveforms (`POST /waveforms`, §9.1); `None` on older servers.
+    #[serde(default)]
+    pub list_waveforms: Option<crate::list_waveforms::ListWaveformsCapability>,
+    /// The server's effective `pregenerate_list_waveforms` (read-only here, §9.2).
+    #[serde(default)]
+    pub pregenerate_list_waveforms: Option<bool>,
 }
 
 fn known() -> bool {
@@ -97,6 +103,8 @@ impl Default for Capabilities {
             external: None,
             can_manage: None,
             root_management: false,
+            list_waveforms: None,
+            pregenerate_list_waveforms: None,
         }
     }
 }
@@ -126,6 +134,16 @@ impl Capabilities {
     /// The server still checks its current policy for every request.
     pub fn may_manage_roots(&self) -> bool {
         self.root_management && self.may_manage()
+    }
+
+    /// Whether the list may show server thumbnail Waveforms (§9.1–§9.2): a known
+    /// `list_waveforms` capability (version 1, 128 buckets, `i16le-minmax-base64`).
+    pub fn list_waveforms_usable(&self) -> bool {
+        self.supported
+            && self
+                .list_waveforms
+                .as_ref()
+                .is_some_and(|capability| capability.usable())
     }
 }
 
