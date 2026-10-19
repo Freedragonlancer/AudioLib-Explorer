@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod folder_rollup_tests;
 mod id_membership;
+mod list_waveforms;
 mod management;
 mod owned_cancellation;
 #[cfg(feature = "scanner")]
@@ -140,6 +141,8 @@ pub struct SqliteProvider {
     read_gate: RwLock<()>,
     /// Whether extracted-tag filters can use the fully populated derived column.
     derived_tags: AtomicBool,
+    /// Session state of local list Waveforms (computed file versions, decode failures).
+    list_waveform_memory: list_waveforms::ListWaveformMemory,
     // Declared last so every SQLite connection closes before the owned directory is removed.
     _owned_snapshot_directory: Option<tempfile::TempDir>,
 }
@@ -347,6 +350,7 @@ impl SqliteProvider {
             tokenizer,
             read_gate: RwLock::new(()),
             derived_tags: AtomicBool::new(derived),
+            list_waveform_memory: Default::default(),
             _owned_snapshot_directory: None,
         })
     }
@@ -562,6 +566,7 @@ impl SqliteProvider {
             tokenizer: load_tokenizer(),
             read_gate: RwLock::new(()),
             derived_tags: AtomicBool::new(derived),
+            list_waveform_memory: Default::default(),
             _owned_snapshot_directory: owned_directory,
         })
     }
@@ -1722,6 +1727,33 @@ impl DataProvider for SqliteProvider {
     }
     fn import_annotations(&self, source: &Path) -> Result<TransferReport> {
         self.management_import(source)
+    }
+
+    fn list_waveform_source(&self) -> audiolib_core::ListWaveformSource {
+        // A read-only snapshot (server mode) never uses its `waveform_cache` rows (§9.3).
+        if self.read_only || !cfg!(feature = "scanner") {
+            audiolib_core::ListWaveformSource::Unavailable
+        } else {
+            audiolib_core::ListWaveformSource::Local
+        }
+    }
+    fn list_waveforms(
+        &self,
+        ids: &[i64],
+        cancel: Arc<AtomicBool>,
+    ) -> Result<audiolib_core::ListWaveformBatch> {
+        self.list_waveforms_impl(ids, &cancel)
+    }
+    #[cfg(feature = "scanner")]
+    fn compute_list_waveform(
+        &self,
+        id: i64,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<audiolib_core::ListWaveformState> {
+        self.compute_list_waveform_impl(id, &cancel)
+    }
+    fn list_waveform_backlog(&self, after: i64, limit: usize) -> Result<Vec<i64>> {
+        self.list_waveform_backlog_impl(after, limit)
     }
 }
 
