@@ -56,7 +56,10 @@ fn id_of(provider: &SqliteProvider, path: &Path) -> i64 {
         .id
 }
 
-fn list_rows(database: &Path, id: i64) -> Vec<(String, i64, Vec<u8>, Vec<u8>, bool, bool)> {
+/// A stored list row: (zoom level, samples per pixel, min, max, rms is NULL, color is NULL).
+type ListRow = (String, i64, Vec<u8>, Vec<u8>, bool, bool);
+
+fn list_rows(database: &Path, id: i64) -> Vec<ListRow> {
     let conn = Connection::open(database).unwrap();
     let mut statement = conn
         .prepare(
