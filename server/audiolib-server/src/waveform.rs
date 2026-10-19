@@ -29,7 +29,7 @@ const ZSTD_LEVEL: i32 = 3;
 /// The cache is trimmed after this many new entries.
 const TRIM_EVERY: u64 = 32;
 /// Server cache identity version; v2 separates libraries and distinct source files.
-const SERVER_CACHE_VERSION: u32 = 2;
+pub(crate) const SERVER_CACHE_VERSION: u32 = 2;
 
 /// Validated `GET /audio/{id}/waveform` parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +161,11 @@ impl WaveformKey {
         }
     }
 
+    /// The 64-bit key hash (shared by the list waveform entity tags, §9.1).
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
     /// Entity tag; distinct per encoding.
     pub fn etag(&self, zstd: bool) -> String {
         let suffix = if zstd { "-zstd" } else { "" };
@@ -176,7 +181,7 @@ impl WaveformKey {
 }
 
 /// Stable 64-bit FNV-1a (std's `DefaultHasher` may change between Rust releases).
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
     })
