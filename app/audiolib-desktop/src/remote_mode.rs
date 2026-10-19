@@ -17,12 +17,13 @@ use audiolib_core::server_url::{Scheme, ServerAddress, ServerUrlError};
 use audiolib_db::SqliteProvider;
 use audiolib_remote::{
     AudioRoute, AutoSyncGate, CacheState, CachedIdentity, DEFAULT_DOWNLOAD_CACHE_BYTES,
-    DownloadCache, DownloadItem, DownloadProgress, MemoryCache, MemoryStream, PollSchedule,
-    RemoteCache, RemoteClient, RemoteError, RemoteProvider, RemoteRoot, RemoteSecrets,
-    RemoteWriter, RevisionCheck, RootState, RouteOptions, SourceAuth, StreamSource, SyncProgress,
-    UrlSource, WAKING_HINT_AFTER, WaveformQuery, WaveformReply, WebDavAuth, WriteEvent,
-    WriteListener, bandwidth, check_revision_with_roots, choose_route, effective_roots,
-    load_profile_secrets, map_server_path, root_for_path, root_status_text, sync_library,
+    DownloadCache, DownloadItem, DownloadProgress, ListWaveformStore, ListWaveformsCapability,
+    MemoryCache, MemoryStream, PollSchedule, RemoteCache, RemoteClient, RemoteError,
+    RemoteListWaveforms, RemoteProvider, RemoteRoot, RemoteSecrets, RemoteWriter, RevisionCheck,
+    RootState, RouteOptions, SourceAuth, StreamSource, SyncProgress, UrlSource, WAKING_HINT_AFTER,
+    WaveformQuery, WaveformReply, WebDavAuth, WriteEvent, WriteListener, bandwidth,
+    check_revision_with_roots, choose_route, effective_roots, load_profile_secrets,
+    map_server_path, root_for_path, root_status_text, sync_library,
 };
 use slint::{ModelRc, VecModel};
 use std::collections::HashMap;
@@ -277,7 +278,12 @@ pub(super) struct RemoteRuntime {
     hidden: server_removal::HiddenRecords,
     /// Whether the active server lets this PC remove records (menus and context menus).
     manage: server_removal::ServerManage,
+    /// List Waveform provider of the open snapshot (`POST /waveforms`), keyed by source
+    /// generation, library and snapshot file.
+    list_waveforms: Option<(ListWaveformKey, Arc<RemoteProvider>)>,
 }
+
+type ListWaveformKey = (u64, String, String, Option<ListWaveformsCapability>);
 
 /// Info line shown above the connection report when no access token is entered.
 fn tokenless_note(chinese: bool) -> String {
@@ -658,6 +664,62 @@ impl Controller {
             chinese,
             Some(listener),
         )))
+    }
+
+    /// Server-mode provider for the list Waveform worker: reads from the open snapshot,
+    /// thumbnails only from `POST /waveforms` (never the snapshot's `waveform_cache` rows,
+    /// §9.3) with the client disk cache under `<cache>/waveforms/server/`. Rebuilt when the
+    /// source or snapshot changes; cheap otherwise. Called on the worker thread.
+    pub(super) fn remote_list_waveform_provider(&self) -> Option<Arc<RemoteProvider>> {
+        let (settings, cache_root) = {
+            let config = self.config.lock().unwrap();
+            (config.data_source.clone(), config.paths.cache.clone())
+        };
+        // The capability comes from the `/capabilities` read after each sync (the menu
+        // gate): no request of our own, and no column until it is known.
+        let (state, capabilities) = {
+            let remote = self.remote.lock().unwrap();
+            (
+                remote.state.clone()?,
+                remote
+                    .manage
+                    .capabilities_for(&settings.server_url)?
+                    .clone(),
+            )
+        };
+        let key: ListWaveformKey = (
+            self.source_generation.load(Ordering::Acquire),
+            state.library_id.clone(),
+            state.database_file.clone(),
+            capabilities.list_waveforms.clone(),
+        );
+        if let Some((cached, provider)) = &self.remote.lock().unwrap().list_waveforms
+            && *cached == key
+        {
+            return Some(provider.clone());
+        }
+        let chinese = self.chinese.load(Ordering::Acquire);
+        let secrets = self.secrets();
+        let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
+        let service = Arc::new(
+            RemoteListWaveforms::new(
+                client.clone(),
+                state.library_id.clone(),
+                ListWaveformStore::for_library(&cache_root, &state.library_id),
+            )
+            .with_capabilities(&capabilities),
+        );
+        let writer = RemoteWriter::new(
+            client,
+            RemoteCache::new(&self.data_root()),
+            state.library_id.clone(),
+        );
+        let provider = Arc::new(
+            RemoteProvider::new(self.provider(), writer, chinese, None)
+                .with_list_waveforms(service),
+        );
+        self.remote.lock().unwrap().list_waveforms = Some((key, provider.clone()));
+        Some(provider)
     }
 
     /// Cache effect of a server write (called on the writing thread).
@@ -1227,6 +1289,7 @@ impl Controller {
                 if let Some(live) = c2.remote.lock().unwrap().live_roots.as_mut() {
                     merge_roots(live, &updated);
                 }
+                c2.list_waveforms.roots_online(&online_root_names(&updated));
                 c2.publish_remote_notice(&ui);
                 c2.publish_data_source(&ui);
                 ui.set_status(message.into());
@@ -1385,6 +1448,9 @@ impl Controller {
                         source_manager::root_configuration_changed(previous, roots)
                     })
             });
+            if let Some(roots) = poll.roots.as_deref() {
+                self.list_waveforms.roots_online(&online_root_names(roots));
+            }
             remote.live_roots = poll.roots;
             roots_changed
         };
@@ -3082,6 +3148,16 @@ fn stream_error_text(error: &RemoteError, root: Option<&RemoteRoot>, chinese: bo
 
 /// The WebDAV stream source for a record, only when the user configured a WebDAV address
 /// for its root (per-root URL or global base); server-suggested URLs are not used.
+/// Names of the roots `/roots` reports online (§6.4): list Waveforms that were
+/// `root_offline` there are asked for again.
+fn online_root_names(roots: &[RemoteRoot]) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|root| root.state() == RootState::Online)
+        .map(|root| root.name.clone())
+        .collect()
+}
+
 /// Replace the entries of `live` that a root check returned (matched by name).
 fn merge_roots(live: &mut [RemoteRoot], updated: &[RemoteRoot]) {
     for root in updated {

@@ -8,12 +8,22 @@
 //! library at a bounded rate. Rows that scroll out of the window are dropped from the
 //! queues and an on-demand decode of such a row is cancelled.
 //!
+//! In server mode ([`ListWaveformSource::Server`]) the lookup is one `POST /waveforms`
+//! for up to 200 ids and the client never decodes: `pending` ids are asked again after
+//! the server's `retry_after`, only while still visible and at most
+//! [`MAX_PENDING_RETRIES`] times; `root_offline` rows keep a stale copy drawn with the
+//! offline tint until [`ListWaveforms::roots_online`] reports their root back; `missing`
+//! and `error` are not retried; a busy server (`503 BUSY`) defers every lookup by its
+//! `Retry-After`.
+//!
 //! Zero-latency rules: the worker never runs on the event loop or in the audio
-//! callback; it takes no new decode during the first [`PREBUFFER_YIELD`] after an
-//! audition starts (Load/Play/Seek), uses at most one decode at a time, and the backfill
-//! pauses for the whole audition and while a scan runs.
+//! callback; it takes no new decode (and, in server mode, sends no `POST /waveforms`)
+//! during the first [`PREBUFFER_YIELD`] after an audition starts (Load/Play/Seek), uses at
+//! most one decode or request at a time, and the backfill pauses for the whole audition
+//! and while a scan runs.
 use audiolib_core::{
-    DataProvider, Error, LIST_WAVEFORM_COLUMNS, ListWaveform, ListWaveformSource, ListWaveformState,
+    DataProvider, Error, LIST_WAVEFORM_COLUMNS, ListWaveform, ListWaveformSource,
+    ListWaveformState, MAX_LIST_WAVEFORM_IDS,
 };
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 use std::{
@@ -39,6 +49,12 @@ const BACKLOG_BATCH: usize = 256;
 const CACHE_CAPACITY: usize = 4096;
 /// Re-evaluation interval of an idle worker (provider availability, scans).
 const IDLE_POLL: Duration = Duration::from_secs(1);
+/// Server mode: a still-visible `pending` id is asked again at most this many times.
+pub(crate) const MAX_PENDING_RETRIES: u32 = 5;
+/// Server mode: retry interval when a reply with `pending` items gives no `retry_after`.
+const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(2);
+/// Server mode: pause after a failed request (unreachable server, protocol error).
+const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 
 /// What a result row shows in its Waveform column.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +63,9 @@ pub(crate) enum ListWaveformCell {
     Ready(ListWaveform),
     /// Missing file or undecodable: the "no Waveform" placeholder.
     Unavailable,
+    /// The record's root is offline (server mode): a stale copy, if any, drawn with the
+    /// offline tint.
+    Offline(Option<ListWaveform>),
 }
 
 /// The desktop side the worker needs; implemented by the controller.
@@ -58,6 +77,9 @@ pub(crate) trait ListWaveformHost: Send + Sync + 'static {
     fn list_waveform_scanning(&self) -> bool;
     /// Publish results; the host checks `generation` on the event loop.
     fn deliver_list_waveforms(&self, generation: u64, cells: Vec<(i64, ListWaveformCell)>);
+    /// The provider's list Waveform source changed (the table shows the column only for
+    /// a source other than `Unavailable`).
+    fn list_waveform_source_changed(&self, source: ListWaveformSource);
 }
 
 #[derive(Debug)]
@@ -65,6 +87,8 @@ pub(crate) enum Task {
     Lookup {
         generation: u64,
         ids: Vec<i64>,
+        cancel: Arc<AtomicBool>,
+        server: bool,
     },
     Compute {
         generation: u64,
@@ -105,6 +129,8 @@ pub(crate) struct State {
     /// Wanted ids in priority order (visible first) and as a set.
     window: Vec<i64>,
     in_window: HashSet<i64>,
+    /// The rows on screen (the start of `window`).
+    visible: HashSet<i64>,
     cache: HashMap<i64, ListWaveformCell>,
     cache_order: VecDeque<i64>,
     /// Cached ids to look up again (files may have changed, e.g. after a scan).
@@ -125,6 +151,15 @@ pub(crate) struct State {
     pregenerate: bool,
     backfill: Backfill,
     task: Option<Task>,
+    /// Server mode: `pending` answers received per id.
+    pending_answers: HashMap<i64, u32>,
+    /// Server mode: ids to ask again once `retry_due` passed (only while visible).
+    retry_wait: HashSet<i64>,
+    retry_due: Option<Instant>,
+    /// Server mode: ids whose root was offline, with the root name.
+    offline: HashMap<i64, String>,
+    /// Server mode: no request before this (a busy or failing server).
+    defer_until: Option<Instant>,
 }
 
 impl State {
@@ -172,6 +207,14 @@ impl State {
         if self.suspended || source == ListWaveformSource::Unavailable {
             return Step::Wait(Some(IDLE_POLL));
         }
+        let prebuffering = self
+            .playback_start
+            .map(|start| now.saturating_duration_since(start))
+            .filter(|elapsed| *elapsed < PREBUFFER_YIELD)
+            .map(|elapsed| PREBUFFER_YIELD - elapsed);
+        if source == ListWaveformSource::Server {
+            return self.next_server_step(now, prebuffering);
+        }
         // 1. Cheap lookups of the window, visible rows first.
         let ids: Vec<i64> = self
             .window
@@ -185,20 +228,9 @@ impl State {
             .collect();
         if !ids.is_empty() {
             self.looked_up.extend(&ids);
-            self.task = Some(Task::Lookup {
-                generation: self.generation,
-                ids,
-            });
+            self.task = Some(self.lookup_task(ids, false));
             return Step::Run;
         }
-        if source != ListWaveformSource::Local {
-            return Step::Wait(None);
-        }
-        let prebuffering = self
-            .playback_start
-            .map(|start| now.saturating_duration_since(start))
-            .filter(|elapsed| *elapsed < PREBUFFER_YIELD)
-            .map(|elapsed| PREBUFFER_YIELD - elapsed);
         // 2. On-demand decodes of window rows, in window order.
         if let Some(id) = self
             .window
@@ -252,6 +284,71 @@ impl State {
         Step::Run
     }
 
+    /// Server mode: one `POST /waveforms` for still-visible ids due for a retry and window
+    /// ids not asked yet; never during the first [`PREBUFFER_YIELD`] of an audition.
+    fn next_server_step(&mut self, now: Instant, prebuffering: Option<Duration>) -> Step {
+        if let Some(until) = self.defer_until {
+            if now < until {
+                return Step::Wait(Some(until - now));
+            }
+            self.defer_until = None;
+        }
+        let waiting: Vec<i64> = self
+            .window
+            .iter()
+            .copied()
+            .filter(|id| self.visible.contains(id) && self.retry_wait.contains(id))
+            .collect();
+        let due = self.retry_due.is_none_or(|due| due <= now);
+        let fresh = self.window.iter().copied().filter(|id| {
+            !self.looked_up.contains(id)
+                && (!self.cache.contains_key(id) || self.verify.contains(id))
+        });
+        let fresh: Vec<i64> = fresh.collect();
+        let mut ids: Vec<i64> = if due { waiting.clone() } else { Vec::new() };
+        for id in fresh {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids.truncate(MAX_LIST_WAVEFORM_IDS);
+        if ids.is_empty() {
+            return match self.retry_due {
+                Some(due) if !waiting.is_empty() => {
+                    Step::Wait(Some(due.saturating_duration_since(now)))
+                }
+                _ => Step::Wait(None),
+            };
+        }
+        if let Some(remaining) = prebuffering {
+            return Step::Wait(Some(remaining));
+        }
+        if due && !waiting.is_empty() {
+            self.retry_due = None;
+        }
+        for id in &ids {
+            self.retry_wait.remove(id);
+            self.looked_up.insert(*id);
+        }
+        self.task = Some(self.lookup_task(ids, true));
+        Step::Run
+    }
+
+    fn lookup_task(&mut self, ids: Vec<i64>, server: bool) -> Task {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.current = Some(Current {
+            id: ids.first().copied().unwrap_or_default(),
+            cancel: cancel.clone(),
+            on_demand: false,
+        });
+        Task::Lookup {
+            generation: self.generation,
+            ids,
+            cancel,
+            server,
+        }
+    }
+
     fn compute_task(&mut self, id: i64, on_demand: bool) -> Task {
         let cancel = Arc::new(AtomicBool::new(false));
         self.current = Some(Current {
@@ -269,44 +366,96 @@ impl State {
 
     /// Apply a finished task; returns the cells to publish.
     pub(crate) fn finish(&mut self, outcome: Outcome) -> Vec<(i64, ListWaveformCell)> {
+        self.finish_at(outcome, Instant::now())
+    }
+
+    pub(crate) fn finish_at(
+        &mut self,
+        outcome: Outcome,
+        now: Instant,
+    ) -> Vec<(i64, ListWaveformCell)> {
         self.current = None;
         let mut cells = Vec::new();
         match outcome {
             Outcome::Lookup {
                 generation,
                 ids,
+                server,
                 result,
             } => {
                 if generation != self.generation {
                     return cells;
                 }
-                let Ok(batch) = result else {
-                    // Retried once the rows scroll out and back (or after a scan).
-                    return cells;
+                let batch = match result {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        // Retried once the rows scroll out and back (or after a scan); a
+                        // failing server is left alone for a moment.
+                        if server && !matches!(error, Error::Cancelled) {
+                            tracing::debug!(%error, "list Waveform request failed");
+                            self.defer_until = Some(now + ERROR_BACKOFF);
+                        }
+                        if matches!(error, Error::Cancelled) {
+                            for id in &ids {
+                                self.looked_up.remove(id);
+                            }
+                        }
+                        return cells;
+                    }
                 };
+                if let Some(wait) = batch.deferred {
+                    // Busy: nothing answered, ask again about all of them later.
+                    for id in &ids {
+                        self.looked_up.remove(id);
+                    }
+                    self.defer_until = Some(now + wait);
+                    return cells;
+                }
+                let retry_after = batch.retry_after.unwrap_or(DEFAULT_RETRY_AFTER);
                 for item in batch.items {
                     if !ids.contains(&item.id) {
                         continue;
                     }
                     self.verify.remove(&item.id);
+                    let id = item.id;
                     let cell = match item.state {
                         ListWaveformState::Ready { waveform } => ListWaveformCell::Ready(waveform),
                         ListWaveformState::Missing | ListWaveformState::Failed { .. } => {
                             ListWaveformCell::Unavailable
                         }
+                        ListWaveformState::Pending { previous } if server => {
+                            let answers = self.pending_answers.entry(id).or_default();
+                            *answers += 1;
+                            if *answers <= MAX_PENDING_RETRIES {
+                                self.retry_wait.insert(id);
+                                self.retry_due = Some(now + retry_after);
+                            }
+                            match previous {
+                                // §9.3: keep showing the old copy.
+                                Some(previous) => ListWaveformCell::Ready(previous),
+                                None => continue,
+                            }
+                        }
+                        ListWaveformState::RootOffline { root, previous } if server => {
+                            self.offline.insert(id, root);
+                            ListWaveformCell::Offline(previous)
+                        }
                         ListWaveformState::Pending { previous }
                         | ListWaveformState::RootOffline { previous, .. } => {
-                            if self.in_window.contains(&item.id) {
-                                self.compute.insert(item.id);
+                            if self.in_window.contains(&id) {
+                                self.compute.insert(id);
                             }
                             if let Some(previous) = previous {
-                                cells.push((item.id, ListWaveformCell::Ready(previous)));
+                                cells.push((id, ListWaveformCell::Ready(previous)));
                             }
                             continue;
                         }
                     };
-                    self.remember(item.id, cell.clone());
-                    cells.push((item.id, cell));
+                    if !matches!(cell, ListWaveformCell::Offline(_)) {
+                        self.offline.remove(&id);
+                    }
+                    self.remember(id, cell.clone());
+                    cells.push((id, cell));
                 }
             }
             Outcome::Compute {
@@ -364,6 +513,7 @@ pub(crate) enum Outcome {
     Lookup {
         generation: u64,
         ids: Vec<i64>,
+        server: bool,
         result: audiolib_core::Result<audiolib_core::ListWaveformBatch>,
     },
     Compute {
@@ -381,10 +531,16 @@ pub(crate) enum Outcome {
 /// Blocking: run one task against `provider`.
 pub(crate) fn run_task(provider: &dyn DataProvider, task: Task) -> Outcome {
     match task {
-        Task::Lookup { generation, ids } => Outcome::Lookup {
-            result: provider.list_waveforms(&ids, Arc::new(AtomicBool::new(false))),
+        Task::Lookup {
             generation,
             ids,
+            cancel,
+            server,
+        } => Outcome::Lookup {
+            result: provider.list_waveforms(&ids, cancel),
+            generation,
+            ids,
+            server,
         },
         Task::Compute {
             generation,
@@ -460,16 +616,22 @@ impl ListWaveforms {
     }
 
     fn run(&self, host: Weak<dyn ListWaveformHost>) {
+        let mut reported = None;
         loop {
             let Some(strong) = host.upgrade() else { return };
             let provider = strong.list_waveform_provider();
             let scanning = strong.list_waveform_scanning();
-            drop(strong);
+            // Blocking on first use for a server (`GET /capabilities`): on this thread.
             let source = provider
                 .as_ref()
                 .map_or(ListWaveformSource::Unavailable, |provider| {
                     provider.list_waveform_source()
                 });
+            if reported != Some(source) {
+                reported = Some(source);
+                strong.list_waveform_source_changed(source);
+            }
+            drop(strong);
             let mut state = self.lock();
             match state.next_step(Instant::now(), scanning, source) {
                 Step::Exit => return,
@@ -512,14 +674,17 @@ impl ListWaveforms {
         self.lock().generation
     }
 
-    /// Replace the wanted ids (visible rows first, then the rows one screen below and
-    /// above). Unsent work for other ids is dropped and their on-demand decode cancelled.
-    pub(crate) fn set_window(&self, ids: Vec<i64>) {
+    /// Replace the wanted ids (the `visible` rows on screen first, then the rows one
+    /// screen below and above). Unsent work for other ids is dropped (including server
+    /// retries) and their on-demand decode cancelled; a sent request is not cancelled.
+    pub(crate) fn set_window(&self, ids: Vec<i64>, visible: usize) {
         self.update(|state| {
             let wanted: HashSet<i64> = ids.iter().copied().collect();
             state.looked_up.retain(|id| wanted.contains(id));
             state.compute.retain(|id| wanted.contains(id));
             state.attempted.retain(|id| wanted.contains(id));
+            state.retry_wait.retain(|id| wanted.contains(id));
+            state.visible = ids.iter().take(visible).copied().collect();
             state.window = ids;
             state.in_window = wanted;
             state.cancel_current(true);
@@ -538,6 +703,12 @@ impl ListWaveforms {
             state.cancel_current(false);
             state.window.clear();
             state.in_window.clear();
+            state.visible.clear();
+            state.pending_answers.clear();
+            state.retry_wait.clear();
+            state.retry_due = None;
+            state.offline.clear();
+            state.defer_until = None;
             state.cache.clear();
             state.cache_order.clear();
             state.verify.clear();
@@ -560,11 +731,34 @@ impl ListWaveforms {
             state.looked_up.clear();
             state.compute.clear();
             state.attempted.clear();
+            state.pending_answers.clear();
+            state.retry_wait.clear();
             state.backfill = Backfill {
                 active: state.pregenerate,
                 ..Backfill::default()
             };
         });
+    }
+
+    /// Server mode: `/roots` reports these roots online; rows that were `root_offline`
+    /// there are asked again (while in the window).
+    pub(crate) fn roots_online(&self, online: &[String]) {
+        let mut state = self.lock();
+        let back: Vec<i64> = state
+            .offline
+            .iter()
+            .filter(|(_, root)| online.contains(root))
+            .map(|(id, _)| *id)
+            .collect();
+        if back.is_empty() {
+            return;
+        }
+        for id in back {
+            state.offline.remove(&id);
+            state.looked_up.remove(&id);
+            state.verify.insert(id);
+        }
+        self.shared.wake.notify_all();
     }
 
     /// The "pre-generate list Waveforms" setting changed. Turning it off lets a running
@@ -706,7 +900,7 @@ mod tests {
 
     fn state_with_window(ids: &[i64]) -> (ListWaveforms, State) {
         let service = ListWaveforms::new(false);
-        service.set_window(ids.to_vec());
+        service.set_window(ids.to_vec(), ids.len());
         let state = std::mem::take(&mut *service.lock());
         (service, state)
     }
@@ -730,13 +924,17 @@ mod tests {
         let now = Instant::now();
         let local = ListWaveformSource::Local;
         assert_eq!(state.next_step(now, false, local), Step::Run);
-        let Task::Lookup { generation, ids } = take_task(&mut state) else {
+        let Task::Lookup {
+            generation, ids, ..
+        } = take_task(&mut state)
+        else {
             panic!("lookup first")
         };
         assert_eq!(ids, vec![1, 2, 3]);
         let cells = state.finish(Outcome::Lookup {
             generation,
             ids: ids.clone(),
+            server: false,
             result: Ok(ListWaveformBatch {
                 items: vec![
                     ListWaveformItem {
@@ -755,6 +953,7 @@ mod tests {
                     },
                 ],
                 retry_after: None,
+                deferred: None,
             }),
         });
         assert_eq!(
@@ -797,7 +996,7 @@ mod tests {
     #[test]
     fn scrolling_away_drops_unsent_work_and_cancels_the_running_decode() {
         let service = ListWaveforms::new(false);
-        service.set_window(vec![1, 2]);
+        service.set_window(vec![1, 2], usize::MAX);
         let now = Instant::now();
         let cancel = {
             let mut state = service.lock();
@@ -805,12 +1004,16 @@ mod tests {
                 state.next_step(now, false, ListWaveformSource::Local),
                 Step::Run
             );
-            let Task::Lookup { generation, ids } = take_task(&mut state) else {
+            let Task::Lookup {
+                generation, ids, ..
+            } = take_task(&mut state)
+            else {
                 panic!()
             };
             state.finish(Outcome::Lookup {
                 generation,
                 ids,
+                server: false,
                 result: Ok(ListWaveformBatch {
                     items: [1, 2]
                         .map(|id| ListWaveformItem {
@@ -819,6 +1022,7 @@ mod tests {
                         })
                         .to_vec(),
                     retry_after: None,
+                    deferred: None,
                 }),
             });
             assert_eq!(
@@ -831,7 +1035,7 @@ mod tests {
             assert_eq!(id, 1);
             cancel
         };
-        service.set_window(vec![7]);
+        service.set_window(vec![7], usize::MAX);
         assert!(
             cancel.load(Ordering::Acquire),
             "scrolled-out decode is cancelled"
@@ -928,7 +1132,7 @@ mod tests {
     #[test]
     fn stale_generations_are_dropped_and_scans_reverify_cached_rows() {
         let service = ListWaveforms::new(false);
-        service.set_window(vec![1]);
+        service.set_window(vec![1], usize::MAX);
         {
             let mut state = service.lock();
             state.remember(1, ListWaveformCell::Ready(waveform(2)));
@@ -989,6 +1193,250 @@ mod tests {
                 .lock()
                 .next_step(Instant::now(), false, ListWaveformSource::Local),
             Step::Exit
+        );
+    }
+
+    fn server_lookup(state: &mut State, now: Instant) -> (u64, Vec<i64>) {
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Run
+        );
+        let Task::Lookup {
+            generation,
+            ids,
+            server,
+            ..
+        } = take_task(state)
+        else {
+            panic!("server lookup")
+        };
+        assert!(server);
+        (generation, ids)
+    }
+
+    fn answer(
+        state: &mut State,
+        now: Instant,
+        (generation, ids): (u64, Vec<i64>),
+        items: Vec<(i64, ListWaveformState)>,
+        retry_after: Option<Duration>,
+    ) -> Vec<(i64, ListWaveformCell)> {
+        state.finish_at(
+            Outcome::Lookup {
+                generation,
+                ids,
+                server: true,
+                result: Ok(ListWaveformBatch {
+                    items: items
+                        .into_iter()
+                        .map(|(id, state)| ListWaveformItem { id, state })
+                        .collect(),
+                    retry_after,
+                    deferred: None,
+                }),
+            },
+            now,
+        )
+    }
+
+    #[test]
+    fn server_pending_rows_are_retried_while_visible_at_most_five_times() {
+        let service = ListWaveforms::new(false);
+        // Rows 1 and 2 are on screen, 3 is one screen below.
+        service.set_window(vec![1, 2, 3], 2);
+        let mut state = std::mem::take(&mut *service.lock());
+        let mut now = Instant::now();
+        // No POST during the first 3 s of an audition.
+        state.playback_start = Some(now - Duration::from_secs(1));
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(Some(Duration::from_secs(2)))
+        );
+        now += Duration::from_secs(2);
+        let request = server_lookup(&mut state, now);
+        assert_eq!(request.1, vec![1, 2, 3], "one batch, visible rows first");
+        let pending = || ListWaveformState::Pending { previous: None };
+        let cells = answer(
+            &mut state,
+            now,
+            request,
+            vec![
+                (1, pending()),
+                (
+                    2,
+                    ListWaveformState::Pending {
+                        previous: Some(waveform(4)),
+                    },
+                ),
+                (3, pending()),
+            ],
+            Some(Duration::from_secs(3)),
+        );
+        assert_eq!(cells, vec![(2, ListWaveformCell::Ready(waveform(4)))]);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(Some(Duration::from_secs(3)))
+        );
+        // Row 2 scrolls off screen (still in the window): only row 1 is retried.
+        state.visible = HashSet::from([1]);
+        for retry in 1..=MAX_PENDING_RETRIES {
+            now += Duration::from_secs(3);
+            let request = server_lookup(&mut state, now);
+            assert_eq!(request.1, vec![1], "retry {retry}");
+            answer(
+                &mut state,
+                now,
+                request,
+                vec![(1, pending())],
+                Some(Duration::from_secs(3)),
+            );
+        }
+        now += Duration::from_secs(30);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(None),
+            "no sixth retry"
+        );
+        // A newly visible row is asked about at once; ready rows are not retried.
+        state.window.push(4);
+        state.in_window.insert(4);
+        let request = server_lookup(&mut state, now);
+        assert_eq!(request.1, vec![4]);
+        let cells = answer(
+            &mut state,
+            now,
+            request,
+            vec![(
+                4,
+                ListWaveformState::Ready {
+                    waveform: waveform(128),
+                },
+            )],
+            None,
+        );
+        assert_eq!(cells, vec![(4, ListWaveformCell::Ready(waveform(128)))]);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(None)
+        );
+    }
+
+    #[test]
+    fn server_busy_errors_and_offline_roots_follow_their_rules() {
+        let service = ListWaveforms::new(false);
+        service.set_window(vec![1, 2, 3, 4], 4);
+        let mut now = Instant::now();
+        let mut state = service.lock();
+        let (generation, ids) = server_lookup(&mut state, now);
+        // 503 BUSY: nothing answered, everything is asked again after Retry-After.
+        assert!(
+            state
+                .finish_at(
+                    Outcome::Lookup {
+                        generation,
+                        ids,
+                        server: true,
+                        result: Ok(ListWaveformBatch {
+                            deferred: Some(Duration::from_secs(4)),
+                            ..ListWaveformBatch::default()
+                        }),
+                    },
+                    now,
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(Some(Duration::from_secs(4)))
+        );
+        now += Duration::from_secs(4);
+        let request = server_lookup(&mut state, now);
+        assert_eq!(request.1, vec![1, 2, 3, 4]);
+        let cells = answer(
+            &mut state,
+            now,
+            request,
+            vec![
+                (1, ListWaveformState::Missing),
+                (
+                    2,
+                    ListWaveformState::Failed {
+                        message: "Cannot decode".into(),
+                    },
+                ),
+                (
+                    3,
+                    ListWaveformState::RootOffline {
+                        root: "SFX".into(),
+                        previous: Some(waveform(8)),
+                    },
+                ),
+                (
+                    4,
+                    ListWaveformState::RootOffline {
+                        root: "Other".into(),
+                        previous: None,
+                    },
+                ),
+            ],
+            None,
+        );
+        assert_eq!(
+            cells,
+            vec![
+                (1, ListWaveformCell::Unavailable),
+                (2, ListWaveformCell::Unavailable),
+                (3, ListWaveformCell::Offline(Some(waveform(8)))),
+                (4, ListWaveformCell::Offline(None)),
+            ]
+        );
+        // Missing, error and offline rows are not retried on their own.
+        now += Duration::from_secs(60);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(None)
+        );
+        drop(state);
+        // `/roots` shows SFX online again: only its rows are asked again.
+        service.roots_online(&["SFX".into()]);
+        let mut state = service.lock();
+        let request = server_lookup(&mut state, now);
+        assert_eq!(request.1, vec![3]);
+        let cells = answer(
+            &mut state,
+            now,
+            request,
+            vec![(
+                3,
+                ListWaveformState::Ready {
+                    waveform: waveform(16),
+                },
+            )],
+            None,
+        );
+        assert_eq!(cells, vec![(3, ListWaveformCell::Ready(waveform(16)))]);
+        assert!(!state.offline.contains_key(&3) && state.offline.contains_key(&4));
+        // A failed request (unreachable server) backs off; the rows wait for a new window.
+        state.window.push(5);
+        state.in_window.insert(5);
+        state.visible.insert(5);
+        let (generation, ids) = server_lookup(&mut state, now);
+        state.finish_at(
+            Outcome::Lookup {
+                generation,
+                ids,
+                server: true,
+                result: Err(Error::Database("unreachable".into())),
+            },
+            now,
+        );
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Server),
+            Step::Wait(Some(ERROR_BACKOFF))
+        );
+        assert_eq!(
+            state.next_step(now + ERROR_BACKOFF, false, ListWaveformSource::Server),
+            Step::Wait(None)
         );
     }
 

@@ -19,7 +19,8 @@ export struct AudioRow {
     checked: bool,
     marker: color,
     // List thumbnail Waveform: 0 placeholder (not loaded), 1 `wave` thumbnail stretched
-    // to the column, 2 center line (empty file), 3 no Waveform (missing/undecodable).
+    // to the column, 2 center line (empty file), 3 no Waveform (missing/undecodable),
+    // 4 root offline (server mode: a stale `wave` with the offline tint, or a placeholder).
     wave-state: int,
     wave: image,
 }
@@ -403,7 +404,9 @@ export component AppWindow inherits Window {
     // List thumbnail Waveforms (local mode; hidden in server mode until the server batch
     // client is available). Rust reports the visible row window for on-demand loading.
     in property <bool> list-waveforms-enabled: true;
-    private property <bool> list-waveforms-visible: root.list-waveforms-enabled && !root.remote-mode;
+    // Server mode: the server offers usable list Waveforms (`/capabilities`).
+    in property <bool> list-waveforms-server: false;
+    private property <bool> list-waveforms-visible: root.list-waveforms-enabled && (!root.remote-mode || root.list-waveforms-server);
     in-out property <bool> pregenerate-list-waveforms: false;
     callback pregenerate-list-waveforms-requested(bool);
     callback result-window-changed(int, int);
@@ -672,6 +675,15 @@ export component AppWindow inherits Window {
     in property <bool> sm-scan-active: false;
     in property <string> sm-scan-text: "";
     in property <[string]> sm-history;
+    // List thumbnail Waveforms of the server (§9.2) on 服务器音效库.
+    in property <bool> sm-wave-supported: false;
+    in-out property <bool> sm-wave-pregenerate: false;
+    in property <bool> sm-wave-can-change: false;
+    in property <bool> sm-wave-busy: false;
+    in property <string> sm-wave-status: "";
+    in property <string> sm-wave-message: "";
+    in property <bool> sm-wave-error: false;
+    callback sm-wave-pregenerate-requested(bool);
     // Server management on 服务器音效库 (B2): active server only, gated on can_manage.
     in property <[string]> sm-root-names;
     in property <bool> sm-scan-paused: false;
@@ -1432,6 +1444,16 @@ export component AppWindow inherits Window {
                                             if row.wave-state == 1: Image {
                                                 width: parent.width; height: parent.height - 8px;
                                                 source: row.wave; image-fit: fill; image-rendering: smooth;
+                                            }
+                                            // Root offline: the stale copy dimmed under a warning tint.
+                                            if row.wave-state == 4: Rectangle {
+                                                width: parent.width; height: parent.height - 8px; border-radius: 2px;
+                                                background: Theme.warning.with-alpha(0.12);
+                                                Rectangle { width: parent.width; height: 1px; background: Theme.warning; opacity: 0.5; }
+                                                Image {
+                                                    width: parent.width; height: parent.height;
+                                                    source: row.wave; image-fit: fill; image-rendering: smooth; opacity: 0.45;
+                                                }
                                             }
                                         }
                                         table-name-cell := Text { width: root.table-name-size - 24px; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : Theme.ink; font-size: 12px; overflow: elide; vertical-alignment: center; }
@@ -2225,6 +2247,19 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         if root.sm-manage-message != "": Label { wrap: word-wrap; font-size: 11px; color: root.sm-manage-error ? Theme.warning : Theme.accent; text: root.sm-manage-message; }
+                                        if root.sm-wave-supported: Rectangle { height: 1px; background: Theme.border; }
+                                        if root.sm-wave-supported: Text { height: 22px; text: root.chinese ? "列表缩略波形" : "List thumbnail Waveforms"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                                        if root.sm-wave-supported: sm-wave-pregenerate-check := CheckBox {
+                                            height: 28px; enabled: root.sm-wave-can-change && !root.sm-wave-busy;
+                                            text: root.chinese ? "服务器预生成列表波形" : "Pre-generate list Waveforms on the server";
+                                            checked <=> root.sm-wave-pregenerate;
+                                            toggled => { root.sm-wave-pregenerate-requested(self.checked); }
+                                        }
+                                        if root.sm-wave-supported: Label { wrap: word-wrap; font-size: 10px; color: Theme.muted;
+                                            text: (root.chinese ? "服务器设置 pregenerate_list_waveforms：开启后服务器以最低优先级为全库补齐缩略波形（NAS 会保持唤醒），试听和扫描时让路；关闭时只计算客户端请求的行。" : "Server setting pregenerate_list_waveforms: when on, the server fills in thumbnails for the whole library at the lowest priority (the NAS stays awake), yielding to auditions and scans; when off it only computes rows clients ask for.") + (root.sm-wave-can-change ? "" : (root.chinese ? " 服务器不允许本机修改，只能查看。" : " The server does not allow this PC to change it; view only."));
+                                        }
+                                        if root.sm-wave-supported && root.sm-wave-status != "": Text { text: root.sm-wave-status; color: root.sm-wave-error ? Theme.warning : Theme.dim; font-size: 11px; wrap: word-wrap; }
+                                        if root.sm-wave-supported && root.sm-wave-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.sm-wave-message; }
                                         Rectangle { height: 1px; background: Theme.border; }
                                         Text { height: 22px; text: root.chinese ? "扫描历史（最近 20 次）" : "Scan history (latest 20)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
                                         for line[index] in root.sm-history: Rectangle { height: 40px; background: Math.mod(index, 2) == 0 ? Theme.raised : Theme.panel;
