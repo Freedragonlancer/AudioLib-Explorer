@@ -2,6 +2,7 @@
   "language": "en",
   "active_database": null,
   "audition_play_on_single_click": false,
+  "pregenerate_list_waveforms": false,
   "audio_table": {
     "name_width": 360.0,
     "duration_width": 80.0,
