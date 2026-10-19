@@ -1,5 +1,79 @@
 # Rust 验证报告
 
+## WASAPI 96 kHz Waveform 定位补修（2026-10-18，0.4.7）
+
+根据用户反馈复查默认 WASAPI、96 kHz、播放中点击 Waveform。确定性回归复现旧顺序在淡出前打开解码器，以及 Pause/Load 保留设备队列的问题；此前单独测试包络和环形缓冲未覆盖这两层。控制线程现在先静音旧源，再执行可能阻塞的打开/定位；暂停前排空设备队列，失败路径也保留淡出尾段。细节见 [审查修复](Rust_Review_Fixes.md)。
+
+真实 Worker/RenderCallback 测试覆盖 48/96 kHz、慢 opener、目标帧与源位置；独立的两缓冲设备 FIFO 覆盖暂停恢复、暂停后定位、复用输出换素材、重开失败、网络 Waiting 和 ASIO 两次完整静音回调。数据均为隔离临时 WAV。
+
+`cargo run --locked -p audiolib-audio --example seek-loopback -- --device <明确端点子串> --expected-rate <设备频率> --volume <增益>` 实际使用 CPAL WASAPI render-endpoint loopback。测试合成正负 DC 段，重开延迟 200 ms（一次定位可能多次打开），执行播放中定位、暂停后定位、三条排队定位、换源和 Stop，不修改系统默认设备或工作库。
+
+| 实测端点 | 结果 |
+| --- | --- |
+| CABLE Input，48 kHz，增益 0.3 | 360,384 个交错样本，峰值 0.045；各定位窗口最大同声道相邻差 0.001451619，等于 32 帧线性包络的约 `峰值/31` |
+| Zen Go Playback 1/2，96 kHz，增益 0.01 | 741,120 个交错样本，峰值 0.001447988；定位、暂停、换源和 Stop 窗口最大相邻差 0.00004670944，约 `峰值/31`；首次 Play 的全局最大差为 0.0003016642 |
+
+两次捕获都无容量溢出、削波、非有限值或致命采集错误，所有播放命令的引擎 underruns 为 0。捕获端分别报告 2/1 次 Xrun，96 kHz 的首次通知在样本 0；因此不称为无损采集，也不等同于模拟输出回录、人工听感或声学延迟验收。最初诊断在停止输出后才停止捕获而收到错误通知，后续增加错误分类并先停止捕获；原失败报告保留，未计为通过。
+
+96 kHz PCM 逐帧复核：左右声道一致，实际输出定位段的 32 点包络拟合最大误差 `1.46e-10`。三条排队定位中前两条未形成非零输出，不能计为各自播放了完整淡入；最终目标起音前连续 118,050 帧为零，未发现旧 PCM 重现。首次 Play 的较大步差符合现有绝对音量平滑步长在 0.01 增益下约五步达到目标的公式，与定位包络分开记录。
+
+本机忽略目录 `.rust-validation/seek-device/` 保存前后回归日志、两份实际端点 PCM/JSON、构建及安装身份。性能目标仍为 **P95 latency <500ms for 1M+ records**；本轮不重新测量搜索性能。
+
+Rust 1.97.1 MSVC 的格式检查、默认与 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试均通过。每种配置各 50 个顶层目标、806 passed、70 ignored、0 failed，音频模块为 72 passed、1 ignored；隔离子进程不重复计数。209 个应用、crate、服务端、配置及资源输入在检查前后 SHA256 一致。ASIO 使用准备脚本校验的 SDK 2.3.4。
+
+2026-10-19 完成源码提交 `4ec211a` 的 ASIO release 构建，耗时 4 分 54 秒，构建及发布回归期间上述 209 个输入保持一致。播放 IPC 17 项通过，默认 WASAPI 实际输出为 96 kHz、960 帧；隔离空库 WM_CLOSE/SC_CLOSE 各 3 次全部正常退出并重新打开库。便携包的隐私边界和 `validate-portable.ps1 -CleanCheckout` 通过。
+
+固定 `local_release/` 已用本轮验证过的 1,213 个包内文件覆盖更新，两个 EXE 与包 SHA256 一致，安装后的独立临时数据 portable 验收通过，CLI 版本为 0.4.7。正常 `%LOCALAPPDATA%/AudioLibExplorer/v1` 的现有数据库、SQLite sidecar 和设置共 6 个基线文件 SHA256 未变，正常数据目录环境保留。旧库/WAV fixture 不可用的检查采用明确的 CleanCheckout，未执行依赖旧 fixture 的 runtime/ACL 验收。该段为构建完成后的文档记录，不改变已验收的二进制。
+
+- AudioLibExplorer.exe：`B00D3255FB1DBEB0E797A611B13D2FA0FA15EFBB147D0D9788C9F71AEF1F69C2`
+- AudioLibCli.exe：`4165BC7C09BDE6A47041983EF418357C8ACBC5CD9C804C932E870CAF31ED5411`
+
+## Seek 淡入淡出复审补修（2026-10-14，0.4.7）
+
+复审补齐短尾缓冲：旧 PCM 不足或为空时，用当前源最近真实立体声样本完成有界衰减，合成帧不推进播放位置；普通静音及源修订变化清除尾样本。Stop 在已排队的淡出尾段排空后暂停 CPAL 流，播放中的 seek 继续保持流运行。问题与修复对应见 [审查修复](Rust_Review_Fixes.md)。
+
+新增 3 项硬件无关回归，覆盖 0/1/7/31 帧旧缓冲、EOF/网络缺流、源位置计数、静音后不重现旧尾音，以及新源尚无 PCM 时清除旧尾音。补修前 10 项 seek 测试中 8 passed、2 failed，确认缺陷；补修后音频模块 64 passed、0 failed、1 ignored。
+
+格式检查、默认与 ASIO 严格 Clippy、工作区全部目标测试通过：两种配置各 49 个顶层目标、798 passed、0 failed、70 ignored，隔离子进程只累计一次。测试输入为隔离临时文件，207 个源码、配置及资源输入在检查期间 SHA256 一致。日志、源码清单和固定安装的 EXE 身份、portable 验收记录保留于本机忽略目录 `.rust-validation/seek-review/`；非零 PCM 数字包络测试不等同于物理回录或人工听感验收。
+
+使用已校验 ASIO SDK 2.3.4 的 release 构建耗时 6 分 51 秒；`validate-playback-ipc.ps1 -CleanCheckout` 与 `validate-desktop-close.ps1 -Cycles 3` 均通过。后者在独立空库完成 WM_CLOSE/SC_CLOSE 各 3 例，全部正常退出且库可重新打开，本轮未发生退出超时。构建及发布回归前后 207 个输入的 SHA256 一致；保留前轮偶发超时记录，不把本轮通过当作已定位该旧问题的证据。
+
+## Seek 边界 click 修复（2026-10-14，0.4.7）
+
+源码基于 `8b7ebd5` 加本轮本地修复，版本仍为 0.4.7。定位前后对每声道使用 32 个设备输出采样点的线性淡出/淡入，独立于音量平滑；设备在替换源时持续输出静音，避免暂停丢弃已排队的淡出尾段。控制线程等待带源修订号的零帧确认，回调不增加锁、分配、文件 I/O 或解码。暂停时定位保留淡入到下一次 Play；共享源重建路径上的 Stop 也先淡出，再保留静音设备流。
+
+新增 7 项硬件无关回归，覆盖正负 PCM 跳变、完整 32 点端点、跨小块回调、监听声道路由和音量保留、静音后停止消耗旧 PCM、暂停及连续定位、真实控制线程/模拟回调握手、旧源确认隔离、设备失败及回调超时。原有定位位置、传输修订号和播放历史会话回归保留。
+
+Rust 1.97.1 MSVC 格式检查、默认与 ASIO 严格 Clippy、工作区全部目标测试通过；两种配置各 49 个顶层目标、795 passed、0 failed、70 ignored，隔离子进程只累计一次。ASIO SDK 2.3.4 经校验后使用。日志及源码 SHA256 清单保存在本机忽略目录 `.rust-validation/seek-click/`。非零 PCM 断言验证数字输出包络，不等同于物理回录或人工听感验收；本轮不重测百万记录搜索与物理音频启动延迟。
+
+ASIO release 构建耗时 6 分 18 秒，`validate-playback-ipc.ps1 -CleanCheckout` 通过。额外关闭验收首轮的 SC_CLOSE 第 2 例超时：空库未加载音频，最初未记录关闭请求；补发 WM_CLOSE 后排空完成且窗口隐藏，但事件循环未退出。同源重跑 WM_CLOSE/SC_CLOSE 各 3 例全部正常退出。首轮不计作通过；已核验并清理仅该隔离空库测试进程，保留 fixture 和失败日志，不将其计为 graceful shutdown。尚未确认该偶发事件循环退出问题的根因。
+
+## 列宽与排序复审补修（2026-10-13，0.4.7）
+
+源码基于 `f8453be3cbc10469ea657c245f62d06342d093ae` 加表格功能及本轮三项修复；程序版本仍为 0.4.7，schema/API 不变。用户标签采用与源标签一致的 Unicode 排序键，Unicode 纯空白标注回退源标签；空结果保留完整列宽和横向滚动。具体问题见 [审查修复](Rust_Review_Fixes.md)。
+
+格式检查、默认与 ASIO 严格 Clippy、工作区全部目标测试均通过。两种配置各完成 49 个顶层目标、788 passed、0 failed、70 ignored；隔离子进程只累计一次，不将忽略项计作通过。206 个源码、配置及资源输入在检查期间 SHA256 保持一致。
+
+新增标签回归覆盖 `Straße` 与 `strassz`、ASCII/Unicode 边界空白、NULL 和空标注、派生键就绪前后、升降序、FTS5、缺失文件与稳定分页。标注编辑仅允许现有修改时间更新；原始 Metadata 和未知扩展字段完整保留，全部排序查询前后的 Metadata 与标注逐项一致。
+
+空列表回归通过同一 VecModel 的空→有→空→有切换，验证真实滚轮输入、右侧标签表头排序、分隔线拖动及键盘调整、小数列宽、无溢出布局、清除搜索按钮与恢复后的五列对齐。60ms 快速切换也通过；公共 `PointerScrolled` 是即时输入，不将其计作底层 `TouchPhase::Moved` 物理动画时序验证。
+
+ASIO release 使用已验证 Steinberg SDK 2.3.4，构建耗时 5 分 41 秒；206 个输入在检查、构建及发布回归期间 SHA256 一致。`validate-review-fixes.ps1 -CleanCheckout` 和 `validate-desktop-close.ps1 -Cycles 3` 通过，后者完成 WM_CLOSE、SC_CLOSE 各三轮重复关闭，全部自然退出、正常 shutdown 且隔离空库重新打开成功。本机缺少旧数据库及真实 WAV fixture，不将缺失素材的验证计作通过。
+
+完整日志和源码 SHA256 清单保留于本机忽略目录 `.rust-validation/table-review-fixes/`；便携包及固定 `local_release/` 安装的后续验收、EXE 哈希也记录于该目录。本轮未重测百万条性能或物理音频启动延迟；主指标仍为 **P95 latency <500ms for 1M+ records**。
+
+## 声音列表列宽与排序（2026-10-13，0.4.7）
+
+源码基于 `f8453be3cbc10469ea657c245f62d06342d093ae` 加本轮表格功能；程序版本仍为 0.4.7，schema/API 不变。五列支持拖动调整、双击恢复单列、列菜单恢复默认布局及横向滚动。表头切换文件名、时长、采样率、声道与标签的升降序，排序作用于全部搜索结果并回到第一页；修改时间继续通过排序下拉框选择。列宽和排序保存到现有本机偏好，重启及切换音效库后保留。
+
+格式检查、默认与 ASIO 严格 Clippy、工作区全部目标测试均通过。两种配置各完成 49 个顶层目标、786 passed、0 failed、70 ignored；隔离子进程结果仅累计一次，不将忽略项计作通过。新增回归验证真实表头点击、宽文件名列缩窄、分隔线多段拖动及上下限、双击与菜单恢复，以及宽窗口、调整列宽和横向滚动后的五列表头/单元格对齐。
+
+205 条合成 WAV 的隔离控制器回归验证全库升降序、跨页与排序后回到第一页、偏好加载、后台保存及关闭时保存最新布局；配置保存锁被占用时，布局回调仍能返回。分页/FTS5 回归覆盖声道与标签排序、缺失文件、稳定 ID 次序和标注修改；源标签的 Unicode 排序在派生键就绪前后保持一致。标签排序采用用户标签优先、空用户标签回退源标签的规则。
+
+ASIO release 使用已验证 Steinberg SDK 2.3.4，构建耗时 4 分 21 秒；构建输入与完整检查时的 SHA256 清单一致。`validate-review-fixes.ps1 -CleanCheckout` 与 `validate-desktop-close.ps1 -Cycles 3` 通过，后者完成 WM_CLOSE、SC_CLOSE 各三轮重复关闭，全部自然退出、正常 shutdown 且隔离空库重新打开成功。本机缺少旧数据库及真实 WAV fixture，不将缺失素材的验证计作通过。
+
+完整检查、专项回归日志与源码 SHA256 清单保留于本机忽略目录 `.rust-validation/table-controls/`；便携包和固定 `local_release/` 安装的后续验证及 EXE 哈希也记录于该目录。本轮未重测百万条性能或物理音频启动延迟；主指标仍为 **P95 latency <500ms for 1M+ records**。
+
 ## 推送前复审补修（2026-10-13，0.4.4）
 
 最终代码提交为 `9cbd54d4a1482f919121cab3fe1bbc81a86494b5`，覆盖此前尚未推送的客户端、服务端、关闭与公开包修复。另一个进行中的服务器目录功能保留在原工作区，本轮使用独立工作目录；版本、schema 与 API 不变。三项新增功能修复见 [审查修复](Rust_Review_Fixes.md)。

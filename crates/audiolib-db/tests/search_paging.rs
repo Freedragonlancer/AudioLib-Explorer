@@ -44,6 +44,11 @@ fn deferred_metadata_hydration_matches_direct_sql_for_every_sort_and_visibility(
         (SortOrder::Duration, "af.duration"),
         (SortOrder::SampleRate, "af.sample_rate"),
         (SortOrder::Modified, "af.modified_at"),
+        (SortOrder::Channels, "af.channels"),
+        (
+            SortOrder::Tags,
+            "COALESCE(NULLIF(trim(af.user_tags),''),af.source_tags_text) COLLATE NOCASE",
+        ),
     ] {
         for descending in [false, true] {
             for (visibility, visible_sql) in [
@@ -164,6 +169,11 @@ fn unfiltered_fts_counts_subtract_only_matching_missing_records_for_every_sort()
         (SortOrder::Duration, "af.duration"),
         (SortOrder::SampleRate, "af.sample_rate"),
         (SortOrder::Modified, "af.modified_at"),
+        (SortOrder::Channels, "af.channels"),
+        (
+            SortOrder::Tags,
+            "COALESCE(NULLIF(trim(af.user_tags),''),af.source_tags_text) COLLATE NOCASE",
+        ),
     ] {
         for descending in [false, true] {
             let direction = if descending && order_by != SortOrder::Relevance {
@@ -227,6 +237,90 @@ fn unfiltered_fts_counts_subtract_only_matching_missing_records_for_every_sort()
             }
         }
     }
+}
+
+#[test]
+fn table_column_sorts_keep_annotation_priority_source_fallback_and_stable_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("table-sorts.db");
+    let provider = SqliteProvider::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    for (id, channels, tags, source, missing) in [
+        (1, 2, "Zulu", "aardvark", false),
+        (2, 1, "Beta", "zulu", false),
+        (3, 2, "\u{3000}\u{2003}\t", "alpha", false),
+        (4, 6, "beta", "aardvark", false),
+        (5, 1, "  ", "", false),
+        (6, 2, "  Alpha\u{3000}\u{2003}", "zulu", false),
+        (7, 1, "", "aardvark", true),
+    ] {
+        conn.execute(
+            "INSERT INTO audio_files(id,file_path,filename,channels,user_tags,
+             source_tags_text,metadata_json,missing) VALUES(?1,?2,'metal.wav',?3,?4,?5,?6,?7)",
+            params![
+                id,
+                format!("root/{id}.wav"),
+                channels,
+                tags,
+                source,
+                serde_json::json!({"wav_metadata":{"fields":{"keywords":source}}}).to_string(),
+                missing,
+            ],
+        )
+        .unwrap();
+    }
+    for (order_by, descending, expected) in [
+        (SortOrder::Channels, false, vec![2, 5, 1, 3, 6, 4]),
+        (SortOrder::Channels, true, vec![4, 1, 3, 6, 2, 5]),
+        (SortOrder::Tags, false, vec![5, 3, 6, 2, 4, 1]),
+        (SortOrder::Tags, true, vec![1, 2, 4, 3, 6, 5]),
+    ] {
+        for query in ["", "metal"] {
+            let mut actual = Vec::new();
+            for offset in [0, 2, 4, 6] {
+                let page = provider
+                    .search(&SearchRequest {
+                        query: query.into(),
+                        order_by,
+                        descending,
+                        limit: 2,
+                        offset,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(page.total_count, 6);
+                actual.extend(page.results.into_iter().map(|file| file.id));
+            }
+            assert_eq!(
+                actual, expected,
+                "{order_by:?}, descending={descending}, {query}"
+            );
+        }
+    }
+    // Annotation edits immediately affect order without modifying the embedded tags.
+    provider
+        .update_metadata(
+            1,
+            &audiolib_core::MetadataPatch {
+                tags: Some("".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let page = provider
+        .search(&SearchRequest {
+            order_by: SortOrder::Tags,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
+        [5, 1, 3, 6, 2, 4]
+    );
+    assert_eq!(
+        provider.get_audio(1).unwrap().attributes["wav_metadata"]["fields"]["keywords"],
+        "aardvark"
+    );
 }
 
 #[test]

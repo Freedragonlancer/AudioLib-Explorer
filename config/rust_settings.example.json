@@ -2,6 +2,15 @@
   "language": "en",
   "active_database": null,
   "audition_play_on_single_click": false,
+  "audio_table": {
+    "name_width": 360.0,
+    "duration_width": 80.0,
+    "format_width": 100.0,
+    "channels_width": 64.0,
+    "tags_width": 160.0,
+    "order_by": "relevance",
+    "descending": false
+  },
   "playback": {
     "backend": "wasapi",
     "device_id": null,

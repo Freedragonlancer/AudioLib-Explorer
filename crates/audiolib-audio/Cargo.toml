@@ -15,6 +15,10 @@ asio = ["playback", "cpal/asio", "audiolib-windows/asio"]
 name = "audio-smoke"
 required-features = ["playback"]
 
+[[example]]
+name = "seek-loopback"
+required-features = ["playback"]
+
 [dependencies]
 audiolib-core = { path = "../audiolib-core" }
 audiolib-windows = { path = "../audiolib-windows" }
