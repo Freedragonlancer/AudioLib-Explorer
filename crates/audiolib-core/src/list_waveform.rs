@@ -112,6 +112,60 @@ impl ListWaveform {
             .collect();
         Self::new(samples_per_pixel, values)
     }
+
+    /// Parse a `POST /waveforms` item (§9.1): `peaks` is standard base64 (RFC 4648, with
+    /// padding) of `n` interleaved int16 LE min/max pairs. The server does not send
+    /// `samples_per_pixel`, so it is reported as 1.
+    pub fn from_base64_peaks(peaks: &str, columns: usize) -> Result<Self> {
+        let bytes = decode_base64(peaks)?;
+        if bytes.len() != columns.saturating_mul(4) {
+            return Err(Error::Validation(format!(
+                "List Waveform peaks hold {} bytes, expected {} for n = {columns}",
+                bytes.len(),
+                columns.saturating_mul(4)
+            )));
+        }
+        Self::from_interleaved_le(1, &bytes)
+    }
+}
+
+/// Strict standard base64 (RFC 4648 alphabet, `=` padding required, no whitespace).
+pub fn decode_base64(text: &str) -> Result<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        Some(match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    }
+    let invalid = || Error::Validation("Invalid base64 in list Waveform peaks".into());
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err(invalid());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let last = index + 1 == bytes.len() / 4;
+        let padding = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        if padding > 2 || (padding > 0 && !last) {
+            return Err(invalid());
+        }
+        let mut word = 0_u32;
+        for byte in &chunk[..4 - padding] {
+            word = (word << 6) | value(*byte).ok_or_else(invalid)?;
+        }
+        word <<= 6 * padding as u32;
+        let decoded = [(word >> 16) as u8, (word >> 8) as u8, word as u8];
+        // Non-canonical encodings (bits set in the padding) are rejected.
+        if decoded[3 - padding..].iter().any(|byte| *byte != 0) {
+            return Err(invalid());
+        }
+        out.extend_from_slice(&decoded[..3 - padding]);
+    }
+    Ok(out)
 }
 
 fn int16_le(bytes: &[u8]) -> Vec<i16> {
@@ -173,6 +227,10 @@ pub struct ListWaveformBatch {
     pub items: Vec<ListWaveformItem>,
     /// Suggested wait before asking again about still-visible `Pending` ids (server mode).
     pub retry_after: Option<Duration>,
+    /// Nothing was answered and every id should be asked again after this wait (a busy
+    /// server, `503 BUSY` with `Retry-After`). `items` is then empty.
+    #[serde(default)]
+    pub deferred: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -214,5 +272,32 @@ mod tests {
         assert_eq!(empty.columns(), 0);
         assert_eq!(empty.samples_per_pixel, 1);
         assert!(empty.to_interleaved_le().is_empty());
+    }
+
+    #[test]
+    fn base64_peaks_decode_rfc4648_vectors_strictly() {
+        for (output, input) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(decode_base64(input).unwrap(), output.as_bytes(), "{input}");
+        }
+        assert_eq!(decode_base64("+/8=").unwrap(), [0xfb, 0xff]);
+        for bad in [
+            "Zg", "Zg=", "Z===", "Zm9v\n", "Zg==Zg==", "Zh==", "Zm9-", "Zm=v",
+        ] {
+            assert!(decode_base64(bad).is_err(), "{bad:?}");
+        }
+        // `n = 1`: [min 1, max -1] as int16 LE.
+        let item = ListWaveform::from_base64_peaks("AQD//w==", 1).unwrap();
+        assert_eq!(item.values, vec![1, -1]);
+        assert!(ListWaveform::from_base64_peaks("AQD//w==", 2).is_err());
+        let empty = ListWaveform::from_base64_peaks("", 0).unwrap();
+        assert_eq!(empty.columns(), 0);
     }
 }
