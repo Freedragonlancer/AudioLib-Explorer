@@ -22,10 +22,11 @@ use audiolib_core::config::{ActiveSource, DataSourceMode, DataSourceSettings, Te
 use audiolib_core::profiles::{MAX_PROFILE_NAME_CHARS, ServerProfile, same_server_url};
 use audiolib_core::{ScanSession, ScanState};
 use audiolib_remote::{
-    CacheState, Capabilities, ManageMode, ProfileEdit, RemoteCache, RemoteClient, RemoteError,
-    RemoteRoot, RemoteSecrets, RootScan, RootState, ScanControl, ScanMode, ScanRequest, ServerScan,
-    edit_transcode, manage_error_text, remove_server_profile, root_status_text, save_profile_edit,
-    save_secrets, test_connection, use_external_address,
+    CacheState, Capabilities, ListWaveformStatus, ManageMode, ProfileEdit, RemoteCache,
+    RemoteClient, RemoteError, RemoteRoot, RemoteSecrets, RootScan, RootState, ScanControl,
+    ScanMode, ScanRequest, ServerScan, ServerSettings, edit_transcode, manage_error_text,
+    remove_server_profile, root_status_text, save_profile_edit, save_secrets, test_connection,
+    use_external_address,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::Arc;
@@ -34,6 +35,8 @@ use std::time::Duration;
 
 /// How often the 服务器音效库 page polls an active server scan.
 const SCAN_POLL: Duration = Duration::from_millis(500);
+/// How often the 服务器音效库 page polls `GET /waveforms/status` while it stays open.
+const WAVE_STATUS_POLL: Duration = Duration::from_secs(5);
 /// Scan sessions shown on the 服务器音效库 page.
 const HISTORY_LIMIT: usize = 20;
 /// Server pages.
@@ -79,6 +82,8 @@ pub(super) struct SourceManager {
     /// Bumped on every page, selection or visibility change: server library loads and
     /// scan polling stop when theirs is no longer current.
     library_generation: u64,
+    /// Bumped by each list Waveform status poll start; older polls stop.
+    wave_poll: u64,
     /// A busy indicator belongs to one request; invalidation releases it and a
     /// delayed completion cannot release a newer request's indicator.
     manage_sequence: u64,
@@ -125,17 +130,34 @@ struct LibraryPage {
     capabilities: Result<Capabilities, RemoteError>,
     scan: Result<Option<ServerScan>, RemoteError>,
     history: Result<Vec<ScanSession>, RemoteError>,
+    /// `GET /settings` and `GET /waveforms/status`, only when the server offers list
+    /// Waveforms.
+    waves: Option<(
+        Result<ServerSettings, RemoteError>,
+        Result<ListWaveformStatus, RemoteError>,
+    )>,
 }
 
 impl LibraryPage {
     fn fetch(client: &RemoteClient, host: String) -> Result<Self, RemoteError> {
+        let roots = client.roots()?;
+        let capabilities = client.capabilities();
+        let waves = capabilities
+            .as_ref()
+            .is_ok_and(Capabilities::list_waveforms_usable)
+            .then(|| (client.server_settings(), client.list_waveform_status()));
         Ok(Self {
             host,
-            roots: client.roots()?,
-            capabilities: client.capabilities(),
+            roots,
+            capabilities,
             scan: client.current_scan(),
             history: client.scan_history(HISTORY_LIMIT, 0),
+            waves,
         })
+    }
+
+    fn waves_supported(&self) -> bool {
+        self.waves.is_some()
     }
 
     fn scan_active(&self) -> bool {
@@ -191,6 +213,8 @@ impl Controller {
         ui.on_sm_scan_start_requested(move || c.start_server_scan());
         let c = self.clone();
         ui.on_sm_scan_control_requested(move |action| c.control_server_scan(action));
+        let c = self.clone();
+        ui.on_sm_wave_pregenerate_requested(move |enabled| c.set_server_pregenerate(enabled));
         let c = self.clone();
         ui.on_sm_remove_records_requested(move || c.remove_server_records());
         let c = self.clone();
@@ -1165,6 +1189,9 @@ impl Controller {
                 .and_then(|scan| scan.as_ref())
                 .map(|scan| scan.progress.session_id)
                 .filter(|id| *id > 0);
+            if page.waves_supported() {
+                c.poll_wave_status(generation, client.clone(), chinese);
+            }
             c.post_library_page(generation, page, chinese);
             while polling {
                 std::thread::sleep(SCAN_POLL);
@@ -1216,6 +1243,102 @@ impl Controller {
                     }
                 }
             }
+        });
+    }
+
+    /// `GET /waveforms/status` every 5 s while this page stays open on this server
+    /// (the first reading came with the page).
+    fn poll_wave_status(self: &Arc<Self>, generation: u64, client: RemoteClient, chinese: bool) {
+        let poll = {
+            let mut remote = self.remote.lock().unwrap();
+            remote.manager.wave_poll += 1;
+            remote.manager.wave_poll
+        };
+        let c = self.clone();
+        let current = move |c: &Self| {
+            c.library_current(generation)
+                && c.remote.lock().unwrap().manager.wave_poll == poll
+                && !c.shutdown.load(Ordering::Acquire)
+        };
+        let spawned = std::thread::Builder::new()
+            .name("audiolib-wave-status".into())
+            .spawn(move || {
+                loop {
+                    let deadline = std::time::Instant::now() + WAVE_STATUS_POLL;
+                    while std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(250));
+                        if !current(&c) {
+                            return;
+                        }
+                    }
+                    let status = client.list_waveform_status();
+                    let c2 = c.clone();
+                    post(c.ui.clone(), move |ui| {
+                        if c2.library_current(generation) {
+                            publish_wave_status(&ui, &status, chinese);
+                        }
+                    });
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not start the list Waveform status poll");
+        }
+    }
+
+    /// 服务器音效库 「服务器预生成列表波形」: `PATCH /settings` (gated by `manage_mode`).
+    fn set_server_pregenerate(self: &Arc<Self>, enabled: bool) {
+        let chinese = self.chinese.load(Ordering::Acquire);
+        let generation = self.remote.lock().unwrap().manager.library_generation;
+        let client = match self.active_manage_client() {
+            Ok((_, client, _)) => client,
+            Err(message) => {
+                post(self.ui.clone(), move |ui| {
+                    ui.set_sm_wave_pregenerate(!enabled);
+                    ui.set_sm_wave_message(message.into());
+                });
+                return;
+            }
+        };
+        post(self.ui.clone(), |ui| {
+            ui.set_sm_wave_busy(true);
+            ui.set_sm_wave_message("".into());
+        });
+        let c = self.clone();
+        std::thread::spawn(move || {
+            let result = client.set_pregenerate_list_waveforms(enabled);
+            let c2 = c.clone();
+            post(c.ui.clone(), move |ui| {
+                if !c2.library_current(generation) {
+                    return;
+                }
+                ui.set_sm_wave_busy(false);
+                match result {
+                    Ok(settings) => {
+                        ui.set_sm_wave_pregenerate(settings.pregenerate_list_waveforms);
+                        ui.set_sm_wave_can_change(settings.can_change);
+                    }
+                    Err(error) => {
+                        ui.set_sm_wave_pregenerate(!enabled);
+                        if matches!(error, RemoteError::Forbidden(_)) {
+                            ui.set_sm_wave_can_change(false);
+                        }
+                        ui.set_sm_wave_message(
+                            if chinese {
+                                format!(
+                                    "修改服务器设置失败：{}",
+                                    manage_error_text(&error, chinese)
+                                )
+                            } else {
+                                format!(
+                                    "Could not change the server setting: {}",
+                                    manage_error_text(&error, chinese)
+                                )
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            });
         });
     }
 
@@ -1660,6 +1783,7 @@ impl Controller {
             }
             ui.set_sm_library_loading(false);
             ui.set_sm_library_error(true);
+            ui.set_sm_wave_supported(false);
             ui.set_sm_library_status(
                 if chinese {
                     format!("读取服务器音效库失败：{text}")
@@ -1726,6 +1850,28 @@ impl Controller {
                 }
             };
             ui.set_sm_history(ModelRc::new(VecModel::from(history)));
+            ui.set_sm_wave_supported(page.waves.is_some());
+            ui.set_sm_wave_busy(false);
+            ui.set_sm_wave_message("".into());
+            match &page.waves {
+                Some((settings, status)) => {
+                    match settings {
+                        Ok(settings) => {
+                            ui.set_sm_wave_pregenerate(settings.pregenerate_list_waveforms);
+                            ui.set_sm_wave_can_change(settings.can_change);
+                        }
+                        Err(error) => {
+                            note(&cn_or(chinese, "服务器设置", "server settings"), error);
+                            ui.set_sm_wave_can_change(false);
+                        }
+                    }
+                    publish_wave_status(&ui, status, chinese);
+                }
+                None => {
+                    ui.set_sm_wave_can_change(false);
+                    ui.set_sm_wave_status("".into());
+                }
+            }
             let rows: Vec<ServerRootRow> = page
                 .roots
                 .iter()
@@ -1891,6 +2037,108 @@ fn cache_info(
             short_id(library_id)
         ),
     }
+}
+
+fn publish_wave_status(
+    ui: &AppWindow,
+    status: &Result<ListWaveformStatus, RemoteError>,
+    chinese: bool,
+) {
+    match status {
+        Ok(status) => {
+            ui.set_sm_wave_error(false);
+            ui.set_sm_wave_status(wave_status_text(status, chinese).into());
+        }
+        Err(error) => {
+            ui.set_sm_wave_error(true);
+            ui.set_sm_wave_status(
+                if chinese {
+                    format!("读取预生成进度失败：{}", manage_error_text(error, chinese))
+                } else {
+                    format!(
+                        "Could not read the pre-generation progress: {}",
+                        manage_error_text(error, chinese)
+                    )
+                }
+                .into(),
+            );
+        }
+    }
+}
+
+/// One line for `GET /waveforms/status` (§9.2).
+fn wave_status_text(status: &ListWaveformStatus, chinese: bool) -> String {
+    let state = match (
+        status.state.as_str(),
+        status.yield_reason.as_deref(),
+        chinese,
+    ) {
+        ("off", _, true) => "未开启".to_owned(),
+        ("off", _, false) => "off".to_owned(),
+        ("idle", _, true) => "空闲（已补齐）".to_owned(),
+        ("idle", _, false) => "idle (complete)".to_owned(),
+        ("running", _, true) => "进行中".to_owned(),
+        ("running", _, false) => "running".to_owned(),
+        ("yielding", Some("audio"), true) => "让路中（试听）".to_owned(),
+        ("yielding", Some("scan"), true) => "让路中（扫描）".to_owned(),
+        ("yielding", _, true) => "让路中".to_owned(),
+        ("yielding", Some(reason), false) => format!("yielding ({reason})"),
+        ("yielding", None, false) => "yielding".to_owned(),
+        ("paused", _, true) => "已暂停".to_owned(),
+        ("paused", _, false) => "paused".to_owned(),
+        (other, _, _) => other.to_owned(),
+    };
+    let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let mut parts = vec![if chinese {
+        format!("预生成：{state}")
+    } else {
+        format!("Pre-generation: {state}")
+    }];
+    parts.push(if chinese {
+        format!("已缓存 {} / {}", status.cached, status.total)
+    } else {
+        format!("cached {} / {}", status.cached, status.total)
+    });
+    if let Some(remaining) = status.remaining {
+        parts.push(if chinese {
+            format!("本轮剩余 {remaining}")
+        } else {
+            format!("{remaining} left in this pass")
+        });
+    }
+    if status.queued_on_demand > 0 {
+        parts.push(if chinese {
+            format!("按需队列 {}", status.queued_on_demand)
+        } else {
+            format!("{} queued on demand", status.queued_on_demand)
+        });
+    }
+    if status.failed > 0 {
+        parts.push(if chinese {
+            format!("失败 {}", status.failed)
+        } else {
+            format!("{} failed", status.failed)
+        });
+    }
+    if status.skipped_offline > 0 {
+        parts.push(if chinese {
+            format!("根离线跳过 {}", status.skipped_offline)
+        } else {
+            format!("{} skipped (root offline)", status.skipped_offline)
+        });
+    }
+    parts.push(format!(
+        "{} {:.0} / {:.0} MiB{}",
+        if chinese { "缓存" } else { "cache" },
+        mib(status.cache_bytes),
+        mib(status.cache_limit_bytes),
+        match (status.over_budget, chinese) {
+            (true, true) => "（超出容量，已淘汰旧分片）",
+            (true, false) => " (over budget, old shards evicted)",
+            _ => "",
+        }
+    ));
+    parts.join(" · ")
 }
 
 fn capabilities_text(capabilities: &Capabilities, chinese: bool) -> String {
@@ -2856,6 +3104,36 @@ mod tests {
         assert!(scan_text(Some(&scan), false).starts_with("paused"));
         scan.active = false;
         assert_eq!(scan_text(Some(&scan), false), "No scan is running.");
+    }
+
+    #[test]
+    fn wave_status_text_summarises_pre_generation_progress() {
+        let status = ListWaveformStatus {
+            enabled: true,
+            state: "yielding".into(),
+            yield_reason: Some("audio".into()),
+            total: 909_342,
+            cached: 412_000,
+            remaining: Some(497_342),
+            queued_on_demand: 3,
+            failed: 12,
+            cache_bytes: 221 * 1024 * 1024,
+            cache_limit_bytes: 640 * 1024 * 1024,
+            ..ListWaveformStatus::default()
+        };
+        assert_eq!(
+            wave_status_text(&status, true),
+            "预生成：让路中（试听） · 已缓存 412000 / 909342 · 本轮剩余 497342 · 按需队列 3 · 失败 12 · 缓存 221 / 640 MiB"
+        );
+        let off = ListWaveformStatus {
+            state: "off".into(),
+            over_budget: true,
+            ..ListWaveformStatus::default()
+        };
+        assert_eq!(
+            wave_status_text(&off, false),
+            "Pre-generation: off · cached 0 / 0 · cache 0 / 0 MiB (over budget, old shards evicted)"
+        );
     }
 
     #[test]
