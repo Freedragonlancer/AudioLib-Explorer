@@ -63,6 +63,13 @@ const RESUME_DELAY: Duration = Duration::from_secs(5);
 const IDLE_TICK: Duration = Duration::from_millis(100);
 /// Wait between attempts to take a `max_waveforms` slot.
 const SLOT_POLL: Duration = Duration::from_millis(20);
+/// Longest suggested `retry_after` of `POST /waveforms` (seconds); also the value when
+/// the metadata budget ran out.
+const RETRY_AFTER_MAX: u32 = 5;
+/// On-demand files finished per second and worker assumed before any was measured.
+const DEFAULT_ON_DEMAND_RATE: f64 = 8.0;
+/// Weight of the newest sample in the on-demand throughput average.
+const THROUGHPUT_ALPHA: f64 = 0.2;
 /// Records read from the library per pre-generation batch.
 const PASS_BATCH: i64 = 256;
 /// Shard file magic and format version.
@@ -753,6 +760,56 @@ impl OnDemand {
     fn len(&self) -> usize {
         self.by_seq.len()
     }
+
+    /// Queue entries up to and including the one of `ids` that will be taken last
+    /// (0 when none of them is queued).
+    fn depth_of(&self, ids: &[i64]) -> usize {
+        ids.iter()
+            .filter_map(|id| self.seq_of.get(id))
+            .min()
+            .map_or(0, |oldest| self.by_seq.range(*oldest..).count())
+    }
+}
+
+/// Exponentially weighted average of the interval between finished on-demand jobs
+/// (all workers together), i.e. the measured on-demand throughput.
+#[derive(Default)]
+struct Throughput {
+    /// Smoothed seconds per finished job; `None` before the first one.
+    interval: Option<f64>,
+    last_done: Option<Instant>,
+}
+
+impl Throughput {
+    /// A job taken from the queue at `taken` finished at `done`. Time without any
+    /// queued work (since the previous completion) does not count.
+    fn record(&mut self, taken: Instant, done: Instant) {
+        let from = self.last_done.map_or(taken, |last| last.max(taken));
+        let sample = done.saturating_duration_since(from).as_secs_f64().max(1e-4);
+        self.interval = Some(match self.interval {
+            Some(old) => old + THROUGHPUT_ALPHA * (sample - old),
+            None => sample,
+        });
+        self.last_done = Some(done);
+    }
+
+    /// Finished jobs per second, or the default for `workers` without history.
+    fn per_second(&self, workers: usize) -> f64 {
+        self.interval
+            .map_or(DEFAULT_ON_DEMAND_RATE * workers.max(1) as f64, |interval| {
+                1.0 / interval
+            })
+    }
+}
+
+/// Suggested `retry_after` (1..=5 s): the time until the job `position` places down the
+/// on-demand queue is done at `per_second`, or 5 when the metadata budget ran out.
+fn estimate_retry_after(position: usize, per_second: f64, budget_exhausted: bool) -> u32 {
+    if budget_exhausted {
+        return RETRY_AFTER_MAX;
+    }
+    let seconds = (position.max(1) as f64 / per_second.max(0.01)).ceil();
+    (seconds as u32).clamp(1, RETRY_AFTER_MAX)
 }
 
 /// One pre-generation pass over the library (in memory; restarts from the beginning
@@ -789,6 +846,7 @@ impl Pass {
 struct Sched {
     on_demand: OnDemand,
     on_demand_in_flight: usize,
+    throughput: Throughput,
     failures: HashMap<i64, Failure>,
     pass: Option<Pass>,
     generation: u64,
@@ -800,7 +858,8 @@ struct Sched {
 }
 
 enum Job {
-    OnDemand(i64),
+    /// An on-demand id and when it was taken from the queue.
+    OnDemand(i64, Instant),
     Pregenerate(i64, u64),
 }
 
@@ -1073,6 +1132,28 @@ impl ListWaveforms {
         self.sched().on_demand.len()
     }
 
+    /// Suggested `retry_after` for a batch whose `pending` ids were just queued: the
+    /// time until the last of them is done at the measured on-demand throughput
+    /// (1..=5 s), 5 when the metadata budget ran out.
+    pub fn retry_after_for(&self, pending: &[i64], budget_exhausted: bool) -> u32 {
+        let sched = self.sched();
+        let position = sched.on_demand.depth_of(pending) + sched.on_demand_in_flight;
+        estimate_retry_after(
+            position,
+            sched.throughput.per_second(self.workers),
+            budget_exhausted,
+        )
+    }
+
+    /// Measured on-demand throughput (finished files per second), `None` before any.
+    pub fn on_demand_rate(&self) -> Option<f64> {
+        let sched = self.sched();
+        sched
+            .throughput
+            .interval
+            .map(|_| sched.throughput.per_second(self.workers))
+    }
+
     /// Prune deleted records from the cache in the background (after removals and scans).
     pub fn request_prune(&self) {
         self.sched().prune = true;
@@ -1188,7 +1269,7 @@ impl ListWaveforms {
         {
             let id = sched.on_demand.pop_newest()?;
             sched.on_demand_in_flight += 1;
-            return Some(Job::OnDemand(id));
+            return Some(Job::OnDemand(id, Instant::now()));
         }
         let reason = self.yield_reason(state, &mut sched);
         if reason.is_some() || !enabled || sched.paused || sched.on_demand.len() > 0 {
@@ -1273,14 +1354,19 @@ impl ListWaveforms {
 
     /// Blocking. Process one job: check the file version, decode on a miss, store.
     fn run(&self, state: &AppState, job: Job) {
-        let (id, pregenerate) = match job {
-            Job::OnDemand(id) => (id, None),
-            Job::Pregenerate(id, generation) => (id, Some(generation)),
+        let (id, pregenerate, taken) = match job {
+            Job::OnDemand(id, taken) => (id, None, Some(taken)),
+            Job::Pregenerate(id, generation) => (id, Some(generation), None),
         };
         self.process(state, id, pregenerate);
         let mut sched = self.sched();
         match pregenerate {
-            None => sched.on_demand_in_flight = sched.on_demand_in_flight.saturating_sub(1),
+            None => {
+                sched.on_demand_in_flight = sched.on_demand_in_flight.saturating_sub(1);
+                if let Some(taken) = taken {
+                    sched.throughput.record(taken, Instant::now());
+                }
+            }
             Some(generation) => {
                 if let Some(pass) = sched.pass.as_mut().filter(|p| p.generation == generation) {
                     pass.in_flight = pass.in_flight.saturating_sub(1);
@@ -1867,15 +1953,7 @@ pub async fn batch(
         .map(|item| item.id)
         .collect();
     list.enqueue_on_demand(&pending);
-    let retry_after = (!pending.is_empty()).then(|| {
-        let queued = list.queued_on_demand() as u32;
-        let estimate = (1 + queued / (4 * list.workers as u32)).clamp(1, 30);
-        if budget_pending {
-            estimate.max(5)
-        } else {
-            estimate
-        }
-    });
+    let retry_after = (!pending.is_empty()).then(|| list.retry_after_for(&pending, budget_pending));
     Ok(BatchResponse {
         library_id: state.library_id().to_string(),
         buckets: LIST_BUCKETS,
@@ -2031,5 +2109,45 @@ mod tests {
         assert_eq!(queue.pop_newest(), Some(10));
         assert_eq!(queue.pop_newest(), Some(ON_DEMAND_CAPACITY as i64 + 5));
         assert!(!queue.seq_of.contains_key(&1));
+    }
+
+    #[test]
+    fn queue_depth_counts_up_to_the_last_taken_id() {
+        let mut queue = OnDemand::default();
+        for id in 1..=10 {
+            queue.push_newest(id);
+        }
+        // Taken newest first: 10, 9, ..., 1.
+        assert_eq!(queue.depth_of(&[10]), 1);
+        assert_eq!(queue.depth_of(&[9, 3]), 8);
+        assert_eq!(queue.depth_of(&[42]), 0);
+        assert_eq!(queue.depth_of(&[]), 0);
+    }
+
+    #[test]
+    fn throughput_ignores_idle_time_and_smooths() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut throughput = Throughput::default();
+        assert_eq!(throughput.per_second(2), 2.0 * DEFAULT_ON_DEMAND_RATE);
+        throughput.record(at(0), at(100));
+        assert!((throughput.per_second(1) - 10.0).abs() < 1e-6);
+        // Taken long after the previous completion: only its own 100 ms count.
+        throughput.record(at(60_000), at(60_100));
+        assert!((throughput.per_second(1) - 10.0).abs() < 1e-6);
+        // Back-to-back completions 50 ms apart pull the average up.
+        throughput.record(at(60_000), at(60_150));
+        assert!(throughput.per_second(1) > 10.0);
+    }
+
+    #[test]
+    fn retry_after_follows_the_queue_position_within_one_to_five_seconds() {
+        assert_eq!(estimate_retry_after(0, 14.0, false), 1);
+        assert_eq!(estimate_retry_after(14, 14.0, false), 1);
+        assert_eq!(estimate_retry_after(15, 14.0, false), 2);
+        assert_eq!(estimate_retry_after(42, 14.0, false), 3);
+        assert_eq!(estimate_retry_after(200, 14.0, false), 5);
+        assert_eq!(estimate_retry_after(10_000, 0.0, false), 5);
+        assert_eq!(estimate_retry_after(1, 1000.0, true), 5);
     }
 }
