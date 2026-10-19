@@ -67,6 +67,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         })
         .unwrap(),
         audition_play_on_single_click: false,
+        pregenerate_list_waveforms: false,
         audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),

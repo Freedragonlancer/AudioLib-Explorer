@@ -108,6 +108,7 @@ fn child_real_pointer_preview_modes() {
         language: "en".into(),
         playback: serde_json::to_value(&playback).unwrap(),
         audition_play_on_single_click: false,
+        pregenerate_list_waveforms: false,
         audio_table: Default::default(),
         allowed_scan_roots: vec![sounds.canonicalize().unwrap()],
         data_source: Default::default(),

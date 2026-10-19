@@ -18,6 +18,10 @@ export struct AudioRow {
     missing: bool,
     checked: bool,
     marker: color,
+    // List thumbnail Waveform: 0 placeholder (not loaded), 1 `wave` thumbnail stretched
+    // to the column, 2 center line (empty file), 3 no Waveform (missing/undecodable).
+    wave-state: int,
+    wave: image,
 }
 export struct FolderRow { name: string, count: string, path: string, depth: int, expanded: bool, has-children: bool }
 export struct CrumbRow { name: string }
@@ -396,6 +400,14 @@ export component AppWindow inherits Window {
     in-out property <int> sort-index: 0;
     in-out property <bool> sort-descending: false;
     // Preferred widths are logical pixels and remain directly customizable.
+    // List thumbnail Waveforms (local mode; hidden in server mode until the server batch
+    // client is available). Rust reports the visible row window for on-demand loading.
+    in property <bool> list-waveforms-enabled: true;
+    private property <bool> list-waveforms-visible: root.list-waveforms-enabled && !root.remote-mode;
+    in-out property <bool> pregenerate-list-waveforms: false;
+    callback pregenerate-list-waveforms-requested(bool);
+    callback result-window-changed(int, int);
+    private property <length> table-wave-size: root.list-waveforms-visible ? 96px : 0px;
     in-out property <float> table-name-width: 360;
     in-out property <float> table-duration-width: 80;
     in-out property <float> table-format-width: 100;
@@ -406,7 +418,7 @@ export component AppWindow inherits Window {
     private property <length> table-channels-size: clamp(root.table-channels-width, 48, 2000) * 1px;
     private property <length> table-tags-size: clamp(root.table-tags-width, 80, 2000) * 1px;
     private property <length> table-name-size: clamp(root.table-name-width, 120, 2000) * 1px;
-    private property <length> table-columns-size: root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
+    private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
     private property <length> table-content-size: max(root.table-columns-size, result-list.visible-width);
     private property <bool> table-empty: root.rows.length == 0;
     private property <length> table-viewport-x;
@@ -966,7 +978,14 @@ export component AppWindow inherits Window {
         }
     }
     changed selected-row => { root.reveal-selected-row(); }
-    changed rows => { result-list.viewport-y = 0px; root.reveal-selected-row(); }
+    changed rows => { result-list.viewport-y = 0px; root.reveal-selected-row(); root.report-result-window(); }
+    // Rows currently on screen (first index, count); Rust adds one screen above/below.
+    function report-result-window() {
+        if root.list-waveforms-visible && root.rows.length > 0 {
+            root.result-window-changed(max(0, floor(-result-list.viewport-y / root.result-row-height)), ceil(result-list.visible-height / root.result-row-height) + 1);
+        }
+    }
+    changed list-waveforms-visible => { root.report-result-window(); }
     function sync-table-viewport() {
         // Avoid writing an unchanged value back during the wheel animation.
         if root.table-empty {
@@ -1290,8 +1309,14 @@ export component AppWindow inherits Window {
                         Rectangle { height: 33px; background: Theme.raised; clip: true;
                             // Both empty and populated results share the header's horizontal position.
                             Rectangle { x: root.table-viewport-x; width: root.table-content-size; height: parent.height;
+                                if root.list-waveforms-visible: table-wave-header := Text {
+                                    x: 8px; width: root.table-wave-size - 16px; height: parent.height;
+                                    text: root.chinese ? "波形" : "WAVE"; font-size: 10px; color: Theme.dim;
+                                    overflow: elide; vertical-alignment: center;
+                                    accessible-role: text; accessible-label: root.chinese ? "波形" : "Waveform";
+                                }
                                 table-name-header := TableHeader {
-                                    x: 0px; width: root.table-name-size - 8px; height: parent.height;
+                                    x: root.table-wave-size; width: root.table-name-size - 8px; height: parent.height;
                                     label: root.chinese ? "文件名" : "NAME";
                                     action-label: root.chinese ? "按文件名排序" : "Sort by filename";
                                     help: root.chinese ? "按文件名排序；再次点击切换升序 / 降序" : "Sort by filename; click again to reverse ascending / descending";
@@ -1299,7 +1324,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.sort-table(1); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-duration-header := TableHeader {
-                                    x: root.table-name-size; width: root.table-duration-size - 8px; height: parent.height;
+                                    x: root.table-wave-size + root.table-name-size; width: root.table-duration-size - 8px; height: parent.height;
                                     label: root.chinese ? "时长" : "TIME";
                                     action-label: root.chinese ? "按时长排序" : "Sort by duration";
                                     help: root.chinese ? "按时长排序；再次点击切换升序 / 降序" : "Sort by duration; click again to reverse ascending / descending";
@@ -1307,7 +1332,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.sort-table(2); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-format-header := TableHeader {
-                                    x: root.table-name-size + root.table-duration-size; width: root.table-format-size - 8px; height: parent.height;
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size; width: root.table-format-size - 8px; height: parent.height;
                                     label: root.chinese ? "格式" : "FORMAT";
                                     action-label: root.chinese ? "按采样率排序" : "Sort by sample rate";
                                     help: root.chinese ? "按采样率排序；再次点击切换升序 / 降序" : "Sort by sample rate; click again to reverse ascending / descending";
@@ -1315,7 +1340,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.sort-table(3); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-channels-header := TableHeader {
-                                    x: root.table-name-size + root.table-duration-size + root.table-format-size; width: root.table-channels-size - 8px; height: parent.height;
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size; width: root.table-channels-size - 8px; height: parent.height;
                                     label: root.chinese ? "声道" : "CH";
                                     action-label: root.chinese ? "按声道排序" : "Sort by channels";
                                     help: root.chinese ? "按声道数排序；再次点击切换升序 / 降序" : "Sort by channel count; click again to reverse ascending / descending";
@@ -1323,7 +1348,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.sort-table(4); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-tags-header := TableHeader {
-                                    x: root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size; width: root.table-tags-size - 8px; height: parent.height;
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size; width: root.table-tags-size - 8px; height: parent.height;
                                     label: root.chinese ? "标签" : "TAGS";
                                     action-label: root.chinese ? "按标签排序" : "Sort by tags";
                                     help: root.chinese ? "按素材库标签排序，空白时使用源标签；再次点击切换升序 / 降序" : "Sort by library tags, using source tags when empty; click again to reverse ascending / descending";
@@ -1331,25 +1356,25 @@ export component AppWindow inherits Window {
                                     clicked => { root.sort-table(5); } context-requested(position) => { root.show-table-menu(position); }
                                 }
                                 table-name-divider := TableDivider {
-                                    x: root.table-name-size - 8px; height: parent.height; column-width: root.table-name-size;
+                                    x: root.table-wave-size + root.table-name-size - 8px; height: parent.height; column-width: root.table-name-size;
                                     label: root.chinese ? "调整文件名列宽" : "Resize Filename column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(1, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-name-width = 360; root.table-layout-changed(); }
                                 }
                                 table-duration-divider := TableDivider {
-                                    x: root.table-name-size + root.table-duration-size - 8px; height: parent.height; column-width: root.table-duration-size;
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size - 8px; height: parent.height; column-width: root.table-duration-size;
                                     label: root.chinese ? "调整时长列宽" : "Resize Duration column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(2, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-duration-width = 80; root.table-layout-changed(); }
                                 }
                                 table-format-divider := TableDivider {
-                                    x: root.table-name-size + root.table-duration-size + root.table-format-size - 8px; height: parent.height; column-width: root.table-format-size;
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size - 8px; height: parent.height; column-width: root.table-format-size;
                                     label: root.chinese ? "调整格式列宽" : "Resize Format column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(3, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-format-width = 100; root.table-layout-changed(); }
                                 }
                                 table-channels-divider := TableDivider {
-                                    x: root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size - 8px; height: parent.height; column-width: root.table-channels-size;
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size - 8px; height: parent.height; column-width: root.table-channels-size;
                                     label: root.chinese ? "调整声道列宽" : "Resize Channels column"; help: root.table-resize-help; enabled: !root.background-blocked;
                                     resized(width) => { root.resize-table-column(4, width); } finished => { root.table-layout-changed(); }
                                     reset => { root.table-channels-width = 64; root.table-layout-changed(); }
@@ -1386,12 +1411,29 @@ export component AppWindow inherits Window {
                                 // A newly populated repeater measures its width after becoming
                                 // visible. Ignore its temporary empty-range clamp until then.
                                 changed viewport-x => { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.table-viewport-x = self.viewport-x; } }
+                                changed viewport-y => { root.report-result-window(); }
+                                changed visible-height => { root.report-result-window(); }
                                 changed viewport-width => { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } }
                                 // Fixed child layout widths let ListView measure its horizontal scroll extent.
                                 for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.result-row-height; accessible-role: list-item; accessible-label: row.name;
                                     background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: 12px; padding-right: 12px; spacing: 24px;
+                                        if root.list-waveforms-visible: table-wave-cell := Rectangle { width: root.table-wave-size - 24px;
+                                            accessible-role: none;
+                                            // Placeholder until loaded; no Waveform is a fainter short bar.
+                                            if row.wave-state == 0 || row.wave-state == 3: Rectangle {
+                                                width: row.wave-state == 0 ? parent.width : parent.width * 0.4; height: 4px; border-radius: 2px;
+                                                background: Theme.border; opacity: row.wave-state == 0 ? 1 : 0.5;
+                                            }
+                                            if row.wave-state == 1 || row.wave-state == 2: Rectangle {
+                                                width: parent.width; height: 1px; background: Theme.accent; opacity: row.wave-state == 2 ? 0.9 : 0.35;
+                                            }
+                                            if row.wave-state == 1: Image {
+                                                width: parent.width; height: parent.height - 8px;
+                                                source: row.wave; image-fit: fill; image-rendering: smooth;
+                                            }
+                                        }
                                         table-name-cell := Text { width: root.table-name-size - 24px; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : Theme.ink; font-size: 12px; overflow: elide; vertical-alignment: center; }
                                         table-duration-cell := Text { width: root.table-duration-size - 24px; text: row.duration; color: Theme.ink; horizontal-alignment: right; vertical-alignment: center; font-size: 11px; overflow: elide; }
                                         table-format-cell := Text { width: root.table-format-size - 24px; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: 10px; overflow: elide; }
@@ -1919,6 +1961,15 @@ export component AppWindow inherits Window {
                                                 Action { width: 130px; enabled: root.scan-controllable; label: root.chinese ? "取消当前扫描" : "Cancel current scan"; clicked => { root.scan-cancel-requested(); } }
                                             }
                                             if root.scan-summary != "": Text { height: 44px; text: root.scan-summary; color: Theme.accent; wrap: word-wrap; font-size: 11px; }
+                                            if !root.remote-mode: pregenerate-waveforms-check := CheckBox {
+                                                height: 28px; enabled: !root.library-busy;
+                                                text: root.chinese ? "预生成列表波形" : "Pre-generate list Waveforms";
+                                                checked <=> root.pregenerate-list-waveforms;
+                                                toggled => { root.pregenerate-list-waveforms-requested(self.checked); }
+                                            }
+                                            if !root.remote-mode: Label { height: 32px; wrap: word-wrap; font-size: 10px;
+                                                text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
+                                            }
                                             Rectangle { height: 1px; background: Theme.border; }
                                             HorizontalLayout { height: 62px; spacing: 16px;
                                                 VerticalLayout { horizontal-stretch: 1; spacing: 4px;

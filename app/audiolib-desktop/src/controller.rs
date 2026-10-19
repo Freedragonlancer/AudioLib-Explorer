@@ -8,6 +8,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::list_waveforms::{
+    ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
+};
 use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform};
 use crate::{AppWindow, AudioRow, CrumbRow, FolderRow};
 use audiolib_audio::{
@@ -606,6 +609,10 @@ pub struct Controller {
     /// A drag-out is being prepared (server downloads) or running.
     drag_busy: AtomicBool,
     drag_cancel: Mutex<Arc<AtomicBool>>,
+    /// Result-table thumbnail Waveforms (doc/api/README.md §9.3), one background worker.
+    list_waveforms: ListWaveforms,
+    /// The "pre-generate list Waveforms" preference (local mode).
+    pregenerate_list_waveforms: AtomicBool,
 }
 
 fn post(ui: slint::Weak<AppWindow>, action: impl FnOnce(AppWindow) + Send + 'static) {
@@ -662,6 +669,7 @@ impl Controller {
         let chinese = config.language == "cn";
         ui.set_chinese(chinese);
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
+        ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         let table = config.audio_table.normalized();
         ui.set_table_name_width(table.name_width);
         ui.set_table_duration_width(table.duration_width);
@@ -704,6 +712,8 @@ impl Controller {
             scans: Mutex::new(Vec::new()),
             audio,
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
+            list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms),
+            pregenerate_list_waveforms: AtomicBool::new(config.pregenerate_list_waveforms),
             audio_table: Mutex::new(table),
             single_click_play_pending: Mutex::new(false),
             single_click_play_wake: Condvar::new(),
@@ -767,6 +777,10 @@ impl Controller {
         });
         controller.bind(ui);
         controller.bind_remote(ui);
+        let host_arc: Arc<dyn ListWaveformHost> = controller.clone();
+        let host: Weak<dyn ListWaveformHost> = Arc::downgrade(&host_arc);
+        drop(host_arc);
+        controller.list_waveforms.start(host);
         ui.set_database_path(
             controller
                 .provider()
@@ -832,6 +846,19 @@ impl Controller {
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
         });
+        let c = self.clone();
+        ui.on_pregenerate_list_waveforms_requested(move |enabled| {
+            if !c.available() {
+                return;
+            }
+            c.pregenerate_list_waveforms
+                .store(enabled, Ordering::Release);
+            c.list_waveforms.set_pregenerate(enabled);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_result_window_changed(move |first, count| c.request_list_waveforms(first, count));
         let c = self.clone();
         ui.on_table_layout_changed(move || {
             if c.available()
@@ -1251,6 +1278,7 @@ impl Controller {
                 row
             })
             .collect::<Vec<_>>();
+        let rows = self.decorate_list_waveforms(rows);
         ui.set_checked_count(selected.len() as i32);
         publish_audio_rows(&ui, rows);
     }
@@ -1570,6 +1598,7 @@ impl Controller {
         self.selection_generation.fetch_add(1, Ordering::AcqRel);
         self.history_generation.fetch_add(1, Ordering::AcqRel);
         self.invalidate_waveform();
+        self.list_waveforms.invalidate();
         *self.search_job.lock().unwrap() = None;
         *self.facet_job.lock().unwrap() = None;
         *self.search_publication.lock().unwrap() = None;
@@ -1656,6 +1685,11 @@ impl Controller {
                     c.wait_metadata(barrier, true)?;
                 }
                 c.wait_remote_plays()?;
+                // The busy gate keeps list Waveform work from starting; cancel a running
+                // decode and let its (lease-protected) write finish first.
+                c.list_waveforms.suspend();
+                c.list_waveforms.wait_idle(Duration::from_secs(5));
+                c.list_waveforms.resume();
                 while c.scan_cancel.lock().unwrap().is_some() {
                     if c.shutdown.load(Ordering::Acquire) {
                         return Err("Desktop is shutting down".into());
@@ -2304,6 +2338,8 @@ impl Controller {
                         }
                         config.audition_play_on_single_click =
                             c.single_click_play.load(Ordering::Acquire);
+                        config.pregenerate_list_waveforms =
+                            c.pregenerate_list_waveforms.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
                         config.save()
                     };
@@ -2472,6 +2508,7 @@ impl Controller {
                                     })
                                     .collect::<Vec<_>>();
                                 *c2.records.lock().unwrap() = page.results;
+                                let rows = c2.decorate_list_waveforms(rows);
                                 let selected_id = ui.get_selected_id();
                                 let selected_row =
                                     rows.iter().position(|row| row.id == selected_id);
@@ -2710,6 +2747,10 @@ impl Controller {
                     let library_generation = c.library_generation.load(Ordering::Acquire);
                     let provider = c.provider();
                     let mut status = c.audio.status();
+                    c.list_waveforms.observe_playback(matches!(
+                        status.state,
+                        PlaybackState::Loading | PlaybackState::Playing
+                    ));
                     let history_events: Vec<_> = events.try_iter().collect();
                     if playback_history
                         .library_generation
@@ -3544,6 +3585,7 @@ impl Controller {
             {
                 return;
             }
+            loading.list_waveforms.note_audition_start();
             loading.audio.enqueue_with_ack(AudioCommand::Load(path))
         };
         match completion.and_then(|completion| completion.wait(Duration::from_secs(4))) {
@@ -4300,6 +4342,8 @@ impl Controller {
         if !self.available() || !admitted {
             return;
         }
+        // Rescanned files may have changed; an enabled pre-generation starts a pass.
+        self.list_waveforms.scan_finished();
         self.request_search(ui, true, true);
         self.reload_tree();
         self.refresh_library_info();
@@ -4667,7 +4711,41 @@ impl Controller {
         }
     }
 
+    /// The result table shows rows `first .. first + count`: ask for their list
+    /// Waveforms, then one screen below and above. Cheap; runs on the event loop.
+    fn request_list_waveforms(&self, first: i32, count: i32) {
+        let ids: Vec<i64> = self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|file| file.id)
+            .collect();
+        let first = usize::try_from(first).unwrap_or(0);
+        let count = usize::try_from(count).unwrap_or(0).max(1);
+        self.list_waveforms
+            .set_window(window_ids(&ids, first, count));
+    }
+
+    /// Keep already known list Waveforms on rows being (re)published.
+    fn decorate_list_waveforms(&self, mut rows: Vec<AudioRow>) -> Vec<AudioRow> {
+        for row in &mut rows {
+            if let Ok(id) = row.id.parse::<i64>()
+                && let Some(cell) = self.list_waveforms.cached(id)
+            {
+                apply_list_waveform(row, &cell);
+            }
+        }
+        rows
+    }
+
     fn command(&self, command: AudioCommand) {
+        if matches!(
+            command,
+            AudioCommand::Play | AudioCommand::SeekAndPlay(_) | AudioCommand::Seek(_)
+        ) {
+            self.list_waveforms.note_audition_start();
+        }
         if let Err(error) = self.audio.send(command) {
             self.status(error.to_string());
         }
@@ -5017,6 +5095,7 @@ impl Controller {
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.list_waveforms.shutdown();
         *self.close_completion.lock().unwrap() = None;
         *self.latest_selection.lock().unwrap() = None;
         // Use the predicate lock when waking an idle preference worker, so shutdown
@@ -5085,6 +5164,7 @@ impl Controller {
             .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4));
         let mut config = self.config.lock().unwrap();
         config.audition_play_on_single_click = self.single_click_play.load(Ordering::Acquire);
+        config.pregenerate_list_waveforms = self.pregenerate_list_waveforms.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
@@ -5165,6 +5245,12 @@ impl Controller {
             },
             _ => return audiolib_core::failure("Unknown playback command"),
         };
+        if matches!(
+            command,
+            AudioCommand::Load(_) | AudioCommand::Play | AudioCommand::Seek(_)
+        ) {
+            self.list_waveforms.note_audition_start();
+        }
         match self.audio.send_and_wait(command, Duration::from_secs(4)) {
             Ok(status) => {
                 if value["command"] == "volume" {
@@ -5589,6 +5675,73 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
     ui.set_edit_favorite(file.favorite);
     ui.set_metadata_dirty(false);
 }
+/// Row Waveform states shown by the table: 0 placeholder, 1 thumbnail, 2 center line
+/// (empty file), 3 no Waveform (missing or undecodable).
+fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell) {
+    match cell {
+        ListWaveformCell::Ready(waveform) => match render_list_waveform(waveform) {
+            Some(buffer) => {
+                row.wave = Image::from_rgba8(buffer);
+                row.wave_state = 1;
+            }
+            None => {
+                row.wave = Image::default();
+                row.wave_state = 2;
+            }
+        },
+        ListWaveformCell::Unavailable => {
+            row.wave = Image::default();
+            row.wave_state = 3;
+        }
+    }
+}
+
+/// Publish worker results into the matching rows of the current model.
+fn publish_list_waveforms(ui: &AppWindow, cells: Vec<(i64, ListWaveformCell)>) {
+    let rows = ui.get_rows();
+    let Some(model) = rows.as_any().downcast_ref::<VecModel<AudioRow>>() else {
+        return;
+    };
+    let cells: HashMap<String, ListWaveformCell> = cells
+        .into_iter()
+        .map(|(id, cell)| (id.to_string(), cell))
+        .collect();
+    for index in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(index)
+            && let Some(cell) = cells.get(row.id.as_str())
+        {
+            apply_list_waveform(&mut row, cell);
+            model.set_row_data(index, row);
+        }
+    }
+}
+
+impl ListWaveformHost for Controller {
+    fn list_waveform_provider(&self) -> Option<Arc<dyn DataProvider>> {
+        if !self.available() {
+            return None;
+        }
+        if self.remote_read_only() {
+            // Server mode never reads the snapshot's waveform_cache rows (§9.3). The
+            // server batch client (POST /waveforms) plugs in here as a provider whose
+            // source is `ListWaveformSource::Server`.
+            return None;
+        }
+        Some(self.provider() as Arc<dyn DataProvider>)
+    }
+    fn list_waveform_scanning(&self) -> bool {
+        self.scan_cancel.lock().unwrap().is_some()
+    }
+    fn deliver_list_waveforms(&self, generation: u64, cells: Vec<(i64, ListWaveformCell)>) {
+        let service = self.list_waveforms.clone();
+        post(self.ui.clone(), move |ui| {
+            if service.generation() == generation {
+                publish_list_waveforms(&ui, cells);
+            }
+        });
+    }
+}
+
 fn audio_row(file: &AudioFile) -> AudioRow {
     let marker = file
         .color
@@ -5616,6 +5769,7 @@ fn audio_row(file: &AudioFile) -> AudioRow {
         missing: file.missing,
         checked: false,
         marker,
+        ..Default::default()
     }
 }
 fn parse_color(value: &str) -> Option<slint::Color> {
@@ -6670,6 +6824,7 @@ mod tests {
             language: "en".into(),
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
+            pregenerate_list_waveforms: false,
             audio_table: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
