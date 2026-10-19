@@ -70,6 +70,13 @@ const RETRY_AFTER_MAX: u32 = 5;
 const DEFAULT_ON_DEMAND_RATE: f64 = 8.0;
 /// Weight of the newest sample in the on-demand throughput average.
 const THROUGHPUT_ALPHA: f64 = 0.2;
+/// Most `POST /waveforms` metadata reads outstanding at once, including the ones that
+/// continue in the background after a request's budget ran out; ids beyond it are left
+/// to the on-demand workers.
+const MAX_OUTSTANDING_STATS: usize = 2 * MAX_LIST_IDS;
+/// A metadata read made for a `pending` item is reused (instead of a new `stat`) by the
+/// workers and later requests this long.
+const STAT_HINT_TTL: Duration = Duration::from_secs(30);
 /// Records read from the library per pre-generation batch.
 const PASS_BATCH: i64 = 256;
 /// Shard file magic and format version.
@@ -803,13 +810,86 @@ impl Throughput {
 }
 
 /// Suggested `retry_after` (1..=5 s): the time until the job `position` places down the
-/// on-demand queue is done at `per_second`, or 5 when the metadata budget ran out.
-fn estimate_retry_after(position: usize, per_second: f64, budget_exhausted: bool) -> u32 {
-    if budget_exhausted {
+/// on-demand queue is done at `per_second`, and at least `stat_wait` seconds, the time
+/// the metadata reads still running in the background need (budget ran out).
+fn estimate_retry_after(position: usize, per_second: f64, stat_wait: Option<f64>) -> u32 {
+    let queue = position.max(1) as f64 / per_second.max(0.01);
+    let seconds = queue.max(stat_wait.unwrap_or(0.0)).ceil();
+    if seconds.is_nan() {
         return RETRY_AFTER_MAX;
     }
-    let seconds = (position.max(1) as f64 / per_second.max(0.01)).ceil();
-    (seconds as u32).clamp(1, RETRY_AFTER_MAX)
+    (seconds.min(f64::from(RETRY_AFTER_MAX)) as u32).clamp(1, RETRY_AFTER_MAX)
+}
+
+/// Seconds the `unfinished` background metadata reads of a request need at the rate the
+/// request measured (`finished` in `elapsed`); unbounded without any progress.
+fn stat_wait(unfinished: usize, finished: usize, elapsed: Duration) -> f64 {
+    if unfinished == 0 {
+        return 0.0;
+    }
+    if finished == 0 || elapsed.is_zero() {
+        return f64::INFINITY;
+    }
+    unfinished as f64 * elapsed.as_secs_f64() / finished as f64
+}
+
+/// A metadata read made for a `pending` item (reused by workers and later requests).
+#[derive(Clone)]
+struct StatHint {
+    canonical: PathBuf,
+    file_etag: String,
+    at: Instant,
+}
+
+/// Ids with an outstanding `POST /waveforms` metadata read (dedupe and bound).
+#[derive(Default)]
+struct StatTracker {
+    in_flight: Mutex<HashSet<i64>>,
+}
+
+impl StatTracker {
+    /// Claim `id`; `false` when it is already being read or too many reads are
+    /// outstanding.
+    fn try_begin(&self, id: i64) -> bool {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        in_flight.len() < MAX_OUTSTANDING_STATS && in_flight.insert(id)
+    }
+
+    fn end(&self, id: i64) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    }
+
+    fn contains(&self, id: i64) -> bool {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id)
+    }
+
+    fn len(&self) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// Releases a [`StatTracker`] claim when the read (or its abandoned task) ends.
+struct StatClaim {
+    list: Arc<ListWaveforms>,
+    id: i64,
+}
+
+impl Drop for StatClaim {
+    fn drop(&mut self) {
+        self.list.stats.end(self.id);
+    }
 }
 
 /// One pre-generation pass over the library (in memory; restarts from the beginning
@@ -869,6 +949,11 @@ pub struct ListWaveforms {
     sched: Mutex<Sched>,
     wake: Condvar,
     requests: Arc<tokio::sync::Semaphore>,
+    /// Parallel `POST /waveforms` metadata reads, shared by all requests and their
+    /// background continuations.
+    stat_slots: Arc<tokio::sync::Semaphore>,
+    stats: StatTracker,
+    hints: Mutex<HashMap<i64, StatHint>>,
     workers: usize,
     rate: u32,
     last_playback_start: Mutex<Option<Instant>>,
@@ -977,6 +1062,9 @@ impl ListWaveforms {
             sched: Mutex::new(Sched::default()),
             wake: Condvar::new(),
             requests: Arc::new(tokio::sync::Semaphore::new(MAX_BATCH_REQUESTS)),
+            stat_slots: Arc::new(tokio::sync::Semaphore::new(STAT_PARALLEL)),
+            stats: StatTracker::default(),
+            hints: Mutex::new(HashMap::new()),
             workers: options.workers.max(1),
             rate: options.rate.max(1),
             last_playback_start: Mutex::new(None),
@@ -1133,16 +1221,55 @@ impl ListWaveforms {
     }
 
     /// Suggested `retry_after` for a batch whose `pending` ids were just queued: the
-    /// time until the last of them is done at the measured on-demand throughput
-    /// (1..=5 s), 5 when the metadata budget ran out.
-    pub fn retry_after_for(&self, pending: &[i64], budget_exhausted: bool) -> u32 {
+    /// time until the last of them is done at the measured on-demand throughput, at
+    /// least `stat_wait` seconds (metadata reads still running), 1..=5 s.
+    fn retry_after_for(&self, pending: &[i64], stat_wait: Option<f64>) -> u32 {
         let sched = self.sched();
         let position = sched.on_demand.depth_of(pending) + sched.on_demand_in_flight;
         estimate_retry_after(
             position,
             sched.throughput.per_second(self.workers),
-            budget_exhausted,
+            stat_wait,
         )
+    }
+
+    /// A fresh metadata read of `id` made for a `pending` item.
+    fn hint(&self, id: i64) -> Option<StatHint> {
+        let hints = self.hints.lock().unwrap_or_else(PoisonError::into_inner);
+        hints
+            .get(&id)
+            .filter(|hint| hint.at.elapsed() < STAT_HINT_TTL)
+            .cloned()
+    }
+
+    fn take_hint(&self, id: i64) -> Option<StatHint> {
+        self.hints
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+            .filter(|hint| hint.at.elapsed() < STAT_HINT_TTL)
+    }
+
+    fn store_hint(&self, id: i64, canonical: PathBuf, file_etag: String) {
+        let mut hints = self.hints.lock().unwrap_or_else(PoisonError::into_inner);
+        if hints.len() >= ON_DEMAND_CAPACITY {
+            hints.retain(|_, hint| hint.at.elapsed() < STAT_HINT_TTL);
+        }
+        if hints.len() < ON_DEMAND_CAPACITY {
+            hints.insert(
+                id,
+                StatHint {
+                    canonical,
+                    file_etag,
+                    at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    /// Metadata reads of `POST /waveforms` outstanding now (including background ones).
+    pub fn outstanding_stats(&self) -> usize {
+        self.stats.len()
     }
 
     /// Measured on-demand throughput (finished files per second), `None` before any.
@@ -1397,7 +1524,14 @@ impl ListWaveforms {
             }
             return;
         }
-        let (canonical, file_etag) = match state.stat_audio(id, &path, index) {
+        let hinted = self
+            .take_hint(id)
+            .map(|hint| (hint.canonical, hint.file_etag));
+        let stat = match hinted {
+            Some(found) => Ok(found),
+            None => state.stat_audio(id, &path, index),
+        };
+        let (canonical, file_etag) = match stat {
             Ok(found) => found,
             Err(StatFailure::RootOffline { root }) => {
                 if let Some(generation) = pregenerate {
@@ -1820,7 +1954,13 @@ fn lookup(
     known: Option<&str>,
 ) -> BatchItem {
     let list = state.list_waveforms();
-    let (canonical, file_etag) = match state.stat_audio(id, path, index) {
+    let hinted = list.hint(id).map(|hint| (hint.canonical, hint.file_etag));
+    let from_hint = hinted.is_some();
+    let stat = match hinted {
+        Some(found) => Ok(found),
+        None => state.stat_audio(id, path, index),
+    };
+    let (canonical, file_etag) = match stat {
         Ok(found) => found,
         Err(StatFailure::Missing) => return BatchItem::bare(id, ItemStatus::Missing),
         Err(StatFailure::RootOffline { root }) => return BatchItem::root_offline(id, root),
@@ -1855,7 +1995,12 @@ fn lookup(
         }
         _ => match list.failure(id, hash) {
             Some(failure) => BatchItem::error(id, failure.code, failure.message),
-            None => BatchItem::bare(id, ItemStatus::Pending),
+            None => {
+                if !from_hint {
+                    list.store_hint(id, canonical, file_etag);
+                }
+                BatchItem::bare(id, ItemStatus::Pending)
+            }
         },
     }
 }
@@ -1890,10 +2035,15 @@ pub async fn batch(
     let mut budget_pending = false;
     let mut budget_exhausted = false;
     let mut open_limited = 0_usize;
+    let mut deduped = 0_usize;
+    let mut capped = 0_usize;
     // Diagnostics (one log line per batch): records per root name.
     let mut per_root: BTreeMap<String, usize> = BTreeMap::new();
-    let parallel = Arc::new(tokio::sync::Semaphore::new(STAT_PARALLEL));
-    let mut tasks = tokio::task::JoinSet::new();
+    // Reads run as detached tasks: those unfinished when the budget runs out keep going
+    // in the background (bounded by `stat_slots`, `MAX_OUTSTANDING_STATS` and the
+    // per-root limit) and leave a hint the workers and later requests reuse.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut stats = 0_usize;
     for (position, id) in ids.iter().copied().enumerate() {
         let Some((path, missing)) = records.get(&id) else {
             items[position] = Some(BatchItem::bare(id, ItemStatus::Missing));
@@ -1922,47 +2072,83 @@ pub async fn batch(
                 continue;
             }
         }
+        if list.stats.contains(id) {
+            // Already being read (an earlier request's background read).
+            deduped += 1;
+            items[position] = Some(BatchItem::bare(id, ItemStatus::Pending));
+            continue;
+        }
+        if !list.stats.try_begin(id) {
+            // Too many reads outstanding: left to the on-demand workers.
+            capped += 1;
+            items[position] = Some(BatchItem::bare(id, ItemStatus::Pending));
+            continue;
+        }
+        let claim = StatClaim {
+            list: list.clone(),
+            id,
+        };
         let state = state.clone();
-        let parallel = parallel.clone();
         let path = path.clone();
         let known = known.get(&id).cloned();
-        tasks.spawn(async move {
-            let _slot = parallel.acquire_owned().await.ok()?;
-            let item = tokio::task::spawn_blocking(move || {
+        let tx = tx.clone();
+        stats += 1;
+        tokio::spawn(async move {
+            let Ok(_slot) = claim.list.stat_slots.clone().acquire_owned().await else {
+                return;
+            };
+            if let Some(index) = index
+                && state.root_monitor().opens_in_progress(index) >= unfinished_limit
+            {
+                // The root has too many unfinished opens: the workers retry it later.
+                let _ = tx.send((position, None));
+                return;
+            }
+            let result = tokio::task::spawn_blocking(move || {
                 let started = Instant::now();
                 let item = lookup(&state, id, &path, index, known.as_deref());
+                drop(claim);
                 (item, started.elapsed())
             })
-            .await
-            .ok()?;
-            Some((position, item))
+            .await;
+            if let Ok(result) = result {
+                // The request may have answered already; the hint stays either way.
+                let _ = tx.send((position, Some(result)));
+            }
         });
     }
+    drop(tx);
     let stat_started = Instant::now();
-    let stats = tasks.len();
+    let mut received = 0_usize;
     let mut finished = 0_usize;
     let mut slowest = Duration::ZERO;
     let deadline = tokio::time::Instant::now() + STAT_BUDGET;
-    loop {
-        match tokio::time::timeout_at(deadline, tasks.join_next()).await {
-            Ok(Some(Ok(Some((position, (item, took)))))) => {
-                items[position] = Some(item);
-                finished += 1;
-                slowest = slowest.max(took);
+    while received < stats {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some((position, result))) => {
+                received += 1;
+                match result {
+                    Some((item, took)) => {
+                        items[position] = Some(item);
+                        finished += 1;
+                        slowest = slowest.max(took);
+                    }
+                    None => open_limited += 1,
+                }
             }
-            Ok(Some(_)) => {}
             Ok(None) => break,
             Err(_) => {
-                budget_pending = true;
                 budget_exhausted = true;
                 break;
             }
         }
     }
-    let stat_ms = stat_started.elapsed().as_millis() as u64;
-    // Unstarted lookups are aborted; started `stat`s finish on their blocking threads
-    // (still registered with the root monitor).
-    drop(tasks);
+    let stat_elapsed = stat_started.elapsed();
+    let stat_ms = stat_elapsed.as_millis() as u64;
+    let unfinished = stats - received;
+    if open_limited > 0 {
+        budget_pending = true;
+    }
     let items: Vec<BatchItem> = items
         .into_iter()
         .zip(&ids)
@@ -1974,7 +2160,15 @@ pub async fn batch(
         .map(|item| item.id)
         .collect();
     list.enqueue_on_demand(&pending);
-    let retry_after = (!pending.is_empty()).then(|| list.retry_after_for(&pending, budget_pending));
+    let stat_wait = if budget_pending {
+        // A root hit its unfinished-open limit: give it the longest interval.
+        Some(f64::INFINITY)
+    } else if budget_exhausted {
+        Some(stat_wait(unfinished, finished, stat_elapsed))
+    } else {
+        None
+    };
+    let retry_after = (!pending.is_empty()).then(|| list.retry_after_for(&pending, stat_wait));
     let count = |status: ItemStatus| items.iter().filter(|item| item.status == status).count();
     tracing::info!(
         ids = ids.len(),
@@ -1982,7 +2176,10 @@ pub async fn batch(
         stat_ms,
         slowest_stat_ms = slowest.as_millis() as u64,
         stats,
-        unfinished_stats = stats - finished,
+        unfinished_stats = unfinished,
+        deduped,
+        capped,
+        outstanding_stats = list.outstanding_stats(),
         budget_exhausted,
         open_limited,
         ok = count(ItemStatus::Ok),
@@ -2186,12 +2383,39 @@ mod tests {
 
     #[test]
     fn retry_after_follows_the_queue_position_within_one_to_five_seconds() {
-        assert_eq!(estimate_retry_after(0, 14.0, false), 1);
-        assert_eq!(estimate_retry_after(14, 14.0, false), 1);
-        assert_eq!(estimate_retry_after(15, 14.0, false), 2);
-        assert_eq!(estimate_retry_after(42, 14.0, false), 3);
-        assert_eq!(estimate_retry_after(200, 14.0, false), 5);
-        assert_eq!(estimate_retry_after(10_000, 0.0, false), 5);
-        assert_eq!(estimate_retry_after(1, 1000.0, true), 5);
+        assert_eq!(estimate_retry_after(0, 14.0, None), 1);
+        assert_eq!(estimate_retry_after(14, 14.0, None), 1);
+        assert_eq!(estimate_retry_after(15, 14.0, None), 2);
+        assert_eq!(estimate_retry_after(42, 14.0, None), 3);
+        assert_eq!(estimate_retry_after(200, 14.0, None), 5);
+        assert_eq!(estimate_retry_after(10_000, 0.0, None), 5);
+        // Background metadata reads still running: at least their expected time.
+        assert_eq!(estimate_retry_after(1, 1000.0, Some(f64::INFINITY)), 5);
+        assert_eq!(estimate_retry_after(1, 1000.0, Some(2.2)), 3);
+        assert_eq!(estimate_retry_after(42, 14.0, Some(0.5)), 3);
+    }
+
+    #[test]
+    fn background_stat_wait_follows_the_measured_rate() {
+        let two = Duration::from_secs(2);
+        assert_eq!(stat_wait(0, 0, two), 0.0);
+        assert!(stat_wait(10, 0, two).is_infinite());
+        assert!((stat_wait(147, 53, two) - 5.547).abs() < 0.01);
+        assert!((stat_wait(20, 100, two) - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stat_tracker_dedupes_and_bounds_outstanding_reads() {
+        let tracker = StatTracker::default();
+        assert!(tracker.try_begin(1));
+        assert!(!tracker.try_begin(1), "already being read");
+        for id in 2..=MAX_OUTSTANDING_STATS as i64 {
+            assert!(tracker.try_begin(id));
+        }
+        assert_eq!(tracker.len(), MAX_OUTSTANDING_STATS);
+        assert!(!tracker.try_begin(10_000), "bounded");
+        tracker.end(1);
+        assert!(!tracker.contains(1));
+        assert!(tracker.try_begin(10_000));
     }
 }
