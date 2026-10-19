@@ -20,8 +20,8 @@ use audiolib_audio::{
 use audiolib_core::config::{AppConfig, AudioTablePreferences};
 use audiolib_core::{
     AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder, LibraryExportFormat,
-    MaintenanceAction, MetadataPatch, PlayRecord, ScanSession, SearchFilters, SearchRequest,
-    SortOrder, TagEditMode,
+    ListWaveformSource, MaintenanceAction, MetadataPatch, PlayRecord, ScanSession, SearchFilters,
+    SearchRequest, SortOrder, TagEditMode,
 };
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -4724,7 +4724,7 @@ impl Controller {
         let first = usize::try_from(first).unwrap_or(0);
         let count = usize::try_from(count).unwrap_or(0).max(1);
         self.list_waveforms
-            .set_window(window_ids(&ids, first, count));
+            .set_window(window_ids(&ids, first, count), count);
     }
 
     /// Keep already known list Waveforms on rows being (re)published.
@@ -5676,7 +5676,8 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
     ui.set_metadata_dirty(false);
 }
 /// Row Waveform states shown by the table: 0 placeholder, 1 thumbnail, 2 center line
-/// (empty file), 3 no Waveform (missing or undecodable).
+/// (empty file), 3 no Waveform (missing or undecodable), 4 root offline (server mode:
+/// a stale thumbnail with the offline tint, or an offline placeholder).
 fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell) {
     match cell {
         ListWaveformCell::Ready(waveform) => match render_list_waveform(waveform) {
@@ -5692,6 +5693,14 @@ fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell) {
         ListWaveformCell::Unavailable => {
             row.wave = Image::default();
             row.wave_state = 3;
+        }
+        ListWaveformCell::Offline(stale) => {
+            row.wave = stale
+                .as_ref()
+                .and_then(render_list_waveform)
+                .map(Image::from_rgba8)
+                .unwrap_or_default();
+            row.wave_state = 4;
         }
     }
 }
@@ -5722,15 +5731,22 @@ impl ListWaveformHost for Controller {
             return None;
         }
         if self.remote_read_only() {
-            // Server mode never reads the snapshot's waveform_cache rows (§9.3). The
-            // server batch client (POST /waveforms) plugs in here as a provider whose
-            // source is `ListWaveformSource::Server`.
-            return None;
+            // Server mode never reads the snapshot's waveform_cache rows (§9.3): the
+            // provider answers from `POST /waveforms` (`ListWaveformSource::Server`, or
+            // `Unavailable` when the server has no usable `list_waveforms` capability).
+            return self
+                .remote_list_waveform_provider()
+                .map(|provider| provider as Arc<dyn DataProvider>);
         }
         Some(self.provider() as Arc<dyn DataProvider>)
     }
     fn list_waveform_scanning(&self) -> bool {
         self.scan_cancel.lock().unwrap().is_some()
+    }
+    fn list_waveform_source_changed(&self, source: ListWaveformSource) {
+        post(self.ui.clone(), move |ui| {
+            ui.set_list_waveforms_server(source == ListWaveformSource::Server);
+        });
     }
     fn deliver_list_waveforms(&self, generation: u64, cells: Vec<(i64, ListWaveformCell)>) {
         let service = self.list_waveforms.clone();
