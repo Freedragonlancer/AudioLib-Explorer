@@ -86,6 +86,18 @@ revision_poll_secs = 3
 # waveform_cache_mb = 1024
 # max_waveforms = 4
 
+# List thumbnail waveforms (POST /waveforms, doc/api/README.md §9.1-§9.2) live in
+# waveform_cache_dir/list/ with their own limit list_waveform_cache_mb (16..=1048576,
+# default 640 MiB; not part of waveform_cache_mb). Misses are computed in the background
+# by list_waveform_workers workers (1..=64, default 1, never more than max_waveforms - 1)
+# that share the max_waveforms slots. pregenerate_list_waveforms = true fills the whole
+# library at most list_waveform_rate files per second (1..=1000, default 10), yielding to
+# scans and audio streams; the admin page and PATCH /api/v1/settings can override it.
+# pregenerate_list_waveforms = false
+# list_waveform_cache_mb = 640
+# list_waveform_workers = 1
+# list_waveform_rate = 10
+
 # GET /audio/{id}/preview (doc/api/README.md §8.1). Previews of both codecs have their own
 # max_previews slots (1..=1024, default 8; then 503 BUSY with Retry-After: 1), separate
 # from max_streams, so /stream downloads filling up never block previews. codec=pcm (WAV,

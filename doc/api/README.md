@@ -51,7 +51,7 @@
 | 远程不支持的操作 | 501 | `UNSUPPORTED` |
 | 库尚未打开（启动中）或打开失败、正在重试（§6.2） | 503 | `UNAVAILABLE`（附 `Retry-After: 5`）；**只用于这一种情况** |
 | 音频流/预览/波形所在的库根目录、或 `POST /scans` 要扫描的根离线或暂时无响应（§6.4、§6.6） | 503 | `ROOT_OFFLINE`（附 `Retry-After: 5`，`message` 为 `Library root "<根名>" is offline: <原因>`） |
-| 音频流并发达到上限 `max_streams`（§8），预览（`pcm`/`flac`）并发达到独立的上限 `max_previews`，或 `flac` 预览等待 0.5 秒仍无转码名额 `max_transcodes`（§8.1）；`POST /waveforms` 同时处理的请求超过 4 个（§9.1 草案） | 503 | `BUSY`（附 `Retry-After: 1`，几种情况形状完全相同；快照并发仍为 409 `BUSY`） |
+| 音频流并发达到上限 `max_streams`（§8），预览（`pcm`/`flac`）并发达到独立的上限 `max_previews`，或 `flac` 预览等待 0.5 秒仍无转码名额 `max_transcodes`（§8.1）；`POST /waveforms` 同时处理的请求超过 4 个（§9.1） | 503 | `BUSY`（附 `Retry-After: 1`，几种情况形状完全相同；快照并发仍为 409 `BUSY`） |
 | 快照还在准备、等待超过 `snapshot_wait_secs`（§6.1） | 503 | `BUSY`（附 `Retry-After: 5`；准备在后台继续，重试即可拿到；与音频流 `BUSY` 同码，靠 `Retry-After` 和端点区分） |
 | `flac` 预览所需的 ffmpeg 不存在或无法启动（§8.1） | 503 | `TRANSCODER_UNAVAILABLE`（不带 `Retry-After`） |
 | 写快照/备份副本前检查所在卷的剩余空间不足（§6.1；需要的字节数 + max(64 MiB, 2 %) 余量）或系统报告磁盘已满 | 507 | `INSUFFICIENT_STORAGE`（`message` 含目录和所需/剩余 MiB；腾出空间后重试，无 `Retry-After`） |
@@ -63,11 +63,11 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - `BUSY`（503）：音频流/预览名额已满，按 `Retry-After` 稍后重试（§8、§8.1）。
 - `TRANSCODER_UNAVAILABLE`：只出现在 `/audio/{id}/preview?codec=flac` 上，服务端没有可用的 ffmpeg；重试无用，改用 `codec=pcm` 或 `/stream`。
 - `UNAVAILABLE`：**整个库**暂不可用（服务端启动中或开库失败正在重试，§6.2），任何需鉴权的端点都可能返回；按“服务器暂不可用、稍后重试”处理（类似连接失败，可沿用离线缓存）。
-- `ROOT_OFFLINE`：只出现在 `/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans`（§6.6）上（`POST /waveforms` 草案不整体返回它，而是逐项 `status: "root_offline"`，§9.1），表示**该文件所在（或要扫描）的库根**离线或暂时无响应；库本身可用（元数据、快照、写入照常），客户端可显示 `message` 中的原因、查看 `/roots` 的 `status`，或用 `POST /roots/{name}/check` 立即重查（§6.4）。
+- `ROOT_OFFLINE`：只出现在 `/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans`（§6.6）上（`POST /waveforms` 不整体返回它，而是逐项 `status: "root_offline"`，§9.1），表示**该文件所在（或要扫描）的库根**离线或暂时无响应；库本身可用（元数据、快照、写入照常），客户端可显示 `message` 中的原因、查看 `/roots` 的 `status`，或用 `POST /roots/{name}/check` 立即重查（§6.4）。
 
 500 的 `message` 可能包含服务端路径；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
 
-连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；草案 `POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
+连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；`POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
 
 ### 2.2 鉴权模式与 token
 
@@ -288,7 +288,7 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/audio/metadata/batch` | `update_metadata_batch` | `BatchMetadataRequest`（`tag_mode` 可省略，默认 `replace`） | `{ "report": BatchMetadataReport, "files": AudioFile[], "revision_before": n, "revision": n+1 }`，见 §6.3 |
 | ✅ | POST | `/audio/remove` | `remove_audio` | `{ "ids": [n, …] }`（1..=10000 个） | 200 `{ "removed": n, "not_found": [id…], "revision_before": n, "revision": n \| n+1 }`；只删库记录，不删文件；受 `manage_mode` 限制，扫描中 409 `BUSY`，见 §6.8 |
 | ✅ | DELETE | `/folders/{id}` | `remove_folder` | 无请求体 | 200 `{ "removed": n, "folders_removed": n, "revision_before": n, "revision": n+1 }`（整个子树）；未知 404，库根顶层文件夹 400，见 §6.8 |
-| ✅ | GET | `/capabilities` | — | — | `{ "manage_mode": "all" \| "lan" \| "off", "external": bool, "can_manage": bool, "root_management": true }`；需鉴权，库启动中也可用，见 §6.9；草案新增 `list_waveforms`、`pregenerate_list_waveforms`（§9.2） |
+| ✅ | GET | `/capabilities` | — | — | `{ "manage_mode": "all" \| "lan" \| "off", "external": bool, "can_manage": bool, "root_management": true }`；需鉴权，库启动中也可用，见 §6.9；另有 `list_waveforms`、`pregenerate_list_waveforms`（§9.2） |
 | ✅ | GET | `/fs` | 服务端目录（有界只读浏览） | `path?`、`hidden?` | 起点或目录列表；受 `manage_mode` 限制，见 §6.10 |
 | ✅ | POST | `/roots` | 持久化根目录设置 | `{ "name", "path" }` | 201 根目录条目；受 `manage_mode` 限制，见 §6.10 |
 | ✅ | PATCH | `/roots/{name}` | 原子重定位根目录记录 + 持久化设置 | `{ "path" }` | 200 根目录条目；保留 ID、Metadata 与标注，见 §6.10 |
@@ -302,10 +302,10 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/scans/{session_id}/pause` · `/resume` · `/cancel` | 扫描控制（受 `manage_mode` 限制，§6.9） | 无请求体 | `ScanResponse`；状态不允许时 409 `SCAN_STATE`，见 §6.6 |
 | ✅ | GET / HEAD | `/audio/{id}/stream[?download=1]` | 音频流 / 下载 | 见 §8 | 音频字节（`download=1` 时附 `Content-Disposition: attachment`，§8） |
 | ✅ | GET / HEAD | `/audio/{id}/waveform?buckets=&colors=&start_frame=&end_frame=` | `audiolib_audio::waveform` | 见 §9 | `WaveformData` JSON + `start_frame`/`end_frame`/`total_frames`（可 zstd），见 §9 |
-| ⏳ | POST | `/waveforms` | 列表缩略波形（批量，只读，不受 `manage_mode` 限制） | `{ "ids": [n, …]（1..=200）, "buckets": 128, "known"?: { "<id>": "<etag>" } }` | 200 `{ "library_id", "buckets", "retry_after", "items": [{ "id", "status": "ok" \| "not_modified" \| "pending" \| "missing" \| "root_offline" \| "error", "etag"?, "n"?, "peaks"? }] }`（单声道 128 列 min/max，int16 LE base64；可 zstd），草案，见 §9.1 |
-| ⏳ | GET | `/waveforms/status` | 列表缩略波形预生成 / 按需队列进度 | — | `{ "enabled", "state", "yield_reason", "total", "cached", "remaining", "queued_on_demand", "failed", … }`，草案，见 §9.2 |
-| ⏳ | POST | `/waveforms/pregeneration/pause` · `/resume` | 手动暂停 / 继续预生成（受 `manage_mode` 限制） | 无请求体 | 同 `/waveforms/status`，草案，见 §9.2 |
-| ⏳ | GET / PATCH | `/settings` | 客户端可读写的服务端设置（PATCH 受 `manage_mode` 限制） | PATCH `{ "pregenerate_list_waveforms": bool \| null }` | `{ "pregenerate_list_waveforms", "pregenerate_list_waveforms_source", "can_change" }`，草案，见 §9.2 |
+| ✅ | POST | `/waveforms` | 列表缩略波形（批量，只读，不受 `manage_mode` 限制） | `{ "ids": [n, …]（1..=200）, "buckets": 128, "known"?: { "<id>": "<etag>" } }` | 200 `{ "library_id", "buckets", "retry_after", "items": [{ "id", "status": "ok" \| "not_modified" \| "pending" \| "missing" \| "root_offline" \| "error", "etag"?, "n"?, "peaks"? }] }`（单声道 128 列 min/max，int16 LE base64；可 zstd），见 §9.1 |
+| ✅ | GET | `/waveforms/status` | 列表缩略波形预生成 / 按需队列进度 | — | `{ "enabled", "state", "yield_reason", "total", "cached", "remaining", "queued_on_demand", "failed", … }`，见 §9.2 |
+| ✅ | POST | `/waveforms/pregeneration/pause` · `/resume` | 手动暂停 / 继续预生成（受 `manage_mode` 限制） | 无请求体 | 同 `/waveforms/status`，见 §9.2 |
+| ✅ | GET / PATCH | `/settings` | 客户端可读写的服务端设置（PATCH 受 `manage_mode` 限制） | PATCH `{ "pregenerate_list_waveforms": bool \| null }` | `{ "pregenerate_list_waveforms", "pregenerate_list_waveforms_source", "can_change" }`，见 §9.2 |
 | ✅ | GET / HEAD | `/audio/{id}/preview?codec=pcm\|flac&sr=&bits=&ch=[&t=]` | 低带宽试听预览 | 见 §8.1 | `pcm`：进程内生成的 WAV（有长度，可 Range）；`flac`：ffmpeg 实时转码的分块 FLAC 流 |
 
 管理页 `/admin` 和 `/admin/api/...` 不在 `/api/v1` 下，只供局域网浏览器使用，见 §2.3。
@@ -408,7 +408,7 @@ audiolib.example.com:8443 {
 
 库根目录通常在 NAS 上，NAS 硬盘休眠后唤醒要 20–30 秒甚至更久。服务端因此遵守：
 
-1. **只有 `/audio/{id}/stream`（GET/HEAD，含 `download=1`）、`/audio/{id}/preview`（GET/HEAD）和 `/audio/{id}/waveform` 会访问根目录下的文件**，而且没有任何时间上限：不受 30 秒 408 限制，打开/stat/首次读取等多久都行（≥ 90 秒没问题）；唯一的超时是 10 秒的请求头读取，只针对客户端发送请求头。打开文件在 tokio 的阻塞线程池里进行，不占用异步运行时；客户端在等待期间断开时，处理函数连同它占用的并发名额（`max_streams` / `max_previews` / 波形名额）立即释放，即使阻塞的 `open()` 本身还卡着（例如 macOS 的“网络宗卷”授权弹窗未处理时）。这些卡住的打开会在服务端登记：每个根最多同时存在 4 × (`max_streams` + `max_previews`) 个未结束的打开（流和预览的打开共用这个上限），超出时新请求直接返回 503 `ROOT_OFFLINE`（`…earlier file opens have not finished yet`），所以卡住的线程有上限。打开超过 10 秒时服务端日志记一条 WARN（含根名和文件路径），结束时若总共超过 10 秒再记一条。草案 §9.1–§9.2：`POST /waveforms` 只对文件做 `stat`（有 2 秒预算，不读音频数据，根缓存为 `offline` 时完全不访问）；列表缩略波形的后台工作线程会读取音频数据，同样没有时间上限。
+1. **只有 `/audio/{id}/stream`（GET/HEAD，含 `download=1`）、`/audio/{id}/preview`（GET/HEAD）和 `/audio/{id}/waveform` 会访问根目录下的文件**，而且没有任何时间上限：不受 30 秒 408 限制，打开/stat/首次读取等多久都行（≥ 90 秒没问题）；唯一的超时是 10 秒的请求头读取，只针对客户端发送请求头。打开文件在 tokio 的阻塞线程池里进行，不占用异步运行时；客户端在等待期间断开时，处理函数连同它占用的并发名额（`max_streams` / `max_previews` / 波形名额）立即释放，即使阻塞的 `open()` 本身还卡着（例如 macOS 的“网络宗卷”授权弹窗未处理时）。这些卡住的打开会在服务端登记：每个根最多同时存在 4 × (`max_streams` + `max_previews`) 个未结束的打开（流和预览的打开共用这个上限），超出时新请求直接返回 503 `ROOT_OFFLINE`（`…earlier file opens have not finished yet`），所以卡住的线程有上限。打开超过 10 秒时服务端日志记一条 WARN（含根名和文件路径），结束时若总共超过 10 秒再记一条。§9.1–§9.2：`POST /waveforms` 只对文件做 `stat`（有 2 秒预算，不读音频数据，根缓存为 `offline` 时完全不访问）；列表缩略波形的后台工作线程会读取音频数据，同样没有时间上限。
 2. **`/health`、`/library`、`/library/snapshot`、`/roots`、`/audio/{id}`、`/history/...`、`/scans/...` 的查询和控制端点以及 metadata 写入端点从不访问根目录**（只读写本机磁盘上的库文件和内存缓存），NAS 休眠或离线时照常快速响应。`POST /scans`（§6.6）是例外：扫描本身就要读根目录，它在独立后台线程里进行，没有时间上限。服务端启动时也不访问根目录；根检查线程在库打开成功之后才启动。
 3. **根状态由后台线程检查并缓存**，`/roots` 只读缓存。每个根一个检查线程：启动时、每 `root_check_secs` 秒（默认 300）、以及有请求要求重查时（见下）各检查一次。检查只做根目录的 `realpath` + `stat`（不列目录、不读文件），**不会为保持唤醒而轮询**；若连这个也不想要，把 `root_check_secs` 调大（最大 86400）。进行中的文件打开与进行中的检查同等对待：自上次成功以来超过 5 秒未完成 → `waking`，超过 `root_offline_secs` → `offline`；在此之后的一次成功（检查或打开）立即恢复 `online`。
 
@@ -669,10 +669,10 @@ audiolib.example.com:8443 {
 | `external` | 服务端是否把**这个请求**当作外部请求（§2.2 的判定） |
 | `can_manage` | 这个请求（同样的网络路径）调用上述管理端点是否会被允许 |
 | `root_management` | 本服务端提供 §6.10 的稳定根目录管理接口；缺字段的旧版本按 `false`，客户端隐藏目录浏览及根目录新增、改路径、删除按钮 |
-| `list_waveforms` | （草案）支持 §9.1 的 `POST /waveforms`：`{ "version": 1, "buckets": [128], "max_ids": 200, "encoding": "i16le-minmax-base64" }`；缺字段 = 不支持 |
-| `pregenerate_list_waveforms` | （草案）当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
+| `list_waveforms` | 支持 §9.1 的 `POST /waveforms`：`{ "version": 1, "buckets": [128], "max_ids": 200, "encoding": "i16le-minmax-base64" }`；缺字段 = 不支持 |
+| `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
 
-- 草案 §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 实现后同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
+- §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
 
 ### 6.10 客户端远程目录浏览与音效库根目录管理（已实现）
@@ -832,9 +832,9 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - **根离线 / 慢速磁盘**：与 `/stream` 完全相同（§6.4）：根缓存为离线时先即时重查（约 2 秒），仍离线返回 503 `ROOT_OFFLINE` + `Retry-After: 5`；没有 30 秒时间上限，NAS 唤醒期间一直等待；打开超过 10 秒记 WARN。解码途中网络卷断开（超时类错误）同样返回 `ROOT_OFFLINE`。
 - 其他错误：无此记录 / 文件缺失 / 不在根下 → 404 `NOT_FOUND`（同 §8）；无法解码 → 500 `AUDIO`；非整数 id 400 `VALIDATION`。
 
-### 9.1 列表缩略波形批量 `POST /waveforms`（⚠️ 草案，客户端已评审，未实现）
+### 9.1 列表缩略波形批量 `POST /waveforms`（已实现）
 
-> **DRAFT / 草案**：§9.1–§9.3 已经过客户端评审（决定见 §9.3），服务端尚未实现，实现时字段和错误码仍可能微调。**不改数据库 schema，快照（§6.1）不变。** 客户端用 `GET /capabilities` 的 `list_waveforms`（§9.2）判断服务端是否支持；缺该字段的服务端没有本端点（404），列表不显示缩略波形（不要在列表滚动时改为逐条请求 `GET /audio/{id}/waveform`）。
+> §9.1–§9.3 已经过客户端评审（决定见 §9.3），服务端已实现（§9.1–§9.2）。**不改数据库 schema，快照（§6.1）不变。** 客户端用 `GET /capabilities` 的 `list_waveforms`（§9.2）判断服务端是否支持；缺该字段的服务端没有本端点（404），列表不显示缩略波形（不要在列表滚动时改为逐条请求 `GET /audio/{id}/waveform`）。
 
 目的：结果列表每行显示一条很小的单声道波形（128 列），一页（UI 每页 200 条，§5）一次请求取回；命中缓存时不读音频数据，未命中时不阻塞列表。
 
@@ -917,7 +917,7 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - 删除记录：扫描结束（含取消前已提交的部分）以及 `POST /audio/remove`、`DELETE /folders/{id}`、`DELETE /roots/{name}` 之后，服务端在后台把分片中已不在库里的 id 删掉（按分片重写，原子替换）；`library_id` 变化（库被替换）时整个 `list/<旧库>` 目录删除。`PATCH /roots/{name}` 改路径后 canonical 路径变了，旧条目的键不再匹配，下次按需请求或预生成时重算覆盖。
 - 文件被直接修改而没有重新扫描：请求时 `stat` 得到的文件 ETag 与缓存键不一致 → `pending` 并重算（惰性检测）。**没有定时巡检，也没有定时重扫。**
 
-### 9.2 预生成开关 `pregenerate_list_waveforms`（⚠️ 草案，未实现）
+### 9.2 预生成开关 `pregenerate_list_waveforms`（已实现）
 
 服务端设置 `pregenerate_list_waveforms`（bool，默认 `false`）。来源规则与 `manage_mode` 相同（§2.3、§6.9）：`config.toml` 给默认值，管理页或下面的 `PATCH /settings` 写入 `admin-settings.json` 覆盖（`null` = 删除覆盖、回到 `config.toml`），立即生效、无需重启。
 
@@ -971,6 +971,8 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 | `cache_bytes` / `cache_limit_bytes` / `over_budget` | 列表缓存占用、子预算 `list_waveform_cache_mb`、是否超出 |
 | `pass_started_at` / `pass_finished_at` | 本轮开始 / 完成时间（Unix 秒，未完成为 `null`） |
 
+服务端实现说明（细节，客户端不应依赖）：`failed` 为当前已知解码失败（按文件版本记在内存中）的记录数，包括按需队列产生的失败；`over_budget` 一旦发生过分片淘汰即为 `true`，直到进程重启；`retry_after` 按按需队列长度 / 工作线程数估计；限速只作用于实际解码的文件，键一致只需 `stat` 的记录不计入限速；扫描结束后加入预生成的是本次扫描写入（新增或内容变化）的记录；预生成进度、按需队列和失败记录都只在内存中。“试听开始”指 `GET` 的 `/stream` / `/preview` 被接受（`HEAD` 不算，但它短暂占用名额时仍算进行中的试听）。
+
 **客户端读取 / 修改开关**：现有的 `/admin/api/settings` 只供局域网管理页使用、客户端不得依赖（§2.3.1），`/capabilities` 是只读的，所以新增一个通用的 `/settings`，以后其他“客户端可改的服务端设置”也放在这里：
 
 - `GET /api/v1/settings`（按 §2.2 鉴权，不受 `manage_mode` 限制；库启动中也可用；30 秒超时）→ `{"pregenerate_list_waveforms": false, "pregenerate_list_waveforms_source": "default", "can_change": true}`。`_source` 为 `default` / `config` / `admin`（同 `GET /admin/api/status`）；`can_change` 与 `/capabilities` 的 `can_manage` 相同，只是提示。
@@ -1011,7 +1013,7 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 ## 10. 服务端部署
 
 - 部署方式：macOS 原生进程（不用容器），默认监听 `0.0.0.0:8790`，可用 launchd 用户代理常驻。启动时先监听端口，再在后台打开库；打不开时进程不退出而是重试（§6.2）。端口被占用、配置无效或（`auth = true` 时）token 缺失仍会直接退出。可选的原生 TLS 监听（§2.3）起不来时只在日志和管理页报错，不影响 HTTP 端口。管理页：`http://<host>:8790/admin`（§2.3）。
-- 配置：TOML 文件，通过 `--config <path>` 或环境变量 `AUDIOLIB_SERVER_CONFIG` 指定；字段 `bind`、`library_db`、`auth`（默认 `false`；`true` = `auth_mode = "all"`）、`auth_mode`（`off`/`external`/`all`，默认 `external`，§2.2）、`manage_mode`（`all`/`lan`/`off`，默认 `all`，§6.9）、`public_url`（可选，§2.3）、`tls_cert_path` + `tls_key_path` + `tls_port`（可选，三项同时设置，原生 TLS，§2.3）、`token_env`、`revision_poll_secs`、`snapshot_dir`、`max_streams`（默认 16）、`root_check_secs`（默认 300）、`root_offline_secs`（默认 120）、`waveform_cache_dir`（默认库文件旁的 `waveforms/`）、`waveform_cache_mb`（默认 1024）、`max_waveforms`（默认 4）、`pregenerate_list_waveforms`（默认 `false`，列表缩略波形预生成，管理页 / `PATCH /settings` 可覆盖，§9.2 草案）、`list_waveform_cache_mb`（默认 640，列表缩略波形缓存子预算，不计入 `waveform_cache_mb`，§9.1 草案）、`list_waveform_workers`（默认 1，占用 `max_waveforms` 名额的上限，§9.2 草案）、`list_waveform_rate`（默认 10，预生成每秒最多开始处理的文件数，§9.2 草案）、`ffmpeg_path`（默认 `/opt/homebrew/bin/ffmpeg`，须为绝对路径；不存在时服务端照常启动，只有 `flac` 预览返回 503 `TRANSCODER_UNAVAILABLE`）、`max_transcodes`（默认 4，1..=64）、`max_previews`（默认 8，1..=1024，`/preview` 两种编码共用的并发上限，与 `max_streams` 分开）、`[[roots]] { name, server_path, webdav_url? }`（`server_path` 填真实路径，不经符号链接，与扫描器写入库的路径一致）。示例见 `server/audiolib-server/config.example.toml`。服务端只打开已有的库，不会创建库。
+- 配置：TOML 文件，通过 `--config <path>` 或环境变量 `AUDIOLIB_SERVER_CONFIG` 指定；字段 `bind`、`library_db`、`auth`（默认 `false`；`true` = `auth_mode = "all"`）、`auth_mode`（`off`/`external`/`all`，默认 `external`，§2.2）、`manage_mode`（`all`/`lan`/`off`，默认 `all`，§6.9）、`public_url`（可选，§2.3）、`tls_cert_path` + `tls_key_path` + `tls_port`（可选，三项同时设置，原生 TLS，§2.3）、`token_env`、`revision_poll_secs`、`snapshot_dir`、`max_streams`（默认 16）、`root_check_secs`（默认 300）、`root_offline_secs`（默认 120）、`waveform_cache_dir`（默认库文件旁的 `waveforms/`）、`waveform_cache_mb`（默认 1024）、`max_waveforms`（默认 4）、`pregenerate_list_waveforms`（默认 `false`，列表缩略波形预生成，管理页 / `PATCH /settings` 可覆盖，§9.2）、`list_waveform_cache_mb`（默认 640，列表缩略波形缓存子预算，不计入 `waveform_cache_mb`，§9.1）、`list_waveform_workers`（默认 1，占用 `max_waveforms` 名额的上限，§9.2）、`list_waveform_rate`（默认 10，预生成每秒最多开始处理的文件数，§9.2）、`ffmpeg_path`（默认 `/opt/homebrew/bin/ffmpeg`，须为绝对路径；不存在时服务端照常启动，只有 `flac` 预览返回 503 `TRANSCODER_UNAVAILABLE`）、`max_transcodes`（默认 4，1..=64）、`max_previews`（默认 8，1..=1024，`/preview` 两种编码共用的并发上限，与 `max_streams` 分开）、`[[roots]] { name, server_path, webdav_url? }`（`server_path` 填真实路径，不经符号链接，与扫描器写入库的路径一致）。示例见 `server/audiolib-server/config.example.toml`。服务端只打开已有的库，不会创建库。
 - token：环境变量 `AUDIOLIB_SERVER_TOKEN`（可用 `token_env` 改名），至少 16 个可见 ASCII 字符；配置文件里写 `token` 会被拒绝。`auth = true` 时必须设置；否则可选，设置了就和管理页生成的 token 一样有效（格式不对时记警告并忽略）。管理页生成的 token 和设置保存在库目录的 `tokens.json` / `admin-settings.json`（§2.3）。
 - macOS 部署：launchd 可通过固定不变的 `audiolib-launcher`（`server/launcher/`，可选，只编译签名一次）用 `posix_spawn` 启动服务端，macOS 的卷访问授权记在启动器上，之后只替换服务端二进制不会再弹授权；通用部署/升级/回滚说明和 systemd、launchd、Docker 示例见 `server/deploy/`。库文件、旁路文件和 `snapshots/`（以及波形缓存 `waveforms/`）建议放在本机磁盘，例如 `/var/lib/audiolib/`（macOS：`/usr/local/var/audiolib/`）。
 - 构建：在 `server/` 目录内运行 cargo（`server/rust-toolchain.toml` 与 `server/.cargo/config.toml` 覆盖仓库根的 Windows MSVC 默认设置），例如 `cargo build --release -p audiolib-server`。详见 `server/README.md`。
@@ -1066,4 +1068,4 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 6. ~~token 轮换和是否需要 HTTPS~~：已定，局域网 HTTP 免 token，外网经 HTTPS 反代 + 管理页生成/撤销的 token（§2.2–§2.4）。以后可加：管理密码、token 过期时间、客户端信任自签名证书。
 7. 库身份是否迁入未来 schema（§3）。
 8. 增量同步 `GET /library/changes`（§6.5 草案）：变更日志放库内触发器（schema v5）还是服务端旁路；保留多久；410 的阈值。
-9. 列表缩略波形（§9.1–§9.3 草案）：客户端评审结论见 §9.3；按需队列的让路已定（只在试听开始后的前 3 秒让路，试听期间最多 1 个解码名额，不因扫描暂停；预生成在试听整个期间和扫描期间让路，§9.2）。服务端实现时再确认 `list_waveform_cache_mb` 默认 640 MiB 是否足够。
+9. 列表缩略波形（§9.1–§9.3，服务端已实现）：客户端评审结论见 §9.3；按需队列的让路已定（只在试听开始后的前 3 秒让路，试听期间最多 1 个解码名额，不因扫描暂停；预生成在试听整个期间和扫描期间让路，§9.2）。服务端实现时再确认 `list_waveform_cache_mb` 默认 640 MiB 是否足够。
