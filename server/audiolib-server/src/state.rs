@@ -628,6 +628,7 @@ impl AppState {
                 cache_mb: config.list_waveform_cache_mb,
                 workers: config.effective_list_waveform_workers(),
                 rate: config.list_waveform_rate,
+                pause_stats_on_playback: config.list_waveform_pause_stats_on_playback,
             },
             &library_id,
             provider.database_path(),

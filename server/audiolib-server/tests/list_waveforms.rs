@@ -988,3 +988,68 @@ async fn slow_metadata_reads_continue_in_the_background_after_the_budget() {
         "{reply:?}"
     );
 }
+
+#[test]
+fn stat_pause_on_playback_is_off_by_default_and_a_bool() {
+    let base = "library_db = 'lib.db'\n";
+    let config = ServerConfig::from_toml_str(base, Path::new(".")).unwrap();
+    assert!(!config.list_waveform_pause_stats_on_playback);
+    let on = ServerConfig::from_toml_str(
+        &format!("{base}list_waveform_pause_stats_on_playback = true\n"),
+        Path::new("."),
+    )
+    .unwrap();
+    assert!(on.list_waveform_pause_stats_on_playback);
+    assert!(
+        ServerConfig::from_toml_str(
+            &format!("{base}list_waveform_pause_stats_on_playback = \"yes\"\n"),
+            Path::new("."),
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn stat_pause_on_playback_answers_pending_during_the_prebuffer_window() {
+    for pause in [false, true] {
+        let f = fixture(if pause {
+            "list_waveform_pause_stats_on_playback = true\n"
+        } else {
+            ""
+        });
+        let tone = f.id("tone.wav");
+        let silence = f.id("silence.wav");
+        let body = format!(r#"{{"ids":[{tone},{silence}]}}"#);
+        let warm = settled(&f.state, &body).await;
+        assert!(warm.items.iter().all(|item| item.status == ItemStatus::Ok));
+
+        // A stream/preview starts (HEAD would not call this).
+        f.state.list_waveforms().note_playback_start();
+        let reply = batch(&f.state, &body).await;
+        if !pause {
+            assert!(
+                reply.items.iter().all(|item| item.status == ItemStatus::Ok),
+                "off: metadata reads go on during playback: {reply:?}"
+            );
+            assert_eq!(reply.retry_after, None);
+            continue;
+        }
+        assert!(
+            reply
+                .items
+                .iter()
+                .all(|item| item.status == ItemStatus::Pending),
+            "on: no metadata reads in the prebuffer window: {reply:?}"
+        );
+        let retry = reply.retry_after.expect("retry_after while paused");
+        assert!((1..=3).contains(&retry), "covers the window: {retry}");
+        assert_eq!(f.state.list_waveforms().outstanding_stats(), 0);
+
+        tokio::time::sleep(Duration::from_millis(3100)).await;
+        let after = batch(&f.state, &body).await;
+        assert!(
+            after.items.iter().all(|item| item.status == ItemStatus::Ok),
+            "after the window: {after:?}"
+        );
+    }
+}

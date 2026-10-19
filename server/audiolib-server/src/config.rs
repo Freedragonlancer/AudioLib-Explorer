@@ -119,6 +119,10 @@ pub struct ServerConfig {
     /// Files pre-generation may start per second (1..=1000, default 10).
     #[serde(default = "default_list_waveform_rate")]
     pub list_waveform_rate: u32,
+    /// Pause `POST /waveforms` metadata reads (in-request and background) for the 3 s
+    /// prebuffer window after a stream or preview starts (default `false`).
+    #[serde(default)]
+    pub list_waveform_pause_stats_on_playback: bool,
     /// ffmpeg executable for `/audio/{id}/preview?codec=flac` (absolute path, default
     /// [`DEFAULT_FFMPEG_PATH`]). A missing ffmpeg only makes those requests answer 503
     /// `TRANSCODER_UNAVAILABLE`; the server still starts.

@@ -97,6 +97,10 @@ revision_poll_secs = 3
 # list_waveform_cache_mb = 640
 # list_waveform_workers = 1
 # list_waveform_rate = 10
+# true: POST /waveforms reads no file metadata (in the request or in the background) during
+# the 3 s prebuffer window after a stream or preview starts; ids it would read answer
+# pending with a retry_after covering the window. Default false.
+# list_waveform_pause_stats_on_playback = false
 
 # GET /audio/{id}/preview (doc/api/README.md §8.1). Previews of both codecs have their own
 # max_previews slots (1..=1024, default 8; then 503 BUSY with Retry-After: 1), separate
