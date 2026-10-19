@@ -240,6 +240,9 @@ component TableHeader inherits Rectangle {
 }
 
 // Store the absolute press position because a resized column moves its divider.
+// Slint reports a press within the double-click interval and 10 px of the previous
+// press as a double click on its release, even after a drag; only two presses that
+// did not drag may reset the column, or a click followed by a drag loses the width.
 component TableDivider inherits Rectangle {
     in property <length> column-width;
     in property <string> label;
@@ -250,6 +253,8 @@ component TableDivider inherits Rectangle {
     callback reset();
     private property <length> pressed-pointer-x;
     private property <length> pressed-column-width;
+    private property <bool> dragged;
+    private property <bool> previous-dragged;
     width: 8px;
     accessible-role: button;
     accessible-label: root.label;
@@ -279,6 +284,8 @@ component TableDivider inherits Rectangle {
         pointer-event(event) => {
             if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
                 divider-focus.focus();
+                root.previous-dragged = root.dragged;
+                root.dragged = false;
                 root.pressed-pointer-x = self.absolute-position.x + self.mouse-x;
                 root.pressed-column-width = root.column-width;
             }
@@ -286,10 +293,13 @@ component TableDivider inherits Rectangle {
         }
         moved => {
             if self.pressed {
-                root.resized(root.pressed-column-width + self.absolute-position.x + self.mouse-x - root.pressed-pointer-x);
+                let delta = self.absolute-position.x + self.mouse-x - root.pressed-pointer-x;
+                if abs(delta) > 2px { root.dragged = true; }
+                root.resized(root.pressed-column-width + delta);
             }
         }
-        double-clicked => { root.reset(); }
+        // Slint calls this before the release pointer event, so `dragged` is this press.
+        double-clicked => { if !root.dragged && !root.previous-dragged { root.reset(); } }
     }
 }
 
