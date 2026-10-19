@@ -3,6 +3,7 @@
 use crate::{
     ApiError, AppState, VERSION,
     auth::{ConnectionInfo, RequestOrigin, classify, same_request_origin},
+    list_waveform::{self, BatchRequest, ListWaveformsCapability, SettingsResponse},
     manage::{
         AddRootRequest, CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse,
         RemoveFolderResponse, RootPathRequest,
@@ -146,6 +147,21 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
                 "/scans/{session_id}/cancel",
                 post(cancel_scan).route_layer(manage()),
             )
+            // List thumbnail waveforms (doc/api/README.md §9.1–§9.2).
+            .route(
+                "/waveforms",
+                post(list_waveforms_batch)
+                    .route_layer(middleware::map_response(vary_accept_encoding)),
+            )
+            .route("/waveforms/status", get(list_waveform_status))
+            .route(
+                "/waveforms/pregeneration/pause",
+                post(pause_pregeneration).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/pregeneration/resume",
+                post(resume_pregeneration).route_layer(manage()),
+            )
             .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES)),
     );
     let protected = timed_protected
@@ -188,6 +204,9 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
     let open = Router::new().route("/health", get(health)).merge(
         Router::new()
             .route("/capabilities", get(capabilities))
+            // Server settings clients may read and (with `manage_mode`) change; like
+            // `/capabilities` they answer while the library is still opening.
+            .route("/settings", get(get_settings).patch(patch_settings))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_token)),
     );
     let api = with_request_timeout(timeout, open)
@@ -308,7 +327,7 @@ pub const LIBRARY_ID_HEADER: &str = "x-audiolib-library-id";
 fn managed_route(method: &Method, path: &str) -> bool {
     match *method {
         Method::GET | Method::HEAD => path.ends_with("/fs"),
-        Method::PATCH => path.ends_with("/roots/{name}"),
+        Method::PATCH => path.ends_with("/roots/{name}") || path.ends_with("/settings"),
         Method::DELETE => path.ends_with("/folders/{id}") || path.ends_with("/roots/{name}"),
         Method::POST => [
             "/roots",
@@ -317,6 +336,8 @@ fn managed_route(method: &Method, path: &str) -> bool {
             "/scans/{session_id}/pause",
             "/scans/{session_id}/resume",
             "/scans/{session_id}/cancel",
+            "/waveforms/pregeneration/pause",
+            "/waveforms/pregeneration/resume",
         ]
         .iter()
         .any(|managed| path.ends_with(*managed)),
@@ -428,7 +449,157 @@ async fn capabilities(
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
         root_management: true,
+        list_waveforms: Some(ListWaveformsCapability::default()),
+        pregenerate_list_waveforms: service.security().pregenerate_list_waveforms(),
     })
+}
+
+fn settings_response(
+    security: &crate::Security,
+    headers: &HeaderMap,
+    connection: Option<&ConnectionInfo>,
+) -> SettingsResponse {
+    let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
+        security.pregenerate_list_waveforms_with_source();
+    SettingsResponse {
+        pregenerate_list_waveforms,
+        pregenerate_list_waveforms_source,
+        can_change: security.manage_mode().allows(classify(headers, connection)),
+    }
+}
+
+/// `GET /settings` (doc/api/README.md §9.2): not gated by `manage_mode`.
+async fn get_settings(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Json<SettingsResponse> {
+    let connection = extensions.get::<ConnectionInfo>().copied();
+    Json(settings_response(
+        service.security(),
+        &headers,
+        connection.as_ref(),
+    ))
+}
+
+/// `PATCH /settings` body: only the present fields change; `null` removes the override.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsPatch {
+    #[serde(default, deserialize_with = "present_value")]
+    pregenerate_list_waveforms: Option<Option<bool>>,
+}
+
+/// `Some(None)` for an explicit JSON `null`, `None` for an absent field.
+fn present_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
+/// `PATCH /settings`: inside the settings lease (409 `BUSY` while another instance holds
+/// it) authenticate, check `manage_mode` (403 `MANAGE_FORBIDDEN`), then validate and
+/// write `admin-settings.json`. Takes effect at once.
+async fn patch_settings(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    let connection = extensions.get::<ConnectionInfo>().copied();
+    let security = service.security().clone();
+    let reply = blocking_api(move || {
+        let lease = security.settings_lease()?;
+        security.authorize(&headers, connection.as_ref())?;
+        security.authorize_manage(&headers, connection.as_ref())?;
+        let value: serde_json::Value = json_body(&headers, body)?;
+        if !value.is_object() {
+            return Err(ApiError::validation(
+                "The request body must be a JSON object",
+            ));
+        }
+        let patch: SettingsPatch = serde_json::from_value(value)
+            .map_err(|error| ApiError::validation(format!("Invalid settings: {error}")))?;
+        if let Some(value) = patch.pregenerate_list_waveforms {
+            security.update_settings_locked(&lease, |settings| {
+                settings.pregenerate_list_waveforms = value;
+            })?;
+            tracing::info!(
+                ?value,
+                "pregenerate_list_waveforms changed through PATCH /settings"
+            );
+        }
+        drop(lease);
+        Ok(settings_response(&security, &headers, connection.as_ref()))
+    })
+    .await?;
+    Ok(Json(reply))
+}
+
+/// `POST /waveforms`: list thumbnail waveforms of up to 200 records (§9.1).
+async fn list_waveforms_batch(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let value: serde_json::Value = json_body(&headers, body)?;
+    let request = BatchRequest::parse(&value)?;
+    let zstd = accepts_zstd(&headers);
+    let reply = list_waveform::batch(state, request).await?;
+    let json = serde_json::to_vec(&reply)
+        .map_err(|error| ApiError::internal(format!("Cannot encode list waveforms: {error}")))?;
+    let bytes = if zstd {
+        blocking(move || crate::waveform::compress(&json)).await?
+    } else {
+        json
+    };
+    let len = bytes.len();
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if zstd {
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+    }
+    Ok(response)
+}
+
+/// `GET /waveforms/status` (§9.2).
+async fn list_waveform_status(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    Ok(Json(
+        blocking(move || state.list_waveforms().status(&state)).await?,
+    ))
+}
+
+async fn set_pregeneration_paused(
+    state: AppState,
+    paused: bool,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    state.list_waveforms().set_paused(paused);
+    tracing::info!(paused, "List waveform pre-generation paused/resumed");
+    Ok(Json(
+        blocking(move || state.list_waveforms().status(&state)).await?,
+    ))
+}
+
+/// `POST /waveforms/pregeneration/pause` (this process only; `manage_mode`).
+async fn pause_pregeneration(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    set_pregeneration_paused(state, true).await
+}
+
+/// `POST /waveforms/pregeneration/resume`.
+async fn resume_pregeneration(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    set_pregeneration_paused(state, false).await
 }
 
 /// Run blocking library work off the async executor.
@@ -970,6 +1141,7 @@ fn wants_download(query: Result<Query<StreamQuery>, QueryRejection>) -> Result<b
 /// `GET`/`HEAD /audio/{id}/stream`: raw file bytes with single-range and ETag support
 /// (see [`crate::stream`]). axum answers `HEAD` through this handler without a body.
 async fn audio_stream(
+    method: Method,
     Extension(state): Extension<AppState>,
     Path(raw_id): Path<String>,
     query: Result<Query<StreamQuery>, QueryRejection>,
@@ -983,6 +1155,9 @@ async fn audio_stream(
         .stream_slots()
         .try_acquire_owned()
         .map_err(|_| ApiError::stream_busy())?;
+    if method != Method::HEAD {
+        state.note_playback_start();
+    }
     let ServedAudio {
         file,
         path,
@@ -1162,6 +1337,9 @@ async fn pcm_preview(
         .preview_slots()
         .try_acquire_owned()
         .map_err(|_| ApiError::preview_busy())?;
+    if !head {
+        state.note_playback_start();
+    }
     let (served, info) = open_wav(&state, id).await?;
     let info = info.map_err(|error| {
         let reason = match error {
@@ -1296,6 +1474,9 @@ async fn flac_preview(
         .preview_slots()
         .try_acquire_owned()
         .map_err(|_| ApiError::preview_busy())?;
+    if !head {
+        state.note_playback_start();
+    }
     let (served, info) = open_wav(&state, id).await?;
     let source = match &info {
         Ok(info) => SourceFormat::from_wav(info),
@@ -1698,6 +1879,9 @@ mod tests {
             (Method::POST, "/scans/{session_id}/pause"),
             (Method::POST, "/scans/{session_id}/resume"),
             (Method::POST, "/scans/{session_id}/cancel"),
+            (Method::POST, "/waveforms/pregeneration/pause"),
+            (Method::POST, "/waveforms/pregeneration/resume"),
+            (Method::PATCH, "/settings"),
         ] {
             assert!(managed_route(&method, path), "{method} {path}");
             assert!(
@@ -1728,6 +1912,9 @@ mod tests {
             (Method::POST, "/fs"),
             (Method::POST, "/folders/{id}"),
             (Method::PUT, "/roots/{name}"),
+            (Method::POST, "/waveforms"),
+            (Method::GET, "/waveforms/status"),
+            (Method::GET, "/settings"),
         ] {
             assert!(!managed_route(&method, path), "{method} {path}");
         }

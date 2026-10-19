@@ -7,7 +7,7 @@ use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_server::{
     AppState, BearerToken, CapabilitiesResponse, ConnectionInfo, ErrorBody, LibraryResponse,
     Listener, ManageMode, RemoveAudioResponse, RemoveFolderResponse, RootResponse, ScanResponse,
-    Security, ServerConfig, Service, router,
+    Security, ServerConfig, Service, list_waveform::ListWaveformsCapability, router,
 };
 use axum::{
     body::Body,
@@ -652,7 +652,9 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             manage_mode: ManageMode::All,
             external: false,
             can_manage: true,
-            root_management: true
+            root_management: true,
+            list_waveforms: Some(ListWaveformsCapability::default()),
+            pregenerate_list_waveforms: false
         }
     );
     assert_eq!(
@@ -661,7 +663,9 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             manage_mode: ManageMode::All,
             external: true,
             can_manage: true,
-            root_management: true
+            root_management: true,
+            list_waveforms: Some(ListWaveformsCapability::default()),
+            pregenerate_list_waveforms: false
         }
     );
     // Authentication still comes first.
@@ -735,7 +739,9 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             manage_mode: ManageMode::Lan,
             external: true,
             can_manage: false,
-            root_management: true
+            root_management: true,
+            list_waveforms: Some(ListWaveformsCapability::default()),
+            pregenerate_list_waveforms: false
         }
     );
     assert_eq!(
@@ -744,7 +750,9 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             manage_mode: ManageMode::Lan,
             external: true,
             can_manage: false,
-            root_management: true
+            root_management: true,
+            list_waveforms: Some(ListWaveformsCapability::default()),
+            pregenerate_list_waveforms: false
         }
     );
     assert_eq!(
@@ -753,7 +761,9 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             manage_mode: ManageMode::Lan,
             external: false,
             can_manage: true,
-            root_management: true
+            root_management: true,
+            list_waveforms: Some(ListWaveformsCapability::default()),
+            pregenerate_list_waveforms: false
         }
     );
     for (method, path, body) in &managed {
@@ -820,7 +830,9 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             manage_mode: ManageMode::Off,
             external: false,
             can_manage: false,
-            root_management: true
+            root_management: true,
+            list_waveforms: Some(ListWaveformsCapability::default()),
+            pregenerate_list_waveforms: false
         }
     );
     for (method, path, body) in &managed {
