@@ -926,3 +926,65 @@ async fn on_demand_queue_yields_during_the_prebuffer_window_only() {
     assert_eq!(reply.items[0].status, ItemStatus::Ok);
     assert!(started.elapsed() >= Duration::from_secs(3));
 }
+
+#[tokio::test]
+async fn slow_metadata_reads_continue_in_the_background_after_the_budget() {
+    let f = fixture("");
+    let tone = f.id("tone.wav");
+    let silence = f.id("silence.wav");
+    let body = format!(r#"{{"ids":[{tone},{silence}]}}"#);
+    let list = f.state.list_waveforms().clone();
+    // Every metadata read outlasts the 2 s budget.
+    f.state.set_stat_delay(Duration::from_millis(3000));
+
+    let started = Instant::now();
+    let first = batch(&f.state, &body).await;
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(2900),
+        "answered within the budget: {took:?}"
+    );
+    assert!(
+        first
+            .items
+            .iter()
+            .all(|item| item.status == ItemStatus::Pending),
+        "{first:?}"
+    );
+    // No read finished in the budget: no progress to estimate from.
+    assert_eq!(first.retry_after, Some(5));
+    assert_eq!(
+        list.outstanding_stats(),
+        2,
+        "reads continue after the reply"
+    );
+
+    // A repeat while they run starts no new reads and answers at once.
+    let started = Instant::now();
+    let again = batch(&f.state, &body).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        again
+            .items
+            .iter()
+            .all(|item| item.status == ItemStatus::Pending),
+        "{again:?}"
+    );
+    assert!(list.outstanding_stats() <= 2);
+
+    f.state.set_stat_delay(Duration::ZERO);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while list.outstanding_stats() > 0 {
+        assert!(Instant::now() < deadline, "background reads never finished");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let reply = settled(&f.state, &body).await;
+    assert!(
+        reply.items.iter().all(|item| item.status == ItemStatus::Ok),
+        "{reply:?}"
+    );
+}

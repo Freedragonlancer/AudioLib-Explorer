@@ -516,6 +516,7 @@ struct Inner {
     roots_edit: Mutex<()>,
     stream_open_delay_ms: AtomicU64,
     snapshot_delay_ms: AtomicU64,
+    stat_delay_ms: AtomicU64,
     security: Arc<Security>,
     snapshot_dir: Option<PathBuf>,
     snapshot_slots: Arc<Semaphore>,
@@ -644,6 +645,7 @@ impl AppState {
                 stats: StatsCache::load(provider_path),
                 stream_open_delay_ms: AtomicU64::new(0),
                 snapshot_delay_ms: AtomicU64::new(0),
+                stat_delay_ms: AtomicU64::new(0),
                 security,
                 snapshot_dir: config.snapshot_dir.clone(),
                 snapshot_slots: Arc::new(Semaphore::new(SNAPSHOT_SLOTS)),
@@ -717,6 +719,10 @@ impl AppState {
             OpenError::Library(error) => StatFailure::Other(error),
         };
         let unavailable = || Error::NotFound(format!("Audio {id} file is missing on the server"));
+        let delay = self.inner.stat_delay_ms.load(Ordering::Relaxed);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
         let path = fs::canonicalize(file_path)
             .map_err(|error| classify(self.access_failure(index, error, unavailable())))?;
         let candidates: Vec<usize> = match index {
@@ -1501,6 +1507,15 @@ impl AppState {
     pub fn set_snapshot_prepare_delay(&self, delay: Duration) {
         self.inner
             .snapshot_delay_ms
+            .store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Test hook: sleep this long inside every list waveform metadata read
+    /// ([`AppState::stat_audio`]; simulates a slow network volume).
+    #[doc(hidden)]
+    pub fn set_stat_delay(&self, delay: Duration) {
+        self.inner
+            .stat_delay_ms
             .store(delay.as_millis() as u64, Ordering::Relaxed);
     }
 
