@@ -271,7 +271,7 @@ async fn batches_answer_pending_then_ok_not_modified_and_missing() {
         .any(|item| item.status == ItemStatus::Pending)
     {
         let retry = first.retry_after.expect("retry_after with pending items");
-        assert!((1..=30).contains(&retry));
+        assert!((1..=5).contains(&retry), "{retry}");
     }
 
     let reply = settled(&f.state, &body).await;
