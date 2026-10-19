@@ -60,6 +60,8 @@ impl FileVersion {
 #[derive(Default)]
 pub(crate) struct ListWaveformMemory {
     computed: Mutex<HashMap<i64, FileVersion>>,
+    // Written by the decoder (`scanner` feature) only.
+    #[cfg_attr(not(feature = "scanner"), allow(dead_code))]
     failed: Mutex<HashMap<i64, (FileVersion, String)>>,
 }
 
@@ -177,6 +179,7 @@ impl SqliteProvider {
         Ok(ListWaveformBatch {
             items,
             retry_after: None,
+            deferred: None,
         })
     }
 
@@ -209,6 +212,7 @@ impl SqliteProvider {
 
     /// Replace the record's list row, unless the record changed (rescanned or removed)
     /// since `expected` was read. Returns whether the row was written.
+    #[cfg_attr(not(feature = "scanner"), allow(dead_code))]
     fn store_list_waveform(
         &self,
         id: i64,

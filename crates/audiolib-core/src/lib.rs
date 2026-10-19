@@ -16,7 +16,7 @@ pub mod server_url;
 pub use library::*;
 pub use list_waveform::{
     LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
-    ListWaveformItem, ListWaveformSource, ListWaveformState, MAX_LIST_WAVEFORM_IDS,
+    ListWaveformItem, ListWaveformSource, ListWaveformState, MAX_LIST_WAVEFORM_IDS, decode_base64,
 };
 pub use metadata::{
     SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
