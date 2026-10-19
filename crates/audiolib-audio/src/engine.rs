@@ -537,8 +537,32 @@ struct Realtime {
     source_finished: AtomicBool,
     transition: SourceTransition,
 }
-/// Per-channel output frames, including the zero and unity endpoints.
-const SEEK_FADE_FRAMES: u32 = 32;
+/// Seek, pause, stop and source-change boundary envelope duration. The envelope
+/// is time based: a fixed frame count shrinks with the device rate (32 frames is
+/// 0.33 ms at 96 kHz), and such a short ramp is itself an audible click.
+const SEEK_FADE_SECONDS: f64 = 0.008;
+/// Per-channel output frames, including the zero and unity endpoints, for very
+/// low device rates (and hardware-free fixtures using the default envelope).
+const SEEK_FADE_MIN_FRAMES: u32 = 32;
+
+/// Boundary envelope frames for a device rate (see [`SEEK_FADE_SECONDS`]).
+fn seek_fade_frames(sample_rate: u32) -> u32 {
+    ((f64::from(sample_rate) * SEEK_FADE_SECONDS).round() as u32).max(SEEK_FADE_MIN_FRAMES)
+}
+
+/// Raised-cosine envelope gain for `level` in `0..frames`. Unlike a linear ramp it
+/// has zero slope at both endpoints, so neither the start nor the end of a fade
+/// forms a corner in the waveform. Exact 0 and 1 endpoints; no allocation.
+fn seek_envelope_gain(level: u32, frames: u32) -> f32 {
+    let last = frames.saturating_sub(1).max(1);
+    if level == 0 {
+        0.0
+    } else if level >= last {
+        1.0
+    } else {
+        0.5 - 0.5 * (std::f32::consts::PI * level as f32 / last as f32).cos()
+    }
+}
 
 #[derive(Default)]
 struct SourceTransition {
@@ -589,18 +613,29 @@ impl Realtime {
 struct SeekEnvelope {
     revision: u64,
     level: u32,
+    /// Envelope length in output frames, fixed for the stream's device rate.
+    frames: u32,
     /// Last real stereo PCM frame, before the volume and seek envelopes. Retained
     /// as fallback only during a fade, never across source changes or ordinary silence.
     last_pcm: [f32; 2],
 }
 
-impl Default for SeekEnvelope {
-    fn default() -> Self {
+impl SeekEnvelope {
+    fn new(frames: u32) -> Self {
+        let frames = frames.max(2);
         Self {
             revision: 0,
-            level: SEEK_FADE_FRAMES - 1,
+            level: frames - 1,
+            frames,
             last_pcm: [0.0; 2],
         }
+    }
+}
+
+#[cfg(test)]
+impl Default for SeekEnvelope {
+    fn default() -> Self {
+        Self::new(SEEK_FADE_MIN_FRAMES)
     }
 }
 /// Audio a network source must hold in memory before playback starts or resumes after a
@@ -943,14 +978,12 @@ where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
     let error_realtime = realtime.clone();
-    let mut callback = RenderCallback {
+    let mut callback = RenderCallback::new(
         realtime,
-        channels: usize::from(config.channels),
-        pair: usize::from(output_pair),
-        ramp_step: 1.0 / (config.sample_rate as f32 * 0.005).max(1.0),
-        gain: 0.0,
-        envelope: SeekEnvelope::default(),
-    };
+        usize::from(config.channels),
+        usize::from(output_pair),
+        config.sample_rate,
+    );
     device
         .build_output_stream::<T, _, _>(
             config,
@@ -986,6 +1019,18 @@ struct RenderCallback {
     envelope: SeekEnvelope,
 }
 impl RenderCallback {
+    /// Callback state for a device stream; all buffers are allocated here, never
+    /// in [`RenderCallback::render`].
+    fn new(realtime: Arc<Realtime>, channels: usize, pair: usize, sample_rate: u32) -> Self {
+        Self {
+            realtime,
+            channels,
+            pair,
+            ramp_step: 1.0 / (sample_rate as f32 * 0.005).max(1.0),
+            gain: 0.0,
+            envelope: SeekEnvelope::new(seek_fade_frames(sample_rate)),
+        }
+    }
     fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, output: &mut [T]) {
         self.realtime.active.store(true, Ordering::SeqCst);
         // This application callback only reads/writes atomics and a preallocated ring.
@@ -1012,7 +1057,7 @@ impl RenderCallback {
             let muted = fade_out && self.envelope.level == 0;
             faded_out |= muted;
             let complete = running && !muted && self.realtime.ring.len() >= 2;
-            let gain = self.gain * self.envelope.level as f32 / (SEEK_FADE_FRAMES - 1) as f32;
+            let gain = self.gain * seek_envelope_gain(self.envelope.level, self.envelope.frames);
             let pcm = if complete {
                 consumed += 1;
                 let pcm = [
@@ -1038,7 +1083,7 @@ impl RenderCallback {
             if fade_out {
                 self.envelope.level = self.envelope.level.saturating_sub(1);
             } else if complete {
-                self.envelope.level = (self.envelope.level + 1).min(SEEK_FADE_FRAMES - 1);
+                self.envelope.level = (self.envelope.level + 1).min(self.envelope.frames - 1);
             }
             for (channel, sample) in frame.iter_mut().enumerate() {
                 let value = if channel == self.pair * 2 {

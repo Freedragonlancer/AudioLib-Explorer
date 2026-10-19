@@ -4,8 +4,12 @@
 use super::*;
 
 fn realtime(volume: f32) -> Arc<Realtime> {
+    realtime_with_capacity(volume, 4096)
+}
+
+fn realtime_with_capacity(volume: f32, capacity: usize) -> Arc<Realtime> {
     Arc::new(Realtime {
-        ring: Ring::new(4096),
+        ring: Ring::new(capacity),
         running: AtomicBool::new(true),
         gain: AtomicU32::new(volume.to_bits()),
         consumed: AtomicU64::new(0),
@@ -49,14 +53,14 @@ fn seek_fades_opposite_sign_pcm_and_preserves_volume_and_hardware_routing() {
     let volume = 0.4;
     let realtime = realtime(volume);
     let mut callback = callback(realtime.clone(), 6, 1, volume);
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     push_frames(&realtime, [0.75, -0.5], frames * 3);
     realtime.transition.fade_out.store(true, Ordering::Release);
     let mut old_output = vec![9.0_f32; frames * 6];
     callback.render(&mut old_output);
     assert_eq!(realtime.transition.faded_out.load(Ordering::Acquire), 0);
     for (index, frame) in old_output.chunks_exact(6).enumerate() {
-        let envelope = (frames - 1 - index) as f32 / (frames - 1) as f32;
+        let envelope = seek_envelope_gain((frames - 1 - index) as u32, frames as u32);
         assert_near(frame[2], 0.75 * volume * envelope);
         assert_near(frame[3], -0.5 * volume * envelope);
         for channel in [0, 1, 4, 5] {
@@ -86,7 +90,7 @@ fn seek_fades_opposite_sign_pcm_and_preserves_volume_and_hardware_routing() {
     let mut new_output = vec![9.0_f32; (frames + 1) * 6];
     callback.render(&mut new_output);
     for (index, frame) in new_output.chunks_exact(6).enumerate() {
-        let envelope = index.min(frames - 1) as f32 / (frames - 1) as f32;
+        let envelope = seek_envelope_gain(index as u32, frames as u32);
         assert_near(frame[2], -0.8 * volume * envelope);
         assert_near(frame[3], 0.6 * volume * envelope);
         for channel in [0, 1, 4, 5] {
@@ -104,7 +108,7 @@ fn seek_fades_opposite_sign_pcm_and_preserves_volume_and_hardware_routing() {
 fn seek_fade_spans_short_callbacks_and_acknowledges_only_after_the_zero_frame() {
     let realtime = realtime(1.0);
     let mut callback = callback(realtime.clone(), 2, 0, 1.0);
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     push_frames(&realtime, [0.9, -0.3], frames * 3);
     realtime.transition.fade_out.store(true, Ordering::Release);
     let mut output = Vec::new();
@@ -122,7 +126,7 @@ fn seek_fade_spans_short_callbacks_and_acknowledges_only_after_the_zero_frame() 
     }
     assert_eq!(rendered, frames);
     for (index, frame) in output.chunks_exact(2).enumerate() {
-        let envelope = (frames - 1 - index) as f32 / (frames - 1) as f32;
+        let envelope = seek_envelope_gain((frames - 1 - index) as u32, frames as u32);
         assert_near(frame[0], 0.9 * envelope);
         assert_near(frame[1], -0.3 * envelope);
     }
@@ -138,7 +142,7 @@ fn paused_and_repeated_seek_revisions_restart_the_fade_at_the_first_audible_fram
     let volume = 0.7;
     let realtime = realtime(volume);
     let mut callback = callback(realtime.clone(), 2, 0, volume);
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     realtime.running.store(false, Ordering::SeqCst);
     for revision in [1, 2] {
         realtime.ring.clear_suspended();
@@ -156,7 +160,7 @@ fn paused_and_repeated_seek_revisions_restart_the_fade_at_the_first_audible_fram
     let mut partial = [9.0_f32; 16];
     callback.render(&mut partial);
     for (index, frame) in partial.chunks_exact(2).enumerate() {
-        let envelope = index as f32 / (frames - 1) as f32;
+        let envelope = seek_envelope_gain(index as u32, frames as u32);
         assert_near(frame[0], -0.6 * volume * envelope);
         assert_near(frame[1], 0.3 * volume * envelope);
     }
@@ -177,7 +181,7 @@ fn paused_and_repeated_seek_revisions_restart_the_fade_at_the_first_audible_fram
     let mut resumed = vec![9.0_f32; frames * 2];
     callback.render(&mut resumed);
     for (index, frame) in resumed.chunks_exact(2).enumerate() {
-        let envelope = index as f32 / (frames - 1) as f32;
+        let envelope = seek_envelope_gain(index as u32, frames as u32);
         assert_near(frame[0], 0.2 * volume * envelope);
         assert_near(frame[1], -0.9 * volume * envelope);
     }
@@ -187,7 +191,7 @@ fn paused_and_repeated_seek_revisions_restart_the_fade_at_the_first_audible_fram
 #[test]
 fn seek_worker_waits_for_real_callback_fade_acknowledgment() {
     let realtime = realtime(0.8);
-    push_frames(&realtime, [0.5, -0.75], SEEK_FADE_FRAMES as usize * 3);
+    push_frames(&realtime, [0.5, -0.75], SEEK_FADE_MIN_FRAMES as usize * 3);
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let callback_realtime = realtime.clone();
     let callback_barrier = barrier.clone();
@@ -227,7 +231,7 @@ fn seek_worker_waits_for_real_callback_fade_acknowledgment() {
     assert_eq!(realtime.transition.faded_out.load(Ordering::Acquire), 0);
     assert!(!realtime.active.load(Ordering::SeqCst));
     assert_near(rendered[0], 0.4);
-    let last = SEEK_FADE_FRAMES as usize - 1;
+    let last = SEEK_FADE_MIN_FRAMES as usize - 1;
     assert_eq!(rendered[last * 2], 0.0);
     assert_eq!(rendered[last * 2 + 1], 0.0);
 }
@@ -245,7 +249,7 @@ fn seek_worker_rejects_a_failed_output_even_with_a_stale_acknowledgment() {
 fn seek_worker_ignores_an_acknowledgment_from_the_previous_source() {
     let realtime = realtime(0.6);
     let mut callback = callback(realtime.clone(), 2, 0, 0.6);
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     push_frames(&realtime, [0.5, -0.5], frames * 4);
     realtime
         .transition
@@ -298,7 +302,7 @@ fn seek_worker_times_out_without_a_callback_instead_of_hanging() {
 
 #[test]
 fn seek_fade_finishes_a_short_or_empty_old_ring_without_advancing_synthetic_frames() {
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     let volume = 0.6;
     let pcm = [0.8, -0.5];
     for remaining in [0, 1, 7, 31] {
@@ -317,7 +321,7 @@ fn seek_fade_finishes_a_short_or_empty_old_ring_without_advancing_synthetic_fram
             let mut faded = vec![9.0_f32; frames * 2];
             callback.render(&mut faded);
             for (index, frame) in faded.chunks_exact(2).enumerate() {
-                let envelope = (frames - 1 - index) as f32 / (frames - 1) as f32;
+                let envelope = seek_envelope_gain((frames - 1 - index) as u32, frames as u32);
                 assert_near(frame[0], pcm[0] * volume * envelope);
                 assert_near(frame[1], pcm[1] * volume * envelope);
             }
@@ -340,7 +344,7 @@ fn seek_fade_finishes_a_short_or_empty_old_ring_without_advancing_synthetic_fram
 
 #[test]
 fn seek_fade_does_not_resurrect_pcm_after_an_ordinary_underrun_or_pause() {
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     for pause in [false, true] {
         let realtime = realtime(0.8);
         let mut callback = callback(realtime.clone(), 2, 0, 0.8);
@@ -369,7 +373,7 @@ fn seek_fade_does_not_resurrect_pcm_after_an_ordinary_underrun_or_pause() {
 
 #[test]
 fn seek_source_revision_discards_the_previous_tail_before_any_new_pcm_is_available() {
-    let frames = SEEK_FADE_FRAMES as usize;
+    let frames = SEEK_FADE_MIN_FRAMES as usize;
     let realtime = realtime(1.0);
     let mut callback = callback(realtime.clone(), 2, 0, 1.0);
     push_frames(&realtime, [0.8, -0.6], 1);
@@ -539,7 +543,7 @@ fn seek_through_worker_with_simulated_callbacks(
     let result = worker.execute_command(AudioCommand::Seek(0.25));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while result.is_ok()
-        && realtime.consumed.load(Ordering::Relaxed) < u64::from(SEEK_FADE_FRAMES) + 8
+        && realtime.consumed.load(Ordering::Relaxed) < u64::from(SEEK_FADE_MIN_FRAMES) + 8
         && std::time::Instant::now() < deadline
     {
         thread::yield_now();
@@ -548,7 +552,7 @@ fn seek_through_worker_with_simulated_callbacks(
     let rendered = render_thread.join().unwrap();
     result.unwrap();
     assert!(opens.load(Ordering::Relaxed) >= 2);
-    assert!(realtime.consumed.load(Ordering::Relaxed) >= u64::from(SEEK_FADE_FRAMES) + 8);
+    assert!(realtime.consumed.load(Ordering::Relaxed) >= u64::from(SEEK_FADE_MIN_FRAMES) + 8);
     let status = worker.snapshot();
     assert_eq!(status.state, PlaybackState::Playing);
     assert_eq!(status.generation, 7);
@@ -587,11 +591,108 @@ fn seek_worker_replaces_real_pcm_through_the_actual_callback_handshake() {
         let first_new = rendered.iter().position(|frame| frame[0] < 0.0).unwrap();
         assert!(first_new > 0);
         assert_eq!(rendered[first_new - 1], [0.0; 2]);
-        for index in 0..SEEK_FADE_FRAMES as usize - 1 {
-            let envelope = (index + 1) as f32 / (SEEK_FADE_FRAMES - 1) as f32;
+        for index in 0..SEEK_FADE_MIN_FRAMES as usize - 1 {
+            let envelope = seek_envelope_gain(index as u32 + 1, SEEK_FADE_MIN_FRAMES);
             assert_near(rendered[first_new + index][0], -0.7 * 0.8 * envelope);
             assert_near(rendered[first_new + index][1], 0.4 * 0.8 * envelope);
         }
         assert!(rendered[first_new..].iter().all(|frame| frame[0] <= 0.0));
+    }
+}
+
+/// Render one seek through the production callback constructor: steady low tone,
+/// fade-out, quiescent source replacement, fade-in of a tone starting at its peak.
+/// Returns the left output channel.
+fn render_seek_boundary(sample_rate: u32, tone_hz: f32, amplitude: f32) -> Vec<f32> {
+    let realtime = realtime_with_capacity(1.0, 1 << 16);
+    let mut callback = RenderCallback::new(realtime.clone(), 2, 0, sample_rate);
+    callback.gain = 1.0;
+    let frames = callback.envelope.frames as usize;
+    let step = std::f32::consts::TAU * tone_hz / sample_rate as f32;
+    let old: Vec<f32> = (0..frames * 3)
+        .flat_map(|frame| {
+            let value = amplitude * (step * frame as f32).sin();
+            [value, value]
+        })
+        .collect();
+    assert_eq!(realtime.ring.push_aligned(&old, 2), old.len());
+    let mut output = Vec::new();
+    // Device-sized blocks; the envelope state must carry across callbacks.
+    let mut render = |callback: &mut RenderCallback, count: usize| {
+        let mut remaining = count;
+        while remaining > 0 {
+            let block = remaining.min(97);
+            let mut buffer = vec![9.0_f32; block * 2];
+            callback.render(&mut buffer);
+            output.extend(buffer.chunks_exact(2).map(|frame| frame[0]));
+            remaining -= block;
+        }
+    };
+    render(&mut callback, frames / 2);
+    realtime.transition.fade_out.store(true, Ordering::Release);
+    render(&mut callback, frames + 16);
+    assert_eq!(realtime.transition.faded_out.load(Ordering::Acquire), 0);
+
+    realtime.running.store(false, Ordering::SeqCst);
+    realtime.ring.clear_suspended();
+    let new: Vec<f32> = (0..frames * 3)
+        .flat_map(|frame| {
+            let value = amplitude * (step * frame as f32).cos();
+            [value, value]
+        })
+        .collect();
+    assert_eq!(realtime.ring.push_aligned(&new, 2), new.len());
+    realtime.arm_fade_in();
+    realtime.running.store(true, Ordering::SeqCst);
+    render(&mut callback, frames * 2);
+    output
+}
+
+#[test]
+fn seek_envelope_lasts_a_fixed_time_at_every_device_rate() {
+    for rate in [22_050, 44_100, 48_000, 88_200, 96_000, 192_000] {
+        let callback = RenderCallback::new(realtime(1.0), 2, 0, rate);
+        let seconds = f64::from(callback.envelope.frames) / f64::from(rate);
+        assert!(
+            seconds >= 0.0075,
+            "{rate} Hz seek envelope lasts only {:.3} ms",
+            seconds * 1000.0
+        );
+    }
+    // Exact endpoints keep the established full-volume and muted contracts.
+    assert_eq!(seek_envelope_gain(0, 384), 0.0);
+    assert_eq!(seek_envelope_gain(383, 384), 1.0);
+    assert_eq!(seek_envelope_gain(500, 384), 1.0);
+}
+
+#[test]
+fn seek_boundary_adds_no_click_corner_to_a_full_scale_low_tone() {
+    // A seek must not change the waveform faster than the tone itself does. The old
+    // 32-frame linear ramp produced a second difference ~2000 times the tone's own
+    // at 96 kHz: a broadband click on every seek, pause, stop and source change.
+    let (tone_hz, amplitude) = (60.0_f32, 0.9_f32);
+    for rate in [44_100, 48_000, 96_000, 192_000] {
+        let output = render_seek_boundary(rate, tone_hz, amplitude);
+        let step = std::f32::consts::TAU * tone_hz / rate as f32;
+        let natural_slope = amplitude * step;
+        let natural_curvature = amplitude * step * step;
+        let slope = output
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
+        let curvature = output
+            .windows(3)
+            .map(|triple| (triple[2] - 2.0 * triple[1] + triple[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(output.iter().all(|sample| sample.abs() <= amplitude + 1e-6));
+        assert!(
+            slope <= natural_slope * 1.25,
+            "{rate} Hz seek slope {slope} exceeds tone slope {natural_slope}"
+        );
+        assert!(
+            curvature <= natural_curvature * 3.0,
+            "{rate} Hz seek curvature {curvature} is {:.0}x the tone's {natural_curvature}",
+            curvature / natural_curvature
+        );
     }
 }
