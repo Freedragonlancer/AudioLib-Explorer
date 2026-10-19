@@ -149,6 +149,18 @@ impl ApiError {
             )
         }
     }
+    /// 503 `BUSY` with `Retry-After: 1` when 4 `POST /waveforms` requests are already
+    /// being processed; the same shape as [`ApiError::stream_busy`].
+    pub fn list_waveforms_busy() -> Self {
+        Self {
+            retry_after: Some(STREAM_BUSY_RETRY_SECS),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BUSY",
+                "Too many list waveform requests are in progress; retry shortly",
+            )
+        }
+    }
     /// 503 `BUSY` with `Retry-After: 5`: the snapshot is still being prepared (it keeps
     /// being prepared; retrying gets it).
     pub fn snapshot_preparing() -> Self {

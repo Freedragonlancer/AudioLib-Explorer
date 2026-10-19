@@ -174,8 +174,12 @@ async fn run() -> Result<()> {
     .await;
     let _ = tls_manager.await;
     if let Readiness::Ready(state) = service.readiness() {
-        let stopped =
-            tokio::task::spawn_blocking(move || state.scans().shutdown(SCAN_SHUTDOWN)).await;
+        let stopped = tokio::task::spawn_blocking(move || {
+            let stopped = state.scans().shutdown(SCAN_SHUTDOWN);
+            state.list_waveforms().shutdown();
+            stopped
+        })
+        .await;
         if !matches!(stopped, Ok(true)) {
             tracing::warn!("Exiting while a scan is still finishing");
         }
