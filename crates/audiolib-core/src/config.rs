@@ -358,6 +358,10 @@ pub struct AppConfig {
     /// Disabled by default so established settings retain double-click audition.
     #[serde(default)]
     pub audition_play_on_single_click: bool,
+    /// Local mode: pre-generate list thumbnail Waveforms in the background after scans
+    /// (doc/api/README.md §9.3). Off by default: only visible rows are computed.
+    #[serde(default)]
+    pub pregenerate_list_waveforms: bool,
     /// Persistent table layout and sorting, applied to every search page.
     #[serde(default)]
     pub audio_table: AudioTablePreferences,
@@ -388,6 +392,8 @@ struct SavedPreferences {
     playback: serde_json::Value,
     #[serde(default)]
     audition_play_on_single_click: bool,
+    #[serde(default)]
+    pregenerate_list_waveforms: bool,
     #[serde(default)]
     audio_table: AudioTablePreferences,
     #[serde(default)]
@@ -461,6 +467,7 @@ impl AppConfig {
             language: english(),
             playback: default_playback(),
             audition_play_on_single_click: false,
+            pregenerate_list_waveforms: false,
             audio_table: AudioTablePreferences::default(),
             allowed_scan_roots: Vec::new(),
             data_source: DataSourceSettings::default(),
@@ -509,6 +516,7 @@ impl AppConfig {
             config.language = saved.language;
             config.playback = saved.playback;
             config.audition_play_on_single_click = saved.audition_play_on_single_click;
+            config.pregenerate_list_waveforms = saved.pregenerate_list_waveforms;
             config.audio_table = saved.audio_table.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
             config.data_source = saved.data_source;
@@ -550,6 +558,7 @@ impl AppConfig {
             language: self.language.clone(),
             playback: self.playback.clone(),
             audition_play_on_single_click: self.audition_play_on_single_click,
+            pregenerate_list_waveforms: self.pregenerate_list_waveforms,
             audio_table: self.audio_table.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),
             data_source: {
@@ -630,6 +639,7 @@ mod tests {
         .unwrap();
         let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
         assert!(!config.audition_play_on_single_click);
+        assert!(!config.pregenerate_list_waveforms);
         assert_eq!(config.audio_table, AudioTablePreferences::default());
         assert_eq!(config.language, "cn");
         assert_eq!(config.playback["volume"], serde_json::json!(0.35));
@@ -651,6 +661,7 @@ mod tests {
         config.language = "cn".into();
         config.playback = serde_json::json!({"volume":0.35,"device_id":"custom-device"});
         config.audition_play_on_single_click = true;
+        config.pregenerate_list_waveforms = true;
         config.allowed_scan_roots = vec![directory.path().join("sounds")];
         config.data_source.webdav.username = "existing-user".into();
         config.audio_table = AudioTablePreferences {
@@ -672,6 +683,7 @@ mod tests {
             loaded.audition_play_on_single_click,
             config.audition_play_on_single_click
         );
+        assert!(loaded.pregenerate_list_waveforms);
         assert_eq!(loaded.allowed_scan_roots, config.allowed_scan_roots);
         assert_eq!(loaded.data_source, config.data_source);
     }

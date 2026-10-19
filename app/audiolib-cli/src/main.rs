@@ -1322,6 +1322,7 @@ mod tests {
             },
             language: "cn".into(),
             audition_play_on_single_click: false,
+            pregenerate_list_waveforms: false,
             audio_table: Default::default(),
             playback: json!({"backend":"wasapi","volume":0.25}),
             allowed_scan_roots: Vec::new(),
