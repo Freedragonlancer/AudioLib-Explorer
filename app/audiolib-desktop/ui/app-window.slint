@@ -409,6 +409,8 @@ export component AppWindow inherits Window {
     private property <bool> list-waveforms-visible: root.list-waveforms-enabled && (!root.remote-mode || root.list-waveforms-server);
     in-out property <bool> pregenerate-list-waveforms: false;
     callback pregenerate-list-waveforms-requested(bool);
+    in-out property <bool> hold-list-waveform-batches: false;
+    callback hold-list-waveform-batches-requested(bool);
     callback result-window-changed(int, int);
     private property <length> table-wave-size: root.list-waveforms-visible ? 96px : 0px;
     in-out property <float> table-name-width: 360;
@@ -1991,6 +1993,15 @@ export component AppWindow inherits Window {
                                             }
                                             if !root.remote-mode: Label { height: 32px; wrap: word-wrap; font-size: 10px;
                                                 text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
+                                            }
+                                            if root.remote-mode: hold-waveform-batches-check := CheckBox {
+                                                height: 28px;
+                                                text: root.chinese ? "试听开始后 3 秒内暂缓列表波形批量请求" : "Hold list-waveform batch requests during first 3 s after audition start";
+                                                checked <=> root.hold-list-waveform-batches;
+                                                toggled => { root.hold-list-waveform-batches-requested(self.checked); }
+                                            }
+                                            if root.remote-mode: Label { height: 32px; wrap: word-wrap; font-size: 10px;
+                                                text: root.chinese ? "开启后，每次试听开始（加载/播放/定位）后的 3 秒内不发送新的列表缩略波形批量请求，之后补发，不会丢弃；默认关闭。" : "When on, no new list thumbnail batch request is sent during the first 3 s after each audition start (Load/Play/Seek); held rows are requested afterwards, not dropped. Off by default.";
                                             }
                                             Rectangle { height: 1px; background: Theme.border; }
                                             HorizontalLayout { height: 62px; spacing: 16px;
