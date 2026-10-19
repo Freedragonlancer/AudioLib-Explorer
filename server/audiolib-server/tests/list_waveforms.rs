@@ -859,3 +859,70 @@ fn list_waveform_config_is_validated() {
         );
     }
 }
+
+#[tokio::test]
+async fn scans_queue_new_records_for_pregeneration() {
+    let f = fixture("pregenerate_list_waveforms = true\nlist_waveform_rate = 1000\n");
+    let wait_cached = |expected: u64| {
+        let state = f.state.clone();
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let current = status(&state).await;
+                if current.cached == expected && current.state == "idle" {
+                    return current;
+                }
+                assert!(Instant::now() < deadline, "{current:?}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let first = wait_cached(3).await;
+    wav(&f.sounds.join("new.wav"), 300, |i| (i as i16) * 10);
+    let library_id = f.state.library_id().to_string();
+    let started = call(
+        f.state.clone(),
+        Method::POST,
+        "/scans",
+        &[("x-audiolib-library-id", &library_id)],
+        LAN,
+        Some(r#"{"root":"SFX"}"#),
+    )
+    .await;
+    assert_eq!(started.status(), StatusCode::OK);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while f.state.scans().current().is_some() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let after = wait_cached(4).await;
+    assert_eq!(after.total, 4);
+    assert_eq!(after.pass_started_at, first.pass_started_at, "same pass");
+    let id = f.id("new.wav");
+    let reply = batch(&f.state, &format!(r#"{{"ids":[{id}]}}"#)).await;
+    assert_eq!(reply.items[0].status, ItemStatus::Ok);
+    assert_eq!(reply.items[0].n, Some(100));
+}
+
+#[tokio::test]
+async fn on_demand_queue_yields_during_the_prebuffer_window_only() {
+    let f = fixture("");
+    let tone = f.id("tone.wav");
+    let body = format!(r#"{{"ids":[{tone}]}}"#);
+    // A stream/preview just started: nothing is decoded for 3 seconds.
+    f.state.list_waveforms().note_playback_start();
+    let started = Instant::now();
+    assert_eq!(
+        batch(&f.state, &body).await.items[0].status,
+        ItemStatus::Pending
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        batch(&f.state, &body).await.items[0].status,
+        ItemStatus::Pending
+    );
+    // Afterwards the queue resumes (no stream is actually active here).
+    let reply = settled(&f.state, &body).await;
+    assert_eq!(reply.items[0].status, ItemStatus::Ok);
+    assert!(started.elapsed() >= Duration::from_secs(3));
+}
