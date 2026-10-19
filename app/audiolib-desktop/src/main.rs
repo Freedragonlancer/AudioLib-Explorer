@@ -5,6 +5,7 @@ mod close_tests;
 mod controller;
 mod diagnostics;
 mod dialogs;
+mod list_waveforms;
 #[cfg(test)]
 mod pane_review_tests;
 mod progressive_waveform;
