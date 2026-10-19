@@ -208,6 +208,8 @@ struct AdminStatus {
     auth_mode_source: Source,
     manage_mode: ManageMode,
     manage_mode_source: Source,
+    pregenerate_list_waveforms: bool,
+    pregenerate_list_waveforms_source: Source,
     public_url: Option<String>,
     public_url_source: Source,
     lan_url: Option<String>,
@@ -226,6 +228,8 @@ fn admin_status(service: &Service) -> AdminStatus {
     let security = service.security();
     let (auth_mode, auth_mode_source) = security.auth_mode_with_source();
     let (manage_mode, manage_mode_source) = security.manage_mode_with_source();
+    let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
+        security.pregenerate_list_waveforms_with_source();
     let (public_url, public_url_source) = security.public_url_with_source();
     let (configured, source) = security.tls_with_source();
     let tls_status = security.tls_status();
@@ -256,6 +260,8 @@ fn admin_status(service: &Service) -> AdminStatus {
         auth_mode_source,
         manage_mode,
         manage_mode_source,
+        pregenerate_list_waveforms,
+        pregenerate_list_waveforms_source,
         public_url,
         public_url_source,
         lan_url,
@@ -303,6 +309,22 @@ struct SettingsBody {
     lan_url: Option<Option<String>>,
     #[serde(default, deserialize_with = "present")]
     manage_mode: Option<Option<ManageMode>>,
+    #[serde(default, deserialize_with = "bool_or_empty")]
+    pregenerate_list_waveforms: Option<Option<bool>>,
+}
+
+/// A present boolean field where `null` or `""` removes the admin override.
+fn bool_or_empty<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<bool>>, D::Error> {
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(Some(value))),
+        Some(serde_json::Value::String(text)) if text.is_empty() => Ok(Some(None)),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "pregenerate_list_waveforms must be true, false, null or \"\", got {other}"
+        ))),
+    }
 }
 
 fn url_field(value: Option<String>) -> Result<Option<String>, ApiError> {
@@ -374,6 +396,7 @@ async fn update_settings(
     let lan_url = body.lan_url.map(url_field).transpose()?;
     let auth_mode = body.auth_mode;
     let manage_mode = body.manage_mode;
+    let pregenerate = body.pregenerate_list_waveforms;
     let security = service.security().clone();
     run_blocking(move || {
         security.update_settings(|settings: &mut AdminSettings| {
@@ -388,6 +411,9 @@ async fn update_settings(
             }
             if let Some(value) = manage_mode {
                 settings.manage_mode = value;
+            }
+            if let Some(value) = pregenerate {
+                settings.pregenerate_list_waveforms = value;
             }
         })
     })
