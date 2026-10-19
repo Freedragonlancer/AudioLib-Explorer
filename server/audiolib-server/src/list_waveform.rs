@@ -968,6 +968,17 @@ impl Drop for ListWaveforms {
     }
 }
 
+/// Snapshot of [`ListWaveforms::activity`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListActivity {
+    /// On-demand jobs being processed.
+    pub on_demand_in_flight: usize,
+    /// Pre-generation jobs being processed.
+    pub pregen_in_flight: usize,
+    /// `POST /waveforms` metadata reads outstanding (including background ones).
+    pub outstanding_stats: usize,
+}
+
 /// `GET /waveforms/status` (and the pause / resume replies).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListWaveformStatus {
@@ -1270,6 +1281,16 @@ impl ListWaveforms {
     /// Metadata reads of `POST /waveforms` outstanding now (including background ones).
     pub fn outstanding_stats(&self) -> usize {
         self.stats.len()
+    }
+
+    /// What the list waveform machinery is doing now (playback timing diagnostics).
+    pub fn activity(&self) -> ListActivity {
+        let sched = self.sched();
+        ListActivity {
+            on_demand_in_flight: sched.on_demand_in_flight,
+            pregen_in_flight: sched.pass.as_ref().map_or(0, |pass| pass.in_flight),
+            outstanding_stats: self.stats.len(),
+        }
     }
 
     /// Measured on-demand throughput (finished files per second), `None` before any.
