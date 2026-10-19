@@ -1873,6 +1873,7 @@ pub async fn batch(
         .try_acquire_owned()
         .map_err(|_| ApiError::list_waveforms_busy())?;
     let BatchRequest { ids, known } = request;
+    let started = Instant::now();
     let records = {
         let list = list.clone();
         let ids = ids.clone();
@@ -1884,8 +1885,13 @@ pub async fn batch(
     let unfinished_limit = state
         .open_slot_count()
         .saturating_mul(UNFINISHED_STATS_PER_SLOT);
+    let db_ms = started.elapsed().as_millis() as u64;
     let mut items: Vec<Option<BatchItem>> = vec![None; ids.len()];
     let mut budget_pending = false;
+    let mut budget_exhausted = false;
+    let mut open_limited = 0_usize;
+    // Diagnostics (one log line per batch): records per root name.
+    let mut per_root: BTreeMap<String, usize> = BTreeMap::new();
     let parallel = Arc::new(tokio::sync::Semaphore::new(STAT_PARALLEL));
     let mut tasks = tokio::task::JoinSet::new();
     for (position, id) in ids.iter().copied().enumerate() {
@@ -1898,6 +1904,8 @@ pub async fn batch(
             continue;
         }
         let index = monitor.root_index_for(Path::new(path));
+        let root_name = index.map_or("-", |index| monitor.roots()[index].name.as_str());
+        *per_root.entry(root_name.to_string()).or_default() += 1;
         if let Some(index) = index {
             // Offline roots answer from the cached status: no disk access, no recheck.
             if monitor.status(index).state == crate::RootState::Offline {
@@ -1909,6 +1917,7 @@ pub async fn batch(
             }
             if monitor.opens_in_progress(index) >= unfinished_limit {
                 budget_pending = true;
+                open_limited += 1;
                 items[position] = Some(BatchItem::bare(id, ItemStatus::Pending));
                 continue;
             }
@@ -1920,25 +1929,37 @@ pub async fn batch(
         tasks.spawn(async move {
             let _slot = parallel.acquire_owned().await.ok()?;
             let item = tokio::task::spawn_blocking(move || {
-                lookup(&state, id, &path, index, known.as_deref())
+                let started = Instant::now();
+                let item = lookup(&state, id, &path, index, known.as_deref());
+                (item, started.elapsed())
             })
             .await
             .ok()?;
             Some((position, item))
         });
     }
+    let stat_started = Instant::now();
+    let stats = tasks.len();
+    let mut finished = 0_usize;
+    let mut slowest = Duration::ZERO;
     let deadline = tokio::time::Instant::now() + STAT_BUDGET;
     loop {
         match tokio::time::timeout_at(deadline, tasks.join_next()).await {
-            Ok(Some(Ok(Some((position, item))))) => items[position] = Some(item),
+            Ok(Some(Ok(Some((position, (item, took)))))) => {
+                items[position] = Some(item);
+                finished += 1;
+                slowest = slowest.max(took);
+            }
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(_) => {
                 budget_pending = true;
+                budget_exhausted = true;
                 break;
             }
         }
     }
+    let stat_ms = stat_started.elapsed().as_millis() as u64;
     // Unstarted lookups are aborted; started `stat`s finish on their blocking threads
     // (still registered with the root monitor).
     drop(tasks);
@@ -1954,6 +1975,29 @@ pub async fn batch(
         .collect();
     list.enqueue_on_demand(&pending);
     let retry_after = (!pending.is_empty()).then(|| list.retry_after_for(&pending, budget_pending));
+    let count = |status: ItemStatus| items.iter().filter(|item| item.status == status).count();
+    tracing::info!(
+        ids = ids.len(),
+        db_ms,
+        stat_ms,
+        slowest_stat_ms = slowest.as_millis() as u64,
+        stats,
+        unfinished_stats = stats - finished,
+        budget_exhausted,
+        open_limited,
+        ok = count(ItemStatus::Ok),
+        not_modified = count(ItemStatus::NotModified),
+        pending = pending.len(),
+        missing = count(ItemStatus::Missing),
+        root_offline = count(ItemStatus::RootOffline),
+        error = count(ItemStatus::Error),
+        retry_after = ?retry_after,
+        queued_on_demand = list.queued_on_demand(),
+        on_demand_per_sec = ?list.on_demand_rate().map(|rate| (rate * 10.0).round() / 10.0),
+        total_ms = started.elapsed().as_millis() as u64,
+        roots = ?per_root,
+        "List waveform batch"
+    );
     Ok(BatchResponse {
         library_id: state.library_id().to_string(),
         buckets: LIST_BUCKETS,
