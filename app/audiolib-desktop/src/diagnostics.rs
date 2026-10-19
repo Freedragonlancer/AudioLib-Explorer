@@ -252,7 +252,9 @@ fn snapshot(ui: &AppWindow, audio: &PlaybackStatus) -> Value {
         "tag_filter": !ui.get_tag_filter().is_empty(), "color_filter": !ui.get_color_filter().is_empty(),
         "sample_filter": ui.get_sample_filter(), "bit_filter": ui.get_bit_filter(),
         "channel_filter": ui.get_channel_filter(), "visibility": ui.get_visibility_index(),
-        "sort": ui.get_sort_index(), "page": ui.get_page_label().split('/').next().unwrap_or("").trim().parse::<u64>().ok(),
+        "sort": ui.get_sort_index(), "sort_descending": ui.get_sort_descending(),
+        "table_widths": [ui.get_table_name_width(), ui.get_table_duration_width(), ui.get_table_format_width(), ui.get_table_channels_width(), ui.get_table_tags_width()],
+        "page": ui.get_page_label().split('/').next().unwrap_or("").trim().parse::<u64>().ok(),
         "audio": audio_fields(audio)
     })
 }

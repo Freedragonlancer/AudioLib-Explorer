@@ -141,6 +141,10 @@ pub enum SortOrder {
     Duration,
     SampleRate,
     Modified,
+    /// Numeric channel count, with stable audio identity as the pagination tie-breaker.
+    Channels,
+    /// Case-insensitive library tags, or extracted source tags when library tags are empty.
+    Tags,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -532,5 +536,21 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn sortable_columns_preserve_named_wire_contract() {
+        for (name, expected) in [
+            ("channels", SortOrder::Channels),
+            ("tags", SortOrder::Tags),
+            ("modified", SortOrder::Modified),
+        ] {
+            let encoded = serde_json::to_string(&expected).unwrap();
+            assert_eq!(encoded, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<SortOrder>(&encoded).unwrap(),
+                expected
+            );
+        }
     }
 }
