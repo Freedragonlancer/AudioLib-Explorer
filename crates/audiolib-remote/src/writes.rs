@@ -14,12 +14,13 @@ use crate::manage::{RemoveReport, manage_error_text};
 use crate::sync::RemoteCache;
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
-    Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats, MaintenanceAction,
-    MaintenanceReport, MetadataPatch, PlayRecord, RestoreReport, ScanSession, SearchPage,
-    SearchRequest, TransferReport,
+    Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats, ListWaveformBatch,
+    ListWaveformSource, MaintenanceAction, MaintenanceReport, MetadataPatch, PlayRecord,
+    RestoreReport, ScanSession, SearchPage, SearchRequest, TransferReport,
 };
 use audiolib_db::SqliteProvider;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
@@ -302,6 +303,9 @@ pub struct RemoteProvider {
     writer: RemoteWriter,
     chinese: bool,
     listener: Option<WriteListener>,
+    /// List thumbnail Waveforms from `POST /waveforms` (never from the snapshot's
+    /// `waveform_cache` rows, §9.3); `None` hides the list's Waveform column.
+    list_waveforms: Option<Arc<crate::list_waveforms::RemoteListWaveforms>>,
 }
 
 impl RemoteProvider {
@@ -316,7 +320,18 @@ impl RemoteProvider {
             writer,
             chinese,
             listener,
+            list_waveforms: None,
         }
+    }
+
+    /// Answer list Waveform lookups through `service` (its library must be the
+    /// snapshot's).
+    pub fn with_list_waveforms(
+        mut self,
+        service: Arc<crate::list_waveforms::RemoteListWaveforms>,
+    ) -> Self {
+        self.list_waveforms = Some(service);
+        self
     }
 
     pub fn writer(&self) -> &RemoteWriter {
@@ -495,6 +510,32 @@ impl DataProvider for RemoteProvider {
     }
     fn import_annotations(&self, _source: &Path) -> audiolib_core::Result<TransferReport> {
         Err(self.refused())
+    }
+    // List Waveforms never come from the snapshot (its `waveform_cache` rows may be left
+    // over from local mode, §9.3): only from the server, and only when it offers them.
+    fn list_waveform_source(&self) -> ListWaveformSource {
+        self.list_waveforms
+            .as_ref()
+            .map_or(ListWaveformSource::Unavailable, |service| service.source())
+    }
+    fn list_waveforms(
+        &self,
+        ids: &[i64],
+        cancel: Arc<AtomicBool>,
+    ) -> audiolib_core::Result<ListWaveformBatch> {
+        let Some(service) = &self.list_waveforms else {
+            return Err(Error::Validation(
+                "This server offers no list Waveforms".into(),
+            ));
+        };
+        service.lookup(ids, &cancel).map_err(|error| {
+            if matches!(error, RemoteError::LibraryChanged(_)) {
+                self.emit(WriteEvent::LibraryChanged {
+                    reason: error.localized(self.chinese),
+                });
+            }
+            core_error(error, self.chinese)
+        })
     }
 }
 #[cfg(test)]
@@ -744,6 +785,86 @@ mod tests {
     fn snapshot(cache: &RemoteCache) -> SqliteProvider {
         let state = cache.state(LIBRARY).unwrap();
         SqliteProvider::open_read_only(&cache.database_path(&state)).unwrap()
+    }
+
+    #[test]
+    fn list_waveforms_come_from_the_server_never_from_snapshot_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 41);
+        // A list row left over from local mode in the snapshot.
+        let state = cache.state(LIBRARY).unwrap();
+        rusqlite::Connection::open(cache.database_path(&state))
+            .unwrap()
+            .execute(
+                "INSERT INTO waveform_cache(audio_file_id,zoom_level,samples_per_pixel,
+                 min_values,max_values) VALUES(3,'list128-v4-l1',1,x'9cff',x'6400')",
+                [],
+            )
+            .unwrap();
+        let reader = Arc::new(snapshot(&cache));
+        let posts = Arc::new(StdMutex::new(0));
+        let server = {
+            let posts = posts.clone();
+            TestServer::start(move |request| match request.path.as_str() {
+                "/api/v1/capabilities" => TestResponse::json(
+                    200,
+                    r#"{"list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64"}}"#,
+                ),
+                "/api/v1/waveforms" => {
+                    *posts.lock().unwrap() += 1;
+                    TestResponse::json(
+                        200,
+                        r#"{"library_id":"lib-w","buckets":128,"retry_after":2,"items":[{"id":3,"status":"pending"}]}"#,
+                    )
+                }
+                other => panic!("unexpected {other}"),
+            })
+        };
+        let writer = || {
+            RemoteWriter::new(
+                RemoteClient::new(&server.url, "").unwrap(),
+                cache.clone(),
+                LIBRARY,
+            )
+        };
+        let plain = RemoteProvider::new(reader.clone(), writer(), false, None);
+        assert_eq!(
+            plain.list_waveform_source(),
+            ListWaveformSource::Unavailable
+        );
+        assert!(
+            plain
+                .list_waveforms(&[3], Arc::new(AtomicBool::new(false)))
+                .is_err()
+        );
+        let service = Arc::new(crate::list_waveforms::RemoteListWaveforms::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            LIBRARY,
+            crate::list_waveforms::ListWaveformStore::new(
+                directory.path().join("list"),
+                crate::list_waveforms::DEFAULT_LIST_WAVEFORM_CACHE_BYTES,
+            ),
+        ));
+        let provider =
+            RemoteProvider::new(reader, writer(), false, None).with_list_waveforms(service);
+        assert_eq!(provider.list_waveform_source(), ListWaveformSource::Server);
+        let batch = provider
+            .list_waveforms(&[3], Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        assert_eq!(
+            batch.items[0].state,
+            audiolib_core::ListWaveformState::Pending { previous: None },
+            "the snapshot's waveform_cache row is not used"
+        );
+        assert_eq!(batch.retry_after, Some(Duration::from_secs(2)));
+        assert_eq!(*posts.lock().unwrap(), 1);
+        assert!(provider.list_waveform_backlog(0, 10).unwrap().is_empty());
+        assert!(
+            provider
+                .compute_list_waveform(3, Arc::new(AtomicBool::new(false)))
+                .is_err(),
+            "the client never decodes in server mode"
+        );
     }
 
     #[test]
