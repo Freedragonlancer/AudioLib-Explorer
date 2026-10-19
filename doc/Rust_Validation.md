@@ -1,5 +1,21 @@
 # Rust 验证报告
 
+## 定位包络与列宽复查（2026-10-19，0.4.10 源码，未发布）
+
+用户安装 0.4.10 后反馈定位仍有破音、自定义列宽不生效；原因与修复见 [审查修复](Rust_Review_Fixes.md)。
+
+`seek-loopback` 新增 `--signal sine --tone-hz --source-rate --source-channels` 及二阶差分指标。CABLE Input 端点 48 kHz、增益 0.3、60 Hz 正弦（输出峰值 0.15），音调自身最大相邻差 0.001178、最大二阶差分 9.25e-6：
+
+| 场景 | 修复前定位窗口 | 修复后定位窗口 |
+| --- | --- | --- |
+| 源 48 kHz 立体声（不重采样） | 相邻差最大 0.00497，二阶差分 0.0011–0.0048（约 120–520 倍） | 相邻差 0.001178，二阶差分 1.3e-5–1.4e-5（约 1.5 倍） |
+| 源 44.1 kHz 单声道（重采样） | 二阶差分 0.0011–0.0048 | 二阶差分 1.3e-5–1.4e-5 |
+| 源 96 kHz 6 声道（重采样） | 二阶差分 0.0011–0.0046 | 二阶差分 1.3e-5–1.4e-5 |
+
+覆盖播放中定位、暂停后定位、三条排队定位、接近结尾定位、从 Ended 定位、暂停中 Seek 后 Play、换源和 Stop；所有命令引擎 underruns 为 0，未出现超过源峰值的旧 PCM。剩余较大二阶差分只出现在两处：首次 Play 的 5 ms 线性音量斜坡（约 0.0011，修复前后相同）以及测试音在文件末尾非零斜率处结束（EOF，属源内容）。捕获端仍报告 Xrun 通知，不称为无损采集，也不等同于模拟回录或人工听感验收。
+
+新增音频回归 2 项、列宽回归 1 项；以旧包络或旧双击处理运行时均失败。格式检查、默认与 ASIO 严格 Clippy 通过；默认与 ASIO（`--no-fail-fast`）完整 workspace/all-targets 测试各 51 个目标、817 passed、0 failed、70 ignored。一次 ASIO 运行中 `audiolib-server` 的 `admin_roots` 列举起始位置因并发负载 5 秒超时（FS_TIMEOUT），重跑通过，与本次改动无关。debug 二进制上的 `validate-playback-ipc.ps1 -CleanCheckout`（默认 WASAPI 96 kHz、960 帧）与 `validate-desktop-close.ps1 -Cycles 3` 通过。本轮未构建发布包、未更新 `local_release/`；正常数据目录的 `settings.json` 未被改动。
+
 ## WASAPI 96 kHz Waveform 定位补修（2026-10-18，0.4.7）
 
 根据用户反馈复查默认 WASAPI、96 kHz、播放中点击 Waveform。确定性回归复现旧顺序在淡出前打开解码器，以及 Pause/Load 保留设备队列的问题；此前单独测试包络和环形缓冲未覆盖这两层。控制线程现在先静音旧源，再执行可能阻塞的打开/定位；暂停前排空设备队列，失败路径也保留淡出尾段。细节见 [审查修复](Rust_Review_Fixes.md)。

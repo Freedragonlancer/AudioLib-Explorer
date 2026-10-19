@@ -669,3 +669,59 @@ fn near(actual: f32, expected: f32) {
         "Expected {expected}px, got {actual}px"
     );
 }
+
+#[test]
+fn divider_drag_after_a_recent_click_keeps_the_dragged_width() {
+    // Slint reports a second press within the double-click interval and 10 px of the
+    // first as a double click, on the release of that press, even after a drag. A
+    // click (or a tiny drag) followed by a real drag used to reset the column to its
+    // default on release and persist the default.
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1800.0, 900.0));
+    ui.show().unwrap();
+    settle();
+    let saves = Rc::new(Cell::new(0));
+    let counted = saves.clone();
+    ui.on_table_layout_changed(move || counted.set(counted.get() + 1));
+
+    let start = midpoint(&element(&ui, "table-duration-divider"));
+    click(&ui, start);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(150));
+    press(&ui, start);
+    for delta in [20.0, 60.0, 100.0] {
+        move_to(&ui, slint::LogicalPosition::new(start.x + delta, start.y));
+        settle();
+    }
+    release(&ui, slint::LogicalPosition::new(start.x + 100.0, start.y));
+    settle();
+    near(ui.get_table_duration_width(), 180.0);
+    assert!(saves.get() > 0, "the dragged width must be saved");
+
+    // Fine adjustment: a small drag and a quick second grab accumulate.
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+    let start = midpoint(&element(&ui, "table-tags-divider"));
+    press(&ui, start);
+    move_to(&ui, slint::LogicalPosition::new(start.x + 4.0, start.y));
+    release(&ui, slint::LogicalPosition::new(start.x + 4.0, start.y));
+    settle();
+    near(ui.get_table_tags_width(), 164.0);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(150));
+    let second = slint::LogicalPosition::new(start.x + 4.0, start.y);
+    press(&ui, second);
+    move_to(&ui, slint::LogicalPosition::new(second.x + 6.0, second.y));
+    release(&ui, slint::LogicalPosition::new(second.x + 6.0, second.y));
+    settle();
+    near(ui.get_table_tags_width(), 170.0);
+
+    // A genuine double click (two presses without dragging) still resets.
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+    let position = midpoint(&element(&ui, "table-tags-divider"));
+    click(&ui, position);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+    click(&ui, position);
+    settle();
+    near(ui.get_table_tags_width(), 160.0);
+    near(ui.get_table_duration_width(), 180.0);
+    ui.hide().unwrap();
+}
