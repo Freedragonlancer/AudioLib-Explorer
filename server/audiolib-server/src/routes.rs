@@ -485,7 +485,13 @@ async fn capabilities(
             ..ListWaveformsCapability::default()
         }),
         pregenerate_list_waveforms: service.security().pregenerate_list_waveforms(),
-        list_waveform_jobs: Some(crate::wf_job::ListWaveformJobsCapability::default()),
+        // Not advertised once the library is open without a usable waveforms.db (the job
+        // endpoints answer 503 UNAVAILABLE then); while it opens they answer 503 too
+        // (retry), as for the bundle.
+        list_waveform_jobs: match service.readiness() {
+            Readiness::Ready(state) if !state.list_waveforms().jobs_available() => None,
+            _ => Some(crate::wf_job::ListWaveformJobsCapability::default()),
+        },
     })
 }
 

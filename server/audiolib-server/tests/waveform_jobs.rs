@@ -753,3 +753,79 @@ async fn corrupt_or_foreign_state_files_are_set_aside() {
     assert!(dir.join("job-state.json.bad").exists());
     assert!(!dir.join("job-state.json").exists());
 }
+
+#[tokio::test]
+async fn paused_mid_record_stays_paused_after_a_restart() {
+    // 1 file per second: a record is being processed when the job is paused.
+    let f = fixture("list_waveform_rate = 1\n");
+    start(&f.state, r#"{"mode":"missing"}"#).await;
+    wait_for(&f.state, "a record in flight", |s| {
+        let job = s.job.as_ref().unwrap();
+        job.done >= 1 && job.current.is_some()
+    })
+    .await;
+    control(&f.state, "pause").await;
+    // The record in flight completes after the pause; its progress save must not
+    // overwrite the paused state.
+    wait_for(&f.state, "in-flight drained", |s| {
+        s.job.as_ref().unwrap().current.is_none()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let file = state_file_where(&f.state, |_| true).await;
+    assert_eq!(file["job"]["state"], "paused", "{file}");
+    let state = reopen(&f);
+    let s = status(&state).await;
+    assert_eq!(s.run_state, "paused", "{s:?}");
+    let done = s.job.as_ref().unwrap().done;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let s = status(&state).await;
+    assert_eq!(s.job.as_ref().unwrap().state, "paused", "{s:?}");
+    assert_eq!(s.job.unwrap().done, done);
+}
+
+#[tokio::test]
+async fn stopped_job_does_not_resume_after_a_restart() {
+    let f = fixture("list_waveform_rate = 1\n");
+    start(&f.state, r#"{"mode":"missing"}"#).await;
+    wait_for(&f.state, "a record in flight", |s| {
+        let job = s.job.as_ref().unwrap();
+        job.done >= 1 && job.current.is_some()
+    })
+    .await;
+    control(&f.state, "stop").await;
+    wait_for(&f.state, "in-flight drained", |s| {
+        s.job.as_ref().unwrap().current.is_none()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let file = state_file_where(&f.state, |_| true).await;
+    assert_eq!(file["job"]["state"], "cancelled", "{file}");
+    let state = reopen(&f);
+    let s = status(&state).await;
+    let job = s.job.clone().unwrap();
+    assert_eq!(job.state, "cancelled", "{s:?}");
+    assert!(!job.resumed);
+    assert_eq!(s.run_state, "idle");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(status(&state).await.job.unwrap().done, job.done);
+}
+
+#[tokio::test]
+async fn unusable_waveforms_db_hides_the_job_capability() {
+    let f = fixture("");
+    let db = state_dir(&f.state).join("waveforms.db");
+    let _ = fs::remove_file(&db);
+    // A directory in its place: the database cannot be opened.
+    fs::create_dir_all(db.join("blocker")).unwrap();
+    let state = reopen(&f);
+    let caps: serde_json::Value =
+        ok(call(state.clone(), Method::GET, "/capabilities", &[], LAN, None).await).await;
+    assert!(caps.get("list_waveform_jobs").is_none(), "{caps}");
+    err(
+        post(&state, "/waveforms/jobs", Some(r#"{"mode":"missing"}"#)).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "UNAVAILABLE",
+    )
+    .await;
+}

@@ -689,7 +689,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 | `root_management` | 本服务端提供 §6.10 的稳定根目录管理接口；缺字段的旧版本按 `false`，客户端隐藏目录浏览及根目录新增、改路径、删除按钮 |
 | `list_waveforms` | 支持 §9.1 的 `POST /waveforms`：`{ "version": 1, "buckets": [128], "max_ids": 200, "encoding": "i16le-minmax-base64" }`；缺字段 = 不支持 |
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
-| `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（草案） |
+| `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（库已打开但 `waveforms.db` 无法打开时也不声明，§9.5.7） |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
@@ -1308,7 +1308,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "list_waveform_jobs": { "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }
 ```
 
-- 缺字段（旧服务端）= 不支持 §9.5 的任务端点与 `list_waveform_rate` 设置；`modes` 以后可扩展，客户端只显示列出的模式；`rate_setting` 表示 `PATCH /settings` 接受 `list_waveform_rate`。
+- 缺字段（旧服务端，或库已打开但 `waveforms.db`（§9.4）无法打开）= 不支持 §9.5 的任务端点与 `list_waveform_rate` 设置（后一种情况下任务端点返回 503 `UNAVAILABLE`）；`modes` 以后可扩展，客户端只显示列出的模式；`rate_setting` 表示 `PATCH /settings` 接受 `list_waveform_rate`。
 - §6.9 的 `manage_mode` 管理端点清单增加：`POST /waveforms/jobs`、`POST /waveforms/jobs/current/pause|resume|stop`。
 - §2.1 错误表新增：任务当前状态不允许该操作（没有任务或任务已结束时暂停/继续/停止）→ 409 `JOB_STATE`（类比 `SCAN_STATE`）。已有任务时再开始 → 409 `BUSY`（同扫描，§6.6）。
 
