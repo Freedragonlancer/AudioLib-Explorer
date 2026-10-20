@@ -1447,7 +1447,7 @@ async fn batch_metadata_returns_the_report_and_changed_files_in_request_order() 
 }
 
 #[tokio::test]
-async fn plays_return_the_updated_record_and_bump_once_per_play() {
+async fn plays_return_the_updated_record_and_leave_the_revision_alone() {
     let f = fixture();
     let id = audio_id(&f, "flyby_02.wav");
     let start = library_revision(&f.state).await;
@@ -1464,10 +1464,29 @@ async fn plays_return_the_updated_record_and_bump_once_per_play() {
         let body: AudioWriteResponse = json(response).await;
         assert_eq!(body.file.id, id);
         assert_eq!(body.file.play_count, play);
-        assert_eq!(body.revision_before, start + play - 1);
-        assert_eq!(body.revision, start + play);
+        assert_eq!(body.revision_before, start);
+        assert_eq!(body.revision, start);
     }
-    assert_eq!(library_revision(&f.state).await, start + 2);
+    // Polling and restarting do not count the play commits either.
+    assert_eq!(library_revision(&f.state).await, start);
+    drop(f.state);
+    let reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
+    assert_eq!(library_revision(&reopened).await, start);
+    assert_eq!(reopened.audio(id).unwrap().play_count, 2);
+
+    // A content write after the plays still bumps exactly once.
+    let response = send_json(
+        &reopened,
+        Method::PATCH,
+        &format!("/api/v1/audio/{id}/metadata"),
+        Some(r#"{"favorite":true}"#),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: AudioWriteResponse = json(response).await;
+    assert_eq!((body.revision_before, body.revision), (start, start + 1));
+    assert_eq!(library_revision(&reopened).await, start + 1);
 }
 
 #[tokio::test]
@@ -1656,9 +1675,9 @@ async fn external_wal_commits_bump_and_restarts_do_not() {
     // A server write right after continues from there.
     let response = send_json(
         &f.state,
-        Method::POST,
-        &format!("/api/v1/audio/{id}/plays"),
-        None,
+        Method::PATCH,
+        &format!("/api/v1/audio/{id}/metadata"),
+        Some(r#"{"favorite":true}"#),
         Some(TOKEN),
     )
     .await;

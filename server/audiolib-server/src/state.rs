@@ -1110,6 +1110,18 @@ impl AppState {
             .record_own_write_if(|| operation(self.inner.provider.as_ref()), changed)
     }
 
+    /// Blocking. Run a provider write that changes no snapshot content clients must
+    /// re-download for (play bookkeeping); the revision stays put (see
+    /// [`RevisionTracker::record_own_write_quiet`]).
+    pub fn write_quiet<T>(
+        &self,
+        operation: impl FnOnce(&SqliteProvider) -> Result<T>,
+    ) -> Result<WriteOutcome<T>> {
+        self.inner
+            .tracker
+            .record_own_write_quiet(|| operation(self.inner.provider.as_ref()))
+    }
+
     /// Blocking. Run `query` on the read-only connection that also serves the `/roots`
     /// aggregates (never the writer, so it does not wait for writes).
     pub(crate) fn read_query<T>(
@@ -1159,9 +1171,12 @@ impl AppState {
         })
     }
 
-    /// Blocking. `DataProvider::record_play`, returning the updated record.
+    /// Blocking. `DataProvider::record_play`, returning the updated record. Plays only
+    /// touch `play_count`, `last_played_at` and `play_history`, so they do not advance
+    /// the revision (`revision == revision_before`): bumping it made every client
+    /// re-download the whole snapshot after each play elsewhere.
     pub fn record_play(&self, id: i64) -> Result<AudioWriteResponse> {
-        let outcome = self.write(|provider| {
+        let outcome = self.write_quiet(|provider| {
             provider.record_play(id)?;
             provider.get_audio(id)
         })?;
