@@ -25,6 +25,18 @@ use std::time::Duration;
 
 /// Status poll interval while the section is open (only then; never from audio code).
 pub(super) const WAVEFORM_CACHE_POLL: Duration = Duration::from_secs(2);
+/// Longest wait between status polls while the server keeps failing.
+pub(super) const WAVEFORM_CACHE_POLL_MAX: Duration = Duration::from_secs(30);
+
+/// The wait before the next status poll: back to [`WAVEFORM_CACHE_POLL`] after a
+/// success, doubled (up to [`WAVEFORM_CACHE_POLL_MAX`]) after each failure.
+pub(super) fn next_poll_interval(current: Duration, ok: bool) -> Duration {
+    if ok {
+        WAVEFORM_CACHE_POLL
+    } else {
+        current.saturating_mul(2).min(WAVEFORM_CACHE_POLL_MAX)
+    }
+}
 
 /// What the section last learned about the active server (kept for the polls).
 #[derive(Clone, Debug, Default)]
@@ -464,7 +476,8 @@ impl Controller {
     }
 
     /// Poll `GET /waveforms/status` through `provider` every [`WAVEFORM_CACHE_POLL`] while
-    /// this page generation stays open (its own thread; stops on any page change).
+    /// this page generation stays open (its own thread; stops on any page change), backing
+    /// off on errors ([`next_poll_interval`]).
     pub(super) fn poll_waveform_cache(
         self: &Arc<Self>,
         generation: u64,
@@ -485,8 +498,9 @@ impl Controller {
         let spawned = std::thread::Builder::new()
             .name("audiolib-waveform-cache".into())
             .spawn(move || {
+                let mut interval = WAVEFORM_CACHE_POLL;
                 loop {
-                    let deadline = std::time::Instant::now() + WAVEFORM_CACHE_POLL;
+                    let deadline = std::time::Instant::now() + interval;
                     while std::time::Instant::now() < deadline {
                         std::thread::sleep(Duration::from_millis(100));
                         if !current(&c) {
@@ -494,6 +508,7 @@ impl Controller {
                         }
                     }
                     let status = provider.waveform_cache_status();
+                    interval = next_poll_interval(interval, status.is_ok());
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.library_current(generation) {
@@ -821,6 +836,18 @@ mod tests {
         assert_eq!(action_error_text(&error, true), "须两次确认");
         error.sub_code = None;
         assert_eq!(action_error_text(&error, true), "波形缓存操作失败：须两次确认");
+    }
+
+    #[test]
+    fn polling_backs_off_on_errors_and_recovers() {
+        let mut interval = WAVEFORM_CACHE_POLL;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            interval = next_poll_interval(interval, false);
+            seen.push(interval.as_secs());
+        }
+        assert_eq!(seen, [4, 8, 16, 30, 30, 30]);
+        assert_eq!(next_poll_interval(interval, true), WAVEFORM_CACHE_POLL);
     }
 
     #[test]
