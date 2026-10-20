@@ -69,6 +69,19 @@ fn child_search_navigation() {
             |_| {},
         )
         .unwrap();
+    // Navigation reuses facets only while the database revision stays unchanged.
+    // The list Waveform worker now fills missing local caches in the background;
+    // those real SQLite writes correctly invalidate the conservative revision token.
+    // Finish fixture derivation first, keeping the production worker enabled and the
+    // strict Arc reuse assertion below intact for navigation without concurrent writes.
+    for file in provider.search(&SearchRequest::default()).unwrap().results {
+        assert!(matches!(
+            provider
+                .compute_list_waveform(file.id, Arc::new(AtomicBool::new(false)))
+                .unwrap(),
+            audiolib_core::ListWaveformState::Ready { .. }
+        ));
+    }
     let favorite = provider
         .search(&SearchRequest {
             query: "gore one".into(),
