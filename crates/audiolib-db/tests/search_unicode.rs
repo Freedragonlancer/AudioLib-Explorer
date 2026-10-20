@@ -1,7 +1,9 @@
 // crates/audiolib-db/tests/search_unicode.rs
 //! Scanner/provider regressions for Unicode word boundaries and derived-index upgrades.
 use audiolib_core::{DataProvider, MaintenanceAction, MetadataPatch, SearchRequest};
-use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
+use audiolib_db::{
+    ScanCancellation, ScanOptions, ScanService, SnapshotUpgradeProgress, SqliteProvider,
+};
 use rusqlite::Connection;
 use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
@@ -66,9 +68,11 @@ fn scanner_search_keeps_unicode_words_and_does_not_merge_separate_words() {
     let root = temp.path().join("audio");
     fs::create_dir(&root).unwrap();
     let expected = BTreeSet::from([
-        "cafe.wav".to_string(),
-        "café.wav".into(),
-        "Cafe\u{301}.wav".into(),
+        // Distinct prefixes keep all three spellings separate on APFS volumes
+        // that fold both filename case and Unicode normalization.
+        "plain-cafe.wav".to_string(),
+        "nfc-café.wav".into(),
+        "nfd-Cafe\u{301}.wav".into(),
     ]);
     for name in expected
         .iter()
@@ -107,6 +111,87 @@ fn scanner_search_keeps_unicode_words_and_does_not_merge_separate_words() {
     }
     let readonly = SqliteProvider::open_read_only(provider.database_path()).unwrap();
     assert_eq!(names(&readonly, "café"), expected);
+}
+
+#[test]
+fn existing_library_upgrade_reports_rows_and_preserves_business_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("library.db");
+    let provider = SqliteProvider::open(&database).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    conn.execute_batch(
+        "WITH RECURSIVE records(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM records WHERE id<5001)
+         INSERT INTO audio_files(id,file_path,filename,user_tags,user_notes,favorite,user_color,metadata_json)
+         SELECT id,'root/clip-'||id||'.wav','clip-'||id||'.wav','retained tag',
+         'retained notes',1,'#abcdef','{\"unknown_extension\":{\"retained\":true}}' FROM records;",
+    )
+    .unwrap();
+    let before = serde_json::to_value(provider.get_audio(1).unwrap()).unwrap();
+    drop(provider);
+    conn.execute_batch(
+        "UPDATE audiolib_schema_features SET version=1 WHERE feature='tokenization';",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut progress = Vec::new();
+    let upgraded = SqliteProvider::open_existing_with_progress(&database, |event| {
+        progress.push(event);
+    })
+    .unwrap();
+    assert_eq!(
+        progress,
+        [
+            SnapshotUpgradeProgress::Preparing,
+            SnapshotUpgradeProgress::Tokenizing {
+                completed: 0,
+                total: 5001
+            },
+            SnapshotUpgradeProgress::Tokenizing {
+                completed: 5000,
+                total: 5001
+            },
+            SnapshotUpgradeProgress::Tokenizing {
+                completed: 5001,
+                total: 5001
+            },
+            SnapshotUpgradeProgress::BuildingFts,
+            SnapshotUpgradeProgress::SourceTags,
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(upgraded.get_audio(1).unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(upgraded.stats().unwrap().audio_files, 5001);
+    assert_eq!(
+        upgraded
+            .search(&SearchRequest {
+                query: "tain".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .total_count,
+        5001
+    );
+    assert!(SqliteProvider::has_current_search_state(&database).unwrap());
+    drop(upgraded);
+    progress.clear();
+    let unchanged = SqliteProvider::open_existing_with_progress(&database, |event| {
+        progress.push(event);
+    })
+    .unwrap();
+    assert_eq!(
+        progress,
+        [
+            SnapshotUpgradeProgress::Preparing,
+            SnapshotUpgradeProgress::SourceTags
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(unchanged.get_audio(1).unwrap()).unwrap(),
+        before
+    );
 }
 
 #[test]

@@ -1,5 +1,22 @@
 # Rust 代码审查修复
 
+## 7ec84ed 跨平台与资源复审修复（2026-10-20，0.4.11 开发构建）
+
+按主报告与逐行补充报告处理，并保留另一并行 GUI 测量任务的未提交改动；先以 merge 合入 `origin/main`（`afb2f04`），合并提交 `9bdc9c5`，两个文档冲突均保留双方章节。
+
+| 评审项 | 修复与验证边界 |
+| --- | --- |
+| P0-1 aarch64 的原生 BM25 对比相差 1 ULP | C/SQLite 与 Rust 的测试 oracle 限为有限值、同符号、最多 2 ULP；超过边界、NaN、无穷仍失败。所有原生对比（含辅助读者测试）共享此规则，返回行顺序、Rust 串行/并行逐位一致性与快照/布局身份仍严格断言。运行期没有“分数不同即回退”的判断，不需放宽布局校验。Windows 已做定向回归；本机不能执行 macOS aarch64，需该平台复验 |
+| P1-1 单字母拒绝行为及 P1-3 API 文档 | 核实此前用户明确选择“至少 2 个字母，1 个字母不搜索”，保留 GUI 取消旧请求和友好提示，core/db 返回 Validation；补充 [API](api/README.md) 搜索规则。当前服务端没有 `/search` 路由，不能描述成已实现端点返回 400/500；未来端点按既有 Validation 映射为 400 |
+| P1-2 首次升级阻塞与进度 | 新增 `open_with_progress` / `open_existing_with_progress`，服务端默认 info 日志可见阶段、每 5000 行和最终行数、经过时间；5001 行回归同时验证 Metadata/未知扩展保留和再次打开不重建。文档明确事务回滚、重启从头、业务 API 在启动期 503 的边界。新增 `upgrade-benchmark --source`，只读源经 SQLite backup 复制到 owned 临时文件后测真实升级与前后完整性，并验证源字节不变 |
+| 补充 P2-1 mmap 风险 | writer 显式 0；所有普通/辅助 reader 与 benchmark probe 共用 canonical Windows fixed-volume 策略，网络/可移动/未知/其他平台默认 0；`AUDIOLIB_DISABLE_MMAP` 任意值全关。测试检查禁用/未知卷、UNC 拒绝、writer 及池化 reader。编译参数注释和架构文档说明 macOS 适用范围、上限不等于启用 |
+| 补充 P2-2 辅助缓存/线程 | 每个辅助 reader 从 64MiB 降为 8MiB，数量为 `min(available_parallelism()-1,7)`；合并固定 quantile 分区及短语分组，测试 0–7 个 helper 的精确结果与分区不重不漏。最多七个辅助缓存预算由 448MiB 降为 56MiB；不是整个进程 RSS 承诺 |
+| 补充 P3-1 串行退化不可见 | 每次 fallback 输出固定原因 debug 日志并计数，无查询或路径；真实 Busy/Locked/CannotOpen 原因优先于清理产生的 Interrupted。新 `search-benchmark --concurrent-writer` 仅操作新建合成库，报告基线/并发 P95、提交数和各原因计数，不冒充完整扫描压力 |
+| 补充 P3-2 FFI 生命周期 | 测试重复注册 Busy 不改变活动 generation；实际连接关闭释放 rank/preparation 两类载荷；用过期 Weak 注入模拟句柄地址复用分支，验证新注册成功，无悬空指针解引用。本轮未执行 Miri/ASan |
+| 原有 macOS 两项失败 | Unicode 文件名使用不同前后缀，仍覆盖 NFC/NFD/ASCII 的检索折叠；重定位修复实际的 `/var`→`/private/var` canonical source 不一致，已有源别名回归扩展至全部平台，并保留物理移动后缺失源路径处理 |
+
+实际完整检查、升级测量与固定安装结果记录在 [验证报告](Rust_Validation.md)。
+
 ## 片段搜索与查询回退复审（2026-10-20，0.4.7 本地开发构建）
 
 审查覆盖两字符片段搜索、并行原生 BM25、排名缓存、筛选交集、目录统计、快照升级进度及相关诊断。确认并修复两个 P2：

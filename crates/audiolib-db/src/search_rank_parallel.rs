@@ -9,7 +9,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -19,8 +19,114 @@ use std::{
 const BUDGET_BATCH: usize = 1024;
 /// Maximum extra snapshot readers used by one provider's active ranking job.
 pub(crate) const AUXILIARY_READERS_MAX: usize = crate::SQLITE_AUXILIARY_SEARCH_READERS;
+/// SQLite page-cache budget in KiB for each temporary ranking worker.
+pub const SQLITE_AUXILIARY_READER_CACHE_KB: i64 = 8192;
 pub(crate) type SplitPoints = [i64; AUXILIARY_READERS_MAX];
 pub(crate) type RankedRows = Vec<(i64, f64)>;
+
+/// Active worker budget; retain one logical CPU for the master and cap fanout.
+pub fn auxiliary_search_reader_count() -> usize {
+    reader_count_for_parallelism(thread::available_parallelism().map_or(1, usize::from))
+}
+
+fn reader_count_for_parallelism(available: usize) -> usize {
+    available.saturating_sub(1).min(AUXILIARY_READERS_MAX)
+}
+
+// Coalesce the prepared eight quantile ranges into worker_count + 1 ranges.
+// The master owns everything before the first cut; workers cover the remainder.
+fn selected_cut(cuts: &SplitPoints, index: usize, worker_count: usize) -> i64 {
+    cuts[(index + 1) * (AUXILIARY_READERS_MAX + 1) / (worker_count + 1) - 1]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FallbackReason {
+    Busy,
+    Locked,
+    ReaderUnavailable,
+    Interrupted,
+    WorkerUnavailable,
+    ThreadStart,
+    SnapshotChanged,
+    Capacity,
+}
+
+impl FallbackReason {
+    fn priority(self) -> u8 {
+        match self {
+            Self::WorkerUnavailable => 0,
+            Self::Interrupted => 1,
+            Self::Busy | Self::Locked | Self::ReaderUnavailable => 2,
+            Self::ThreadStart | Self::SnapshotChanged | Self::Capacity => 3,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Busy => "reader_busy",
+            Self::Locked => "reader_locked",
+            Self::ReaderUnavailable => "reader_unavailable",
+            Self::Interrupted => "reader_interrupted",
+            Self::WorkerUnavailable => "worker_unavailable",
+            Self::ThreadStart => "thread_start_failed",
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::Capacity => "parallel_job_active",
+        }
+    }
+}
+
+fn preferred_fallback_reason(
+    previous: Option<FallbackReason>,
+    candidate: FallbackReason,
+) -> FallbackReason {
+    // Joining follows worker index order, which is independent of failure order.
+    // Cleanup interrupts must not hide a concrete reader failure in a later join.
+    previous
+        .filter(|reason| reason.priority() >= candidate.priority())
+        .unwrap_or(candidate)
+}
+
+static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static FALLBACKS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+/// Process-wide cumulative parallel-ranking counters, without query or path data.
+/// Subtract snapshots to measure one isolated benchmark interval. Concurrent
+/// searches share these counters; the snapshot is not an atomic transaction.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct ParallelRankingDiagnostics {
+    /// Eligible jobs which attempted to obtain auxiliary readers.
+    pub attempts: u64,
+    /// Fallbacks grouped by stable diagnostic reason.
+    pub fallbacks: [u64; 8],
+    /// Labels corresponding to each entry in `fallbacks`.
+    pub reasons: [&'static str; 8],
+}
+
+/// Read the current process-wide parallel-ranking diagnostics.
+pub fn parallel_ranking_diagnostics() -> ParallelRankingDiagnostics {
+    ParallelRankingDiagnostics {
+        attempts: ATTEMPTS.load(Ordering::Relaxed),
+        fallbacks: std::array::from_fn(|index| FALLBACKS[index].load(Ordering::Relaxed)),
+        reasons: [
+            FallbackReason::Busy.label(),
+            FallbackReason::Locked.label(),
+            FallbackReason::ReaderUnavailable.label(),
+            FallbackReason::Interrupted.label(),
+            FallbackReason::WorkerUnavailable.label(),
+            FallbackReason::ThreadStart.label(),
+            FallbackReason::SnapshotChanged.label(),
+            FallbackReason::Capacity.label(),
+        ],
+    }
+}
+
+fn record_fallback(reason: FallbackReason) {
+    FALLBACKS[reason as usize].fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(
+        reason = reason.label(),
+        "Parallel ranking resumed serial scoring"
+    );
+}
 
 /// Observer identity from the master's already-pinned transaction.
 /// The caller retains its read gate until collection and every worker have drained.
@@ -102,7 +208,7 @@ impl Shared {
 enum WorkerFailure {
     // An auxiliary reader could not start, or was cancelled by local cleanup.
     // The original cursor remains valid and can finish the complete serial read.
-    Unavailable,
+    Unavailable(FallbackReason),
     // SQL/data errors are never converted into a successful partial ranking.
     Fatal(Error),
 }
@@ -110,21 +216,24 @@ enum WorkerFailure {
 type WorkerResult<T> = std::result::Result<T, WorkerFailure>;
 
 fn prepare_error(error: rusqlite::Error) -> WorkerFailure {
-    if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if matches!(
-        code.code,
-        rusqlite::ErrorCode::DatabaseBusy
-            | rusqlite::ErrorCode::DatabaseLocked
-            | rusqlite::ErrorCode::CannotOpen
-            | rusqlite::ErrorCode::OperationInterrupted
-    )) {
-        WorkerFailure::Unavailable
-    } else {
-        WorkerFailure::Fatal(db_error(error))
+    if let rusqlite::Error::SqliteFailure(code, _) = &error {
+        let reason = match code.code {
+            rusqlite::ErrorCode::DatabaseBusy => Some(FallbackReason::Busy),
+            rusqlite::ErrorCode::DatabaseLocked => Some(FallbackReason::Locked),
+            rusqlite::ErrorCode::CannotOpen => Some(FallbackReason::ReaderUnavailable),
+            rusqlite::ErrorCode::OperationInterrupted => Some(FallbackReason::Interrupted),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            return WorkerFailure::Unavailable(reason);
+        }
     }
+    WorkerFailure::Fatal(db_error(error))
 }
 
 struct Parallel<'a> {
     boundary: i64,
+    worker_count: usize,
     shared: Arc<Shared>,
     prepare_gate: Arc<StartGate>,
     score_gate: Arc<StartGate>,
@@ -138,17 +247,17 @@ impl Parallel<'_> {
         &mut self,
         cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<Option<Vec<search_bm25::PartialStats>>> {
-        let mut partials = Vec::with_capacity(AUXILIARY_READERS_MAX);
-        while partials.len() < AUXILIARY_READERS_MAX {
+        let mut partials = Vec::with_capacity(self.worker_count);
+        while partials.len() < self.worker_count {
             check_cancel(cancel)?;
             if self.shared.stopped() {
-                self.stop()?;
+                self.stop(FallbackReason::WorkerUnavailable)?;
                 return Ok(None);
             }
             match self.prepared.recv_timeout(Duration::from_millis(20)) {
                 Ok(partial) => partials.push(partial),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.stop()?;
+                    self.stop(FallbackReason::WorkerUnavailable)?;
                     return Ok(None);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -159,14 +268,14 @@ impl Parallel<'_> {
 
     fn finish(&mut self) -> WorkerResult<Vec<RankedRows>> {
         let mut parts = Vec::with_capacity(self.workers.len());
-        let mut unavailable = false;
+        let mut unavailable = None;
         let mut fatal = None;
         for worker in self.workers.drain(..) {
             match worker.join() {
                 Ok(Ok(rows)) => parts.push(rows),
-                Ok(Err(WorkerFailure::Unavailable)) => {
+                Ok(Err(WorkerFailure::Unavailable(reason))) => {
                     self.shared.abort.store(true, Ordering::Release);
-                    unavailable = true;
+                    unavailable = Some(preferred_fallback_reason(unavailable, reason));
                 }
                 Ok(Err(WorkerFailure::Fatal(error))) => {
                     self.shared.abort.store(true, Ordering::Release);
@@ -182,20 +291,31 @@ impl Parallel<'_> {
         }
         if let Some(error) = fatal {
             Err(WorkerFailure::Fatal(error))
-        } else if unavailable {
-            Err(WorkerFailure::Unavailable)
+        } else if let Some(reason) = unavailable {
+            Err(WorkerFailure::Unavailable(reason))
         } else {
             Ok(parts)
         }
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&mut self, fallback: FallbackReason) -> Result<()> {
         self.shared.abort.store(true, Ordering::Release);
         self.prepare_gate.decide(false);
         self.score_gate.decide(false);
         match self.finish() {
             Err(WorkerFailure::Fatal(error)) => Err(error),
-            _ => Ok(()),
+            Err(WorkerFailure::Unavailable(reason)) => {
+                record_fallback(if fallback == FallbackReason::WorkerUnavailable {
+                    reason
+                } else {
+                    fallback
+                });
+                Ok(())
+            }
+            _ => {
+                record_fallback(fallback);
+                Ok(())
+            }
         }
     }
 }
@@ -229,10 +349,12 @@ fn worker_connection(path: &Path, shared: Arc<Shared>) -> WorkerResult<Connectio
         .map_err(prepare_error)?;
     conn.progress_handler(2000, Some(move || shared.stopped()))
         .map_err(prepare_error)?;
-    conn.pragma_update(None, "mmap_size", crate::SQLITE_READER_MMAP_BYTES)
+    conn.pragma_update(None, "mmap_size", crate::sqlite_reader_mmap_bytes(path))
+        .map_err(prepare_error)?;
+    conn.pragma_update(None, "cache_size", -SQLITE_AUXILIARY_READER_CACHE_KB)
         .map_err(prepare_error)?;
     conn.execute_batch(
-        "PRAGMA query_only=ON; PRAGMA cache_size=-65536;
+        "PRAGMA query_only=ON;
          PRAGMA temp_store=MEMORY; BEGIN;",
     )
     .map_err(prepare_error)?;
@@ -247,7 +369,7 @@ fn worker_connection(path: &Path, shared: Arc<Shared>) -> WorkerResult<Connectio
 fn plan_error(error: Error, shared: &Shared) -> WorkerFailure {
     if matches!(&error, Error::Busy(_)) || (shared.stopped() && matches!(&error, Error::Cancelled))
     {
-        WorkerFailure::Unavailable
+        WorkerFailure::Unavailable(FallbackReason::WorkerUnavailable)
     } else {
         WorkerFailure::Fatal(error)
     }
@@ -256,6 +378,7 @@ fn plan_error(error: Error, shared: &Shared) -> WorkerFailure {
 struct WorkerPlan {
     plan: Arc<search_bm25::Prepared>,
     index: usize,
+    worker_count: usize,
     phrases: Vec<usize>,
     // Production always obtains cuts from the completed plan. Tiny fixtures
     // override them to exercise the same score protocol without 262k test rows.
@@ -274,26 +397,33 @@ fn rank_worker(path: &Path, work: WorkerPlan, gates: &WorkerGates) -> WorkerResu
     let WorkerPlan {
         plan,
         index,
+        worker_count,
         phrases,
         fixture_cuts,
     } = work;
     let shared = &gates.shared;
     let conn = worker_connection(path, shared.clone())?;
     if gates.ready.send(()).is_err() || !gates.prepare.wait(shared) {
-        return Err(WorkerFailure::Unavailable);
+        return Err(WorkerFailure::Unavailable(
+            FallbackReason::WorkerUnavailable,
+        ));
     }
     // All auxiliary read transactions are pinned before this gate opens. Each
     // phrase's global DF is computed exactly once, without document-size work.
     let partial = search_bm25::prepare_phrases(&conn, &plan, &phrases)
         .map_err(|error| plan_error(error, shared))?;
     if gates.prepared.send(partial).is_err() {
-        return Err(WorkerFailure::Unavailable);
+        return Err(WorkerFailure::Unavailable(
+            FallbackReason::WorkerUnavailable,
+        ));
     }
     if !gates.score.wait(shared) {
         // A rare query can use these complete statistics on the root alone.
         // This clean decision differs from cancellation or a failed worker.
         return if shared.stopped() {
-            Err(WorkerFailure::Unavailable)
+            Err(WorkerFailure::Unavailable(
+                FallbackReason::WorkerUnavailable,
+            ))
         } else {
             Ok(Vec::new())
         };
@@ -303,8 +433,8 @@ fn rank_worker(path: &Path, work: WorkerPlan, gates: &WorkerGates) -> WorkerResu
             "Parallel ranking split keys are missing".into(),
         ))
     })?;
-    let lower = cuts[index];
-    let upper = cuts.get(index + 1).copied();
+    let lower = selected_cut(&cuts, index, worker_count);
+    let upper = (index + 1 < worker_count).then(|| selected_cut(&cuts, index + 1, worker_count));
     let _registration = search_bm25::register_prepared(&conn, plan.clone())
         .map_err(|error| plan_error(error, shared))?;
     // Only the row-ID bounds differ. All cursors bind the complete MATCH and
@@ -331,17 +461,21 @@ fn rank_worker(path: &Path, work: WorkerPlan, gates: &WorkerGates) -> WorkerResu
                 && matches!(&error, rusqlite::Error::SqliteFailure(code, _)
                     if code.code == rusqlite::ErrorCode::OperationInterrupted)
             {
-                WorkerFailure::Unavailable
+                WorkerFailure::Unavailable(FallbackReason::WorkerUnavailable)
             } else {
                 WorkerFailure::Fatal(db_error(error))
             }
         })?;
         let Some(row) = row else { break };
         if ranked.len().is_multiple_of(BUDGET_BATCH) && shared.stopped() {
-            return Err(WorkerFailure::Unavailable);
+            return Err(WorkerFailure::Unavailable(
+                FallbackReason::WorkerUnavailable,
+            ));
         }
         if !shared.claim(&mut remaining) {
-            return Err(WorkerFailure::Unavailable);
+            return Err(WorkerFailure::Unavailable(
+                FallbackReason::WorkerUnavailable,
+            ));
         }
         ranked.push((
             row.get(0)
@@ -376,14 +510,20 @@ fn try_start<'a>(
     revision: u64,
     cancel: Option<&Arc<AtomicBool>>,
     fixture_cuts: Option<SplitPoints>,
+    worker_count: usize,
 ) -> Result<Option<Parallel<'a>>> {
     check_cancel(cancel)?;
-    if !plan.has_layout()
-        || provider
-            .parallel_rank_reserved
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+    if !plan.has_layout() || worker_count == 0 {
+        return Ok(None);
+    }
+    debug_assert!(worker_count <= AUXILIARY_READERS_MAX);
+    ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    if provider
+        .parallel_rank_reserved
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
     {
+        record_fallback(FallbackReason::Capacity);
         return Ok(None);
     }
     let reservation = Reservation(&provider.parallel_rank_reserved);
@@ -395,28 +535,34 @@ fn try_start<'a>(
         overflow: AtomicBool::new(false),
         reserved: AtomicUsize::new(0),
     });
-    let (prepared, receiving) = mpsc::sync_channel(AUXILIARY_READERS_MAX);
+    let (prepared, receiving) = mpsc::sync_channel(worker_count);
     let mut parallel = Parallel {
         boundary: 0,
+        worker_count,
         shared,
         prepare_gate: Arc::new(StartGate::default()),
         score_gate: Arc::new(StartGate::default()),
         prepared: receiving,
-        workers: Vec::with_capacity(AUXILIARY_READERS_MAX),
+        workers: Vec::with_capacity(worker_count),
         _reservation: reservation,
     };
-    let (ready, waiting) = mpsc::sync_channel(AUXILIARY_READERS_MAX);
-    let groups = plan.phrase_groups();
-    if groups.len() != AUXILIARY_READERS_MAX {
+    let (ready, waiting) = mpsc::sync_channel(worker_count);
+    let prepared_groups = plan.phrase_groups();
+    if prepared_groups.len() != AUXILIARY_READERS_MAX {
         return Err(Error::Database(
             "Parallel phrase groups are incomplete".into(),
         ));
+    }
+    let mut groups = vec![Vec::new(); worker_count];
+    for (index, phrases) in prepared_groups.into_iter().enumerate() {
+        groups[index % worker_count].extend(phrases);
     }
     for (index, phrases) in groups.into_iter().enumerate() {
         let path = provider.path.clone();
         let work = WorkerPlan {
             plan: plan.clone(),
             index,
+            worker_count,
             phrases,
             fixture_cuts,
         };
@@ -433,26 +579,26 @@ fn try_start<'a>(
         match spawned {
             Ok(worker) => parallel.workers.push(worker),
             Err(_) => {
-                parallel.stop()?;
+                parallel.stop(FallbackReason::ThreadStart)?;
                 return Ok(None);
             }
         }
     }
     drop(ready);
     drop(prepared);
-    for _ in 0..AUXILIARY_READERS_MAX {
+    for _ in 0..worker_count {
         loop {
             check_cancel(cancel)?;
             match waiting.recv_timeout(Duration::from_millis(20)) {
                 Ok(()) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    parallel.stop()?;
+                    parallel.stop(FallbackReason::WorkerUnavailable)?;
                     return Ok(None);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             if parallel.shared.stopped() {
-                parallel.stop()?;
+                parallel.stop(FallbackReason::WorkerUnavailable)?;
                 return Ok(None);
             }
         }
@@ -460,8 +606,12 @@ fn try_start<'a>(
     // Every worker pinned its transaction before reporting ready. With no commit
     // between the master's observer probe and this one, all readers see the same
     // data. Workers bypass reader()/read_gate to avoid a waiting admin deadlock.
-    if parallel.shared.stopped() || provider.observe_search_revision()? != revision {
-        parallel.stop()?;
+    if parallel.shared.stopped() {
+        parallel.stop(FallbackReason::WorkerUnavailable)?;
+        return Ok(None);
+    }
+    if provider.observe_search_revision()? != revision {
+        parallel.stop(FallbackReason::SnapshotChanged)?;
         return Ok(None);
     }
     parallel.prepare_gate.decide(true);
@@ -485,6 +635,7 @@ pub(crate) fn collect(
         search_bm25::Prepared::empty(query),
         snapshot,
         None,
+        auxiliary_search_reader_count(),
     )
 }
 
@@ -494,6 +645,7 @@ fn collect_inner(
     plan: Arc<search_bm25::Prepared>,
     snapshot: Snapshot<'_>,
     fixture_cuts: Option<SplitPoints>,
+    worker_count: usize,
 ) -> Result<Option<RankedRows>> {
     let Snapshot {
         revision,
@@ -508,7 +660,14 @@ fn collect_inner(
         return Ok(Some(Vec::new()));
     }
     let mut parallel = if cache_eligible && (fixture_cuts.is_some() || plan.is_large()) {
-        try_start(provider, plan.clone(), revision, cancel, fixture_cuts)?
+        try_start(
+            provider,
+            plan.clone(),
+            revision,
+            cancel,
+            fixture_cuts,
+            worker_count,
+        )?
     } else {
         None
     };
@@ -533,7 +692,7 @@ fn collect_inner(
             && (fixture_cuts.is_some() || plan.parallel_worthy())
             && let Some(cuts) = cuts
         {
-            active.boundary = cuts[0];
+            active.boundary = selected_cut(&cuts, 0, active.worker_count);
             // Publishing all statistics and lengths precedes opening this gate.
             // Each worker then obtains its own bounds from the completed plan.
             active.score_gate.decide(true);
@@ -541,8 +700,10 @@ fn collect_inner(
         } else {
             // DFs remain useful for rare queries even when scoring stays serial.
             active.score_gate.decide(false);
-            if let Err(WorkerFailure::Fatal(error)) = active.finish() {
-                return Err(error);
+            match active.finish() {
+                Err(WorkerFailure::Fatal(error)) => return Err(error),
+                Err(WorkerFailure::Unavailable(reason)) => record_fallback(reason),
+                Ok(_) => {}
             }
         }
     }
@@ -610,6 +771,9 @@ fn collect_inner(
             check_cancel(cancel)?;
             return Ok(Some(ranked));
         }
+        if let Err(WorkerFailure::Unavailable(reason)) = parts {
+            record_fallback(reason);
+        }
         drop(active);
         // Every auxiliary reader has drained. Resume at the unconsumed master's
         // row, not a new query or snapshot, and discard all partial worker data.
@@ -639,6 +803,97 @@ mod tests {
     use crate::{DataProvider, SearchRequest};
 
     #[test]
+    fn concrete_reader_failure_outweighs_cleanup_regardless_of_join_order() {
+        for concrete in [
+            FallbackReason::Busy,
+            FallbackReason::Locked,
+            FallbackReason::ReaderUnavailable,
+        ] {
+            assert_eq!(preferred_fallback_reason(None, concrete), concrete);
+            for cleanup in [
+                FallbackReason::Interrupted,
+                FallbackReason::WorkerUnavailable,
+            ] {
+                assert_eq!(preferred_fallback_reason(Some(cleanup), concrete), concrete);
+                assert_eq!(preferred_fallback_reason(Some(concrete), cleanup), concrete);
+            }
+        }
+        assert_eq!(
+            preferred_fallback_reason(
+                Some(FallbackReason::WorkerUnavailable),
+                FallbackReason::Interrupted,
+            ),
+            FallbackReason::Interrupted
+        );
+        assert_eq!(
+            preferred_fallback_reason(
+                Some(FallbackReason::Interrupted),
+                FallbackReason::WorkerUnavailable,
+            ),
+            FallbackReason::Interrupted
+        );
+        // Equal concrete priorities keep the first joined concrete reason.
+        assert_eq!(
+            preferred_fallback_reason(Some(FallbackReason::Locked), FallbackReason::Busy),
+            FallbackReason::Locked
+        );
+    }
+
+    #[test]
+    fn reader_budget_and_coalesced_ranges_cover_every_row_once() {
+        for available in 0..=32 {
+            assert_eq!(
+                reader_count_for_parallelism(available),
+                available.saturating_sub(1).min(7)
+            );
+        }
+        let cuts = fixture_cuts();
+        let rows = [
+            i64::MIN,
+            i64::MIN + 63,
+            i64::MIN + 64,
+            i64::MIN + 255,
+            -1,
+            0,
+            i64::MAX - 255,
+            i64::MAX - 63,
+            i64::MAX,
+        ];
+        for count in 1..=AUXILIARY_READERS_MAX {
+            let selected = (0..count)
+                .map(|index| selected_cut(&cuts, index, count))
+                .collect::<Vec<_>>();
+            assert!(selected.windows(2).all(|pair| pair[0] < pair[1]));
+            for row in rows {
+                let root = usize::from(row < selected[0]);
+                let workers = (0..count)
+                    .filter(|&index| {
+                        row >= selected[index]
+                            && selected.get(index + 1).is_none_or(|upper| row < *upper)
+                    })
+                    .count();
+                assert_eq!(root + workers, 1, "{count} workers, row {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_page_cache_uses_the_small_budget() {
+        let (_directory, provider) = fixture();
+        let shared = Arc::new(Shared {
+            external: Arc::new(AtomicBool::new(false)),
+            abort: AtomicBool::new(false),
+            overflow: AtomicBool::new(false),
+            reserved: AtomicUsize::new(0),
+        });
+        let conn = worker_connection(provider.database_path(), shared).unwrap();
+        let cache: i64 = conn
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache, -8192);
+    }
+
+    #[test]
     fn unavailable_readers_never_hide_corruption_or_io_errors() {
         for code in [
             rusqlite::ffi::SQLITE_BUSY,
@@ -650,7 +905,7 @@ mod tests {
                 rusqlite::ffi::Error::new(code),
                 None,
             ));
-            assert!(matches!(failure, WorkerFailure::Unavailable));
+            assert!(matches!(failure, WorkerFailure::Unavailable(_)));
         }
         for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_IOERR] {
             let failure = prepare_error(rusqlite::Error::SqliteFailure(
@@ -691,18 +946,30 @@ mod tests {
         (directory, provider)
     }
 
-    fn native(tx: &Connection, query: &str) -> Vec<(i64, u64)> {
+    fn native(tx: &Connection, query: &str) -> RankedRows {
         tx.prepare(
             "SELECT rowid,bm25(audio_search) FROM audio_search
              WHERE audio_search MATCH ?1 ORDER BY rowid",
         )
         .unwrap()
-        .query_map([query], |row| {
-            Ok((row.get(0)?, row.get::<_, f64>(1)?.to_bits()))
-        })
+        .query_map([query], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap()
+    }
+
+    fn assert_native_ranking(actual: &RankedRows, expected: &RankedRows) {
+        assert_eq!(actual.len(), expected.len());
+        for ((actual_id, actual_score), (expected_id, expected_score)) in
+            actual.iter().zip(expected)
+        {
+            assert_eq!(actual_id, expected_id);
+            crate::search_bm25::tests::assert_native_score(
+                *actual_score,
+                *expected_score,
+                actual_id,
+            );
+        }
     }
 
     fn fixture_cuts() -> SplitPoints {
@@ -718,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_global_statistics_preserve_native_bits_across_extreme_id_ranges() {
+    fn shared_global_statistics_preserve_native_scores_across_extreme_id_ranges() {
         let (_directory, provider) = fixture();
         let mut reader = provider.reader().unwrap();
         let tx = reader.transaction().unwrap();
@@ -733,27 +1000,39 @@ mod tests {
             format!("({compiled}) AND filename : \"metal\""),
         ] {
             let expected = native(&tx, &query);
-            let plan = search_bm25::Prepared::empty(query);
-            let actual = collect_inner(
-                &provider,
-                &tx,
-                plan.clone(),
-                Snapshot {
-                    revision: provider.observe_search_revision().unwrap(),
-                    cache_eligible: true,
-                    cancel: None,
-                },
-                Some(fixture_cuts()),
-            )
-            .unwrap()
-            .unwrap()
-            .into_iter()
-            .map(|(id, score)| (id, score.to_bits()))
-            .collect::<Vec<_>>();
-            assert_eq!(actual, expected);
-            assert_eq!(actual.len(), 512);
-            assert!(plan.is_ready());
-            assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+            let mut serial = None;
+            for worker_count in 0..=AUXILIARY_READERS_MAX {
+                let plan = search_bm25::Prepared::empty(query.clone());
+                let actual = collect_inner(
+                    &provider,
+                    &tx,
+                    plan.clone(),
+                    Snapshot {
+                        revision: provider.observe_search_revision().unwrap(),
+                        cache_eligible: true,
+                        cancel: None,
+                    },
+                    Some(fixture_cuts()),
+                    worker_count,
+                )
+                .unwrap()
+                .unwrap();
+                assert_native_ranking(&actual, &expected);
+                // Only the independently compiled SQLite-C oracle permits two
+                // ULPs. Rust serial and every fanout retain identical bits.
+                let bits = actual
+                    .iter()
+                    .map(|(id, score)| (*id, score.to_bits()))
+                    .collect::<Vec<_>>();
+                if let Some(serial) = &serial {
+                    assert_eq!(&bits, serial, "{worker_count} workers");
+                } else {
+                    serial = Some(bits);
+                }
+                assert_eq!(actual.len(), 512);
+                assert!(plan.is_ready());
+                assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+            }
         }
     }
 
@@ -797,13 +1076,11 @@ mod tests {
                 i64::MAX - 127,
                 i64::MAX - 63,
             ]),
+            AUXILIARY_READERS_MAX,
         )
         .unwrap()
-        .unwrap()
-        .into_iter()
-        .map(|(id, score)| (id, score.to_bits()))
-        .collect::<Vec<_>>();
-        assert_eq!(actual, expected);
+        .unwrap();
+        assert_native_ranking(&actual, &expected);
         assert!(plan.is_ready());
         assert!(plan.split_points().is_none());
         assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
@@ -842,13 +1119,11 @@ mod tests {
                 cancel: None,
             },
             Some(fixture_cuts()),
+            AUXILIARY_READERS_MAX,
         )
         .unwrap()
-        .unwrap()
-        .into_iter()
-        .map(|(id, score)| (id, score.to_bits()))
-        .collect::<Vec<_>>();
-        assert_eq!(actual, expected);
+        .unwrap();
+        assert_native_ranking(&actual, &expected);
         assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
     }
 
@@ -889,6 +1164,7 @@ mod tests {
                 let work = WorkerPlan {
                     plan: plan.clone(),
                     index,
+                    worker_count: AUXILIARY_READERS_MAX,
                     phrases: Vec::new(),
                     fixture_cuts: Some(fixture_cuts()),
                 };
@@ -908,19 +1184,20 @@ mod tests {
                     WorkerPlan {
                         plan: plan.clone(),
                         index: count,
+                        worker_count: AUXILIARY_READERS_MAX,
                         phrases: Vec::new(),
                         fixture_cuts: Some(fixture_cuts()),
                     },
                     &make_gates(),
                 );
-                assert!(matches!(failure, Err(WorkerFailure::Unavailable)));
+                assert!(matches!(failure, Err(WorkerFailure::Unavailable(_))));
             } else {
                 shared.external.store(true, Ordering::Release);
             }
             for worker in workers {
                 assert!(matches!(
                     worker.join().unwrap(),
-                    Err(WorkerFailure::Unavailable)
+                    Err(WorkerFailure::Unavailable(_))
                 ));
             }
             assert!(waiting.try_recv().is_err());
@@ -947,6 +1224,7 @@ mod tests {
             provider.observe_search_revision().unwrap(),
             Some(&cancelled),
             Some(fixture_cuts()),
+            AUXILIARY_READERS_MAX,
         )
         .unwrap()
         .unwrap();
@@ -957,7 +1235,10 @@ mod tests {
             AUXILIARY_READERS_MAX
         );
         cancelled.store(true, Ordering::Release);
-        assert!(matches!(active.finish(), Err(WorkerFailure::Unavailable)));
+        assert!(matches!(
+            active.finish(),
+            Err(WorkerFailure::Unavailable(_))
+        ));
         assert!(active.prepared.try_recv().is_err());
         drop(active);
         assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
@@ -983,6 +1264,7 @@ mod tests {
                 provider.observe_search_revision().unwrap(),
                 Some(&cancelled),
                 Some(fixture_cuts()),
+                AUXILIARY_READERS_MAX,
             )
             .unwrap()
             .unwrap();

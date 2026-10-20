@@ -789,16 +789,15 @@ impl SqliteProvider {
         if target.file_name().is_none() {
             return Err(validation("File system or drive roots cannot be relocated"));
         }
-        // Scanning stores canonical Windows paths. Resolve existing source
-        // aliases (including short names), but retain a missing old path after
-        // the user physically moves a directory. Other I/O failures are errors.
-        #[cfg(windows)]
+        // Scanning stores canonical paths. Resolve existing source aliases
+        // (including macOS /var -> /private/var and Windows short names), but
+        // retain a missing old path after a physical move or case-only rename.
+        // Other I/O failures are errors.
         let resolved_source = match source.canonicalize() {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => source.to_path_buf(),
             Err(error) => return Err(error.into()),
         };
-        #[cfg(windows)]
         let source = resolved_source.as_path();
         if source.file_name().is_none() {
             return Err(validation("File system or drive roots cannot be relocated"));

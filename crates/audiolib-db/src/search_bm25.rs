@@ -1140,8 +1140,70 @@ unsafe extern "C" fn bm25(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    // SQLite's C compiler and Rust/LLVM may round the same BM25 expression
+    // differently (for example, aarch64 may contract multiply/add operations).
+    // Keep this oracle tolerance at two adjacent finite values, rather than a
+    // relative epsilon that would hide larger errors near zero. Internal Rust
+    // layout and snapshot identity checks remain exact.
+    fn native_scores_agree(actual: f64, native: f64) -> bool {
+        actual.is_finite()
+            && native.is_finite()
+            && (actual == native
+                || (actual.is_sign_negative() == native.is_sign_negative()
+                    && actual.to_bits().abs_diff(native.to_bits()) <= 2))
+    }
+
+    #[track_caller]
+    pub(crate) fn assert_native_score(actual: f64, native: f64, context: impl std::fmt::Display) {
+        assert!(
+            native_scores_agree(actual, native),
+            "{context}: Rust {actual:?} ({:#018x}), SQLite {native:?} ({:#018x})",
+            actual.to_bits(),
+            native.to_bits()
+        );
+    }
+
+    #[track_caller]
+    fn assert_native_ranking(actual: &[(i64, f64)], native: &[(i64, f64)], query: &str) {
+        assert_eq!(actual.len(), native.len(), "{query}: match count");
+        for ((actual_row, actual_score), (native_row, native_score)) in actual.iter().zip(native) {
+            assert_eq!(actual_row, native_row, "{query}: ranking order");
+            assert_native_score(
+                *actual_score,
+                *native_score,
+                format!("{query}: {actual_row}"),
+            );
+        }
+    }
+
+    #[test]
+    fn native_score_oracle_only_accepts_two_ulps_of_finite_rounding() {
+        for base in [1.0f64, -1.0, 1e-6, -1e-6, f64::MIN_POSITIVE] {
+            assert!(native_scores_agree(base, base));
+            for offset in [1, 2] {
+                for adjacent in [base.to_bits() - offset, base.to_bits() + offset] {
+                    let adjacent = f64::from_bits(adjacent);
+                    assert!(native_scores_agree(base, adjacent));
+                    assert!(native_scores_agree(adjacent, base));
+                }
+            }
+            for distant in [base.to_bits() - 3, base.to_bits() + 3] {
+                assert!(!native_scores_agree(base, f64::from_bits(distant)));
+            }
+            assert!(!native_scores_agree(base, -base));
+        }
+        assert!(native_scores_agree(0.0, -0.0));
+        assert!(native_scores_agree(0.0, f64::from_bits(2)));
+        assert!(!native_scores_agree(0.0, f64::from_bits(3)));
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!native_scores_agree(invalid, invalid));
+            assert!(!native_scores_agree(invalid, 1.0));
+            assert!(!native_scores_agree(1.0, invalid));
+        }
+    }
 
     fn fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -1274,9 +1336,10 @@ mod tests {
             .unwrap();
         let mut root_rows = root_statement.query([prepared.query()]).unwrap();
         let first = root_rows.next().unwrap().unwrap();
-        assert_eq!(
-            first.get::<_, f64>(1).unwrap().to_bits(),
-            first.get::<_, f64>(2).unwrap().to_bits()
+        assert_native_score(
+            first.get::<_, f64>(1).unwrap(),
+            first.get::<_, f64>(2).unwrap(),
+            "first root row",
         );
         assert!(prepared.is_ready());
         assert!(!prepared.parallel_worthy(), "small fixtures do not fan out");
@@ -1300,11 +1363,10 @@ mod tests {
                 .unwrap();
             let mut rows = statement.query([prepared.query()]).unwrap();
             while let Some(row) = rows.next().unwrap() {
-                assert_eq!(
-                    row.get::<_, f64>(1).unwrap().to_bits(),
-                    row.get::<_, f64>(2).unwrap().to_bits(),
-                    "worker row {}",
-                    row.get::<_, i64>(0).unwrap()
+                assert_native_score(
+                    row.get::<_, f64>(1).unwrap(),
+                    row.get::<_, f64>(2).unwrap(),
+                    format!("worker row {}", row.get::<_, i64>(0).unwrap()),
                 );
                 assert_eq!(Arc::strong_count(&shared_stats), retained + 1);
             }
@@ -1324,10 +1386,10 @@ mod tests {
                 .unwrap();
             let mut rows = statement.query([query]).unwrap();
             while let Some(row) = rows.next().unwrap() {
-                assert_eq!(
-                    row.get::<_, f64>(0).unwrap().to_bits(),
-                    row.get::<_, f64>(1).unwrap().to_bits(),
-                    "fallback for {table}: {query}"
+                assert_native_score(
+                    row.get::<_, f64>(0).unwrap(),
+                    row.get::<_, f64>(1).unwrap(),
+                    format!("fallback for {table}: {query}"),
                 );
                 assert_eq!(Arc::strong_count(&shared_stats), retained);
             }
@@ -1337,11 +1399,10 @@ mod tests {
         // Continue the root while the worker has visited rows with different
         // phrase frequencies; only immutable global statistics were shared.
         while let Some(row) = root_rows.next().unwrap() {
-            assert_eq!(
-                row.get::<_, f64>(1).unwrap().to_bits(),
-                row.get::<_, f64>(2).unwrap().to_bits(),
-                "root row {}",
-                row.get::<_, i64>(0).unwrap()
+            assert_native_score(
+                row.get::<_, f64>(1).unwrap(),
+                row.get::<_, f64>(2).unwrap(),
+                format!("root row {}", row.get::<_, i64>(0).unwrap()),
             );
         }
         drop(root_rows);
@@ -1355,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn separate_phrase_preparation_merges_native_bits_from_owned_reader_results() {
+    fn separate_phrase_preparation_merges_native_scores_from_owned_reader_results() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("parallel-preparation.db");
         let root = Connection::open(&database).unwrap();
@@ -1412,11 +1473,10 @@ mod tests {
         let mut rows = statement.query([plan.query()]).unwrap();
         let mut matched = 0;
         while let Some(row) = rows.next().unwrap() {
-            assert_eq!(
-                row.get::<_, f64>(1).unwrap().to_bits(),
-                row.get::<_, f64>(2).unwrap().to_bits(),
-                "row {}",
-                row.get::<_, i64>(0).unwrap()
+            assert_native_score(
+                row.get::<_, f64>(1).unwrap(),
+                row.get::<_, f64>(2).unwrap(),
+                format!("row {}", row.get::<_, i64>(0).unwrap()),
             );
             matched += 1;
         }
@@ -1428,13 +1488,17 @@ mod tests {
             )
             .unwrap()
             .query_map(rusqlite::params![plan.query(), function], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?.to_bits()))
+                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
         };
-        assert_eq!(ranking("audiolib_bm25()"), ranking("bm25()"));
+        assert_native_ranking(
+            &ranking("audiolib_bm25()"),
+            &ranking("bm25()"),
+            plan.query(),
+        );
     }
 
     #[test]
@@ -1497,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn private_default_bm25_matches_native_bits_and_guard_drop_restores_fallback() {
+    fn private_default_bm25_matches_native_scores_and_guard_drop_restores_fallback() {
         let conn = fixture();
         let lengths = load_lengths(&conn, None).unwrap().unwrap();
         let guard = register(&conn, lengths.clone()).unwrap();
@@ -1531,7 +1595,7 @@ mod tests {
                 .unwrap();
             for scores in scores {
                 let (row, native, cached) = scores.unwrap();
-                assert_eq!(native.to_bits(), cached.to_bits(), "{query}: {row}");
+                assert_native_score(cached, native, format!("{query}: {row}"));
             }
         }
         drop(guard);
@@ -1543,7 +1607,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(native.to_bits(), fallback.to_bits());
+        assert_native_score(fallback, native, "guard drop fallback");
     }
 
     #[test]
@@ -1618,7 +1682,7 @@ mod tests {
             let mut matched = 0;
             for scores in scores {
                 let (row, private, native) = scores.unwrap();
-                assert_eq!(private.to_bits(), native.to_bits(), "{query}: {row}");
+                assert_native_score(private, native, format!("{query}: {row}"));
                 matched += 1;
             }
             assert!(matched > 0, "oracle query must exercise instances: {query}");
@@ -1631,18 +1695,18 @@ mod tests {
                     .unwrap();
                 statement
                     .query_map(rusqlite::params![query, function], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?.to_bits()))
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
                     })
                     .unwrap()
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .unwrap()
             };
-            assert_eq!(ranking("audiolib_bm25()"), ranking("bm25()"), "{query}");
+            assert_native_ranking(&ranking("audiolib_bm25()"), &ranking("bm25()"), query);
         }
     }
 
     #[test]
-    fn idf_clamp_boundaries_match_native_bits_for_even_and_odd_row_counts() {
+    fn idf_clamp_boundaries_match_native_scores_for_even_and_odd_row_counts() {
         for total_rows in [1i64, 6i64, 7i64] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch(
@@ -1719,10 +1783,10 @@ mod tests {
                 let mut matched = 0i64;
                 for scores in scores {
                     let (row, native, cached) = scores.unwrap();
-                    assert_eq!(
-                        native.to_bits(),
-                        cached.to_bits(),
-                        "N={total_rows}, row={row}, query={query}"
+                    assert_native_score(
+                        cached,
+                        native,
+                        format!("N={total_rows}, row={row}, query={query}"),
                     );
                     matched += 1;
                 }
@@ -1732,6 +1796,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn repeated_busy_registration_keeps_the_active_snapshot_and_generation() {
+        let conn = fixture();
+        let lengths = load_lengths(&conn, None).unwrap().unwrap();
+        let guard = register(&conn, lengths.clone()).unwrap();
+        let generation = guard.generation;
+        let registration = guard.registration.clone();
+        for _ in 0..4 {
+            let rejected = Arc::new(Lengths {
+                domains: [None, None],
+                split_points: None,
+            });
+            let rejected_reference = Arc::downgrade(&rejected);
+            assert!(matches!(register(&conn, rejected), Err(Error::Busy(_))));
+            assert!(
+                rejected_reference.upgrade().is_none(),
+                "failed registration releases its proposed snapshot"
+            );
+            let slot = registration.slot.lock().unwrap();
+            assert!(slot.active);
+            assert_eq!(slot.generation, generation);
+            assert!(Arc::ptr_eq(slot.lengths.as_ref().unwrap(), &lengths));
+        }
+        let (private, native): (f64, f64) = conn
+            .query_row(
+                "SELECT audiolib_bm25(audio_search),bm25(audio_search)
+                 FROM audio_search WHERE audio_search MATCH 'alpha' LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_native_score(private, native, "active registration after Busy");
+        drop(guard);
+        let replacement = register(&conn, lengths).unwrap();
+        assert!(Arc::ptr_eq(&replacement.registration, &registration));
+        assert_eq!(replacement.generation, generation + 1);
+    }
+
+    #[test]
+    fn closed_connection_stale_handle_entries_allow_fresh_registration() {
+        let conn = fixture();
+        let plan = Prepared::empty("alpha OR beta".into());
+        assert!(prepare_layout(&conn, &plan).unwrap());
+        let guard = register_prepared(&conn, plan).unwrap();
+        assert!(
+            guard
+                .registration
+                .preparation_registered
+                .load(Ordering::Acquire)
+        );
+        let expired_registration = Arc::downgrade(&guard.registration);
+        drop(guard);
+        conn.close().unwrap();
+        assert!(
+            expired_registration.upgrade().is_none(),
+            "closing SQLite destroys both rank and preparation function payloads"
+        );
+
+        let conn = fixture();
+        // A SQLite allocator need not recycle the same address on every platform.
+        // Reproduce its observable registry state deterministically: a new live
+        // handle address has the expired Weak entry from a closed connection.
+        // SAFETY: This connection is live and remains owned by this test.
+        let key = unsafe { conn.handle() } as usize;
+        REGISTRY
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .insert(key, expired_registration.clone());
+        let plan = Prepared::empty("alpha OR beta".into());
+        assert!(prepare_layout(&conn, &plan).unwrap());
+        let partials = plan
+            .phrase_groups()
+            .iter()
+            .map(|indices| prepare_phrases(&conn, &plan, indices).unwrap())
+            .collect();
+        plan.complete_preparation(partials).unwrap();
+        let guard = register_prepared(&conn, plan.clone()).unwrap();
+        let fresh_registration = Arc::downgrade(&guard.registration);
+        assert!(!Weak::ptr_eq(&fresh_registration, &expired_registration));
+        let (private, native): (f64, f64) = conn
+            .query_row(
+                "SELECT audiolib_bm25(audio_search),bm25(audio_search)
+                 FROM audio_search WHERE audio_search MATCH ?1 LIMIT 1",
+                [plan.query()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_native_score(private, native, "registration after handle reuse");
+        drop(guard);
+        conn.close().unwrap();
+        assert!(
+            fresh_registration.upgrade().is_none(),
+            "the replacement connection also destroys both FFI payloads"
+        );
     }
 
     #[test]
@@ -1815,13 +1977,17 @@ mod tests {
             ).unwrap();
                 statement
                     .query_map([rank], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?.to_bits()))
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
                     })
                     .unwrap()
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .unwrap()
             };
-        assert_eq!(ranks("bm25()"), ranks("audiolib_bm25()"));
+        assert_native_ranking(
+            &ranks("audiolib_bm25()"),
+            &ranks("bm25()"),
+            "alpha OR delta",
+        );
     }
 
     #[test]

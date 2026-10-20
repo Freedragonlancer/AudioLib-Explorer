@@ -15,6 +15,7 @@ mod search_facets;
 mod search_rank_parallel;
 mod search_text;
 mod space;
+mod sqlite_mmap;
 
 #[cfg(feature = "scanner")]
 use audiolib_core::AudioMetadata;
@@ -40,11 +41,11 @@ pub const MIN_SNAPSHOT_SCHEMA: i64 = schema::MIN_SNAPSHOT_SCHEMA_VERSION;
 pub const MAX_SNAPSHOT_SCHEMA: i64 = schema::SCHEMA_VERSION;
 const _: () = assert!(MIN_SNAPSHOT_SCHEMA <= MAX_SNAPSHOT_SCHEMA);
 
-/// Requested SQLite virtual file-mapping limit for large x64 libraries, matching
-/// the bundled build's configured maximum. Mappings are demand-paged; this does
-/// not reserve the same amount of resident memory per connection. The VFS may
-/// use a lower effective limit or ordinary reads when mapping is unavailable.
-pub const SQLITE_READER_MMAP_BYTES: i64 = 68_719_476_736;
+pub use search_rank_parallel::{
+    ParallelRankingDiagnostics, SQLITE_AUXILIARY_READER_CACHE_KB, auxiliary_search_reader_count,
+    parallel_ranking_diagnostics,
+};
+pub use sqlite_mmap::{SQLITE_READER_MMAP_BYTES, sqlite_reader_mmap_bytes};
 
 /// Maximum auxiliary readers used by one exact ranking job. The provider admits
 /// one such job at a time; the original reader forms the eighth partition.
@@ -335,6 +336,15 @@ impl SqliteProvider {
     /// Open a Rust library database and apply transactional legacy-compatible migrations.
     /// Call import_legacy for the original Python database to preserve that source unchanged.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_progress(path, |_| {})
+    }
+
+    /// Open a writable library, synchronously reporting migration phases and rows.
+    /// Tokenization counts are uncommitted work; errors roll back the rebuild.
+    pub fn open_with_progress(
+        path: &Path,
+        mut progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             return Err(Error::Validation(
                 "Provider requires a persistent database path".into(),
@@ -365,13 +375,17 @@ impl SqliteProvider {
             PRAGMA temp_store=MEMORY;",
         )
         .map_err(db_error)?;
-        conn.pragma_update(None, "mmap_size", SQLITE_READER_MMAP_BYTES)
-            .map_err(db_error)?;
+        conn.pragma_update(None, "mmap_size", 0).map_err(db_error)?;
         let tokenizer = load_tokenizer();
         schema::register_tokenizer(&conn, tokenizer.clone())?;
-        schema::migrate(&mut conn)?;
+        progress(SnapshotUpgradeProgress::Preparing);
+        schema::migrate_with_progress(&mut conn, &mut |event| {
+            progress(event);
+            Ok(())
+        })?;
         // Batched and resumable: an interrupted run continues from `source_tags_progress`.
         // On failure (e.g. Busy) the library still opens and tag filters use the JSON path.
+        progress(SnapshotUpgradeProgress::SourceTags);
         let derived =
             schema::backfill_source_tags(&mut conn).is_ok() && schema::source_tags_ready(&conn)?;
         Ok(Self {
@@ -540,6 +554,15 @@ impl SqliteProvider {
 
     /// Open a known Rust library; original Python or arbitrary SQLite files must be imported.
     pub fn open_existing(path: &Path) -> Result<Self> {
+        Self::open_existing_with_progress(path, |_| {})
+    }
+
+    /// Validate an existing Rust library before opening and reporting its upgrade.
+    /// Missing or unrelated databases are never initialized by this entry point.
+    pub fn open_existing_with_progress(
+        path: &Path,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         if !path.is_file() {
             return Err(Error::NotFound(path.display().to_string()));
         }
@@ -556,7 +579,7 @@ impl SqliteProvider {
             )));
         }
         drop(probe);
-        Self::open(path)
+        Self::open_with_progress(path, progress)
     }
 
     /// Open a schema-current library without writing its source file. Older derived
@@ -738,7 +761,7 @@ impl SqliteProvider {
             "PRAGMA query_only=ON; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;",
         )
         .map_err(db_error)?;
-        conn.pragma_update(None, "mmap_size", SQLITE_READER_MMAP_BYTES)
+        conn.pragma_update(None, "mmap_size", sqlite_reader_mmap_bytes(&self.path))
             .map_err(db_error)?;
         schema::register_casefold(&conn)?;
         Ok(ReadLease {

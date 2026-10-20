@@ -14,5 +14,9 @@ CPAL_ASIO_DIR = { value = "tools/.build-tools/asio-2.3.4/ASIOSDK", relative = tr
 # Large x64 libraries can place FTS5/covering indexes past SQLite's default 2 GiB
 # mapping ceiling. This is a virtual, demand-paged limit; the VFS may fall back
 # to ordinary reads without allocating this amount of resident memory.
+# Both flags are portable SQLite options, including on macOS aarch64. The mmap
+# flag raises only the compile-time ceiling: writers use zero; readers enable it
+# only on verified Windows fixed volumes. macOS/unknown/network volumes use zero.
+# Set AUDIOLIB_DISABLE_MMAP before startup to disable every reader mapping.
 LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_MMAP_SIZE=68719476736LL"
 

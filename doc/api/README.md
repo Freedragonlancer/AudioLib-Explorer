@@ -264,6 +264,8 @@ audiolib.example.com:8443 {
 
 ## 5. 分页
 
+- 搜索输入按客户端快照上的 `SearchRequest` 校验：查询最多 500 个字符；独立的非 Han 字母词至少需要两个可搜索 Unicode grapheme（组合重音不另计）。这是已确认的产品行为。GUI 输入一个字母时取消旧请求、保留当前结果与目录并显示“字母搜索请至少输入 2 个字符”，不发送新搜索。直接调用 core/db 或 CLI 则返回 `Validation`，不会当作零命中或内部数据库错误。多词中的单字母代码（例如 `P-51`）、单个 Han 字和纯数字沿用原规则。
+- 两个字母以上支持词内连续片段：`expl`、`plos`、`sion` 匹配 `explosion`，多个词之间为 AND；用户文本中的标点、`OR` 等不作为 FTS5 运算符。当前服务端 **尚未实现**下表的 `POST /search` 与 `/search/folders`，正常服务器模式在本地快照查询，因此不存在当前 HTTP 搜索端点的单字母 400/500 响应；若未来开放端点，按 §2.1 的现有映射应为 HTTP 400 `VALIDATION`。
 - v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。理由：与本地实现完全一致，remote 改动最小。
 - 游标分页（服务端提议）列为待定：如果服务端需要快照一致性，建议游标为不透明字符串 `next_cursor`，内部编码排序键 + 最后一个 id；`SearchRequest` 再加可选 `cursor` 字段，有游标时忽略 `offset`。
 - 历史类列表（扫描历史、播放历史）同样用 `limit` + `offset`。
@@ -358,6 +360,14 @@ audiolib.example.com:8443 {
 - 打开失败不会退出进程：错误写入日志，按 5 秒起、每次翻倍、最长 300 秒的间隔重试；之后一旦成功即转为 `ok`（例如用户在弹窗里授权、外置卷挂载后）。`ok` 之后不会再回到 `starting`/`error`。
 - `/health` 和 503 `UNAVAILABLE` 的 `message` 都只给固定文字，不含路径或密钥；具体原因只写入服务端日志。
 - 客户端：`/health` 为 `starting`/`error` 或收到 503 `UNAVAILABLE` 时，按“服务器暂不可用”处理并稍后重试，不要当成空库或 token 错误。503 `UNAVAILABLE` 只表示库未就绪；库根离线是另一个错误码 `ROOT_OFFLINE`（§2.1、§6.4），此时服务器和库都可用。
+
+#### 派生搜索索引升级与维护窗口
+
+schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升为 3 时会重新计算全部派生搜索文本并重建 FTS5，`search_indexes` 修订 1 另补覆盖索引。不会重扫源 WAV，也不改用户 Metadata、标注和扩展字段。大库首次启动需要维护窗口：先通过受支持的备份流程保存库，再启动新版；按数据与可用磁盘空间预留时间，不以搜索的 **P95 latency <500ms for 1M+ records** 目标推断升级时长。
+
+服务端以默认 `info` 日志输出 `preparing`、`tokenizing`（`completed`/`total`，每 5000 行及最终值）、`building_fts`、`source_tags` 和经过秒数；FTS5 构建阶段没有可信百分比。HTTP 在后台开库期间仍可访问 `/health`，业务端点继续返回上述 503 和 `Retry-After: 5`，开库完成后才转为就绪。日志进度不是已提交数据量。
+
+派生文本、FTS5 和相关版本标记在一个事务中提交；取消/失败会回滚，重启从头重建，不支持分批提交或跨进程断点续做。`source_tags` 补齐是独立的已有分批可恢复阶段。升级的独占 administration lease 排除参与协议的跨实例写入；启动业务 API 不可用，不应承诺升级期间持续服务。只读客户端快照只在 owned 副本上升级，原快照保留。可用 `cargo run --release --locked -p audiolib-db --bin upgrade-benchmark -- --source <snapshot.db>` 对源库只读备份到临时副本后测量，Windows 副本结果与 macOS 实测应分别记录，见 [Rust 验证记录](../Rust_Validation.md)。
 
 ### 6.3 Metadata 写入（已实现）
 

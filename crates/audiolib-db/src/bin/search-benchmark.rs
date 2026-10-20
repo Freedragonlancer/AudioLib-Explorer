@@ -1,13 +1,152 @@
 // crates/audiolib-db/src/bin/search-benchmark.rs
 //! Standalone 1M+ record benchmark through the real Rust DataProvider search pipeline.
-use audiolib_core::{DataProvider, MaintenanceAction, SearchFilters, SearchRequest, SortOrder};
-use audiolib_db::{SQLITE_AUXILIARY_SEARCH_READERS, SQLITE_READER_MMAP_BYTES, SqliteProvider};
+use audiolib_core::{
+    DataProvider, MaintenanceAction, MetadataPatch, SearchFilters, SearchRequest, SortOrder,
+};
+use audiolib_db::{
+    ParallelRankingDiagnostics, SQLITE_AUXILIARY_READER_CACHE_KB, SQLITE_AUXILIARY_SEARCH_READERS,
+    SQLITE_READER_MMAP_BYTES, SqliteProvider, auxiliary_search_reader_count,
+    parallel_ranking_diagnostics, sqlite_reader_mmap_bytes,
+};
 use rusqlite::{Connection, params};
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    time::Instant,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
+
+fn diagnostics_delta(before: ParallelRankingDiagnostics) -> serde_json::Value {
+    let after = parallel_ranking_diagnostics();
+    let reasons = after
+        .reasons
+        .iter()
+        .enumerate()
+        .map(|(index, reason)| {
+            (
+                (*reason).to_string(),
+                serde_json::json!(after.fallbacks[index].saturating_sub(before.fallbacks[index])),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::json!({
+        "attempts":after.attempts.saturating_sub(before.attempts),
+        "fallbacks":reasons,
+        "scope":"process-wide counter delta during the measured search interval"
+    })
+}
+
+struct ConcurrentWriter {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<Result<u64, String>>>,
+}
+
+impl ConcurrentWriter {
+    fn start(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let provider = SqliteProvider::open_existing(path)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let (ready, waiting) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let mut commits = 0_u64;
+            while !stopping.load(Ordering::Acquire) {
+                provider
+                    .update_metadata(
+                        1,
+                        &MetadataPatch {
+                            favorite: Some(commits.is_multiple_of(2)),
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                commits += 1;
+                if commits == 1 {
+                    let _ = ready.send(());
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Ok(commits)
+        });
+        let writer = Self {
+            stop,
+            worker: Some(worker),
+        };
+        if waiting.recv_timeout(Duration::from_secs(30)).is_err() {
+            writer.finish()?;
+            return Err("Concurrent writer did not produce its first commit".into());
+        }
+        Ok(writer)
+    }
+
+    fn finish(mut self) -> Result<u64, Box<dyn std::error::Error>> {
+        self.stop.store(true, Ordering::Release);
+        self.worker
+            .take()
+            .expect("active benchmark writer")
+            .join()
+            .map_err(|_| "Concurrent benchmark writer panicked")?
+            .map_err(Into::into)
+    }
+}
+
+impl Drop for ConcurrentWriter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn concurrent_writer_report(
+    path: &Path,
+    cases: &[SearchRequest],
+    queries: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let measure = || -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+        let mut samples = Vec::with_capacity(queries);
+        for index in 0..queries {
+            // A fresh provider avoids hiding writer contention behind cached ranks.
+            // Provider open time is outside the DataProvider search timer.
+            let provider = SqliteProvider::open_read_only(path)?;
+            samples.push(
+                provider
+                    .search(&cases[index % cases.len()])?
+                    .execution_time_ms,
+            );
+        }
+        Ok(samples)
+    };
+    let baseline_before = parallel_ranking_diagnostics();
+    let baseline = measure()?;
+    let baseline_diagnostics = diagnostics_delta(baseline_before);
+    let writer = ConcurrentWriter::start(path)?;
+    let concurrent_before = parallel_ranking_diagnostics();
+    let concurrent = measure()?;
+    let concurrent_diagnostics = diagnostics_delta(concurrent_before);
+    let commits = writer.finish()?;
+    let p95 = |values: &[f64]| {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted[((sorted.len() - 1) as f64 * 0.95).ceil() as usize]
+    };
+    let baseline_p95 = p95(&baseline);
+    let concurrent_p95 = p95(&concurrent);
+    Ok(serde_json::json!({
+        "queries":queries,"writer_commits":commits,"writer_pause_ms":2,
+        "baseline_samples_ms":baseline,"samples_ms":concurrent,
+        "baseline_p95_ms":baseline_p95,"p95_ms":concurrent_p95,
+        "p95_ratio":(baseline_p95>0.0).then_some(concurrent_p95/baseline_p95),
+        "baseline_parallel_ranking":baseline_diagnostics,
+        "parallel_ranking":concurrent_diagnostics,
+        "condition":"Owned synthetic fixture only. Fresh read-only provider per search; baseline precedes concurrent Metadata favorite toggles committed through DataProvider. OS pages are not flushed; provider opening and folder facets are excluded. This measures commit contention and snapshot-race fallback, not a complete scanning workload. Zero fallback counts are reported unchanged."
+    }))
+}
 
 fn request_file_cases(path: &Path) -> Result<Vec<SearchRequest>, Box<dyn std::error::Error>> {
     const MAX_BYTES: u64 = 1024 * 1024;
@@ -92,7 +231,7 @@ fn first_only_report(
         &source,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    probe.pragma_update(None, "mmap_size", SQLITE_READER_MMAP_BYTES)?;
+    probe.pragma_update(None, "mmap_size", sqlite_reader_mmap_bytes(&source))?;
     let (records, missing): (i64, i64) = probe.query_row(
         "SELECT COUNT(*),COALESCE(SUM(CASE WHEN missing=1 THEN 1 ELSE 0 END),0)
          FROM audio_files INDEXED BY idx_audio_search_facets",
@@ -135,10 +274,13 @@ fn first_only_report(
         "reader_pool_size":4,"sqlite_cache_kb_per_reader":65536
     });
     report["parallel_ranking_auxiliary_readers_max"] = SQLITE_AUXILIARY_SEARCH_READERS.into();
+    report["parallel_ranking_auxiliary_readers_active"] = auxiliary_search_reader_count().into();
+    report["sqlite_cache_kb_per_auxiliary_reader"] = SQLITE_AUXILIARY_READER_CACHE_KB.into();
     report["sqlite_default_memstatus_disabled"] = sqlite_build.0.into();
     report["sqlite_threadsafe"] = sqlite_build.1.into();
     report["mmap_bytes"] = mmap_limit.into();
-    report["mmap_requested_bytes"] = SQLITE_READER_MMAP_BYTES.into();
+    report["mmap_requested_bytes"] = sqlite_reader_mmap_bytes(&source).into();
+    report["mmap_fixed_drive_max_bytes"] = SQLITE_READER_MMAP_BYTES.into();
     report["mmap_reporting"] = "Configured upper limit read back from a same-file, same-build read-only probe after timing; not actual mapped length, resident memory, or proof that every timed connection mapped each page.".into();
     Ok(report)
 }
@@ -163,12 +305,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut query_filter = None;
     let mut request_file = None;
     let mut first_only = false;
+    let mut concurrent_writer = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--folder-facets" => folder_facets = true,
             "--first-provider" => first_provider = true,
             "--first-only" => first_only = true,
+            "--concurrent-writer" => concurrent_writer = true,
             "--request-file" => {
                 request_file = Some(PathBuf::from(
                     arguments.next().ok_or("--request-file requires a path")?,
@@ -217,7 +361,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "search-benchmark [--records 1000000] [--queries 100] [--folder-facets] [--first-provider | --first-only] [--request-file REQUESTS_JSON] [--edge-cases] [--fragment-cases] [--missing-records N] [--case-index N | --query TEXT] [--db NEW_DATABASE | --existing-db MIGRATED_DATABASE]"
+                    "search-benchmark [--records 1000000] [--queries 100] [--folder-facets] [--first-provider | --first-only] [--concurrent-writer] [--request-file REQUESTS_JSON] [--edge-cases] [--fragment-cases] [--missing-records N] [--case-index N | --query TEXT] [--db NEW_DATABASE | --existing-db MIGRATED_DATABASE]"
                 );
                 println!(
                     "--first-provider measures one fresh read-only provider per case: first search, then first folder facets; provider opening is reported separately and the OS page cache is not cleared."
@@ -231,10 +375,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "--first-only requires a current --existing-db: one first search then facets per selected case, without pre-query stats, initial/warm passes or --queries repetitions. Select one request and launch a new process for each independent first-query repetition."
                 );
+                println!(
+                    "--concurrent-writer adds fresh-provider baseline and concurrent Metadata commit samples with parallel fallback counters. It requires a newly generated synthetic fixture and cannot modify --existing-db or combine with --first-only."
+                );
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument {argument}").into()),
         }
+    }
+    if concurrent_writer && (existing_database.is_some() || first_only) {
+        return Err("--concurrent-writer requires a new synthetic fixture and cannot combine with --existing-db or --first-only".into());
     }
     let mut cases = vec![
         SearchRequest {
@@ -669,7 +819,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    mmap_probe.pragma_update(None, "mmap_size", SQLITE_READER_MMAP_BYTES)?;
+    let writer_report = concurrent_writer
+        .then(|| concurrent_writer_report(&path, &cases, queries))
+        .transpose()?;
+    mmap_probe.pragma_update(None, "mmap_size", sqlite_reader_mmap_bytes(&path))?;
     let mmap_limit: i64 = mmap_probe.pragma_query_value(None, "mmap_size", |row| row.get(0))?;
     let mut report = serde_json::json!({"records":records,"queries":queries,"cache_enabled":true,"cache_kind":"bounded ranked IDs; Metadata is read from the current snapshot","ranking_cache_hits":ranking_cache_hits,"edge_cases":edge_cases,"missing_records":missing_records,"folder_facets":folder_facets,
         "database":path,"database_bytes":std::fs::metadata(&path)?.len(),"existing_database":existing,
@@ -693,9 +846,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "first_provider_facet_meets_target":first_provider.then(||percentile(&first_facet_samples,0.95)<500.0),
         "first_provider_sequential_meets_target":first_provider.then(||percentile(&first_total_samples,0.95)<500.0)});
     report["parallel_ranking_auxiliary_readers_max"] = SQLITE_AUXILIARY_SEARCH_READERS.into();
+    report["parallel_ranking_auxiliary_readers_active"] = auxiliary_search_reader_count().into();
+    report["sqlite_cache_kb_per_auxiliary_reader"] = SQLITE_AUXILIARY_READER_CACHE_KB.into();
+    report["concurrent_writer"] = concurrent_writer.into();
+    report["concurrent_writer_report"] = serde_json::to_value(writer_report)?;
     report["sqlite_default_memstatus_disabled"] = sqlite_build.0.into();
     report["sqlite_threadsafe"] = sqlite_build.1.into();
-    report["mmap_requested_bytes"] = SQLITE_READER_MMAP_BYTES.into();
+    report["mmap_requested_bytes"] = sqlite_reader_mmap_bytes(&path).into();
+    report["mmap_fixed_drive_max_bytes"] = SQLITE_READER_MMAP_BYTES.into();
     report["mmap_reporting"] = "Configured upper limit read back from a same-file, same-build read-only probe after timing; not actual mapped length, resident memory, or proof that every timed connection mapped each page.".into();
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

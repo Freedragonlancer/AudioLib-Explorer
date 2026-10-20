@@ -854,12 +854,11 @@ fn root_relocation_keeps_windows_case_aliases_as_a_noop() {
     }
 }
 
-#[cfg(windows)]
 #[test]
-fn root_relocation_resolves_existing_windows_source_aliases() {
+fn root_relocation_resolves_existing_source_aliases() {
     let f = fixture();
-    // This alias reproduces the raw/canonical identity mismatch without relying
-    // on 8.3 short-name generation being enabled on the runner's volume.
+    // This alias reproduces the raw/canonical identity mismatch on every OS,
+    // including macOS temporary paths behind the /var -> /private/var symlink.
     let source = f.temp.path().join("audio").join("..").join("audio");
     assert!(source.is_dir());
     let canonical_source = source.canonicalize().unwrap();

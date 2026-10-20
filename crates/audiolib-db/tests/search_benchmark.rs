@@ -183,6 +183,77 @@ fn insufficient_queries_fail_before_creating_a_synthetic_database() {
 }
 
 #[test]
+fn concurrent_writer_reports_baseline_commits_and_fallback_reasons() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("concurrent.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .args([
+            "--records",
+            "31",
+            "--queries",
+            "2",
+            "--query",
+            "metal",
+            "--concurrent-writer",
+            "--db",
+        ])
+        .arg(&database)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["concurrent_writer"], true);
+    assert_eq!(report["sqlite_cache_kb_per_auxiliary_reader"], 8192);
+    assert!(
+        report["parallel_ranking_auxiliary_readers_active"]
+            .as_u64()
+            .unwrap()
+            <= 7
+    );
+    let scenario = &report["concurrent_writer_report"];
+    assert_eq!(scenario["queries"], 2);
+    assert!(scenario["writer_commits"].as_u64().unwrap() >= 1);
+    for key in ["baseline_samples_ms", "samples_ms"] {
+        let values = scenario[key].as_array().unwrap();
+        assert_eq!(values.len(), 2);
+        assert!(
+            values
+                .iter()
+                .all(|value| value.as_f64().is_some_and(|v| v.is_finite() && v >= 0.0))
+        );
+    }
+    // Tiny fixtures do not meet the fanout threshold. Preserve zero counts rather
+    // than misreporting this runner smoke test as evidence of serial fallback.
+    for key in ["baseline_parallel_ranking", "parallel_ranking"] {
+        assert_eq!(scenario[key]["attempts"], 0);
+        let reasons = scenario[key]["fallbacks"].as_object().unwrap();
+        assert_eq!(reasons.len(), 8);
+        assert!(reasons.values().all(|value| value == 0));
+        assert!(reasons.contains_key("reader_busy"));
+        assert!(reasons.contains_key("snapshot_changed"));
+    }
+}
+
+#[test]
+fn concurrent_writer_refuses_existing_libraries_before_opening_them() {
+    let (_directory, database) = fixture();
+    let original = fs::read(&database).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .arg("--existing-db")
+        .arg(&database)
+        .arg("--concurrent-writer")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a new synthetic fixture"));
+    assert_eq!(fs::read(&database).unwrap(), original);
+}
+
+#[test]
 fn first_only_custom_requests_keep_real_scope_results_and_source_bytes() {
     let (directory, database) = fixture();
     let conn = Connection::open(&database).unwrap();
