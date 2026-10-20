@@ -185,6 +185,18 @@ pub struct SnapshotMeta {
     pub schema_version: Option<i64>,
 }
 
+/// Snapshot transfer counters, emitted synchronously on the calling worker thread.
+/// Compressed snapshots are decoded while downloading, so these events interleave;
+/// callers should retain both counters instead of treating them as sequential stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotProgress {
+    /// Response-body bytes read from the network, against `Content-Length` when known.
+    Downloading { received: u64, total: Option<u64> },
+    /// Database bytes written by the zstd decoder, against `X-Uncompressed-Length`.
+    /// Identity responses emit only [`Self::Downloading`].
+    Decompressing { written: u64, total: Option<u64> },
+}
+
 /// Normalize a configured server URL (`http(s)://host[:port][/prefix]`, optionally with a
 /// pasted `/api/v1`) to its API base (`.../api/v1`, no trailing '/'). See
 /// [`audiolib_core::server_url`].
@@ -827,7 +839,8 @@ impl RemoteClient {
     }
 
     /// Stream `GET /library/snapshot` into `destination` through a sibling `.part`
-    /// file, then atomically rename. `progress(received, total)` runs per chunk and
+    /// file, then atomically rename. `progress` reports independent network and zstd
+    /// output counters per chunk; their totals remain unknown when headers omit them.
     /// `cancel` closes the request socket during headers and body reads; a failure
     /// preserves an existing target and removes the partial file before returning.
     /// A `409 BUSY` (server snapshot slots exhausted) is returned as [`RemoteError::Busy`]
@@ -835,7 +848,7 @@ impl RemoteClient {
     pub fn download_snapshot(
         &self,
         destination: &Path,
-        progress: &mut dyn FnMut(u64, Option<u64>),
+        progress: &mut dyn FnMut(SnapshotProgress),
         cancel: &AtomicBool,
     ) -> Result<SnapshotMeta> {
         cancellable_io(cancel, || {
@@ -846,7 +859,7 @@ impl RemoteClient {
     fn download_snapshot_io(
         &self,
         destination: &Path,
-        progress: &mut dyn FnMut(u64, Option<u64>),
+        progress: &mut dyn FnMut(SnapshotProgress),
         cancel: &AtomicBool,
     ) -> Result<SnapshotMeta> {
         let url = format!("{}/library/snapshot", self.api);
@@ -868,7 +881,7 @@ impl RemoteClient {
                 .map(str::to_owned)
         };
         // With `Content-Encoding: zstd`, Content-Length is the compressed size and
-        // X-Uncompressed-Length the database size (progress, preallocation, check).
+        // X-Uncompressed-Length the database size (decompression, preallocation, check).
         let compressed = match header("content-encoding").as_deref() {
             None => false,
             Some(value) if value.eq_ignore_ascii_case("identity") => false,
@@ -917,7 +930,13 @@ impl RemoteClient {
             let mut received = 0u64;
             let mut throughput = crate::bandwidth::Throughput::new();
             let mut counted = 0;
-            progress(0, total);
+            progress(SnapshotProgress::Downloading {
+                received: 0,
+                total: wire_length,
+            });
+            if compressed {
+                progress(SnapshotProgress::Decompressing { written: 0, total });
+            }
             loop {
                 if cancel.load(Ordering::Acquire) {
                     return Err(RemoteError::Cancelled);
@@ -934,12 +953,23 @@ impl RemoteClient {
                 let wire_now = wire_count.load(Ordering::Acquire);
                 throughput.add(wire_now - counted, crate::bandwidth::bandwidth());
                 counted = wire_now;
+                // Report the wire counter even on EOF: the decoder may consume its
+                // final frame bytes without producing another database chunk.
+                progress(SnapshotProgress::Downloading {
+                    received: wire_now,
+                    total: wire_length,
+                });
                 if read == 0 {
                     break;
                 }
                 file.write_all(&buffer[..read])?;
                 received += read as u64;
-                progress(received, total);
+                if compressed {
+                    progress(SnapshotProgress::Decompressing {
+                        written: received,
+                        total,
+                    });
+                }
             }
             throughput.pause(crate::bandwidth::bandwidth());
             let wire_received = wire_count.load(Ordering::Acquire);
@@ -1250,11 +1280,8 @@ mod tests {
                 std::time::Instant::now()
             });
             let mut observed = Vec::new();
-            let result = client.download_snapshot(
-                &target,
-                &mut |received, total| observed.push((received, total)),
-                &cancel,
-            );
+            let result =
+                client.download_snapshot(&target, &mut |progress| observed.push(progress), &cancel);
             let returned = std::time::Instant::now();
             let cancelled_at = cancelled.join().unwrap();
             assert!(matches!(result, Err(RemoteError::Cancelled)), "{result:?}");
@@ -1269,11 +1296,9 @@ mod tests {
                 1,
                 "partial removed before return"
             );
-            assert!(
-                observed
-                    .iter()
-                    .all(|(received, total)| *received < total.unwrap_or(u64::MAX))
-            );
+            assert!(observed.iter().all(|progress| matches!(progress,
+                        SnapshotProgress::Downloading { received, total }
+                            if *received < total.unwrap_or(u64::MAX))));
             if !stalled_body {
                 assert!(
                     observed.is_empty(),
@@ -1336,9 +1361,15 @@ mod tests {
         let meta = client
             .download_snapshot(
                 &target,
-                &mut |_, total| {
+                &mut |progress| {
                     calls += 1;
-                    assert_eq!(total, Some(300_000));
+                    assert!(matches!(
+                        progress,
+                        SnapshotProgress::Downloading {
+                            total: Some(300_000),
+                            ..
+                        }
+                    ));
                 },
                 &AtomicBool::new(false),
             )
@@ -1350,7 +1381,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&target).unwrap().len(), 300_000);
         let cancelled = directory.path().join("cancelled.db");
         let error = client
-            .download_snapshot(&cancelled, &mut |_, _| {}, &AtomicBool::new(true))
+            .download_snapshot(&cancelled, &mut |_| {}, &AtomicBool::new(true))
             .unwrap_err();
         assert!(matches!(error, RemoteError::Cancelled));
         assert!(!cancelled.exists());
@@ -1401,16 +1432,42 @@ mod tests {
         let meta = client
             .download_snapshot(
                 &target,
-                &mut |received, total| totals.push((received, total)),
+                &mut |progress| totals.push(progress),
                 &AtomicBool::new(false),
             )
             .unwrap();
         assert_eq!(meta.bytes, 700_000);
         assert_eq!(meta.revision, Some(9));
         assert_eq!(std::fs::read(&target).unwrap(), database());
-        // Progress counts database bytes against X-Uncompressed-Length.
-        assert!(totals.iter().all(|&(_, total)| total == Some(700_000)));
-        assert_eq!(totals.last().unwrap().0, 700_000);
+        let packed_bytes = zstd::encode_all(database().as_slice(), 3).unwrap().len() as u64;
+        let downloaded: Vec<_> = totals
+            .iter()
+            .filter_map(|&progress| match progress {
+                SnapshotProgress::Downloading { received, total } => Some((received, total)),
+                _ => None,
+            })
+            .collect();
+        let decompressed: Vec<_> = totals
+            .iter()
+            .filter_map(|&progress| match progress {
+                SnapshotProgress::Decompressing { written, total } => Some((written, total)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            downloaded
+                .iter()
+                .all(|&(_, total)| total == Some(packed_bytes))
+        );
+        assert_eq!(downloaded.first(), Some(&(0, Some(packed_bytes))));
+        assert_eq!(downloaded.last(), Some(&(packed_bytes, Some(packed_bytes))));
+        assert!(
+            decompressed
+                .iter()
+                .all(|&(_, total)| total == Some(700_000))
+        );
+        assert_eq!(decompressed.first(), Some(&(0, Some(700_000))));
+        assert_eq!(decompressed.last(), Some(&(700_000, Some(700_000))));
 
         // A wrong uncompressed length, or a cut body, fails without a target.
         for (claimed, cut, label) in [
@@ -1421,7 +1478,7 @@ mod tests {
             let client = RemoteClient::new(&server.url, "").unwrap();
             let target = directory.path().join(format!("{label}.db"));
             let error = client
-                .download_snapshot(&target, &mut |_, _| {}, &AtomicBool::new(false))
+                .download_snapshot(&target, &mut |_| {}, &AtomicBool::new(false))
                 .unwrap_err();
             assert!(
                 matches!(
@@ -1432,6 +1489,106 @@ mod tests {
             );
             assert!(!target.exists(), "{label}");
         }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn snapshot_transfer_totals_are_independent_and_unknown_lengths_stay_unknown() {
+        // A high compression ratio makes it impossible to confuse network bytes
+        // with the database byte count while still letting decompression stream.
+        let plain = vec![42_u8; 2 * 1024 * 1024];
+        let packed = zstd::encode_all(plain.as_slice(), 3).unwrap();
+        assert!(packed.len() < plain.len() / 100);
+        for (compressed, know_wire, know_output) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+            (true, false, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("snapshot.db");
+            let body = if compressed { &packed } else { &plain }.clone();
+            let wire_bytes = body.len() as u64;
+            let plain_bytes = plain.len() as u64;
+            let server = TestServer::start(move |_| {
+                let mut response = TestResponse::bytes(200, body.clone());
+                if compressed {
+                    response = response.with_header("Content-Encoding", "zstd");
+                    if know_output {
+                        response =
+                            response.with_header("X-Uncompressed-Length", &plain_bytes.to_string());
+                    }
+                }
+                if !know_wire {
+                    response = response.without_content_length();
+                }
+                response
+            });
+            let client = RemoteClient::new(&server.url, "").unwrap();
+            let mut downloaded = Vec::new();
+            let mut decompressed = Vec::new();
+            let meta = client
+                .download_snapshot(
+                    &target,
+                    &mut |progress| match progress {
+                        SnapshotProgress::Downloading { received, total } => {
+                            assert_eq!(total, know_wire.then_some(wire_bytes));
+                            downloaded.push(received);
+                        }
+                        SnapshotProgress::Decompressing { written, total } => {
+                            assert!(compressed);
+                            assert_eq!(total, know_output.then_some(plain_bytes));
+                            decompressed.push(written);
+                        }
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(meta.bytes, plain_bytes);
+            assert_eq!(std::fs::read(target).unwrap(), plain);
+            assert_eq!(downloaded.first(), Some(&0));
+            assert_eq!(downloaded.last(), Some(&wire_bytes));
+            assert!(downloaded.windows(2).all(|pair| pair[0] <= pair[1]));
+            if compressed {
+                assert_eq!(decompressed.first(), Some(&0));
+                assert_eq!(decompressed.last(), Some(&plain_bytes));
+                assert!(decompressed.windows(2).all(|pair| pair[0] <= pair[1]));
+            } else {
+                assert!(decompressed.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_during_decompression_preserves_existing_snapshot_and_cleans_partial() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("snapshot.db");
+        std::fs::write(&target, b"existing snapshot").unwrap();
+        let plain = vec![42_u8; 2 * 1024 * 1024];
+        let packed = zstd::encode_all(plain.as_slice(), 3).unwrap();
+        let server = TestServer::start(move |_| {
+            TestResponse::bytes(200, packed.clone())
+                .with_header("Content-Encoding", "zstd")
+                .with_header("X-Uncompressed-Length", &plain.len().to_string())
+        });
+        let client = RemoteClient::new(&server.url, "").unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut written = 0;
+        let result = client.download_snapshot(
+            &target,
+            &mut |progress| {
+                if let SnapshotProgress::Decompressing { written: bytes, .. } = progress
+                    && bytes > 0
+                {
+                    written = bytes;
+                    cancel.store(true, Ordering::Release);
+                }
+            },
+            &cancel,
+        );
+        assert!(matches!(result, Err(RemoteError::Cancelled)), "{result:?}");
+        assert!(written > 0);
+        assert_eq!(std::fs::read(target).unwrap(), b"existing snapshot");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 

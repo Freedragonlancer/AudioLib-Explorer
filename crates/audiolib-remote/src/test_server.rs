@@ -33,6 +33,8 @@ pub(crate) struct TestResponse {
     pub cut_after: Option<usize>,
     /// Wait this long before sending anything (a NAS disk spinning up).
     pub delay: Option<Duration>,
+    /// Connection-close framing without a known transfer size.
+    pub omit_content_length: bool,
 }
 
 impl TestResponse {
@@ -45,6 +47,7 @@ impl TestResponse {
             chunk: None,
             cut_after: None,
             delay: None,
+            omit_content_length: false,
         }
     }
     pub fn bytes(status: u16, body: Vec<u8>) -> Self {
@@ -56,6 +59,7 @@ impl TestResponse {
             chunk: None,
             cut_after: None,
             delay: None,
+            omit_content_length: false,
         }
     }
     pub fn slow(mut self, size: usize, delay: Duration) -> Self {
@@ -72,6 +76,11 @@ impl TestResponse {
     }
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn without_content_length(mut self) -> Self {
+        self.omit_content_length = true;
         self
     }
 }
@@ -137,11 +146,14 @@ impl TestServer {
                         .iter()
                         .map(|(name, value)| format!("{name}: {value}\r\n"))
                         .collect();
+                    let content_length = if response.omit_content_length {
+                        String::new()
+                    } else {
+                        format!("Content-Length: {}\r\n", response.body.len())
+                    };
                     let head = format!(
-                        "HTTP/1.1 {} Test\r\nContent-Type: {}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
-                        response.status,
-                        response.content_type,
-                        response.body.len()
+                        "HTTP/1.1 {} Test\r\nContent-Type: {}\r\n{content_length}{extra}Connection: close\r\n\r\n",
+                        response.status, response.content_type
                     );
                     let _ = stream.write_all(head.as_bytes());
                     if request.method != "HEAD" {
