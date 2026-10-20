@@ -1388,6 +1388,27 @@ impl SqliteProvider {
         )?;
         let where_sql = conditions.join(" AND ");
         let has_query = !request.query.trim().is_empty();
+        if let Some(Value::Text(query)) = values.first()
+            && let Some(page) = search_sorted::filtered_filename_page(
+                &tx,
+                &self.tokenizer,
+                request,
+                query,
+                start,
+                || {
+                    if cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Acquire))
+                    {
+                        Err(Error::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )?
+        {
+            return Ok(page);
+        }
         let unfiltered_fts =
             has_query && values.len() == 1 && conditions.len() == 2 && request.folder_id.is_none();
         let not_present_probe = if unfiltered_fts

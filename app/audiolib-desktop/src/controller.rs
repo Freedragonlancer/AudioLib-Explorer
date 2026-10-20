@@ -6168,6 +6168,53 @@ mod tests {
     }
 
     #[test]
+    fn check_current_page_action_tracks_empty_pages_and_keeps_operation_guards() {
+        use std::{cell::RefCell, rc::Rc};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let observed = requests.clone();
+        ui.on_check_page_requested(move |checked| observed.borrow_mut().push(checked));
+        let rows = || {
+            vec![AudioRow {
+                id: "42".into(),
+                name: "Current page.wav".into(),
+                ..Default::default()
+            }]
+        };
+
+        ui.invoke_check_current_page();
+        assert!(requests.borrow().is_empty());
+        publish_audio_rows(&ui, rows());
+        assert!(ui.get_menu_has_page_rows());
+        ui.invoke_check_current_page();
+        assert_eq!(&*requests.borrow(), &[true]);
+
+        // Publishing a zero-hit page must update the actual model, while the
+        // native menu action safely does nothing instead of retaining old IDs.
+        publish_audio_rows(&ui, Vec::new());
+        assert!(!ui.get_menu_has_page_rows());
+        assert_eq!(ui.get_rows().row_count(), 0);
+        ui.invoke_check_current_page();
+        assert_eq!(&*requests.borrow(), &[true]);
+
+        publish_audio_rows(&ui, rows());
+        ui.set_library_busy(true);
+        ui.invoke_check_current_page();
+        ui.set_library_busy(false);
+        ui.set_closing(true);
+        ui.invoke_check_current_page();
+        ui.set_closing(false);
+        ui.set_settings_visible(true);
+        ui.invoke_check_current_page();
+        assert_eq!(&*requests.borrow(), &[true]);
+        ui.set_settings_visible(false);
+        ui.invoke_check_current_page();
+        assert_eq!(&*requests.borrow(), &[true, true]);
+    }
+
+    #[test]
     fn themed_controls_preserve_pointer_keyboard_and_accessible_actions() {
         use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
         use slint::platform::{Key, PointerEventButton, WindowEvent};

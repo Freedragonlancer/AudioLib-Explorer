@@ -852,6 +852,13 @@ export component AppWindow inherits Window {
     callback file-action-requested(string, int);
     callback folder-action-requested(string, int);
     callback selection-step-requested(int);
+    // Keep the native menu state stable when a search crosses an empty page.
+    // Slint's Windows menu rebuild temporarily disables native window redraw.
+    public function check-current-page() {
+        if root.menu-ready && root.menu-has-page-rows {
+            root.check-page-requested(true);
+        }
+    }
     public function open-library(kind: int) { root.open-source-manager(kind, 1); }
     // 扫描历史 / 最近播放: the open library's history (local, or the active snapshot's).
     public function open-history(kind: int) { root.open-source-manager(kind, 2); }
@@ -1062,7 +1069,7 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.chinese ? "保存 Metadata" : "Save Metadata"); enabled: root.menu-ready && root.has-selection && root.metadata-dirty; shortcut: @keys(Control + S); activated => { root.save-metadata-requested(); } }
             MenuItem { title: (root.chinese ? "批量标注选择记录…" : "Edit selected records…"); enabled: root.menu-ready && root.checked-count > 0; activated => { root.open-batch(); } }
             MenuSeparator { }
-            MenuItem { title: root.chinese ? "选择当前页" : "Check current page"; enabled: root.menu-ready && root.menu-has-page-rows; activated => { root.check-page-requested(true); } }
+            MenuItem { title: root.chinese ? "选择当前页" : "Check current page"; enabled: root.menu-ready; activated => { root.check-current-page(); } }
             MenuItem { title: root.chinese ? "清除全部选择" : "Clear selection"; enabled: root.menu-ready && root.checked-count > 0; activated => { root.check-page-requested(false); } }
             MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
             MenuSeparator { }
