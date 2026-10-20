@@ -1552,7 +1552,7 @@ impl SqliteProvider {
             .then(|| self.observe_search_revision())
             .transpose()?;
         let tx = conn.transaction().map_err(db_error)?;
-        let ranked_ids = if let Some(revision_before) = revision_before {
+        let (ranked_ids, pinned_revision) = if let Some(revision_before) = revision_before {
             // The complete ranking is query-only, even when its page was scoped
             // or filtered. Reuse it only when it belongs to this pinned snapshot.
             tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
@@ -1563,22 +1563,51 @@ impl SqliteProvider {
             let revision = self.observe_search_revision()?;
             if revision_before == revision {
                 let query = compile_query(&self.tokenizer, &request.query)?;
-                self.ranking_cache.lock().unwrap().get(revision, &query)
+                (
+                    self.ranking_cache.lock().unwrap().get(revision, &query),
+                    Some(revision),
+                )
             } else {
-                None
+                (None, None)
             }
         } else {
-            None
+            (None, None)
         };
         check_cancel()?;
+        // A concurrent first page may not have published its BM25 ranking yet.
+        // Collect query-only membership locally in this same pinned transaction;
+        // these unscored IDs must never enter the ranking cache.
+        let query_ids = match (values.first(), ranked_ids.as_ref()) {
+            (Some(Value::Text(query)), None) if has_query => {
+                search_candidates::query_ids(&tx, query, &check_cancel, || {
+                    let Some(revision) = pinned_revision else {
+                        return Ok(None);
+                    };
+                    match self.ranking_cache.try_lock() {
+                        Ok(cache) => Ok(cache.peek(revision, query)),
+                        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+                        Err(std::sync::TryLockError::Poisoned(_)) => {
+                            Err(Error::Database("Ranking cache lock was poisoned".into()))
+                        }
+                    }
+                })?
+            }
+            _ => None,
+        };
         // Project only filter IDs first. This lets existing partial/format
         // indexes cover common filters, before any folder lookup or FTS work.
         // Retained rankings stay in their original BM25 order; only temporary
         // intersection IDs may be reordered for narrow directory lookups.
-        let retained_ids = ranked_ids.as_deref().map(Vec::as_slice);
+        let retained_ids = ranked_ids
+            .as_deref()
+            .map(Vec::as_slice)
+            .or_else(|| query_ids.as_deref().map(Vec::as_slice));
         let use_filter_ids =
             !visibility_only && ((!has_query && !tagged_folder_scan) || retained_ids.is_some());
-        let candidate_ids = if use_filter_ids {
+        let candidate_ids = if retained_ids.is_some_and(<[i64]>::is_empty) {
+            // Completeness is already known, so no filter scan can add a match.
+            Some(Vec::new())
+        } else if use_filter_ids {
             let mut filter_request = request.clone();
             filter_request.query.clear();
             let filter_sql = search_sql(
@@ -1587,17 +1616,40 @@ impl SqliteProvider {
                 false,
                 self.derived_tags.load(Ordering::Acquire),
             )?;
-            search_candidates::filtered_ids(
-                &tx,
-                &format!(
-                    "SELECT af.id FROM {} WHERE {}",
-                    filter_sql.from,
-                    filter_sql.conditions.join(" AND ")
-                ),
-                &filter_sql.values,
-                retained_ids,
-                &check_cancel,
-            )?
+            let cold_basic_filter = query_ids.is_some()
+                && request.filters.visibility == FileVisibility::Present
+                && (audiolib_core::SearchFilters {
+                    sample_rate: None,
+                    duration_min: None,
+                    duration_max: None,
+                    ..request.filters.clone()
+                }) == audiolib_core::SearchFilters::default();
+            let filter_from = if cold_basic_filter {
+                search_candidates::visible_filter_from(&tx)?
+            } else {
+                filter_sql.from.as_str()
+            };
+            let filter_query = format!(
+                "SELECT af.id FROM {filter_from} WHERE {}",
+                filter_sql.conditions.join(" AND ")
+            );
+            if cold_basic_filter {
+                search_candidates::filtered_ids_full_scan(
+                    &tx,
+                    &filter_query,
+                    &filter_sql.values,
+                    query_ids.as_deref().expect("cold query membership"),
+                    &check_cancel,
+                )?
+            } else {
+                search_candidates::filtered_ids(
+                    &tx,
+                    &filter_query,
+                    &filter_sql.values,
+                    retained_ids,
+                    &check_cancel,
+                )?
+            }
         } else {
             None
         };

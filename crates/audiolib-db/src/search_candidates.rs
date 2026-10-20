@@ -1,11 +1,116 @@
 // crates/audiolib-db/src/search_candidates.rs
-//! Bounded exact intersections of filtered IDs with a retained query ranking.
+//! Bounded, snapshot-local query IDs and exact filtered intersections.
 use crate::{Result, db_error, id_membership::IdMembership, search_cache::MAX_RANKED_IDS};
-use rusqlite::{Connection, params_from_iter, types::Value};
+use rusqlite::{Connection, OptionalExtension, params_from_iter, types::Value};
+use std::sync::Arc;
+
+const RANKING_POLL_INTERVAL: usize = 16_384;
 
 struct Limits {
     candidates: usize,
     matched: usize,
+}
+
+/// Collect the complete MATCH membership in this pinned snapshot without scoring
+/// or publishing a ranking. An oversized set discards all IDs for a full fallback.
+/// `reuse_complete` may supply only a complete query-only ranking proven to share
+/// this snapshot and query. It must never wait for a producer or acquire a blocking
+/// cache lock; missing/contended entries leave the local cursor making progress.
+pub(super) fn query_ids(
+    tx: &Connection,
+    query: &str,
+    check_cancel: impl FnMut() -> Result<()>,
+    reuse_complete: impl FnMut() -> Result<Option<Arc<Vec<i64>>>>,
+) -> Result<Option<Arc<Vec<i64>>>> {
+    query_ids_with_limit(tx, query, check_cancel, reuse_complete, MAX_RANKED_IDS)
+}
+
+fn query_ids_with_limit(
+    tx: &Connection,
+    query: &str,
+    mut check_cancel: impl FnMut() -> Result<()>,
+    mut reuse_complete: impl FnMut() -> Result<Option<Arc<Vec<i64>>>>,
+    limit: usize,
+) -> Result<Option<Arc<Vec<i64>>>> {
+    check_cancel()?;
+    let mut statement = tx
+        .prepare("SELECT rowid FROM audio_search WHERE audio_search MATCH ?1")
+        .map_err(db_error)?;
+    let mut rows = statement.query([query]).map_err(db_error)?;
+    let mut ids = Vec::new();
+    let limit = limit.min(MAX_RANKED_IDS);
+    while let Some(row) = rows.next().map_err(db_error)? {
+        if ids.len().is_multiple_of(1024) {
+            check_cancel()?;
+        }
+        if ids.len().is_multiple_of(RANKING_POLL_INTERVAL)
+            && let Some(complete) = reuse_complete()?
+            && complete.len() <= limit
+        {
+            check_cancel()?;
+            return Ok(Some(complete));
+        }
+        if ids.len() == limit {
+            return Ok(None);
+        }
+        ids.push(row.get(0).map_err(db_error)?);
+    }
+    check_cancel()?;
+    Ok(Some(Arc::new(ids)))
+}
+
+/// A cold present sample-rate/duration filter can scan this narrow index once
+/// instead of hitting a small-ranking heuristic and repeating the full FTS join.
+/// The index is optional in supported snapshots; force it only for its exact
+/// known definition, otherwise retain the ordinary planner and complete fallback.
+pub(super) fn visible_filter_from(tx: &Connection) -> Result<&'static str> {
+    let sql: Option<String> = tx
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='index' AND name='idx_audio_visible_filter'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let exact = sql.is_some_and(|sql| {
+        let normalized: String = sql
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect();
+        matches!(
+            normalized.as_str(),
+            "createindexidx_audio_visible_filteronaudio_files(sample_rate,duration,id)wheremissing=0"
+                | "createindexifnotexistsidx_audio_visible_filteronaudio_files(sample_rate,duration,id)wheremissing=0"
+        )
+    });
+    Ok(if exact {
+        "audio_files af INDEXED BY idx_audio_visible_filter"
+    } else {
+        "audio_files af"
+    })
+}
+
+/// Use a bounded full narrow-filter scan for a cold query, keeping the ordinary
+/// small-ranking heuristic unchanged for warm rankings and other filter shapes.
+pub(super) fn filtered_ids_full_scan(
+    tx: &Connection,
+    sql: &str,
+    values: &[Value],
+    query_ids: &[i64],
+    check_cancel: impl FnMut() -> Result<()>,
+) -> Result<Option<Vec<i64>>> {
+    filtered_ids_with_limits(
+        tx,
+        sql,
+        values,
+        Some(query_ids),
+        check_cancel,
+        Limits {
+            candidates: MAX_RANKED_IDS,
+            matched: MAX_RANKED_IDS,
+        },
+    )
 }
 
 /// Read a parameterized, unique-primary-key SELECT from the caller's pinned
@@ -103,6 +208,184 @@ mod tests {
     use crate::Error;
     use rusqlite::params;
     use std::cell::Cell;
+
+    fn query_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE VIRTUAL TABLE audio_search USING fts5(text);")
+            .unwrap();
+        for id in [i64::MIN, -7, i64::MAX] {
+            conn.execute(
+                "INSERT INTO audio_search(rowid,text) VALUES(?1,'metal')",
+                [id],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn query_membership_exact_cap_and_overflow_never_return_partial_ids() {
+        let conn = query_fixture();
+        let read = |query, limit| query_ids_with_limit(&conn, query, || Ok(()), || Ok(None), limit);
+        assert_eq!(
+            read("metal", 3).unwrap().unwrap().as_slice(),
+            &[i64::MIN, -7, i64::MAX]
+        );
+        assert!(read("metal", 2).unwrap().is_none());
+        assert!(read("metal", 0).unwrap().is_none());
+        assert!(read("wood", 0).unwrap().unwrap().is_empty());
+        assert!(matches!(read("metal OR", 3), Err(Error::Database(_))));
+        conn.execute_batch("DROP TABLE audio_search;").unwrap();
+        assert!(matches!(read("metal", 3), Err(Error::Database(_))));
+    }
+
+    #[test]
+    fn query_scan_cancellation_and_handoff_errors_leave_the_connection_usable() {
+        let conn = query_fixture();
+        conn.execute_batch(
+            "WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<2050)
+            INSERT INTO audio_search(rowid,text) SELECT id,'metal' FROM ids;",
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+        query_ids(
+            &conn,
+            "metal",
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            || Ok(None),
+        )
+        .unwrap();
+        let checkpoints = calls.get();
+        for cancel_at in 1..=checkpoints {
+            calls.set(0);
+            assert!(matches!(
+                query_ids(
+                    &conn,
+                    "metal",
+                    || {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == cancel_at {
+                            Err(Error::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || Ok(None)
+                ),
+                Err(Error::Cancelled)
+            ));
+        }
+        assert!(matches!(
+            query_ids(
+                &conn,
+                "metal",
+                || Ok(()),
+                || Err(Error::Database("handoff failure".into()))
+            ),
+            Err(Error::Database(_))
+        ));
+        assert_eq!(
+            query_ids(&conn, "metal", || Ok(()), || Ok(None))
+                .unwrap()
+                .unwrap()
+                .len(),
+            2053
+        );
+    }
+
+    #[test]
+    fn handoff_replaces_a_partial_scan_with_one_complete_arc_and_rechecks_cancel() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE audio_search USING fts5(text);
+            WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<16385)
+            INSERT INTO audio_search(rowid,text) SELECT id,'metal' FROM ids;",
+        )
+        .unwrap();
+        let complete = Arc::new((1..=16385).rev().collect::<Vec<i64>>());
+        let polls = Cell::new(0);
+        let result = query_ids(
+            &conn,
+            "metal",
+            || Ok(()),
+            || {
+                polls.set(polls.get() + 1);
+                Ok((polls.get() == 2).then(|| complete.clone()))
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(polls.get(), 2);
+        assert!(Arc::ptr_eq(&result, &complete));
+        polls.set(0);
+        let result = query_ids(
+            &conn,
+            "metal",
+            || {
+                if polls.get() == 2 {
+                    Err(Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                polls.set(polls.get() + 1);
+                Ok((polls.get() == 2).then(|| complete.clone()))
+            },
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
+        let oversized = Arc::new(vec![1, 2, 3, 4]);
+        assert!(
+            query_ids_with_limit(&conn, "metal", || Ok(()), || Ok(Some(oversized.clone())), 3)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn old_pinned_query_scan_ignores_a_newer_cached_ranking_without_rewinding_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("query-snapshot.db");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+            CREATE VIRTUAL TABLE audio_search USING fts5(text);
+            INSERT INTO audio_search(rowid,text) VALUES(1,'metal'),(2,'metal');",
+            )
+            .unwrap();
+        let mut reader = Connection::open(&database).unwrap();
+        let tx = reader.transaction().unwrap();
+        tx.query_row("SELECT rowid FROM audio_search LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+        writer
+            .execute_batch(
+                "BEGIN; DELETE FROM audio_search WHERE rowid=1;
+            INSERT INTO audio_search(rowid,text) VALUES(3,'metal'); COMMIT;",
+            )
+            .unwrap();
+        let mut cache = crate::search_cache::RankingCache::default();
+        let newer = Arc::new(vec![3, 2]);
+        cache.insert(12, "metal".into(), newer.clone());
+        let old = query_ids(&tx, "metal", || Ok(()), || Ok(cache.peek(11, "metal")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.as_slice(), &[1, 2]);
+        assert!(Arc::ptr_eq(&cache.peek(12, "metal").unwrap(), &newer));
+        drop(tx);
+        assert_eq!(
+            query_ids(&reader, "metal", || Ok(()), || Ok(None))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            &[2, 3]
+        );
+    }
 
     fn fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

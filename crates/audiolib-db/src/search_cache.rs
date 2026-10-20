@@ -28,6 +28,19 @@ pub(crate) struct RankingCache {
 }
 
 impl RankingCache {
+    /// Borrow a complete ranking for a proven pinned snapshot without changing
+    /// its revision, LRU order or admission state. An older reader must not clear
+    /// a newer cache while opportunistically checking a concurrent page result.
+    pub(crate) fn peek(&self, revision: u64, query: &str) -> Option<Arc<Vec<i64>>> {
+        if self.revision != Some(revision) {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find(|entry| entry.query == query)
+            .map(|entry| entry.ids.clone())
+    }
+
     pub(crate) fn get(&mut self, revision: u64, query: &str) -> Option<Arc<Vec<i64>>> {
         if self.revision != Some(revision) {
             self.entries.clear();
@@ -137,6 +150,27 @@ impl RankingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_peeks_do_not_rewind_revision_or_change_lru_payloads() {
+        let mut cache = RankingCache::default();
+        let older = Arc::new(vec![9, 1]);
+        let newer = Arc::new(vec![8, 3]);
+        cache.insert(11, "old".into(), older.clone());
+        cache.insert(11, "other".into(), Arc::new(vec![4]));
+        assert!(Arc::ptr_eq(&cache.peek(11, "old").unwrap(), &older));
+        assert_eq!(cache.entries.front().unwrap().query, "old");
+        cache.insert(12, "new".into(), newer.clone());
+        let payloads = cache.ids;
+        assert!(cache.peek(11, "old").is_none());
+        assert!(cache.peek(13, "new").is_none());
+        assert!(cache.peek(12, "different-query").is_none());
+        assert_eq!(cache.revision, Some(12));
+        assert_eq!(cache.ids, payloads);
+        assert!(Arc::ptr_eq(&cache.peek(12, "new").unwrap(), &newer));
+        // A reader holding the old Arc can finish its older pinned transaction.
+        assert_eq!(*older, vec![9, 1]);
+    }
 
     #[test]
     fn retained_rankings_are_bounded_and_every_commit_invalidates_them() {
