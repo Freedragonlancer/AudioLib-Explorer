@@ -805,7 +805,9 @@ async fn config_default_and_capabilities_fields() {
             "version": 1,
             "buckets": [128],
             "max_ids": 200,
-            "encoding": "i16le-minmax-base64"
+            "encoding": "i16le-minmax-base64",
+            "encodings": ["i16le-minmax-base64", "i8-minmax-base64"],
+            "bundle": true
         })
     );
     assert_eq!(capabilities["pregenerate_list_waveforms"], true);
@@ -1052,4 +1054,157 @@ async fn stat_pause_on_playback_answers_pending_during_the_prebuffer_window() {
             "after the window: {after:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
+    let f = fixture("");
+    let tone = f.id("tone.wav");
+    let silence = f.id("silence.wav");
+    let empty = f.id("empty.wav");
+    let ids = format!("[{tone},{silence},{empty}]");
+    let i16 = settled(&f.state, &format!(r#"{{"ids":{ids}}}"#)).await;
+    assert_eq!(i16.encoding, "i16le-minmax-base64");
+    let i8 = settled(
+        &f.state,
+        &format!(r#"{{"ids":{ids},"encoding":"i8-minmax-base64"}}"#),
+    )
+    .await;
+    assert_eq!(i8.encoding, "i8-minmax-base64");
+    for (a, b) in i16.items.iter().zip(&i8.items) {
+        assert_eq!(b.status, ItemStatus::Ok, "{b:?}");
+        let (ea, eb) = (a.etag.clone().unwrap(), b.etag.clone().unwrap());
+        assert!(ea.ends_with("-l1\""), "{ea}");
+        assert_eq!(eb, format!("{}i8\"", ea.trim_end_matches('"')));
+        let n = b.n.unwrap();
+        assert_eq!(a.n, b.n);
+        let peaks = b.peaks.as_deref().unwrap();
+        assert_eq!(peaks.len(), audiolib_server::wfdb::base64_len(n));
+        let raw = decode_base64(peaks);
+        assert_eq!(raw.len(), 2 * n);
+        let expected: Vec<u8> = values(a.peaks.as_deref().unwrap())
+            .iter()
+            .map(|v| audiolib_server::wfdb::i16_to_i8(*v) as u8)
+            .collect();
+        assert_eq!(raw, expected);
+        assert!(raw.iter().all(|b| *b != 0x80), "-128 emitted");
+        for pair in raw.chunks_exact(2) {
+            assert!((pair[0] as i8) <= (pair[1] as i8));
+        }
+    }
+    assert_eq!(i8.items[2].n, Some(0));
+    assert_eq!(i8.items[2].peaks.as_deref(), Some(""));
+    assert_eq!(i8.items[0].n, Some(125));
+    // tone.wav: +16384 → 64 (half away from zero would matter only at exact ties).
+    let tone_bytes = decode_base64(i8.items[0].peaks.as_deref().unwrap());
+    assert_eq!(tone_bytes.iter().map(|b| *b as i8).max(), Some(64));
+
+    // known with the i16 tag while asking for i8: ok with the -l1i8 tag.
+    let l1 = i16.items[0].etag.clone().unwrap();
+    let l1i8 = i8.items[0].etag.clone().unwrap();
+    let known = |etag: &str| {
+        format!(
+            r#"{{"ids":[{tone}],"encoding":"i8-minmax-base64","known":{{"{tone}":{}}}}}"#,
+            serde_json::to_string(etag).unwrap()
+        )
+    };
+    let reply = batch(&f.state, &known(&l1)).await;
+    assert_eq!(reply.items[0].status, ItemStatus::Ok);
+    assert_eq!(reply.items[0].etag.as_deref(), Some(l1i8.as_str()));
+    let reply = batch(&f.state, &known(&l1i8)).await;
+    assert_eq!(reply.items[0].status, ItemStatus::NotModified);
+    // The i8 tag as known for an i16 request is not a match either.
+    let reply = batch(
+        &f.state,
+        &format!(
+            r#"{{"ids":[{tone}],"known":{{"{tone}":{}}}}}"#,
+            serde_json::to_string(&l1i8).unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(reply.items[0].status, ItemStatus::Ok);
+
+    // Unknown encodings: 400 VALIDATION / UNSUPPORTED_ENCODING.
+    for body in [
+        format!(r#"{{"ids":[{tone}],"encoding":"u8"}}"#),
+        format!(r#"{{"ids":[{tone}],"encoding":5}}"#),
+    ] {
+        let response = call(
+            f.state.clone(),
+            Method::POST,
+            "/waveforms",
+            &[],
+            LAN,
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = serde_json::from_slice(&bytes(response).await).unwrap();
+        assert_eq!(body.error_code, "VALIDATION");
+        if body.message.contains("u8") {
+            assert_eq!(body.sub_code.as_deref(), Some("UNSUPPORTED_ENCODING"));
+        }
+    }
+
+    // waveforms.db holds one 256-byte row per record with the -l1i8 tag.
+    let wfdb = f.state.list_waveforms().wfdb().unwrap();
+    wfdb.flush();
+    assert_eq!(wfdb.count(), 3);
+    let row = wfdb.get(tone).unwrap();
+    assert_eq!(row.etag, l1i8);
+    assert_eq!(row.blob.len(), 256);
+    assert_eq!(row.n, 125);
+    assert!(row.src_size > 0 && row.src_mtime > 0);
+
+    // Bundle: validated SQLite snapshot with meta; bad encodings rejected.
+    let response = call(
+        f.state.clone(),
+        Method::GET,
+        "/waveforms/bundle?encoding=i16le-minmax-base64",
+        &[],
+        LAN,
+        None,
+    )
+    .await;
+    error(response, StatusCode::BAD_REQUEST, "VALIDATION").await;
+    let response = call(
+        f.state.clone(),
+        Method::GET,
+        "/waveforms/bundle?encoding=i8-minmax-base64",
+        &[],
+        LAN,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.sqlite3"
+    );
+    let body = bytes(response).await;
+    let out = tempfile::tempdir().unwrap();
+    let path = out.path().join("b.db");
+    std::fs::write(&path, &body).unwrap();
+    audiolib_server::wfdb::validate_bundle(&path).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let meta = |key: &str| -> String {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(meta("library_id"), f.state.library_id());
+    assert_eq!(meta("encoding"), "i8-minmax-base64");
+    assert!(meta("generated_at").parse::<u64>().unwrap() > 0);
+    meta("revision").parse::<u64>().unwrap();
+    // The temporary bundle directory is gone once the body was sent.
+    let leftovers = std::fs::read_dir(wfdb.path().parent().unwrap())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("audiolib-wfbundle-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
 }
