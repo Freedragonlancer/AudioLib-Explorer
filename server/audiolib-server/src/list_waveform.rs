@@ -1043,6 +1043,9 @@ struct ActiveJob {
     recount: bool,
     /// A worker is clearing the cache (`rebuild`).
     clearing: bool,
+    /// A worker is reading the library for this job (recount or the next ids) outside
+    /// the scheduler lock.
+    fetching: bool,
     since_save: u64,
     saved_at: Instant,
 }
@@ -1062,6 +1065,7 @@ impl ActiveJob {
             requeued: VecDeque::new(),
             recount: false,
             clearing: false,
+            fetching: false,
             since_save: 0,
             saved_at: Instant::now(),
         }
@@ -1111,6 +1115,25 @@ impl ActiveJob {
         self.record.done += 1;
         self.since_save += 1;
         self.touch();
+    }
+
+    /// Move records deferred for an offline root back into the job once `online(root)`
+    /// holds; their counts are taken back and counted again when processed (§9.5.2).
+    fn requeue_online(&mut self, online: impl Fn(&str) -> bool) {
+        let roots: Vec<String> = self
+            .deferred
+            .keys()
+            .filter(|name| online(name))
+            .cloned()
+            .collect();
+        for name in roots {
+            if let Some(ids) = self.deferred.remove(&name) {
+                let count = ids.len() as u64;
+                self.record.skipped_offline = self.record.skipped_offline.saturating_sub(count);
+                self.record.done = self.record.done.saturating_sub(count);
+                self.requeued.extend(ids);
+            }
+        }
     }
 
     fn save_due(&self) -> bool {
@@ -1205,8 +1228,49 @@ struct Sched {
     /// Records processed by pre-generation and jobs in the last 60 s.
     window: RateWindow,
     last_error: Option<LastError>,
-    /// Job state to persist once the scheduler lock is released.
-    pending_save: Option<(JobRecord, Option<LastError>)>,
+    /// Job state to persist once the scheduler lock is released, with its save sequence
+    /// number.
+    pending_save: Option<(u64, JobRecord, Option<LastError>)>,
+    /// Sequence number of the latest `job-state.json` snapshot taken (monotonic).
+    save_seq: u64,
+}
+
+/// A `job-state.json` snapshot: the job and the last error.
+type Snapshot = (Option<JobRecord>, Option<LastError>);
+
+impl Sched {
+    /// Number the snapshot taken now (under the scheduler lock): later snapshots get
+    /// larger numbers, and a write never replaces a newer snapshot by an older one.
+    fn next_save_seq(&mut self) -> u64 {
+        self.save_seq += 1;
+        self.save_seq
+    }
+
+    /// Persist `saved` once the scheduler lock is released ([`ListWaveforms::flush_pending_save`]).
+    fn queue_save(&mut self, saved: (JobRecord, Option<LastError>)) {
+        let seq = self.next_save_seq();
+        self.pending_save = Some((seq, saved.0, saved.1));
+    }
+}
+
+/// Result of one look at the queues ([`ListWaveforms::next_job_once`]).
+enum Next {
+    Run(Job),
+    Nothing,
+    /// A library read for the job was done without the scheduler lock: look again.
+    Again,
+}
+
+/// What a worker does next for the cache job.
+enum JobStep {
+    /// Process this record.
+    Take(Job),
+    /// Nothing to take now.
+    Idle,
+    /// Compute `total` / `max_id` of the job of this generation (outside the lock).
+    Recount(u64),
+    /// Read the next ids after `after` for the job of this generation (outside the lock).
+    Fetch { generation: u64, after: i64 },
 }
 
 enum Job {
@@ -1239,8 +1303,10 @@ pub struct ListWaveforms {
     /// `waveforms.db` of the 8-bit encoding (§9.4); `None` when it cannot be opened.
     wfdb: Option<crate::wfdb::WaveformsDb>,
     library_id: String,
-    /// Serialises writes of `job-state.json`.
-    state_write: Mutex<()>,
+    /// Serialises writes of `job-state.json`; holds the sequence number of the newest
+    /// snapshot written (older ones are skipped). Taken before the scheduler lock, never
+    /// while holding it.
+    state_write: Mutex<u64>,
 }
 
 impl Drop for ListWaveforms {
@@ -1394,7 +1460,7 @@ impl ListWaveforms {
         };
         let list = Self {
             library_id: library_id.to_string(),
-            state_write: Mutex::new(()),
+            state_write: Mutex::new(0),
             wfdb,
             cache: ListCache::open(list_dir.join(name), options.cache_mb),
             sched: Mutex::new(Sched::default()),
@@ -1793,6 +1859,17 @@ impl ListWaveforms {
 
     /// Blocking. The next file for this worker, honouring the yield rules (§9.2).
     fn next_job(&self, state: &AppState) -> Option<Job> {
+        loop {
+            match self.next_job_once(state) {
+                Next::Run(job) => return Some(job),
+                Next::Nothing => return None,
+                Next::Again => {}
+            }
+        }
+    }
+
+    /// One look at the queues.
+    fn next_job_once(&self, state: &AppState) -> Next {
         let enabled = state.security().pregenerate_list_waveforms();
         let playback = state.playback_active();
         let prebuffer = self.playback_started_within(PREBUFFER_YIELD);
@@ -1802,34 +1879,53 @@ impl ListWaveforms {
         // starts, and uses at most one decode slot while any is active.
         if sched.on_demand.len() > 0 && !prebuffer && (!playback || sched.on_demand_in_flight == 0)
         {
-            let id = sched.on_demand.pop_newest()?;
+            let Some(id) = sched.on_demand.pop_newest() else {
+                return Next::Nothing;
+            };
             sched.on_demand_in_flight += 1;
-            return Some(Job::OnDemand(id, Instant::now()));
+            return Next::Run(Job::OnDemand(id, Instant::now()));
         }
         let reason = self.yield_reason(state, &mut sched);
         if reason.is_some() || sched.on_demand.len() > 0 {
-            return None;
+            return Next::Nothing;
         }
         // A cache job (running or paused) replaces pre-generation (§9.5.1).
         if sched.job.as_ref().is_some_and(ActiveJob::active) {
-            return self.next_job_item(&mut sched);
+            let step = self.next_job_item(&mut sched);
+            drop(sched);
+            return match step {
+                JobStep::Take(job) => Next::Run(job),
+                JobStep::Idle => Next::Nothing,
+                // Library reads run without the scheduler lock, then the worker looks
+                // again.
+                JobStep::Recount(generation) => {
+                    self.recount_job(generation);
+                    Next::Again
+                }
+                JobStep::Fetch { generation, after } => {
+                    self.fetch_job_ids(generation, after);
+                    Next::Again
+                }
+            };
         }
         if !enabled || sched.paused {
-            return None;
+            return Next::Nothing;
         }
-        let pass = sched.pass.as_mut()?;
+        let Some(pass) = sched.pass.as_mut() else {
+            return Next::Nothing;
+        };
         let id = self.take_pass_id(pass);
         match id {
             Some(id) => {
                 pass.in_flight += 1;
-                Some(Job::Pregenerate(id, pass.generation))
+                Next::Run(Job::Pregenerate(id, pass.generation))
             }
             None => {
                 if pass.exhausted && pass.in_flight == 0 && pass.finished_at.is_none() {
                     pass.finished_at = Some(crate::auth::unix_now());
                     tracing::info!("List waveform pre-generation pass finished");
                 }
-                None
+                Next::Nothing
             }
         }
     }
@@ -1865,27 +1961,13 @@ impl ListWaveforms {
             .filter(|job| job.record.state == JobState::Running && !job.deferred.is_empty())
         {
             let monitor = state.root_monitor();
-            let online: Vec<String> = job
-                .deferred
-                .keys()
-                .filter(|name| {
-                    monitor
-                        .roots()
-                        .iter()
-                        .position(|root| &root.name == *name)
-                        .is_none_or(|index| monitor.status(index).state == crate::RootState::Online)
-                })
-                .cloned()
-                .collect();
-            for name in online {
-                if let Some(ids) = job.deferred.remove(&name) {
-                    // Counted again when processed.
-                    job.record.skipped_offline =
-                        job.record.skipped_offline.saturating_sub(ids.len() as u64);
-                    job.record.done = job.record.done.saturating_sub(ids.len() as u64);
-                    job.requeued.extend(ids);
-                }
-            }
+            job.requeue_online(|name| {
+                monitor
+                    .roots()
+                    .iter()
+                    .position(|root| root.name == name)
+                    .is_none_or(|index| monitor.status(index).state == crate::RootState::Online)
+            });
         }
         let Some(pass) = sched.pass.as_mut() else {
             return;
@@ -1930,13 +2012,13 @@ impl ListWaveforms {
         if let Outcome::Failed { code, message } = &outcome {
             self.note_error(code, message.clone(), Some(id));
         }
-        let save = {
+        let save_due = {
             let mut sched = self.sched();
             match job {
                 Job::OnDemand(_, taken) => {
                     sched.on_demand_in_flight = sched.on_demand_in_flight.saturating_sub(1);
                     sched.throughput.record(taken, now);
-                    None
+                    false
                 }
                 Job::Pregenerate(_, generation) => {
                     if let Outcome::Offline(root) = &outcome
@@ -1951,31 +2033,39 @@ impl ListWaveforms {
                     if outcome.counts() {
                         sched.window.record(now);
                     }
-                    None
+                    false
                 }
-                Job::ClearForRebuild(_) => None,
+                Job::ClearForRebuild(_) => false,
                 Job::Cache(_, generation) => {
                     let counted = outcome.counts();
-                    let mut save = None;
+                    let mut due = false;
                     if let Some(job) = sched
                         .job
                         .as_mut()
                         .filter(|job| job.generation == generation)
                     {
                         job.finish_item(id, &outcome);
-                        if job.save_due() {
-                            save = Some(job.mark_saved());
-                        }
+                        due = job.save_due();
                     }
                     if counted {
                         sched.window.record(now);
                     }
-                    save.map(|record| (record, sched.last_error.clone()))
+                    due
                 }
             }
         };
-        if let Some((record, last_error)) = save {
-            self.save_state(Some(record), last_error);
+        if let (true, Job::Cache(_, generation)) = (save_due, job) {
+            // The snapshot is taken under the write lock, so a pause / stop decided after
+            // it is written after it too.
+            self.persist(|sched| {
+                let last_error = sched.last_error.clone();
+                let record = sched
+                    .job
+                    .as_mut()
+                    .filter(|job| job.generation == generation && job.save_due())
+                    .map(ActiveJob::mark_saved);
+                ((), record.map(|record| (Some(record), last_error)))
+            });
         }
     }
 
@@ -2262,18 +2352,62 @@ impl ListWaveforms {
         self.cache.dir()
     }
 
-    /// Blocking. Persist the job state (logged on failure; the job keeps running).
-    fn save_state(&self, job: Option<JobRecord>, last_error: Option<LastError>) {
+    /// Blocking. Decide a job state change under the scheduler lock and persist the
+    /// snapshot `decide` returns, in that order: the write lock is taken first, so
+    /// snapshots are written in the order they were taken.
+    fn persist<R>(&self, decide: impl FnOnce(&mut Sched) -> (R, Option<Snapshot>)) -> R {
+        let mut written = self
+            .state_write
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (result, snapshot) = {
+            let mut sched = self.sched();
+            let (result, snapshot) = decide(&mut sched);
+            (
+                result,
+                snapshot.map(|snapshot| (sched.next_save_seq(), snapshot)),
+            )
+        };
+        if let Some((seq, (job, last_error))) = snapshot {
+            self.write_state(&mut written, seq, job, last_error);
+        }
+        result
+    }
+
+    /// Blocking. Persist snapshot `seq` (taken earlier under the scheduler lock).
+    fn save_state(&self, seq: u64, job: Option<JobRecord>, last_error: Option<LastError>) {
+        let mut written = self
+            .state_write
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.write_state(&mut written, seq, job, last_error);
+    }
+
+    /// Write snapshot `seq` unless a newer one was written already (logged on failure;
+    /// the job keeps running). `written`: the guarded newest sequence number.
+    fn write_state(
+        &self,
+        written: &mut u64,
+        seq: u64,
+        job: Option<JobRecord>,
+        last_error: Option<LastError>,
+    ) {
+        if seq <= *written {
+            tracing::debug!(
+                seq,
+                written = *written,
+                "Skipping a stale list waveform job state"
+            );
+            return;
+        }
+        // Even when the write fails, an older snapshot must not replace this state.
+        *written = seq;
         let file = StateFile {
             version: wf_job::STATE_VERSION,
             library_id: self.library_id.clone(),
             job,
             last_error,
         };
-        let _guard = self
-            .state_write
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         if let Err(error) = wf_job::save(self.state_dir(), &file) {
             tracing::warn!(%error, "Cannot save the list waveform job state");
         }
@@ -2281,14 +2415,13 @@ impl ListWaveforms {
 
     /// Blocking. Persist the current job (if any) as it is now.
     fn save_current(&self) {
-        let (record, last_error) = {
-            let mut sched = self.sched();
+        self.persist(|sched| {
             let last_error = sched.last_error.clone();
-            (sched.job.as_mut().map(ActiveJob::mark_saved), last_error)
-        };
-        if record.is_some() || last_error.is_some() {
-            self.save_state(record, last_error);
-        }
+            let record = sched.job.as_mut().map(ActiveJob::mark_saved);
+            let snapshot =
+                (record.is_some() || last_error.is_some()).then_some((record, last_error));
+            ((), snapshot)
+        });
     }
 
     /// Restore the job of `job-state.json` (called once when the library opens).
@@ -2345,7 +2478,7 @@ impl ListWaveforms {
 
     /// Blocking. `POST /waveforms/jobs`: start a job unless one is running or paused.
     pub fn start_job(&self, mode: JobMode) -> std::result::Result<(), JobRefusal> {
-        if self.wfdb.is_none() {
+        if !self.jobs_available() {
             return Err(JobRefusal::Unavailable);
         }
         if let Some(job) = self.sched().job.as_ref().filter(|job| job.active()) {
@@ -2360,10 +2493,9 @@ impl ListWaveforms {
             .map_err(JobRefusal::Failed)?;
         let present = self.count_present(i64::MIN).map_err(JobRefusal::Failed)?;
         let now = crate::auth::unix_now();
-        let record = {
-            let mut sched = self.sched();
+        let record = self.persist(|sched| {
             if let Some(job) = sched.job.as_ref().filter(|job| job.active()) {
-                return Err(JobRefusal::Busy(job.record.id.clone()));
+                return (Err(JobRefusal::Busy(job.record.id.clone())), None);
             }
             let (effective, list) = match mode {
                 JobMode::Failed if !sched.failures.is_empty() => {
@@ -2405,63 +2537,70 @@ impl ListWaveforms {
             let generation = sched.job_generation;
             sched.job = Some(ActiveJob::new(generation, record.clone(), false, list));
             sched.window.restart(Instant::now());
-            record
-        };
+            let last_error = sched.last_error.clone();
+            (Ok(record.clone()), Some((Some(record), last_error)))
+        })?;
         tracing::info!(id = %record.id, ?mode, effective = ?record.mode_effective, total = record.total, "List waveform job started");
-        let last_error = self.sched().last_error.clone();
-        self.save_state(Some(record), last_error);
         self.wake.notify_all();
         Ok(())
     }
 
     /// Blocking. Pause (`true`) or resume the current job; idempotent.
     pub fn pause_job(&self, paused: bool) -> std::result::Result<(), JobRefusal> {
-        {
-            let mut sched = self.sched();
-            let job = sched
-                .job
-                .as_mut()
-                .filter(|job| job.active())
-                .ok_or(JobRefusal::NoJob)?;
+        let changed = self.persist(|sched| {
+            let Some(job) = sched.job.as_mut().filter(|job| job.active()) else {
+                return (Err(JobRefusal::NoJob), None);
+            };
             let target = if paused {
                 JobState::Paused
             } else {
                 JobState::Running
             };
             if job.record.state == target {
-                return Ok(());
+                return (Ok(false), None);
             }
             job.set_state(target);
+            let record = job.mark_saved();
             if paused {
                 sched.window.stop();
             } else {
                 sched.window.restart(Instant::now());
             }
+            let last_error = sched.last_error.clone();
+            (Ok(true), Some((Some(record), last_error)))
+        })?;
+        if changed {
+            tracing::info!(paused, "List waveform job paused/resumed");
         }
-        tracing::info!(paused, "List waveform job paused/resumed");
-        self.save_current();
         self.wake.notify_all();
         Ok(())
     }
 
     /// Blocking. Stop the current job (the record being processed completes).
     pub fn stop_job(&self) -> std::result::Result<(), JobRefusal> {
-        {
-            let mut sched = self.sched();
-            let job = sched
-                .job
-                .as_mut()
-                .filter(|job| job.active())
-                .ok_or(JobRefusal::NoJob)?;
+        self.persist(|sched| {
+            let Some(job) = sched.job.as_mut().filter(|job| job.active()) else {
+                return (Err(JobRefusal::NoJob), None);
+            };
             job.set_state(JobState::Cancelled);
             job.buffer.clear();
             job.requeued.clear();
+            let record = job.mark_saved();
             sched.window.stop();
-        }
+            let last_error = sched.last_error.clone();
+            (Ok(()), Some((Some(record), last_error)))
+        })?;
         tracing::info!("List waveform job stopped");
-        self.save_current();
         self.wake.notify_all();
         Ok(())
+    }
+
+    /// Whether cache jobs can run: `waveforms.db` (§9.4) can be opened. Blocking (opens
+    /// the database once).
+    pub fn jobs_available(&self) -> bool {
+        self.wfdb
+            .as_ref()
+            .is_some_and(crate::wfdb::WaveformsDb::usable)
     }
 
     /// Whether a job is running or paused (pre-generation waits for it).
@@ -2483,30 +2622,102 @@ impl ListWaveforms {
         Some((record, sched.last_error.clone()))
     }
 
-    /// Blocking. Next record of the running job (`None`: nothing to take now). Ends the
-    /// job when everything was checked.
-    fn next_job_item(&self, sched: &mut Sched) -> Option<Job> {
-        let job = sched
+    /// Next record of the running job. Never reads the library: a recount or the next
+    /// ids are asked for ([`JobStep::Recount`] / [`JobStep::Fetch`]) and read by the
+    /// worker after it released the scheduler lock. Ends the job when everything was
+    /// checked.
+    fn next_job_item(&self, sched: &mut Sched) -> JobStep {
+        let Some(job) = sched
             .job
             .as_mut()
-            .filter(|job| job.record.state == JobState::Running)?;
+            .filter(|job| job.record.state == JobState::Running)
+        else {
+            return JobStep::Idle;
+        };
         let generation = job.generation;
         if job.clearing {
-            return None;
+            return JobStep::Idle;
         }
         if job.record.mode_effective == JobMode::Rebuild && !job.record.rebuild_cleared {
             job.clearing = true;
-            return Some(Job::ClearForRebuild(generation));
+            return JobStep::Take(Job::ClearForRebuild(generation));
         }
         if job.recount {
-            let counted = self.count_present(i64::MIN).and_then(|total| {
-                self.query(|conn| {
-                    conn.query_row("SELECT COALESCE(MAX(id),0) FROM audio_files", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
+            if job.fetching {
+                return JobStep::Idle;
+            }
+            job.fetching = true;
+            return JobStep::Recount(generation);
+        }
+        let id = if let Some(id) = job.requeued.pop_front() {
+            Some(id)
+        } else if let Some(list) = job.list.as_mut() {
+            list.pop_front()
+        } else {
+            if job.buffer.is_empty() && !job.exhausted {
+                if job.fetching {
+                    return JobStep::Idle;
+                }
+                job.fetching = true;
+                return JobStep::Fetch {
+                    generation,
+                    after: job.last_taken,
+                };
+            }
+            let id = job.buffer.pop_front();
+            if let Some(id) = id {
+                job.last_taken = job.last_taken.max(id);
+            }
+            id
+        };
+        match id {
+            Some(id) => {
+                job.in_flight.insert(id, crate::auth::unix_now());
+                JobStep::Take(Job::Cache(id, generation))
+            }
+            None => {
+                let drained = job.list.as_ref().is_none_or(VecDeque::is_empty)
+                    && (job.list.is_some() || job.exhausted)
+                    && job.requeued.is_empty()
+                    && job.in_flight.is_empty()
+                    && !job.fetching;
+                if drained {
+                    if job.list.is_none() {
+                        job.last_taken = job.last_taken.max(job.record.max_id);
+                    }
+                    if let Some(saved) = self.end_job(sched, JobState::Completed) {
+                        sched.queue_save(saved);
+                    }
+                }
+                JobStep::Idle
+            }
+        }
+    }
+
+    /// Blocking, without the scheduler lock. Compute `total` / `max_id` of the job of
+    /// `generation` ([`JobStep::Recount`]).
+    fn recount_job(&self, generation: u64) {
+        let counted = self.count_present(i64::MIN).and_then(|total| {
+            self.query(|conn| {
+                conn.query_row("SELECT COALESCE(MAX(id),0) FROM audio_files", [], |row| {
+                    row.get::<_, i64>(0)
                 })
-                .map(|max| (total, max))
-            });
+            })
+            .map(|max| (total, max))
+        });
+        {
+            let mut sched = self.sched();
+            let Some(job) = sched
+                .job
+                .as_mut()
+                .filter(|job| job.generation == generation)
+            else {
+                return;
+            };
+            job.fetching = false;
+            if !job.active() {
+                return;
+            }
             match counted {
                 Ok((total, max_id)) => {
                     job.record.total = total;
@@ -2514,68 +2725,60 @@ impl ListWaveforms {
                     job.recount = false;
                 }
                 Err(error) => {
-                    let message = error.to_string();
-                    self.fail_job(sched, "DATABASE", message);
-                    return None;
+                    if let Some(saved) = self.fail_job(&mut sched, "DATABASE", error.to_string()) {
+                        sched.queue_save(saved);
+                    }
                 }
             }
         }
-        let job = sched.job.as_mut()?;
-        let id = if let Some(id) = job.requeued.pop_front() {
-            Some(id)
-        } else if let Some(list) = job.list.as_mut() {
-            list.pop_front()
-        } else {
-            if job.buffer.is_empty() && !job.exhausted {
-                match self.next_ids(job.last_taken) {
-                    Ok(ids) => {
-                        let max_id = job.record.max_id;
-                        let ids: Vec<i64> = ids.into_iter().filter(|id| *id <= max_id).collect();
-                        if ids.is_empty() {
-                            job.exhausted = true;
-                        }
-                        job.buffer.extend(ids);
+        self.wake.notify_all();
+    }
+
+    /// Blocking, without the scheduler lock. Read the ids after `after` for the job of
+    /// `generation` ([`JobStep::Fetch`]).
+    fn fetch_job_ids(&self, generation: u64, after: i64) {
+        let ids = self.next_ids(after);
+        {
+            let mut sched = self.sched();
+            let Some(job) = sched
+                .job
+                .as_mut()
+                .filter(|job| job.generation == generation)
+            else {
+                return;
+            };
+            job.fetching = false;
+            if !job.active() {
+                return;
+            }
+            match ids {
+                // Still the batch this job needs (else the worker reads again).
+                Ok(ids) if job.last_taken == after && job.buffer.is_empty() && !job.exhausted => {
+                    let max_id = job.record.max_id;
+                    let ids: Vec<i64> = ids.into_iter().filter(|id| *id <= max_id).collect();
+                    if ids.is_empty() {
+                        job.exhausted = true;
                     }
-                    Err(error) => {
-                        let message = error.to_string();
-                        self.fail_job(sched, "DATABASE", message);
-                        return None;
+                    job.buffer.extend(ids);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    if let Some(saved) = self.fail_job(&mut sched, "DATABASE", error.to_string()) {
+                        sched.queue_save(saved);
                     }
                 }
-            }
-            let job = sched.job.as_mut()?;
-            let id = job.buffer.pop_front();
-            if let Some(id) = id {
-                job.last_taken = job.last_taken.max(id);
-            }
-            id
-        };
-        let job = sched.job.as_mut()?;
-        match id {
-            Some(id) => {
-                job.in_flight.insert(id, crate::auth::unix_now());
-                Some(Job::Cache(id, generation))
-            }
-            None => {
-                let drained = job.list.as_ref().is_none_or(VecDeque::is_empty)
-                    && (job.list.is_some() || job.exhausted)
-                    && job.requeued.is_empty()
-                    && job.in_flight.is_empty();
-                if drained {
-                    if job.list.is_none() {
-                        job.last_taken = job.last_taken.max(job.record.max_id);
-                    }
-                    if let Some((record, last_error)) = self.end_job(sched, JobState::Completed) {
-                        sched.pending_save = Some((record, last_error));
-                    }
-                }
-                None
             }
         }
+        self.wake.notify_all();
     }
 
     /// End the running job with `error` (`last_error` = `code` / `message`).
-    fn fail_job(&self, sched: &mut Sched, code: &str, message: String) {
+    fn fail_job(
+        &self,
+        sched: &mut Sched,
+        code: &str,
+        message: String,
+    ) -> Option<(JobRecord, Option<LastError>)> {
         tracing::warn!(code, %message, "List waveform job failed");
         sched.last_error = Some(LastError {
             at: crate::auth::unix_now(),
@@ -2583,53 +2786,69 @@ impl ListWaveforms {
             message,
             id: None,
         });
-        if let Some(saved) = self.end_job(sched, JobState::Error) {
-            sched.pending_save = Some(saved);
-        }
+        self.end_job(sched, JobState::Error)
     }
 
     /// Blocking. Clear this library's list cache for a `rebuild` job.
     fn clear_for_rebuild(&self, generation: u64) {
+        // Only for the current, running job: a stop or a newer job must not have its
+        // cache wiped by a stale request.
+        {
+            let mut sched = self.sched();
+            match sched
+                .job
+                .as_mut()
+                .filter(|job| job.generation == generation)
+            {
+                Some(job) if job.record.state == JobState::Running => {}
+                Some(job) => {
+                    // Paused (or ended) before the clear: clear once it runs again.
+                    job.clearing = false;
+                    return;
+                }
+                None => return,
+            }
+        }
         self.cache.clear();
         let cleared = match &self.wfdb {
             Some(wfdb) => wfdb.clear(),
             None => Ok(()),
         };
-        let save = {
-            let mut sched = self.sched();
-            sched.failures.clear();
+        tracing::info!("Cleared the list waveform cache for a rebuild");
+        self.persist(|sched| {
             let current = sched
                 .job
                 .as_ref()
                 .is_some_and(|job| job.generation == generation);
             if !current {
-                None
-            } else if let Err(error) = cleared {
-                self.fail_job(
-                    &mut sched,
+                return ((), None);
+            }
+            sched.failures.clear();
+            if let Err(error) = cleared {
+                let saved = self.fail_job(
+                    sched,
                     "IO",
                     format!("Cannot clear the list waveform cache: {error}"),
                 );
-                sched.pending_save.take()
-            } else {
-                let job = sched.job.as_mut().expect("checked");
-                job.clearing = false;
-                job.record.rebuild_cleared = true;
-                let record = job.mark_saved();
-                Some((record, sched.last_error.clone()))
+                return (
+                    (),
+                    saved.map(|(record, last_error)| (Some(record), last_error)),
+                );
             }
-        };
-        tracing::info!("Cleared the list waveform cache for a rebuild");
-        if let Some((record, last_error)) = save {
-            self.save_state(Some(record), last_error);
-        }
+            let job = sched.job.as_mut().expect("checked");
+            job.clearing = false;
+            job.record.rebuild_cleared = true;
+            let record = job.mark_saved();
+            ((), Some((Some(record), sched.last_error.clone())))
+        });
+        self.wake.notify_all();
     }
 
     /// Write a job state change decided under the scheduler lock.
     fn flush_pending_save(&self) {
         let pending = self.sched().pending_save.take();
-        if let Some((record, last_error)) = pending {
-            self.save_state(Some(record), last_error);
+        if let Some((seq, record, last_error)) = pending {
+            self.save_state(seq, Some(record), last_error);
         }
     }
 
@@ -3382,5 +3601,130 @@ mod tests {
         tracker.end(1);
         assert!(!tracker.contains(1));
         assert!(tracker.try_begin(10_000));
+    }
+
+    fn job_service(dir: &Path) -> ListWaveforms {
+        ListWaveforms::new(
+            ListOptions {
+                cache_root: dir.join("cache"),
+                cache_mb: 16,
+                workers: 1,
+                rate: 10,
+                pause_stats_on_playback: false,
+            },
+            "lib-test",
+            &dir.join("absent.db"),
+        )
+    }
+
+    fn running_record() -> JobRecord {
+        JobRecord {
+            id: "wfj-1-abcd".into(),
+            mode: JobMode::Missing,
+            mode_effective: JobMode::Missing,
+            state: JobState::Running,
+            paused: false,
+            started_at: 1,
+            updated_at: 1,
+            finished_at: None,
+            cursor: 0,
+            max_id: 100,
+            total: 100,
+            done: 0,
+            generated: 0,
+            skipped: 0,
+            failed: 0,
+            skipped_offline: 0,
+            rebuild_cleared: false,
+        }
+    }
+
+    fn saved_state(list: &ListWaveforms) -> JobState {
+        match wf_job::load(list.state_dir(), "lib-test") {
+            wf_job::Loaded::State(file) => file.job.expect("job").state,
+            _ => panic!("no state file"),
+        }
+    }
+
+    /// A worker's progress snapshot taken before a pause / stop but written after it
+    /// must not bring the running state back (and the job stays paused / stopped
+    /// after a restart).
+    #[test]
+    fn stale_job_state_snapshots_are_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        for (action, expected) in [("pause", JobState::Paused), ("stop", JobState::Cancelled)] {
+            let list = job_service(dir.path());
+            {
+                let mut sched = list.sched();
+                sched.job_generation += 1;
+                let generation = sched.job_generation;
+                sched.job = Some(ActiveJob::new(generation, running_record(), false, None));
+            }
+            // A worker finished a record and snapshots the running job...
+            let (seq, stale) = {
+                let mut sched = list.sched();
+                let record = sched.job.as_mut().unwrap().mark_saved();
+                (sched.next_save_seq(), record)
+            };
+            assert_eq!(stale.state, JobState::Running);
+            // ...the client pauses / stops before the worker writes it...
+            match action {
+                "pause" => list.pause_job(true).unwrap(),
+                _ => list.stop_job().unwrap(),
+            }
+            assert_eq!(saved_state(&list), expected, "{action}");
+            // ...and the late write is skipped.
+            list.save_state(seq, Some(stale), None);
+            assert_eq!(saved_state(&list), expected, "{action}");
+            list.shutdown();
+            drop(list);
+            let list = job_service(dir.path());
+            let restored = list.sched().job.as_ref().unwrap().record.state;
+            assert_eq!(restored, expected, "{action} after a restart");
+            assert_eq!(list.job_active(), expected == JobState::Paused);
+            fs::remove_file(list.state_dir().join(wf_job::STATE_FILE)).unwrap();
+        }
+    }
+
+    /// Records skipped for an offline root are requeued (and counted again) once the
+    /// root is online, and taken before the walk continues.
+    #[test]
+    fn offline_records_are_requeued_when_their_root_is_online() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = job_service(dir.path());
+        let mut job = ActiveJob::new(1, running_record(), false, None);
+        for id in [5, 6] {
+            job.in_flight.insert(id, 0);
+            job.finish_item(id, &Outcome::Offline("SFX".into()));
+        }
+        job.in_flight.insert(7, 0);
+        job.finish_item(7, &Outcome::Offline("NAS".into()));
+        assert_eq!((job.record.done, job.record.skipped_offline), (3, 3));
+        job.requeue_online(|root| root == "SFX");
+        assert_eq!(job.requeued, VecDeque::from([5, 6]));
+        assert_eq!((job.record.done, job.record.skipped_offline), (1, 1));
+        assert!(job.deferred.contains_key("NAS") && !job.deferred.contains_key("SFX"));
+        // Taken first, without reading the library.
+        job.exhausted = false;
+        let mut sched = list.sched();
+        sched.job = Some(job);
+        assert!(matches!(
+            list.next_job_item(&mut sched),
+            JobStep::Take(Job::Cache(5, 1))
+        ));
+        assert!(matches!(
+            list.next_job_item(&mut sched),
+            JobStep::Take(Job::Cache(6, 1))
+        ));
+        // Then the walk asks for the next ids (read outside the lock).
+        assert!(matches!(
+            list.next_job_item(&mut sched),
+            JobStep::Fetch {
+                generation: 1,
+                after: 0
+            }
+        ));
+        // Only one worker reads at a time.
+        assert!(matches!(list.next_job_item(&mut sched), JobStep::Idle));
     }
 }

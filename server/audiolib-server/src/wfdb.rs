@@ -256,6 +256,17 @@ impl WaveformsDb {
         }
     }
 
+    /// Blocking. Whether the database can be opened (created when it does not exist yet).
+    pub fn usable(&self) -> bool {
+        match self.connection(true) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::debug!(%error, "waveforms.db cannot be opened");
+                false
+            }
+        }
+    }
+
     /// Blocking. Delete every row (and drop queued ones) for a `rebuild` job (§9.5.1).
     pub fn clear(&self) -> Result<()> {
         lock(&self.queue).0.clear();
