@@ -71,7 +71,7 @@ pub use error::{NetworkFailure, RemoteError, Result, TlsFailure};
 pub use list_waveforms::{
     BatchItem, BatchReply, BatchStatus, DEFAULT_LIST_WAVEFORM_CACHE_BYTES, LIST_WAVEFORM_ENCODING,
     LIST_WAVEFORM_SHARD_IDS, ListWaveformStatus, ListWaveformStore, ListWaveformsCapability,
-    RemoteListWaveforms, ServerSettings, StoredListWaveform,
+    RemoteListWaveforms, ServerSettings, StoredListWaveform, UNSUPPORTED_ENCODING,
 };
 pub use manage::{
     Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS, ManageMode, RemoveReport,

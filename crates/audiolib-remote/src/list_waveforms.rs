@@ -21,6 +21,14 @@
 //!   [`RemoteClient::list_waveform_status`]: `GET`/`PATCH /settings` and
 //!   `GET /waveforms/status` for the 服务器音效库 page.
 //!
+//! * Compact `i8-minmax-base64` items: requested (field `encoding`) only when
+//!   `list_waveforms.encodings` of `GET /capabilities` lists that encoding and a
+//!   `waveforms.db` store was attached ([`RemoteListWaveforms::with_i8_store`]). The reply
+//!   must echo the encoding (top level and any per-item value), otherwise it is a protocol
+//!   error. `UNSUPPORTED_ENCODING` switches this client back to the int16 path. Entity tags
+//!   are compared in full, including the `-l1i8` suffix. Peaks are expanded to the int16
+//!   scale at true amplitude for display.
+//!
 //! Retry policy (only still-visible `pending` ids, at most 5 times; `root_offline` after
 //! `/roots` reports the root online; no automatic retry of `missing` or `error`) and the
 //! audition yield (no POST during the first 3 s after a stream or preview starts) belong to
@@ -29,9 +37,11 @@ use crate::client::{RemoteClient, call_cancellable, retry_after};
 use crate::error::{RemoteError, Result};
 use crate::manage::Capabilities;
 use audiolib_core::{
-    LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
+    LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_I8, LIST_WAVEFORM_ENCODING_VERSION,
+    LIST_WAVEFORM_I8_ETAG_SUFFIX, ListWaveform, ListWaveformBatch, ListWaveformI8,
     ListWaveformItem, ListWaveformSource, ListWaveformState, MAX_LIST_WAVEFORM_IDS,
 };
+use audiolib_db::{WaveformsDb, WaveformsDbRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Read;
@@ -59,6 +69,8 @@ const CAPABILITY_RETRY: Duration = Duration::from_secs(30);
 const BUSY_DEFAULT: Duration = Duration::from_secs(1);
 const SHARD_MAGIC: &[u8; 8] = b"ALXLWS1\n";
 const SHARD_EXTENSION: &str = "lws";
+/// Error code of a server that rejects the requested `encoding`.
+pub const UNSUPPORTED_ENCODING: &str = "UNSUPPORTED_ENCODING";
 
 /// `list_waveforms` of `GET /capabilities` (§9.2).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +84,8 @@ pub struct ListWaveformsCapability {
     pub max_ids: usize,
     /// `peaks` encoding.
     pub encoding: String,
+    /// Additional encodings the server accepts in a request's `encoding` field.
+    pub encodings: Vec<String>,
 }
 
 impl ListWaveformsCapability {
@@ -80,6 +94,13 @@ impl ListWaveformsCapability {
         self.version == LIST_WAVEFORM_ENCODING_VERSION
             && self.buckets.contains(&LIST_WAVEFORM_COLUMNS)
             && self.encoding == LIST_WAVEFORM_ENCODING
+    }
+
+    /// Whether a request may ask for `i8-minmax-base64` (listed in `encodings`).
+    pub fn offers_i8(&self) -> bool {
+        self.encodings
+            .iter()
+            .any(|encoding| encoding == LIST_WAVEFORM_ENCODING_I8)
     }
 
     /// Ids per request: the server's `max_ids`, at most the UI page size.
@@ -123,6 +144,9 @@ pub struct BatchItem {
     pub error_code: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+    /// Per-item encoding echo, when the server sends one.
+    #[serde(default)]
+    pub encoding: Option<String>,
 }
 
 /// `POST /waveforms` reply.
@@ -137,6 +161,9 @@ pub struct BatchReply {
     pub retry_after: Option<u64>,
     #[serde(default)]
     pub items: Vec<BatchItem>,
+    /// Echo of the requested `encoding` (absent on the int16 path of older servers).
+    #[serde(default)]
+    pub encoding: Option<String>,
 }
 
 /// `GET /settings` / `PATCH /settings` reply (§9.2).
@@ -201,6 +228,19 @@ impl RemoteClient {
         known: &BTreeMap<i64, String>,
         cancel: &AtomicBool,
     ) -> Result<BatchReply> {
+        self.list_waveform_batch_encoded(ids, known, None, cancel)
+    }
+
+    /// [`RemoteClient::list_waveform_batch`] with an optional request `encoding` (sent only
+    /// when `Some`). A `UNSUPPORTED_ENCODING` error body is reported as
+    /// [`RemoteError::Server`] with that code.
+    pub fn list_waveform_batch_encoded(
+        &self,
+        ids: &[i64],
+        known: &BTreeMap<i64, String>,
+        encoding: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<BatchReply> {
         if ids.is_empty() || ids.len() > MAX_LIST_WAVEFORM_IDS || ids.iter().any(|id| *id <= 0) {
             return Err(RemoteError::Validation(format!(
                 "POST /waveforms takes 1..={MAX_LIST_WAVEFORM_IDS} positive ids"
@@ -214,6 +254,9 @@ impl RemoteClient {
         let mut body = serde_json::json!({ "ids": ids, "buckets": LIST_WAVEFORM_COLUMNS });
         if !known.is_empty() {
             body["known"] = serde_json::json!(known);
+        }
+        if let Some(encoding) = encoding {
+            body["encoding"] = serde_json::json!(encoding);
         }
         let body = serde_json::to_vec(&body)
             .map_err(|error| RemoteError::Validation(format!("POST /waveforms: {error}")))?;
@@ -264,6 +307,14 @@ impl RemoteClient {
         let text = decompress(context, encoding.as_deref(), reply)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
+        let parsed: crate::error::ErrorBody = serde_json::from_str(&text).unwrap_or_default();
+        if parsed.error_code == UNSUPPORTED_ENCODING {
+            return Err(RemoteError::Server {
+                status,
+                code: UNSUPPORTED_ENCODING.into(),
+                message: format!("{context}: {}", parsed.message),
+            });
+        }
         let error = match RemoteError::from_response(status, &text, context, retry) {
             RemoteError::NotFound(_) | RemoteError::Server { status: 405, .. } => {
                 RemoteError::Unsupported(format!("{context}: the server has no list Waveforms"))
@@ -616,6 +667,10 @@ pub struct RemoteListWaveforms {
     store: ListWaveformStore,
     capability: Mutex<Probe>,
     in_flight: Mutex<()>,
+    /// `waveforms.db` for compact i8 items; `None` keeps the int16 path only.
+    i8_store: Option<WaveformsDb>,
+    /// Set after `UNSUPPORTED_ENCODING`: this client stays on the int16 path.
+    i8_rejected: AtomicBool,
 }
 
 impl RemoteListWaveforms {
@@ -630,7 +685,32 @@ impl RemoteListWaveforms {
             store,
             capability: Mutex::new(Probe::Unknown),
             in_flight: Mutex::new(()),
+            i8_store: None,
+            i8_rejected: AtomicBool::new(false),
         }
+    }
+
+    /// Attach a `waveforms.db` store, enabling `i8-minmax-base64` requests when the
+    /// server's capability lists that encoding.
+    pub fn with_i8_store(mut self, store: WaveformsDb) -> Self {
+        self.i8_store = Some(store);
+        self
+    }
+
+    /// `waveforms.db` beside a server library's list cache directory
+    /// (`<cache>/waveforms/server/<library hash>/waveforms.db`).
+    pub fn i8_store_path(cache_root: &Path, library_id: &str) -> PathBuf {
+        ListWaveformStore::library_directory(cache_root, library_id)
+            .with_file_name(audiolib_db::WAVEFORMS_DB_FILE)
+    }
+
+    /// Whether the next lookup sends `encoding: i8-minmax-base64`.
+    pub fn requests_i8(&self) -> bool {
+        self.i8_store.is_some()
+            && !self.i8_rejected.load(Ordering::Acquire)
+            && self
+                .capability()
+                .is_some_and(|capability| capability.offers_i8())
     }
 
     /// Use already fetched capabilities instead of probing `GET /capabilities`.
@@ -710,6 +790,18 @@ impl RemoteListWaveforms {
         if ids.is_empty() {
             return Ok(ListWaveformBatch::default());
         }
+        if capability.offers_i8()
+            && !self.i8_rejected.load(Ordering::Acquire)
+            && let Some(i8_store) = &self.i8_store
+        {
+            match self.lookup_i8(i8_store, &ids, cancel) {
+                Err(RemoteError::Server { code, .. }) if code == UNSUPPORTED_ENCODING => {
+                    tracing::info!("server rejected i8 list Waveforms; using int16");
+                    self.i8_rejected.store(true, Ordering::Release);
+                }
+                other => return other,
+            }
+        }
         let stored = self.store.get_many(&ids);
         let known: BTreeMap<i64, String> = stored
             .iter()
@@ -727,17 +819,15 @@ impl RemoteListWaveforms {
         };
         let reply = match reply {
             Ok(reply) => reply,
-            Err(RemoteError::Busy { retry_after, .. }) => {
-                return Ok(ListWaveformBatch {
-                    deferred: Some(
-                        retry_after
-                            .map_or(BUSY_DEFAULT, |seconds| Duration::from_secs(seconds.max(1))),
-                    ),
-                    ..ListWaveformBatch::default()
-                });
-            }
+            Err(RemoteError::Busy { retry_after, .. }) => return Ok(busy(retry_after)),
             Err(error) => return Err(error),
         };
+        self.check_reply(&reply, None)?;
+        Ok(self.resolve(&ids, reply, &stored))
+    }
+
+    /// Library, bucket and encoding echo checks shared by both encodings.
+    fn check_reply(&self, reply: &BatchReply, requested: Option<&str>) -> Result<()> {
         if reply.library_id != self.library_id {
             return Err(RemoteError::LibraryChanged(format!(
                 "POST /waveforms answered for library {} instead of the open snapshot's; reply discarded",
@@ -750,7 +840,69 @@ impl RemoteListWaveforms {
                 reply.buckets
             )));
         }
-        Ok(self.resolve(&ids, reply, &stored))
+        if let Some(requested) = requested {
+            if reply.encoding.as_deref() != Some(requested) {
+                return Err(RemoteError::Protocol(format!(
+                    "POST /waveforms answered with encoding {:?} instead of {requested}",
+                    reply.encoding
+                )));
+            }
+            if reply.items.iter().any(|item| {
+                item.encoding
+                    .as_deref()
+                    .is_some_and(|value| value != requested)
+            }) {
+                return Err(RemoteError::Protocol(
+                    "POST /waveforms mixed encodings in one reply".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The `i8-minmax-base64` lookup, cached in `waveforms.db`.
+    fn lookup_i8(
+        &self,
+        i8_store: &WaveformsDb,
+        ids: &[i64],
+        cancel: &AtomicBool,
+    ) -> Result<ListWaveformBatch> {
+        let stored: HashMap<i64, WaveformsDbRow> = i8_store
+            .get_many(ids)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "waveforms.db read failed");
+                Vec::new()
+            })
+            .into_iter()
+            .filter(|row| row.encoding.as_deref() == Some(LIST_WAVEFORM_ENCODING_I8))
+            .map(|row| (row.file_id, row))
+            .collect();
+        let known: BTreeMap<i64, String> = stored
+            .iter()
+            .map(|(id, row)| (*id, row.etag.clone()))
+            .collect();
+        let reply = {
+            let _one = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if cancel.load(Ordering::Acquire) {
+                return Err(RemoteError::Cancelled);
+            }
+            self.client.list_waveform_batch_encoded(
+                ids,
+                &known,
+                Some(LIST_WAVEFORM_ENCODING_I8),
+                cancel,
+            )
+        };
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(RemoteError::Busy { retry_after, .. }) => return Ok(busy(retry_after)),
+            Err(error) => return Err(error),
+        };
+        self.check_reply(&reply, Some(LIST_WAVEFORM_ENCODING_I8))?;
+        Ok(resolve_i8(i8_store, ids, reply, &stored))
     }
 
     fn resolve(
@@ -831,6 +983,108 @@ impl RemoteListWaveforms {
                 .map(|seconds| Duration::from_secs(seconds.clamp(1, 30))),
             deferred: None,
         }
+    }
+}
+
+fn busy(retry_after: Option<u64>) -> ListWaveformBatch {
+    ListWaveformBatch {
+        deferred: Some(
+            retry_after.map_or(BUSY_DEFAULT, |seconds| Duration::from_secs(seconds.max(1))),
+        ),
+        ..ListWaveformBatch::default()
+    }
+}
+
+/// Parse one `ok` i8 item: its entity tag must carry the `-l1i8` suffix.
+pub(crate) fn parse_i8_item(
+    item: &BatchItem,
+) -> std::result::Result<(String, ListWaveformI8), String> {
+    match (&item.etag, &item.peaks, item.n) {
+        (Some(etag), Some(peaks), Some(n)) => {
+            if !etag
+                .trim_end_matches('"')
+                .ends_with(LIST_WAVEFORM_I8_ETAG_SUFFIX)
+            {
+                return Err(format!(
+                    "i8 item entity tag {etag} lacks {LIST_WAVEFORM_I8_ETAG_SUFFIX}"
+                ));
+            }
+            ListWaveformI8::from_base64_peaks(peaks, n)
+                .map(|waveform| (etag.clone(), waveform))
+                .map_err(|error| error.to_string())
+        }
+        _ => Err("incomplete ok item".into()),
+    }
+}
+
+fn resolve_i8(
+    i8_store: &WaveformsDb,
+    ids: &[i64],
+    reply: BatchReply,
+    stored: &HashMap<i64, WaveformsDbRow>,
+) -> ListWaveformBatch {
+    let previous = |id: i64| stored.get(&id).map(|row| row.peaks.to_list_waveform());
+    let mut answered = HashSet::new();
+    let mut items = Vec::new();
+    for item in reply.items {
+        if !ids.contains(&item.id) || !answered.insert(item.id) {
+            continue;
+        }
+        let id = item.id;
+        let state = match item.status {
+            BatchStatus::Ok => match parse_i8_item(&item) {
+                Ok((etag, peaks)) => {
+                    let waveform = peaks.to_list_waveform();
+                    let row = WaveformsDbRow {
+                        file_id: id,
+                        etag,
+                        encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
+                        src_mtime: None,
+                        src_size: None,
+                        peaks,
+                    };
+                    if let Err(error) = i8_store.upsert(&row) {
+                        tracing::warn!(%error, "waveforms.db write failed");
+                    }
+                    ListWaveformState::Ready { waveform }
+                }
+                Err(message) => {
+                    tracing::warn!(id, %message, "malformed i8 list Waveform item");
+                    ListWaveformState::Failed { message }
+                }
+            },
+            // Entity tags are compared in full, suffix included.
+            BatchStatus::NotModified => match stored.get(&id) {
+                Some(row) if item.etag.as_ref().is_none_or(|etag| *etag == row.etag) => {
+                    ListWaveformState::Ready {
+                        waveform: row.peaks.to_list_waveform(),
+                    }
+                }
+                _ => ListWaveformState::Pending { previous: None },
+            },
+            BatchStatus::Pending | BatchStatus::Unknown => ListWaveformState::Pending {
+                previous: previous(id),
+            },
+            BatchStatus::Missing => ListWaveformState::Missing,
+            BatchStatus::RootOffline => ListWaveformState::RootOffline {
+                root: item.root.unwrap_or_default(),
+                previous: previous(id),
+            },
+            BatchStatus::Error => ListWaveformState::Failed {
+                message: item
+                    .message
+                    .or(item.error_code)
+                    .unwrap_or_else(|| "error".into()),
+            },
+        };
+        items.push(ListWaveformItem { id, state });
+    }
+    ListWaveformBatch {
+        items,
+        retry_after: reply
+            .retry_after
+            .map(|seconds| Duration::from_secs(seconds.clamp(1, 30))),
+        deferred: None,
     }
 }
 
@@ -1227,5 +1481,241 @@ mod tests {
             ("yielding", 4, Some(6))
         );
         assert_eq!(status.yield_reason.as_deref(), Some("audio"));
+    }
+}
+
+#[cfg(test)]
+mod i8_tests {
+    use super::*;
+    use crate::test_server::{TestResponse, TestServer};
+    use std::sync::Arc;
+
+    const LIBRARY: &str = "lib-i8";
+    const CAPS_I16: &str = r#"{"manage_mode":"all","list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64"}}"#;
+    const CAPS_I8: &str = r#"{"manage_mode":"all","list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64","encodings":["i16le-minmax-base64","i8-minmax-base64"]}}"#;
+
+    fn b64(bytes: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let w = (u32::from(chunk[0]) << 16)
+                | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*chunk.get(2).unwrap_or(&0));
+            for i in 0..4 {
+                out.push(if i <= chunk.len() {
+                    T[(w >> (18 - 6 * i)) as usize & 63] as char
+                } else {
+                    '='
+                });
+            }
+        }
+        out
+    }
+
+    type Posts = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    /// A server answering `/capabilities` with `caps` and every POST with `reply(body)`.
+    fn server(
+        caps: &'static str,
+        reply: impl Fn(&serde_json::Value) -> TestResponse + Send + Sync + 'static,
+    ) -> (TestServer, Posts) {
+        let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+        let seen = posts.clone();
+        let server = TestServer::start(move |request| match request.path.as_str() {
+            "/api/v1/capabilities" => TestResponse::json(200, caps),
+            "/api/v1/waveforms" => {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                seen.lock().unwrap().push(body.clone());
+                reply(&body)
+            }
+            other => panic!("unexpected {other}"),
+        });
+        (server, posts)
+    }
+
+    fn service(server: &TestServer, directory: &Path, with_store: bool) -> RemoteListWaveforms {
+        let service = RemoteListWaveforms::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            LIBRARY,
+            ListWaveformStore::new(directory.join("list"), DEFAULT_LIST_WAVEFORM_CACHE_BYTES),
+        );
+        if with_store {
+            service.with_i8_store(WaveformsDb::open(&directory.join("waveforms.db")).unwrap())
+        } else {
+            service
+        }
+    }
+
+    fn i8_reply(items: serde_json::Value) -> TestResponse {
+        TestResponse::json(
+            200,
+            &serde_json::json!({"library_id": LIBRARY, "buckets": 128,
+                "encoding": "i8-minmax-base64", "items": items})
+            .to_string(),
+        )
+    }
+
+    fn i16_reply() -> TestResponse {
+        TestResponse::json(
+            200,
+            &serde_json::json!({"library_id": LIBRARY, "buckets": 128,
+                "items": [{"id": 1, "status": "missing"}]})
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn encoding_is_sent_only_when_the_capability_lists_it_and_a_store_exists() {
+        let cancel = AtomicBool::new(false);
+        for (caps, with_store, expect_i8) in [
+            (CAPS_I16, true, false),
+            (CAPS_I8, false, false),
+            (CAPS_I8, true, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (server, posts) = server(caps, move |body| {
+                if body.get("encoding").is_some() {
+                    i8_reply(serde_json::json!([{"id": 1, "status": "missing"}]))
+                } else {
+                    i16_reply()
+                }
+            });
+            let service = service(&server, directory.path(), with_store);
+            assert_eq!(service.requests_i8(), expect_i8);
+            let batch = service.lookup(&[1], &cancel).unwrap();
+            assert_eq!(batch.items[0].state, ListWaveformState::Missing);
+            let body = posts.lock().unwrap()[0].clone();
+            assert_eq!(
+                body.get("encoding").and_then(|value| value.as_str()),
+                expect_i8.then_some(LIST_WAVEFORM_ENCODING_I8),
+                "{caps} {with_store}"
+            );
+        }
+    }
+
+    #[test]
+    fn ok_items_are_stored_in_waveforms_db_and_etags_compare_in_full() {
+        let directory = tempfile::tempdir().unwrap();
+        let peaks = b64(&[0x80, 0x7f, 0xf6, 0x0a]); // (-128 → -127, 127), (-10, 10)
+        let (server, posts) = server(CAPS_I8, move |body| {
+            if body.get("known").is_none() {
+                i8_reply(serde_json::json!([
+                    {"id": 1, "status": "ok", "etag": "W/\"e1-l1i8\"", "n": 2, "peaks": peaks},
+                    {"id": 2, "status": "ok", "etag": "W/\"e2-l1\"", "n": 0, "peaks": ""},
+                    {"id": 3, "status": "ok", "etag": "W/\"e3-l1i8\"", "n": 1, "peaks": b64(&[5, 4])},
+                    {"id": 4, "status": "ok", "etag": "W/\"e4-l1i8\"", "n": 2, "peaks": b64(&[1, 2])}
+                ]))
+            } else {
+                i8_reply(serde_json::json!([
+                    {"id": 1, "status": "not_modified", "etag": "W/\"e1-l1i8\""},
+                    {"id": 2, "status": "not_modified", "etag": "W/\"e1-l1\""}
+                ]))
+            }
+        });
+        let cancel = AtomicBool::new(false);
+        {
+            let service = service(&server, directory.path(), true);
+            let batch = service.lookup(&[1, 2, 3, 4], &cancel).unwrap();
+            assert_eq!(
+                batch.items[0].state,
+                ListWaveformState::Ready {
+                    waveform: ListWaveform::new(1, vec![-32767, 32767, -2580, 2580]).unwrap()
+                }
+            );
+            // Wrong suffix, min > max and a length mismatch are rejected per item.
+            for item in &batch.items[1..] {
+                assert!(
+                    matches!(item.state, ListWaveformState::Failed { .. }),
+                    "{item:?}"
+                );
+            }
+            assert!(service.store().get(1).is_none(), "int16 cache untouched");
+        }
+        // Reopen: the row is still there, with its encoding; `known` carries the full tag.
+        let reopened = WaveformsDb::open(&directory.path().join("waveforms.db")).unwrap();
+        let row = reopened.get(1).unwrap().unwrap();
+        assert_eq!(row.etag, "W/\"e1-l1i8\"");
+        assert_eq!(row.encoding.as_deref(), Some(LIST_WAVEFORM_ENCODING_I8));
+        assert_eq!(row.peaks.values, vec![-127, 127, -10, 10]);
+        assert!(reopened.get(2).unwrap().is_none());
+        let service = service(&server, directory.path(), true);
+        reopened
+            .upsert(&WaveformsDbRow {
+                file_id: 2,
+                etag: "W/\"e1-l1i8\"".into(),
+                ..row.clone()
+            })
+            .unwrap();
+        let batch = service.lookup(&[1, 2], &cancel).unwrap();
+        assert_eq!(
+            posts.lock().unwrap()[1]["known"],
+            serde_json::json!({"1": "W/\"e1-l1i8\"", "2": "W/\"e1-l1i8\""})
+        );
+        assert!(matches!(
+            batch.items[0].state,
+            ListWaveformState::Ready { .. }
+        ));
+        // `W/"e1-l1"` differs from the stored `W/"e1-l1i8"` only by its suffix: not a match.
+        assert_eq!(
+            batch.items[1].state,
+            ListWaveformState::Pending { previous: None }
+        );
+    }
+
+    #[test]
+    fn encoding_mismatch_and_mixed_encodings_are_protocol_errors() {
+        let cancel = AtomicBool::new(false);
+        for reply in [
+            serde_json::json!({"library_id": LIBRARY, "items": []}),
+            serde_json::json!({"library_id": LIBRARY, "encoding": "i16le-minmax-base64", "items": []}),
+            serde_json::json!({"library_id": LIBRARY, "encoding": "i8-minmax-base64",
+                "items": [{"id": 1, "status": "missing", "encoding": "i16le-minmax-base64"}]}),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let text = reply.to_string();
+            let (server, _) = server(CAPS_I8, move |_| TestResponse::json(200, &text));
+            let service = service(&server, directory.path(), true);
+            assert!(
+                matches!(service.lookup(&[1], &cancel), Err(RemoteError::Protocol(_))),
+                "{reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_encoding_falls_back_to_int16() {
+        let directory = tempfile::tempdir().unwrap();
+        let (server, posts) = server(CAPS_I8, |body| {
+            if body.get("encoding").is_some() {
+                TestResponse::json(
+                    400,
+                    r#"{"error_code":"UNSUPPORTED_ENCODING","message":"no i8"}"#,
+                )
+            } else {
+                i16_reply()
+            }
+        });
+        let service = service(&server, directory.path(), true);
+        let cancel = AtomicBool::new(false);
+        let batch = service.lookup(&[1], &cancel).unwrap();
+        assert_eq!(batch.items[0].state, ListWaveformState::Missing);
+        assert!(!service.requests_i8());
+        service.lookup(&[1], &cancel).unwrap();
+        let posts = posts.lock().unwrap();
+        assert_eq!(posts.len(), 3);
+        assert!(posts[0].get("encoding").is_some());
+        assert!(posts[1].get("encoding").is_none());
+        assert!(posts[2].get("encoding").is_none());
+    }
+
+    #[test]
+    fn store_path_sits_beside_the_list_cache() {
+        let root = Path::new("cache");
+        let path = RemoteListWaveforms::i8_store_path(root, LIBRARY);
+        assert_eq!(path.file_name().unwrap(), "waveforms.db");
+        assert_eq!(
+            path.parent(),
+            ListWaveformStore::library_directory(root, LIBRARY).parent()
+        );
     }
 }

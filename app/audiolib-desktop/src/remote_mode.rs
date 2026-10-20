@@ -701,14 +701,25 @@ impl Controller {
         let chinese = self.chinese.load(Ordering::Acquire);
         let secrets = self.secrets();
         let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
-        let service = Arc::new(
-            RemoteListWaveforms::new(
-                client.clone(),
-                state.library_id.clone(),
-                ListWaveformStore::for_library(&cache_root, &state.library_id),
-            )
-            .with_capabilities(&capabilities),
-        );
+        let mut service = RemoteListWaveforms::new(
+            client.clone(),
+            state.library_id.clone(),
+            ListWaveformStore::for_library(&cache_root, &state.library_id),
+        )
+        .with_capabilities(&capabilities);
+        // Compact i8 items are requested only when the server lists that encoding.
+        if capabilities
+            .list_waveforms
+            .as_ref()
+            .is_some_and(|capability| capability.offers_i8())
+        {
+            let path = RemoteListWaveforms::i8_store_path(&cache_root, &state.library_id);
+            match audiolib_db::WaveformsDb::open(&path) {
+                Ok(store) => service = service.with_i8_store(store),
+                Err(error) => tracing::warn!(%error, "waveforms.db unavailable; using int16"),
+            }
+        }
+        let service = Arc::new(service);
         let writer = RemoteWriter::new(
             client,
             RemoteCache::new(&self.data_root()),
