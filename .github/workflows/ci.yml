@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
   pull_request:
 
 permissions:
@@ -16,6 +16,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  db-macos-arm64:
+    name: macOS ARM64 (database tests)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # Use a native host toolchain and override the Windows Cargo target.
+      RUSTUP_TOOLCHAIN: 1.97.1-aarch64-apple-darwin
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned native Rust
+        run: rustup toolchain install 1.97.1-aarch64-apple-darwin --profile minimal
+      - name: Verify native compiler and C tooling
+        run: |
+          test "$(uname -m)" = arm64
+          rustc -vV
+          xcrun --find clang
+      - name: Test database library and integrations
+        run: cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin
+
   windows:
     name: Windows (fmt, clippy, test)
     runs-on: windows-latest

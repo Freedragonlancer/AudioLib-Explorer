@@ -2,7 +2,7 @@
 
 ## 7ec84ed 跨平台与资源复审修复（2026-10-20，0.4.11 开发构建）
 
-按主报告与逐行补充报告处理，并保留另一并行 GUI 测量任务的未提交改动；先以 merge 合入 `origin/main`（`afb2f04`），合并提交 `9bdc9c5`，两个文档冲突均保留双方章节。
+按主报告与逐行补充报告处理，并与同工作区 GUI 测量任务协调提交；先以 merge 合入 `origin/main`（`afb2f04`），合并提交 `9bdc9c5`，两个文档冲突均保留双方章节。
 
 | 评审项 | 修复与验证边界 |
 | --- | --- |
@@ -13,7 +13,7 @@
 | 补充 P2-2 辅助缓存/线程 | 每个辅助 reader 从 64MiB 降为 8MiB，数量为 `min(available_parallelism()-1,7)`；合并固定 quantile 分区及短语分组，测试 0–7 个 helper 的精确结果与分区不重不漏。最多七个辅助缓存预算由 448MiB 降为 56MiB；不是整个进程 RSS 承诺。真实副本测量又发现 `check_library()` 复用 mapped reader 复制整库使全流程工作集升到 19.54GB（采样 private bytes 约 129MB）；完整性验证改为持有原 read gate 的独立只读、禁用 mmap 连接，源/目标均为 0，避免验证结束后将整库映射留在搜索池中 |
 | 补充 P3-1 串行退化不可见 | 每次 fallback 输出固定原因 debug 日志并计数，无查询或路径；真实 Busy/Locked/CannotOpen 原因优先于清理产生的 Interrupted。新 `search-benchmark --concurrent-writer` 仅操作新建合成库，报告基线/并发 P95、提交数和各原因计数，不冒充完整扫描压力 |
 | 补充 P3-2 FFI 生命周期 | 测试重复注册 Busy 不改变活动 generation；实际连接关闭释放 rank/preparation 两类载荷；用过期 Weak 注入模拟句柄地址复用分支，验证新注册成功，无悬空指针解引用。本轮未执行 Miri/ASan |
-| 原有 macOS 两项失败 | Unicode 文件名使用不同前后缀，仍覆盖 NFC/NFD/ASCII 的检索折叠；重定位修复实际的 `/var`→`/private/var` canonical source 不一致，已有源别名回归扩展至全部平台，并保留物理移动后缺失源路径处理 |
+| 原有 macOS 两项失败 | Unicode 文件名使用不同前后缀，仍覆盖 NFC/NFD/ASCII 的检索折叠；重定位源根查询使用原始路径、完整 canonical 路径及 canonical 父目录加原始 basename 三个参数化候选，按唯一的已存根路径计算后缀，避免 `/var`→`/private/var` 和不区分大小写卷丢失旧拼写；歧义根报 Validation。大小写改名回归不再跳过不区分大小写卷，新增 Unix 父符号链接加 Unicode 改名/取消回归，保留 Windows 别名无操作契约 |
 
 实际完整检查、升级测量与固定安装结果记录在 [验证报告](Rust_Validation.md)。
 
