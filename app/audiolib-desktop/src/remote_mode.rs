@@ -180,6 +180,23 @@ pub fn open_remote_startup_with_progress(
     })
 }
 
+/// After a startup that opened the main window: open 音效库管理 when the startup sync
+/// failed (unreachable, unauthorized, snapshot invalid or a failed rebuild) or the
+/// server's library_id changed; a newer revision alone does not.
+fn startup_sync_opens_manager(result: &Result<audiolib_remote::SyncOutcome, RemoteError>) -> bool {
+    match result {
+        Ok(outcome) => {
+            outcome.library_changed
+                || outcome
+                    .previous
+                    .as_ref()
+                    .is_some_and(|previous| previous.library_id != outcome.state.library_id)
+        }
+        Err(RemoteError::Cancelled) => false,
+        Err(_) => true,
+    }
+}
+
 /// Whether startup must open 音效库管理: only without a cached snapshot of the
 /// configured server. A newer server revision just syncs in the background.
 fn startup_needs_manager(cached: Option<&CacheState>, configured_url: &str) -> bool {
@@ -247,6 +264,9 @@ pub(super) struct RemoteRuntime {
     /// A known replacement blocks writes until its snapshot is actually opened.
     /// Later offline/check failures must never re-enable stale cached record IDs.
     library_changed: bool,
+    /// The startup sync is still running: its failure or a library_id change opens
+    /// 音效库管理 (a plain revision change does not).
+    startup_check: bool,
     /// Unix seconds of the next automatic revision check, when scheduled.
     next_check: Option<u64>,
     /// A new revision is known but automatic sync waits for the server to settle
@@ -974,6 +994,7 @@ impl Controller {
     }
 
     /// Server record id of a playback-cache path handed to the engine.
+    #[allow(dead_code)]
     pub(super) fn remote_audio_id(&self, path: &Path) -> Option<i64> {
         self.remote.lock().unwrap().audio_ids.get(path).copied()
     }
@@ -1034,6 +1055,9 @@ impl Controller {
 
     /// Count one finished play off the audio and UI threads. Source/provider changes
     /// and close drain registered workers through their reply and listener settlement.
+    // Unused since plays are no longer sent to the server (kept for the pending
+    // client-side server-mode play history store).
+    #[allow(dead_code)]
     pub(super) fn remote_record_play(self: &Arc<Self>, id: i64, generation: u64) {
         let source_generation = self.source_generation.load(Ordering::Acquire);
         let worker = {
@@ -1130,6 +1154,8 @@ impl Controller {
                     let cached = RemoteCache::new(&root).active();
                     if startup_needs_manager(cached.as_ref(), &url) {
                         ui.invoke_open_data_source();
+                    } else {
+                        self.remote.lock().unwrap().startup_check = true;
                     }
                 }
             }
@@ -2046,8 +2072,14 @@ impl Controller {
         cache: &RemoteCache,
     ) {
         let chinese = self.chinese.load(Ordering::Acquire);
+        let startup_check = std::mem::take(&mut self.remote.lock().unwrap().startup_check);
         if self.config.lock().unwrap().data_source.mode != DataSourceMode::Server {
             return;
+        }
+        if startup_check && startup_sync_opens_manager(&result) && !ui.get_library_visible() {
+            // Unreachable server, rejected token, unusable snapshot or a new
+            // library_id: show the reason in 音效库管理 rather than the main window.
+            ui.invoke_open_data_source();
         }
         match result {
             Ok(outcome) => {
@@ -3399,6 +3431,42 @@ mod tests {
             Some(&cached(794)),
             "https://other.example.test"
         ));
+    }
+
+    #[test]
+    fn startup_sync_opens_the_manager_only_on_failure_or_a_new_library() {
+        use super::startup_sync_opens_manager;
+        let state = |library_id: &str, revision| audiolib_remote::CacheState {
+            library_id: library_id.into(),
+            revision,
+            ..Default::default()
+        };
+        let outcome = |previous: Option<audiolib_remote::CacheState>, changed| {
+            Ok(audiolib_remote::SyncOutcome {
+                state: state("library", 794),
+                downloaded: true,
+                library_changed: changed,
+                previous,
+                elapsed_ms: 0,
+            })
+        };
+        // r793 -> r794 of the same library: stay on the main window.
+        assert!(!startup_sync_opens_manager(&outcome(
+            Some(state("library", 793)),
+            false
+        )));
+        assert!(startup_sync_opens_manager(&outcome(
+            Some(state("other", 793)),
+            false
+        )));
+        assert!(startup_sync_opens_manager(&outcome(None, true)));
+        assert!(startup_sync_opens_manager(&Err(RemoteError::Unreachable(
+            "x".into()
+        ))));
+        assert!(startup_sync_opens_manager(&Err(RemoteError::Snapshot(
+            "bad".into()
+        ))));
+        assert!(!startup_sync_opens_manager(&Err(RemoteError::Cancelled)));
     }
     use audiolib_remote::{
         CacheState, CachedIdentity, RemoteCache, RemoteRoot, RemoteSecrets, RevisionCheck,
