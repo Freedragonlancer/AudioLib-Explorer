@@ -653,7 +653,10 @@ export component AppWindow inherits Window {
     in property <bool> ds-syncing: false;
     in property <bool> ds-applying: false;
     in property <float> ds-progress: 0;
+    in property <string> ds-decompression-info: "";
+    in property <float> ds-decompression-progress: -1;
     private property <float> ds-motion: root.ds-syncing && root.ds-progress < 0 ? (1 - cos(360deg * mod(animation-tick(), 2s) / 2s)) / 2 : 0;
+    private property <float> ds-decompression-motion: root.ds-syncing && root.ds-decompression-progress < 0 ? (1 - cos(360deg * mod(animation-tick(), 2s) / 2s)) / 2 : 0;
     private property <duration> ds-started;
     private property <string> ds-elapsed: (root.chinese ? "已用时 " : "Elapsed: ") + floor((animation-tick() - root.ds-started) / 1s) + (root.chinese ? " 秒" : " s");
     changed ds-syncing => { if root.ds-syncing { root.ds-started = animation-tick(); } }
@@ -1988,15 +1991,22 @@ export component AppWindow inherits Window {
                             Action { width: 110px; active: root.sm-page == 2; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "缓存与导出" : "Cache and export"; clicked => { root.sm-page = 2; root.sm-page-selected(2); } }
                             Rectangle { horizontal-stretch: 1; }
                         }
-                        if root.library-visible && root.sm-server && root.sm-page == 2: VerticalLayout { spacing: 6px;
+                        if root.library-visible && root.sm-server && root.sm-page == 2: VerticalLayout { vertical-stretch: 0; spacing: 6px;
                             Text { text: root.sm-cache-info; color: Theme.ink; font-size: 11px; wrap: word-wrap; }
                             Label { wrap: word-wrap; font-size: 11px; color: Theme.muted; text: root.chinese ? "快照按服务器音效库（library id）缓存，同一服务器的局域网和外网配置共用一份。删除服务器配置不会删除缓存或数据目录。" : "Snapshots are cached per server library (library id), shared by a server's LAN and external profiles. Deleting a profile never deletes caches or data directories."; }
                             if root.sm-active: HorizontalLayout { height: 32px; spacing: 8px;
                                 Action { width: 110px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
-                                Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.ds-sync-info; }
+                                if !root.ds-syncing: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.ds-sync-info; }
                             }
+                            if root.sm-active && root.ds-syncing: Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
                             if root.sm-active && root.ds-syncing: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
                                 Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                            }
+                            if root.sm-active && root.ds-syncing && root.ds-decompression-info != "": VerticalLayout { vertical-stretch: 0; spacing: 6px;
+                                Label { wrap: word-wrap; font-size: 11px; text: root.ds-decompression-info; }
+                                Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
+                                    Rectangle { x: root.ds-decompression-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-decompression-motion; width: root.ds-decompression-progress >= 0 ? parent.width * clamp(root.ds-decompression-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                                }
                             }
                             if root.sm-active && root.ds-syncing: Label { font-size: 11px; color: Theme.muted; text: root.ds-elapsed; }
                             if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
@@ -2173,10 +2183,16 @@ export component AppWindow inherits Window {
                                         LineEdit { input-label: root.chinese ? "WebDAV 设置（功能未开发）" : "WebDAV settings (not developed)"; enabled: false; text: ""; }
                                     }
                                 }
+                                Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
                                 if root.ds-syncing: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
                                     Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                                 }
-                                Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
+                                if root.ds-syncing && root.ds-decompression-info != "": VerticalLayout { vertical-stretch: 0; spacing: 6px;
+                                    Label { wrap: word-wrap; font-size: 11px; text: root.ds-decompression-info; }
+                                    Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
+                                        Rectangle { x: root.ds-decompression-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-decompression-motion; width: root.ds-decompression-progress >= 0 ? parent.width * clamp(root.ds-decompression-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                                    }
+                                }
                                 if root.ds-syncing: Label { font-size: 11px; color: Theme.muted; text: root.ds-elapsed; }
                                 if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                                 HorizontalLayout { height: 33px; spacing: 8px;
