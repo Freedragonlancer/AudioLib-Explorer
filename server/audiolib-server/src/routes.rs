@@ -189,6 +189,8 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             "/library/snapshot",
             get(snapshot).route_layer(middleware::map_response(vary_accept_encoding)),
         )
+        // Not time-limited: VACUUM INTO of ~900k rows plus a ~230 MB body (§9.4.2).
+        .route("/waveforms/bundle", get(waveform_bundle))
         .route("/audio/{id}/stream", get(audio_stream))
         .route("/audio/{id}/preview", get(audio_preview))
         .route(
@@ -1857,6 +1859,83 @@ async fn snapshot(
     };
     let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().extend(response_headers);
+    Ok(response)
+}
+
+/// One `GET /waveforms/bundle` preparation at a time; others get 503 `BUSY`.
+static BUNDLE_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+#[derive(Deserialize)]
+struct BundleQuery {
+    encoding: Option<String>,
+}
+
+/// `GET /waveforms/bundle?encoding=i8-minmax-base64` (§9.4.2): a read-only SQLite
+/// snapshot of `waveforms.db` made with `VACUUM INTO` in a temporary directory that is
+/// removed once the body is sent or dropped.
+async fn waveform_bundle(
+    Extension(state): Extension<AppState>,
+    Query(query): Query<BundleQuery>,
+) -> Result<Response, ApiError> {
+    let encoding = query
+        .encoding
+        .as_deref()
+        .unwrap_or(crate::wfdb::I8_ENCODING);
+    if list_waveform::ListEncoding::parse(encoding)? != list_waveform::ListEncoding::I8 {
+        return Err(ApiError::unsupported_encoding(format!(
+            "bundles exist only for {}",
+            crate::wfdb::I8_ENCODING
+        )));
+    }
+    let permit = BUNDLE_SLOT
+        .try_acquire()
+        .map_err(|_| ApiError::list_waveforms_busy())?;
+    let (dir, path, revision) = blocking(move || {
+        let list = state.list_waveforms();
+        let wfdb = list.wfdb().ok_or_else(|| {
+            audiolib_core::Error::Io(io::Error::other("waveforms.db is unavailable"))
+        })?;
+        let revision = state.revision()?;
+        let dir = tempfile::Builder::new()
+            .prefix("audiolib-wfbundle-")
+            .tempdir_in(wfdb.path().parent().unwrap_or(std::path::Path::new(".")))?;
+        let path = dir.path().join("waveforms-bundle.db");
+        let started = std::time::Instant::now();
+        wfdb.bundle(&path, &revision.library_id, revision.revision)?;
+        tracing::info!(
+            ms = started.elapsed().as_millis() as u64,
+            bytes = std::fs::metadata(&path).map_or(0, |m| m.len()),
+            "Prepared waveforms bundle"
+        );
+        Ok((dir, path, revision))
+    })
+    .await?;
+    drop(permit);
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|error| ApiError::internal(format!("Cannot open the bundle: {error}")))?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .len();
+    let stream = GuardedStream {
+        inner: ReaderStream::with_capacity(file, STREAM_CHUNK_BYTES),
+        _guard: dir,
+    };
+    let mut response = Response::new(Body::from_stream(stream));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.sqlite3"),
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert("x-library-id", header_value(revision.library_id)?);
+    headers.insert(
+        "x-library-revision",
+        header_value(revision.revision.to_string())?,
+    );
     Ok(response)
 }
 
