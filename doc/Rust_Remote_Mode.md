@@ -1022,9 +1022,11 @@ manual test; never point tests at the real library.
   rules. `i8 = round(i16 * 127 / 32767)`, half away from zero; a received `-128` is clamped
   to `-127`; a column with `min > max` fails that item.
 - **Checks.** The reply must echo `encoding` (and any per-item `encoding`) as requested;
-  otherwise the whole reply is a protocol error. `ok` entity tags must end with `-l1i8`,
-  and `not_modified` tags are compared in full. `UNSUPPORTED_ENCODING` switches the client
-  back to int16 for the rest of the session.
+  otherwise the reply is a protocol error: none of its items is cached and every id backs
+  off like `pending` (2 s), still showing an older i8 copy. `ok` entity tags must end with
+  `-l1i8`, and `not_modified` tags are compared in full. An error body with
+  `"sub_code": "UNSUPPORTED_ENCODING"` (doc/api §9.4, `400 VALIDATION`) switches the
+  client back to int16 for the rest of the session.
 - **Storage.** `waveforms.db` (SQLite, WAL) next to the library's list cache directory:
   `list_waveforms_i8(file_id INTEGER PRIMARY KEY, etag TEXT NOT NULL, encoding TEXT,
   src_mtime INTEGER, src_size INTEGER, peaks BLOB CHECK(length(peaks)<=256))`, one UPSERT

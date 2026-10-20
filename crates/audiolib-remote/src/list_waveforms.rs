@@ -25,8 +25,10 @@
 //!   `list_waveforms.encodings` of `GET /capabilities` lists that encoding and a
 //!   `waveforms.db` store was attached ([`RemoteListWaveforms::with_i8_store`]). The reply
 //!   must echo the encoding (top level and any per-item value), otherwise it is a protocol
-//!   error. `UNSUPPORTED_ENCODING` switches this client back to the int16 path. Entity tags
-//!   are compared in full, including the `-l1i8` suffix. Peaks are expanded to the int16
+//!   error: nothing of that reply is cached and every id backs off like `pending`.
+//!   An error body with `sub_code` `UNSUPPORTED_ENCODING` (doc/api §9.4) switches this
+//!   client back to the int16 path. Entity tags are compared in full, including the
+//!   `-l1i8` suffix. Peaks are expanded to the int16
 //!   scale at true amplitude for display.
 //!
 //! Retry policy (only still-visible `pending` ids, at most 5 times; `root_offline` after
@@ -307,12 +309,11 @@ impl RemoteClient {
         let text = decompress(context, encoding.as_deref(), reply)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
-        let parsed: crate::error::ErrorBody = serde_json::from_str(&text).unwrap_or_default();
-        if parsed.error_code == UNSUPPORTED_ENCODING {
+        if let Some(message) = unsupported_encoding(&text) {
             return Err(RemoteError::Server {
                 status,
                 code: UNSUPPORTED_ENCODING.into(),
-                message: format!("{context}: {}", parsed.message),
+                message: format!("{context}: {message}"),
             });
         }
         let error = match RemoteError::from_response(status, &text, context, retry) {
@@ -901,8 +902,28 @@ impl RemoteListWaveforms {
             Err(RemoteError::Busy { retry_after, .. }) => return Ok(busy(retry_after)),
             Err(error) => return Err(error),
         };
-        self.check_reply(&reply, Some(LIST_WAVEFORM_ENCODING_I8))?;
-        Ok(resolve_i8(i8_store, ids, reply, &stored))
+        match self.check_reply(&reply, Some(LIST_WAVEFORM_ENCODING_I8)) {
+            Ok(()) => Ok(resolve_i8(i8_store, ids, reply, &stored)),
+            // §9.4: a wrong echo is a protocol error; nothing of the reply is cached and
+            // every id backs off like `pending`, keeping any older copy on screen.
+            Err(RemoteError::Protocol(message)) => {
+                tracing::warn!(%message, "i8 list Waveform reply discarded");
+                Ok(ListWaveformBatch {
+                    items: ids
+                        .iter()
+                        .map(|id| ListWaveformItem {
+                            id: *id,
+                            state: ListWaveformState::Pending {
+                                previous: stored.get(id).map(|row| row.peaks.to_list_waveform()),
+                            },
+                        })
+                        .collect(),
+                    retry_after: Some(ECHO_MISMATCH_RETRY),
+                    deferred: None,
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn resolve(
@@ -985,6 +1006,26 @@ impl RemoteListWaveforms {
         }
     }
 }
+
+/// The `message` of an error body whose `sub_code` (doc/api §9.4: `400 VALIDATION` with
+/// `"sub_code": "UNSUPPORTED_ENCODING"`) or `error_code` is `UNSUPPORTED_ENCODING`.
+pub(crate) fn unsupported_encoding(body: &str) -> Option<String> {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Body {
+        error_code: String,
+        sub_code: Option<String>,
+        message: String,
+    }
+    let parsed: Body = serde_json::from_str(body).ok()?;
+    (parsed.sub_code.as_deref() == Some(UNSUPPORTED_ENCODING)
+        || parsed.error_code == UNSUPPORTED_ENCODING)
+        .then_some(parsed.message)
+}
+
+/// Pending wait after an i8 reply with a wrong encoding echo (§9.4: nothing is cached and
+/// the ids back off like `pending`).
+const ECHO_MISMATCH_RETRY: Duration = Duration::from_secs(2);
 
 fn busy(retry_after: Option<u64>) -> ListWaveformBatch {
     ListWaveformBatch {
@@ -1663,23 +1704,66 @@ mod i8_tests {
     }
 
     #[test]
-    fn encoding_mismatch_and_mixed_encodings_are_protocol_errors() {
+    fn encoding_mismatch_and_mixed_encodings_cache_nothing_and_back_off() {
         let cancel = AtomicBool::new(false);
+        let ok = r#"{"id": 1, "status": "ok", "etag": "W/\"n-l1i8\"", "n": 1, "peaks": "AAA="}"#;
         for reply in [
-            serde_json::json!({"library_id": LIBRARY, "items": []}),
-            serde_json::json!({"library_id": LIBRARY, "encoding": "i16le-minmax-base64", "items": []}),
-            serde_json::json!({"library_id": LIBRARY, "encoding": "i8-minmax-base64",
-                "items": [{"id": 1, "status": "missing", "encoding": "i16le-minmax-base64"}]}),
+            format!(r#"{{"library_id": "{LIBRARY}", "items": [{ok}]}}"#),
+            format!(
+                r#"{{"library_id": "{LIBRARY}", "encoding": "i16le-minmax-base64", "items": [{ok}]}}"#
+            ),
+            format!(
+                r#"{{"library_id": "{LIBRARY}", "encoding": "i8-minmax-base64", "items": [{ok},
+                {{"id": 2, "status": "missing", "encoding": "i16le-minmax-base64"}}]}}"#
+            ),
         ] {
             let directory = tempfile::tempdir().unwrap();
-            let text = reply.to_string();
+            let text = reply.clone();
             let (server, _) = server(CAPS_I8, move |_| TestResponse::json(200, &text));
             let service = service(&server, directory.path(), true);
-            assert!(
-                matches!(service.lookup(&[1], &cancel), Err(RemoteError::Protocol(_))),
-                "{reply}"
+            let old = ListWaveformI8::new(vec![-3, 3]).unwrap();
+            service
+                .i8_store
+                .as_ref()
+                .unwrap()
+                .upsert(&WaveformsDbRow {
+                    file_id: 2,
+                    etag: "W/\"old-l1i8\"".into(),
+                    encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
+                    src_mtime: None,
+                    src_size: None,
+                    peaks: old.clone(),
+                })
+                .unwrap();
+            let batch = service.lookup(&[1, 2], &cancel).unwrap();
+            assert_eq!(batch.retry_after, Some(ECHO_MISMATCH_RETRY), "{reply}");
+            assert_eq!(
+                batch.items[0].state,
+                ListWaveformState::Pending { previous: None }
             );
+            assert_eq!(
+                batch.items[1].state,
+                ListWaveformState::Pending {
+                    previous: Some(old.to_list_waveform())
+                }
+            );
+            let store = service.i8_store.as_ref().unwrap();
+            assert!(store.get(1).unwrap().is_none(), "nothing cached: {reply}");
+            assert_eq!(store.get(2).unwrap().unwrap().etag, "W/\"old-l1i8\"");
         }
+    }
+
+    #[test]
+    fn unsupported_encoding_sub_code_is_recognised() {
+        assert_eq!(
+            unsupported_encoding(
+                r#"{"error_code":"VALIDATION","sub_code":"UNSUPPORTED_ENCODING","message":"unsupported list waveform encoding"}"#
+            )
+            .as_deref(),
+            Some("unsupported list waveform encoding")
+        );
+        assert!(unsupported_encoding(r#"{"error_code":"VALIDATION","message":"x"}"#).is_none());
+        assert!(unsupported_encoding("not json").is_none());
     }
 
     #[test]
@@ -1689,7 +1773,7 @@ mod i8_tests {
             if body.get("encoding").is_some() {
                 TestResponse::json(
                     400,
-                    r#"{"error_code":"UNSUPPORTED_ENCODING","message":"no i8"}"#,
+                    r#"{"error_code":"VALIDATION","sub_code":"UNSUPPORTED_ENCODING","message":"unsupported list waveform encoding"}"#,
                 )
             } else {
                 i16_reply()
@@ -1706,6 +1790,77 @@ mod i8_tests {
         assert!(posts[0].get("encoding").is_some());
         assert!(posts[1].get("encoding").is_none());
         assert!(posts[2].get("encoding").is_none());
+    }
+
+    #[test]
+    fn pending_previous_follows_the_requested_encoding_and_bad_lengths_are_rejected() {
+        let cancel = AtomicBool::new(false);
+        let i16_copy = ListWaveform::new(1, vec![-1000, 1000]).unwrap();
+        let i8_copy = ListWaveformI8::new(vec![-64, 64]).unwrap();
+        for (caps, with_store, expected) in [
+            (CAPS_I8, true, i8_copy.to_list_waveform()),
+            (CAPS_I16, true, i16_copy.clone()),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (server, _) = server(caps, move |body| {
+                let items = serde_json::json!([
+                    {"id": 1, "status": "pending"},
+                    // n = 2 needs 4 bytes (8 base64 characters); 2 bytes is a length mismatch.
+                    {"id": 2, "status": "ok", "etag": "W/\"x-l1i8\"", "n": 2, "peaks": "AAA="}
+                ]);
+                if body.get("encoding").is_some() {
+                    i8_reply(items)
+                } else {
+                    TestResponse::json(
+                        200,
+                        &serde_json::json!({"library_id": LIBRARY, "buckets": 128,
+                            "items": [{"id": 1, "status": "pending"},
+                                {"id": 2, "status": "ok", "etag": "W/\"x-l1\"", "n": 2, "peaks": "AAAAAA=="}]})
+                        .to_string(),
+                    )
+                }
+            });
+            let service = service(&server, directory.path(), with_store);
+            // Both caches hold an older copy of id 1; only the requested encoding's is used.
+            service
+                .store()
+                .put_many(vec![(
+                    1,
+                    StoredListWaveform {
+                        etag: "W/\"old-l1\"".into(),
+                        waveform: i16_copy.clone(),
+                    },
+                )])
+                .unwrap();
+            service
+                .i8_store
+                .as_ref()
+                .unwrap()
+                .upsert(&WaveformsDbRow {
+                    file_id: 1,
+                    etag: "W/\"old-l1i8\"".into(),
+                    encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
+                    src_mtime: None,
+                    src_size: None,
+                    peaks: i8_copy.clone(),
+                })
+                .unwrap();
+            let batch = service.lookup(&[1, 2], &cancel).unwrap();
+            assert_eq!(
+                batch.items[0].state,
+                ListWaveformState::Pending {
+                    previous: Some(expected)
+                },
+                "{caps}"
+            );
+            assert!(
+                matches!(batch.items[1].state, ListWaveformState::Failed { .. }),
+                "{caps}: {:?}",
+                batch.items[1]
+            );
+            assert!(service.store().get(2).is_none());
+            assert!(service.i8_store.as_ref().unwrap().get(2).unwrap().is_none());
+        }
     }
 
     #[test]
