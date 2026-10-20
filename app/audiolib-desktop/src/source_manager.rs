@@ -1951,7 +1951,7 @@ impl Controller {
                 }
             }
             match waveform_cache {
-                Some(fetch) => c.publish_waveform_cache_fetch(&ui, fetch, chinese),
+                Some(fetch) => c.publish_waveform_cache_fetch(&ui, fetch, generation, chinese),
                 None => {
                     c.remote.lock().unwrap().manager.wave_cache = WaveformCacheState::default();
                     ui.set_sm_wc_visible(false);

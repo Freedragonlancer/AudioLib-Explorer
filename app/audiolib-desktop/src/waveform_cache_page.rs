@@ -33,9 +33,32 @@ pub(super) struct WaveformCacheState {
     pub(super) settings: Option<WaveformCacheSettings>,
     /// A `403 MANAGE_FORBIDDEN` was answered since the page loaded.
     pub(super) forbidden: bool,
+    /// The library page generation this state belongs to.
+    pub(super) generation: Option<u64>,
 }
 
 impl WaveformCacheState {
+    /// The state after a reading for page `generation`. A reload of the same page (e.g.
+    /// after a scan finished) keeps the 403 state; the flag tells whether the page is new,
+    /// so the rebuild confirmation and the rate draft are reset only then.
+    pub(super) fn reloaded(
+        &self,
+        generation: u64,
+        capabilities: Option<WaveformCacheCapabilities>,
+        settings: Option<WaveformCacheSettings>,
+    ) -> (Self, bool) {
+        let same = self.generation == Some(generation);
+        (
+            Self {
+                capabilities,
+                settings,
+                forbidden: same && self.forbidden,
+                generation: Some(generation),
+            },
+            !same,
+        )
+    }
+
     fn jobs(&self) -> bool {
         self.capabilities
             .as_ref()
@@ -268,6 +291,15 @@ pub(super) fn waveform_cache_view(
     }
 }
 
+/// The rate field's initial text: the effective rate unless it is the built-in default.
+pub(super) fn rate_draft(settings: Option<&WaveformCacheSettings>) -> String {
+    settings
+        .filter(|settings| settings.list_waveform_rate_source.as_deref() != Some("default"))
+        .and_then(|settings| settings.list_waveform_rate)
+        .map(|rate| rate.to_string())
+        .unwrap_or_default()
+}
+
 /// Parse the rate field: empty restores the default, otherwise 1..=1000.
 pub(super) fn parse_rate(text: &str, chinese: bool) -> Result<Option<u32>, String> {
     let text = text.trim();
@@ -340,35 +372,23 @@ impl Controller {
         &self,
         ui: &AppWindow,
         fetch: WaveformCacheFetch,
+        generation: u64,
         chinese: bool,
     ) {
-        let state = {
+        let (state, new_page) = {
             let mut remote = self.remote.lock().unwrap();
-            let state = &mut remote.manager.wave_cache;
-            *state = WaveformCacheState {
-                capabilities: fetch.capabilities.as_ref().ok().cloned(),
-                settings: fetch.settings.as_ref().ok().cloned(),
-                forbidden: false,
-            };
-            state.clone()
+            let (state, new_page) = remote.manager.wave_cache.reloaded(
+                generation,
+                fetch.capabilities.as_ref().ok().cloned(),
+                fetch.settings.as_ref().ok().cloned(),
+            );
+            remote.manager.wave_cache = state.clone();
+            (state, new_page)
         };
         ui.set_sm_wc_visible(fetch.capabilities.is_ok());
-        ui.set_sm_wc_confirm(0);
-        if let Some(rate) = state
-            .settings
-            .as_ref()
-            .and_then(|settings| settings.list_waveform_rate)
-            .filter(|_| {
-                state
-                    .settings
-                    .as_ref()
-                    .and_then(|settings| settings.list_waveform_rate_source.as_deref())
-                    != Some("default")
-            })
-        {
-            ui.set_sm_wc_rate_draft(rate.to_string().into());
-        } else {
-            ui.set_sm_wc_rate_draft("".into());
+        if new_page {
+            ui.set_sm_wc_confirm(0);
+            ui.set_sm_wc_rate_draft(rate_draft(state.settings.as_ref()).into());
         }
         if let Some(settings) = &state.settings {
             ui.set_sm_wave_pregenerate(settings.pregenerate_list_waveforms);
@@ -617,6 +637,7 @@ mod tests {
                 ..Default::default()
             }),
             forbidden: false,
+            generation: Some(1),
         }
     }
 
@@ -711,6 +732,32 @@ mod tests {
         assert_eq!(view.run_state, "出错");
         assert_eq!(view.last_error, "最近错误 #106：AUDIO decode failed");
         assert_eq!(view.progress, 0.0);
+    }
+
+    #[test]
+    fn reload_keeps_forbidden_and_drafts_only_on_the_same_page() {
+        let mut loaded = state(true, true);
+        loaded.forbidden = true;
+        let (same, new_page) = loaded.reloaded(1, loaded.capabilities.clone(), None);
+        assert!(same.forbidden && !new_page);
+        let (next, new_page) = loaded.reloaded(2, loaded.capabilities.clone(), None);
+        assert!(!next.forbidden && new_page);
+        assert_eq!(next.generation, Some(2));
+        let (first, new_page) = WaveformCacheState::default().reloaded(1, None, None);
+        assert!(!first.forbidden && new_page);
+    }
+
+    #[test]
+    fn rate_draft_hides_the_default() {
+        let mut settings = WaveformCacheSettings {
+            list_waveform_rate: Some(10),
+            list_waveform_rate_source: Some("default".into()),
+            ..Default::default()
+        };
+        assert_eq!(rate_draft(Some(&settings)), "");
+        settings.list_waveform_rate_source = Some("config".into());
+        assert_eq!(rate_draft(Some(&settings)), "10");
+        assert_eq!(rate_draft(None), "");
     }
 
     #[test]
