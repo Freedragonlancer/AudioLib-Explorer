@@ -1862,9 +1862,6 @@ async fn snapshot(
     Ok(response)
 }
 
-/// One `GET /waveforms/bundle` preparation at a time; others get 503 `BUSY`.
-static BUNDLE_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-
 #[derive(Deserialize)]
 struct BundleQuery {
     encoding: Option<String>,
@@ -1887,10 +1884,11 @@ async fn waveform_bundle(
             crate::wfdb::I8_ENCODING
         )));
     }
-    let permit = BUNDLE_SLOT
+    // One bundle at a time, held until the body is sent (503 BUSY + Retry-After).
+    let permit = crate::wfdb::BUNDLE_SLOT
         .try_acquire()
-        .map_err(|_| ApiError::list_waveforms_busy())?;
-    let (dir, path, revision) = blocking(move || {
+        .map_err(|_| ApiError::bundle_busy())?;
+    let (dir, path, revision, etag) = blocking(move || {
         let list = state.list_waveforms();
         let wfdb = list.wfdb().ok_or_else(|| {
             audiolib_core::Error::Io(io::Error::other("waveforms.db is unavailable"))
@@ -1901,16 +1899,15 @@ async fn waveform_bundle(
             .tempdir_in(wfdb.path().parent().unwrap_or(std::path::Path::new(".")))?;
         let path = dir.path().join("waveforms-bundle.db");
         let started = std::time::Instant::now();
-        wfdb.bundle(&path, &revision.library_id, revision.revision)?;
+        let etag = wfdb.bundle(&path, &revision.library_id, revision.revision)?;
         tracing::info!(
             ms = started.elapsed().as_millis() as u64,
             bytes = std::fs::metadata(&path).map_or(0, |m| m.len()),
             "Prepared waveforms bundle"
         );
-        Ok((dir, path, revision))
+        Ok((dir, path, revision, etag))
     })
     .await?;
-    drop(permit);
     let file = tokio::fs::File::open(&path)
         .await
         .map_err(|error| ApiError::internal(format!("Cannot open the bundle: {error}")))?;
@@ -1921,7 +1918,7 @@ async fn waveform_bundle(
         .len();
     let stream = GuardedStream {
         inner: ReaderStream::with_capacity(file, STREAM_CHUNK_BYTES),
-        _guard: dir,
+        _guard: (dir, permit),
     };
     let mut response = Response::new(Body::from_stream(stream));
     let headers = response.headers_mut();
@@ -1931,6 +1928,7 @@ async fn waveform_bundle(
     );
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::ETAG, header_value(etag)?);
     headers.insert("x-library-id", header_value(revision.library_id)?);
     headers.insert(
         "x-library-revision",
