@@ -10,6 +10,7 @@ use std::sync::{
 pub mod config;
 pub mod library;
 pub mod list_waveform;
+pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
 pub mod server_url;
@@ -17,6 +18,11 @@ pub use library::*;
 pub use list_waveform::{
     LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
     ListWaveformItem, ListWaveformSource, ListWaveformState, MAX_LIST_WAVEFORM_IDS, decode_base64,
+};
+pub use list_waveform_i8::{
+    LIST_WAVEFORM_ENCODING_I8, LIST_WAVEFORM_ENCODING_I16, LIST_WAVEFORM_I8_ETAG_SUFFIX,
+    LIST_WAVEFORM_I8_MAX_BYTES, LIST_WAVEFORM_I8_ZOOM_LEVEL, ListWaveformI8, expand_i8_to_i16,
+    i8_base64_len, quantize_i16_to_i8,
 };
 pub use metadata::{
     SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
