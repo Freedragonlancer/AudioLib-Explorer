@@ -113,6 +113,9 @@ mod windows {
     fn metrics(samples: &[f32], channels: usize) -> Value {
         let mut peak = 0.0_f32;
         let mut step = 0.0_f32;
+        // A corner in the envelope (abrupt start/stop of a slope) shows up in the
+        // second difference even when the first difference looks moderate.
+        let mut curvature = 0.0_f32;
         let mut clipped = 0_usize;
         let mut nonfinite = 0_usize;
         for (index, &sample) in samples.iter().enumerate() {
@@ -125,8 +128,16 @@ mod windows {
             if index >= channels {
                 step = step.max((sample - samples[index - channels]).abs());
             }
+            if index >= 2 * channels {
+                let second =
+                    sample - 2.0 * samples[index - channels] + samples[index - 2 * channels];
+                if second.is_finite() {
+                    curvature = curvature.max(second.abs());
+                }
+            }
         }
         json!({"sample_count":samples.len(),"peak":peak,"max_adjacent_step":step,
+            "max_second_difference":curvature,
             "clipped_samples":clipped,"nonfinite_samples":nonfinite})
     }
 
@@ -174,6 +185,24 @@ mod windows {
             .unwrap_or(0.3);
         if !volume.is_finite() || !(0.0 < volume && volume <= 1.0) {
             return Err("--volume must be in (0,1]".into());
+        }
+        let signal = value("--signal").map_or("dc", String::as_str);
+        if signal != "dc" && signal != "sine" {
+            return Err("--signal must be dc or sine".into());
+        }
+        let tone_hz = value("--tone-hz")
+            .map(|v| v.parse::<f32>())
+            .transpose()?
+            .unwrap_or(60.0);
+        if !tone_hz.is_finite() || !(1.0..=2000.0).contains(&tone_hz) {
+            return Err("--tone-hz must be in 1..=2000".into());
+        }
+        let source_channels = value("--source-channels")
+            .map(|v| v.parse::<u16>())
+            .transpose()?
+            .unwrap_or(2);
+        if !(1..=8).contains(&source_channels) {
+            return Err("--source-channels must be in 1..=8".into());
         }
         let host = cpal::host_from_id(cpal::HostId::Wasapi)?;
         let mut matches = host.output_devices()?.filter(|device| {
@@ -228,15 +257,34 @@ mod windows {
         ));
         fs::create_dir(&result_dir)?;
         let fixture = tempfile::tempdir()?;
-        let fixture_path = fixture.path().join("dc.wav");
-        // Two long constant regions avoid natural edges during the short test windows.
-        let pcm: Vec<_> = (0..rate * 4)
+        let fixture_path = fixture.path().join("fixture.wav");
+        // A source rate other than the endpoint rate exercises the resampling path.
+        let source_rate = value("--source-rate")
+            .map(|v| v.parse::<u32>())
+            .transpose()?
+            .unwrap_or(rate);
+        if !(8_000..=384_000).contains(&source_rate) {
+            return Err("--source-rate must be in 8000..=384000".into());
+        }
+        // DC: two long constant regions avoid natural edges during the short test
+        // windows. Sine: a low tone whose own slope is far below any click corner.
+        let amplitude = if signal == "sine" { 0.5_f32 } else { 0.15 };
+        let pcm: Vec<_> = (0..source_rate * 4)
             .flat_map(|frame| {
-                let value = if frame < rate * 2 { 0.15_f32 } else { -0.15 };
-                [value, value]
+                let value = if signal == "sine" {
+                    amplitude
+                        * (std::f64::consts::TAU * f64::from(tone_hz) * f64::from(frame)
+                            / f64::from(source_rate))
+                        .sin() as f32
+                } else if frame < source_rate * 2 {
+                    amplitude
+                } else {
+                    -amplitude
+                };
+                std::iter::repeat_n(value, usize::from(source_channels))
             })
             .collect();
-        wav(&fixture_path, rate, 2, &pcm)?;
+        wav(&fixture_path, source_rate, source_channels, &pcm)?;
         let bytes: Arc<[u8]> = fs::read(&fixture_path)?.into();
         let virtual_path = fixture.path().join("streamed.wav");
         let opens = Arc::new(AtomicUsize::new(0));
@@ -352,6 +400,16 @@ mod windows {
                 "capture_begin":begin,"capture_end":capture.count.load(Ordering::Acquire),"status":status}));
         }
         thread::sleep(Duration::from_millis(100));
+        // Seek near the end, then let the source reach EOF and restart from Ended.
+        for (name, command_value, settle) in [
+            ("Seek near end", AudioCommand::SeekAndPlay(3.95), 300),
+            ("Seek from ended", AudioCommand::SeekAndPlay(1.0), 120),
+            ("Pause before seek", AudioCommand::Pause, 60),
+            ("Seek while paused", AudioCommand::Seek(1.75), 60),
+            ("Play after paused seek", AudioCommand::Play, 120),
+        ] {
+            command(&handle, &capture, &mut events, name, command_value, settle)?;
+        }
         for (name, command_value, settle) in [
             ("Load during playback", AudioCommand::Load(virtual_path), 50),
             ("Play after load", AudioCommand::Play, 100),
@@ -389,7 +447,12 @@ mod windows {
             .collect();
         let report = json!({"kind":"WASAPI render-endpoint loopback; not physical ADC or listening",
             "device":description,"device_id":device_id,"sample_rate":rate,"channels":channels,
-            "fixture_seconds":4,"fixture_dc":[0.15,-0.15],"volume":volume,"expected_peak":0.15 * volume,
+            "fixture_seconds":4,"signal":signal,"tone_hz":tone_hz,"amplitude":amplitude,
+            "source_rate":source_rate,"source_channels":source_channels,
+            // Reference for a click-free stream: the tone's own largest slope/curvature.
+            "natural_max_step":if signal == "sine" { amplitude * volume * (std::f32::consts::TAU * tone_hz / rate as f32) } else { 0.0 },
+            "natural_max_second_difference":if signal == "sine" { amplitude * volume * (std::f32::consts::TAU * tone_hz / rate as f32).powi(2) } else { 0.0 },
+            "volume":volume,"expected_peak":amplitude * volume,
             "opener_delay_ms":delay_ms,"source_opens":opens.load(Ordering::Relaxed),
             "delayed_opens":delayed.load(Ordering::Relaxed),"elapsed_ms":clock.elapsed().as_secs_f64()*1000.0,
             "capture_overflow":capture.overflow.load(Ordering::Relaxed),"capture_failed":capture.failed.load(Ordering::Relaxed),
@@ -407,7 +470,7 @@ mod windows {
         )?;
         println!("{}", result_dir.display());
         if count == 0
-            || !samples.iter().any(|v| v.abs() > 0.15 * volume * 0.1)
+            || !samples.iter().any(|v| v.abs() > amplitude * volume * 0.1)
             || capture.failed.load(Ordering::Relaxed)
             || capture.overflow.load(Ordering::Relaxed)
         {

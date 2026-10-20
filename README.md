@@ -6,7 +6,7 @@
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.4.7 (workspace `Cargo.toml`)
+- **Program version:** 0.4.11 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 5 (snapshot compatibility range 3..=5)
 - **License:** [GPL-3.0-only](LICENSE)
@@ -62,7 +62,7 @@ cargo run -p audiolib-cli -- search "explosion" --format table
 cargo run -p audiolib-cli -- stats
 ```
 
-User settings, logs, caches and the library database live in `%LOCALAPPDATA%/AudioLibExplorer/v1`; set `AUDIOLIB_DATA_DIR` to use an isolated directory. In the Data source window, choose server mode and enter the server address (for example `https://audiolib.example.com:8443` or `http://192.168.1.10:8790`) and an access token if the server requires one. See [Remote mode](doc/Rust_Remote_Mode.md) and [library management](doc/Rust_Library_Management.md).
+User settings, logs, caches and the library database live in `%LOCALAPPDATA%/AudioLibExplorer/v1`; set `AUDIOLIB_DATA_DIR` to use an isolated directory. In the Data source window, choose server mode and enter the server address (for example `https://audiolib.example.com:8443` or `http://server.example.lan:8790`) and an access token if the server requires one. See [Remote mode](doc/Rust_Remote_Mode.md) and [library management](doc/Rust_Library_Management.md).
 
 ### Server
 
@@ -79,7 +79,7 @@ Three independent versions: the program version (workspace `Cargo.toml`, `MAJOR.
 
 ## Releases and CI
 
-The v0.4.7 release includes changes since the previously published v0.4.3; the v0.4.4 through v0.4.6 tags are retained after failed release validation.
+The current release is v0.4.11, a patch release on top of the published v0.4.10.
 
 GitHub Actions run formatting, Clippy and tests on `main` pushes and pull requests (`.github/workflows/ci.yml`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies the version policy and builds the Windows x64 ASIO client, Windows x64 server and Linux x64 server. The release is published only after all build jobs pass; each archive has a SHA-256 file and a public validation report. Linux GNU server binaries are built on Ubuntu 22.04.
 

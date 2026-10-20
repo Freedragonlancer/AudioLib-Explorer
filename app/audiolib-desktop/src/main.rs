@@ -116,13 +116,26 @@ fn run() -> Result<()> {
     let _instance = DesktopInstanceGuard::acquire(&config.paths.settings)?;
     // Read the snapshot under the instance lock as a CLI library selection may have
     // completed between the initial path discovery and acquiring this guard.
-    let config = AppConfig::load_default().context("Reload locked AudioLib preferences")?;
+    let mut config = AppConfig::load_default().context("Reload locked AudioLib preferences")?;
     let default_database = config
         .paths
         .settings
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join("library.db");
+    // Server mode only with a usable active profile: otherwise open local for this
+    // session while saves keep the persisted selection. Without an openable local
+    // library the server selection stays (its placeholder lets the user fix the
+    // profile) instead of refusing to start. Logged once tracing is ready.
+    let local_usable = config.paths.database.exists() || config.paths.database == default_database;
+    let server_fallback = if local_usable {
+        config.guard_server_mode().map(|reason| (reason, true))
+    } else {
+        config
+            .data_source
+            .server_mode_problem()
+            .map(|reason| (reason, false))
+    };
     // Server mode never opens (or creates) the local working library.
     let server_mode = config.data_source.mode == audiolib_core::config::DataSourceMode::Server;
     anyhow::ensure!(
@@ -140,6 +153,16 @@ fn run() -> Result<()> {
         .with_writer(writer)
         .try_init()
         .ok();
+    match server_fallback {
+        Some((reason, true)) => {
+            tracing::warn!(%reason, "Server data source unusable; starting in local mode")
+        }
+        Some((reason, false)) => tracing::warn!(
+            %reason,
+            "Server data source unusable and no local library exists; keeping server mode"
+        ),
+        None => {}
+    }
     if arguments
         .iter()
         .any(|argument| argument == "--headless-smoke")

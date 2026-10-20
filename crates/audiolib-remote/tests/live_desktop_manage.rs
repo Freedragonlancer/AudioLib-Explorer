@@ -9,7 +9,7 @@
 //! Off by default: `#[ignore]`d, needs `AUDIOLIB_LIVE_MANAGE_URL`, refuses port 8790.
 //!
 //! ```text
-//! $env:AUDIOLIB_LIVE_MANAGE_URL = "http://192.168.1.10:8799"
+//! $env:AUDIOLIB_LIVE_MANAGE_URL = "http://server.example.lan:8799"
 //! cargo test -p audiolib-remote --test live_desktop_manage -- --ignored --nocapture
 //! ```
 use audiolib_core::{DataProvider, ScanState};

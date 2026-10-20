@@ -207,6 +207,21 @@ Rust 1.97.1 MSVC 的格式检查、默认与 ASIO 严格 Clippy、两种配置�
 | 每类新 provider 的结果页与目录统计顺序总计，不含打开 provider | 未汇总 | 1535.09ms |
 
 新 provider 上 `ex`、`pl`、`plos`、`sion` 各匹配 100,000 条，结果页分别为 69.25、68.90、93.13、94.46ms。`et` 匹配 1,000,000 条为 441.18ms；同为百万命中的 `metal`、`door outdoor` 分别为 752.99、1222.58ms。宽泛首次排序和部分筛选仍有慢例，整体不能认定满足 **P95 latency <500ms for 1M+ records**，后续问题见 [SEARCH-001](Rust_Known_Issues.md#search-001百万条数据的宽泛片段查询仍有慢例)。顺序服务计时包含目录统计，而 GUI 两类 worker 仍并行，结果页可先发布；这些数据不是完整 GUI 输入到显示延迟。
+## 定位包络与列宽复查（2026-10-19，0.4.10 源码，未发布）
+
+用户安装 0.4.10 后反馈定位仍有破音、自定义列宽不生效；原因与修复见 [审查修复](Rust_Review_Fixes.md)。
+
+`seek-loopback` 新增 `--signal sine --tone-hz --source-rate --source-channels` 及二阶差分指标。CABLE Input 端点 48 kHz、增益 0.3、60 Hz 正弦（输出峰值 0.15），音调自身最大相邻差 0.001178、最大二阶差分 9.25e-6：
+
+| 场景 | 修复前定位窗口 | 修复后定位窗口 |
+| --- | --- | --- |
+| 源 48 kHz 立体声（不重采样） | 相邻差最大 0.00497，二阶差分 0.0011–0.0048（约 120–520 倍） | 相邻差 0.001178，二阶差分 1.3e-5–1.4e-5（约 1.5 倍） |
+| 源 44.1 kHz 单声道（重采样） | 二阶差分 0.0011–0.0048 | 二阶差分 1.3e-5–1.4e-5 |
+| 源 96 kHz 6 声道（重采样） | 二阶差分 0.0011–0.0046 | 二阶差分 1.3e-5–1.4e-5 |
+
+覆盖播放中定位、暂停后定位、三条排队定位、接近结尾定位、从 Ended 定位、暂停中 Seek 后 Play、换源和 Stop；所有命令引擎 underruns 为 0，未出现超过源峰值的旧 PCM。剩余较大二阶差分只出现在两处：首次 Play 的 5 ms 线性音量斜坡（约 0.0011，修复前后相同）以及测试音在文件末尾非零斜率处结束（EOF，属源内容）。捕获端仍报告 Xrun 通知，不称为无损采集，也不等同于模拟回录或人工听感验收。
+
+新增音频回归 2 项、列宽回归 1 项；以旧包络或旧双击处理运行时均失败。格式检查、默认与 ASIO 严格 Clippy 通过；默认与 ASIO（`--no-fail-fast`）完整 workspace/all-targets 测试各 51 个目标、817 passed、0 failed、70 ignored。一次 ASIO 运行中 `audiolib-server` 的 `admin_roots` 列举起始位置因并发负载 5 秒超时（FS_TIMEOUT），重跑通过，与本次改动无关。debug 二进制上的 `validate-playback-ipc.ps1 -CleanCheckout`（默认 WASAPI 96 kHz、960 帧）与 `validate-desktop-close.ps1 -Cycles 3` 通过。本轮未构建发布包、未更新 `local_release/`；正常数据目录的 `settings.json` 未被改动。
 
 ## WASAPI 96 kHz Waveform 定位补修（2026-10-18，0.4.7）
 
@@ -1033,3 +1048,9 @@ Windows 发布检查的快照回归已正确返回 `Cancelled`，失败的是 `<
 两处修改经独立复核，无阻断问题。本机扫描模块六项单元回归、七项 HTTP 扫描集成回归及服务端严格 Clippy 通过；远程取消 filter 的三项回归在默认配置连续三轮通过。完整工作区、ASIO、重建打包及各平台发布检查继续由本次流水线和公开报告记录。
 
 此前 `v0.4.6` 本机 fmt、默认及 ASIO 严格 Clippy、两种完整 workspace/all-targets 测试、最新 ASIO release 构建、review-fixes、library-management、desktop-close（三轮）、playback-ipc、客户端打包及隔离 portable 验收通过。替换旧 server 生成目录时，本机 SMB 文件系统的递归删除报告目录非空；续验先将已核验的生成输出移动到仓库内私有备份，再重新打包，不涉及工作库或固定安装。`v0.4.7` 的续验日志在忽略的 `.rust-validation/release-v0.4.7/`；最终平台检查、提交与资产身份以新标签的公开 workflow 和报告为准。
+
+## 2026-10-14 v0.4.8 服务器模式启动与关闭后续修复
+
+本版基于已发布的 `v0.4.7`。缓存准备的 Busy/Locked 备份步骤有 5 秒上限，未知步骤结果直接报错；关窗等待远端缓存任务最多 15 秒；服务器模式启动清理超过 1 小时的 staging；服务器配置无效时本次会话回退本地，保存时保留原服务器选择（用户显式选择数据源除外），无可用本地库时保持服务器模式；管理器切回本地前检查本地库存在。
+
+本机 Windows MSVC 1.97.1：`cargo fmt --all -- --check`、严格 Clippy、`cargo test --workspace --all-targets --locked`（786 passed）通过；validate-desktop-close、validate-review-fixes、validate-library-management 通过。validate-runtime 在 BOOM SMED Metadata 解码处失败，为既有问题，与本版改动无关。API v1、schema 5、snapshot 3..=5 不变；最终平台检查与资产身份以 `v0.4.8` 标签的公开 workflow 和报告为准。

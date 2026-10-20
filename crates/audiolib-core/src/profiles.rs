@@ -618,8 +618,8 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
 
-    const LAN: &str = "http://192.168.1.10:8790";
-    const EXT: &str = "https://audiolib.example.com:18086";
+    const LAN: &str = "http://server.example.lan:8790";
+    const EXT: &str = "https://audiolib.example.com:8443";
 
     fn server(url: &str) -> DataSourceSettings {
         DataSourceSettings {
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn single_server_settings_migrate_to_one_profile_with_a_backup() {
         let directory = tempfile::tempdir().unwrap();
-        let original = r#"{"language":"cn","data_source":{"mode":"server","server_url":"http://192.168.1.10:8790","webdav":{"username":"sound"},"poll_interval_secs":120,"auto_sync":true}}"#;
+        let original = r#"{"language":"cn","data_source":{"mode":"server","server_url":"http://server.example.lan:8790","webdav":{"username":"sound"},"poll_interval_secs":120,"auto_sync":true}}"#;
         std::fs::write(directory.path().join("settings.json"), original).unwrap();
         let config = AppConfig::load_in(directory.path().to_owned()).unwrap();
         let source = &config.data_source;
@@ -650,7 +650,7 @@ mod tests {
             (profile.id.as_str(), profile.server_url.as_str()),
             (DEFAULT_PROFILE_ID, LAN)
         );
-        assert_eq!(profile.name, "192.168.1.10:8790");
+        assert_eq!(profile.name, "server.example.lan:8790");
         assert_eq!(profile.kind, ProfileKind::Lan);
         assert_eq!(profile.group_key(), DEFAULT_PROFILE_ID);
         // The old fields are untouched and the global settings stay global.
@@ -905,13 +905,13 @@ mod tests {
     #[test]
     fn address_kinds_are_guessed_from_the_host() {
         for (url, kind) in [
-            ("http://192.168.1.10:8790", ProfileKind::Lan),
+            ("http://server.example.lan:8790", ProfileKind::Lan),
             ("http://10.1.2.3", ProfileKind::Lan),
             ("http://127.0.0.1:8790", ProfileKind::Lan),
             ("http://[fd00::1]:8790", ProfileKind::Lan),
             ("http://nas.example.lan:8790", ProfileKind::Lan),
             ("http://nas:8790", ProfileKind::Lan),
-            ("https://audiolib.example.com:18086", ProfileKind::External),
+            ("https://audiolib.example.com:8443", ProfileKind::External),
             ("https://8.8.8.8", ProfileKind::External),
             ("http://[2001:db8::1]", ProfileKind::External),
         ] {
@@ -924,13 +924,13 @@ mod tests {
     #[test]
     fn transcode_defaults_follow_the_address() {
         for (url, transcode) in [
-            ("http://192.168.1.10:8790", false),
+            ("http://server.example.lan:8790", false),
             ("http://10.0.0.2", false),
             ("http://172.16.5.1:8790", false),
             ("http://nas.example.lan:8790", false),
             ("http://nas:8790", false),
             ("http://127.0.0.1:8790", false),
-            ("https://audiolib.example.com:18086", true),
+            ("https://audiolib.example.com:8443", true),
             ("http://audiolib.example.com:8790", true),
             ("https://nas.local:8443", true),
             ("http://8.8.8.8:8790", true),
@@ -942,17 +942,17 @@ mod tests {
     #[test]
     fn transcode_is_migrated_per_profile_and_folds_the_old_original_switch() {
         // A single-server LAN file: one profile, transcode off; mirrored for older builds.
-        let mut lan = server("http://192.168.1.10:8790");
+        let mut lan = server("http://server.example.lan:8790");
         lan.migrate_profiles();
         assert_eq!(lan.profiles[0].transcode, Some(false));
         assert!(!lan.audition_transcode() && lan.audition_original);
         // An external single-server file: on.
-        let mut external = server("https://audiolib.example.com:18086");
+        let mut external = server("https://audiolib.example.com:8443");
         external.migrate_profiles();
         assert_eq!(external.profiles[0].transcode, Some(true));
         assert!(external.audition_transcode() && !external.audition_original);
         // `audition_original = true` from an earlier build: off, even for an external URL.
-        let mut original = server("https://audiolib.example.com:18086");
+        let mut original = server("https://audiolib.example.com:8443");
         original.audition_original = true;
         original.migrate_profiles();
         assert_eq!(original.profiles[0].transcode, Some(false));
@@ -964,9 +964,9 @@ mod tests {
         // Profiles saved before the field (no `transcode` key) get their address default;
         // a stored choice is kept, and a key-less file parses as before.
         let mut profiles: DataSourceSettings = serde_json::from_str(
-            r#"{"mode":"server","server_url":"http://192.168.1.10:8790","active":"default",
-                "profiles":[{"id":"default","server_url":"http://192.168.1.10:8790"},
-                            {"id":"ext","server_url":"https://audiolib.example.com:18086","kind":"external"},
+            r#"{"mode":"server","server_url":"http://server.example.lan:8790","active":"default",
+                "profiles":[{"id":"default","server_url":"http://server.example.lan:8790"},
+                            {"id":"ext","server_url":"https://audiolib.example.com:8443","kind":"external"},
                             {"id":"mine","server_url":"http://10.0.0.9:8790","transcode":true}]}"#,
         )
         .unwrap();
@@ -999,7 +999,7 @@ mod tests {
         profiles.migrate_profiles();
         assert!(!profiles.audition_transcode() && profiles.audition_original);
         // Unmigrated settings without profiles fall back to the address and the old switch.
-        let mut bare = server("https://audiolib.example.com:18086");
+        let mut bare = server("https://audiolib.example.com:8443");
         assert!(bare.audition_transcode());
         bare.audition_original = true;
         assert!(!bare.audition_transcode());
@@ -1007,11 +1007,11 @@ mod tests {
 
     #[test]
     fn new_and_external_profiles_get_their_transcode_default() {
-        let mut settings = server("http://192.168.1.10:8790");
+        let mut settings = server("http://server.example.lan:8790");
         settings.migrate_profiles();
         let lan = settings.add_profile("", "http://10.0.0.5:8790").unwrap();
         let public = settings
-            .add_profile("", "http://audiolib.example.com:18086")
+            .add_profile("", "http://audiolib.example.com:8443")
             .unwrap();
         assert_eq!(settings.profile(&lan).unwrap().transcode, Some(false));
         assert_eq!(settings.profile(&public).unwrap().transcode, Some(true));
@@ -1019,7 +1019,7 @@ mod tests {
         let sibling = settings
             .upsert_external_profile(
                 DEFAULT_PROFILE_ID,
-                "https://audiolib.example.com:18086",
+                "https://audiolib.example.com:8443",
                 None,
             )
             .unwrap();
@@ -1033,7 +1033,7 @@ mod tests {
         let again = settings
             .upsert_external_profile(
                 DEFAULT_PROFILE_ID,
-                "https://audiolib.example.com:18086",
+                "https://audiolib.example.com:8443",
                 None,
             )
             .unwrap();

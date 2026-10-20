@@ -260,7 +260,7 @@ mod profile_tests {
         let mut old = b"ALXS-PLAIN-1\n".to_vec();
         old.extend_from_slice(br#"{"token":"lan-token","webdav_password":"dav"}"#);
         std::fs::write(secrets_path(directory.path()), old).unwrap();
-        let mut settings = server_settings("http://192.168.1.10:8790");
+        let mut settings = server_settings("http://server.example.lan:8790");
         let mut secrets = load_profile_secrets(directory.path(), &settings).unwrap();
         assert_eq!(secrets.token_for(DEFAULT_PROFILE_ID), "lan-token");
         assert_eq!(secrets.token, "lan-token");
@@ -312,7 +312,7 @@ mod profile_tests {
 
     #[test]
     fn an_older_client_rewrite_is_migrated_again() {
-        let mut settings = server_settings("http://192.168.1.10:8790");
+        let mut settings = server_settings("http://server.example.lan:8790");
         let other = settings
             .add_profile("vps", "https://vps.example.net")
             .unwrap();

@@ -1411,7 +1411,7 @@ mod tests {
             security.auth_mode_with_source(),
             (AuthMode::External, Source::Default)
         );
-        let (info, secret) = security.create_token("Paul laptop").unwrap();
+        let (info, secret) = security.create_token("office laptop").unwrap();
         assert!(secret.starts_with(TOKEN_PREFIX) && secret.len() == 3 + 64);
         let text = std::fs::read_to_string(dir.path().join(TOKENS_FILE)).unwrap();
         assert!(!text.contains(&secret), "plaintext never stored");
@@ -1429,7 +1429,7 @@ mod tests {
         assert!(!security.verify("al_wrong"));
         let listed = security.tokens();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "Paul laptop");
+        assert_eq!(listed[0].name, "office laptop");
         assert!(listed[0].last_used_at.is_some(), "first use is recorded");
         // A restart reads the same tokens back.
         let reloaded = Security::from_config(&config, None);
