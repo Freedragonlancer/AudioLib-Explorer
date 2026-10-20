@@ -20,7 +20,26 @@
 
 整个工具进程的 Windows 高水位工作集为 **123,932,672 bytes**，200ms 采样的 private bytes 峰值为 **128,884,736 bytes**；3,120 个采样点。采样不能保证捕捉 private bytes 的瞬时峰值，工作集也包含共享/映射页。硬件为 Ryzen 7 9800X3D（8 核、16 线程）、系统报告内存 100,415,373,312 bytes、本机 SSD；测量期间没有并行编译或 GUI 性能测试，OS 缓存未清空。这是 Windows owned DELETE-journal 副本的整套工具测量，不能代替服务器 WAL 写入负载、Mac 峰值内存或播放首声测量。工具 SHA256 为 `07EE67409B72E5AD655011D8CC70901F7FDC497838A8431785A727BD5F029AD4`。
 
-两轮源报告、逐阶段 JSONL、采样方法及前后哈希保留在本机忽略目录 `.rust-validation/review-7ec84ed/upgrade-real-v1*` 与 `upgrade-real-v2*`。首次失败资源基线保留，未覆盖为成功结果。最终联合检查、原生 Mac CI、并发写入及安装结果在本节后续记录。
+两轮源报告、逐阶段 JSONL、采样方法及前后哈希保留在本机忽略目录 `.rust-validation/review-7ec84ed/upgrade-real-v1*` 与 `upgrade-real-v2*`。首次失败资源基线保留，未覆盖为成功结果。
+
+最终应用源码为 `38c5ed2ecdf59adf799ade50882171e5fb8522c4`，Windows Rust 1.97.1 MSVC 的 `cargo fmt --all -- --check`、默认及 ASIO 严格 workspace/all-targets Clippy、完整 locked 测试全部通过：每种配置各 **54 个顶层目标、925 passed、72 ignored、0 failed**，隔离子进程不重复计数；两套检查总计约 410.7 秒。ASIO 使用准备脚本验证过的 Steinberg SDK 2.3.4。222 项应用、crate、服务端、配置及资源输入在检查前后集合及 SHA256 不变；正常数据目录环境和六项持久数据基线保持一致。此前 `b4d64e6` 的检查与构建证据另保存在 `checks-b4d64e6/`，没有覆盖为最终版本。
+
+同一提交的 [原生 macOS ARM64 数据库 CI](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/39372798464/job/118464191043) 通过：`macos-15` runner 安装 `1.97.1-aarch64-apple-darwin`，先断言 `uname -m=arm64` 并验证编译器/C tooling，再执行 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`。涵盖主报告的四项 BM25 测试、Unicode fixture、源别名及大小写改名回归；不是交叉编译或 Windows 结果推断。该 CI 不验证 Mac 桌面、ASIO、真实大库升级资源或音频首声，且本轮未运行 Miri/ASan。相同工作流的 Linux 服务端检查也通过。
+
+同源正式 ASIO release 构建耗时 256.53 秒，版本 `0.4.11` 开发构建，未发布新 Release。两 EXE 在本机 SSD 构建后复制到打包使用的仓库 target 目录并逐个验哈希：
+
+- AudioLibExplorer.exe：`7CE8AE1FC9A49648128FD221F3A4C192248783880DBFF502E055ACE080D2E1C5`
+- AudioLibCli.exe：`D47A65C2C8C3FCE48A920216F5BE2ECB1472843A60E94F646588F0EF1EB00664`
+
+`search-benchmark --records 1000000 --queries 100 --fragment-cases --query et --concurrent-writer --db <new-owned-path>` 新建独立百万条合成库，不复用历史冻结 fixture。生成及重建耗时 168.24 秒；`et` 查询的两组各 100 次，每次使用新只读 provider、provider 打开和目录统计不计入搜索计时。无写入搜索 P95 **114.804ms**；并发 favorite 提交 P95 **188.654ms**（1.643 倍），共 8,054 次提交，写线程每次提交后等待 2ms。无写入组 100 次并行尝试、无回退；并发组 99 次尝试均因 `snapshot_changed` 回退，Busy/Locked/Interrupted/Unavailable/启动失败均为 0。这证明本次提交竞争回退可见，不代表测出了扫描时 Busy、网络盘或真实扫描全负载。整个含生成、重建、搜索及写入的进程峰值工作集 **277,479,424 bytes**，200ms 采样 private bytes 峰值 **259,784,704 bytes**；并非仅搜索新增内存。
+
+正常结束后 checkpoint 返回 `(0,0,0)` 并关闭连接，主库 1,786,855,424 bytes，SHA256 `8D131FFB2E55A770802A79ACA5E23ABF9F5658D90B02DA9177D7A6F7B5C688DF`，无 WAL/SHM/journal。再以同一 EXE 对它执行只读 **21 类请求、100 次共享 provider 循环、21 类新 provider 首查及目录统计**，不带 query filter：共享结果页 P95 **114.210ms**、搜索加目录统计 P95 **208.895ms**；新 provider 首次串行总计 P95 **224.083ms**（打开另计）。完整混合工具峰值工作集 **284,418,048 bytes**，200ms 采样 private bytes 峰值 **130,957,312 bytes**。7 个辅助 reader 各 8MiB cache，普通 reader 64MiB，本地 fixed-volume 的 mmap 配置上限 64GiB；上限不是实际驻留内存。测试期间无并行编译、GUI 或其他基准，OS 缓存未清空；沿用含测前统计的历史混合协议，不能混称严格新进程首查或 GUI 端到端。测后库 SHA256、大小及修改时间不变。目标仍为 **P95 latency <500ms for 1M+ records**；这些是本次资料与条件下的实测。
+
+同一正式 GUI EXE 的真实 909,342 条副本 `impact metal` 原生输入筛查（`gui-e2e/native-probe-v4`）结果页和全部目录计数与 oracle 相符；进程工作集高水位 **400,482,304 bytes**，200ms 搜索窗口仅 3 次采样，private/current WS 最大分别为 **353,734,656 / 395,149,312 bytes**。这是一个画面验收无效样本的资源观察，不能外推宽泛查询、整套矩阵或 8GB 机器预算。工具捕获到 431.59ms 的匹配画面，但真实瞬时 Resized 事件触发严格几何门禁，因此保留为 invalid，**不计为 GUI <500ms 达标样本**。大批量 GUI 矩阵由另一协调任务继续；本轮没有测量搜索同时试听的实际首声延迟。
+
+本轮原始基准与资源/哈希证据位于 `.rust-validation/review-7ec84ed/concurrent-million-v1*`、`mixed-million-v1*`、`million-fixture-baseline.json`；benchmark EXE SHA256 为 `AE3363B78F0030BAC244193E3B8B2396849F3CBB30D61D94EEFD172AEB982D53`。新合成库保留供后续只读 GUI 验收，未删除源 WAV 或正常运行数据。
+
+发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 均通过；`package-portable.ps1 -SkipBuild` 与上述构建使用相同 ASIO 选择，随后对 `dist/latest/portable` 和固定 `local_release/` 分别运行 `validate-portable.ps1 -CleanCheckout`，两次均通过 EXE 身份、隔离首次启动、CLI/UI 和启动诊断检查。旧库/WAV fixture 在本 checkout 缺失，由支持该模式的脚本明确跳过，不能计为真实音频或首声验收。安装仅覆盖包拥有的 1,213 个文件，没有删除或镜像清理安装目录，也没有强制终止用户应用；两份已安装 EXE SHA256 与上述正式构建、验证后的包完全一致。六项持久数据基线及正常 `AUDIOLIB_DATA_DIR` 环境保持原值，未覆盖工作库、设置或 SQLite sidecar。日常入口继续为 `local_release/Start-AudioLibExplorer.cmd`。成功记录在本机 `.rust-validation/review-7ec84ed/installation.json`，本轮只推送开发分支，没有创建 tag 或发布 GitHub Release。
 
 ## 片段搜索 CR 推送前检查（2026-10-20，0.4.7、tokenization 3）
 

@@ -6,7 +6,7 @@
 
 | 评审项 | 修复与验证边界 |
 | --- | --- |
-| P0-1 aarch64 的原生 BM25 对比相差 1 ULP | C/SQLite 与 Rust 的测试 oracle 限为有限值、同符号、最多 2 ULP；超过边界、NaN、无穷仍失败。所有原生对比（含辅助读者测试）共享此规则，返回行顺序、Rust 串行/并行逐位一致性与快照/布局身份仍严格断言。运行期没有“分数不同即回退”的判断，不需放宽布局校验。Windows 已做定向回归；本机不能执行 macOS aarch64，需该平台复验 |
+| P0-1 aarch64 的原生 BM25 对比相差 1 ULP | C/SQLite 与 Rust 的测试 oracle 限为有限值、同符号、最多 2 ULP；超过边界、NaN、无穷仍失败。所有原生对比（含辅助读者测试）共享此规则，返回行顺序、Rust 串行/并行逐位一致性与快照/布局身份仍严格断言。运行期没有“分数不同即回退”的判断，不需放宽布局校验。Windows 两套完整检查通过；精确 `38c5ed2` 的 [原生 macOS ARM64 DB CI](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/39372798464/job/118464191043) 已通过，先断言 `uname -m=arm64` 再执行完整 db lib/integration 测试 |
 | P1-1 单字母拒绝行为及 P1-3 API 文档 | 核实此前用户明确选择“至少 2 个字母，1 个字母不搜索”，保留 GUI 取消旧请求和友好提示，core/db 返回 Validation；补充 [API](api/README.md) 搜索规则。当前服务端没有 `/search` 路由，不能描述成已实现端点返回 400/500；未来端点按既有 Validation 映射为 400 |
 | P1-2 首次升级阻塞与进度 | 新增 `open_with_progress` / `open_existing_with_progress`，服务端默认 info 日志可见阶段、每 5000 行和最终行数、经过时间；5001 行回归同时验证 Metadata/未知扩展保留和再次打开不重建。文档明确事务回滚、重启从头、业务 API 在启动期 503 的边界。新增 `upgrade-benchmark --source`，只读源经 SQLite backup 复制到 owned 临时文件后测真实升级与前后完整性，并验证源字节不变 |
 | 补充 P2-1 mmap 风险 | writer 显式 0；所有普通/辅助 reader 与 benchmark probe 共用 canonical Windows fixed-volume 策略，网络/可移动/未知/其他平台默认 0；`AUDIOLIB_DISABLE_MMAP` 任意值全关。测试检查禁用/未知卷、UNC 拒绝、writer 及池化 reader。编译参数注释和架构文档说明 macOS 适用范围、上限不等于启用 |
