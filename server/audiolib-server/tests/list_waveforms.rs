@@ -1124,10 +1124,18 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     .await;
     assert_eq!(reply.items[0].status, ItemStatus::Ok);
 
-    // Unknown encodings: 400 VALIDATION / UNSUPPORTED_ENCODING.
-    for body in [
-        format!(r#"{{"ids":[{tone}],"encoding":"u8"}}"#),
-        format!(r#"{{"ids":[{tone}],"encoding":5}}"#),
+    // Unknown encodings: 400 VALIDATION / UNSUPPORTED_ENCODING; a non-string
+    // encoding is a plain VALIDATION without sub_code.
+    for (body, sub_code) in [
+        (
+            format!(r#"{{"ids":[{tone}],"encoding":"u8"}}"#),
+            Some("UNSUPPORTED_ENCODING"),
+        ),
+        (
+            format!(r#"{{"ids":[{tone}],"encoding":"../x"}}"#),
+            Some("UNSUPPORTED_ENCODING"),
+        ),
+        (format!(r#"{{"ids":[{tone}],"encoding":5}}"#), None),
     ] {
         let response = call(
             f.state.clone(),
@@ -1138,12 +1146,10 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
             Some(&body),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body: ErrorBody = serde_json::from_slice(&bytes(response).await).unwrap();
-        assert_eq!(body.error_code, "VALIDATION");
-        if body.message.contains("u8") {
-            assert_eq!(body.sub_code.as_deref(), Some("UNSUPPORTED_ENCODING"));
-        }
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        let reply: ErrorBody = serde_json::from_slice(&bytes(response).await).unwrap();
+        assert_eq!(reply.error_code, "VALIDATION", "{body}");
+        assert_eq!(reply.sub_code.as_deref(), sub_code, "{body}");
     }
 
     // waveforms.db holds one 256-byte row per record with the -l1i8 tag.
@@ -1167,6 +1173,54 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     )
     .await;
     error(response, StatusCode::BAD_REQUEST, "VALIDATION").await;
+    for query in [
+        "encoding=../x",
+        "encoding=%2e%2e%2fwaveforms.db",
+        "encoding=",
+    ] {
+        let response = call(
+            f.state.clone(),
+            Method::GET,
+            &format!("/waveforms/bundle?{query}"),
+            &[],
+            LAN,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        let reply: ErrorBody = serde_json::from_slice(&bytes(response).await).unwrap();
+        assert_eq!(
+            reply.sub_code.as_deref(),
+            Some("UNSUPPORTED_ENCODING"),
+            "{query}"
+        );
+    }
+    // Without a token an external client gets 401.
+    let response = call(
+        f.state.clone(),
+        Method::GET,
+        "/waveforms/bundle?encoding=i8-minmax-base64",
+        &[],
+        "203.0.113.9:50000",
+        None,
+    )
+    .await;
+    error(response, StatusCode::UNAUTHORIZED, "UNAUTHORIZED").await;
+    // A second bundle while one is in progress: 503 BUSY + Retry-After.
+    {
+        let _held = audiolib_server::wfdb::BUNDLE_SLOT.try_acquire().unwrap();
+        let response = call(
+            f.state.clone(),
+            Method::GET,
+            "/waveforms/bundle?encoding=i8-minmax-base64",
+            &[],
+            LAN,
+            None,
+        )
+        .await;
+        assert_eq!(response.headers()["retry-after"], "5");
+        error(response, StatusCode::SERVICE_UNAVAILABLE, "BUSY").await;
+    }
     let response = call(
         f.state.clone(),
         Method::GET,
@@ -1181,11 +1235,19 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
         response.headers()["content-type"],
         "application/vnd.sqlite3"
     );
+    assert_eq!(response.headers()["x-library-id"], f.state.library_id());
+    assert!(response.headers().contains_key("x-library-revision"));
+    let bundle_etag = response.headers()["etag"].to_str().unwrap().to_string();
+    assert!(bundle_etag.starts_with("\"wfb1-"), "{bundle_etag}");
     let body = bytes(response).await;
     let out = tempfile::tempdir().unwrap();
     let path = out.path().join("b.db");
     std::fs::write(&path, &body).unwrap();
     audiolib_server::wfdb::validate_bundle(&path).unwrap();
+    assert_eq!(
+        audiolib_server::wfdb::file_etag(&path).unwrap(),
+        bundle_etag
+    );
     let conn = rusqlite::Connection::open(&path).unwrap();
     let meta = |key: &str| -> String {
         conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
