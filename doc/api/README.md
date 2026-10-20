@@ -421,7 +421,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 { "file": { "id": 3, "play_count": 0, "…": "…" }, "revision_before": 43, "revision": 43 }
 ```
 
-示例中的 `play_count` 仅为示意：该端点不改动它，`file` 原样返回库里的当前值；旧数据里已有的播放次数（以及 `play_history` 旧行）保持不变并照常返回。
+示例中的 `play_count` 仅为示意：该端点不改动它，`file` 原样返回库里的当前值；旧数据里已有的播放次数保持不变，在 `AudioFile.play_count` 中照常返回；`play_history` 旧行留在库里但不再经 `GET /history/plays` 返回（该端点总是 `[]`）。
 
 错误：`color` 不是空串或 `#RRGGBB`、`tags` > 16 KiB、`notes` > 1 MiB、非法 JSON / 字段类型不对、非整数 id、空 `ids` 或空 `patch`、未知 `tag_mode` → 400 `VALIDATION`；无此 id → 404 `NOT_FOUND`；需要 token 时（§2.2）token 缺失或错误 → 401。任何错误都不改库，`revision` 不变。
 
