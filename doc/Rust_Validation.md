@@ -1,5 +1,43 @@
 # Rust 验证报告
 
+## 升级恢复与最新客户端/服务端集成（2026-10-20，0.4.11 开发候选）
+
+本轮首先修复首次升级无法续跑、WAL 未截断及停机快照残留，再按用户要求拉取并合并最新远端代码。最终可执行源码为 `1d81a784e7372a21a71968470eef83061807133c`，包含 `origin/main` 的 `71bb1fd`、客户端 `integ/client-list-waveforms` 的 `c50bd27`、服务端 `integ/list-waveforms-final` 的 `3eef19c`，以及 `bd58b3f` 的升级恢复修复。构建完成后再次 fetch 并验证三条远端分支都是当前提交的祖先。发布说明保留 Unreleased 状态，未创建新 tag、未发布 GitHub Release、未部署 8790。
+
+Rust 1.97.1 MSVC 的格式化、默认及 ASIO 两套严格 Clippy 和完整 locked workspace/all-targets 测试全部通过：**每套 64 个顶层目标、1,067 passed、73 ignored、0 failed**。247 项动态源码/配置/资源输入与维护的 GUI 性能验证脚本在检查、构建及发布回归前后 SHA256 相同。ASIO 使用校验过的 Steinberg SDK 2.3.4。第一次集成检查发现的目录缓存测试问题与修正边界见 [审查修复](Rust_Review_Fixes.md)；失败批次日志保留。
+
+正式 `tools/build-release.ps1` 构建耗时 **272.717 秒**；`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和 CLI 片段回归通过。编译期间只有根目录文档修改，动态编译输入保持冻结；构建身份报告因此记录 `WorkingTreeChanges=true`。本轮两 EXE 的身份为：
+
+- AudioLibExplorer.exe：`6B8C4578EB72F5DBEF732D531ECEDEF9B60637B491B5FBBD6A4D1ECE51678CB4`
+- AudioLibCli.exe：`7383190DC9848C0F0A97F3B46A5B5E7F66EED3E16056AA51658FDE58ED0486EA`
+- audiolib-server.exe：`FA23469A577B1F2ED059E78775F3A732FB57A778E0FAE17102598C7860C10376`；同一 workspace 构建，`--version` 为 0.4.11。
+
+恢复回归覆盖分词、索引、验证和 checkpoint 阶段的取消及子进程突然退出，检查续跑、完整行数、signed ID 极值、Metadata、未知扩展和播放历史保留；另检查旧已打开 writer 的持久保护、读事务阻塞 checkpoint 时的 Busy、释放后 WAL 归零，以及未知恢复协议拒绝执行。服务端回归覆盖快照创建/压缩取消、活动下载持有文件、带锁的残留目录清理、health 进度、正常停机 WAL 回收与 revision 不虚增。用户已明确暂缓原 Mac 的同机耗时复测；这些功能回归不能代替新的 Mac 性能数据。
+
+真实库使用 `upgrade-benchmark --source <原快照> --live`，只在 owned 副本中执行实际可写库 WAL 升级，没有强制降级源数据。909,342 条记录、19,492,810,752 字节，schema 5、tokenization 2→3，SQLite 3.53.2；Windows 本地 SSD、Ryzen 7 9800X3D（8 核/16 线程）、100,415,373,312 字节物理内存，预校验已预热文件缓存，测量时没有并行 Cargo 构建。结果如下：
+
+| 项目 | 实测 |
+| --- | ---: |
+| 源 quick-check/FK/统计 | 34.711 秒 |
+| 复制到 owned 临时库 | 33.687 秒 |
+| owned 升级前完整性检查 | 65.162 秒 |
+| **可写库打开及升级，含回退备份、验证、分批 checkpoint** | **336.371 秒** |
+| 其中备份阶段通知至首批分词通知（含备份验证及初始化） | 67.954 秒 |
+| 分词阶段通知至索引阶段通知 | 158.756 秒 |
+| 索引阶段通知至验证阶段通知 | 95.969 秒 |
+| 索引验证通知至 checkpoint 通知 | 13.536 秒 |
+| 升级后完整性检查 | 63.766 秒 |
+| 全流程含准备和临时目录清理 | 536.141 秒 |
+| 进程峰值 working set / 采样 private bytes 峰值 | 243,048,448 / 235,114,496 字节 |
+| **200ms 采样 WAL 峰值 / 成功打开时 WAL** | **151,780,832 / 0 字节** |
+| owned 目录采样峰值（主库、回退备份、WAL/SHM） | 39,137,730,016 字节 |
+
+分词和索引均提交到 909,342 条；升级前后 SQLite、FTS5、外键检查通过，条数不变。原库测试前后 SHA256 均为 `5ADAECFFB603716F4B2840EFA2838F3D8174B2C9825B0D95EAF93275EBF6393F`，大小及修改时间一致；测试退出码 0，owned 临时目录已经删除。采样峰值是观测下界，目录大小不含保持不变的原快照，也不含运行中的服务器快照缓存；正常升级保留的回退备份在本次临时目录清理时一并删除，不代表生产升级会删除回退备份。该源修订和硬件与 Mac 报告不同，不能把 336.371 秒视为 Mac 新耗时或直接用其计算提速倍数。
+
+候选包通过正式 portable 流程更新固定 `local_release/`；两个目录各自运行隔离验证，只复制包所有文件并核对 SHA256，不替换工作库、设置、日志或源 WAV。最终安装结果独立记录在 `.rust-validation/resumable-upgrade/completion.json`，仅其 `success=true` 且两个 portable 检查和全部载荷哈希通过才表示安装完成。开发包与已发布 v0.4.11 的二进制身份不同，不能作为该 Release 的原产物；下一次发布仍需新程序版本和新 tag。
+
+完整检查与构建日志位于本机忽略目录 `.rust-validation/gui-e2e/round-upgrade-integrated-2/`，真实副本测量及安装记录位于 `.rust-validation/resumable-upgrade/`。原有搜索性能慢样本和未执行的 224 样本矩阵仍保留；**P95 latency <500ms for 1M+ records 尚未全面验收通过**。
+
 ## b49f7d2 搜索与 GUI 阶段收尾（2026-10-20，0.4.11）
 
 用户要求尽快阶段收尾后审查、推送，本轮据此停止扩展优化。**P95 latency <500ms for 1M+ records 仍未全面达到**；完整 224 样本矩阵尚未开始，也未完成。当前源码为 `b49f7d278505669ac025b4b49b9eceec45873728`，与另一个 Debug 任务协调后独立完成代码、构建及 GUI 操作，未混入其 Mac 升级、WAL 或服务端生命周期修复。

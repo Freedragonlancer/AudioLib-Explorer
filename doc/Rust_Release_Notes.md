@@ -1,4 +1,34 @@
-# AudioLib Explorer v0.4.11
+# AudioLib Explorer release notes
+
+## Unreleased: upgrade recovery and integrated client/server
+
+This candidate includes `origin/main` at `71bb1fd`, client integration at `c50bd27`
+and server integration at `3eef19c`, followed by the upgrade and shutdown repairs.
+The previously rejected `47ddd03` through `c0e8af9` builds must not be published.
+The workspace still reports 0.4.11 during preparation; publication requires a new
+shared program version and matching tag. Do not replace the published v0.4.11 tag.
+
+- Existing writable libraries upgrade search text and FTS5 in committed batches,
+  resume after interruption and retain one validated rollback backup. Local startup
+  displays bilingual progress; server health reports the current phase and committed
+  row count. Business endpoints remain unavailable until the offline upgrade finishes.
+- Upgrade batches and graceful server shutdown check WAL truncation. Shutdown stops
+  list Waveform workers, drains scans and snapshot jobs, then releases owned cached snapshots.
+  Active downloads retain their files until their last reference is released.
+- The latest client and server list Waveform changes are included, along with the
+  current toolbar/focus fixes. ARM64 BM25 comparisons retain exact result-order checks
+  while accepting the documented two-ULP numerical tolerance.
+- Libraries, Metadata, annotations, scan history and preferences are preserved.
+  API `/api/v1/`, schema 5 and snapshot compatibility 3..=5 remain unchanged.
+
+Validation and build identity are recorded in [Rust validation](Rust_Validation.md).
+The original Mac's performance rerun is deferred at the user's request. Search latency
+has not met the complete **P95 latency <500ms for 1M+ records** acceptance criteria;
+the recorded slow samples and pending full GUI matrix remain open. See
+[known issues](Rust_Known_Issues.md) and [upgrade recovery](Rust_Upgrade_Recovery.md).
+This preparation does not publish a GitHub Release or deploy the service on port 8790.
+
+## Published v0.4.11
 
 Release 0.4.11; the client, CLI and server share the same program version. Patch release on top of the published v0.4.10.
 
