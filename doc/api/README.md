@@ -1091,24 +1091,24 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 现有的 `waveforms/` 目录（§9 详情彩色波形缓存及 §9.1 的 i16 分片）**保留不变**；i8 由 i16 结果按上面的公式推导后写入 `waveforms.db`。
 - 选型依据（同一组指标，90 万合成行，热缓存，p50/p95；kill 为进程被杀，**不是断电**）：
 
-| 指标 | Windows 11 Dragonpark-Home（Python sqlite3 3.49.1）定长槽文件 | 同机 `waveforms.db` | Mac（服务端 rusqlite，release）`waveforms.db` |
+| 指标 | Windows 11 Dragonpark-Home（Python sqlite3 3.49.1）定长槽文件 | 同机 `waveforms.db` | Mac mini（M 系列，外置 SSD `/Volumes/ssd8t`，服务端 rusqlite（bundled SQLite），release，`examples/wfdb_bench.rs`）`waveforms.db` |
 |---|---|---|---|
-| 文件大小 | 252 MB | 284 MB | {{MAC_SIZE}} |
-| 全量写入 | 0.65 s | 2.16 s（每事务 1 万行） | {{MAC_FULL}} |
-| 单条更新 | 0.00 / 0.03 ms（fsync 0.90 ms） | 0.02 / 0.04 ms（FULL 0.90 ms） | {{MAC_UPSERT}} |
-| 读 200 行一页 | 1.08 / 1.38 ms + 42 ms 索引加载 | 1.16 / 1.72 ms | {{MAC_READ}} |
-| 写入时并发读 | 不支持 | 1.06 / 1.81 ms，0 错误 | {{MAC_CONC}} |
-| 随机 kill -9 | 20 次中 4 次撕裂槽（CRC 可检出，条目丢失） | integrity_check 20/20 ok | {{MAC_KILL}} |
+| 文件大小 | 252 MB | 284 MB | 308 MB（293.7 MiB） |
+| 全量写入 | 0.65 s | 2.16 s（每事务 1 万行） | 1.84 s（每事务 1 万行）/ 1.87 s（每事务 256 行） |
+| 单条更新 | 0.00 / 0.03 ms（fsync 0.90 ms） | 0.02 / 0.04 ms（FULL 0.90 ms） | 0.008 / 0.010 ms（FULL 0.081 / 0.153 ms） |
+| 读 200 行一页 | 1.08 / 1.38 ms + 42 ms 索引加载 | 1.16 / 1.72 ms | 0.175 / 0.192 ms |
+| 写入时并发读 | 不支持 | 1.06 / 1.81 ms，0 错误 | 0.178 / 0.205 ms，0 错误（同时每事务 256 行写入） |
+| 随机 kill -9 | 20 次中 4 次撕裂槽（CRC 可检出，条目丢失） | integrity_check 20/20 ok | integrity_check 20/20 ok，全部行 blob 256 B |
 
   结论：采用 `waveforms.db`、WAL、普通 `INTEGER PRIMARY KEY`、`synchronous=NORMAL`、后台批量写入（每事务几百行）。
 
 #### 9.4.2 整包下载（Bundle）
 
-- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`，90 万条约 230 MB 量级）。服务端用 `VACUUM INTO` 生成临时文件后流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他 → 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。
+- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端用 `VACUUM INTO` 生成临时文件后流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他 → 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。
 - `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`（生成时的库版本）、`schema_version`、`encoding`。
 - 客户端流程：下载到临时文件 → **校验后才使用**：`PRAGMA integrity_check` 为 `ok`；表/列名在白名单内（`list_waveforms` 与 `meta`，列同上，不多不少）；每行 `blob` 恰好 256 B、`encoding` 等于请求值、`0 ≤ n ≤ 128`；`meta.library_id` 等于当前库 → **原子替换**本地 `waveforms.db`（同目录临时文件 + rename）。任一校验失败则丢弃，不覆盖现有缓存。
 - 增量：导入后从该版本开始用 §9.1（`known` = 包内 etag）按 etag 增量拉取，因此打包期间变化的条目不会丢失（其 etag 已不同，会返回 `ok`）。
-- 实测（生成时间 / 大小）：Mac {{MAC_BUNDLE}}；Windows {{WIN_BUNDLE}}（待测）。
+- 实测（生成时间 / 大小）：Mac `VACUUM INTO` 0.38 s，308 MB（与源文件同大小），客户端式校验（integrity_check + 白名单 + blob 长度）0.23 s；Windows 待测（待测）。
 
 ## 10. 服务端部署
 
