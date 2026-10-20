@@ -1,5 +1,24 @@
 # Rust 验证报告
 
+## 远程快照下载与解压双进度（2026-10-21，0.4.11 修复构建）
+
+开发集成源码修复为 `aecd59b0f376d992940bea4d592407eec1ebd122`，已推送。最小 main backport 为 `d479a2c3d02a5e286e5d09dc939d597854d38aab`，通过 [PR #16](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/16) 合并为 `88d8bf39a086d2040927f48bb841e144cfa1099f`；未夹带集成分支的 84 个前置提交或其他任务文档。
+
+zstd 下载按 HTTP `Content-Length` 统计压缩响应体字节，解压按 `X-Uncompressed-Length` 统计数据库写入字节。GUI 连接页和缓存/导出页显示两组文字及独立进度条，19,495,989,248 字节对应的 **18592.8 MiB 仅用于解压总量**。缺失总量时分别保持不定进度，普通响应只显示下载。CR 另修正声明大小过小时重复绕过节流、首次收到下载总量被节流隐藏的问题，并加入回归。
+
+Rust 1.97.1 MSVC 的格式检查、默认及 ASIO 两套严格 workspace/all-targets Clippy 均通过。默认 locked workspace/all-targets 测试：开发集成版本 **65 个目标、1,075 passed、73 ignored、0 failed**；main backport **50 个目标、824 passed、71 ignored、0 failed**。PR 关联 Windows 与 Linux CI 均通过。两名代理分别审查后端、GUI 和最小 backport，没有未解决发现。
+
+本次验证范围过大。按用户要求停止重复 ASIO 全套测试和额外原生截图运行，省略无关 Metadata/库维护回归；不再追加测试。相同 Slint 布局在之前一轮已通过原生 UI 回归（1 passed），检查中英文、连接/缓存页、下载完成继续解压和解压总量未知的 8 个截图场景；该历史结果没有计作本轮新执行结果。
+
+使用验证过的 Steinberg ASIO SDK 2.3.4，`tools/build-release.ps1` 成功，用时 **306.177 秒**；标准便携打包成功，包验证通过（5.487 秒）。独立本机 `CARGO_TARGET_DIR` 的新 EXE 按 SHA256 同步到规范 release 输出后再打包，251 个源码/构建输入在构建和打包后哈希一致。
+
+固定 `X:\AI_Build\AudioLib_Explorer_oss\local_release` 已更新 **1,214 个包内文件**，通过 `validate-portable.ps1 -BinaryDirectory local_release -CleanCheckout`，CLI 版本为 **0.4.11**。本机保留既有开发集成功能并包含 `aecd59b` 的修复。两份安装 EXE 与验证过的便携包及本轮 release 输出 SHA256 一致：
+
+- AudioLibExplorer.exe：`1B0F980A43C38B503A0CC847F3563E1F6F1E080D9FC574366DA2C7D4771ED174`
+- AudioLibCli.exe：`FCDEE68E454616E5E4D4E1E57CB62D3EC9DE366652D640E82C3A969C2ED1A231`
+
+只覆盖包内文件，未清空安装目录。工作库、设置、Waveform 缓存库和占位缓存共 4 项的大小及 UTC 修改时间保持原值，设置 SHA256 与正常 `AUDIOLIB_DATA_DIR` 环境不变。上轮基线的远程 r793 快照已在本轮 CR 前被替换为 r819；当前 19,495,989,248 字节快照及缓存清单均早于本轮验证。旧基线导致的核对误报已保留，修正核对后确认安装完成，没有恢复或改写用户缓存。记录位于本机忽略目录 `.rust-validation/snapshot-progress/`。
+
 ## 升级恢复与最新客户端/服务端集成（2026-10-20，0.4.11 开发候选）
 
 本轮首先修复首次升级无法续跑、WAL 未截断及停机快照残留，再按用户要求拉取并合并最新远端代码。最终可执行源码为 `1d81a784e7372a21a71968470eef83061807133c`，包含 `origin/main` 的 `71bb1fd`、客户端 `integ/client-list-waveforms` 的 `c50bd27`、服务端 `integ/list-waveforms-final` 的 `3eef19c`，以及 `bd58b3f` 的升级恢复修复。构建完成后再次 fetch 并验证三条远端分支都是当前提交的祖先。发布说明保留 Unreleased 状态，未创建新 tag、未发布 GitHub Release、未部署 8790。
