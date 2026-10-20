@@ -1011,3 +1011,26 @@ covers the drag gesture threshold and Cancel. `audiolib-audio` tests decode
 through a registered in-memory byte source; the desktop server-mode test streams a WAV
 from a loopback server through the registered source. Use `AUDIOLIB_DATA_DIR` temporary directories for any
 manual test; never point tests at the real library.
+
+### Compact i8 list Waveforms (`i8-minmax-base64`, client side)
+
+- **Gating.** The client adds `"encoding": "i8-minmax-base64"` to `POST /waveforms` only
+  when `GET /capabilities` `list_waveforms.encodings` lists it. Otherwise the request and
+  the int16 (`i16le-minmax-base64`) path are unchanged.
+- **Format.** Up to 128 columns of interleaved signed i8 `min,max` (256 bytes), standard
+  base64 of exactly `4 * ceil(2n / 3)` characters; `n = 0` and `n < 128` follow the int16
+  rules. `i8 = round(i16 * 127 / 32767)`, half away from zero; a received `-128` is clamped
+  to `-127`; a column with `min > max` fails that item.
+- **Checks.** The reply must echo `encoding` (and any per-item `encoding`) as requested;
+  otherwise the whole reply is a protocol error. `ok` entity tags must end with `-l1i8`,
+  and `not_modified` tags are compared in full. `UNSUPPORTED_ENCODING` switches the client
+  back to int16 for the rest of the session.
+- **Storage.** `waveforms.db` (SQLite, WAL) next to the library's list cache directory:
+  `list_waveforms_i8(file_id INTEGER PRIMARY KEY, etag TEXT NOT NULL, encoding TEXT,
+  src_mtime INTEGER, src_size INTEGER, peaks BLOB CHECK(length(peaks)<=256))`, one UPSERT
+  per row, recording the encoding. Local libraries can derive the same rows (zoom key
+  `list128-v4-l1i8`) from their `list128-v4-l1` rows without decoding audio, in a
+  `waveforms.db` beside the library file; the library schema is unchanged.
+- **Display.** Values are expanded to the int16 scale (`round(i8 * 32767 / 127)`) and drawn
+  at true amplitude, without normalization.
+- The bundle download endpoint is not implemented yet.
