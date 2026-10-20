@@ -53,7 +53,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-pub use waveforms_db::{WAVEFORMS_DB_FILE, WaveformsDb, WaveformsDbRow};
+pub use waveforms_db::{
+    LIST_WAVEFORMS_COLUMNS, META_COLUMNS, WAVEFORMS_DB_FILE, WaveformsDb, WaveformsDbRow,
+    validate_bundle,
+};
 
 pub(crate) fn db_error(error: rusqlite::Error) -> Error {
     if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted)

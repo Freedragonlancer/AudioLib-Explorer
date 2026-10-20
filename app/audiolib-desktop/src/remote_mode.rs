@@ -720,6 +720,7 @@ impl Controller {
             }
         }
         let service = Arc::new(service);
+        spawn_waveform_bundle_import(&service);
         let writer = RemoteWriter::new(
             client,
             RemoteCache::new(&self.data_root()),
@@ -3246,6 +3247,55 @@ pub(super) fn playback_name(path: &Path, record_name: Option<&str>) -> String {
 /// worker's waveform detection aligned with cached playback copies).
 pub(super) fn is_remote_cache_path(data_root: &Path, path: &Path) -> bool {
     path.starts_with(data_root.join("remote"))
+}
+
+/// First fill of an empty `waveforms.db` from the server's bundle (doc/api §9.4.2), on a
+/// background thread. `503 BUSY` is retried with `bundle_backoff` (5 s doubling, at most
+/// 5 minutes) while page lookups continue; the thread ends when the provider is replaced
+/// (its last strong reference is dropped) or on any other outcome.
+fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
+    let wanted = service.offers_bundle()
+        && service
+            .i8_store()
+            .is_some_and(|store| store.is_empty().unwrap_or(false));
+    if !wanted {
+        return;
+    }
+    let weak = Arc::downgrade(service);
+    let spawned = std::thread::Builder::new()
+        .name("waveform-bundle".into())
+        .spawn(move || {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let mut attempt = 0u32;
+            loop {
+                let Some(service) = weak.upgrade() else { return };
+                let wait = match service.import_bundle(&cancel) {
+                    Ok(rows) => {
+                        tracing::info!(rows, "list Waveform bundle imported");
+                        return;
+                    }
+                    Err(audiolib_remote::RemoteError::Busy { retry_after, .. }) => {
+                        audiolib_remote::bundle_backoff(attempt, retry_after)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "list Waveform bundle import failed; using page lookups");
+                        return;
+                    }
+                };
+                drop(service);
+                attempt = attempt.saturating_add(1);
+                let until = std::time::Instant::now() + wait;
+                while std::time::Instant::now() < until {
+                    if weak.strong_count() == 0 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "list Waveform bundle thread not started");
+    }
 }
 
 #[cfg(test)]

@@ -205,9 +205,9 @@ impl SqliteProvider {
             store.upsert(&crate::WaveformsDbRow {
                 file_id: *id,
                 etag: audiolib_core::LIST_WAVEFORM_I8_ZOOM_LEVEL.into(),
-                encoding: Some(audiolib_core::LIST_WAVEFORM_ENCODING_I8.into()),
-                src_mtime: version.mtime_ns,
-                src_size: i64::try_from(version.size).ok(),
+                encoding: audiolib_core::LIST_WAVEFORM_ENCODING_I8.into(),
+                src_mtime: version.mtime_ns.unwrap_or(0),
+                src_size: i64::try_from(version.size).unwrap_or(i64::MAX),
                 peaks: audiolib_core::ListWaveformI8::from_list_waveform(&waveform),
             })?;
             written += 1;

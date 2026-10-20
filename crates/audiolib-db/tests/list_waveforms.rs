@@ -305,12 +305,9 @@ fn i8_rows_are_derived_from_int16_rows_into_a_separate_waveforms_db() {
     };
     let row = store.get(loud_id).unwrap().unwrap();
     assert_eq!(row.etag, LIST_WAVEFORM_I8_ZOOM_LEVEL);
-    assert_eq!(row.encoding.as_deref(), Some(LIST_WAVEFORM_ENCODING_I8));
+    assert_eq!(row.encoding, LIST_WAVEFORM_ENCODING_I8);
     assert_eq!(row.peaks, ListWaveformI8::from_list_waveform(&waveform));
-    assert_eq!(
-        row.src_size,
-        Some(fs::metadata(&loud).unwrap().len() as i64)
-    );
+    assert_eq!(row.src_size, fs::metadata(&loud).unwrap().len() as i64);
     // True amplitude: a quiet file stays quiet (100/32767 rounds to 0), never normalized.
     let quiet_row = store.get(quiet_id).unwrap().unwrap();
     assert!(quiet_row.peaks.values.iter().all(|value| *value == 0));

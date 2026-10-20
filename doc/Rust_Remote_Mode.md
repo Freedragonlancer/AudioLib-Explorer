@@ -1027,12 +1027,25 @@ manual test; never point tests at the real library.
   `-l1i8`, and `not_modified` tags are compared in full. An error body with
   `"sub_code": "UNSUPPORTED_ENCODING"` (doc/api §9.4, `400 VALIDATION`) switches the
   client back to int16 for the rest of the session.
-- **Storage.** `waveforms.db` (SQLite, WAL) next to the library's list cache directory:
-  `list_waveforms_i8(file_id INTEGER PRIMARY KEY, etag TEXT NOT NULL, encoding TEXT,
-  src_mtime INTEGER, src_size INTEGER, peaks BLOB CHECK(length(peaks)<=256))`, one UPSERT
-  per row, recording the encoding. Local libraries can derive the same rows (zoom key
+- **Storage.** `waveforms.db` (SQLite, WAL, `synchronous=NORMAL`) next to the library's
+  list cache directory, laid out like the server file of doc/api §9.4.1:
+  `list_waveforms(file_id INTEGER PRIMARY KEY, etag, src_mtime, src_size, encoding, n,
+  blob)` with `blob` exactly 256 bytes (zero padded after `n` columns) plus
+  `meta(key, value)`. One UPSERT per row, recording the encoding (server items store
+  `src_mtime`/`src_size` 0). Local libraries can derive the same rows (etag/zoom key
   `list128-v4-l1i8`) from their `list128-v4-l1` rows without decoding audio, in a
   `waveforms.db` beside the library file; the library schema is unchanged.
+- **Bundle (doc/api §9.4.2).** When `list_waveforms.bundle` is true and the local
+  `waveforms.db` is empty, a background thread downloads
+  `GET /waveforms/bundle?encoding=i8-minmax-base64`, streaming it to a temporary file
+  beside `waveforms.db`. It checks `Content-Length`, the `ETag` `"wfb1-<32 hex>"` against
+  the first 16 bytes of the file's SHA-256, and `X-Library-Id`. It then validates the file:
+  `integrity_check`, exact tables and columns, no views, triggers or extra indexes, every
+  `blob` 256 bytes, the encoding, `0 <= n <= 128` and `meta.library_id`. After that it
+  closes the store and renames the file over it. Any failure deletes the temporary file
+  and keeps the current store. `503 BUSY` waits for the larger of `Retry-After` and 5 s
+  doubling, at most 5 minutes; page lookups continue meanwhile. Lookups then resume
+  incrementally, sending the bundle's per-entry etags in `known`. `meta.revision` is
+  never used to judge freshness.
 - **Display.** Values are expanded to the int16 scale (`round(i8 * 32767 / 127)`) and drawn
   at true amplitude, without normalization.
-- The bundle download endpoint is not implemented yet.

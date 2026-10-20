@@ -201,7 +201,7 @@ pub struct RemoteClient {
     // Timeout profiles over the shared keep-alive agent ([`crate::abort::shared_agent`]).
     pub(crate) agent: Timeouts,
     library: Timeouts,
-    bulk: Timeouts,
+    pub(crate) bulk: Timeouts,
     pub(crate) writes: Timeouts,
     expected_library_id: Option<String>,
     library_changed: Arc<AtomicBool>,
@@ -287,7 +287,10 @@ pub(crate) fn call_cancellable<T: Send + 'static>(
 /// Keep the HTTP exchange and file writes on the caller while a scoped watcher shuts
 /// its sockets down on cancellation. The watcher always joins before returning, and
 /// the caller has already closed/removed any partial file when cancellation returns.
-fn cancellable_io<T>(cancel: &AtomicBool, exchange: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn cancellable_io<T>(
+    cancel: &AtomicBool,
+    exchange: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     if cancel.load(Ordering::Acquire) {
         return Err(RemoteError::Cancelled);
     }

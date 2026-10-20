@@ -1,20 +1,38 @@
 // crates/audiolib-db/src/waveforms_db.rs
-//! `waveforms.db`: a separate SQLite file next to (never inside) a library database or a
-//! server library's client cache, holding compact list Waveforms (`i8-minmax-base64`
-//! bytes, at most 256 per row). WAL mode, one row per record, written by per-row UPSERT.
-//! The library schema, its indexes, FTS5 and server snapshots are not touched.
+//! `waveforms.db` (doc/api/README.md §9.4.1): a separate SQLite file next to (never inside)
+//! a library database or a server library's client cache, holding compact
+//! `i8-minmax-base64` list Waveforms. WAL mode, `synchronous=NORMAL`, one row per record
+//! written by per-row UPSERT. The library schema, its indexes, FTS5 and server snapshots
+//! are not touched.
 //!
-//! Local mode fills it from existing `waveform_cache` `list128-v4-l1` rows
-//! ([`crate::SqliteProvider::derive_i8_list_waveforms`], no audio decode); server mode
-//! stores the server's i8 items together with their entity tag and encoding.
+//! The table layout matches the server's §9.4.1 file so that a downloaded bundle (§9.4.2)
+//! can replace the local file after [`validate_bundle`]:
+//! `list_waveforms(file_id, etag, src_mtime, src_size, encoding, n, blob)` with `blob`
+//! exactly 256 bytes (128 × `min,max` int8, zero padded after `n` columns) and
+//! `meta(key, value)`.
 use crate::db_error;
-use audiolib_core::{Error, LIST_WAVEFORM_I8_MAX_BYTES, ListWaveformI8, Result};
-use rusqlite::{Connection, OptionalExtension};
+use audiolib_core::{
+    Error, LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_I8_MAX_BYTES, ListWaveformI8, Result,
+};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 /// File name of the compact list Waveform store.
 pub const WAVEFORMS_DB_FILE: &str = "waveforms.db";
+/// Columns of `list_waveforms` (the §9.4.2 whitelist, exactly these).
+pub const LIST_WAVEFORMS_COLUMNS: [&str; 7] = [
+    "file_id",
+    "etag",
+    "src_mtime",
+    "src_size",
+    "encoding",
+    "n",
+    "blob",
+];
+/// Columns of `meta`.
+pub const META_COLUMNS: [&str; 2] = ["key", "value"];
 
 /// One stored compact list Waveform.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,11 +41,11 @@ pub struct WaveformsDbRow {
     /// Server entity tag (full, including its `-l1i8` suffix) or the local zoom key.
     pub etag: String,
     /// Wire encoding the peaks were received or derived in.
-    pub encoding: Option<String>,
-    /// Source file mtime (Unix nanoseconds) when known (local mode).
-    pub src_mtime: Option<i64>,
-    /// Source file size in bytes when known (local mode).
-    pub src_size: Option<i64>,
+    pub encoding: String,
+    /// Source file mtime (Unix nanoseconds locally; 0 when unknown, as for server items).
+    pub src_mtime: i64,
+    /// Source file size in bytes (0 when unknown).
+    pub src_size: i64,
     pub peaks: ListWaveformI8,
 }
 
@@ -35,6 +53,42 @@ pub struct WaveformsDbRow {
 pub struct WaveformsDb {
     path: PathBuf,
     conn: Mutex<Connection>,
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path).map_err(db_error)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(db_error)?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .map_err(db_error)?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(Error::Database(format!(
+            "waveforms.db journal mode is {mode}, expected wal"
+        )));
+    }
+    conn.execute_batch(
+        "PRAGMA synchronous=NORMAL;
+         CREATE TABLE IF NOT EXISTS list_waveforms(
+           file_id   INTEGER PRIMARY KEY,
+           etag      TEXT    NOT NULL,
+           src_mtime INTEGER NOT NULL,
+           src_size  INTEGER NOT NULL,
+           encoding  TEXT    NOT NULL,
+           n         INTEGER NOT NULL,
+           blob      BLOB    NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )
+    .map_err(db_error)?;
+    Ok(conn)
+}
+
+/// Zero-padded 256-byte blob of `peaks`.
+fn padded_blob(peaks: &ListWaveformI8) -> Vec<u8> {
+    let mut blob = peaks.to_bytes();
+    blob.resize(LIST_WAVEFORM_I8_MAX_BYTES, 0);
+    blob
 }
 
 impl WaveformsDb {
@@ -46,7 +100,7 @@ impl WaveformsDb {
             .join(WAVEFORMS_DB_FILE)
     }
 
-    /// Open or create the store at `path` (WAL mode, table created if absent).
+    /// Open or create the store at `path` (WAL mode, tables created if absent).
     pub fn open(path: &Path) -> Result<Self> {
         if path.file_name().and_then(|name| name.to_str()) != Some(WAVEFORMS_DB_FILE) {
             return Err(Error::Validation(format!(
@@ -59,32 +113,9 @@ impl WaveformsDb {
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::Database(format!("{}: {error}", parent.display())))?;
         }
-        let conn = Connection::open(path).map_err(db_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(db_error)?;
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .map_err(db_error)?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(Error::Database(format!(
-                "waveforms.db journal mode is {mode}, expected wal"
-            )));
-        }
-        conn.execute_batch(
-            "PRAGMA synchronous=NORMAL;
-             CREATE TABLE IF NOT EXISTS list_waveforms_i8(
-               file_id INTEGER PRIMARY KEY,
-               etag TEXT NOT NULL,
-               encoding TEXT,
-               src_mtime INTEGER,
-               src_size INTEGER,
-               peaks BLOB CHECK(length(peaks)<=256)
-             );",
-        )
-        .map_err(db_error)?;
         Ok(Self {
             path: path.to_path_buf(),
-            conn: Mutex::new(conn),
+            conn: Mutex::new(open_connection(path)?),
         })
     }
 
@@ -94,53 +125,60 @@ impl WaveformsDb {
 
     /// Insert or replace one row (single-statement UPSERT, its own transaction).
     pub fn upsert(&self, row: &WaveformsDbRow) -> Result<()> {
-        let peaks = row.peaks.to_bytes();
-        if peaks.len() > LIST_WAVEFORM_I8_MAX_BYTES {
+        if row.peaks.values.len() > LIST_WAVEFORM_I8_MAX_BYTES {
             return Err(Error::Validation("i8 peaks exceed 256 bytes".into()));
         }
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         conn.prepare_cached(
-            "INSERT INTO list_waveforms_i8(file_id,etag,encoding,src_mtime,src_size,peaks)
-             VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(file_id) DO UPDATE SET etag=excluded.etag,encoding=excluded.encoding,
-              src_mtime=excluded.src_mtime,src_size=excluded.src_size,peaks=excluded.peaks",
+            "INSERT INTO list_waveforms(file_id,etag,src_mtime,src_size,encoding,n,blob)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(file_id) DO UPDATE SET etag=excluded.etag,src_mtime=excluded.src_mtime,
+              src_size=excluded.src_size,encoding=excluded.encoding,n=excluded.n,
+              blob=excluded.blob",
         )
         .map_err(db_error)?
         .execute(rusqlite::params![
             row.file_id,
             row.etag,
-            row.encoding,
             row.src_mtime,
             row.src_size,
-            peaks
+            row.encoding,
+            row.peaks.columns() as i64,
+            padded_blob(&row.peaks)
         ])
         .map_err(db_error)?;
         Ok(())
     }
 
-    /// The row of `file_id`. A stored blob that no longer validates is reported as absent.
+    /// The row of `file_id`. A row whose blob or `n` no longer validates is reported as
+    /// absent (it is replaced by the next UPSERT).
     pub fn get(&self, file_id: i64) -> Result<Option<WaveformsDbRow>> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let row = conn
             .prepare_cached(
-                "SELECT etag,encoding,src_mtime,src_size,peaks FROM list_waveforms_i8
+                "SELECT etag,src_mtime,src_size,encoding,n,blob FROM list_waveforms
                  WHERE file_id=?1",
             )
             .map_err(db_error)?
             .query_row([file_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
                 ))
             })
             .optional()
             .map_err(db_error)?;
         Ok(
-            row.and_then(|(etag, encoding, src_mtime, src_size, peaks)| {
-                let peaks = ListWaveformI8::from_bytes(&peaks.unwrap_or_default()).ok()?;
+            row.and_then(|(etag, src_mtime, src_size, encoding, n, blob)| {
+                let n = usize::try_from(n).ok()?;
+                if blob.len() != LIST_WAVEFORM_I8_MAX_BYTES || n > LIST_WAVEFORM_COLUMNS as usize {
+                    return None;
+                }
+                let peaks = ListWaveformI8::from_bytes(&blob[..n * 2]).ok()?;
                 Some(WaveformsDbRow {
                     file_id,
                     etag,
@@ -163,6 +201,129 @@ impl WaveformsDb {
         }
         Ok(rows)
     }
+
+    /// Number of stored rows.
+    pub fn len(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.query_row("SELECT COUNT(*) FROM list_waveforms", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count.max(0) as u64)
+        .map_err(db_error)
+    }
+
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
+
+    /// Atomically replace this store with an already validated bundle file (§9.4.2):
+    /// the connection is closed, `validated` is renamed over `waveforms.db` (same
+    /// directory) and the store is reopened in WAL mode. On a failed rename the previous
+    /// file is reopened and kept.
+    pub fn replace_with(&self, validated: &Path) -> Result<()> {
+        if validated.parent() != self.path.parent() {
+            return Err(Error::Validation(
+                "a bundle must be staged in the waveforms.db directory".into(),
+            ));
+        }
+        let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        // Closing the only connection checkpoints the WAL and removes its sidecars.
+        let old = std::mem::replace(&mut *conn, Connection::open_in_memory().map_err(db_error)?);
+        old.close().map_err(|(_, error)| db_error(error))?;
+        let renamed = std::fs::rename(validated, &self.path);
+        *conn = open_connection(&self.path)?;
+        renamed.map_err(|error| Error::Database(format!("waveforms.db replace: {error}")))
+    }
+}
+
+/// Validate a downloaded bundle (§9.4.2) before it may replace `waveforms.db`:
+/// `PRAGMA integrity_check` is `ok`; exactly the tables `list_waveforms` and `meta` with
+/// exactly the whitelisted columns (no views, triggers or extra indexes); every row's
+/// `blob` is exactly 256 bytes, `encoding` equals `encoding`, `0 <= n <= 128`; and
+/// `meta.library_id` equals `library_id`. Returns the row count. The file is opened
+/// read-only and never modified.
+pub fn validate_bundle(path: &Path, encoding: &str, library_id: &str) -> Result<u64> {
+    let invalid =
+        |message: String| Error::Validation(format!("waveform bundle rejected: {message}"));
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    let check: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| invalid(error.to_string()))?;
+    if check != "ok" {
+        return Err(invalid(format!("integrity_check: {check}")));
+    }
+    let objects: Vec<(String, String)> = conn
+        .prepare("SELECT type,name FROM sqlite_master")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        })
+        .map_err(|error| invalid(error.to_string()))?;
+    let mut tables = BTreeSet::new();
+    for (kind, name) in &objects {
+        match kind.as_str() {
+            "table" => {
+                tables.insert(name.as_str());
+            }
+            "index" if name.starts_with("sqlite_autoindex_") => {}
+            _ => return Err(invalid(format!("unexpected {kind} {name}"))),
+        }
+    }
+    if tables != BTreeSet::from(["list_waveforms", "meta"]) {
+        return Err(invalid(format!("unexpected tables {tables:?}")));
+    }
+    for (table, expected) in [
+        ("list_waveforms", &LIST_WAVEFORMS_COLUMNS[..]),
+        ("meta", &META_COLUMNS[..]),
+    ] {
+        let columns: BTreeSet<String> = conn
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect())
+            .map_err(|error| invalid(error.to_string()))?;
+        let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
+        if columns != expected {
+            return Err(invalid(format!("{table} columns {columns:?}")));
+        }
+    }
+    let bad: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM list_waveforms WHERE typeof(blob)<>'blob' OR length(blob)<>?1
+              OR encoding IS NOT ?2 OR typeof(n)<>'integer' OR n<0 OR n>?3
+              OR typeof(etag)<>'text'",
+            rusqlite::params![
+                LIST_WAVEFORM_I8_MAX_BYTES as i64,
+                encoding,
+                i64::from(LIST_WAVEFORM_COLUMNS)
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+    if bad != 0 {
+        return Err(invalid(format!(
+            "{bad} rows with a bad blob, encoding or n"
+        )));
+    }
+    let meta_library: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key='library_id'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| invalid(error.to_string()))?;
+    if meta_library.as_deref() != Some(library_id) {
+        return Err(invalid(format!(
+            "meta.library_id {meta_library:?} is not the open library"
+        )));
+    }
+    conn.query_row("SELECT COUNT(*) FROM list_waveforms", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|count| count.max(0) as u64)
+    .map_err(|error| invalid(error.to_string()))
 }
 
 #[cfg(test)]
@@ -174,9 +335,9 @@ mod tests {
         WaveformsDbRow {
             file_id: id,
             etag: etag.into(),
-            encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
-            src_mtime: Some(11),
-            src_size: Some(22),
+            encoding: LIST_WAVEFORM_ENCODING_I8.into(),
+            src_mtime: 11,
+            src_size: 22,
             peaks: ListWaveformI8::new(values).unwrap(),
         }
     }
@@ -194,38 +355,45 @@ mod tests {
             db.upsert(&row(7, "\"c-l1i8\"", vec![-5, 5, 0, 1])).unwrap();
         }
         let db = WaveformsDb::open(&path).unwrap();
-        let mode: String = db
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .unwrap();
+        let (mode, blob_len, n): (String, i64, i64) = {
+            let conn = db.conn.lock().unwrap();
+            let mode = conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            let (blob_len, n) = conn
+                .query_row(
+                    "SELECT length(blob),n FROM list_waveforms WHERE file_id=7",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            (mode, blob_len, n)
+        };
         assert_eq!(mode, "wal");
+        assert_eq!((blob_len, n), (256, 2));
         let seven = db.get(7).unwrap().unwrap();
         assert_eq!(seven.etag, "\"c-l1i8\"");
         assert_eq!(seven.peaks.values, vec![-5, 5, 0, 1]);
-        assert_eq!(seven.encoding.as_deref(), Some(LIST_WAVEFORM_ENCODING_I8));
+        assert_eq!(seven.encoding, LIST_WAVEFORM_ENCODING_I8);
         assert_eq!(db.get(8).unwrap().unwrap().peaks.columns(), 0);
         assert!(db.get(9).unwrap().is_none());
         assert_eq!(db.get_many(&[9, 8, 7]).unwrap().len(), 2);
-        let count: i64 = db
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM list_waveforms_i8", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(db.len().unwrap(), 2);
+        assert!(WaveformsDb::open(&directory.path().join("library.db")).is_err());
     }
 
     #[test]
-    fn oversized_blob_is_rejected_by_the_table_check() {
+    fn rows_with_a_bad_blob_or_n_read_as_absent() {
         let directory = tempfile::tempdir().unwrap();
         let db = WaveformsDb::open(&directory.path().join(WAVEFORMS_DB_FILE)).unwrap();
-        let error = db.conn.lock().unwrap().execute(
-            "INSERT INTO list_waveforms_i8(file_id,etag,peaks) VALUES(1,'x',zeroblob(257))",
-            [],
-        );
-        assert!(error.is_err());
-        assert!(WaveformsDb::open(&directory.path().join("library.db")).is_err());
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO list_waveforms VALUES(1,'x',0,0,'i8-minmax-base64',1,zeroblob(255));
+             INSERT INTO list_waveforms VALUES(2,'x',0,0,'i8-minmax-base64',129,zeroblob(256));",
+        )
+        .unwrap();
+        drop(conn);
+        assert!(db.get(1).unwrap().is_none());
+        assert!(db.get(2).unwrap().is_none());
     }
 }

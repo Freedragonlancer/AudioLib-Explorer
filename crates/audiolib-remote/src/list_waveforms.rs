@@ -31,6 +31,14 @@
 //!   `-l1i8` suffix. Peaks are expanded to the int16
 //!   scale at true amplitude for display.
 //!
+//! * Bundle import (§9.4.2, [`RemoteListWaveforms::import_bundle`]): only when the
+//!   capability advertises `bundle` and i8. The bundle is streamed to a temporary file
+//!   beside `waveforms.db` (never held in memory), its `ETag` `"wfb1-<32 hex>"` must equal
+//!   the first 16 bytes of the file's SHA-256, `X-Library-Id` must be the open library,
+//!   and [`audiolib_db::validate_bundle`] must pass before the store is atomically
+//!   replaced. Lookups then continue incrementally with the bundle's per-entry etags.
+//!   `503 BUSY` is retried by [`bundle_backoff`] (5 s doubling, at most 5 minutes).
+//!
 //! Retry policy (only still-visible `pending` ids, at most 5 times; `root_offline` after
 //! `/roots` reports the root online; no automatic retry of `missing` or `error`) and the
 //! audition yield (no POST during the first 3 s after a stream or preview starts) belong to
@@ -88,6 +96,8 @@ pub struct ListWaveformsCapability {
     pub encoding: String,
     /// Additional encodings the server accepts in a request's `encoding` field.
     pub encodings: Vec<String>,
+    /// `GET /waveforms/bundle` is available (§9.4.2).
+    pub bundle: bool,
 }
 
 impl ListWaveformsCapability {
@@ -326,6 +336,108 @@ impl RemoteClient {
             error.without_token()
         } else {
             error
+        })
+    }
+
+    /// Stream `GET /waveforms/bundle?encoding=i8-minmax-base64` (§9.4.2) into
+    /// `destination` (created or truncated) without holding it in memory, checking
+    /// `Content-Length` and the `ETag` (`"wfb1-"` + first 16 bytes of the SHA-256 as hex).
+    /// `503 BUSY` is [`RemoteError::Busy`] with `Retry-After`. The caller validates and
+    /// removes the file.
+    pub fn download_list_waveform_bundle(
+        &self,
+        destination: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<BundleMeta> {
+        crate::client::cancellable_io(cancel, || {
+            self.download_list_waveform_bundle_io(destination, cancel)
+        })
+    }
+
+    fn download_list_waveform_bundle_io(
+        &self,
+        destination: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<BundleMeta> {
+        use std::io::Write;
+        let context = "GET /waveforms/bundle";
+        let url = format!(
+            "{}/waveforms/bundle?encoding={LIST_WAVEFORM_ENCODING_I8}",
+            self.api
+        );
+        let response = crate::abort::call_fresh(|| {
+            let mut request = self.bulk.get(&url);
+            if !self.token.is_empty() {
+                request = request.header("Authorization", &format!("Bearer {}", self.token));
+            }
+            request
+        })
+        .map_err(|error| RemoteError::from_transport(error, &url))?;
+        let response = self.checked(response, context)?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.trim().to_owned())
+        };
+        if let Some(encoding) = header("content-encoding")
+            && !encoding.eq_ignore_ascii_case("identity")
+        {
+            return Err(RemoteError::Protocol(format!(
+                "{context}: unexpected Content-Encoding {encoding}"
+            )));
+        }
+        let etag =
+            header("etag").ok_or_else(|| RemoteError::Protocol(format!("{context}: no ETag")))?;
+        let length = header("content-length").and_then(|value| value.parse::<u64>().ok());
+        let meta = BundleMeta {
+            etag,
+            library_id: header("x-library-id").unwrap_or_default(),
+            revision: header("x-library-revision").and_then(|value| value.parse().ok()),
+            bytes: 0,
+        };
+        let mut file = std::fs::File::create(destination)?;
+        let mut reader = response.into_body().into_reader();
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut buffer = vec![0u8; 256 * 1024];
+        let mut received = 0u64;
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err(RemoteError::Cancelled);
+            }
+            let read = reader.read(&mut buffer).map_err(|error| {
+                if cancel.load(Ordering::Acquire) {
+                    RemoteError::Cancelled
+                } else {
+                    RemoteError::Unreachable(format!("{context}: {error}"))
+                }
+            })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            file.write_all(&buffer[..read])?;
+            received += read as u64;
+        }
+        file.sync_all()?;
+        drop(file);
+        if length.is_some_and(|length| length != received) {
+            return Err(RemoteError::Protocol(format!(
+                "{context}: truncated, received {received} of {} bytes",
+                length.unwrap_or_default()
+            )));
+        }
+        let expected = bundle_etag(digest.finish().as_ref());
+        if meta.etag != expected {
+            return Err(RemoteError::Protocol(format!(
+                "{context}: ETag {} does not match the content ({expected})",
+                meta.etag
+            )));
+        }
+        Ok(BundleMeta {
+            bytes: received,
+            ..meta
         })
     }
 
@@ -705,6 +817,57 @@ impl RemoteListWaveforms {
             .with_file_name(audiolib_db::WAVEFORMS_DB_FILE)
     }
 
+    /// Whether a bundle import is possible (`bundle` and i8 advertised, store attached,
+    /// i8 not rejected).
+    pub fn offers_bundle(&self) -> bool {
+        self.requests_i8()
+            && self
+                .capability()
+                .is_some_and(|capability| capability.bundle)
+    }
+
+    /// Download, verify, validate and install the server's `waveforms.db` bundle
+    /// (§9.4.2). Returns the installed row count. On any failure the temporary file is
+    /// removed and the existing store is kept. `503 BUSY` is returned as
+    /// [`RemoteError::Busy`]; retry after [`bundle_backoff`].
+    pub fn import_bundle(&self, cancel: &AtomicBool) -> Result<u64> {
+        let Some(store) = self.i8_store.as_ref().filter(|_| self.offers_bundle()) else {
+            return Err(RemoteError::Unsupported(
+                "The server offers no list Waveform bundle".into(),
+            ));
+        };
+        let staged = store.path().with_file_name(format!(
+            "{}.bundle-{}-{}.tmp",
+            audiolib_db::WAVEFORMS_DB_FILE,
+            std::process::id(),
+            BUNDLE_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let meta = self.client.download_list_waveform_bundle(&staged, cancel)?;
+            if meta.library_id != self.library_id {
+                return Err(RemoteError::LibraryChanged(format!(
+                    "waveform bundle is for library {:?}, not the open snapshot's; discarded",
+                    meta.library_id
+                )));
+            }
+            if cancel.load(Ordering::Acquire) {
+                return Err(RemoteError::Cancelled);
+            }
+            let rows =
+                audiolib_db::validate_bundle(&staged, LIST_WAVEFORM_ENCODING_I8, &self.library_id)
+                    .map_err(|error| RemoteError::Protocol(error.to_string()))?;
+            store
+                .replace_with(&staged)
+                .map_err(|error| RemoteError::Io(std::io::Error::other(error.to_string())))?;
+            tracing::info!(rows, bytes = meta.bytes, etag = %meta.etag, "waveform bundle installed");
+            Ok(rows)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
+        result
+    }
+
     /// Whether the next lookup sends `encoding: i8-minmax-base64`.
     pub fn requests_i8(&self) -> bool {
         self.i8_store.is_some()
@@ -729,6 +892,11 @@ impl RemoteListWaveforms {
 
     pub fn store(&self) -> &ListWaveformStore {
         &self.store
+    }
+
+    /// The attached `waveforms.db`, if any.
+    pub fn i8_store(&self) -> Option<&WaveformsDb> {
+        self.i8_store.as_ref()
     }
 
     /// Blocking on first use (`GET /capabilities`, run it off the UI thread):
@@ -875,7 +1043,7 @@ impl RemoteListWaveforms {
                 Vec::new()
             })
             .into_iter()
-            .filter(|row| row.encoding.as_deref() == Some(LIST_WAVEFORM_ENCODING_I8))
+            .filter(|row| row.encoding == LIST_WAVEFORM_ENCODING_I8)
             .map(|row| (row.file_id, row))
             .collect();
         let known: BTreeMap<i64, String> = stored
@@ -1027,6 +1195,40 @@ pub(crate) fn unsupported_encoding(body: &str) -> Option<String> {
 /// the ids back off like `pending`).
 const ECHO_MISMATCH_RETRY: Duration = Duration::from_secs(2);
 
+/// Headers of a downloaded `waveforms.db` bundle (§9.4.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleMeta {
+    /// `"wfb1-<32 hex>"`, verified against the content.
+    pub etag: String,
+    /// `X-Library-Id`.
+    pub library_id: String,
+    /// `X-Library-Revision` (diagnostic only; never used to judge entry freshness).
+    pub revision: Option<i64>,
+    pub bytes: u64,
+}
+
+/// `"wfb1-<first 16 bytes of SHA-256 as lowercase hex>"`.
+pub fn bundle_etag(sha256: &[u8]) -> String {
+    let hex: String = sha256
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("\"wfb1-{hex}\"")
+}
+
+/// Wait before bundle attempt `attempt + 1` after a `503 BUSY` (§9.4.2): the larger of the
+/// server's `Retry-After` and 5 s doubling per consecutive failure, at most 5 minutes.
+pub fn bundle_backoff(attempt: u32, retry_after: Option<u64>) -> Duration {
+    const CAP: Duration = Duration::from_secs(300);
+    let doubling = Duration::from_secs(5).saturating_mul(1u32 << attempt.min(16));
+    doubling
+        .max(Duration::from_secs(retry_after.unwrap_or(0)))
+        .min(CAP)
+}
+
+static BUNDLE_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
 fn busy(retry_after: Option<u64>) -> ListWaveformBatch {
     ListWaveformBatch {
         deferred: Some(
@@ -1079,9 +1281,9 @@ fn resolve_i8(
                     let row = WaveformsDbRow {
                         file_id: id,
                         etag,
-                        encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
-                        src_mtime: None,
-                        src_size: None,
+                        encoding: LIST_WAVEFORM_ENCODING_I8.into(),
+                        src_mtime: 0,
+                        src_size: 0,
                         peaks,
                     };
                     if let Err(error) = i8_store.upsert(&row) {
@@ -1676,7 +1878,7 @@ mod i8_tests {
         let reopened = WaveformsDb::open(&directory.path().join("waveforms.db")).unwrap();
         let row = reopened.get(1).unwrap().unwrap();
         assert_eq!(row.etag, "W/\"e1-l1i8\"");
-        assert_eq!(row.encoding.as_deref(), Some(LIST_WAVEFORM_ENCODING_I8));
+        assert_eq!(row.encoding, LIST_WAVEFORM_ENCODING_I8);
         assert_eq!(row.peaks.values, vec![-127, 127, -10, 10]);
         assert!(reopened.get(2).unwrap().is_none());
         let service = service(&server, directory.path(), true);
@@ -1729,9 +1931,9 @@ mod i8_tests {
                 .upsert(&WaveformsDbRow {
                     file_id: 2,
                     etag: "W/\"old-l1i8\"".into(),
-                    encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
-                    src_mtime: None,
-                    src_size: None,
+                    encoding: LIST_WAVEFORM_ENCODING_I8.into(),
+                    src_mtime: 0,
+                    src_size: 0,
                     peaks: old.clone(),
                 })
                 .unwrap();
@@ -1839,9 +2041,9 @@ mod i8_tests {
                 .upsert(&WaveformsDbRow {
                     file_id: 1,
                     etag: "W/\"old-l1i8\"".into(),
-                    encoding: Some(LIST_WAVEFORM_ENCODING_I8.into()),
-                    src_mtime: None,
-                    src_size: None,
+                    encoding: LIST_WAVEFORM_ENCODING_I8.into(),
+                    src_mtime: 0,
+                    src_size: 0,
                     peaks: i8_copy.clone(),
                 })
                 .unwrap();
@@ -1872,5 +2074,305 @@ mod i8_tests {
             path.parent(),
             ListWaveformStore::library_directory(root, LIBRARY).parent()
         );
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+    use crate::test_server::{TestResponse, TestServer};
+    use std::sync::Arc;
+
+    const LIBRARY: &str = "lib-bundle";
+    const CAPS: &str = r#"{"manage_mode":"all","list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64","encodings":["i16le-minmax-base64","i8-minmax-base64"],"bundle":true}}"#;
+    const CAPS_NO_BUNDLE: &str = r#"{"manage_mode":"all","list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64","encodings":["i16le-minmax-base64","i8-minmax-base64"]}}"#;
+
+    /// Bytes of a server-style bundle; `tweak` is SQL run before closing.
+    fn bundle_bytes(library: &str, tweak: &str) -> Vec<u8> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("b.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE list_waveforms (file_id INTEGER PRIMARY KEY, etag TEXT NOT NULL,
+               src_mtime INTEGER NOT NULL, src_size INTEGER NOT NULL, encoding TEXT NOT NULL,
+               n INTEGER NOT NULL, blob BLOB NOT NULL);
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO list_waveforms VALUES(1,'W/\"b1-l1i8\"',0,0,'i8-minmax-base64',1,
+               CAST(X'F60A' || zeroblob(254) AS BLOB));
+             INSERT INTO meta VALUES('library_id','{library}'),('revision','3'),
+               ('encoding','i8-minmax-base64'),('schema_version','1'),('generated_at','1');
+             {tweak}"
+        ))
+        .unwrap();
+        drop(conn);
+        std::fs::read(path).unwrap()
+    }
+
+    fn etag_of(bytes: &[u8]) -> String {
+        bundle_etag(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+    }
+
+    struct Reply {
+        status: u16,
+        bytes: Vec<u8>,
+        etag: Option<String>,
+        library: String,
+        retry_after: Option<&'static str>,
+    }
+
+    fn ok_reply(bytes: Vec<u8>) -> Reply {
+        Reply {
+            status: 200,
+            etag: Some(etag_of(&bytes)),
+            bytes,
+            library: LIBRARY.into(),
+            retry_after: None,
+        }
+    }
+
+    type Posts = Arc<Mutex<Vec<serde_json::Value>>>;
+    type Check = fn(&RemoteError) -> bool;
+
+    fn server(caps: &'static str, reply: Reply) -> (TestServer, Posts) {
+        let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+        let seen = posts.clone();
+        let server = TestServer::start(move |request| {
+            if request.path.starts_with("/api/v1/waveforms/bundle") {
+                assert!(request.path.ends_with("?encoding=i8-minmax-base64"));
+                if reply.status != 200 {
+                    let mut response = TestResponse::json(
+                        reply.status,
+                        r#"{"error_code":"BUSY","message":"one bundle at a time"}"#,
+                    );
+                    if let Some(seconds) = reply.retry_after {
+                        response = response.with_header("Retry-After", seconds);
+                    }
+                    return response;
+                }
+                let mut response = TestResponse::bytes(200, reply.bytes.clone())
+                    .with_header("Content-Type", "application/vnd.sqlite3")
+                    .with_header("X-Library-Id", &reply.library)
+                    .with_header("X-Library-Revision", "3");
+                if let Some(etag) = &reply.etag {
+                    response = response.with_header("ETag", etag);
+                }
+                return response;
+            }
+            match request.path.as_str() {
+                "/api/v1/capabilities" => TestResponse::json(200, caps),
+                "/api/v1/waveforms" => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    seen.lock().unwrap().push(body);
+                    TestResponse::json(
+                        200,
+                        &serde_json::json!({"library_id": LIBRARY, "buckets": 128,
+                            "encoding": "i8-minmax-base64",
+                            "items": [{"id": 1, "status": "not_modified", "etag": "W/\"b1-l1i8\""}]})
+                        .to_string(),
+                    )
+                }
+                other => panic!("unexpected {other}"),
+            }
+        });
+        (server, posts)
+    }
+
+    fn service(server: &TestServer, directory: &Path) -> RemoteListWaveforms {
+        RemoteListWaveforms::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            LIBRARY,
+            ListWaveformStore::new(directory.join("list"), DEFAULT_LIST_WAVEFORM_CACHE_BYTES),
+        )
+        .with_i8_store(WaveformsDb::open(&directory.join("waveforms.db")).unwrap())
+    }
+
+    fn seed(service: &RemoteListWaveforms) {
+        service
+            .i8_store
+            .as_ref()
+            .unwrap()
+            .upsert(&WaveformsDbRow {
+                file_id: 9,
+                etag: "W/\"keep-l1i8\"".into(),
+                encoding: LIST_WAVEFORM_ENCODING_I8.into(),
+                src_mtime: 0,
+                src_size: 0,
+                peaks: ListWaveformI8::new(vec![-1, 1]).unwrap(),
+            })
+            .unwrap();
+    }
+
+    fn leftovers(directory: &Path) -> Vec<String> {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".bundle-"))
+            .collect()
+    }
+
+    #[test]
+    fn etag_and_backoff_helpers() {
+        let digest = ring::digest::digest(&ring::digest::SHA256, b"abc");
+        assert_eq!(
+            bundle_etag(digest.as_ref()),
+            "\"wfb1-ba7816bf8f01cfea414140de5dae2223\""
+        );
+        let secs = |attempt, retry| bundle_backoff(attempt, retry).as_secs();
+        assert_eq!(secs(0, Some(5)), 5);
+        assert_eq!(secs(1, Some(5)), 10);
+        assert_eq!(secs(2, None), 20);
+        assert_eq!(secs(0, Some(60)), 60);
+        assert_eq!(secs(6, Some(5)), 300);
+        assert_eq!(secs(40, None), 300);
+        assert_eq!(secs(0, Some(10_000)), 300);
+    }
+
+    #[test]
+    fn a_verified_bundle_replaces_the_store_and_lookups_resume_by_etag() {
+        let directory = tempfile::tempdir().unwrap();
+        let (server, posts) = server(CAPS, ok_reply(bundle_bytes(LIBRARY, "")));
+        let service = service(&server, directory.path());
+        seed(&service);
+        assert!(service.offers_bundle());
+        let cancel = AtomicBool::new(false);
+        assert_eq!(service.import_bundle(&cancel).unwrap(), 1);
+        let store = service.i8_store.as_ref().unwrap();
+        assert!(store.get(9).unwrap().is_none(), "old store replaced");
+        assert_eq!(store.get(1).unwrap().unwrap().peaks.values, vec![-10, 10]);
+        assert!(leftovers(directory.path()).is_empty());
+        let batch = service.lookup(&[1], &cancel).unwrap();
+        assert_eq!(
+            posts.lock().unwrap()[0]["known"],
+            serde_json::json!({"1": "W/\"b1-l1i8\""})
+        );
+        assert_eq!(
+            batch.items[0].state,
+            ListWaveformState::Ready {
+                waveform: ListWaveformI8::new(vec![-10, 10])
+                    .unwrap()
+                    .to_list_waveform()
+            }
+        );
+    }
+
+    #[test]
+    fn every_rejected_bundle_keeps_the_store_and_leaves_no_temporary_file() {
+        let good = bundle_bytes(LIBRARY, "");
+        let mut truncated_etag = ok_reply(good[..good.len() / 2].to_vec());
+        truncated_etag.etag = Some(etag_of(&good));
+        let cases: Vec<(&str, Reply, Check)> = vec![
+            (
+                "etag mismatch",
+                Reply {
+                    etag: Some("\"wfb1-00000000000000000000000000000000\"".into()),
+                    ..ok_reply(good.clone())
+                },
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("ETag")),
+            ),
+            (
+                "missing etag",
+                Reply {
+                    etag: None,
+                    ..ok_reply(good.clone())
+                },
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("ETag")),
+            ),
+            ("content differs from etag", truncated_etag, |e| {
+                matches!(e, RemoteError::Protocol(_))
+            }),
+            (
+                "other library header",
+                Reply {
+                    library: "other".into(),
+                    ..ok_reply(good.clone())
+                },
+                |e| matches!(e, RemoteError::LibraryChanged(_)),
+            ),
+            (
+                "meta library",
+                ok_reply(bundle_bytes("other", "")),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("library_id")),
+            ),
+            (
+                "extra table",
+                ok_reply(bundle_bytes(LIBRARY, "CREATE TABLE x(y);")),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("tables")),
+            ),
+            (
+                "extra column",
+                ok_reply(bundle_bytes(LIBRARY, "ALTER TABLE meta ADD COLUMN z;")),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("columns")),
+            ),
+            (
+                "blob length",
+                ok_reply(bundle_bytes(
+                    LIBRARY,
+                    "UPDATE list_waveforms SET blob=zeroblob(128);",
+                )),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("bad blob")),
+            ),
+            (
+                "encoding",
+                ok_reply(bundle_bytes(
+                    LIBRARY,
+                    "UPDATE list_waveforms SET encoding='i16le-minmax-base64';",
+                )),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("bad blob")),
+            ),
+            (
+                "n out of range",
+                ok_reply(bundle_bytes(LIBRARY, "UPDATE list_waveforms SET n=200;")),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("bad blob")),
+            ),
+            (
+                "not sqlite",
+                ok_reply(b"definitely not a sqlite file".to_vec()),
+                |e| matches!(e, RemoteError::Protocol(_)),
+            ),
+            (
+                "busy",
+                Reply {
+                    status: 503,
+                    retry_after: Some("5"),
+                    ..ok_reply(Vec::new())
+                },
+                |e| {
+                    matches!(
+                        e,
+                        RemoteError::Busy {
+                            retry_after: Some(5),
+                            ..
+                        }
+                    )
+                },
+            ),
+        ];
+        for (name, reply, expected) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let (server, _) = server(CAPS, reply);
+            let service = service(&server, directory.path());
+            seed(&service);
+            let error = service
+                .import_bundle(&AtomicBool::new(false))
+                .expect_err(name);
+            assert!(expected(&error), "{name}: {error:?}");
+            let store = service.i8_store.as_ref().unwrap();
+            assert_eq!(store.len().unwrap(), 1, "{name}: store kept");
+            assert!(store.get(9).unwrap().is_some(), "{name}");
+            assert!(leftovers(directory.path()).is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn no_bundle_request_without_the_capability() {
+        let directory = tempfile::tempdir().unwrap();
+        let (server, _) = server(CAPS_NO_BUNDLE, ok_reply(bundle_bytes(LIBRARY, "")));
+        let service = service(&server, directory.path());
+        assert!(!service.offers_bundle());
+        assert!(matches!(
+            service.import_bundle(&AtomicBool::new(false)),
+            Err(RemoteError::Unsupported(_))
+        ));
     }
 }
