@@ -51,6 +51,12 @@ const FOCUS_HISTORY: i32 = 2;
 mod source_roots;
 pub(in crate::controller) use source_roots::RootOperation;
 
+#[path = "waveform_cache_page.rs"]
+mod waveform_cache_page;
+use waveform_cache_page::{
+    WaveformCacheAction, WaveformCacheFetch, WaveformCacheState, parse_rate,
+};
+
 /// Row selected in the source list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum Selection {
@@ -84,6 +90,8 @@ pub(super) struct SourceManager {
     library_generation: u64,
     /// Bumped by each list Waveform status poll start; older polls stop.
     wave_poll: u64,
+    /// The 「波形缓存」 section's capability, settings and 403 state (active server).
+    wave_cache: WaveformCacheState,
     /// A busy indicator belongs to one request; invalidation releases it and a
     /// delayed completion cannot release a newer request's indicator.
     manage_sequence: u64,
@@ -136,10 +144,17 @@ struct LibraryPage {
         Result<ServerSettings, RemoteError>,
         Result<ListWaveformStatus, RemoteError>,
     )>,
+    /// The 「波形缓存」 section through the active server's `DataProvider`; `None` hides
+    /// it (another profile, local mode or no list Waveforms).
+    waveform_cache: Option<WaveformCacheFetch>,
 }
 
 impl LibraryPage {
-    fn fetch(client: &RemoteClient, host: String) -> Result<Self, RemoteError> {
+    fn fetch(
+        client: &RemoteClient,
+        host: String,
+        cache: Option<&dyn audiolib_core::DataProvider>,
+    ) -> Result<Self, RemoteError> {
         let roots = client.roots()?;
         let capabilities = client.capabilities();
         let waves = capabilities
@@ -152,6 +167,10 @@ impl LibraryPage {
             capabilities,
             scan: client.current_scan(),
             history: client.scan_history(HISTORY_LIMIT, 0),
+            waveform_cache: waves
+                .is_some()
+                .then(|| cache.map(WaveformCacheFetch::fetch))
+                .flatten(),
             waves,
         })
     }
@@ -215,6 +234,34 @@ impl Controller {
         ui.on_sm_scan_control_requested(move |action| c.control_server_scan(action));
         let c = self.clone();
         ui.on_sm_wave_pregenerate_requested(move |enabled| c.set_server_pregenerate(enabled));
+        let c = self.clone();
+        ui.on_sm_wc_job_requested(move |mode| {
+            let mode = match mode {
+                1 => audiolib_core::waveform_cache::WaveformJobMode::Failed,
+                2 => audiolib_core::waveform_cache::WaveformJobMode::Rebuild,
+                _ => audiolib_core::waveform_cache::WaveformJobMode::Missing,
+            };
+            c.run_waveform_cache_action(WaveformCacheAction::Start(mode));
+        });
+        let c = self.clone();
+        ui.on_sm_wc_control_requested(move |control| {
+            let control = match control {
+                1 => audiolib_core::waveform_cache::WaveformJobControl::Resume,
+                2 => audiolib_core::waveform_cache::WaveformJobControl::Stop,
+                _ => audiolib_core::waveform_cache::WaveformJobControl::Pause,
+            };
+            c.run_waveform_cache_action(WaveformCacheAction::Control(control));
+        });
+        let c = self.clone();
+        ui.on_sm_wc_rate_requested(move |text| {
+            let chinese = c.chinese.load(Ordering::Acquire);
+            match parse_rate(&text, chinese) {
+                Ok(rate) => c.run_waveform_cache_action(WaveformCacheAction::Rate(rate)),
+                Err(message) => post(c.ui.clone(), move |ui| {
+                    ui.set_sm_wave_message(message.into());
+                }),
+            }
+        });
         let c = self.clone();
         ui.on_sm_remove_records_requested(move || c.remove_server_records());
         let c = self.clone();
@@ -1174,7 +1221,8 @@ impl Controller {
                     return;
                 }
             };
-            let page = match LibraryPage::fetch(&client, host.clone()) {
+            let cache = c.waveform_cache_provider(&profile.id);
+            let page = match LibraryPage::fetch(&client, host.clone(), cache.as_deref()) {
                 Ok(page) => page,
                 Err(error) => {
                     c.post_library_error(generation, &error, chinese);
@@ -1189,8 +1237,14 @@ impl Controller {
                 .and_then(|scan| scan.as_ref())
                 .map(|scan| scan.progress.session_id)
                 .filter(|id| *id > 0);
-            if page.waves_supported() {
-                c.poll_wave_status(generation, client.clone(), chinese);
+            match (&page.waveform_cache, &cache) {
+                (Some(_), Some(provider)) => {
+                    c.poll_waveform_cache(generation, provider.clone(), chinese);
+                }
+                _ if page.waves_supported() => {
+                    c.poll_wave_status(generation, client.clone(), chinese);
+                }
+                _ => {}
             }
             c.post_library_page(generation, page, chinese);
             while polling {
@@ -1224,7 +1278,7 @@ impl Controller {
                         let sync = finished
                             .as_ref()
                             .is_some_and(|scan| c.scan_moved_revision(scan));
-                        match LibraryPage::fetch(&client, host.clone()) {
+                        match LibraryPage::fetch(&client, host.clone(), cache.as_deref()) {
                             Ok(page) => {
                                 c.post_library_page(generation, page, chinese);
                                 if sync {
@@ -1287,6 +1341,19 @@ impl Controller {
 
     /// 服务器音效库 「服务器预生成列表波形」: `PATCH /settings` (gated by `manage_mode`).
     fn set_server_pregenerate(self: &Arc<Self>, enabled: bool) {
+        // The active server's 「波形缓存」 section goes through its DataProvider.
+        if self
+            .remote
+            .lock()
+            .unwrap()
+            .manager
+            .wave_cache
+            .capabilities
+            .is_some()
+        {
+            self.run_waveform_cache_action(WaveformCacheAction::Pregenerate(enabled));
+            return;
+        }
         let chinese = self.chinese.load(Ordering::Acquire);
         let generation = self.remote.lock().unwrap().manager.library_generation;
         let client = match self.active_manage_client() {
@@ -1784,6 +1851,7 @@ impl Controller {
             ui.set_sm_library_loading(false);
             ui.set_sm_library_error(true);
             ui.set_sm_wave_supported(false);
+            ui.set_sm_wc_visible(false);
             ui.set_sm_library_status(
                 if chinese {
                     format!("读取服务器音效库失败：{text}")
@@ -1801,6 +1869,8 @@ impl Controller {
             if !c.library_current(generation) {
                 return;
             }
+            let mut page = page;
+            let waveform_cache = page.waveform_cache.take();
             ui.set_sm_library_loading(false);
             let mut problems = Vec::new();
             let mut note = |what: &str, error: &RemoteError| {
@@ -1870,6 +1940,14 @@ impl Controller {
                 None => {
                     ui.set_sm_wave_can_change(false);
                     ui.set_sm_wave_status("".into());
+                }
+            }
+            match waveform_cache {
+                Some(fetch) => c.publish_waveform_cache_fetch(&ui, fetch, chinese),
+                None => {
+                    c.remote.lock().unwrap().manager.wave_cache = WaveformCacheState::default();
+                    ui.set_sm_wc_visible(false);
+                    ui.set_sm_wc_confirm(0);
                 }
             }
             let rows: Vec<ServerRootRow> = page

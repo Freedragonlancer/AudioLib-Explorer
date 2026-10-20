@@ -718,6 +718,32 @@ export component AppWindow inherits Window {
     in property <string> sm-wave-message: "";
     in property <bool> sm-wave-error: false;
     callback sm-wave-pregenerate-requested(bool);
+    // 「波形缓存」 (§9.5): the active server's list Waveform cache; busy/messages reuse sm-wave-*.
+    in property <bool> sm-wc-visible: false;
+    in property <bool> sm-wc-jobs: false;
+    in property <bool> sm-wc-can-manage: false;
+    in property <bool> sm-wc-rate-setting: false;
+    in property <bool> sm-wc-offers-missing: false;
+    in property <bool> sm-wc-offers-failed: false;
+    in property <bool> sm-wc-offers-rebuild: false;
+    in property <bool> sm-wc-job-active: false;
+    in property <bool> sm-wc-paused: false;
+    in property <bool> sm-wc-has-failed: false;
+    in property <string> sm-wc-run-state: "";
+    in property <float> sm-wc-progress: 0;
+    in property <string> sm-wc-progress-text: "";
+    in property <string> sm-wc-rate-text: "";
+    in property <string> sm-wc-job-text: "";
+    in property <string> sm-wc-last-error: "";
+    in-out property <string> sm-wc-rate-draft: "";
+    // 全部重建 confirmation: 0 none, 1 first, 2 second (destructive).
+    in-out property <int> sm-wc-confirm: 0;
+    property <bool> sm-wc-ready: root.sm-wc-can-manage && !root.sm-wave-busy;
+    // 0 missing, 1 failed, 2 rebuild (only after both confirmations).
+    callback sm-wc-job-requested(int);
+    // 0 pause, 1 resume, 2 stop.
+    callback sm-wc-control-requested(int);
+    callback sm-wc-rate-requested(string);
     // Server management on 服务器音效库 (B2): active server only, gated on can_manage.
     in property <[string]> sm-root-names;
     in property <bool> sm-scan-paused: false;
@@ -2312,6 +2338,49 @@ export component AppWindow inherits Window {
                                         }
                                         if root.sm-wave-supported && root.sm-wave-status != "": Text { text: root.sm-wave-status; color: root.sm-wave-error ? Theme.warning : Theme.dim; font-size: 11px; wrap: word-wrap; }
                                         if root.sm-wave-supported && root.sm-wave-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.sm-wave-message; }
+                                        if root.sm-wave-supported && root.sm-wc-visible: VerticalLayout { spacing: 6px;
+                                            Text { height: 20px; text: root.chinese ? "波形缓存" : "Waveform cache"; color: Theme.ink; font-size: 13px; font-weight: 600; }
+                                            Label { text: (root.chinese ? "状态：" : "State: ") + root.sm-wc-run-state; }
+                                            Rectangle { height: 8px; border-radius: 4px; background: Theme.raised; border-width: 1px; border-color: Theme.border;
+                                                accessible-role: progress-indicator; accessible-value: Math.round(max(0, min(1, root.sm-wc-progress)) * 100) + "%";
+                                                Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * max(0, min(1, root.sm-wc-progress)); border-radius: 4px; background: Theme.accent; }
+                                            }
+                                            if root.sm-wc-progress-text != "": Label { wrap: word-wrap; text: root.sm-wc-progress-text; }
+                                            if root.sm-wc-rate-text != "": Label { wrap: word-wrap; text: root.sm-wc-rate-text; }
+                                            if root.sm-wc-job-text != "": Label { wrap: word-wrap; text: root.sm-wc-job-text; }
+                                            if root.sm-wc-last-error != "": Label { wrap: word-wrap; color: Theme.warning; text: root.sm-wc-last-error; }
+                                            if root.sm-wc-jobs && root.sm-wc-confirm == 0: HorizontalLayout { height: 30px; spacing: 6px;
+                                                if root.sm-wc-offers-missing: Action { width: 96px; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.chinese ? "补齐缺失" : "Fill missing"; clicked => { root.sm-wc-job-requested(0); } }
+                                                if root.sm-wc-offers-failed: Action { width: 96px; enabled: root.sm-wc-ready && !root.sm-wc-job-active && root.sm-wc-has-failed; label: root.chinese ? "重试失败" : "Retry failed"; clicked => { root.sm-wc-job-requested(1); } }
+                                                if root.sm-wc-offers-rebuild: Action { width: 104px; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.chinese ? "全部重建…" : "Rebuild all…"; clicked => { root.sm-wc-confirm = 1; } }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            if root.sm-wc-confirm == 1 || root.sm-wc-confirm == 2: Rectangle { border-radius: 5px; background: Theme.raised;
+                                                VerticalLayout { padding: 8px; spacing: 6px;
+                                                    Label { wrap: word-wrap; color: Theme.warning; text: root.sm-wc-confirm == 1 ? (root.chinese ? "全部重建会先清空服务器上本库的全部列表缩略波形缓存，再重新读取所有文件生成。确定要继续吗？" : "Rebuild all first clears this library's whole list thumbnail Waveform cache on the server, then reads every file again. Continue?") : (root.chinese ? "再次确认：现有缓存将被清空，服务器会重新读取所有文件，NAS 会长时间保持唤醒。" : "Confirm again: the existing cache is cleared and the server re-reads every file; the NAS stays awake for a long time."); }
+                                                    HorizontalLayout { height: 30px; spacing: 6px;
+                                                        Action { width: 128px; primary: true; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.sm-wc-confirm == 1 ? (root.chinese ? "继续…" : "Continue…") : (root.chinese ? "确认全部重建" : "Rebuild all"); clicked => { if root.sm-wc-confirm == 1 { root.sm-wc-confirm = 2; } else { root.sm-wc-confirm = 0; root.sm-wc-job-requested(2); } } }
+                                                        Action { width: 72px; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-wc-confirm = 0; } }
+                                                        Rectangle { horizontal-stretch: 1; }
+                                                    }
+                                                }
+                                            }
+                                            HorizontalLayout { height: 30px; spacing: 6px;
+                                                Action { width: 72px; enabled: root.sm-wc-ready && !root.sm-wc-paused && (!root.sm-wc-jobs || root.sm-wc-job-active); label: root.chinese ? "暂停" : "Pause"; clicked => { root.sm-wc-control-requested(0); } }
+                                                Action { width: 72px; enabled: root.sm-wc-ready && root.sm-wc-paused; label: root.chinese ? "继续" : "Resume"; clicked => { root.sm-wc-control-requested(1); } }
+                                                if root.sm-wc-jobs: Action { width: 72px; enabled: root.sm-wc-ready && root.sm-wc-job-active; label: root.chinese ? "停止" : "Stop"; clicked => { root.sm-wc-control-requested(2); } }
+                                                if root.sm-wave-busy: Label { text: root.chinese ? "处理中…" : "Working…"; }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            if root.sm-wc-jobs && root.sm-wc-rate-setting: HorizontalLayout { height: 30px; spacing: 6px;
+                                                Label { text: root.chinese ? "生成限速（文件/秒）" : "Rate limit (files/s)"; }
+                                                LineEdit { min-width: 100px; max-width: 100px; horizontal-stretch: 0; enabled: root.sm-wc-ready; input-label: root.chinese ? "生成限速" : "Rate limit"; placeholder-text: root.chinese ? "默认" : "default"; text <=> root.sm-wc-rate-draft; accepted => { root.sm-wc-rate-requested(root.sm-wc-rate-draft); } }
+                                                Action { width: 72px; enabled: root.sm-wc-ready; label: root.chinese ? "应用" : "Apply"; clicked => { root.sm-wc-rate-requested(root.sm-wc-rate-draft); } }
+                                                Label { text: root.chinese ? "1–1000，留空 = 恢复默认" : "1–1000, empty = default"; color: Theme.muted; font-size: 10px; }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            if !root.sm-wc-can-manage: Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "服务器不允许本机管理波形缓存（manage_mode），只能查看。" : "The server does not allow this PC to manage the Waveform cache (manage_mode); view only."; }
+                                        }
                                         Rectangle { height: 1px; background: Theme.border; }
                                         Text { height: 22px; text: root.chinese ? "扫描历史（最近 20 次）" : "Scan history (latest 20)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
                                         for line[index] in root.sm-history: Rectangle { height: 40px; background: Math.mod(index, 2) == 0 ? Theme.raised : Theme.panel;
