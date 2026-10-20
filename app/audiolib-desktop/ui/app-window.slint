@@ -350,6 +350,23 @@ export component AppWindow inherits Window {
     default-font-size: 12px;
 
     in property <string> app-version: "development";
+    // Explicit diagnostics only: the compositor observer identifies the exact
+    // request and publication phase from pixels, without encoding user text.
+    in property <bool> perf-marker-enabled: false;
+    in property <[bool]> perf-marker-bits;
+    // The diagnostic runner aligns these lengths to whole physical pixels at
+    // the observed DPI; fractional display scales must not shift bit centers.
+    in property <length> perf-marker-cell-width: 3px;
+    in property <length> perf-marker-cell-height: 6px;
+    in property <length> perf-marker-x: root.width - 196px;
+    in property <length> perf-marker-y: root.height - 16px;
+    out property <length> perf-marker-parent-x: shortcuts.absolute-position.x;
+    out property <length> perf-marker-parent-y: shortcuts.absolute-position.y;
+    out property <length> perf-marker-actual-client-x;
+    out property <length> perf-marker-actual-client-y;
+    public function perf-focus-search() {
+        if root.perf-marker-enabled { search-input.focus(); }
+    }
     in property <bool> startup-busy: false;
     in property <string> startup-message;
     in property <string> startup-stage;
@@ -2373,6 +2390,27 @@ export component AppWindow inherits Window {
         TouchArea { }
         Rectangle { width: 340px; height: 110px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 8px; border-width: 1px; border-color: Theme.border;
             Text { text: root.chinese ? "正在保存更改…" : "Saving changes…"; color: Theme.ink; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    if root.perf-marker-enabled && !root.closing && !root.startup-busy: Rectangle {
+        x: root.perf-marker-x - shortcuts.absolute-position.x;
+        y: root.perf-marker-y - shortcuts.absolute-position.y;
+        init => {
+            root.perf-marker-actual-client-x = self.absolute-position.x;
+            root.perf-marker-actual-client-y = self.absolute-position.y;
+        }
+        changed absolute-position => {
+            root.perf-marker-actual-client-x = self.absolute-position.x;
+            root.perf-marker-actual-client-y = self.absolute-position.y;
+        }
+        width: 64 * root.perf-marker-cell-width;
+        height: 2 * root.perf-marker-cell-height; background: #000000;
+        for bit[index] in root.perf-marker-bits: Rectangle {
+            x: Math.mod(index, 64) * root.perf-marker-cell-width;
+            y: floor(index / 64) * root.perf-marker-cell-height;
+            width: root.perf-marker-cell-width;
+            height: root.perf-marker-cell-height;
+            background: bit ? #ffffff : #000000;
         }
     }
     }

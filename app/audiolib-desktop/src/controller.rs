@@ -2087,8 +2087,12 @@ impl Controller {
                     )
                     .into(),
                 );
+                crate::gui_search_benchmark::library_info_published(true);
             }
-            Err(error) => ui.set_management_report(error.to_string().into()),
+            Err(error) => {
+                ui.set_management_report(error.to_string().into());
+                crate::gui_search_benchmark::library_info_published(false);
+            }
         }
     }
 
@@ -2424,7 +2428,9 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
+                    crate::gui_search_benchmark::worker_started(job.generation, false);
                     let mut result = provider.search_cancellable(&job.request, job.cancel.clone());
+                    crate::gui_search_benchmark::worker_completed(job.generation, false);
                     // Server removals stay hidden until the resync swaps the snapshot.
                     if let Ok(page) = result.as_mut() {
                         c.hide_removed_in_page(page);
@@ -2532,6 +2538,24 @@ impl Controller {
                                         })
                                         .into(),
                                 );
+                                if crate::gui_search_benchmark::enabled() {
+                                    let ids = c2
+                                        .records
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|file| file.id)
+                                        .collect();
+                                    crate::gui_search_benchmark::page_published(
+                                        &ui,
+                                        job.generation,
+                                        page.total_count,
+                                        page.returned_count,
+                                        ids,
+                                        page.execution_time_ms,
+                                        page.cache_hit,
+                                    );
+                                }
                                 c2.search_page_published(&ui, job.generation, true);
                             }
                             Err(error) => {
@@ -2575,6 +2599,7 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
+                    crate::gui_search_benchmark::worker_started(job.generation, true);
                     let database_revision = provider.search_revision().ok().flatten();
                     let cached = facets.as_ref().filter(|cached| {
                         cached.matches(
@@ -2615,6 +2640,7 @@ impl Controller {
                             folders: folders.clone(),
                         });
                     }
+                    crate::gui_search_benchmark::worker_completed(job.generation, true);
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         c2.search_folders_computed(
@@ -3022,6 +3048,7 @@ impl Controller {
             ui.set_status(error.to_string().into());
             return;
         }
+        crate::gui_search_benchmark::request(ui, generation, &request);
         *self.request.lock().unwrap() = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
@@ -3268,6 +3295,12 @@ impl Controller {
                                 })
                                 .into(),
                         );
+                        if crate::gui_search_benchmark::enabled() {
+                            let folders = c2.tree.lock().unwrap().matches.clone();
+                            crate::gui_search_benchmark::folders_published(
+                                &ui, generation, folders,
+                            );
+                        }
                     }
                 }
             });

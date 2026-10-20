@@ -7,6 +7,10 @@ use std::path::PathBuf;
 mod drag;
 pub use drag::{DragOutcome, drag_files, primary_button_down};
 
+/// Explicit diagnostic capture of this process's own GUI completion marker.
+/// Normal application use does not start capture; codec helpers are cross-platform.
+pub mod gui_capture;
+
 /// Display a fatal startup diagnostic for a desktop application without a console.
 /// Headless callers should write their diagnostics directly and skip this dialog.
 pub fn show_error_dialog(message: &str) {
