@@ -40,9 +40,10 @@ component Action inherits Rectangle {
     in property <bool> subtle: false;
     in property <bool> dropdown: false;
     in property <bool> enabled: true;
-    /// Toolbar buttons must not capture Space/Return or claim keyboard focus,
-    /// so transport keys keep working after a mouse click (e.g. the Details toggle).
-    in property <bool> keyboard-active: false;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the button with Space/Return.
+    in property <bool> keyboard-active: true;
     out property <bool> has-focus: button-focus.has-focus;
     callback clicked;
     min-width: 36px;
@@ -67,7 +68,7 @@ component Action inherits Rectangle {
             reject
         }
     }
-    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if root.keyboard-active { button-focus.focus(); } root.clicked(); } }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 component Label inherits Text { color: Theme.dim; font-size: 11px; vertical-alignment: center; }
@@ -76,9 +77,10 @@ component Label inherits Text { color: Theme.dim; font-size: 11px; vertical-alig
 component RemoteFolderAction inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
-    /// Picker rows must not capture Space/Return or claim keyboard focus, so
-    /// transport keys keep working after a mouse click.
-    in property <bool> keyboard-active: false;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the picker row with Space/Return.
+    in property <bool> keyboard-active: true;
     callback clicked();
     height: 36px;
     min-width: 180px;
@@ -103,7 +105,7 @@ component RemoteFolderAction inherits Rectangle {
             reject
         }
     }
-    folder-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if root.keyboard-active { folder-focus.focus(); } root.clicked(); } }
+    folder-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // Source tags remain selectable while compact views avoid TextEdit's large padding.
@@ -200,9 +202,10 @@ component TableHeader inherits Rectangle {
     in property <bool> active: false;
     in property <bool> descending: false;
     in property <bool> enabled: true;
-    /// Sort headers must not capture Space/Return or claim keyboard focus, so
-    /// transport keys keep working after a mouse click on a column header.
-    in property <bool> keyboard-active: false;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the header with Space/Return.
+    in property <bool> keyboard-active: true;
     callback clicked();
     callback context-requested(Point);
     accessible-role: button;
@@ -238,7 +241,7 @@ component TableHeader inherits Rectangle {
     }
     header-hit := TouchArea {
         enabled: root.enabled; mouse-cursor: pointer;
-        clicked => { if root.keyboard-active { header-focus.focus(); } root.clicked(); }
+        clicked => { root.clicked(); }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                 header-focus.focus();
@@ -1253,7 +1256,7 @@ export component AppWindow inherits Window {
                         current-index <=> root.sort-index;
                         selected => { root.sort-descending = false; root.filter-requested(); root.table-layout-changed(); }
                     }
-                    Action { width: 62px; subtle: true; active: root.inspector-visible; label: root.chinese ? "详情" : "Details"; keyboard-active: false; clicked => { root.inspector-visible = !root.inspector-visible; } }
+                    Action { width: 62px; subtle: true; active: root.inspector-visible; label: root.chinese ? "详情" : "Details"; clicked => { root.inspector-visible = !root.inspector-visible; } }
                 }
                 if root.crumbs.length > 0: HorizontalLayout { height: 30px; spacing: 4px;
                     Action { width: 64px; subtle: true; label: root.chinese ? "素材库" : "Library"; clicked => { root.all-library-requested(); } }

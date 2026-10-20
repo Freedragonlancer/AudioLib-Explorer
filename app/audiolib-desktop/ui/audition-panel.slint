@@ -9,9 +9,10 @@ component Tool inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> active: false;
     in property <bool> primary: false;
-    /// Transport buttons must not capture Space/Return or claim keyboard focus,
-    /// so transport keys keep working after a mouse click (e.g. Mono monitoring).
-    in property <bool> keyboard-active: false;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the button with Space/Return.
+    in property <bool> keyboard-active: true;
     callback clicked();
     width: 32px; height: 30px; border-radius: 4px;
     background: root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent) : (root.active ? Theme.selected : (hit.has-hover ? Theme.hover : Theme.raised));
@@ -23,7 +24,7 @@ component Tool inherits Rectangle {
     if root.icon.width > 0: Image { source: root.icon; colorize: root.primary ? Theme.on-accent : Theme.ink; width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
     if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
     focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; } reject } }
-    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if root.keyboard-active { focus.focus(); } root.clicked(); } }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     if hit.has-hover: Rectangle { z: 10; y: -28px; height: 24px; width: max(86px, tip.preferred-width + 16px); background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px;
         tip := Text { text: root.label; color: Theme.ink; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
     }
@@ -113,7 +114,7 @@ export component AuditionPanel inherits Rectangle {
             Caption { text: root.chinese ? "音量" : "Volume"; }
             Slider { min-width: 76px; max-width: 160px; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px; text: root.volume-label; horizontal-alignment: right; }
-            Tool { width: 54px; symbol: "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; keyboard-active: false; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Tool { width: 54px; symbol: "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: 9px; }
             Tool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; clicked => { root.peaks(); } }
             Tool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.output-settings(); } }
