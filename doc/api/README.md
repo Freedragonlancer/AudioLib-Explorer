@@ -253,9 +253,10 @@ audiolib.example.com:8443 {
 
 - 客户端在本机保存库缓存：`%LOCALAPPDATA%/AudioLibExplorer/v1/remote/<library_id>/library.db`。搜索、浏览、统计直接走本地缓存，延迟与本地模式一致。
 - 客户端轮询 `GET /library`；`revision` 变化时重新下载 `GET /library/snapshot`，校验后替换本地缓存（先下载到临时文件，校验 `X-Library-Id`、快照 `user_version` 的兼容范围和 SQLite 完整性，读取 `X-Schema-Version` 响应头，再原子替换）。
-- `revision` 是保守的变更提示：服务端用专用只读连接轮询 `PRAGMA data_version`（其他连接/进程的每次提交都会改变它，包括只写进 WAL、尚未 checkpoint 的提交），并比对**主库文件**的大小/mtime（默认每 3 秒一次，每次 `/library` 和快照请求也会检查）。WAL 文件的大小/mtime 不参与运行期比对（它们在每次打开/关闭时都会变化，以前会导致每次重启都递增）。服务端停机期间的改动在下次启动时递增一次：主库文件变化，或 WAL 签名（WAL 文件长度 + 32 字节文件头中的 checkpoint 序号和 salt，不含 mtime）变化。服务端退出时故意不关闭自己的 SQLite 连接，避免最后一个连接关闭时把 WAL checkpoint 进主库、下次启动被误判为变更；因此**单纯重启服务端不会递增 `revision`**。它**可能在没有实际变更时递增**（如其他进程做 WAL checkpoint），但**不会漏掉已提交的变更**。`revision` 先于数据读取，所以返回的数据不会比所标的 `revision` 旧。
+- `revision` 是保守的变更提示：服务端用专用只读连接轮询 `PRAGMA data_version`（其他连接/进程的每次提交都会改变它，包括只写进 WAL、尚未 checkpoint 的提交），并比对**主库文件**的大小/mtime（默认每 3 秒一次，每次 `/library` 和快照请求也会检查）。WAL 文件的大小/mtime 不参与运行期比对（它们在每次打开/关闭时都会变化，以前会导致每次重启都递增）。服务端停机期间的改动在下次启动时递增一次：主库文件变化，或 WAL 签名（WAL 文件长度 + 32 字节文件头中的 checkpoint 序号和 salt，不含 mtime）变化。服务端退出时故意不关闭自己的 SQLite 连接，避免最后一个连接关闭时把 WAL checkpoint 进主库、下次启动被误判为变更；因此**单纯重启服务端不会递增 `revision`**；**播放计数也不会递增 `revision`**（见下文）。它**可能在没有实际变更时递增**（如其他进程做 WAL checkpoint），但**不会漏掉已提交的变更**。`revision` 先于数据读取，所以返回的数据不会比所标的 `revision` 旧。
 - Metadata 编辑：先写服务端，成功后再更新本地缓存。写入端点（§6.3）返回写入后的完整记录以及 `revision_before` / `revision`：服务端在同一个临界区里（所有服务端写入串行）先把此前所有未计入的提交计入 `revision`，记下 `revision_before`，执行写入，然后把 `revision` 设为 `revision_before + 1` 并更新轮询基线，所以这次写入**只递增一次**，轮询不会再为它递增。
   - **客户端规则**：若本地缓存的 `revision == revision_before`，把返回的记录（`file` 或 `files`）写入本地缓存，并把本地 `revision` 设为返回的 `revision`；否则（期间有别的改动）按正常流程下载完整快照同步。写入失败（4xx/5xx）时 `revision` 不变，本地缓存也不要改。
+  - 播放（`POST /audio/{id}/plays`）是例外：它只改播放统计（`play_count`、`last_played_at`、`play_history`），服务端先计入此前未计入的提交，再把这次提交并入轮询基线而**不递增**，返回 `revision == revision_before`。本地缓存等于 `revision_before` 时客户端照样写入返回的记录并保持 `revision`。代价：其他客户端快照里的播放次数/播放历史要等下一次内容变更才会更新（播放历史可随时用 `GET /history/plays` 读取）。
   - 已知窄窗口：服务端写入执行期间若恰好有其他进程提交，那次提交会并入同一次递增；客户端按上面的规则只应用返回的记录，那次外部改动要等下一次变更（`revision` 再变）才会同步到。
   - 写入端点受 30 秒请求超时约束；若超时返回 408，写入可能已经提交，`revision` 会照常变化，客户端下一次轮询会走快照同步。
 - 远程扫描（§6.6）：扫描期间 `revision` 冻结，结束时有改动才递增一次（无改动的增量扫描不递增）；客户端照常按 `revision` 变化同步。
@@ -295,7 +296,7 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/roots` | 持久化根目录设置 | `{ "name", "path" }` | 201 根目录条目；受 `manage_mode` 限制，见 §6.10 |
 | ✅ | PATCH | `/roots/{name}` | 原子重定位根目录记录 + 持久化设置 | `{ "path" }` | 200 根目录条目；保留 ID、Metadata 与标注，见 §6.10 |
 | ✅ | DELETE | `/roots/{name}` | 数据库记录移除 + 持久化设置 | — | 200 `{ "name", "removed", "folders_removed", "revision_before", "revision" }`；不删除源 WAV，见 §6.10 |
-| ✅ | POST | `/audio/{id}/plays` | `record_play` | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n+1 }`（`play_count` 在快照里，所以也走 revision 规则），见 §6.3 |
+| ✅ | POST | `/audio/{id}/plays` | `record_play` | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n }`（播放只改 `play_count`/`last_played_at`/`play_history`，**不递增 revision**，避免每次播放都让所有客户端重新下载整个快照；客户端仍按 revision 规则把返回记录写入本地缓存），见 §6.3 |
 | ✅ | GET | `/history/plays?limit=&offset=` | `play_history` | `limit` 默认 100（1..=10000），`offset` 默认 0 | `PlayRecord[]`，新的在前，见 §6.7 |
 | ✅ | GET | `/history/scans?limit=&offset=` | `scan_history` | 同上 | `ScanSession[]`，新的在前，见 §6.7 |
 | ✅ | POST | `/scans` | 扫描（`ScanService::scan`；受 `manage_mode` 限制，§6.9） | `{ "root": "<name>", "subpath": "", "mode": "incremental" \| "full", "workers": null }` | 200 `ScanResponse`（`ScanProgress` 字段 + `root`/`subpath`/`mode`/`active`/`pause_requested`/`cancel_requested`/`revision`，含新的 `session_id`），见 §6.6 |
@@ -378,7 +379,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 
 ### 6.3 Metadata 写入（已实现）
 
-三个写入端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。请求体为 JSON，必须声明 `Content-Type: application/json`（可带 `charset`，见 §2），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。成功后 `revision == revision_before + 1`，客户端按 §4 的规则应用返回的记录。
+三个写入端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。请求体为 JSON，必须声明 `Content-Type: application/json`（可带 `charset`，见 §2），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。metadata 写入成功后 `revision == revision_before + 1`；播放（`POST /audio/{id}/plays`）成功后 `revision == revision_before`（不递增）。客户端按 §4 的规则应用返回的记录。
 
 `PATCH /audio/{id}/metadata`，请求体 `MetadataPatch`，省略的字段不变（`color` 传 `""` 清除颜色）：
 

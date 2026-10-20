@@ -431,13 +431,14 @@ in server mode the Metadata worker and the batch operation use
 |---|---|---|
 | single edit | `PATCH /api/v1/audio/{id}/metadata` (JSON patch, absent fields unchanged, `"color":""` clears) | `{file, revision_before, revision}` |
 | batch edit | `POST /api/v1/audio/metadata/batch` `{ids, patch, tag_mode}` (one transaction) | `{report:{updated}, files, revision_before, revision}` — `files` in request order, duplicates removed |
-| play | `POST /api/v1/audio/{id}/plays` (no body) | `{file, revision_before, revision}` |
+| play | `POST /api/v1/audio/{id}/plays` (no body) | `{file, revision_before, revision}` with `revision == revision_before` (plays never advance the revision) |
 
 **Revision rule.** After a successful write, if the cached snapshot's revision equals
 `revision_before`, the returned record(s) are written into the open snapshot in one SQLite
 transaction (`audiolib_db::apply_snapshot_records`: user tags/notes with their tokenized
 columns — the FTS5 triggers keep search consistent — favorite, color, play count)
-and the cached revision becomes `revision` (`cache.json` and the header). Otherwise (another
+and the cached revision becomes `revision` (`cache.json` and the header); a play reply has
+`revision == revision_before`, so the record is applied and the revision is kept. Otherwise (another
 client wrote in between, no cached state, a different snapshot open) a normal full
 snapshot sync runs. The background revision poll therefore does not report the client's
 own writes as "new revision".
