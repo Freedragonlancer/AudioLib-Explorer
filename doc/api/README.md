@@ -1125,7 +1125,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 增量（续传）：导入后用 §9.1（`known` = 包内该项的 etag）按 etag 增量拉取；打包期间或之后变化的条目 etag 已不同，会返回 `ok`，所以不会丢失。不按 `meta.revision` 或 `generated_at` 做任何过滤。
 - 实测（生成时间 / 大小）：Mac 0.48 s（只读连接 `VACUUM INTO` + 元数据 + SHA-256 ETag；仅 `VACUUM INTO` 的首测为 0.38 s），308 MB（与源文件同大小），客户端式校验（integrity_check + 白名单 + blob 长度）0.23 s；Windows（待测）。
 
-### 9.5 列表波形缓存管理：状态扩展、生成任务与限速设置（客户端已评审，未实现）
+### 9.5 列表波形缓存管理：状态扩展、生成任务与限速设置（客户端已评审，服务端已实现）
 
 > 目的：让客户端在「服务器音效库」设置页查看列表缩略波形缓存（§9.1–§9.4）的完整进度，并手动发起「补齐缺失」「全部重建」「重试失败」任务、暂停/继续/停止任务、调整生成限速。**只新增端点和字段，已有字段语义不变**；不改主库 schema，快照（§6.1）不变。客户端用 `GET /capabilities` 的 `list_waveform_jobs` 判断是否支持（缺字段 = 不支持，隐藏这些按钮，只显示 §9.2 的开关与进度）。
 
@@ -1216,7 +1216,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
 - `mode` 必填：`missing` \| `rebuild` \| `failed`；缺失、类型不对、未知值或含未知字段 → 400 `VALIDATION`（未知 `mode` 带 `"sub_code": "UNSUPPORTED_MODE"`）。
-- `rebuild` 必须同时带 `"confirm": "rebuild"`，否则 400 `VALIDATION`（`sub_code`: `CONFIRM_REQUIRED`）；防止误发。
+- `rebuild` 必须同时带 `"confirm": "rebuild"`，否则 400 `VALIDATION`（`sub_code`: `CONFIRM_REQUIRED`）；防止误发。其他模式带 `confirm` 时忽略该字段。
 - 成功 → **202**，状态体中 `job.id` 为新任务 id（不透明字符串）、`job.state` 为 `running`。
 - 已有任务在 `running` / `yielding` / `paused` → **409 `BUSY`**（`message`：`A list waveform job is already in progress`，错误体附 `"job_id": "<当前任务 id>"`），不排队。结束状态的任务不妨碍新任务。
 - 库未打开 → 503 `UNAVAILABLE`（§6.2）；列表缓存不可用（`waveforms.db` 无法使用，同 §9.4.2）→ 503 `UNAVAILABLE` + `Retry-After`。
@@ -1286,6 +1286,14 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - 已结束的任务也保留在文件中，供 `GET /waveforms/status` 的 `job` 与 `last_error` 在重启后仍可查。
   - 失败记录的明细（哪些 id 失败）**不持久化**，只持久化计数。重启后恢复的 `mode: "failed"` 任务，以及重启后新开始、但本进程尚无已知失败项的 `failed` 任务，都**回退为 `missing`**：失败的文件没有缓存，`missing` 会覆盖它们（代价是也会补齐其他缺失项）。回退时 `job.mode` 仍为 `failed`，`job.mode_effective` 为 `missing`，客户端可据此提示「已按补齐缺失执行」。
 
+#### 实现细节（客户端不应依赖）
+
+- `done` 中「已删除 / 文件缺失 / 无法读取 Metadata」的记录计入 `skipped`；已知解码失败且文件未变的记录（`missing` 模式下）计入 `failed`。`current_rate` 按「已检查的记录」计（含只做 `stat` 跳过的），不含因根离线跳过的记录。
+- 根离线跳过的记录先计入 `skipped_offline`；任务运行期间该根恢复 `online` 时重新处理（从 `skipped_offline` / `done` 中扣回再重新计数）。任务**不等待**离线根：其余记录处理完即 `completed`，此时仍离线的记录保留在 `skipped_offline` 中，之后由按需队列或下一次任务补齐。
+- 重启后恢复的 `failed` 任务（`mode_effective` 回退为 `missing`）从头开始：`cursor`、`done` 及各计数清零，`total` 按当前库重新统计。
+- 结束（`completed` / `error`）时的状态文件在最后一条记录处理完后立即写入，可能比 `GET /waveforms/status` 晚几毫秒。
+- `GET /settings` 的 `list_waveform_rate_source`：`config.toml` 中的值等于内置默认 10 时报 `default`（无法区分“写了 10”与“没写”），其他值报 `config`。
+
 #### 9.5.6 整包与客户端行为
 
 - 任务进行中 `GET /waveforms/bundle`（§9.4.2）照常可用，返回当前已有的条目（`VACUUM INTO` 是 WAL 读事务，不阻塞任务写入）；`rebuild` 刚清空后整包可能接近空，客户端导入后用 §9.1 增量补齐即可（不会丢失：etag 规则不变）。`POST /waveforms` 照常可用。
@@ -1306,7 +1314,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 #### 9.5.8 已知问题（随本功能一起修复）
 
-- **整包首次请求 500 `IO`（ENOENT）**：库的 `list/<library_id 的哈希>/` 目录尚未创建时，第一次 `GET /waveforms/bundle` 可能在创建目录与生成临时目录之间竞争，返回 500 `IO`（No such file or directory）。计划修复：生成整包前在持有整包名额的情况下 `create_dir_all` 该目录（幂等），并在打开 `waveforms.db` 时就保证目录存在；目录无法创建时按 §9.4.2 返回 503 `UNAVAILABLE`，不返回 500。客户端在修复前遇到该 500 可按 `Retry-After: 5` 等同处理重试一次。
+- **整包首次请求 500 `IO`（ENOENT）**：库的 `list/<library_id 的哈希>/` 目录尚未创建时，第一次 `GET /waveforms/bundle` 可能在创建目录与生成临时目录之间竞争，返回 500 `IO`（No such file or directory）。已修复：生成整包前在持有整包名额的情况下 `create_dir_all` 该目录（幂等）；目录无法创建时返回 503 `UNAVAILABLE` + `Retry-After`（`message` 不含路径），不返回 500。目录仍按需创建（第一次写入分片、`waveforms.db`、`job-state.json` 或整包时），库打开时不预先创建。旧服务端遇到该 500 时客户端可按 `Retry-After: 5` 重试一次。
 
 ## 10. 服务端部署
 
