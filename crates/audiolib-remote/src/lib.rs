@@ -54,14 +54,16 @@ mod sync;
 mod test_server;
 mod tls;
 mod util;
+mod waveform_cache;
 mod writes;
+pub use waveform_cache::waveform_cache_error;
 
 pub use abort::set_connection_warming;
 pub use bandwidth::{Bandwidth, bandwidth};
 pub use client::{
-    BatchWrite, CONNECT_TIMEOUT, FileWrite, HealthInfo, LIBRARY_ID_HEADER, MAX_WRITE_BODY_BYTES,
-    RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, WaveformQuery, WaveformReply,
-    api_base_url,
+    BatchWrite, CONNECT_TIMEOUT, DownloadStage, FileWrite, HealthInfo, LIBRARY_ID_HEADER,
+    MAX_WRITE_BODY_BYTES, RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, WaveformQuery,
+    WaveformReply, api_base_url,
 };
 pub use download::{
     DEFAULT_DOWNLOAD_CACHE_BYTES, DownloadCache, DownloadItem, DownloadProbe, DownloadProgress,

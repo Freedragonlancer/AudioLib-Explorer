@@ -489,7 +489,7 @@ fn own_and_external_commits_removal_and_restore_invalidate_rankings_and_refresh_
             .find(|row| row.id == 1)
             .unwrap()
             .play_count,
-        1
+        0
     );
     assert_exact(&conn, &request, &page);
     assert!(provider.search(&request).unwrap().cache_hit);

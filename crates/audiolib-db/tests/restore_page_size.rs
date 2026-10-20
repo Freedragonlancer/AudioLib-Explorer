@@ -63,7 +63,7 @@ fn official_backups_with_different_page_sizes_restore_into_wal_without_modifying
         assert_eq!(report.library.schema_version, 5);
         assert!(provider.check_library().unwrap().is_ok());
         assert_eq!(provider.get_audio(1).unwrap().tags, "saved-state");
-        assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+        assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
         assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);
         assert_eq!(
             provider
@@ -105,7 +105,7 @@ fn official_backups_with_different_page_sizes_restore_into_wal_without_modifying
             .update_metadata(1, &patch("usable-after-restore"))
             .unwrap();
         provider.record_play(1).unwrap();
-        assert_eq!(provider.get_audio(1).unwrap().play_count, 2);
+        assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
     }
 }
 

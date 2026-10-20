@@ -2842,11 +2842,9 @@ impl Controller {
                             return Ok(false);
                         }
                         if c.remote_read_only() {
-                            // A cached server copy: count the play on the server, off this
-                            // worker (fire-and-forget; the snapshot follows by revision).
-                            if let Some(id) = c.remote_audio_id(path) {
-                                c.remote_record_play(id, library_generation);
-                            }
+                            // Server mode: plays are not sent (no POST /audio/{id}/plays)
+                            // and play counts are not recorded. A local server-mode play
+                            // history needs a client-side store (pending decision).
                             return Ok(true);
                         }
                         let found = provider.find_audio_by_path(path)?;

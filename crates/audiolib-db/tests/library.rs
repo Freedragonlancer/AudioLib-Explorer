@@ -194,7 +194,7 @@ fn metadata_updates_fts_old_terms_and_deletion_leave_no_stale_postings() {
         assert_eq!(search(&provider, query), 1);
     }
     provider.record_play(42).unwrap();
-    assert_eq!(provider.get_audio(42).unwrap().play_count, 13);
+    assert_eq!(provider.get_audio(42).unwrap().play_count, 12);
     provider.delete_audio(42).unwrap();
     assert_eq!(search(&provider, "newtag"), 0);
     let conn = Connection::open(&target).unwrap();

@@ -236,7 +236,12 @@ struct ActiveLibrary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncProgress {
     Checking,
-    Downloading { received: u64, total: Option<u64> },
+    Downloading {
+        received: u64,
+        total: Option<u64>,
+    },
+    /// Flushing the downloaded snapshot to disk before validation.
+    Writing,
     Validating,
     Preparing(CachePreparation),
     Saving,
@@ -929,11 +934,20 @@ pub fn sync_library(
         let mut attempt = 0;
         let mut transient = 0;
         let meta = loop {
-            match client.download_snapshot(
+            let report = std::cell::RefCell::new(&mut *progress);
+            let downloaded = client.download_snapshot_staged(
                 &staging,
-                &mut |received, total| progress(SyncProgress::Downloading { received, total }),
+                &mut |received, total| {
+                    (report.borrow_mut())(SyncProgress::Downloading { received, total })
+                },
+                &mut |stage| match stage {
+                    crate::client::DownloadStage::Writing => {
+                        (report.borrow_mut())(SyncProgress::Writing)
+                    }
+                },
                 cancel,
-            ) {
+            );
+            match downloaded {
                 Err(RemoteError::Busy {
                     message,
                     retry_after,
@@ -969,11 +983,19 @@ pub fn sync_library(
             return Err(RemoteError::Cancelled);
         }
         progress(SyncProgress::Validating);
+        let validating = Instant::now();
+        tracing::info!("Snapshot stage start: validating");
         let info = validate_snapshot_with_progress_cancellable(
             &staging,
             &mut |stage| progress(SyncProgress::Preparing(stage)),
             cancel,
-        )?;
+        );
+        tracing::info!(
+            elapsed_ms = validating.elapsed().as_millis() as u64,
+            ok = info.is_ok(),
+            "Snapshot stage end: validating"
+        );
+        let info = info?;
         Ok((meta, info))
     })();
     let (meta, info) = match result {

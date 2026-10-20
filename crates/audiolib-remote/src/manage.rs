@@ -30,7 +30,7 @@
 //! [`manage_error_text`] for the management wording.
 use crate::client::RemoteClient;
 use crate::error::{RemoteError, Result};
-use audiolib_core::{PlayRecord, ScanProgress, ScanSession};
+use audiolib_core::{ScanProgress, ScanSession};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -89,6 +89,10 @@ pub struct Capabilities {
     /// The server's effective `pregenerate_list_waveforms` (read-only here, §9.2).
     #[serde(default)]
     pub pregenerate_list_waveforms: Option<bool>,
+    /// List Waveform generation jobs and the rate setting (§9.5.7); `None` on older
+    /// servers (only the §9.2 switch, status and pause/resume).
+    #[serde(default)]
+    pub list_waveform_jobs: Option<audiolib_core::waveform_cache::WaveformJobsCapability>,
 }
 
 fn known() -> bool {
@@ -105,6 +109,7 @@ impl Default for Capabilities {
             root_management: false,
             list_waveforms: None,
             pregenerate_list_waveforms: None,
+            list_waveform_jobs: None,
         }
     }
 }
@@ -362,7 +367,7 @@ fn endpoint_missing(error: RemoteError, context: &str) -> RemoteError {
 impl RemoteClient {
     /// One management request; `None` for an empty (`204`) reply. Writes are never
     /// retried here.
-    fn manage_call(
+    pub(crate) fn manage_call(
         &self,
         method: &str,
         path: &str,
@@ -563,11 +568,6 @@ impl RemoteClient {
         self.history("scans", limit, offset)
     }
 
-    /// `GET /history/plays?limit=&offset=`: newest first; times are UTC text.
-    pub fn play_history(&self, limit: usize, offset: usize) -> Result<Vec<PlayRecord>> {
-        self.history("plays", limit, offset)
-    }
-
     /// `POST /audio/remove {ids}` (§6.8): remove audio records (with their annotations,
     /// playlist entries and play history) from the server database. Never deletes files.
     /// `1..=10000` positive ids, de-duplicated before sending; unknown ids come back in
@@ -660,6 +660,7 @@ mod tests {
     const STARTED: &str = r#"{"session_id":17,"state":"running","paused":false,"finalizing":false,"discovered":0,"processed":0,"added":0,"updated":0,"unchanged":0,"removed":0,"errors":0,"error_details":[],"errors_truncated":0,"current_path":"/srv/audiolib/library/ExampleLibrary/SFX/Foley/Doors","message":"","root":"SFX","subpath":"Foley/Doors","mode":"incremental","active":true,"pause_requested":false,"cancel_requested":false,"revision":null,"future":{"x":1}}"#;
     const FINISHED: &str = r#"{"session_id":17,"state":"completed","paused":false,"finalizing":false,"discovered":12,"processed":12,"added":1,"updated":0,"unchanged":11,"removed":0,"errors":0,"error_details":[],"errors_truncated":0,"current_path":"","message":"","root":"SFX","subpath":"Foley/Doors","mode":"incremental","active":false,"pause_requested":false,"cancel_requested":false,"revision":42}"#;
 
+    #[allow(dead_code)]
     struct Seen {
         method: String,
         path: String,
@@ -958,45 +959,6 @@ mod tests {
         assert!(matches!(
             RemoteClient::new(&old.url, "").unwrap().current_scan(),
             Err(RemoteError::Unsupported(_))
-        ));
-    }
-
-    #[test]
-    fn history_lists_scans_and_plays_newest_first() {
-        let (server, seen) = server(|_, path| match path {
-            "/api/v1/history/scans?limit=5&offset=0" => TestResponse::json(
-                200,
-                r#"[{"id":17,"start_time":"2000-01-01 12:00:00.100","end_time":"2000-01-01 12:00:02.200","scan_path":"/x/SFX/Foley/Doors","scan_type":"incremental","state":"completed","scanned":12,"added":1,"updated":0,"removed":0,"unchanged":11,"errors":0,"error_details":[],"errors_truncated":0},{"id":16,"start_time":"2000-01-01 11:30:00.000","end_time":null,"scan_path":"/x/SFX","scan_type":"full","state":"running","scanned":3}]"#,
-            ),
-            "/api/v1/history/plays?limit=10000&offset=20" => TestResponse::json(
-                200,
-                r#"[{"id":5,"audio_file_id":3,"played_at":"2000-01-01 12:01:00.300","filename":"door.wav","file_path":"/Volumes/SFX/door.wav","missing":false}]"#,
-            ),
-            _ => error(400, "VALIDATION", "limit must be 1..=10000"),
-        });
-        let client = RemoteClient::new(&server.url, "").unwrap();
-        let scans = client.scan_history(5, 0).unwrap();
-        assert_eq!(scans.len(), 2);
-        assert_eq!(
-            (scans[0].id, scans[0].scanned, scans[0].start_time.as_str()),
-            (17, 12, "2000-01-01 12:00:00.100")
-        );
-        assert_eq!(scans[1].end_time, None);
-        assert_eq!(scans[1].state, audiolib_core::ScanState::Running);
-        assert!(scans[1].error_details.is_empty(), "missing fields default");
-        let plays = client.play_history(50_000, 20).unwrap();
-        assert_eq!(
-            (plays[0].audio_file_id, plays[0].filename.as_str()),
-            (3, "door.wav")
-        );
-        assert_eq!(
-            seen.lock().unwrap()[1].path,
-            "/api/v1/history/plays?limit=10000&offset=20",
-            "limit clamped to the server's range"
-        );
-        assert!(matches!(
-            client.scan_history(0, 1),
-            Err(RemoteError::Validation(_))
         ));
     }
 

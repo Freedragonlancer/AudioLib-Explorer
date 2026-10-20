@@ -178,39 +178,11 @@ pub struct BatchReply {
     pub encoding: Option<String>,
 }
 
-/// `GET /settings` / `PATCH /settings` reply (§9.2).
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct ServerSettings {
-    pub pregenerate_list_waveforms: bool,
-    /// `default`, `config` or `admin`.
-    pub pregenerate_list_waveforms_source: String,
-    /// The server would accept a `PATCH /settings` from this client (a hint).
-    pub can_change: bool,
-}
+/// `GET /settings` / `PATCH /settings` reply (§9.2, §9.5.4): the core contract.
+pub type ServerSettings = audiolib_core::waveform_cache::WaveformCacheSettings;
 
-/// `GET /waveforms/status` (§9.2).
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct ListWaveformStatus {
-    pub enabled: bool,
-    /// `off`, `idle`, `running`, `yielding` or `paused`.
-    pub state: String,
-    /// `scan` or `audio` while yielding.
-    pub yield_reason: Option<String>,
-    pub total: u64,
-    pub cached: u64,
-    pub remaining: Option<u64>,
-    pub queued_on_demand: u64,
-    pub failed: u64,
-    pub skipped_offline: u64,
-    pub rate: u32,
-    pub cache_bytes: u64,
-    pub cache_limit_bytes: u64,
-    pub over_budget: bool,
-    pub pass_started_at: Option<i64>,
-    pub pass_finished_at: Option<i64>,
-}
+/// `GET /waveforms/status` (§9.2, §9.5.2): the core contract.
+pub type ListWaveformStatus = audiolib_core::waveform_cache::WaveformCacheStatus;
 
 fn decompress(context: &str, encoding: Option<&str>, body: Vec<u8>) -> Result<Vec<u8>> {
     match encoding {
