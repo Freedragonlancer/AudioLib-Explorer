@@ -101,7 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut |progress| {
                 let name = match progress {
                     SyncProgress::Checking => "checking",
-                    SyncProgress::Downloading { .. } => "downloading",
+                    // Streamed decompression overlaps download; keep one timing
+                    // interval rather than recording alternating per-chunk marks.
+                    SyncProgress::Downloading { .. } | SyncProgress::Decompressing { .. } => {
+                        "downloading"
+                    }
                     SyncProgress::Writing => "writing",
                     SyncProgress::Validating => "validating",
                     SyncProgress::Preparing(_) => "preparing cache",

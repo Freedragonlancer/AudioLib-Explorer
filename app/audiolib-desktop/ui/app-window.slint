@@ -653,7 +653,10 @@ export component AppWindow inherits Window {
     in property <bool> ds-syncing: false;
     in property <bool> ds-applying: false;
     in property <float> ds-progress: 0;
+    in property <string> ds-decompression-info: "";
+    in property <float> ds-decompression-progress: -1;
     private property <float> ds-motion: root.ds-syncing && root.ds-progress < 0 ? (1 - cos(360deg * mod(animation-tick(), 2s) / 2s)) / 2 : 0;
+    private property <float> ds-decompression-motion: root.ds-syncing && root.ds-decompression-progress < 0 ? (1 - cos(360deg * mod(animation-tick(), 2s) / 2s)) / 2 : 0;
     private property <duration> ds-started;
     private property <string> ds-elapsed: (root.chinese ? "已用时 " : "Elapsed: ") + floor((animation-tick() - root.ds-started) / 1s) + (root.chinese ? " 秒" : " s");
     changed ds-syncing => { if root.ds-syncing { root.ds-started = animation-tick(); } }
@@ -2041,6 +2044,12 @@ export component AppWindow inherits Window {
                                 if !root.sm-active: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.chinese ? "切换到此数据源后，可在这里同步快照、管理波形缓存、查看历史、校验、备份和导出。" : "Switch to this source to sync, manage the Waveform cache, view history, check, back up and export here."; }
                                 Action { width: 64px; subtle: true; active: root.sm-cache-details; label: root.sm-cache-details ? (root.chinese ? "收起" : "Less") : (root.chinese ? "详情" : "Details"); clicked => { root.sm-cache-details = !root.sm-cache-details; } }
                             }
+                            if root.sm-active && root.ds-syncing && root.ds-decompression-info != "": VerticalLayout { vertical-stretch: 0; spacing: 6px;
+                                Label { wrap: word-wrap; font-size: 11px; text: root.ds-decompression-info; }
+                                Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
+                                    Rectangle { x: root.ds-decompression-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-decompression-motion; width: root.ds-decompression-progress >= 0 ? parent.width * clamp(root.ds-decompression-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                                }
+                            }
                             if root.sm-cache-details: Text { wrap: word-wrap; color: Theme.dim; font-size: 10px; text: root.sm-cache-info + "\n" + (root.chinese ? "快照按服务器音效库（library id）缓存，同一服务器的局域网和外网配置共用一份；删除服务器配置不会删除缓存或数据目录。" : "Snapshots are cached per server library (library id), shared by a server's LAN and external profiles; deleting a profile never deletes caches or data directories."); }
                             if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                             Rectangle { height: 1px; background: Theme.border; }
@@ -2293,10 +2302,16 @@ export component AppWindow inherits Window {
                                         LineEdit { input-label: root.chinese ? "WebDAV 设置（功能未开发）" : "WebDAV settings (not developed)"; enabled: false; text: ""; }
                                     }
                                 }
+                                Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
                                 if root.ds-syncing: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
                                     Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                                 }
-                                Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
+                                if root.ds-syncing && root.ds-decompression-info != "": VerticalLayout { vertical-stretch: 0; spacing: 6px;
+                                    Label { wrap: word-wrap; font-size: 11px; text: root.ds-decompression-info; }
+                                    Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
+                                        Rectangle { x: root.ds-decompression-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-decompression-motion; width: root.ds-decompression-progress >= 0 ? parent.width * clamp(root.ds-decompression-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
+                                    }
+                                }
                                 if root.ds-syncing: Label { font-size: 11px; color: Theme.muted; text: root.ds-elapsed; }
                                 if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                                 HorizontalLayout { height: 33px; spacing: 8px;

@@ -112,6 +112,9 @@ impl ProgressReporter {
                     (
                         CachePreparation::Copying { .. },
                         CachePreparation::Copying { .. }
+                    ) | (
+                        CachePreparation::Tokenizing { .. },
+                        CachePreparation::Tokenizing { .. }
                     )
                 )
             }
@@ -155,6 +158,9 @@ impl ProgressReporter {
                     decompression_fraction: self.decompression.map_or(-1.0, Bytes::fraction),
                 }
             }
+            SyncProgress::Writing => {
+                ProgressDisplay::stage(stage("写入磁盘中…", "Writing to disk…"), -1.0)
+            }
             SyncProgress::Validating => ProgressDisplay::stage(
                 stage("正在校验快照完整性…", "Validating snapshot integrity…"),
                 -1.0,
@@ -168,7 +174,7 @@ impl ProgressReporter {
                 let text = if fraction >= 0.0 {
                     format!("{} · {:.0}%", preparation.label(chinese), fraction * 100.0)
                 } else {
-                    preparation.label(chinese).to_owned()
+                    preparation.label(chinese)
                 };
                 ProgressDisplay::stage(text, fraction)
             }
