@@ -266,3 +266,64 @@ fn read_only_snapshots_do_not_offer_their_waveform_cache_rows() {
     assert!(snapshot.compute_list_waveform(id, cancel()).is_err());
     assert!(snapshot.list_waveform_backlog(0, 10).unwrap().is_empty());
 }
+
+#[test]
+fn i8_rows_are_derived_from_int16_rows_into_a_separate_waveforms_db() {
+    use audiolib_core::{LIST_WAVEFORM_ENCODING_I8, LIST_WAVEFORM_I8_ZOOM_LEVEL, ListWaveformI8};
+    use audiolib_db::WaveformsDb;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    fs::create_dir_all(&root).unwrap();
+    let loud = root.join("loud.wav");
+    let quiet = root.join("quiet.wav");
+    write_wav(&loud, 4_800, 16384);
+    write_wav(&quiet, 4_800, 100);
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("lib.db")).unwrap());
+    let database = provider.database_path().to_path_buf();
+    scan(&provider, &root);
+    let (loud_id, quiet_id) = (id_of(&provider, &loud), id_of(&provider, &quiet));
+    let store = WaveformsDb::open(&WaveformsDb::path_beside(&database)).unwrap();
+    assert_ne!(store.path(), database.as_path());
+    // Nothing computed yet: no i8 rows, and nothing was decoded to make them.
+    assert_eq!(
+        provider
+            .derive_i8_list_waveforms(&store, &[loud_id, quiet_id])
+            .unwrap(),
+        0
+    );
+    assert!(list_rows(&database, loud_id).is_empty());
+    provider.compute_list_waveform(loud_id, cancel()).unwrap();
+    provider.compute_list_waveform(quiet_id, cancel()).unwrap();
+    assert_eq!(
+        provider
+            .derive_i8_list_waveforms(&store, &[loud_id, quiet_id, i64::MAX])
+            .unwrap(),
+        2
+    );
+    let ListWaveformState::Ready { waveform } = state(&provider, loud_id) else {
+        panic!("loud row must be ready");
+    };
+    let row = store.get(loud_id).unwrap().unwrap();
+    assert_eq!(row.etag, LIST_WAVEFORM_I8_ZOOM_LEVEL);
+    assert_eq!(row.encoding.as_deref(), Some(LIST_WAVEFORM_ENCODING_I8));
+    assert_eq!(row.peaks, ListWaveformI8::from_list_waveform(&waveform));
+    assert_eq!(
+        row.src_size,
+        Some(fs::metadata(&loud).unwrap().len() as i64)
+    );
+    // True amplitude: a quiet file stays quiet (100/32767 rounds to 0), never normalized.
+    let quiet_row = store.get(quiet_id).unwrap().unwrap();
+    assert!(quiet_row.peaks.values.iter().all(|value| *value == 0));
+    assert!(
+        row.peaks
+            .values
+            .iter()
+            .any(|value| matches!(value.abs(), 63 | 64))
+    );
+    // The library keeps only its int16 row; i8 lives in the separate file.
+    assert!(
+        list_rows(&database, loud_id)
+            .iter()
+            .all(|row| row.0 == "list128-v4-l1")
+    );
+}

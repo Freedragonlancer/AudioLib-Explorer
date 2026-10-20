@@ -183,6 +183,38 @@ impl SqliteProvider {
         })
     }
 
+    /// Fill `store` (`waveforms.db`) with compact i8 copies of the current
+    /// `list128-v4-l1` rows of `ids` (zoom key `list128-v4-l1i8`). Never decodes audio:
+    /// records without a current int16 row are skipped. Returns the rows written.
+    pub fn derive_i8_list_waveforms(
+        &self,
+        store: &crate::WaveformsDb,
+        ids: &[i64],
+    ) -> Result<usize> {
+        let mut written = 0;
+        for id in ids {
+            let record = {
+                let conn = self.reader()?;
+                Self::list_record(&conn, *id)?
+            };
+            let version = record.as_ref().map(|(record, _)| record.version);
+            let ListWaveformState::Ready { waveform } = self.list_state(*id, record) else {
+                continue;
+            };
+            let Some(version) = version else { continue };
+            store.upsert(&crate::WaveformsDbRow {
+                file_id: *id,
+                etag: audiolib_core::LIST_WAVEFORM_I8_ZOOM_LEVEL.into(),
+                encoding: Some(audiolib_core::LIST_WAVEFORM_ENCODING_I8.into()),
+                src_mtime: version.mtime_ns,
+                src_size: i64::try_from(version.size).ok(),
+                peaks: audiolib_core::ListWaveformI8::from_list_waveform(&waveform),
+            })?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
     pub(crate) fn list_waveform_backlog_impl(&self, after: i64, limit: usize) -> Result<Vec<i64>> {
         if self.read_only {
             return Ok(Vec::new());

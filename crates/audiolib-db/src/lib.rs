@@ -12,6 +12,7 @@ mod schema;
 mod search_cache;
 mod search_text;
 mod space;
+mod waveforms_db;
 
 #[cfg(feature = "scanner")]
 use audiolib_core::AudioMetadata;
@@ -52,6 +53,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+pub use waveforms_db::{WAVEFORMS_DB_FILE, WaveformsDb, WaveformsDbRow};
 
 pub(crate) fn db_error(error: rusqlite::Error) -> Error {
     if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted)
