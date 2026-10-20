@@ -15,6 +15,7 @@ pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
 pub mod server_url;
+pub mod waveform_cache;
 pub use library::*;
 pub use list_waveform::{
     LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
@@ -486,6 +487,59 @@ pub trait DataProvider: Send + Sync {
     /// have no stored list Waveform, at most `limit`. Only local providers have one.
     fn list_waveform_backlog(&self, _after: i64, _limit: usize) -> Result<Vec<i64>> {
         Ok(Vec::new())
+    }
+
+    // Server list Waveform cache management (doc/api/README.md §9.5). Only server-mode
+    // providers implement these; all block on the network, so callers run them on worker
+    // threads (never the UI thread or audio callbacks). The defaults answer
+    // `Unsupported`.
+
+    /// Whether the server offers generation jobs (`list_waveform_jobs`) and management.
+    fn waveform_cache_capabilities(
+        &self,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheCapabilities> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// `GET /waveforms/status`.
+    fn waveform_cache_status(
+        &self,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheStatus> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// The waveform fields of `GET /settings`.
+    fn waveform_cache_settings(
+        &self,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheSettings> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// `PATCH /settings` (`pregenerate_list_waveforms`, `list_waveform_rate`).
+    fn update_waveform_cache_settings(
+        &self,
+        _patch: &waveform_cache::WaveformCacheSettingsPatch,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheSettings> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// Start a generation job; `Rebuild` requires `confirm_rebuild`.
+    fn start_waveform_cache_job(
+        &self,
+        _mode: waveform_cache::WaveformJobMode,
+        _confirm_rebuild: bool,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheStatus> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// Pause, resume or stop the current job.
+    fn control_waveform_cache_job(
+        &self,
+        _control: waveform_cache::WaveformJobControl,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheStatus> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// Legacy pre-generation pause/resume (servers without `list_waveform_jobs`).
+    fn control_waveform_pregeneration(
+        &self,
+        _control: waveform_cache::WaveformJobControl,
+    ) -> waveform_cache::WaveformCacheResult<()> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
     }
 }
 
