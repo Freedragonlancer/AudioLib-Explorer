@@ -1136,6 +1136,11 @@ impl ListWaveforms {
         let list_dir = options.cache_root.join("list");
         let name = library_dir_name(library_id);
         remove_other_libraries(&list_dir, &name);
+        // Make sure the library's directory exists from the start (§9.5.8): the bundle
+        // and the job state file live there before any shard is written.
+        if let Err(error) = fs::create_dir_all(list_dir.join(&name)) {
+            tracing::warn!(%error, "Cannot create the list waveform cache directory");
+        }
         let wfdb = match crate::wfdb::WaveformsDb::open(&list_dir.join(&name)) {
             Ok(wfdb) => Some(wfdb),
             Err(error) => {

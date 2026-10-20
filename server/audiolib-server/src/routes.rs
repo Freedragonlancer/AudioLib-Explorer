@@ -1914,6 +1914,17 @@ async fn waveform_bundle(
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf();
+        // The library's list cache directory may not exist yet (nothing generated so
+        // far, or a rebuild in progress): create it (idempotent) instead of failing the
+        // temporary directory with ENOENT (500). If it cannot be created the bundle is
+        // unavailable: 503 UNAVAILABLE, never a path-bearing 500 (§9.4.2, §9.5.8).
+        std::fs::create_dir_all(&parent).map_err(|error| {
+            tracing::warn!(%error, "Cannot create the list waveform cache directory");
+            ApiError::unavailable(format!(
+                "The list waveform cache directory cannot be created ({})",
+                error.kind()
+            ))
+        })?;
         // We hold the only slot, so every other bundle directory is a leftover of a
         // crash or kill; remove them before writing a new ~300 MB copy.
         crate::wfdb::sweep_stale_bundles(&parent, std::time::Duration::ZERO);

@@ -1270,3 +1270,73 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
         .count();
     assert_eq!(leftovers, 0);
 }
+
+/// `GET /waveforms/bundle` (status, has `Retry-After`, body), retrying while another
+/// test holds the process-wide bundle slot (503 `BUSY`).
+async fn bundle_response(state: &AppState) -> (StatusCode, bool, Vec<u8>) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let response = call(
+            state.clone(),
+            Method::GET,
+            "/waveforms/bundle?encoding=i8-minmax-base64",
+            &[],
+            LAN,
+            None,
+        )
+        .await;
+        let status = response.status();
+        let retry = response.headers().contains_key("retry-after");
+        let body = bytes(response).await;
+        let busy = status == StatusCode::SERVICE_UNAVAILABLE
+            && serde_json::from_slice::<ErrorBody>(&body).is_ok_and(|b| b.error_code == "BUSY");
+        if !busy || Instant::now() > deadline {
+            return (status, retry, body);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn first_bundle_creates_a_missing_cache_directory() {
+    // §9.5.8: the first bundle request used to fail with 500 IO (ENOENT) when the
+    // library's list cache directory did not exist yet.
+    let f = fixture("");
+    let dir = f
+        .state
+        .list_waveforms()
+        .wfdb()
+        .unwrap()
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(dir.is_dir(), "created when the library opens");
+    fs::remove_dir_all(&dir).unwrap();
+    let (status, _, body) = bundle_response(&f.state).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(dir.is_dir());
+}
+
+#[tokio::test]
+async fn bundle_is_unavailable_when_the_cache_directory_cannot_be_created() {
+    let f = fixture("");
+    let dir = f
+        .state
+        .list_waveforms()
+        .wfdb()
+        .unwrap()
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    fs::remove_dir_all(&dir).unwrap();
+    // A file where the directory should be: create_dir_all fails.
+    fs::write(&dir, b"not a directory").unwrap();
+    let (status, retry, body) = bundle_response(&f.state).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(retry);
+    let body: ErrorBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body.error_code, "UNAVAILABLE");
+    assert!(!body.message.contains('/'), "{}", body.message);
+}
