@@ -188,7 +188,8 @@ pub fn bad_path(dir: &Path) -> PathBuf {
     dir.join(format!("{STATE_FILE}.bad"))
 }
 
-/// Blocking. Atomically replace `dir/job-state.json` (temporary file + rename).
+/// Blocking. Atomically replace `dir/job-state.json` (temporary file + rename; on Unix
+/// the directory is synced after the rename).
 pub fn save(dir: &Path, file: &StateFile) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     let bytes = serde_json::to_vec_pretty(file).map_err(std::io::Error::other)?;
@@ -198,6 +199,9 @@ pub fn save(dir: &Path, file: &StateFile) -> std::io::Result<()> {
     stage.write_all(&bytes)?;
     stage.as_file().sync_all()?;
     stage.persist(dir.join(STATE_FILE)).map_err(|e| e.error)?;
+    // Make the rename itself durable.
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 
