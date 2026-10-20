@@ -3265,11 +3265,16 @@ fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
     let spawned = std::thread::Builder::new()
         .name("waveform-bundle".into())
         .spawn(move || {
-            let cancel = std::sync::atomic::AtomicBool::new(false);
             let mut attempt = 0u32;
             loop {
                 let Some(service) = weak.upgrade() else { return };
-                let wait = match service.import_bundle(&cancel) {
+                // A library switch drops every other reference: cancel the download.
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                cancel_when_released(weak.clone(), cancel.clone(), done.clone());
+                let outcome = service.import_bundle(&cancel);
+                done.store(true, std::sync::atomic::Ordering::Release);
+                let wait = match outcome {
                     Ok(rows) => {
                         tracing::info!(rows, "list Waveform bundle imported");
                         return;
@@ -3298,9 +3303,34 @@ fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
     }
 }
 
+/// Set `cancel` once only the importing thread still holds `weak`'s value (the provider
+/// was replaced by a library switch). The watcher ends when `done` is set.
+fn cancel_when_released<T: Send + Sync + 'static>(
+    weak: std::sync::Weak<T>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let spawned = std::thread::Builder::new()
+        .name("waveform-bundle-cancel".into())
+        .spawn(move || {
+            while !done.load(Ordering::Acquire) {
+                if weak.strong_count() <= 1 {
+                    cancel.store(true, Ordering::Release);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "bundle cancel watcher not started");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::cancel_when_released;
     use super::{
         AddressForm, AutoSync, DataSourceSwitch, NOTICE_RETRY, NOTICE_SETTINGS, NOTICE_UPDATE,
         RemoteStartup, address_hint, configured_webdav_source, connection_verdict,
@@ -3313,6 +3343,35 @@ mod tests {
         CacheState, CachedIdentity, RemoteCache, RemoteRoot, RemoteSecrets, RevisionCheck,
         RootState, SourceAuth,
     };
+
+    #[test]
+    fn bundle_import_is_cancelled_when_the_library_switches() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let provider = Arc::new(());
+        let importing = provider.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        cancel_when_released(Arc::downgrade(&provider), cancel.clone(), done.clone());
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "still owned by the provider"
+        );
+        drop(provider);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !cancel.load(Ordering::Acquire) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(cancel.load(Ordering::Acquire));
+        drop(importing);
+        // A finished import stops the watcher without cancelling.
+        let owner = Arc::new(());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(true));
+        cancel_when_released(Arc::downgrade(&owner), cancel.clone(), done);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(!cancel.load(Ordering::Acquire));
+    }
 
     #[test]
     fn damaged_waveform_caches_are_refetched_and_bad_replies_do_not_poison_retries() {
