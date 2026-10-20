@@ -228,11 +228,28 @@ impl WaveformsDb {
         }
         let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         // Closing the only connection checkpoints the WAL and removes its sidecars.
-        let old = std::mem::replace(&mut *conn, Connection::open_in_memory().map_err(db_error)?);
-        old.close().map_err(|(_, error)| db_error(error))?;
+        close_or_restore(&mut conn, Connection::close)?;
         let renamed = std::fs::rename(validated, &self.path);
         *conn = open_connection(&self.path)?;
         renamed.map_err(|error| Error::Database(format!("waveforms.db replace: {error}")))
+    }
+}
+
+/// Close the connection in `slot` with `close`, leaving a placeholder in memory only
+/// while it closes. When closing fails the original file connection is put back, so the
+/// store never stays on an empty in-memory database.
+fn close_or_restore(
+    slot: &mut Connection,
+    close: impl FnOnce(Connection) -> std::result::Result<(), (Connection, rusqlite::Error)>,
+) -> Result<()> {
+    let placeholder = Connection::open_in_memory().map_err(db_error)?;
+    let old = std::mem::replace(slot, placeholder);
+    match close(old) {
+        Ok(()) => Ok(()),
+        Err((old, error)) => {
+            *slot = old;
+            Err(db_error(error))
+        }
     }
 }
 
@@ -380,6 +397,22 @@ mod tests {
         assert_eq!(db.get_many(&[9, 8, 7]).unwrap().len(), 2);
         assert_eq!(db.len().unwrap(), 2);
         assert!(WaveformsDb::open(&directory.path().join("library.db")).is_err());
+    }
+
+    #[test]
+    fn a_failed_close_keeps_the_file_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = WaveformsDb::open(&directory.path().join(WAVEFORMS_DB_FILE)).unwrap();
+        db.upsert(&row(3, "e", vec![-1, 1])).unwrap();
+        {
+            let mut conn = db.conn.lock().unwrap();
+            let failed = close_or_restore(&mut conn, |old| {
+                Err((old, rusqlite::Error::InvalidQuery))
+            });
+            assert!(failed.is_err());
+        }
+        assert_eq!(db.len().unwrap(), 1, "still the file store, not :memory:");
+        assert_eq!(db.get(3).unwrap().unwrap().etag, "e");
     }
 
     #[test]
