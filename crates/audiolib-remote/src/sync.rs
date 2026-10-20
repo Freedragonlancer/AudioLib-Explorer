@@ -10,7 +10,7 @@
 //!   [`RemoteCache::cleanup_after_swap`] once its provider has switched to the new file.
 //! * `<library_id>/audio-cache/` - the disk audition cache of earlier versions (audition
 //!   now streams into memory); [`RemoteCache::remove_audition_caches`] deletes it once.
-use crate::client::{RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta};
+use crate::client::{RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, SnapshotProgress};
 use crate::error::{RemoteError, Result};
 use crate::util::{fnv64, unix_now, write_atomic};
 #[cfg(test)]
@@ -235,7 +235,17 @@ struct ActiveLibrary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncProgress {
     Checking,
-    Downloading { received: u64, total: Option<u64> },
+    /// Network response-body bytes, using the compressed Content-Length for zstd.
+    Downloading {
+        received: u64,
+        total: Option<u64>,
+    },
+    /// Database output bytes for streaming zstd decompression. Download counters
+    /// continue independently and must be retained when this event is received.
+    Decompressing {
+        written: u64,
+        total: Option<u64>,
+    },
     Validating,
     Preparing(CachePreparation),
     Saving,
@@ -867,7 +877,16 @@ pub fn sync_library(
         let meta = loop {
             match client.download_snapshot(
                 &staging,
-                &mut |received, total| progress(SyncProgress::Downloading { received, total }),
+                &mut |stage| {
+                    progress(match stage {
+                        SnapshotProgress::Downloading { received, total } => {
+                            SyncProgress::Downloading { received, total }
+                        }
+                        SnapshotProgress::Decompressing { written, total } => {
+                            SyncProgress::Decompressing { written, total }
+                        }
+                    })
+                },
                 cancel,
             ) {
                 Err(RemoteError::Busy {
@@ -1807,6 +1826,79 @@ mod tests {
             .map(|attempt| busy_backoff(attempt).as_millis())
             .collect();
         assert_eq!(waits, [500, 1000, 2000, 4000]);
+    }
+
+    #[test]
+    fn sync_forwards_separate_transfer_counters_and_cancel_keeps_active_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = sample_snapshot(directory.path());
+        let database_bytes = snapshot.len() as u64;
+        let packed = zstd::encode_all(snapshot.as_slice(), 3).unwrap();
+        let wire_bytes = packed.len() as u64;
+        assert!(wire_bytes < database_bytes);
+        let server = TestServer::start(move |request| match request.path.as_str() {
+            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#),
+            "/api/v1/library" => TestResponse::json(
+                200,
+                r#"{"library_id":"compressed","schema_version":5,"revision":1}"#,
+            ),
+            "/api/v1/roots" => TestResponse::json(200, "[]"),
+            "/api/v1/library/snapshot" => TestResponse::bytes(200, packed.clone())
+                .with_header("Content-Encoding", "zstd")
+                .with_header("X-Uncompressed-Length", &database_bytes.to_string())
+                .with_header("X-Library-Id", "compressed")
+                .with_header("X-Library-Revision", "1")
+                .with_header("X-Schema-Version", "5"),
+            _ => TestResponse::json(404, "{}"),
+        });
+        let client = RemoteClient::new(&server.url, "").unwrap();
+        let cache = RemoteCache::new(&directory.path().join("data"));
+        let mut progress = Vec::new();
+        let outcome = sync_library(
+            &client,
+            &cache,
+            &mut |stage| progress.push(stage),
+            &AtomicBool::new(false),
+            false,
+        )
+        .unwrap();
+        assert!(progress.contains(&SyncProgress::Downloading {
+            received: wire_bytes,
+            total: Some(wire_bytes),
+        }));
+        assert!(progress.contains(&SyncProgress::Decompressing {
+            written: database_bytes,
+            total: Some(database_bytes),
+        }));
+        assert!(progress.contains(&SyncProgress::Validating));
+        assert_eq!(outcome.state.snapshot_bytes, database_bytes);
+        let original = std::fs::read(cache.database_path(&outcome.state)).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let cancel = AtomicBool::new(false);
+        let result = sync_library(
+            &client,
+            &cache,
+            &mut |stage| {
+                if matches!(stage, SyncProgress::Decompressing { written, .. } if written > 0) {
+                    cancel.store(true, Ordering::Release);
+                }
+            },
+            &cancel,
+            true,
+        );
+        assert!(matches!(result, Err(RemoteError::Cancelled)), "{result:?}");
+        assert_eq!(cache.active().unwrap(), outcome.state);
+        assert_eq!(
+            std::fs::read(cache.database_path(&outcome.state)).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read_dir(cache.library_dir("compressed"))
+                .unwrap()
+                .count(),
+            2,
+            "only the active database and cache.json survive cancellation"
+        );
     }
 
     #[test]
