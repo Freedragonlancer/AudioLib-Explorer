@@ -213,6 +213,99 @@ impl PixelRect {
     }
 }
 
+/// Read-only placement advice preserving the current DWM-frame dimensions.
+/// Applying `delta` to the public Slint physical outer position translates both
+/// rectangles equally without assuming an invisible resize-border thickness.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct WindowWorkAreaAdjustment {
+    /// Minimal physical translation needed for the workarea and optional margin.
+    pub delta: [i32; 2],
+    /// Own DWM extended-frame rectangle before any caller-applied translation.
+    pub frame_before: PixelRect,
+    /// Actual workarea of the nearest native monitor, not virtual desktop bounds.
+    pub work_area: PixelRect,
+    /// Native monitor rectangle used to validate the selected workarea.
+    pub monitor_bounds: PixelRect,
+}
+
+/// Inspect only the caller process's HWND and suggest a physical translation
+/// into its nearest monitor workarea. Keeps the frame size, leaves up to eight
+/// pixels per side where space permits, and never moves/resizes/focuses a window.
+/// Errors retain rectangle/dimension evidence when the selected workarea cannot
+/// fit the frame. The caller must still verify strict coverage after moving.
+pub fn window_work_area_adjustment(own_hwnd: usize) -> Result<WindowWorkAreaAdjustment, String> {
+    #[cfg(windows)]
+    {
+        native::window_work_area_adjustment(own_hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = own_hwnd;
+        Err("native window workarea placement requires Windows".into())
+    }
+}
+
+#[cfg(any(windows, test))]
+fn work_area_adjustment(
+    frame: PixelRect,
+    work_area: PixelRect,
+    monitor_bounds: PixelRect,
+) -> Result<WindowWorkAreaAdjustment, String> {
+    let frame_width = i64::from(frame.right) - i64::from(frame.left);
+    let frame_height = i64::from(frame.bottom) - i64::from(frame.top);
+    let work_width = i64::from(work_area.right) - i64::from(work_area.left);
+    let work_height = i64::from(work_area.bottom) - i64::from(work_area.top);
+    let evidence = || {
+        format!(
+            "frame_before={frame:?}, frame_size=[{frame_width},{frame_height}], work_area={work_area:?}, work_size=[{work_width},{work_height}], monitor_bounds={monitor_bounds:?}"
+        )
+    };
+    if frame.area().is_none()
+        || work_area.area().is_none()
+        || monitor_bounds.area().is_none()
+        || monitor_bounds.intersection(work_area) != Some(work_area)
+    {
+        return Err(format!(
+            "invalid native placement rectangles: {}",
+            evidence()
+        ));
+    }
+    if frame_width > work_width || frame_height > work_height {
+        return Err(format!(
+            "unchanged window frame cannot fit selected monitor workarea: {}",
+            evidence()
+        ));
+    }
+    let margin_x = 8_i64.min((work_width - frame_width) / 2);
+    let margin_y = 8_i64.min((work_height - frame_height) / 2);
+    let left = i64::from(frame.left).clamp(
+        i64::from(work_area.left) + margin_x,
+        i64::from(work_area.right) - frame_width - margin_x,
+    );
+    let top = i64::from(frame.top).clamp(
+        i64::from(work_area.top) + margin_y,
+        i64::from(work_area.bottom) - frame_height - margin_y,
+    );
+    let dx = i32::try_from(left - i64::from(frame.left)).map_err(|_| {
+        format!(
+            "horizontal placement delta exceeds native range: {}",
+            evidence()
+        )
+    })?;
+    let dy = i32::try_from(top - i64::from(frame.top)).map_err(|_| {
+        format!(
+            "vertical placement delta exceeds native range: {}",
+            evidence()
+        )
+    })?;
+    Ok(WindowWorkAreaAdjustment {
+        delta: [dx, dy],
+        frame_before: frame,
+        work_area,
+        monitor_bounds,
+    })
+}
+
 /// Exact rectangle-union coverage of the own DWM frame and client. A virtual
 /// desktop bounding rectangle is insufficient because monitor layouts have gaps.
 /// Incomplete/invalid enumeration or an arithmetic/allocation limit rejects.
@@ -952,7 +1045,7 @@ mod native {
                 },
                 Gdi::{
                     ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
-                    MONITORINFO,
+                    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
                 },
             },
             System::{
@@ -1016,6 +1109,60 @@ mod native {
             top: rectangle.top,
             right: rectangle.right,
             bottom: rectangle.bottom,
+        }
+    }
+
+    pub(super) fn window_work_area_adjustment(
+        value: usize,
+    ) -> Result<WindowWorkAreaAdjustment, String> {
+        let hwnd = HWND(value as *mut c_void);
+        let mut process_id = 0;
+        // SAFETY: only scalar PID/geometry queries on a supplied native HWND.
+        // Reject foreign/stale HWNDs before reading placement. The monitor handle
+        // is borrowed from Windows; no window/desktop state or input is changed.
+        unsafe {
+            if value == 0
+                || GetWindowThreadProcessId(hwnd, Some(&mut process_id)) == 0
+                || process_id != std::process::id()
+            {
+                return Err("refusing placement advice for a non-owned HWND".into());
+            }
+            let mut bounds = RECT::default();
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut bounds as *mut RECT).cast(),
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .map_err(|error| format!("read own DWM placement bounds: {error}"))?;
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if monitor.0.is_null() {
+                return Err(format!(
+                    "nearest native monitor unavailable: frame_before={:?}",
+                    pixel_rectangle(bounds)
+                ));
+            }
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return Err(format!(
+                    "nearest monitor workarea unavailable: frame_before={:?}",
+                    pixel_rectangle(bounds)
+                ));
+            }
+            let mut checked_id = 0;
+            if GetWindowThreadProcessId(hwnd, Some(&mut checked_id)) == 0
+                || checked_id != process_id
+            {
+                return Err("own HWND identity changed during placement inspection".into());
+            }
+            work_area_adjustment(
+                pixel_rectangle(bounds),
+                pixel_rectangle(info.rcWork),
+                pixel_rectangle(info.rcMonitor),
+            )
         }
     }
 
@@ -2041,6 +2188,111 @@ mod tests {
             right,
             bottom,
         }
+    }
+
+    #[test]
+    fn workarea_placement_translates_taskbar_overlap_and_preserves_frame_size() {
+        let frame = rect(40, 40, 2924, 1939);
+        let work = rect(0, 96, 3840, 2160);
+        let adjustment = work_area_adjustment(frame, work, rect(0, 0, 3840, 2160)).unwrap();
+        assert_eq!(adjustment.delta, [0, 64]);
+        let translated = rect(
+            frame.left + adjustment.delta[0],
+            frame.top + adjustment.delta[1],
+            frame.right + adjustment.delta[0],
+            frame.bottom + adjustment.delta[1],
+        );
+        assert_eq!(translated.area(), frame.area());
+        assert_eq!(work.intersection(translated), Some(translated));
+        assert_eq!(translated.top, work.top + 8);
+        assert_eq!(adjustment.frame_before, frame);
+        let unchanged = work_area_adjustment(translated, work, adjustment.monitor_bounds).unwrap();
+        assert_eq!(
+            unchanged.delta,
+            [0, 0],
+            "one adjustment is stable; repeated movement is unnecessary"
+        );
+    }
+
+    #[test]
+    fn workarea_placement_uses_minimal_clamping_with_negative_coordinates() {
+        let negative = work_area_adjustment(
+            rect(-2000, -1100, -1000, -400),
+            rect(-1920, -1040, 0, 0),
+            rect(-1920, -1080, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(negative.delta, [88, 68]);
+        let right_bottom = work_area_adjustment(
+            rect(900, 900, 1300, 1200),
+            rect(0, 0, 1000, 1000),
+            rect(0, 0, 1000, 1000),
+        )
+        .unwrap();
+        assert_eq!(right_bottom.delta, [-308, -208]);
+        assert_eq!(
+            work_area_adjustment(
+                rect(100, 200, 500, 600),
+                rect(0, 0, 1000, 1000),
+                rect(0, 0, 1000, 1000),
+            )
+            .unwrap()
+            .delta,
+            [0, 0]
+        );
+    }
+
+    #[test]
+    fn workarea_placement_reduces_margin_without_resizing_and_reports_cannot_fit() {
+        let exact = work_area_adjustment(
+            rect(20, 20, 120, 120),
+            rect(0, 0, 100, 100),
+            rect(0, 0, 100, 100),
+        )
+        .unwrap();
+        assert_eq!(exact.delta, [-20, -20]);
+        let small_slack = work_area_adjustment(
+            rect(0, 0, 100, 100),
+            rect(0, 0, 103, 115),
+            rect(0, 0, 103, 115),
+        )
+        .unwrap();
+        assert_eq!(small_slack.delta, [1, 7]);
+        for frame in [rect(0, 0, 101, 100), rect(0, 0, 100, 101)] {
+            let error = work_area_adjustment(frame, rect(0, 0, 100, 100), rect(0, 0, 100, 100))
+                .unwrap_err();
+            assert!(error.contains("cannot fit"));
+            assert!(
+                error.contains("frame_before=")
+                    && error.contains("work_area=")
+                    && error.contains("monitor_bounds=")
+            );
+        }
+        assert!(
+            work_area_adjustment(
+                rect(0, 0, 0, 100),
+                rect(0, 0, 100, 100),
+                rect(0, 0, 100, 100)
+            )
+            .is_err()
+        );
+        assert!(
+            work_area_adjustment(
+                rect(0, 0, 10, 10),
+                rect(-1, 0, 100, 100),
+                rect(0, 0, 100, 100)
+            )
+            .is_err()
+        );
+        assert!(
+            work_area_adjustment(
+                rect(i32::MIN, 0, i32::MIN + 10, 10),
+                rect(i32::MAX - 10, 0, i32::MAX, 10),
+                rect(i32::MAX - 10, 0, i32::MAX, 10),
+            )
+            .is_err(),
+            "delta must be representable for the caller's native physical position"
+        );
     }
 
     #[test]

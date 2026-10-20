@@ -635,6 +635,138 @@ struct Observation {
     marker_parent_offset: [f32; 2],
     marker_actual_client_position: [f32; 2],
     memory: MemoryObservations,
+    work_area_adjustment: Option<Value>,
+    prearm_progress_at: Option<Instant>,
+    prearm_progress_gates: Option<PrearmGates>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PrearmGates {
+    startup_page: bool,
+    startup_folders: bool,
+    startup_library_info: Option<bool>,
+    ready: bool,
+    calibration_generation: Option<u64>,
+    calibrated: bool,
+    // own process, foreground, visible, noniconic, uncloaked, input desktop
+    visibility_checks: Option<[bool; 6]>,
+    coverage_complete: Option<bool>,
+    // frame/client monitor, then frame/client workarea uncovered physical pixels
+    uncovered_pixels: Option<[u64; 4]>,
+    unknown_occluders: Option<u32>,
+}
+
+fn log_prearm_progress(observation: &mut Observation, started: Instant) {
+    if observation.armed_at.is_some() {
+        return;
+    }
+    let mut startup = (false, false, None);
+    state(|value| {
+        startup = (
+            value.startup_page,
+            value.startup_folders,
+            value.startup_library_info,
+        )
+    });
+    let inspection = observation.last_inspection;
+    let gates = PrearmGates {
+        startup_page: startup.0,
+        startup_folders: startup.1,
+        startup_library_info: startup.2,
+        ready: observation.ready,
+        calibration_generation: observation.calibration_generation,
+        calibrated: observation.calibrated.is_some(),
+        visibility_checks: inspection.map(|value| {
+            let visibility = value.visibility;
+            [
+                visibility.own_process,
+                visibility.foreground,
+                visibility.visible,
+                !visibility.iconic,
+                visibility.cloaked == Some(0),
+                visibility.input_desktop_accessible,
+            ]
+        }),
+        coverage_complete: inspection.map(|value| {
+            value.desktop_coverage.enumeration_complete
+                && value.desktop_coverage.calculation_complete
+        }),
+        uncovered_pixels: inspection.map(|value| {
+            let coverage = value.desktop_coverage;
+            [
+                coverage.frame_uncovered_monitor_pixels,
+                coverage.client_uncovered_monitor_pixels,
+                coverage.frame_uncovered_work_area_pixels,
+                coverage.client_uncovered_work_area_pixels,
+            ]
+        }),
+        unknown_occluders: inspection.map(|value| value.potential_occluders),
+    };
+    let changed = observation.prearm_progress_gates.as_ref() != Some(&gates);
+    let should_log = observation.prearm_progress_at.is_none_or(|last| {
+        last.elapsed() >= Duration::from_secs(2)
+            || (changed && last.elapsed() >= Duration::from_millis(250))
+    });
+    if should_log {
+        eprintln!(
+            "GUI calibration prearm: elapsed_ms={} gates={gates:?} decoded_frames={} rejected_frames={} last_rejection={:?}",
+            started.elapsed().as_millis(),
+            observation.telemetry.decoded_frames,
+            observation.telemetry.prearm_rejected_frames,
+            observation.telemetry.last_prearm_rejected_frame
+        );
+        observation.prearm_progress_at = Some(Instant::now());
+        observation.prearm_progress_gates = Some(gates);
+    }
+}
+
+fn adjust_initial_work_area(ui: &AppWindow, observation: &mut Observation) -> Result<bool> {
+    if observation.work_area_adjustment.is_some() {
+        return Ok(false);
+    }
+    let (hwnd, scale, size) = own_window(ui)?;
+    let before = ui.window().position();
+    observation.scale_factor = scale;
+    observation.logical_size = [f64::from(size[0]) / scale, f64::from(size[1]) / scale];
+    observation.outer_position = [before.x, before.y];
+    observation.work_area_adjustment = Some(json!({
+        "attempted":true,"outer_position_before_physical":[before.x,before.y],
+        "physical_client_size_before":size,"scale_factor_before":scale,
+        "resized":false,"applied_once_before_observer":true
+    }));
+    let adjustment = match capture::window_work_area_adjustment(hwnd) {
+        Ok(adjustment) => adjustment,
+        Err(error) => {
+            observation
+                .work_area_adjustment
+                .as_mut()
+                .expect("placement record initialized")["error"] = json!(error);
+            bail!("initial window cannot fit the workarea at its preferred size: {error}");
+        }
+    };
+    let x = before
+        .x
+        .checked_add(adjustment.delta[0])
+        .context("initial workarea x adjustment overflow")?;
+    let y = before
+        .y
+        .checked_add(adjustment.delta[1])
+        .context("initial workarea y adjustment overflow")?;
+    let record = observation
+        .work_area_adjustment
+        .as_mut()
+        .expect("placement record initialized");
+    record["basis"] = json!(adjustment);
+    record["requested_outer_position_physical"] = json!([x, y]);
+    let moved = adjustment.delta != [0, 0];
+    record["move_requested"] = moved.into();
+    if moved {
+        // Own diagnostic window only, before observer/input. Do not resize or
+        // weaken the independent strict frame/client workarea coverage checks.
+        ui.window().set_position(slint::PhysicalPosition::new(x, y));
+        ui.window().request_redraw();
+    }
+    Ok(moved)
 }
 
 #[derive(Default)]
@@ -803,6 +935,12 @@ fn start_observer(ui: &AppWindow, observation: &mut Observation) -> Result<()> {
     observation.logical_size = [f64::from(size[0]) / scale, f64::from(size[1]) / scale];
     let position = ui.window().position();
     observation.outer_position = [position.x, position.y];
+    if let Some(adjustment) = observation.work_area_adjustment.as_mut() {
+        adjustment["actual_outer_position_at_observer_setup_physical"] =
+            json!([position.x, position.y]);
+        adjustment["actual_coverage_at_observer_setup"] =
+            json!(geometry.inspection.desktop_coverage);
+    }
     ui.window().request_redraw();
     Ok(())
 }
@@ -822,6 +960,7 @@ fn tick(
     started: Instant,
     pointer_policy: Option<&capture::PointerOverlayPolicy>,
 ) -> Result<bool> {
+    log_prearm_progress(observation, started);
     if observation.observer.is_none() {
         let mut startup_ready = false;
         let mut failure = None;
@@ -839,6 +978,11 @@ fn tick(
                 started.elapsed() < Duration::from_secs(120),
                 "startup library information or empty models timed out"
             );
+            return Ok(false);
+        }
+        if adjust_initial_work_area(ui, observation)? {
+            // Give the native move/DPI events an event-loop turn before setting
+            // the fixed capture ROI. This adjustment is never repeated.
             return Ok(false);
         }
         start_observer(ui, observation)?;
@@ -1460,6 +1604,7 @@ fn measure(options: &Options) -> Result<Value> {
         "normal_preferred_size_used":preferred_size_used(observation.logical_size),
         "initial_outer_position_request":{"physical_x":40,"physical_y":40},
         "actual_outer_position_at_capture_setup_physical":observation.outer_position,
+        "work_area_adjustment":observation.work_area_adjustment,
         "client_origin_in_capture":observation.geometry.map(|value| value.inspection.client_origin_in_capture),
         "expected_capture_size":observation.geometry.map(|value| value.inspection.expected_capture_size),
         "marker_parent_offset_logical":observation.marker_parent_offset,
