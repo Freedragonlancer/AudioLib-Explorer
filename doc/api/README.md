@@ -990,6 +990,39 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - `list_waveforms`：本服务端支持 §9.1；`version` 与 `etag` 的 `-l<版本>` 一致，`encoding` 说明 `peaks` 的格式。缺字段（旧服务端）= 不支持。
 - `pregenerate_list_waveforms`：当前生效的开关值（只读；修改用 `PATCH /settings`，进度看 `/waveforms/status`）。
 
+### 9.4 列表波形 8 位编码 `i8-minmax-base64`（草稿，待客户端评审）
+
+> 2026-10-20 Paul 选定方案 A：128 列、每值 1 字节、**线性、按真实振幅绘制，不加增益字节**。只新增一种可选编码，**默认编码不变**（`i16le-minmax-base64`），已实现的 §9.1 客户端不受影响。不改数据库 schema、索引、FTS，快照（§6.1）不变，不影响搜索。
+
+**命名说明**：群里讨论时叫「u8」，但 min 是负值，实际存的是**有符号** int8，所以编码名定为 `i8-minmax-base64`（避免客户端按无符号解码）。
+
+**请求**：§9.1 请求体新增可选字段 `encoding`：
+
+| 字段 | 说明 |
+|---|---|
+| `encoding` | 可省略，默认 `"i16le-minmax-base64"`。可选 `"i8-minmax-base64"`。其他值 → 400 `VALIDATION`（`unsupported list waveform encoding`）。一次请求内所有项用同一种编码 |
+
+**响应**：顶层新增 `encoding`（回显本次实际编码）；各项字段不变，只是 `peaks` 的长度和含义随编码变：
+
+- 每个值先截到 −1..1，再 `round(v × 127)` 存为 **int8**（−127..127，不用 −128）；按列交错 `[min₀, max₀, min₁, max₁, …]`，标准 base64（带填充），共 `n × 2` 字节（`n = 128` 时 **256 字节**，base64 后 344 个字符）。
+- 解码：`v = byte_as_i8 / 127.0`。线性刻度，最小非零台阶约 −42 dBFS：峰值低于这个的很安静素材会画成一条平线，这是选定方案接受的取舍（真实电平）。
+- 列数 `n`、多声道合并、0 帧文件的规则与 §9.1 完全相同。
+
+**`etag`**：十六进制部分与 §9.1 相同（同一份服务端缓存），后缀按编码区分：i16 仍是 `-l1`，i8 是 `-l1i8`。客户端切换编码后旧 `known` 不会误判 `not_modified`。
+
+**服务端存储**：`waveforms/` 缓存仍只存一份 128 列 int16 结果，i8 在响应时由它量化得到（一次乘法加取整，200 项不到 1 ms）；预生成（§9.2）不变，不多占磁盘。
+
+**能力声明**：`/capabilities` 的 `list_waveforms` 新增 `encodings` 数组，例如 `"encodings": ["i16le-minmax-base64", "i8-minmax-base64"]`；原 `encoding` 字段保留且仍表示默认编码。缺 `encodings` 的服务端只支持 i16，客户端不要发 `encoding`。
+
+**体积估算**（`n = 128`，不含 JSON 外壳与 zstd）：
+
+| 编码 | 每条 | 90 万条 | 200 条一页（响应约） |
+|---|---|---|---|
+| `i16le-minmax-base64` | 512 B（base64 684 字符） | 约 461 MB | 约 150 KB |
+| `i8-minmax-base64` | 256 B（base64 344 字符） | 约 230 MB | 约 82 KB |
+
+客户端本地 `waveform_cache` 用新的 zoom_level 存 i8 结果，不改 schema（客户端侧细节由客户端补充）。
+
 ### 9.3 本地模式与客户端决定（客户端已评审）
 
 **本地模式**：
