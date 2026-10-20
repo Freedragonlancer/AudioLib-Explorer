@@ -425,7 +425,11 @@ impl Controller {
             // Reattach to the selected server's current scan and refresh roots/history
             // using the generation established by the successful provider swap.
             PAGE_LIBRARY => self.load_server_library(ui),
-            PAGE_CACHE => self.publish_cache_info(ui),
+            // ????? also hosts the ?????? block, read with the library page.
+            PAGE_CACHE => {
+                self.publish_cache_info(ui);
+                self.load_server_library(ui);
+            }
             _ => {}
         }
     }
@@ -569,7 +573,10 @@ impl Controller {
         ui.set_sm_fs_busy(false);
         match page {
             PAGE_LIBRARY => self.load_server_library(&ui),
-            PAGE_CACHE => self.publish_cache_info(&ui),
+            PAGE_CACHE => {
+                self.publish_cache_info(&ui);
+                self.load_server_library(&ui);
+            }
             _ => {}
         }
     }
@@ -624,7 +631,7 @@ impl Controller {
         }
         if !deferred {
             self.publish_manage_busy(ui);
-            if ui.get_library_visible() && ui.get_sm_page() == PAGE_LIBRARY {
+            if ui.get_library_visible() && matches!(ui.get_sm_page(), PAGE_LIBRARY | PAGE_CACHE) {
                 self.load_server_library(ui);
             }
         }
