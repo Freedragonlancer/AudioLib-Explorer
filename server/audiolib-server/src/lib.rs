@@ -24,6 +24,7 @@ pub mod state;
 pub mod stream;
 pub mod tls;
 pub mod waveform;
+pub mod wfdb;
 
 pub use auth::{AuthMode, ConnectionInfo, Listener, ManageMode, Security};
 pub use config::{BearerToken, RootConfig, ServerConfig};
