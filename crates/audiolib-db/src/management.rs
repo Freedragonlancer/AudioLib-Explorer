@@ -416,7 +416,25 @@ impl SqliteProvider {
         })
     }
     pub(crate) fn management_check(&self) -> Result<IntegrityReport> {
-        let mut source = self.reader()?;
+        let _gate = self
+            .read_gate
+            .read()
+            .map_err(|_| Error::Database("Library reader gate was poisoned".into()))?;
+        // A full backup touches every source page. A mapped pooled search reader
+        // can retain the whole library's working set after this check returns.
+        // Keep its snapshot/restore gate, but give validation a separate ordinary
+        // I/O connection whose page cache is released with this operation.
+        let mut source = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(db_error)?;
+        source
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_error)?;
+        source
+            .pragma_update(None, "mmap_size", 0)
+            .map_err(db_error)?;
         let tx = source.transaction().map_err(db_error)?;
         tx.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| {
             r.get::<_, i64>(0)
@@ -425,6 +443,7 @@ impl SqliteProvider {
         // Keep validation memory bounded even for multi-million-record libraries.
         let stage = tempfile::NamedTempFile::new()?;
         let mut copy = Connection::open(stage.path()).map_err(db_error)?;
+        copy.pragma_update(None, "mmap_size", 0).map_err(db_error)?;
         copy_database(&tx, &mut copy)?;
         copy.execute_batch("PRAGMA journal_mode=DELETE;")
             .map_err(db_error)?;
@@ -528,6 +547,10 @@ impl SqliteProvider {
             let mut target = Connection::open(stage.path()).map_err(db_error)?;
             copy_database(&src, &mut target)?;
             schema::register_tokenizer(&target, self.tokenizer.clone())?;
+            // A derived-state upgrade recreates the FTS table and triggers.
+            // Validate the original owned snapshot first so that rebuilding
+            // cannot conceal damaged postings or synchronization triggers.
+            checked(&check_connection(&target)?)?;
             schema::migrate(&mut target)?;
             schema::backfill_source_tags(&mut target)?;
             // A restore may bring back fewer/lower IDs than this installation has
@@ -785,27 +808,44 @@ impl SqliteProvider {
         if target.file_name().is_none() {
             return Err(validation("File system or drive roots cannot be relocated"));
         }
-        // Scanning stores canonical Windows paths. Resolve existing source
-        // aliases (including short names), but retain a missing old path after
-        // the user physically moves a directory. Other I/O failures are errors.
-        #[cfg(windows)]
+        // Scanning stores canonical paths. Resolve existing source aliases
+        // (including macOS /var -> /private/var and Windows short names), but
+        // retain a missing old path after a physical move or case-only rename.
+        // Other I/O failures are errors.
+        let requested_source_text = folder_path_text(source).trim_end_matches('/').to_string();
         let resolved_source = match source.canonicalize() {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => source.to_path_buf(),
             Err(error) => return Err(error.into()),
         };
-        #[cfg(windows)]
+        // Keep the requested basename when only its parent is an alias. Full
+        // realpath may return a renamed Unicode basename that SQLite's ASCII
+        // NOCASE cannot match to the old indexed spelling.
+        let parent_resolved_source = match source
+            .parent()
+            .expect("absolute source has a parent")
+            .canonicalize()
+        {
+            Ok(parent) => parent.join(source.file_name().expect("source filename validated above")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => source.to_path_buf(),
+            Err(error) => return Err(error.into()),
+        };
+        let parent_resolved_source_text = folder_path_text(&parent_resolved_source)
+            .trim_end_matches('/')
+            .to_string();
         let source = resolved_source.as_path();
         if source.file_name().is_none() {
             return Err(validation("File system or drive roots cannot be relocated"));
         }
         let target_text = folder_path_text(&target);
-        let source_text = folder_path_text(source).trim_end_matches('/').to_string();
-        let source_key = path_key(&source_text);
+        let resolved_source_text = folder_path_text(source).trim_end_matches('/').to_string();
+        let source_key = path_key(&resolved_source_text);
         let target_key = path_key(&target_text);
-        // Search keys fold case on every platform; a POSIX case-only rename is
-        // still a different stored source path. Windows aliases remain a no-op.
-        if relocation_path_matches(&source_text, &target_text) {
+        // Windows source aliases retain their established no-op behavior. On
+        // case-insensitive POSIX volumes, realpath can change the source spelling
+        // after a case-only rename, so compare its stored spelling below instead.
+        #[cfg(windows)]
+        if relocation_path_matches(&resolved_source_text, &target_text) {
             return Ok(0);
         }
         if source_key.starts_with(&format!("{target_key}/"))
@@ -814,17 +854,57 @@ impl SqliteProvider {
             return Err(validation("Relocation paths must not overlap"));
         }
         let mut writer = self.writer_unlocked()?;
-        let root: Option<(i64, Option<i64>)> = writer
-            .query_row(
-                "SELECT id,parent_id FROM folders WHERE folder_path=?1 COLLATE NOCASE",
-                [&source_text],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(db_error)?;
-        let Some((root, parent)) = root else {
+        let lookup = |sql: &str| -> Result<Vec<(i64, Option<i64>, String)>> {
+            writer
+                .prepare(sql)
+                .map_err(db_error)?
+                .query_map(
+                    params![
+                        requested_source_text,
+                        resolved_source_text,
+                        parent_resolved_source_text
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(db_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(db_error)
+        };
+        // Prefer exact stored identities: case-sensitive filesystems can index
+        // distinct "audio" and "Audio" roots. Only fall back to NOCASE when no
+        // exact candidate exists, and never pick an arbitrary matching identity.
+        let mut roots = lookup(
+            "SELECT id,parent_id,folder_path FROM folders
+             WHERE folder_path=?1 COLLATE BINARY OR folder_path=?2 COLLATE BINARY
+                OR folder_path=?3 COLLATE BINARY LIMIT 2",
+        )?;
+        if roots.is_empty() {
+            roots = lookup(
+                "SELECT id,parent_id,folder_path FROM folders
+                 WHERE folder_path=?1 COLLATE NOCASE OR folder_path=?2 COLLATE NOCASE
+                    OR folder_path=?3 COLLATE NOCASE LIMIT 2",
+            )?;
+        }
+        if roots.len() > 1 {
+            return Err(validation(
+                "Source path matches more than one indexed folder",
+            ));
+        }
+        let Some((root, parent, source_text)) = roots.pop() else {
             return Ok(0);
         };
+        // Use the indexed spelling for suffixes and POSIX case-only relocation.
+        // The canonical path above serves as a lookup alias, not a replacement
+        // for the identity recorded before the directory moved or was renamed.
+        if relocation_path_matches(&source_text, &target_text) {
+            return Ok(0);
+        }
+        let source_key = path_key(&source_text);
+        if source_key.starts_with(&format!("{target_key}/"))
+            || target_key.starts_with(&format!("{source_key}/"))
+        {
+            return Err(validation("Relocation paths must not overlap"));
+        }
         if parent.is_some() {
             return Err(validation(
                 "Only an indexed top-level folder may be relocated",

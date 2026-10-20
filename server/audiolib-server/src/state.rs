@@ -17,7 +17,7 @@ use audiolib_core::{
     AudioFile, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error, LibraryInfo,
     LibraryStats, MetadataPatch, Result,
 };
-use audiolib_db::SqliteProvider;
+use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -571,7 +571,41 @@ impl AppState {
         } else {
             remove_stale_snapshots(&std::env::temp_dir(), Some(SHARED_TEMP_SNAPSHOT_AGE));
         }
-        let provider = Arc::new(SqliteProvider::open_existing(&config.library_db)?);
+        let opened = Instant::now();
+        let provider = Arc::new(SqliteProvider::open_existing_with_progress(
+            &config.library_db,
+            |progress| {
+                let elapsed_seconds = opened.elapsed().as_secs_f64();
+                match progress {
+                    SnapshotUpgradeProgress::Preparing => tracing::info!(
+                        phase = "preparing",
+                        elapsed_seconds,
+                        "Library startup: checking schema and search indexes"
+                    ),
+                    SnapshotUpgradeProgress::Tokenizing { completed, total } => tracing::info!(
+                        phase = "tokenizing",
+                        completed,
+                        total,
+                        elapsed_seconds,
+                        "Library startup: rebuilding search text (uncommitted rows)"
+                    ),
+                    SnapshotUpgradeProgress::BuildingFts => tracing::info!(
+                        phase = "building_fts",
+                        elapsed_seconds,
+                        "Library startup: building FTS5 postings"
+                    ),
+                    SnapshotUpgradeProgress::SourceTags => tracing::info!(
+                        phase = "source_tags",
+                        elapsed_seconds,
+                        "Library startup: checking extracted source tags"
+                    ),
+                }
+            },
+        )?);
+        tracing::info!(
+            elapsed_seconds = opened.elapsed().as_secs_f64(),
+            "Library startup: database opened"
+        );
         crate::manage::recover_root_relink(&provider, &security)?;
         let tracker = RevisionTracker::open(provider.database_path())?;
         let library_id = tracker.current()?.library_id;

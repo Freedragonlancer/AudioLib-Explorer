@@ -9,9 +9,15 @@ mod owned_cancellation;
 #[cfg(feature = "scanner")]
 pub mod scanner;
 mod schema;
+mod search_bm25;
 mod search_cache;
+mod search_candidates;
+mod search_facets;
+mod search_rank_parallel;
+mod search_sorted;
 mod search_text;
 mod space;
+mod sqlite_mmap;
 
 #[cfg(feature = "scanner")]
 use audiolib_core::AudioMetadata;
@@ -36,6 +42,35 @@ pub const MIN_SNAPSHOT_SCHEMA: i64 = schema::MIN_SNAPSHOT_SCHEMA_VERSION;
 /// use an owned copy when their derived search state needs upgrading; the source is preserved.
 pub const MAX_SNAPSHOT_SCHEMA: i64 = schema::SCHEMA_VERSION;
 const _: () = assert!(MIN_SNAPSHOT_SCHEMA <= MAX_SNAPSHOT_SCHEMA);
+
+pub use search_rank_parallel::{
+    ParallelRankingDiagnostics, SQLITE_AUXILIARY_READER_CACHE_KB, auxiliary_search_reader_count,
+    parallel_ranking_diagnostics,
+};
+pub use sqlite_mmap::{SQLITE_READER_MMAP_BYTES, sqlite_reader_mmap_bytes};
+
+/// Maximum auxiliary readers used by one exact ranking job. The provider admits
+/// one such job at a time; the original reader forms the eighth partition.
+pub const SQLITE_AUXILIARY_SEARCH_READERS: usize = 7;
+
+/// Work performed while upgrading an exclusively owned snapshot. Row counts describe
+/// completed tokenization within the upgrade transaction, not committed partial data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotUpgradeProgress {
+    /// Validate the implementation revisions and prepare required schema indexes.
+    Preparing,
+    /// Recompute derived search text for this many of the snapshot's audio records.
+    Tokenizing {
+        /// Audio records whose derived text has been recomputed.
+        completed: u64,
+        /// Total audio records in the transaction's pinned snapshot.
+        total: u64,
+    },
+    /// Build the FTS5 postings; SQLite does not expose a reliable row percentage.
+    BuildingFts,
+    /// Complete any remaining resumable extracted-tag backfill.
+    SourceTags,
+}
 
 /// Whether a snapshot of this `user_version` can be opened read-only by this client.
 pub fn snapshot_schema_supported(version: i64) -> bool {
@@ -137,6 +172,8 @@ pub struct SqliteProvider {
     read_pool: Mutex<Vec<Connection>>,
     revision_reader: Mutex<Option<Connection>>,
     ranking_cache: Mutex<search_cache::RankingCache>,
+    document_lengths: Mutex<Option<(u64, Arc<search_bm25::Lengths>)>>,
+    parallel_rank_reserved: AtomicBool,
     tokenizer: Arc<Jieba>,
     read_gate: RwLock<()>,
     /// Whether extracted-tag filters can use the fully populated derived column.
@@ -303,6 +340,15 @@ impl SqliteProvider {
     /// Open a Rust library database and apply transactional legacy-compatible migrations.
     /// Call import_legacy for the original Python database to preserve that source unchanged.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_progress(path, |_| {})
+    }
+
+    /// Open a writable library, synchronously reporting migration phases and rows.
+    /// Tokenization counts are uncommitted work; errors roll back the rebuild.
+    pub fn open_with_progress(
+        path: &Path,
+        mut progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             return Err(Error::Validation(
                 "Provider requires a persistent database path".into(),
@@ -329,15 +375,21 @@ impl SqliteProvider {
             .map_err(db_error)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
-            PRAGMA foreign_keys=ON; PRAGMA cache_size=-65536; PRAGMA mmap_size=1073741824;
+            PRAGMA foreign_keys=ON; PRAGMA cache_size=-65536;
             PRAGMA temp_store=MEMORY;",
         )
         .map_err(db_error)?;
+        conn.pragma_update(None, "mmap_size", 0).map_err(db_error)?;
         let tokenizer = load_tokenizer();
         schema::register_tokenizer(&conn, tokenizer.clone())?;
-        schema::migrate(&mut conn)?;
+        progress(SnapshotUpgradeProgress::Preparing);
+        schema::migrate_with_progress(&mut conn, &mut |event| {
+            progress(event);
+            Ok(())
+        })?;
         // Batched and resumable: an interrupted run continues from `source_tags_progress`.
         // On failure (e.g. Busy) the library still opens and tag filters use the JSON path.
+        progress(SnapshotUpgradeProgress::SourceTags);
         let derived =
             schema::backfill_source_tags(&mut conn).is_ok() && schema::source_tags_ready(&conn)?;
         Ok(Self {
@@ -347,6 +399,8 @@ impl SqliteProvider {
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
             ranking_cache: Mutex::new(Default::default()),
+            document_lengths: Mutex::new(None),
+            parallel_rank_reserved: AtomicBool::new(false),
             tokenizer,
             read_gate: RwLock::new(()),
             derived_tags: AtomicBool::new(derived),
@@ -425,11 +479,32 @@ impl SqliteProvider {
     /// The caller removes the cancelled staging copy; live libraries must use their
     /// administration workflow and must never be passed to this operation.
     pub fn upgrade_owned_snapshot_cancellable(path: &Path, cancel: &AtomicBool) -> Result<bool> {
+        Self::upgrade_owned_snapshot_with_progress_cancellable(path, cancel, |_| {})
+    }
+
+    /// Upgrade an exclusively owned snapshot with synchronous phase and row progress.
+    /// Tokenization and FTS construction share one transaction; cancellation before
+    /// its commit rolls it back. Callers discard owned staging on later cancellation.
+    /// Callbacks must return promptly and must not access the upgrading database.
+    pub fn upgrade_owned_snapshot_with_progress_cancellable(
+        path: &Path,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<bool> {
         let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(db_error)?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
         owned_cancellation::run(&mut conn, cancel, |conn| {
+            let mut report = |event| {
+                progress(event);
+                if cancel.load(Ordering::Acquire) {
+                    Err(Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            };
+            report(SnapshotUpgradeProgress::Preparing)?;
             schema::validate_library_identity(conn)?;
             let version: i64 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -450,10 +525,16 @@ impl SqliteProvider {
                     "Owned snapshot must use rollback-journal mode".into(),
                 ));
             }
-            conn.execute_batch("PRAGMA foreign_keys=ON;")
-                .map_err(db_error)?;
+            // Match ordinary writer caching without changing the owned snapshot's
+            // rollback journal or synchronous durability. Large FTS builds otherwise
+            // fall back to SQLite's small default cache and disk-backed sort work.
+            conn.execute_batch(
+                "PRAGMA foreign_keys=ON; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;",
+            )
+            .map_err(db_error)?;
             schema::register_tokenizer(conn, load_tokenizer())?;
-            schema::migrate(conn)?;
+            schema::migrate_with_progress(conn, &mut report)?;
+            report(SnapshotUpgradeProgress::SourceTags)?;
             schema::backfill_source_tags(conn)?;
             Ok(true)
         })
@@ -478,6 +559,15 @@ impl SqliteProvider {
 
     /// Open a known Rust library; original Python or arbitrary SQLite files must be imported.
     pub fn open_existing(path: &Path) -> Result<Self> {
+        Self::open_existing_with_progress(path, |_| {})
+    }
+
+    /// Validate an existing Rust library before opening and reporting its upgrade.
+    /// Missing or unrelated databases are never initialized by this entry point.
+    pub fn open_existing_with_progress(
+        path: &Path,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         if !path.is_file() {
             return Err(Error::NotFound(path.display().to_string()));
         }
@@ -494,7 +584,7 @@ impl SqliteProvider {
             )));
         }
         drop(probe);
-        Self::open(path)
+        Self::open_with_progress(path, progress)
     }
 
     /// Open a schema-current library without writing its source file. Older derived
@@ -563,6 +653,8 @@ impl SqliteProvider {
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
             ranking_cache: Mutex::new(Default::default()),
+            document_lengths: Mutex::new(None),
+            parallel_rank_reserved: AtomicBool::new(false),
             tokenizer: load_tokenizer(),
             read_gate: RwLock::new(()),
             derived_tags: AtomicBool::new(derived),
@@ -672,9 +764,11 @@ impl SqliteProvider {
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
         conn.execute_batch(
-            "PRAGMA query_only=ON; PRAGMA cache_size=-65536; PRAGMA mmap_size=1073741824; PRAGMA temp_store=MEMORY;",
+            "PRAGMA query_only=ON; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;",
         )
         .map_err(db_error)?;
+        conn.pragma_update(None, "mmap_size", sqlite_reader_mmap_bytes(&self.path))
+            .map_err(db_error)?;
         schema::register_casefold(&conn)?;
         Ok(ReadLease {
             conn: Some(conn),
@@ -1023,7 +1117,7 @@ struct RankingSnapshot<'a> {
     revision: u64,
     cache_eligible: bool,
     start: Instant,
-    cancel: Option<&'a AtomicBool>,
+    cancel: Option<&'a Arc<AtomicBool>>,
 }
 
 impl SqliteProvider {
@@ -1046,6 +1140,35 @@ impl SqliteProvider {
             .unwrap()
             .query_row("PRAGMA data_version", [], |row| unsigned(row, 0))
             .map_err(db_error)
+    }
+
+    fn rank_document_lengths(
+        &self,
+        tx: &Connection,
+        stable_revision: Option<u64>,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Option<Arc<search_bm25::Lengths>>> {
+        let Some(revision) = stable_revision else {
+            return search_bm25::load_lengths(tx, cancel);
+        };
+        let mut cached = self
+            .document_lengths
+            .lock()
+            .map_err(|_| Error::Database("Document-length cache lock was poisoned".into()))?;
+        if let Some((cached_revision, lengths)) = cached.as_ref()
+            && *cached_revision == revision
+        {
+            return Ok(Some(lengths.clone()));
+        }
+        // The caller pinned this transaction between matching observer values.
+        // Decode each document length once rather than issuing a docsize lookup
+        // for every scored row. A concurrent commit only forbids publication;
+        // the owned values remain valid for this request's pinned snapshot.
+        let lengths = search_bm25::load_lengths(tx, cancel)?;
+        if self.observe_search_revision()? == revision {
+            *cached = lengths.as_ref().map(|lengths| (revision, lengths.clone()));
+        }
+        Ok(lengths)
     }
 
     fn ranked_search(
@@ -1076,29 +1199,24 @@ impl SqliteProvider {
         let ids = if let Some(ids) = cached {
             ids
         } else {
-            let mut ranked = Vec::<(i64, f64)>::new();
-            let mut statement = tx
-                .prepare(
-                    // Read FTS5's score directly; fixing its mapping per request
-                    // preserves default BM25 even if a library configured rank.
-                    "SELECT rowid,rank FROM audio_search
-                     WHERE audio_search MATCH ?1 AND rank MATCH 'bm25()'",
-                )
-                .map_err(db_error)?;
-            let mut rows = statement.query([&query]).map_err(db_error)?;
-            while let Some(row) = rows.next().map_err(db_error)? {
-                if ranked.len().is_multiple_of(1024) {
-                    check_cancel()?;
-                }
-                if ranked.len() == search_cache::MAX_RANKED_IDS {
-                    // Retain bounded memory even for libraries beyond the cache budget.
-                    // The original SQL sorter remains the exact, cancellable fallback.
-                    return Ok(None);
-                }
-                ranked.push((row.get(0).map_err(db_error)?, row.get(1).map_err(db_error)?));
-            }
+            let Some(mut ranked) = search_rank_parallel::collect(
+                self,
+                tx,
+                query.clone(),
+                search_rank_parallel::Snapshot {
+                    revision,
+                    cache_eligible,
+                    cancel,
+                },
+            )?
+            else {
+                return Ok(None);
+            };
             check_cancel()?;
-            ranked.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+            // Every input range is in ascending rowid order and ranges are
+            // concatenated in that order. Stable score sorting therefore keeps
+            // the exact ID tie-break without comparing it for every equal score.
+            ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
             check_cancel()?;
             let mut ids = ranked.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
             // Collect may reuse the wider (id,score) allocation; retained cache entries
@@ -1128,27 +1246,9 @@ impl SqliteProvider {
         } else {
             let mut filter_request = request.clone();
             filter_request.query.clear();
-            // A handful of non-present files should not force a wide Metadata lookup
-            // for every ID in an otherwise covering folder/sample-rate index.
-            // Probe and subtract only a bounded sparse set from this same snapshot.
-            let sparse_not_present = if !visibility_only
-                && request.filters.visibility == FileVisibility::Present
-            {
-                let mut statement = tx
-                        .prepare("SELECT id FROM audio_files INDEXED BY idx_audio_files_not_present WHERE missing IS NOT 0 LIMIT 129")
-                        .map_err(db_error)?;
-                let not_present = statement
-                    .query_map([], |row| row.get::<_, i64>(0))
-                    .map_err(db_error)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(db_error)?;
-                (not_present.len() <= 128).then_some(not_present)
-            } else {
-                None
-            };
-            if sparse_not_present.is_some() {
-                filter_request.filters.visibility = FileVisibility::All;
-            }
+            // Preserve the visibility predicate: the visible folder/format/filter
+            // indexes cover IDs only while their missing=0 condition is present.
+            // Removing it forces duration and other fields back onto wide rows.
             let SearchSql {
                 from,
                 conditions,
@@ -1198,11 +1298,6 @@ impl SqliteProvider {
                 }
                 membership_rows += 1;
                 membership.insert(row.get(0).map_err(db_error)?);
-            }
-            if let Some(not_present) = sparse_not_present {
-                for id in not_present {
-                    membership.remove(&id);
-                }
             }
             (Some(membership), exclude)
         };
@@ -1280,7 +1375,7 @@ impl SqliteProvider {
                     revision,
                     cache_eligible: revision_before == revision,
                     start,
-                    cancel: cancel.as_deref(),
+                    cancel: cancel.as_ref(),
                 },
             )?
         {
@@ -1350,6 +1445,7 @@ impl SqliteProvider {
                 cache_hit: false,
             });
         }
+        let sorted_duration_sql = search_sorted::page_sql(&tx, request, no_missing, total)?;
         let order = match request.order_by {
             SortOrder::Relevance if has_query => "bm25(audio_search)",
             SortOrder::Relevance | SortOrder::Filename => "af.filename COLLATE NOCASE",
@@ -1375,7 +1471,9 @@ impl SqliteProvider {
         // SQLite's bounded top-N sorter is faster than FTS5's internal rank sorter for
         // very broad matches. Hydrate only the ranked page after confirming visibility
         // in this transaction; the scores are exactly FTS5's default BM25 scores.
-        let page_sql = if no_missing && request.order_by == SortOrder::Relevance {
+        let page_sql = if let Some(sql) = sorted_duration_sql {
+            sql
+        } else if no_missing && request.order_by == SortOrder::Relevance {
             format!(
                 "WITH ranked AS MATERIALIZED (
                     SELECT rowid,bm25(audio_search) AS score FROM audio_search
@@ -1418,50 +1516,137 @@ impl SqliteProvider {
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<Folder>> {
         request.validate()?;
+        let has_query = !request.query.trim().is_empty();
+        let visibility_only = request.filters
+            == (audiolib_core::SearchFilters {
+                visibility: request.filters.visibility,
+                ..Default::default()
+            });
+        let check_cancel = || {
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         let SearchSql {
-            from,
-            conditions,
-            values,
+            conditions, values, ..
         } = search_sql(
             &self.tokenizer,
             request,
             false,
             self.derived_tags.load(Ordering::Acquire),
         )?;
-        let mut conn = self.search_reader(cancel)?;
+        // FTS emits arbitrary row IDs. Use a narrow covering lookup rather than
+        // fetching each matching file's wide Metadata row just for its folder.
+        let tagged_folder_scan = !has_query
+            && self.derived_tags.load(Ordering::Acquire)
+            && request.filters.visibility == FileVisibility::Present
+            && (request.filters.tagged_only || request.filters.tag_contains.is_some())
+            && (audiolib_core::SearchFilters {
+                tagged_only: false,
+                tag_contains: None,
+                ..request.filters.clone()
+            }) == audiolib_core::SearchFilters::default();
+        let from = folder_search_from(has_query, visibility_only, tagged_folder_scan);
+        let mut conn = self.search_reader(cancel.clone())?;
+        let revision_before = has_query
+            .then(|| self.observe_search_revision())
+            .transpose()?;
         let tx = conn.transaction().map_err(db_error)?;
+        let ranked_ids = if let Some(revision_before) = revision_before {
+            // The complete ranking is query-only, even when its page was scoped
+            // or filtered. Reuse it only when it belongs to this pinned snapshot.
+            tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()
+            .map_err(db_error)?;
+            let revision = self.observe_search_revision()?;
+            if revision_before == revision {
+                let query = compile_query(&self.tokenizer, &request.query)?;
+                self.ranking_cache.lock().unwrap().get(revision, &query)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        check_cancel()?;
+        // Project only filter IDs first. This lets existing partial/format
+        // indexes cover common filters, before any folder lookup or FTS work.
+        // Retained rankings stay in their original BM25 order; only temporary
+        // intersection IDs may be reordered for narrow directory lookups.
+        let retained_ids = ranked_ids.as_deref().map(Vec::as_slice);
+        let use_filter_ids =
+            !visibility_only && ((!has_query && !tagged_folder_scan) || retained_ids.is_some());
+        let candidate_ids = if use_filter_ids {
+            let mut filter_request = request.clone();
+            filter_request.query.clear();
+            let filter_sql = search_sql(
+                &self.tokenizer,
+                &filter_request,
+                false,
+                self.derived_tags.load(Ordering::Acquire),
+            )?;
+            search_candidates::filtered_ids(
+                &tx,
+                &format!(
+                    "SELECT af.id FROM {} WHERE {}",
+                    filter_sql.from,
+                    filter_sql.conditions.join(" AND ")
+                ),
+                &filter_sql.values,
+                retained_ids,
+                &check_cancel,
+            )?
+        } else {
+            None
+        };
+        let complete_ids = candidate_ids
+            .as_deref()
+            .or_else(|| visibility_only.then_some(retained_ids).flatten());
         // FTS emits row IDs, not folder order. SQL GROUP BY would sort one row per
         // matching file. Stream those IDs into folder-sized counters instead, with
         // a run accumulator for the usual contiguous files from the same directory.
         // Counts and closure rollup share one snapshot, including during a scan.
-        let (direct, values) = if !request.query.trim().is_empty() {
-            let mut statement = tx
-                .prepare(&format!(
-                    "SELECT af.folder_id FROM {from} WHERE {}",
-                    conditions.join(" AND ")
-                ))
-                .map_err(db_error)?;
-            let mut rows = statement
-                .query(params_from_iter(&values))
-                .map_err(db_error)?;
-            let mut counts = std::collections::BTreeMap::<i64, u64>::new();
-            let mut last = None;
-            let mut run = 0;
-            while let Some(row) = rows.next().map_err(db_error)? {
-                let folder: Option<i64> = row.get(0).map_err(db_error)?;
-                if folder != last {
-                    if let Some(folder) = last {
-                        *counts.entry(folder).or_default() += run;
-                    }
-                    last = folder;
-                    run = 0;
+        let (direct, values) = if has_query || complete_ids.is_some() {
+            let mut counter = FolderCounter::default();
+            if let Some(ids) = complete_ids {
+                if let Some(counts) = search_facets::ranked_counts(
+                    &tx,
+                    ids,
+                    request.filters.visibility,
+                    &check_cancel,
+                )? {
+                    counter = counts;
+                } else {
+                    counter = search_facets::chunked_counts(
+                        &tx,
+                        ids,
+                        request.filters.visibility,
+                        &check_cancel,
+                    )?;
                 }
-                run += 1;
+            } else {
+                let mut statement = tx
+                    .prepare(&format!(
+                        "SELECT af.folder_id FROM {from} WHERE {}",
+                        conditions.join(" AND ")
+                    ))
+                    .map_err(db_error)?;
+                let mut rows = statement
+                    .query(params_from_iter(&values))
+                    .map_err(db_error)?;
+                while let Some(row) = rows.next().map_err(db_error)? {
+                    counter.push(row.get(0).map_err(db_error)?);
+                }
             }
-            if let Some(folder) = last {
-                *counts.entry(folder).or_default() += run;
-            }
-            let counts: Vec<_> = counts.into_iter().collect();
+            check_cancel()?;
+            let counts = counter.into_counts();
             let json =
                 serde_json::to_string(&counts).map_err(|e| Error::Database(e.to_string()))?;
             ("SELECT json_extract(value,'$[0]') AS folder_id,json_extract(value,'$[1]') AS matches FROM json_each(?)".to_string(), vec![Value::Text(json)])
@@ -1757,6 +1942,60 @@ impl DataProvider for SqliteProvider {
     }
 }
 
+#[derive(Default)]
+struct FolderCounter {
+    counts: std::collections::BTreeMap<i64, u64>,
+    last: Option<i64>,
+    run: u64,
+}
+
+impl FolderCounter {
+    fn push(&mut self, folder: Option<i64>) {
+        if folder != self.last {
+            if let Some(last) = self.last {
+                *self.counts.entry(last).or_default() += self.run;
+            }
+            self.last = folder;
+            self.run = 0;
+        }
+        self.run += 1;
+    }
+
+    fn into_counts(mut self) -> Vec<(i64, u64)> {
+        if let Some(last) = self.last {
+            *self.counts.entry(last).or_default() += self.run;
+        }
+        self.counts.into_iter().collect()
+    }
+}
+
+// Count, page and facet fallbacks must keep MATCH as the outer loop. Otherwise
+// filter selectivity or stale statistics can make every eligible audio_files ID
+// reopen the complete positional query. Facets can retain their covering lookup.
+fn fts_search_from(covering_facets: bool) -> &'static str {
+    if covering_facets {
+        "audio_search CROSS JOIN audio_files af INDEXED BY idx_audio_search_facets
+         ON af.id=audio_search.rowid"
+    } else {
+        "audio_search CROSS JOIN audio_files af ON af.id=audio_search.rowid"
+    }
+}
+
+fn folder_search_from(
+    has_query: bool,
+    visibility_only: bool,
+    tagged_folder_scan: bool,
+) -> &'static str {
+    if has_query {
+        fts_search_from(visibility_only)
+    } else if tagged_folder_scan {
+        // The shared query builder supplies the same partial tag predicate.
+        "audio_files af INDEXED BY idx_audio_visible_tagged_folders"
+    } else {
+        "audio_files af"
+    }
+}
+
 fn folder_rollup_sql(direct: &str) -> String {
     format!(
         "WITH direct AS MATERIALIZED ({direct}), totals AS MATERIALIZED (
@@ -1799,7 +2038,7 @@ fn search_sql(
     let mut values = Vec::<Value>::new();
     let mut from = "audio_files af".to_string();
     if !request.query.trim().is_empty() {
-        from.push_str(" INNER JOIN audio_search ON audio_search.rowid=af.id");
+        from = fts_search_from(false).into();
         conditions.push("audio_search MATCH ?".into());
         values.push(Value::Text(compile_query(tokenizer, &request.query)?));
     }
@@ -2075,6 +2314,184 @@ fn refresh_folder_statistics(conn: &Connection) -> Result<()> {
         total_duration=COALESCE((SELECT duration FROM totals WHERE ancestor_id=folders.id),0),
         total_size=COALESCE((SELECT bytes FROM totals WHERE ancestor_id=folders.id),0),
         updated_at=strftime('%Y-%m-%d %H:%M:%f','now');").map_err(db_error)
+}
+
+#[cfg(test)]
+mod search_folder_plan_tests {
+    use super::*;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    fn fixture(stale_statistics: bool) -> (tempfile::TempDir, SqliteProvider) {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = SqliteProvider::open(&directory.path().join("facet-plan.db")).unwrap();
+        let conn = Connection::open(provider.database_path()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
+             INSERT INTO folder_closure VALUES(1,1,0);
+             INSERT INTO audio_files(id,file_path,filename,folder_id,missing,sample_rate,duration)
+             VALUES(1,'root/ambient.wav','ambient.wav',1,0,48000,1.0);",
+        )
+        .unwrap();
+        if stale_statistics {
+            conn.execute_batch("ANALYZE;").unwrap();
+        }
+        conn.execute_batch(
+            "WITH RECURSIVE ids(id) AS (
+               VALUES(2) UNION ALL SELECT id+1 FROM ids WHERE id<256
+             ) INSERT INTO audio_files(id,file_path,filename,folder_id,missing,sample_rate,duration)
+               SELECT id,'root/'||id||'.wav','wood.wav',1,0,48000,1.0 FROM ids;",
+        )
+        .unwrap();
+        if stale_statistics {
+            let old: String = conn
+                .query_row(
+                    "SELECT stat FROM sqlite_stat1 WHERE idx='idx_audio_visible_filter'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(old.split_whitespace().next(), Some("1"));
+        } else {
+            let statistics: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='sqlite_stat1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(statistics, 0);
+        }
+        (directory, provider)
+    }
+
+    fn filtered_request() -> SearchRequest {
+        SearchRequest {
+            query: "ambient".into(),
+            filters: audiolib_core::SearchFilters {
+                sample_rate: Some(48_000),
+                duration_min: Some(0.0),
+                duration_max: Some(5.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn count_page_and_facet_fallback_plans_keep_match_outer_with_any_statistics() {
+        for stale_statistics in [false, true] {
+            let (_directory, provider) = fixture(stale_statistics);
+            let conn = Connection::open(provider.database_path()).unwrap();
+            for visibility_only in [false, true] {
+                let request = if visibility_only {
+                    SearchRequest {
+                        query: "ambient".into(),
+                        ..Default::default()
+                    }
+                } else {
+                    filtered_request()
+                };
+                // This is the production query builder and fallback FROM, used
+                // both when no ranking exists and when candidate IDs overflow.
+                let SearchSql {
+                    conditions, values, ..
+                } = search_sql(&provider.tokenizer, &request, false, true).unwrap();
+                let from = folder_search_from(true, visibility_only, false);
+                let plan = conn
+                    .prepare(&format!(
+                        "EXPLAIN QUERY PLAN SELECT af.folder_id FROM {from} WHERE {}",
+                        conditions.join(" AND ")
+                    ))
+                    .unwrap()
+                    .query_map(params_from_iter(&values), |row| row.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert!(
+                    plan[0].starts_with("SCAN audio_search VIRTUAL TABLE INDEX"),
+                    "stale={stale_statistics}, visibility_only={visibility_only}: {plan:?}"
+                );
+                assert!(!plan[0].contains("=M"), "{plan:?}");
+                if visibility_only {
+                    assert!(
+                        plan.iter()
+                            .any(|step| step
+                                .contains("USING COVERING INDEX idx_audio_search_facets")),
+                        "{plan:?}"
+                    );
+                }
+            }
+            // Non-relevance sorting and an exhausted ranking budget use this
+            // same SearchSql for their joined count and bounded page SELECT.
+            let SearchSql {
+                from,
+                conditions,
+                values,
+            } = search_sql(&provider.tokenizer, &filtered_request(), true, true).unwrap();
+            for (columns, suffix) in [
+                ("COUNT(*)", ""),
+                (
+                    "af.id",
+                    "ORDER BY af.filename COLLATE NOCASE,af.id LIMIT 7 OFFSET 3",
+                ),
+                (
+                    "af.id",
+                    "ORDER BY bm25(audio_search),af.id LIMIT 7 OFFSET 3",
+                ),
+            ] {
+                let plan = conn
+                    .prepare(&format!(
+                        "EXPLAIN QUERY PLAN SELECT {columns} FROM {from} WHERE {} {suffix}",
+                        conditions.join(" AND ")
+                    ))
+                    .unwrap()
+                    .query_map(params_from_iter(&values), |row| row.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert!(
+                    plan[0].starts_with("SCAN audio_search VIRTUAL TABLE INDEX"),
+                    "stale={stale_statistics}, projection={columns}, suffix={suffix}: {plan:?}"
+                );
+                assert!(!plan[0].contains("=M"), "{plan:?}");
+            }
+            // A fresh provider has no ranking to reuse; its actual fallback must
+            // still execute the complete query and retain the filtered count.
+            let folders = provider.search_folders(&filtered_request()).unwrap();
+            assert_eq!(folders.len(), 1);
+            assert_eq!((folders[0].id, folders[0].file_count), (1, 1));
+        }
+    }
+
+    #[test]
+    fn small_cached_filtered_facets_do_not_reopen_match() {
+        let (_directory, provider) = fixture(false);
+        let request = filtered_request();
+        assert_eq!(provider.search(&request).unwrap().total_count, 1);
+        assert!(provider.search(&request).unwrap().cache_hit);
+        let reader = provider.reader().unwrap();
+        // Reusing this one-ID ranking needs only the covering filter-ID query
+        // and folder lookups. Reject any attempt to prepare the old FTS join.
+        reader
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Read { table_name, .. }
+                    if table_name == "audio_search")
+                {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .unwrap();
+        drop(reader);
+        let folders = provider.search_folders(&request).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!((folders[0].id, folders[0].file_count), (1, 1));
+        let reader = provider.reader().unwrap();
+        reader
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+    }
 }
 
 #[cfg(test)]

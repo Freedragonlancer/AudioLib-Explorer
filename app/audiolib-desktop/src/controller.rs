@@ -2024,6 +2024,9 @@ impl Controller {
         ui.set_waveform_ready(false);
         ui.set_waveform_image(Image::default());
         ui.set_waveform_info("".into());
+        if ui.get_menu_has_page_rows() {
+            ui.set_menu_has_page_rows(false);
+        }
         ui.set_rows(ModelRc::new(VecModel::<AudioRow>::default()));
         ui.set_folders(ModelRc::new(VecModel::<FolderRow>::default()));
         ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
@@ -2137,8 +2140,12 @@ impl Controller {
                     )
                     .into(),
                 );
+                crate::gui_search_benchmark::library_info_published(true);
             }
-            Err(error) => ui.set_management_report(error.to_string().into()),
+            Err(error) => {
+                ui.set_management_report(error.to_string().into());
+                crate::gui_search_benchmark::library_info_published(false);
+            }
         }
     }
 
@@ -2478,7 +2485,9 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
+                    crate::gui_search_benchmark::worker_started(job.generation, false);
                     let mut result = provider.search_cancellable(&job.request, job.cancel.clone());
+                    crate::gui_search_benchmark::worker_completed(job.generation, false);
                     // Server removals stay hidden until the resync swaps the snapshot.
                     if let Ok(page) = result.as_mut() {
                         c.hide_removed_in_page(page);
@@ -2587,6 +2596,24 @@ impl Controller {
                                         })
                                         .into(),
                                 );
+                                if crate::gui_search_benchmark::enabled() {
+                                    let ids = c2
+                                        .records
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|file| file.id)
+                                        .collect();
+                                    crate::gui_search_benchmark::page_published(
+                                        &ui,
+                                        job.generation,
+                                        page.total_count,
+                                        page.returned_count,
+                                        ids,
+                                        page.execution_time_ms,
+                                        page.cache_hit,
+                                    );
+                                }
                                 c2.search_page_published(&ui, job.generation, true);
                             }
                             Err(error) => {
@@ -2630,6 +2657,7 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
+                    crate::gui_search_benchmark::worker_started(job.generation, true);
                     let database_revision = provider.search_revision().ok().flatten();
                     let cached = facets.as_ref().filter(|cached| {
                         cached.matches(
@@ -2670,6 +2698,7 @@ impl Controller {
                             folders: folders.clone(),
                         });
                     }
+                    crate::gui_search_benchmark::worker_completed(job.generation, true);
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         c2.search_folders_computed(
@@ -3013,6 +3042,17 @@ impl Controller {
         ui.set_searching(false);
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
+        if request.needs_more_search_text() {
+            ui.set_status(
+                if self.chinese.load(Ordering::Acquire) {
+                    "字母搜索请至少输入 2 个字符"
+                } else {
+                    "Enter at least 2 characters for a letter search"
+                }
+                .into(),
+            );
+            return;
+        }
         request.limit = PAGE_SIZE;
         if reset {
             request.offset = 0;
@@ -3070,6 +3110,7 @@ impl Controller {
             ui.set_status(error.to_string().into());
             return;
         }
+        crate::gui_search_benchmark::request(ui, generation, &request);
         *self.request.lock().unwrap() = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
@@ -3083,7 +3124,11 @@ impl Controller {
                 + if immediate {
                     Duration::ZERO
                 } else {
-                    Duration::from_millis(160)
+                    // Coalesce a short typing burst while leaving the first
+                    // results and complete folder counts enough render budget.
+                    // New generations still replace queued work and cancel both
+                    // active workers before publishing any stale models.
+                    Duration::from_millis(30)
                 },
             provider: self.provider(),
         };
@@ -3316,6 +3361,12 @@ impl Controller {
                                 })
                                 .into(),
                         );
+                        if crate::gui_search_benchmark::enabled() {
+                            let folders = c2.tree.lock().unwrap().matches.clone();
+                            crate::gui_search_benchmark::folders_published(
+                                &ui, generation, folders,
+                            );
+                        }
                     }
                 }
             });
@@ -5286,6 +5337,10 @@ impl Controller {
 /// Keep native pointer gestures and the viewport when a refresh retains the same row
 /// identities and order. New identities replace delegates, cancelling old gestures.
 fn publish_audio_rows(ui: &AppWindow, rows: Vec<AudioRow>) {
+    let has_page_rows = !rows.is_empty();
+    if ui.get_menu_has_page_rows() != has_page_rows {
+        ui.set_menu_has_page_rows(has_page_rows);
+    }
     let existing = ui.get_rows();
     if let Some(model) = existing.as_any().downcast_ref::<VecModel<AudioRow>>()
         && model.row_count() == rows.len()

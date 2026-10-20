@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 pub mod config;
 pub mod library;
@@ -178,12 +179,42 @@ impl Default for SearchRequest {
     }
 }
 impl SearchRequest {
+    /// A lone non-Han letter waits for another searchable character. Surrounding
+    /// punctuation, whitespace and combining accents do not satisfy that minimum.
+    /// Empty browsing, numeric codes, Han characters and multi-term queries remain ready.
+    pub fn needs_more_search_text(&self) -> bool {
+        // Inspect one base character per grapheme so Other_Alphabetic combining
+        // marks (for example Hebrew points) cannot count as another input letter.
+        let mut characters = self.query.graphemes(true).filter_map(|grapheme| {
+            grapheme
+                .chars()
+                .find(|character| character.is_alphanumeric())
+        });
+        let Some(character) = characters.next() else {
+            return false;
+        };
+        character.is_alphabetic()
+            && !matches!(character,
+                '\u{3400}'..='\u{4dbf}'
+                | '\u{4e00}'..='\u{9fff}'
+                | '\u{f900}'..='\u{faff}'
+                | '\u{20000}'..='\u{2ffff}'
+                | '\u{30000}'..='\u{323af}'
+            )
+            && characters.next().is_none()
+    }
+
     /// Validate bounded search input before compiling a parameterized FTS5 query.
     pub fn validate(&self) -> Result<()> {
         if self.query.chars().count() > 500 || self.query.contains(';') || self.query.contains('\0')
         {
             return Err(Error::Validation(
                 "Query exceeds 500 characters or contains a forbidden delimiter".into(),
+            ));
+        }
+        if self.needs_more_search_text() {
+            return Err(Error::Validation(
+                "Enter at least two characters for a letter search".into(),
             ));
         }
         if self.limit == 0 || self.limit > 10_000 {
@@ -575,6 +606,63 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_lone_letter_waits_without_restricting_other_searches() {
+        for query in [
+            "e",
+            "E",
+            "  e  ",
+            "(e)*",
+            "é",
+            "e\u{301}",
+            "e\u{345}",
+            "Ä",
+            "Ε",
+            "a\u{5b0}",
+            "(a\u{5b0})",
+            "a\u{5b0}\u{345}",
+            "א\u{5b0}",
+            "ب\u{650}",
+        ] {
+            let request = SearchRequest {
+                query: query.into(),
+                ..Default::default()
+            };
+            assert!(request.needs_more_search_text(), "{query:?}");
+            assert!(request.validate().is_err(), "{query:?}");
+        }
+        for query in [
+            "",
+            " ",
+            "1",
+            "1.2",
+            "P-51",
+            "P51",
+            "e1",
+            "雷",
+            "爆",
+            "𠀀",
+            "ex",
+            "plos",
+            "sion",
+            "e b",
+            "a explosion",
+            "e雷",
+            "A.wav",
+            "B.wav",
+            "a\u{5b0}b",
+            "雷\u{5b0}",
+            "1\u{5b0}",
+        ] {
+            let request = SearchRequest {
+                query: query.into(),
+                ..Default::default()
+            };
+            assert!(!request.needs_more_search_text(), "{query:?}");
+            assert!(request.validate().is_ok(), "{query:?}");
+        }
     }
 
     #[test]

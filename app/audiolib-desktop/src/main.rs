@@ -5,6 +5,7 @@ mod close_tests;
 mod controller;
 mod diagnostics;
 mod dialogs;
+mod gui_search_benchmark;
 mod list_waveforms;
 #[cfg(test)]
 mod pane_review_tests;
@@ -72,6 +73,11 @@ fn main() {
 fn report_fatal_error(error: &anyhow::Error) {
     let message = format!("AudioLib Explorer: {error:#}");
     eprintln!("{message}");
+    // Explicit GUI diagnostics own an isolated report/log path. An invalid
+    // diagnostic invocation must not append to normal user state or open a modal.
+    if std::env::args().any(|argument| argument.starts_with("--gui-search-")) {
+        return;
+    }
     // The asynchronous tracing guard may already have been dropped by run(), and
     // invalid preferences can fail before tracing starts. Persist this synchronously.
     let root = std::env::var_os("AUDIOLIB_DATA_DIR")
@@ -113,6 +119,12 @@ fn report_fatal_error(error: &anyhow::Error) {
 
 fn run() -> Result<()> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument.starts_with("--gui-search-"))
+    {
+        return gui_search_benchmark::run(&arguments);
+    }
     let config = AppConfig::load_default().context("Load AudioLib preferences")?;
     let _instance = DesktopInstanceGuard::acquire(&config.paths.settings)?;
     // Read the snapshot under the instance lock as a CLI library selection may have

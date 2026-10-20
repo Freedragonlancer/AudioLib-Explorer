@@ -1,5 +1,8 @@
 // crates/audiolib-db/src/bin/search-diagnose.rs
-//! Read-only SQL plans and stage timings for diagnosing broad-query latency.
+//! Read-only raw-token SQL plans and timings, retained as comparable SQLite baselines.
+//! Literal `MATCH 'metal'` bypasses the current DataProvider fragment compiler and
+//! search pipeline. These probes are not DataProvider or GUI end-to-end measurements.
+use audiolib_db::SQLITE_READER_MMAP_BYTES;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Instant;
 
@@ -8,10 +11,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("Usage: search-diagnose DATABASE")?;
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.execute_batch(
-        "PRAGMA cache_size=-65536; PRAGMA mmap_size=1073741824; PRAGMA temp_store=MEMORY;",
-    )?;
+    conn.execute_batch("PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;")?;
+    conn.pragma_update(None, "mmap_size", SQLITE_READER_MMAP_BYTES)?;
     println!("SQLite {}", rusqlite::version());
+    println!(
+        "Mode: raw-token SQL baseline using literal MATCH 'metal'; not current DataProvider letter-fragment search."
+    );
+    println!(
+        "Original SQL predicates and labels are retained for comparison. These timings do not measure the DataProvider pipeline or GUI input-to-display latency."
+    );
     for (label, sql) in [
         (
             "count",

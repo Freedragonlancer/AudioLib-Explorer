@@ -1836,6 +1836,7 @@ impl Controller {
             let sync_busy_guard = busy_guard;
             let cache = RemoteCache::new(&data_root);
             let mut last_post = Instant::now() - Duration::from_secs(1);
+            let mut last_progress = None;
             let cached_preparation_incomplete = std::cell::Cell::new(false);
             let mut report = |progress| {
                 match progress {
@@ -1848,18 +1849,29 @@ impl Controller {
                     _ => {}
                 }
                 let now = Instant::now();
-                if now.duration_since(last_post) < Duration::from_millis(200)
-                    && matches!(
-                        progress,
-                        SyncProgress::Downloading { .. }
-                            | SyncProgress::Preparing(
+                let repeating_count = match (last_progress, progress) {
+                    (Some(SyncProgress::Downloading { .. }), SyncProgress::Downloading { .. }) => {
+                        true
+                    }
+                    (Some(SyncProgress::Preparing(previous)), SyncProgress::Preparing(current)) => {
+                        matches!(
+                            (previous, current),
+                            (
+                                audiolib_remote::CachePreparation::Copying { .. },
                                 audiolib_remote::CachePreparation::Copying { .. }
+                            ) | (
+                                audiolib_remote::CachePreparation::Tokenizing { .. },
+                                audiolib_remote::CachePreparation::Tokenizing { .. }
                             )
-                    )
-                {
+                        )
+                    }
+                    _ => false,
+                };
+                if now.duration_since(last_post) < Duration::from_millis(200) && repeating_count {
                     return;
                 }
                 last_post = now;
+                last_progress = Some(progress);
                 let (text, fraction) = match progress {
                     SyncProgress::Checking => (
                         cn_or(chinese, "正在检查服务器版本…", "Checking server revision…"),
@@ -1923,7 +1935,7 @@ impl Controller {
                         let text = if fraction >= 0.0 {
                             format!("{} · {:.0}%", stage.label(chinese), fraction * 100.0)
                         } else {
-                            stage.label(chinese).to_owned()
+                            stage.label(chinese)
                         };
                         (text, fraction)
                     }
