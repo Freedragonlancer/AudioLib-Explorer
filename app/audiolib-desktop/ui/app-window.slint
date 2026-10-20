@@ -40,6 +40,10 @@ component Action inherits Rectangle {
     in property <bool> subtle: false;
     in property <bool> dropdown: false;
     in property <bool> enabled: true;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the button with Space/Return.
+    in property <bool> keyboard-active: true;
     out property <bool> has-focus: button-focus.has-focus;
     callback clicked;
     min-width: 36px;
@@ -60,11 +64,11 @@ component Action inherits Rectangle {
         enabled: root.enabled;
         focus-on-click: false;
         key-pressed(event) => {
-            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; }
             reject
         }
     }
-    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { button-focus.focus(); root.clicked(); } }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 component Label inherits Text { color: Theme.dim; font-size: 11px; vertical-alignment: center; }
@@ -73,6 +77,10 @@ component Label inherits Text { color: Theme.dim; font-size: 11px; vertical-alig
 component RemoteFolderAction inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the picker row with Space/Return.
+    in property <bool> keyboard-active: true;
     callback clicked();
     height: 36px;
     min-width: 180px;
@@ -93,11 +101,11 @@ component RemoteFolderAction inherits Rectangle {
         enabled: root.enabled;
         focus-on-click: false;
         key-pressed(event) => {
-            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; }
             reject
         }
     }
-    folder-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { folder-focus.focus(); root.clicked(); } }
+    folder-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // Source tags remain selectable while compact views avoid TextEdit's large padding.
@@ -194,6 +202,10 @@ component TableHeader inherits Rectangle {
     in property <bool> active: false;
     in property <bool> descending: false;
     in property <bool> enabled: true;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the header with Space/Return.
+    in property <bool> keyboard-active: true;
     callback clicked();
     callback context-requested(Point);
     accessible-role: button;
@@ -219,7 +231,7 @@ component TableHeader inherits Rectangle {
     header-focus := FocusScope {
         enabled: root.enabled; focus-on-click: false;
         key-pressed(event) => {
-            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; }
             if event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift) {
                 root.context-requested({x: self.absolute-position.x, y: self.absolute-position.y + self.height});
                 return accept;
@@ -229,7 +241,7 @@ component TableHeader inherits Rectangle {
     }
     header-hit := TouchArea {
         enabled: root.enabled; mouse-cursor: pointer;
-        clicked => { header-focus.focus(); root.clicked(); }
+        clicked => { root.clicked(); }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                 header-focus.focus();
