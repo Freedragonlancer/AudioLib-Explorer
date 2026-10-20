@@ -1069,7 +1069,8 @@ async fn update_metadata_batch(
     ))
 }
 
-/// `POST /audio/{id}/plays`: count one play (body ignored), reply like the metadata patch.
+/// `POST /audio/{id}/plays` (deprecated): a no-op kept for old clients. Nothing is
+/// written; the reply has the metadata patch shape with `revision == revision_before`.
 async fn record_play(
     Extension(state): Extension<AppState>,
     Path(raw_id): Path<String>,
@@ -1143,15 +1144,13 @@ async fn scan_history(
     ))
 }
 
-/// `GET /history/plays?limit=&offset=`: `PlayRecord[]`, newest first.
+/// `GET /history/plays?limit=&offset=` (deprecated): always an empty `PlayRecord[]`.
+/// Play history is recorded locally by clients only; paging is still validated.
 async fn play_history(
-    Extension(state): Extension<AppState>,
     query: Result<Query<PageQuery>, QueryRejection>,
 ) -> Result<Json<Vec<PlayRecord>>, ApiError> {
-    let (limit, offset) = page(query)?;
-    Ok(Json(
-        blocking(move || state.provider().play_history(limit, offset)).await?,
-    ))
+    page(query)?;
+    Ok(Json(Vec::new()))
 }
 
 /// Run blocking work that already answers with [`ApiError`].

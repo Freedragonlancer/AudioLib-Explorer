@@ -1171,20 +1171,17 @@ impl AppState {
         })
     }
 
-    /// Blocking. `DataProvider::record_play`, returning the updated record. Plays only
-    /// touch `play_count`, `last_played_at` and `play_history`, so they do not advance
-    /// the revision (`revision == revision_before`): bumping it made every client
-    /// re-download the whole snapshot after each play elsewhere.
+    /// Blocking. Deprecated `POST /audio/{id}/plays`: play counts are not recorded by
+    /// the server any more (play history is client-local), so this writes nothing. It
+    /// only checks that the record exists and answers with the current record and
+    /// `revision == revision_before`, so old clients that still report plays keep working.
     pub fn record_play(&self, id: i64) -> Result<AudioWriteResponse> {
-        let outcome = self.write_quiet(|provider| {
-            provider.record_play(id)?;
-            provider.get_audio(id)
-        })?;
-        self.carry_stats_forward(&outcome);
+        let revision = self.inner.tracker.poll()?.revision;
+        let file = self.inner.provider.get_audio(id)?;
         Ok(AudioWriteResponse {
-            file: outcome.value,
-            revision_before: outcome.revision_before,
-            revision: outcome.revision,
+            file,
+            revision_before: revision,
+            revision,
         })
     }
 
