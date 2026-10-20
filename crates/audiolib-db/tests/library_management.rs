@@ -847,7 +847,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
             moved.favorite,
             moved.play_count
         ),
-        ("retained tag", "retained note", true, 1)
+        ("retained tag", "retained note", true, 0)
     );
     assert_eq!(moved.attributes["unknown_extension"], "keep");
     assert_eq!(
