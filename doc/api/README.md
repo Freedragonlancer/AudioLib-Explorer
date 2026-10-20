@@ -1025,8 +1025,8 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 
 - `/capabilities` 的 `list_waveforms` 新增 `"encodings": ["i16le-minmax-base64", "i8-minmax-base64"]` 和 `"bundle": true`（见下面「整包下载」）；原 `encoding` 字段保留，仍表示默认编码。
 - §9.1 请求体新增可选字段 `encoding`，默认 `"i16le-minmax-base64"`，可选 `"i8-minmax-base64"`。
-- `capabilities` 中**没有** `encodings` 时客户端 **MUST NOT** 发送 `encoding` 字段（旧服务端只支持 i16）。
-- 未知编码 → 400 `VALIDATION`，错误体带子码 `"sub_code": "UNSUPPORTED_ENCODING"`（`message`：`unsupported list waveform encoding`）。
+- 客户端 **MUST** 只发送 `capabilities.list_waveforms.encodings` 中列出的值；`capabilities` 中**没有** `encodings` 时客户端 **MUST NOT** 发送 `encoding` 字段（旧服务端只支持 i16）。
+- 未知编码（字符串，但不在 `encodings` 中）→ 400 `VALIDATION`，错误体带子码 `"sub_code": "UNSUPPORTED_ENCODING"`（`message`：`unsupported list waveform encoding "<值>"`）。`encoding` 不是字符串（如 `5`）→ 400 `VALIDATION`，**不带** `sub_code`（`message`：`encoding must be a string`）。
 
 **响应**：顶层新增 `encoding`，**必须等于请求的编码**（未发送时为默认编码）。一次响应内所有项使用同一编码，不会混用。回显与请求不一致视为协议错误：客户端**不缓存**该响应的任何项，并按 `pending` 的退避规则（§9.3 第 2 条）退避后再试。
 
@@ -1081,24 +1081,27 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 现有的 `waveforms/` 目录（§9 详情彩色波形缓存及 §9.1 的 i16 分片）**保留不变**；i8 由 i16 结果按上面的公式推导后写入 `waveforms.db`。
 - 选型依据（同一组指标，90 万合成行，热缓存，p50/p95；kill 为进程被杀，**不是断电**）：
 
-| 指标 | Windows 11 Dragonpark-Home（Python sqlite3 3.49.1）定长槽文件 | 同机 `waveforms.db` | Mac mini（M 系列，外置 SSD `/Volumes/ssd8t`，服务端 rusqlite（bundled SQLite），release，`examples/wfdb_bench.rs`）`waveforms.db` |
+| 指标 | Windows 11 台式机（Python sqlite3 3.49.1）定长槽文件 | 同机 `waveforms.db` | Mac（Apple Silicon，外置 SSD，服务端 rusqlite（bundled SQLite），release，`examples/wfdb_bench.rs`）`waveforms.db` |
 |---|---|---|---|
 | 文件大小 | 252 MB | 284 MB | 308 MB（293.7 MiB） |
 | 全量写入 | 0.65 s | 2.16 s（每事务 1 万行） | 1.84 s（每事务 1 万行）/ 1.87 s（每事务 256 行） |
 | 单条更新 | 0.00 / 0.03 ms（fsync 0.90 ms） | 0.02 / 0.04 ms（FULL 0.90 ms） | 0.008 / 0.010 ms（FULL 0.081 / 0.153 ms） |
 | 读 200 行一页 | 1.08 / 1.38 ms + 42 ms 索引加载 | 1.16 / 1.72 ms | 0.175 / 0.192 ms |
 | 写入时并发读 | 不支持 | 1.06 / 1.81 ms，0 错误 | 0.178 / 0.205 ms，0 错误（同时每事务 256 行写入） |
-| 随机 kill -9 | 20 次中 4 次撕裂槽（CRC 可检出，条目丢失） | integrity_check 20/20 ok | integrity_check 20/20 ok，全部行 blob 256 B |
+| 随机 kill -9 | 20 次中 4 次撕裂槽（CRC 可检出，条目丢失） | integrity_check 20/20 ok | integrity_check 20/20 ok，且 20/20 次行数恰为 900,000、每行 blob 256 B（修正后的基准重跑） |
 
   结论：采用 `waveforms.db`、WAL、普通 `INTEGER PRIMARY KEY`、`synchronous=NORMAL`、后台批量写入（每事务几百行）。
 
 #### 9.4.2 整包下载（Bundle）
 
-- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端用 `VACUUM INTO` 生成临时文件后流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他 → 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。
-- `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`（生成时的库版本）、`schema_version`、`encoding`。
+- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端在**单独的只读连接**上用 `VACUUM INTO` 生成临时文件（WAL 读事务，不阻塞写入和 `POST /waveforms`），再流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他值（包括 `../x` 之类，从不用作路径）→ 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。
+- **并发**：同一时间只生成/发送**一个**整包（名额一直占到响应体发送完或客户端断开）；其他请求立即 503 `BUSY` + `Retry-After: 5`。客户端按 `Retry-After` 等待后重试，连续失败时指数退避（5 s、10 s、20 s……上限 5 分钟），期间照常用 §9.1 按页请求。
+- **超时**：本端点**不受** §2.1 的 30 秒请求上限（与 `/library/snapshot` 相同），慢速网络下载几百 MB 不会被切断。
+- **响应头**：`ETag: "wfb1-<32 位十六进制>"`（整个包文件 SHA-256 的前 16 字节；同样内容同样 ETag，客户端可用于判断是否与上次导入的包相同，本端点不支持 `If-None-Match`）、`X-Library-Id`（同 `meta.library_id`）、`X-Library-Revision`（同 `meta.revision`）、`Content-Length`、`Cache-Control: no-store`。
+- `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`、`schema_version`、`encoding`。**`revision` 是主库的 `revision`（§4），仅供参考/诊断**：`waveforms.db` 的内容不随主库 revision 变化，也可能在同一 revision 下变化，客户端**不得**用它判断条目新旧；续传只按逐项 `etag`（下一条）。
 - 客户端流程：下载到临时文件 → **校验后才使用**：`PRAGMA integrity_check` 为 `ok`；表/列名在白名单内（`list_waveforms` 与 `meta`，列同上，不多不少）；每行 `blob` 恰好 256 B、`encoding` 等于请求值、`0 ≤ n ≤ 128`；`meta.library_id` 等于当前库 → **原子替换**本地 `waveforms.db`（同目录临时文件 + rename）。任一校验失败则丢弃，不覆盖现有缓存。
-- 增量：导入后从该版本开始用 §9.1（`known` = 包内 etag）按 etag 增量拉取，因此打包期间变化的条目不会丢失（其 etag 已不同，会返回 `ok`）。
-- 实测（生成时间 / 大小）：Mac `VACUUM INTO` 0.38 s，308 MB（与源文件同大小），客户端式校验（integrity_check + 白名单 + blob 长度）0.23 s；Windows 待测（待测）。
+- 增量（续传）：导入后用 §9.1（`known` = 包内该项的 etag）按 etag 增量拉取；打包期间或之后变化的条目 etag 已不同，会返回 `ok`，所以不会丢失。不按 `meta.revision` 或 `generated_at` 做任何过滤。
+- 实测（生成时间 / 大小）：Mac 0.48 s（只读连接 `VACUUM INTO` + 元数据 + SHA-256 ETag；仅 `VACUUM INTO` 的首测为 0.38 s），308 MB（与源文件同大小），客户端式校验（integrity_check + 白名单 + blob 长度）0.23 s；Windows（待测）。
 
 ## 10. 服务端部署
 
