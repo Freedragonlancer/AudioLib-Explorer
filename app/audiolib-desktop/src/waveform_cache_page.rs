@@ -202,8 +202,8 @@ pub(super) fn waveform_cache_view(
             format!("{} skipped (root offline)", status.skipped_offline)
         });
     }
-    let rate_text = if run == WaveformRunState::Running || status.current_rate.is_some() {
-        let rate = status.current_rate.unwrap_or(0.0);
+    // Older servers send no `current_rate`: no rate line rather than a made-up 0.0.
+    let rate_text = if let Some(rate) = status.current_rate {
         let eta = match (status.eta_secs, chinese) {
             (Some(seconds), _) => duration_text(seconds, chinese),
             (None, true) => "估算中".to_owned(),
@@ -734,6 +734,10 @@ mod tests {
         assert!(view.paused && view.can_manage);
         assert_eq!(view.run_state, "paused");
         assert_eq!(view.rate_text, "");
+        let mut older = running();
+        older.current_rate = None;
+        let view = waveform_cache_view(&state(true, true), &older, true);
+        assert_eq!(view.rate_text, "", "no current_rate, no rate line");
     }
 
     #[test]
