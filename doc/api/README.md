@@ -1050,7 +1050,7 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - `known` 按**完整** etag 字符串（含后缀）比较。`known` 为 `-l1` 而请求 i8 时，返回 `ok` + 新的 `-l1i8` etag，**不是** `not_modified`。
 - `pending` 时客户端仍显示的旧副本（`previous`）按**请求编码**对应的本地缓存取。
 
-**客户端本地缓存键**：`waveform_cache.zoom_level = 'list128-v4-l1i8'`（i16 为 `'list128-v4-l1'`），`min_values` / `max_values` 各 `n` 字节 int8，其余同 §9.3。
+**客户端本地存储**：本地模式与服务器模式的 i8 列表波形都存在客户端自己的独立 `waveforms.db`（表结构同 §9.4.1），**不写入主库的 `waveform_cache` 表**；本地模式由已有 i16 结果（`waveform_cache.zoom_level = 'list128-v4-l1'`，§9.3）按上面的公式推导 i8，不重新解码音频。
 
 **体积估算**（`n = 128`，不含 JSON 外壳与 zstd）：
 
@@ -1077,6 +1077,7 @@ CREATE TABLE list_waveforms (
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
+- `src_mtime` / `src_size`：服务端按库记录填写，用于本机判断失效；API 和整包对客户端不承诺其含义。客户端写入**来自服务端**的条目时这两列存 `0`，失效只按 etag 判断；本地模式条目填本机文件的 mtime / size。
 - 设置：`journal_mode=WAL`、`synchronous=NORMAL`；每项写入为 UPSERT（`INSERT … ON CONFLICT(file_id) DO UPDATE`），后台按批写入，每个事务几百行；事务保证不出现半行。
 - 现有的 `waveforms/` 目录（§9 详情彩色波形缓存及 §9.1 的 i16 分片）**保留不变**；i8 由 i16 结果按上面的公式推导后写入 `waveforms.db`。
 - 选型依据（同一组指标，90 万合成行，热缓存，p50/p95；kill 为进程被杀，**不是断电**）：
