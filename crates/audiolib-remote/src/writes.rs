@@ -12,6 +12,10 @@ use crate::client::{BatchWrite, FileWrite, RemoteClient};
 use crate::error::{RemoteError, Result};
 use crate::manage::{RemoveReport, manage_error_text};
 use crate::sync::RemoteCache;
+use audiolib_core::waveform_cache::{
+    WaveformCacheCapabilities, WaveformCacheResult, WaveformCacheSettings,
+    WaveformCacheSettingsPatch, WaveformCacheStatus, WaveformJobControl, WaveformJobMode,
+};
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
     Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats, ListWaveformBatch,
@@ -537,6 +541,59 @@ impl DataProvider for RemoteProvider {
             core_error(error, self.chinese)
         })
     }
+    // List Waveform cache management (§9.5) goes to the server through the writer's
+    // client (identity-bound mutations; the snapshot is not involved).
+    fn waveform_cache_capabilities(&self) -> WaveformCacheResult<WaveformCacheCapabilities> {
+        let capabilities = self.waveform_cache(|client| client.capabilities())?;
+        Ok(WaveformCacheCapabilities {
+            jobs: capabilities
+                .list_waveform_jobs
+                .clone()
+                .filter(|jobs| jobs.version >= 1),
+            can_manage: capabilities.may_manage(),
+        })
+    }
+    fn waveform_cache_status(&self) -> WaveformCacheResult<WaveformCacheStatus> {
+        self.waveform_cache(|client| client.list_waveform_status())
+    }
+    fn waveform_cache_settings(&self) -> WaveformCacheResult<WaveformCacheSettings> {
+        self.waveform_cache(|client| client.server_settings())
+    }
+    fn update_waveform_cache_settings(
+        &self,
+        patch: &WaveformCacheSettingsPatch,
+    ) -> WaveformCacheResult<WaveformCacheSettings> {
+        self.waveform_cache(|client| client.update_list_waveform_settings(patch))
+    }
+    fn start_waveform_cache_job(
+        &self,
+        mode: WaveformJobMode,
+        confirm_rebuild: bool,
+    ) -> WaveformCacheResult<WaveformCacheStatus> {
+        self.waveform_cache(|client| client.start_list_waveform_job(mode, confirm_rebuild))
+    }
+    fn control_waveform_cache_job(
+        &self,
+        control: WaveformJobControl,
+    ) -> WaveformCacheResult<WaveformCacheStatus> {
+        self.waveform_cache(|client| client.control_list_waveform_job(control))
+    }
+    fn control_waveform_pregeneration(
+        &self,
+        control: WaveformJobControl,
+    ) -> WaveformCacheResult<()> {
+        self.waveform_cache(|client| client.control_list_waveform_pregeneration(control))
+    }
+}
+
+impl RemoteProvider {
+    fn waveform_cache<T>(
+        &self,
+        call: impl FnOnce(&RemoteClient) -> Result<T>,
+    ) -> WaveformCacheResult<T> {
+        call(self.writer.client())
+            .map_err(|error| crate::waveform_cache::waveform_cache_error(&error, self.chinese))
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -780,6 +837,73 @@ mod tests {
             });
             reply(&request.method, &request.path)
         })
+    }
+
+    #[test]
+    fn provider_routes_waveform_cache_management_through_data_provider() {
+        use audiolib_core::waveform_cache::{WaveformCacheErrorKind, WaveformRunState};
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 1);
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let status = r#"{"state":"paused","total":4,"cached":1,"pending":3,"run_state":"paused","current_rate":0,"eta_secs":null,"job":{"id":"wfj-2","mode":"missing","started_at":1,"done":1,"failed":0,"total":4,"state":"paused"}}"#;
+        let server = server(seen.clone(), move |method, path| match (method, path) {
+            ("GET", "/api/v1/capabilities") => TestResponse::json(
+                200,
+                r#"{"manage_mode":"lan","can_manage":false,"list_waveform_jobs":{"version":1,"modes":["missing","rebuild","failed"],"rate_setting":true}}"#,
+            ),
+            ("GET", "/api/v1/waveforms/status") => TestResponse::json(200, status),
+            ("GET", "/api/v1/settings") => TestResponse::json(
+                200,
+                r#"{"pregenerate_list_waveforms":true,"list_waveform_rate":10,"list_waveform_rate_source":"default","can_change":false}"#,
+            ),
+            ("POST", "/api/v1/waveforms/jobs") => TestResponse::json(
+                409,
+                r#"{"error_code":"BUSY","message":"A list waveform job is already in progress","job_id":"wfj-2"}"#,
+            ),
+            ("POST", "/api/v1/waveforms/jobs/current/resume") => TestResponse::json(
+                403,
+                r#"{"error_code":"MANAGE_FORBIDDEN","message":"Management is limited to the LAN"}"#,
+            ),
+            (method, path) => panic!("unexpected {method} {path}"),
+        });
+        let writer = RemoteWriter::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            cache.clone(),
+            LIBRARY,
+        );
+        let provider: Arc<dyn DataProvider> = Arc::new(RemoteProvider::new(
+            Arc::new(snapshot(&cache)),
+            writer,
+            true,
+            None,
+        ));
+        let capabilities = provider.waveform_cache_capabilities().unwrap();
+        assert!(!capabilities.can_manage);
+        assert!(capabilities.jobs.unwrap().rate_setting);
+        let current = provider.waveform_cache_status().unwrap();
+        assert_eq!(current.effective_run_state(), WaveformRunState::Paused);
+        assert_eq!(current.eta_secs, None);
+        assert_eq!(
+            provider
+                .waveform_cache_settings()
+                .unwrap()
+                .list_waveform_rate,
+            Some(10)
+        );
+        let busy = provider
+            .start_waveform_cache_job(WaveformJobMode::Missing, false)
+            .unwrap_err();
+        assert_eq!(busy.kind, WaveformCacheErrorKind::Busy);
+        assert!(busy.message.contains("409"), "{}", busy.message);
+        let forbidden = provider
+            .control_waveform_cache_job(WaveformJobControl::Resume)
+            .unwrap_err();
+        assert_eq!(forbidden.kind, WaveformCacheErrorKind::Forbidden);
+        // A local provider offers none of it.
+        assert_eq!(
+            snapshot(&cache).waveform_cache_status().unwrap_err().kind,
+            WaveformCacheErrorKind::Unsupported
+        );
     }
 
     fn snapshot(cache: &RemoteCache) -> SqliteProvider {

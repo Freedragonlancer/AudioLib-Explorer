@@ -89,6 +89,10 @@ pub struct Capabilities {
     /// The server's effective `pregenerate_list_waveforms` (read-only here, §9.2).
     #[serde(default)]
     pub pregenerate_list_waveforms: Option<bool>,
+    /// List Waveform generation jobs and the rate setting (§9.5.7); `None` on older
+    /// servers (only the §9.2 switch, status and pause/resume).
+    #[serde(default)]
+    pub list_waveform_jobs: Option<audiolib_core::waveform_cache::WaveformJobsCapability>,
 }
 
 fn known() -> bool {
@@ -105,6 +109,7 @@ impl Default for Capabilities {
             root_management: false,
             list_waveforms: None,
             pregenerate_list_waveforms: None,
+            list_waveform_jobs: None,
         }
     }
 }
@@ -362,7 +367,7 @@ fn endpoint_missing(error: RemoteError, context: &str) -> RemoteError {
 impl RemoteClient {
     /// One management request; `None` for an empty (`204`) reply. Writes are never
     /// retried here.
-    fn manage_call(
+    pub(crate) fn manage_call(
         &self,
         method: &str,
         path: &str,

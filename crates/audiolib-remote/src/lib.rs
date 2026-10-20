@@ -54,7 +54,9 @@ mod sync;
 mod test_server;
 mod tls;
 mod util;
+mod waveform_cache;
 mod writes;
+pub use waveform_cache::waveform_cache_error;
 
 pub use abort::set_connection_warming;
 pub use bandwidth::{Bandwidth, bandwidth};

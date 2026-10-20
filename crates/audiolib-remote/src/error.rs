@@ -109,6 +109,10 @@ pub enum RemoteError {
     /// [`RemoteError::Busy`] retrying does not help; refresh the scan status instead.
     #[error("Scan state does not allow this: {0}")]
     ScanState(String),
+    /// `409 JOB_STATE` (API §9.5.3): there is no list Waveform job or it has finished;
+    /// refresh the status instead of retrying.
+    #[error("Job state does not allow this: {0}")]
+    JobState(String),
     /// The cached record/session IDs belong to another library (`409 LIBRARY_CHANGED`
     /// or `LIBRARY_ID_REQUIRED`); reject the write and sync before allowing new edits.
     #[error("Server library changed: {0}")]
@@ -213,6 +217,7 @@ impl RemoteError {
             (_, "MANAGE_FORBIDDEN") => Self::Forbidden(message),
             // Before the generic 409 arm; other 409 codes stay `Busy`.
             (_, "SCAN_STATE") => Self::ScanState(message),
+            (_, "JOB_STATE") => Self::JobState(message),
             (_, "LIBRARY_CHANGED" | "LIBRARY_ID_REQUIRED") => Self::LibraryChanged(message),
             // Before the 503 arm: a `503 BUSY` is a full stream cap, not a starting server.
             (409, _) | (_, "BUSY") | (_, "CANCELLED") => Self::Busy {
@@ -390,6 +395,9 @@ impl RemoteError {
                 Self::ScanState(detail) => format!(
                     "The scan's current state does not allow this (409); refresh the scan progress. ({detail})"
                 ),
+                Self::JobState(detail) => format!(
+                    "There is no list Waveform job in progress (409); refresh the status. ({detail})"
+                ),
                 Self::LibraryChanged(detail) => format!(
                     "The server library changed or its identity is unconfirmed (409); nothing was written. Sync before editing again. ({detail})"
                 ),
@@ -435,6 +443,9 @@ impl RemoteError {
             ),
             Self::ScanState(detail) => {
                 format!("扫描当前的状态不允许此操作（409），请刷新扫描进度：{detail}")
+            }
+            Self::JobState(detail) => {
+                format!("当前没有进行中的列表波形任务（409），请刷新状态：{detail}")
             }
             Self::LibraryChanged(detail) => {
                 format!(
@@ -540,6 +551,7 @@ impl From<RemoteError> for audiolib_core::Error {
             RemoteError::NotFound(message) => Self::NotFound(message),
             RemoteError::Busy { message, .. }
             | RemoteError::ScanState(message)
+            | RemoteError::JobState(message)
             | RemoteError::Starting { message, .. }
             | RemoteError::RootOffline { message, .. } => Self::Busy(message),
             RemoteError::Validation(message) | RemoteError::PayloadTooLarge(message) => {
@@ -634,6 +646,7 @@ impl RemoteError {
             },
             Self::Forbidden(detail) => Self::Forbidden(detail.clone()),
             Self::ScanState(detail) => Self::ScanState(detail.clone()),
+            Self::JobState(detail) => Self::JobState(detail.clone()),
             Self::LibraryChanged(detail) => Self::LibraryChanged(detail.clone()),
             Self::PayloadTooLarge(detail) => Self::PayloadTooLarge(detail.clone()),
             Self::InsufficientStorage(detail) => Self::InsufficientStorage(detail.clone()),
