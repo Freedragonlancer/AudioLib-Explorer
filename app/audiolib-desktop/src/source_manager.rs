@@ -1178,6 +1178,8 @@ impl Controller {
         let chinese = self.chinese.load(Ordering::Acquire);
         let Some(profile) = self.selected_profile() else {
             ui.set_sm_cache_info("".into());
+            ui.set_sm_cache_summary("".into());
+            ui.set_sm_cache_dir("".into());
             return;
         };
         let active = self.config.lock().unwrap().data_source.active_source()
@@ -1194,6 +1196,22 @@ impl Controller {
         let directory = library_id
             .as_deref()
             .map(|id| cache.library_dir(id).display().to_string());
+        ui.set_sm_cache_summary(
+            cache_summary(library_id.as_deref(), state.as_ref(), chinese).into(),
+        );
+        ui.set_sm_cache_dir(
+            directory
+                .as_deref()
+                .map(|directory| {
+                    if chinese {
+                        format!("?????{directory}")
+                    } else {
+                        format!("Cache directory: {directory}")
+                    }
+                })
+                .unwrap_or_default()
+                .into(),
+        );
         ui.set_sm_cache_info(
             cache_info(
                 library_id.as_deref(),
@@ -2129,6 +2147,36 @@ fn cache_info(
             "Library {} ({library_id})\nCache directory: {directory}\nNo snapshot of this library on this PC yet.",
             short_id(library_id)
         ),
+    }
+}
+
+/// One line for the compact ????? header; [`cache_info`] keeps the full details.
+fn cache_summary(library_id: Option<&str>, state: Option<&CacheState>, chinese: bool) -> String {
+    let Some(library_id) = library_id else {
+        return cn_or(
+            chinese,
+            "?????????????????????????",
+            "Server library not known yet: test or sync first.",
+        );
+    };
+    let id = short_id(library_id);
+    match (state, chinese) {
+        (Some(state), true) => format!(
+            "??? {id} ? ?? r{} ? {} ??? ? {:.1} MiB ? ???? {}",
+            state.revision,
+            state.audio_files,
+            state.snapshot_bytes as f64 / 1_048_576.0,
+            format_time(state.checked_at),
+        ),
+        (Some(state), false) => format!(
+            "Library {id} ? snapshot r{} ? {} sounds ? {:.1} MiB ? checked {}",
+            state.revision,
+            state.audio_files,
+            state.snapshot_bytes as f64 / 1_048_576.0,
+            format_time(state.checked_at),
+        ),
+        (None, true) => format!("??? {id} ? ???????"),
+        (None, false) => format!("Library {id} ? no snapshot on this PC yet"),
     }
 }
 
@@ -3286,6 +3334,16 @@ mod tests {
         assert!(tested_line(&failed, true, true).contains("× 健康检查"));
         assert!(tested_line(&failed, false, true).ends_with("（地址未保存，不记录）"));
         assert_eq!(last_test_line(None, true), "");
+    }
+
+    #[test]
+    fn cache_summary_is_one_line() {
+        assert!(cache_summary(None, None, true).contains("??????????"));
+        let missing = cache_summary(Some("11111111-5e97"), None, true);
+        assert!(
+            missing.contains("???????") && !missing.contains('\n'),
+            "{missing}"
+        );
     }
 
     #[test]
