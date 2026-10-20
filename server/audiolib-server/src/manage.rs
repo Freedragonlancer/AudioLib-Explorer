@@ -78,6 +78,12 @@ pub struct CapabilitiesResponse {
     pub can_manage: bool,
     /// This API supports the stable server directory browser and root mutations.
     pub root_management: bool,
+    /// `POST /waveforms` support (doc/api/README.md §9.1); absent on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_waveforms: Option<crate::list_waveform::ListWaveformsCapability>,
+    /// Effective `pregenerate_list_waveforms` (read-only here; see `PATCH /settings`).
+    #[serde(default)]
+    pub pregenerate_list_waveforms: bool,
 }
 
 impl AppState {
@@ -154,6 +160,9 @@ impl AppState {
         let (removed, not_found) = outcome.value;
         if outcome.revision != outcome.revision_before {
             self.invalidate_snapshot();
+        }
+        if removed > 0 {
+            self.list_waveforms().request_prune();
         }
         tracing::info!(
             requested = ids.len(),
@@ -248,6 +257,9 @@ impl AppState {
         )?;
         let (removed, folders_removed) = outcome.value;
         self.invalidate_snapshot();
+        if removed > 0 {
+            self.list_waveforms().request_prune();
+        }
         tracing::info!(
             folder = id,
             removed,

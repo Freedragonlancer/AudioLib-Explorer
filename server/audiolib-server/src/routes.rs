@@ -3,6 +3,7 @@
 use crate::{
     ApiError, AppState, VERSION,
     auth::{ConnectionInfo, RequestOrigin, classify, same_request_origin},
+    list_waveform::{self, BatchRequest, ListWaveformsCapability, SettingsResponse},
     manage::{
         AddRootRequest, CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse,
         RemoveFolderResponse, RootPathRequest,
@@ -146,6 +147,21 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
                 "/scans/{session_id}/cancel",
                 post(cancel_scan).route_layer(manage()),
             )
+            // List thumbnail waveforms (doc/api/README.md §9.1–§9.2).
+            .route(
+                "/waveforms",
+                post(list_waveforms_batch)
+                    .route_layer(middleware::map_response(vary_accept_encoding)),
+            )
+            .route("/waveforms/status", get(list_waveform_status))
+            .route(
+                "/waveforms/pregeneration/pause",
+                post(pause_pregeneration).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/pregeneration/resume",
+                post(resume_pregeneration).route_layer(manage()),
+            )
             .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES)),
     );
     let protected = timed_protected
@@ -188,6 +204,9 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
     let open = Router::new().route("/health", get(health)).merge(
         Router::new()
             .route("/capabilities", get(capabilities))
+            // Server settings clients may read and (with `manage_mode`) change; like
+            // `/capabilities` they answer while the library is still opening.
+            .route("/settings", get(get_settings).patch(patch_settings))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_token)),
     );
     let api = with_request_timeout(timeout, open)
@@ -308,7 +327,7 @@ pub const LIBRARY_ID_HEADER: &str = "x-audiolib-library-id";
 fn managed_route(method: &Method, path: &str) -> bool {
     match *method {
         Method::GET | Method::HEAD => path.ends_with("/fs"),
-        Method::PATCH => path.ends_with("/roots/{name}"),
+        Method::PATCH => path.ends_with("/roots/{name}") || path.ends_with("/settings"),
         Method::DELETE => path.ends_with("/folders/{id}") || path.ends_with("/roots/{name}"),
         Method::POST => [
             "/roots",
@@ -317,6 +336,8 @@ fn managed_route(method: &Method, path: &str) -> bool {
             "/scans/{session_id}/pause",
             "/scans/{session_id}/resume",
             "/scans/{session_id}/cancel",
+            "/waveforms/pregeneration/pause",
+            "/waveforms/pregeneration/resume",
         ]
         .iter()
         .any(|managed| path.ends_with(*managed)),
@@ -428,7 +449,157 @@ async fn capabilities(
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
         root_management: true,
+        list_waveforms: Some(ListWaveformsCapability::default()),
+        pregenerate_list_waveforms: service.security().pregenerate_list_waveforms(),
     })
+}
+
+fn settings_response(
+    security: &crate::Security,
+    headers: &HeaderMap,
+    connection: Option<&ConnectionInfo>,
+) -> SettingsResponse {
+    let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
+        security.pregenerate_list_waveforms_with_source();
+    SettingsResponse {
+        pregenerate_list_waveforms,
+        pregenerate_list_waveforms_source,
+        can_change: security.manage_mode().allows(classify(headers, connection)),
+    }
+}
+
+/// `GET /settings` (doc/api/README.md §9.2): not gated by `manage_mode`.
+async fn get_settings(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Json<SettingsResponse> {
+    let connection = extensions.get::<ConnectionInfo>().copied();
+    Json(settings_response(
+        service.security(),
+        &headers,
+        connection.as_ref(),
+    ))
+}
+
+/// `PATCH /settings` body: only the present fields change; `null` removes the override.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsPatch {
+    #[serde(default, deserialize_with = "present_value")]
+    pregenerate_list_waveforms: Option<Option<bool>>,
+}
+
+/// `Some(None)` for an explicit JSON `null`, `None` for an absent field.
+fn present_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
+/// `PATCH /settings`: inside the settings lease (409 `BUSY` while another instance holds
+/// it) authenticate, check `manage_mode` (403 `MANAGE_FORBIDDEN`), then validate and
+/// write `admin-settings.json`. Takes effect at once.
+async fn patch_settings(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    let connection = extensions.get::<ConnectionInfo>().copied();
+    let security = service.security().clone();
+    let reply = blocking_api(move || {
+        let lease = security.settings_lease()?;
+        security.authorize(&headers, connection.as_ref())?;
+        security.authorize_manage(&headers, connection.as_ref())?;
+        let value: serde_json::Value = json_body(&headers, body)?;
+        if !value.is_object() {
+            return Err(ApiError::validation(
+                "The request body must be a JSON object",
+            ));
+        }
+        let patch: SettingsPatch = serde_json::from_value(value)
+            .map_err(|error| ApiError::validation(format!("Invalid settings: {error}")))?;
+        if let Some(value) = patch.pregenerate_list_waveforms {
+            security.update_settings_locked(&lease, |settings| {
+                settings.pregenerate_list_waveforms = value;
+            })?;
+            tracing::info!(
+                ?value,
+                "pregenerate_list_waveforms changed through PATCH /settings"
+            );
+        }
+        drop(lease);
+        Ok(settings_response(&security, &headers, connection.as_ref()))
+    })
+    .await?;
+    Ok(Json(reply))
+}
+
+/// `POST /waveforms`: list thumbnail waveforms of up to 200 records (§9.1).
+async fn list_waveforms_batch(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let value: serde_json::Value = json_body(&headers, body)?;
+    let request = BatchRequest::parse(&value)?;
+    let zstd = accepts_zstd(&headers);
+    let reply = list_waveform::batch(state, request).await?;
+    let json = serde_json::to_vec(&reply)
+        .map_err(|error| ApiError::internal(format!("Cannot encode list waveforms: {error}")))?;
+    let bytes = if zstd {
+        blocking(move || crate::waveform::compress(&json)).await?
+    } else {
+        json
+    };
+    let len = bytes.len();
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if zstd {
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+    }
+    Ok(response)
+}
+
+/// `GET /waveforms/status` (§9.2).
+async fn list_waveform_status(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    Ok(Json(
+        blocking(move || state.list_waveforms().status(&state)).await?,
+    ))
+}
+
+async fn set_pregeneration_paused(
+    state: AppState,
+    paused: bool,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    state.list_waveforms().set_paused(paused);
+    tracing::info!(paused, "List waveform pre-generation paused/resumed");
+    Ok(Json(
+        blocking(move || state.list_waveforms().status(&state)).await?,
+    ))
+}
+
+/// `POST /waveforms/pregeneration/pause` (this process only; `manage_mode`).
+async fn pause_pregeneration(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    set_pregeneration_paused(state, true).await
+}
+
+/// `POST /waveforms/pregeneration/resume`.
+async fn resume_pregeneration(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    set_pregeneration_paused(state, false).await
 }
 
 /// Run blocking library work off the async executor.
@@ -970,6 +1141,7 @@ fn wants_download(query: Result<Query<StreamQuery>, QueryRejection>) -> Result<b
 /// `GET`/`HEAD /audio/{id}/stream`: raw file bytes with single-range and ETag support
 /// (see [`crate::stream`]). axum answers `HEAD` through this handler without a body.
 async fn audio_stream(
+    method: Method,
     Extension(state): Extension<AppState>,
     Path(raw_id): Path<String>,
     query: Result<Query<StreamQuery>, QueryRejection>,
@@ -977,20 +1149,37 @@ async fn audio_stream(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&raw_id)?;
     let download = wants_download(query)?;
+    let mut trace = PlaybackTrace::start(
+        state.list_waveforms().activity(),
+        "stream",
+        id,
+        method == Method::HEAD,
+        "file",
+    );
     // The permit travels with the response body, so it counts streams until fully sent
     // or dropped by the client.
     let permit = state
         .stream_slots()
         .try_acquire_owned()
         .map_err(|_| ApiError::stream_busy())?;
+    trace.slot_acquired();
+    if method != Method::HEAD {
+        state.note_playback_start();
+    }
     let ServedAudio {
         file,
         path,
         len,
         etag,
         filename,
+        record,
         ..
     } = open_for_stream(state, id).await?;
+    trace.opened();
+    trace.format(
+        (record.sample_rate, record.bit_depth, record.channels),
+        (record.sample_rate, record.bit_depth, record.channels),
+    );
     // Same file, same ETag: the disposition never enters the validator.
     let disposition = download
         .then(|| HeaderValue::try_from(stream::attachment_disposition(&filename, id)).ok())
@@ -1054,7 +1243,7 @@ async fn audio_stream(
         inner: ReaderStream::with_capacity(file.take(body_len), STREAM_CHUNK_BYTES),
         _guard: permit,
     };
-    let mut response = Response::new(Body::from_stream(body));
+    let mut response = Response::new(Body::from_stream(Traced::new(body, trace)));
     *response.status_mut() = status;
     common(&mut response);
     attach(&mut response);
@@ -1103,8 +1292,26 @@ async fn audio_preview(
     )?;
     let head = method == Method::HEAD;
     match request.codec {
-        Codec::Pcm => pcm_preview(state, id, &request, head, &headers).await,
-        Codec::Flac => flac_preview(state, id, &request, head, &headers).await,
+        Codec::Pcm => {
+            let trace = PlaybackTrace::start(
+                state.list_waveforms().activity(),
+                "preview",
+                id,
+                head,
+                "pcm",
+            );
+            pcm_preview(state, id, &request, head, &headers, trace).await
+        }
+        Codec::Flac => {
+            let trace = PlaybackTrace::start(
+                state.list_waveforms().activity(),
+                "preview",
+                id,
+                head,
+                "flac",
+            );
+            flac_preview(state, id, &request, head, &headers, trace).await
+        }
     }
 }
 
@@ -1157,12 +1364,18 @@ async fn pcm_preview(
     request: &PreviewRequest,
     head: bool,
     headers: &HeaderMap,
+    mut trace: PlaybackTrace,
 ) -> Result<Response, ApiError> {
     let permit = state
         .preview_slots()
         .try_acquire_owned()
         .map_err(|_| ApiError::preview_busy())?;
+    trace.slot_acquired();
+    if !head {
+        state.note_playback_start();
+    }
     let (served, info) = open_wav(&state, id).await?;
+    trace.opened();
     let info = info.map_err(|error| {
         let reason = match error {
             WavError::Unsupported(reason) => reason,
@@ -1183,7 +1396,9 @@ async fn pcm_preview(
     };
     let bits = preview::resolve_bits(request.bits, info.format.bits(), info.format.is_float());
     let (channels, mix) = preview::resolve_channels(request.channels, info.channels)?;
+    let source = (info.sample_rate, info.format.bits(), info.channels);
     let plan = PcmPlan::new(info, factor, bits, channels, mix);
+    trace.format(source, (plan.sample_rate, plan.bits, plan.channels));
     let etag = plan.etag(&served.etag);
     let total = plan.total_len();
     let common = |response: &mut Response| {
@@ -1255,10 +1470,13 @@ async fn pcm_preview(
                 "PCM preview sent"
             );
         });
-        Body::from_stream(ChannelBody {
-            receiver,
-            _permit: permit,
-        })
+        Body::from_stream(Traced::new(
+            ChannelBody {
+                receiver,
+                _permit: permit,
+            },
+            trace,
+        ))
     };
     let mut response = Response::new(body);
     *response.status_mut() = status;
@@ -1284,6 +1502,7 @@ async fn flac_preview(
     request: &PreviewRequest,
     head: bool,
     headers: &HeaderMap,
+    mut trace: PlaybackTrace,
 ) -> Result<Response, ApiError> {
     let ffmpeg = state.ffmpeg_path().to_path_buf();
     if !preview::ffmpeg_available(&ffmpeg) {
@@ -1296,12 +1515,25 @@ async fn flac_preview(
         .preview_slots()
         .try_acquire_owned()
         .map_err(|_| ApiError::preview_busy())?;
+    if !head {
+        state.note_playback_start();
+    }
     let (served, info) = open_wav(&state, id).await?;
+    trace.opened();
+    let source_format = match &info {
+        Ok(info) => (info.sample_rate, info.format.bits(), info.channels),
+        Err(_) => (
+            served.record.sample_rate,
+            served.record.bit_depth,
+            served.record.channels,
+        ),
+    };
     let source = match &info {
         Ok(info) => SourceFormat::from_wav(info),
         Err(_) => SourceFormat::from_record(&served.record),
     };
     let plan = FlacPlan::new(&source, request)?;
+    trace.format(source_format, (plan.sample_rate, plan.bits, plan.channels));
     let etag = plan.etag(&served.etag, &preview::ffmpeg_tag(&ffmpeg));
     let set_headers = |headers: &mut HeaderMap| -> Result<(), ApiError> {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/flac"));
@@ -1337,6 +1569,7 @@ async fn flac_preview(
         return Ok(response);
     }
     // Waiting for a transcode slot holds only this preview slot, never a /stream slot.
+    let transcode_wait = Instant::now();
     let transcode_permit = tokio::time::timeout(
         preview::TRANSCODE_SLOT_WAIT,
         state.transcode_slots().acquire_owned(),
@@ -1344,6 +1577,7 @@ async fn flac_preview(
     .await
     .map_err(|_| ApiError::transcode_busy())?
     .map_err(|_| ApiError::internal("Transcode slots closed"))?;
+    trace.add_slot_wait(transcode_wait.elapsed());
     let ServedAudio { file, path, .. } = served;
     tracing::debug!(id, path = %path.display(), start = %plan.start_time(), "Starting FLAC preview");
     // On Unix ffmpeg reads the very file that passed the root checks through its stdin
@@ -1368,7 +1602,8 @@ async fn flac_preview(
         id,
     )?;
     body.first_chunk().await?;
-    let mut response = Response::new(Body::from_stream(body));
+    trace.transcoder_ready();
+    let mut response = Response::new(Body::from_stream(Traced::new(body, trace)));
     set_headers(response.headers_mut())?;
     Ok(response)
 }
@@ -1664,6 +1899,169 @@ fn filename_token(value: &str) -> String {
 }
 
 /// A byte stream that keeps `_guard` (temporary files, permits) alive until it is dropped.
+/// Timing of one `/stream` or `/preview` request, logged as a single info line
+/// (`Playback timing`) when the response body ends or is dropped, or when the handler
+/// returns without a body (`HEAD`, `304`, errors). A few `Instant::now()` calls per
+/// request; nothing per chunk beyond a byte count.
+struct PlaybackTrace {
+    route: &'static str,
+    id: i64,
+    head: bool,
+    codec: &'static str,
+    started: Instant,
+    /// Stage boundary of the next measurement.
+    mark: Instant,
+    slot_wait: Duration,
+    open: Option<Duration>,
+    transcoder: Option<Duration>,
+    first_chunk: Option<Duration>,
+    source: Option<(u32, u16, u16)>,
+    output: Option<(u32, u16, u16)>,
+    bytes: u64,
+    complete: bool,
+    activity: list_waveform::ListActivity,
+}
+
+impl PlaybackTrace {
+    fn start(
+        activity: list_waveform::ListActivity,
+        route: &'static str,
+        id: i64,
+        head: bool,
+        codec: &'static str,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            route,
+            id,
+            head,
+            codec,
+            started: now,
+            mark: now,
+            slot_wait: Duration::ZERO,
+            open: None,
+            transcoder: None,
+            first_chunk: None,
+            source: None,
+            output: None,
+            bytes: 0,
+            complete: false,
+            activity,
+        }
+    }
+
+    /// The stream / preview slot was taken (`try_acquire`: never waits today).
+    fn slot_acquired(&mut self) {
+        let now = Instant::now();
+        self.slot_wait += now - self.mark;
+        self.mark = now;
+    }
+
+    /// Time spent waiting for a later slot (FLAC transcode slot).
+    fn add_slot_wait(&mut self, waited: Duration) {
+        self.slot_wait += waited;
+        self.mark = Instant::now();
+    }
+
+    /// The file is open (root checks, open, and for previews the WAV header read).
+    fn opened(&mut self) {
+        let now = Instant::now();
+        self.open = Some(now - self.mark);
+        self.mark = now;
+    }
+
+    /// ffmpeg produced its first output (FLAC previews).
+    fn transcoder_ready(&mut self) {
+        let now = Instant::now();
+        self.transcoder = Some(now - self.mark);
+        self.mark = now;
+    }
+
+    fn format(&mut self, source: (u32, u16, u16), output: (u32, u16, u16)) {
+        self.source = Some(source);
+        self.output = Some(output);
+    }
+}
+
+impl Drop for PlaybackTrace {
+    fn drop(&mut self) {
+        let ms = |duration: Duration| duration.as_millis() as u64;
+        let (src_rate, src_bits, src_channels) = self.source.unzip3();
+        let (rate, bits, channels) = self.output.unzip3();
+        tracing::info!(
+            route = self.route,
+            id = self.id,
+            head = self.head,
+            codec = self.codec,
+            sample_rate = ?rate,
+            bits = ?bits,
+            channels = ?channels,
+            src_sample_rate = ?src_rate,
+            src_bits = ?src_bits,
+            src_channels = ?src_channels,
+            slot_wait_ms = ms(self.slot_wait),
+            open_ms = ?self.open.map(ms),
+            transcoder_ms = ?self.transcoder.map(ms),
+            first_chunk_ms = ?self.first_chunk.map(ms),
+            total_ms = ms(self.started.elapsed()),
+            bytes = self.bytes,
+            complete = self.complete,
+            list_on_demand_in_flight = self.activity.on_demand_in_flight,
+            list_pregen_in_flight = self.activity.pregen_in_flight,
+            list_outstanding_stats = self.activity.outstanding_stats,
+            "Playback timing"
+        );
+    }
+}
+
+trait Unzip3 {
+    fn unzip3(self) -> (Option<u32>, Option<u16>, Option<u16>);
+}
+
+impl Unzip3 for Option<(u32, u16, u16)> {
+    fn unzip3(self) -> (Option<u32>, Option<u16>, Option<u16>) {
+        match self {
+            Some((a, b, c)) => (Some(a), Some(b), Some(c)),
+            None => (None, None, None),
+        }
+    }
+}
+
+/// A response body that records its first chunk, byte count and end in a
+/// [`PlaybackTrace`] (logged when the body is dropped).
+struct Traced<S> {
+    inner: S,
+    trace: PlaybackTrace,
+}
+
+impl<S> Traced<S> {
+    fn new(inner: S, trace: PlaybackTrace) -> Self {
+        Self { inner, trace }
+    }
+}
+
+impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Traced<S> {
+    type Item = io::Result<Bytes>;
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_next(context);
+        match &poll {
+            Poll::Ready(Some(Ok(chunk))) => {
+                if this.trace.first_chunk.is_none() {
+                    this.trace.first_chunk = Some(this.trace.started.elapsed());
+                }
+                this.trace.bytes += chunk.len() as u64;
+            }
+            Poll::Ready(None) => this.trace.complete = true,
+            _ => {}
+        }
+        poll
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
 struct GuardedStream<S, G> {
     inner: S,
     _guard: G,
@@ -1683,6 +2081,47 @@ impl<S: Stream + Unpin, G: Unpin> Stream for GuardedStream<S, G> {
 mod tests {
     use super::*;
 
+    struct Chunks(Vec<io::Result<Bytes>>);
+
+    impl Stream for Chunks {
+        type Item = io::Result<Bytes>;
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let chunks = &mut self.get_mut().0;
+            Poll::Ready((!chunks.is_empty()).then(|| chunks.remove(0)))
+        }
+    }
+
+    #[test]
+    fn traced_bodies_record_first_chunk_bytes_and_completion() {
+        let mut trace = PlaybackTrace::start(
+            list_waveform::ListActivity::default(),
+            "preview",
+            7,
+            false,
+            "pcm",
+        );
+        trace.slot_acquired();
+        trace.opened();
+        trace.format((96_000, 24, 2), (48_000, 16, 2));
+        assert!(trace.open.is_some());
+        let mut body = Traced::new(
+            Chunks(vec![
+                Ok(Bytes::from_static(b"abc")),
+                Ok(Bytes::from_static(b"de")),
+            ]),
+            trace,
+        );
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(body.trace.first_chunk.is_none());
+        while let Poll::Ready(Some(_)) = Pin::new(&mut body).poll_next(&mut context) {
+            assert!(body.trace.first_chunk.is_some());
+        }
+        assert_eq!(body.trace.bytes, 5);
+        assert!(body.trace.complete);
+        assert_eq!(body.trace.output, Some((48_000, 16, 2)));
+    }
+
     #[test]
     fn management_admission_matches_every_managed_route_and_exact_method() {
         // Keep this table aligned with all route_layer(manage()) registrations above.
@@ -1698,6 +2137,9 @@ mod tests {
             (Method::POST, "/scans/{session_id}/pause"),
             (Method::POST, "/scans/{session_id}/resume"),
             (Method::POST, "/scans/{session_id}/cancel"),
+            (Method::POST, "/waveforms/pregeneration/pause"),
+            (Method::POST, "/waveforms/pregeneration/resume"),
+            (Method::PATCH, "/settings"),
         ] {
             assert!(managed_route(&method, path), "{method} {path}");
             assert!(
@@ -1728,6 +2170,9 @@ mod tests {
             (Method::POST, "/fs"),
             (Method::POST, "/folders/{id}"),
             (Method::PUT, "/roots/{name}"),
+            (Method::POST, "/waveforms"),
+            (Method::GET, "/waveforms/status"),
+            (Method::GET, "/settings"),
         ] {
             assert!(!managed_route(&method, path), "{method} {path}");
         }

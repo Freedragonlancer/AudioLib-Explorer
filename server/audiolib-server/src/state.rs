@@ -2,6 +2,7 @@
 //! Shared server state: the library `DataProvider`, its revision tracker and configured roots.
 //! Every method that touches SQLite or the filesystem is blocking; async handlers call them
 //! through `tokio::task::spawn_blocking`.
+use crate::list_waveform::{ListOptions, ListWaveforms};
 use crate::preview::TranscodeRegistry;
 use crate::revision::{RevisionInfo, RevisionTracker, WriteOutcome};
 use crate::roots::{
@@ -24,7 +25,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, PoisonError, RwLock,
+        Arc, Mutex, PoisonError, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -182,6 +183,29 @@ pub enum OpenError {
 impl From<Error> for OpenError {
     fn from(error: Error) -> Self {
         Self::Library(error)
+    }
+}
+
+/// Why [`AppState::stat_audio`] found no usable file.
+#[derive(Debug)]
+pub enum StatFailure {
+    /// Unknown, outside every root, or not a regular file.
+    Missing,
+    /// The file's root is offline or not answering.
+    RootOffline {
+        /// Configured root name.
+        root: String,
+    },
+    /// Any other error (permissions, ...).
+    Other(Error),
+}
+
+/// Weak [`AppState`] handle.
+pub(crate) struct WeakAppState(Weak<Inner>);
+
+impl WeakAppState {
+    pub(crate) fn upgrade(&self) -> Option<AppState> {
+        self.0.upgrade().map(|inner| AppState { inner })
     }
 }
 
@@ -492,6 +516,7 @@ struct Inner {
     roots_edit: Mutex<()>,
     stream_open_delay_ms: AtomicU64,
     snapshot_delay_ms: AtomicU64,
+    stat_delay_ms: AtomicU64,
     security: Arc<Security>,
     snapshot_dir: Option<PathBuf>,
     snapshot_slots: Arc<Semaphore>,
@@ -506,6 +531,11 @@ struct Inner {
     open_slots: usize,
     waveforms: WaveformCache,
     waveform_slots: Arc<Semaphore>,
+    /// `max_streams` / `max_previews`: a slot in use means audio is being served.
+    max_streams: usize,
+    max_previews: usize,
+    /// List thumbnail waveforms (`POST /waveforms`, pre-generation; §9.1–§9.2).
+    list: Arc<ListWaveforms>,
     ffmpeg_path: PathBuf,
     transcode_slots: Arc<Semaphore>,
     transcodes: TranscodeRegistry,
@@ -626,9 +656,20 @@ impl AppState {
                 "ffmpeg is not available: /audio/{{id}}/preview?codec=flac answers 503 TRANSCODER_UNAVAILABLE (codec=pcm is unaffected)"
             );
         }
+        let list = Arc::new(ListWaveforms::new(
+            ListOptions {
+                cache_root: config.waveform_cache_path(),
+                cache_mb: config.list_waveform_cache_mb,
+                workers: config.effective_list_waveform_workers(),
+                rate: config.list_waveform_rate,
+                pause_stats_on_playback: config.list_waveform_pause_stats_on_playback,
+            },
+            &library_id,
+            provider.database_path(),
+        ));
         // Root directories are deliberately not touched here (a sleeping NAS disk would
         // delay startup); the root monitor checks them in the background.
-        Ok(Self {
+        let state = Self {
             inner: Arc::new(Inner {
                 provider,
                 tracker,
@@ -639,6 +680,7 @@ impl AppState {
                 stats: StatsCache::load(provider_path),
                 stream_open_delay_ms: AtomicU64::new(0),
                 snapshot_delay_ms: AtomicU64::new(0),
+                stat_delay_ms: AtomicU64::new(0),
                 security,
                 snapshot_dir: config.snapshot_dir.clone(),
                 snapshot_slots: Arc::new(Semaphore::new(SNAPSHOT_SLOTS)),
@@ -653,13 +695,105 @@ impl AppState {
                     config.waveform_cache_mb,
                 ),
                 waveform_slots: Arc::new(Semaphore::new(config.max_waveforms)),
+                max_streams: config.max_streams,
+                max_previews: config.max_previews,
+                list,
                 ffmpeg_path: config.ffmpeg_path.clone(),
                 transcode_slots: Arc::new(Semaphore::new(config.max_transcodes)),
                 transcodes: TranscodeRegistry::default(),
                 scans: ScanManager::default(),
                 roots_db: Mutex::new(roots_db),
             }),
-        })
+        };
+        crate::list_waveform::spawn_workers(&state);
+        Ok(state)
+    }
+
+    /// List thumbnail waveforms of this library (§9.1–§9.2).
+    pub fn list_waveforms(&self) -> &Arc<ListWaveforms> {
+        &self.inner.list
+    }
+
+    /// Handle that does not keep the library open (background workers).
+    pub(crate) fn downgrade(&self) -> WeakAppState {
+        WeakAppState(Arc::downgrade(&self.inner))
+    }
+
+    /// Whether any `/audio/{id}/stream` or `/audio/{id}/preview` response is in progress
+    /// (one of their slots is taken).
+    pub fn playback_active(&self) -> bool {
+        self.inner.stream_slots.available_permits() < self.inner.max_streams
+            || self.inner.preview_slots.available_permits() < self.inner.max_previews
+    }
+
+    /// A stream or preview response was admitted (list waveform yield rules, §9.2).
+    pub(crate) fn note_playback_start(&self) {
+        self.inner.list.note_playback_start();
+    }
+
+    /// `max_streams + max_previews`.
+    pub(crate) fn open_slot_count(&self) -> usize {
+        self.inner.open_slots
+    }
+
+    /// Blocking. Read the metadata of audio `id`'s file at `file_path` without opening
+    /// it: the same canonical root containment as [`AppState::open_audio`], registered
+    /// with the root monitor while it runs. Returns the canonical path and the file's
+    /// stream entity tag.
+    pub(crate) fn stat_audio(
+        &self,
+        id: i64,
+        file_path: &str,
+        index: Option<usize>,
+    ) -> std::result::Result<(PathBuf, String), StatFailure> {
+        let monitor = self.root_monitor();
+        let _registration = index.map(|index| monitor.begin_open(index));
+        let classify = |error: OpenError| match error {
+            OpenError::RootOffline { root, .. } => StatFailure::RootOffline { root },
+            OpenError::Library(Error::NotFound(_)) => StatFailure::Missing,
+            OpenError::Library(error) => StatFailure::Other(error),
+        };
+        let unavailable = || Error::NotFound(format!("Audio {id} file is missing on the server"));
+        let delay = self.inner.stat_delay_ms.load(Ordering::Relaxed);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        let path = fs::canonicalize(file_path)
+            .map_err(|error| classify(self.access_failure(index, error, unavailable())))?;
+        let candidates: Vec<usize> = match index {
+            Some(index) => vec![index],
+            None => (0..monitor.roots().len()).collect(),
+        };
+        let mut matched = None;
+        for candidate in candidates {
+            match fs::canonicalize(&monitor.roots()[candidate].server_path) {
+                Ok(root) if path.starts_with(&root) => {
+                    matched = Some((candidate, root));
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if index == Some(candidate) => {
+                    return Err(classify(self.access_failure(index, error, unavailable())));
+                }
+                Err(_) => {}
+            }
+        }
+        let Some((root_index, root)) = matched else {
+            return Err(StatFailure::Missing);
+        };
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Err(StatFailure::Missing),
+            Err(error) => {
+                return Err(classify(self.access_failure(
+                    Some(root_index),
+                    error,
+                    unavailable(),
+                )));
+            }
+        };
+        monitor.record(root_index, Ok(root));
+        Ok((path, crate::stream::file_etag(&metadata)))
     }
 
     /// The library provider; future endpoints use it for all business data access.
@@ -1408,6 +1542,15 @@ impl AppState {
     pub fn set_snapshot_prepare_delay(&self, delay: Duration) {
         self.inner
             .snapshot_delay_ms
+            .store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Test hook: sleep this long inside every list waveform metadata read
+    /// ([`AppState::stat_audio`]; simulates a slow network volume).
+    #[doc(hidden)]
+    pub fn set_stat_delay(&self, delay: Duration) {
+        self.inner
+            .stat_delay_ms
             .store(delay.as_millis() as u64, Ordering::Relaxed);
     }
 
