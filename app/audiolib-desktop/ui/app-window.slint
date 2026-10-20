@@ -739,8 +739,10 @@ export component AppWindow inherits Window {
     // 全部重建 confirmation: 0 none, 1 first, 2 second (destructive).
     in-out property <int> sm-wc-confirm: 0;
     property <bool> sm-wc-ready: root.sm-wc-can-manage && !root.sm-wave-busy;
-    // 0 missing, 1 failed, 2 rebuild (only after both confirmations).
+    // 0 missing, 1 failed; 2 rebuild is sent unconfirmed (refused), see sm-wc-rebuild-confirmed.
     callback sm-wc-job-requested(int);
+    // 全部重建 after the second confirmation (the only path that sends confirm).
+    callback sm-wc-rebuild-confirmed();
     // 0 pause, 1 resume, 2 stop.
     callback sm-wc-control-requested(int);
     callback sm-wc-rate-requested(string);
@@ -2359,7 +2361,7 @@ export component AppWindow inherits Window {
                                                 VerticalLayout { padding: 8px; spacing: 6px;
                                                     Label { wrap: word-wrap; color: Theme.warning; text: root.sm-wc-confirm == 1 ? (root.chinese ? "全部重建会先清空服务器上本库的全部列表缩略波形缓存，再重新读取所有文件生成。确定要继续吗？" : "Rebuild all first clears this library's whole list thumbnail Waveform cache on the server, then reads every file again. Continue?") : (root.chinese ? "再次确认：现有缓存将被清空，服务器会重新读取所有文件，NAS 会长时间保持唤醒。" : "Confirm again: the existing cache is cleared and the server re-reads every file; the NAS stays awake for a long time."); }
                                                     HorizontalLayout { height: 30px; spacing: 6px;
-                                                        Action { width: 128px; primary: true; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.sm-wc-confirm == 1 ? (root.chinese ? "继续…" : "Continue…") : (root.chinese ? "确认全部重建" : "Rebuild all"); clicked => { if root.sm-wc-confirm == 1 { root.sm-wc-confirm = 2; } else { root.sm-wc-confirm = 0; root.sm-wc-job-requested(2); } } }
+                                                        Action { width: 128px; primary: true; enabled: root.sm-wc-ready && !root.sm-wc-job-active; label: root.sm-wc-confirm == 1 ? (root.chinese ? "继续…" : "Continue…") : (root.chinese ? "确认全部重建" : "Rebuild all"); clicked => { if root.sm-wc-confirm == 1 { root.sm-wc-confirm = 2; } else { root.sm-wc-confirm = 0; root.sm-wc-rebuild-confirmed(); } } }
                                                         Action { width: 72px; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-wc-confirm = 0; } }
                                                         Rectangle { horizontal-stretch: 1; }
                                                     }

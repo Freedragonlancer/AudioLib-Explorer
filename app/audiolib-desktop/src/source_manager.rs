@@ -241,7 +241,15 @@ impl Controller {
                 2 => audiolib_core::waveform_cache::WaveformJobMode::Rebuild,
                 _ => audiolib_core::waveform_cache::WaveformJobMode::Missing,
             };
-            c.run_waveform_cache_action(WaveformCacheAction::Start(mode));
+            // Never confirmed here: a rebuild only starts from the second confirmation.
+            c.run_waveform_cache_action(WaveformCacheAction::Start(mode, false));
+        });
+        let c = self.clone();
+        ui.on_sm_wc_rebuild_confirmed(move || {
+            c.run_waveform_cache_action(WaveformCacheAction::Start(
+                audiolib_core::waveform_cache::WaveformJobMode::Rebuild,
+                true,
+            ));
         });
         let c = self.clone();
         ui.on_sm_wc_control_requested(move |control| {

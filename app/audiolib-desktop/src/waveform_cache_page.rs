@@ -54,8 +54,10 @@ impl WaveformCacheState {
 /// One user request from the section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WaveformCacheAction {
-    /// `Rebuild` is only requested after the UI's two confirmations.
-    Start(WaveformJobMode),
+    /// Start a job. The flag is `confirm_rebuild`: `true` only from the UI's second
+    /// 全部重建 confirmation, so the provider's and client's rebuild guards still apply
+    /// to every other path.
+    Start(WaveformJobMode, bool),
     Control(WaveformJobControl),
     /// `None` restores the server's configured rate.
     Rate(Option<u32>),
@@ -515,8 +517,8 @@ impl Controller {
             };
             let mut settings = None;
             let outcome: WaveformCacheResult<Option<WaveformCacheStatus>> = match action {
-                WaveformCacheAction::Start(mode) => provider
-                    .start_waveform_cache_job(mode, mode == WaveformJobMode::Rebuild)
+                WaveformCacheAction::Start(mode, confirm_rebuild) => provider
+                    .start_waveform_cache_job(mode, confirm_rebuild)
                     .map(Some),
                 WaveformCacheAction::Control(control) if state.jobs() => {
                     provider.control_waveform_cache_job(control).map(Some)
