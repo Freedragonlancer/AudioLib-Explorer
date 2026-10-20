@@ -575,6 +575,7 @@ dependencies = [
  "audiolib-db",
  "audiolib-windows",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",

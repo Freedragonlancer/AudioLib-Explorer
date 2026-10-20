@@ -10,10 +10,21 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod config;
 pub mod library;
+pub mod list_waveform;
+pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
 pub mod server_url;
 pub use library::*;
+pub use list_waveform::{
+    LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
+    ListWaveformItem, ListWaveformSource, ListWaveformState, MAX_LIST_WAVEFORM_IDS, decode_base64,
+};
+pub use list_waveform_i8::{
+    LIST_WAVEFORM_ENCODING_I8, LIST_WAVEFORM_ENCODING_I16, LIST_WAVEFORM_I8_ETAG_SUFFIX,
+    LIST_WAVEFORM_I8_MAX_BYTES, LIST_WAVEFORM_I8_ZOOM_LEVEL, ListWaveformI8, expand_i8_to_i16,
+    i8_base64_len, quantize_i16_to_i8,
+};
 pub use metadata::{
     SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
 };
@@ -442,6 +453,40 @@ pub trait DataProvider: Send + Sync {
         format: LibraryExportFormat,
     ) -> Result<TransferReport>;
     fn import_annotations(&self, source: &Path) -> Result<TransferReport>;
+
+    /// Where this provider's list thumbnail Waveforms come from (doc/api/README.md
+    /// §9.1–§9.3). `Unavailable` (the default) hides the list Waveform column.
+    fn list_waveform_source(&self) -> ListWaveformSource {
+        ListWaveformSource::Unavailable
+    }
+    /// Blocking and cheap: answer up to [`MAX_LIST_WAVEFORM_IDS`] ids from stored list
+    /// Waveforms without decoding audio (a local provider reads `waveform_cache` and only
+    /// reads file Metadata to detect changed files; a server provider sends one
+    /// `POST /waveforms`). Items keep the request order without duplicates. Callers run
+    /// this on a background thread; `cancel` abandons the request.
+    fn list_waveforms(&self, _ids: &[i64], _cancel: Arc<AtomicBool>) -> Result<ListWaveformBatch> {
+        Err(Error::Validation(
+            "This data provider has no list Waveforms".into(),
+        ))
+    }
+    /// Blocking and expensive (decodes the whole file): compute, store and return the
+    /// list Waveform of one record. Only [`ListWaveformSource::Local`] providers compute;
+    /// a server computes `Pending` items itself. Callers run this on a low-priority
+    /// background thread and set `cancel` to stop the decode at its next block.
+    fn compute_list_waveform(
+        &self,
+        _id: i64,
+        _cancel: Arc<AtomicBool>,
+    ) -> Result<ListWaveformState> {
+        Err(Error::Validation(
+            "This data provider does not compute list Waveforms".into(),
+        ))
+    }
+    /// Pre-generation backlog: ascending ids greater than `after` of present records that
+    /// have no stored list Waveform, at most `limit`. Only local providers have one.
+    fn list_waveform_backlog(&self, _after: i64, _limit: usize) -> Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Resolve an existing scan root using actual filesystem identity, not prefix strings.

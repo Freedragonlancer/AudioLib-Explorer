@@ -6,6 +6,7 @@ mod controller;
 mod diagnostics;
 mod dialogs;
 mod gui_search_benchmark;
+mod list_waveforms;
 #[cfg(test)]
 mod pane_review_tests;
 mod progressive_waveform;

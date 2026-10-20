@@ -13,7 +13,7 @@ use super::source_manager::capabilities_note;
 use super::{Controller, cn_or, post};
 use crate::AppWindow;
 use audiolib_core::{AudioFile, DataProvider, Folder, SearchPage};
-use audiolib_remote::{CacheState, MemoryCache, RemoteClient};
+use audiolib_remote::{CacheState, Capabilities, MemoryCache, RemoteClient};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -90,6 +90,9 @@ pub(super) struct ServerManage {
     can_manage: bool,
     /// Why not, in the server's terms; empty while unknown.
     note: String,
+    /// The `/capabilities` answer itself (list Waveforms read it); `None` while unknown
+    /// or unreadable.
+    capabilities: Option<Capabilities>,
 }
 
 impl ServerManage {
@@ -99,7 +102,15 @@ impl ServerManage {
             url: url.into(),
             can_manage: true,
             note: String::new(),
+            capabilities: None,
         }
+    }
+
+    /// `/capabilities` of `server_url`, once read after the latest sync.
+    pub(super) fn capabilities_for(&self, server_url: &str) -> Option<&Capabilities> {
+        (self.url == server_url)
+            .then_some(self.capabilities.as_ref())
+            .flatten()
     }
 
     /// The answer for `server_url`, or "unknown" if it came from another server.
@@ -266,10 +277,12 @@ impl Controller {
                     url: settings.server_url.clone(),
                     can_manage: capabilities.may_manage(),
                     note: capabilities_note(&capabilities, chinese),
+                    capabilities: Some(capabilities),
                 },
                 Err(error) => ServerManage {
                     url: settings.server_url.clone(),
                     can_manage: false,
+                    capabilities: None,
                     note: if chinese {
                         format!("未能读取服务器的管理权限：{}", error.localized(true))
                     } else {
@@ -436,6 +449,7 @@ mod tests {
             url: "http://server.example.lan:8799".into(),
             can_manage: true,
             note: String::new(),
+            capabilities: None,
         };
         assert!(
             manage

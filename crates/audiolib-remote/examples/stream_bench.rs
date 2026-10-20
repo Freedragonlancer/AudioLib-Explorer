@@ -12,7 +12,8 @@
 //! memory, 0.5 s prebuffer at start and after a seek, pause when the ring runs dry and
 //! resume once 2 s are buffered (the engine's rules). Arrowing follows the desktop: a
 //! selection starts its stream after resting 180 ms, its waveform after the prebuffer.
-//! Results are `RESULT` JSON lines.
+//! Results are `RESULT` JSON lines. `--quick` measures only the first sound, `--seconds`
+//! of play and one seek per record (no fresh-seek passes, no waveform).
 use audiolib_core::AudioFile;
 use audiolib_remote::{
     AudioRoute, MemoryCache, MemoryReader, MemoryStream, RemoteClient, RemoteError, RouteOptions,
@@ -32,6 +33,8 @@ const BLOCK_FRAMES: u64 = 2048;
 const TICK: Duration = Duration::from_millis(5);
 /// `--transcode on|off` (default on): the server profile's "transcode auditions" choice.
 static TRANSCODE: AtomicBool = AtomicBool::new(true);
+/// `--quick`: first sound, play and one seek only (no fresh-seek passes, no waveform).
+static QUICK: AtomicBool = AtomicBool::new(false);
 
 fn route_options() -> RouteOptions {
     RouteOptions {
@@ -60,6 +63,10 @@ fn args() -> Args {
     };
     let mut items = std::env::args().skip(1);
     while let Some(flag) = items.next() {
+        if flag == "--quick" {
+            QUICK.store(true, Ordering::Relaxed);
+            continue;
+        }
         let value = items.next().unwrap_or_default();
         match flag.as_str() {
             "--server" => args.server = value,
@@ -316,6 +323,7 @@ fn fresh_seek(client: &RemoteClient, file: &AudioFile, listen: f64) -> (Option<D
 
 fn play_record(client: &RemoteClient, args: &Args, file: &AudioFile) {
     let started = Instant::now();
+    let started_epoch_ms = epoch_ms();
     let (stream, route) = match open(client, file) {
         Ok(opened) => opened,
         Err(error) => {
@@ -361,6 +369,30 @@ fn play_record(client: &RemoteClient, args: &Args, file: &AudioFile) {
     let stalls_after_seek = player.stalls - stalls_play;
     let played_format = format!("{}/{}ch", player.wav.rate, player.wav.channels);
     let bitrate_mbps = f64::from(player.wav.rate) * player.wav.align as f64 * 8.0 / 1e6;
+    if QUICK.load(Ordering::Relaxed) {
+        let stalled_after_seek = player.stalled - stalled_play;
+        println!(
+            "RESULT {}",
+            serde_json::json!({
+                "label": args.label,
+                "id": file.id,
+                "source": format!("{}k/{}/{}ch", file.sample_rate / 1000, file.bit_depth, file.channels),
+                "route": route.tag(),
+                "played_format": played_format,
+                "played_mbps": (bitrate_mbps * 100.0).round() / 100.0,
+                "started_epoch_ms": started_epoch_ms,
+                "ended_epoch_ms": epoch_ms(),
+                "first_sound": first.is_some(),
+                "ttfa_ms": ttfa.as_millis(),
+                "stalls": stalls_play,
+                "stalled_ms": stalled_play.as_millis(),
+                "seek_ms": seek.map(|s| s.as_millis()),
+                "stalls_after_seek": stalls_after_seek,
+                "stalled_after_seek_ms": stalled_after_seek.as_millis(),
+            })
+        );
+        return;
+    }
     let (seek_late, stalls_late) = {
         drop(player);
         drop(stream);
@@ -395,6 +427,7 @@ fn play_record(client: &RemoteClient, args: &Args, file: &AudioFile) {
             "route": route.tag(),
             "played_format": played_format,
             "played_mbps": (bitrate_mbps * 100.0).round() / 100.0,
+            "started_epoch_ms": started_epoch_ms,
             "ttfa_ms": ttfa.as_millis(),
             "stalls": stalls_play,
             "stalled_ms": stalled_play.as_millis(),

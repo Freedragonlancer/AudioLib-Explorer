@@ -7,6 +7,7 @@ mod audition;
 mod decoder;
 #[cfg(feature = "playback")]
 mod engine;
+mod list_waveform;
 mod source;
 mod spectral;
 #[cfg(test)]
@@ -16,6 +17,10 @@ mod wav_metadata;
 mod waveform;
 #[cfg(feature = "playback")]
 pub use audition::AuditionSettings;
+pub use list_waveform::{
+    LIST_WAVEFORM_ZOOM_LEVEL, list_samples_per_pixel, list_waveform_with_cancel,
+    merge_list_channels, quantize_list_peak,
+};
 pub use source::{
     ByteSource, SourceBuffer, SourceOpener, is_stream_source, register_buffered_stream_source,
     register_stream_source, unregister_stream_source,
