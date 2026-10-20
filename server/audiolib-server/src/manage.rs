@@ -84,6 +84,10 @@ pub struct CapabilitiesResponse {
     /// Effective `pregenerate_list_waveforms` (read-only here; see `PATCH /settings`).
     #[serde(default)]
     pub pregenerate_list_waveforms: bool,
+    /// List waveform cache jobs and the `list_waveform_rate` setting (§9.5); absent on
+    /// older servers (= unsupported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_waveform_jobs: Option<crate::wf_job::ListWaveformJobsCapability>,
 }
 
 impl AppState {

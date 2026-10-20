@@ -165,6 +165,23 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
                 "/waveforms/pregeneration/resume",
                 post(resume_pregeneration).route_layer(manage()),
             )
+            // List waveform cache jobs (doc/api/README.md §9.5).
+            .route(
+                "/waveforms/jobs",
+                post(start_list_waveform_job).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/jobs/current/pause",
+                post(pause_list_waveform_job).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/jobs/current/resume",
+                post(resume_list_waveform_job).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/jobs/current/stop",
+                post(stop_list_waveform_job).route_layer(manage()),
+            )
             .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES)),
     );
     let protected = timed_protected
@@ -343,6 +360,10 @@ fn managed_route(method: &Method, path: &str) -> bool {
             "/scans/{session_id}/cancel",
             "/waveforms/pregeneration/pause",
             "/waveforms/pregeneration/resume",
+            "/waveforms/jobs",
+            "/waveforms/jobs/current/pause",
+            "/waveforms/jobs/current/resume",
+            "/waveforms/jobs/current/stop",
         ]
         .iter()
         .any(|managed| path.ends_with(*managed)),
@@ -464,6 +485,7 @@ async fn capabilities(
             ..ListWaveformsCapability::default()
         }),
         pregenerate_list_waveforms: service.security().pregenerate_list_waveforms(),
+        list_waveform_jobs: Some(crate::wf_job::ListWaveformJobsCapability::default()),
     })
 }
 
@@ -631,6 +653,116 @@ async fn resume_pregeneration(
     Extension(state): Extension<AppState>,
 ) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
     set_pregeneration_paused(state, false).await
+}
+
+fn job_refusal(refusal: list_waveform::JobRefusal) -> ApiError {
+    match refusal {
+        list_waveform::JobRefusal::Busy(id) => ApiError::job_busy(id),
+        list_waveform::JobRefusal::NoJob => {
+            ApiError::job_state("No list waveform job is running or paused")
+        }
+        list_waveform::JobRefusal::Unavailable => {
+            ApiError::unavailable("The list waveform cache (waveforms.db) is unavailable")
+        }
+        list_waveform::JobRefusal::Failed(error) => ApiError::from(error),
+    }
+}
+
+/// `POST /waveforms/jobs` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobRequest {
+    mode: serde_json::Value,
+    #[serde(default)]
+    confirm: Option<serde_json::Value>,
+}
+
+/// `POST /waveforms/jobs` (§9.5.3; `manage_mode`): 202 with the full status.
+async fn start_list_waveform_job(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<(StatusCode, Json<list_waveform::ListWaveformStatus>), ApiError> {
+    let value: serde_json::Value = json_body(&headers, body)?;
+    if !value.is_object() {
+        return Err(ApiError::validation(
+            "The request body must be a JSON object",
+        ));
+    }
+    let request: JobRequest = serde_json::from_value(value)
+        .map_err(|error| ApiError::validation(format!("Invalid job request: {error}")))?;
+    let mode = match &request.mode {
+        serde_json::Value::String(name) => crate::wf_job::JobMode::parse(name).ok_or_else(|| {
+            ApiError::unsupported_mode(format!(
+                "unsupported list waveform job mode {name:?} (expected missing, rebuild or failed)"
+            ))
+        })?,
+        _ => return Err(ApiError::validation("mode must be a string")),
+    };
+    match (&request.confirm, mode) {
+        (None, crate::wf_job::JobMode::Rebuild) => {
+            return Err(ApiError::confirm_required(
+                "mode rebuild clears the list waveform cache; send \"confirm\": \"rebuild\"",
+            ));
+        }
+        (Some(serde_json::Value::String(text)), crate::wf_job::JobMode::Rebuild)
+            if text == "rebuild" => {}
+        (Some(_), crate::wf_job::JobMode::Rebuild) => {
+            return Err(ApiError::confirm_required(
+                "confirm must be \"rebuild\" for mode rebuild",
+            ));
+        }
+        // Ignored for the other modes.
+        _ => {}
+    }
+    let status = blocking_api(move || {
+        state
+            .list_waveforms()
+            .start_job(mode)
+            .map_err(job_refusal)?;
+        state
+            .list_waveforms()
+            .status(&state)
+            .map_err(ApiError::from)
+    })
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(status)))
+}
+
+async fn control_list_waveform_job(
+    state: AppState,
+    action: fn(&list_waveform::ListWaveforms) -> Result<(), list_waveform::JobRefusal>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    let status = blocking_api(move || {
+        action(state.list_waveforms()).map_err(job_refusal)?;
+        state
+            .list_waveforms()
+            .status(&state)
+            .map_err(ApiError::from)
+    })
+    .await?;
+    Ok(Json(status))
+}
+
+/// `POST /waveforms/jobs/current/pause` (idempotent; persists across restarts).
+async fn pause_list_waveform_job(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    control_list_waveform_job(state, |list| list.pause_job(true)).await
+}
+
+/// `POST /waveforms/jobs/current/resume` (idempotent).
+async fn resume_list_waveform_job(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    control_list_waveform_job(state, |list| list.pause_job(false)).await
+}
+
+/// `POST /waveforms/jobs/current/stop`: the job ends `cancelled`; generated entries stay.
+async fn stop_list_waveform_job(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    control_list_waveform_job(state, list_waveform::ListWaveforms::stop_job).await
 }
 
 /// Run blocking library work off the async executor.
