@@ -298,18 +298,26 @@ impl WaveformsDb {
             .unwrap_or(0) as u64
     }
 
-    /// Blocking. Write a read-only snapshot to `dest` (`VACUUM INTO`), then stamp its
-    /// `meta` with `generated_at`, `library_id`, `revision` and `encoding`.
-    pub fn bundle(&self, dest: &Path, library_id: &str, revision: u64) -> Result<()> {
+    /// Blocking. Write a read-only snapshot to `dest` (`VACUUM INTO` on a separate
+    /// read-only connection, so writers and `POST /waveforms` lookups are not blocked),
+    /// then stamp its `meta` with `generated_at`, `library_id`, `revision` and
+    /// `encoding`. Returns the bundle's entity tag (SHA-256 of the finished file).
+    pub fn bundle(&self, dest: &Path, library_id: &str, revision: u64) -> Result<String> {
         self.flush();
+        // Make sure the file and its WAL exist before the read-only connection opens it.
+        drop(self.connection(true)?);
         let generated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         {
-            let guard = self.connection(true)?.expect("created");
-            guard
-                .as_ref()
-                .expect("open")
+            let reader = Connection::open_with_flags(
+                &self.path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(sql)?;
+            reader.busy_timeout(Duration::from_secs(5)).map_err(sql)?;
+            reader
                 .execute("VACUUM INTO ?1", [dest.to_string_lossy()])
                 .map_err(sql)?;
         }
@@ -330,9 +338,34 @@ impl WaveformsDb {
             )
             .map_err(sql)?;
         }
-        Ok(())
+        drop(conn);
+        file_etag(dest)
     }
 }
+
+/// Bundle entity tag: `"wfb1-<first 16 bytes of SHA-256 of the file, hex>"`.
+pub fn file_etag(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        context.update(&buffer[..read]);
+    }
+    let digest = context.finish();
+    let hex: String = digest.as_ref()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(format!("\"wfb1-{hex}\""))
+}
+
+/// One `GET /waveforms/bundle` preparation at a time; others get 503 `BUSY`.
+pub static BUNDLE_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 impl Drop for WaveformsDb {
     fn drop(&mut self) {
@@ -489,7 +522,8 @@ mod tests {
         assert_eq!(db.count(), 300);
         assert_eq!(db.get(7).unwrap().etag, "new");
         let out = dir.path().join("bundle.db");
-        db.bundle(&out, "lib", 42).unwrap();
+        let etag = db.bundle(&out, "lib", 42).unwrap();
+        assert_eq!(etag, file_etag(&out).unwrap());
         validate_bundle(&out).unwrap();
         let conn = Connection::open(&out).unwrap();
         let rev: String = conn
@@ -500,6 +534,82 @@ mod tests {
         assert_eq!(rev, "42");
         db.retain(|id| id <= 10);
         assert_eq!(db.count(), 10);
+    }
+
+    #[test]
+    fn writes_during_bundling_are_found_again_by_etag() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(WaveformsDb::open(dir.path()).unwrap());
+        let mk = |id: i64, v: u32| Row {
+            file_id: id,
+            etag: format!("e{id}-{v}"),
+            src_mtime: 1,
+            src_size: 1,
+            n: 128,
+            blob: to_blob(&[100; 256]),
+        };
+        for id in 1..=20_000 {
+            db.queue(mk(id, 0));
+        }
+        db.flush();
+        let writer = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for round in 1..=20 {
+                    for id in (round..=20_000).step_by(97) {
+                        db.queue(mk(id, round as u32));
+                    }
+                    db.flush();
+                }
+            })
+        };
+        let out = dir.path().join("b.db");
+        let etag = db.bundle(&out, "lib", 1).unwrap();
+        writer.join().unwrap();
+        db.flush();
+        assert!(etag.starts_with("\"wfb1-"));
+        validate_bundle(&out).unwrap();
+        // Client resume: every row whose etag differs from the bundle is re-fetched,
+        // so the final state equals the server's.
+        let bundle = Connection::open(&out).unwrap();
+        let mut stale = 0;
+        for id in 1..=20_000 {
+            let server = db.etag(id).unwrap();
+            let local: String = bundle
+                .query_row(
+                    "SELECT etag FROM list_waveforms WHERE file_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if local != server {
+                stale += 1;
+            }
+        }
+        // No write made during bundling was lost, and a client resuming from the
+        // bundle by etag re-fetches exactly the rows written after the snapshot.
+        let mut expected_stale = 0;
+        for id in 1..=20_000_i64 {
+            let last = (1..=20_i64)
+                .rev()
+                .find(|r| id >= *r && (id - r) % 97 == 0)
+                .unwrap_or(0);
+            assert_eq!(db.etag(id).unwrap(), format!("e{id}-{last}"));
+            let local: String = bundle
+                .query_row(
+                    "SELECT etag FROM list_waveforms WHERE file_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let bundled_version: i64 = local.rsplit('-').next().unwrap().parse().unwrap();
+            assert!(bundled_version <= last);
+            if bundled_version < last {
+                expected_stale += 1;
+            }
+        }
+        assert_eq!(stale, expected_stale);
+        assert_eq!(db.count(), 20_000);
     }
 
     #[test]
