@@ -199,7 +199,7 @@ fn default_list_waveform_workers() -> usize {
     1
 }
 fn default_list_waveform_rate() -> u32 {
-    10
+    crate::auth::DEFAULT_LIST_WAVEFORM_RATE
 }
 fn default_ffmpeg_path() -> PathBuf {
     PathBuf::from(DEFAULT_FFMPEG_PATH)

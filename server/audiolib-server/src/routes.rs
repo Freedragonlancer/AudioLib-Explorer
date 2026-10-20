@@ -474,9 +474,12 @@ fn settings_response(
 ) -> SettingsResponse {
     let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
         security.pregenerate_list_waveforms_with_source();
+    let (list_waveform_rate, list_waveform_rate_source) = security.list_waveform_rate_with_source();
     SettingsResponse {
         pregenerate_list_waveforms,
         pregenerate_list_waveforms_source,
+        list_waveform_rate,
+        list_waveform_rate_source,
         can_change: security.manage_mode().allows(classify(headers, connection)),
     }
 }
@@ -501,6 +504,8 @@ async fn get_settings(
 struct SettingsPatch {
     #[serde(default, deserialize_with = "present_value")]
     pregenerate_list_waveforms: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "present_value")]
+    list_waveform_rate: Option<Option<u32>>,
 }
 
 /// `Some(None)` for an explicit JSON `null`, `None` for an absent field.
@@ -533,6 +538,19 @@ async fn patch_settings(
         }
         let patch: SettingsPatch = serde_json::from_value(value)
             .map_err(|error| ApiError::validation(format!("Invalid settings: {error}")))?;
+        if let Some(Some(rate)) = patch.list_waveform_rate
+            && !(1..=1000).contains(&rate)
+        {
+            return Err(ApiError::validation(
+                "list_waveform_rate must be an integer in 1..=1000 or null",
+            ));
+        }
+        if let Some(value) = patch.list_waveform_rate {
+            security.update_settings_locked(&lease, |settings| {
+                settings.list_waveform_rate = value;
+            })?;
+            tracing::info!(?value, "list_waveform_rate changed through PATCH /settings");
+        }
         if let Some(value) = patch.pregenerate_list_waveforms {
             security.update_settings_locked(&lease, |settings| {
                 settings.pregenerate_list_waveforms = value;
