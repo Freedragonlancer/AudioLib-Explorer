@@ -268,6 +268,14 @@ mod tests {
     #[test]
     fn errors_classify_forbidden_busy_and_job_state() {
         let (server, _) = server(|request| match request.path.as_str() {
+            "/api/v1/waveforms/jobs"
+                if String::from_utf8_lossy(&request.body).contains("bogus") =>
+            {
+                TestResponse::json(
+                    400,
+                    r#"{"error_code":"VALIDATION","sub_code":"UNSUPPORTED_MODE","message":"unknown mode"}"#,
+                )
+            }
             "/api/v1/waveforms/jobs" => error(409, "BUSY"),
             "/api/v1/waveforms/jobs/current/stop" => error(409, "JOB_STATE"),
             _ => error(403, "MANAGE_FORBIDDEN"),
@@ -280,6 +288,17 @@ mod tests {
         assert_eq!(
             waveform_cache_error(&busy, true).kind,
             WaveformCacheErrorKind::Busy
+        );
+        let invalid = client
+            .manage_json::<WaveformCacheStatus>(
+                "POST",
+                "/waveforms/jobs",
+                Some(&serde_json::json!({"mode": "bogus"})),
+            )
+            .unwrap_err();
+        assert_eq!(
+            waveform_cache_error(&invalid, false).kind,
+            WaveformCacheErrorKind::Validation
         );
         let state = client
             .control_list_waveform_job(WaveformJobControl::Stop)
