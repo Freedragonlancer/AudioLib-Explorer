@@ -180,6 +180,13 @@ pub fn open_remote_startup_with_progress(
     })
 }
 
+/// Whether startup must open ?????: only without a cached snapshot of the
+/// configured server. A newer server revision just syncs in the background.
+fn startup_needs_manager(cached: Option<&CacheState>, configured_url: &str) -> bool {
+    configured_url.trim().is_empty()
+        || !cached.is_some_and(|state| cached_source_matches(&state.server_url, configured_url))
+}
+
 /// Cached IDs are valid only for the configured endpoint. Ignore user spelling of
 /// hosts/default ports and the accepted trailing API suffix when comparing addresses.
 fn cached_source_matches(cached: &str, configured: &str) -> bool {
@@ -1110,8 +1117,20 @@ impl Controller {
             self.remote.lock().unwrap().state = startup.state;
             if let Some(ui) = self.ui.upgrade() {
                 self.publish_data_source(&ui);
+                // The GUI always starts on the placeholder and lets the sync pipeline
+                // prepare the cache, so `deferred` alone is no reason to show the
+                // manager. Open it only when there is no usable cached snapshot for
+                // the configured server (first run or a changed address); revision
+                // drift or an unreachable server are reported by the sync itself.
                 if deferred {
-                    ui.invoke_open_data_source();
+                    let (root, url) = {
+                        let config = self.config.lock().unwrap();
+                        (config.data_root(), config.data_source.server_url.clone())
+                    };
+                    let cached = RemoteCache::new(&root).active();
+                    if startup_needs_manager(cached.as_ref(), &url) {
+                        ui.invoke_open_data_source();
+                    }
                 }
             }
             self.start_sync(false, deferred);
@@ -3351,6 +3370,31 @@ mod tests {
     };
     use audiolib_core::config::{DataSourceMode, DataSourceSettings};
     use audiolib_remote::RemoteError;
+
+    #[test]
+    fn startup_opens_the_manager_only_without_a_cached_snapshot_of_the_server() {
+        use super::startup_needs_manager;
+        let url = "https://sounds.example.test";
+        let cached = |revision| audiolib_remote::CacheState {
+            library_id: "library".into(),
+            server_url: url.into(),
+            revision,
+            ..Default::default()
+        };
+        // A newer server revision (r793 cached, r794 live) is synced in the background.
+        assert!(!startup_needs_manager(Some(&cached(793)), url));
+        assert!(!startup_needs_manager(
+            Some(&cached(794)),
+            "https://sounds.example.test/"
+        ));
+        // First run, no configured address, or a cache of another server.
+        assert!(startup_needs_manager(None, url));
+        assert!(startup_needs_manager(Some(&cached(794)), ""));
+        assert!(startup_needs_manager(
+            Some(&cached(794)),
+            "https://other.example.test"
+        ));
+    }
     use audiolib_remote::{
         CacheState, CachedIdentity, RemoteCache, RemoteRoot, RemoteSecrets, RevisionCheck,
         RootState, SourceAuth,
