@@ -2,8 +2,10 @@
 
 The `47ddd03` through `c0e8af9` builds remain excluded from the planned Release.
 The reported Mac startup took 954 seconds (411 seconds tokenization, 542 seconds FTS5),
-and retained an 18.9 GB WAL. These are release blockers. Functional regression tests
-and Windows measurements do not replace a rerun on that Mac and its original database.
+and retained an 18.9 GB WAL. These builds are not release candidates. The user has
+explicitly deferred a rerun on that Mac; this repair is accepted through code review,
+functional regressions and owned-copy checks. Windows measurements do not establish
+that Mac's new startup time or invalidate its earlier report.
 
 ## Resumable writable-library startup
 
