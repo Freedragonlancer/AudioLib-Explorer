@@ -122,6 +122,7 @@ impl WaveformsDb {
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::Database(format!("{}: {error}", parent.display())))?;
         }
+        remove_stale_bundle_files(path);
         Ok(Self {
             path: path.to_path_buf(),
             conn: Mutex::new(open_connection(path)?),
@@ -293,6 +294,35 @@ impl WaveformsDb {
         let renamed = std::fs::rename(validated, &self.path);
         *conn = open_connection(&self.path)?;
         renamed.map_err(|error| Error::Database(format!("waveforms.db replace: {error}")))
+    }
+}
+
+/// Remove `waveforms.db.bundle-<pid>-<n>.tmp` downloads (and their SQLite sidecars)
+/// left in the directory of `path` by an earlier process that stopped mid-import.
+/// Files of this process are kept, as an import may be running. Best effort.
+fn remove_stale_bundle_files(path: &Path) {
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let prefix = format!("{WAVEFORMS_DB_FILE}.bundle-");
+    let own = format!("{prefix}{}-", std::process::id());
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(&prefix) && name.contains(".tmp") && !name.starts_with(&own) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => tracing::info!(file = name, "removed a stale waveform bundle download"),
+                Err(error) => tracing::debug!(%error, file = name, "stale bundle file kept"),
+            }
+        }
     }
 }
 
@@ -508,6 +538,22 @@ mod tests {
         assert_eq!(db.get(1).unwrap().unwrap().etag, "page");
         assert_eq!(db.get(2).unwrap().unwrap().etag, "bundle");
         assert_eq!(db.get(3).unwrap().unwrap().etag, "page");
+    }
+
+    #[test]
+    fn opening_removes_stale_bundle_downloads_of_other_processes_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        let stale = dir.join("waveforms.db.bundle-0-3.tmp");
+        let stale_journal = dir.join("waveforms.db.bundle-0-3.tmp-journal");
+        let own = dir.join(format!("waveforms.db.bundle-{}-0.tmp", std::process::id()));
+        let unrelated = dir.join("library.db");
+        for file in [&stale, &stale_journal, &own, &unrelated] {
+            std::fs::write(file, b"x").unwrap();
+        }
+        let _db = WaveformsDb::open(&dir.join(WAVEFORMS_DB_FILE)).unwrap();
+        assert!(!stale.exists() && !stale_journal.exists());
+        assert!(own.exists() && unrelated.exists());
     }
 
     #[test]
