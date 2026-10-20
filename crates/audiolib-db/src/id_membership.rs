@@ -42,6 +42,7 @@ impl DenseMembership {
         Some(!was_present)
     }
 
+    #[cfg(test)]
     fn remove(&mut self, id: i64) -> Option<bool> {
         let (word, mask) = self.position(id)?;
         let was_present = self.words[word] & mask != 0;
@@ -67,11 +68,22 @@ impl IdMembership {
     /// Each linear discovery pass observes cancellation at least every 1024 IDs.
     pub(crate) fn for_ranked_ids<E>(
         ids: &[i64],
-        mut check_cancel: impl FnMut() -> Result<(), E>,
+        check_cancel: impl FnMut() -> Result<(), E>,
     ) -> Result<Self, E> {
+        Ok(Self::try_dense_for_ranked_ids(ids, check_cancel)?
+            .unwrap_or_else(|| Self::sparse(ids.len())))
+    }
+
+    /// Discover compact domains without allocating a fallback HashSet. None
+    /// leaves sparse rankings on their caller's existing bounded SQL path.
+    /// Accepted bitmaps use at most 1 MiB, including both vectors' word rounding.
+    pub(crate) fn try_dense_for_ranked_ids<E>(
+        ids: &[i64],
+        mut check_cancel: impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Self>, E> {
         check_cancel()?;
         let Some(&first) = ids.first() else {
-            return Ok(Self::sparse(0));
+            return Ok(None);
         };
         let (mut min, mut max) = (first, first);
         for (index, &id) in ids.iter().enumerate() {
@@ -89,10 +101,10 @@ impl IdMembership {
             && span <= ids.len().saturating_mul(MAX_SPAN_PER_RANKED_ID) as i128
         {
             let span = usize::try_from(span).expect("Bounded positive dense-ID span");
-            return Ok(Self::Dense(DenseMembership::new(min, span)));
+            return Ok(Some(Self::Dense(DenseMembership::new(min, span))));
         }
         if ids.len() < MIN_TWO_DENSE_IDS {
-            return Ok(Self::sparse(ids.len()));
+            return Ok(None);
         }
 
         // Legacy small identities and subsequent epoch identities form two dense
@@ -125,19 +137,19 @@ impl IdMembership {
             || right_span > right_count.saturating_mul(MAX_SPAN_PER_RANKED_ID) as i128
             || left_span + right_span > MAX_DENSE_SPAN as i128
         {
-            return Ok(Self::sparse(ids.len()));
+            return Ok(None);
         }
         let left_span = usize::try_from(left_span).expect("Bounded positive first ID span");
         let right_span = usize::try_from(right_span).expect("Bounded positive second ID span");
         // Two separately rounded vectors can need one extra word even when the
         // exact bit counts fit. Reject before allocating either vector.
         if left_span.div_ceil(64) + right_span.div_ceil(64) > MAX_DENSE_SPAN / 64 {
-            return Ok(Self::sparse(ids.len()));
+            return Ok(None);
         }
-        Ok(Self::TwoDense(
+        Ok(Some(Self::TwoDense(
             DenseMembership::new(min, left_span),
             DenseMembership::new(right_min, right_span),
-        ))
+        )))
     }
 
     /// Insert an SQL candidate. Dense candidates outside the ranking domain cannot
@@ -153,7 +165,8 @@ impl IdMembership {
         }
     }
 
-    /// Remove a missing record using the same transaction's identity set.
+    /// Exercise bit removal when checking exact membership domain boundaries.
+    #[cfg(test)]
     pub(crate) fn remove(&mut self, id: &i64) -> bool {
         match self {
             Self::Dense(dense) => dense.remove(*id).unwrap_or(false),

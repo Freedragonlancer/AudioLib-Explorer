@@ -17,7 +17,8 @@ use crate::util::{fnv64, unix_now, write_atomic};
 use audiolib_core::DataProvider;
 use audiolib_core::server_url::ServerAddress;
 use audiolib_db::{
-    MAX_SNAPSHOT_SCHEMA, MIN_SNAPSHOT_SCHEMA, SqliteProvider, snapshot_schema_supported,
+    MAX_SNAPSHOT_SCHEMA, MIN_SNAPSHOT_SCHEMA, SnapshotUpgradeProgress, SqliteProvider,
+    snapshot_schema_supported,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -246,18 +247,33 @@ pub enum SyncProgress {
         written: u64,
         total: Option<u64>,
     },
+    /// Flushing the downloaded snapshot to disk before validation.
+    Writing,
     Validating,
     Preparing(CachePreparation),
     Saving,
 }
 
-/// Offline cache preparation stages. Copy counts are SQLite pages, not total startup progress.
+/// Offline cache preparation stages. Copy counts are SQLite pages and tokenization
+/// counts are records; neither represents total startup progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CachePreparation {
     Checking,
-    Copying { completed: u64, total: u64 },
+    Copying {
+        completed: u64,
+        total: u64,
+    },
     Validating,
     Upgrading,
+    /// Recomputing derived text, counted against the snapshot's actual record count.
+    Tokenizing {
+        completed: u64,
+        total: u64,
+    },
+    /// Building the FTS5 index from the recomputed text; duration is not predictable.
+    BuildingFts,
+    /// Completing extracted tag state before the owned snapshot can be published.
+    SourceTags,
     Saving,
 }
 
@@ -741,7 +757,57 @@ fn validate_snapshot_with_progress_cancellable(
     // owned staging, not a live/user library; upgrade without creating WAL sidecars.
     progress(CachePreparation::Upgrading);
     check_cancelled(cancel)?;
-    if SqliteProvider::upgrade_owned_snapshot_cancellable(path, cancel)? {
+    let upgrade_started = Instant::now();
+    let mut last_text_log = Instant::now() - Duration::from_secs(5);
+    let upgraded =
+        SqliteProvider::upgrade_owned_snapshot_with_progress_cancellable(path, cancel, |stage| {
+            match stage {
+                SnapshotUpgradeProgress::Tokenizing { completed, total } => {
+                    if completed == 0
+                        || completed == total
+                        || last_text_log.elapsed() >= Duration::from_secs(5)
+                    {
+                        tracing::info!(
+                            completed,
+                            total,
+                            elapsed_ms = upgrade_started.elapsed().as_millis() as u64,
+                            "Owned snapshot search text progress"
+                        );
+                        last_text_log = Instant::now();
+                    }
+                }
+                _ => tracing::info!(
+                    ?stage,
+                    elapsed_ms = upgrade_started.elapsed().as_millis() as u64,
+                    "Owned snapshot search preparation stage"
+                ),
+            }
+            progress(match stage {
+                SnapshotUpgradeProgress::Preparing => CachePreparation::Upgrading,
+                SnapshotUpgradeProgress::Tokenizing { completed, total } => {
+                    CachePreparation::Tokenizing { completed, total }
+                }
+                SnapshotUpgradeProgress::BuildingFts => CachePreparation::BuildingFts,
+                SnapshotUpgradeProgress::SourceTags => CachePreparation::SourceTags,
+                SnapshotUpgradeProgress::Indexing { .. } => CachePreparation::BuildingFts,
+                SnapshotUpgradeProgress::Validating => CachePreparation::Validating,
+                SnapshotUpgradeProgress::BackingUp => CachePreparation::Upgrading,
+                SnapshotUpgradeProgress::Checkpoint => CachePreparation::Saving,
+            });
+        })
+        .inspect_err(|error| {
+            tracing::info!(
+                %error,
+                elapsed_ms = upgrade_started.elapsed().as_millis() as u64,
+                "Owned snapshot search preparation stopped"
+            );
+        })?;
+    tracing::info!(
+        upgraded,
+        elapsed_ms = upgrade_started.elapsed().as_millis() as u64,
+        "Owned snapshot search preparation complete"
+    );
+    if upgraded {
         progress(CachePreparation::Validating);
         check_cancelled(cancel)?;
         let upgraded = SqliteProvider::check_owned_file_cancellable(path, cancel)?;
@@ -875,10 +941,11 @@ pub fn sync_library(
         let mut attempt = 0;
         let mut transient = 0;
         let meta = loop {
-            match client.download_snapshot(
+            let report = std::cell::RefCell::new(&mut *progress);
+            let downloaded = client.download_snapshot_staged(
                 &staging,
                 &mut |stage| {
-                    progress(match stage {
+                    (report.borrow_mut())(match stage {
                         SnapshotProgress::Downloading { received, total } => {
                             SyncProgress::Downloading { received, total }
                         }
@@ -887,8 +954,14 @@ pub fn sync_library(
                         }
                     })
                 },
+                &mut |stage| match stage {
+                    crate::client::DownloadStage::Writing => {
+                        (report.borrow_mut())(SyncProgress::Writing)
+                    }
+                },
                 cancel,
-            ) {
+            );
+            match downloaded {
                 Err(RemoteError::Busy {
                     message,
                     retry_after,
@@ -924,11 +997,19 @@ pub fn sync_library(
             return Err(RemoteError::Cancelled);
         }
         progress(SyncProgress::Validating);
+        let validating = Instant::now();
+        tracing::info!("Snapshot stage start: validating");
         let info = validate_snapshot_with_progress_cancellable(
             &staging,
             &mut |stage| progress(SyncProgress::Preparing(stage)),
             cancel,
-        )?;
+        );
+        tracing::info!(
+            elapsed_ms = validating.elapsed().as_millis() as u64,
+            ok = info.is_ok(),
+            "Snapshot stage end: validating"
+        );
+        let info = info?;
         Ok((meta, info))
     })();
     let (meta, info) = match result {
@@ -1133,6 +1214,12 @@ mod tests {
             },
             CachePreparation::Validating,
             CachePreparation::Upgrading,
+            CachePreparation::Tokenizing {
+                completed: 0,
+                total: 1,
+            },
+            CachePreparation::BuildingFts,
+            CachePreparation::SourceTags,
             CachePreparation::Saving,
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -1217,7 +1304,16 @@ mod tests {
 
     #[test]
     fn cancelling_downloaded_snapshot_validation_preserves_active_cache() {
-        for stage in [CachePreparation::Validating, CachePreparation::Upgrading] {
+        for stage in [
+            CachePreparation::Validating,
+            CachePreparation::Upgrading,
+            CachePreparation::Tokenizing {
+                completed: 0,
+                total: 1,
+            },
+            CachePreparation::BuildingFts,
+            CachePreparation::SourceTags,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let bytes = old_unicode_snapshot(directory.path());
             let server = TestServer::start(move |request| match request.path.as_str() {
@@ -1343,12 +1439,41 @@ mod tests {
         );
         let (done, total) = copies.last().unwrap();
         assert_eq!(done, total);
-        assert!(events.windows(3).any(|stages| stages
-            == [
-                CachePreparation::Validating,
-                CachePreparation::Upgrading,
-                CachePreparation::Validating
-            ]));
+        let validation_positions = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| (*event == CachePreparation::Validating).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(validation_positions.len(), 2, "{events:?}");
+        let text_progress = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match *event {
+                CachePreparation::Tokenizing { completed, total } => {
+                    Some((index, completed, total))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!text_progress.is_empty(), "{events:?}");
+        assert_eq!(
+            text_progress
+                .first()
+                .map(|(_, done, total)| (*done, *total)),
+            Some((0, 1))
+        );
+        assert_eq!(
+            text_progress.last().map(|(_, done, total)| (*done, *total)),
+            Some((1, 1))
+        );
+        assert!(text_progress.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+        let fts_position = events
+            .iter()
+            .position(|event| *event == CachePreparation::BuildingFts)
+            .expect("the FTS5 build must have its own preparation stage");
+        assert!(validation_positions[0] < text_progress[0].0);
+        assert!(text_progress.last().unwrap().0 < fts_position);
+        assert!(fts_position < validation_positions[1]);
         assert_ne!(prepared.database_file, state.database_file);
         assert_eq!(prepared.revision, state.revision);
         assert_eq!(prepared.server_url, state.server_url);

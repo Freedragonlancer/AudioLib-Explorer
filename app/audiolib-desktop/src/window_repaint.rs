@@ -5,6 +5,7 @@ use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEve
 /// Install once, before the first show, on the event-loop-owned desktop window.
 pub(crate) fn install(window: &slint::Window) {
     window.on_winit_window_event(|window, event| {
+        crate::gui_search_benchmark::window_event(window, event);
         handle_event(window, event);
         EventResult::Propagate
     });

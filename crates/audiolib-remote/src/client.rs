@@ -213,7 +213,7 @@ pub struct RemoteClient {
     // Timeout profiles over the shared keep-alive agent ([`crate::abort::shared_agent`]).
     pub(crate) agent: Timeouts,
     library: Timeouts,
-    bulk: Timeouts,
+    pub(crate) bulk: Timeouts,
     pub(crate) writes: Timeouts,
     expected_library_id: Option<String>,
     library_changed: Arc<AtomicBool>,
@@ -299,7 +299,10 @@ pub(crate) fn call_cancellable<T: Send + 'static>(
 /// Keep the HTTP exchange and file writes on the caller while a scoped watcher shuts
 /// its sockets down on cancellation. The watcher always joins before returning, and
 /// the caller has already closed/removed any partial file when cancellation returns.
-fn cancellable_io<T>(cancel: &AtomicBool, exchange: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn cancellable_io<T>(
+    cancel: &AtomicBool,
+    exchange: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     if cancel.load(Ordering::Acquire) {
         return Err(RemoteError::Cancelled);
     }
@@ -595,14 +598,6 @@ impl RemoteClient {
         self.write("POST", "/audio/metadata/batch", Some(&body))
     }
 
-    /// `POST /audio/{id}/plays` (no body): `play_count` + 1 and a play history row.
-    pub fn record_play(&self, id: i64) -> Result<FileWrite> {
-        if id <= 0 {
-            return Err(RemoteError::Validation(format!("invalid audio id {id}")));
-        }
-        self.write("POST", &format!("/audio/{id}/plays"), None)
-    }
-
     /// Audition source of a record for `route` (§8, §8.1): the original `/stream`, or a
     /// `/preview` (a FLAC preview is decoded to PCM and needs the record's duration). A
     /// large file is fetched [`READ_AHEAD_SECONDS`](crate::stream::READ_AHEAD_SECONDS)
@@ -851,8 +846,21 @@ impl RemoteClient {
         progress: &mut dyn FnMut(SnapshotProgress),
         cancel: &AtomicBool,
     ) -> Result<SnapshotMeta> {
+        self.download_snapshot_staged(destination, progress, &mut |_| {}, cancel)
+    }
+
+    /// [`Self::download_snapshot`], also reporting [`DownloadStage::Writing`] before the
+    /// file is flushed to disk. A cancel during the flush returns at once; the abandoned
+    /// flush finishes on its own thread and then removes the partial file.
+    pub fn download_snapshot_staged(
+        &self,
+        destination: &Path,
+        progress: &mut dyn FnMut(SnapshotProgress),
+        stage: &mut dyn FnMut(DownloadStage),
+        cancel: &AtomicBool,
+    ) -> Result<SnapshotMeta> {
         cancellable_io(cancel, || {
-            self.download_snapshot_io(destination, progress, cancel)
+            self.download_snapshot_io(destination, progress, stage, cancel)
         })
     }
 
@@ -860,6 +868,7 @@ impl RemoteClient {
         &self,
         destination: &Path,
         progress: &mut dyn FnMut(SnapshotProgress),
+        stage: &mut dyn FnMut(DownloadStage),
         cancel: &AtomicBool,
     ) -> Result<SnapshotMeta> {
         let url = format!("{}/library/snapshot", self.api);
@@ -937,6 +946,8 @@ impl RemoteClient {
             if compressed {
                 progress(SnapshotProgress::Decompressing { written: 0, total });
             }
+            let download_started = std::time::Instant::now();
+            tracing::info!(?total, compressed, "Snapshot stage start: downloading");
             loop {
                 if cancel.load(Ordering::Acquire) {
                     return Err(RemoteError::Cancelled);
@@ -972,6 +983,23 @@ impl RemoteClient {
                 }
             }
             throughput.pause(crate::bandwidth::bandwidth());
+            // The last update always reaches the caller (UI throttles drop repeats).
+            if compressed {
+                progress(SnapshotProgress::Decompressing {
+                    written: received,
+                    total,
+                });
+            } else {
+                progress(SnapshotProgress::Downloading {
+                    received,
+                    total: wire_length,
+                });
+            }
+            tracing::info!(
+                received,
+                elapsed_ms = download_started.elapsed().as_millis() as u64,
+                "Snapshot stage end: downloading"
+            );
             let wire_received = wire_count.load(Ordering::Acquire);
             if wire_length.is_some_and(|length| length != wire_received) {
                 return Err(RemoteError::Protocol(format!(
@@ -988,12 +1016,17 @@ impl RemoteClient {
             if received == 0 {
                 return Err(RemoteError::Protocol("snapshot is empty".into()));
             }
-            file.sync_all()?;
-            drop(file);
+            stage(DownloadStage::Writing);
+            flush_abandonable(file, &partial, cancel)?;
             if cancel.load(Ordering::Acquire) {
                 return Err(RemoteError::Cancelled);
             }
+            let renamed = std::time::Instant::now();
             std::fs::rename(&partial, destination)?;
+            tracing::info!(
+                elapsed_ms = renamed.elapsed().as_millis() as u64,
+                "Snapshot stage end: rename"
+            );
             Ok(received)
         })();
         if result.is_err() {
@@ -1001,6 +1034,63 @@ impl RemoteClient {
         }
         meta.bytes = result?;
         Ok(meta)
+    }
+}
+
+/// Stages of [`RemoteClient::download_snapshot_staged`] after the byte stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadStage {
+    /// Flushing the downloaded file to disk (`sync_all`), which can take long on
+    /// slow or busy disks.
+    Writing,
+}
+
+/// `sync_all` on a worker thread the caller can abandon on cancel: the worker keeps
+/// the file, finishes the flush, closes it and then deletes `partial` itself (a file
+/// still open cannot be removed on Windows).
+fn flush_abandonable(file: std::fs::File, partial: &Path, cancel: &AtomicBool) -> Result<()> {
+    let started = std::time::Instant::now();
+    tracing::info!("Snapshot stage start: writing to disk");
+    let abandoned = std::sync::Arc::new(AtomicBool::new(false));
+    let (done, finished) = std::sync::mpsc::sync_channel::<std::io::Result<()>>(1);
+    let worker_abandoned = abandoned.clone();
+    let worker_partial = partial.to_path_buf();
+    std::thread::Builder::new()
+        .name("audiolib-snapshot-flush".into())
+        .spawn(move || {
+            let result = file.sync_all();
+            drop(file);
+            if worker_abandoned.load(Ordering::Acquire) {
+                let _ = std::fs::remove_file(&worker_partial);
+            }
+            let _ = done.send(result);
+        })?;
+    loop {
+        match finished.recv_timeout(WAIT_TICK) {
+            Ok(result) => {
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    "Snapshot stage end: writing to disk"
+                );
+                return Ok(result?);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::Acquire) {
+                    abandoned.store(true, Ordering::Release);
+                    tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "Snapshot stage cancelled: writing to disk"
+                    );
+                    return Err(RemoteError::Cancelled);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(RemoteError::Snapshot(
+                    "snapshot flush worker stopped".into(),
+                ));
+            }
+        }
     }
 }
 
@@ -1306,49 +1396,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn cached_id_writes_require_the_servers_atomic_identity_capability() {
-        let mutations = Arc::new(std::sync::Mutex::new(0));
-        let server = {
-            let mutations = mutations.clone();
-            TestServer::start(move |request| {
-                if request.path == "/api/v1/library" {
-                    return TestResponse::json(
-                        200,
-                        r#"{"library_id":"old-server","schema_version":3,"revision":1}"#,
-                    );
-                }
-                *mutations.lock().unwrap() += 1;
-                TestResponse::json(200, "{}")
-            })
-        };
-        let client = RemoteClient::new(&server.url, "")
-            .unwrap()
-            .with_library_id("old-server")
-            .unwrap();
-        assert_eq!(
-            client.library().unwrap().library_id,
-            "old-server",
-            "older servers remain readable"
-        );
-        assert!(matches!(
-            client.record_play(3),
-            Err(RemoteError::Unsupported(_))
-        ));
-        assert!(matches!(
-            client.remove_audio(&[3]),
-            Err(RemoteError::Unsupported(_))
-        ));
-        assert!(matches!(
-            client.start_scan(&crate::ScanRequest {
-                root: "SFX".into(),
-                ..crate::ScanRequest::default()
-            }),
-            Err(RemoteError::Unsupported(_))
-        ));
-        assert_eq!(*mutations.lock().unwrap(), 0);
     }
 
     #[test]

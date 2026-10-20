@@ -640,7 +640,7 @@ async fn root_path_update_preserves_ids_annotations_extension_metadata_and_tree_
             changed.favorite,
             changed.play_count
         ),
-        ("custom tag", "Keep me", true, 1)
+        ("custom tag", "Keep me", true, 0)
     );
     assert_eq!(changed.attributes["unknown_extension"], "keep");
     assert_eq!(changed.folder_id, first.folder_id);
@@ -923,7 +923,7 @@ async fn another_live_server_reloads_a_relocated_root_before_scan() {
             retained.favorite,
             retained.play_count
         ),
-        ("shared root tag", "shared root note", true, 1)
+        ("shared root tag", "shared root note", true, 0)
     );
     assert_eq!(retained.attributes["unknown_extension"], "keep");
 }

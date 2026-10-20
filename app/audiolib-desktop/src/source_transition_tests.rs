@@ -67,6 +67,8 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         })
         .unwrap(),
         audition_play_on_single_click: false,
+        pregenerate_list_waveforms: false,
+        hold_list_waveform_batches_after_audition: false,
         audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
@@ -1464,7 +1466,8 @@ fn child_deferred_server_cache() {
         playback,
         deferred,
     );
-    assert!(ui.get_library_visible() && ui.get_ds_syncing());
+    // A matching cached snapshot opens the main window; the sync runs in the background.
+    assert!(!ui.get_library_visible() && ui.get_ds_syncing());
     let c = controller.clone();
     let weak = ui.as_weak();
     let waiting = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));

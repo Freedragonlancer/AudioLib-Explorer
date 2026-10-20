@@ -1,6 +1,6 @@
 // crates/audiolib-db/tests/schema_snapshot_merge.rs
 //! Supported old snapshots repair derived state only in owned copies.
-use audiolib_core::{DataProvider, Error, SearchFilters, SearchRequest};
+use audiolib_core::{DataProvider, Error, SearchFilters, SearchRequest, SortOrder};
 use audiolib_db::{SCHEMA_VERSION, SqliteProvider};
 use rusqlite::Connection;
 use std::{fs, path::Path};
@@ -33,6 +33,7 @@ fn obsolete_v3_v4_v5_derived_snapshots_keep_source_bytes_annotations_and_identit
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "DROP INDEX idx_audio_visible_tagged_any;
+                 DROP INDEX idx_audio_visible_tagged_folders;
                  ALTER TABLE audio_files DROP COLUMN source_tags_text;
                  DROP TABLE library_meta;
                  DELETE FROM audiolib_schema_features WHERE feature='tokenization';",
@@ -60,6 +61,7 @@ fn obsolete_v3_v4_v5_derived_snapshots_keep_source_bytes_annotations_and_identit
             let page = provider
                 .search(&SearchRequest {
                     query: "cafe metal".into(),
+                    order_by: SortOrder::Filename,
                     filters: SearchFilters {
                         tagged_only: true,
                         tag_contains: Some("RATTLE".into()),

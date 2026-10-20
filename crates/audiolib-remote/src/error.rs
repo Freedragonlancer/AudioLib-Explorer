@@ -95,6 +95,10 @@ pub enum RemoteError {
     },
     #[error("Validation: {0}")]
     Validation(String),
+    /// `400 VALIDATION` from the list Waveform job endpoints (§9.5.3) with a `sub_code`
+    /// the settings page explains: `CONFIRM_REQUIRED` or `UNSUPPORTED_MODE`.
+    #[error("Validation ({sub_code}): {message}")]
+    JobValidation { sub_code: String, message: String },
     /// `415 PREVIEW_UNSUPPORTED_FORMAT` (this preview codec cannot encode the file) or
     /// `503 TRANSCODER_UNAVAILABLE` (no ffmpeg for `codec=flac`) from `/audio/{id}/preview`
     /// (§8.1): use another codec or the original `/stream`; nothing else is wrong.
@@ -109,6 +113,10 @@ pub enum RemoteError {
     /// [`RemoteError::Busy`] retrying does not help; refresh the scan status instead.
     #[error("Scan state does not allow this: {0}")]
     ScanState(String),
+    /// `409 JOB_STATE` (API §9.5.3): there is no list Waveform job or it has finished;
+    /// refresh the status instead of retrying.
+    #[error("Job state does not allow this: {0}")]
+    JobState(String),
     /// The cached record/session IDs belong to another library (`409 LIBRARY_CHANGED`
     /// or `LIBRARY_ID_REQUIRED`); reject the write and sync before allowing new edits.
     #[error("Server library changed: {0}")]
@@ -167,6 +175,9 @@ pub(crate) struct ErrorBody {
     pub error_code: String,
     #[serde(default)]
     pub message: String,
+    /// Refines `VALIDATION` (§9.4, §9.5.3); empty when absent.
+    #[serde(default)]
+    pub sub_code: String,
 }
 
 impl RemoteError {
@@ -213,6 +224,7 @@ impl RemoteError {
             (_, "MANAGE_FORBIDDEN") => Self::Forbidden(message),
             // Before the generic 409 arm; other 409 codes stay `Busy`.
             (_, "SCAN_STATE") => Self::ScanState(message),
+            (_, "JOB_STATE") => Self::JobState(message),
             (_, "LIBRARY_CHANGED" | "LIBRARY_ID_REQUIRED") => Self::LibraryChanged(message),
             // Before the 503 arm: a `503 BUSY` is a full stream cap, not a starting server.
             (409, _) | (_, "BUSY") | (_, "CANCELLED") => Self::Busy {
@@ -240,6 +252,17 @@ impl RemoteError {
             }
             (413, _) | (_, "PAYLOAD_TOO_LARGE") => Self::PayloadTooLarge(message),
             (507, _) | (_, "INSUFFICIENT_STORAGE") => Self::InsufficientStorage(message),
+            (400, _) | (_, "VALIDATION")
+                if matches!(
+                    parsed.sub_code.as_str(),
+                    "CONFIRM_REQUIRED" | "UNSUPPORTED_MODE"
+                ) =>
+            {
+                Self::JobValidation {
+                    sub_code: parsed.sub_code,
+                    message,
+                }
+            }
             (400, _) | (_, "VALIDATION") => Self::Validation(message),
             (501, _) | (_, "UNSUPPORTED") => Self::Unsupported(message),
             _ => Self::Server {
@@ -390,6 +413,9 @@ impl RemoteError {
                 Self::ScanState(detail) => format!(
                     "The scan's current state does not allow this (409); refresh the scan progress. ({detail})"
                 ),
+                Self::JobState(detail) => format!(
+                    "There is no list Waveform job in progress (409); refresh the status. ({detail})"
+                ),
                 Self::LibraryChanged(detail) => format!(
                     "The server library changed or its identity is unconfirmed (409); nothing was written. Sync before editing again. ({detail})"
                 ),
@@ -426,6 +452,7 @@ impl RemoteError {
                 "音效库根目录离线（NAS 共享未挂载或无法访问），已缓存的音效仍可试听：{message}"
             ),
             Self::Validation(detail) => format!("参数无效：{detail}"),
+            Self::JobValidation { message, .. } => format!("参数无效：{message}"),
             Self::PreviewUnavailable { message, .. } => {
                 format!("服务器无法生成此文件的试听预览，将改用原始文件：{message}")
             }
@@ -435,6 +462,9 @@ impl RemoteError {
             ),
             Self::ScanState(detail) => {
                 format!("扫描当前的状态不允许此操作（409），请刷新扫描进度：{detail}")
+            }
+            Self::JobState(detail) => {
+                format!("当前没有进行中的列表波形任务（409），请刷新状态：{detail}")
             }
             Self::LibraryChanged(detail) => {
                 format!(
@@ -540,11 +570,12 @@ impl From<RemoteError> for audiolib_core::Error {
             RemoteError::NotFound(message) => Self::NotFound(message),
             RemoteError::Busy { message, .. }
             | RemoteError::ScanState(message)
+            | RemoteError::JobState(message)
             | RemoteError::Starting { message, .. }
             | RemoteError::RootOffline { message, .. } => Self::Busy(message),
-            RemoteError::Validation(message) | RemoteError::PayloadTooLarge(message) => {
-                Self::Validation(message)
-            }
+            RemoteError::Validation(message)
+            | RemoteError::JobValidation { message, .. }
+            | RemoteError::PayloadTooLarge(message) => Self::Validation(message),
             RemoteError::Cancelled => Self::Cancelled,
             RemoteError::Io(error) => Self::Io(error),
             other => Self::Database(other.to_string()),
@@ -628,12 +659,17 @@ impl RemoteError {
                 retry_after: *retry_after,
             },
             Self::Validation(detail) => Self::Validation(detail.clone()),
+            Self::JobValidation { sub_code, message } => Self::JobValidation {
+                sub_code: sub_code.clone(),
+                message: message.clone(),
+            },
             Self::PreviewUnavailable { code, message } => Self::PreviewUnavailable {
                 code: code.clone(),
                 message: message.clone(),
             },
             Self::Forbidden(detail) => Self::Forbidden(detail.clone()),
             Self::ScanState(detail) => Self::ScanState(detail.clone()),
+            Self::JobState(detail) => Self::JobState(detail.clone()),
             Self::LibraryChanged(detail) => Self::LibraryChanged(detail.clone()),
             Self::PayloadTooLarge(detail) => Self::PayloadTooLarge(detail.clone()),
             Self::InsufficientStorage(detail) => Self::InsufficientStorage(detail.clone()),

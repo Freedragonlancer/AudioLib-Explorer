@@ -7,6 +7,14 @@ use std::path::PathBuf;
 mod drag;
 pub use drag::{DragOutcome, drag_files, primary_button_down};
 
+/// Explicit diagnostic capture of this process's own GUI completion marker.
+/// Normal application use does not start capture; codec helpers are cross-platform.
+pub mod gui_capture;
+
+/// Opt-in own-window geometry history on the HWND's existing Windows UI thread.
+#[cfg(windows)]
+pub mod gui_geometry;
+
 /// Display a fatal startup diagnostic for a desktop application without a console.
 /// Headless callers should write their diagnostics directly and skip this dialog.
 pub fn show_error_dialog(message: &str) {
@@ -33,6 +41,29 @@ pub fn show_error_dialog(message: &str) {
     }
     #[cfg(not(windows))]
     eprintln!("AudioLib Explorer: {message}");
+}
+
+/// Put the calling thread into background processing mode (lowest CPU scheduling plus
+/// very low I/O and memory priority) for the rest of its life. Intended for optional
+/// background analysis such as list Waveforms, so it never competes with audition
+/// decoding or the audio device. A no-op elsewhere or if Windows refuses.
+pub fn enter_background_thread_mode() {
+    #[cfg(windows)]
+    {
+        const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+        }
+        // SAFETY: GetCurrentThread returns a pseudo handle for the calling thread that
+        // needs no closing; SetThreadPriority only changes this thread's own scheduling
+        // and accepts THREAD_MODE_BACKGROUND_BEGIN for the current thread. Failure is
+        // harmless and ignored.
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -362,6 +393,12 @@ pub fn reveal_path(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn background_mode_applies_only_to_its_own_thread() {
+        std::thread::spawn(enter_background_thread_mode)
+            .join()
+            .unwrap();
+    }
     #[test]
     fn user_secret_round_trips_and_is_not_plaintext_on_windows() {
         let secret = b"token-\xe4\xb8\xad-123";

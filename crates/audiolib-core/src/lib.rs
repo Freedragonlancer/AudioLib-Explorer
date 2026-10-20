@@ -6,13 +6,26 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 pub mod config;
 pub mod library;
+pub mod list_waveform;
+pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
 pub mod server_url;
+pub mod waveform_cache;
 pub use library::*;
+pub use list_waveform::{
+    LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
+    ListWaveformItem, ListWaveformSource, ListWaveformState, MAX_LIST_WAVEFORM_IDS, decode_base64,
+};
+pub use list_waveform_i8::{
+    LIST_WAVEFORM_ENCODING_I8, LIST_WAVEFORM_ENCODING_I16, LIST_WAVEFORM_I8_ETAG_SUFFIX,
+    LIST_WAVEFORM_I8_MAX_BYTES, LIST_WAVEFORM_I8_ZOOM_LEVEL, ListWaveformI8, expand_i8_to_i16,
+    i8_base64_len, quantize_i16_to_i8,
+};
 pub use metadata::{
     SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
 };
@@ -173,12 +186,42 @@ impl Default for SearchRequest {
     }
 }
 impl SearchRequest {
+    /// A lone non-Han letter waits for another searchable character. Surrounding
+    /// punctuation, whitespace and combining accents do not satisfy that minimum.
+    /// Empty browsing, numeric codes, Han characters and multi-term queries remain ready.
+    pub fn needs_more_search_text(&self) -> bool {
+        // Inspect one base character per grapheme so Other_Alphabetic combining
+        // marks (for example Hebrew points) cannot count as another input letter.
+        let mut characters = self.query.graphemes(true).filter_map(|grapheme| {
+            grapheme
+                .chars()
+                .find(|character| character.is_alphanumeric())
+        });
+        let Some(character) = characters.next() else {
+            return false;
+        };
+        character.is_alphabetic()
+            && !matches!(character,
+                '\u{3400}'..='\u{4dbf}'
+                | '\u{4e00}'..='\u{9fff}'
+                | '\u{f900}'..='\u{faff}'
+                | '\u{20000}'..='\u{2ffff}'
+                | '\u{30000}'..='\u{323af}'
+            )
+            && characters.next().is_none()
+    }
+
     /// Validate bounded search input before compiling a parameterized FTS5 query.
     pub fn validate(&self) -> Result<()> {
         if self.query.chars().count() > 500 || self.query.contains(';') || self.query.contains('\0')
         {
             return Err(Error::Validation(
                 "Query exceeds 500 characters or contains a forbidden delimiter".into(),
+            ));
+        }
+        if self.needs_more_search_text() {
+            return Err(Error::Validation(
+                "Enter at least two characters for a letter search".into(),
             ));
         }
         if self.limit == 0 || self.limit > 10_000 {
@@ -411,6 +454,93 @@ pub trait DataProvider: Send + Sync {
         format: LibraryExportFormat,
     ) -> Result<TransferReport>;
     fn import_annotations(&self, source: &Path) -> Result<TransferReport>;
+
+    /// Where this provider's list thumbnail Waveforms come from (doc/api/README.md
+    /// §9.1–§9.3). `Unavailable` (the default) hides the list Waveform column.
+    fn list_waveform_source(&self) -> ListWaveformSource {
+        ListWaveformSource::Unavailable
+    }
+    /// Blocking and cheap: answer up to [`MAX_LIST_WAVEFORM_IDS`] ids from stored list
+    /// Waveforms without decoding audio (a local provider reads `waveform_cache` and only
+    /// reads file Metadata to detect changed files; a server provider sends one
+    /// `POST /waveforms`). Items keep the request order without duplicates. Callers run
+    /// this on a background thread; `cancel` abandons the request.
+    fn list_waveforms(&self, _ids: &[i64], _cancel: Arc<AtomicBool>) -> Result<ListWaveformBatch> {
+        Err(Error::Validation(
+            "This data provider has no list Waveforms".into(),
+        ))
+    }
+    /// Blocking and expensive (decodes the whole file): compute, store and return the
+    /// list Waveform of one record. Only [`ListWaveformSource::Local`] providers compute;
+    /// a server computes `Pending` items itself. Callers run this on a low-priority
+    /// background thread and set `cancel` to stop the decode at its next block.
+    fn compute_list_waveform(
+        &self,
+        _id: i64,
+        _cancel: Arc<AtomicBool>,
+    ) -> Result<ListWaveformState> {
+        Err(Error::Validation(
+            "This data provider does not compute list Waveforms".into(),
+        ))
+    }
+    /// Pre-generation backlog: ascending ids greater than `after` of present records that
+    /// have no stored list Waveform, at most `limit`. Only local providers have one.
+    fn list_waveform_backlog(&self, _after: i64, _limit: usize) -> Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
+
+    // Server list Waveform cache management (doc/api/README.md §9.5). Only server-mode
+    // providers implement these; all block on the network, so callers run them on worker
+    // threads (never the UI thread or audio callbacks). The defaults answer
+    // `Unsupported`.
+
+    /// Whether the server offers generation jobs (`list_waveform_jobs`) and management.
+    fn waveform_cache_capabilities(
+        &self,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheCapabilities> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// `GET /waveforms/status`.
+    fn waveform_cache_status(
+        &self,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheStatus> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// The waveform fields of `GET /settings`.
+    fn waveform_cache_settings(
+        &self,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheSettings> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// `PATCH /settings` (`pregenerate_list_waveforms`, `list_waveform_rate`).
+    fn update_waveform_cache_settings(
+        &self,
+        _patch: &waveform_cache::WaveformCacheSettingsPatch,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheSettings> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// Start a generation job; `Rebuild` requires `confirm_rebuild`.
+    fn start_waveform_cache_job(
+        &self,
+        _mode: waveform_cache::WaveformJobMode,
+        _confirm_rebuild: bool,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheStatus> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// Pause, resume or stop the current job.
+    fn control_waveform_cache_job(
+        &self,
+        _control: waveform_cache::WaveformJobControl,
+    ) -> waveform_cache::WaveformCacheResult<waveform_cache::WaveformCacheStatus> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
+    /// Legacy pre-generation pause/resume (servers without `list_waveform_jobs`).
+    fn control_waveform_pregeneration(
+        &self,
+        _control: waveform_cache::WaveformJobControl,
+    ) -> waveform_cache::WaveformCacheResult<()> {
+        Err(waveform_cache::WaveformCacheError::unsupported())
+    }
 }
 
 /// Resolve an existing scan root using actual filesystem identity, not prefix strings.
@@ -536,6 +666,63 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_lone_letter_waits_without_restricting_other_searches() {
+        for query in [
+            "e",
+            "E",
+            "  e  ",
+            "(e)*",
+            "é",
+            "e\u{301}",
+            "e\u{345}",
+            "Ä",
+            "Ε",
+            "a\u{5b0}",
+            "(a\u{5b0})",
+            "a\u{5b0}\u{345}",
+            "א\u{5b0}",
+            "ب\u{650}",
+        ] {
+            let request = SearchRequest {
+                query: query.into(),
+                ..Default::default()
+            };
+            assert!(request.needs_more_search_text(), "{query:?}");
+            assert!(request.validate().is_err(), "{query:?}");
+        }
+        for query in [
+            "",
+            " ",
+            "1",
+            "1.2",
+            "P-51",
+            "P51",
+            "e1",
+            "雷",
+            "爆",
+            "𠀀",
+            "ex",
+            "plos",
+            "sion",
+            "e b",
+            "a explosion",
+            "e雷",
+            "A.wav",
+            "B.wav",
+            "a\u{5b0}b",
+            "雷\u{5b0}",
+            "1\u{5b0}",
+        ] {
+            let request = SearchRequest {
+                query: query.into(),
+                ..Default::default()
+            };
+            assert!(!request.needs_more_search_text(), "{query:?}");
+            assert!(request.validate().is_ok(), "{query:?}");
+        }
     }
 
     #[test]

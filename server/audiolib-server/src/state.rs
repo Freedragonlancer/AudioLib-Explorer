@@ -2,6 +2,7 @@
 //! Shared server state: the library `DataProvider`, its revision tracker and configured roots.
 //! Every method that touches SQLite or the filesystem is blocking; async handlers call them
 //! through `tokio::task::spawn_blocking`.
+use crate::list_waveform::{ListOptions, ListWaveforms};
 use crate::preview::TranscodeRegistry;
 use crate::revision::{RevisionInfo, RevisionTracker, WriteOutcome};
 use crate::roots::{
@@ -17,14 +18,14 @@ use audiolib_core::{
     AudioFile, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error, LibraryInfo,
     LibraryStats, MetadataPatch, Result,
 };
-use audiolib_db::SqliteProvider;
+use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, PoisonError, RwLock,
+        Arc, Mutex, PoisonError, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -185,6 +186,29 @@ impl From<Error> for OpenError {
     }
 }
 
+/// Why [`AppState::stat_audio`] found no usable file.
+#[derive(Debug)]
+pub enum StatFailure {
+    /// Unknown, outside every root, or not a regular file.
+    Missing,
+    /// The file's root is offline or not answering.
+    RootOffline {
+        /// Configured root name.
+        root: String,
+    },
+    /// Any other error (permissions, ...).
+    Other(Error),
+}
+
+/// Weak [`AppState`] handle.
+pub(crate) struct WeakAppState(Weak<Inner>);
+
+impl WeakAppState {
+    pub(crate) fn upgrade(&self) -> Option<AppState> {
+        self.0.upgrade().map(|inner| AppState { inner })
+    }
+}
+
 /// An opened audio file whose canonical path lies under a configured root.
 #[derive(Debug)]
 pub struct ServedAudio {
@@ -204,6 +228,8 @@ pub struct ServedAudio {
 
 /// One snapshot file in an owned temporary directory, removed when dropped.
 pub struct SnapshotFile {
+    // Release the owner lock before TempDir removes the owned payload.
+    _owner: fs::File,
     /// Owning temporary directory; dropping it deletes the file.
     pub directory: tempfile::TempDir,
     /// File path inside `directory`.
@@ -251,6 +277,14 @@ impl PreparedSnapshot {
 
     /// Blocking. The zstd copy, compressing the plain copy on first use.
     pub fn zstd_file(&self) -> Result<Arc<SnapshotFile>> {
+        self.zstd_file_cancellable(&AtomicBool::new(false))
+    }
+
+    fn zstd_file_cancellable(&self, cancel: &AtomicBool) -> Result<Arc<SnapshotFile>> {
+        use std::io::{Read, Write};
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let mut slot = self
             .zstd
             .lock()
@@ -270,6 +304,7 @@ impl PreparedSnapshot {
         let directory = tempfile::Builder::new()
             .prefix(SNAPSHOT_PREFIX)
             .tempdir_in(parent)?;
+        let owner = snapshot_owner(directory.path())?;
         let path = directory.path().join("library-snapshot.db.zst");
         let started = Instant::now();
         {
@@ -280,8 +315,21 @@ impl PreparedSnapshot {
             encoder.multithread(u32::try_from(threads.min(8)).unwrap_or(1))?;
             encoder.include_contentsize(true)?;
             encoder.set_pledged_src_size(Some(self.plain.bytes))?;
-            std::io::copy(&mut input, &mut encoder)?;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Error::Cancelled);
+                }
+                let read = input.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                encoder.write_all(&buffer[..read])?;
+            }
             encoder.finish()?.sync_all()?;
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
         }
         let bytes = fs::metadata(&path)?.len();
         tracing::info!(
@@ -292,6 +340,7 @@ impl PreparedSnapshot {
             "Compressed library snapshot"
         );
         let file = Arc::new(SnapshotFile {
+            _owner: owner,
             directory,
             path,
             bytes,
@@ -479,6 +528,7 @@ impl StatsCache {
 const INLINE_STATS_MILLIS: u64 = 250;
 
 struct Inner {
+    stopping: AtomicBool,
     provider: Arc<SqliteProvider>,
     tracker: RevisionTracker,
     /// Immutable identity of this provider; never takes the revision/write mutex.
@@ -492,6 +542,7 @@ struct Inner {
     roots_edit: Mutex<()>,
     stream_open_delay_ms: AtomicU64,
     snapshot_delay_ms: AtomicU64,
+    stat_delay_ms: AtomicU64,
     security: Arc<Security>,
     snapshot_dir: Option<PathBuf>,
     snapshot_slots: Arc<Semaphore>,
@@ -506,6 +557,11 @@ struct Inner {
     open_slots: usize,
     waveforms: WaveformCache,
     waveform_slots: Arc<Semaphore>,
+    /// `max_streams` / `max_previews`: a slot in use means audio is being served.
+    max_streams: usize,
+    max_previews: usize,
+    /// List thumbnail waveforms (`POST /waveforms`, pre-generation; §9.1–§9.2).
+    list: Arc<ListWaveforms>,
     ffmpeg_path: PathBuf,
     transcode_slots: Arc<Semaphore>,
     transcodes: TranscodeRegistry,
@@ -532,11 +588,30 @@ impl AppState {
     /// Like [`AppState::open`] with already loaded security (the server shares one
     /// [`Security`] between the starting service and the opened library).
     pub fn open_with_security(config: &ServerConfig, security: Arc<Security>) -> Result<Self> {
+        Self::open_with_progress(config, security, |_| {})
+    }
+
+    /// Open with committed migration progress suitable for a lightweight health response.
+    pub fn open_with_progress(
+        config: &ServerConfig,
+        security: Arc<Security>,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_progress_cancellable(config, security, &AtomicBool::new(false), progress)
+    }
+
+    /// Open with cancellation at committed upgrade boundaries.
+    pub fn open_with_progress_cancellable(
+        config: &ServerConfig,
+        security: Arc<Security>,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         // The root checkers start only once the library is open, so failed (retried)
         // opens never leave checker threads behind on a hung volume.
         // Roots changed on the admin page replace the `config.toml` list.
         let root_security = security.clone();
-        Self::open_inner(config, security, || {
+        Self::open_inner(config, security, cancel, progress, || {
             let roots = root_security
                 .roots_override()
                 .unwrap_or_else(|| config.roots.clone());
@@ -551,14 +626,20 @@ impl AppState {
         token: impl Into<Option<BearerToken>>,
         monitor: RootMonitor,
     ) -> Result<Self> {
-        Self::open_inner(config, Security::from_config(config, token.into()), || {
-            monitor
-        })
+        Self::open_inner(
+            config,
+            Security::from_config(config, token.into()),
+            &AtomicBool::new(false),
+            |_| {},
+            || monitor,
+        )
     }
 
     fn open_inner(
         config: &ServerConfig,
         security: Arc<Security>,
+        cancel: &AtomicBool,
+        mut report: impl FnMut(SnapshotUpgradeProgress),
         monitor: impl FnOnce() -> RootMonitor,
     ) -> Result<Self> {
         if config.auth && security.env_token().is_none() {
@@ -571,7 +652,53 @@ impl AppState {
         } else {
             remove_stale_snapshots(&std::env::temp_dir(), Some(SHARED_TEMP_SNAPSHOT_AGE));
         }
-        let provider = Arc::new(SqliteProvider::open_existing(&config.library_db)?);
+        let opened = Instant::now();
+        let provider = Arc::new(SqliteProvider::open_existing_with_progress_cancellable(
+            &config.library_db,
+            cancel,
+            |progress| {
+                report(progress);
+                let elapsed_seconds = opened.elapsed().as_secs_f64();
+                match progress {
+                    SnapshotUpgradeProgress::Preparing => tracing::info!(
+                        phase = "preparing",
+                        elapsed_seconds,
+                        "Library startup: checking schema and search indexes"
+                    ),
+                    SnapshotUpgradeProgress::Tokenizing { completed, total } => tracing::info!(
+                        phase = "tokenizing",
+                        completed,
+                        total,
+                        elapsed_seconds,
+                        "Library startup: rebuilding search text (committed rows)"
+                    ),
+                    SnapshotUpgradeProgress::BuildingFts => tracing::info!(
+                        phase = "building_fts",
+                        elapsed_seconds,
+                        "Library startup: building FTS5 postings"
+                    ),
+                    SnapshotUpgradeProgress::SourceTags => tracing::info!(
+                        phase = "source_tags",
+                        elapsed_seconds,
+                        "Library startup: checking extracted source tags"
+                    ),
+                    SnapshotUpgradeProgress::Indexing { completed, total } => tracing::info!(
+                        phase = "indexing",
+                        completed,
+                        total,
+                        elapsed_seconds,
+                        "Library startup: building FTS5 (committed rows)"
+                    ),
+                    stage => {
+                        tracing::info!(?stage, elapsed_seconds, "Library startup: maintenance")
+                    }
+                }
+            },
+        )?);
+        tracing::info!(
+            elapsed_seconds = opened.elapsed().as_secs_f64(),
+            "Library startup: database opened"
+        );
         crate::manage::recover_root_relink(&provider, &security)?;
         let tracker = RevisionTracker::open(provider.database_path())?;
         let library_id = tracker.current()?.library_id;
@@ -592,10 +719,22 @@ impl AppState {
                 "ffmpeg is not available: /audio/{{id}}/preview?codec=flac answers 503 TRANSCODER_UNAVAILABLE (codec=pcm is unaffected)"
             );
         }
+        let list = Arc::new(ListWaveforms::new(
+            ListOptions {
+                cache_root: config.waveform_cache_path(),
+                cache_mb: config.list_waveform_cache_mb,
+                workers: config.effective_list_waveform_workers(),
+                rate: config.list_waveform_rate,
+                pause_stats_on_playback: config.list_waveform_pause_stats_on_playback,
+            },
+            &library_id,
+            provider.database_path(),
+        ));
         // Root directories are deliberately not touched here (a sleeping NAS disk would
         // delay startup); the root monitor checks them in the background.
-        Ok(Self {
+        let state = Self {
             inner: Arc::new(Inner {
+                stopping: AtomicBool::new(false),
                 provider,
                 tracker,
                 library_id,
@@ -605,6 +744,7 @@ impl AppState {
                 stats: StatsCache::load(provider_path),
                 stream_open_delay_ms: AtomicU64::new(0),
                 snapshot_delay_ms: AtomicU64::new(0),
+                stat_delay_ms: AtomicU64::new(0),
                 security,
                 snapshot_dir: config.snapshot_dir.clone(),
                 snapshot_slots: Arc::new(Semaphore::new(SNAPSHOT_SLOTS)),
@@ -619,13 +759,138 @@ impl AppState {
                     config.waveform_cache_mb,
                 ),
                 waveform_slots: Arc::new(Semaphore::new(config.max_waveforms)),
+                max_streams: config.max_streams,
+                max_previews: config.max_previews,
+                list,
                 ffmpeg_path: config.ffmpeg_path.clone(),
                 transcode_slots: Arc::new(Semaphore::new(config.max_transcodes)),
                 transcodes: TranscodeRegistry::default(),
                 scans: ScanManager::default(),
                 roots_db: Mutex::new(roots_db),
             }),
-        })
+        };
+        crate::list_waveform::spawn_workers(&state);
+        Ok(state)
+    }
+
+    /// List thumbnail waveforms of this library (§9.1–§9.2).
+    pub fn list_waveforms(&self) -> &Arc<ListWaveforms> {
+        &self.inner.list
+    }
+
+    /// Handle that does not keep the library open (background workers).
+    pub(crate) fn downgrade(&self) -> WeakAppState {
+        WeakAppState(Arc::downgrade(&self.inner))
+    }
+
+    /// Whether any `/audio/{id}/stream` or `/audio/{id}/preview` response is in progress
+    /// (one of their slots is taken).
+    pub fn playback_active(&self) -> bool {
+        self.inner.stream_slots.available_permits() < self.inner.max_streams
+            || self.inner.preview_slots.available_permits() < self.inner.max_previews
+    }
+
+    /// A stream or preview response was admitted (list waveform yield rules, §9.2).
+    pub(crate) fn note_playback_start(&self) {
+        self.inner.list.note_playback_start();
+    }
+
+    /// `max_streams + max_previews`.
+    pub(crate) fn open_slot_count(&self) -> usize {
+        self.inner.open_slots
+    }
+
+    /// Blocking. Read the metadata of audio `id`'s file at `file_path` without opening
+    /// it: the same canonical root containment as [`AppState::open_audio`], registered
+    /// with the root monitor while it runs. Returns the canonical path and the file's
+    /// stream entity tag.
+    pub(crate) fn stat_audio(
+        &self,
+        id: i64,
+        file_path: &str,
+        index: Option<usize>,
+    ) -> std::result::Result<(PathBuf, String), StatFailure> {
+        let monitor = self.root_monitor();
+        let _registration = index.map(|index| monitor.begin_open(index));
+        let classify = |error: OpenError| match error {
+            OpenError::RootOffline { root, .. } => StatFailure::RootOffline { root },
+            OpenError::Library(Error::NotFound(_)) => StatFailure::Missing,
+            OpenError::Library(error) => StatFailure::Other(error),
+        };
+        let unavailable = || Error::NotFound(format!("Audio {id} file is missing on the server"));
+        let delay = self.inner.stat_delay_ms.load(Ordering::Relaxed);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        let path = fs::canonicalize(file_path)
+            .map_err(|error| classify(self.access_failure(index, error, unavailable())))?;
+        let candidates: Vec<usize> = match index {
+            Some(index) => vec![index],
+            None => (0..monitor.roots().len()).collect(),
+        };
+        let mut matched = None;
+        for candidate in candidates {
+            match fs::canonicalize(&monitor.roots()[candidate].server_path) {
+                Ok(root) if path.starts_with(&root) => {
+                    matched = Some((candidate, root));
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if index == Some(candidate) => {
+                    return Err(classify(self.access_failure(index, error, unavailable())));
+                }
+                Err(_) => {}
+            }
+        }
+        let Some((root_index, root)) = matched else {
+            return Err(StatFailure::Missing);
+        };
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Err(StatFailure::Missing),
+            Err(error) => {
+                return Err(classify(self.access_failure(
+                    Some(root_index),
+                    error,
+                    unavailable(),
+                )));
+            }
+        };
+        monitor.record(root_index, Ok(root));
+        Ok((path, crate::stream::file_etag(&metadata)))
+    }
+
+    /// Stop new snapshot work, drain admitted preparations and scans, release cached
+    /// files, then checkpoint and persist the revision baseline. A timeout stays visible.
+    pub fn shutdown(&self, timeout: Duration) -> Result<()> {
+        self.inner.stopping.store(true, Ordering::Release);
+        self.inner.list.shutdown();
+        let started = Instant::now();
+        if !self.inner.scans.shutdown(timeout) {
+            return Err(Error::Busy("A scan is still finishing".into()));
+        }
+        let jobs: Vec<_> = self
+            .inner
+            .snapshot_jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .flatten()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        while jobs.iter().any(|job| job.finished().is_none())
+            || self.inner.stats.refreshing.load(Ordering::Acquire)
+        {
+            if started.elapsed() >= timeout {
+                return Err(Error::Busy(
+                    "Snapshot or statistics preparation is still finishing".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(jobs);
+        self.invalidate_snapshot();
+        self.inner.tracker.checkpoint(&self.inner.provider)
     }
 
     /// The library provider; future endpoints use it for all business data access.
@@ -845,6 +1110,18 @@ impl AppState {
             .record_own_write_if(|| operation(self.inner.provider.as_ref()), changed)
     }
 
+    /// Blocking. Run a provider write that changes no snapshot content clients must
+    /// re-download for (play bookkeeping); the revision stays put (see
+    /// [`RevisionTracker::record_own_write_quiet`]).
+    pub fn write_quiet<T>(
+        &self,
+        operation: impl FnOnce(&SqliteProvider) -> Result<T>,
+    ) -> Result<WriteOutcome<T>> {
+        self.inner
+            .tracker
+            .record_own_write_quiet(|| operation(self.inner.provider.as_ref()))
+    }
+
     /// Blocking. Run `query` on the read-only connection that also serves the `/roots`
     /// aggregates (never the writer, so it does not wait for writes).
     pub(crate) fn read_query<T>(
@@ -894,17 +1171,17 @@ impl AppState {
         })
     }
 
-    /// Blocking. `DataProvider::record_play`, returning the updated record.
+    /// Blocking. Deprecated `POST /audio/{id}/plays`: play counts are not recorded by
+    /// the server any more (play history is client-local), so this writes nothing. It
+    /// only checks that the record exists and answers with the current record and
+    /// `revision == revision_before`, so old clients that still report plays keep working.
     pub fn record_play(&self, id: i64) -> Result<AudioWriteResponse> {
-        let outcome = self.write(|provider| {
-            provider.record_play(id)?;
-            provider.get_audio(id)
-        })?;
-        self.carry_stats_forward(&outcome);
+        let revision = self.inner.tracker.poll()?.revision;
+        let file = self.inner.provider.get_audio(id)?;
         Ok(AudioWriteResponse {
-            file: outcome.value,
-            revision_before: outcome.revision_before,
-            revision: outcome.revision,
+            file,
+            revision_before: revision,
+            revision,
         })
     }
 
@@ -1018,8 +1295,15 @@ impl AppState {
     /// used at startup and when the revision poller sees a new revision, so `/library`
     /// rarely finds a stale cache.
     pub fn refresh_stats_in_background(&self) {
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return;
+        }
         let cache = &self.inner.stats;
         if cache.refreshing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.inner.stopping.load(Ordering::Acquire) {
+            cache.refreshing.store(false, Ordering::Release);
             return;
         }
         let state = self.clone();
@@ -1377,6 +1661,15 @@ impl AppState {
             .store(delay.as_millis() as u64, Ordering::Relaxed);
     }
 
+    /// Test hook: sleep this long inside every list waveform metadata read
+    /// ([`AppState::stat_audio`]; simulates a slow network volume).
+    #[doc(hidden)]
+    pub fn set_stat_delay(&self, delay: Duration) {
+        self.inner
+            .stat_delay_ms
+            .store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
     /// Test hook: sleep this long inside every stream open (simulates a sleeping disk).
     #[doc(hidden)]
     pub fn set_stream_open_delay(&self, delay: Duration) {
@@ -1436,6 +1729,11 @@ impl AppState {
             result: Mutex::new(None),
             done: tokio::sync::Notify::new(),
         });
+        if self.inner.stopping.load(Ordering::Acquire) {
+            *job.result.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(Arc::new(Err(Error::Cancelled)));
+            return job;
+        }
         let running = job.clone();
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -1445,7 +1743,7 @@ impl AppState {
             }
             let result = state.prepare_snapshot().and_then(|prepared| {
                 let file = if zstd {
-                    Some(prepared.zstd_file()?)
+                    Some(prepared.zstd_file_cancellable(&state.inner.stopping)?)
                 } else {
                     None
                 };
@@ -1469,12 +1767,18 @@ impl AppState {
     /// fresh copy made with `DataProvider::backup_library` (which then replaces the cache).
     /// Preparation is single-flight: concurrent requests wait for one copy.
     pub fn prepare_snapshot(&self) -> Result<Arc<PreparedSnapshot>> {
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let revision = self.poll_revision()?;
         let mut cache = self
             .inner
             .snapshot_cache
             .lock()
             .map_err(|_| Error::Database("Snapshot cache lock was poisoned".into()))?;
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         if let Some(entry) = cache.as_ref().filter(|entry| {
             entry.library_id == revision.library_id
                 && entry.revision == revision.revision
@@ -1494,8 +1798,15 @@ impl AppState {
             }
             None => builder.tempdir()?,
         };
+        let owner = snapshot_owner(directory.path())?;
         let path = directory.path().join("library-snapshot.db");
-        let report = self.inner.provider.backup_library(&path)?;
+        let report = self
+            .inner
+            .provider
+            .backup_library_cancellable(&path, &self.inner.stopping)?;
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| Error::Database(error.to_string()))?;
         let schema_version: i64 = conn
@@ -1510,6 +1821,7 @@ impl AppState {
         );
         let entry = Arc::new(PreparedSnapshot {
             plain: SnapshotFile {
+                _owner: owner,
                 directory,
                 path,
                 bytes: report.bytes,
@@ -1522,6 +1834,18 @@ impl AppState {
         *cache = Some(entry.clone());
         Ok(entry)
     }
+}
+
+fn snapshot_owner(directory: &Path) -> Result<fs::File> {
+    let owner = fs::File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(directory.join(".owner.lock"))?;
+    owner
+        .try_lock()
+        .map_err(|error| Error::Busy(format!("Snapshot ownership unavailable: {error}")))?;
+    Ok(owner)
 }
 
 /// Remove leftover `audiolib-snapshot-*` directories (from a crash or kill) in `dir`;
@@ -1541,6 +1865,18 @@ pub fn remove_stale_snapshots(dir: &Path, min_age: Option<Duration>) {
             continue;
         };
         if !metadata.is_dir() {
+            continue;
+        }
+        // A prefix and age are not ownership proof. Legacy unmarked directories are
+        // retained; a live instance or response retains its lock even across shutdown.
+        let owner_path = path.join(".owner.lock");
+        if !fs::symlink_metadata(&owner_path).is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        let Ok(owner) = fs::File::options().read(true).write(true).open(owner_path) else {
+            continue;
+        };
+        if owner.try_lock().is_err() {
             continue;
         }
         if let Some(min_age) = min_age {
@@ -1572,6 +1908,9 @@ pub fn spawn_revision_poller(state: AppState, every: Duration) -> tokio::task::J
         interval.tick().await;
         loop {
             interval.tick().await;
+            if state.inner.stopping.load(Ordering::Acquire) {
+                return;
+            }
             let poll_state = state.clone();
             match tokio::task::spawn_blocking(move || poll_state.poll_revision()).await {
                 Ok(Ok(revision)) => state.refresh_stats_if_stale(&revision),

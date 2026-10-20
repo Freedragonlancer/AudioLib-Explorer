@@ -274,8 +274,6 @@ enum RemoteCommand {
         #[arg(long)]
         favorite: Option<bool>,
     },
-    /// Record one play on the server (`POST /audio/{id}/plays`).
-    Plays { id: i64 },
     /// Download records into the drag-out cache (`<data dir>/cache`) and print the paths.
     Download {
         #[arg(value_delimiter = ',', required = true)]
@@ -317,7 +315,6 @@ enum RemoteCommand {
 #[derive(Clone, Copy, ValueEnum)]
 enum HistoryKind {
     Scans,
-    Plays,
 }
 #[derive(Subcommand)]
 enum DbCommand {
@@ -834,7 +831,7 @@ fn print_result(value: &Value, format: Format) {
             if let Some(results) = data["results"].as_array() {
                 if matches!(format, Format::Csv) {
                     println!(
-                        "id,filename,sample_rate,bit_depth,channels,duration,tags,file_path,color,notes,favorite,play_count,missing"
+                        "id,filename,sample_rate,bit_depth,channels,duration,tags,file_path,color,notes,favorite,missing"
                     );
                     for file in results {
                         println!(
@@ -851,7 +848,6 @@ fn print_result(value: &Value, format: Format) {
                                 "color",
                                 "notes",
                                 "favorite",
-                                "play_count",
                                 "missing"
                             ]
                             .iter()
@@ -1065,22 +1061,6 @@ fn remote_operation(config: &AppConfig, command: &RemoteCommand) -> anyhow::Resu
             };
             remote_write_reply(&client, &cache, result)
         }
-        RemoteCommand::Plays { id } => {
-            require_server()?;
-            let (client, state) = remote_writer_parts(settings, &secrets, &cache)?;
-            let writer =
-                audiolib_remote::RemoteWriter::new(client.clone(), cache.clone(), state.library_id);
-            let result = writer.record_play(*id).map(|outcome| {
-                (
-                    "plays",
-                    json!({"files": [outcome.value]}),
-                    outcome.revision_before,
-                    outcome.revision,
-                    outcome.cache,
-                )
-            });
-            remote_write_reply(&client, &cache, result)
-        }
         RemoteCommand::Download { ids } => {
             require_server()?;
             let (client, state) = remote_writer_parts(settings, &secrets, &cache)?;
@@ -1186,7 +1166,6 @@ fn remote_operation(config: &AppConfig, command: &RemoteCommand) -> anyhow::Resu
             let client = audiolib_remote::RemoteClient::new(&settings.server_url, &secrets.token)?;
             Ok(match kind {
                 HistoryKind::Scans => json!({ "scans": client.scan_history(*limit, *offset)? }),
-                HistoryKind::Plays => json!({ "plays": client.play_history(*limit, *offset)? }),
             })
         }
     }
@@ -1322,6 +1301,8 @@ mod tests {
             },
             language: "cn".into(),
             audition_play_on_single_click: false,
+            pregenerate_list_waveforms: false,
+            hold_list_waveform_batches_after_audition: false,
             audio_table: Default::default(),
             playback: json!({"backend":"wasapi","volume":0.25}),
             allowed_scan_roots: Vec::new(),

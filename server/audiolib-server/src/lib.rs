@@ -10,6 +10,7 @@ pub mod auth;
 pub mod browse;
 pub mod config;
 pub mod error;
+pub mod list_waveform;
 pub mod manage;
 pub mod pcm;
 pub mod preview;
@@ -23,6 +24,8 @@ pub mod state;
 pub mod stream;
 pub mod tls;
 pub mod waveform;
+pub mod wf_job;
+pub mod wfdb;
 
 pub use auth::{AuthMode, ConnectionInfo, Listener, ManageMode, Security};
 pub use config::{BearerToken, RootConfig, ServerConfig};

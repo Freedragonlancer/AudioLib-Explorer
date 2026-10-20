@@ -11,8 +11,8 @@
 //! every open/close, which used to bump the revision on each restart. Commits that only
 //! reached the WAL while the server was stopped are caught at startup by a WAL signature
 //! (file length plus its 32-byte header with checkpoint sequence and salts, no mtime),
-//! which a plain open does not change. The server never closes its connections on exit
-//! (see `main.rs`), so its own shutdown does not checkpoint the WAL into the main file.
+//! which a plain open does not change. Graceful shutdown checkpoints under the library
+//! administration lease and persists that new physical baseline before closing.
 //!
 //! The server's own writes go through [`RevisionTracker::record_own_write`], which holds
 //! the tracker lock across the write so the change bumps the revision exactly once and
@@ -70,7 +70,8 @@ pub struct WriteOutcome<T> {
     pub value: T,
     /// Revision covering every commit before this write.
     pub revision_before: u64,
-    /// Revision after this write (`revision_before + 1`).
+    /// Revision after this write (`revision_before + 1`, or `revision_before` for a
+    /// write that changed no snapshot content).
     pub revision: u64,
 }
 
@@ -205,6 +206,33 @@ pub struct RevisionTracker {
 }
 
 impl RevisionTracker {
+    /// Drain outstanding revisions, checkpoint, and persist the physical baseline
+    /// while library writers are excluded by the administration lease. Direct SQLite
+    /// writers must follow that same lease protocol, just as for restore/maintenance.
+    pub fn checkpoint(&self, provider: &audiolib_db::SqliteProvider) -> Result<()> {
+        let mut inner = self.lock()?;
+        if inner.holds != 0 {
+            return Err(Error::Busy("A library write is still finishing".into()));
+        }
+        provider.checkpoint_wal_observed(|stage| {
+            if stage == audiolib_db::CheckpointStage::Before {
+                self.catch_up(&mut inner)?;
+            } else {
+                let version = data_version(&inner.conn)?;
+                let fingerprint = FileFingerprint::read(&self.database)?;
+                // SQLite can change this connection's data_version when TRUNCATE
+                // resets the WAL. All admitted commits were counted in Before and
+                // the exclusive administration lease still excludes library writers.
+                let mut next = inner.state.clone();
+                next.fingerprint = fingerprint;
+                next.wal = Some(WalSignature::read(&self.database)?);
+                write_sidecar(&self.sidecar, &next)?;
+                inner.state = next;
+                inner.data_version = version;
+            }
+            Ok(())
+        })
+    }
     /// Blocking. Open the change-detection connection and load or create the sidecar.
     /// A database changed since the last recorded fingerprint bumps the revision once.
     pub fn open(database: &Path) -> Result<Self> {
@@ -392,6 +420,43 @@ impl RevisionTracker {
             value,
             revision_before,
             revision: inner.state.revision,
+        })
+    }
+
+    /// Blocking. Run a server-side write that only touches data clients do not need to
+    /// re-download a snapshot for (play bookkeeping: `play_count`, `last_played_at`,
+    /// `play_history`). Under the tracker lock, pending commits from other writers are
+    /// counted first (so `revision_before` covers them), then `write` runs and its commit
+    /// becomes the new polling baseline (persisted, so a restart does not bump either)
+    /// without advancing the revision: `revision == revision_before`. During a hold the
+    /// baseline is left alone so the scan's commits are still counted by `end_hold`; the
+    /// caller's commit then rides along with that bump.
+    pub fn record_own_write_quiet<T>(
+        &self,
+        write: impl FnOnce() -> Result<T>,
+    ) -> Result<WriteOutcome<T>> {
+        let mut inner = self.lock()?;
+        if inner.holds == 0 {
+            self.catch_up(&mut inner)?;
+        }
+        let value = write()?;
+        let revision = inner.state.revision;
+        if inner.holds == 0 {
+            let version = data_version(&inner.conn)?;
+            let fingerprint = FileFingerprint::read(&self.database)?;
+            if version != inner.data_version || fingerprint != inner.state.fingerprint {
+                let mut next = inner.state.clone();
+                next.fingerprint = fingerprint;
+                next.wal = Some(WalSignature::read(&self.database)?);
+                write_sidecar(&self.sidecar, &next)?;
+                inner.state = next;
+                inner.data_version = version;
+            }
+        }
+        Ok(WriteOutcome {
+            value,
+            revision_before: revision,
+            revision,
         })
     }
 
@@ -693,6 +758,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tracker.poll().unwrap().revision, start + 3);
+    }
+
+    #[test]
+    fn quiet_writes_leave_the_revision_alone_and_content_writes_still_bump() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _setup) = database(dir.path());
+        let tracker = RevisionTracker::open(&path).unwrap();
+        let start = tracker.poll().unwrap().revision;
+        let writer = wal_writer(&path);
+        // A non-content write commits but neither it nor a later poll bumps.
+        let outcome = tracker
+            .record_own_write_quiet(|| {
+                writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!((outcome.revision_before, outcome.revision), (start, start));
+        assert_eq!(tracker.poll().unwrap().revision, start);
+        // Nor does a restart.
+        drop(tracker);
+        let tracker = RevisionTracker::open(&path).unwrap();
+        assert_eq!(tracker.poll().unwrap().revision, start);
+        // An external commit pending before a quiet write is still counted.
+        writer.execute("INSERT INTO t VALUES (2)", []).unwrap();
+        let outcome = tracker
+            .record_own_write_quiet(|| {
+                writer.execute("INSERT INTO t VALUES (3)", []).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            (outcome.revision_before, outcome.revision),
+            (start + 1, start + 1)
+        );
+        assert_eq!(tracker.poll().unwrap().revision, start + 1);
+        // A content write bumps exactly once.
+        let outcome = tracker
+            .record_own_write(|| {
+                writer.execute("INSERT INTO t VALUES (4)", []).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outcome.revision, start + 2);
+        assert_eq!(tracker.poll().unwrap().revision, start + 2);
+        // During a hold the quiet write does not swallow the scan's commits.
+        tracker.begin_hold().unwrap();
+        writer.execute("INSERT INTO t VALUES (5)", []).unwrap();
+        tracker
+            .record_own_write_quiet(|| {
+                writer.execute("INSERT INTO t VALUES (6)", []).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(tracker.end_hold(true).unwrap().revision, start + 3);
     }
 
     #[test]

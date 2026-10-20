@@ -21,6 +21,12 @@ pub struct ErrorBody {
     pub error_code: String,
     /// Human-readable description; never contains the bearer token.
     pub message: String,
+    /// Finer reason of some codes, e.g. `UNSUPPORTED_ENCODING` of `VALIDATION`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_code: Option<String>,
+    /// The list waveform job in progress (409 `BUSY` of `POST /waveforms/jobs`, §9.5.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// An HTTP status plus stable error code; converts from [`audiolib_core::Error`].
@@ -30,6 +36,8 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     retry_after: Option<&'static str>,
+    sub_code: Option<&'static str>,
+    job_id: Option<String>,
 }
 
 impl ApiError {
@@ -40,6 +48,8 @@ impl ApiError {
             code,
             message: message.into(),
             retry_after: None,
+            sub_code: None,
+            job_id: None,
         }
     }
     /// 401 `UNAUTHORIZED` for a missing or wrong bearer token.
@@ -111,6 +121,44 @@ impl ApiError {
     pub fn validation(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "VALIDATION", message)
     }
+    /// 400 `VALIDATION` with `sub_code` `UNSUPPORTED_ENCODING` (§9.4).
+    pub fn unsupported_encoding(message: impl Into<String>) -> Self {
+        Self {
+            sub_code: Some("UNSUPPORTED_ENCODING"),
+            ..Self::validation(message)
+        }
+    }
+    /// 400 `VALIDATION` with `sub_code` `UNSUPPORTED_MODE`: unknown list waveform job
+    /// mode (§9.5.3).
+    pub fn unsupported_mode(message: impl Into<String>) -> Self {
+        Self {
+            sub_code: Some("UNSUPPORTED_MODE"),
+            ..Self::validation(message)
+        }
+    }
+    /// 400 `VALIDATION` with `sub_code` `CONFIRM_REQUIRED`: `rebuild` without
+    /// `"confirm": "rebuild"` (§9.5.3).
+    pub fn confirm_required(message: impl Into<String>) -> Self {
+        Self {
+            sub_code: Some("CONFIRM_REQUIRED"),
+            ..Self::validation(message)
+        }
+    }
+    /// 409 `BUSY` carrying the id of the list waveform job in progress (§9.5.3).
+    pub fn job_busy(job_id: String) -> Self {
+        Self {
+            job_id: Some(job_id),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "BUSY",
+                "A list waveform job is already in progress",
+            )
+        }
+    }
+    /// 409 `JOB_STATE`: no list waveform job is running or paused (§9.5.3).
+    pub fn job_state(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "JOB_STATE", message)
+    }
     /// 416 `RANGE_NOT_SATISFIABLE`; the caller adds `Content-Range: bytes */<len>`.
     pub fn range_not_satisfiable(message: impl Into<String>) -> Self {
         Self::new(
@@ -146,6 +194,29 @@ impl ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "BUSY",
                 "Too many audio streams are active; retry shortly",
+            )
+        }
+    }
+    /// 503 `BUSY` + `Retry-After: 5`: another `GET /waveforms/bundle` is in progress.
+    pub fn bundle_busy() -> Self {
+        Self {
+            retry_after: Some("5"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BUSY",
+                "Another waveform bundle is being prepared or sent; retry later",
+            )
+        }
+    }
+    /// 503 `BUSY` with `Retry-After: 1` when 4 `POST /waveforms` requests are already
+    /// being processed; the same shape as [`ApiError::stream_busy`].
+    pub fn list_waveforms_busy() -> Self {
+        Self {
+            retry_after: Some(STREAM_BUSY_RETRY_SECS),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BUSY",
+                "Too many list waveform requests are in progress; retry shortly",
             )
         }
     }
@@ -264,6 +335,8 @@ impl IntoResponse for ApiError {
             Json(ErrorBody {
                 error_code: self.code.to_string(),
                 message: self.message,
+                sub_code: self.sub_code.map(str::to_string),
+                job_id: self.job_id,
             }),
         )
             .into_response();

@@ -1,5 +1,337 @@
 # Rust 验证报告
 
+## 远程快照下载与解压双进度（2026-10-21，0.4.11 修复构建）
+
+开发集成源码修复为 `aecd59b0f376d992940bea4d592407eec1ebd122`，已推送。最小 main backport 为 `d479a2c3d02a5e286e5d09dc939d597854d38aab`，通过 [PR #16](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/16) 合并为 `88d8bf39a086d2040927f48bb841e144cfa1099f`；未夹带集成分支的 84 个前置提交或其他任务文档。
+
+zstd 下载按 HTTP `Content-Length` 统计压缩响应体字节，解压按 `X-Uncompressed-Length` 统计数据库写入字节。GUI 连接页和缓存/导出页显示两组文字及独立进度条，19,495,989,248 字节对应的 **18592.8 MiB 仅用于解压总量**。缺失总量时分别保持不定进度，普通响应只显示下载。CR 另修正声明大小过小时重复绕过节流、首次收到下载总量被节流隐藏的问题，并加入回归。
+
+Rust 1.97.1 MSVC 的格式检查、默认及 ASIO 两套严格 workspace/all-targets Clippy 均通过。默认 locked workspace/all-targets 测试：开发集成版本 **65 个目标、1,075 passed、73 ignored、0 failed**；main backport **50 个目标、824 passed、71 ignored、0 failed**。PR 关联 Windows 与 Linux CI 均通过。两名代理分别审查后端、GUI 和最小 backport，没有未解决发现。
+
+本次验证范围过大。按用户要求停止重复 ASIO 全套测试和额外原生截图运行，省略无关 Metadata/库维护回归；不再追加测试。相同 Slint 布局在之前一轮已通过原生 UI 回归（1 passed），检查中英文、连接/缓存页、下载完成继续解压和解压总量未知的 8 个截图场景；该历史结果没有计作本轮新执行结果。
+
+使用验证过的 Steinberg ASIO SDK 2.3.4，`tools/build-release.ps1` 成功，用时 **306.177 秒**；标准便携打包成功，包验证通过（5.487 秒）。独立本机 `CARGO_TARGET_DIR` 的新 EXE 按 SHA256 同步到规范 release 输出后再打包，251 个源码/构建输入在构建和打包后哈希一致。
+
+固定 `X:\AI_Build\AudioLib_Explorer_oss\local_release` 已更新 **1,214 个包内文件**，通过 `validate-portable.ps1 -BinaryDirectory local_release -CleanCheckout`，CLI 版本为 **0.4.11**。本机保留既有开发集成功能并包含 `aecd59b` 的修复。两份安装 EXE 与验证过的便携包及本轮 release 输出 SHA256 一致：
+
+- AudioLibExplorer.exe：`1B0F980A43C38B503A0CC847F3563E1F6F1E080D9FC574366DA2C7D4771ED174`
+- AudioLibCli.exe：`FCDEE68E454616E5E4D4E1E57CB62D3EC9DE366652D640E82C3A969C2ED1A231`
+
+只覆盖包内文件，未清空安装目录。工作库、设置、Waveform 缓存库和占位缓存共 4 项的大小及 UTC 修改时间保持原值，设置 SHA256 与正常 `AUDIOLIB_DATA_DIR` 环境不变。上轮基线的远程 r793 快照已在本轮 CR 前被替换为 r819；当前 19,495,989,248 字节快照及缓存清单均早于本轮验证。旧基线导致的核对误报已保留，修正核对后确认安装完成，没有恢复或改写用户缓存。记录位于本机忽略目录 `.rust-validation/snapshot-progress/`。
+
+## 升级恢复与最新客户端/服务端集成（2026-10-20，0.4.11 开发候选）
+
+本轮首先修复首次升级无法续跑、WAL 未截断及停机快照残留，再按用户要求拉取并合并最新远端代码。最终可执行源码为 `1d81a784e7372a21a71968470eef83061807133c`，包含 `origin/main` 的 `71bb1fd`、客户端 `integ/client-list-waveforms` 的 `c50bd27`、服务端 `integ/list-waveforms-final` 的 `3eef19c`，以及 `bd58b3f` 的升级恢复修复。构建完成后再次 fetch 并验证三条远端分支都是当前提交的祖先。发布说明保留 Unreleased 状态，未创建新 tag、未发布 GitHub Release、未部署 8790。
+
+Rust 1.97.1 MSVC 的格式化、默认及 ASIO 两套严格 Clippy 和完整 locked workspace/all-targets 测试全部通过：**每套 64 个顶层目标、1,067 passed、73 ignored、0 failed**。247 项动态源码/配置/资源输入与维护的 GUI 性能验证脚本在检查、构建及发布回归前后 SHA256 相同。ASIO 使用校验过的 Steinberg SDK 2.3.4。第一次集成检查发现的目录缓存测试问题与修正边界见 [审查修复](Rust_Review_Fixes.md)；失败批次日志保留。
+
+正式 `tools/build-release.ps1` 构建耗时 **272.717 秒**；`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和 CLI 片段回归通过。编译期间只有根目录文档修改，动态编译输入保持冻结；构建身份报告因此记录 `WorkingTreeChanges=true`。本轮两 EXE 的身份为：
+
+- AudioLibExplorer.exe：`6B8C4578EB72F5DBEF732D531ECEDEF9B60637B491B5FBBD6A4D1ECE51678CB4`
+- AudioLibCli.exe：`7383190DC9848C0F0A97F3B46A5B5E7F66EED3E16056AA51658FDE58ED0486EA`
+- audiolib-server.exe：`FA23469A577B1F2ED059E78775F3A732FB57A778E0FAE17102598C7860C10376`；同一 workspace 构建，`--version` 为 0.4.11。
+
+恢复回归覆盖分词、索引、验证和 checkpoint 阶段的取消及子进程突然退出，检查续跑、完整行数、signed ID 极值、Metadata、未知扩展和播放历史保留；另检查旧已打开 writer 的持久保护、读事务阻塞 checkpoint 时的 Busy、释放后 WAL 归零，以及未知恢复协议拒绝执行。服务端回归覆盖快照创建/压缩取消、活动下载持有文件、带锁的残留目录清理、health 进度、正常停机 WAL 回收与 revision 不虚增。用户已明确暂缓原 Mac 的同机耗时复测；这些功能回归不能代替新的 Mac 性能数据。
+
+真实库使用 `upgrade-benchmark --source <原快照> --live`，只在 owned 副本中执行实际可写库 WAL 升级，没有强制降级源数据。909,342 条记录、19,492,810,752 字节，schema 5、tokenization 2→3，SQLite 3.53.2；Windows 本地 SSD、Ryzen 7 9800X3D（8 核/16 线程）、100,415,373,312 字节物理内存，预校验已预热文件缓存，测量时没有并行 Cargo 构建。结果如下：
+
+| 项目 | 实测 |
+| --- | ---: |
+| 源 quick-check/FK/统计 | 34.711 秒 |
+| 复制到 owned 临时库 | 33.687 秒 |
+| owned 升级前完整性检查 | 65.162 秒 |
+| **可写库打开及升级，含回退备份、验证、分批 checkpoint** | **336.371 秒** |
+| 其中备份阶段通知至首批分词通知（含备份验证及初始化） | 67.954 秒 |
+| 分词阶段通知至索引阶段通知 | 158.756 秒 |
+| 索引阶段通知至验证阶段通知 | 95.969 秒 |
+| 索引验证通知至 checkpoint 通知 | 13.536 秒 |
+| 升级后完整性检查 | 63.766 秒 |
+| 全流程含准备和临时目录清理 | 536.141 秒 |
+| 进程峰值 working set / 采样 private bytes 峰值 | 243,048,448 / 235,114,496 字节 |
+| **200ms 采样 WAL 峰值 / 成功打开时 WAL** | **151,780,832 / 0 字节** |
+| owned 目录采样峰值（主库、回退备份、WAL/SHM） | 39,137,730,016 字节 |
+
+分词和索引均提交到 909,342 条；升级前后 SQLite、FTS5、外键检查通过，条数不变。原库测试前后 SHA256 均为 `5ADAECFFB603716F4B2840EFA2838F3D8174B2C9825B0D95EAF93275EBF6393F`，大小及修改时间一致；测试退出码 0，owned 临时目录已经删除。采样峰值是观测下界，目录大小不含保持不变的原快照，也不含运行中的服务器快照缓存；正常升级保留的回退备份在本次临时目录清理时一并删除，不代表生产升级会删除回退备份。该源修订和硬件与 Mac 报告不同，不能把 336.371 秒视为 Mac 新耗时或直接用其计算提速倍数。
+
+候选包通过正式 portable 流程更新固定 `local_release/`；两个目录各自运行隔离验证，只复制包所有文件并核对 SHA256，不替换工作库、设置、日志或源 WAV。最终安装结果独立记录在 `.rust-validation/resumable-upgrade/completion.json`，仅其 `success=true` 且两个 portable 检查和全部载荷哈希通过才表示安装完成。开发包与已发布 v0.4.11 的二进制身份不同，不能作为该 Release 的原产物；下一次发布仍需新程序版本和新 tag。
+
+完整检查与构建日志位于本机忽略目录 `.rust-validation/gui-e2e/round-upgrade-integrated-2/`，真实副本测量及安装记录位于 `.rust-validation/resumable-upgrade/`。原有搜索性能慢样本和未执行的 224 样本矩阵仍保留；**P95 latency <500ms for 1M+ records 尚未全面验收通过**。
+
+## b49f7d2 搜索与 GUI 阶段收尾（2026-10-20，0.4.11）
+
+用户要求尽快阶段收尾后审查、推送，本轮据此停止扩展优化。**P95 latency <500ms for 1M+ records 仍未全面达到**；完整 224 样本矩阵尚未开始，也未完成。当前源码为 `b49f7d278505669ac025b4b49b9eceec45873728`，与另一个 Debug 任务协调后独立完成代码、构建及 GUI 操作，未混入其 Mac 升级、WAL 或服务端生命周期修复。
+
+本轮将首次文件名排序的完整 MATCH ID 收集、基本筛选交集及精确计数移至宽 Metadata 查询之前，验证现有可选覆盖索引后由 SQLite 执行 NOCASE 排序及 ID 升序平局规则，仅加载所选页面。无附加筛选的 present 请求要求同快照全 present 证明；不适用或超预算时完整回退。此前的冷目录统计、复杂查询文档长度、时长覆盖分页及 30ms debounce 优化继续保留。空页菜单动作采用稳定可用状态与实时空页 guard，保留 WGC 的严格可见性和同步几何检查。
+
+同一正式 ASIO GUI EXE 完成三个独立阶段批次，各 14 类请求、每类一次、每次新进程。真实库为 909,342 条、20,248 个目录的 owned 只读副本，另有独立百万条合成库。分页 200 条，首次目标请求排名缓存未命中；OS 缓存未清空，启动、索引准备和校准不计入计时。终点为结果页与完整目录计数模型发布后、CRC/nonce/代次符合的首个观测 WGC ALL compositor frame，包含生产 debounce、排队及当前视口绘制；不是物理屏幕出光或同时绘制所有目录。
+
+| 阶段样本 | 有效 / 无效 | ≥500ms | P95 / 最大 |
+| --- | ---: | ---: | ---: |
+| 真实库，synthetic Slint 输入 | 14 / 0 | 4 | 933.151 / 933.151ms |
+| 百万条合成库，synthetic Slint 输入 | 14 / 0 | 2 | 568.9038 / 568.9038ms |
+| 真实库，原生 Sky 输入 | 14 / 0 | 1 | 609.3829 / 609.3829ms |
+
+全部 42 个有效样本的页面顺序、精确总数与全部目录计数均与计时后 oracle 一致；7 个有效慢样本全部保留，不以重试替换。每组只有 14 条不同请求，P95 按原摘要 `ceil((n-1)*p)` 索引计算，此处等于最大值；不能据此建立长期尾延迟保证。百万条 `ambient` + 48kHz + 0–5s + 文件名排序本次为 **125.9468ms**，前轮同类有效慢例为 1,673.8516ms；真实库该请求的本次 synthetic 样本仍为 **584.7215ms**。局部优化不意味着总体达标。完整条件及历史失败见 [GUI 搜索性能](Rust_GUI_Search_Performance.md) 与 [待解决问题](Rust_Known_Issues.md)。
+
+Rust 1.97.1 MSVC 的格式化、默认和 ASIO 严格 workspace/all-targets Clippy、完整 locked 测试全部通过：**每种配置各 57 个顶层目标、959 passed、72 ignored、0 failed**。227 项动态源码/配置/资源输入及维护的 GUI 验证脚本在检查与构建前后保持相同 SHA256，正常数据目录环境和六项持久数据基线保留。首次完整检查捕获了旧 COUNT 密度测试与新免 COUNT 文件名路径的测试意图冲突；该旧测试改用 Modified 继续验证原 128 行密度阈值，新文件名路径由完整 native SQL oracle 回归覆盖，随后重新执行两套完整检查。
+
+同源正式 ASIO 构建耗时 **262.641s**，Steinberg SDK 2.3.4 由准备脚本验证。发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和 CLI 片段回归通过。构建与测量的身份为：
+
+- AudioLibExplorer.exe：`588553215AF4C0A6133DEB0C456F0B66A756AD1DB68AC38495970161CC0A97EA`
+- AudioLibCli.exe：`938265EBE96612314ED9609A3EC81C72430E4A17A5C1BA3A33AE7FDACD066527`
+
+阶段安装使用相同 ASIO 便携载荷和固定 `local_release/`：先打包及隔离 portable 验证，再仅覆盖包所有的文件、核对两 EXE 与全部载荷 SHA256，最后执行安装目录的隔离 portable 验证并复核持久数据。安装结果独立记在本机 `.rust-validation/gui-e2e/round-v11-checks/completion.json`，仅其成功结果可证明安装完成；其中 `StageAcceptanceOnly=true`、`PerformanceTargetMet=false`、`Full224Complete=false` 与软件安装成功分别记录。没有发布 Release 或 tag，未替换工作数据库或源 WAV。
+
+原始私有阶段记录由 `.rust-validation/gui-e2e/coordination/stage-report-storage-v1.json` 定位，检查和构建日志位于 `.rust-validation/gui-e2e/round-v11-checks/`。旧的有效慢例、无效捕获及失败检查批次继续保留。原定大矩阵与后续性能定位均为待办。
+
+## 7ec84ed 审查修复与真实升级资源复测（2026-10-20，0.4.11）
+
+本轮按主报告及逐行补充报告修复 BM25 跨平台测试判定、源路径别名、辅助 reader 资源预算、mmap 策略、串行回退诊断、服务端升级进度及 FFI 生命周期回归，并合并上游 `afb2f04`。单字母查询仍按用户明确要求返回输入提示；API 文档明确当前服务器只提供快照，尚未实现远端搜索路由。Mac 原生数据库 CI 单独验证 ARM64 C/Rust 浮点及文件系统行为，不以 Windows 结果代替 Mac 测试。
+
+真实升级使用当前只读服务器缓存：909,342 条音效、20,248 个目录，19,492,810,752 字节，schema 5、tokenization 2。新 `upgrade-benchmark --source` 先验证源库，再用 SQLite backup 生成 owned 临时副本，验证副本后实际执行修订 2→3 升级，最后通过公共完整性检查并自动清理副本；没有强制降级或升级用户工作库。源文件在测试前后 SHA256 均为 `5ADAECFFB603716F4B2840EFA2838F3D8174B2C9825B0D95EAF93275EBF6393F`，大小、修改时间相同，升级后条数仍为 909,342。
+
+首次完整测量发现一个额外资源问题：`check_library()` 复用搜索池中的 mapped reader 复制整库，使全流程峰值工作集达到 19,542,970,368 bytes，而采样 private bytes 约 129MB；这不能描述为升级本身需要 19.5GB 私有内存。修复让完整性检查使用独立禁用 mmap 的只读连接，并继续持有原 read gate，副本目标也禁用 mmap。`b4d64e6` 的正式 release 工具复测结果如下；后一轮文件系统重定位和 GUI 诊断修改没有参与该次测量。
+
+| 真实升级复测阶段 | 秒 |
+| --- | ---: |
+| 源只读验证 | 34.304 |
+| owned 副本完整性预检 | 64.073 |
+| 实际升级 | **236.582** |
+| 其中全部 909,342 行派生文本完成 | 161.941 |
+| FTS5 构建结束、进入 source tags | 236.555 |
+| 升级后公共完整性检查 | 286.448 |
+| 工具全流程（另含复制等阶段） | 656.357 |
+
+整个工具进程的 Windows 高水位工作集为 **123,932,672 bytes**，200ms 采样的 private bytes 峰值为 **128,884,736 bytes**；3,120 个采样点。采样不能保证捕捉 private bytes 的瞬时峰值，工作集也包含共享/映射页。硬件为 Ryzen 7 9800X3D（8 核、16 线程）、系统报告内存 100,415,373,312 bytes、本机 SSD；测量期间没有并行编译或 GUI 性能测试，OS 缓存未清空。这是 Windows owned DELETE-journal 副本的整套工具测量，不能代替服务器 WAL 写入负载、Mac 峰值内存或播放首声测量。工具 SHA256 为 `07EE67409B72E5AD655011D8CC70901F7FDC497838A8431785A727BD5F029AD4`。
+
+两轮源报告、逐阶段 JSONL、采样方法及前后哈希保留在本机忽略目录 `.rust-validation/review-7ec84ed/upgrade-real-v1*` 与 `upgrade-real-v2*`。首次失败资源基线保留，未覆盖为成功结果。
+
+最终应用源码为 `38c5ed2ecdf59adf799ade50882171e5fb8522c4`，Windows Rust 1.97.1 MSVC 的 `cargo fmt --all -- --check`、默认及 ASIO 严格 workspace/all-targets Clippy、完整 locked 测试全部通过：每种配置各 **54 个顶层目标、925 passed、72 ignored、0 failed**，隔离子进程不重复计数；两套检查总计约 410.7 秒。ASIO 使用准备脚本验证过的 Steinberg SDK 2.3.4。222 项应用、crate、服务端、配置及资源输入在检查前后集合及 SHA256 不变；正常数据目录环境和六项持久数据基线保持一致。此前 `b4d64e6` 的检查与构建证据另保存在 `checks-b4d64e6/`，没有覆盖为最终版本。
+
+同一提交的 [原生 macOS ARM64 数据库 CI](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/39372798464/job/118464191043) 通过：`macos-15` runner 安装 `1.97.1-aarch64-apple-darwin`，先断言 `uname -m=arm64` 并验证编译器/C tooling，再执行 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`。涵盖主报告的四项 BM25 测试、Unicode fixture、源别名及大小写改名回归；不是交叉编译或 Windows 结果推断。该 CI 不验证 Mac 桌面、ASIO、真实大库升级资源或音频首声，且本轮未运行 Miri/ASan。相同工作流的 Linux 服务端检查也通过。
+
+同源正式 ASIO release 构建耗时 256.53 秒，版本 `0.4.11` 开发构建，未发布新 Release。两 EXE 在本机 SSD 构建后复制到打包使用的仓库 target 目录并逐个验哈希：
+
+- AudioLibExplorer.exe：`7CE8AE1FC9A49648128FD221F3A4C192248783880DBFF502E055ACE080D2E1C5`
+- AudioLibCli.exe：`D47A65C2C8C3FCE48A920216F5BE2ECB1472843A60E94F646588F0EF1EB00664`
+
+`search-benchmark --records 1000000 --queries 100 --fragment-cases --query et --concurrent-writer --db <new-owned-path>` 新建独立百万条合成库，不复用历史冻结 fixture。生成及重建耗时 168.24 秒；`et` 查询的两组各 100 次，每次使用新只读 provider、provider 打开和目录统计不计入搜索计时。无写入搜索 P95 **114.804ms**；并发 favorite 提交 P95 **188.654ms**（1.643 倍），共 8,054 次提交，写线程每次提交后等待 2ms。无写入组 100 次并行尝试、无回退；并发组 99 次尝试均因 `snapshot_changed` 回退，Busy/Locked/Interrupted/Unavailable/启动失败均为 0。这证明本次提交竞争回退可见，不代表测出了扫描时 Busy、网络盘或真实扫描全负载。整个含生成、重建、搜索及写入的进程峰值工作集 **277,479,424 bytes**，200ms 采样 private bytes 峰值 **259,784,704 bytes**；并非仅搜索新增内存。
+
+正常结束后 checkpoint 返回 `(0,0,0)` 并关闭连接，主库 1,786,855,424 bytes，SHA256 `8D131FFB2E55A770802A79ACA5E23ABF9F5658D90B02DA9177D7A6F7B5C688DF`，无 WAL/SHM/journal。再以同一 EXE 对它执行只读 **21 类请求、100 次共享 provider 循环、21 类新 provider 首查及目录统计**，不带 query filter：共享结果页 P95 **114.210ms**、搜索加目录统计 P95 **208.895ms**；新 provider 首次串行总计 P95 **224.083ms**（打开另计）。完整混合工具峰值工作集 **284,418,048 bytes**，200ms 采样 private bytes 峰值 **130,957,312 bytes**。7 个辅助 reader 各 8MiB cache，普通 reader 64MiB，本地 fixed-volume 的 mmap 配置上限 64GiB；上限不是实际驻留内存。测试期间无并行编译、GUI 或其他基准，OS 缓存未清空；沿用含测前统计的历史混合协议，不能混称严格新进程首查或 GUI 端到端。测后库 SHA256、大小及修改时间不变。目标仍为 **P95 latency <500ms for 1M+ records**；这些是本次资料与条件下的实测。
+
+同一正式 GUI EXE 的真实 909,342 条副本 `impact metal` 原生输入筛查（`gui-e2e/native-probe-v4`）结果页和全部目录计数与 oracle 相符；进程工作集高水位 **400,482,304 bytes**，200ms 搜索窗口仅 3 次采样，private/current WS 最大分别为 **353,734,656 / 395,149,312 bytes**。这是一个画面验收无效样本的资源观察，不能外推宽泛查询、整套矩阵或 8GB 机器预算。工具捕获到 431.59ms 的匹配画面，但真实瞬时 Resized 事件触发严格几何门禁，因此保留为 invalid，**不计为 GUI <500ms 达标样本**。大批量 GUI 矩阵由另一协调任务继续；本轮没有测量搜索同时试听的实际首声延迟。
+
+本轮原始基准与资源/哈希证据位于 `.rust-validation/review-7ec84ed/concurrent-million-v1*`、`mixed-million-v1*`、`million-fixture-baseline.json`；benchmark EXE SHA256 为 `AE3363B78F0030BAC244193E3B8B2396849F3CBB30D61D94EEFD172AEB982D53`。新合成库保留供后续只读 GUI 验收，未删除源 WAV 或正常运行数据。
+
+发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 均通过；`package-portable.ps1 -SkipBuild` 与上述构建使用相同 ASIO 选择，随后对 `dist/latest/portable` 和固定 `local_release/` 分别运行 `validate-portable.ps1 -CleanCheckout`，两次均通过 EXE 身份、隔离首次启动、CLI/UI 和启动诊断检查。旧库/WAV fixture 在本 checkout 缺失，由支持该模式的脚本明确跳过，不能计为真实音频或首声验收。安装仅覆盖包拥有的 1,213 个文件，没有删除或镜像清理安装目录，也没有强制终止用户应用；两份已安装 EXE SHA256 与上述正式构建、验证后的包完全一致。六项持久数据基线及正常 `AUDIOLIB_DATA_DIR` 环境保持原值，未覆盖工作库、设置或 SQLite sidecar。日常入口继续为 `local_release/Start-AudioLibExplorer.cmd`。成功记录在本机 `.rust-validation/review-7ec84ed/installation.json`，本轮只推送开发分支，没有创建 tag 或发布 GitHub Release。
+
+## 片段搜索 CR 推送前检查（2026-10-20，0.4.7、tokenization 3）
+
+本轮复审修复单 grapheme 完整 Unicode 折叠的片段漏命中，以及非相关度分页/COUNT/排名预算 SQL 回退可能重复 MATCH 的执行顺序，详见 [审查修复](Rust_Review_Fixes.md)。派生文本修订升为 3；原修订 2 的真实库后端测量保留为历史证据，不能代替新修订或 GUI 输入到完整显示的验证。
+
+`cargo fmt --all -- --check`、默认与已校验 ASIO SDK 2.3.4 配置的严格 workspace/all-targets Clippy、完整 locked 测试全部通过：两种配置各 **52 个顶层目标、873 passed、71 ignored、0 failed**，隔离子进程不重复累计。217 项应用、crate、服务端、资源及配置输入的集合与 SHA256 在整套检查前后保持一致；当前六项持久数据基线、正常数据目录环境及真实源库大小/修改时间也保持一致。Rust 1.97.1 MSVC，构建缓存位于本机 SSD。
+
+首次检查被新增测试的冗余 struct update 警告中断；修正后在新审计批次完整重跑两种配置，耗时 440.39 秒，没有忽略警告或覆盖失败记录。检查证据位于本机忽略目录 `.rust-validation/gui-e2e/prepush-retry1/`；初次失败保留在 `prepush/`。此阶段尚未运行新修订的真实库 GUI 帧计量，也尚未打包或更新安装；这些结果需由后续独立验收记录确认。
+
+## 真实音效库首次查询与目录统计（2026-10-20，0.4.7 本地开发构建）
+
+本轮直接只读验证机器上当前有效的服务器缓存快照，没有拿空的本地库或合成库代替真实资料：**909,342 条音效、20,248 个目录、19,492,810,752 字节**。真实库未满百万条，因此另保留原有百万条合成基准回归；目标术语仍为 **P95 latency <500ms for 1M+ records**。所有测试不联网同步、不重建索引、不运行 ANALYZE、不写入真实库或源 WAV。
+
+原业务实现的首次对照发现一个真实慢例：`ambient` 加 `sample_rate=48000`、`duration_min=0`、`duration_max=5`，命中 11,776 条、199 个正计数目录；搜索 216.16ms、目录统计 **62,268.15ms**，外层串行总计 **62,484.31ms**。未过滤的完整排名为 17,156 条，过滤索引候选有 154,447 条。源码与复现执行计划表明，缺少 ANALYZE 统计时，过滤索引外层会逐条进入复杂位置 MATCH，与现场慢例一致；原实现没有利用小排名缓存，即使去掉旧的 65,536 条准入门槛，候选仍超过 `8×17,156+8192=145,440` 的预算而回退到原慢计划。
+
+修复让任何同修订完整排名均可尝试有界交集；预算溢出仍丢弃整个部分结果，随后使用共享 `folder_search_from` 构造的 FTS5 外层 CROSS JOIN，一次遍历 MATCH 后按 ID 读取文件并应用原参数化筛选。无缓存及修订不稳定也走这一完整回退。没有增加候选上限、截断结果或改变原生 BM25 排序；无/陈旧统计的执行计划、小排名不重新访问 FTS、候选溢出、NULL/非二元 missing、目录范围与分页均有回归。极宽 MATCH、极窄过滤且没有缓存时仍有扫描匹配集的成本，不能据此宣称对任意选择率都最优，详见 [架构说明](Rust_Architecture.md)。
+
+新增 `--request-file` 读取上限 1MiB 的非空、逐条校验 `SearchRequest` 数组，`--first-only` 在共享 provider、统计及 warm search 之前分流。每个正式样本启动一个新进程/只读 provider，计时前只有 schema/派生状态检查，拒绝隐式升级副本；按顺序调用 `search`、`search_folders`，同一个外层计时器记录总计。全库窄索引 COUNT、SQLite 配置探测、结果 ID 与目录计数输出均放在计时后。打开 provider 单独报告；总计不含 GUI 防抖、排队或绘制。原 21 类混合基准保留测前统计的历史协议，不能与此严格首查协议混称。
+
+正式构建后的固定请求集合为 `explosion`、`expl`、`plos`、`metal`、`door outdoor`、`impact metal`、`foley`、`whoosh`、`et`、`on`、`爆炸` 和上述带采样率/时长筛选的 `ambient`；全部跨目录、present、relevance、descending=false、limit=200、offset=0，其余筛选默认。没有沿用合成库的 folder 1 作为真实范围；全部请求均有命中。每类运行 30 个独立进程，结果页有序 ID、完整命中数及全部排序后的 folder ID/count 均逐次与修复前基线比较。分位取排序后 `ceil((n-1)*p)`；保留全部慢例，不自动重试或替换样本。
+
+硬件仍为 Ryzen 7 9800X3D、约 93.5GiB 系统可见内存、本机 WD_BLACK SN8100 2TB SSD，Rust 1.97.1 MSVC、已校验 ASIO SDK 2.3.4。正式计时与编译、发布回归及用户 GUI 分开执行；OS 页面缓存未清空，首次对照后已进行源文件完整哈希，因此是新进程/provider 的首次业务查询，**不是物理冷盘或 GUI 端到端保证**。连接缓存、mmap 和并行 reader 的资源配置与下节一致；64GiB mmap 是配置上限，不是驻留内存。
+
+正式 **360 次总计 P50 为 120.98ms、P95 为 277.78ms、最大 293.20ms，≥500ms 为 0/360**。搜索本身 P50/P95 为 98.92/263.86ms，随后目录统计 P95 为 91.17ms；provider 打开 P95/max 为 39.36/43.01ms，单独计时。各列分位不能相加。每类完整 30 次结果如下：
+
+| 请求 | 完整命中数 | 正计数目录 | 总计 P95（ms） | 总计 max（ms） |
+| --- | ---: | ---: | ---: | ---: |
+| explosion | 10,020 | 941 | 105.62 | 106.47 |
+| expl | 13,177 | 1,236 | 86.58 | 87.65 |
+| plos | 11,280 | 1,074 | 99.99 | 103.87 |
+| metal | 85,996 | 4,231 | 281.43 | 287.16 |
+| door outdoor | 2,085 | 425 | 95.39 | 100.32 |
+| impact metal | 25,867 | 1,498 | 289.85 | 293.20 |
+| foley | 64,980 | 1,707 | 130.42 | 133.56 |
+| whoosh | 43,343 | 2,223 | 120.98 | 121.07 |
+| et | 562,510 | 13,923 | 197.93 | 204.49 |
+| on | 638,080 | 15,227 | 202.83 | 209.96 |
+| 爆炸 | 1 | 4 | 62.60 | 65.91 |
+| ambient + 48kHz、0–5s | 11,776 | 199 | **185.49** | **186.14** |
+
+原筛选慢例的最终搜索 P95 为 132.16ms、目录统计 P95 为 57.81ms，30/30 总计低于 500ms。全部 360 个样本的有序结果页 ID、返回数、完整命中数及每个目录的精确计数均与修复前基线一致；最初 62.48 秒样本和中间候选记录全部保留。缓存条件不同，不能把两轮结果页时间之差单独归因于这次目录统计改动。
+
+随后用同一正式 benchmark EXE 回归原有 1,000,000 条隔离合成库，保留 21 类完整请求及 100 次共享 provider 循环，逐类请求、命中数与正计数目录数同前一轮正式结果一致。共享结果页 P50/P95 为 0.59/111.60ms，共享搜索加目录统计总计 P95 为 **200.69ms**；21 类新 provider 首次搜索 P95 为 126.21ms、首次总计 P95/max 为 **215.23/283.85ms**，0/21 达到 500ms。该历史混合协议保留测前统计，OS 缓存未清空，不代替上述真实库严格首查测量。
+
+默认与 ASIO 的格式检查、严格 workspace/all-targets Clippy、完整 locked 测试均通过：各 52 个顶层目标、**869 passed、71 ignored、0 failed**，隔离子进程不重复计数。版本 0.4.7，基于 `a666857b0913dde070e1fb2e61d69f65d37d7bf0` 加工作区修改；217 项应用、crate、服务端、配置和资源输入在全套检查、正式构建及性能验收后 SHA256 一致。正式 ASIO 构建耗时 276.65 秒；`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和 CLI 片段验收通过。缺失旧库/WAV fixture 明确跳过，不计为真实资料或实际音频输出验收。正式 EXE SHA256：
+
+- AudioLibExplorer.exe：`C1D53DC2474C0EEB70BB8329273A370BE0C91AF3D5D402BFB972320D6C0514CF`
+- AudioLibCli.exe：`173D0747151F2A36AC59DF481890C8019844C9D50D9AFEA44C55239AE7501F1B`
+- search-benchmark.exe：`51C5A37570C804908778C9E989F78B50C51F4812266F1D6431C104C071988BDD`
+
+真实库在首轮对照后及全部正式测量后的完整 SHA256 均为 `5ADAECFFB603716F4B2840EFA2838F3D8174B2C9825B0D95EAF93275EBF6393F`，大小、修改时间一致；合成库仍为 `2CD3AABD7A32D12E44AB05C9529058A0050A9FAF7194A5E4B1123AE7124D179B`。正常数据目录环境及本轮六项设置/工作库/sidecar/远端状态基线也保持一致。没有为适配旧基线恢复或覆盖运行数据。
+
+本轮所有原始 JSON、stderr、请求、失败基线和校验输出保留在本机忽略目录 `.rust-validation/real-first-total/`：`formal-summary.json`、`formal-verified.json` 和全部 `formal-rXX-cYY.json` 对应 360 次实测，`synthetic-verified.json` 对应百万条回归，`library-hash-final.json` 对应测后完整源库校验。便携包与固定 `local_release/` 分别运行隔离 `validate-portable.ps1 -CleanCheckout`；最终安装状态、构建→包→安装两 EXE 身份、完整包内文件身份及六项持久数据复核以该目录 `completion.json` 的成功记录确认。安装仅覆盖包内文件，日常入口仍为 `local_release/Start-AudioLibExplorer.cmd`，正常数据仍位于 `%LOCALAPPDATA%/AudioLibExplorer/v1`。
+
+## 首次复杂查询与目录统计总耗时优化（2026-10-20，0.4.7 本地开发构建）
+
+本轮将 `door outdoor` 首次复杂查询与随后目录统计的串行总耗时纳入验收，目标为 **P95 latency <500ms for 1M+ records**，并要求该复杂请求的 30 次首次总计全部严格小于 500ms。实现采用主 reader 加七个辅助 reader 的精确全局统计准备及八段评分；目录统计先投影筛选 ID，与同快照完整排名交集，再读取覆盖索引中的目录。宽泛密集 ID 使用至多 1MiB 位图顺序计数，其余保留 8192-ID 分块查询；候选或内存预算超限时丢弃整个部分结果并完整回退。原生 BM25 分数、排序、分页、完整计数及 Metadata 契约保持不变，细节及官方资料见 [架构说明](Rust_Architecture.md)。
+
+复用同一只读隔离合成库：单目录、1,000,000 条 present 记录、主库 1,776,566,272 字节；测试前后 SHA256、大小和修改时间一致，SHA256 为 `2CD3AABD7A32D12E44AB05C9529058A0050A9FAF7194A5E4B1123AE7124D179B`。硬件为 Ryzen 7 9800X3D、约 93.5GiB 系统可见内存和 WD_BLACK SN8100 2TB 本机 SSD，Rust 1.97.1 MSVC。普通及辅助连接各保留 64MiB SQLite cache，配置 mmap ceiling=64GiB，bundled `SQLITE_MAX_MMAP_SIZE=68719476736LL`；这是按需虚拟映射上限，VFS 可降低或回退，不是每个连接预占 64GiB RAM。benchmark 在全部计时结束后只读探测，requested/effective 配置读回值均为 68,719,476,736 bytes，不代表实际映射长度。
+
+最终完整 ASIO release 构建及发布回归完成后，在没有并行编译或应用升级重负载、原 GUI 已退出的空闲窗口计时。OS 页面缓存没有清空，且测前会校验 fixture 文件哈希；因此这里的“首次”指新进程或新 provider 的首次查询，不是物理冷盘测试。每轮仍为原有 21 类查询、每页 200 条、100 次共享 provider 循环；各类请求、命中数与目录数逐一对照原基准，没有缩减工作负载。所有首次排名缓存未命中，目录统计可复用刚生成的完整排名。
+
+| 正式完整工作负载（ms） | 第 1 轮 | 第 2 轮 |
+| --- | ---: | ---: |
+| 循环结果页 P50 / P95 | 0.87 / 130.87 | 0.82 / 129.52 |
+| 循环结果页与目录统计串行总计 P95 | 239.92 | 242.67 |
+| 21 类新 provider 首次结果页 P95 | 133.35 | 131.41 |
+| 21 类首次搜索与目录统计总计 P95 | **214.30** | **221.77** |
+| 21 类首次总计最大值 | **287.89** | **294.16** |
+| 首次总计 ≥500ms | **0/21** | **0/21** |
+
+另连续运行 30 个独立进程，每次只采用新只读 DataProvider 的第一条 case 4：`door outdoor`、folder 1、包含子目录、limit 200、offset 0、relevance、descending=false、visibility=present，其余筛选为默认。每次完整匹配 1,000,000 条且 `search_ranking_cache_hit=false`；不用同进程后续样本替代。分位取排序后 `ceil((n-1)*p)`，全部样本保留。
+
+| 独立进程首次复杂请求（30 次，ms） | min | P50 | P95 | max | ≥500 次数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 搜索 | 223.43 | 233.25 | 248.61 | 248.99 | 0/30 |
+| 随后的目录统计 | 60.78 | 62.45 | 67.61 | 67.89 | 0/30 |
+| **搜索与目录统计串行总计** | **285.00** | **296.98** | **311.87** | **312.14** | **0/30** |
+| provider 打开，单独报告 | 23.03 | 27.02 | 42.87 | 43.07 | 0/30 |
+
+总计由外层计时器直接测量，不包含 provider 打开、GUI 防抖、排队和绘制。各列分位不能相加。GUI 文件页和目录统计仍由两个 worker 并行发布，其交互端到端延迟未由本基准测量。总体 P95 和指定复杂请求逐次总计门槛均通过；额外观察的全部 42 个首次总计也通过，但这不是任意生产资料库或任意负载下最大延迟的保证。
+
+本轮失败记录完整保留：旧构建五次总计为 531.25–547.22ms；首个密集计数候选 30 次中首样本为 621.72ms，整批逐次门槛失败，没有移除。首次正式 v1 的混合筛选曾达到 4514.68ms；仅调大 mmap 的中间实验仍失败，因此又实现筛选 ID 投影及交集。中间 staged2 的复杂请求 30 次总计 P95/max 为 356.71/394.18ms，但空查询 `tag_contains=rareword` 的首次总计为 724.87ms。最终空闲正式批次该标签请求总计为 214.30/221.77ms；没有再为此改动源码，也不能据此把此前差异归因为某个已证实的单一原因或宣称旧 outlier 已消失。原始对照、分阶段诊断、失败正式构建及所有重测均保留。
+
+默认及 ASIO 的 `cargo fmt --all -- --check`、严格 workspace/all-targets Clippy 和完整测试通过：每种配置各 52 个顶层目标、864 passed、71 ignored、0 failed，隔离子进程不重复计数。新增回归覆盖筛选交集预算、极端 signed ID、NULL/非二元 missing、覆盖计数计划、分块边界、旧 WAL 快照、取消与 SQL 错误。发布前复核还修复了 ready/prepared 重复失败通知可能填满有界队列并阻塞 join 的问题；每个 worker 在各通道只发送一次，确定性回归覆盖启动失败及两个 gate 的取消。20ms 是接收/gate 轮询粒度，不是 SQLite 执行取消的总耗时上限。
+
+最终源码为 0.4.7，基于 `a666857b0913dde070e1fb2e61d69f65d37d7bf0` 加工作区修改；217 项应用、crate、服务端、配置及资源输入在完整检查、构建和性能验收前后 SHA256 一致。已校验 ASIO SDK 2.3.4 的正式构建耗时 311.54 秒，发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 及 CLI 片段搜索验收通过。缺失的真实旧库/WAV fixture 显式跳过，不计为生产资料库或实际音频输出验收。正式二进制 SHA256：
+
+- AudioLibExplorer.exe：`489FAB0E5723566DC978F2C61E6DC5AB2A75E5094BF9DFE32EE6768B5F1E8100`
+- AudioLibCli.exe：`596FF7321D910BF6AE28465EBEBA512209A0CF03B7D8FA8BF5A389A777E9D9DF`
+- search-benchmark.exe：`31E47CEA0BB8ECFEC2B9B1CF15E0F61636C034F0C17C750A4A71151C8A9231B7`
+
+正式性能证据在本机忽略目录 `.rust-validation/first-total/formal64-*`，失败正式 v1 独立保存在 `failed-formal-v1/`，此前 candidate/staged2 不覆盖。联合打包、固定 `local_release/` 更新及安装后隔离验证由 `.rust-validation/index-upgrade/` 记录；最终包→安装 EXE 身份、便携验证及持久数据复核由本轮 `completion.json` 记录。安装只覆盖包内文件，保留正常数据目录和库路径；原 GUI 在安装前已退出，两个任务均未强制终止它。服务器同步正常轮换缓存及关闭时的设置保存分别记录，不能为凑齐旧哈希而回写运行数据。
+
+## 服务器缓存索引升级与可见进度（2026-10-20，0.4.7 本地开发构建）
+
+现场旧服务器缓存需要从 `tokenization=1` 升级到 `2`，重新计算派生文本并构建 FTS5。进程的 CPU 与磁盘读写持续增长，同一次同步最终正常完成；仅凭界面停在“正在升级搜索索引”及累计秒数，无法判断是否卡死。宽 Metadata 和位置二元编码会扩大重写数据量及回滚日志，这与小型合成库的耗时条件不同。
+
+Owned snapshot 升级原来采用 SQLite 默认约 2MiB 页缓存；现在与普通 writer 一样使用 64MiB 页缓存和内存临时存储，保留 DELETE 回滚日志及原同步耐久性。重建每 5,000 条记录报告真实累计计数，另行显示 FTS5 构建和提取标签阶段。行数只代表文本阶段，未知耗时阶段仍不显示估算百分比。日志记录阶段、节流后的处理条数及耗时，不记录 Metadata 或凭据。未在同一真实大库上进行旧、新配置的速度对照，因此不宣称加速倍数或固定完成时限。
+
+全部重分词批次和 FTS5 构建保留同一迁移事务，已观测到的批后取消及 FTS5 开始前取消均逐字节回滚。迁移提交后的取消由远端准备流程丢弃 owned staging，保留当前缓存、状态和已有 reader。新增回归覆盖真实旧 Porter 索引、10,003 条跨批处理、完整 signed i64 边界、原 Metadata 与标注保留、空库、取消及完成后重复调用不写文件；远端回归覆盖进度传播及各阶段取消，隔离 Slint 子进程检查双语行数和阶段显示。
+
+共同最终源码的 `cargo fmt --all -- --check`、默认及 ASIO 严格 workspace/all-targets Clippy、两种配置的完整测试全部通过：各 52 个顶层目标、864 passed、71 ignored、0 failed，隔离子进程不重复计数。输入 SHA256 在全套检查及正式构建期间保持一致。基于 `a666857` 加本地修改的完整 ASIO release 构建耗时 311.54 秒；`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和发布版 CLI 片段验收通过。缺失的真实旧库/WAV fixture 不计为已验证。构建、回归、便携包及固定安装的本机审计输出保存在忽略目录 `.rust-validation/index-upgrade/`。
+
+## 首次复杂查询优化（2026-10-20，0.4.7 本地开发构建）
+
+本轮继续处理此前约 758ms 的 `door outdoor` 首次慢例，目标仍为 **P95 latency <500ms for 1M+ records**，并额外要求本批次每个首次结果页均低于 500ms。保留两字符起任意连续片段、默认 BM25 分数、ID 次序、完整计数及 Metadata。三个辅助 reader 分别准备不重叠短语组的全局 DF，同时主 reader 加载文档长度；验证同一快照并完整发布统计后，再按四段 rowid 范围评分。SQLite 默认关闭全局内存统计以减少分配锁竞争，保留 THREADSAFE=1、事务与 WAL 锁；内存边界和回退契约见 [架构说明](Rust_Architecture.md)。
+
+复用同一份只读隔离合成库：单目录、1,000,000 条 present 记录、主库 1,776,566,272 字节，测试前后 SHA256、大小和修改时间一致。硬件仍为 Ryzen 7 9800X3D、约 93.5GiB 系统可见内存和 WD_BLACK SN8100 2TB 本机 SSD，Rust 1.97.1 MSVC。四个常驻 reader，每 reader SQLite cache 64MiB、mmap 上限 1GiB；单个 provider 最多新增三个临时辅助 reader。
+
+正式完整 ASIO release 构建后，在没有并行编译的情况下，两次运行原有 21 类查询及 100 次共享 provider 循环：`search-benchmark --existing-db <隔离库> --queries 100 --fragment-cases --folder-facets --first-provider`。没有修改查询集合或减少结果数。
+
+| 正式工作负载 | 第 1 次 | 第 2 次 |
+| --- | ---: | ---: |
+| 循环结果页 P50 / P95 | 0.78 / 155.45ms | 0.74 / 115.54ms |
+| 循环结果页与目录统计串行总计 P95 | 313.91ms | 336.90ms |
+| 21 类新 provider 首次结果页 P95 | 198.81ms | 176.60ms |
+| 21 类新 provider 首次结果页最大值 | 302.12ms | 306.57ms |
+| 21 类首次搜索与目录统计串行总计 P95 | 457.38ms | 475.33ms |
+
+两次循环排名缓存均命中 75/100；全部 42 个首次结果页均未命中排名缓存且小于 500ms。每轮最慢的仍为 `door outdoor`，均完整匹配百万条。
+
+另以同一正式 benchmark EXE 连续启动 30 个独立进程，每个只采用新只读 DataProvider 的第一条查询：`--case-index 4 --queries 1 --folder-facets --first-provider`。精确请求保持 `door outdoor`、folder 1、包含子目录、present、relevance、升序、offset 0、limit 200，其余可选筛选为空。每次 `total_count=1,000,000`、`search_ranking_cache_hit=false`，不采用随后同进程的预热样本。
+
+| 独立进程首查（30 次，ms） | min | P50 | P95 | max | ≥500 次数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 结果页查询 | 296.38 | 307.33 | **352.20** | **364.84** | **0/30** |
+| provider 打开，单独计时 | 22.20 | 25.28 | 29.27 | 30.33 | 0/30 |
+| 搜索后目录统计 | 231.78 | 238.27 | 248.44 | 260.28 | 0/30 |
+| 搜索与目录统计串行总计，不含打开 | 532.56 | 549.39 | 601.37 | 604.22 | 30/30 |
+
+OS 页面缓存未清空；这些是新进程/新 provider 的首次查询，不是物理冷盘或完整 GUI 输入到显示延迟。分位取排序后的 `ceil((n-1)*p)`，所有样本保留。首次复杂结果页的本批次最大值达标，不能推导为任意请求的最大延迟保证；其与目录统计的串行总计仍超过 500ms，GUI 两类 worker 并行发布的时间另需测量。
+
+本轮最初五次旧构建对照为 788.07–875.99ms。只共享统计并并行评分的前一候选在 30 次中仍有 3 次超时：第 19/20/22 次为 568.21/534.71/518.83ms，整批判失败，未删除或替换。增加准备阶段重叠后的诊断 30 次为 299.51–343.42ms，P95 337.07ms；随后以上正式构建又独立复测 30 次。全部对照、失败和最终原始 JSON/stderr 均保留于本机忽略目录 `.rust-validation/first-complex/`。
+
+格式检查、默认/ASIO 严格 workspace/all-targets Clippy 和全部测试通过：两种配置各 51 个顶层目标、845 passed、71 ignored、0 failed，隔离子进程不重复累计。定向回归涵盖逐位原生 BM25 分数及排序、极端 ID、稀疏长度的原生回退、完整统计发布、跨提交保留旧 snapshot、两道 gate 的取消、资源释放及真实 SQL 错误传播。发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和 CLI 片段验收通过；缺失的真实旧库/WAV fixture 显式跳过，不计为生产资料库或实际音频输出验收。
+
+版本 0.4.7，基于 `a666857b0913dde070e1fb2e61d69f65d37d7bf0` 加工作区修改；215 个应用、crate、服务端、配置与资源输入在完整检查及正式构建前后 SHA256 一致。使用已校验 ASIO SDK 2.3.4 的完整 release 构建耗时 290.9 秒。最终 EXE SHA256：
+
+- AudioLibExplorer.exe：`10142BC37F4A5FF9277DFEC715F31F6D4AA8C48F895B27435A7CEE9636BCA75A`
+- AudioLibCli.exe：`58F17C098BFBAE71E13232FD55DB2EA418E8F02F61BCC1E04162A1739BB4CE60`
+
+固定安装目标为仓库 `local_release/`，正常入口为 `local_release/Start-AudioLibExplorer.cmd`。便携包和固定安装分别执行隔离 `validate-portable.ps1 -CleanCheckout`，安装只覆盖包内文件。两 EXE 的构建→包→安装身份、ZIP 校验和、8 项工作库/sidecar/设置基线以及正常数据目录环境的最终核对，以本轮审计目录 `completion.json` 的成功结果确认；这些安装验证不访问用户工作库。
+
+## 百万条宽泛查询性能优化（2026-10-19，0.4.7 本地开发构建）
+
+以下保留上一轮结果；首次复杂慢例的后续优化和最新构建数据见本报告首节。
+
+本轮在既有两字符起任意连续片段语义上优化宽泛查询，目标为 **P95 latency <500ms for 1M+ records**。保留默认 BM25、ID 次序、完整计数、分页及原始 Metadata；没有截断候选或修改基准查询集合。相同完整排名经逐 ID 比较后共享缓存，32MiB 预算按唯一 ID 数组计费；覆盖索引和保留 `missing=0` 的筛选使目录/格式统计避开宽 Metadata 行。目录统计在固定读快照内复用完整排名，以 8192 个 ID 分块聚合。
+
+私有 FTS5 评分函数缓存同一修订的文档长度，减少逐命中的 docsize 查找。短语命中达到 `ceil(N/2)` 时可提前结束文档频率枚举，因为原生 IDF 此时已固定钳位为 `1e-6`。原生分数位级 oracle 覆盖稀有/常见短语、AND/OR、列限定、奇偶记录数半数边界和单条记录；稀疏 ID、长度槽损坏、语句释放、重复注册、取消和修订失效均有回归。原生 BM25 分数与排序保持一致；提前结束不承诺与全遍历在未访问损坏页上的报错时机相同。新增 `search_indexes` 实现修订 1；已有当前 tokenization 的库只增加索引，不重建 FTS5。
+
+同一份隔离百万条合成数据使用 SQLite backup API 复制并增加当前两个索引，包含单目录下 1,000,000 条可用记录，主库为 1,776,566,272 字节，较原库增加约 48.9MiB。准备共 6.94 秒，其中 backup 2.82 秒、索引创建 2.36 秒；原合成库 SHA256 未变，没有重新生成 Metadata 或 FTS5。硬件为 Ryzen 7 9800X3D、约 93.5GiB 系统可见内存、WD_BLACK SN8100 2TB 本机 SSD；Rust 1.97.1 MSVC、校验后的 ASIO SDK 2.3.4，四个 reader、每 reader SQLite cache 64MiB、mmap 1GiB。
+
+最终完整 ASIO release 构建后、没有并行编译时，连续运行两次 `search-benchmark --existing-db <隔离库> --queries 100 --fragment-cases --folder-facets --first-provider`。查询仍为原 14 类加 7 类字母片段，每页 200 条；P95 使用排序后 `ceil((n-1)*0.95)`。结果页为 DataProvider 执行时间；目录统计列为先结果页再统计的串行后端时间，GUI 两个 worker 仍并行，这些数据不包含输入防抖、事件排队和绘制。
+
+| 同一基准口径（P95） | 优化前 | 最终第 1 次 | 最终第 2 次 |
+| --- | ---: | ---: | ---: |
+| 共享 provider 循环结果页 | 759.27ms | **120.26ms** | **119.06ms** |
+| 同轮结果页与目录统计顺序总计 | 1407.49ms | **293.75ms** | **286.41ms** |
+| 每类新 provider 的首次结果页 | 767.98ms | **423.92ms** | **419.30ms** |
+| 每类新 provider 的首次结果页与目录统计顺序总计 | 1538.20ms | 678.42ms | 656.84ms |
+
+两次循环排名缓存均命中 75/100（优化前为 69/100）；结果页 P50 分别为 0.81/0.69ms。首次目录统计 P95 为 254.50/244.33ms。固定查询混合包含命中百万条的 `metal`、`door outdoor`、`et`，以及普通片段、中文、目录范围、标签、采样率/时长、深 offset 和文件名排序。优化前对照为同轮记录的 `baseline-page-cases.json`；最终结果为 `benchmark-1m-1.json`、`benchmark-1m-2.json`。
+
+新 provider 阶段每类仅一次、共 21 次查询，之后共享 provider 先执行一轮，再循环 100 次。OS 页面缓存没有清空，不能称为物理冷盘测试；首次目录统计可以自然复用刚生成的排名。首次 `metal` 结果页为 423.92/419.30ms；最慢的 `door outdoor` 为 758.16/755.57ms，均命中百万条。首次串行总计 P95 仍超过 500ms，后续问题见 [SEARCH-001](Rust_Known_Issues.md#search-001百万条数据的宽泛片段查询仍有慢例)。结果页 P95 已达标，但不能将其解释为每次请求最大延迟或完整 GUI 显示均在 500ms 内。
+
+格式检查、默认与 ASIO 的严格 workspace/all-targets Clippy 和完整测试均通过；两种配置各 51 个顶层目标、834 passed、71 ignored、0 failed，隔离子进程不重复累计。发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 各 10 项通过；CLI 片段验收覆盖有效/无效片段、大小写、单字母拒绝及源 WAV 字节不变。新增定向用例还覆盖 canonical 排名哈希碰撞、最后引用计费、8192 分块边界、极端 ID、非零/NULL missing、范围/排序/分页无关的目录计数、外部写入失效及旧索引只读副本升级。
+
+本轮基于 `a666857` 加当前工作区修改，214 个应用、crate、服务端、配置及资源输入在完整检查和正式发布构建前后 SHA256 一致。正式 ASIO release 构建耗时 301.9 秒，最终两个 EXE 的 SHA256 为：
+
+- AudioLibExplorer.exe：`1BFD71692CC319ED4E9F7807D72C493C6287AA0BF24DB988200A7FF330B47171`
+- AudioLibCli.exe：`93B56E57CE4E08E8F6BD1DC687CC588568E19CB54663C79425F61F1D79EAF398`
+
+检查、基准原始 JSON、源码清单及构建/安装身份位于本机忽略目录 `.rust-validation/search-p95/`。现有工作库、SQLite sidecar、配置及其他持久数据使用独立基线核对，所有验证仅使用隔离临时数据；缺少旧库/WAV fixture 的发布回归显式使用 CleanCheckout，不计作旧 fixture 或实际生产库验收。
+
+## 两字符起的字母片段搜索（2026-10-19，0.4.7 本地开发构建）
+
+以下保留字母片段初版的验收记录；本轮后续的宽泛查询性能优化、最终构建和复测另见本报告首节。
+
+关键词包含至少两个字符的字母片段时支持任意连续位置：`ex`、`expl`、`plos`、`sion` 均匹配 `explosion`。单个非汉字字母不发起搜索，并取消旧文件页和目录统计请求；空查询、单个汉字、数字及多词中的完整单字母代码保留原规则。两字符的判定按 Unicode 字素，组合重音不算额外字母。
+
+FTS5 派生列改用位置二元编码，词间分隔防止跨词拼接；原文字段和编码字段分别限定查询，用户输入的类似编码字符串不会误匹配内部词元。移除 Porter，`tokenization` 实现修订升为 2，`user_version` 仍为 5。真实旧 Porter 索引的可写升级、只读副本升级、重复打开、Metadata/标注/扫描与播放历史保留均通过回归；恢复旧备份在重建前严格检查表和同步触发器，损坏备份不能被升级隐藏。WAV 源字节保持不变，无需重新扫描音频文件。
+
+Rust 1.97.1 MSVC 的格式检查、默认与 ASIO 严格 Clippy、两种配置的完整 workspace/all-targets 测试均通过。每种配置各 51 个顶层目标、819 passed、71 ignored、0 failed；隔离子进程不重复计数。定向回归覆盖全部两字符起的 `explosion` 连续片段、大小写和重音、中文、数值、跨字段 AND、排序分页、目录计数和缓存失效。桌面用例还验证单字母输入取消旧请求，拒绝迟到的文件页/目录统计，并在清空输入后恢复浏览。
+
+首轮完整用例发现既有表格测试在请求退出事件循环后，定时器再次回调而进入 `unreachable!()`；完成阶段改为幂等后复测通过。NAS 构建输出还出现生成 `.rmeta` 的访问拒绝，最终验证和构建使用本机 SSD 上独立的 `CARGO_TARGET_DIR`，保留原输出目录，并将新生成的 EXE 按 SHA256 同步回仓库 `target/`。正常数据目录和库路径没有迁移。
+
+本轮源码基于 `a666857`，包含当前工作区修改。213 个应用、crate、服务端、配置及资源输入在发布构建前后 SHA256 一致。ASIO 使用准备脚本校验的 SDK 2.3.4，release 构建耗时 248.0 秒。`validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和实际 release CLI 片段搜索验收均通过；CLI 同时确认单字母查询被拒绝、无效片段不命中、合成 WAV 源字节不变。旧库/WAV fixture 不可用的检查采用明确的 CleanCheckout，不计为已执行旧 fixture 验收。
+
+本机忽略目录 `.rust-validation/keyword-prefix/` 保存检查、构建、回归、输入清单及身份日志。当前 release 输出：
+
+- AudioLibExplorer.exe：`0C7A919AFE2CA117210BB6AFACB99B0A48D04F5B25A0039C30C5F1FFD5FB484E`
+- AudioLibCli.exe：`E813E21C14A915E0524AE71E9FC8E054C4918125108DED526B3CD2C768594DB1`
+
+新增源 Metadata 复合代码回归：`FX_123` 的 `123`、`A.wav` 的多词 `a wav` 保留可检索性；位置边界防止 `1_AB_2` 误匹配数字短语 `1.2`。原始 JSON、用户标签和只读查询均验收通过。缓存回归验证稍超预算的循环工作集不会退化为全部未命中，大型新排名不能挤掉较小工作集，拒绝保留不改变本次完整结果；32MiB ID 预算、修订失效和每查询上限不变。
+
+百万条性能实测使用 Ryzen 7 9800X3D、约 93.5GiB 可见内存和 WD_BLACK SN8100 2TB 本机 SSD。隔离合成库含 1,000,000 条记录，主数据库为 1,725,247,488 字节；使用最终 release CLI 重建当前派生索引耗时 33.9 秒。`search-benchmark --existing-db <隔离库> --queries 100 --fragment-cases --folder-facets --first-provider` 包含原 14 类及新增 7 类片段查询，每页 200 条；4 个 reader、每 reader 64MiB SQLite cache、1GiB mmap。首次 provider 阶段每类仅测一次，之后共享 provider 先运行一轮再循环 100 次；操作系统页面缓存未清空，因此不能称为物理冷盘测试。
+
+| 最终测量 | P50 | P95 |
+| --- | ---: | ---: |
+| 共享 provider 循环结果页，排名缓存命中 69/100 | 0.63ms | 738.30ms |
+| 同轮结果页后顺序计算目录统计 | 201.95ms | 1353.96ms |
+| 每类新 provider 的首次结果页 | 未汇总 | 752.99ms |
+| 每类新 provider 的首次目录统计 | 未汇总 | 782.10ms |
+| 每类新 provider 的结果页与目录统计顺序总计，不含打开 provider | 未汇总 | 1535.09ms |
+
+新 provider 上 `ex`、`pl`、`plos`、`sion` 各匹配 100,000 条，结果页分别为 69.25、68.90、93.13、94.46ms。`et` 匹配 1,000,000 条为 441.18ms；同为百万命中的 `metal`、`door outdoor` 分别为 752.99、1222.58ms。宽泛首次排序和部分筛选仍有慢例，整体不能认定满足 **P95 latency <500ms for 1M+ records**，后续问题见 [SEARCH-001](Rust_Known_Issues.md#search-001百万条数据的宽泛片段查询仍有慢例)。顺序服务计时包含目录统计，而 GUI 两类 worker 仍并行，结果页可先发布；这些数据不是完整 GUI 输入到显示延迟。
 ## 定位包络与列宽复查（2026-10-19，0.4.10 源码，未发布）
 
 用户安装 0.4.10 后反馈定位仍有破音、自定义列宽不生效；原因与修复见 [审查修复](Rust_Review_Fixes.md)。

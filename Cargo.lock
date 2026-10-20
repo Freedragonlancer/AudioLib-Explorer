@@ -511,6 +511,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.21",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -521,6 +522,7 @@ dependencies = [
  "audiolib-core",
  "chrono",
  "icu_casemap",
+ "icu_normalizer",
  "jieba-rs",
  "libc",
  "rusqlite",
@@ -548,6 +550,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "tempfile",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -572,6 +575,7 @@ dependencies = [
  "audiolib-db",
  "audiolib-windows",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",

@@ -1,5 +1,50 @@
 # Rust 代码审查修复
 
+## 首次打开断点恢复及 WAL 收尾（2026-10-20，0.4.11 开发构建）
+
+Mac 实测的 954 秒首次打开、18.9 GB WAL 和停机后整库快照残留要求先修复，`47ddd03` 至 `c0e8af9` 不作为待发布构建。下表记录后续修复。用户随后明确暂缓原 Mac 同机复测，先以代码审查和功能回归验收修复；Windows 结果不能解释为新 Mac 耗时，也不能据此否定原报告。完整生命周期与回退说明见 [升级恢复](Rust_Upgrade_Recovery.md)。
+
+| 问题 | 修复与验证边界 |
+| --- | --- |
+| 全库分词及 FTS5 重建在一个事务内，失败从头开始 | 现有可写库按 5,000 条提交分词和暂存 FTS5，阶段、独立游标及累计行数与该批数据同事务持久化。完成后验证、原子替换正式 FTS5；不再追加全库 rebuild/optimize。保留一份经过验证的升级前回退备份。四个阶段的取消及子进程强制退出回归检查续跑、完整行数、Metadata、未知扩展和播放历史 |
+| 分批提交会暴露半成品或允许旧连接继续写入 | 升级持扫描、管理和搜索升级租约；正常 reader 参与搜索升级租约。持久维护标记、临时 feature revision 和连接专属写保护阻止旧进程在崩溃后误写。未完成 FTS5 使用独立表名；未知协议拒绝恢复。普通维护原有 reader snapshot 行为保留 |
+| 本地升级没有可见进度或取消 | GUI 中英文显示真实阶段和已提交条数，关窗请求取消当前批。服务端日志及 health 返回相同阶段/条数；停机取消打开线程及重试。维护期间业务 API 仍为 503，不宣称在线升级 |
+| 升级和正常停机留下非空 WAL | 每批及最终提交后执行并检查 TRUNCATE 的 busy/frame 结果；被旧事务阻塞时明确报 Busy。停机在排除写入期间 checkpoint 并保存物理 revision 基线，避免回收 WAL 被误记为业务修改；停机后的外部提交仍会增加 revision |
+| 服务端泄漏连接和快照，后台工作可能在停机后重新填充缓存 | 移除 `mem::forget(service)`；停止准入并取消、排空快照复制/压缩和统计任务，释放缓存。复制在 SQLite backup 步之间取消，压缩每 1 MiB 检查。新快照持有所有者锁；仅清理已释放锁的自有残留目录，活动下载最后释放后删除文件，旧无标记目录保留 |
+
+`upgrade-benchmark --live` 只在独立副本中测真实 WAL 升级，计入回退备份、验证及 checkpoint，并检查成功打开后 WAL 为零。此前 Windows 236.6 秒是修订 2→3、warm cache、owned DELETE 路径；Mac 为修订 1→3、外置 SSD、live WAL，不能直接作四倍性能结论。此前搜索回归及 GUI 未完成样本的限制继续保留，实际检查与资源测量见 [验证报告](Rust_Validation.md)。
+
+本轮随后按用户要求拉取并合并 `origin/main` 的 `71bb1fd`、服务端集成 `3eef19c` 和客户端集成 `c50bd27`，修复源码最终为 `1d81a78`。服务端停机同时保留新列表 Waveform worker 的停止调用与本轮 WAL/快照清理。合并后完整回归发现旧目录导航缓存测试假定后台没有数据库写入，而新增 Waveform worker 会合法写入缓存并改变 `data_version`。测试在创建 Controller 前预计算四条合成 WAV 的 Waveform，保留生产 worker、缓存失效逻辑和严格的 `Arc` 复用断言；没有为通过测试放宽生产缓存一致性。
+
+正式打包的隐私检查另发现合并后的公开 API 文档包含方案确认人的姓名。将讨论身份说明改成编码规格及精度边界，保留全部协议数值和兼容约定；隐私规则保持不变，拒绝的打包日志保留后重新打包验证。
+
+## 7ec84ed 跨平台与资源复审修复（2026-10-20，0.4.11 开发构建）
+
+按主报告与逐行补充报告处理，并与同工作区 GUI 测量任务协调提交；先以 merge 合入 `origin/main`（`afb2f04`），合并提交 `9bdc9c5`，两个文档冲突均保留双方章节。
+
+| 评审项 | 修复与验证边界 |
+| --- | --- |
+| P0-1 aarch64 的原生 BM25 对比相差 1 ULP | C/SQLite 与 Rust 的测试 oracle 限为有限值、同符号、最多 2 ULP；超过边界、NaN、无穷仍失败。所有原生对比（含辅助读者测试）共享此规则，返回行顺序、Rust 串行/并行逐位一致性与快照/布局身份仍严格断言。运行期没有“分数不同即回退”的判断，不需放宽布局校验。Windows 两套完整检查通过；精确 `38c5ed2` 的 [原生 macOS ARM64 DB CI](https://github.com/Freedragonlancer/AudioLib-Explorer/actions/runs/39372798464/job/118464191043) 已通过，先断言 `uname -m=arm64` 再执行完整 db lib/integration 测试 |
+| P1-1 单字母拒绝行为及 P1-3 API 文档 | 核实此前用户明确选择“至少 2 个字母，1 个字母不搜索”，保留 GUI 取消旧请求和友好提示，core/db 返回 Validation；补充 [API](api/README.md) 搜索规则。当前服务端没有 `/search` 路由，不能描述成已实现端点返回 400/500；未来端点按既有 Validation 映射为 400 |
+| P1-2 首次升级阻塞与进度 | 新增 `open_with_progress` / `open_existing_with_progress`，服务端默认 info 日志可见阶段、每 5000 行和最终行数、经过时间；5001 行回归同时验证 Metadata/未知扩展保留和再次打开不重建。文档明确事务回滚、重启从头、业务 API 在启动期 503 的边界。新增 `upgrade-benchmark --source`，只读源经 SQLite backup 复制到 owned 临时文件后测真实升级与前后完整性，并验证源字节不变 |
+| 补充 P2-1 mmap 风险 | writer 显式 0；所有普通/辅助 reader 与 benchmark probe 共用 canonical Windows fixed-volume 策略，网络/可移动/未知/其他平台默认 0；`AUDIOLIB_DISABLE_MMAP` 任意值全关。测试检查禁用/未知卷、UNC 拒绝、writer 及池化 reader。编译参数注释和架构文档说明 macOS 适用范围、上限不等于启用 |
+| 补充 P2-2 辅助缓存/线程 | 每个辅助 reader 从 64MiB 降为 8MiB，数量为 `min(available_parallelism()-1,7)`；合并固定 quantile 分区及短语分组，测试 0–7 个 helper 的精确结果与分区不重不漏。最多七个辅助缓存预算由 448MiB 降为 56MiB；不是整个进程 RSS 承诺。真实副本测量又发现 `check_library()` 复用 mapped reader 复制整库使全流程工作集升到 19.54GB（采样 private bytes 约 129MB）；完整性验证改为持有原 read gate 的独立只读、禁用 mmap 连接，源/目标均为 0，避免验证结束后将整库映射留在搜索池中 |
+| 补充 P3-1 串行退化不可见 | 每次 fallback 输出固定原因 debug 日志并计数，无查询或路径；真实 Busy/Locked/CannotOpen 原因优先于清理产生的 Interrupted。新 `search-benchmark --concurrent-writer` 仅操作新建合成库，报告基线/并发 P95、提交数和各原因计数，不冒充完整扫描压力 |
+| 补充 P3-2 FFI 生命周期 | 测试重复注册 Busy 不改变活动 generation；实际连接关闭释放 rank/preparation 两类载荷；用过期 Weak 注入模拟句柄地址复用分支，验证新注册成功，无悬空指针解引用。本轮未执行 Miri/ASan |
+| 原有 macOS 两项失败 | Unicode 文件名使用不同前后缀，仍覆盖 NFC/NFD/ASCII 的检索折叠；重定位源根查询使用原始路径、完整 canonical 路径及 canonical 父目录加原始 basename 三个参数化候选，按唯一的已存根路径计算后缀，避免 `/var`→`/private/var` 和不区分大小写卷丢失旧拼写；歧义根报 Validation。大小写改名回归不再跳过不区分大小写卷，新增 Unix 父符号链接加 Unicode 改名/取消回归，保留 Windows 别名无操作契约 |
+
+实际完整检查、升级测量与固定安装结果记录在 [验证报告](Rust_Validation.md)。
+
+## 片段搜索与查询回退复审（2026-10-20，0.4.7 本地开发构建）
+
+审查覆盖两字符片段搜索、并行原生 BM25、排名缓存、筛选交集、目录统计、快照升级进度及相关诊断。确认并修复两个 P2：
+
+| 问题 | 修复与回归 |
+| --- | --- |
+| 独立的 `ß`、`ﬃ` 原词只有一个 grapheme，索引先按输入长度拒绝生成 grams，导致合法的 `ss`、`ff`、`fi`、`ffi` 漏命中 | 输入长度限制只用于查询；索引按完整 Unicode 折叠后的字符生成 grams，同时保留单 grapheme 精确 token 和两侧位置分隔。`tokenization` 升为 3，已有修订 2 库通过原有事务重建路径升级，只读源仅升级 owned 副本；覆盖用户标注、source-only Metadata、多词精确项、跨词隔离、旧库升级幂等及取消逐字节回滚 |
+| 目录统计已固定 FTS5 外层，但非相关度排序、COUNT 和排名预算回退仍可能由过滤索引逐 ID 重复执行复杂 MATCH | `search_sql` 与目录回退共享 FTS5 外层构造器，保留参数化筛选、原生分数、allowlist 排序及空查询路径；覆盖无/陈旧统计的 COUNT、分页、原生 BM25、目录执行计划，以及七种排序正反方向的筛选、分页和 Metadata oracle |
+
+`search-diagnose` 的 literal `MATCH 'metal'` 保留作原始 token SQL 对照，新增明确说明它绕过当前片段 compiler/DataProvider，不能代表 GUI 输入到显示的延迟。旧修订 2 的真实库 360 次测量仍按其原构建保存；新修订 3 和 GUI 帧显示必须重新验收，不能复用旧数值作为新构建结果。实际检查及安装记录见 [验证报告](Rust_Validation.md)。
 ## 定位破音与自定义列宽复查（2026-10-19，0.4.10）
 
 用户安装 0.4.10 后反馈播放中定位仍有破音，自定义列宽不生效。

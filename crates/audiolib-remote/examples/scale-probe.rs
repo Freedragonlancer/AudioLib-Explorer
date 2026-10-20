@@ -106,6 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     SyncProgress::Downloading { .. } | SyncProgress::Decompressing { .. } => {
                         "downloading"
                     }
+                    SyncProgress::Writing => "writing",
                     SyncProgress::Validating => "validating",
                     SyncProgress::Preparing(_) => "preparing cache",
                     SyncProgress::Saving => "saving",

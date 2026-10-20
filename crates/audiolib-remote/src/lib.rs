@@ -25,6 +25,9 @@
 //! * Server library management (`manage` module): [`Capabilities`] (`manage_mode`),
 //!   server scans ([`ScanRequest`] / [`ServerScan`]) and database-only removals
 //!   ([`RemoveReport`]); typed `403`/`409`/`503` errors ([`manage_error_text`]).
+//! * List thumbnail Waveforms (`list_waveforms` module, §9.1–§9.3): [`RemoteListWaveforms`]
+//!   (`POST /waveforms` with `known` entity tags) over the [`ListWaveformStore`] disk cache,
+//!   plugged into [`RemoteProvider`]; `GET`/`PATCH /settings` and `GET /waveforms/status`.
 //! * Remote folder browsing ([`RemoteDirectory`]) and sound-library root registration,
 //!   path changes and database-only root removal ([`RootRemoveReport`]), guarded by
 //!   [`Capabilities::may_manage_roots`].
@@ -36,6 +39,7 @@ mod bandwidth;
 mod client;
 mod download;
 mod error;
+mod list_waveforms;
 mod manage;
 mod mapping;
 mod poll;
@@ -50,20 +54,28 @@ mod sync;
 mod test_server;
 mod tls;
 mod util;
+mod waveform_cache;
 mod writes;
+pub use waveform_cache::waveform_cache_error;
 
 pub use abort::set_connection_warming;
 pub use bandwidth::{Bandwidth, bandwidth};
 pub use client::{
-    BatchWrite, CONNECT_TIMEOUT, FileWrite, HealthInfo, LIBRARY_ID_HEADER, MAX_WRITE_BODY_BYTES,
-    RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, SnapshotProgress, WaveformQuery,
-    WaveformReply, api_base_url,
+    BatchWrite, CONNECT_TIMEOUT, DownloadStage, FileWrite, HealthInfo, LIBRARY_ID_HEADER,
+    MAX_WRITE_BODY_BYTES, RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, SnapshotProgress,
+    WaveformQuery, WaveformReply, api_base_url,
 };
 pub use download::{
     DEFAULT_DOWNLOAD_CACHE_BYTES, DownloadCache, DownloadItem, DownloadProbe, DownloadProgress,
     MARKER_FILE, content_disposition_filename, etag_token, probe_download, sanitize_filename,
 };
 pub use error::{NetworkFailure, RemoteError, Result, TlsFailure};
+pub use list_waveforms::{
+    BatchItem, BatchReply, BatchStatus, BundleMeta, DEFAULT_LIST_WAVEFORM_CACHE_BYTES,
+    LIST_WAVEFORM_ENCODING, LIST_WAVEFORM_SHARD_IDS, ListWaveformStatus, ListWaveformStore,
+    ListWaveformsCapability, RemoteListWaveforms, ServerSettings, StoredListWaveform,
+    UNSUPPORTED_ENCODING, bundle_backoff, bundle_etag,
+};
 pub use manage::{
     Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS, ManageMode, RemoveReport,
     RootScan, ScanControl, ScanMode, ScanRequest, ServerScan, manage_error_text,

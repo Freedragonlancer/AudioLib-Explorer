@@ -416,6 +416,12 @@ pub struct AdminSettings {
     /// replaces the `[[roots]]` of `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roots: Option<Vec<crate::config::RootConfig>>,
+    /// Pre-generate list thumbnail waveforms (doc/api/README.md §9.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pregenerate_list_waveforms: Option<bool>,
+    /// List waveform generation rate in files per second, 1..=1000 (§9.5.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_waveform_rate: Option<u32>,
     /// Recovery journal for an atomic indexed-root relocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_relink: Option<crate::manage::RootRelinkJournal>,
@@ -423,6 +429,9 @@ pub struct AdminSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_removal: Option<crate::manage::RootRemovalJournal>,
 }
+
+/// Built-in `list_waveform_rate` (files per second).
+pub const DEFAULT_LIST_WAVEFORM_RATE: u32 = 10;
 
 fn format_version() -> u32 {
     1
@@ -471,7 +480,7 @@ struct StoredToken {
 }
 
 /// Where a setting's effective value comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Built-in default.
@@ -503,6 +512,10 @@ struct Defaults {
     auth_mode_source: Source,
     manage_mode: ManageMode,
     manage_mode_source: Source,
+    pregenerate_list_waveforms: bool,
+    pregenerate_list_waveforms_source: Source,
+    list_waveform_rate: u32,
+    list_waveform_rate_source: Source,
     public_url: Option<String>,
     tls: Option<TlsSettings>,
 }
@@ -610,11 +623,27 @@ impl Security {
             Some(mode) => (mode, Source::Config),
             None => (ManageMode::All, Source::Default),
         };
+        let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
+            match config.pregenerate_list_waveforms {
+                Some(value) => (value, Source::Config),
+                None => (false, Source::Default),
+            };
+        // `config.toml` always yields a value (default 10); report `config` only when it
+        // differs from the built-in default.
+        let list_waveform_rate_source = if config.list_waveform_rate == DEFAULT_LIST_WAVEFORM_RATE {
+            Source::Default
+        } else {
+            Source::Config
+        };
         let defaults = Defaults {
             auth_mode,
             auth_mode_source,
             manage_mode,
             manage_mode_source,
+            pregenerate_list_waveforms,
+            pregenerate_list_waveforms_source,
+            list_waveform_rate: config.list_waveform_rate,
+            list_waveform_rate_source,
             public_url: config.public_url.clone(),
             tls: config.tls(),
         };
@@ -642,6 +671,10 @@ impl Security {
             auth_mode_source: Source::Config,
             manage_mode: ManageMode::All,
             manage_mode_source: Source::Default,
+            pregenerate_list_waveforms: false,
+            pregenerate_list_waveforms_source: Source::Default,
+            list_waveform_rate: DEFAULT_LIST_WAVEFORM_RATE,
+            list_waveform_rate_source: Source::Default,
             public_url: None,
             tls: None,
         };
@@ -715,6 +748,38 @@ impl Security {
             Some(mode) => (mode, Source::Admin),
             None => (self.defaults.manage_mode, self.defaults.manage_mode_source),
         }
+    }
+
+    /// Effective `pregenerate_list_waveforms` and its source.
+    pub fn pregenerate_list_waveforms_with_source(&self) -> (bool, Source) {
+        match self.read().settings.pregenerate_list_waveforms {
+            Some(value) => (value, Source::Admin),
+            None => (
+                self.defaults.pregenerate_list_waveforms,
+                self.defaults.pregenerate_list_waveforms_source,
+            ),
+        }
+    }
+
+    /// Effective `pregenerate_list_waveforms`.
+    pub fn pregenerate_list_waveforms(&self) -> bool {
+        self.pregenerate_list_waveforms_with_source().0
+    }
+
+    /// Effective `list_waveform_rate` (files per second) and its source (§9.5.4).
+    pub fn list_waveform_rate_with_source(&self) -> (u32, Source) {
+        match self.read().settings.list_waveform_rate {
+            Some(value) => (value.clamp(1, 1000), Source::Admin),
+            None => (
+                self.defaults.list_waveform_rate,
+                self.defaults.list_waveform_rate_source,
+            ),
+        }
+    }
+
+    /// Effective `list_waveform_rate`.
+    pub fn list_waveform_rate(&self) -> u32 {
+        self.list_waveform_rate_with_source().0
     }
 
     /// Library roots set on the admin page (replacing `config.toml`'s), if any.

@@ -514,6 +514,9 @@ fn child_table_controller_preferences() {
                     timer_phase.set(5);
                     slint::quit_event_loop().unwrap();
                 }
+                // Quit is queued; an already-ready timer callback can run once
+                // more before the event loop returns. Completion is idempotent.
+                5 => {}
                 _ => unreachable!(),
             }
         },

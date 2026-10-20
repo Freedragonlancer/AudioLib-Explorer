@@ -468,7 +468,7 @@ async fn scans_run_to_completion_bump_the_revision_only_for_changes_and_feed_the
         .await;
     }
 
-    // Play history.
+    // Play history (deprecated): plays are accepted but never recorded.
     let id = f
         .state
         .provider()
@@ -483,8 +483,8 @@ async fn scans_run_to_completion_bump_the_revision_only_for_changes_and_feed_the
         StatusCode::OK
     );
     let plays: Vec<audiolib_core::PlayRecord> = get(state, "/history/plays?limit=10").await;
-    assert_eq!(plays.len(), 1);
-    assert_eq!(plays[0].audio_file_id, id);
+    assert!(plays.is_empty(), "the server records no play history");
+    assert_eq!(f.state.provider().get_audio(id).unwrap().play_count, 0);
 }
 
 #[tokio::test]

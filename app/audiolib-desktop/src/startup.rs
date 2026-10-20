@@ -3,13 +3,16 @@
 use crate::{AppWindow, controller};
 use anyhow::{Context, Result};
 use audiolib_core::config::{AppConfig, DataSourceMode};
-use audiolib_db::{SqliteProvider, import_legacy};
+use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider, import_legacy};
 use audiolib_remote::CachePreparation;
 use slint::ComponentHandle;
 use std::{
     cell::Cell,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -25,10 +28,56 @@ pub(crate) enum StartupProgress {
     Preferences,
     Placeholder,
     Remote(CachePreparation),
+    Local(SnapshotUpgradeProgress),
 }
 
 impl StartupProgress {
-    pub(crate) fn label(self, chinese: bool) -> &'static str {
+    pub(crate) fn label(self, chinese: bool) -> String {
+        if let Self::Local(stage) = self {
+            return match stage {
+                SnapshotUpgradeProgress::Tokenizing { completed, total } => {
+                    if chinese {
+                        format!("正在重建搜索文本 · 已保存 {completed}/{total} 条")
+                    } else {
+                        format!("Rebuilding search text · {completed}/{total} records saved")
+                    }
+                }
+                SnapshotUpgradeProgress::Indexing { completed, total } => {
+                    if chinese {
+                        format!("正在构建 FTS5 · 已保存 {completed}/{total} 条")
+                    } else {
+                        format!("Building FTS5 · {completed}/{total} records saved")
+                    }
+                }
+                _ => {
+                    let (cn, en) = match stage {
+                        SnapshotUpgradeProgress::BackingUp => {
+                            ("正在创建升级回退备份", "Creating upgrade rollback backup")
+                        }
+                        SnapshotUpgradeProgress::Validating => {
+                            ("正在验证搜索索引", "Validating the search index")
+                        }
+                        SnapshotUpgradeProgress::Checkpoint => (
+                            "正在保存数据库并回收 WAL",
+                            "Saving database and reclaiming WAL",
+                        ),
+                        SnapshotUpgradeProgress::BuildingFts => ("正在构建 FTS5", "Building FTS5"),
+                        SnapshotUpgradeProgress::SourceTags => {
+                            ("正在准备提取标签", "Preparing extracted tags")
+                        }
+                        _ => ("正在准备搜索升级", "Preparing search upgrade"),
+                    };
+                    if chinese { cn } else { en }.into()
+                }
+            };
+        }
+        if let Self::Remote(CachePreparation::Tokenizing { completed, total }) = self {
+            return if chinese {
+                format!("正在重建搜索文本 · 已处理 {completed}/{total} 条")
+            } else {
+                format!("Rebuilding search text · {completed}/{total} records")
+            };
+        }
         let (cn, en) = match self {
             Self::Opening => ("正在打开音效库", "Opening the library"),
             Self::Importing => ("正在导入原有音效库", "Importing the existing library"),
@@ -45,12 +94,21 @@ impl StartupProgress {
             Self::Remote(CachePreparation::Upgrading) => {
                 ("正在升级搜索索引", "Upgrading the search index")
             }
+            Self::Remote(CachePreparation::Tokenizing { .. }) => unreachable!(),
+            Self::Remote(CachePreparation::BuildingFts) => {
+                ("正在构建 FTS5 搜索索引", "Building the FTS5 search index")
+            }
+            Self::Remote(CachePreparation::SourceTags) => {
+                ("正在准备提取标签", "Preparing extracted tags")
+            }
             Self::Remote(CachePreparation::Saving) => ("正在保存缓存", "Saving the cache"),
+            Self::Local(_) => unreachable!(),
         };
-        if chinese { cn } else { en }
+        if chinese { cn } else { en }.to_owned()
     }
 
-    /// Only the copy stage has a measurable total; all other stages are indeterminate.
+    /// Only page copying is displayed as a percentage. Text counts describe one
+    /// upgrade stage; they must not be mistaken for total startup progress.
     pub(crate) fn fraction(self) -> f32 {
         match self {
             Self::Remote(CachePreparation::Copying { completed, total }) if total > 0 => {
@@ -69,6 +127,14 @@ pub(super) fn open_library(config: &AppConfig) -> Result<OpenedLibrary> {
 fn open_library_with_progress(
     config: &AppConfig,
     progress: &mut dyn FnMut(StartupProgress),
+) -> Result<OpenedLibrary> {
+    open_library_cancellable(config, progress, &AtomicBool::new(false))
+}
+
+fn open_library_cancellable(
+    config: &AppConfig,
+    progress: &mut dyn FnMut(StartupProgress),
+    cancel: &AtomicBool,
 ) -> Result<OpenedLibrary> {
     let started = Instant::now();
     let opened = if config.data_source.mode == DataSourceMode::Server {
@@ -90,9 +156,17 @@ fn open_library_with_progress(
         }
         progress(StartupProgress::Opening);
         let sqlite = if config.paths.database.exists() {
-            SqliteProvider::open_existing(&config.paths.database)
+            SqliteProvider::open_existing_with_progress_cancellable(
+                &config.paths.database,
+                cancel,
+                |stage| progress(StartupProgress::Local(stage)),
+            )
         } else {
-            SqliteProvider::open(&config.paths.database)
+            SqliteProvider::open_with_progress_cancellable(
+                &config.paths.database,
+                cancel,
+                |stage| progress(StartupProgress::Local(stage)),
+            )
         }
         .context("Open library database")?;
         // Keep the feature branch's marker-guarded source-tag FTS upgrade inside
@@ -141,21 +215,33 @@ pub(super) fn show_while_opening(
         }
         return Ok(Some((remote.provider.clone(), Some(remote))));
     }
-    show_while_working(ui, server, move |progress| {
-        open_library_with_progress(&config, progress)
+    show_while_working_cancellable(ui, server, move |progress, cancel| {
+        open_library_cancellable(&config, progress, cancel)
     })
 }
 
+#[cfg(test)]
 fn show_while_working<T: Send + 'static>(
     ui: &AppWindow,
     server: bool,
     open: impl FnOnce(&mut dyn FnMut(StartupProgress)) -> Result<T> + Send + 'static,
 ) -> Result<Option<T>> {
+    show_while_working_cancellable(ui, server, move |progress, _| open(progress))
+}
+
+fn show_while_working_cancellable<T: Send + 'static>(
+    ui: &AppWindow,
+    server: bool,
+    open: impl FnOnce(&mut dyn FnMut(StartupProgress), &AtomicBool) -> Result<T> + Send + 'static,
+) -> Result<Option<T>> {
     ui.set_startup_busy(true);
     let closing = Rc::new(Cell::new(false));
     let close_state = closing.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let close_cancel = cancel.clone();
     ui.window().on_close_requested(move || {
         close_state.set(true);
+        close_cancel.store(true, Ordering::Release);
         slint::CloseRequestResponse::KeepWindowShown
     });
     let initial = if server {
@@ -169,11 +255,15 @@ fn show_while_working<T: Send + 'static>(
     // The worker never calls Slint or waits for the event loop to consume a message.
     let progress = Arc::new(Mutex::new(initial));
     let worker_progress = progress.clone();
+    let worker_cancel = cancel.clone();
     let (complete, completion) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
         .name("library-startup".into())
         .spawn(move || {
-            let result = open(&mut |next| *worker_progress.lock().unwrap() = next);
+            let result = open(
+                &mut |next| *worker_progress.lock().unwrap() = next,
+                &worker_cancel,
+            );
             let _ = complete.send(());
             result
         })
@@ -201,6 +291,9 @@ fn show_while_working<T: Send + 'static>(
     );
     let event_loop = slint::run_event_loop().context("Run startup event loop");
     timer.stop();
+    if event_loop.is_err() {
+        cancel.store(true, Ordering::Release);
+    }
     let opened = worker
         .join()
         .unwrap_or_else(|_| Err(anyhow::anyhow!("Library initialization worker panicked")));
@@ -209,6 +302,9 @@ fn show_while_working<T: Send + 'static>(
         let _ = ui.hide();
     }
     event_loop?;
+    if closing.get() {
+        return Ok(None);
+    }
     let opened = opened?;
     Ok((!closing.get()).then_some(opened))
 }
@@ -254,6 +350,35 @@ fn wait_message(chinese: bool, server: bool, closing: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_upgrade_labels_show_record_counts_and_fts_stage_in_both_languages() {
+        let local = StartupProgress::Local(SnapshotUpgradeProgress::Indexing {
+            completed: 5000,
+            total: 900000,
+        });
+        assert!(local.label(true).contains("已保存 5000/900000"));
+        assert!(local.label(false).contains("5000/900000 records saved"));
+        assert!(local.fraction() < 0.0);
+        let text = StartupProgress::Remote(CachePreparation::Tokenizing {
+            completed: 5_000,
+            total: 900_000,
+        });
+        assert_eq!(text.label(true), "正在重建搜索文本 · 已处理 5000/900000 条");
+        assert_eq!(
+            text.label(false),
+            "Rebuilding search text · 5000/900000 records"
+        );
+        assert!(text.fraction() < 0.0);
+        let fts = StartupProgress::Remote(CachePreparation::BuildingFts);
+        assert_eq!(fts.label(true), "正在构建 FTS5 搜索索引");
+        assert_eq!(fts.label(false), "Building the FTS5 search index");
+        assert!(fts.fraction() < 0.0);
+        let tags = StartupProgress::Remote(CachePreparation::SourceTags);
+        assert_eq!(tags.label(true), "正在准备提取标签");
+        assert_eq!(tags.label(false), "Preparing extracted tags");
+        assert!(tags.fraction() < 0.0);
+    }
 
     #[cfg(windows)]
     #[test]
@@ -528,9 +653,13 @@ mod tests {
         let ticks = Rc::new(Cell::new(0));
         let saw_copy = Rc::new(Cell::new(false));
         let saw_index = Rc::new(Cell::new(false));
+        let saw_text = Rc::new(Cell::new(false));
+        let saw_fts = Rc::new(Cell::new(false));
         let saw_motion = Rc::new(Cell::new(false));
         let copy = saw_copy.clone();
         let index = saw_index.clone();
+        let text = saw_text.clone();
+        let fts = saw_fts.clone();
         let motion = saw_motion.clone();
         let observed = ticks.clone();
         let weak = ui.as_weak();
@@ -549,6 +678,14 @@ mod tests {
                     assert!(ui.get_startup_progress() < 0.0);
                     index.set(true);
                 }
+                if ui.get_startup_stage() == "Rebuilding search text · 5000/900000 records" {
+                    assert!(ui.get_startup_progress() < 0.0);
+                    text.set(true);
+                }
+                if ui.get_startup_stage() == "Building the FTS5 search index" {
+                    assert!(ui.get_startup_progress() < 0.0);
+                    fts.set(true);
+                }
                 if ui.get_startup_motion() > 0.0 {
                     motion.set(true);
                 }
@@ -564,6 +701,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
             progress(StartupProgress::Remote(CachePreparation::Upgrading));
             std::thread::sleep(Duration::from_millis(200));
+            progress(StartupProgress::Remote(CachePreparation::Tokenizing {
+                completed: 5_000,
+                total: 900_000,
+            }));
+            std::thread::sleep(Duration::from_millis(200));
+            progress(StartupProgress::Remote(CachePreparation::BuildingFts));
+            std::thread::sleep(Duration::from_millis(200));
             Ok(42)
         })
         .unwrap();
@@ -571,6 +715,7 @@ mod tests {
         assert_eq!(value, Some(42));
         assert!(ticks.get() > 3);
         assert!(saw_copy.get() && saw_index.get() && saw_motion.get());
+        assert!(saw_text.get() && saw_fts.get());
         assert!(!ui.get_startup_busy());
         let weak = ui.as_weak();
         timer.start(

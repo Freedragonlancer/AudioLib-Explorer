@@ -19,12 +19,13 @@ use audiolib_core::server_url::{Scheme, ServerAddress, ServerUrlError};
 use audiolib_db::SqliteProvider;
 use audiolib_remote::{
     AudioRoute, AutoSyncGate, CacheState, CachedIdentity, DEFAULT_DOWNLOAD_CACHE_BYTES,
-    DownloadCache, DownloadItem, DownloadProgress, MemoryCache, MemoryStream, PollSchedule,
-    RemoteCache, RemoteClient, RemoteError, RemoteProvider, RemoteRoot, RemoteSecrets,
-    RemoteWriter, RevisionCheck, RootState, RouteOptions, SourceAuth, StreamSource, SyncProgress,
-    UrlSource, WAKING_HINT_AFTER, WaveformQuery, WaveformReply, WebDavAuth, WriteEvent,
-    WriteListener, bandwidth, check_revision_with_roots, choose_route, effective_roots,
-    load_profile_secrets, map_server_path, root_for_path, root_status_text, sync_library,
+    DownloadCache, DownloadItem, DownloadProgress, ListWaveformStore, ListWaveformsCapability,
+    MemoryCache, MemoryStream, PollSchedule, RemoteCache, RemoteClient, RemoteError,
+    RemoteListWaveforms, RemoteProvider, RemoteRoot, RemoteSecrets, RemoteWriter, RevisionCheck,
+    RootState, RouteOptions, SourceAuth, StreamSource, SyncProgress, UrlSource, WAKING_HINT_AFTER,
+    WaveformQuery, WaveformReply, WebDavAuth, WriteEvent, WriteListener, bandwidth,
+    check_revision_with_roots, choose_route, effective_roots, load_profile_secrets,
+    map_server_path, root_for_path, root_status_text, sync_library,
 };
 use slint::{ModelRc, VecModel};
 use std::collections::HashMap;
@@ -65,6 +66,7 @@ pub(super) struct RemotePlayState {
     publication_gates: usize,
 }
 
+#[allow(dead_code)] // plays are no longer sent to the server
 struct RemotePlayWorker(Arc<Controller>);
 
 impl Drop for RemotePlayWorker {
@@ -181,6 +183,30 @@ pub fn open_remote_startup_with_progress(
     })
 }
 
+/// After a startup that opened the main window: open 音效库管理 when the startup sync
+/// failed (unreachable, unauthorized, snapshot invalid or a failed rebuild) or the
+/// server's library_id changed; a newer revision alone does not.
+fn startup_sync_opens_manager(result: &Result<audiolib_remote::SyncOutcome, RemoteError>) -> bool {
+    match result {
+        Ok(outcome) => {
+            outcome.library_changed
+                || outcome
+                    .previous
+                    .as_ref()
+                    .is_some_and(|previous| previous.library_id != outcome.state.library_id)
+        }
+        Err(RemoteError::Cancelled) => false,
+        Err(_) => true,
+    }
+}
+
+/// Whether startup must open 音效库管理: only without a cached snapshot of the
+/// configured server. A newer server revision just syncs in the background.
+fn startup_needs_manager(cached: Option<&CacheState>, configured_url: &str) -> bool {
+    configured_url.trim().is_empty()
+        || !cached.is_some_and(|state| cached_source_matches(&state.server_url, configured_url))
+}
+
 /// Cached IDs are valid only for the configured endpoint. Ignore user spelling of
 /// hosts/default ports and the accepted trailing API suffix when comparing addresses.
 fn cached_source_matches(cached: &str, configured: &str) -> bool {
@@ -241,6 +267,9 @@ pub(super) struct RemoteRuntime {
     /// A known replacement blocks writes until its snapshot is actually opened.
     /// Later offline/check failures must never re-enable stale cached record IDs.
     library_changed: bool,
+    /// The startup sync is still running: its failure or a library_id change opens
+    /// 音效库管理 (a plain revision change does not).
+    startup_check: bool,
     /// Unix seconds of the next automatic revision check, when scheduled.
     next_check: Option<u64>,
     /// A new revision is known but automatic sync waits for the server to settle
@@ -279,7 +308,12 @@ pub(super) struct RemoteRuntime {
     hidden: server_removal::HiddenRecords,
     /// Whether the active server lets this PC remove records (menus and context menus).
     manage: server_removal::ServerManage,
+    /// List Waveform provider of the open snapshot (`POST /waveforms`), keyed by source
+    /// generation, library and snapshot file.
+    list_waveforms: Option<(ListWaveformKey, Arc<RemoteProvider>)>,
 }
+
+type ListWaveformKey = (u64, String, String, Option<ListWaveformsCapability>);
 
 /// Info line shown above the connection report when no access token is entered.
 fn tokenless_note(chinese: bool) -> String {
@@ -662,6 +696,74 @@ impl Controller {
         )))
     }
 
+    /// Server-mode provider for the list Waveform worker: reads from the open snapshot,
+    /// thumbnails only from `POST /waveforms` (never the snapshot's `waveform_cache` rows,
+    /// §9.3) with the client disk cache under `<cache>/waveforms/server/`. Rebuilt when the
+    /// source or snapshot changes; cheap otherwise. Called on the worker thread.
+    pub(super) fn remote_list_waveform_provider(&self) -> Option<Arc<RemoteProvider>> {
+        let (settings, cache_root) = {
+            let config = self.config.lock().unwrap();
+            (config.data_source.clone(), config.paths.cache.clone())
+        };
+        // The capability comes from the `/capabilities` read after each sync (the menu
+        // gate): no request of our own, and no column until it is known.
+        let (state, capabilities) = {
+            let remote = self.remote.lock().unwrap();
+            (
+                remote.state.clone()?,
+                remote
+                    .manage
+                    .capabilities_for(&settings.server_url)?
+                    .clone(),
+            )
+        };
+        let key: ListWaveformKey = (
+            self.source_generation.load(Ordering::Acquire),
+            state.library_id.clone(),
+            state.database_file.clone(),
+            capabilities.list_waveforms.clone(),
+        );
+        if let Some((cached, provider)) = &self.remote.lock().unwrap().list_waveforms
+            && *cached == key
+        {
+            return Some(provider.clone());
+        }
+        let chinese = self.chinese.load(Ordering::Acquire);
+        let secrets = self.secrets();
+        let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
+        let mut service = RemoteListWaveforms::new(
+            client.clone(),
+            state.library_id.clone(),
+            ListWaveformStore::for_library(&cache_root, &state.library_id),
+        )
+        .with_capabilities(&capabilities);
+        // Compact i8 items are requested only when the server lists that encoding.
+        if capabilities
+            .list_waveforms
+            .as_ref()
+            .is_some_and(|capability| capability.offers_i8())
+        {
+            let path = RemoteListWaveforms::i8_store_path(&cache_root, &state.library_id);
+            match audiolib_db::WaveformsDb::open(&path) {
+                Ok(store) => service = service.with_i8_store(store),
+                Err(error) => tracing::warn!(%error, "waveforms.db unavailable; using int16"),
+            }
+        }
+        let service = Arc::new(service);
+        spawn_waveform_bundle_import(&service);
+        let writer = RemoteWriter::new(
+            client,
+            RemoteCache::new(&self.data_root()),
+            state.library_id.clone(),
+        );
+        let provider = Arc::new(
+            RemoteProvider::new(self.provider(), writer, chinese, None)
+                .with_list_waveforms(service),
+        );
+        self.remote.lock().unwrap().list_waveforms = Some((key, provider.clone()));
+        Some(provider)
+    }
+
     /// Cache effect of a server write (called on the writing thread).
     fn remote_write_event(
         self: &Arc<Self>,
@@ -895,6 +997,7 @@ impl Controller {
     }
 
     /// Server record id of a playback-cache path handed to the engine.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn remote_audio_id(&self, path: &Path) -> Option<i64> {
         self.remote.lock().unwrap().audio_ids.get(path).copied()
     }
@@ -945,69 +1048,13 @@ impl Controller {
         Ok(())
     }
 
+    #[allow(dead_code)] // plays are no longer sent to the server
     fn remote_play_current(&self, generation: u64, source_generation: u64) -> bool {
         self.available()
             && !self.remote_busy.load(Ordering::Acquire)
             && self.library_generation.load(Ordering::Acquire) == generation
             && self.source_generation.load(Ordering::Acquire) == source_generation
             && self.remote_plays.lock().unwrap().publication_gates == 0
-    }
-
-    /// Count one finished play off the audio and UI threads. Source/provider changes
-    /// and close drain registered workers through their reply and listener settlement.
-    pub(super) fn remote_record_play(self: &Arc<Self>, id: i64, generation: u64) {
-        let source_generation = self.source_generation.load(Ordering::Acquire);
-        let worker = {
-            let mut plays = self.remote_plays.lock().unwrap();
-            if !self.available()
-                || self.remote_busy.load(Ordering::Acquire)
-                || plays.publication_gates != 0
-                || self.library_generation.load(Ordering::Acquire) != generation
-                || self.source_generation.load(Ordering::Acquire) != source_generation
-            {
-                return;
-            }
-            plays.workers += 1;
-            RemotePlayWorker(self.clone())
-        };
-        // Bind the destination before dispatch; a later source switch cannot retarget it.
-        let provider = self.remote_provider();
-        let c = self.clone();
-        let spawned = std::thread::Builder::new()
-            .name("audiolib-remote-play".into())
-            .spawn(move || {
-                // Drop only after the reply and synchronous listener have settled.
-                let _worker = worker;
-                match provider {
-                    Ok(provider) => {
-                        if !c.remote_play_current(generation, source_generation) {
-                            return;
-                        }
-                        match provider.record_play_if(id, || {
-                            c.remote_play_current(generation, source_generation)
-                        }) {
-                            Ok(()) => crate::diagnostics::record(
-                                crate::diagnostics::Event::PlaybackHistoryRecorded,
-                            ),
-                            Err(error) => {
-                                crate::diagnostics::record(
-                                    crate::diagnostics::Event::PlaybackHistoryFailed,
-                                );
-                                tracing::warn!(id, %error, "server play count was not recorded");
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        crate::diagnostics::record(
-                            crate::diagnostics::Event::PlaybackHistoryFailed,
-                        );
-                        tracing::warn!(id, %error, "server play count was not recorded");
-                    }
-                }
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(id, %error, "could not start the play count request");
-        }
     }
 
     fn data_root(&self) -> PathBuf {
@@ -1038,8 +1085,22 @@ impl Controller {
             self.remote.lock().unwrap().state = startup.state;
             if let Some(ui) = self.ui.upgrade() {
                 self.publish_data_source(&ui);
+                // The GUI always starts on the placeholder and lets the sync pipeline
+                // prepare the cache, so `deferred` alone is no reason to show the
+                // manager. Open it only when there is no usable cached snapshot for
+                // the configured server (first run or a changed address); revision
+                // drift or an unreachable server are reported by the sync itself.
                 if deferred {
-                    ui.invoke_open_data_source();
+                    let (root, url) = {
+                        let config = self.config.lock().unwrap();
+                        (config.data_root(), config.data_source.server_url.clone())
+                    };
+                    let cached = RemoteCache::new(&root).active();
+                    if startup_needs_manager(cached.as_ref(), &url) {
+                        ui.invoke_open_data_source();
+                    } else {
+                        self.remote.lock().unwrap().startup_check = true;
+                    }
                 }
             }
             self.start_sync(false, deferred);
@@ -1229,6 +1290,7 @@ impl Controller {
                 if let Some(live) = c2.remote.lock().unwrap().live_roots.as_mut() {
                     merge_roots(live, &updated);
                 }
+                c2.list_waveforms.roots_online(&online_root_names(&updated));
                 c2.publish_remote_notice(&ui);
                 c2.publish_data_source(&ui);
                 ui.set_status(message.into());
@@ -1387,6 +1449,9 @@ impl Controller {
                         source_manager::root_configuration_changed(previous, roots)
                     })
             });
+            if let Some(roots) = poll.roots.as_deref() {
+                self.list_waveforms.roots_online(&online_root_names(roots));
+            }
             remote.live_roots = poll.roots;
             roots_changed
         };
@@ -1868,8 +1933,14 @@ impl Controller {
         cache: &RemoteCache,
     ) {
         let chinese = self.chinese.load(Ordering::Acquire);
+        let startup_check = std::mem::take(&mut self.remote.lock().unwrap().startup_check);
         if self.config.lock().unwrap().data_source.mode != DataSourceMode::Server {
             return;
+        }
+        if startup_check && startup_sync_opens_manager(&result) && !ui.get_library_visible() {
+            // Unreachable server, rejected token, unusable snapshot or a new
+            // library_id: show the reason in 音效库管理 rather than the main window.
+            ui.invoke_open_data_source();
         }
         match result {
             Ok(outcome) => {
@@ -3018,6 +3089,16 @@ fn stream_error_text(error: &RemoteError, root: Option<&RemoteRoot>, chinese: bo
 
 /// The WebDAV stream source for a record, only when the user configured a WebDAV address
 /// for its root (per-root URL or global base); server-suggested URLs are not used.
+/// Names of the roots `/roots` reports online (§6.4): list Waveforms that were
+/// `root_offline` there are asked for again.
+fn online_root_names(roots: &[RemoteRoot]) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|root| root.state() == RootState::Online)
+        .map(|root| root.name.clone())
+        .collect()
+}
+
 /// Replace the entries of `live` that a root check returned (matched by name).
 fn merge_roots(live: &mut [RemoteRoot], updated: &[RemoteRoot]) {
     for root in updated {
@@ -3097,9 +3178,88 @@ pub(super) fn is_remote_cache_path(data_root: &Path, path: &Path) -> bool {
     path.starts_with(data_root.join("remote"))
 }
 
+/// First fill of an empty `waveforms.db` from the server's bundle (doc/api §9.4.2), on a
+/// background thread. `503 BUSY` is retried with `bundle_backoff` (5 s doubling, at most
+/// 5 minutes) while page lookups continue; the thread ends when the provider is replaced
+/// (its last strong reference is dropped) or on any other outcome.
+fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
+    let wanted = service.offers_bundle()
+        && service
+            .i8_store()
+            .is_some_and(|store| store.is_empty().unwrap_or(false));
+    if !wanted {
+        return;
+    }
+    let weak = Arc::downgrade(service);
+    let spawned = std::thread::Builder::new()
+        .name("waveform-bundle".into())
+        .spawn(move || {
+            let mut attempt = 0u32;
+            loop {
+                let Some(service) = weak.upgrade() else { return };
+                // A library switch drops every other reference: cancel the download.
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                cancel_when_released(weak.clone(), cancel.clone(), done.clone());
+                let outcome = service.import_bundle(&cancel);
+                done.store(true, std::sync::atomic::Ordering::Release);
+                let wait = match outcome {
+                    Ok(rows) => {
+                        tracing::info!(rows, "list Waveform bundle imported");
+                        return;
+                    }
+                    Err(audiolib_remote::RemoteError::Busy { retry_after, .. }) => {
+                        audiolib_remote::bundle_backoff(attempt, retry_after)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "list Waveform bundle import failed; using page lookups");
+                        return;
+                    }
+                };
+                drop(service);
+                attempt = attempt.saturating_add(1);
+                let until = std::time::Instant::now() + wait;
+                while std::time::Instant::now() < until {
+                    if weak.strong_count() == 0 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "list Waveform bundle thread not started");
+    }
+}
+
+/// Set `cancel` once only the importing thread still holds `weak`'s value (the provider
+/// was replaced by a library switch). The watcher ends when `done` is set.
+fn cancel_when_released<T: Send + Sync + 'static>(
+    weak: std::sync::Weak<T>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let spawned = std::thread::Builder::new()
+        .name("waveform-bundle-cancel".into())
+        .spawn(move || {
+            while !done.load(Ordering::Acquire) {
+                if weak.strong_count() <= 1 {
+                    cancel.store(true, Ordering::Release);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "bundle cancel watcher not started");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::cancel_when_released;
     use super::{
         AddressForm, AutoSync, DataSourceSwitch, NOTICE_RETRY, NOTICE_SETTINGS, NOTICE_UPDATE,
         RemoteStartup, address_hint, configured_webdav_source, connection_verdict,
@@ -3108,10 +3268,100 @@ mod tests {
     };
     use audiolib_core::config::{DataSourceMode, DataSourceSettings};
     use audiolib_remote::RemoteError;
+
+    #[test]
+    fn startup_opens_the_manager_only_without_a_cached_snapshot_of_the_server() {
+        use super::startup_needs_manager;
+        let url = "https://sounds.example.test";
+        let cached = |revision| audiolib_remote::CacheState {
+            library_id: "library".into(),
+            server_url: url.into(),
+            revision,
+            ..Default::default()
+        };
+        // A newer server revision (r793 cached, r794 live) is synced in the background.
+        assert!(!startup_needs_manager(Some(&cached(793)), url));
+        assert!(!startup_needs_manager(
+            Some(&cached(794)),
+            "https://sounds.example.test/"
+        ));
+        // First run, no configured address, or a cache of another server.
+        assert!(startup_needs_manager(None, url));
+        assert!(startup_needs_manager(Some(&cached(794)), ""));
+        assert!(startup_needs_manager(
+            Some(&cached(794)),
+            "https://other.example.test"
+        ));
+    }
+
+    #[test]
+    fn startup_sync_opens_the_manager_only_on_failure_or_a_new_library() {
+        use super::startup_sync_opens_manager;
+        let state = |library_id: &str, revision| audiolib_remote::CacheState {
+            library_id: library_id.into(),
+            revision,
+            ..Default::default()
+        };
+        let outcome = |previous: Option<audiolib_remote::CacheState>, changed| {
+            Ok(audiolib_remote::SyncOutcome {
+                state: state("library", 794),
+                downloaded: true,
+                library_changed: changed,
+                previous,
+                elapsed_ms: 0,
+            })
+        };
+        // r793 -> r794 of the same library: stay on the main window.
+        assert!(!startup_sync_opens_manager(&outcome(
+            Some(state("library", 793)),
+            false
+        )));
+        assert!(startup_sync_opens_manager(&outcome(
+            Some(state("other", 793)),
+            false
+        )));
+        assert!(startup_sync_opens_manager(&outcome(None, true)));
+        assert!(startup_sync_opens_manager(&Err(RemoteError::Unreachable(
+            "x".into()
+        ))));
+        assert!(startup_sync_opens_manager(&Err(RemoteError::Snapshot(
+            "bad".into()
+        ))));
+        assert!(!startup_sync_opens_manager(&Err(RemoteError::Cancelled)));
+    }
     use audiolib_remote::{
         CacheState, CachedIdentity, RemoteCache, RemoteRoot, RemoteSecrets, RevisionCheck,
         RootState, SourceAuth,
     };
+
+    #[test]
+    fn bundle_import_is_cancelled_when_the_library_switches() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let provider = Arc::new(());
+        let importing = provider.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        cancel_when_released(Arc::downgrade(&provider), cancel.clone(), done.clone());
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "still owned by the provider"
+        );
+        drop(provider);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !cancel.load(Ordering::Acquire) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(cancel.load(Ordering::Acquire));
+        drop(importing);
+        // A finished import stops the watcher without cancelling.
+        let owner = Arc::new(());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(true));
+        cancel_when_released(Arc::downgrade(&owner), cancel.clone(), done);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(!cancel.load(Ordering::Acquire));
+    }
 
     #[test]
     fn damaged_waveform_caches_are_refetched_and_bad_replies_do_not_poison_retries() {

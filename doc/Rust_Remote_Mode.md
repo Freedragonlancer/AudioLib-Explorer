@@ -279,8 +279,17 @@ matching old cache, with the original failure still visible. A failed preparatio
 that old cache is not immediately attempted again in the same sync.
 
 The manager shows the actual copy/download fraction, bilingual preparation stages and
-elapsed time. Unknown-duration integrity checks and index upgrades show an animated
-bar, without an estimated percentage. The source-change gate preserves drafts while
+elapsed time. Search-text upgrades report completed records in batches of 5,000,
+followed by separate FTS5 construction and extracted-tag stages. These counts describe
+the text stage only; integrity checks and FTS5 construction keep an animated bar
+without an estimated percentage. Owned upgrades use a 64 MiB SQLite page cache and
+memory-backed temporary work, retaining rollback-journal mode and its durability.
+All text batches and the FTS5 rebuild share one transaction. Cancellation before its
+commit rolls back that transaction; cancellation later in preparation discards only
+the owned staging copy. The original cache and its readers remain available.
+Stage transitions, bounded five-second text-progress logs and upgrade timings help
+distinguish a large rebuild from a stalled worker without logging Metadata or secrets.
+The source-change gate preserves drafts while
 leaving this progress visible through the final provider-open stage. Closing drains
 the cache worker before releasing the desktop instance lease. Original integrity
 checks and owned-copy safety are retained;
@@ -431,13 +440,14 @@ in server mode the Metadata worker and the batch operation use
 |---|---|---|
 | single edit | `PATCH /api/v1/audio/{id}/metadata` (JSON patch, absent fields unchanged, `"color":""` clears) | `{file, revision_before, revision}` |
 | batch edit | `POST /api/v1/audio/metadata/batch` `{ids, patch, tag_mode}` (one transaction) | `{report:{updated}, files, revision_before, revision}` — `files` in request order, duplicates removed |
-| play | `POST /api/v1/audio/{id}/plays` (no body) | `{file, revision_before, revision}` |
+| play | `POST /api/v1/audio/{id}/plays` (no body) | `{file, revision_before, revision}` with `revision == revision_before` (plays never advance the revision) |
 
 **Revision rule.** After a successful write, if the cached snapshot's revision equals
 `revision_before`, the returned record(s) are written into the open snapshot in one SQLite
 transaction (`audiolib_db::apply_snapshot_records`: user tags/notes with their tokenized
 columns — the FTS5 triggers keep search consistent — favorite, color, play count)
-and the cached revision becomes `revision` (`cache.json` and the header). Otherwise (another
+and the cached revision becomes `revision` (`cache.json` and the header); a play reply has
+`revision == revision_before`, so the record is applied and the revision is kept. Otherwise (another
 client wrote in between, no cached state, a different snapshot open) a normal full
 snapshot sync runs. The background revision poll therefore does not report the client's
 own writes as "new revision".
@@ -710,6 +720,97 @@ files never stalled. Waveform JSON is 364 KB–1.07 MB decompressed (zstd on the
 revalidation is one round trip. The spare-connection requests (`/health`, about two per
 selection) are tiny.
 
+## List thumbnail Waveforms (§9.1–§9.3, client side)
+
+The Waveform column of the result table uses the batch API in server mode; the server
+spec and its deviations live in `doc/api/README.md` §9. This section describes what the
+client does.
+
+- **Capability.** The column exists only when `/capabilities` has `list_waveforms` with
+  `version` 1, `buckets` containing 128 and `encoding` `i16le-minmax-base64`. The client
+  reuses the `/capabilities` answer read after each sync (the same read that gates
+  removal menus) and makes no request of its own. Until that answer arrives, or when it
+  lacks the capability, the column is hidden. There is never a fallback to per-item
+  `GET /audio/{id}/waveform`, and the snapshot's `waveform_cache` rows are never read:
+  `RemoteProvider::list_waveforms` answers only from the server.
+- **Requests.** `POST /api/v1/waveforms` sends up to `max_ids` (at most 200) visible ids,
+  plus the ids one screen above and below. Each id carries the `known` etag from the
+  client cache. Requests send `Accept-Encoding: zstd` and use the shared keep-alive agent
+  and authentication. At most one POST is in flight per client (one worker, plus a mutex
+  in `RemoteListWaveforms`). The worker runs in background thread mode. With the client
+  setting "hold list-waveform batch requests during first 3 s after audition start"
+  (`hold_list_waveform_batches_after_audition`, default off) it sends no new POST until
+  3 s after the latest audition stream or preview start (Load/Play/Seek), using the same
+  yield hooks as local decoding; held rows are deferred, not dropped. A reply whose `library_id` differs from the
+  open snapshot's is discarded (`LibraryChanged`) and nothing is cached. A `503 BUSY`
+  defers every lookup by its `Retry-After`, or 1 s when the header is absent. Other
+  failures pause lookups for 5 s.
+- **Statuses.**
+  - `ok`: shown and stored.
+  - `not_modified`: shown from the client cache.
+  - `pending`: shows an older copy if one exists. The id is asked again after
+    `retry_after` (clamped to 1–30 s, 2 s if absent), only while the row is still among
+    the visible rows (not the ±1-screen margin), and at most 5 times per id.
+  - `missing`: the "no Waveform" placeholder, never retried.
+  - `root_offline`: keeps the stale copy, dimmed under the warning tint, or shows an
+    offline placeholder. The ids are asked again once a revision poll or a root check
+    reports that root `online`.
+  - `error`: the "no Waveform" placeholder, with no automatic retry.
+  - A status the client does not know is treated as `pending`.
+  - A new snapshot, library or source clears all of this state.
+- **Client disk cache.**
+  - Location: `<data dir>/cache/waveforms/server/<fnv1a64(library_id) as 16 hex>/list/`.
+  - Format: client-private shards of 1024 ids each (`<id / 1024>.lws`), holding id, etag
+    and peaks, protected by a checksum.
+  - Writes: each touched shard is written atomically (temporary file, then rename).
+  - Eviction: least recently used shards are evicted past 640 MiB. Shards written by the
+    current batch are never evicted.
+  - Damaged shards and leftover temporary files are dropped on scan.
+  - Memory: one memory cache holds the cells of recently visible rows (4096 entries).
+  - Server items carry no `samples_per_pixel`, so the client stores 1.
+- **Settings page.** The 服务器音效库 page shows the 「列表缩略波形」 section only when
+  the capability is usable.
+  - The `pregenerate_list_waveforms` toggle reads `GET /api/v1/settings`. It is disabled
+    when `can_change` is false, and changes go through `PATCH /api/v1/settings` with the
+    usual library-identity check.
+  - Progress comes from `GET /api/v1/waveforms/status`, read with the page and then
+    every 5 s, only while the page stays open on that server.
+- **波形缓存 (Waveform cache) section** (API §9.5 as implemented at server commit cdea7c9), shown only for the active, open
+  server source. All requests go through the server `DataProvider`
+  (`waveform_cache_*` methods on `RemoteProvider`; local providers answer
+  unsupported) on worker threads.
+  - Shows `run_state`, a progress bar (the active job's `done / total`, otherwise
+    `cached / total`), `pending`, `failed`, `current_rate` with the effective rate limit,
+    the ETA (「估算中」 while `eta_secs` is `null`), the job line (including the
+    `skipped_offline` count and the `mode_effective` fallback note) and `last_error`. Status is polled every 2 s only
+    while the page stays open; any page, selection or window change stops the poll.
+  - With `list_waveform_jobs`: 补齐缺失 / 重试失败 (only when something failed) /
+    全部重建 (two inline confirmations; only then `"confirm": "rebuild"` is sent), and
+    暂停 / 继续 / 停止 through `/waveforms/jobs/current/*`; the rate field
+    (1–1000, empty = server default) patches `list_waveform_rate` when `rate_setting`
+    is listed. Only modes listed in `modes` are offered.
+  - Without the capability (older servers): only the switch, status and pre-generation
+    pause/resume (`/waveforms/pregeneration/*`).
+  - `403 MANAGE_FORBIDDEN` (or `can_manage` false) disables the controls until the page
+    reloads; `409 BUSY` and `409 JOB_STATE` (`RemoteError::JobState`) show a message and
+    refresh the status.
+
+Read-only measurements (2026-10-19, LAN test server, about 0.9 M records, pre-generation
+off, release build; ids and server identity omitted). Each page held 200 consecutive ids
+that had not been generated:
+
+| Request | Result | Latency |
+|---|---|---|
+| First POST, cold range | 200 `pending`, `retry_after` 30 | 0.5–2.0 s |
+| Repeated POST right after | 200 `pending` | 6 ms (one run: 2.0 s) |
+| Retry after 30 s | 200 `ok` | 11 ms |
+| Retry every 2 s | 25→18 ids `ok` per poll; all 200 after 7 polls (about 14 s) | 2–6 ms |
+| POST with 200 `known` etags | 200 `not_modified` | 5–6 ms |
+| Lookup through the provider, warm disk cache | 200 ready | 6–9 ms |
+
+The zstd reply for 200 `ok` items was 88.9 KB, against 154.7 KB uncompressed. The disk
+cache for 200 items was 108 KiB.
+
 ## Drag-out (files to other programs)
 
 Result rows can be dragged to Explorer, a DAW or any program that accepts dropped files.
@@ -948,3 +1049,41 @@ covers the drag gesture threshold and Cancel. `audiolib-audio` tests decode
 through a registered in-memory byte source; the desktop server-mode test streams a WAV
 from a loopback server through the registered source. Use `AUDIOLIB_DATA_DIR` temporary directories for any
 manual test; never point tests at the real library.
+
+### Compact i8 list Waveforms (`i8-minmax-base64`, client side)
+
+- **Gating.** The client adds `"encoding": "i8-minmax-base64"` to `POST /waveforms` only
+  when `GET /capabilities` `list_waveforms.encodings` lists it. Otherwise the request and
+  the int16 (`i16le-minmax-base64`) path are unchanged.
+- **Format.** Up to 128 columns of interleaved signed i8 `min,max` (256 bytes), standard
+  base64 of exactly `4 * ceil(2n / 3)` characters; `n = 0` and `n < 128` follow the int16
+  rules. `i8 = round(i16 * 127 / 32767)`, half away from zero; a received `-128` is clamped
+  to `-127`; a column with `min > max` fails that item.
+- **Checks.** The reply must echo `encoding` (and any per-item `encoding`) as requested;
+  otherwise the reply is a protocol error: none of its items is cached and every id backs
+  off like `pending` (2 s), still showing an older i8 copy. `ok` entity tags must end with
+  `-l1i8`, and `not_modified` tags are compared in full. An error body with
+  `"sub_code": "UNSUPPORTED_ENCODING"` (doc/api §9.4, `400 VALIDATION`) switches the
+  client back to int16 for the rest of the session.
+- **Storage.** `waveforms.db` (SQLite, WAL, `synchronous=NORMAL`) next to the library's
+  list cache directory, laid out like the server file of doc/api §9.4.1:
+  `list_waveforms(file_id INTEGER PRIMARY KEY, etag, src_mtime, src_size, encoding, n,
+  blob)` with `blob` exactly 256 bytes (zero padded after `n` columns) plus
+  `meta(key, value)`. One UPSERT per row, recording the encoding (server items store
+  `src_mtime`/`src_size` 0). Local libraries can derive the same rows (etag/zoom key
+  `list128-v4-l1i8`) from their `list128-v4-l1` rows without decoding audio, in a
+  `waveforms.db` beside the library file; the library schema is unchanged.
+- **Bundle (doc/api §9.4.2).** When `list_waveforms.bundle` is true and the local
+  `waveforms.db` is empty, a background thread downloads
+  `GET /waveforms/bundle?encoding=i8-minmax-base64`, streaming it to a temporary file
+  beside `waveforms.db`. It checks `Content-Length`, the `ETag` `"wfb1-<32 hex>"` against
+  the first 16 bytes of the file's SHA-256, and `X-Library-Id`. It then validates the file:
+  `integrity_check`, exact tables and columns, no views, triggers or extra indexes, every
+  `blob` 256 bytes, the encoding, `0 <= n <= 128` and `meta.library_id`. After that it
+  closes the store and renames the file over it. Any failure deletes the temporary file
+  and keeps the current store. `503 BUSY` waits for the larger of `Retry-After` and 5 s
+  doubling, at most 5 minutes; page lookups continue meanwhile. Lookups then resume
+  incrementally, sending the bundle's per-entry etags in `known`. `meta.revision` is
+  never used to judge freshness.
+- **Display.** Values are expanded to the int16 scale (`round(i8 * 32767 / 127)`) and drawn
+  at true amplitude, without normalization.

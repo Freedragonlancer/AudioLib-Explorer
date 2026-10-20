@@ -12,6 +12,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Application icon](Rust_App_Icon.md) | Windows high DPI icon, macOS Retina assets and regeneration |
 | [WAV Metadata](Rust_Wav_Metadata.md) | Embedded BWF/INFO/iXML/XMP/ID3 extraction, search, rescan upgrades and private-format limits |
 | [Library Management](Rust_Library_Management.md) | Multi-library selection, backup/restore, integrity, relinking and import/export |
+| [Search Upgrade Recovery](Rust_Upgrade_Recovery.md) | Committed upgrade batches, crash recovery, startup progress, WAL and snapshot cleanup |
 | [Remote Mode (client)](Rust_Remote_Mode.md) | Server data source: settings/secrets, snapshot sync, WebDAV URL mapping, read-only rules and playback cache |
 | [Server API](api/README.md) | `server/audiolib-server` HTTP contract and client behaviour |
 | [Spectral Peaks and Audition](Rust_Spectral_Audition.md) | Waveform colors, bounded analysis and playback transforms |

@@ -315,6 +315,6 @@ fn extensible_valid_bits_are_removed_after_pcm_replacement_preserving_user_data(
             current.favorite,
             current.play_count
         ),
-        ("user tag", "private notes", Some("#123456"), true, 1)
+        ("user tag", "private notes", Some("#123456"), true, 0)
     );
 }

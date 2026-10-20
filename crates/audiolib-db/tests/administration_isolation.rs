@@ -117,14 +117,14 @@ fn failed_maintenance_excludes_other_instances_and_keeps_acknowledged_writes() {
     blocker.execute_batch("ROLLBACK;").unwrap();
     assert!(worker.join().unwrap().is_err());
     assert_eq!(provider.get_audio(1).unwrap().tags, "acknowledged-before");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
     assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);
     editor
         .update_metadata(1, &patch("acknowledged-after"))
         .unwrap();
     editor.record_play(1).unwrap();
     assert_eq!(provider.get_audio(1).unwrap().tags, "acknowledged-after");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 2);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn restore_holds_isolation_through_install_and_releases_it_afterward() {
     editor.update_metadata(1, &patch("after-restore")).unwrap();
     editor.record_play(1).unwrap();
     assert_eq!(provider.get_audio(1).unwrap().tags, "after-restore");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -269,7 +269,7 @@ fn scans_allow_metadata_and_play_updates_from_another_provider() {
         .unwrap();
     assert!(edited);
     assert_eq!(provider.get_audio(1).unwrap().tags, "during-scan");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn cross_process_administration_blocks_edits_then_releases_without_losing_writes
         provider.get_audio(1).unwrap().tags,
         "cross-process-acknowledged"
     );
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]

@@ -81,7 +81,7 @@ fn version_two_upgrade_preserves_old_counts_without_inventing_events() {
     assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 7);
     assert!(upgraded.play_history(20, 0).unwrap().is_empty());
     upgraded.record_play(f.ids[0]).unwrap();
-    assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 8);
+    assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 7);
     assert_eq!(upgraded.play_history(20, 0).unwrap().len(), 1);
     assert!(upgraded.record_play(99999).is_err());
     assert_eq!(upgraded.play_history(20, 0).unwrap().len(), 1);
@@ -227,7 +227,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     let restored = f.provider.restore_library(&backup).unwrap();
     assert!(restored.rollback_backup.is_file());
     assert_eq!(tags(&f, id), "snapshot");
-    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 1);
+    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 0);
     assert_eq!(
         f.provider
             .search(&SearchRequest {
@@ -250,7 +250,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     );
     let rollback = SqliteProvider::open_read_only(&restored.rollback_backup).unwrap();
     assert_eq!(rollback.get_audio(id).unwrap().tags, "later");
-    assert_eq!(rollback.get_audio(id).unwrap().play_count, 2);
+    assert_eq!(rollback.get_audio(id).unwrap().play_count, 0);
     assert!(f.provider.check_library().unwrap().is_ok());
     assert_eq!(fs::read(&f.paths[0]).unwrap(), original);
 }
@@ -464,7 +464,7 @@ fn relink_refreshes_headers_preserves_identity_annotations_and_rejects_collision
     assert_eq!(updated.id, id);
     assert_eq!(updated.sample_rate, 96000);
     assert_eq!(updated.tags, "keep");
-    assert_eq!(updated.play_count, 1);
+    assert_eq!(updated.play_count, 0);
     assert!(!updated.missing);
     assert_eq!(
         f.provider.find_audio_by_path(&target).unwrap().unwrap().id,
@@ -755,11 +755,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
     let f = fixture();
     let source = f.temp.path().join("audio");
     let target = f.temp.path().join("Audio");
-    if target.exists() {
-        // The regression requires a case-sensitive directory. Windows and some
-        // macOS volumes treat these paths as aliases; the Windows no-op test covers it.
-        return;
-    }
+    let case_insensitive = target.exists();
     let original: Vec<_> = f.paths.iter().map(|path| fs::read(path).unwrap()).collect();
     let first = f.provider.get_audio(f.ids[0]).unwrap();
     f.provider
@@ -783,9 +779,50 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
     drop(conn);
     let root_id = f.provider.folders(None).unwrap()[0].id;
     let child_id = f.provider.folders(Some(root_id)).unwrap()[0].id;
+    let before: Vec<_> = f
+        .ids
+        .iter()
+        .map(|id| serde_json::to_value(f.provider.get_audio(*id).unwrap()).unwrap())
+        .collect();
+    let before_root = f.provider.get_folder(root_id).unwrap().path;
 
     fs::rename(&source, &target).unwrap();
-    assert!(!source.exists());
+    assert_eq!(source.exists(), case_insensitive);
+    // On APFS the old spelling may still resolve, and realpath may already return
+    // the new spelling. A precancelled request must still leave every record alone.
+    assert!(matches!(
+        f.provider.relink_folder_cancellable(
+            &source,
+            &target,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ),
+        Err(Error::Cancelled)
+    ));
+    for (id, preserved) in f.ids.iter().zip(&before) {
+        assert_eq!(
+            serde_json::to_value(f.provider.get_audio(*id).unwrap()).unwrap(),
+            *preserved
+        );
+    }
+    assert_eq!(f.provider.get_folder(root_id).unwrap().path, before_root);
+    assert!(!f.temp.path().join("backups").exists());
+    if cfg!(windows) {
+        // Windows aliases remain a no-op even after a physical case-only rename.
+        assert_eq!(f.provider.relink_folder(&source, &target).unwrap(), 0);
+        for ((id, preserved), (relative, bytes)) in f
+            .ids
+            .iter()
+            .zip(&before)
+            .zip(["metal.wav", "child/wood.wav"].into_iter().zip(&original))
+        {
+            assert_eq!(
+                serde_json::to_value(f.provider.get_audio(*id).unwrap()).unwrap(),
+                *preserved
+            );
+            assert_eq!(fs::read(target.join(relative)).unwrap(), *bytes);
+        }
+        return;
+    }
     assert_eq!(f.provider.relink_folder(&source, &target).unwrap(), 2);
     for ((id, relative), bytes) in f
         .ids
@@ -810,7 +847,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
             moved.favorite,
             moved.play_count
         ),
-        ("retained tag", "retained note", true, 1)
+        ("retained tag", "retained note", true, 0)
     );
     assert_eq!(moved.attributes["unknown_extension"], "keep");
     assert_eq!(
@@ -835,6 +872,176 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
     );
 }
 
+#[test]
+fn root_relocation_rejects_ambiguous_indexed_source_aliases() {
+    let f = fixture();
+    let source = f.temp.path().join("audio");
+    let target = f.temp.path().join("destination");
+    fs::create_dir(&target).unwrap();
+    let canonical = source.canonicalize().unwrap();
+    let root_id = f.provider.folders(None).unwrap()[0].id;
+    let conn = Connection::open(f.provider.database_path()).unwrap();
+    conn.execute(
+        "UPDATE folders SET folder_path=?2 WHERE id=?1",
+        rusqlite::params![
+            root_id,
+            audiolib_db::folder_path_text(&canonical.with_file_name("AUDIO"))
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO folders(folder_path,folder_name) VALUES(?1,'alias')",
+        [audiolib_db::folder_path_text(
+            &canonical.with_file_name("AuDiO"),
+        )],
+    )
+    .unwrap();
+    drop(conn);
+    let before: Vec<_> = f
+        .ids
+        .iter()
+        .map(|id| serde_json::to_value(f.provider.get_audio(*id).unwrap()).unwrap())
+        .collect();
+    let original: Vec<_> = f.paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    let error = f.provider.relink_folder(&source, &target).unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("more than one indexed folder"),
+        "{error}"
+    );
+    for ((id, preserved), (path, bytes)) in
+        f.ids.iter().zip(&before).zip(f.paths.iter().zip(&original))
+    {
+        assert_eq!(
+            serde_json::to_value(f.provider.get_audio(*id).unwrap()).unwrap(),
+            *preserved
+        );
+        assert_eq!(fs::read(path).unwrap(), *bytes);
+    }
+    assert!(!f.temp.path().join("backups").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn root_relocation_resolves_parent_aliases_after_unicode_case_only_rename() {
+    let temp = tempfile::tempdir().unwrap();
+    let actual_parent = temp.path().join("actual");
+    let alias_parent = temp.path().join("alias");
+    let source = actual_parent.join("Äudio");
+    let target = actual_parent.join("äudio");
+    fs::create_dir_all(source.join("child")).unwrap();
+    std::os::unix::fs::symlink(&actual_parent, &alias_parent).unwrap();
+    let requested_source = alias_parent.join("Äudio");
+    let case_insensitive = target.exists();
+    let paths = [source.join("metal.wav"), source.join("child/wood.wav")];
+    for path in &paths {
+        wav(path, 48_000);
+    }
+    let original: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    ScanService::new(provider.clone())
+        .scan(
+            &source,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let ids: Vec<_> = paths
+        .iter()
+        .map(|path| provider.find_audio_by_path(path).unwrap().unwrap().id)
+        .collect();
+    provider
+        .update_metadata(
+            ids[0],
+            &MetadataPatch {
+                tags: Some("retained Unicode tag".into()),
+                notes: Some("retained alias note".into()),
+                favorite: Some(true),
+                color: Some("#abcdef".into()),
+            },
+        )
+        .unwrap();
+    provider.record_play(ids[0]).unwrap();
+    let before: Vec<_> = ids
+        .iter()
+        .map(|id| provider.get_audio(*id).unwrap())
+        .collect();
+    let root_id = provider.folders(None).unwrap()[0].id;
+    let child_id = provider.folders(Some(root_id)).unwrap()[0].id;
+    fs::rename(&source, &target).unwrap();
+    assert_eq!(source.exists(), case_insensitive);
+    assert!(matches!(
+        provider.relink_folder_cancellable(
+            &requested_source,
+            &target,
+            Arc::new(std::sync::atomic::AtomicBool::new(true))
+        ),
+        Err(Error::Cancelled)
+    ));
+    for previous in &before {
+        assert_eq!(
+            serde_json::to_value(provider.get_audio(previous.id).unwrap()).unwrap(),
+            serde_json::to_value(previous).unwrap()
+        );
+    }
+    assert!(!temp.path().join("backups").exists());
+    assert_eq!(
+        provider.relink_folder(&requested_source, &target).unwrap(),
+        2
+    );
+    for ((previous, relative), bytes) in before
+        .iter()
+        .zip(["metal.wav", "child/wood.wav"])
+        .zip(&original)
+    {
+        let moved = target.join(relative);
+        let current = provider.get_audio(previous.id).unwrap();
+        assert_eq!(
+            current.file_path,
+            audiolib_db::display_path(&moved.canonicalize().unwrap())
+        );
+        assert_eq!(current.folder_id, previous.folder_id);
+        assert_eq!(
+            (
+                &current.tags,
+                &current.notes,
+                current.favorite,
+                &current.color,
+                current.play_count
+            ),
+            (
+                &previous.tags,
+                &previous.notes,
+                previous.favorite,
+                &previous.color,
+                previous.play_count
+            )
+        );
+        assert_eq!(fs::read(&moved).unwrap(), *bytes);
+    }
+    assert_eq!(
+        provider.get_folder(root_id).unwrap().path,
+        audiolib_db::folder_path_text(&target.canonicalize().unwrap())
+    );
+    assert_eq!(provider.folders(Some(root_id)).unwrap()[0].id, child_id);
+    assert_eq!(provider.stats().unwrap().audio_files, 2);
+    assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);
+    let rescanned = ScanService::new(provider.clone())
+        .scan(
+            &target,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(rescanned.added, 0);
+    assert_eq!(
+        provider.get_audio(ids[0]).unwrap().notes,
+        "retained alias note"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn root_relocation_keeps_windows_case_aliases_as_a_noop() {
@@ -854,12 +1061,11 @@ fn root_relocation_keeps_windows_case_aliases_as_a_noop() {
     }
 }
 
-#[cfg(windows)]
 #[test]
-fn root_relocation_resolves_existing_windows_source_aliases() {
+fn root_relocation_resolves_existing_source_aliases() {
     let f = fixture();
-    // This alias reproduces the raw/canonical identity mismatch without relying
-    // on 8.3 short-name generation being enabled on the runner's volume.
+    // This alias reproduces the raw/canonical identity mismatch on every OS,
+    // including macOS temporary paths behind the /var -> /private/var symlink.
     let source = f.temp.path().join("audio").join("..").join("audio");
     assert!(source.is_dir());
     let canonical_source = source.canonicalize().unwrap();
