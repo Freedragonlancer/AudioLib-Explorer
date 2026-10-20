@@ -765,6 +765,25 @@ client does.
     usual library-identity check.
   - Progress comes from `GET /api/v1/waveforms/status`, read with the page and then
     every 5 s, only while the page stays open on that server.
+- **波形缓存 (Waveform cache) section** (API §9.5 as implemented at server commit cdea7c9), shown only for the active, open
+  server source. All requests go through the server `DataProvider`
+  (`waveform_cache_*` methods on `RemoteProvider`; local providers answer
+  unsupported) on worker threads.
+  - Shows `run_state`, a progress bar (the active job's `done / total`, otherwise
+    `cached / total`), `pending`, `failed`, `current_rate` with the effective rate limit,
+    the ETA (「估算中」 while `eta_secs` is `null`), the job line (including the
+    `skipped_offline` count and the `mode_effective` fallback note) and `last_error`. Status is polled every 2 s only
+    while the page stays open; any page, selection or window change stops the poll.
+  - With `list_waveform_jobs`: 补齐缺失 / 重试失败 (only when something failed) /
+    全部重建 (two inline confirmations; only then `"confirm": "rebuild"` is sent), and
+    暂停 / 继续 / 停止 through `/waveforms/jobs/current/*`; the rate field
+    (1–1000, empty = server default) patches `list_waveform_rate` when `rate_setting`
+    is listed. Only modes listed in `modes` are offered.
+  - Without the capability (older servers): only the switch, status and pre-generation
+    pause/resume (`/waveforms/pregeneration/*`).
+  - `403 MANAGE_FORBIDDEN` (or `can_manage` false) disables the controls until the page
+    reloads; `409 BUSY` and `409 JOB_STATE` (`RemoteError::JobState`) show a message and
+    refresh the status.
 
 Read-only measurements (2026-10-19, LAN test server, about 0.9 M records, pre-generation
 off, release build; ids and server identity omitted). Each page held 200 consecutive ids
