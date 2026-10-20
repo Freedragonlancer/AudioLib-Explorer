@@ -416,7 +416,25 @@ impl SqliteProvider {
         })
     }
     pub(crate) fn management_check(&self) -> Result<IntegrityReport> {
-        let mut source = self.reader()?;
+        let _gate = self
+            .read_gate
+            .read()
+            .map_err(|_| Error::Database("Library reader gate was poisoned".into()))?;
+        // A full backup touches every source page. A mapped pooled search reader
+        // can retain the whole library's working set after this check returns.
+        // Keep its snapshot/restore gate, but give validation a separate ordinary
+        // I/O connection whose page cache is released with this operation.
+        let mut source = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(db_error)?;
+        source
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_error)?;
+        source
+            .pragma_update(None, "mmap_size", 0)
+            .map_err(db_error)?;
         let tx = source.transaction().map_err(db_error)?;
         tx.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| {
             r.get::<_, i64>(0)
@@ -425,6 +443,7 @@ impl SqliteProvider {
         // Keep validation memory bounded even for multi-million-record libraries.
         let stage = tempfile::NamedTempFile::new()?;
         let mut copy = Connection::open(stage.path()).map_err(db_error)?;
+        copy.pragma_update(None, "mmap_size", 0).map_err(db_error)?;
         copy_database(&tx, &mut copy)?;
         copy.execute_batch("PRAGMA journal_mode=DELETE;")
             .map_err(db_error)?;
