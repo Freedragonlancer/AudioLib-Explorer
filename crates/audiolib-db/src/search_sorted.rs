@@ -259,7 +259,7 @@ mod tests {
         let sql = page_sql(&conn, &request(), true, MIN_SORTED_MATCH_IDS)
             .unwrap()
             .unwrap();
-        conn.progress_handler(1, Some(|| true));
+        conn.progress_handler(1, Some(|| true)).unwrap();
         let result = conn
             .prepare(&sql)
             .and_then(|mut statement| {
@@ -269,7 +269,7 @@ mod tests {
             })
             .map_err(db_error);
         assert!(matches!(result, Err(Error::Cancelled)));
-        conn.progress_handler(0, None::<fn() -> bool>);
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
         let ids = conn
             .prepare(&sql)
             .unwrap()
