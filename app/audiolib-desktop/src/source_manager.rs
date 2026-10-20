@@ -51,6 +51,9 @@ const FOCUS_HISTORY: i32 = 2;
 mod source_roots;
 pub(in crate::controller) use source_roots::RootOperation;
 
+#[path = "detail_waveform_cache.rs"]
+mod detail_waveform_cache;
+
 #[path = "waveform_cache_page.rs"]
 mod waveform_cache_page;
 use waveform_cache_page::{
@@ -199,6 +202,7 @@ struct FormInput {
 impl Controller {
     pub(super) fn bind_source_manager(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_source_roots(ui);
+        self.bind_detail_waveform_cache(ui);
         let c = self.clone();
         ui.on_sm_open_requested(move |focus| c.open_source_manager(focus));
         let c = self.clone();
@@ -571,6 +575,7 @@ impl Controller {
         ui.set_sm_root_form(false);
         ui.set_sm_fs_visible(false);
         ui.set_sm_fs_busy(false);
+        self.refresh_detail_cache(false);
         match page {
             PAGE_LIBRARY => self.load_server_library(&ui),
             PAGE_CACHE => {

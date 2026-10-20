@@ -788,6 +788,13 @@ export component AppWindow inherits Window {
     // 缓存与导出 page.
     in property <string> sm-cache-info: "";
     // One-line summary and the cache directory for the compact ????? header.
+    // ??????????: the client's colored detail Waveform cache (size, clear).
+    in property <string> sm-cw-stats: "";
+    in property <string> sm-cw-message: "";
+    in property <bool> sm-cw-busy: false;
+    in-out property <bool> sm-cw-confirm: false;
+    callback sm-cw-refresh-requested();
+    callback sm-cw-clear-requested();
     in property <string> sm-cache-summary: "";
     in property <string> sm-cache-dir: "";
     in-out property <bool> sm-cache-details: false;
@@ -2137,6 +2144,25 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             if root.sm-server && root.sm-page == 2 && !root.sm-wave-supported: Label { wrap: word-wrap; font-size: 11px; color: root.sm-library-error ? Theme.warning : Theme.muted; text: root.sm-library-loading ? (root.chinese ? "??????????????????" : "Loading the server list Waveforms and Waveform cache?") : root.sm-library-error ? root.sm-library-status : (root.chinese ? "???????????????????????" : "This server does not offer list Waveforms, so its Waveform cache cannot be managed."); }
+                                            Rectangle { height: 1px; background: Theme.border; }
+                                            Text { height: 22px; text: root.chinese ? "????????" : "Colored Waveforms (local)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                                            Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "???????????????????????????????????????????????????? WAV ???" : "Colored detail Waveforms generated on demand for audition, cached on this PC; after clearing they are regenerated or downloaded again. List Waveforms, databases, settings and WAV files are untouched."; }
+                                            if !root.sm-cw-confirm: HorizontalLayout { height: 30px; spacing: 6px;
+                                                Label { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; text: (root.chinese ? "?????" : "Local cache: ") + (root.sm-cw-busy ? (root.chinese ? "????" : "Counting?") : root.sm-cw-stats); }
+                                                Action { width: 72px; enabled: !root.sm-cw-busy; label: root.chinese ? "??" : "Refresh"; clicked => { root.sm-cw-refresh-requested(); } }
+                                                Action { width: 168px; enabled: !root.sm-cw-busy; label: root.chinese ? "???????????" : "Clear local colored cache?"; clicked => { root.sm-cw-confirm = true; } }
+                                            }
+                                            if root.sm-cw-confirm: Rectangle { border-radius: 5px; background: Theme.raised;
+                                                VerticalLayout { padding: 8px; spacing: 6px;
+                                                    Label { wrap: word-wrap; color: Theme.warning; text: root.chinese ? "????????????" + root.sm-cw-stats + "????????????" : "Delete this PC's colored Waveform cache (" + root.sm-cw-stats + ")? Only these cache files are removed."; }
+                                                    HorizontalLayout { height: 30px; spacing: 6px;
+                                                        Action { width: 96px; primary: true; enabled: !root.sm-cw-busy; label: root.chinese ? "????" : "Clear"; clicked => { root.sm-cw-clear-requested(); } }
+                                                        Action { width: 72px; label: root.chinese ? "??" : "Cancel"; clicked => { root.sm-cw-confirm = false; } }
+                                                        Rectangle { horizontal-stretch: 1; }
+                                                    }
+                                                }
+                                            }
+                                            if root.sm-cw-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.accent; text: root.sm-cw-message; }
                                             Rectangle { height: 1px; background: Theme.border; }
                                             Rectangle { height: 1px; background: Theme.border; }
                                             HorizontalLayout { height: 62px; spacing: 16px;
