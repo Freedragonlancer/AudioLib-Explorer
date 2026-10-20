@@ -44,6 +44,7 @@
 | JSON 修改请求的 Content-Type 缺少或不是 application/json | 415 | `JSON_CONTENT_TYPE_REQUIRED` |
 | `Cancelled` | 409 | `CANCELLED` |
 | 扫描会话当前状态不允许该操作（已结束、正在取消、已进入最终对账等，§6.6） | 409 | `SCAN_STATE` |
+| 列表波形任务当前状态不允许该操作（没有任务或已结束，§9.5，草案） | 409 | `JOB_STATE` |
 | JSON 请求体超过 8 MiB（§6.3） | 413 | `PAYLOAD_TOO_LARGE` |
 | 音频流 `Range` 无法满足（§8）、`pcm` 预览 `Range` 无法满足（§8.1） | 416 | `RANGE_NOT_SATISFIABLE`（附 `Content-Range: bytes */<长度>`） |
 | `flac` 预览的 `t=` 在时长之后（§8.1） | 416 | `RANGE_NOT_SATISFIABLE`（不带 `Content-Range`） |
@@ -659,7 +660,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 
 ### 6.9 库管理权限 `manage_mode` 与 `GET /capabilities`（已实现）
 
-服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`，以及 §6.10 的 `GET /fs`、`POST /roots`、`PATCH /roots/{name}`、`DELETE /roots/{name}`。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和其他 GET 不受影响。
+服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`，以及 §6.10 的 `GET /fs`、`POST /roots`、`PATCH /roots/{name}`、`DELETE /roots/{name}`，以及 §9.5 的列表波形任务端点（`POST /waveforms/jobs`、`POST /waveforms/jobs/current/pause|resume|stop`，草案）。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和其他 GET 不受影响。
 
 | `manage_mode` | 局域网直连 | 外部请求（经反代 / 公网对端，判定同 §2.2） |
 |---|---|---|
@@ -688,6 +689,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 | `root_management` | 本服务端提供 §6.10 的稳定根目录管理接口；缺字段的旧版本按 `false`，客户端隐藏目录浏览及根目录新增、改路径、删除按钮 |
 | `list_waveforms` | 支持 §9.1 的 `POST /waveforms`：`{ "version": 1, "buckets": [128], "max_ids": 200, "encoding": "i16le-minmax-base64" }`；缺字段 = 不支持 |
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
+| `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（草案） |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
@@ -1123,6 +1125,185 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 增量（续传）：导入后用 §9.1（`known` = 包内该项的 etag）按 etag 增量拉取；打包期间或之后变化的条目 etag 已不同，会返回 `ok`，所以不会丢失。不按 `meta.revision` 或 `generated_at` 做任何过滤。
 - 实测（生成时间 / 大小）：Mac 0.48 s（只读连接 `VACUUM INTO` + 元数据 + SHA-256 ETag；仅 `VACUUM INTO` 的首测为 0.38 s），308 MB（与源文件同大小），客户端式校验（integrity_check + 白名单 + blob 长度）0.23 s；Windows（待测）。
 
+### 9.5 列表波形缓存管理：状态扩展、生成任务与限速设置（⚠️ 草案，待客户端评审，未实现）
+
+> 目的：让客户端在「服务器音效库」设置页查看列表缩略波形缓存（§9.1–§9.4）的完整进度，并手动发起「补齐缺失」「全部重建」「重试失败」任务、暂停/继续/停止任务、调整生成限速。**只新增端点和字段，已有字段语义不变**；不改主库 schema，快照（§6.1）不变。客户端用 `GET /capabilities` 的 `list_waveform_jobs` 判断是否支持（缺字段 = 不支持，隐藏这些按钮，只显示 §9.2 的开关与进度）。
+
+#### 9.5.1 任务模型
+
+- 服务端同一时间最多一个**列表波形任务**（job）。任务与 §9.2 的「预生成」共用同一组后台工作线程、限速和让路规则：
+  - 有任务在运行时，任务**取代**本轮预生成（预生成不另起一轮，任务结束后按 `pregenerate_list_waveforms` 继续）；
+  - §9.1 的按需队列始终优先于任务，不受任务暂停影响；
+  - 让路规则与 §9.2 的预生成完全相同（扫描运行/暂停中、试听整个期间让路，条件消失 5 秒后继续；根离线的记录跳过，根恢复后再处理）；已开始的解码不因让路中断。
+- 模式 `mode`：
+
+| `mode` | 处理范围 | 说明 |
+|---|---|---|
+| `missing` | 所有非 missing 记录中**没有缓存或缓存键不一致**（文件 ETag 已变，即 etag 不匹配）的项 | 已有且键一致的只做 `stat` 跳过，不计入限速（同 §9.2）。相当于“立即跑一轮预生成”，不要求开启 `pregenerate_list_waveforms` |
+| `rebuild` | 所有非 missing 记录 | 先**清空**本库的列表缓存（`list/<library_id 的哈希>/` 下的 i16 分片与 `waveforms.db` 的 `list_waveforms` 行），再全部重新生成。破坏性操作：客户端须二次确认（§9.5.6）。清空期间 `POST /waveforms` 的未命中项照常返回 `pending` |
+| `failed` | 当前已知解码失败（`failed`）的记录 | 清除这些记录的失败标记后重新解码；仍失败的再次记为失败 |
+
+- **持续生效**：任务只处理**开始时**确定的记录集合（按 id 升序遍历）；任务进行中扫描新增的记录不加入本任务（开启预生成时由预生成在任务结束后处理）。任务进行中被移除的记录跳过。
+- 任务结束状态：`completed`（全部处理完；有失败项也算完成，见 `failed`）、`cancelled`（被停止）、`error`（无法继续，如缓存目录不可写；见 `last_error`）。
+
+#### 9.5.2 `GET /api/v1/waveforms/status` 新增字段（向后兼容）
+
+已有字段（§9.2）全部保留、语义不变。新增：
+
+```json
+{
+  "enabled": true,
+  "state": "running",
+  "yield_reason": null,
+  "total": 909342,
+  "cached": 412000,
+  "remaining": 497342,
+  "queued_on_demand": 0,
+  "failed": 12,
+  "skipped_offline": 0,
+  "rate": 10,
+  "cache_bytes": 221000000,
+  "cache_limit_bytes": 671088640,
+  "over_budget": false,
+  "pass_started_at": 1700000000,
+  "pass_finished_at": null,
+
+  "pending": 497342,
+  "run_state": "running",
+  "current_rate": 9.6,
+  "eta_secs": 51800,
+  "last_error": null,
+  "job": {
+    "id": "wfj-1700000000-3f2a",
+    "mode": "missing",
+    "state": "running",
+    "started_at": 1700000000,
+    "updated_at": 1700003600,
+    "finished_at": null,
+    "total": 909342,
+    "processed": 412000,
+    "generated": 35000,
+    "skipped": 377000,
+    "failed": 12,
+    "skipped_offline": 0,
+    "resumed": false,
+    "current": { "id": 412345, "started_at": 1700003599 }
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `pending` | 尚需生成的记录数：有任务时 = `job.total − job.processed`；无任务时同 `remaining`（未开启预生成时为 `null`）。新客户端用它代替 `remaining` |
+| `run_state` | 归一化的运行状态：`idle` \| `running` \| `paused` \| `error`。`running` 包括已有 `state` 的 `running` 与 `yielding`（让路细节仍看 `state` / `yield_reason`）；`paused` = 任务或预生成被手动暂停；`error` = 最近一个任务以 `error` 结束且之后没有新任务；`off` 与 `idle` 都报 `idle` |
+| `current_rate` | 最近 60 秒实际解码速度（文件/秒，一位小数），只计实际解码的文件；空闲时为 `0` |
+| `eta_secs` | 预计剩余秒数 = `pending` / 最近 10 分钟平均解码速度，向上取整；无法估计（刚开始、暂停、让路中且无样本、`pending` 为 `null`）时为 `null`。只是估计，`missing` 模式下大部分记录只需 `stat`，实际往往更快 |
+| `last_error` | 最近一次后台错误（任务级错误或最近一个文件解码失败）：`{ "at": <Unix 秒>, "error_code": "AUDIO", "message": "…", "id": 106 }`（`id` 可为 `null`；`message` 不含路径，同 §9.1 的 `error`），没有时为 `null`。进程重启后从持久化任务状态恢复（§9.5.5） |
+| `job` | 当前或最近一个任务；从未运行过任务时为 `null`。`state`：`running` \| `yielding` \| `paused` \| `completed` \| `cancelled` \| `error`。`processed` = 已检查的记录数（`generated` + `skipped` + `failed` + `skipped_offline`）；`generated` = 实际解码写入的数；`skipped` = 键一致只做 `stat` 的数；`resumed` = 本任务是否在重启后恢复过；`current` = 正在处理的记录（没有时为 `null`）；结束的任务保留到下一个任务开始 |
+
+- 已有字段 `failed`、`remaining`、`pass_*` 的含义不变；有任务时 `pass_started_at` / `pass_finished_at` 跟随任务的 `started_at` / `finished_at`。
+- 仍按 §2.2 鉴权，**不受 `manage_mode` 限制**，30 秒超时。旧字段“进度在内存中，重启后从头统计”的说明改为：预生成进度仍在内存中；**任务**进度持久化（§9.5.5）。
+
+#### 9.5.3 任务端点
+
+所有任务端点：按 §2.2 鉴权，**受 `manage_mode` 限制**（§6.9，403 `MANAGE_FORBIDDEN`；先鉴权，缺 token 仍是 401）；浏览器请求须同源（§2）；是缓存而不是库记录，所以**不要求** `X-AudioLib-Library-Id`，不改 `revision`；30 秒超时（只登记任务，不在请求内解码）。成功时回复与 `GET /waveforms/status` 相同的完整状态（客户端无需再查一次）。
+
+**开始**：`POST /api/v1/waveforms/jobs`，`Content-Type: application/json`
+
+```json
+{ "mode": "missing" }
+```
+
+- `mode` 必填：`missing` \| `rebuild` \| `failed`；缺失、类型不对、未知值或含未知字段 → 400 `VALIDATION`（未知 `mode` 带 `"sub_code": "UNSUPPORTED_MODE"`）。
+- `rebuild` 必须同时带 `"confirm": "rebuild"`，否则 400 `VALIDATION`（`sub_code`: `CONFIRM_REQUIRED`）；防止误发。
+- 成功 → **202**，状态体中 `job.id` 为新任务 id（不透明字符串）、`job.state` 为 `running`。
+- 已有任务在 `running` / `yielding` / `paused` → **409 `BUSY`**（`message`：`A list waveform job is already in progress`，错误体附 `"job_id": "<当前任务 id>"`），不排队。结束状态的任务不妨碍新任务。
+- 库未打开 → 503 `UNAVAILABLE`（§6.2）；列表缓存不可用（`waveforms.db` 无法使用，同 §9.4.2）→ 503 `UNAVAILABLE` + `Retry-After`。
+- 扫描运行中也可以开始：任务登记后按让路规则等待扫描结束。
+
+**暂停 / 继续**：`POST /api/v1/waveforms/jobs/current/pause`、`POST /api/v1/waveforms/jobs/current/resume`（无请求体）
+
+- 暂停后不再取新文件（正在处理的那个完成后停下）；暂停状态会持久化，**重启后仍为暂停**（与 §9.2 预生成的手动暂停不同）。
+- 幂等：对已暂停的再暂停、对运行中的再继续都返回 200。
+- 没有任务、或当前任务已结束 → 409 `JOB_STATE`（新错误码，见 §9.5.7）。
+
+**停止**：`POST /api/v1/waveforms/jobs/current/stop`（无请求体）
+
+- 选 `POST …/stop` 而不是 `DELETE`：与 §6.6 扫描的 `POST /scans/{id}/cancel` 一样是“动作”，且停止后任务记录仍保留可查（`DELETE` 容易被理解成删除记录或缓存）。
+- 正在处理的文件完成后停下，任务变为 `cancelled`；**已生成的缓存保留**（`rebuild` 中途停止时，已清空且尚未重建的条目之后由按需队列或下一次 `missing` 补齐）。
+- 回复 200；没有进行中的任务 → 409 `JOB_STATE`。
+
+**与 §9.2 旧端点的关系**：`POST /waveforms/pregeneration/pause|resume` **保留**，行为扩展为：有进行中的任务时作用于任务（等同 `jobs/current/pause|resume`，但与旧行为保持一致，没有任务时也不报错）；没有任务时与原来相同，只暂停当前进程的预生成。新客户端在支持 `list_waveform_jobs` 时用新端点。
+
+#### 9.5.4 限速设置 `list_waveform_rate`
+
+- `GET /api/v1/settings` 新增 `list_waveform_rate`（生效值，整数，文件/秒）和 `list_waveform_rate_source`（`default` \| `config` \| `admin`）。
+- `PATCH /api/v1/settings` 接受 `{"list_waveform_rate": 20}`：整数 1..=1000，越界或类型不对 → 400 `VALIDATION`；`null` = 删除覆盖、回到 `config.toml`（默认 10）。规则与 `pregenerate_list_waveforms` 完全相同（§9.2：受 `manage_mode` 限制、写入 `admin-settings.json`、立即生效），对进行中的任务和预生成**立即生效**（下一个文件起）。按需队列仍不受限速。
+- `pregenerate_list_waveforms` 不变，即「新扫描到的文件自动生成缩略波形」开关；客户端设置页把两者放在一起显示。
+- 管理页：`PUT /admin/api/settings` 同样接受 `list_waveform_rate`（`null` / `""` = 删除覆盖）。
+
+#### 9.5.5 跨重启恢复：任务状态文件
+
+- 位置：本库列表缓存目录 `list/<library_id 的哈希>/` 下的 `job-state.json`（与 `waveforms.db` 同目录）。服务端内部文件，客户端不读取。
+- 写入：同目录临时文件 + `rename` 原子替换；任务开始、暂停/继续/停止、结束时立即写入，运行中最多每 **5 秒**或每 1,000 条记录写一次进度。
+- 格式（`version` 1）：
+
+```json
+{
+  "version": 1,
+  "library_id": "…",
+  "job": {
+    "id": "wfj-1700000000-3f2a",
+    "mode": "missing",
+    "state": "running",
+    "paused": false,
+    "started_at": 1700000000,
+    "updated_at": 1700003600,
+    "finished_at": null,
+    "cursor": 412345,
+    "max_id": 1203344,
+    "total": 909342,
+    "processed": 412000,
+    "generated": 35000,
+    "skipped": 377000,
+    "failed": 12,
+    "skipped_offline": 0,
+    "rebuild_cleared": true
+  },
+  "last_error": null
+}
+```
+
+- 语义：
+  - `cursor` = 已完成处理的最大记录 id（按 id 升序遍历）；恢复时从 `cursor + 1` 继续，范围上限为任务开始时的 `max_id`。由于进度最多 5 秒落盘一次，恢复后可能重复处理最后几秒的记录：`missing` 下键一致只需 `stat`，重复无害。
+  - `rebuild`：`rebuild_cleared` 为 `false` 时（清空过程中被中断）恢复时重新清空；为 `true` 后按 `cursor` 继续生成。
+  - 启动时（打开 `waveforms.db` 之后）若 `state` 为 `running` / `yielding` / `paused`，恢复该任务，`job.resumed` = `true`；`paused` 恢复后仍暂停。
+  - `library_id` 与当前库不同、`version` 未知或文件损坏：忽略并改名为 `job-state.json.bad`，记 WARN，不恢复（不影响服务启动）。
+  - 已结束的任务也保留在文件中，供 `GET /waveforms/status` 的 `job` 与 `last_error` 在重启后仍可查。
+  - 失败记录的明细（哪些 id 失败）不持久化，只有计数；重启后 `mode: "failed"` 只覆盖本进程内已知的失败项（`missing` 会重新尝试这些文件）。
+
+#### 9.5.6 整包与客户端行为
+
+- 任务进行中 `GET /waveforms/bundle`（§9.4.2）照常可用，返回当前已有的条目（`VACUUM INTO` 是 WAL 读事务，不阻塞任务写入）；`rebuild` 刚清空后整包可能接近空，客户端导入后用 §9.1 增量补齐即可（不会丢失：etag 规则不变）。`POST /waveforms` 照常可用。
+- 建议的客户端交互：设置页显示 `run_state`、`cached` / `total`、`pending`、`failed`、`current_rate`、`eta_secs`、`last_error`、`job.current`；按钮「补齐缺失」（`missing`）、「重试失败」（`failed`，`failed > 0` 时可用）、「全部重建」（`rebuild`，**两次确认**后才发送，第二次确认提示会清空现有缓存并重新读取所有文件，NAS 会长时间保持唤醒）、「暂停 / 继续」「停止」；限速输入框（1..=1000，留空 = 恢复默认）。`can_manage` / `can_change` 为假时只读。该页打开时每 5 秒轮询一次 `GET /waveforms/status`（同 §9.3）。
+- 收到 409 `BUSY` 时刷新状态并显示当前任务；收到 409 `JOB_STATE` 时刷新状态即可。
+
+#### 9.5.7 能力声明与错误码
+
+`GET /capabilities` 新增：
+
+```json
+"list_waveform_jobs": { "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }
+```
+
+- 缺字段（旧服务端）= 不支持 §9.5 的任务端点与 `list_waveform_rate` 设置；`modes` 以后可扩展，客户端只显示列出的模式；`rate_setting` 表示 `PATCH /settings` 接受 `list_waveform_rate`。
+- §6.9 的 `manage_mode` 管理端点清单增加：`POST /waveforms/jobs`、`POST /waveforms/jobs/current/pause|resume|stop`。
+- §2.1 错误表新增：任务当前状态不允许该操作（没有任务或任务已结束时暂停/继续/停止）→ 409 `JOB_STATE`（类比 `SCAN_STATE`）。已有任务时再开始 → 409 `BUSY`（同扫描，§6.6）。
+
+#### 9.5.8 已知问题（随本功能一起修复）
+
+- **整包首次请求 500 `IO`（ENOENT）**：库的 `list/<library_id 的哈希>/` 目录尚未创建时，第一次 `GET /waveforms/bundle` 可能在创建目录与生成临时目录之间竞争，返回 500 `IO`（No such file or directory）。计划修复：生成整包前在持有整包名额的情况下 `create_dir_all` 该目录（幂等），并在打开 `waveforms.db` 时就保证目录存在；目录无法创建时按 §9.4.2 返回 503 `UNAVAILABLE`，不返回 500。客户端在修复前遇到该 500 可按 `Retry-After: 5` 等同处理重试一次。
+
 ## 10. 服务端部署
 
 - 部署方式：macOS 原生进程（不用容器），默认监听 `0.0.0.0:8790`，可用 launchd 用户代理常驻。启动时先监听端口，再在后台打开库；打不开时进程不退出而是重试（§6.2）。端口被占用、配置无效或（`auth = true` 时）token 缺失仍会直接退出。可选的原生 TLS 监听（§2.3）起不来时只在日志和管理页报错，不影响 HTTP 端口。管理页：`http://<host>:8790/admin`（§2.3）。
@@ -1182,3 +1363,4 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 7. 库身份是否迁入未来 schema（§3）。
 8. 增量同步 `GET /library/changes`（§6.5 草案）：变更日志放库内触发器（schema v5）还是服务端旁路；保留多久；410 的阈值。
 9. 列表缩略波形（§9.1–§9.3，服务端已实现）：客户端评审结论见 §9.3；按需队列的让路已定（只在试听开始后的前 3 秒让路，试听期间最多 1 个解码名额，不因扫描暂停；预生成在试听整个期间和扫描期间让路，§9.2）。`list_waveform_cache_mb` 默认 640 MiB 已确认够用：909,342 条的满库约 465 MiB（§9.1 容量估算），超出时按分片淘汰并在 `/waveforms/status` 报 `over_budget`。
+10. 列表波形缓存管理（§9.5 草案，待客户端评审）：停止用 `POST …/stop`（不用 `DELETE`）；`rebuild` 要求 `confirm` 字段；任务暂停跨重启保留；`failed` 模式重启后只覆盖本进程已知失败项；`eta_secs` 的估计窗口；旧 `pregeneration/pause|resume` 作为任务别名保留。
