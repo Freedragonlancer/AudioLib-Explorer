@@ -567,20 +567,25 @@ async fn patch_settings(
                 "list_waveform_rate must be an integer in 1..=1000 or null",
             ));
         }
-        if let Some(value) = patch.list_waveform_rate {
+        // One write of admin-settings.json for both fields: a failure changes neither.
+        if patch.list_waveform_rate.is_some() || patch.pregenerate_list_waveforms.is_some() {
             security.update_settings_locked(&lease, |settings| {
-                settings.list_waveform_rate = value;
+                if let Some(value) = patch.list_waveform_rate {
+                    settings.list_waveform_rate = value;
+                }
+                if let Some(value) = patch.pregenerate_list_waveforms {
+                    settings.pregenerate_list_waveforms = value;
+                }
             })?;
-            tracing::info!(?value, "list_waveform_rate changed through PATCH /settings");
-        }
-        if let Some(value) = patch.pregenerate_list_waveforms {
-            security.update_settings_locked(&lease, |settings| {
-                settings.pregenerate_list_waveforms = value;
-            })?;
-            tracing::info!(
-                ?value,
-                "pregenerate_list_waveforms changed through PATCH /settings"
-            );
+            if let Some(value) = patch.list_waveform_rate {
+                tracing::info!(?value, "list_waveform_rate changed through PATCH /settings");
+            }
+            if let Some(value) = patch.pregenerate_list_waveforms {
+                tracing::info!(
+                    ?value,
+                    "pregenerate_list_waveforms changed through PATCH /settings"
+                );
+            }
         }
         drop(lease);
         Ok(settings_response(&security, &headers, connection.as_ref()))
