@@ -1337,7 +1337,8 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(f.state.audio(id).unwrap().play_count, 1);
+    // The deprecated play route is a no-op: nothing is counted.
+    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
 }
 
 #[tokio::test]
@@ -1447,7 +1448,7 @@ async fn batch_metadata_returns_the_report_and_changed_files_in_request_order() 
 }
 
 #[tokio::test]
-async fn plays_return_the_updated_record_and_leave_the_revision_alone() {
+async fn plays_are_a_no_op_that_return_the_record_and_leave_the_revision_alone() {
     let f = fixture();
     let id = audio_id(&f, "flyby_02.wav");
     let start = library_revision(&f.state).await;
@@ -1463,16 +1464,31 @@ async fn plays_return_the_updated_record_and_leave_the_revision_alone() {
         assert_eq!(response.status(), StatusCode::OK);
         let body: AudioWriteResponse = json(response).await;
         assert_eq!(body.file.id, id);
-        assert_eq!(body.file.play_count, play);
+        // Deprecated no-op: the play is not recorded.
+        assert_eq!(body.file.play_count, 0, "play {play}");
         assert_eq!(body.revision_before, start);
         assert_eq!(body.revision, start);
     }
-    // Polling and restarting do not count the play commits either.
+    // Nothing was written: polling and restarting see the same revision.
     assert_eq!(library_revision(&f.state).await, start);
     drop(f.state);
     let reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
     assert_eq!(library_revision(&reopened).await, start);
-    assert_eq!(reopened.audio(id).unwrap().play_count, 2);
+    assert_eq!(reopened.audio(id).unwrap().play_count, 0);
+    let history = send_json(
+        &reopened,
+        Method::GET,
+        "/api/v1/history/plays",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(history.status(), StatusCode::OK);
+    let history: Vec<audiolib_core::PlayRecord> = json(history).await;
+    assert!(
+        history.is_empty(),
+        "play history is not recorded by the server"
+    );
 
     // A content write after the plays still bumps exactly once.
     let response = send_json(
