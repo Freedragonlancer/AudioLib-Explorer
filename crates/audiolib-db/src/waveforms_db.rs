@@ -252,7 +252,8 @@ impl WaveformsDb {
         Ok(self.len()? == 0)
     }
 
-    /// Atomically replace this store with an already validated bundle file (§9.4.2):
+    /// Atomically replace this store with an already validated bundle file; rows already
+    /// in the store win over the bundle's (§9.4.2):
     /// the connection is closed, `validated` is renamed over `waveforms.db` (same
     /// directory) and the store is reopened in WAL mode. On a failed rename the previous
     /// file is reopened and kept.
@@ -263,6 +264,30 @@ impl WaveformsDb {
             ));
         }
         let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        // Re-check under the store lock right before the swap: rows written by page
+        // lookups while the bundle downloaded are newer than the bundle's, so they are
+        // copied over it instead of being lost. Writers wait on this lock meanwhile.
+        let local_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM list_waveforms", [], |row| row.get(0))
+            .map_err(db_error)?;
+        if local_rows > 0 {
+            let target = validated
+                .to_str()
+                .ok_or_else(|| Error::Validation("bundle path is not UTF-8".into()))?;
+            conn.execute("ATTACH DATABASE ?1 AS bundle", [target])
+                .map_err(db_error)?;
+            let merged = conn
+                .execute_batch(
+                    "INSERT OR REPLACE INTO bundle.list_waveforms
+                       (file_id,etag,src_mtime,src_size,encoding,n,blob)
+                     SELECT file_id,etag,src_mtime,src_size,encoding,n,blob
+                     FROM main.list_waveforms;",
+                )
+                .map_err(db_error);
+            conn.execute_batch("DETACH DATABASE bundle")
+                .map_err(db_error)?;
+            merged?;
+        }
         // Closing the only connection checkpoints the WAL and removes its sidecars.
         close_or_restore(&mut conn, Connection::close)?;
         let renamed = std::fs::rename(validated, &self.path);
@@ -451,6 +476,38 @@ mod tests {
                 .is_err()
         );
         assert!(db.get(10_000).unwrap().is_none(), "nothing written");
+    }
+
+    #[test]
+    fn rows_written_during_a_bundle_download_survive_the_swap() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = WaveformsDb::open(&directory.path().join(WAVEFORMS_DB_FILE)).unwrap();
+        let staged = directory.path().join("waveforms.db.bundle-0-0.tmp");
+        {
+            let bundle = open_connection(&staged).unwrap();
+            for (id, etag) in [(1, "old"), (2, "bundle")] {
+                bundle
+                    .execute(
+                        "INSERT INTO list_waveforms VALUES(?1,?2,0,0,'i8-minmax-base64',1,?3)",
+                        rusqlite::params![
+                            id,
+                            etag,
+                            padded_blob(&ListWaveformI8::new(vec![-1, 1]).unwrap())
+                        ],
+                    )
+                    .unwrap();
+            }
+            bundle.execute_batch("PRAGMA journal_mode=DELETE").unwrap();
+        }
+        // A page lookup wrote id 1 (newer) and id 3 while the bundle was downloading.
+        db.upsert(&row(1, "page", vec![-2, 2])).unwrap();
+        db.upsert(&row(3, "page", vec![])).unwrap();
+        db.replace_with(&staged).unwrap();
+        assert!(!staged.exists());
+        assert_eq!(db.len().unwrap(), 3);
+        assert_eq!(db.get(1).unwrap().unwrap().etag, "page");
+        assert_eq!(db.get(2).unwrap().unwrap().etag, "bundle");
+        assert_eq!(db.get(3).unwrap().unwrap().etag, "page");
     }
 
     #[test]
