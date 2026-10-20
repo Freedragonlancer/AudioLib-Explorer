@@ -75,7 +75,8 @@ pub struct WriteOutcome<T> {
 }
 
 /// Apply the revision rule for one write reply: if the cached snapshot of `library_id`
-/// is at `revision_before`, write `files` into it and record `revision`; otherwise ask
+/// is at `revision_before`, write `files` into it and record `revision` (which may equal
+/// `revision_before` for a play, so no full sync is needed); otherwise ask
 /// for a full sync. Never downloads anything itself.
 pub fn apply_server_write(
     cache: &RemoteCache,
@@ -92,7 +93,9 @@ pub fn apply_server_write(
             reason: "no cached snapshot for this library".into(),
         };
     };
-    if state.revision != revision_before || revision <= revision_before {
+    // `revision == revision_before` is a write that changed no snapshot content the
+    // server versions (plays, no-op patches): apply the records, keep the revision.
+    if state.revision != revision_before || revision < revision_before {
         return CacheUpdate::Resync {
             reason: format!(
                 "cached revision {} does not match revision_before {revision_before} (server now {revision})",
@@ -905,6 +908,33 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[1].path, "/api/v1/history/plays?limit=10000&offset=17");
+    }
+
+    #[test]
+    fn play_that_keeps_the_revision_is_applied_without_a_resync() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 41);
+        let reader = Arc::new(snapshot(&cache));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let server = server(seen, |method, path| match (method, path) {
+            ("POST", "/api/v1/audio/3/plays") => TestResponse::json(
+                200,
+                &format!(
+                    r#"{{"file":{},"revision_before":41,"revision":41}}"#,
+                    file_json(3, "", 0, "", 1)
+                ),
+            ),
+            _ => TestResponse::json(404, "{}"),
+        });
+        let writer = RemoteWriter::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            cache.clone(),
+            LIBRARY,
+        );
+        let outcome = writer.record_play(3).unwrap();
+        assert_eq!(outcome.cache, CacheUpdate::Applied { revision: 41 });
+        assert_eq!(cache.state(LIBRARY).unwrap().revision, 41);
+        assert_eq!(reader.get_audio(3).unwrap().play_count, 1);
     }
 
     #[test]
