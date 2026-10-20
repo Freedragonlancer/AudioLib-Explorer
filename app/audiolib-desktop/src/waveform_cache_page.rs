@@ -822,9 +822,15 @@ mod tests {
         assert!(!rate_unchanged(Some(&settings), Some(30)));
         settings.list_waveform_rate_source = Some("admin".into());
         assert!(rate_unchanged(Some(&settings), Some(20)));
-        assert!(!rate_unchanged(Some(&settings), None), "clears the override");
+        assert!(
+            !rate_unchanged(Some(&settings), None),
+            "clears the override"
+        );
         settings.list_waveform_rate_source = Some("default".into());
-        assert!(!rate_unchanged(Some(&settings), Some(20)), "explicit override");
+        assert!(
+            !rate_unchanged(Some(&settings), Some(20)),
+            "explicit override"
+        );
         assert!(rate_unchanged(Some(&settings), None));
         assert!(!rate_unchanged(None, Some(20)));
     }
@@ -835,7 +841,10 @@ mod tests {
         error.sub_code = Some("CONFIRM_REQUIRED".into());
         assert_eq!(action_error_text(&error, true), "须两次确认");
         error.sub_code = None;
-        assert_eq!(action_error_text(&error, true), "波形缓存操作失败：须两次确认");
+        assert_eq!(
+            action_error_text(&error, true),
+            "波形缓存操作失败：须两次确认"
+        );
     }
 
     #[test]

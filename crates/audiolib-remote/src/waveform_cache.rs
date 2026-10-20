@@ -337,7 +337,11 @@ mod tests {
         let mapped = waveform_cache_error(&invalid, true);
         assert_eq!(mapped.kind, WaveformCacheErrorKind::Validation);
         assert_eq!(mapped.sub_code.as_deref(), Some(UNSUPPORTED_MODE));
-        assert!(mapped.message.contains("服务器不支持这种列表波形任务"), "{}", mapped.message);
+        assert!(
+            mapped.message.contains("服务器不支持这种列表波形任务"),
+            "{}",
+            mapped.message
+        );
         let unconfirmed = waveform_cache_error(
             &RemoteError::from_status(
                 400,
@@ -347,7 +351,11 @@ mod tests {
             true,
         );
         assert_eq!(unconfirmed.sub_code.as_deref(), Some(CONFIRM_REQUIRED));
-        assert!(unconfirmed.message.contains("两次确认"), "{}", unconfirmed.message);
+        assert!(
+            unconfirmed.message.contains("两次确认"),
+            "{}",
+            unconfirmed.message
+        );
         // Other sub_codes stay plain validation errors.
         assert!(matches!(
             RemoteError::from_status(
