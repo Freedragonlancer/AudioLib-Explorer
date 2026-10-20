@@ -990,39 +990,6 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - `list_waveforms`：本服务端支持 §9.1；`version` 与 `etag` 的 `-l<版本>` 一致，`encoding` 说明 `peaks` 的格式。缺字段（旧服务端）= 不支持。
 - `pregenerate_list_waveforms`：当前生效的开关值（只读；修改用 `PATCH /settings`，进度看 `/waveforms/status`）。
 
-### 9.4 列表波形 8 位编码 `i8-minmax-base64`（草稿，待客户端评审）
-
-> 2026-10-20 Paul 选定方案 A：128 列、每值 1 字节、**线性、按真实振幅绘制，不加增益字节**。只新增一种可选编码，**默认编码不变**（`i16le-minmax-base64`），已实现的 §9.1 客户端不受影响。不改数据库 schema、索引、FTS，快照（§6.1）不变，不影响搜索。
-
-**命名说明**：群里讨论时叫「u8」，但 min 是负值，实际存的是**有符号** int8，所以编码名定为 `i8-minmax-base64`（避免客户端按无符号解码）。
-
-**请求**：§9.1 请求体新增可选字段 `encoding`：
-
-| 字段 | 说明 |
-|---|---|
-| `encoding` | 可省略，默认 `"i16le-minmax-base64"`。可选 `"i8-minmax-base64"`。其他值 → 400 `VALIDATION`（`unsupported list waveform encoding`）。一次请求内所有项用同一种编码 |
-
-**响应**：顶层新增 `encoding`（回显本次实际编码）；各项字段不变，只是 `peaks` 的长度和含义随编码变：
-
-- 每个值先截到 −1..1，再 `round(v × 127)` 存为 **int8**（−127..127，不用 −128）；按列交错 `[min₀, max₀, min₁, max₁, …]`，标准 base64（带填充），共 `n × 2` 字节（`n = 128` 时 **256 字节**，base64 后 344 个字符）。
-- 解码：`v = byte_as_i8 / 127.0`。线性刻度，最小非零台阶约 −42 dBFS：峰值低于这个的很安静素材会画成一条平线，这是选定方案接受的取舍（真实电平）。
-- 列数 `n`、多声道合并、0 帧文件的规则与 §9.1 完全相同。
-
-**`etag`**：十六进制部分与 §9.1 相同（同一份服务端缓存），后缀按编码区分：i16 仍是 `-l1`，i8 是 `-l1i8`。客户端切换编码后旧 `known` 不会误判 `not_modified`。
-
-**服务端存储**：`waveforms/` 缓存仍只存一份 128 列 int16 结果，i8 在响应时由它量化得到（一次乘法加取整，200 项不到 1 ms）；预生成（§9.2）不变，不多占磁盘。
-
-**能力声明**：`/capabilities` 的 `list_waveforms` 新增 `encodings` 数组，例如 `"encodings": ["i16le-minmax-base64", "i8-minmax-base64"]`；原 `encoding` 字段保留且仍表示默认编码。缺 `encodings` 的服务端只支持 i16，客户端不要发 `encoding`。
-
-**体积估算**（`n = 128`，不含 JSON 外壳与 zstd）：
-
-| 编码 | 每条 | 90 万条 | 200 条一页（响应约） |
-|---|---|---|---|
-| `i16le-minmax-base64` | 512 B（base64 684 字符） | 约 461 MB | 约 150 KB |
-| `i8-minmax-base64` | 256 B（base64 344 字符） | 约 230 MB | 约 82 KB |
-
-客户端本地 `waveform_cache` 用新的 zoom_level 存 i8 结果，不改 schema（客户端侧细节由客户端补充）。
-
 ### 9.3 本地模式与客户端决定（客户端已评审）
 
 **本地模式**：
@@ -1047,6 +1014,91 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 
 - 客户端本地模式：开启「预生成列表波形」时，后台补齐除了在扫描结束后运行，**也在启动时和打开该开关时**运行；正在按需计算的本地行滚出视图时**取消**该次计算（服务器模式下已发出的 `POST /waveforms` 仍不取消，见上面第 2 条）。
 - 服务端：按需队列非空时预生成也让路（按需优先）；开关关闭但按需队列还有任务时，`/waveforms/status` 的 `state` 为 `running`（不是 `off`）；`cached` 在后台清理（§9.1“删除记录”）完成前仍包含已删除记录的条目。
+
+### 9.4 列表波形 8 位编码 `i8-minmax-base64`、`waveforms.db` 与整包下载（客户端已评审，实现中）
+
+> 2026-10-20 Paul 选定方案 A：128 列、每值 1 字节、**线性、按真实振幅绘制，不加增益字节**。只新增一种可选编码，**默认编码不变**（`i16le-minmax-base64`），已实现的 §9.1 客户端不受影响。不改主库数据库 schema、索引、FTS，快照（§6.1）不变，不影响搜索。
+
+**命名说明**：群里讨论时叫「u8」，但 min 是负值，实际存的是**有符号** int8，所以编码名定为 `i8-minmax-base64`（避免客户端按无符号解码）。
+
+**能力声明与请求**：
+
+- `/capabilities` 的 `list_waveforms` 新增 `"encodings": ["i16le-minmax-base64", "i8-minmax-base64"]` 和 `"bundle": true`（见下面「整包下载」）；原 `encoding` 字段保留，仍表示默认编码。
+- §9.1 请求体新增可选字段 `encoding`，默认 `"i16le-minmax-base64"`，可选 `"i8-minmax-base64"`。
+- `capabilities` 中**没有** `encodings` 时客户端 **MUST NOT** 发送 `encoding` 字段（旧服务端只支持 i16）。
+- 未知编码 → 400 `VALIDATION`，错误体带子码 `"sub_code": "UNSUPPORTED_ENCODING"`（`message`：`unsupported list waveform encoding`）。
+
+**响应**：顶层新增 `encoding`，**必须等于请求的编码**（未发送时为默认编码）。一次响应内所有项使用同一编码，不会混用。回显与请求不一致视为协议错误：客户端**不缓存**该响应的任何项，并按 `pending` 的退避规则（§9.3 第 2 条）退避后再试。
+
+**量化（规范）**：
+
+- i8 值由 §9.1 的 int16 值推导：`i8 = round(i16 × 127 / 32767)`，取整为**四舍五入、0.5 远离零**（与 Rust `f64::round` 相同；例：`16384 → 64`（63.50→64），`-16384 → -64`，`129 → 1`（0.5002→1），`128 → 0`（0.496→0），`32767 → 127`，`-32767 → -127`）。客户端本地模式必须用同一方法由 int16 推导，保证本地与服务器像素一致。
+- 服务端**从不输出 −128**（i16 已截到 ±32767，推导结果在 −127..127）。客户端收到 −128 时按 −127 处理。“先截到 −1..1”只适用于 f32 源值（§9.1 的 int16 量化之前），对 i8 推导不适用。
+- 保证每列 `min ≤ max`（量化单调，不会翻转）。
+- 解码：`v = i8 / 127.0`。
+- **已接受的取舍**（Paul 已确认）：线性刻度下最小非零台阶约 1/127 ≈ **−42 dBFS**，峰值低于此的安静素材会画成一条平线。
+
+**长度**：`peaks` 解码后**恰好 `2n` 字节**（按列交错 `[min₀, max₀, min₁, max₁, …]`），base64（RFC 4648 标准字母表，带 `=` 填充）长度为 `4 × ⌈2n / 3⌉` 字符；`n = 128` 时 256 字节、344 字符。
+
+- `n = 0`（0 帧文件）：`status: ok`、`n: 0`、`peaks: ""`（空字符串）。
+- 短文件 `n < 128`：`n` 为实际列数 = ⌈frames / samples_per_pixel⌉，`samples_per_pixel = max(1, ⌈frames / 128⌉)`；例如 1000 帧 → spp 8 → `n = 125`，50 帧 → spp 1 → `n = 50`。客户端按 `n` 横向拉伸，不得假设 128。
+- 长度与 `n` 不符的项视为协议错误，不缓存。
+
+**`etag` 与 `known`**：
+
+- 十六进制部分与 §9.1 相同，后缀按编码区分：i16 为 `-l1`，i8 为 `-l1i8`（`W/"wf4-k2-<hex>-l1i8"`）。
+- `known` 按**完整** etag 字符串（含后缀）比较。`known` 为 `-l1` 而请求 i8 时，返回 `ok` + 新的 `-l1i8` etag，**不是** `not_modified`。
+- `pending` 时客户端仍显示的旧副本（`previous`）按**请求编码**对应的本地缓存取。
+
+**客户端本地缓存键**：`waveform_cache.zoom_level = 'list128-v4-l1i8'`（i16 为 `'list128-v4-l1'`），`min_values` / `max_values` 各 `n` 字节 int8，其余同 §9.3。
+
+**体积估算**（`n = 128`，不含 JSON 外壳与 zstd）：
+
+| 编码 | 每条 | 90 万条 | 200 条一页（响应约） |
+|---|---|---|---|
+| `i16le-minmax-base64` | 512 B（base64 684 字符） | 约 461 MB | 约 150 KB |
+| `i8-minmax-base64` | 256 B（base64 344 字符） | 约 230 MB | 约 82 KB |
+
+#### 9.4.1 存储（Storage）
+
+- 服务端把列表波形存到单独的 SQLite 文件 **`waveforms.db`**（位于 `waveform_cache_dir` 下的 `list/<library_id 的哈希>/`），**不是主库数据库**，主库 schema / FTS / 快照不变。
+- 表（服务端内部，客户端经整包下载可读到，见 9.4.2）：
+
+```sql
+CREATE TABLE list_waveforms (
+  file_id   INTEGER PRIMARY KEY,   -- 记录 id；普通 rowid 表（不用 WITHOUT ROWID）
+  etag      TEXT    NOT NULL,      -- 完整 etag（含 -l1i8 后缀）
+  src_mtime INTEGER NOT NULL,
+  src_size  INTEGER NOT NULL,
+  encoding  TEXT    NOT NULL,      -- 'i8-minmax-base64'
+  n         INTEGER NOT NULL,      -- 实际列数 0..=128
+  blob      BLOB    NOT NULL       -- 恰好 256 B：128 × (min,max) int8，n < 128 时尾部补 0
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+```
+
+- 设置：`journal_mode=WAL`、`synchronous=NORMAL`；每项写入为 UPSERT（`INSERT … ON CONFLICT(file_id) DO UPDATE`），后台按批写入，每个事务几百行；事务保证不出现半行。
+- 现有的 `waveforms/` 目录（§9 详情彩色波形缓存及 §9.1 的 i16 分片）**保留不变**；i8 由 i16 结果按上面的公式推导后写入 `waveforms.db`。
+- 选型依据（同一组指标，90 万合成行，热缓存，p50/p95；kill 为进程被杀，**不是断电**）：
+
+| 指标 | Windows 11 Dragonpark-Home（Python sqlite3 3.49.1）定长槽文件 | 同机 `waveforms.db` | Mac（服务端 rusqlite，release）`waveforms.db` |
+|---|---|---|---|
+| 文件大小 | 252 MB | 284 MB | {{MAC_SIZE}} |
+| 全量写入 | 0.65 s | 2.16 s（每事务 1 万行） | {{MAC_FULL}} |
+| 单条更新 | 0.00 / 0.03 ms（fsync 0.90 ms） | 0.02 / 0.04 ms（FULL 0.90 ms） | {{MAC_UPSERT}} |
+| 读 200 行一页 | 1.08 / 1.38 ms + 42 ms 索引加载 | 1.16 / 1.72 ms | {{MAC_READ}} |
+| 写入时并发读 | 不支持 | 1.06 / 1.81 ms，0 错误 | {{MAC_CONC}} |
+| 随机 kill -9 | 20 次中 4 次撕裂槽（CRC 可检出，条目丢失） | integrity_check 20/20 ok | {{MAC_KILL}} |
+
+  结论：采用 `waveforms.db`、WAL、普通 `INTEGER PRIMARY KEY`、`synchronous=NORMAL`、后台批量写入（每事务几百行）。
+
+#### 9.4.2 整包下载（Bundle）
+
+- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`，90 万条约 230 MB 量级）。服务端用 `VACUUM INTO` 生成临时文件后流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他 → 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。
+- `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`（生成时的库版本）、`schema_version`、`encoding`。
+- 客户端流程：下载到临时文件 → **校验后才使用**：`PRAGMA integrity_check` 为 `ok`；表/列名在白名单内（`list_waveforms` 与 `meta`，列同上，不多不少）；每行 `blob` 恰好 256 B、`encoding` 等于请求值、`0 ≤ n ≤ 128`；`meta.library_id` 等于当前库 → **原子替换**本地 `waveforms.db`（同目录临时文件 + rename）。任一校验失败则丢弃，不覆盖现有缓存。
+- 增量：导入后从该版本开始用 §9.1（`known` = 包内 etag）按 etag 增量拉取，因此打包期间变化的条目不会丢失（其 etag 已不同，会返回 `ok`）。
+- 实测（生成时间 / 大小）：Mac {{MAC_BUNDLE}}；Windows {{WIN_BUNDLE}}（待测）。
 
 ## 10. 服务端部署
 
