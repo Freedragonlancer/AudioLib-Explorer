@@ -296,6 +296,55 @@ fn run() -> Result<()> {
                     ui.invoke_open_data_source();
                     ui.invoke_sm_select_row(-1);
                 }
+                "cache-export" => {
+                    // Synthetic presentation-only fixture of 缓存与导出; never connects to a
+                    // server or changes a working library. Smoke runs use an isolated data dir.
+                    ui.set_library_visible(true);
+                    ui.set_remote_mode(true);
+                    ui.set_sm_sources(slint::ModelRc::new(slint::VecModel::from(vec![
+                        SourceRow {
+                            name: "本地素材库".into(),
+                            ..Default::default()
+                        },
+                        SourceRow {
+                            name: "Sound server".into(),
+                            subtitle: "https://example.invalid".into(),
+                            kind: 1,
+                            active: true,
+                            ..Default::default()
+                        },
+                    ])));
+                    ui.set_sm_selected(1);
+                    ui.set_sm_page(2);
+                    ui.set_sm_cache_summary(
+                        "音效库 1a2b3c4d · 快照 r794 · 3009 个音效 · 41.7 MiB · 最近检查 10-21 00:10".into(),
+                    );
+                    ui.set_sm_cache_dir(
+                        "缓存目录：D:/AudioLib/data/remote/1a2b3c4d-0000-4000-8000-000000000000"
+                            .into(),
+                    );
+                    ui.set_sm_cache_info(
+                        "音效库 1a2b3c4d（1a2b3c4d-0000-4000-8000-000000000000）".into(),
+                    );
+                    ui.set_ds_sync_info("已是最新 · r794".into());
+                    ui.set_sm_wave_supported(true);
+                    ui.set_sm_wave_can_change(true);
+                    ui.set_sm_wave_pregenerate(true);
+                    ui.set_sm_wave_status("已生成 2870 / 3009".into());
+                    ui.set_sm_wc_visible(true);
+                    ui.set_sm_wc_jobs(true);
+                    ui.set_sm_wc_can_manage(true);
+                    ui.set_sm_wc_rate_setting(true);
+                    ui.set_sm_wc_offers_missing(true);
+                    ui.set_sm_wc_offers_failed(true);
+                    ui.set_sm_wc_offers_rebuild(true);
+                    ui.set_sm_wc_has_failed(true);
+                    ui.set_sm_wc_run_state("空闲".into());
+                    ui.set_sm_wc_progress(0.95);
+                    ui.set_sm_wc_progress_text("2870 / 3009 · 失败 12".into());
+                    ui.set_sm_wc_rate_draft("20".into());
+                    ui.set_sm_cw_stats("418 条 · 23.6 MiB".into());
+                }
                 "server-roots" | "remote-folder" => {
                     // Synthetic presentation-only fixture; never connects to a server
                     // or changes a working library. Smoke runs use an isolated data dir.

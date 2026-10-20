@@ -787,8 +787,8 @@ export component AppWindow inherits Window {
     in property <int> ds-token-focus-serial: 0;
     // 缓存与导出 page.
     in property <string> sm-cache-info: "";
-    // One-line summary and the cache directory for the compact ????? header.
-    // ??????????: the client's colored detail Waveform cache (size, clear).
+    // One-line summary and the cache directory for the compact 缓存与导出 header.
+    // 「彩色波形（本地）」: the client's colored detail Waveform cache (size, clear).
     in property <string> sm-cw-stats: "";
     in property <string> sm-cw-message: "";
     in property <bool> sm-cw-busy: false;
@@ -2029,19 +2029,19 @@ export component AppWindow inherits Window {
                         }
                         if root.library-visible && root.sm-server && root.sm-page == 2: VerticalLayout { spacing: 4px;
                             // Compact header: one summary line, the elided cache directory, then sync on one row;
-                            // the full library id / path / snapshot details open on demand (??).
+                            // the full library id / path / snapshot details open on demand (详情).
                             Text { height: 16px; vertical-alignment: center; overflow: elide; color: Theme.ink; font-size: 11px; text: root.sm-cache-summary; }
                             if root.sm-cache-dir != "": Text { height: 14px; vertical-alignment: center; overflow: elide; color: Theme.dim; font-size: 10px; text: root.sm-cache-dir; }
                             HorizontalLayout { height: 28px; spacing: 8px;
-                                if root.sm-active: Action { width: 96px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-syncing ? (root.chinese ? "????" : "Syncing?") : (root.chinese ? "????" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
+                                if root.sm-active: Action { width: 96px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
                                 if root.sm-active && root.ds-syncing: Rectangle { width: 80px; height: 6px; y: (parent.height - self.height) / 2; background: Theme.border; border-radius: 3px;
                                     Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                                 }
-                                if root.sm-active: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.ds-syncing && root.ds-elapsed != "" ? root.ds-sync-info + " ? " + root.ds-elapsed : root.ds-sync-info; }
-                                if !root.sm-active: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.chinese ? "???????????????????????????????????????" : "Switch to this source to sync, manage the Waveform cache, view history, check, back up and export here."; }
-                                Action { width: 64px; subtle: true; active: root.sm-cache-details; label: root.sm-cache-details ? (root.chinese ? "??" : "Less") : (root.chinese ? "??" : "Details"); clicked => { root.sm-cache-details = !root.sm-cache-details; } }
+                                if root.sm-active: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.ds-syncing && root.ds-elapsed != "" ? root.ds-sync-info + " · " + root.ds-elapsed : root.ds-sync-info; }
+                                if !root.sm-active: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.chinese ? "切换到此数据源后，可在这里同步快照、管理波形缓存、查看历史、校验、备份和导出。" : "Switch to this source to sync, manage the Waveform cache, view history, check, back up and export here."; }
+                                Action { width: 64px; subtle: true; active: root.sm-cache-details; label: root.sm-cache-details ? (root.chinese ? "收起" : "Less") : (root.chinese ? "详情" : "Details"); clicked => { root.sm-cache-details = !root.sm-cache-details; } }
                             }
-                            if root.sm-cache-details: Text { wrap: word-wrap; color: Theme.dim; font-size: 10px; text: root.sm-cache-info + "\n" + (root.chinese ? "??????????library id??????????????????????????????????????????" : "Snapshots are cached per server library (library id), shared by a server's LAN and external profiles; deleting a profile never deletes caches or data directories."); }
+                            if root.sm-cache-details: Text { wrap: word-wrap; color: Theme.dim; font-size: 10px; text: root.sm-cache-info + "\n" + (root.chinese ? "快照按服务器音效库（library id）缓存，同一服务器的局域网和外网配置共用一份；删除服务器配置不会删除缓存或数据目录。" : "Snapshots are cached per server library (library id), shared by a server's LAN and external profiles; deleting a profile never deletes caches or data directories."); }
                             if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                             Rectangle { height: 1px; background: Theme.border; }
                         }
@@ -2087,7 +2087,7 @@ export component AppWindow inherits Window {
                                                 text: root.chinese ? "开启后，每次试听开始（加载/播放/定位）后的 3 秒内不发送新的列表缩略波形批量请求，之后补发，不会丢弃；默认关闭。" : "When on, no new list thumbnail batch request is sent during the first 3 s after each audition start (Load/Play/Seek); held rows are requested afterwards, not dropped. Off by default.";
                                             }
                                             if root.sm-server && root.sm-page == 2 && root.sm-wave-supported: VerticalLayout { spacing: 6px;
-                                                if root.sm-wave-supported: Text { height: 22px; text: root.chinese ? "列表缩略波形" : "List thumbnail Waveforms"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                                                if root.sm-wave-supported: Text { height: 22px; text: root.chinese ? "列表简化波形（服务器）" : "List Waveforms (server)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
                                                 if root.sm-wave-supported: sm-wave-pregenerate-check := CheckBox {
                                                     height: 28px; enabled: root.sm-wave-can-change && !root.sm-wave-busy;
                                                     text: root.chinese ? "服务器预生成列表波形" : "Pre-generate list Waveforms on the server";
@@ -2143,21 +2143,21 @@ export component AppWindow inherits Window {
                                                     if !root.sm-wc-can-manage: Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "服务器不允许本机管理波形缓存（manage_mode），只能查看。" : "The server does not allow this PC to manage the Waveform cache (manage_mode); view only."; }
                                                 }
                                             }
-                                            if root.sm-server && root.sm-page == 2 && !root.sm-wave-supported: Label { wrap: word-wrap; font-size: 11px; color: root.sm-library-error ? Theme.warning : Theme.muted; text: root.sm-library-loading ? (root.chinese ? "??????????????????" : "Loading the server list Waveforms and Waveform cache?") : root.sm-library-error ? root.sm-library-status : (root.chinese ? "???????????????????????" : "This server does not offer list Waveforms, so its Waveform cache cannot be managed."); }
+                                            if root.sm-server && root.sm-page == 2 && !root.sm-wave-supported: Label { wrap: word-wrap; font-size: 11px; color: root.sm-library-error ? Theme.warning : Theme.muted; text: root.sm-library-loading ? (root.chinese ? "正在读取服务器的列表波形与波形缓存…" : "Loading the server list Waveforms and Waveform cache…") : root.sm-library-error ? root.sm-library-status : (root.chinese ? "此服务器未提供列表波形接口，无法管理波形缓存。" : "This server does not offer list Waveforms, so its Waveform cache cannot be managed."); }
                                             Rectangle { height: 1px; background: Theme.border; }
-                                            Text { height: 22px; text: root.chinese ? "????????" : "Colored Waveforms (local)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                                            Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "???????????????????????????????????????????????????? WAV ???" : "Colored detail Waveforms generated on demand for audition, cached on this PC; after clearing they are regenerated or downloaded again. List Waveforms, databases, settings and WAV files are untouched."; }
+                                            Text { height: 22px; text: root.chinese ? "彩色波形（本地）" : "Colored Waveforms (local)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                                            Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "试听时按需生成的彩色详细波形，缓存在本机；清空后再次试听会重新生成或下载。不影响列表波形、数据库、设置和 WAV 文件。" : "Colored detail Waveforms generated on demand for audition, cached on this PC; after clearing they are regenerated or downloaded again. List Waveforms, databases, settings and WAV files are untouched."; }
                                             if !root.sm-cw-confirm: HorizontalLayout { height: 30px; spacing: 6px;
-                                                Label { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; text: (root.chinese ? "?????" : "Local cache: ") + (root.sm-cw-busy ? (root.chinese ? "????" : "Counting?") : root.sm-cw-stats); }
-                                                Action { width: 72px; enabled: !root.sm-cw-busy; label: root.chinese ? "??" : "Refresh"; clicked => { root.sm-cw-refresh-requested(); } }
-                                                Action { width: 168px; enabled: !root.sm-cw-busy; label: root.chinese ? "???????????" : "Clear local colored cache?"; clicked => { root.sm-cw-confirm = true; } }
+                                                Label { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; text: (root.chinese ? "本地缓存：" : "Local cache: ") + (root.sm-cw-busy ? (root.chinese ? "统计中…" : "Counting…") : root.sm-cw-stats); }
+                                                Action { width: 72px; enabled: !root.sm-cw-busy; label: root.chinese ? "刷新" : "Refresh"; clicked => { root.sm-cw-refresh-requested(); } }
+                                                Action { width: 168px; enabled: !root.sm-cw-busy; label: root.chinese ? "清空本地彩色波形缓存…" : "Clear local colored cache…"; clicked => { root.sm-cw-confirm = true; } }
                                             }
                                             if root.sm-cw-confirm: Rectangle { border-radius: 5px; background: Theme.raised;
                                                 VerticalLayout { padding: 8px; spacing: 6px;
-                                                    Label { wrap: word-wrap; color: Theme.warning; text: root.chinese ? "????????????" + root.sm-cw-stats + "????????????" : "Delete this PC's colored Waveform cache (" + root.sm-cw-stats + ")? Only these cache files are removed."; }
+                                                    Label { wrap: word-wrap; color: Theme.warning; text: root.chinese ? "删除本机的彩色波形缓存（" + root.sm-cw-stats + "）？只删除这些缓存文件。" : "Delete this PC's colored Waveform cache (" + root.sm-cw-stats + ")? Only these cache files are removed."; }
                                                     HorizontalLayout { height: 30px; spacing: 6px;
-                                                        Action { width: 96px; primary: true; enabled: !root.sm-cw-busy; label: root.chinese ? "????" : "Clear"; clicked => { root.sm-cw-clear-requested(); } }
-                                                        Action { width: 72px; label: root.chinese ? "??" : "Cancel"; clicked => { root.sm-cw-confirm = false; } }
+                                                        Action { width: 96px; primary: true; enabled: !root.sm-cw-busy; label: root.chinese ? "确认清空" : "Clear"; clicked => { root.sm-cw-clear-requested(); } }
+                                                        Action { width: 72px; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-cw-confirm = false; } }
                                                         Rectangle { horizontal-stretch: 1; }
                                                     }
                                                 }
@@ -2419,7 +2419,7 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         if root.sm-manage-message != "": Label { wrap: word-wrap; font-size: 11px; color: root.sm-manage-error ? Theme.warning : Theme.accent; text: root.sm-manage-message; }
-                                        if root.sm-wave-supported: Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "?????????????????????????" : "List thumbnail Waveforms and the Waveform cache are managed on Cache and export."; }
+                                        if root.sm-wave-supported: Label { wrap: word-wrap; font-size: 10px; color: Theme.muted; text: root.chinese ? "列表缩略波形与「波形缓存」管理在「缓存与导出」页。" : "List thumbnail Waveforms and the Waveform cache are managed on Cache and export."; }
                                         Rectangle { height: 1px; background: Theme.border; }
                                         Text { height: 22px; text: root.chinese ? "扫描历史（最近 20 次）" : "Scan history (latest 20)"; color: Theme.ink; font-size: 14px; font-weight: 600; }
                                         for line[index] in root.sm-history: Rectangle { height: 40px; background: Math.mod(index, 2) == 0 ? Theme.raised : Theme.panel;

@@ -429,7 +429,7 @@ impl Controller {
             // Reattach to the selected server's current scan and refresh roots/history
             // using the generation established by the successful provider swap.
             PAGE_LIBRARY => self.load_server_library(ui),
-            // ????? also hosts the ?????? block, read with the library page.
+            // 缓存与导出 also hosts the 「波形缓存」 block, read with the library page.
             PAGE_CACHE => {
                 self.publish_cache_info(ui);
                 self.load_server_library(ui);
@@ -1209,7 +1209,7 @@ impl Controller {
                 .as_deref()
                 .map(|directory| {
                     if chinese {
-                        format!("?????{directory}")
+                        format!("缓存目录：{directory}")
                     } else {
                         format!("Cache directory: {directory}")
                     }
@@ -2155,33 +2155,33 @@ fn cache_info(
     }
 }
 
-/// One line for the compact ????? header; [`cache_info`] keeps the full details.
+/// One line for the compact 缓存与导出 header; [`cache_info`] keeps the full details.
 fn cache_summary(library_id: Option<&str>, state: Option<&CacheState>, chinese: bool) -> String {
     let Some(library_id) = library_id else {
         return cn_or(
             chinese,
-            "?????????????????????????",
+            "还不知道这个服务器的音效库：测试连接或同步后显示。",
             "Server library not known yet: test or sync first.",
         );
     };
     let id = short_id(library_id);
     match (state, chinese) {
         (Some(state), true) => format!(
-            "??? {id} ? ?? r{} ? {} ??? ? {:.1} MiB ? ???? {}",
+            "音效库 {id} · 快照 r{} · {} 个音效 · {:.1} MiB · 最近检查 {}",
             state.revision,
             state.audio_files,
             state.snapshot_bytes as f64 / 1_048_576.0,
             format_time(state.checked_at),
         ),
         (Some(state), false) => format!(
-            "Library {id} ? snapshot r{} ? {} sounds ? {:.1} MiB ? checked {}",
+            "Library {id} · snapshot r{} · {} sounds · {:.1} MiB · checked {}",
             state.revision,
             state.audio_files,
             state.snapshot_bytes as f64 / 1_048_576.0,
             format_time(state.checked_at),
         ),
-        (None, true) => format!("??? {id} ? ???????"),
-        (None, false) => format!("Library {id} ? no snapshot on this PC yet"),
+        (None, true) => format!("音效库 {id} · 本机还没有快照"),
+        (None, false) => format!("Library {id} · no snapshot on this PC yet"),
     }
 }
 
@@ -3343,10 +3343,10 @@ mod tests {
 
     #[test]
     fn cache_summary_is_one_line() {
-        assert!(cache_summary(None, None, true).contains("??????????"));
+        assert!(cache_summary(None, None, true).contains("测试连接或同步后显示"));
         let missing = cache_summary(Some("11111111-5e97"), None, true);
         assert!(
-            missing.contains("???????") && !missing.contains('\n'),
+            missing.contains("本机还没有快照") && !missing.contains('\n'),
             "{missing}"
         );
     }

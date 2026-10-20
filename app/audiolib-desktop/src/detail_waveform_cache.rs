@@ -1,5 +1,5 @@
 // app/audiolib-desktop/src/detail_waveform_cache.rs
-//! ?????????? on ?????: the client's on-demand colored detail Waveform
+//! 「彩色波形（本地）」 on 缓存与导出: the client's on-demand colored detail Waveform
 //! cache, as distinct from the server's list thumbnail Waveforms.
 //!
 //! Layout under `<cache>/waveforms/` (shared parent with the list cache):
@@ -103,9 +103,9 @@ pub(super) fn clear_detail_cache(cache_root: &Path) -> (u64, DetailCacheStats) {
 fn stats_text(stats: DetailCacheStats, chinese: bool) -> String {
     let mib = stats.bytes as f64 / 1_048_576.0;
     if chinese {
-        format!("{} ? ? {mib:.1} MiB", stats.entries)
+        format!("{} 条 · {mib:.1} MiB", stats.entries)
     } else {
-        format!("{} entries ? {mib:.1} MiB", stats.entries)
+        format!("{} entries · {mib:.1} MiB", stats.entries)
     }
 }
 
@@ -148,7 +148,7 @@ impl Controller {
                         removed
                             .map(|removed| {
                                 if chinese {
-                                    format!("??? {removed} ????????????")
+                                    format!("已删除 {removed} 个本地彩色波形缓存文件。")
                                 } else {
                                     format!("Removed {removed} local colored Waveform cache files.")
                                 }
@@ -161,7 +161,12 @@ impl Controller {
         if spawned.is_err() {
             ui.set_sm_cw_busy(false);
             ui.set_sm_cw_message(
-                cn_or(chinese, "?????????", "Could not start the cache scan.").into(),
+                cn_or(
+                    chinese,
+                    "无法启动缓存统计。",
+                    "Could not start the cache scan.",
+                )
+                .into(),
             );
         }
     }
