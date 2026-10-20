@@ -149,7 +149,7 @@ fn stats_neutral_writes_carry_the_cache_forward_and_warm_up_skips_a_current_side
         .results[0]
         .id;
     let played = state.record_play(id).unwrap();
-    assert_eq!(played.revision, first.revision + 1);
+    assert_eq!(played.revision, first.revision, "plays do not bump");
     let edited = state
         .update_metadata(
             id,
@@ -159,6 +159,7 @@ fn stats_neutral_writes_carry_the_cache_forward_and_warm_up_skips_a_current_side
             },
         )
         .unwrap();
+    assert_eq!(edited.revision, first.revision + 1);
     let after = state.library_response().unwrap();
     assert_eq!(after.revision, edited.revision);
     assert_eq!(
