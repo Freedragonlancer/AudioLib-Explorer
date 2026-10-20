@@ -59,6 +59,93 @@ function Test-JsonEqual([object]$Left, [object]$Right) {
     try { return [decimal]$Left -eq [decimal]$Right } catch { return [double]$Left -eq [double]$Right }
 }
 
+function Assert-GeometryInteger([object]$Value, [decimal]$Minimum, [decimal]$Maximum, [string]$Label) {
+    $numeric = $Value -is [int] -or $Value -is [long] -or $Value -is [uint64] -or $Value -is [double] -or $Value -is [decimal] -or $Value -is [System.Numerics.BigInteger]
+    if (!$numeric -or !(Test-FiniteNonnegative ([Math]::Abs([double]$Value))) -or [decimal]$Value -lt $Minimum -or [decimal]$Value -gt $Maximum -or [decimal]$Value -ne [Math]::Truncate([decimal]$Value)) { throw "Invalid native geometry integer: $Label" }
+}
+
+function Assert-GeometryBoolean([object]$Value, [bool]$Expected, [string]$Label) {
+    if (!($Value -is [bool]) -or $Value -ne $Expected) { throw "Invalid native geometry boolean: $Label" }
+}
+
+function Assert-GeometryShape([object]$Geometry, [string]$Label) {
+    if (!($Geometry -is [Management.Automation.PSCustomObject])) { throw "Missing native geometry: $Label" }
+    Assert-GeometryInteger $Geometry.dpi 1 4294967295 "$Label DPI"
+    foreach ($name in @('window_rect','frame_rect','client_screen')) {
+        $rectangle = $Geometry.$name
+        if (!($rectangle -is [Management.Automation.PSCustomObject])) { throw "Missing native rectangle: $Label $name" }
+        foreach ($coordinate in @('left','top','right','bottom')) { Assert-GeometryInteger $rectangle.$coordinate -2147483648 2147483647 "$Label $name $coordinate" }
+        if ([decimal]$rectangle.right -le [decimal]$rectangle.left -or [decimal]$rectangle.bottom -le [decimal]$rectangle.top) { throw "Empty native rectangle: $Label $name" }
+    }
+}
+
+function Assert-GeometryClock([object]$Stamp, [object]$ExpectedFrequency, [string]$Label) {
+    if (!($Stamp -is [Management.Automation.PSCustomObject])) { throw "Missing native geometry clock: $Label" }
+    Assert-GeometryInteger $Stamp.ticks 0 9223372036854775807 "$Label ticks"
+    Assert-GeometryInteger $Stamp.frequency 1 9223372036854775807 "$Label frequency"
+    if ([decimal]$Stamp.frequency -ne [decimal]$ExpectedFrequency) { throw "Native geometry QPC frequency differs from input: $Label" }
+}
+
+function Assert-NativeGeometryEvidence([object]$Raw) {
+    $history = $Raw.synchronous_native_geometry_history
+    $final = $Raw.final_native_geometry
+    if (!($history -is [Management.Automation.PSCustomObject]) -or !($final -is [Management.Automation.PSCustomObject])) { throw 'Missing synchronous/final native geometry evidence' }
+    if ($null -eq $history.PSObject.Properties['fatal'] -or $null -ne $history.fatal -or $null -ne $history.stop_error) { throw 'Synchronous geometry history failed or lacks explicit fatal=null' }
+    Assert-GeometryBoolean $history.client_layout_pending $false 'native client layout restored'
+    Assert-GeometryInteger $history.overflow 0 0 'synchronous native geometry overflow'
+    Assert-GeometryBoolean $Raw.armed_native_geometry.client_layout_guarded $true 'synchronous native client-layout guard'
+    if (!($history.events -is [Array])) { throw 'Missing bounded native geometry event history' }
+    Assert-GeometryShape $history.baseline 'armed baseline'
+    Assert-GeometryShape $final.before 'final before'
+    Assert-GeometryShape $final.after 'final after'
+    if (!(Test-JsonEqual $history.baseline $final.before) -or !(Test-JsonEqual $history.baseline $final.after)) { throw 'Final native geometry differs from the armed baseline' }
+    Assert-GeometryBoolean $final.frame_at_or_after_last_client_restore $true 'final frame follows native client restoration'
+    Assert-GeometryInteger $Raw.stages.input.qpc_ticks 0 9223372036854775807 'native geometry input QPC'
+    Assert-GeometryInteger $Raw.stages.input.qpc_frequency 1 9223372036854775807 'native geometry input frequency'
+    Assert-GeometryInteger $Raw.final_frame.frame_system_relative_time_100ns 0 9223372036854775807 'native geometry final frame time'
+    $frequency = $Raw.stages.input.qpc_frequency
+    Assert-GeometryClock $history.armed_at $frequency 'guard arm'
+    Assert-GeometryClock $history.last_client_restore $frequency 'history restoration'
+    Assert-GeometryClock $final.last_client_restore $frequency 'final restoration'
+    if (!(Test-JsonEqual $history.last_client_restore $final.last_client_restore)) { throw 'Final/native-history restoration stamps differ' }
+    if ([decimal]$history.armed_at.ticks -gt [decimal]$Raw.stages.input.qpc_ticks -or [decimal]$history.last_client_restore.ticks -lt [decimal]$history.armed_at.ticks) { throw 'Native geometry guard was armed after input or restoration predates arming' }
+    if ([decimal]$Raw.final_frame.frame_system_relative_time_100ns * [decimal]$frequency - [decimal]$history.last_client_restore.ticks * 10000000 -lt 0) { throw 'Final compositor frame predates native client restoration' }
+}
+
+function Normalize-SearchRequest([object]$Request) {
+    # Mirror only serde's missing Option fields and visibility default. Keep all
+    # provided values unchanged for Rust type/domain validation. This tool
+    # deliberately rejects unknown/case-mismatched keys instead of dropping them.
+    if (!($Request -is [Management.Automation.PSCustomObject])) { throw 'Every request must be a SearchRequest object' }
+    $required = @('query','include_subfolders','filters','limit','offset','order_by','descending')
+    $allowed = $required + @('folder_id')
+    $names = @($Request.PSObject.Properties.Name)
+    foreach ($name in $names) { if ($allowed -cnotcontains $name) { throw "Unknown SearchRequest field: $name" } }
+    foreach ($name in $required) {
+        if ($names -cnotcontains $name -or $null -eq $Request.$name) { throw "Required SearchRequest field is missing or null: $name" }
+    }
+    if (!($Request.filters -is [Management.Automation.PSCustomObject])) { throw 'SearchRequest.filters must be an object' }
+    $filters = $Request.filters
+    $filterRequired = @('favorites_only','tagged_only')
+    $filterOptional = @('sample_rate','bit_depth','channels','duration_min','duration_max','tag_contains','color')
+    $filterAllowed = $filterRequired + $filterOptional + @('visibility')
+    $filterNames = @($filters.PSObject.Properties.Name)
+    foreach ($name in $filterNames) { if ($filterAllowed -cnotcontains $name) { throw "Unknown SearchFilters field: $name" } }
+    foreach ($name in $filterRequired) {
+        if ($filterNames -cnotcontains $name -or $null -eq $filters.$name) { throw "Required SearchFilters field is missing or null: $name" }
+    }
+    if ($filterNames -ccontains 'visibility') {
+        if ($null -eq $filters.visibility) { throw 'SearchFilters.visibility may be omitted but cannot be null' }
+    } else {
+        $filters | Add-Member -NotePropertyName 'visibility' -NotePropertyValue 'present'
+    }
+    foreach ($name in $filterOptional) {
+        if ($filterNames -cnotcontains $name) { $filters | Add-Member -NotePropertyName $name -NotePropertyValue $null }
+    }
+    if ($names -cnotcontains 'folder_id') { $Request | Add-Member -NotePropertyName 'folder_id' -NotePropertyValue $null }
+    return $Request
+}
+
 function Get-LatencyStatistics([object[]]$Samples) {
     $values = @($Samples | Where-Object Valid | ForEach-Object { [double]$_.TotalMs } | Sort-Object)
     if (!$values.Count) { return [pscustomobject]@{Count=0;MinMs=$null;P50Ms=$null;P95Ms=$null;MaxMs=$null;AtOrOver500=0} }
@@ -86,10 +173,11 @@ $requestInfo = Get-Item -LiteralPath $requestPath
 if ($requestInfo.PSIsContainer -or $requestInfo.Length -gt 1MB) { throw 'RequestFile must be a JSON array file no larger than 1 MiB' }
 $requests = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $requestPath -Raw) -Depth 30 -NoEnumerate -DateKind String
 if (!($requests -is [Array]) -or !$requests.Count) { throw 'RequestFile must contain a nonempty JSON array' }
-foreach ($request in $requests) {
-    if (!($request -is [Management.Automation.PSCustomObject])) { throw 'Every request must be a SearchRequest object' }
-    if (($request | ConvertTo-Json -Compress -Depth 20).Length -gt 65536) { throw 'A request exceeds the diagnostic CLI 64 KiB input bound' }
-}
+$requests = @(foreach ($request in $requests) {
+    $normalized = Normalize-SearchRequest $request
+    if (($normalized | ConvertTo-Json -Compress -Depth 20).Length -gt 65536) { throw 'A request exceeds the diagnostic CLI 64 KiB input bound' }
+    $normalized
+})
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $output) { throw 'OutputDirectory must be new; existing batches are never overwritten' }
 New-Item -ItemType Directory -Path $output | Out-Null
@@ -172,6 +260,7 @@ try {
             if (!(Test-JsonEqual $requests[$caseIndex] $report.expected_request) -or !(Test-JsonEqual $requests[$caseIndex] $report.actual_request)) { $issues.Add('expected/actual request differs from the fixed request file') }
             if (!($report.page.search_ranking_cache_hit -is [bool]) -or $report.page.search_ranking_cache_hit) { $issues.Add('first final search did not explicitly report a ranking-cache miss') }
             if ($report.oracle_matches -ne $true) { $issues.Add('page IDs/counts or all folder counts did not match the post-timing oracle') }
+            try { Assert-NativeGeometryEvidence $report } catch { $issues.Add("native geometry evidence rejected: $($_.Exception.Message)") }
             if ($report.source_same -ne $true -or $report.source_current -ne $true -or $report.source_read_only -ne $true -or $report.owned_copy -ne $false -or $report.source_size_mtime_unchanged -ne $true -or $report.source_database_bytes -ne $databaseBefore.Bytes) { $issues.Add('read-only current-source identity check failed') }
             if (!(Test-FiniteNonnegative $report.total_ms)) { $issues.Add('total_ms is missing, nonnumeric, nonfinite or negative') }
             if ($report.input_timestamp_source -cne 'Slint KeyPressed dispatch, complete text' -or $report.native_text_events -ne 0) { $issues.Add('input was not the isolated synthetic Slint-dispatch condition') }

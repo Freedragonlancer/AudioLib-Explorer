@@ -1974,6 +1974,9 @@ impl Controller {
         ui.set_waveform_ready(false);
         ui.set_waveform_image(Image::default());
         ui.set_waveform_info("".into());
+        if ui.get_menu_has_page_rows() {
+            ui.set_menu_has_page_rows(false);
+        }
         ui.set_rows(ModelRc::new(VecModel::<AudioRow>::default()));
         ui.set_folders(ModelRc::new(VecModel::<FolderRow>::default()));
         ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
@@ -5224,6 +5227,10 @@ impl Controller {
 /// Keep native pointer gestures and the viewport when a refresh retains the same row
 /// identities and order. New identities replace delegates, cancelling old gestures.
 fn publish_audio_rows(ui: &AppWindow, rows: Vec<AudioRow>) {
+    let has_page_rows = !rows.is_empty();
+    if ui.get_menu_has_page_rows() != has_page_rows {
+        ui.set_menu_has_page_rows(has_page_rows);
+    }
     let existing = ui.get_rows();
     if let Some(model) = existing.as_any().downcast_ref::<VecModel<AudioRow>>()
         && model.row_count() == rows.len()

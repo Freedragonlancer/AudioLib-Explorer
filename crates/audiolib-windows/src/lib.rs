@@ -11,6 +11,10 @@ pub use drag::{DragOutcome, drag_files, primary_button_down};
 /// Normal application use does not start capture; codec helpers are cross-platform.
 pub mod gui_capture;
 
+/// Opt-in own-window geometry history on the HWND's existing Windows UI thread.
+#[cfg(windows)]
+pub mod gui_geometry;
+
 /// Display a fatal startup diagnostic for a desktop application without a console.
 /// Headless callers should write their diagnostics directly and skip this dialog.
 pub fn show_error_dialog(message: &str) {

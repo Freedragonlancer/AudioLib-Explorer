@@ -84,8 +84,10 @@ enum NativeGeometryEvent {
 #[derive(Default)]
 struct ArmedGeometryEvents {
     baseline: Option<ArmedGeometry>,
+    client_layout_guarded: bool,
     total: u64,
     ignored_duplicates: u64,
+    delegated_client_layout: u64,
     overflow: u64,
     events: Vec<Value>,
 }
@@ -104,8 +106,20 @@ impl ArmedGeometryEvents {
             NativeGeometryEvent::ScaleFactorChanged(_) => false,
         });
         let ignored_duplicate = equal_payload && timestamp.is_ok();
+        // WM_SIZE reports client layout, including native menu reconstruction.
+        // Only the synchronous own-HWND guard can establish unchanged outer
+        // geometry before winit buffers these events. Never infer this from a
+        // later GetWindowRect snapshot or discard the original event payload.
+        let delegated_client_layout = self.client_layout_guarded
+            && self.baseline.is_some()
+            && matches!(event, NativeGeometryEvent::Resized(_))
+            && !equal_payload
+            && timestamp.is_ok();
         if ignored_duplicate {
             self.ignored_duplicates += 1;
+        }
+        if delegated_client_layout {
+            self.delegated_client_layout += 1;
         }
         let (kind, payload) = match event {
             NativeGeometryEvent::Moved(position) => {
@@ -123,12 +137,13 @@ impl ArmedGeometryEvents {
                 "qpc_frequency":timestamp.as_ref().ok().map(|time| time.frequency),
                 "qpc_error":timestamp.as_ref().err(),
                 "armed_baseline":self.baseline.map(ArmedGeometry::report),
-                "ignored_duplicate":ignored_duplicate
+                "ignored_duplicate":ignored_duplicate,
+                "delegated_client_layout":delegated_client_layout
             }));
         } else {
             self.overflow += 1;
         }
-        (!ignored_duplicate).then(|| format!(
+        (!ignored_duplicate && !delegated_client_layout).then(|| format!(
             "native geometry event rejected during sample: {event:?}; armed baseline={:?}; QPC error={:?}",
             self.baseline, timestamp.err()
         ))
@@ -699,6 +714,11 @@ fn preset_filters(ui: &AppWindow, request: &SearchRequest) {
 #[derive(Default)]
 struct Observation {
     observer: Option<Observer>,
+    #[cfg(windows)]
+    native_geometry_guard: Option<audiolib_windows::gui_geometry::NativeGeometryGuard>,
+    native_geometry_history: Option<Value>,
+    final_native_geometry: Option<Value>,
+    deferred_layout_frames: u64,
     hwnd: usize,
     geometry: Option<MarkerGeometry>,
     ready: bool,
@@ -1044,6 +1064,146 @@ fn geometry_unchanged(original: MarkerGeometry, current: capture::WindowInspecti
         && original.inspection.expected_capture_size == current.expected_capture_size
 }
 
+fn arm_native_geometry(observation: &mut Observation) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let guard = audiolib_windows::gui_geometry::NativeGeometryGuard::arm(observation.hwnd, 256)
+            .map_err(|error| anyhow!(error))?;
+        let history = guard.history().map_err(|error| anyhow!(error))?;
+        let calibrated = observation.geometry.context("capture geometry missing")?;
+        let client = history.baseline.client_screen;
+        let frame = history.baseline.frame_rect;
+        ensure!(
+            [
+                i64::from(client.right) - i64::from(client.left),
+                i64::from(client.bottom) - i64::from(client.top)
+            ] == calibrated.inspection.client_size.map(i64::from)
+                && [
+                    i64::from(frame.right) - i64::from(frame.left),
+                    i64::from(frame.bottom) - i64::from(frame.top)
+                ] == calibrated.inspection.expected_capture_size.map(i64::from),
+            "synchronous native geometry differs from compositor calibration"
+        );
+        ensure!(
+            [
+                i64::from(client.left) - i64::from(frame.left),
+                i64::from(client.top) - i64::from(frame.top)
+            ] == calibrated
+                .inspection
+                .client_origin_in_capture
+                .map(i64::from),
+            "synchronous native client origin differs from compositor calibration"
+        );
+        observation.native_geometry_guard = Some(guard);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = observation;
+        bail!("synchronous native geometry diagnostics require Windows")
+    }
+}
+
+fn check_native_geometry(observation: &Observation) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let guard = observation
+            .native_geometry_guard
+            .as_ref()
+            .context("synchronous native geometry guard missing")?;
+        let history = guard.history().map_err(|error| anyhow!(error))?;
+        ensure!(
+            history.fatal.is_none(),
+            "native geometry history failed: {:?}",
+            history.fatal
+        );
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = observation;
+        bail!("synchronous native geometry diagnostics require Windows")
+    }
+}
+
+fn final_native_geometry(observation: &Observation, frame_time: i64) -> Result<Option<Value>> {
+    #[cfg(windows)]
+    {
+        use audiolib_windows::gui_geometry::own_window_geometry;
+        let guard = observation
+            .native_geometry_guard
+            .as_ref()
+            .context("synchronous native geometry guard missing")?;
+        let before = own_window_geometry(observation.hwnd)
+            .map_err(|error| anyhow!("native final geometry before: {error:?}"))?;
+        if !guard
+            .frame_after_restore(frame_time)
+            .map_err(|error| anyhow!(error))?
+        {
+            return Ok(None);
+        }
+        let after = own_window_geometry(observation.hwnd)
+            .map_err(|error| anyhow!("native final geometry after: {error:?}"))?;
+        let history = guard.history().map_err(|error| anyhow!(error))?;
+        if !history
+            .frame_after_restore(frame_time)
+            .map_err(|error| anyhow!("latest native frame geometry: {error:?}"))?
+        {
+            return Ok(None);
+        }
+        ensure!(
+            history.fatal.is_none() && before == history.baseline && after == history.baseline,
+            "native geometry changed around final frame qualification"
+        );
+        Ok(Some(json!({"before":before,"after":after,
+            "frame_at_or_after_last_client_restore":true,
+            "last_client_restore":history.last_client_restore,
+            "snapshot_boundary":"qualification time, not historical frame metadata"})))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (observation, frame_time);
+        bail!("synchronous native geometry diagnostics require Windows")
+    }
+}
+
+fn stop_native_geometry(observation: &mut Observation) -> Result<()> {
+    #[cfg(windows)]
+    if let Some(mut guard) = observation.native_geometry_guard.take() {
+        match guard.stop() {
+            Ok(history) => {
+                observation.native_geometry_history = Some(json!(history));
+                ensure!(
+                    history.fatal.is_none(),
+                    "native geometry history failed on stop: {:?}",
+                    history.fatal
+                );
+                ensure!(
+                    !history.client_layout_pending,
+                    "native client layout was not restored before stop"
+                );
+                if let Some(frame) = observation.final_frame.as_ref() {
+                    ensure!(
+                        history
+                            .frame_after_restore(frame.frame_time_100ns)
+                            .map_err(|error| anyhow!("stopped native frame geometry: {error:?}"))?,
+                        "final frame predates the last native client-layout restoration"
+                    );
+                }
+            }
+            Err(error) => {
+                observation.native_geometry_history = Some(json!({
+                    "stop_error":error,"history":guard.history().ok()
+                }));
+                bail!(error);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = observation;
+    Ok(())
+}
+
 fn tick(
     ui: &AppWindow,
     observation: &mut Observation,
@@ -1098,10 +1258,11 @@ fn tick(
     }
     let (hwnd, scale, _) = own_window(ui)?;
     let position = ui.window().position();
-    if !geometry_unchanged(geometry, inspection)
-        || hwnd != observation.hwnd
+    if hwnd != observation.hwnd
         || scale.to_bits() != observation.scale_factor.to_bits()
         || [position.x, position.y] != observation.outer_position
+        || geometry.inspection.expected_capture_size != inspection.expected_capture_size
+        || (!armed && !geometry_unchanged(geometry, inspection))
     {
         ensure!(
             !armed,
@@ -1113,6 +1274,9 @@ fn tick(
         observation.observer_restarts += 1;
         start_observer(ui, observation)?;
         return Ok(false);
+    }
+    if armed {
+        check_native_geometry(observation)?;
     }
     let observer = observation
         .observer
@@ -1237,6 +1401,17 @@ fn tick(
                     models_published,
                     "completion pixels lack matching page and folder publication evidence"
                 );
+                let Some(final_geometry) =
+                    final_native_geometry(observation, frame.frame_time_100ns)?
+                else {
+                    observation.deferred_layout_frames += 1;
+                    continue;
+                };
+                ensure!(
+                    geometry_unchanged(geometry, inspection),
+                    "final compositor frame has a changed client/capture translation"
+                );
+                observation.final_native_geometry = Some(final_geometry);
                 observation.final_frame = Some(frame);
                 observation.memory.sample_after_input(true);
                 return Ok(true);
@@ -1295,9 +1470,11 @@ fn tick(
                 observation.dropped_when_armed = observer.dropped_messages();
                 observation.memory.baseline_before_arming =
                     observation.memory.read().map(|memory| json!(memory));
+                arm_native_geometry(observation)?;
                 observation.armed_at = Some(Instant::now());
                 state(|value| {
                     value.geometry_events.baseline = Some(armed_geometry);
+                    value.geometry_events.client_layout_guarded = true;
                     value.armed = true;
                     stamp(value, "armed_after_initial_frame");
                 });
@@ -1556,6 +1733,11 @@ fn measure(options: &Options) -> Result<Value> {
                 }
             };
             if should_close {
+                // Detach before controller close/hide can destroy the HWND. A
+                // detach/history failure belongs to this sample, even after an ALL.
+                if let Err(error) = stop_native_geometry(&mut observation) {
+                    invalidate(format!("{error:#}"));
+                }
                 let mut hold = false;
                 state(|value| {
                     hold = interactive && captured_successfully && value.invalid.is_none();
@@ -1583,6 +1765,11 @@ fn measure(options: &Options) -> Result<Value> {
     }
     let event_loop_result = slint::run_event_loop();
     timer.stop();
+    if let Err(error) = stop_native_geometry(&mut observation.borrow_mut()) {
+        state(|value| {
+            value.invalid.get_or_insert(format!("{error:#}"));
+        });
+    }
     stop_observer(&mut observation.borrow_mut());
     controller.shutdown();
     let hide_result = ui.hide();
@@ -1727,10 +1914,15 @@ fn measure(options: &Options) -> Result<Value> {
         "baseline":measurement.geometry_events.baseline.map(ArmedGeometry::report),
         "events_total":measurement.geometry_events.total,
         "ignored_duplicates":measurement.geometry_events.ignored_duplicates,
+        "client_layout_guarded":measurement.geometry_events.client_layout_guarded,
+        "delegated_client_layout":measurement.geometry_events.delegated_client_layout,
         "events_overflow":measurement.geometry_events.overflow,
         "retained_limit":32,"events":measurement.geometry_events.events,
         "scale_factor_events_always_rejected":true
     });
+    report["synchronous_native_geometry_history"] = json!(observation.native_geometry_history);
+    report["final_native_geometry"] = json!(observation.final_native_geometry);
+    report["deferred_client_layout_final_frames"] = json!(observation.deferred_layout_frames);
     report["capture_observations"] = json!({
         "observer_restarts_before_arming":observation.observer_restarts,
         "ready_events":observation.telemetry.ready_events,
@@ -1849,6 +2041,51 @@ mod tests {
                 .is_none()
         );
         assert_eq!(events.events[3]["ignored_duplicate"], false);
+    }
+
+    #[test]
+    fn buffered_client_layout_requires_the_synchronous_native_guard() {
+        let timestamp = QpcStamp {
+            ticks: 123,
+            frequency: 10_000_000,
+        };
+        let mut events = ArmedGeometryEvents {
+            baseline: Some(ArmedGeometry {
+                physical_client_size: [2880, 1800],
+                outer_position: [40, 104],
+                scale_factor: 2.0,
+            }),
+            client_layout_guarded: true,
+            ..Default::default()
+        };
+        assert!(
+            events
+                .record(NativeGeometryEvent::Resized([2880, 1839]), Ok(timestamp))
+                .is_none()
+        );
+        assert_eq!(events.delegated_client_layout, 1);
+        assert_eq!(events.events[0]["delegated_client_layout"], true);
+        assert_eq!(events.events[0]["ignored_duplicate"], false);
+        for event in [
+            NativeGeometryEvent::Moved([40, 105]),
+            NativeGeometryEvent::ScaleFactorChanged(2.0),
+        ] {
+            assert!(events.record(event, Ok(timestamp)).is_some());
+        }
+        assert!(
+            events
+                .record(
+                    NativeGeometryEvent::Resized([2880, 1839]),
+                    Err("QPC failed".into())
+                )
+                .is_some()
+        );
+        events.client_layout_guarded = false;
+        assert!(
+            events
+                .record(NativeGeometryEvent::Resized([2880, 1839]), Ok(timestamp))
+                .is_some()
+        );
     }
 
     #[test]

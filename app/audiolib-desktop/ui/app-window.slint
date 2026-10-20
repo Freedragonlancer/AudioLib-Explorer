@@ -393,6 +393,9 @@ export component AppWindow inherits Window {
     in-out property <int> selected-folder: -1;
     in property <string> selected-folder-path: "";
     in property <[AudioRow]> rows;
+    // Keep menu dependencies independent of result-model identity changes.
+    // The controller updates this stored value only on empty/nonempty transitions.
+    in property <bool> menu-has-page-rows: false;
     in property <[FolderRow]> folders;
     in property <[CrumbRow]> crumbs;
     in property <string> library-summary: "";
@@ -1059,7 +1062,7 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.chinese ? "保存 Metadata" : "Save Metadata"); enabled: root.menu-ready && root.has-selection && root.metadata-dirty; shortcut: @keys(Control + S); activated => { root.save-metadata-requested(); } }
             MenuItem { title: (root.chinese ? "批量标注选择记录…" : "Edit selected records…"); enabled: root.menu-ready && root.checked-count > 0; activated => { root.open-batch(); } }
             MenuSeparator { }
-            MenuItem { title: root.chinese ? "选择当前页" : "Check current page"; enabled: root.menu-ready && root.rows.length > 0; activated => { root.check-page-requested(true); } }
+            MenuItem { title: root.chinese ? "选择当前页" : "Check current page"; enabled: root.menu-ready && root.menu-has-page-rows; activated => { root.check-page-requested(true); } }
             MenuItem { title: root.chinese ? "清除全部选择" : "Clear selection"; enabled: root.menu-ready && root.checked-count > 0; activated => { root.check-page-requested(false); } }
             MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
             MenuSeparator { }

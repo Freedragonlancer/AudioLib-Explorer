@@ -32,7 +32,7 @@ pub const PHASE_PAGE: u8 = 1;
 pub const PHASE_ALL: u8 = 2;
 
 /// Native input-handler timestamp with a known conversion to WGC's QPC domain.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct QpcStamp {
     pub ticks: i64,
     pub frequency: i64,
