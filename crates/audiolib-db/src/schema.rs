@@ -4,6 +4,8 @@ use audiolib_core::{Error, Result};
 use jieba_rs::Jieba;
 use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
 use std::sync::Arc;
+mod search_upgrade;
+pub(crate) use search_upgrade::{ensure_ready, migrate_resumable, pending};
 
 pub const SCHEMA_VERSION: i64 = 5;
 /// Read-only source snapshots remain compatible across schemas 3..=5. Obsolete
@@ -36,10 +38,14 @@ fn feature_version(conn: &Connection, feature: &str) -> Result<Option<i64>> {
 /// Refuse to reinterpret a known newer implementation within a supported schema.
 /// Both writable migrations and read-only revision probes use this guard.
 fn validate_supported_feature_revisions(conn: &Connection) -> Result<()> {
+    validate_feature_revisions(conn, SEARCH_TEXT_VERSION)
+}
+
+fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()> {
     for (feature, supported) in [
         ("stable_audio_ids", 1),
         ("foreign_key_indexes", 1),
-        ("tokenization", SEARCH_TEXT_VERSION),
+        ("tokenization", tokenization),
         ("search_indexes", 1),
     ] {
         if let Some(version) = feature_version(conn, feature)?
@@ -79,6 +85,9 @@ fn set_feature_version(conn: &Connection, feature: &str, version: i64) -> Result
 /// Probe additive implementation revisions and indexes before upgrading a library.
 /// Read-only connections can probe this without creating tables or changing the source.
 pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
+    if pending(conn)? {
+        return Ok(true);
+    }
     validate_supported_feature_revisions(conn)?;
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -120,6 +129,9 @@ pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
 
 /// Whether this snapshot's derived text agrees with the plain-text query compiler.
 pub(crate) fn search_text_is_current(conn: &Connection) -> Result<bool> {
+    if pending(conn)? {
+        return Ok(false);
+    }
     validate_supported_feature_revisions(conn)?;
     Ok(
         feature_version(conn, "tokenization")? == Some(SEARCH_TEXT_VERSION)
@@ -790,7 +802,9 @@ pub(crate) fn triggers_match(conn: &Connection) -> Result<bool> {
     }
     expected.execute_batch(FTS_SCHEMA).map_err(db_error)?;
     let normalize = |sql: String| {
-        sql.chars()
+        // ALTER TABLE on the resumable staging FTS quotes the published table name.
+        sql.replace("\"audio_search\"", "audio_search")
+            .chars()
             .filter(|ch| !ch.is_whitespace())
             .collect::<String>()
             .trim_end_matches(';')

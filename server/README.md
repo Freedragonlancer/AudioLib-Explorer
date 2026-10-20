@@ -106,6 +106,11 @@ Operational behavior:
   example a macOS removable-volume permission prompt was declined) `/health` reports
   `"status":"error"` and the open is retried with backoff (5 s doubling to 300 s) instead of
   exiting. Bind, configuration and token errors still exit immediately.
+- Writable search upgrades now resume committed text and FTS5 batches after interruption.
+  `/health` adds an optional `upgrade` phase with committed row counts. Normal shutdown
+  drains snapshot work, releases owned caches and checks WAL truncation before persisting
+  its revision baseline. See [upgrade recovery](../doc/Rust_Upgrade_Recovery.md) for disk
+  accounting and the pending Mac release acceptance.
 - ffmpeg is optional (only `preview?codec=flac`); without it that codec answers 503
   `TRANSCODER_UNAVAILABLE` and the server keeps running. The server does not bundle ffmpeg.
 

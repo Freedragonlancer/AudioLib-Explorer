@@ -1,6 +1,6 @@
 // crates/audiolib-db/src/bin/upgrade-benchmark.rs
 //! Measure a real snapshot upgrade in a disposable owned copy; never upgrade the input.
-use audiolib_core::{DataProvider, IntegrityReport};
+use audiolib_core::IntegrityReport;
 use audiolib_db::{
     SnapshotUpgradeProgress, SqliteProvider, ensure_free_space, snapshot_schema_supported,
 };
@@ -17,22 +17,25 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const USAGE: &str = "Usage: upgrade-benchmark --source <existing-snapshot.db>
+const USAGE: &str = "Usage: upgrade-benchmark --source <existing-snapshot.db> [--live]
 
 Opens the input read-only and pins one SQLite read transaction while copying it
 to a disposable temporary directory. Only that owned copy is upgraded. JSON
 results go to stdout; timestamped phase and row progress go to stderr. The copy
-is removed on completion. Measure process peak memory externally if required.";
+is removed on completion. --live exercises resumable WAL startup and its rollback
+backup, still ONLY in the disposable copy. Measure process peak memory externally.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Measure(PathBuf),
+    MeasureLive(PathBuf),
     Help,
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command> {
     let mut args = args.into_iter();
     let mut source = None;
+    let mut live = false;
     while let Some(arg) = args.next() {
         if arg == "--source" {
             if source.is_some() {
@@ -43,13 +46,20 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command> {
                 return Err("--source requires a file path".into());
             }
             source = Some(PathBuf::from(path));
+        } else if arg == "--live" && !live {
+            live = true;
         } else if arg == "--help" || arg == "-h" {
             return Ok(Command::Help);
         } else {
             return Err("Unknown argument; use --source <existing-snapshot.db>".into());
         }
     }
-    Ok(Command::Measure(source.ok_or("--source is required")?))
+    let source = source.ok_or("--source is required")?;
+    Ok(if live {
+        Command::MeasureLive(source)
+    } else {
+        Command::Measure(source)
+    })
 }
 
 #[derive(Serialize)]
@@ -144,6 +154,12 @@ fn require_integrity(report: &IntegrityReport) -> Result<()> {
 fn progress_event(progress: SnapshotUpgradeProgress, started: Instant) -> Value {
     let (phase, completed, total) = match progress {
         SnapshotUpgradeProgress::Preparing => ("preparing", None, None),
+        SnapshotUpgradeProgress::BackingUp => ("backing_up", None, None),
+        SnapshotUpgradeProgress::Validating => ("validating", None, None),
+        SnapshotUpgradeProgress::Checkpoint => ("checkpoint", None, None),
+        SnapshotUpgradeProgress::Indexing { completed, total } => {
+            ("indexing", Some(completed), Some(total))
+        }
         SnapshotUpgradeProgress::Tokenizing { completed, total } => {
             ("tokenizing", Some(completed), Some(total))
         }
@@ -160,6 +176,10 @@ fn progress_event(progress: SnapshotUpgradeProgress, started: Instant) -> Value 
 }
 
 fn measure(path: &Path) -> Result<Value> {
+    measure_mode(path, false)
+}
+
+fn measure_mode(path: &Path, live: bool) -> Result<Value> {
     if !path.is_file() {
         return Err("--source must name an existing snapshot file".into());
     }
@@ -176,6 +196,10 @@ fn measure(path: &Path) -> Result<Value> {
         .prefix("audiolib-upgrade-benchmark-")
         .tempdir()?;
     let owned_path = directory.path().join("snapshot.db");
+    eprintln!(
+        "{}",
+        json!({"phase":"copying", "owned_directory": directory.path()})
+    );
     let estimated_bytes = source_state
         .page_size
         .checked_mul(source_state.page_count)
@@ -200,21 +224,34 @@ fn measure(path: &Path) -> Result<Value> {
     let owned_validation_seconds = validating.elapsed().as_secs_f64();
     let upgrading = Instant::now();
     let mut events = Vec::new();
-    let changed = SqliteProvider::upgrade_owned_snapshot_with_progress_cancellable(
-        &owned_path,
-        &AtomicBool::new(false),
-        |progress| {
-            let event = progress_event(progress, upgrading);
-            eprintln!("{event}");
-            events.push(event);
-        },
-    )?;
+    let mut report = |progress| {
+        let event = progress_event(progress, upgrading);
+        eprintln!("{event}");
+        events.push(event);
+    };
+    let changed = if live {
+        let changed = !SqliteProvider::has_current_search_state(&owned_path)?;
+        let provider = SqliteProvider::open_existing_with_progress(&owned_path, &mut report)?;
+        let wal_bytes = std::fs::metadata(format!("{}-wal", owned_path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if wal_bytes != 0 {
+            return Err("Live upgrade retained a nonempty WAL".into());
+        }
+        drop(provider);
+        changed
+    } else {
+        SqliteProvider::upgrade_owned_snapshot_with_progress_cancellable(
+            &owned_path,
+            &AtomicBool::new(false),
+            &mut report,
+        )?
+    };
     let upgrade_seconds = upgrading.elapsed().as_secs_f64();
     let verifying = Instant::now();
-    let provider = SqliteProvider::open_existing(&owned_path)?;
-    let after_integrity = provider.check_library()?;
+    // This is already an exclusively owned copy: validation needs no second full copy.
+    let after_integrity = SqliteProvider::check_owned_file(&owned_path)?;
     require_integrity(&after_integrity)?;
-    drop(provider);
     let after = Connection::open_with_flags(&owned_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let upgraded_state = snapshot_state(&after)?;
     if upgraded_state.audio_records != source_state.audio_records {
@@ -226,6 +263,7 @@ fn measure(path: &Path) -> Result<Value> {
     directory.close()?;
     Ok(json!({
         "benchmark": "owned_snapshot_upgrade",
+        "mode": if live { "resumable_live_wal" } else { "atomic_owned_delete" },
         "version": env!("CARGO_PKG_VERSION"),
         "os": std::env::consts::OS,
         "architecture": std::env::consts::ARCH,
@@ -241,7 +279,7 @@ fn measure(path: &Path) -> Result<Value> {
         "before_integrity": before_integrity,
         "after_integrity": after_integrity,
         "events": events,
-        "conditions": "Read-only source pinned during backup; real recorded revision, without forced downgrade. Source quick_check, FK checks and owned FTS5 validation precede upgrade and warm filesystem caches. Upgrade uses one owned rollback-journal transaction, not live server WAL. Tokenization row counts are uncommitted progress. Post-validation includes public check_library's extra owned copy. Temporary files removed; process peak memory and source checksum measured externally.",
+        "conditions": "Read-only source pinned during backup; real recorded revision, without forced downgrade. Source quick_check, FK checks and owned FTS5 validation precede upgrade and warm filesystem caches. Atomic mode uses one DELETE transaction; live mode uses resumable WAL batches and includes rollback backup validation, index verification and checked checkpoints. Post-validation runs in the owned copy. Temporary files removed; process peak memory, disk peak and source checksum measured externally.",
     }))
 }
 
@@ -250,6 +288,12 @@ fn main() -> Result<()> {
         Command::Help => println!("{USAGE}"),
         Command::Measure(source) => {
             println!("{}", serde_json::to_string_pretty(&measure(&source)?)?)
+        }
+        Command::MeasureLive(source) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&measure_mode(&source, true)?)?
+            )
         }
     }
     Ok(())
@@ -271,6 +315,10 @@ mod tests {
             Command::Measure("a.db".into())
         );
         assert_eq!(parse(&["--help"]).unwrap(), Command::Help);
+        assert_eq!(
+            parse(&["--source", "a.db", "--live"]).unwrap(),
+            Command::MeasureLive("a.db".into())
+        );
     }
 
     #[test]

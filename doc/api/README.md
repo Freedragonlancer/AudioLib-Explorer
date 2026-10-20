@@ -347,6 +347,13 @@ audiolib.example.com:8443 {
 
 ### 6.2 启动状态与 `/health`
 
+可恢复搜索升级期间额外返回 `upgrade`，例如
+`{"phase":"indexing","completed":5000,"total":900000}`。阶段包含 `preparing`、
+`backing_up`、`tokenizing`、`indexing`、`validating`、`checkpoint` 和 `source_tags`；
+行数为该阶段已提交的恢复点，非全流程百分比，不含路径或凭据。就绪后省略此字段。
+升级中断后从已提交批次恢复，业务接口在完成前仍为 503。
+详见 [升级恢复和 WAL 生命周期](../Rust_Upgrade_Recovery.md)。
+
 服务端**先监听、后开库**：进程启动后立即绑定端口提供服务，库（及 revision 轮询）在后台线程打开。这样外置卷上的库被 macOS 权限弹窗（可移动卷访问授权）卡住时，端口仍然可用，launchd 也不会反复重启进程。
 
 | 阶段 | `GET /health`（始终 HTTP 200） | 需鉴权的端点 |

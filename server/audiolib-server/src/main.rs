@@ -145,7 +145,7 @@ async fn run() -> Result<()> {
     let address = listener.local_addr()?;
     tracing::info!(%address, base = API_BASE, admin = %format!("http://{address}/admin"), "Serving");
     let bind_ip = config.bind.ip();
-    open_in_background(
+    let opening = open_in_background(
         service.clone(),
         config,
         RetryPolicy::default(),
@@ -163,6 +163,7 @@ async fn run() -> Result<()> {
         app,
         async move {
             shutdown_signal().await;
+            signal_service.request_stop();
             let _ = stop_tx.send(true);
             // Cancel a running scan right away; it finalizes while connections drain.
             if let Readiness::Ready(state) = signal_service.readiness() {
@@ -173,18 +174,23 @@ async fn run() -> Result<()> {
     )
     .await;
     let _ = tls_manager.await;
+    let waiting = std::time::Instant::now();
+    while !opening.is_finished() && waiting.elapsed() < SCAN_SHUTDOWN {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if opening.is_finished() {
+        let _ = opening.join();
+    } else {
+        tracing::warn!("Library startup has not reached a cancellation boundary");
+    }
     if let Readiness::Ready(state) = service.readiness() {
-        let stopped =
-            tokio::task::spawn_blocking(move || state.scans().shutdown(SCAN_SHUTDOWN)).await;
-        if !matches!(stopped, Ok(true)) {
-            tracing::warn!("Exiting while a scan is still finishing");
+        match tokio::task::spawn_blocking(move || state.shutdown(SCAN_SHUTDOWN)).await {
+            Ok(Ok(())) => tracing::info!("Library checkpoint and snapshot cleanup complete"),
+            Ok(Err(error)) => tracing::warn!(%error, "Library shutdown maintenance incomplete"),
+            Err(error) => tracing::warn!(%error, "Library shutdown task failed"),
         }
     }
-    // Deliberately never close the library's SQLite connections: when the last connection
-    // closes, SQLite checkpoints the WAL into the main file, whose changed size/mtime would
-    // look like an external change and bump the revision on the next start. Leaving the
-    // WAL for the next open is safe (SQLite recovers it), and the process exits right after.
-    std::mem::forget(service);
+    drop(service);
     tracing::info!("Server stopped");
     Ok(())
 }

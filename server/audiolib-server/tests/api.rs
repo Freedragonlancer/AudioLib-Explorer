@@ -1705,6 +1705,13 @@ async fn startup_removes_only_stale_snapshot_directories() {
     fs::write(
         snapshots
             .join("audiolib-snapshot-stale")
+            .join(".owner.lock"),
+        b"",
+    )
+    .unwrap();
+    fs::write(
+        snapshots
+            .join("audiolib-snapshot-stale")
             .join("library-snapshot.db"),
         b"x",
     )

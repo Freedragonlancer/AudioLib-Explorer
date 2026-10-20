@@ -17,6 +17,8 @@ mod search_sorted;
 mod search_text;
 mod space;
 mod sqlite_mmap;
+mod wal;
+pub use wal::CheckpointStage;
 
 #[cfg(feature = "scanner")]
 use audiolib_core::AudioMetadata;
@@ -52,12 +54,15 @@ pub use sqlite_mmap::{SQLITE_READER_MMAP_BYTES, sqlite_reader_mmap_bytes};
 /// one such job at a time; the original reader forms the eighth partition.
 pub const SQLITE_AUXILIARY_SEARCH_READERS: usize = 7;
 
-/// Work performed while upgrading an exclusively owned snapshot. Row counts describe
-/// completed tokenization within the upgrade transaction, not committed partial data.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Upgrade work. Live-library row counts are committed resume points; owned temporary
+/// snapshot upgrades retain their atomic transaction and discard-on-cancel contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
 pub enum SnapshotUpgradeProgress {
     /// Validate the implementation revisions and prepare required schema indexes.
     Preparing,
+    /// Save and validate the original library before changing its derived search data.
+    BackingUp,
     /// Recompute derived search text for this many of the snapshot's audio records.
     Tokenizing {
         /// Audio records whose derived text has been recomputed.
@@ -67,6 +72,17 @@ pub enum SnapshotUpgradeProgress {
     },
     /// Build the FTS5 postings; SQLite does not expose a reliable row percentage.
     BuildingFts,
+    /// Committed FTS5 insertion progress in a resumable live-library upgrade.
+    Indexing {
+        /// Indexed records committed so far.
+        completed: u64,
+        /// Total records to index.
+        total: u64,
+    },
+    /// Check the completed search index before publishing it.
+    Validating,
+    /// Move committed WAL pages into the library and truncate the WAL.
+    Checkpoint,
     /// Complete any remaining resumable extracted-tag backfill.
     SourceTags,
 }
@@ -202,6 +218,7 @@ struct ReadLease<'a> {
     conn: Option<Connection>,
     pool: &'a Mutex<Vec<Connection>>,
     _gate: RwLockReadGuard<'a, ()>,
+    _upgrade: Option<management::SearchUpgradeLease>,
 }
 impl std::ops::Deref for ReadLease<'_> {
     type Target = Connection;
@@ -341,11 +358,25 @@ impl SqliteProvider {
     }
 
     /// Open a writable library, synchronously reporting migration phases and rows.
-    /// Tokenization counts are uncommitted work; errors roll back the rebuild.
+    /// Existing libraries commit resumable batches; a failed upgrade remains unavailable
+    /// until a later open resumes it. Its rollback backup is retained beside the library.
     pub fn open_with_progress(
         path: &Path,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_progress_cancellable(path, &AtomicBool::new(false), progress)
+    }
+
+    /// Like `open_with_progress`, stopping at a durable batch boundary when cancelled.
+    /// A later writable open resumes the persisted upgrade; source records are retained.
+    pub fn open_with_progress_cancellable(
+        path: &Path,
+        cancel: &AtomicBool,
         mut progress: impl FnMut(SnapshotUpgradeProgress),
     ) -> Result<Self> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             return Err(Error::Validation(
                 "Provider requires a persistent database path".into(),
@@ -356,6 +387,11 @@ impl SqliteProvider {
         }
         let mut conn = Connection::open(path).map_err(db_error)?;
         let upgrade = schema::needs_upgrade(&conn)?;
+        let mut scan_lease = if upgrade {
+            Some(management::LibraryLease::acquire(path)?)
+        } else {
+            None
+        };
         let mut isolation = if upgrade {
             management::AdministrationLease::exclusive(path)?
         } else {
@@ -365,9 +401,16 @@ impl SqliteProvider {
         // an older snapshot between the read-only probe and this shared acquisition.
         if !upgrade && schema::needs_upgrade(&conn)? {
             drop(isolation);
+            scan_lease = Some(management::LibraryLease::acquire(path)?);
             isolation = management::AdministrationLease::exclusive(path)?;
         }
+        let _scan_lease = scan_lease;
         let _isolation = isolation;
+        let _upgrade = if _scan_lease.is_some() {
+            Some(management::SearchUpgradeLease::acquire(path, true)?)
+        } else {
+            None
+        };
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
         conn.execute_batch(
@@ -380,15 +423,26 @@ impl SqliteProvider {
         let tokenizer = load_tokenizer();
         schema::register_tokenizer(&conn, tokenizer.clone())?;
         progress(SnapshotUpgradeProgress::Preparing);
-        schema::migrate_with_progress(&mut conn, &mut |event| {
-            progress(event);
-            Ok(())
+        // This startup connection is not yet published. Interrupting its current
+        // statement rolls back only that batch; earlier committed watermarks survive.
+        owned_cancellation::run(&mut conn, cancel, |conn| {
+            schema::migrate_resumable(conn, path, cancel, &mut |event| {
+                progress(event);
+                if cancel.load(Ordering::Acquire) {
+                    Err(Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
         })?;
         // Batched and resumable: an interrupted run continues from `source_tags_progress`.
         // On failure (e.g. Busy) the library still opens and tag filters use the JSON path.
         progress(SnapshotUpgradeProgress::SourceTags);
         let derived =
             schema::backfill_source_tags(&mut conn).is_ok() && schema::source_tags_ready(&conn)?;
+        if upgrade {
+            wal::truncate(&conn)?;
+        }
         Ok(Self {
             path: path.to_path_buf(),
             read_only: false,
@@ -564,6 +618,15 @@ impl SqliteProvider {
         path: &Path,
         progress: impl FnMut(SnapshotUpgradeProgress),
     ) -> Result<Self> {
+        Self::open_existing_with_progress_cancellable(path, &AtomicBool::new(false), progress)
+    }
+
+    /// Validate an existing library and resume its upgrade with batch-boundary cancellation.
+    pub fn open_existing_with_progress_cancellable(
+        path: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         if !path.is_file() {
             return Err(Error::NotFound(path.display().to_string()));
         }
@@ -580,7 +643,7 @@ impl SqliteProvider {
             )));
         }
         drop(probe);
-        Self::open_with_progress(path, progress)
+        Self::open_with_progress_cancellable(path, cancel, progress)
     }
 
     /// Open a schema-current library without writing its source file. Older derived
@@ -591,6 +654,7 @@ impl SqliteProvider {
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let source = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(db_error)?;
+        schema::ensure_ready(&source)?;
         source
             .busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
@@ -717,8 +781,10 @@ impl SqliteProvider {
             return Err(Error::Validation("Library is read-only".into()));
         }
         let isolation = management::AdministrationLease::shared(&self.path)?;
+        let conn = self.writer_unlocked()?;
+        schema::ensure_ready(&conn)?;
         Ok(WriteLease {
-            conn: self.writer_unlocked()?,
+            conn,
             _isolation: isolation,
         })
     }
@@ -732,6 +798,11 @@ impl SqliteProvider {
     }
 
     fn reader(&self) -> Result<ReadLease<'_>> {
+        let upgrade = if self.read_only {
+            None
+        } else {
+            Some(management::SearchUpgradeLease::acquire(&self.path, false)?)
+        };
         let gate = self
             .read_gate
             .read()
@@ -742,10 +813,12 @@ impl SqliteProvider {
             .map_err(|_| Error::Database("Reader pool lock was poisoned".into()))?
             .pop()
         {
+            schema::ensure_ready(&conn)?;
             return Ok(ReadLease {
                 conn: Some(conn),
                 pool: &self.read_pool,
                 _gate: gate,
+                _upgrade: upgrade,
             });
         }
         // A ReadLease exclusively owns this !Sync connection until it returns to
@@ -765,10 +838,12 @@ impl SqliteProvider {
         conn.pragma_update(None, "mmap_size", sqlite_reader_mmap_bytes(&self.path))
             .map_err(db_error)?;
         schema::register_casefold(&conn)?;
+        schema::ensure_ready(&conn)?;
         Ok(ReadLease {
             conn: Some(conn),
             pool: &self.read_pool,
             _gate: gate,
+            _upgrade: upgrade,
         })
     }
 

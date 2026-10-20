@@ -11,8 +11,8 @@
 //! every open/close, which used to bump the revision on each restart. Commits that only
 //! reached the WAL while the server was stopped are caught at startup by a WAL signature
 //! (file length plus its 32-byte header with checkpoint sequence and salts, no mtime),
-//! which a plain open does not change. The server never closes its connections on exit
-//! (see `main.rs`), so its own shutdown does not checkpoint the WAL into the main file.
+//! which a plain open does not change. Graceful shutdown checkpoints under the library
+//! administration lease and persists that new physical baseline before closing.
 //!
 //! The server's own writes go through [`RevisionTracker::record_own_write`], which holds
 //! the tracker lock across the write so the change bumps the revision exactly once and
@@ -205,6 +205,33 @@ pub struct RevisionTracker {
 }
 
 impl RevisionTracker {
+    /// Drain outstanding revisions, checkpoint, and persist the physical baseline
+    /// while library writers are excluded by the administration lease. Direct SQLite
+    /// writers must follow that same lease protocol, just as for restore/maintenance.
+    pub fn checkpoint(&self, provider: &audiolib_db::SqliteProvider) -> Result<()> {
+        let mut inner = self.lock()?;
+        if inner.holds != 0 {
+            return Err(Error::Busy("A library write is still finishing".into()));
+        }
+        provider.checkpoint_wal_observed(|stage| {
+            if stage == audiolib_db::CheckpointStage::Before {
+                self.catch_up(&mut inner)?;
+            } else {
+                let version = data_version(&inner.conn)?;
+                let fingerprint = FileFingerprint::read(&self.database)?;
+                // SQLite can change this connection's data_version when TRUNCATE
+                // resets the WAL. All admitted commits were counted in Before and
+                // the exclusive administration lease still excludes library writers.
+                let mut next = inner.state.clone();
+                next.fingerprint = fingerprint;
+                next.wal = Some(WalSignature::read(&self.database)?);
+                write_sidecar(&self.sidecar, &next)?;
+                inner.state = next;
+                inner.data_version = version;
+            }
+            Ok(())
+        })
+    }
     /// Blocking. Open the change-detection connection and load or create the sidecar.
     /// A database changed since the last recorded fingerprint bumps the revision once.
     pub fn open(database: &Path) -> Result<Self> {

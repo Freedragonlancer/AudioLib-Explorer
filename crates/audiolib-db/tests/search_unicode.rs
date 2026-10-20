@@ -143,6 +143,7 @@ fn existing_library_upgrade_reports_rows_and_preserves_business_metadata() {
         progress,
         [
             SnapshotUpgradeProgress::Preparing,
+            SnapshotUpgradeProgress::BackingUp,
             SnapshotUpgradeProgress::Tokenizing {
                 completed: 0,
                 total: 5001
@@ -155,7 +156,20 @@ fn existing_library_upgrade_reports_rows_and_preserves_business_metadata() {
                 completed: 5001,
                 total: 5001
             },
-            SnapshotUpgradeProgress::BuildingFts,
+            SnapshotUpgradeProgress::Indexing {
+                completed: 0,
+                total: 5001
+            },
+            SnapshotUpgradeProgress::Indexing {
+                completed: 5000,
+                total: 5001
+            },
+            SnapshotUpgradeProgress::Indexing {
+                completed: 5001,
+                total: 5001
+            },
+            SnapshotUpgradeProgress::Validating,
+            SnapshotUpgradeProgress::Checkpoint,
             SnapshotUpgradeProgress::SourceTags,
         ]
     );

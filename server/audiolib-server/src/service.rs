@@ -11,7 +11,10 @@ use crate::{
     state::spawn_revision_poller,
 };
 use std::{
-    sync::{Arc, PoisonError, RwLock},
+    sync::{
+        Arc, PoisonError, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -33,6 +36,8 @@ pub enum Readiness {
 struct ServiceInner {
     security: Arc<Security>,
     readiness: RwLock<Readiness>,
+    progress: RwLock<Option<audiolib_db::SnapshotUpgradeProgress>>,
+    stopping: AtomicBool,
 }
 
 /// Router state: authentication and admin settings ([`Security`], known before the
@@ -60,6 +65,8 @@ impl Service {
             inner: Arc::new(ServiceInner {
                 security,
                 readiness: RwLock::new(readiness),
+                progress: RwLock::new(None),
+                stopping: AtomicBool::new(false),
             }),
         }
     }
@@ -73,8 +80,36 @@ impl Service {
             .clone()
     }
 
+    /// Stop startup retries and request a durable-boundary cancellation of an upgrade.
+    pub fn request_stop(&self) {
+        self.inner.stopping.store(true, Ordering::Release);
+    }
+
+    /// Last upgrade phase; contains only stage names and committed row counts.
+    pub fn upgrade_progress(&self) -> Option<audiolib_db::SnapshotUpgradeProgress> {
+        *self
+            .inner
+            .progress
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Publish bounded in-memory startup progress without exposing database paths.
+    pub fn set_upgrade_progress(&self, progress: audiolib_db::SnapshotUpgradeProgress) {
+        *self
+            .inner
+            .progress
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(progress);
+    }
+
     /// Mark the library as open; later [`Service::set_failed`] calls are ignored.
     pub fn set_ready(&self, state: AppState) {
+        *self
+            .inner
+            .progress
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         *self
             .inner
             .readiness
@@ -153,10 +188,20 @@ pub fn open_in_background(
             let mut delay = retry.initial;
             let mut attempt: u32 = 1;
             loop {
+                if service.inner.stopping.load(Ordering::Acquire) {
+                    return;
+                }
                 tracing::info!(library = %config.library_db.display(), attempt, "Opening library");
                 // A panic inside the open must not leave the service `starting` forever.
                 let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    AppState::open_with_security(&config, security.clone())
+                    AppState::open_with_progress_cancellable(
+                        &config,
+                        security.clone(),
+                        &service.inner.stopping,
+                        |stage| {
+                            service.set_upgrade_progress(stage);
+                        },
+                    )
                 }))
                 .unwrap_or_else(|_| {
                     Err(audiolib_core::Error::Database(
@@ -165,6 +210,12 @@ pub fn open_in_background(
                 });
                 match opened {
                     Ok(state) => {
+                        if service.inner.stopping.load(Ordering::Acquire) {
+                            if let Err(error) = state.shutdown(Duration::from_secs(30)) {
+                                tracing::warn!(%error, "Startup shutdown maintenance incomplete");
+                            }
+                            return;
+                        }
                         match state.revision() {
                             Ok(revision) => tracing::info!(
                                 library = %config.library_db.display(),
@@ -184,6 +235,9 @@ pub fn open_in_background(
                         return;
                     }
                     Err(error) => {
+                        if service.inner.stopping.load(Ordering::Acquire) {
+                            return;
+                        }
                         tracing::error!(
                             library = %config.library_db.display(),
                             %error,
@@ -193,7 +247,14 @@ pub fn open_in_background(
                         service.set_failed(error.to_string());
                     }
                 }
-                std::thread::sleep(delay);
+                let until = std::time::Instant::now() + delay;
+                while let Some(remaining) = until.checked_duration_since(std::time::Instant::now())
+                {
+                    if service.inner.stopping.load(Ordering::Acquire) {
+                        return;
+                    }
+                    std::thread::sleep(remaining.min(Duration::from_millis(100)));
+                }
                 delay = delay.saturating_mul(2).min(retry.max);
                 attempt = attempt.saturating_add(1);
             }

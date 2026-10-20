@@ -204,6 +204,8 @@ pub struct ServedAudio {
 
 /// One snapshot file in an owned temporary directory, removed when dropped.
 pub struct SnapshotFile {
+    // Release the owner lock before TempDir removes the owned payload.
+    _owner: fs::File,
     /// Owning temporary directory; dropping it deletes the file.
     pub directory: tempfile::TempDir,
     /// File path inside `directory`.
@@ -251,6 +253,14 @@ impl PreparedSnapshot {
 
     /// Blocking. The zstd copy, compressing the plain copy on first use.
     pub fn zstd_file(&self) -> Result<Arc<SnapshotFile>> {
+        self.zstd_file_cancellable(&AtomicBool::new(false))
+    }
+
+    fn zstd_file_cancellable(&self, cancel: &AtomicBool) -> Result<Arc<SnapshotFile>> {
+        use std::io::{Read, Write};
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let mut slot = self
             .zstd
             .lock()
@@ -270,6 +280,7 @@ impl PreparedSnapshot {
         let directory = tempfile::Builder::new()
             .prefix(SNAPSHOT_PREFIX)
             .tempdir_in(parent)?;
+        let owner = snapshot_owner(directory.path())?;
         let path = directory.path().join("library-snapshot.db.zst");
         let started = Instant::now();
         {
@@ -280,8 +291,21 @@ impl PreparedSnapshot {
             encoder.multithread(u32::try_from(threads.min(8)).unwrap_or(1))?;
             encoder.include_contentsize(true)?;
             encoder.set_pledged_src_size(Some(self.plain.bytes))?;
-            std::io::copy(&mut input, &mut encoder)?;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Error::Cancelled);
+                }
+                let read = input.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                encoder.write_all(&buffer[..read])?;
+            }
             encoder.finish()?.sync_all()?;
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
         }
         let bytes = fs::metadata(&path)?.len();
         tracing::info!(
@@ -292,6 +316,7 @@ impl PreparedSnapshot {
             "Compressed library snapshot"
         );
         let file = Arc::new(SnapshotFile {
+            _owner: owner,
             directory,
             path,
             bytes,
@@ -479,6 +504,7 @@ impl StatsCache {
 const INLINE_STATS_MILLIS: u64 = 250;
 
 struct Inner {
+    stopping: AtomicBool,
     provider: Arc<SqliteProvider>,
     tracker: RevisionTracker,
     /// Immutable identity of this provider; never takes the revision/write mutex.
@@ -532,11 +558,30 @@ impl AppState {
     /// Like [`AppState::open`] with already loaded security (the server shares one
     /// [`Security`] between the starting service and the opened library).
     pub fn open_with_security(config: &ServerConfig, security: Arc<Security>) -> Result<Self> {
+        Self::open_with_progress(config, security, |_| {})
+    }
+
+    /// Open with committed migration progress suitable for a lightweight health response.
+    pub fn open_with_progress(
+        config: &ServerConfig,
+        security: Arc<Security>,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_progress_cancellable(config, security, &AtomicBool::new(false), progress)
+    }
+
+    /// Open with cancellation at committed upgrade boundaries.
+    pub fn open_with_progress_cancellable(
+        config: &ServerConfig,
+        security: Arc<Security>,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
         // The root checkers start only once the library is open, so failed (retried)
         // opens never leave checker threads behind on a hung volume.
         // Roots changed on the admin page replace the `config.toml` list.
         let root_security = security.clone();
-        Self::open_inner(config, security, || {
+        Self::open_inner(config, security, cancel, progress, || {
             let roots = root_security
                 .roots_override()
                 .unwrap_or_else(|| config.roots.clone());
@@ -551,14 +596,20 @@ impl AppState {
         token: impl Into<Option<BearerToken>>,
         monitor: RootMonitor,
     ) -> Result<Self> {
-        Self::open_inner(config, Security::from_config(config, token.into()), || {
-            monitor
-        })
+        Self::open_inner(
+            config,
+            Security::from_config(config, token.into()),
+            &AtomicBool::new(false),
+            |_| {},
+            || monitor,
+        )
     }
 
     fn open_inner(
         config: &ServerConfig,
         security: Arc<Security>,
+        cancel: &AtomicBool,
+        mut report: impl FnMut(SnapshotUpgradeProgress),
         monitor: impl FnOnce() -> RootMonitor,
     ) -> Result<Self> {
         if config.auth && security.env_token().is_none() {
@@ -572,9 +623,11 @@ impl AppState {
             remove_stale_snapshots(&std::env::temp_dir(), Some(SHARED_TEMP_SNAPSHOT_AGE));
         }
         let opened = Instant::now();
-        let provider = Arc::new(SqliteProvider::open_existing_with_progress(
+        let provider = Arc::new(SqliteProvider::open_existing_with_progress_cancellable(
             &config.library_db,
+            cancel,
             |progress| {
+                report(progress);
                 let elapsed_seconds = opened.elapsed().as_secs_f64();
                 match progress {
                     SnapshotUpgradeProgress::Preparing => tracing::info!(
@@ -587,7 +640,7 @@ impl AppState {
                         completed,
                         total,
                         elapsed_seconds,
-                        "Library startup: rebuilding search text (uncommitted rows)"
+                        "Library startup: rebuilding search text (committed rows)"
                     ),
                     SnapshotUpgradeProgress::BuildingFts => tracing::info!(
                         phase = "building_fts",
@@ -599,6 +652,16 @@ impl AppState {
                         elapsed_seconds,
                         "Library startup: checking extracted source tags"
                     ),
+                    SnapshotUpgradeProgress::Indexing { completed, total } => tracing::info!(
+                        phase = "indexing",
+                        completed,
+                        total,
+                        elapsed_seconds,
+                        "Library startup: building FTS5 (committed rows)"
+                    ),
+                    stage => {
+                        tracing::info!(?stage, elapsed_seconds, "Library startup: maintenance")
+                    }
                 }
             },
         )?);
@@ -630,6 +693,7 @@ impl AppState {
         // delay startup); the root monitor checks them in the background.
         Ok(Self {
             inner: Arc::new(Inner {
+                stopping: AtomicBool::new(false),
                 provider,
                 tracker,
                 library_id,
@@ -660,6 +724,38 @@ impl AppState {
                 roots_db: Mutex::new(roots_db),
             }),
         })
+    }
+
+    /// Stop new snapshot work, drain admitted preparations and scans, release cached
+    /// files, then checkpoint and persist the revision baseline. A timeout stays visible.
+    pub fn shutdown(&self, timeout: Duration) -> Result<()> {
+        self.inner.stopping.store(true, Ordering::Release);
+        let started = Instant::now();
+        if !self.inner.scans.shutdown(timeout) {
+            return Err(Error::Busy("A scan is still finishing".into()));
+        }
+        let jobs: Vec<_> = self
+            .inner
+            .snapshot_jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .flatten()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        while jobs.iter().any(|job| job.finished().is_none())
+            || self.inner.stats.refreshing.load(Ordering::Acquire)
+        {
+            if started.elapsed() >= timeout {
+                return Err(Error::Busy(
+                    "Snapshot or statistics preparation is still finishing".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(jobs);
+        self.invalidate_snapshot();
+        self.inner.tracker.checkpoint(&self.inner.provider)
     }
 
     /// The library provider; future endpoints use it for all business data access.
@@ -1052,8 +1148,15 @@ impl AppState {
     /// used at startup and when the revision poller sees a new revision, so `/library`
     /// rarely finds a stale cache.
     pub fn refresh_stats_in_background(&self) {
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return;
+        }
         let cache = &self.inner.stats;
         if cache.refreshing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.inner.stopping.load(Ordering::Acquire) {
+            cache.refreshing.store(false, Ordering::Release);
             return;
         }
         let state = self.clone();
@@ -1470,6 +1573,11 @@ impl AppState {
             result: Mutex::new(None),
             done: tokio::sync::Notify::new(),
         });
+        if self.inner.stopping.load(Ordering::Acquire) {
+            *job.result.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(Arc::new(Err(Error::Cancelled)));
+            return job;
+        }
         let running = job.clone();
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -1479,7 +1587,7 @@ impl AppState {
             }
             let result = state.prepare_snapshot().and_then(|prepared| {
                 let file = if zstd {
-                    Some(prepared.zstd_file()?)
+                    Some(prepared.zstd_file_cancellable(&state.inner.stopping)?)
                 } else {
                     None
                 };
@@ -1503,12 +1611,18 @@ impl AppState {
     /// fresh copy made with `DataProvider::backup_library` (which then replaces the cache).
     /// Preparation is single-flight: concurrent requests wait for one copy.
     pub fn prepare_snapshot(&self) -> Result<Arc<PreparedSnapshot>> {
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let revision = self.poll_revision()?;
         let mut cache = self
             .inner
             .snapshot_cache
             .lock()
             .map_err(|_| Error::Database("Snapshot cache lock was poisoned".into()))?;
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         if let Some(entry) = cache.as_ref().filter(|entry| {
             entry.library_id == revision.library_id
                 && entry.revision == revision.revision
@@ -1528,8 +1642,15 @@ impl AppState {
             }
             None => builder.tempdir()?,
         };
+        let owner = snapshot_owner(directory.path())?;
         let path = directory.path().join("library-snapshot.db");
-        let report = self.inner.provider.backup_library(&path)?;
+        let report = self
+            .inner
+            .provider
+            .backup_library_cancellable(&path, &self.inner.stopping)?;
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| Error::Database(error.to_string()))?;
         let schema_version: i64 = conn
@@ -1544,6 +1665,7 @@ impl AppState {
         );
         let entry = Arc::new(PreparedSnapshot {
             plain: SnapshotFile {
+                _owner: owner,
                 directory,
                 path,
                 bytes: report.bytes,
@@ -1556,6 +1678,18 @@ impl AppState {
         *cache = Some(entry.clone());
         Ok(entry)
     }
+}
+
+fn snapshot_owner(directory: &Path) -> Result<fs::File> {
+    let owner = fs::File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(directory.join(".owner.lock"))?;
+    owner
+        .try_lock()
+        .map_err(|error| Error::Busy(format!("Snapshot ownership unavailable: {error}")))?;
+    Ok(owner)
 }
 
 /// Remove leftover `audiolib-snapshot-*` directories (from a crash or kill) in `dir`;
@@ -1575,6 +1709,18 @@ pub fn remove_stale_snapshots(dir: &Path, min_age: Option<Duration>) {
             continue;
         };
         if !metadata.is_dir() {
+            continue;
+        }
+        // A prefix and age are not ownership proof. Legacy unmarked directories are
+        // retained; a live instance or response retains its lock even across shutdown.
+        let owner_path = path.join(".owner.lock");
+        if !fs::symlink_metadata(&owner_path).is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        let Ok(owner) = fs::File::options().read(true).write(true).open(owner_path) else {
+            continue;
+        };
+        if owner.try_lock().is_err() {
             continue;
         }
         if let Some(min_age) = min_age {
@@ -1606,6 +1752,9 @@ pub fn spawn_revision_poller(state: AppState, every: Duration) -> tokio::task::J
         interval.tick().await;
         loop {
             interval.tick().await;
+            if state.inner.stopping.load(Ordering::Acquire) {
+                return;
+            }
             let poll_state = state.clone();
             match tokio::task::spawn_blocking(move || poll_state.poll_revision()).await {
                 Ok(Ok(revision)) => state.refresh_stats_if_stale(&revision),

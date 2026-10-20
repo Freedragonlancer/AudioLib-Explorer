@@ -35,6 +35,8 @@ jobs:
           xcrun --find clang
       - name: Test database library and integrations
         run: cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin
+      - name: Test server startup and shutdown on native macOS
+        run: cargo test -p audiolib-server --test startup_upgrade --test shutdown_cleanup --locked --target aarch64-apple-darwin
 
   windows:
     name: Windows (fmt, clippy, test)

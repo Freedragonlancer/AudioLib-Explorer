@@ -73,6 +73,9 @@ struct ManagedAdmission;
 /// `GET /health` reply (always HTTP 200 while the process serves requests).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
+    /// Startup maintenance phase and committed batch counts, omitted when ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<audiolib_db::SnapshotUpgradeProgress>,
     /// `ok` (library open), `starting` (still opening) or `error` (open failed, retrying).
     pub status: String,
     /// Server crate version.
@@ -451,6 +454,7 @@ async fn health(State(service): State<Service>) -> Json<HealthResponse> {
         Readiness::Failed(_) => ("error", Some(FAILED_MESSAGE.to_string())),
     };
     Json(HealthResponse {
+        upgrade: service.upgrade_progress(),
         status: status.into(),
         version: VERSION.into(),
         message,

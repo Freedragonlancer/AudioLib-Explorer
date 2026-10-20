@@ -52,7 +52,7 @@ fn server_startup_logs_upgrade_phases_rows_and_elapsed_time() {
         "phase=\"tokenizing\" completed=0 total=5001",
         "phase=\"tokenizing\" completed=5000 total=5001",
         "phase=\"tokenizing\" completed=5001 total=5001",
-        "phase=\"building_fts\"",
+        "phase=\"indexing\"",
         "phase=\"source_tags\"",
         "Library startup: database opened",
     ];
@@ -64,7 +64,7 @@ fn server_startup_logs_upgrade_phases_rows_and_elapsed_time() {
         after += index + event.len();
     }
     assert!(text.contains("elapsed_seconds="), "{text}");
-    assert!(text.contains("uncommitted rows"), "{text}");
+    assert!(text.contains("committed rows"), "{text}");
     assert_eq!(state.audio(1).unwrap().notes, "retained notes");
     assert!(SqliteProvider::has_current_search_state(&database).unwrap());
 }

@@ -777,6 +777,10 @@ fn validate_snapshot_with_progress_cancellable(
                 }
                 SnapshotUpgradeProgress::BuildingFts => CachePreparation::BuildingFts,
                 SnapshotUpgradeProgress::SourceTags => CachePreparation::SourceTags,
+                SnapshotUpgradeProgress::Indexing { .. } => CachePreparation::BuildingFts,
+                SnapshotUpgradeProgress::Validating => CachePreparation::Validating,
+                SnapshotUpgradeProgress::BackingUp => CachePreparation::Upgrading,
+                SnapshotUpgradeProgress::Checkpoint => CachePreparation::Saving,
             });
         })
         .inspect_err(|error| {

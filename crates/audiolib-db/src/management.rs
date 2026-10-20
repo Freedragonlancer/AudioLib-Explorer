@@ -56,6 +56,40 @@ impl Drop for LibraryLease {
 /// Cross-process isolation for all writers against whole-library replacement.
 /// Scans and normal edits share this lock; maintenance and restore own it exclusively.
 pub(crate) struct AdministrationLease(fs::File);
+
+/// Search upgrades commit incomplete derived state between batches. Ordinary
+/// maintenance keeps its established read-snapshot behavior and does not take this lock.
+pub(crate) struct SearchUpgradeLease(fs::File);
+impl SearchUpgradeLease {
+    pub(crate) fn acquire(database: &Path, exclusive: bool) -> Result<Self> {
+        let database = database.canonicalize()?;
+        let mut name = database.file_name().unwrap_or_default().to_os_string();
+        name.push(".upgrade.lock");
+        let file = fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(database.with_file_name(name))?;
+        let result = if exclusive {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        match result {
+            Ok(()) => Ok(Self(file)),
+            Err(fs::TryLockError::WouldBlock) => Err(Error::Busy(
+                "Library search upgrade conflicts with an active reader".into(),
+            )),
+            Err(fs::TryLockError::Error(error)) => Err(Error::Io(error)),
+        }
+    }
+}
+impl Drop for SearchUpgradeLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 fn administration_lock_path(database: &Path) -> Result<PathBuf> {
     let database = database.canonicalize()?;
     let mut name = database.file_name().unwrap_or_default().to_os_string();
@@ -145,16 +179,6 @@ fn copy_database(source: &Connection, destination: &mut Connection) -> Result<()
         .run_to_completion(256, Duration::from_millis(10), None)
         .map_err(db_error)
 }
-/// Copy a source that the caller holds in one read transaction. The 10 ms pauses of
-/// [`copy_database`] only give other connections a chance between steps, which cannot
-/// help while that transaction stays open (WAL writers are never blocked by readers), so
-/// this copies in large steps without pausing (656 MiB library: 11 s -> 1.9 s).
-fn copy_database_in_transaction(source: &Connection, destination: &mut Connection) -> Result<()> {
-    rusqlite::backup::Backup::new(source, destination)
-        .map_err(db_error)?
-        .run_to_completion(4096, Duration::ZERO, None)
-        .map_err(db_error)
-}
 fn normalize_page_size(staging: &Connection, target_page_size: i64) -> Result<()> {
     let source_page_size: i64 = staging
         .pragma_query_value(None, "page_size", |row| row.get(0))
@@ -172,7 +196,21 @@ fn normalize_page_size(staging: &Connection, target_page_size: i64) -> Result<()
     }
     Ok(())
 }
-fn snapshot_to_file(source: &mut Connection, destination: &Path) -> Result<BackupReport> {
+pub(crate) fn snapshot_to_file(
+    source: &mut Connection,
+    destination: &Path,
+) -> Result<BackupReport> {
+    snapshot_to_file_cancellable(source, destination, &AtomicBool::new(false))
+}
+
+pub(crate) fn snapshot_to_file_cancellable(
+    source: &mut Connection,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Result<BackupReport> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
     let stage = output_stage(destination, "audiolib-backup-")?;
     // The copy is as large as the live database (WAL content included); fail before
     // writing anything instead of with a half-written copy and a generic I/O error.
@@ -192,12 +230,35 @@ fn snapshot_to_file(source: &mut Connection, destination: &Path) -> Result<Backu
         .map_err(db_error)?;
     {
         let mut target = Connection::open(stage.path()).map_err(db_error)?;
-        copy_database_in_transaction(&tx, &mut target)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&tx, &mut target).map_err(db_error)?;
+            // The source transaction is pinned; pauses between steps cannot improve
+            // concurrency, but each bounded step gives cancellation a chance.
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Error::Cancelled);
+                }
+                match backup.step(4096).map_err(db_error)? {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => {}
+                    // The source transaction is pinned and the destination is exclusively
+                    // owned. A lock conflict cannot be fixed by endlessly retrying here.
+                    _ => {
+                        return Err(Error::Busy(
+                            "Snapshot copy encountered a database lock".into(),
+                        ));
+                    }
+                }
+            }
+        }
         target
             .execute_batch("PRAGMA journal_mode=DELETE;")
             .map_err(db_error)?;
     }
     tx.commit().map_err(db_error)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
     stage.as_file().sync_all()?;
     let bytes = stage.as_file().metadata()?.len();
     stage
@@ -257,7 +318,7 @@ fn checked(report: &IntegrityReport) -> Result<()> {
         Err(Error::Database(report.errors.join("; ")))
     }
 }
-fn rollback_path(database: &Path) -> Result<PathBuf> {
+pub(crate) fn rollback_path(database: &Path) -> Result<PathBuf> {
     let parent = database
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -375,6 +436,7 @@ fn remove_one(conn: &Connection, id: i64) -> Result<u64> {
 
 impl SqliteProvider {
     fn require_writable(&self) -> Result<()> {
+        schema::ensure_ready(&*self.writer_unlocked()?)?;
         if self
             .writer_unlocked()?
             .is_readonly("main")
@@ -416,6 +478,11 @@ impl SqliteProvider {
         })
     }
     pub(crate) fn management_check(&self) -> Result<IntegrityReport> {
+        let _upgrade = if self.read_only {
+            None
+        } else {
+            Some(SearchUpgradeLease::acquire(&self.path, false)?)
+        };
         let _gate = self
             .read_gate
             .read()
@@ -435,6 +502,7 @@ impl SqliteProvider {
         source
             .pragma_update(None, "mmap_size", 0)
             .map_err(db_error)?;
+        schema::ensure_ready(&source)?;
         let tx = source.transaction().map_err(db_error)?;
         tx.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| {
             r.get::<_, i64>(0)
@@ -519,6 +587,16 @@ impl SqliteProvider {
     pub(crate) fn management_backup(&self, destination: &Path) -> Result<BackupReport> {
         let mut reader = self.reader()?;
         snapshot_to_file(&mut reader, destination)
+    }
+    /// Copy a consistent library snapshot, cancelling between bounded SQLite backup
+    /// steps. Cancellation removes only this operation's unpublished staging file.
+    pub fn backup_library_cancellable(
+        &self,
+        destination: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<BackupReport> {
+        let mut reader = self.reader()?;
+        snapshot_to_file_cancellable(&mut reader, destination, cancel)
     }
     pub(crate) fn management_restore(&self, source: &Path) -> Result<RestoreReport> {
         self.require_writable()?;
