@@ -639,6 +639,8 @@ impl Controller {
 fn action_error_text(error: &WaveformCacheError, chinese: bool) -> String {
     match error.kind {
         WaveformCacheErrorKind::Busy | WaveformCacheErrorKind::JobState => error.message.clone(),
+        // CONFIRM_REQUIRED / UNSUPPORTED_MODE: the message is already the page's wording.
+        WaveformCacheErrorKind::Validation if error.sub_code.is_some() => error.message.clone(),
         _ if chinese => format!("波形缓存操作失败：{}", error.message),
         _ => format!("The Waveform cache request failed: {}", error.message),
     }
@@ -810,6 +812,15 @@ mod tests {
         assert!(!rate_unchanged(Some(&settings), Some(20)), "explicit override");
         assert!(rate_unchanged(Some(&settings), None));
         assert!(!rate_unchanged(None, Some(20)));
+    }
+
+    #[test]
+    fn validation_sub_codes_show_their_own_message() {
+        let mut error = WaveformCacheError::new(WaveformCacheErrorKind::Validation, "须两次确认");
+        error.sub_code = Some("CONFIRM_REQUIRED".into());
+        assert_eq!(action_error_text(&error, true), "须两次确认");
+        error.sub_code = None;
+        assert_eq!(action_error_text(&error, true), "波形缓存操作失败：须两次确认");
     }
 
     #[test]

@@ -402,6 +402,7 @@ impl RemoteProvider {
                     | RemoteError::RootOffline { .. } => Error::Busy(text),
                     RemoteError::Cancelled => Error::Cancelled,
                     RemoteError::Validation(_)
+                    | RemoteError::JobValidation { .. }
                     | RemoteError::Forbidden(_)
                     | RemoteError::Unsupported(_) => Error::Validation(text),
                     _ => Error::Database(text),
@@ -426,7 +427,9 @@ pub fn core_error(error: RemoteError, chinese: bool) -> Error {
     match error {
         RemoteError::NotFound(_) => Error::NotFound(text),
         RemoteError::Busy { .. } | RemoteError::Starting { .. } => Error::Busy(text),
-        RemoteError::Validation(_) | RemoteError::PayloadTooLarge(_) => Error::Validation(text),
+        RemoteError::Validation(_)
+        | RemoteError::JobValidation { .. }
+        | RemoteError::PayloadTooLarge(_) => Error::Validation(text),
         RemoteError::Cancelled => Error::Cancelled,
         _ => Error::Database(text),
     }

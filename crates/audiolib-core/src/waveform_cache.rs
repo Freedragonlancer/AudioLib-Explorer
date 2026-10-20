@@ -284,6 +284,9 @@ pub enum WaveformCacheErrorKind {
 pub struct WaveformCacheError {
     pub kind: WaveformCacheErrorKind,
     pub message: String,
+    /// The server's `400 VALIDATION` `sub_code` (§9.5.3: `CONFIRM_REQUIRED`,
+    /// `UNSUPPORTED_MODE`) when it sent one; `message` already explains it.
+    pub sub_code: Option<String>,
 }
 
 impl WaveformCacheError {
@@ -291,6 +294,7 @@ impl WaveformCacheError {
         Self {
             kind,
             message: message.into(),
+            sub_code: None,
         }
     }
 

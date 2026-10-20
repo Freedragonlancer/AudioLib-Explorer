@@ -95,6 +95,10 @@ pub enum RemoteError {
     },
     #[error("Validation: {0}")]
     Validation(String),
+    /// `400 VALIDATION` from the list Waveform job endpoints (§9.5.3) with a `sub_code`
+    /// the settings page explains: `CONFIRM_REQUIRED` or `UNSUPPORTED_MODE`.
+    #[error("Validation ({sub_code}): {message}")]
+    JobValidation { sub_code: String, message: String },
     /// `415 PREVIEW_UNSUPPORTED_FORMAT` (this preview codec cannot encode the file) or
     /// `503 TRANSCODER_UNAVAILABLE` (no ffmpeg for `codec=flac`) from `/audio/{id}/preview`
     /// (§8.1): use another codec or the original `/stream`; nothing else is wrong.
@@ -171,6 +175,9 @@ pub(crate) struct ErrorBody {
     pub error_code: String,
     #[serde(default)]
     pub message: String,
+    /// Refines `VALIDATION` (§9.4, §9.5.3); empty when absent.
+    #[serde(default)]
+    pub sub_code: String,
 }
 
 impl RemoteError {
@@ -245,6 +252,17 @@ impl RemoteError {
             }
             (413, _) | (_, "PAYLOAD_TOO_LARGE") => Self::PayloadTooLarge(message),
             (507, _) | (_, "INSUFFICIENT_STORAGE") => Self::InsufficientStorage(message),
+            (400, _) | (_, "VALIDATION")
+                if matches!(
+                    parsed.sub_code.as_str(),
+                    "CONFIRM_REQUIRED" | "UNSUPPORTED_MODE"
+                ) =>
+            {
+                Self::JobValidation {
+                    sub_code: parsed.sub_code,
+                    message,
+                }
+            }
             (400, _) | (_, "VALIDATION") => Self::Validation(message),
             (501, _) | (_, "UNSUPPORTED") => Self::Unsupported(message),
             _ => Self::Server {
@@ -434,6 +452,7 @@ impl RemoteError {
                 "音效库根目录离线（NAS 共享未挂载或无法访问），已缓存的音效仍可试听：{message}"
             ),
             Self::Validation(detail) => format!("参数无效：{detail}"),
+            Self::JobValidation { message, .. } => format!("参数无效：{message}"),
             Self::PreviewUnavailable { message, .. } => {
                 format!("服务器无法生成此文件的试听预览，将改用原始文件：{message}")
             }
@@ -554,9 +573,9 @@ impl From<RemoteError> for audiolib_core::Error {
             | RemoteError::JobState(message)
             | RemoteError::Starting { message, .. }
             | RemoteError::RootOffline { message, .. } => Self::Busy(message),
-            RemoteError::Validation(message) | RemoteError::PayloadTooLarge(message) => {
-                Self::Validation(message)
-            }
+            RemoteError::Validation(message)
+            | RemoteError::JobValidation { message, .. }
+            | RemoteError::PayloadTooLarge(message) => Self::Validation(message),
             RemoteError::Cancelled => Self::Cancelled,
             RemoteError::Io(error) => Self::Io(error),
             other => Self::Database(other.to_string()),
@@ -640,6 +659,10 @@ impl RemoteError {
                 retry_after: *retry_after,
             },
             Self::Validation(detail) => Self::Validation(detail.clone()),
+            Self::JobValidation { sub_code, message } => Self::JobValidation {
+                sub_code: sub_code.clone(),
+                message: message.clone(),
+            },
             Self::PreviewUnavailable { code, message } => Self::PreviewUnavailable {
                 code: code.clone(),
                 message: message.clone(),

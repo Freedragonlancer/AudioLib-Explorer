@@ -16,6 +16,10 @@ use audiolib_core::waveform_cache::{
     WaveformCacheStatus, WaveformJobControl, WaveformJobMode,
 };
 
+/// `400 VALIDATION` `sub_code`s of `POST /waveforms/jobs` (§9.5.3).
+pub const CONFIRM_REQUIRED: &str = "CONFIRM_REQUIRED";
+pub const UNSUPPORTED_MODE: &str = "UNSUPPORTED_MODE";
+
 impl RemoteClient {
     /// `POST /waveforms/jobs` (§9.5.3). `rebuild` is refused locally unless
     /// `confirm_rebuild` (the user confirmed twice); then `"confirm": "rebuild"` is sent.
@@ -27,9 +31,10 @@ impl RemoteClient {
     ) -> Result<WaveformCacheStatus> {
         let body = match mode {
             WaveformJobMode::Rebuild if !confirm_rebuild => {
-                return Err(RemoteError::Validation(
-                    "a rebuild must be confirmed before it is sent".into(),
-                ));
+                return Err(RemoteError::JobValidation {
+                    sub_code: CONFIRM_REQUIRED.into(),
+                    message: "a rebuild must be confirmed before it is sent".into(),
+                });
             }
             WaveformJobMode::Rebuild => {
                 serde_json::json!({ "mode": mode.as_str(), "confirm": "rebuild" })
@@ -96,7 +101,9 @@ pub fn waveform_cache_error(error: &RemoteError, chinese: bool) -> WaveformCache
         RemoteError::Forbidden(_) => WaveformCacheErrorKind::Forbidden,
         RemoteError::Busy { .. } => WaveformCacheErrorKind::Busy,
         RemoteError::JobState(_) => WaveformCacheErrorKind::JobState,
-        RemoteError::Validation(_) => WaveformCacheErrorKind::Validation,
+        RemoteError::Validation(_) | RemoteError::JobValidation { .. } => {
+            WaveformCacheErrorKind::Validation
+        }
         RemoteError::Unsupported(_) | RemoteError::NotFound(_) => {
             WaveformCacheErrorKind::Unsupported
         }
@@ -119,9 +126,36 @@ pub fn waveform_cache_error(error: &RemoteError, chinese: bool) -> WaveformCache
         (RemoteError::JobState(message), false) => format!(
             "There is no list Waveform job in progress (409); the status was refreshed. ({message})"
         ),
+        (RemoteError::JobValidation { sub_code, message }, chinese) => {
+            job_validation_text(sub_code, message, chinese)
+        }
         (other, chinese) => manage_error_text(other, chinese),
     };
-    WaveformCacheError::new(kind, message)
+    let mut cache_error = WaveformCacheError::new(kind, message);
+    if let RemoteError::JobValidation { sub_code, .. } = error {
+        cache_error.sub_code = Some(sub_code.clone());
+    }
+    cache_error
+}
+
+/// The page's text for a job `400 VALIDATION` `sub_code`.
+fn job_validation_text(sub_code: &str, message: &str, chinese: bool) -> String {
+    match (sub_code, chinese) {
+        (CONFIRM_REQUIRED, true) => {
+            format!("全部重建须经两次确认后才会开始（400 CONFIRM_REQUIRED），未执行。（{message}）")
+        }
+        (CONFIRM_REQUIRED, false) => format!(
+            "Rebuild all must be confirmed twice before it starts (400 CONFIRM_REQUIRED); nothing was done. ({message})"
+        ),
+        (UNSUPPORTED_MODE, true) => {
+            format!("服务器不支持这种列表波形任务（400 UNSUPPORTED_MODE），未执行。（{message}）")
+        }
+        (UNSUPPORTED_MODE, false) => format!(
+            "The server does not support this list Waveform job (400 UNSUPPORTED_MODE); nothing was done. ({message})"
+        ),
+        (_, true) => format!("参数无效（{sub_code}）：{message}"),
+        (_, false) => format!("Invalid request ({sub_code}): {message}"),
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +219,7 @@ mod tests {
         assert_eq!(status.job.unwrap().id, "wfj-1");
         assert!(matches!(
             client.start_list_waveform_job(WaveformJobMode::Rebuild, false),
-            Err(RemoteError::Validation(_))
+            Err(RemoteError::JobValidation { ref sub_code, .. }) if sub_code == CONFIRM_REQUIRED
         ));
         client
             .start_list_waveform_job(WaveformJobMode::Rebuild, true)
@@ -296,10 +330,33 @@ mod tests {
                 Some(&serde_json::json!({"mode": "bogus"})),
             )
             .unwrap_err();
-        assert_eq!(
-            waveform_cache_error(&invalid, false).kind,
-            WaveformCacheErrorKind::Validation
+        assert!(
+            matches!(&invalid, RemoteError::JobValidation { sub_code, .. } if sub_code == UNSUPPORTED_MODE),
+            "{invalid:?}"
         );
+        let mapped = waveform_cache_error(&invalid, true);
+        assert_eq!(mapped.kind, WaveformCacheErrorKind::Validation);
+        assert_eq!(mapped.sub_code.as_deref(), Some(UNSUPPORTED_MODE));
+        assert!(mapped.message.contains("服务器不支持这种列表波形任务"), "{}", mapped.message);
+        let unconfirmed = waveform_cache_error(
+            &RemoteError::from_status(
+                400,
+                r#"{"error_code":"VALIDATION","sub_code":"CONFIRM_REQUIRED","message":"confirm"}"#,
+                "POST /waveforms/jobs",
+            ),
+            true,
+        );
+        assert_eq!(unconfirmed.sub_code.as_deref(), Some(CONFIRM_REQUIRED));
+        assert!(unconfirmed.message.contains("两次确认"), "{}", unconfirmed.message);
+        // Other sub_codes stay plain validation errors.
+        assert!(matches!(
+            RemoteError::from_status(
+                400,
+                r#"{"error_code":"VALIDATION","sub_code":"UNSUPPORTED_ENCODING","message":"x"}"#,
+                "POST /waveforms",
+            ),
+            RemoteError::Validation(_)
+        ));
         let state = client
             .control_list_waveform_job(WaveformJobControl::Stop)
             .unwrap_err();
