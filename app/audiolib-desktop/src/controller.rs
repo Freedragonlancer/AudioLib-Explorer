@@ -3065,7 +3065,11 @@ impl Controller {
                 + if immediate {
                     Duration::ZERO
                 } else {
-                    Duration::from_millis(80)
+                    // Coalesce a short typing burst while leaving the first
+                    // results and complete folder counts enough render budget.
+                    // New generations still replace queued work and cancel both
+                    // active workers before publishing any stale models.
+                    Duration::from_millis(30)
                 },
             provider: self.provider(),
         };

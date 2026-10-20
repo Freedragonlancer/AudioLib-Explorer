@@ -36,6 +36,7 @@ fn diagnostics_delta(before: ParallelRankingDiagnostics) -> serde_json::Value {
         .collect::<serde_json::Map<_, _>>();
     serde_json::json!({
         "attempts":after.attempts.saturating_sub(before.attempts),
+        "sparse_native_length_selections":after.sparse_native_length_selections.saturating_sub(before.sparse_native_length_selections),
         "fallbacks":reasons,
         "scope":"process-wide counter delta during the measured search interval"
     })

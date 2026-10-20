@@ -113,8 +113,31 @@ fn child_search_navigation() {
         assert!(controller.search_generation.load(Ordering::Acquire) > previous_generation);
         assert!(!ui.get_searching());
     }
-    ui.set_query("".into());
     ui.set_duration_min("".into());
+    // Typing and then backspacing within the debounce window must replace both
+    // workers' generations. Returning to one letter cancels the last valid
+    // request without dispatching a broad single-letter search.
+    for query in ["go", "gor", "gore", "go", "g"] {
+        let previous_cancel = controller.search_cancel.lock().unwrap().clone();
+        let previous_generation = controller.search_generation.load(Ordering::Acquire);
+        ui.set_query(query.into());
+        controller.request_search(&ui, false, true);
+        assert!(previous_cancel.load(Ordering::Acquire));
+        assert!(controller.search_generation.load(Ordering::Acquire) > previous_generation);
+    }
+    assert!(
+        controller
+            .search_cancel
+            .lock()
+            .unwrap()
+            .load(Ordering::Acquire)
+    );
+    assert!(controller.search_job.lock().unwrap().is_none());
+    assert!(controller.facet_job.lock().unwrap().is_none());
+    assert!(controller.search_publication.lock().unwrap().is_none());
+    assert!(!ui.get_searching());
+    assert!(ui.get_status().contains("at least 2"));
+    ui.set_query("".into());
     // Simulate out-of-order background completions, including stale errors and a
     // read invalidated by maintenance before its library generation changes.
     let generation = controller.library_generation.load(Ordering::Acquire);

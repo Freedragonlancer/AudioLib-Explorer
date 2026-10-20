@@ -13,6 +13,7 @@ mod search_cache;
 mod search_candidates;
 mod search_facets;
 mod search_rank_parallel;
+mod search_sorted;
 mod search_text;
 mod space;
 mod sqlite_mmap;
@@ -1439,6 +1440,7 @@ impl SqliteProvider {
                 cache_hit: false,
             });
         }
+        let sorted_duration_sql = search_sorted::page_sql(&tx, request, no_missing, total)?;
         let order = match request.order_by {
             SortOrder::Relevance if has_query => "bm25(audio_search)",
             SortOrder::Relevance | SortOrder::Filename => "af.filename COLLATE NOCASE",
@@ -1464,7 +1466,9 @@ impl SqliteProvider {
         // SQLite's bounded top-N sorter is faster than FTS5's internal rank sorter for
         // very broad matches. Hydrate only the ranked page after confirming visibility
         // in this transaction; the scores are exactly FTS5's default BM25 scores.
-        let page_sql = if no_missing && request.order_by == SortOrder::Relevance {
+        let page_sql = if let Some(sql) = sorted_duration_sql {
+            sql
+        } else if no_missing && request.order_by == SortOrder::Relevance {
             format!(
                 "WITH ranked AS MATERIALIZED (
                     SELECT rowid,bm25(audio_search) AS score FROM audio_search

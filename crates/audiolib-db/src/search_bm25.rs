@@ -21,6 +21,7 @@ const COLUMNS: usize = 12;
 const MAX_ROWS: usize = 2_097_152;
 const MAX_SLOTS: usize = 16 * 1024 * 1024 / std::mem::size_of::<u32>();
 const MIN_SPLIT_ROWS: usize = 65_536;
+const MAX_NATIVE_LENGTH_MATCHES: u64 = 65_536;
 const MISSING: u32 = u32::MAX;
 
 #[derive(Debug)]
@@ -264,6 +265,7 @@ struct Stats {
     layout: Arc<Layout>,
     idf: Vec<f64>,
     common_phrase: bool,
+    exact_phrase_hit_sum: Option<u64>,
 }
 
 /// One reader's owned global phrase statistics. Only complete, disjoint partials
@@ -273,6 +275,9 @@ pub(crate) struct PartialStats {
     layout: Arc<Layout>,
     entries: Vec<(usize, f64)>,
     common_phrase: bool,
+    // Sum of exact global DFs. None if any phrase stopped at the IDF clamp or
+    // addition overflowed. Overlapping phrase hits deliberately count twice.
+    exact_phrase_hit_sum: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -344,6 +349,30 @@ impl Prepared {
             .is_some_and(|layout| layout.row_count >= 262_144)
     }
 
+    /// Only positional multi-token phrases consider deferring a cold length
+    /// scan. Two-letter fragment queries remain on their existing overlap path.
+    pub(crate) fn has_complex_phrase(&self) -> bool {
+        self.layout
+            .get()
+            .is_some_and(|layout| layout.phrase_sizes.iter().any(|size| *size > 1))
+    }
+
+    /// Every matching document contains at least one query phrase. The sum of
+    /// complete global phrase DFs therefore bounds matches conservatively, even
+    /// for overlapping OR alternatives or conjunctions. Never infer this bound
+    /// from floating-point IDF or an early-stopped phrase count.
+    pub(crate) fn sparse_native_lengths(&self) -> bool {
+        self.stats.get().is_some_and(|stats| {
+            let Ok(rows) = u64::try_from(stats.layout.row_count) else {
+                return false;
+            };
+            !stats.common_phrase
+                && stats.exact_phrase_hit_sum.is_some_and(|hits| {
+                    hits > 0 && hits <= (rows / 8).min(MAX_NATIVE_LENGTH_MATCHES)
+                })
+        })
+    }
+
     /// Disjoint groups balanced greedily by each phrase's token count.
     /// Their entries remain original phrase indices for exact-order merging.
     pub(crate) fn phrase_groups(&self) -> Vec<Vec<usize>> {
@@ -384,11 +413,14 @@ impl Prepared {
             .map_err(|_| sqlite_error(ffi::SQLITE_NOMEM))?;
         seen.resize(count, false);
         let mut common_phrase = false;
+        let mut exact_phrase_hit_sum = Some(0u64);
         for partial in partials {
             if !layout.agrees(&partial.layout) {
                 return Err(Error::Database("Prepared phrase layouts disagree".into()));
             }
             common_phrase |= partial.common_phrase;
+            exact_phrase_hit_sum =
+                add_exact_hits(exact_phrase_hit_sum, partial.exact_phrase_hit_sum);
             for (index, value) in partial.entries {
                 let Some(visited) = seen.get_mut(index) else {
                     return Err(Error::Database(
@@ -414,6 +446,7 @@ impl Prepared {
                 layout: layout.clone(),
                 idf,
                 common_phrase,
+                exact_phrase_hit_sum,
             }))
             .map_err(|_| Error::Database("Prepared statistics were already published".into()))
     }
@@ -427,6 +460,11 @@ impl Prepared {
     #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
         self.stats.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_lengths(&self) -> bool {
+        self.lengths.lock().unwrap().is_some()
     }
 
     /// A scoring-only scheduling hint: a large snapshot and a globally common
@@ -737,6 +775,10 @@ struct PhraseCount {
     clamp_at: i64,
 }
 
+fn add_exact_hits(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    left?.checked_add(right?)
+}
+
 unsafe extern "C" fn count_phrase(
     _api: *const ffi::Fts5ExtensionApi,
     _fts: *mut ffi::Fts5Context,
@@ -828,6 +870,7 @@ unsafe fn compute_partial(
             .try_reserve_exact(indices.len())
             .map_err(|_| ffi::SQLITE_NOMEM)?;
         let mut common_phrase = false;
+        let mut exact_phrase_hit_sum = Some(0u64);
         let row_count = layout.row_count;
         for (position, index) in indices.iter().copied().enumerate() {
             if index >= layout.phrase_sizes.len() || indices[..position].contains(&index) {
@@ -847,7 +890,14 @@ unsafe fn compute_partial(
             if code != ffi::SQLITE_OK {
                 return Err(code);
             }
-            common_phrase |= counter.hits >= counter.clamp_at;
+            let clamped = counter.hits >= counter.clamp_at;
+            common_phrase |= clamped;
+            exact_phrase_hit_sum = add_exact_hits(
+                exact_phrase_hit_sum,
+                (!clamped)
+                    .then(|| u64::try_from(counter.hits).ok())
+                    .flatten(),
+            );
             // Preserve SQLite's integer N-nHit subtraction before conversion to
             // double, and its exact phrase iteration/clamp order.
             let hits = counter.hits;
@@ -861,6 +911,7 @@ unsafe fn compute_partial(
             layout,
             entries,
             common_phrase,
+            exact_phrase_hit_sum,
         })
     }
 }
@@ -889,6 +940,7 @@ unsafe fn compute_stats(
             layout,
             idf,
             common_phrase: partial.common_phrase,
+            exact_phrase_hit_sum: partial.exact_phrase_hit_sum,
         }))
     }
 }
@@ -1558,6 +1610,125 @@ pub(crate) mod tests {
         assert!(plan.lengths.lock().unwrap().is_none());
         plan.set_lengths(None).unwrap();
         assert_eq!(plan.split_points(), None);
+    }
+
+    #[test]
+    fn sparse_length_hint_requires_exact_bounded_global_counts() {
+        let hint = |rows, hits, common_phrase| {
+            let plan = Prepared::empty("\"rare token\"".into());
+            let layout = Arc::new(Layout {
+                avgdl: 2.0,
+                phrase_count: 1,
+                column_count: COLUMNS as c_int,
+                row_count: rows,
+                phrase_sizes: vec![2],
+            });
+            assert!(
+                plan.stats
+                    .set(Arc::new(Stats {
+                        layout,
+                        idf: vec![1.0],
+                        common_phrase,
+                        exact_phrase_hit_sum: hits,
+                    }))
+                    .is_ok()
+            );
+            plan.sparse_native_lengths()
+        };
+        assert!(hint(512, Some(64), false));
+        assert!(!hint(512, Some(65), false));
+        assert!(hint(1_000_000, Some(65_536), false));
+        assert!(!hint(1_000_000, Some(65_537), false));
+        assert!(!hint(512, None, false));
+        assert!(!hint(512, Some(1), true));
+        assert!(!hint(512, Some(0), false));
+        assert!(!hint(-1, Some(1), false));
+        assert_eq!(add_exact_hits(Some(u64::MAX), Some(1)), None);
+        assert_eq!(add_exact_hits(Some(1), None), None);
+        assert_eq!(add_exact_hits(None, Some(1)), None);
+
+        let conn = fixture();
+        let plan = Prepared::empty("alpha".into());
+        assert!(prepare_layout(&conn, &plan).unwrap());
+        let partials = plan
+            .phrase_groups()
+            .iter()
+            .map(|group| prepare_phrases(&conn, &plan, group).unwrap())
+            .collect();
+        plan.complete_preparation(partials).unwrap();
+        assert!(plan.stats.get().unwrap().common_phrase);
+        assert_eq!(plan.stats.get().unwrap().exact_phrase_hit_sum, None);
+        assert!(!plan.sparse_native_lengths());
+    }
+
+    #[test]
+    fn prepared_native_lengths_preserve_cached_score_bits_and_sqlite_oracle() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE audio_search USING fts5(a,b,c,d,e,f,g,h,i,j,k,l);",
+        )
+        .unwrap();
+        for id in 1..=128 {
+            let text = if id % 32 == 0 {
+                "rare token ".repeat(id / 32)
+            } else {
+                "ordinary filler".into()
+            };
+            conn.execute(
+                "INSERT INTO audio_search(rowid,a,b) VALUES(?1,?2,?3)",
+                rusqlite::params![id as i64, text, "other column ".repeat(id % 7)],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("BEGIN; SELECT COUNT(*) FROM audio_search_docsize;")
+            .unwrap();
+        let plan = Prepared::empty("\"rare token\" OR a:rare".into());
+        assert!(prepare_layout(&conn, &plan).unwrap());
+        assert!(plan.has_complex_phrase());
+        let partials = plan
+            .phrase_groups()
+            .iter()
+            .map(|group| prepare_phrases(&conn, &plan, group).unwrap())
+            .collect();
+        plan.complete_preparation(partials).unwrap();
+        assert_eq!(plan.stats.get().unwrap().exact_phrase_hit_sum, Some(8));
+        assert!(plan.sparse_native_lengths());
+        let collect = |function: &str| {
+            conn.prepare(
+                "SELECT rowid,rank FROM audio_search WHERE audio_search MATCH ?1
+                 AND rank MATCH ?2 ORDER BY rank,rowid",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![plan.query(), function], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        plan.set_lengths(load_lengths(&conn, None).unwrap())
+            .unwrap();
+        let cached = {
+            let _registration = register_prepared(&conn, plan.clone()).unwrap();
+            collect("audiolib_bm25()")
+        };
+        plan.set_lengths(None).unwrap();
+        let per_match = {
+            let _registration = register_prepared(&conn, plan.clone()).unwrap();
+            collect("audiolib_bm25()")
+        };
+        assert_eq!(cached.len(), 4);
+        assert_eq!(
+            cached
+                .iter()
+                .map(|(id, score)| (*id, score.to_bits()))
+                .collect::<Vec<_>>(),
+            per_match
+                .iter()
+                .map(|(id, score)| (*id, score.to_bits()))
+                .collect::<Vec<_>>()
+        );
+        assert_native_ranking(&per_match, &collect("bm25()"), plan.query());
     }
 
     #[test]

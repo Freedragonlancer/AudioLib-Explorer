@@ -1,7 +1,8 @@
 // crates/audiolib-db/src/search_rank_parallel.rs
 //! Bounded exact ranking across readers verified to share the master's snapshot.
-//! Phrase statistics and document lengths are prepared concurrently; workers
-//! share only owned plans after their pinned snapshots have been verified.
+//! Phrase statistics and document lengths normally overlap. Cold complex sparse
+//! queries may retain prepared statistics and read native lengths only per match.
+//! Workers share owned plans only after pinned snapshots have been verified.
 use crate::{Error, Result, SqliteProvider, db_error, search_bm25, search_cache};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
@@ -88,6 +89,7 @@ fn preferred_fallback_reason(
 
 static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static FALLBACKS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static SPARSE_NATIVE_LENGTH_SELECTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Process-wide cumulative parallel-ranking counters, without query or path data.
 /// Subtract snapshots to measure one isolated benchmark interval. Concurrent
@@ -100,6 +102,9 @@ pub struct ParallelRankingDiagnostics {
     pub fallbacks: [u64; 8],
     /// Labels corresponding to each entry in `fallbacks`.
     pub reasons: [&'static str; 8],
+    /// Jobs selecting prepared IDF with native per-match lengths instead of a
+    /// cold full-library docsize scan. A plan choice, not a worker failure.
+    pub sparse_native_length_selections: u64,
 }
 
 /// Read the current process-wide parallel-ranking diagnostics.
@@ -117,6 +122,7 @@ pub fn parallel_ranking_diagnostics() -> ParallelRankingDiagnostics {
             FallbackReason::SnapshotChanged.label(),
             FallbackReason::Capacity.label(),
         ],
+        sparse_native_length_selections: SPARSE_NATIVE_LENGTH_SELECTIONS.load(Ordering::Relaxed),
     }
 }
 
@@ -618,8 +624,9 @@ fn try_start<'a>(
     Ok(Some(parallel))
 }
 
-/// Prepare disjoint global phrase statistics while the pinned master loads its
-/// document lengths, then collect exact scores with up to seven extra readers.
+/// Prepare disjoint global phrase statistics, normally overlapping the master's
+/// document-length work. Cold complex queries with a small exact phrase-hit bound
+/// may skip the full length scan and score serially with native per-match sizes.
 /// Preparation/revision races retain serial scoring on the master's snapshot;
 /// SQL/data failures propagate. None requests the existing SQL paging fallback
 /// when the bounded ranking budget cannot retain this complete result.
@@ -671,19 +678,56 @@ fn collect_inner(
     } else {
         None
     };
-    // Workers are already past the verified snapshot gate and enumerating
-    // disjoint DFs while the root alone reads or reuses its owned docsize cache.
-    let lengths = provider.rank_document_lengths(
-        tx,
-        cache_eligible.then_some(revision),
-        cancel.map(Arc::as_ref),
-    )?;
+    // Probe without loading: a warm cache keeps the existing overlap/score path.
+    // Like rank_document_lengths(), reuse requires this request's stable revision;
+    // the Arc remains owned by this pinned snapshot even if a later commit occurs.
+    let cached_lengths = if cache_eligible {
+        provider
+            .document_lengths
+            .lock()
+            .map_err(|_| Error::Database("Document-length cache lock was poisoned".into()))?
+            .as_ref()
+            .filter(|(cached_revision, _)| *cached_revision == revision)
+            .map(|(_, lengths)| lengths.clone())
+    } else {
+        None
+    };
+    let defer_lengths = parallel.is_some() && cached_lengths.is_none() && plan.has_complex_phrase();
+    let load_lengths = || {
+        provider.rank_document_lengths(
+            tx,
+            cache_eligible.then_some(revision),
+            cancel.map(Arc::as_ref),
+        )
+    };
+    // Two-letter and other single-token phrases still overlap all DF work with
+    // length loading. Only a cold positional phrase first waits for exact DFs.
+    let mut lengths = if defer_lengths {
+        None
+    } else if cached_lengths.is_some() {
+        cached_lengths
+    } else {
+        load_lengths()?
+    };
+    let prepared_parallel = if let Some(mut active) = parallel.take() {
+        if let Some(partials) = active.partials(cancel)? {
+            plan.complete_preparation(partials)?;
+            Some(active)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let sparse_native_lengths =
+        defer_lengths && prepared_parallel.is_some() && plan.sparse_native_lengths();
+    if defer_lengths && !sparse_native_lengths {
+        check_cancel(cancel)?;
+        lengths = load_lengths()?;
+    }
     let has_lengths = lengths.is_some();
     plan.set_lengths(lengths)?;
-    if let Some(mut active) = parallel.take()
-        && let Some(partials) = active.partials(cancel)?
-    {
-        plan.complete_preparation(partials)?;
+    if let Some(mut active) = prepared_parallel {
         let cuts = plan
             .split_points()
             .or(fixture_cuts)
@@ -708,13 +752,17 @@ fn collect_inner(
         }
     }
     check_cancel(cancel)?;
-    // Sparse or oversized docsize layouts retain SQLite's true native rank
-    // path. An incomplete preparation likewise lets this root cursor initialize
-    // global statistics once, without using partial results from other readers.
-    let _registration = has_lengths
+    // Intentional sparse selection reuses every prepared global IDF and the exact
+    // private score expression; score() obtains xColumnSize(-1) only for a match.
+    // Unsuitable docsize layouts retain the existing true native-rank fallback.
+    if sparse_native_lengths {
+        SPARSE_NATIVE_LENGTH_SELECTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    let use_private_rank = has_lengths || sparse_native_lengths;
+    let _registration = use_private_rank
         .then(|| search_bm25::register_prepared(tx, plan.clone()))
         .transpose()?;
-    let sql = if has_lengths {
+    let sql = if use_private_rank {
         "SELECT rowid,rank FROM audio_search WHERE audio_search MATCH ?1
          AND rank MATCH 'audiolib_bm25()' ORDER BY rowid ASC"
     } else {
@@ -1034,6 +1082,208 @@ mod tests {
                 assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
             }
         }
+    }
+
+    #[test]
+    fn cold_complex_sparse_collection_skips_full_lengths_and_warm_scores_keep_bits() {
+        let (_directory, provider) = fixture();
+        let mut reader = provider.reader().unwrap();
+        let tx = reader.transaction().unwrap();
+        tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+        let revision = provider.observe_search_revision().unwrap();
+        let query = crate::compile_query(&provider.tokenizer, "rare").unwrap();
+        let expected = native(&tx, &query);
+        let collect = |plan| {
+            collect_inner(
+                &provider,
+                &tx,
+                plan,
+                Snapshot {
+                    revision,
+                    cache_eligible: true,
+                    cancel: None,
+                },
+                Some(fixture_cuts()),
+                AUXILIARY_READERS_MAX,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let cold_plan = search_bm25::Prepared::empty(query.clone());
+        let cold = collect(cold_plan.clone());
+        assert_eq!(cold.len(), 17);
+        assert!(cold_plan.sparse_native_lengths());
+        assert!(!cold_plan.has_cached_lengths());
+        assert!(provider.document_lengths.lock().unwrap().is_none());
+        assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+        assert_native_ranking(&cold, &expected);
+
+        // A stable suitable snapshot would publish full lengths if that scan ran.
+        // Populate it independently, then verify warm collection keeps the Arc
+        // and exactly the cold per-match score bits, rather than forcing a skip.
+        let lengths = provider
+            .rank_document_lengths(&tx, Some(revision), None)
+            .unwrap()
+            .unwrap();
+        let warm_plan = search_bm25::Prepared::empty(query);
+        let warm = collect(warm_plan.clone());
+        assert!(warm_plan.has_cached_lengths());
+        assert!(Arc::ptr_eq(
+            &lengths,
+            &provider
+                .document_lengths
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .1
+        ));
+        assert_eq!(
+            cold.iter()
+                .map(|(id, score)| (*id, score.to_bits()))
+                .collect::<Vec<_>>(),
+            warm.iter()
+                .map(|(id, score)| (*id, score.to_bits()))
+                .collect::<Vec<_>>()
+        );
+        assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn two_letter_and_common_complex_queries_keep_full_length_collection() {
+        for (query, complex, sparse) in [("ar", false, true), ("metal", true, false)] {
+            let (_directory, provider) = fixture();
+            // Direct fixture inserts leave derived columns empty; a fragment
+            // requires the same current positional index as a real library.
+            provider
+                .maintain_library(audiolib_core::MaintenanceAction::RebuildSearch)
+                .unwrap();
+            let mut reader = provider.reader().unwrap();
+            let tx = reader.transaction().unwrap();
+            tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+            let query = crate::compile_query(&provider.tokenizer, query).unwrap();
+            let expected = native(&tx, &query);
+            let plan = search_bm25::Prepared::empty(query);
+            let actual = collect_inner(
+                &provider,
+                &tx,
+                plan.clone(),
+                Snapshot {
+                    revision: provider.observe_search_revision().unwrap(),
+                    cache_eligible: true,
+                    cancel: None,
+                },
+                Some(fixture_cuts()),
+                AUXILIARY_READERS_MAX,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(plan.has_complex_phrase(), complex);
+            assert_eq!(plan.sparse_native_lengths(), sparse);
+            assert!(plan.has_cached_lengths());
+            assert!(provider.document_lengths.lock().unwrap().is_some());
+            assert_native_ranking(&actual, &expected);
+            assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn sparse_native_length_errors_propagate_and_release_workers() {
+        let (_directory, provider) = fixture();
+        Connection::open(provider.database_path())
+            .unwrap()
+            .execute(
+                "UPDATE audio_search_docsize SET sz=x'80' WHERE id=?1",
+                [i64::MIN],
+            )
+            .unwrap();
+        let mut reader = provider.reader().unwrap();
+        let tx = reader.transaction().unwrap();
+        tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+        let query = crate::compile_query(&provider.tokenizer, "rare").unwrap();
+        let plan = search_bm25::Prepared::empty(query.clone());
+        assert!(
+            tx.query_row(
+                "SELECT bm25(audio_search) FROM audio_search WHERE audio_search MATCH ?1 LIMIT 1",
+                [&query],
+                |row| row.get::<_, f64>(0),
+            )
+            .is_err()
+        );
+        let actual = collect_inner(
+            &provider,
+            &tx,
+            plan.clone(),
+            Snapshot {
+                revision: provider.observe_search_revision().unwrap(),
+                cache_eligible: true,
+                cancel: None,
+            },
+            Some(fixture_cuts()),
+            AUXILIARY_READERS_MAX,
+        );
+        assert!(matches!(actual, Err(Error::Database(_))));
+        assert!(plan.sparse_native_lengths());
+        assert!(!plan.has_cached_lengths());
+        assert!(provider.document_lengths.lock().unwrap().is_none());
+        assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancelling_prepared_sparse_query_does_not_leave_score_waiters() {
+        let (_directory, provider) = fixture();
+        let mut reader = provider.reader().unwrap();
+        let tx = reader.transaction().unwrap();
+        tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+        let query = crate::compile_query(&provider.tokenizer, "rare").unwrap();
+        let plan = search_bm25::Prepared::empty(query);
+        assert!(search_bm25::prepare_layout(&tx, &plan).unwrap());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut active = try_start(
+            &provider,
+            plan.clone(),
+            provider.observe_search_revision().unwrap(),
+            Some(&cancelled),
+            Some(fixture_cuts()),
+            AUXILIARY_READERS_MAX,
+        )
+        .unwrap()
+        .unwrap();
+        plan.complete_preparation(active.partials(Some(&cancelled)).unwrap().unwrap())
+            .unwrap();
+        assert!(plan.sparse_native_lengths());
+        cancelled.store(true, Ordering::Release);
+        active.score_gate.decide(false);
+        assert!(matches!(
+            active.finish(),
+            Err(WorkerFailure::Unavailable(_))
+        ));
+        drop(active);
+        assert!(!provider.parallel_rank_reserved.load(Ordering::Acquire));
+        assert!(matches!(
+            check_cancel(Some(&cancelled)),
+            Err(Error::Cancelled)
+        ));
+        assert!(provider.document_lengths.lock().unwrap().is_none());
+        assert_eq!(
+            provider
+                .search(&SearchRequest::default())
+                .unwrap()
+                .total_count,
+            512
+        );
     }
 
     #[test]
