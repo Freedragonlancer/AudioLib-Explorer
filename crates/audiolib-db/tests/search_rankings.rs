@@ -1,7 +1,8 @@
 // crates/audiolib-db/tests/search_rankings.rs
 //! Cached ranking identities retain exact BM25 order while reading current owned DTOs.
 use audiolib_core::{
-    DataProvider, Error, FileVisibility, MetadataPatch, SearchFilters, SearchPage, SearchRequest,
+    DataProvider, Error, FileVisibility, MaintenanceAction, MetadataPatch, SearchFilters,
+    SearchPage, SearchRequest, SortOrder,
 };
 use audiolib_db::SqliteProvider;
 use rusqlite::{Connection, params, params_from_iter, types::Value};
@@ -52,12 +53,22 @@ fn fixture() -> (tempfile::TempDir, SqliteProvider) {
         .unwrap();
     }
     drop(conn);
+    provider
+        .maintain_library(MaintenanceAction::RebuildSearch)
+        .unwrap();
     (temp, provider)
 }
 
 fn expected(conn: &Connection, request: &SearchRequest) -> Vec<i64> {
+    assert_eq!(
+        request.query, "metal",
+        "This oracle covers the metal fixtures"
+    );
+    // Independent SQL oracle for the public letter-fragment contract: the raw
+    // complete word OR the positional m-e/e-t/t-a/a-l phrase in derived columns.
+    const METAL_QUERY: &str = "({filename user_tags user_notes bwf_description ixml_scene ixml_take} : \"metal\" OR {filename_tokenized user_tags_tokenized user_notes_tokenized bwf_description_tokenized ixml_scene_tokenized ixml_take_tokenized} : \"g00006d000065 g000065000074 g000074000061 g00006100006c\")";
     let mut predicates = vec!["audio_search MATCH ?".to_string()];
-    let mut values = vec![Value::Text("metal".into())];
+    let mut values = vec![Value::Text(METAL_QUERY.into())];
     match request.filters.visibility {
         FileVisibility::Present => predicates.push("af.missing=0".into()),
         FileVisibility::Missing => predicates.push("af.missing=1".into()),
@@ -100,9 +111,26 @@ fn expected(conn: &Connection, request: &SearchRequest) -> Vec<i64> {
         predicates.push("af.user_color COLLATE NOCASE=?".into());
         values.push(Value::Text(value.clone()));
     }
+    let order = match request.order_by {
+        SortOrder::Relevance => "bm25(audio_search)",
+        SortOrder::Filename => "af.filename COLLATE NOCASE",
+        SortOrder::Duration => "af.duration",
+        SortOrder::SampleRate => "af.sample_rate",
+        SortOrder::Modified => "af.modified_at",
+        SortOrder::Channels => "af.channels",
+        // This fixture has only lowercase ASCII user tags and no source tags.
+        SortOrder::Tags => {
+            "COALESCE(NULLIF(trim(af.user_tags),''),af.source_tags_text) COLLATE NOCASE"
+        }
+    };
+    let direction = if request.descending && request.order_by != SortOrder::Relevance {
+        "DESC"
+    } else {
+        "ASC"
+    };
     conn.prepare(&format!(
         "SELECT af.id FROM audio_files af JOIN audio_search ON audio_search.rowid=af.id
-         WHERE {} ORDER BY bm25(audio_search),af.id",
+         WHERE {} ORDER BY {order} {direction},af.id ASC",
         predicates.join(" AND ")
     ))
     .unwrap()
@@ -128,6 +156,50 @@ fn assert_exact(conn: &Connection, request: &SearchRequest, page: &SearchPage) {
     assert_eq!(page.returned_count, page.results.len());
     for row in &page.results {
         assert_eq!(row.attributes["private"]["identity"], row.id);
+    }
+}
+
+#[test]
+fn alternative_sorts_with_complex_filters_keep_counts_pages_and_metadata_exact() {
+    let (_temp, provider) = fixture();
+    let conn = Connection::open(provider.database_path()).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET filename='metal '||printf('%03d',73-id)||'.wav'",
+        [],
+    )
+    .unwrap();
+    provider
+        .maintain_library(MaintenanceAction::RebuildSearch)
+        .unwrap();
+    for order_by in [
+        SortOrder::Relevance,
+        SortOrder::Filename,
+        SortOrder::Duration,
+        SortOrder::SampleRate,
+        SortOrder::Modified,
+        SortOrder::Channels,
+        SortOrder::Tags,
+    ] {
+        for descending in [false, true] {
+            for offset in [0, 3, 100] {
+                let request = SearchRequest {
+                    query: "metal".into(),
+                    folder_id: Some(1),
+                    include_subfolders: true,
+                    filters: SearchFilters {
+                        sample_rate: Some(48_000),
+                        duration_min: Some(0.0),
+                        duration_max: Some(5.0),
+                        ..Default::default()
+                    },
+                    order_by,
+                    descending,
+                    offset,
+                    limit: 7,
+                };
+                assert_exact(&conn, &request, &provider.search(&request).unwrap());
+            }
+        }
     }
 }
 
@@ -170,6 +242,9 @@ fn dense_missing_rows_keep_filtered_rankings_exact() {
         )
         .unwrap();
     }
+    provider
+        .maintain_library(MaintenanceAction::RebuildSearch)
+        .unwrap();
     for visibility in [
         FileVisibility::Present,
         FileVisibility::Missing,
@@ -227,6 +302,9 @@ fn mixed_epoch_clusters_keep_filtered_bm25_pages_exact() {
         [EPOCH * 2],
     )
     .unwrap();
+    provider
+        .maintain_library(MaintenanceAction::RebuildSearch)
+        .unwrap();
     for visibility in [
         FileVisibility::Present,
         FileVisibility::Missing,

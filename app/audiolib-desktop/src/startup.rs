@@ -28,7 +28,14 @@ pub(crate) enum StartupProgress {
 }
 
 impl StartupProgress {
-    pub(crate) fn label(self, chinese: bool) -> &'static str {
+    pub(crate) fn label(self, chinese: bool) -> String {
+        if let Self::Remote(CachePreparation::Tokenizing { completed, total }) = self {
+            return if chinese {
+                format!("正在重建搜索文本 · 已处理 {completed}/{total} 条")
+            } else {
+                format!("Rebuilding search text · {completed}/{total} records")
+            };
+        }
         let (cn, en) = match self {
             Self::Opening => ("正在打开音效库", "Opening the library"),
             Self::Importing => ("正在导入原有音效库", "Importing the existing library"),
@@ -45,12 +52,20 @@ impl StartupProgress {
             Self::Remote(CachePreparation::Upgrading) => {
                 ("正在升级搜索索引", "Upgrading the search index")
             }
+            Self::Remote(CachePreparation::Tokenizing { .. }) => unreachable!(),
+            Self::Remote(CachePreparation::BuildingFts) => {
+                ("正在构建 FTS5 搜索索引", "Building the FTS5 search index")
+            }
+            Self::Remote(CachePreparation::SourceTags) => {
+                ("正在准备提取标签", "Preparing extracted tags")
+            }
             Self::Remote(CachePreparation::Saving) => ("正在保存缓存", "Saving the cache"),
         };
-        if chinese { cn } else { en }
+        if chinese { cn } else { en }.to_owned()
     }
 
-    /// Only the copy stage has a measurable total; all other stages are indeterminate.
+    /// Only page copying is displayed as a percentage. Text counts describe one
+    /// upgrade stage; they must not be mistaken for total startup progress.
     pub(crate) fn fraction(self) -> f32 {
         match self {
             Self::Remote(CachePreparation::Copying { completed, total }) if total > 0 => {
@@ -255,6 +270,28 @@ fn wait_message(chinese: bool, server: bool, closing: bool) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn search_upgrade_labels_show_record_counts_and_fts_stage_in_both_languages() {
+        let text = StartupProgress::Remote(CachePreparation::Tokenizing {
+            completed: 5_000,
+            total: 900_000,
+        });
+        assert_eq!(text.label(true), "正在重建搜索文本 · 已处理 5000/900000 条");
+        assert_eq!(
+            text.label(false),
+            "Rebuilding search text · 5000/900000 records"
+        );
+        assert!(text.fraction() < 0.0);
+        let fts = StartupProgress::Remote(CachePreparation::BuildingFts);
+        assert_eq!(fts.label(true), "正在构建 FTS5 搜索索引");
+        assert_eq!(fts.label(false), "Building the FTS5 search index");
+        assert!(fts.fraction() < 0.0);
+        let tags = StartupProgress::Remote(CachePreparation::SourceTags);
+        assert_eq!(tags.label(true), "正在准备提取标签");
+        assert_eq!(tags.label(false), "Preparing extracted tags");
+        assert!(tags.fraction() < 0.0);
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore = "requires an interactive Windows desktop and real Slint backend"]
@@ -436,9 +473,13 @@ mod tests {
         let ticks = Rc::new(Cell::new(0));
         let saw_copy = Rc::new(Cell::new(false));
         let saw_index = Rc::new(Cell::new(false));
+        let saw_text = Rc::new(Cell::new(false));
+        let saw_fts = Rc::new(Cell::new(false));
         let saw_motion = Rc::new(Cell::new(false));
         let copy = saw_copy.clone();
         let index = saw_index.clone();
+        let text = saw_text.clone();
+        let fts = saw_fts.clone();
         let motion = saw_motion.clone();
         let observed = ticks.clone();
         let weak = ui.as_weak();
@@ -457,6 +498,14 @@ mod tests {
                     assert!(ui.get_startup_progress() < 0.0);
                     index.set(true);
                 }
+                if ui.get_startup_stage() == "Rebuilding search text · 5000/900000 records" {
+                    assert!(ui.get_startup_progress() < 0.0);
+                    text.set(true);
+                }
+                if ui.get_startup_stage() == "Building the FTS5 search index" {
+                    assert!(ui.get_startup_progress() < 0.0);
+                    fts.set(true);
+                }
                 if ui.get_startup_motion() > 0.0 {
                     motion.set(true);
                 }
@@ -472,6 +521,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
             progress(StartupProgress::Remote(CachePreparation::Upgrading));
             std::thread::sleep(Duration::from_millis(200));
+            progress(StartupProgress::Remote(CachePreparation::Tokenizing {
+                completed: 5_000,
+                total: 900_000,
+            }));
+            std::thread::sleep(Duration::from_millis(200));
+            progress(StartupProgress::Remote(CachePreparation::BuildingFts));
+            std::thread::sleep(Duration::from_millis(200));
             Ok(42)
         })
         .unwrap();
@@ -479,6 +535,7 @@ mod tests {
         assert_eq!(value, Some(42));
         assert!(ticks.get() > 3);
         assert!(saw_copy.get() && saw_index.get() && saw_motion.get());
+        assert!(saw_text.get() && saw_fts.get());
         assert!(!ui.get_startup_busy());
         let weak = ui.as_weak();
         timer.start(

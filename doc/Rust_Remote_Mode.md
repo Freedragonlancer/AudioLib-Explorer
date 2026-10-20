@@ -270,8 +270,17 @@ matching old cache, with the original failure still visible. A failed preparatio
 that old cache is not immediately attempted again in the same sync.
 
 The manager shows the actual copy/download fraction, bilingual preparation stages and
-elapsed time. Unknown-duration integrity checks and index upgrades show an animated
-bar, without an estimated percentage. The source-change gate preserves drafts while
+elapsed time. Search-text upgrades report completed records in batches of 5,000,
+followed by separate FTS5 construction and extracted-tag stages. These counts describe
+the text stage only; integrity checks and FTS5 construction keep an animated bar
+without an estimated percentage. Owned upgrades use a 64 MiB SQLite page cache and
+memory-backed temporary work, retaining rollback-journal mode and its durability.
+All text batches and the FTS5 rebuild share one transaction. Cancellation before its
+commit rolls back that transaction; cancellation later in preparation discards only
+the owned staging copy. The original cache and its readers remain available.
+Stage transitions, bounded five-second text-progress logs and upgrade timings help
+distinguish a large rebuild from a stalled worker without logging Metadata or secrets.
+The source-change gate preserves drafts while
 leaving this progress visible through the final provider-open stage. Closing drains
 the cache worker before releasing the desktop instance lease. Original integrity
 checks and owned-copy safety are retained;

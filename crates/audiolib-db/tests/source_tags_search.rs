@@ -346,13 +346,25 @@ fn escaped_source_key_repairs_owned_snapshot_without_changing_original() {
         [r#"{"wav_metadata":{"fields":{"\u006beywords":"OnlySource"}}}"#],
     )
     .unwrap();
-    conn.execute_batch("UPDATE library_meta SET value='1' WHERE key='source_tags_rev'")
-        .unwrap();
+    // This fixture predates positional fragment text: its ordinary derived
+    // word and revision marker must agree so the owned copy rebuilds it.
+    conn.execute_batch(
+        "UPDATE library_meta SET value='1' WHERE key='source_tags_rev';
+         UPDATE audiolib_schema_features SET version=1 WHERE feature='tokenization';",
+    )
+    .unwrap();
     drop(conn);
     let original = std::fs::read(&path).unwrap();
     let provider = SqliteProvider::open_read_only(&path).unwrap();
     assert_ne!(provider.database_path(), path.as_path());
     assert_eq!(ids(&provider, "OnlySource", Default::default()), [2]);
+    assert_eq!(ids(&provider, "lySou", Default::default()), [2]);
+    let file = provider.get_audio(2).unwrap();
+    assert_eq!(file.tags, "");
+    assert_eq!(
+        file.attributes["wav_metadata"]["fields"]["keywords"],
+        "OnlySource"
+    );
     assert_eq!(
         ids(
             &provider,
@@ -365,6 +377,54 @@ fn escaped_source_key_repairs_owned_snapshot_without_changing_original() {
         [2]
     );
     assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn extracted_compound_codes_keep_numeric_and_single_letter_components_searchable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    make_library(&path);
+    let keywords = "FX_123 A.wav 1_AB_2 4_5";
+    let metadata = tags_json(keywords, "");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET metadata_json=?1 WHERE id=2",
+        [&metadata],
+    )
+    .unwrap();
+    drop(conn);
+    let provider = SqliteProvider::open_existing(&path).unwrap();
+    provider
+        .maintain_library(audiolib_core::MaintenanceAction::RebuildSearch)
+        .unwrap();
+    for query in ["123", "fx 123", "a wav", "A.wav", "4.5", "x_12"] {
+        assert_eq!(ids(&provider, query, Default::default()), [2], "{query}");
+    }
+    for query in ["1.2", "fx123"] {
+        assert!(
+            ids(&provider, query, Default::default()).is_empty(),
+            "{query}"
+        );
+    }
+    let file = provider.get_audio(2).unwrap();
+    assert_eq!(file.tags, "");
+    assert_eq!(
+        file.attributes["wav_metadata"]["fields"]["keywords"],
+        keywords
+    );
+    let stored: String = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, metadata);
+    let readonly = SqliteProvider::open_read_only(&path).unwrap();
+    assert_eq!(ids(&readonly, "123", Default::default()), [2]);
+    assert_eq!(ids(&readonly, "a wav", Default::default()), [2]);
+    assert!(ids(&readonly, "1.2", Default::default()).is_empty());
 }
 
 #[test]
@@ -407,7 +467,9 @@ fn old_snapshots_without_the_column_repair_owned_tags_without_changing_source() 
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "DROP INDEX idx_audio_visible_tagged_any; ALTER TABLE audio_files DROP COLUMN source_tags_text;
+            "DROP INDEX idx_audio_visible_tagged_any;
+             DROP INDEX idx_audio_visible_tagged_folders;
+             ALTER TABLE audio_files DROP COLUMN source_tags_text;
              DELETE FROM library_meta WHERE key LIKE 'source_tags%';",
         )
         .unwrap();

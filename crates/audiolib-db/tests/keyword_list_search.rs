@@ -43,17 +43,6 @@ fn search(provider: &SqliteProvider, query: &str) -> u64 {
         .total_count
 }
 
-fn fts(path: &Path, term: &str) -> i64 {
-    Connection::open(path)
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM audio_search WHERE audio_search MATCH ?1",
-            [format!("\"{term}\"")],
-            |row| row.get(0),
-        )
-        .unwrap()
-}
-
 #[test]
 fn semicolon_keyword_list_items_are_all_searchable() {
     let temp = tempfile::tempdir().unwrap();
@@ -61,6 +50,9 @@ fn semicolon_keyword_list_items_are_all_searchable() {
     fs::create_dir(&root).unwrap();
     wav(&root.join("a.wav"), "Zebragroan; thunderclap");
     wav(&root.join("b.wav"), "Zebragroan; thunderclap");
+    let source_bytes: Vec<_> = ["a.wav", "b.wav"]
+        .map(|name| (root.join(name), fs::read(root.join(name)).unwrap()))
+        .into();
     let db = temp.path().join("library.db");
     let provider = Arc::new(SqliteProvider::open(&db).unwrap());
     ScanService::new(provider.clone())
@@ -71,16 +63,34 @@ fn semicolon_keyword_list_items_are_all_searchable() {
             |_| {},
         )
         .unwrap();
+    let source_metadata: Vec<_> = provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .into_iter()
+        .map(|file| (file.id, file.attributes))
+        .collect();
     let check = |stage: &str| {
-        for term in ["zebragroan", "thunderclap", "Thunderclap"] {
-            assert_eq!(fts(&db, &term.to_lowercase()), 2, "{stage}: fts {term}");
+        for term in [
+            "zebragroan",
+            "thunderclap",
+            "Thunderclap",
+            "zebra",
+            "groan",
+            "under",
+            "clap",
+        ] {
             assert_eq!(search(&provider, term), 2, "{stage}: search {term}");
         }
-        assert_eq!(
-            search(&provider, "zebragroan thunderclap"),
-            2,
-            "{stage}: both"
-        );
+        for query in ["zebragroan thunderclap", "groan clap"] {
+            assert_eq!(search(&provider, query), 2, "{stage}: {query}");
+        }
+        for (id, metadata) in &source_metadata {
+            assert_eq!(&provider.get_audio(*id).unwrap().attributes, metadata);
+        }
+        for (path, bytes) in &source_bytes {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+        }
     };
     check("after scan");
     provider
@@ -109,8 +119,15 @@ fn sql_seeded_metadata_json_keywords_are_searchable_after_rebuild() {
     provider
         .maintain_library(MaintenanceAction::RebuildSearch)
         .unwrap();
-    for term in ["zebragroan", "thunderclap"] {
+    for term in ["zebragroan", "thunderclap", "groan", "under", "groan clap"] {
         assert_eq!(search(&provider, term), 2, "{term}");
-        assert_eq!(fts(&db, term), 2, "fts {term}");
+    }
+    for id in [364, 2104] {
+        let file = provider.get_audio(id).unwrap();
+        assert_eq!(
+            file.attributes,
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        assert_eq!(file.tags, "");
     }
 }

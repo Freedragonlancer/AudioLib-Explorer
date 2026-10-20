@@ -2947,6 +2947,17 @@ impl Controller {
         ui.set_searching(false);
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
+        if request.needs_more_search_text() {
+            ui.set_status(
+                if self.chinese.load(Ordering::Acquire) {
+                    "字母搜索请至少输入 2 个字符"
+                } else {
+                    "Enter at least 2 characters for a letter search"
+                }
+                .into(),
+            );
+            return;
+        }
         request.limit = PAGE_SIZE;
         if reset {
             request.offset = 0;

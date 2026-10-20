@@ -528,6 +528,10 @@ impl SqliteProvider {
             let mut target = Connection::open(stage.path()).map_err(db_error)?;
             copy_database(&src, &mut target)?;
             schema::register_tokenizer(&target, self.tokenizer.clone())?;
+            // A derived-state upgrade recreates the FTS table and triggers.
+            // Validate the original owned snapshot first so that rebuilding
+            // cannot conceal damaged postings or synchronization triggers.
+            checked(&check_connection(&target)?)?;
             schema::migrate(&mut target)?;
             schema::backfill_source_tags(&mut target)?;
             // A restore may bring back fewer/lower IDs than this installation has

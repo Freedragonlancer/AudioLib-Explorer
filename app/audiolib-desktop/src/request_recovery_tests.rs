@@ -135,6 +135,102 @@ fn release_metadata_barrier(controller: &Controller) {
 }
 
 #[test]
+fn a_lone_letter_cancels_searches_and_rejects_late_publications() {
+    isolated("child_a_lone_letter_cancels_searches");
+}
+
+#[test]
+#[ignore = "isolated Slint short-query cancellation and publication helper"]
+fn child_a_lone_letter_cancels_searches() {
+    let (_provider, _engine, ui, controller) = fixture();
+    let retained_folders = Arc::new(vec![Folder {
+        id: 999,
+        name: "Retained navigation".into(),
+        file_count: 1,
+        ..Default::default()
+    }]);
+    controller.tree.lock().unwrap().matches = retained_folders.clone();
+    publish_audio_rows(
+        &ui,
+        vec![audio_row(&AudioFile {
+            id: 999,
+            filename: "Retained.wav".into(),
+            ..Default::default()
+        })],
+    );
+    for (query, chinese, immediate) in [("e", true, false), (" (e\u{301}) ", false, true)] {
+        ui.set_query("A.wav".into());
+        controller.request_search(&ui, false, true);
+        let previous_cancel = controller.search_cancel.lock().unwrap().clone();
+        let previous_generation = controller.search_generation.load(Ordering::Acquire);
+        let previous_tree = controller.tree_generation.load(Ordering::Acquire);
+        controller.chinese.store(chinese, Ordering::Release);
+        ui.set_chinese(chinese);
+        ui.set_query(query.into());
+        controller.request_search(&ui, immediate, true);
+        assert!(previous_cancel.load(Ordering::Acquire));
+        assert!(controller.search_generation.load(Ordering::Acquire) > previous_generation);
+        assert!(controller.tree_generation.load(Ordering::Acquire) > previous_tree);
+        assert!(controller.search_job.lock().unwrap().is_none());
+        assert!(controller.facet_job.lock().unwrap().is_none());
+        assert!(controller.search_publication.lock().unwrap().is_none());
+        assert!(!ui.get_searching());
+        assert_eq!(
+            ui.get_status(),
+            if chinese {
+                "字母搜索请至少输入 2 个字符"
+            } else {
+                "Enter at least 2 characters for a letter search"
+            }
+        );
+        // Completions from an already-running page/facet query cannot restore its
+        // publication state or replace the navigation while the input is waiting.
+        controller.search_page_published(&ui, previous_generation, true);
+        controller.search_folders_computed(&ui, previous_generation, Ok(Arc::new(Vec::new())));
+        assert!(controller.search_publication.lock().unwrap().is_none());
+        assert!(Arc::ptr_eq(
+            &controller.tree.lock().unwrap().matches,
+            &retained_folders
+        ));
+    }
+    let c = controller.clone();
+    let window = ui.as_weak();
+    let started = Instant::now();
+    let stage = Rc::new(Cell::new(0));
+    let observed = stage.clone();
+    run_until(&ui, move || {
+        let ui = window.upgrade().unwrap();
+        match observed.get() {
+            0 if started.elapsed() >= Duration::from_millis(220) => {
+                assert!(!ui.get_searching());
+                assert_eq!(ui.get_rows().row_count(), 1);
+                assert_eq!(ui.get_rows().row_data(0).unwrap().name, "Retained.wav");
+                assert_eq!(
+                    ui.get_status(),
+                    "Enter at least 2 characters for a letter search"
+                );
+                assert!(c.search_job.lock().unwrap().is_none());
+                assert!(c.facet_job.lock().unwrap().is_none());
+                assert!(c.search_publication.lock().unwrap().is_none());
+                assert!(Arc::ptr_eq(
+                    &c.tree.lock().unwrap().matches,
+                    &retained_folders
+                ));
+                ui.set_query("".into());
+                c.request_search(&ui, true, true);
+                observed.set(1);
+            }
+            1 if page_published(&c) && ui.get_rows().row_count() == 2 => return true,
+            _ => {}
+        }
+        false
+    });
+    controller.shutdown();
+    ui.hide().unwrap();
+    assert_eq!(stage.get(), 1);
+}
+
+#[test]
 fn selection_completion_tracks_the_current_page_identity() {
     isolated("child_selection_completion_tracks_page");
 }
@@ -179,7 +275,7 @@ fn child_selection_completion_tracks_page() {
             4 if ui.get_selected_name() == "A.wav" && ui.get_audio_ready() => {
                 hold_metadata_barrier(&c);
                 c.select_row(1, false, false, false);
-                ui.set_query("A".into());
+                ui.set_query("A.wav".into());
                 c.request_search(&ui, true, true);
                 observed.set(5);
             }
@@ -238,7 +334,7 @@ fn child_failed_close_resumes_reads() {
                 ui.set_edit_notes("must survive failed close".into());
                 ui.set_metadata_dirty(true);
                 c.select_row(1, false, false, true);
-                ui.set_query("B".into());
+                ui.set_query("B.wav".into());
                 // Recovery must also retain the save error when a shrinking
                 // result set forces the page worker to correct the old offset.
                 c.request.lock().unwrap().offset = PAGE_SIZE;
@@ -252,7 +348,7 @@ fn child_failed_close_resumes_reads() {
                 && page_published(&c)
                 && ui.get_waveform_ready() =>
             {
-                assert_eq!(ui.get_query(), "B");
+                assert_eq!(ui.get_query(), "B.wav");
                 assert_eq!(ui.get_rows().row_count(), 1);
                 assert_eq!(ui.get_rows().row_data(0).unwrap().name, "B.wav");
                 assert_eq!(c.tree.lock().unwrap().matches[0].file_count, 1);

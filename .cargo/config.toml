@@ -8,4 +8,11 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # Prevent asio-sys from implicitly downloading an unpinned SDK when ASIO is enabled.
 # Prepare this fixed directory with tools/prepare-asio.ps1 before an ASIO build.
 CPAL_ASIO_DIR = { value = "tools/.build-tools/asio-2.3.4/ASIOSDK", relative = true }
+# Independent search readers must not serialize every allocation on SQLite's
+# global memory-statistics mutex. Keep SQLite's thread safety and cache limits;
+# this application does not use its global memory-status/heap-limit interfaces.
+# Large x64 libraries can place FTS5/covering indexes past SQLite's default 2 GiB
+# mapping ceiling. This is a virtual, demand-paged limit; the VFS may fall back
+# to ordinary reads without allocating this amount of resident memory.
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_MMAP_SIZE=68719476736LL"
 

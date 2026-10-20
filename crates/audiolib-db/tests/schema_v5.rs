@@ -106,7 +106,9 @@ fn downgrade(path: &Path, version: i64) {
     }
     // Pre-v5 libraries have neither the derived column nor its marker/index.
     conn.execute_batch(&format!(
-        "DROP INDEX IF EXISTS {NEW_TAG_INDEX}; ALTER TABLE audio_files DROP COLUMN source_tags_text;
+        "DROP INDEX IF EXISTS {NEW_TAG_INDEX};
+         DROP INDEX IF EXISTS idx_audio_visible_tagged_folders;
+         ALTER TABLE audio_files DROP COLUMN source_tags_text;
          DELETE FROM library_meta WHERE key LIKE 'source_tags%';
          CREATE INDEX {OLD_TAG_INDEX} ON audio_files(filename COLLATE NOCASE,id) WHERE missing=0 AND COALESCE(trim(user_tags),'')<>'';"
     ))

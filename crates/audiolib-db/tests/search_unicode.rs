@@ -61,7 +61,7 @@ fn names(provider: &SqliteProvider, query: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn scanner_search_keeps_unicode_words_and_does_not_match_fragments() {
+fn scanner_search_keeps_unicode_words_and_does_not_merge_separate_words() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("audio");
     fs::create_dir(&root).unwrap();
@@ -115,7 +115,7 @@ fn embedded_source_words_and_chinese_search_survive_rebuild() {
     let root = temp.path().join("audio");
     fs::create_dir(&root).unwrap();
     wav(
-        &root.join("embedded.wav"),
+        &root.join("source.wav"),
         Some("café 爆炸声音 数字音频工作站"),
     );
     let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
@@ -139,7 +139,7 @@ fn embedded_source_words_and_chinese_search_survive_rebuild() {
         ] {
             assert_eq!(
                 names(&provider, query),
-                BTreeSet::from(["embedded.wav".into()]),
+                BTreeSet::from(["source.wav".into()]),
                 "{query}"
             );
         }
@@ -311,7 +311,7 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
             |row| row.get::<_, i64>(0)
         )
         .unwrap(),
-        1
+        3
     );
     drop(conn);
     drop(SqliteProvider::open_existing(&database).unwrap());
@@ -325,4 +325,347 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
         .unwrap(),
         rootpage
     );
+}
+
+fn recreate_legacy_porter_index(path: &Path, source_words: &str) {
+    let mut conn = Connection::open(path).unwrap();
+    let table: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='audio_search'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let triggers: Vec<String> = conn
+        .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type='trigger'
+             AND name IN ('audio_files_ai','audio_files_au','audio_files_ad') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(triggers.len(), 3);
+    let columns = table.split_once("content='audio_files'").unwrap().0;
+    let legacy_table = format!(
+        "{columns}content='audio_files',content_rowid='id',
+         tokenize='porter unicode61 remove_diacritics 2');"
+    );
+    let tx = conn.transaction().unwrap();
+    tx.execute_batch(
+        "DROP TRIGGER audio_files_ai; DROP TRIGGER audio_files_au;
+         DROP TRIGGER audio_files_ad; DROP TABLE audio_search;",
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE audio_files SET filename_tokenized=filename,
+         user_tags_tokenized=user_tags,user_notes_tokenized=user_notes,
+         bwf_description_tokenized=?1,ixml_scene_tokenized=ixml_scene,
+         ixml_take_tokenized=ixml_take",
+        [source_words],
+    )
+    .unwrap();
+    tx.execute_batch(&legacy_table).unwrap();
+    for trigger in triggers {
+        tx.execute_batch(&trigger).unwrap();
+    }
+    tx.execute(
+        "INSERT INTO audio_search(audio_search) VALUES('rebuild')",
+        [],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE audiolib_schema_features SET version=1 WHERE feature='tokenization'",
+        [],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+}
+
+fn retained_business_data(provider: &SqliteProvider, id: i64) -> serde_json::Value {
+    serde_json::json!({
+        "audio": provider.get_audio(id).unwrap(),
+        "scans": provider.scan_history(10, 0).unwrap(),
+        "plays": provider.play_history(10, 0).unwrap(),
+    })
+}
+
+fn assert_explosion_fragments(provider: &SqliteProvider) {
+    for end in 2..="explosion".len() {
+        let query = &"explosion"[..end];
+        assert_eq!(
+            names(provider, query),
+            BTreeSet::from(["explosion.wav".into()]),
+            "{query}"
+        );
+    }
+    for query in ["plos", "sion"] {
+        assert_eq!(
+            names(provider, query),
+            BTreeSet::from(["explosion.wav".into()]),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn real_porter_v1_index_upgrades_owned_readers_and_writers_without_business_data_loss() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    fs::create_dir(&root).unwrap();
+    let audio = root.join("explosion.wav");
+    wav(&audio, Some("café 爆炸声音"));
+    let source_audio = fs::read(&audio).unwrap();
+    let database = temp.path().join("library.db");
+    let provider = Arc::new(SqliteProvider::open(&database).unwrap());
+    scan(&provider, &root);
+    let id = provider.search(&SearchRequest::default()).unwrap().results[0].id;
+    provider
+        .update_metadata(
+            id,
+            &MetadataPatch {
+                tags: Some("Retain 私人".into()),
+                notes: Some("Keep notes".into()),
+                favorite: Some(true),
+                color: Some("#AABBCC".into()),
+            },
+        )
+        .unwrap();
+    provider.record_play(id).unwrap();
+    let original = retained_business_data(&provider, id);
+    drop(provider);
+    recreate_legacy_porter_index(&database, "café 爆炸 声音");
+    let source_database = fs::read(&database).unwrap();
+    assert!(!SqliteProvider::has_current_search_text(&database).unwrap());
+    assert!(SqliteProvider::check_owned_file(&database).unwrap().is_ok());
+
+    let readonly = SqliteProvider::open_read_only(&database).unwrap();
+    assert_ne!(readonly.database_path(), database.as_path());
+    assert!(SqliteProvider::has_current_search_text(readonly.database_path()).unwrap());
+    let owned_directory = readonly.database_path().parent().unwrap().to_path_buf();
+    assert_explosion_fragments(&readonly);
+    assert_eq!(retained_business_data(&readonly, id), original);
+    assert_eq!(fs::read(&database).unwrap(), source_database);
+    assert_eq!(fs::read(&audio).unwrap(), source_audio);
+    drop(readonly);
+    assert!(!owned_directory.exists());
+    assert_eq!(fs::read(&database).unwrap(), source_database);
+
+    let provider = SqliteProvider::open_existing(&database).unwrap();
+    assert_explosion_fragments(&provider);
+    assert_eq!(retained_business_data(&provider, id), original);
+    assert!(provider.check_library().unwrap().is_ok());
+    assert!(SqliteProvider::has_current_search_text(&database).unwrap());
+    assert_eq!(fs::read(&audio).unwrap(), source_audio);
+    drop(provider);
+    let conn = Connection::open(&database).unwrap();
+    let table_before: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='audio_search'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rootpage: i64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!table_before.contains("porter"));
+    assert!(!table_before.contains("prefix="));
+    assert_eq!(
+        conn.query_row(
+            "SELECT version FROM audiolib_schema_features WHERE feature='tokenization'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        3
+    );
+    drop(conn);
+    let reopened = SqliteProvider::open_existing(&database).unwrap();
+    assert_eq!(retained_business_data(&reopened, id), original);
+    assert_explosion_fragments(&reopened);
+    drop(reopened);
+    let conn = Connection::open(&database).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        rootpage
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='audio_search'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        table_before
+    );
+}
+
+#[test]
+fn restore_checks_legacy_porter_triggers_before_rebuilding_the_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("current.db");
+    let provider = SqliteProvider::open(&database).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    conn.execute_batch(
+        "INSERT INTO audio_files(id,file_path,filename,filename_tokenized,
+         user_tags,user_tags_tokenized,user_notes,user_notes_tokenized,favorite,metadata_json)
+         VALUES(42,'fixture/explosion.wav','explosion.wav','explosion wav',
+         'retain','retain','private notes','private notes',1,'{\"private\":\"keep\"}');",
+    )
+    .unwrap();
+    drop(conn);
+    provider
+        .maintain_library(MaintenanceAction::RebuildSearch)
+        .unwrap();
+    provider.record_play(42).unwrap();
+    let original = retained_business_data(&provider, 42);
+    let legacy = temp.path().join("legacy.db");
+    provider.backup_library(&legacy).unwrap();
+    recreate_legacy_porter_index(&legacy, "");
+    let legacy_bytes = fs::read(&legacy).unwrap();
+
+    for modified in [false, true] {
+        let broken = temp.path().join(format!("broken-{modified}.db"));
+        fs::copy(&legacy, &broken).unwrap();
+        let conn = Connection::open(&broken).unwrap();
+        conn.execute_batch("DROP TRIGGER audio_files_au;").unwrap();
+        if modified {
+            conn.execute_batch(
+                "CREATE TRIGGER audio_files_au AFTER UPDATE ON audio_files
+                 BEGIN SELECT 1; END;",
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let broken_bytes = fs::read(&broken).unwrap();
+        let target_bytes = fs::read(&database).unwrap();
+        let report = SqliteProvider::check_owned_file(&broken).unwrap();
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|error| error.contains("triggers")));
+        let error = provider.restore_library(&broken).unwrap_err();
+        assert!(error.to_string().contains("triggers"), "{error}");
+        assert_eq!(fs::read(&broken).unwrap(), broken_bytes);
+        assert_eq!(fs::read(&database).unwrap(), target_bytes);
+        assert_eq!(retained_business_data(&provider, 42), original);
+        assert_explosion_fragments(&provider);
+    }
+
+    provider.restore_library(&legacy).unwrap();
+    assert!(SqliteProvider::has_current_search_text(&database).unwrap());
+    assert_eq!(retained_business_data(&provider, 42), original);
+    assert_explosion_fragments(&provider);
+    assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+}
+
+#[test]
+fn letter_fragments_require_contiguous_order_within_one_word_and_metadata_field() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    fs::create_dir(&root).unwrap();
+    for name in [
+        "target.wav",
+        "split-words.wav",
+        "split-fields.wav",
+        "wrong-order.wav",
+        "separated.wav",
+        "encoded.wav",
+    ] {
+        wav(&root.join(name), None);
+    }
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    scan(&provider, &root);
+    for file in provider.search(&SearchRequest::default()).unwrap().results {
+        let (tags, notes) = match file.filename.as_str() {
+            "target.wav" => ("explosion", ""),
+            "split-words.wav" => ("pl lo os si io on", ""),
+            "split-fields.wav" => ("pl si", "lo os io on"),
+            "wrong-order.wav" => ("os lo pl on io si", ""),
+            "separated.wav" => ("plxloxos sixioxon", ""),
+            // A user's text resembling internal tokens must stay ordinary text.
+            "encoded.wav" => ("g00007000006c g00006c00006f g00006f000073", ""),
+            other => panic!("Unexpected fixture {other}"),
+        };
+        provider
+            .update_metadata(
+                file.id,
+                &MetadataPatch {
+                    tags: Some(tags.into()),
+                    notes: Some(notes.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    for query in ["plos", "sion", "plos sion"] {
+        assert_eq!(
+            names(&provider, query),
+            BTreeSet::from(["target.wav".into()]),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn letter_fragments_fold_case_accents_and_combining_marks_consistently() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    fs::create_dir(&root).unwrap();
+    for name in ["a.wav", "b.wav", "c.wav", "d.wav", "e.wav", "f.wav"] {
+        wav(&root.join(name), None);
+    }
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    scan(&provider, &root);
+    for file in provider.search(&SearchRequest::default()).unwrap().results {
+        let tags = match file.filename.as_str() {
+            "a.wav" => "café",
+            "b.wav" => "Cafe\u{301}",
+            "c.wav" => "CAFETERIA",
+            "d.wav" => "Straße",
+            "e.wav" => "STRASSE",
+            "f.wav" => "ΑΘΉΝΑ",
+            other => panic!("Unexpected fixture {other}"),
+        };
+        provider
+            .update_metadata(
+                file.id,
+                &MetadataPatch {
+                    tags: Some(tags.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let accents = BTreeSet::from(["a.wav".into(), "b.wav".into(), "c.wav".into()]);
+    for query in ["af", "AF", "afé", "afe\u{301}", "FÉ", "fe\u{301}"] {
+        assert_eq!(names(&provider, query), accents, "{query}");
+    }
+    let expanding_case = BTreeSet::from(["d.wav".into(), "e.wav".into()]);
+    for query in ["rass", "raß", "RAẞ", "aße"] {
+        assert_eq!(names(&provider, query), expanding_case, "{query}");
+    }
+    for query in ["θήν", "ΘΗΝ", "θη\u{301}ν"] {
+        assert_eq!(
+            names(&provider, query),
+            BTreeSet::from(["f.wav".into()]),
+            "{query}"
+        );
+    }
+    let readonly = SqliteProvider::open_read_only(provider.database_path()).unwrap();
+    assert_eq!(names(&readonly, "AFÉ"), accents);
+    assert_eq!(names(&readonly, "rass"), expanding_case);
 }

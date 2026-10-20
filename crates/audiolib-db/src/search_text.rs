@@ -1,8 +1,98 @@
 // crates/audiolib-db/src/search_text.rs
 //! Shared Chinese segmentation and Unicode word boundaries for FTS5 input.
 use audiolib_core::{Error, Result};
+use icu_normalizer::{DecomposingNormalizer, properties::CanonicalCombiningClassMap};
 use jieba_rs::Jieba;
+use std::fmt::Write;
 use unicode_segmentation::UnicodeSegmentation;
+
+const RAW_COLUMNS: &str = "{filename user_tags user_notes bwf_description ixml_scene ixml_take}";
+const DERIVED_COLUMNS: &str = "{filename_tokenized user_tags_tokenized user_notes_tokenized bwf_description_tokenized ixml_scene_tokenized ixml_take_tokenized}";
+
+fn has_letters(word: &str) -> bool {
+    word.chars()
+        .any(|character| character.is_alphabetic() && !is_han(character))
+}
+
+fn searchable_grapheme_count(word: &str) -> usize {
+    word.graphemes(true)
+        .filter(|grapheme| grapheme.chars().any(char::is_alphanumeric))
+        .count()
+}
+
+// Encoded tokens cannot collide with raw Han/numeric derived
+// terms. Fixed-width scalar pairs preserve punctuation without exposing FTS
+// syntax. Positions, rather than an unordered AND of grams, enforce continuity.
+fn normalized_letters(word: &str) -> Vec<char> {
+    let folded = icu_casemap::CaseMapper::new().fold_string(word);
+    let classes = CanonicalCombiningClassMap::new();
+    DecomposingNormalizer::new_nfd()
+        .normalize_iter(folded.chars())
+        .filter(|character| classes.get_u8(*character) == 0)
+        .map(|character| if character == '_' { '.' } else { character })
+        .collect()
+}
+
+fn letter_bigrams(word: &str) -> Option<String> {
+    if searchable_grapheme_count(word) < 2 {
+        return None;
+    }
+    normalized_bigrams(word)
+}
+
+fn normalized_bigrams(word: &str) -> Option<String> {
+    if !has_letters(word) {
+        return None;
+    }
+    let normalized = normalized_letters(word);
+    if normalized.len() < 2 {
+        return None;
+    }
+    let mut text = String::new();
+    for pair in normalized.windows(2) {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        // Writing into a String is infallible.
+        write!(text, "g{:06x}{:06x}", pair[0] as u32, pair[1] as u32).unwrap();
+    }
+    Some(text)
+}
+
+fn single_letter_token(word: &str) -> String {
+    let mut text = String::from("s");
+    for character in normalized_letters(word) {
+        write!(text, "{:06x}", character as u32).unwrap();
+    }
+    text
+}
+
+// unicode61 treats dot/underscore compounds as separate tokens. Keep their
+// numeric and single-letter components searchable even when source Metadata
+// exists only in a derived column. Guards retain intervening letter positions
+// so, for example, 1_AB_2 cannot become the numeric phrase "1 2".
+fn compound_exact_tokens(word: &str) -> Option<String> {
+    if !has_letters(word) || !word.contains(['.', '_']) {
+        return None;
+    }
+    let mut retained = false;
+    let tokens: Vec<_> = word
+        .split(['.', '_'])
+        .filter(|part| part.chars().any(char::is_alphanumeric))
+        .map(|part| {
+            if !has_letters(part) {
+                retained = true;
+                part.to_owned()
+            } else if searchable_grapheme_count(part) < 2 {
+                retained = true;
+                single_letter_token(part)
+            } else {
+                "z".to_owned()
+            }
+        })
+        .collect();
+    retained.then(|| tokens.join(" "))
+}
 
 // Split ideographic runs before applying Unicode word boundaries: UAX #29 gives
 // individual Han characters, whereas the audio dictionary must keep Chinese words.
@@ -47,10 +137,41 @@ fn words<'a>(jieba: &Jieba, value: &'a str, for_search: bool) -> Vec<&'a str> {
     words
 }
 
-/// Derived search text uses the same Unicode word boundaries as query compilation.
-/// Chinese search-mode expansion retains the existing dictionary subword recall.
+/// Index letter fragments as positional bigrams with linear storage/work.
+/// Word boundaries prevent phrase matches joining unrelated words; Chinese
+/// search-mode expansion and numeric tokens retain their previous semantics.
 pub(crate) fn index_text(jieba: &Jieba, value: &str) -> String {
-    words(jieba, value, true).join(" ")
+    words(jieba, value, true)
+        .into_iter()
+        .flat_map(query_word_parts)
+        .map(|word| {
+            // Input length restricts queries, not indexed normalized text. A
+            // single grapheme such as ß or ﬃ may fold into multiple letters.
+            let grams = normalized_bigrams(word);
+            let keep_single =
+                grams.is_some() && has_letters(word) && searchable_grapheme_count(word) < 2;
+            let mut text = grams.map(|grams| format!("{grams} z")).unwrap_or_else(|| {
+                if has_letters(word) {
+                    single_letter_token(word)
+                } else {
+                    word.to_owned()
+                }
+            });
+            if keep_single {
+                // Preserve exact single-grapheme terms in multi-word queries,
+                // and keep both encodings away from the next word's positions.
+                text.push(' ');
+                text.push_str(&single_letter_token(word));
+                text.push_str(" z");
+            }
+            if let Some(tokens) = compound_exact_tokens(word) {
+                text.push_str(" z ");
+                text.push_str(&tokens);
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn query_word_parts(word: &str) -> Vec<&str> {
@@ -76,13 +197,29 @@ fn query_word_parts(word: &str) -> Vec<&str> {
     parts
 }
 
-/// Compile a plain-text AND query; user punctuation never becomes an FTS operator.
+/// Compile plain-text AND terms with contiguous letter-fragment matching.
+/// Two or more characters use an indexed bigram phrase; single letters in a
+/// multi-term query, Han dictionary terms and numbers retain exact matching.
 pub(crate) fn compile_query(jieba: &Jieba, value: &str) -> Result<String> {
     let terms: Vec<_> = words(jieba, value, false)
         .into_iter()
         .flat_map(query_word_parts)
         .filter(|word| word.chars().any(char::is_alphanumeric))
-        .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+        .map(|word| {
+            let quoted = word.replace('"', "\"\"");
+            if let Some(grams) = letter_bigrams(word) {
+                // Only original columns may satisfy the raw-word alternative:
+                // a user code resembling an encoded gram must remain literal.
+                format!("({RAW_COLUMNS} : \"{quoted}\" OR {DERIVED_COLUMNS} : \"{grams}\")")
+            } else if has_letters(word) {
+                format!(
+                    "({RAW_COLUMNS} : \"{quoted}\" OR {DERIVED_COLUMNS} : \"{}\")",
+                    single_letter_token(word)
+                )
+            } else {
+                format!("\"{quoted}\"")
+            }
+        })
         .collect();
     if terms.is_empty() {
         return Err(Error::Validation("Search requires a word or number".into()));
@@ -95,34 +232,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unicode_words_keep_accents_and_combining_marks() {
+    fn unicode_fragments_fold_case_accents_and_combining_marks() {
         let jieba = Jieba::new();
-        for word in ["café", "Cafe\u{301}", "naïve", "Äpfel", "Ελληνικά"] {
-            assert_eq!(compile_query(&jieba, word).unwrap(), format!("\"{word}\""));
-            assert_eq!(index_text(&jieba, word), word);
+        for (word, equivalent) in [
+            ("café", "CAFE"),
+            ("Cafe\u{301}", "cafe"),
+            ("naïve", "naive"),
+            ("Äpfel", "apfel"),
+            ("Ελληνικά", "ΕΛΛΗΝΙΚΑ"),
+        ] {
+            assert_eq!(letter_bigrams(word), letter_bigrams(equivalent));
+            assert_eq!(index_text(&jieba, word), index_text(&jieba, equivalent));
         }
+        assert_eq!(
+            letter_bigrams("plos").unwrap(),
+            "g00007000006c g00006c00006f g00006f000073"
+        );
+        assert!(letter_bigrams("e").is_none());
     }
 
     #[test]
     fn punctuation_and_operator_names_remain_plain_and_terms() {
         let jieba = Jieba::new();
-        assert_eq!(
-            compile_query(&jieba, "metal (OR) \"wood\"*").unwrap(),
-            "\"metal\" AND \"OR\" AND \"wood\""
-        );
+        let query = compile_query(&jieba, "metal (OR) \"wood\"*").unwrap();
+        assert_eq!(query.matches(" AND ").count(), 2);
+        assert!(query.contains(" : \"OR\" OR "));
+        assert!(!query.contains('*'));
         assert!(compile_query(&jieba, "\" () *").is_err());
         assert_eq!(
-            compile_query(&jieba, "door,slam").unwrap(),
-            "\"door\" AND \"slam\""
+            compile_query(&jieba, "door,slam")
+                .unwrap()
+                .matches(" AND ")
+                .count(),
+            1
         );
     }
 
     #[test]
     fn chinese_dictionary_words_and_search_expansions_are_retained() {
         let jieba = crate::load_tokenizer();
-        assert_eq!(
-            compile_query(&jieba, "café爆炸声音").unwrap(),
-            "\"café\" AND \"爆炸\" AND \"声音\""
+        assert!(
+            compile_query(&jieba, "café爆炸声音")
+                .unwrap()
+                .ends_with(" AND \"爆炸\" AND \"声音\"")
         );
         let expected = jieba
             .cut_for_search("数字音频工作站", true)
@@ -137,24 +289,33 @@ mod tests {
     fn internal_uax_punctuation_keeps_and_terms_and_legacy_compound_phrases() {
         let jieba = Jieba::new();
         for query in ["foo:bar", "foo·bar", "foo：bar", "foo‿bar"] {
-            assert_eq!(compile_query(&jieba, query).unwrap(), "\"foo\" AND \"bar\"");
+            assert_eq!(
+                compile_query(&jieba, query).unwrap(),
+                compile_query(&jieba, "foo bar").unwrap()
+            );
         }
         for query in ["don't", "don’t", "don‘t", "don＇t"] {
-            assert_eq!(compile_query(&jieba, query).unwrap(), "\"don\" AND \"t\"");
+            assert_eq!(
+                compile_query(&jieba, query).unwrap(),
+                compile_query(&jieba, "don t").unwrap()
+            );
         }
         assert_eq!(compile_query(&jieba, "1,2").unwrap(), "\"1\" AND \"2\"");
         assert_eq!(
             compile_query(&jieba, "Cafe\u{301}:door").unwrap(),
-            "\"Cafe\u{301}\" AND \"door\""
+            compile_query(&jieba, "Cafe\u{301} door").unwrap()
         );
-        for query in ["foo.bar", "foo_bar", "1.2"] {
+        for query in ["foo.bar", "foo_bar"] {
             assert_eq!(
                 compile_query(&jieba, query).unwrap(),
-                format!("\"{query}\"")
+                format!(
+                    "({RAW_COLUMNS} : \"{query}\" OR {DERIVED_COLUMNS} : \"{}\")",
+                    letter_bigrams(query).unwrap()
+                )
             );
         }
-        // This is query compilation only; the stored token revision is unchanged.
-        assert_eq!(index_text(&jieba, "don't"), "don't");
-        assert_eq!(index_text(&jieba, "Cafe\u{301}:door"), "Cafe\u{301}:door");
+        assert_eq!(compile_query(&jieba, "1.2").unwrap(), "\"1.2\"");
+        assert_ne!(index_text(&jieba, "foo bar"), index_text(&jieba, "foobar"));
+        assert_eq!(letter_bigrams("foo.bar"), letter_bigrams("foo_bar"));
     }
 }

@@ -1,6 +1,6 @@
 // crates/audiolib-db/tests/search_benchmark.rs
 //! Existing benchmark fixtures report every row without changing library visibility.
-use audiolib_core::DataProvider;
+use audiolib_core::{DataProvider, SearchRequest};
 use audiolib_db::SqliteProvider;
 use rusqlite::Connection;
 use std::{
@@ -180,4 +180,173 @@ fn insufficient_queries_fail_before_creating_a_synthetic_database() {
         );
         assert!(!database.exists());
     }
+}
+
+#[test]
+fn first_only_custom_requests_keep_real_scope_results_and_source_bytes() {
+    let (directory, database) = fixture();
+    let conn = Connection::open(&database).unwrap();
+    conn.execute_batch(
+        "INSERT INTO folders(id,folder_path,folder_name,depth) VALUES(9,'other','other',0);
+         INSERT INTO folder_closure VALUES(9,9,0);
+         INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES
+         (4,'other/metal-present.wav','metal-present.wav',9,0),
+         (5,'other/legacy-negative.wav','legacy-negative.wav',9,-1),
+         (6,'other/legacy-other.wav','legacy-other.wav',9,2);",
+    )
+    .unwrap();
+    drop(conn);
+    let requests = vec![
+        SearchRequest {
+            query: "metal present".into(),
+            ..Default::default()
+        },
+        SearchRequest {
+            query: "metal present".into(),
+            folder_id: Some(9),
+            ..Default::default()
+        },
+    ];
+    let request_file = directory.path().join("requests.json");
+    fs::write(&request_file, serde_json::to_vec(&requests).unwrap()).unwrap();
+    let original = fs::read(&database).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .arg("--existing-db")
+        .arg(&database)
+        .arg("--request-file")
+        .arg(&request_file)
+        .args(["--first-only", "--queries", "0"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["first_only"], true);
+    assert_eq!(report["pre_query_stats"], false);
+    assert_eq!(report["statistics_collected_after_timing"], true);
+    assert_eq!(report["shared_provider_measured"], false);
+    assert_eq!(report["cases"], serde_json::json!([]));
+    assert_eq!(report["queries"], 2);
+    assert_eq!(report["records"], 6);
+    assert_eq!(report["missing_records"], 1);
+    assert_eq!(report["source_same"], true);
+    assert_eq!(report["owned_copy"], false);
+    let first = report["first_provider_cases"].as_array().unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[0]["total_count"], 2);
+    assert_eq!(first[1]["total_count"], 1);
+    let oracle = SqliteProvider::open_read_only(&database).unwrap();
+    for (sample, request) in first.iter().zip(&requests) {
+        assert_eq!(sample["request"], serde_json::to_value(request).unwrap());
+        assert_eq!(sample["search_ranking_cache_hit"], false);
+        let page = oracle.search(request).unwrap();
+        assert_eq!(
+            sample["result_ids"],
+            serde_json::json!(
+                page.results
+                    .iter()
+                    .map(|audio| audio.id)
+                    .collect::<Vec<_>>()
+            )
+        );
+        let mut counts = oracle
+            .search_folders(request)
+            .unwrap()
+            .into_iter()
+            .map(|folder| (folder.id, folder.file_count))
+            .collect::<Vec<_>>();
+        counts.sort_unstable_by_key(|&(id, _)| id);
+        assert_eq!(sample["folder_counts"], serde_json::json!(counts));
+        assert!(
+            sample["total_ms"].as_f64().unwrap() + 0.000001
+                >= sample["search_ms"].as_f64().unwrap() + sample["facet_ms"].as_f64().unwrap()
+        );
+    }
+    drop(oracle);
+    assert_eq!(fs::read(&database).unwrap(), original);
+
+    let selected = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .arg("--existing-db")
+        .arg(&database)
+        .arg("--request-file")
+        .arg(&request_file)
+        .args(["--first-only", "--case-index", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    let selected: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert_eq!(selected["queries"], 1);
+    assert_eq!(
+        selected["first_provider_cases"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(selected["first_provider_cases"][0]["case_index"], 1);
+    assert_eq!(
+        selected["first_provider_cases"][0]["request"]["folder_id"],
+        9
+    );
+    assert_eq!(fs::read(&database).unwrap(), original);
+}
+
+#[test]
+fn first_only_refuses_generation_invalid_requests_and_implicit_upgrades() {
+    let (directory, database) = fixture();
+    let generated = directory.path().join("must-not-create.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .args(["--first-only", "--db"])
+        .arg(&generated)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!generated.exists());
+    let request_file = directory.path().join("requests.json");
+    for requests in [
+        Vec::new(),
+        vec![SearchRequest {
+            query: "a".into(),
+            ..Default::default()
+        }],
+    ] {
+        fs::write(&request_file, serde_json::to_vec(&requests).unwrap()).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+            .arg("--existing-db")
+            .arg(directory.path().join("absent.db"))
+            .arg("--request-file")
+            .arg(&request_file)
+            .arg("--first-only")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!directory.path().join("absent.db").exists());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(if requests.is_empty() {
+                "at least one SearchRequest"
+            } else {
+                "at least two characters"
+            })
+        );
+    }
+    let conn = Connection::open(&database).unwrap();
+    conn.execute_batch("DROP INDEX idx_audio_search_facets")
+        .unwrap();
+    drop(conn);
+    let original = fs::read(&database).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .arg("--existing-db")
+        .arg(&database)
+        .args(["--first-only", "--case-index", "1"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires current derived search state")
+    );
+    assert_eq!(fs::read(&database).unwrap(), original);
 }
