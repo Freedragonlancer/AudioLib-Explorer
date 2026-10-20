@@ -1971,7 +1971,9 @@ impl DataProvider for SqliteProvider {
         let tx = writer.transaction().map_err(db_error)?;
         if tx
             .execute(
-                "UPDATE audio_files SET play_count=COALESCE(play_count,0)+1,
+                // Play counts are no longer recorded (the column stays, unwritten);
+                // the play history row below is.
+                "UPDATE audio_files SET
             last_played_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1",
                 [id],
             )

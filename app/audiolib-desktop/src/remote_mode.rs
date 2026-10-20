@@ -64,6 +64,7 @@ pub(super) struct RemotePlayState {
     publication_gates: usize,
 }
 
+#[allow(dead_code)] // plays are no longer sent to the server
 struct RemotePlayWorker(Arc<Controller>);
 
 impl Drop for RemotePlayWorker {
@@ -994,7 +995,7 @@ impl Controller {
     }
 
     /// Server record id of a playback-cache path handed to the engine.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn remote_audio_id(&self, path: &Path) -> Option<i64> {
         self.remote.lock().unwrap().audio_ids.get(path).copied()
     }
@@ -1045,72 +1046,13 @@ impl Controller {
         Ok(())
     }
 
+    #[allow(dead_code)] // plays are no longer sent to the server
     fn remote_play_current(&self, generation: u64, source_generation: u64) -> bool {
         self.available()
             && !self.remote_busy.load(Ordering::Acquire)
             && self.library_generation.load(Ordering::Acquire) == generation
             && self.source_generation.load(Ordering::Acquire) == source_generation
             && self.remote_plays.lock().unwrap().publication_gates == 0
-    }
-
-    /// Count one finished play off the audio and UI threads. Source/provider changes
-    /// and close drain registered workers through their reply and listener settlement.
-    // Unused since plays are no longer sent to the server (kept for the pending
-    // client-side server-mode play history store).
-    #[allow(dead_code)]
-    pub(super) fn remote_record_play(self: &Arc<Self>, id: i64, generation: u64) {
-        let source_generation = self.source_generation.load(Ordering::Acquire);
-        let worker = {
-            let mut plays = self.remote_plays.lock().unwrap();
-            if !self.available()
-                || self.remote_busy.load(Ordering::Acquire)
-                || plays.publication_gates != 0
-                || self.library_generation.load(Ordering::Acquire) != generation
-                || self.source_generation.load(Ordering::Acquire) != source_generation
-            {
-                return;
-            }
-            plays.workers += 1;
-            RemotePlayWorker(self.clone())
-        };
-        // Bind the destination before dispatch; a later source switch cannot retarget it.
-        let provider = self.remote_provider();
-        let c = self.clone();
-        let spawned = std::thread::Builder::new()
-            .name("audiolib-remote-play".into())
-            .spawn(move || {
-                // Drop only after the reply and synchronous listener have settled.
-                let _worker = worker;
-                match provider {
-                    Ok(provider) => {
-                        if !c.remote_play_current(generation, source_generation) {
-                            return;
-                        }
-                        match provider.record_play_if(id, || {
-                            c.remote_play_current(generation, source_generation)
-                        }) {
-                            Ok(()) => crate::diagnostics::record(
-                                crate::diagnostics::Event::PlaybackHistoryRecorded,
-                            ),
-                            Err(error) => {
-                                crate::diagnostics::record(
-                                    crate::diagnostics::Event::PlaybackHistoryFailed,
-                                );
-                                tracing::warn!(id, %error, "server play count was not recorded");
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        crate::diagnostics::record(
-                            crate::diagnostics::Event::PlaybackHistoryFailed,
-                        );
-                        tracing::warn!(id, %error, "server play count was not recorded");
-                    }
-                }
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(id, %error, "could not start the play count request");
-        }
     }
 
     fn data_root(&self) -> PathBuf {

@@ -280,7 +280,7 @@ fn assert_fold_upgrade(provider: &SqliteProvider) {
     assert_eq!(file.tags, "ß");
     assert_eq!(file.notes, "anchor");
     assert!(file.favorite);
-    assert_eq!(file.play_count, 1);
+    assert_eq!(file.play_count, 0);
     assert_eq!(file.attributes["private"], "keep");
     assert_eq!(file.attributes["wav_metadata"]["fields"]["keywords"], "ﬃ");
     assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);

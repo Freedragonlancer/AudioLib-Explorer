@@ -74,7 +74,6 @@ fn cli(root: &Path, args: &[&str]) -> Value {
 fn rejected_id_commands(root: &Path, message: &str) {
     for args in [
         vec!["remote", "edit", "7", "--notes", "wrong notes"],
-        vec!["remote", "plays", "7"],
         vec!["remote", "download", "7"],
     ] {
         let reply = cli(root, &args);
@@ -133,7 +132,7 @@ fn replaced_library_at_same_url_rejects_id_commands_and_preserves_snapshot() {
     let state = cache.active().unwrap();
     let before = std::fs::read(cache.database_path(&state)).unwrap();
     rejected_id_commands(directory.path(), "library changed");
-    assert_eq!(requests.lock().unwrap().as_slice(), ["/api/v1/library"; 3]);
+    assert_eq!(requests.lock().unwrap().as_slice(), ["/api/v1/library"; 2]);
     assert_eq!(cache.active().unwrap(), state);
     assert_eq!(std::fs::read(cache.database_path(&state)).unwrap(), before);
 }
@@ -158,7 +157,7 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
                     &json!({"library_id": LIBRARY, "identity_bound_writes":true, "schema_version":5,"revision":*revision})
                         .to_string(),
                 ),
-                ("PATCH", "/api/v1/audio/7/metadata") | ("POST", "/api/v1/audio/7/plays") => {
+                ("PATCH", "/api/v1/audio/7/metadata") => {
                     assert_eq!(request.header(audiolib_remote::LIBRARY_ID_HEADER), Some(LIBRARY));
                     if request.method == "PATCH" {
                         let patch: Value = serde_json::from_slice(&request.body).unwrap();
@@ -175,7 +174,6 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
                                 file_path: "/A/original.wav".into(),
                                 filename: "original.wav".into(),
                                 notes: "saved notes".into(),
-                                play_count: u64::from(request.method == "POST"),
                                 ..Default::default()
                             },
                             "revision_before": before,
@@ -195,17 +193,15 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
     let cache = prepare_cache(directory.path(), &cached_url, &server.url);
     for args in [
         vec!["remote", "edit", "7", "--notes", "saved notes"],
-        vec!["remote", "plays", "7"],
         vec!["remote", "download", "7"],
     ] {
         assert_eq!(cli(directory.path(), &args)["success"], true);
     }
     let state = cache.active().unwrap();
-    assert_eq!(state.revision, 3);
+    assert_eq!(state.revision, 2);
     let snapshot = SqliteProvider::open_read_only(&cache.database_path(&state)).unwrap();
     let file = snapshot.get_audio(7).unwrap();
     assert_eq!(file.notes, "saved notes");
-    assert_eq!(file.play_count, 1);
     let requests = requests.lock().unwrap();
     assert_eq!(requests[0], ("GET".into(), "/api/v1/library".into()));
     let mutations = requests
@@ -215,10 +211,7 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
         .collect::<Vec<_>>();
     assert_eq!(
         mutations,
-        [
-            ("PATCH".into(), "/api/v1/audio/7/metadata".into()),
-            ("POST".into(), "/api/v1/audio/7/plays".into()),
-        ]
+        [("PATCH".into(), "/api/v1/audio/7/metadata".into()),]
     );
     assert!(
         requests
@@ -251,11 +244,11 @@ fn legacy_server_remains_readable_but_cli_never_sends_cached_id_writes() {
     let cache = prepare_cache(directory.path(), &server.url, &server.url);
     let state = cache.active().unwrap();
     let before = std::fs::read(cache.database_path(&state)).unwrap();
-    for args in [
-        vec!["remote", "edit", "7", "--notes", "saved notes"],
-        vec!["remote", "plays", "7"],
-    ] {
-        let reply = cli(directory.path(), &args);
+    {
+        let reply = cli(
+            directory.path(),
+            &["remote", "edit", "7", "--notes", "saved notes"],
+        );
         assert_eq!(reply["success"], false, "{reply}");
         assert!(
             reply["error"]

@@ -216,8 +216,6 @@ fn live_management_round_trip() {
         break;
     }
     assert!(busy_checked, "could not pause a scan in 3 attempts");
-    let plays = client.play_history(5, 0).expect("GET /history/plays");
-    eprintln!("{} recent plays", plays.len());
 
     // Discover ids from a synced snapshot.
     let state = sync(&client, &cache);

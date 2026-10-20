@@ -81,7 +81,7 @@ fn version_two_upgrade_preserves_old_counts_without_inventing_events() {
     assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 7);
     assert!(upgraded.play_history(20, 0).unwrap().is_empty());
     upgraded.record_play(f.ids[0]).unwrap();
-    assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 8);
+    assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 7);
     assert_eq!(upgraded.play_history(20, 0).unwrap().len(), 1);
     assert!(upgraded.record_play(99999).is_err());
     assert_eq!(upgraded.play_history(20, 0).unwrap().len(), 1);
@@ -227,7 +227,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     let restored = f.provider.restore_library(&backup).unwrap();
     assert!(restored.rollback_backup.is_file());
     assert_eq!(tags(&f, id), "snapshot");
-    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 1);
+    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 0);
     assert_eq!(
         f.provider
             .search(&SearchRequest {
@@ -250,7 +250,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     );
     let rollback = SqliteProvider::open_read_only(&restored.rollback_backup).unwrap();
     assert_eq!(rollback.get_audio(id).unwrap().tags, "later");
-    assert_eq!(rollback.get_audio(id).unwrap().play_count, 2);
+    assert_eq!(rollback.get_audio(id).unwrap().play_count, 0);
     assert!(f.provider.check_library().unwrap().is_ok());
     assert_eq!(fs::read(&f.paths[0]).unwrap(), original);
 }
@@ -464,7 +464,7 @@ fn relink_refreshes_headers_preserves_identity_annotations_and_rejects_collision
     assert_eq!(updated.id, id);
     assert_eq!(updated.sample_rate, 96000);
     assert_eq!(updated.tags, "keep");
-    assert_eq!(updated.play_count, 1);
+    assert_eq!(updated.play_count, 0);
     assert!(!updated.missing);
     assert_eq!(
         f.provider.find_audio_by_path(&target).unwrap().unwrap().id,

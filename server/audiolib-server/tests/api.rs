@@ -1337,7 +1337,7 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(f.state.audio(id).unwrap().play_count, 1);
+    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
 }
 
 #[tokio::test]
@@ -1451,7 +1451,7 @@ async fn plays_return_the_updated_record_and_leave_the_revision_alone() {
     let f = fixture();
     let id = audio_id(&f, "flyby_02.wav");
     let start = library_revision(&f.state).await;
-    for play in 1..=2_u64 {
+    for _ in 0..2 {
         let response = send_json(
             &f.state,
             Method::POST,
@@ -1463,7 +1463,7 @@ async fn plays_return_the_updated_record_and_leave_the_revision_alone() {
         assert_eq!(response.status(), StatusCode::OK);
         let body: AudioWriteResponse = json(response).await;
         assert_eq!(body.file.id, id);
-        assert_eq!(body.file.play_count, play);
+        assert_eq!(body.file.play_count, 0);
         assert_eq!(body.revision_before, start);
         assert_eq!(body.revision, start);
     }
@@ -1472,7 +1472,7 @@ async fn plays_return_the_updated_record_and_leave_the_revision_alone() {
     drop(f.state);
     let reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
     assert_eq!(library_revision(&reopened).await, start);
-    assert_eq!(reopened.audio(id).unwrap().play_count, 2);
+    assert_eq!(reopened.audio(id).unwrap().play_count, 0);
 
     // A content write after the plays still bumps exactly once.
     let response = send_json(

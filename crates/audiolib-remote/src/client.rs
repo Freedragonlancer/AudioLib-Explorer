@@ -586,14 +586,6 @@ impl RemoteClient {
         self.write("POST", "/audio/metadata/batch", Some(&body))
     }
 
-    /// `POST /audio/{id}/plays` (no body): `play_count` + 1 and a play history row.
-    pub fn record_play(&self, id: i64) -> Result<FileWrite> {
-        if id <= 0 {
-            return Err(RemoteError::Validation(format!("invalid audio id {id}")));
-        }
-        self.write("POST", &format!("/audio/{id}/plays"), None)
-    }
-
     /// Audition source of a record for `route` (§8, §8.1): the original `/stream`, or a
     /// `/preview` (a FLAC preview is decoded to PCM and needs the record's duration). A
     /// large file is fetched [`READ_AHEAD_SECONDS`](crate::stream::READ_AHEAD_SECONDS)
@@ -1369,49 +1361,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn cached_id_writes_require_the_servers_atomic_identity_capability() {
-        let mutations = Arc::new(std::sync::Mutex::new(0));
-        let server = {
-            let mutations = mutations.clone();
-            TestServer::start(move |request| {
-                if request.path == "/api/v1/library" {
-                    return TestResponse::json(
-                        200,
-                        r#"{"library_id":"old-server","schema_version":3,"revision":1}"#,
-                    );
-                }
-                *mutations.lock().unwrap() += 1;
-                TestResponse::json(200, "{}")
-            })
-        };
-        let client = RemoteClient::new(&server.url, "")
-            .unwrap()
-            .with_library_id("old-server")
-            .unwrap();
-        assert_eq!(
-            client.library().unwrap().library_id,
-            "old-server",
-            "older servers remain readable"
-        );
-        assert!(matches!(
-            client.record_play(3),
-            Err(RemoteError::Unsupported(_))
-        ));
-        assert!(matches!(
-            client.remove_audio(&[3]),
-            Err(RemoteError::Unsupported(_))
-        ));
-        assert!(matches!(
-            client.start_scan(&crate::ScanRequest {
-                root: "SFX".into(),
-                ..crate::ScanRequest::default()
-            }),
-            Err(RemoteError::Unsupported(_))
-        ));
-        assert_eq!(*mutations.lock().unwrap(), 0);
     }
 
     #[test]
