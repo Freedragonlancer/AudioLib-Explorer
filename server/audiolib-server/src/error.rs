@@ -161,8 +161,6 @@ impl ApiError {
             )
         }
     }
-    /// 503 `BUSY` with `Retry-After: 1` when 4 `POST /waveforms` requests are already
-    /// being processed; the same shape as [`ApiError::stream_busy`].
     /// 503 `BUSY` + `Retry-After: 5`: another `GET /waveforms/bundle` is in progress.
     pub fn bundle_busy() -> Self {
         Self {
@@ -174,6 +172,8 @@ impl ApiError {
             )
         }
     }
+    /// 503 `BUSY` with `Retry-After: 1` when 4 `POST /waveforms` requests are already
+    /// being processed; the same shape as [`ApiError::stream_busy`].
     pub fn list_waveforms_busy() -> Self {
         Self {
             retry_after: Some(STREAM_BUSY_RETRY_SECS),
