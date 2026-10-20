@@ -1095,8 +1095,10 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 #### 9.4.2 整包下载（Bundle）
 
-- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端在**单独的只读连接**上用 `VACUUM INTO` 生成临时文件（WAL 读事务，不阻塞写入和 `POST /waveforms`），再流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他值（包括 `../x` 之类，从不用作路径）→ 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。
-- **并发**：同一时间只生成/发送**一个**整包（名额一直占到响应体发送完或客户端断开）；其他请求立即 503 `BUSY` + `Retry-After: 5`。客户端按 `Retry-After` 等待后重试，连续失败时指数退避（5 s、10 s、20 s……上限 5 分钟），期间照常用 §9.1 按页请求。
+- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端在**单独的只读连接**上用 `VACUUM INTO` 生成临时文件（WAL 读事务，不阻塞写入和 `POST /waveforms`），再流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他值（包括 `../x` 之类，从不用作路径）→ 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。省略 `encoding` 时按 `i8-minmax-base64` 处理（客户端应显式发送）。
+- **不可用**：库已打开但服务端无法使用 `waveforms.db`（例如缓存目录无法创建）时，`/capabilities` 的 `list_waveforms.bundle` 为 `false`，本端点返回 503 `UNAVAILABLE` + `Retry-After`（不是 500）。库仍在打开时 `bundle` 照常为 `true`，本端点按 §6.2 返回 503 `UNAVAILABLE`，客户端按 `Retry-After` 重试。
+- **临时文件**：整包写在 `waveforms.db` 旁的 `audiolib-wfbundle-*` 临时目录里。服务端被强杀、崩溃或断电时可能残留，服务端在启动（打开 `waveforms.db`）时和每次生成新整包之前（已持有唯一名额）清理这些残留目录。
+- **并发**：同一时间只生成/发送**一个**整包（名额一直占到响应体发送完或客户端断开；客户端在服务端准备整包期间断开时，名额占到准备工作结束为止，不会同时生成第二个整包）；其他请求立即 503 `BUSY` + `Retry-After: 5`。客户端按 `Retry-After` 等待后重试，连续失败时指数退避（5 s、10 s、20 s……上限 5 分钟），期间照常用 §9.1 按页请求。
 - **超时**：本端点**不受** §2.1 的 30 秒请求上限（与 `/library/snapshot` 相同），慢速网络下载几百 MB 不会被切断。
 - **响应头**：`ETag: "wfb1-<32 位十六进制>"`（整个包文件 SHA-256 的前 16 字节；同样内容同样 ETag，客户端可用于判断是否与上次导入的包相同，本端点不支持 `If-None-Match`）、`X-Library-Id`（同 `meta.library_id`）、`X-Library-Revision`（同 `meta.revision`）、`Content-Length`、`Cache-Control: no-store`。
 - `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`、`schema_version`、`encoding`。**`revision` 是主库的 `revision`（§4），仅供参考/诊断**：`waveforms.db` 的内容不随主库 revision 变化，也可能在同一 revision 下变化，客户端**不得**用它判断条目新旧；续传只按逐项 `etag`（下一条）。

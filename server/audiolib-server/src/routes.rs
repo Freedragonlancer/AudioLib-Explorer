@@ -451,7 +451,15 @@ async fn capabilities(
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
         root_management: true,
-        list_waveforms: Some(ListWaveformsCapability::default()),
+        list_waveforms: Some(ListWaveformsCapability {
+            // While the library is opening the bundle endpoint answers 503 UNAVAILABLE
+            // (retry); once open it is advertised only when waveforms.db is usable.
+            bundle: match service.readiness() {
+                Readiness::Ready(state) => state.list_waveforms().wfdb().is_some(),
+                _ => true,
+            },
+            ..ListWaveformsCapability::default()
+        }),
         pregenerate_list_waveforms: service.security().pregenerate_list_waveforms(),
     })
 }
@@ -1884,28 +1892,45 @@ async fn waveform_bundle(
             crate::wfdb::I8_ENCODING
         )));
     }
-    // One bundle at a time, held until the body is sent (503 BUSY + Retry-After).
+    // One bundle at a time (503 BUSY + Retry-After). The permit moves into the blocking
+    // job and comes back with its result, so a client that disconnects while the bundle
+    // is being prepared does not free the slot before `VACUUM INTO` + hashing end; after
+    // that it is held by the body stream until the body is sent or dropped.
     let permit = crate::wfdb::BUNDLE_SLOT
         .try_acquire()
         .map_err(|_| ApiError::bundle_busy())?;
-    let (dir, path, revision, etag) = blocking(move || {
+    let (dir, path, revision, etag, permit) = blocking_api(move || {
+        let permit = permit;
         let list = state.list_waveforms();
-        let wfdb = list.wfdb().ok_or_else(|| {
-            audiolib_core::Error::Io(io::Error::other("waveforms.db is unavailable"))
-        })?;
-        let revision = state.revision()?;
+        let wfdb = list
+            .wfdb()
+            .ok_or_else(|| ApiError::unavailable("waveforms.db is unavailable"))?;
+        let parent = wfdb
+            .path()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        // We hold the only slot, so every other bundle directory is a leftover of a
+        // crash or kill; remove them before writing a new ~300 MB copy.
+        crate::wfdb::sweep_stale_bundles(&parent, std::time::Duration::ZERO);
+        // Informational only (doc §9.4.2): read before `VACUUM INTO`, so it can be
+        // older than the bundle's content, never newer.
+        let revision = state.revision().map_err(ApiError::from)?;
         let dir = tempfile::Builder::new()
-            .prefix("audiolib-wfbundle-")
-            .tempdir_in(wfdb.path().parent().unwrap_or(std::path::Path::new(".")))?;
+            .prefix(crate::wfdb::BUNDLE_DIR_PREFIX)
+            .tempdir_in(&parent)
+            .map_err(|error| ApiError::from(audiolib_core::Error::from(error)))?;
         let path = dir.path().join("waveforms-bundle.db");
         let started = std::time::Instant::now();
-        let etag = wfdb.bundle(&path, &revision.library_id, revision.revision)?;
+        let etag = wfdb
+            .bundle(&path, &revision.library_id, revision.revision)
+            .map_err(ApiError::from)?;
         tracing::info!(
             ms = started.elapsed().as_millis() as u64,
             bytes = std::fs::metadata(&path).map_or(0, |m| m.len()),
             "Prepared waveforms bundle"
         );
-        Ok((dir, path, revision, etag))
+        Ok((dir, path, revision, etag, permit))
     })
     .await?;
     let file = tokio::fs::File::open(&path)

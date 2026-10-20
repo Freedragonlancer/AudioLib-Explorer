@@ -184,9 +184,13 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(
             300 + (k as u64 * 137) % 900,
         ));
+        // SIGKILL on Unix; TerminateProcess (equally abrupt) elsewhere.
+        #[cfg(unix)]
         unsafe {
             libc::kill(child.id() as i32, libc::SIGKILL);
         }
+        #[cfg(not(unix))]
+        child.kill().unwrap();
         child.wait().unwrap();
         let conn = Connection::open(&path).unwrap();
         let check: String = conn

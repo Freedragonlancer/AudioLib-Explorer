@@ -135,6 +135,8 @@ impl WaveformsDb {
     /// `dir/waveforms.db`; opened lazily (an existing file is opened on first read,
     /// a missing one is created on first write).
     pub fn open(dir: &Path) -> Result<Self> {
+        // No bundle can be in progress yet: drop leftovers of a crash or kill -9.
+        sweep_stale_bundles(dir, Duration::ZERO);
         Ok(Self {
             path: dir.join(FILE_NAME),
             conn: Mutex::new(None),
@@ -318,7 +320,12 @@ impl WaveformsDb {
             .map_err(sql)?;
             reader.busy_timeout(Duration::from_secs(5)).map_err(sql)?;
             reader
-                .execute("VACUUM INTO ?1", [dest.to_string_lossy()])
+                .execute(
+                    "VACUUM INTO ?1",
+                    [dest.to_str().ok_or_else(|| {
+                        Error::Io(std::io::Error::other("bundle path is not valid UTF-8"))
+                    })?],
+                )
                 .map_err(sql)?;
         }
         let conn = Connection::open(dest).map_err(sql)?;
@@ -362,6 +369,51 @@ pub fn file_etag(path: &Path) -> Result<String> {
         .map(|b| format!("{b:02x}"))
         .collect();
     Ok(format!("\"wfb1-{hex}\""))
+}
+
+/// Prefix of the temporary directory each bundle is written to (next to `waveforms.db`).
+pub const BUNDLE_DIR_PREFIX: &str = "audiolib-wfbundle-";
+
+/// Remove `audiolib-wfbundle-*` entries in `dir` last modified at least `min_age` ago
+/// (left behind when the server was killed while building or sending a bundle).
+/// Best effort; returns how many entries were removed.
+pub fn sweep_stale_bundles(dir: &Path, min_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(BUNDLE_DIR_PREFIX)
+        {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_none_or(|age| age >= min_age);
+        if !old_enough {
+            continue;
+        }
+        let path = entry.path();
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::warn!(%error, "Cannot remove a stale waveforms bundle"),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "Removed stale waveforms bundle directories");
+    }
+    removed
 }
 
 /// One `GET /waveforms/bundle` preparation at a time; others get 503 `BUSY`.
@@ -630,5 +682,34 @@ mod tests {
         validate_bundle(&out).unwrap();
         conn.execute("CREATE TABLE evil(x)", []).unwrap();
         assert!(validate_bundle(&out).is_err());
+    }
+
+    #[test]
+    fn stale_bundle_dirs_are_swept_on_open_and_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(format!("{BUNDLE_DIR_PREFIX}abc"));
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("waveforms-bundle.db"), b"x").unwrap();
+        let stray_file = dir.path().join(format!("{BUNDLE_DIR_PREFIX}file"));
+        std::fs::write(&stray_file, b"x").unwrap();
+        let other = dir.path().join("keep-me");
+        std::fs::create_dir(&other).unwrap();
+
+        // Too young for a one-hour threshold: kept.
+        assert_eq!(
+            sweep_stale_bundles(dir.path(), Duration::from_secs(3600)),
+            0
+        );
+        assert!(stale.exists());
+
+        // Opening the store removes every leftover bundle, nothing else.
+        let db = WaveformsDb::open(dir.path()).unwrap();
+        assert!(!stale.exists() && !stray_file.exists());
+        assert!(other.exists());
+        assert_eq!(db.path(), dir.path().join(FILE_NAME));
+        assert_eq!(
+            sweep_stale_bundles(&dir.path().join("missing"), Duration::ZERO),
+            0
+        );
     }
 }
