@@ -776,6 +776,8 @@ fn run_scan_inner(
     state.tracker().begin_hold()?;
     cleanup.holding_revision = true;
     let shape_before = library_shape(state);
+    // New and changed records are queued for list waveform pre-generation afterwards.
+    let scan_started_at = state.list_waveforms().database_now();
     let foreign_before = provider.foreign_data_version().ok();
     let options = ScanOptions {
         recursive: true,
@@ -868,6 +870,12 @@ fn run_scan_inner(
             "Scan finished"
         );
     }
+    // Includes the part committed before a cancellation.
+    state.list_waveforms().scan_finished(
+        state.security().pregenerate_list_waveforms(),
+        job.session_id(),
+        scan_started_at.as_deref(),
+    );
     if sender.is_some() {
         let error = match result {
             Err(error) => start_failure(error, &job.root),

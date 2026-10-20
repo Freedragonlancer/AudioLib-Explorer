@@ -104,6 +104,25 @@ pub struct ServerConfig {
     /// Concurrent waveform computations (1..=64, default 4); further requests wait.
     #[serde(default = "default_max_waveforms")]
     pub max_waveforms: usize,
+    /// Pre-generate list thumbnail waveforms for the whole library in the background
+    /// (default `false`); the admin page and `PATCH /settings` can override it.
+    #[serde(default)]
+    pub pregenerate_list_waveforms: Option<bool>,
+    /// Size limit of the list thumbnail waveform cache in MiB (16..=1048576, default
+    /// 640), separate from `waveform_cache_mb`.
+    #[serde(default = "default_list_waveform_cache_mb")]
+    pub list_waveform_cache_mb: u64,
+    /// List waveform workers, i.e. `max_waveforms` slots they may hold at once (1..=64,
+    /// default 1; never more than `max(1, max_waveforms - 1)`).
+    #[serde(default = "default_list_waveform_workers")]
+    pub list_waveform_workers: usize,
+    /// Files pre-generation may start per second (1..=1000, default 10).
+    #[serde(default = "default_list_waveform_rate")]
+    pub list_waveform_rate: u32,
+    /// Pause `POST /waveforms` metadata reads (in-request and background) for the 3 s
+    /// prebuffer window after a stream or preview starts (default `false`).
+    #[serde(default)]
+    pub list_waveform_pause_stats_on_playback: bool,
     /// ffmpeg executable for `/audio/{id}/preview?codec=flac` (absolute path, default
     /// [`DEFAULT_FFMPEG_PATH`]). A missing ffmpeg only makes those requests answer 503
     /// `TRANSCODER_UNAVAILABLE`; the server still starts.
@@ -173,6 +192,15 @@ fn default_snapshot_wait_secs() -> u64 {
 fn default_max_waveforms() -> usize {
     4
 }
+fn default_list_waveform_cache_mb() -> u64 {
+    640
+}
+fn default_list_waveform_workers() -> usize {
+    1
+}
+fn default_list_waveform_rate() -> u32 {
+    10
+}
 fn default_ffmpeg_path() -> PathBuf {
     PathBuf::from(DEFAULT_FFMPEG_PATH)
 }
@@ -237,6 +265,14 @@ impl ServerConfig {
         })
     }
 
+    /// List waveform workers actually started: `list_waveform_workers`, at most
+    /// `max(1, max_waveforms - 1)` so detail waveforms always keep a slot.
+    pub fn effective_list_waveform_workers(&self) -> usize {
+        self.list_waveform_workers
+            .min(self.max_waveforms.saturating_sub(1).max(1))
+            .max(1)
+    }
+
     /// Directory of the admin files (`admin-settings.json`, `tokens.json`): the directory
     /// of `library_db`.
     pub fn admin_dir(&self) -> PathBuf {
@@ -293,6 +329,15 @@ impl ServerConfig {
         }
         if !(1..=64).contains(&self.max_waveforms) {
             bail!("max_waveforms must be 1..=64");
+        }
+        if !(16..=1_048_576).contains(&self.list_waveform_cache_mb) {
+            bail!("list_waveform_cache_mb must be 16..=1048576");
+        }
+        if !(1..=64).contains(&self.list_waveform_workers) {
+            bail!("list_waveform_workers must be 1..=64");
+        }
+        if !(1..=1000).contains(&self.list_waveform_rate) {
+            bail!("list_waveform_rate must be 1..=1000");
         }
         // `has_root` keeps the Unix default valid when the crate is tested on Windows.
         if !(self.ffmpeg_path.is_absolute() || self.ffmpeg_path.has_root()) {
