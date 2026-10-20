@@ -39,6 +39,52 @@ pub const MAX_LIST_IDS: usize = 200;
 pub const LIST_VERSION: u32 = 1;
 /// `list_waveforms.encoding` of `/capabilities`.
 pub const LIST_ENCODING: &str = "i16le-minmax-base64";
+/// Every `encoding` of `POST /waveforms` (§9.4).
+pub const LIST_ENCODINGS: [&str; 2] = [LIST_ENCODING, crate::wfdb::I8_ENCODING];
+
+/// `encoding` of a `POST /waveforms` request (§9.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ListEncoding {
+    /// `i16le-minmax-base64` (default, `-l1`).
+    #[default]
+    I16,
+    /// `i8-minmax-base64` (`-l1i8`).
+    I8,
+}
+
+impl ListEncoding {
+    /// Parse a wire name; unknown names are 400 `VALIDATION` / `UNSUPPORTED_ENCODING`.
+    pub fn parse(name: &str) -> std::result::Result<Self, ApiError> {
+        match name {
+            LIST_ENCODING => Ok(Self::I16),
+            crate::wfdb::I8_ENCODING => Ok(Self::I8),
+            _ => Err(ApiError::unsupported_encoding(format!(
+                "unsupported list waveform encoding {name:?}"
+            ))),
+        }
+    }
+    /// Wire name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::I16 => LIST_ENCODING,
+            Self::I8 => crate::wfdb::I8_ENCODING,
+        }
+    }
+    /// Entity tag of a list entry in this encoding.
+    pub fn etag(self, hash: u64) -> String {
+        match self {
+            Self::I16 => list_etag(hash),
+            Self::I8 => list_etag_i8(hash),
+        }
+    }
+    /// `peaks` value of interleaved int16 min/max values.
+    pub fn encode(self, values: &[i16]) -> String {
+        match self {
+            Self::I16 => encode_peaks(values),
+            Self::I8 => base64(&crate::wfdb::to_i8_bytes(values)),
+        }
+    }
+}
 /// Concurrent `POST /waveforms` requests; more get 503 `BUSY` (internal constant).
 pub const MAX_BATCH_REQUESTS: usize = 4;
 /// Records per cache shard (`id / 1024`).
@@ -105,6 +151,12 @@ pub fn list_etag(hash: u64) -> String {
         "W/\"wf{WAVEFORM_CACHE_VERSION}-k{}-{hash:016x}-l{LIST_VERSION}\"",
         crate::waveform::SERVER_CACHE_VERSION
     )
+}
+
+/// Entity tag of an 8-bit list entry (`-l1i8`, §9.4).
+pub fn list_etag_i8(hash: u64) -> String {
+    let etag = list_etag(hash);
+    format!("{}i8\"", etag.trim_end_matches('"'))
 }
 
 /// Stable directory name of a library under `list/`.
@@ -961,11 +1013,16 @@ pub struct ListWaveforms {
     stop: AtomicBool,
     db_path: PathBuf,
     db: Mutex<Option<Connection>>,
+    /// `waveforms.db` of the 8-bit encoding (§9.4); `None` when it cannot be opened.
+    wfdb: Option<crate::wfdb::WaveformsDb>,
 }
 
 impl Drop for ListWaveforms {
     fn drop(&mut self) {
         self.cache.flush_all();
+        if let Some(wfdb) = &self.wfdb {
+            wfdb.flush();
+        }
     }
 }
 
@@ -1024,8 +1081,14 @@ pub struct ListWaveformsCapability {
     pub buckets: Vec<u32>,
     /// Most ids per request.
     pub max_ids: usize,
-    /// `peaks` encoding.
+    /// Default `peaks` encoding.
     pub encoding: String,
+    /// Every accepted `encoding` (§9.4).
+    #[serde(default)]
+    pub encodings: Vec<String>,
+    /// `GET /waveforms/bundle` is available (§9.4.2).
+    #[serde(default)]
+    pub bundle: bool,
 }
 
 impl Default for ListWaveformsCapability {
@@ -1035,6 +1098,8 @@ impl Default for ListWaveformsCapability {
             buckets: vec![LIST_BUCKETS],
             max_ids: MAX_LIST_IDS,
             encoding: LIST_ENCODING.into(),
+            encodings: LIST_ENCODINGS.iter().map(|e| (*e).to_string()).collect(),
+            bundle: true,
         }
     }
 }
@@ -1071,7 +1136,15 @@ impl ListWaveforms {
         let list_dir = options.cache_root.join("list");
         let name = library_dir_name(library_id);
         remove_other_libraries(&list_dir, &name);
+        let wfdb = match crate::wfdb::WaveformsDb::open(&list_dir.join(&name)) {
+            Ok(wfdb) => Some(wfdb),
+            Err(error) => {
+                tracing::warn!(%error, "Cannot open waveforms.db; 8-bit list waveforms are not stored");
+                None
+            }
+        };
         Self {
+            wfdb,
             cache: ListCache::open(list_dir.join(name), options.cache_mb),
             sched: Mutex::new(Sched::default()),
             wake: Condvar::new(),
@@ -1094,6 +1167,36 @@ impl ListWaveforms {
         &self.cache
     }
 
+    /// `waveforms.db` (§9.4).
+    pub fn wfdb(&self) -> Option<&crate::wfdb::WaveformsDb> {
+        self.wfdb.as_ref()
+    }
+
+    /// Queue the 8-bit row of `id` unless `waveforms.db` already has `hash`'s version.
+    fn store_i8(&self, id: i64, hash: u64, canonical: &Path, values: &[i16]) {
+        let Some(wfdb) = &self.wfdb else { return };
+        let etag = list_etag_i8(hash);
+        if wfdb.etag(id).as_deref() == Some(etag.as_str()) {
+            return;
+        }
+        let (src_mtime, src_size) = std::fs::metadata(canonical).map_or((0, 0), |meta| {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs() as i64);
+            (mtime, meta.len() as i64)
+        });
+        wfdb.queue(crate::wfdb::Row {
+            file_id: id,
+            etag,
+            src_mtime,
+            src_size,
+            n: values.len() / 2,
+            blob: crate::wfdb::to_blob(values),
+        });
+    }
+
     fn sched(&self) -> MutexGuard<'_, Sched> {
         self.sched.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -1103,6 +1206,9 @@ impl ListWaveforms {
         self.stop.store(true, Ordering::SeqCst);
         self.wake.notify_all();
         self.cache.flush_all();
+        if let Some(wfdb) = &self.wfdb {
+            wfdb.flush();
+        }
     }
 
     /// A stream or preview response started (the on-demand queue yields for 3 s).
@@ -1628,6 +1734,7 @@ impl ListWaveforms {
                     ms = started.elapsed().as_millis() as u64,
                     "Computed list waveform"
                 );
+                self.store_i8(id, hash, &canonical, &values);
                 self.cache.put(id, hash, values);
                 self.sched().failures.remove(&id);
             }
@@ -1679,6 +1786,11 @@ impl ListWaveforms {
                     sched.failures.remove(&id);
                 }
             }
+        }
+        if removed_total > 0
+            && let Some(wfdb) = &self.wfdb
+        {
+            wfdb.retain(|id| self.cache.hash_of(id).is_some());
         }
         let failed: Vec<i64> = self.sched().failures.keys().copied().collect();
         if let Ok(found) = self.records(&failed) {
@@ -1803,6 +1915,9 @@ pub fn spawn_workers(state: &AppState) {
                         break;
                     };
                     list.cache.flush_due();
+                    if let Some(wfdb) = &list.wfdb {
+                        wfdb.flush_due();
+                    }
                     if list.take_prune() {
                         list.prune();
                     }
@@ -1832,6 +1947,8 @@ pub struct BatchRequest {
     pub ids: Vec<i64>,
     /// Client-cached entity tags by id (only ids of `ids`).
     pub known: HashMap<i64, String>,
+    /// Requested `encoding` (§9.4).
+    pub encoding: ListEncoding,
 }
 
 impl BatchRequest {
@@ -1893,7 +2010,16 @@ impl BatchRequest {
             }
             Some(_) => return Err(ApiError::validation("known must be an object")),
         }
-        Ok(Self { ids, known })
+        let encoding = match object.get("encoding") {
+            None | Some(serde_json::Value::Null) => ListEncoding::default(),
+            Some(serde_json::Value::String(name)) => ListEncoding::parse(name)?,
+            Some(_) => return Err(ApiError::validation("encoding must be a string")),
+        };
+        Ok(Self {
+            ids,
+            known,
+            encoding,
+        })
     }
 }
 
@@ -1979,6 +2105,8 @@ pub struct BatchResponse {
     pub library_id: String,
     /// Always 128.
     pub buckets: u32,
+    /// Encoding of every `peaks`; equals the request's (§9.4).
+    pub encoding: String,
     /// Suggested retry interval for `pending` items (seconds), `null` without any.
     pub retry_after: Option<u32>,
     /// One item per unique requested id, in request order.
@@ -1992,6 +2120,7 @@ fn lookup(
     path: &str,
     index: Option<usize>,
     known: Option<&str>,
+    encoding: ListEncoding,
 ) -> BatchItem {
     let list = state.list_waveforms();
     let hinted = list.hint(id).map(|hint| (hint.canonical, hint.file_etag));
@@ -2018,7 +2147,10 @@ fn lookup(
     .hash();
     match list.cache.get(id) {
         Some((cached, values)) if cached == hash => {
-            let etag = list_etag(hash);
+            let etag = encoding.etag(hash);
+            if encoding == ListEncoding::I8 {
+                list.store_i8(id, hash, &canonical, &values);
+            }
             if known == Some(etag.as_str()) {
                 BatchItem {
                     etag: Some(etag),
@@ -2028,7 +2160,7 @@ fn lookup(
                 BatchItem {
                     etag: Some(etag),
                     n: Some(values.len() / 2),
-                    peaks: Some(encode_peaks(&values)),
+                    peaks: Some(encoding.encode(&values)),
                     ..BatchItem::bare(id, ItemStatus::Ok)
                 }
             }
@@ -2057,7 +2189,11 @@ pub async fn batch(
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError::list_waveforms_busy())?;
-    let BatchRequest { ids, known } = request;
+    let BatchRequest {
+        ids,
+        known,
+        encoding,
+    } = request;
     let started = Instant::now();
     let records = {
         let list = list.clone();
@@ -2158,7 +2294,7 @@ pub async fn batch(
             }
             let result = tokio::task::spawn_blocking(move || {
                 let started = Instant::now();
-                let item = lookup(&state, id, &path, index, known.as_deref());
+                let item = lookup(&state, id, &path, index, known.as_deref(), encoding);
                 drop(claim);
                 (item, started.elapsed())
             })
@@ -2258,6 +2394,7 @@ pub async fn batch(
     Ok(BatchResponse {
         library_id: state.library_id().to_string(),
         buckets: LIST_BUCKETS,
+        encoding: encoding.name().to_string(),
         retry_after,
         items,
     })
