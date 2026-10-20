@@ -2688,7 +2688,9 @@ mod search_count_tests {
             let page = provider
                 .search(&SearchRequest {
                     query: "metal".into(),
-                    order_by: SortOrder::Filename,
+                    // Keep exercising the generic count density guard. Filename
+                    // pages can now count exact complete membership without COUNT.
+                    order_by: SortOrder::Modified,
                     offset: 10_000,
                     ..Default::default()
                 })
