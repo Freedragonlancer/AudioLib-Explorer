@@ -2242,7 +2242,10 @@ mod bundle_tests {
         let cancel = AtomicBool::new(false);
         assert_eq!(service.import_bundle(&cancel).unwrap(), 1);
         let store = service.i8_store.as_ref().unwrap();
-        assert!(store.get(9).unwrap().is_none(), "old store replaced");
+        assert!(
+            store.get(9).unwrap().is_some(),
+            "local rows kept over the bundle"
+        );
         assert_eq!(store.get(1).unwrap().unwrap().peaks.values, vec![-10, 10]);
         assert!(leftovers(directory.path()).is_empty());
         let batch = service.lookup(&[1], &cancel).unwrap();

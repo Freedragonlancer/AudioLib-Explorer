@@ -557,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)] // mirrors rusqlite's `Connection::close` signature
     fn a_failed_close_keeps_the_file_connection() {
         let directory = tempfile::tempdir().unwrap();
         let db = WaveformsDb::open(&directory.path().join(WAVEFORMS_DB_FILE)).unwrap();

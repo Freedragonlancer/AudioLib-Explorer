@@ -177,11 +177,12 @@ fn a_validated_bundle_replaces_the_store_atomically() {
     validate_bundle(&staged, LIST_WAVEFORM_ENCODING_I8, LIBRARY).unwrap();
     store.replace_with(&staged).unwrap();
     assert!(!staged.exists());
-    assert!(store.get(9).unwrap().is_none());
+    // Rows already in the store are newer than the bundle's and are kept (S6).
+    assert_eq!(store.get(9).unwrap().unwrap().etag, "W/\"old-l1i8\"");
     let one = store.get(1).unwrap().unwrap();
     assert_eq!(one.etag, "W/\"a-l1i8\"");
     assert_eq!(one.peaks.values, vec![-5, 5]);
-    assert_eq!(store.len().unwrap(), 2);
+    assert_eq!(store.len().unwrap(), 3);
     // Still writable in WAL mode after the swap.
     store
         .upsert(&WaveformsDbRow {
@@ -190,10 +191,10 @@ fn a_validated_bundle_replaces_the_store_atomically() {
         })
         .unwrap();
     let reopened = WaveformsDb::open(store.path()).unwrap();
-    assert_eq!(reopened.len().unwrap(), 3);
+    assert_eq!(reopened.len().unwrap(), 4);
     // A bundle staged elsewhere is refused and the store stays intact.
     let elsewhere = tempfile::tempdir().unwrap();
     let foreign = bundle(elsewhere.path(), "b.db", "");
     assert!(store.replace_with(&foreign).is_err());
-    assert_eq!(store.len().unwrap(), 3);
+    assert_eq!(store.len().unwrap(), 4);
 }
