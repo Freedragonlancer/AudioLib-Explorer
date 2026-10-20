@@ -1007,7 +1007,6 @@ pub struct ListWaveforms {
     stats: StatTracker,
     hints: Mutex<HashMap<i64, StatHint>>,
     workers: usize,
-    rate: u32,
     pause_stats_on_playback: bool,
     last_playback_start: Mutex<Option<Instant>>,
     stop: AtomicBool,
@@ -1111,6 +1110,10 @@ pub struct SettingsResponse {
     pub pregenerate_list_waveforms: bool,
     /// `default`, `config` or `admin`.
     pub pregenerate_list_waveforms_source: Source,
+    /// Effective `list_waveform_rate` (files per second, §9.5.4).
+    pub list_waveform_rate: u32,
+    /// `default`, `config` or `admin`.
+    pub list_waveform_rate_source: Source,
     /// Whether this client may change the settings (`manage_mode`; a hint).
     pub can_change: bool,
 }
@@ -1123,7 +1126,8 @@ pub struct ListOptions {
     pub cache_mb: u64,
     /// Effective worker count (`list_waveform_workers`, at most `max(1, max_waveforms - 1)`).
     pub workers: usize,
-    /// `list_waveform_rate`.
+    /// `list_waveform_rate` of `config.toml` (informational: the effective rate is read
+    /// from [`crate::Security::list_waveform_rate`] for every file, §9.5.4).
     pub rate: u32,
     /// `list_waveform_pause_stats_on_playback`.
     pub pause_stats_on_playback: bool,
@@ -1136,11 +1140,6 @@ impl ListWaveforms {
         let list_dir = options.cache_root.join("list");
         let name = library_dir_name(library_id);
         remove_other_libraries(&list_dir, &name);
-        // Make sure the library's directory exists from the start (§9.5.8): the bundle
-        // and the job state file live there before any shard is written.
-        if let Err(error) = fs::create_dir_all(list_dir.join(&name)) {
-            tracing::warn!(%error, "Cannot create the list waveform cache directory");
-        }
         let wfdb = match crate::wfdb::WaveformsDb::open(&list_dir.join(&name)) {
             Ok(wfdb) => Some(wfdb),
             Err(error) => {
@@ -1158,7 +1157,6 @@ impl ListWaveforms {
             stats: StatTracker::default(),
             hints: Mutex::new(HashMap::new()),
             workers: options.workers.max(1),
-            rate: options.rate.max(1),
             pause_stats_on_playback: options.pause_stats_on_playback,
             last_playback_start: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -1712,7 +1710,8 @@ impl ListWaveforms {
                 let mut sched = self.sched();
                 let now = Instant::now();
                 let at = sched.next_decode_at.map_or(now, |at| at.max(now));
-                sched.next_decode_at = Some(at + Duration::from_secs(1) / self.rate);
+                let rate = state.security().list_waveform_rate().max(1);
+                sched.next_decode_at = Some(at + Duration::from_secs(1) / rate);
                 at.saturating_duration_since(now)
             };
             if !wait.is_zero() {
@@ -1863,7 +1862,7 @@ impl ListWaveforms {
             skipped_offline: pass.map_or(0, |pass| {
                 pass.deferred.values().map(|ids| ids.len() as u64).sum()
             }),
-            rate: self.rate,
+            rate: state.security().list_waveform_rate(),
             cache_bytes: self.cache.bytes(),
             cache_limit_bytes: self.cache.limit_bytes(),
             over_budget: self.cache.over_budget(),

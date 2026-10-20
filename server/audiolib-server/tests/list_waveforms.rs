@@ -1311,8 +1311,10 @@ async fn first_bundle_creates_a_missing_cache_directory() {
         .parent()
         .unwrap()
         .to_path_buf();
-    assert!(dir.is_dir(), "created when the library opens");
-    fs::remove_dir_all(&dir).unwrap();
+    // Nothing was generated yet: the directory does not exist (or only holds an
+    // empty waveforms.db); make sure it is gone.
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!dir.exists());
     let (status, _, body) = bundle_response(&f.state).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(dir.is_dir());
@@ -1330,7 +1332,8 @@ async fn bundle_is_unavailable_when_the_cache_directory_cannot_be_created() {
         .parent()
         .unwrap()
         .to_path_buf();
-    fs::remove_dir_all(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.parent().unwrap()).unwrap();
     // A file where the directory should be: create_dir_all fails.
     fs::write(&dir, b"not a directory").unwrap();
     let (status, retry, body) = bundle_response(&f.state).await;
@@ -1339,4 +1342,110 @@ async fn bundle_is_unavailable_when_the_cache_directory_cannot_be_created() {
     let body: ErrorBody = serde_json::from_slice(&body).unwrap();
     assert_eq!(body.error_code, "UNAVAILABLE");
     assert!(!body.message.contains('/'), "{}", body.message);
+}
+
+#[tokio::test]
+async fn list_waveform_rate_setting_follows_config_admin_and_manage_mode() {
+    let f = fixture("manage_mode = \"lan\"\nlist_waveform_rate = 25\n");
+    let bearer = format!("Bearer {TOKEN}");
+    let external: &[(&str, &str)] = &[("authorization", &bearer)];
+    let rate = |v: &serde_json::Value| {
+        (
+            v["list_waveform_rate"].as_u64().unwrap(),
+            v["list_waveform_rate_source"].as_str().unwrap().to_string(),
+        )
+    };
+    let get: serde_json::Value =
+        ok(call(f.state.clone(), Method::GET, "/settings", &[], LAN, None).await).await;
+    assert_eq!(rate(&get), (25, "config".into()));
+    assert_eq!(status(&f.state).await.rate, 25);
+
+    // External PATCH is forbidden under manage_mode = lan.
+    error(
+        call(
+            f.state.clone(),
+            Method::PATCH,
+            "/settings",
+            external,
+            PUBLIC,
+            Some(r#"{"list_waveform_rate":50}"#),
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "MANAGE_FORBIDDEN",
+    )
+    .await;
+    for bad in [
+        r#"{"list_waveform_rate":0}"#,
+        r#"{"list_waveform_rate":1001}"#,
+        r#"{"list_waveform_rate":-1}"#,
+        r#"{"list_waveform_rate":2.5}"#,
+        r#"{"list_waveform_rate":"10"}"#,
+    ] {
+        error(
+            call(
+                f.state.clone(),
+                Method::PATCH,
+                "/settings",
+                &[],
+                LAN,
+                Some(bad),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+        )
+        .await;
+    }
+    let patched: serde_json::Value = ok(call(
+        f.state.clone(),
+        Method::PATCH,
+        "/settings",
+        &[],
+        LAN,
+        Some(r#"{"list_waveform_rate":1000}"#),
+    )
+    .await)
+    .await;
+    assert_eq!(rate(&patched), (1000, "admin".into()));
+    // pregenerate_list_waveforms is untouched by a rate-only PATCH.
+    assert_eq!(patched["pregenerate_list_waveforms"], false);
+    assert_eq!(status(&f.state).await.rate, 1000);
+    // null removes the override: back to config.toml.
+    let reset: serde_json::Value = ok(call(
+        f.state.clone(),
+        Method::PATCH,
+        "/settings",
+        &[],
+        LAN,
+        Some(r#"{"list_waveform_rate":null}"#),
+    )
+    .await)
+    .await;
+    assert_eq!(rate(&reset), (25, "config".into()));
+    // Persisted in admin-settings.json across a reload.
+    let _: serde_json::Value = ok(call(
+        f.state.clone(),
+        Method::PATCH,
+        "/settings",
+        &[],
+        LAN,
+        Some(r#"{"list_waveform_rate":7}"#),
+    )
+    .await)
+    .await;
+    let reloaded = audiolib_server::Security::from_config(&f.config, None);
+    assert_eq!(
+        reloaded.list_waveform_rate_with_source(),
+        (7, audiolib_server::auth::Source::Admin)
+    );
+}
+
+#[tokio::test]
+async fn list_waveform_rate_defaults_to_ten() {
+    let f = fixture("");
+    let get: serde_json::Value =
+        ok(call(f.state.clone(), Method::GET, "/settings", &[], LAN, None).await).await;
+    assert_eq!(get["list_waveform_rate"], 10);
+    assert_eq!(get["list_waveform_rate_source"], "default");
 }
