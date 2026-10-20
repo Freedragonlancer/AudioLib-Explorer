@@ -873,36 +873,54 @@ pub(crate) fn window_ids(ids: &[i64], first: usize, count: usize) -> Vec<i64> {
     window
 }
 
-/// Thumbnail height in pixels; the table stretches it to the cell.
-pub(crate) const THUMBNAIL_HEIGHT: u32 = 24;
+/// Logical size of the list Waveform image (cell 120 px wide, 18 px tall in a 22 px row).
+pub(crate) const THUMBNAIL_WIDTH: u32 = 120;
+pub(crate) const THUMBNAIL_HEIGHT: u32 = 18;
+/// Plain grey bars.
 const WAVE_COLOR: Rgba8Pixel = Rgba8Pixel {
-    r: 143,
-    g: 174,
-    b: 166,
-    a: 230,
+    r: 150,
+    g: 150,
+    b: 150,
+    a: 255,
 };
 
-/// Rasterize `waveform`: one pixel column per Waveform column (the table stretches
-/// `n < 128` columns to the full cell width). `None` for 0 columns (center line).
+/// Rasterize `waveform` as filled min/max bars at `scale` physical pixels per logical
+/// pixel, so the table shows it 1:1 at the window scale factor. Each pixel column takes
+/// the envelope union of the Waveform columns it covers. `None` for 0 columns (centre line).
 pub(crate) fn render_list_waveform(
     waveform: &ListWaveform,
+    scale: f32,
 ) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let columns = waveform.columns().min(LIST_WAVEFORM_COLUMNS as usize);
     if columns == 0 {
         return None;
     }
-    let height = THUMBNAIL_HEIGHT;
-    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(columns as u32, height);
+    let scale = if scale.is_finite() {
+        scale.clamp(1.0, 4.0)
+    } else {
+        1.0
+    };
+    let width = ((THUMBNAIL_WIDTH as f32 * scale).round() as u32).max(1);
+    let height = ((THUMBNAIL_HEIGHT as f32 * scale).round() as u32).max(1);
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
     let pixels = buffer.make_mut_slice();
     let row = |value: i16| -> u32 {
         let scaled = (32767.0 - f32::from(value.max(-32767))) / 65534.0 * (height - 1) as f32;
         (scaled.round() as u32).min(height - 1)
     };
-    for column in 0..columns {
-        let (low, high) = waveform.column(column).unwrap_or((0, 0));
-        let (top, bottom) = (row(high.max(low)), row(low.min(high)));
-        for y in top..=bottom {
-            pixels[y as usize * columns + column] = WAVE_COLOR;
+    for x in 0..width as usize {
+        let first = x * columns / width as usize;
+        let last = ((x + 1) * columns)
+            .div_ceil(width as usize)
+            .clamp(first + 1, columns);
+        let (mut low, mut high) = (i16::MAX, i16::MIN);
+        for column in first..last {
+            let (a, b) = waveform.column(column).unwrap_or((0, 0));
+            low = low.min(a.min(b));
+            high = high.max(a.max(b));
+        }
+        for y in row(high)..=row(low) {
+            pixels[y as usize * width as usize + x] = WAVE_COLOR;
         }
     }
     Some(buffer)
@@ -1513,20 +1531,26 @@ mod tests {
     }
 
     #[test]
-    fn thumbnails_have_one_column_per_peak_and_empty_files_none() {
-        assert!(render_list_waveform(&waveform(0)).is_none());
+    fn thumbnails_fill_the_cell_at_the_window_scale_and_empty_files_none() {
+        assert!(render_list_waveform(&waveform(0), 1.0).is_none());
         let full = ListWaveform::new(1, vec![-32767, 32767, 0, 0]).unwrap();
-        let image = render_list_waveform(&full).unwrap();
-        assert_eq!((image.width(), image.height()), (2, THUMBNAIL_HEIGHT));
+        let image = render_list_waveform(&full, 1.0).unwrap();
+        let (w, h) = (THUMBNAIL_WIDTH as usize, THUMBNAIL_HEIGHT as usize);
+        assert_eq!((image.width(), image.height()), (w as u32, h as u32));
         let pixels = image.as_slice();
-        let filled = |column: usize| {
-            (0..THUMBNAIL_HEIGHT as usize)
-                .filter(|y| pixels[y * 2 + column].a > 0)
-                .count()
-        };
-        assert_eq!(filled(0), THUMBNAIL_HEIGHT as usize);
-        assert_eq!(filled(1), 1, "silence keeps a one-pixel line");
-        let short = render_list_waveform(&waveform(125)).unwrap();
-        assert_eq!(short.width(), 125);
+        let filled = |x: usize| (0..h).filter(|y| pixels[y * w + x].a > 0).count();
+        assert_eq!(filled(0), h, "full-scale column fills the cell");
+        assert_eq!(filled(w - 1), 1, "silence keeps a one-pixel line");
+        assert!(
+            pixels
+                .iter()
+                .all(|p| p.a == 0 || (p.r == p.g && p.g == p.b)),
+            "plain grey"
+        );
+        let double = render_list_waveform(&waveform(125), 2.0).unwrap();
+        assert_eq!(
+            (double.width(), double.height()),
+            (2 * w as u32, 2 * h as u32)
+        );
     }
 }

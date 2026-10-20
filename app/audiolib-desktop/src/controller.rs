@@ -4747,11 +4747,15 @@ impl Controller {
 
     /// Keep already known list Waveforms on rows being (re)published.
     fn decorate_list_waveforms(&self, mut rows: Vec<AudioRow>) -> Vec<AudioRow> {
+        let scale = self
+            .ui
+            .upgrade()
+            .map_or(1.0, |ui| ui.window().scale_factor());
         for row in &mut rows {
             if let Ok(id) = row.id.parse::<i64>()
                 && let Some(cell) = self.list_waveforms.cached(id)
             {
-                apply_list_waveform(row, &cell);
+                apply_list_waveform(row, &cell, scale);
             }
         }
         rows
@@ -5698,9 +5702,9 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
 /// Row Waveform states shown by the table: 0 placeholder, 1 thumbnail, 2 center line
 /// (empty file), 3 no Waveform (missing or undecodable), 4 root offline (server mode:
 /// a stale thumbnail with the offline tint, or an offline placeholder).
-fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell) {
+fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell, scale: f32) {
     match cell {
-        ListWaveformCell::Ready(waveform) => match render_list_waveform(waveform) {
+        ListWaveformCell::Ready(waveform) => match render_list_waveform(waveform, scale) {
             Some(buffer) => {
                 row.wave = Image::from_rgba8(buffer);
                 row.wave_state = 1;
@@ -5717,7 +5721,7 @@ fn apply_list_waveform(row: &mut AudioRow, cell: &ListWaveformCell) {
         ListWaveformCell::Offline(stale) => {
             row.wave = stale
                 .as_ref()
-                .and_then(render_list_waveform)
+                .and_then(|waveform| render_list_waveform(waveform, scale))
                 .map(Image::from_rgba8)
                 .unwrap_or_default();
             row.wave_state = 4;
@@ -5731,6 +5735,7 @@ fn publish_list_waveforms(ui: &AppWindow, cells: Vec<(i64, ListWaveformCell)>) {
     let Some(model) = rows.as_any().downcast_ref::<VecModel<AudioRow>>() else {
         return;
     };
+    let scale = ui.window().scale_factor();
     let cells: HashMap<String, ListWaveformCell> = cells
         .into_iter()
         .map(|(id, cell)| (id.to_string(), cell))
@@ -5739,7 +5744,7 @@ fn publish_list_waveforms(ui: &AppWindow, cells: Vec<(i64, ListWaveformCell)>) {
         if let Some(mut row) = model.row_data(index)
             && let Some(cell) = cells.get(row.id.as_str())
         {
-            apply_list_waveform(&mut row, cell);
+            apply_list_waveform(&mut row, cell, scale);
             model.set_row_data(index, row);
         }
     }
