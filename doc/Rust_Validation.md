@@ -1,5 +1,32 @@
 # Rust 验证报告
 
+## b49f7d2 搜索与 GUI 阶段收尾（2026-10-20，0.4.11）
+
+用户要求尽快阶段收尾后审查、推送，本轮据此停止扩展优化。**P95 latency <500ms for 1M+ records 仍未全面达到**；完整 224 样本矩阵尚未开始，也未完成。当前源码为 `b49f7d278505669ac025b4b49b9eceec45873728`，与另一个 Debug 任务协调后独立完成代码、构建及 GUI 操作，未混入其 Mac 升级、WAL 或服务端生命周期修复。
+
+本轮将首次文件名排序的完整 MATCH ID 收集、基本筛选交集及精确计数移至宽 Metadata 查询之前，验证现有可选覆盖索引后由 SQLite 执行 NOCASE 排序及 ID 升序平局规则，仅加载所选页面。无附加筛选的 present 请求要求同快照全 present 证明；不适用或超预算时完整回退。此前的冷目录统计、复杂查询文档长度、时长覆盖分页及 30ms debounce 优化继续保留。空页菜单动作采用稳定可用状态与实时空页 guard，保留 WGC 的严格可见性和同步几何检查。
+
+同一正式 ASIO GUI EXE 完成三个独立阶段批次，各 14 类请求、每类一次、每次新进程。真实库为 909,342 条、20,248 个目录的 owned 只读副本，另有独立百万条合成库。分页 200 条，首次目标请求排名缓存未命中；OS 缓存未清空，启动、索引准备和校准不计入计时。终点为结果页与完整目录计数模型发布后、CRC/nonce/代次符合的首个观测 WGC ALL compositor frame，包含生产 debounce、排队及当前视口绘制；不是物理屏幕出光或同时绘制所有目录。
+
+| 阶段样本 | 有效 / 无效 | ≥500ms | P95 / 最大 |
+| --- | ---: | ---: | ---: |
+| 真实库，synthetic Slint 输入 | 14 / 0 | 4 | 933.151 / 933.151ms |
+| 百万条合成库，synthetic Slint 输入 | 14 / 0 | 2 | 568.9038 / 568.9038ms |
+| 真实库，原生 Sky 输入 | 14 / 0 | 1 | 609.3829 / 609.3829ms |
+
+全部 42 个有效样本的页面顺序、精确总数与全部目录计数均与计时后 oracle 一致；7 个有效慢样本全部保留，不以重试替换。每组只有 14 条不同请求，P95 按原摘要 `ceil((n-1)*p)` 索引计算，此处等于最大值；不能据此建立长期尾延迟保证。百万条 `ambient` + 48kHz + 0–5s + 文件名排序本次为 **125.9468ms**，前轮同类有效慢例为 1,673.8516ms；真实库该请求的本次 synthetic 样本仍为 **584.7215ms**。局部优化不意味着总体达标。完整条件及历史失败见 [GUI 搜索性能](Rust_GUI_Search_Performance.md) 与 [待解决问题](Rust_Known_Issues.md)。
+
+Rust 1.97.1 MSVC 的格式化、默认和 ASIO 严格 workspace/all-targets Clippy、完整 locked 测试全部通过：**每种配置各 57 个顶层目标、959 passed、72 ignored、0 failed**。227 项动态源码/配置/资源输入及维护的 GUI 验证脚本在检查与构建前后保持相同 SHA256，正常数据目录环境和六项持久数据基线保留。首次完整检查捕获了旧 COUNT 密度测试与新免 COUNT 文件名路径的测试意图冲突；该旧测试改用 Modified 继续验证原 128 行密度阈值，新文件名路径由完整 native SQL oracle 回归覆盖，随后重新执行两套完整检查。
+
+同源正式 ASIO 构建耗时 **262.641s**，Steinberg SDK 2.3.4 由准备脚本验证。发布版 `validate-review-fixes.ps1 -CleanCheckout`、`validate-library-management.ps1` 和 CLI 片段回归通过。构建与测量的身份为：
+
+- AudioLibExplorer.exe：`588553215AF4C0A6133DEB0C456F0B66A756AD1DB68AC38495970161CC0A97EA`
+- AudioLibCli.exe：`938265EBE96612314ED9609A3EC81C72430E4A17A5C1BA3A33AE7FDACD066527`
+
+阶段安装使用相同 ASIO 便携载荷和固定 `local_release/`：先打包及隔离 portable 验证，再仅覆盖包所有的文件、核对两 EXE 与全部载荷 SHA256，最后执行安装目录的隔离 portable 验证并复核持久数据。安装结果独立记在本机 `.rust-validation/gui-e2e/round-v11-checks/completion.json`，仅其成功结果可证明安装完成；其中 `StageAcceptanceOnly=true`、`PerformanceTargetMet=false`、`Full224Complete=false` 与软件安装成功分别记录。没有发布 Release 或 tag，未替换工作数据库或源 WAV。
+
+原始私有阶段记录由 `.rust-validation/gui-e2e/coordination/stage-report-storage-v1.json` 定位，检查和构建日志位于 `.rust-validation/gui-e2e/round-v11-checks/`。旧的有效慢例、无效捕获及失败检查批次继续保留。原定大矩阵与后续性能定位均为待办。
+
 ## 7ec84ed 审查修复与真实升级资源复测（2026-10-20，0.4.11）
 
 本轮按主报告及逐行补充报告修复 BM25 跨平台测试判定、源路径别名、辅助 reader 资源预算、mmap 策略、串行回退诊断、服务端升级进度及 FFI 生命周期回归，并合并上游 `afb2f04`。单字母查询仍按用户明确要求返回输入提示；API 文档明确当前服务器只提供快照，尚未实现远端搜索路由。Mac 原生数据库 CI 单独验证 ARM64 C/Rust 浮点及文件系统行为，不以 Windows 结果代替 Mac 测试。

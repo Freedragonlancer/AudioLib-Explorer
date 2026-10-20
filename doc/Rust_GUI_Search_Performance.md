@@ -1,4 +1,43 @@
-# Large-library GUI search — 2026-10-10
+# Large-library GUI search
+
+## 2026-10-20 stage record — performance target not met
+
+The primary target remains **P95 latency <500ms for 1M+ records**. At the user's request to close this development stage promptly, 42 GUI samples were collected: 14 real-library synthetic-Slint samples, 14 million-record synthetic-Slint samples and 14 real-library native-input samples. All 42 are valid; seven exceed the target. The original 224-sample formal matrix **has not started and is not complete**. This smaller stage must not be described as its replacement or as final SLA acceptance.
+
+The source is `b49f7d278505669ac025b4b49b9eceec45873728`, version **0.4.11**, built with the verified ASIO SDK 2.3.4. The official measured GUI SHA256 is `588553215AF4C0A6133DEB0C456F0B66A756AD1DB68AC38495970161CC0A97EA`. The two completed synthetic-input populations did not meet the latency target:
+
+| Population and input | Records / database folders | Collected / valid / invalid | Valid totals ≥500ms | Total P95 / maximum |
+| --- | --- | ---: | ---: | ---: |
+| Real library, synthetic Slint | 909,342 / 20,248 | 14 / 14 / 0 | 4 | 933.151 / 933.151 ms |
+| Isolated synthetic database, synthetic Slint | 1,000,000 / separate synthetic hierarchy | 14 / 14 / 0 | 2 | 568.9038 / 568.9038 ms |
+| Real library, native Sky input | 909,342 / 20,248 | 14 / 14 / 0 | 1 | 609.3829 / 609.3829 ms |
+
+Each completed population has one run for each of the fixed 14 requests, rather than repeated observations of one query. Its stored summary uses sorted index `ceil((n-1)*p)`; at 14 samples its P95 is the maximum. These small populations do not establish a production latency tail. All four real-library synthetic slow totals—933.151, 511.5448, 511.0314 and 584.7215ms—both million-record slow totals, and the native `metal` total of 609.3829ms remain valid retained measurements. Slow samples are not reclassified as invalid or removed from the statistics.
+
+For the million-record filtered filename-order case (`ambient`, 48kHz, duration 0–5s), the earlier valid 1,673.8516ms preflight sample and the current valid 125.9468ms sample are both retained. The real-library instance of that request still took **584.7215ms** in this stage. These are different populations/runs, not a controlled speedup ratio or evidence that every such request is now below 500ms.
+
+### Current measurement boundary
+
+The machine is Windows x64 with an AMD Ryzen 7 9800X3D (8 cores / 16 logical CPUs) and approximately 93.5GiB of system RAM. The build uses Rust 1.97.1 and Slint 1.17.1. These are measurements on this machine, not a resource requirement or evidence for macOS performance.
+
+Each request starts a fresh process, uses a 200-record page across folders, and reports a first target-query ranking-cache miss. The real-library measurements use an explicitly selected read-only current snapshot through an isolated diagnostic profile; the million-record fixture is a separate database. Provider opening, startup empty browsing, library-information refresh, index preparation and initial WGC calibration finish before target input. Those reads may warm pages. **OS page caches are not cleared**; a fresh process does not establish physical cold-disk performance. The measured production path includes the current **30ms debounce**, worker queueing, model publication and rendering.
+
+Synthetic Slint dispatch sends the complete text through the production LineEdit's KeyPressed/KeyReleased handling; it is not OS keyboard injection. Native Sky cross-checks use the native KeyboardInput Pressed text or Ime Commit timestamp before the production handler. Their results remain separate. The endpoint is the first observed qualifying, CRC-verified Windows Graphics Capture (WGC) compositor frame with the matching nonce/generation and phase ALL, after both the result page and complete directory-count model have been published. The current viewport is rendered through virtualized models; this does **not** mean all 20,248 real-library folders are painted simultaneously. It is not panel scanout or photon timing.
+
+The correctness and frame qualifications are unchanged for this stage. Every accepted raw sample must match the post-timing oracle's ordered IDs, complete result count and all directory counts, with the read-only source and normal runtime data preserved. Foreground, visibility, monitor/workarea coverage, unknown/application occlusion, native geometry history, CRC and QPC checks remain strict. Outer-window or DPI changes invalidate a sample; client-only native layout transitions must restore the full armed geometry before the qualifying frame. Only the explicitly verified Sky pointer-decoration exception is permitted when selected. This protocol does not claim continuous absolute absence of every possible occluder. Invalid reports and all earlier failed probes remain preserved.
+
+### Current implementation and verification status
+
+- The native “Check current page” action keeps stable menu availability while the menu is ready. Its activation checks a separately stored has-page-rows boolean and does nothing for an empty page; normal result-model replacement no longer drives native-menu reconstruction. This preserves the action's selection behavior without claiming that every other menu state is static.
+- Filename sorting can collect bounded exact MATCH membership and apply supported sample-rate/duration filters through verified existing covering indexes before counting. The complete intersection determines the count; SQLite preserves native NOCASE ordering and ascending ID ties in both directions, then hydrates only the selected page. Present, unscoped requests without additional filters require a same-snapshot proof that all rows are present. Missing/incompatible optional indexes, unsupported requests or exceeded budgets retain the complete existing path. Unscored IDs never enter the BM25 ranking cache.
+
+Formatting, strict default/ASIO Clippy and **959 tests in each configuration** passed for this source. The official ASIO build completed in **262.641s**, and the release regressions passed. All three stage populations are complete, while their performance acceptance failed. The stage installation workflow retains those slow samples and records `PerformanceTargetMet=false`; it cannot turn them into a performance pass or complete the 224-sample matrix. Portable validation, full installed payload identity and normal runtime-data preservation have a separate installation report; installation is complete only when that report confirms those checks.
+
+Private audit references are `.rust-validation/gui-e2e/coordination/stage-close-plan-v1.json`, `.rust-validation/gui-e2e/coordination/stage-report-storage-v1.json` and `.rust-validation/gui-e2e/round-v11-checks/`. The storage record identifies the `real-stage-slint-1`, `million-stage-slint-1` and `real-stage-native-1` batches. Raw private reports, database locations, screenshots and real audio filenames are not part of packaged documentation. See [Rust Validation](Rust_Validation.md) for the coordinated checks and final installation status.
+
+## Historical record — 2026-10-10 and 2026-10-11
+
+The remaining sections retain their original dates and measurement conditions; they do not override the current stage status above.
 
 The 2026-10-11 first-search follow-up uses fixed parallel page/facet workers, exclusive NO_MUTEX readers and a directory rollup that stays bounded with stale ANALYZE statistics. Fresh-process GUI publication and fresh-provider measurements for 1M rows with 1 or 20001 database folders are recorded in [Rust Validation](Rust_Validation.md) and the full first-search record. The earlier measurements below are retained with their original conditions.
 
