@@ -191,7 +191,7 @@ impl SqliteProvider {
         store: &crate::WaveformsDb,
         ids: &[i64],
     ) -> Result<usize> {
-        let mut written = 0;
+        let mut rows = Vec::new();
         for id in ids {
             let record = {
                 let conn = self.reader()?;
@@ -202,17 +202,16 @@ impl SqliteProvider {
                 continue;
             };
             let Some(version) = version else { continue };
-            store.upsert(&crate::WaveformsDbRow {
+            rows.push(crate::WaveformsDbRow {
                 file_id: *id,
                 etag: audiolib_core::LIST_WAVEFORM_I8_ZOOM_LEVEL.into(),
                 encoding: audiolib_core::LIST_WAVEFORM_ENCODING_I8.into(),
                 src_mtime: version.mtime_ns.unwrap_or(0),
                 src_size: i64::try_from(version.size).unwrap_or(i64::MAX),
                 peaks: audiolib_core::ListWaveformI8::from_list_waveform(&waveform),
-            })?;
-            written += 1;
+            });
         }
-        Ok(written)
+        store.upsert_many(&rows)
     }
 
     pub(crate) fn list_waveform_backlog_impl(&self, after: i64, limit: usize) -> Result<Vec<i64>> {

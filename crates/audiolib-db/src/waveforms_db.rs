@@ -84,6 +84,15 @@ fn open_connection(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Rows per write transaction of [`WaveformsDb::upsert_many`].
+pub const WRITE_BATCH_ROWS: usize = 256;
+const UPSERT_SQL: &str =
+    "INSERT INTO list_waveforms(file_id,etag,src_mtime,src_size,encoding,n,blob)
+     VALUES(?1,?2,?3,?4,?5,?6,?7)
+     ON CONFLICT(file_id) DO UPDATE SET etag=excluded.etag,src_mtime=excluded.src_mtime,
+      src_size=excluded.src_size,encoding=excluded.encoding,n=excluded.n,
+      blob=excluded.blob";
+
 /// Zero-padded 256-byte blob of `peaks`.
 fn padded_blob(peaks: &ListWaveformI8) -> Vec<u8> {
     let mut blob = peaks.to_bytes();
@@ -129,25 +138,52 @@ impl WaveformsDb {
             return Err(Error::Validation("i8 peaks exceed 256 bytes".into()));
         }
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        conn.prepare_cached(
-            "INSERT INTO list_waveforms(file_id,etag,src_mtime,src_size,encoding,n,blob)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(file_id) DO UPDATE SET etag=excluded.etag,src_mtime=excluded.src_mtime,
-              src_size=excluded.src_size,encoding=excluded.encoding,n=excluded.n,
-              blob=excluded.blob",
-        )
-        .map_err(db_error)?
-        .execute(rusqlite::params![
-            row.file_id,
-            row.etag,
-            row.src_mtime,
-            row.src_size,
-            row.encoding,
-            row.peaks.columns() as i64,
-            padded_blob(&row.peaks)
-        ])
-        .map_err(db_error)?;
+        conn.prepare_cached(UPSERT_SQL)
+            .map_err(db_error)?
+            .execute(rusqlite::params![
+                row.file_id,
+                row.etag,
+                row.src_mtime,
+                row.src_size,
+                row.encoding,
+                row.peaks.columns() as i64,
+                padded_blob(&row.peaks)
+            ])
+            .map_err(db_error)?;
         Ok(())
+    }
+
+    /// Insert or replace many rows in transactions of [`WRITE_BATCH_ROWS`] rows, so a
+    /// page of results costs one commit instead of one per row.
+    pub fn upsert_many(&self, rows: &[WaveformsDbRow]) -> Result<usize> {
+        if rows
+            .iter()
+            .any(|row| row.peaks.values.len() > LIST_WAVEFORM_I8_MAX_BYTES)
+        {
+            return Err(Error::Validation("i8 peaks exceed 256 bytes".into()));
+        }
+        let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        for chunk in rows.chunks(WRITE_BATCH_ROWS) {
+            let transaction = conn.transaction().map_err(db_error)?;
+            {
+                let mut statement = transaction.prepare_cached(UPSERT_SQL).map_err(db_error)?;
+                for row in chunk {
+                    statement
+                        .execute(rusqlite::params![
+                            row.file_id,
+                            row.etag,
+                            row.src_mtime,
+                            row.src_size,
+                            row.encoding,
+                            row.peaks.columns() as i64,
+                            padded_blob(&row.peaks)
+                        ])
+                        .map_err(db_error)?;
+                }
+            }
+            transaction.commit().map_err(db_error)?;
+        }
+        Ok(rows.len())
     }
 
     /// The row of `file_id`. A row whose blob or `n` no longer validates is reported as
@@ -400,15 +436,32 @@ mod tests {
     }
 
     #[test]
+    fn upsert_many_writes_in_batches_and_rejects_oversized_rows_up_front() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = WaveformsDb::open(&directory.path().join(WAVEFORMS_DB_FILE)).unwrap();
+        let rows: Vec<_> = (0..WRITE_BATCH_ROWS as i64 * 2 + 7)
+            .map(|id| row(id, "e", vec![-1, 1]))
+            .collect();
+        assert_eq!(db.upsert_many(&rows).unwrap(), rows.len());
+        assert_eq!(db.len().unwrap(), rows.len() as u64);
+        let mut too_big = row(9_999, "e", vec![]);
+        too_big.peaks.values = vec![0; LIST_WAVEFORM_I8_MAX_BYTES + 2];
+        assert!(
+            db.upsert_many(&[row(10_000, "e", vec![]), too_big])
+                .is_err()
+        );
+        assert!(db.get(10_000).unwrap().is_none(), "nothing written");
+    }
+
+    #[test]
     fn a_failed_close_keeps_the_file_connection() {
         let directory = tempfile::tempdir().unwrap();
         let db = WaveformsDb::open(&directory.path().join(WAVEFORMS_DB_FILE)).unwrap();
         db.upsert(&row(3, "e", vec![-1, 1])).unwrap();
         {
             let mut conn = db.conn.lock().unwrap();
-            let failed = close_or_restore(&mut conn, |old| {
-                Err((old, rusqlite::Error::InvalidQuery))
-            });
+            let failed =
+                close_or_restore(&mut conn, |old| Err((old, rusqlite::Error::InvalidQuery)));
             assert!(failed.is_err());
         }
         assert_eq!(db.len().unwrap(), 1, "still the file store, not :memory:");

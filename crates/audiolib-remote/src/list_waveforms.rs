@@ -1267,6 +1267,7 @@ fn resolve_i8(
     stored: &HashMap<i64, WaveformsDbRow>,
 ) -> ListWaveformBatch {
     let previous = |id: i64| stored.get(&id).map(|row| row.peaks.to_list_waveform());
+    let mut written = Vec::new();
     let mut answered = HashSet::new();
     let mut items = Vec::new();
     for item in reply.items {
@@ -1286,9 +1287,7 @@ fn resolve_i8(
                         src_size: 0,
                         peaks,
                     };
-                    if let Err(error) = i8_store.upsert(&row) {
-                        tracing::warn!(%error, "waveforms.db write failed");
-                    }
+                    written.push(row);
                     ListWaveformState::Ready { waveform }
                 }
                 Err(message) => {
@@ -1321,6 +1320,11 @@ fn resolve_i8(
             },
         };
         items.push(ListWaveformItem { id, state });
+    }
+    if !written.is_empty()
+        && let Err(error) = i8_store.upsert_many(&written)
+    {
+        tracing::warn!(%error, "waveforms.db write failed");
     }
     ListWaveformBatch {
         items,
