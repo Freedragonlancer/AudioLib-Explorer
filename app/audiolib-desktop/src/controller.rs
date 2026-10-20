@@ -3062,7 +3062,7 @@ impl Controller {
                 + if immediate {
                     Duration::ZERO
                 } else {
-                    Duration::from_millis(160)
+                    Duration::from_millis(80)
                 },
             provider: self.provider(),
         };

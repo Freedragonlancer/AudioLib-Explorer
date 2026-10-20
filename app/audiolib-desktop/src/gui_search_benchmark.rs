@@ -57,6 +57,82 @@ struct Measurement {
     invalid: Option<String>,
     native_text_events: u64,
     intermediate_requests: u64,
+    geometry_events: ArmedGeometryEvents,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ArmedGeometry {
+    physical_client_size: [u32; 2],
+    outer_position: [i32; 2],
+    scale_factor: f64,
+}
+
+impl ArmedGeometry {
+    fn report(self) -> Value {
+        json!({"physical_client_size":self.physical_client_size,
+            "outer_position_physical":self.outer_position,"scale_factor":self.scale_factor})
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NativeGeometryEvent {
+    Moved([i32; 2]),
+    Resized([u32; 2]),
+    ScaleFactorChanged(f64),
+}
+
+#[derive(Default)]
+struct ArmedGeometryEvents {
+    baseline: Option<ArmedGeometry>,
+    total: u64,
+    ignored_duplicates: u64,
+    overflow: u64,
+    events: Vec<Value>,
+}
+
+impl ArmedGeometryEvents {
+    fn record(
+        &mut self,
+        event: NativeGeometryEvent,
+        timestamp: Result<QpcStamp, String>,
+    ) -> Option<String> {
+        self.total += 1;
+        let equal_payload = self.baseline.is_some_and(|baseline| match event {
+            NativeGeometryEvent::Moved(position) => position == baseline.outer_position,
+            NativeGeometryEvent::Resized(size) => size == baseline.physical_client_size,
+            // Preserve conservative rejection even when this payload repeats.
+            NativeGeometryEvent::ScaleFactorChanged(_) => false,
+        });
+        let ignored_duplicate = equal_payload && timestamp.is_ok();
+        if ignored_duplicate {
+            self.ignored_duplicates += 1;
+        }
+        let (kind, payload) = match event {
+            NativeGeometryEvent::Moved(position) => {
+                ("Moved", json!({"outer_position_physical":position}))
+            }
+            NativeGeometryEvent::Resized(size) => ("Resized", json!({"physical_client_size":size})),
+            NativeGeometryEvent::ScaleFactorChanged(scale) => {
+                ("ScaleFactorChanged", json!({"scale_factor":scale}))
+            }
+        };
+        if self.events.len() < 32 {
+            self.events.push(json!({
+                "index":self.total,"event":kind,"payload":payload,
+                "qpc_ticks":timestamp.as_ref().ok().map(|time| time.ticks),
+                "qpc_frequency":timestamp.as_ref().ok().map(|time| time.frequency),
+                "qpc_error":timestamp.as_ref().err(),
+                "armed_baseline":self.baseline.map(ArmedGeometry::report),
+                "ignored_duplicate":ignored_duplicate
+            }));
+        } else {
+            self.overflow += 1;
+        }
+        (!ignored_duplicate).then(|| format!(
+            "native geometry event rejected during sample: {event:?}; armed baseline={:?}; QPC error={:?}",
+            self.baseline, timestamp.err()
+        ))
+    }
 }
 
 fn state(action: impl FnOnce(&mut Measurement)) {
@@ -210,12 +286,29 @@ pub(super) fn window_event(
                     .invalid
                     .get_or_insert("window lost focus or became occluded during the sample".into());
             }
-            WindowEvent::Moved(_)
-            | WindowEvent::Resized(_)
-            | WindowEvent::ScaleFactorChanged { .. } => {
-                value
-                    .invalid
-                    .get_or_insert("window moved, resized or changed DPI during the sample".into());
+            WindowEvent::Moved(position) => {
+                if let Some(reason) = value.geometry_events.record(
+                    NativeGeometryEvent::Moved([position.x, position.y]),
+                    capture::qpc_now(),
+                ) {
+                    value.invalid.get_or_insert(reason);
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(reason) = value.geometry_events.record(
+                    NativeGeometryEvent::Resized([size.width, size.height]),
+                    capture::qpc_now(),
+                ) {
+                    value.invalid.get_or_insert(reason);
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(reason) = value.geometry_events.record(
+                    NativeGeometryEvent::ScaleFactorChanged(*scale_factor),
+                    capture::qpc_now(),
+                ) {
+                    value.invalid.get_or_insert(reason);
+                }
             }
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 value
@@ -1182,11 +1275,29 @@ fn tick(
             if since.elapsed() >= Duration::from_millis(200) {
                 preset_filters(ui, expected);
                 ui.invoke_perf_focus_search();
+                let (armed_hwnd, armed_scale, armed_size) = own_window(ui)?;
+                let armed_position = ui.window().position();
+                if armed_hwnd != observation.hwnd
+                    || armed_size != inspection.client_size
+                    || armed_scale.to_bits() != observation.scale_factor.to_bits()
+                    || [armed_position.x, armed_position.y] != observation.outer_position
+                {
+                    // Still prearm: the next tick observes and recalibrates the
+                    // changed setup. Never promote a changed geometry to input.
+                    observation.foreground_since = None;
+                    return Ok(false);
+                }
+                let armed_geometry = ArmedGeometry {
+                    physical_client_size: inspection.client_size,
+                    outer_position: [armed_position.x, armed_position.y],
+                    scale_factor: armed_scale,
+                };
                 observation.dropped_when_armed = observer.dropped_messages();
                 observation.memory.baseline_before_arming =
                     observation.memory.read().map(|memory| json!(memory));
                 observation.armed_at = Some(Instant::now());
                 state(|value| {
+                    value.geometry_events.baseline = Some(armed_geometry);
                     value.armed = true;
                     stamp(value, "armed_after_initial_frame");
                 });
@@ -1379,6 +1490,7 @@ fn measure(options: &Options) -> Result<Value> {
         invalid: None,
         native_text_events: 0,
         intermediate_requests: 0,
+        geometry_events: ArmedGeometryEvents::default(),
     });
     marker(&ui, nonce, 0, capture::PHASE_PENDING);
     let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
@@ -1611,6 +1723,14 @@ fn measure(options: &Options) -> Result<Value> {
         "marker_actual_client_position_logical":observation.marker_actual_client_position,
         "marker_roi":observation.geometry.map(|value| json!({"x":value.roi.x,"y":value.roi.y,"cell_width":value.roi.cell_width,"cell_height":value.roi.cell_height}))
     });
+    report["armed_native_geometry"] = json!({
+        "baseline":measurement.geometry_events.baseline.map(ArmedGeometry::report),
+        "events_total":measurement.geometry_events.total,
+        "ignored_duplicates":measurement.geometry_events.ignored_duplicates,
+        "events_overflow":measurement.geometry_events.overflow,
+        "retained_limit":32,"events":measurement.geometry_events.events,
+        "scale_factor_events_always_rejected":true
+    });
     report["capture_observations"] = json!({
         "observer_restarts_before_arming":observation.observer_restarts,
         "ready_events":observation.telemetry.ready_events,
@@ -1676,6 +1796,94 @@ pub(super) fn run(arguments: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn armed_geometry_accepts_only_exact_duplicate_move_or_resize_payloads() {
+        let baseline = ArmedGeometry {
+            physical_client_size: [2880, 1800],
+            outer_position: [102, 238],
+            scale_factor: 2.0,
+        };
+        let timestamp = QpcStamp {
+            ticks: 123,
+            frequency: 10_000_000,
+        };
+        let mut events = ArmedGeometryEvents {
+            baseline: Some(baseline),
+            ..Default::default()
+        };
+        for event in [
+            NativeGeometryEvent::Resized([2880, 1800]),
+            NativeGeometryEvent::Moved([102, 238]),
+        ] {
+            assert!(events.record(event, Ok(timestamp)).is_none());
+            assert_eq!(events.events.last().unwrap()["ignored_duplicate"], true);
+        }
+        for event in [
+            NativeGeometryEvent::Resized([2881, 1800]),
+            NativeGeometryEvent::Moved([103, 238]),
+            NativeGeometryEvent::ScaleFactorChanged(2.0),
+        ] {
+            assert!(events.record(event, Ok(timestamp)).is_some());
+            assert_eq!(events.events.last().unwrap()["ignored_duplicate"], false);
+        }
+        assert!(
+            events
+                .record(
+                    NativeGeometryEvent::Moved([102, 238]),
+                    Err("QPC failed".into())
+                )
+                .is_some()
+        );
+        let mut missing = ArmedGeometryEvents::default();
+        assert!(
+            missing
+                .record(NativeGeometryEvent::Resized([2880, 1800]), Ok(timestamp))
+                .is_some()
+        );
+        // A real change remains a recorded rejection even if a later event
+        // returns exactly to the original geometry; no history is discarded.
+        assert!(
+            events
+                .record(NativeGeometryEvent::Moved([102, 238]), Ok(timestamp))
+                .is_none()
+        );
+        assert_eq!(events.events[3]["ignored_duplicate"], false);
+    }
+
+    #[test]
+    fn armed_geometry_event_report_is_bounded_and_counts_every_overflow() {
+        let mut events = ArmedGeometryEvents {
+            baseline: Some(ArmedGeometry {
+                physical_client_size: [2880, 1800],
+                outer_position: [102, 238],
+                scale_factor: 2.0,
+            }),
+            ..Default::default()
+        };
+        for _ in 0..35 {
+            assert!(
+                events
+                    .record(
+                        NativeGeometryEvent::Resized([2880, 1800]),
+                        Ok(QpcStamp {
+                            ticks: 123,
+                            frequency: 10_000_000
+                        })
+                    )
+                    .is_none()
+            );
+        }
+        assert_eq!(events.events.len(), 32);
+        assert_eq!(events.total, 35);
+        assert_eq!(events.overflow, 3);
+        assert_eq!(events.ignored_duplicates, 35);
+        assert_eq!(events.events[0]["qpc_ticks"], 123);
+        assert_eq!(
+            events.events[0]["armed_baseline"]["physical_client_size"],
+            json!([2880, 1800])
+        );
+    }
 
     #[test]
     fn request_parser_rejects_silent_scope_or_paging_changes() {
