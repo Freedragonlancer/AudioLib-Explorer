@@ -1297,7 +1297,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 #### 9.5.6 整包与客户端行为
 
 - 任务进行中 `GET /waveforms/bundle`（§9.4.2）照常可用，返回当前已有的条目（`VACUUM INTO` 是 WAL 读事务，不阻塞任务写入）；`rebuild` 刚清空后整包可能接近空，客户端导入后用 §9.1 增量补齐即可（不会丢失：etag 规则不变）。`POST /waveforms` 照常可用。
-- 建议的客户端交互：设置页显示 `run_state`、`cached` / `total`、`pending`、`failed`、`current_rate`、`eta_secs`、`last_error`、`job.current`；按钮「补齐缺失」（`missing`）、「重试失败」（`failed`，`failed > 0` 时可用）、「全部重建」（`rebuild`，**两次确认**后才发送，第二次确认提示会清空现有缓存并重新读取所有文件，NAS 会长时间保持唤醒）、「暂停 / 继续」「停止」；限速输入框（1..=1000，留空 = 恢复默认）。`can_manage` / `can_change` 为假时只读。该页打开时每 5 秒轮询一次 `GET /waveforms/status`（同 §9.3）。
+- 建议的客户端交互：设置页显示 `run_state`、`cached` / `total`、`pending`、`failed`、`current_rate`、`eta_secs`、`last_error`、`job.current`；按钮「补齐缺失」（`missing`）、「重试失败」（`failed`，`failed > 0` 时可用）、「全部重建」（`rebuild`，**两次确认**后才发送，第二次确认提示会清空现有缓存并重新读取所有文件，NAS 会长时间保持唤醒）、「暂停 / 继续」「停止」；限速输入框（1..=1000，留空 = 恢复默认）。`can_manage` / `can_change` 为假时只读。「波形缓存」面板打开时每 **2 秒**轮询一次 `GET /waveforms/status`，面板关闭即停止轮询（状态在内存中，开销很小；与 §9.3 第 5 条预生成进度的 5 秒轮询独立）。
 - 收到 409 `BUSY` 时刷新状态并显示当前任务；收到 409 `JOB_STATE` 时刷新状态即可。
 
 #### 9.5.7 能力声明与错误码
