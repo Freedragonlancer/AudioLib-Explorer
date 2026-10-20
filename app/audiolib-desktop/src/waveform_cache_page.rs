@@ -300,6 +300,20 @@ pub(super) fn rate_draft(settings: Option<&WaveformCacheSettings>) -> String {
         .unwrap_or_default()
 }
 
+/// Whether applying `rate` would change nothing on the server, so no `PATCH` is sent.
+/// Re-sending the configured value would turn it into an admin override (§9.5.4), and
+/// "empty" only matters while an override exists.
+pub(super) fn rate_unchanged(settings: Option<&WaveformCacheSettings>, rate: Option<u32>) -> bool {
+    let Some(settings) = settings else {
+        return false;
+    };
+    match (settings.list_waveform_rate_source.as_deref(), rate) {
+        (Some("config" | "admin"), Some(rate)) => settings.list_waveform_rate == Some(rate),
+        (Some("config" | "default"), None) => true,
+        _ => false,
+    }
+}
+
 /// Parse the rate field: empty restores the default, otherwise 1..=1000.
 pub(super) fn parse_rate(text: &str, chinese: bool) -> Result<Option<u32>, String> {
     let text = text.trim();
@@ -509,6 +523,21 @@ impl Controller {
                         chinese,
                         "服务器不允许本机管理波形缓存，只能查看。",
                         "The server does not allow this PC to manage the Waveform cache; view only.",
+                    )
+                    .into(),
+                );
+            });
+            return;
+        }
+        if let WaveformCacheAction::Rate(rate) = action
+            && rate_unchanged(state.settings.as_ref(), rate)
+        {
+            post(self.ui.clone(), move |ui| {
+                ui.set_sm_wave_message(
+                    cn_or(
+                        chinese,
+                        "限速没有变化，未提交。",
+                        "The rate is unchanged; nothing was sent.",
                     )
                     .into(),
                 );
@@ -758,6 +787,25 @@ mod tests {
         settings.list_waveform_rate_source = Some("config".into());
         assert_eq!(rate_draft(Some(&settings)), "10");
         assert_eq!(rate_draft(None), "");
+    }
+
+    #[test]
+    fn unchanged_rate_is_not_sent() {
+        let mut settings = WaveformCacheSettings {
+            list_waveform_rate: Some(20),
+            list_waveform_rate_source: Some("config".into()),
+            ..Default::default()
+        };
+        assert!(rate_unchanged(Some(&settings), Some(20)));
+        assert!(rate_unchanged(Some(&settings), None));
+        assert!(!rate_unchanged(Some(&settings), Some(30)));
+        settings.list_waveform_rate_source = Some("admin".into());
+        assert!(rate_unchanged(Some(&settings), Some(20)));
+        assert!(!rate_unchanged(Some(&settings), None), "clears the override");
+        settings.list_waveform_rate_source = Some("default".into());
+        assert!(!rate_unchanged(Some(&settings), Some(20)), "explicit override");
+        assert!(rate_unchanged(Some(&settings), None));
+        assert!(!rate_unchanged(None, Some(20)));
     }
 
     #[test]
