@@ -180,7 +180,7 @@ pub fn open_remote_startup_with_progress(
     })
 }
 
-/// Whether startup must open ?????: only without a cached snapshot of the
+/// Whether startup must open 音效库管理: only without a cached snapshot of the
 /// configured server. A newer server revision just syncs in the background.
 fn startup_needs_manager(cached: Option<&CacheState>, configured_url: &str) -> bool {
     configured_url.trim().is_empty()
@@ -1881,9 +1881,11 @@ impl Controller {
                 }
                 let now = Instant::now();
                 let repeating_count = match (last_progress, progress) {
-                    (Some(SyncProgress::Downloading { .. }), SyncProgress::Downloading { .. }) => {
-                        true
-                    }
+                    // The final byte count always shows (it precedes 写入磁盘中…).
+                    (
+                        Some(SyncProgress::Downloading { .. }),
+                        SyncProgress::Downloading { received, total },
+                    ) => total.is_none_or(|total| received < total),
                     (Some(SyncProgress::Preparing(previous)), SyncProgress::Preparing(current)) => {
                         matches!(
                             (previous, current),
@@ -1947,6 +1949,9 @@ impl Controller {
                                 -1.0,
                             ),
                         }
+                    }
+                    SyncProgress::Writing => {
+                        (cn_or(chinese, "写入磁盘中…", "Writing to disk…"), -1.0)
                     }
                     SyncProgress::Validating => (
                         cn_or(

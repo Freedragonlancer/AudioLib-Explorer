@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let name = match progress {
                     SyncProgress::Checking => "checking",
                     SyncProgress::Downloading { .. } => "downloading",
+                    SyncProgress::Writing => "writing",
                     SyncProgress::Validating => "validating",
                     SyncProgress::Preparing(_) => "preparing cache",
                     SyncProgress::Saving => "saving",
