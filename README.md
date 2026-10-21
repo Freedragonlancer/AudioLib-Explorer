@@ -2,11 +2,27 @@
 
 <img src="resources/icons/AudioLibExplorer.png" width="128" height="128" alt="AudioLib Explorer: audio library and Waveform icon">
 
-[中文说明 / Chinese](README.zh-CN.md)
+**AudioLib Explorer 帮助声音设计师建立属于自己的音效库。**
+
+- 三种部署方式：纯客户端单机、客户端加局域网服务端、客户端加公网域名服务端。
+- 针对公网音频流预览做了专门优化，试听做到 0 延迟。
+- 服务端数据库同步到本地，搜索 0 延迟。
+- 支持「基础目录 + 关键词」交叉索引搜索。
+- 可承载 10 TB 以上的大规模音效素材库。
+
+**AudioLib Explorer helps sound designers build a sound-effects library of their own.**
+
+- Three deployment modes: standalone client, client with a LAN server, or client with a server on a public domain.
+- Audio streaming over the internet is specifically optimized for zero-latency preview.
+- The library database syncs to the client for zero-latency search.
+- Search combines a base folder with keywords as a cross index.
+- Scales to sound libraries of 10 TB and more.
+
+![AudioLib Explorer main window / 主界面](resources/screenshot-main.png)
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.4.11 (workspace `Cargo.toml`)
+- **Program version:** 0.5.0 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 5 (snapshot compatibility range 3..=5)
 - **License:** [GPL-3.0-only](LICENSE)
