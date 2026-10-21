@@ -1,6 +1,8 @@
 // crates/audiolib-remote/src/snapshot_transfer.rs
 //! Owned, leased wire-byte checkpoints for streaming snapshot downloads.
-use crate::client::{RemoteClient, RemoteLibrary, SnapshotMeta, cancellable_io};
+use crate::client::{
+    RemoteClient, RemoteLibrary, SnapshotMeta, cancellable_io_with_stall, snapshot_read_stall,
+};
 use crate::error::{RemoteError, Result};
 use crate::sync::{CacheState, RemoteCache, SyncProgress};
 use crate::util::{unix_now, write_atomic};
@@ -374,7 +376,7 @@ impl TransferSession {
             // replay it, nor leave an old consumer's receipt able to clear this attempt.
             self.discard_payload()?;
         }
-        let result = cancellable_io(cancel, || {
+        let result = cancellable_io_with_stall(cancel, snapshot_read_stall(), || {
             self.download_io(client, destination, progress, cancel)
         });
         if matches!(
@@ -692,6 +694,12 @@ impl Input<'_, '_> {
             .map_err(|error| {
                 if self.cancel.load(Ordering::Acquire) {
                     RemoteError::Cancelled
+                } else if is_read_stall(&error) {
+                    // The per-read stall limit fired: retryable, resumed with Range.
+                    RemoteError::Timeout(format!(
+                        "snapshot body: no data for {} s",
+                        snapshot_read_stall().as_secs_f32()
+                    ))
                 } else {
                     RemoteError::from_io(&error, "snapshot body")
                 }
@@ -890,6 +898,16 @@ fn snapshot_response(
     Ok((response, object))
 }
 
+/// ureq reports a transport read timeout inside the body reader as an `io::Error`
+/// wrapping `ureq::Error::Timeout`; `from_io` alone would see only its outer kind.
+fn is_read_stall(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::TimedOut)
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+            .is_some_and(|inner| matches!(inner, ureq::Error::Timeout(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,6 +960,84 @@ mod tests {
             .and_then(|range| range.strip_prefix("bytes="))
             .and_then(|range| range.strip_suffix('-'))
             .and_then(|range| range.parse().ok())
+    }
+
+    #[test]
+    fn a_stalled_snapshot_body_times_out_and_resumes_from_the_kept_prefix() {
+        let original = bytes();
+        let cut = original.len() / 3;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server = {
+            let requests = requests.clone();
+            let original = original.clone();
+            TestServer::start(move |request| {
+                let offset = request_offset(request);
+                requests.lock().unwrap().push(offset);
+                match offset {
+                    Some(offset) => response(
+                        original[offset..].to_vec(),
+                        Some(offset),
+                        original.len(),
+                        original.len(),
+                        false,
+                    ),
+                    // Send a prefix, then go silent far longer than the stall limit.
+                    None => response(
+                        original.clone(),
+                        None,
+                        original.len(),
+                        original.len(),
+                        false,
+                    )
+                    .slow(cut, Duration::from_secs(5)),
+                }
+            })
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let cache = RemoteCache::new(directory.path());
+        let client = RemoteClient::new(&server.url, "").unwrap();
+        let output = directory.path().join("output.db");
+        let cancel = AtomicBool::new(false);
+        crate::client::override_snapshot_read_stall(Some(Duration::from_millis(400)));
+        {
+            let mut session = TransferSession::open(&cache, client.api_url(), false).unwrap();
+            session.bind_library("library-a").unwrap();
+            let started = Instant::now();
+            let error = session
+                .download(&client, &output, &mut |_| {}, &cancel)
+                .unwrap_err();
+            assert!(
+                matches!(error, RemoteError::Timeout(_)) && error.is_slow(),
+                "{error:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "{:?}",
+                started.elapsed()
+            );
+            assert_eq!(session.pending().downloaded_bytes, cut as u64);
+            assert!(!output.exists());
+        }
+        let mut session = TransferSession::open(&cache, client.api_url(), false).unwrap();
+        session.bind_library("library-a").unwrap();
+        session
+            .download(&client, &output, &mut |_| {}, &cancel)
+            .unwrap();
+        crate::client::override_snapshot_read_stall(None);
+        assert_eq!(std::fs::read(&output).unwrap(), original);
+        assert_eq!(*requests.lock().unwrap(), vec![None, Some(cut)]);
+    }
+
+    #[test]
+    fn snapshot_read_stall_defaults_to_ninety_seconds_without_a_total_limit() {
+        assert_eq!(
+            crate::client::SNAPSHOT_READ_STALL_TIMEOUT,
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            crate::client::snapshot_read_stall(),
+            Duration::from_secs(90)
+        );
     }
 
     #[test]
