@@ -962,10 +962,23 @@ impl Controller {
         let c = self.clone();
         ui.on_selection_step_requested(move |delta| {
             if let Some(ui) = c.ui.upgrade() {
-                let count = c.records.lock().unwrap().len() as i32;
+                let records = c.records.lock().unwrap();
+                let count = records.len() as i32;
                 if count > 0 {
-                    let index = (ui.get_selected_row() + delta).clamp(0, count - 1);
-                    c.select_row(index, false, false, false);
+                    let current = ui.get_selected_row();
+                    let index = (current + delta).clamp(0, count - 1);
+                    // Single-click playback covers the keyboard too: an arrow key that
+                    // moves the selection auditions its new row exactly like a click.
+                    // A clamped step (already at the first/last row) must not reload or
+                    // restart the sound that is playing, and a missing record stays
+                    // silent instead of opening a nonexistent file.
+                    if index == current {
+                        return;
+                    }
+                    let play =
+                        ui.get_audition_play_on_single_click() && !records[index as usize].missing;
+                    drop(records);
+                    c.select_row(index, false, false, play);
                 }
             }
         });
