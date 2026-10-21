@@ -123,6 +123,19 @@ settings files load as local mode):
   through the normal path (local: `LibraryOperation::DataSource(Local)`; a profile: a sync that
   opens its snapshot). The snapshot cache is keyed by library id, so a LAN and an
   external profile of the same server share one cache.
+- Local settings and switching back to the local library remain available while a
+  server snapshot sync is pending, downloading or failing, including the sync after
+  selecting a server. Switching cancels and invalidates the old sync; late progress,
+  results and queued retries cannot restore that server selection. Metadata/settings
+  writes and actual provider opening still drain before another source change, and
+  abandoning a server selection preserves the original provider's rollback settings.
+- Keyboard navigation also keeps the local recovery controls reachable. Saving an
+  active connection on Close leaves the manager visible until the new provider
+  commits; choosing another source cancels that pending Close. If local opening
+  fails, rollback restores the original settings and waits for cancelled cache
+  publication before restoring the active cache. A window-close request during
+  that wait proceeds through the normal bounded shutdown drain; any unfinished
+  cache marker is still checked against the configured endpoint on restart.
 
 ## Server address and HTTPS
 

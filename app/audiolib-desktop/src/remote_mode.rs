@@ -1801,8 +1801,18 @@ impl Controller {
     /// swap the provider. `apply` also switches from local mode, falling back to the last
     /// cache (or the empty placeholder) with a clear error when the server is unavailable.
     pub(super) fn start_sync(self: &Arc<Self>, force: bool, apply: bool) {
-        if self.shutdown.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
+        if self.shutdown.load(Ordering::Acquire)
+            || self.closing.load(Ordering::Acquire)
+            || self.config.lock().unwrap().data_source.mode != DataSourceMode::Server
+        {
             return;
+        }
+        if apply
+            && self.source_changing.load(Ordering::Acquire)
+            && let Some(ui) = self.ui.upgrade()
+        {
+            // Settings are now saved; local escape is safe until provider opening.
+            ui.set_ds_source_syncing(true);
         }
         let already_busy = {
             let _plays = self.remote_plays.lock().unwrap();
@@ -1811,14 +1821,27 @@ impl Controller {
         if already_busy {
             if apply {
                 // A running sync would be superseded; restart after it notices cancel.
+                let generation = self.remote_generation.load(Ordering::Acquire);
+                let source_generation = self.source_generation.load(Ordering::Acquire);
                 let c = self.clone();
                 std::thread::spawn(move || {
                     let deadline = Instant::now() + Duration::from_secs(10);
                     while c.remote_busy.load(Ordering::Acquire) && Instant::now() < deadline {
+                        if c.remote_generation.load(Ordering::Acquire) != generation
+                            || c.source_generation.load(Ordering::Acquire) != source_generation
+                        {
+                            return;
+                        }
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     let c2 = c.clone();
-                    post(c.ui.clone(), move |_| c2.start_sync(force, apply));
+                    post(c.ui.clone(), move |_| {
+                        if c2.remote_generation.load(Ordering::Acquire) == generation
+                            && c2.source_generation.load(Ordering::Acquire) == source_generation
+                        {
+                            c2.start_sync(force, apply);
+                        }
+                    });
                 });
             }
             return;
@@ -1929,6 +1952,7 @@ impl Controller {
                 {
                     return;
                 }
+                ui.set_ds_source_syncing(false);
                 ui.set_ds_syncing(false);
                 ui.set_ds_progress(0.0);
                 ui.set_ds_decompression_info("".into());

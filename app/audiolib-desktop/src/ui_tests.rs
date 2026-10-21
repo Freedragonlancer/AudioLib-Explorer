@@ -2,7 +2,7 @@
 //! UI regression checks use an isolated Slint backend, with no audio or user database.
 use crate::{AppWindow, AudioRow, FolderRow, SourceRow};
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
-use slint::{ComponentHandle, ModelRc, VecModel, platform::WindowEvent};
+use slint::{ComponentHandle, Model, ModelRc, VecModel, platform::WindowEvent};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[test]
@@ -355,7 +355,7 @@ fn result_row_position(ui: &AppWindow, label: &str) -> slint::LogicalPosition {
     slint::LogicalPosition::new(origin.x + 8.0, origin.y + row.size().height / 2.0)
 }
 
-fn click_label(ui: &AppWindow, label: &str) {
+pub(crate) fn click_label(ui: &AppWindow, label: &str) {
     let element = ElementHandle::find_by_accessible_label(ui, label)
         .next()
         .unwrap_or_else(|| panic!("Missing action: {label}"));
@@ -3286,6 +3286,116 @@ fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages(
         assert!(!ui.get_library_visible());
     }
     ui.hide().unwrap();
+}
+
+#[test]
+fn local_source_switch_remains_clickable_during_server_sync_in_both_languages() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        ui.set_chinese(chinese);
+        ui.set_sm_sources(source_rows(true));
+        ui.set_sm_selected(1);
+        ui.set_remote_mode(true);
+        ui.set_ds_syncing(true);
+        let switches = Rc::new(RefCell::new(0));
+        let observed = switches.clone();
+        ui.on_sm_switch_requested(move || *observed.borrow_mut() += 1);
+        ui.show().unwrap();
+        ui.invoke_open_library(0);
+        click_label(
+            &ui,
+            if chinese {
+                "本地设置"
+            } else {
+                "Local settings"
+            },
+        );
+        assert_eq!(ui.get_sm_selected(), 0);
+        let label = if chinese {
+            "切换到此数据源"
+        } else {
+            "Switch to this source"
+        };
+        let action = ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap();
+        assert_eq!(action.accessible_enabled(), Some(true));
+        click_label(&ui, label);
+        assert_eq!(*switches.borrow(), 1);
+        // Other library operations and a settings write still own their gate.
+        ui.set_library_busy(true);
+        click_label(&ui, label);
+        ui.set_library_busy(false);
+        ui.set_ds_applying(true);
+        click_label(&ui, label);
+        assert_eq!(*switches.borrow(), 1);
+        // A saved server activation can be abandoned before its provider opens.
+        ui.set_library_busy(true);
+        ui.set_ds_source_syncing(true);
+        ui.set_sm_selected(1);
+        click_label(
+            &ui,
+            if chinese {
+                "本地设置"
+            } else {
+                "Local settings"
+            },
+        );
+        assert_eq!(ui.get_sm_selected(), 0);
+        click_label(&ui, label);
+        assert_eq!(*switches.borrow(), 2);
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn keyboard_can_escape_a_pending_server_activation_past_other_profiles() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        ui.set_chinese(chinese);
+        ui.set_remote_mode(true);
+        let existing = source_rows(true);
+        let mut sources = (0..existing.row_count())
+            .map(|index| existing.row_data(index).unwrap())
+            .collect::<Vec<_>>();
+        sources[1].active = false;
+        sources.push(SourceRow {
+            id: "other".into(),
+            name: "Other server".into(),
+            kind: 1,
+            active: true,
+            ..Default::default()
+        });
+        ui.set_sm_sources(ModelRc::new(VecModel::from(sources)));
+        ui.set_sm_selected(2);
+        let switches = Rc::new(RefCell::new(0));
+        let observed = switches.clone();
+        ui.on_sm_switch_requested(move || *observed.borrow_mut() += 1);
+        ui.show().unwrap();
+        ui.invoke_open_library(0);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+        click_label(&ui, "● Other server");
+        ui.set_ds_syncing(true);
+        ui.set_ds_applying(true);
+        ui.set_library_busy(true);
+        ui.set_ds_source_syncing(true);
+        send_keys(&ui, &[slint::platform::Key::UpArrow.into()]);
+        assert_eq!(ui.get_sm_selected(), 0, "skip unavailable server profiles");
+        send_keys(&ui, &[slint::platform::Key::DownArrow.into()]);
+        assert_eq!(ui.get_sm_selected(), 0);
+        send_keys(&ui, &[slint::platform::Key::Tab.into()]);
+        send_keys(&ui, &[slint::platform::Key::Return.into()]);
+        assert_eq!(*switches.borrow(), 1, "keyboard activates local recovery");
+        // Provider opening and settings persistence still block keyboard actions.
+        ui.set_ds_source_syncing(false);
+        send_keys(&ui, &[slint::platform::Key::Return.into()]);
+        assert_eq!(*switches.borrow(), 1);
+        ui.hide().unwrap();
+    }
 }
 
 #[test]

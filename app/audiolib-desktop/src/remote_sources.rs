@@ -15,31 +15,50 @@ impl Controller {
     /// published until requested annotations persist or their replaced-library
     /// drafts are retained in a durable local recovery file.
     pub(super) fn begin_source_change(&self, ui: &AppWindow) -> Result<u64, String> {
-        self.begin_source_change_guarded(ui, true)
+        self.begin_source_change_guarded(ui, true, false)
     }
 
     /// Preference-only saves keep the ordinary successful-write barrier.
     pub(super) fn begin_source_change_for_settings(&self, ui: &AppWindow) -> Result<u64, String> {
-        self.begin_source_change_guarded(ui, false)
+        self.begin_source_change_guarded(ui, false, false)
+    }
+
+    /// A saved server selection can be abandoned while its sync is pending, before
+    /// any provider-open operation starts. Settings writes and rollback stay gated.
+    fn can_interrupt_source_sync(&self, ui: &AppWindow) -> bool {
+        ui.get_ds_source_syncing()
+            && self.source_changing.load(Ordering::Acquire)
+            && !self.library_busy.load(Ordering::Acquire)
+            && !self.closing.load(Ordering::Acquire)
+            && !self.shutdown.load(Ordering::Acquire)
     }
 
     fn begin_source_change_guarded(
         &self,
         ui: &AppWindow,
         recover_replaced_library: bool,
+        local: bool,
     ) -> Result<u64, String> {
-        if !self.available() {
+        let interrupt_sync = local && self.can_interrupt_source_sync(ui);
+        if !self.available() && !interrupt_sync {
             return Err("The library is busy".into());
         }
-        self.capture_metadata(ui);
-        let barrier = if recover_replaced_library {
-            self.enqueue_transition_metadata()?
+        let barrier = if interrupt_sync {
+            // The preceding transition already drained these drafts using the old
+            // source. Do not recapture them using the pending server's credentials.
+            self.metadata.lock().unwrap().sequence
         } else {
-            self.metadata.lock().unwrap().enqueue_all()?
+            self.capture_metadata(ui);
+            let barrier = if recover_replaced_library {
+                self.enqueue_transition_metadata()?
+            } else {
+                self.metadata.lock().unwrap().enqueue_all()?
+            };
+            let old_settings = self.config.lock().unwrap().data_source.clone();
+            let old_secrets = self.secrets();
+            self.remote.lock().unwrap().source_rollback = Some((old_settings, old_secrets));
+            barrier
         };
-        let old_settings = self.config.lock().unwrap().data_source.clone();
-        let old_secrets = self.secrets();
-        self.remote.lock().unwrap().source_rollback = Some((old_settings, old_secrets));
         {
             let _plays = self.remote_plays.lock().unwrap();
             self.source_changing.store(true, Ordering::Release);
@@ -50,6 +69,13 @@ impl Controller {
             .unwrap()
             .store(true, Ordering::Release);
         self.cancel_remote();
+        // The cancelled worker's generation is stale, so it cannot clear its UI.
+        // Its busy guard still owns cache work until that worker actually drains.
+        ui.set_ds_source_syncing(false);
+        ui.set_ds_syncing(false);
+        ui.set_ds_progress(0.0);
+        ui.set_ds_decompression_info("".into());
+        ui.set_ds_decompression_progress(-1.0);
         ui.set_library_busy(true);
         self.invalidate_library_reads();
         self.remote_audio_cancel
@@ -67,23 +93,44 @@ impl Controller {
         ui: &AppWindow,
         committed: bool,
     ) {
+        ui.set_ds_source_syncing(false);
         let rollback = self.remote.lock().unwrap().source_rollback.take();
         if !self.source_changing.load(Ordering::Acquire) {
             return;
         }
+        self.finish_source_manager_sync(ui, committed);
         if !committed && let Some((settings, secrets)) = rollback {
             let c = self.clone();
             std::thread::spawn(move || {
                 let result = c.wait_remote_plays().and_then(|_| {
-                    // An old play may have advanced this state while the failed
-                    // operation drained. Capture and restore it only afterwards.
-                    let previous_state = c.remote.lock().unwrap().state.clone();
+                    // Restore credentials before draining cache work, so a close
+                    // requested during this wait can safely use the old provider.
                     let settings_result = c.save_data_source(
                         settings.clone(),
                         secrets.clone(),
                         c.chinese.load(Ordering::Acquire),
                         false,
                     );
+                    // A failed local escape can roll back while the cancelled sync
+                    // is still publishing its cache. Restore the original state only
+                    // after that worker's owned writes finish; successful escapes
+                    // never wait for this cache drain.
+                    while c.remote_busy.load(Ordering::Acquire) {
+                        if c.shutdown.load(Ordering::Acquire) {
+                            return Err("Desktop is shutting down".into());
+                        }
+                        if c.close_after_operation.load(Ordering::Acquire) {
+                            return Err(super::cn_or(
+                                c.chinese.load(Ordering::Acquire),
+                                "已请求关闭；将按正常关闭流程等待已取消的服务器缓存任务。",
+                                "Close requested; continuing shutdown while cancelled server cache work drains.",
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    // An old play may have advanced this state while the failed
+                    // operation drained. Capture and restore it only afterwards.
+                    let previous_state = c.remote.lock().unwrap().state.clone();
                     // Sync publishes cache state before opening the provider.
                     // Restore the old cache so restart cannot open B with A's URL.
                     let cache_result = previous_state.as_ref().map_or(Ok(()), |state| {
@@ -103,7 +150,7 @@ impl Controller {
                 let c2 = c.clone();
                 post(c.ui.clone(), move |ui| {
                     c2.source_changing.store(false, Ordering::Release);
-                    c2.close_after_operation.store(false, Ordering::Release);
+                    let close_requested = c2.close_after_operation.swap(false, Ordering::AcqRel);
                     ui.set_library_busy(false);
                     ui.set_ds_applying(false);
                     if let Err(error) = result {
@@ -112,6 +159,9 @@ impl Controller {
                     c2.publish_data_source(&ui);
                     c2.sync_editor(&ui);
                     c2.resume_source_reads(&ui, false);
+                    if close_requested {
+                        c2.request_close(&ui);
+                    }
                 });
             });
             return;
@@ -180,7 +230,9 @@ impl Controller {
     /// `LibraryOperation::DataSource(Local)`, a server profile through a sync that swaps
     /// to its snapshot; a failure restores the previous connection and library.
     pub(super) fn activate_data_source(self: &Arc<Self>, source: ActiveSource) {
-        if !self.available() {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let local = source == ActiveSource::Local;
+        if !self.available() && !(local && self.can_interrupt_source_sync(&ui)) {
             return;
         }
         let chinese = self.chinese.load(Ordering::Acquire);
@@ -192,8 +244,7 @@ impl Controller {
             }
             return;
         }
-        let Some(ui) = self.ui.upgrade() else { return };
-        let barrier = match self.begin_source_change(&ui) {
+        let barrier = match self.begin_source_change_guarded(&ui, true, local) {
             Ok(barrier) => barrier,
             Err(error) => {
                 ui.set_ds_message(error.into());

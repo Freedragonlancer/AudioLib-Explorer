@@ -12,7 +12,7 @@ Rust 1.97.1 MSVC 的格式检查、默认及 ASIO 两套严格 workspace/all-tar
 
 使用验证过的 Steinberg ASIO SDK 2.3.4，`tools/build-release.ps1` 成功，用时 **306.177 秒**；标准便携打包成功，包验证通过（5.487 秒）。独立本机 `CARGO_TARGET_DIR` 的新 EXE 按 SHA256 同步到规范 release 输出后再打包，251 个源码/构建输入在构建和打包后哈希一致。
 
-固定 `X:\AI_Build\AudioLib_Explorer_oss\local_release` 已更新 **1,214 个包内文件**，通过 `validate-portable.ps1 -BinaryDirectory local_release -CleanCheckout`，CLI 版本为 **0.4.11**。本机保留既有开发集成功能并包含 `aecd59b` 的修复。两份安装 EXE 与验证过的便携包及本轮 release 输出 SHA256 一致：
+固定 `local_release/` 已更新 **1,214 个包内文件**，通过 `validate-portable.ps1 -BinaryDirectory local_release -CleanCheckout`，CLI 版本为 **0.4.11**。本机保留既有开发集成功能并包含 `aecd59b` 的修复。两份安装 EXE 与验证过的便携包及本轮 release 输出 SHA256 一致：
 
 - AudioLibExplorer.exe：`1B0F980A43C38B503A0CC847F3563E1F6F1E080D9FC574366DA2C7D4771ED174`
 - AudioLibCli.exe：`FCDEE68E454616E5E4D4E1E57CB62D3EC9DE366652D640E82C3A969C2ED1A231`
@@ -1179,3 +1179,15 @@ Windows 发布检查的快照回归已正确返回 `Cancelled`，失败的是 `<
 本版基于已发布的 `v0.4.7`。缓存准备的 Busy/Locked 备份步骤有 5 秒上限，未知步骤结果直接报错；关窗等待远端缓存任务最多 15 秒；服务器模式启动清理超过 1 小时的 staging；服务器配置无效时本次会话回退本地，保存时保留原服务器选择（用户显式选择数据源除外），无可用本地库时保持服务器模式；管理器切回本地前检查本地库存在。
 
 本机 Windows MSVC 1.97.1：`cargo fmt --all -- --check`、严格 Clippy、`cargo test --workspace --all-targets --locked`（786 passed）通过；validate-desktop-close、validate-review-fixes、validate-library-management 通过。validate-runtime 在 BOOM SMED Metadata 解码处失败，为既有问题，与本版改动无关。API v1、schema 5、snapshot 3..=5 不变；最终平台检查与资产身份以 `v0.4.8` 标签的公开 workflow 和报告为准。
+
+## 2026-10-21 v0.4.11 服务器同步期间切回本地
+
+服务器启动同步、后台同步及已保存服务器选择的同步阶段均保留本地切换入口。切换取消旧同步并清理其 UI 进度，以 source/remote generation 拒绝晚到结果和排队重试；缓存 worker 仍自行排空并释放 busy。预占服务器选择时复用已完成的 Metadata barrier，保留原 provider 的 rollback 设置，避免用待同步服务器的凭据重新捕获旧草稿。实际 provider 打开、设置写入和回滚仍保留互斥门禁。
+
+本机 Rust 1.97.1 MSVC：格式检查、桌面包全部 targets 的严格 Clippy、`cargo test -p audiolib-desktop --locked` 通过（221 passed、0 failed、71 ignored；隔离 child helper 由 parent 调用，不重复计数）。新增回归通过真实 Slint 指针操作覆盖无缓存启动的挂起/失败 HTTP、切入服务器后返回本地及 Metadata 保留、等待旧 worker 的重试失效、中英文入口与正常 busy 门禁。测试仅使用 owned 临时目录和 loopback 服务，没有访问工作库或实际服务器。
+
+补充修复当前服务器连接“关闭→保存”在 resync 时隐藏管理窗口的路径，保留同步期间的本地入口。独立本机构建缓存中的严格 Clippy 和管理器专项复验通过（15 passed、0 failed、4 ignored，包含新增关闭保存回归及原普通保存关闭回归）；共享盘 debug 缓存的两项 rmeta 写入拒绝没有通过修改权限或工作数据规避。`validate-review-fixes.ps1 -CleanCheckout` 和 `validate-library-management.ps1` 通过，包含 2,000 条合成记录的跨进程扫描保护、标注保留和库管理回归；真实 legacy fixture 不可用的检查明确跳过。
+
+CR 补充修复同步门禁吞掉键盘输入及方向键停在中间服务器的问题，并保留“关闭→保存”的关闭意图，成功提交 provider 后关闭，导航或失败时取消。切回本地失败时先恢复原设置，等待旧同步缓存发布结束后再恢复 active cache；等待期间的原生关窗会进入既有的限时关闭流程，重启仍校验缓存端点。交叉复核未发现新的阻断问题。最终格式检查、桌面全部 targets 严格 Clippy 和桌面包测试通过（226 passed、0 failed、75 ignored；隔离 helper 由 parent 执行），覆盖上述键盘、晚到缓存发布、关闭意图及等待回滚时的原生关窗。此次复验使用原共享盘 target 的 UNC 路径，两个辅助 crate 采用命令行 `profile.dev.package.<crate>.opt-level=1`，未复制新的整份临时构建缓存。
+
+本轮构建、便携验收和固定 `local_release/` 安装的本机记录保存在忽略目录 `.rust-validation/sync-local-recovery/`；安装成功以 `installation.json` 中的文件身份和隔离启动结果为准。本次未申请发布 GitHub Release，未进行公网、百万条性能或物理音频延迟验收。

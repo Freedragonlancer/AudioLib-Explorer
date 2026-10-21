@@ -652,6 +652,10 @@ export component AppWindow inherits Window {
     in property <bool> ds-testing: false;
     in property <bool> ds-syncing: false;
     in property <bool> ds-applying: false;
+    // A source selection has been saved and is waiting for its server snapshot.
+    // Local escape closes before provider opening or settings rollback begins.
+    in property <bool> ds-source-syncing: false;
+    private property <bool> sm-local-escape: root.ds-source-syncing && !root.closing;
     in property <float> ds-progress: 0;
     in property <string> ds-decompression-info: "";
     in property <float> ds-decompression-progress: -1;
@@ -807,7 +811,7 @@ export component AppWindow inherits Window {
     }
     // Select a source row (click, Up/Down, 添加服务器): unsaved 连接 edits prompt first.
     public function sm-select-row(index: int) {
-        if index == root.sm-selected || root.ds-applying || root.library-busy || root.sm-manage-busy {
+        if index == root.sm-selected || ((root.ds-applying || root.library-busy) && !(index == 0 && root.sm-local-escape)) || root.sm-manage-busy {
             return;
         }
         if root.ds-dirty && root.sm-server {
@@ -834,6 +838,12 @@ export component AppWindow inherits Window {
     }
     public function sm-step(down: bool) {
         if root.sm-pending-select != -2 {
+            return;
+        }
+        if root.sm-local-escape {
+            if !down && root.sm-selected != 0 {
+                root.sm-select-row(0);
+            }
             return;
         }
         if root.sm-selected < 0 {
@@ -1896,7 +1906,7 @@ export component AppWindow inherits Window {
         property <bool> reverse-wrap: false;
         capture-key-pressed(event) => {
             if event.text == Key.Escape { root.dismiss-modal(); return accept; }
-            if root.confirmation-visible || root.library-busy || root.closing { return accept; }
+            if root.confirmation-visible || (root.library-busy && !root.sm-local-escape) || root.closing { return accept; }
             if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && library-close-action.has-focus {
                 self.reverse-wrap = true;
                 library-tab-end.focus();
@@ -1921,7 +1931,7 @@ export component AppWindow inherits Window {
                     library-close-action := Action { width: 60px; enabled: !root.library-busy && !root.ds-applying && !root.sm-manage-busy; label: root.chinese ? "关闭" : "Close"; clicked => { root.close-library-manager(); } }
                 }
                 HorizontalLayout { height: 34px; spacing: 8px;
-                    Action { width: 160px; active: !root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "本地设置" : "Local settings"; clicked => { root.sm-select-row(0); } }
+                    Action { width: 160px; active: !root.sm-server; enabled: (!root.ds-applying && !root.library-busy) || root.sm-local-escape; label: root.chinese ? "本地设置" : "Local settings"; clicked => { root.sm-select-row(0); } }
                     Action { width: 160px; active: root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "服务器设置" : "Server settings"; clicked => { if !root.sm-server { root.sm-select-row(root.sm-sources.length > 1 ? 1 : -1); } } }
                     Rectangle { horizontal-stretch: 1; }
                 }
@@ -1952,7 +1962,7 @@ export component AppWindow inherits Window {
                                             Text { text: source.subtitle; color: Theme.muted; font-size: 10px; overflow: elide; }
                                             Text { text: source.active ? ((root.chinese ? "当前数据源" : "Active") + (source.status != "" ? " · " + source.status : "")) : source.status; color: source.status-kind == 3 ? Theme.warning : (source.status-kind == 1 ? Theme.accent : Theme.dim); font-size: 10px; overflow: elide; }
                                         }
-                                        source-hit := TouchArea { enabled: !root.ds-applying && !root.library-busy; mouse-cursor: pointer; clicked => { source-keys.focus(); root.sm-select-row(index); } }
+                                        source-hit := TouchArea { enabled: (!root.ds-applying && !root.library-busy) || (index == 0 && root.sm-local-escape); mouse-cursor: pointer; clicked => { source-keys.focus(); root.sm-select-row(index); } }
                                     }
                                     if root.sm-new: Rectangle { height: 40px; border-radius: 5px; background: Theme.selected;
                                         Text { x: 8px; height: parent.height; vertical-alignment: center; text: root.chinese ? "＋ 新服务器（未保存）" : "+ New server (unsaved)"; color: Theme.ink; font-size: 12px; }
@@ -1983,7 +1993,7 @@ export component AppWindow inherits Window {
                     VerticalLayout { horizontal-stretch: 1; spacing: 8px;
                         HorizontalLayout { height: 32px; spacing: 8px;
                             Text { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; color: Theme.ink; font-size: 15px; font-weight: 600; text: root.sm-title; }
-                            if root.library-visible && !root.sm-new && !root.sm-active: Action { width: 150px; primary: true; enabled: !root.ds-applying && !root.library-busy && !root.ds-syncing; label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
+                            if root.library-visible && !root.sm-new && !root.sm-active: Action { width: 150px; primary: true; enabled: (!root.ds-applying && !root.library-busy) || (!root.sm-server && root.sm-local-escape); label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
                         }
                         if root.library-visible && root.sm-server: HorizontalLayout { height: 30px; spacing: 6px;
                             Action { width: 96px; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接" : "Connection"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
