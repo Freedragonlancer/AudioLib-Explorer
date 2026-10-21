@@ -67,9 +67,11 @@ pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
     if version > SCHEMA_VERSION {
-        return Err(Error::Database(format!(
-            "Unsupported future schema {version}"
-        )));
+        return Err(Error::NewerDatabase {
+            what: "schema".into(),
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
     }
     if version == SCHEMA_VERSION {
         return current_format_ready(conn).map(|ready| !ready);

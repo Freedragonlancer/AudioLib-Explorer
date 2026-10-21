@@ -367,7 +367,7 @@ pub struct CompatibilityManifest {
 
 /// Exact published protocol baselines. Keep legacy admission and the exposed
 /// direct-use/migration ranges derived from this one reviewed release set.
-const LEGACY_APPLICATION_RANGES: &[&str] = &["=0.4.11", "=0.5.0"];
+const LEGACY_APPLICATION_RANGES: &[&str] = &["=0.4.11", "=0.5.0", "=0.5.1"];
 
 /// This development catalog admits the tested published releases and the exact
 /// development version. Actual format inspection still decides direct use versus
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn peer_checks_are_mutual_bounded_and_pre_release_explicit() {
         let local = compatibility_manifest();
-        for supported in ["0.4.11", "0.5.0"] {
+        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
             assert!(peer_versions_compatible(&local, supported, None));
             let version = Version::parse(supported).unwrap();
             for ranges in [
@@ -567,7 +567,8 @@ mod tests {
             "0.4.12",
             "0.4.11-rc.1",
             "0.5.0-rc.1",
-            "0.5.1",
+            "0.5.1-rc.1",
+            "0.5.2",
             "0.6.0",
             "0.6.0-dev.2",
             "9.0.0",
@@ -600,12 +601,13 @@ mod tests {
     fn catalog_controls_legacy_exception_without_bypassing_peer_ranges() {
         let mut local = compatibility_manifest();
         local.legacy_peer_application_ranges.clear();
-        assert!(!peer_versions_compatible(&local, "0.4.11", None));
-        assert!(!peer_versions_compatible(&local, "0.5.0", None));
+        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
+            assert!(!peer_versions_compatible(&local, supported, None));
+        }
         // A catalog does not classify an untested release as legacy merely because
         // its ordinary peer range admits that version.
-        local.peer_application_ranges.push("=0.5.1".into());
-        assert!(!peer_versions_compatible(&local, "0.5.1", None));
+        local.peer_application_ranges.push("=0.5.2".into());
+        assert!(!peer_versions_compatible(&local, "0.5.2", None));
         local.legacy_peer_application_ranges = vec!["=0.5.0".into()];
         assert!(peer_versions_compatible(&local, "0.5.0", None));
         local.peer_application_ranges = vec![format!("={}", local.application_version)];
@@ -621,7 +623,9 @@ mod tests {
             .remove("legacy_peer_application_ranges");
         let older_catalog: CompatibilityManifest = serde_json::from_value(json).unwrap();
         assert!(older_catalog.legacy_peer_application_ranges.is_empty());
-        assert!(!peer_versions_compatible(&older_catalog, "0.5.0", None));
+        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
+            assert!(!peer_versions_compatible(&older_catalog, supported, None));
+        }
         assert!(peer_versions_compatible(
             &local,
             &older_catalog.application_version,

@@ -113,7 +113,7 @@ pub struct ServerConfig {
     #[serde(default = "default_list_waveform_cache_mb")]
     pub list_waveform_cache_mb: u64,
     /// List waveform workers, i.e. `max_waveforms` slots they may hold at once (1..=64,
-    /// default 1; never more than `max(1, max_waveforms - 1)`).
+    /// default 3; never more than `max(1, max_waveforms - 1)`).
     #[serde(default = "default_list_waveform_workers")]
     pub list_waveform_workers: usize,
     /// Files pre-generation may start per second (1..=1000, default 10).
@@ -196,7 +196,7 @@ fn default_list_waveform_cache_mb() -> u64 {
     640
 }
 fn default_list_waveform_workers() -> usize {
-    1
+    3
 }
 fn default_list_waveform_rate() -> u32 {
     crate::auth::DEFAULT_LIST_WAVEFORM_RATE

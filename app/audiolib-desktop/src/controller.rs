@@ -1858,7 +1858,7 @@ impl Controller {
                                     |_| {},
                                 )
                             }
-                            .map_err(|e| e.to_string())?,
+                            .map_err(|e| e.local_display_text(c.chinese.load(Ordering::Acquire)))?,
                         );
                         let integrity = next.check_library().map_err(|error| error.to_string())?;
                         if !integrity.is_ok() {
@@ -2304,8 +2304,11 @@ impl Controller {
                         }
                     })()
                     .map_err(|error| error.to_string());
-                    c.metadata.lock().unwrap().complete(&job, &result);
-                    c.metadata_wake.notify_all();
+                    // Queue the UI publication before completion becomes observable:
+                    // a waiter (close, source switch) must not see the job completed
+                    // and then have this older result overwrite its newer status.
+                    let mut state = c.metadata.lock().unwrap();
+                    state.complete(&job, &result);
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.library_generation.load(Ordering::Acquire) != library_generation
@@ -2346,6 +2349,8 @@ impl Controller {
                             Err(error) => ui.set_status(error.into()),
                         }
                     });
+                    drop(state);
+                    c.metadata_wake.notify_all();
                 }
             })
             .expect("spawn Metadata worker");

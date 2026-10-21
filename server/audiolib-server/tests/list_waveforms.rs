@@ -836,9 +836,9 @@ fn list_waveform_config_is_validated() {
     let config = ServerConfig::from_toml_str(base, Path::new(".")).unwrap();
     assert_eq!(config.pregenerate_list_waveforms, None);
     assert_eq!(config.list_waveform_cache_mb, 640);
-    assert_eq!(config.list_waveform_workers, 1);
+    assert_eq!(config.list_waveform_workers, 3);
     assert_eq!(config.list_waveform_rate, 10);
-    assert_eq!(config.effective_list_waveform_workers(), 1);
+    assert_eq!(config.effective_list_waveform_workers(), 3);
     let many = ServerConfig::from_toml_str(
         &format!("{base}list_waveform_workers = 64\nmax_waveforms = 4\n"),
         Path::new("."),

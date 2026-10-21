@@ -2,7 +2,8 @@
 //! Additive implementation revisions never downgrade a future library or snapshot.
 mod support;
 use audiolib_core::{DataProvider, Error, SearchRequest};
-use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider};
+use audiolib_db::{SCHEMA_VERSION, SnapshotUpgradeProgress, SqliteProvider};
+use rusqlite::Connection;
 use std::{
     fs,
     path::Path,
@@ -31,9 +32,18 @@ fn fixture(path: &Path) {
 
 fn assert_future_error<T>(result: audiolib_core::Result<T>, feature: &str) {
     match result {
-        Err(Error::Database(message)) => {
-            assert!(message.contains(feature), "{message}");
-            assert!(message.contains("newer than supported"), "{message}");
+        Err(error @ Error::NewerDatabase { .. }) => {
+            let Error::NewerDatabase {
+                what,
+                found,
+                supported,
+            } = &error
+            else {
+                unreachable!()
+            };
+            assert!(what.contains(feature), "{error}");
+            assert!(found > supported, "{error}");
+            assert!(error.to_string().contains("too old"), "{error}");
         }
         Err(error) => panic!("Unexpected error for {feature}: {error}"),
         Ok(_) => panic!("Future {feature} revision was accepted"),
@@ -383,4 +393,88 @@ fn cancelled_revision_two_fold_upgrade_preserves_source_and_resumes() {
     let provider = SqliteProvider::open_read_only(&owned).unwrap();
     assert_fold_upgrade(&provider);
     assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn feature_revision_above_supported_tokenization_is_a_newer_database_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("future-tokenization.db");
+    fixture(&database);
+    let conn = Connection::open(&database).unwrap();
+    conn.execute(
+        "UPDATE audiolib_schema_features SET version=99 WHERE feature='tokenization'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    match SqliteProvider::open_read_only(&database) {
+        Err(error @ Error::NewerDatabase { .. }) => {
+            assert!(
+                matches!(&error, Error::NewerDatabase { what, found: 99, supported }
+                    if what == "feature tokenization revision" && *supported < 99),
+                "{error:?}"
+            );
+            let chinese = error.display_text(true);
+            assert!(chinese.starts_with("客户端版本过旧"), "{chinese}");
+            assert!(chinese.contains("请升级 AudioLib Explorer"), "{chinese}");
+            assert!(!error.to_string().starts_with("Database:"), "{error}");
+        }
+        other => panic!("expected NewerDatabase, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn feature_revision_newer_schema_version_is_a_newer_database_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("future-schema.db");
+    fixture(&database);
+    Connection::open(&database)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    let original = fs::read(&database).unwrap();
+    for result in [
+        SqliteProvider::open_existing(&database).map(|_| ()),
+        SqliteProvider::open(&database).map(|_| ()),
+        SqliteProvider::open_read_only(&database).map(|_| ()),
+        SqliteProvider::upgrade_owned_snapshot(&database).map(|_| ()),
+    ] {
+        assert!(
+            matches!(&result, Err(Error::NewerDatabase { what, found: 99, supported })
+                if what == "schema" && *supported == SCHEMA_VERSION),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&database).unwrap(), original);
+    }
+}
+
+#[test]
+fn feature_revision_newer_local_library_uses_local_wording() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("future-local.db");
+    fixture(&database);
+    Connection::open(&database)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    let error = SqliteProvider::open_existing(&database)
+        .map(|_| ())
+        .unwrap_err();
+    let chinese = error.local_display_text(true);
+    assert!(
+        chinese.starts_with("客户端版本过旧：这个音效库")
+            && chinese.contains(&format!("schema 99 > {SCHEMA_VERSION}")),
+        "{chinese}"
+    );
+    assert!(
+        chinese.ends_with("请升级 AudioLib Explorer 后再打开。"),
+        "{chinese}"
+    );
+    let english = error.local_display_text(false);
+    assert!(
+        english.contains("this library uses a newer database format")
+            && english.ends_with("then open it again."),
+        "{english}"
+    );
+    assert!(error.display_text(true).contains("服务器快照"));
 }

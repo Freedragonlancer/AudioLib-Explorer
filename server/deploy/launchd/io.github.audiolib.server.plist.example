@@ -36,7 +36,10 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>ProcessType</key>
-    <string>Background</string>
+    <!-- Interactive: Background makes launchd throttle disk I/O, which noticeably slows
+         list waveform pre-generation reads from network shares (switching to Interactive
+         together with 3 workers measured a ~1.9x speedup). -->
+    <string>Interactive</string>
     <key>StandardOutPath</key>
     <string>/usr/local/var/audiolib/log/server.out.log</string>
     <key>StandardErrorPath</key>

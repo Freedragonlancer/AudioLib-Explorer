@@ -552,3 +552,175 @@ fn registered_stream_sources_decode_like_files_and_unregister_cleanly() {
         assert!(Decoder::open(&virtual_path).is_err());
     }
 }
+#[test]
+fn read_buffered_waveform_matches_unbuffered_for_every_source_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let pattern = |len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|i| ((i * 2_654_435_761) >> 13) as u8)
+            .collect()
+    };
+    let mut files = Vec::new();
+    for (name, channels, bits, tag) in [
+        ("pcm16.wav", 2_u16, 16_u16, 1_u16),
+        ("pcm24.wav", 1, 24, 1),
+        ("pcm8.wav", 2, 8, 1),
+    ] {
+        let path = temp.path().join(name);
+        write_wav(
+            &path,
+            48000,
+            channels,
+            bits,
+            tag,
+            &pattern(300_001 * usize::from(channels) * usize::from(bits / 8)),
+            true,
+            false,
+        );
+        files.push(path);
+    }
+    let float: Vec<u8> = (0..200_000)
+        .flat_map(|i| ((i as f32 * 0.001).sin()).to_le_bytes())
+        .collect();
+    let path = temp.path().join("float.wav");
+    write_wav(&path, 44100, 1, 32, 3, &float, false, true);
+    files.push(path);
+    // mu-law (Symphonia format reader) and IMA ADPCM (block reader).
+    let path = temp.path().join("mulaw.wav");
+    write_encoded_wav(&path, 7, 1, 150_000, &[], &pattern(150_000));
+    files.push(path);
+    let mut adpcm = Vec::new();
+    for block in 0..4000 {
+        adpcm.extend_from_slice(&((block * 37 % 3000) as i16).to_le_bytes());
+        adpcm.extend_from_slice(&[0, 0]);
+        adpcm.extend_from_slice(&pattern(12));
+    }
+    let path = temp.path().join("adpcm.wav");
+    write_encoded_wav(&path, 17, 16, 4000 * 25 - 7, &25_u16.to_le_bytes(), &adpcm);
+    files.push(path);
+
+    let cancel = AtomicBool::new(false);
+    for path in &files {
+        for samples_per_pixel in [97_u32, 4096] {
+            let request = WaveformRequest {
+                samples_per_pixel,
+                ..WaveformRequest::default()
+            };
+            let reference = waveform_with_cancel(path, request.clone(), &cancel).unwrap();
+            assert!(!reference.peaks[0].is_empty(), "{path:?}");
+            for read_buffer in [7, 4096, 2 * 1024 * 1024] {
+                let buffered =
+                    waveform_with_read_buffer(path, request.clone(), &cancel, read_buffer).unwrap();
+                assert_eq!(
+                    format!("{:?}", buffered.peaks),
+                    format!("{:?}", reference.peaks),
+                    "{path:?} spp={samples_per_pixel} buffer={read_buffer}"
+                );
+                assert_eq!(buffered.frames, reference.frames);
+            }
+        }
+    }
+}
+#[test]
+fn single_open_summary_matches_probe_then_waveform_with_trailing_chunks() {
+    fn append_trailing(path: &Path) {
+        let mut wav = fs::read(path).unwrap();
+        let mut tail = Vec::new();
+        chunk(b"ID3 ", &[b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 0], &mut tail);
+        chunk(b"SMED", &[7; 333], &mut tail);
+        chunk(b"iXML", b"<BWFXML><TAKE>3</TAKE></BWFXML>", &mut tail);
+        chunk(b"_PMX", b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>", &mut tail);
+        chunk(b"LIST", b"INFOINAM\x04\x00\x00\x00tail", &mut tail);
+        wav.extend_from_slice(&tail);
+        if &wav[..4] == b"RIFF" {
+            let size = (wav.len() - 8) as u32;
+            wav[4..8].copy_from_slice(&size.to_le_bytes());
+        }
+        fs::write(path, wav).unwrap();
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let pattern = |len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|i| ((i * 2_654_435_761) >> 13) as u8)
+            .collect()
+    };
+    let mut files = Vec::new();
+    for (name, rate, channels, bits, tag, frames, rf64) in [
+        (
+            "pcm16.wav",
+            48000_u32,
+            2_u16,
+            16_u16,
+            1_u16,
+            70_001_usize,
+            false,
+        ),
+        ("pcm24-rf64.wav", 96000, 1, 24, 1, 50_000, true),
+        ("float-rf64.wav", 44100, 2, 32, 3, 33_333, true),
+        ("short.wav", 48000, 1, 16, 1, 100, false),
+        ("empty.wav", 48000, 1, 16, 1, 0, false),
+    ] {
+        let path = temp.path().join(name);
+        let bytes = frames * usize::from(channels) * usize::from(bits / 8);
+        let samples = if tag == 3 {
+            (0..bytes / 4)
+                .flat_map(|i| ((i as f32 * 0.003).sin()).to_le_bytes())
+                .collect()
+        } else {
+            pattern(bytes)
+        };
+        write_wav(&path, rate, channels, bits, tag, &samples, true, rf64);
+        files.push(path);
+    }
+    let path = temp.path().join("mulaw.wav");
+    write_encoded_wav(&path, 7, 1, 90_001, &[], &pattern(90_001));
+    files.push(path);
+    let mut adpcm = Vec::new();
+    for block in 0..2000 {
+        adpcm.extend_from_slice(&((block * 37 % 3000) as i16).to_le_bytes());
+        adpcm.extend_from_slice(&[0, 0]);
+        adpcm.extend_from_slice(&pattern(12));
+    }
+    let path = temp.path().join("adpcm.wav");
+    write_encoded_wav(&path, 17, 16, 2000 * 25 - 7, &25_u16.to_le_bytes(), &adpcm);
+    files.push(path);
+
+    let cancel = AtomicBool::new(false);
+    for path in &files {
+        for trailing in [false, true] {
+            if trailing {
+                append_trailing(path);
+            }
+            let metadata = probe(path).unwrap();
+            let samples_per_pixel = metadata.frames.div_ceil(128).max(1) as u32;
+            let probed = waveform_with_read_buffer(
+                path,
+                WaveformRequest {
+                    samples_per_pixel,
+                    include_colors: false,
+                    ..WaveformRequest::default()
+                },
+                &cancel,
+                2 << 20,
+            )
+            .unwrap();
+            for read_buffer in [0, 2 << 20] {
+                let single =
+                    summary_waveform_with_read_buffer(path, 128, &cancel, read_buffer).unwrap();
+                let context = format!("{path:?} trailing={trailing} buffer={read_buffer}");
+                assert_eq!(single.frames, metadata.frames, "{context}");
+                assert_eq!(single.samples_per_pixel, samples_per_pixel, "{context}");
+                assert_eq!(
+                    format!("{:?}", single.peaks),
+                    format!("{:?}", probed.peaks),
+                    "{context}"
+                );
+                assert_eq!(
+                    single.peaks[0].is_empty(),
+                    metadata.frames == 0,
+                    "{context}"
+                );
+            }
+        }
+    }
+}

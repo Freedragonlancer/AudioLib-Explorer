@@ -441,6 +441,15 @@ pub fn clone_error(error: &Error) -> Error {
         Error::Cancelled => Error::Cancelled,
         Error::Busy(m) => Error::Busy(m.clone()),
         Error::NotFound(m) => Error::NotFound(m.clone()),
+        Error::NewerDatabase {
+            what,
+            found,
+            supported,
+        } => Error::NewerDatabase {
+            what: what.clone(),
+            found: *found,
+            supported: *supported,
+        },
     }
 }
 

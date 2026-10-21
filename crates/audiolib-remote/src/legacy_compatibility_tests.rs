@@ -96,7 +96,7 @@ fn legacy_server(
             ("GET", "/api/v1/health") => json(&serde_json::json!({
                 "status":"ok", "version":state.version,
             })),
-            // Both published baselines expose management hints, without a modern
+            // The tested published baselines expose management hints, without a modern
             // compatibility catalog or an actual-format descriptor.
             ("GET", "/api/v1/capabilities") => json(&serde_json::json!({
                 "manage_mode":"all", "can_manage":true,
@@ -166,7 +166,7 @@ fn cached_identity(cache: &RemoteCache) -> CachedIdentity {
 
 #[test]
 fn published_legacy_peers_sync_poll_probe_patch_and_ignore_retired_json_fields() {
-    for version in ["0.4.11", "0.5.0"] {
+    for version in ["0.4.11", "0.5.0", "0.5.1"] {
         let owned = tempfile::tempdir().unwrap();
         let original = owned.path().join("original-schema5.db");
         let (bytes, file) = legacy_snapshot(&original);
@@ -320,7 +320,7 @@ fn published_legacy_peers_sync_poll_probe_patch_and_ignore_retired_json_fields()
 
 #[test]
 fn unknown_legacy_versions_fail_before_download_or_write_and_retain_cache() {
-    for unsupported in ["0.4.12", "0.5.1", "0.5.0-rc.1", "99.0.0"] {
+    for unsupported in ["0.4.12", "0.5.2", "0.5.0-rc.1", "0.5.1-rc.1", "99.0.0"] {
         let owned = tempfile::tempdir().unwrap();
         let (bytes, file) = legacy_snapshot(&owned.path().join("source.db"));
         let (server, observed) = legacy_server("0.5.0", bytes, file);

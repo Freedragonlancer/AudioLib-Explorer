@@ -105,9 +105,11 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
         if let Some(version) = feature_version(conn, feature)?
             && version > supported
         {
-            return Err(Error::Database(format!(
-                "Database feature {feature} revision {version} is newer than supported {supported}"
-            )));
+            return Err(Error::NewerDatabase {
+                what: format!("feature {feature} revision"),
+                found: version,
+                supported,
+            });
         }
     }
     for (key, supported) in [
@@ -118,9 +120,11 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
         if let Some(version) = meta_value(conn, key)?.and_then(|value| value.parse::<i64>().ok())
             && version > supported
         {
-            return Err(Error::Database(format!(
-                "Database feature {key} revision {version} is newer than supported {supported}"
-            )));
+            return Err(Error::NewerDatabase {
+                what: format!("feature {key} revision"),
+                found: version,
+                supported,
+            });
         }
     }
     Ok(())
@@ -690,9 +694,16 @@ pub(crate) fn migrate_with_progress(
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
+    if version > SCHEMA_VERSION {
+        return Err(Error::NewerDatabase {
+            what: "schema".into(),
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
     if version > LEGACY_SCHEMA_VERSION {
         return Err(Error::Database(format!(
-            "Database schema {version} is newer than supported {LEGACY_SCHEMA_VERSION}"
+            "Legacy normalization supports schema up to {LEGACY_SCHEMA_VERSION}, found {version}"
         )));
     }
     if version == LEGACY_SCHEMA_VERSION && !legacy_needs_upgrade(conn)? {

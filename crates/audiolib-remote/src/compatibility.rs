@@ -281,9 +281,12 @@ mod tests {
         let mut one_way = compatibility_manifest();
         one_way.peer_application_ranges = vec!["<0.4.0".into()];
         assert!(peer(&one_way.application_version, Some(&one_way)).is_err());
-        peer("0.4.11", None).unwrap();
-        assert!(peer("0.4.12", None).is_err());
-        assert!(peer("99.0.0", None).is_err());
+        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
+            peer(supported, None).unwrap();
+        }
+        for unsupported in ["0.4.12", "0.5.2", "0.5.1-rc.1", "99.0.0"] {
+            assert!(peer(unsupported, None).is_err());
+        }
     }
 
     #[test]
@@ -493,7 +496,7 @@ mod tests {
 
     #[test]
     fn legacy_stale_or_unbound_download_preserves_the_active_cache() {
-        for version in ["0.4.11", "0.5.0"] {
+        for version in ["0.4.11", "0.5.0", "0.5.1"] {
             for mode in [
                 "stale",
                 "missing_revision",

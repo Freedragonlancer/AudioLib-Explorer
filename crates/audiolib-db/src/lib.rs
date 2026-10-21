@@ -747,6 +747,13 @@ impl SqliteProvider {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
+        if version > MAX_SNAPSHOT_SCHEMA {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: MAX_SNAPSHOT_SCHEMA,
+            });
+        }
         if !snapshot_schema_supported(version) {
             return Err(Error::Database(format!(
                 "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
@@ -824,6 +831,13 @@ impl SqliteProvider {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(db_error)?;
         schema::validate_library_identity(&probe)?;
+        if version > schema::SCHEMA_VERSION {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: schema::SCHEMA_VERSION,
+            });
+        }
         if !(1..=schema::SCHEMA_VERSION).contains(&version) {
             return Err(Error::Validation(format!(
                 "Use Import to create a copy first; supported Rust schema is 1..={}, found {version}",
@@ -848,6 +862,13 @@ impl SqliteProvider {
         let version: i64 = source
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
+        if version > MAX_SNAPSHOT_SCHEMA {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: MAX_SNAPSHOT_SCHEMA,
+            });
+        }
         if !snapshot_schema_supported(version) {
             return Err(Error::Database(format!(
                 "Read-only database requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
@@ -928,6 +949,13 @@ impl SqliteProvider {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
+        if version > MAX_SNAPSHOT_SCHEMA {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: MAX_SNAPSHOT_SCHEMA,
+            });
+        }
         if !snapshot_schema_supported(version) {
             return Err(Error::Database(format!(
                 "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
