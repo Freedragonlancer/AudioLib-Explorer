@@ -10,8 +10,9 @@
 [历史全库实验](Search_Storage_B_Validation.md)、
 [共享迁移器全库与回滚实测](Search_Storage_B_Integrated_Validation.md)、
 [实现与验收边界](Implementation_B_Status.md)。
-CR、修复及合入 0.5.0 主线后的证据见 [方案 B CR](Search_Storage_B_CR.md)。
-隔离分支此前已完成 p0 的两端实现、兼容测试及全库复验；新增 p1 和独立本机历史已完成实现及隔离验收，条件与首次排序退化见 [schema v6 合并升级](Schema_V6_Iteration.md)。这些新协商字段尚未发布或部署。
+CR、修复及历次隔离证据见 [方案 B CR](Search_Storage_B_CR.md)；p1、本机历史和首次排序修复的原构建身份与测量见 [schema v6 合并升级](Schema_V6_Iteration.md)。本轮未重跑全库迁移或广泛性能验收；只补受影响的验证与五类排序抽查。
+
+本轮已将 main `c90c0fe`（0.5.1，含方向键试听修复）合入本地候选 `c81eca2`，三端版本仍为 `0.6.0-dev.1`。旧端例外只接纳精确的 0.4.11 / 0.5.0 / 0.5.1，未知 patch 和未列入目录的预发布仍拒绝；新客户端可连接这些旧服务端，旧客户端仍不能读取新 p1 快照或执行 p1 库写入。相关本地验证通过，PR 继续草稿；尚未部署、安装或升级工作库。用户部署后另行通知，再按 [局域网验收计划](Schema_V6_LAN_Acceptance.md) 核验实际服务。
 
 - 服务器模式 = 一个实现 `audiolib_core::DataProvider` 的远程提供者（`crates/audiolib-remote`）+ 服务端进程（`server/audiolib-server`）。UI / CLI 不感知本地还是远程。
 - 服务端直接复用 `audiolib-core` 的 DTO（`AudioFile`、`Folder`、`SearchRequest`、`SearchPage`、`MetadataPatch`、`ScanProgress`、`LibraryStats`、`LibraryInfo` 等），JSON 字段名与 serde 序列化结果一致，remote 端可以直接反序列化。
@@ -1226,6 +1227,8 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 | `last_error` | 最近一次后台错误（任务级错误或最近一个文件解码失败）：`{ "at": <Unix 秒>, "error_code": "AUDIO", "message": "…", "id": 106 }`（`id` 可为 `null`；`message` 不含路径，同 §9.1 的 `error`），没有时为 `null`。进程重启后从持久化任务状态恢复（§9.5.5） |
 | `job` | 当前或最近一个任务；从未运行过任务时为 `null`。**必有字段**：`id`（不透明字符串，客户端用它判断任务是否已换成新的）、`mode`、`started_at`、`done`、`failed`、`total`，其余字段可能随版本增加。`mode_effective` = 实际执行的模式，通常等于 `mode`；`failed` 回退时为 `missing`（见 §9.5.5）。`state`：`running` \| `yielding` \| `paused` \| `completed` \| `cancelled` \| `error`。`done` = 已检查的记录数（`generated` + `skipped` + `failed` + `skipped_offline`）；`generated` = 实际解码写入的数；`skipped` = 键一致只做 `stat` 的数；`resumed` = 本任务是否在重启后恢复过；`current` = 正在处理的记录（没有时为 `null`）；结束的任务保留到下一个任务开始 |
 
+当前桌面候选的速度和 ETA 使用客户端滚动估计（180 秒窗口、至少 30 秒有效运行样本，排除暂停与让路），不直接展示上述服务器 60 秒窗口估计；HTTP 字段含义保持不变。
+
 - 已有字段 `failed`、`remaining`、`pass_*` 的含义不变；有任务时 `pass_started_at` / `pass_finished_at` 跟随任务的 `started_at` / `finished_at`。
 - 仍按 §2.2 鉴权，**不受 `manage_mode` 限制**，30 秒超时。旧字段“进度在内存中，重启后从头统计”的说明改为：预生成进度仍在内存中；**任务**进度持久化（§9.5.5）。
 
@@ -1370,9 +1373,9 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 缓存：`<数据目录>/remote/<library_id>/library-r<revision>-<毫秒>.db` + `cache.json`（Windows 无法替换仍被打开的 SQLite 文件，所以不用固定的 `library.db` 文件名；只保留当前打开的一份，旧文件在切换后删除，仍被占用时由轮询重试）。同步本身不删除任何文件：旧快照和被替换的库目录只在提供者切换到新快照之后清理（当前打开的和 `cache.json` 记录的快照永不删除）；超过 1 小时的快照下载暂存文件在启动和切换时清理（试听不再写磁盘，旧版本留下的 `audio-cache/` 目录删除一次）。同一 `server_url` 换成新 `library_id` 后，旧库目录（快照、`cache.json`）在新库安装后删除；其他服务器的缓存保留。拖出下载缓存 `<数据目录>/cache/<library_id>/` 不专门清理，跟随全局 4 GiB LRU 正常淘汰。服务器不可达时用上次缓存离线只读打开；从未同步过则显示空库并提示。
 - `library_id` 变化：提示警告，清空选择与草稿，重新下载快照。401 提示令牌无效；连接失败、超时（连接 3 秒）、`INTERNAL` 等均有明确中英文提示，不会静默显示空库。服务端 408 `TIMEOUT` 按超时处理（可重试，轮询显示离线并继续用缓存），不当作令牌或协议错误。
 - 版本轮询：服务器模式下后台线程每 `poll_interval_secs` 秒（默认 60，0 = 关闭，设置项 `data_source.poll_interval_secs`）调用 `GET /library`，与已打开快照的 `library_id`/`revision` 比对；有变化时在标题栏下方显示非阻塞提示和「同步」按钮（`auto_sync = true` 时自动同步，但要等 revision 稳定：同一 revision 至少保持一个轮询间隔才同步（「重试」、保存设置等额外检查不算），持续变化时最多推迟 15 分钟，避免分批扫描时每批都整库下载；`library_id` 变化或首次同步立即进行）。轮询能连上服务器时同时取 `GET /roots`（§6.4 状态缓存），标题栏显示「根目录离线：X」「磁盘唤醒中：Y」，数据源对话框按根显示状态；离线根的记录照常列出，不标为缺失。根离线提示上的「重试」对每个离线根调用 `POST /roots/{name}/check`（约 2 秒，不阻塞界面），用返回的条目更新状态，仍离线则保留提示；服务器没有该端点（404）时改为对所选记录发 `HEAD /audio/{id}/stream`。切到本地模式、改用离线缓存或保存设置时丢弃旧的根状态（保存设置后立即重新获取，成功同步会带来新的根状态）；只有快照中保存的根列表时不使用其中过时的状态。离线时继续用缓存并显示「离线」，按间隔翻倍退避（最长 15 分钟）；`503` 视为「服务器启动中，稍后重试」（10/20/40 秒…重试，且不早于 `Retry-After`，不当作令牌错误；`/health` 的 `status: starting|error` 在连接测试中单独显示）；401 提示检查令牌。
-- 标注写入（§6.3）：服务器模式下详情面板的收藏、标签、备注，以及右键/菜单的收藏、批量标注均可用，经 `DataProvider`（`audiolib_remote::RemoteProvider`）发到服务器；颜色含清除可通过 CLI 标注，标签支持替换/追加/移除。单条 `PATCH /audio/{id}/metadata`，批量 `POST /audio/metadata/batch {ids, patch, tag_mode}`；0.4.0 不提供评分编辑。**revision 规则**：成功后若本地快照 revision 等于 `revision_before`，把返回的 `file`/`files` 在一个事务中写入已打开的快照（用户标签/备注及其分词列，FTS5 触发器同步更新；收藏、颜色、播放次数），并把本地 revision 设为 `revision`（`cache.json` 与标题栏），不做整库同步；否则（期间有其他客户端写入、无缓存状态等）执行一次完整快照同步。错误映射：`400 VALIDATION` → 值无效（附服务器说明；发送前也做本地校验）；`404` → 记录在服务器上已不存在（批量整体回滚）；`409 BUSY` → 服务器正在扫描，稍后重试；`413 PAYLOAD_TOO_LARGE` → 请求过大（8 MiB 上限，客户端发送前也拦截）；`401` 同读取；`408 TIMEOUT`/超时/断线/响应不可读 → 结果不确定，提示错误并请求完整同步。写入不自动重试；保存失败时草稿保留为「未保存」。快照提供者切换必须先排空 Metadata 写入，排空失败则保留当前提供者与草稿，不安装新快照。
+- 标注写入（§6.3）：服务器模式下详情面板的收藏、标签、备注，以及右键/菜单的收藏、批量标注均可用，经 `DataProvider`（`audiolib_remote::RemoteProvider`）发到服务器；颜色含清除可通过 CLI 标注，标签支持替换/追加/移除。单条 `PATCH /audio/{id}/metadata`，批量 `POST /audio/metadata/batch {ids, patch, tag_mode}`；0.4.0 不提供评分编辑。**revision 规则**：成功后若本地快照 revision 等于 `revision_before`，把返回的 `file`/`files` 在一个事务中写入已打开的快照（用户标签/备注、收藏、颜色；按实际快照格式维护派生搜索与 FTS5），并把本地 revision 设为 `revision`（`cache.json` 与标题栏），不做整库同步；否则（期间有其他客户端写入、无缓存状态等）执行一次完整快照同步。错误映射：`400 VALIDATION` → 值无效（附服务器说明；发送前也做本地校验）；`404` → 记录在服务器上已不存在（批量整体回滚）；`409 BUSY` → 服务器正在扫描，稍后重试；`413 PAYLOAD_TOO_LARGE` → 请求过大（8 MiB 上限，客户端发送前也拦截）；`401` 同读取；`408 TIMEOUT`/超时/断线/响应不可读 → 结果不确定，提示错误并请求完整同步。写入不自动重试；保存失败时草稿保留为「未保存」。快照提供者切换必须先排空 Metadata 写入，排空失败则保留当前提供者与草稿，不安装新快照。
 - 仍只读：扫描/重扫（主窗口入口；扫描在「服务器音效库」页）、维护/还原、relink、导入、新建/打开库、在资源管理器中定位。菜单项置灰并带「（服务器模式只读）」后缀，音效库管理对话框有说明行，控制器（`refuse_remote_write`）和 `RemoteProvider` 都独立拒绝。移除记录或目录见上（需服务器 `can_manage`）。原始 WAV 从不修改。
-- 播放计数：本地和服务器模式都不再写入计数或历史；服务器模式播放不请求 `/audio/{id}/plays`，也不产生缓存写入或重同步事件。低层兼容路由只服务旧调用方。客户端不新增历史存储；旧库中的播放结构在下一次明确迁移时退役，升级前完整备份保留旧值用于回滚（§6.3、迁移契约 §7）。
+- 播放与本机历史（本 PR 候选）：主库不再累计播放次数；本地和服务器模式的成功播放会话只写入独立的本机 `history.db`（默认最多 5,000 条，可设为 0 禁用）。客户端不请求 `/audio/{id}/plays`，不因播放修改服务端 revision 或快照，也不触发重同步；低层兼容空操作只服务旧调用方。本地旧事件在受保护的 v6 升级中先从已验证备份导入本机历史，再退役主库播放结构；服务端升级不导入本机历史。升级前完整备份保留旧值用于回滚（§6.3、[迁移契约 §7](Library_Migration_Compatibility.md#7-通用结构演进与播放统计退役)）。
 - 拖出：结果行可拖到资源管理器/DAW（拖动已勾选的行则拖出全部勾选项），原生 OLE `DoDragDrop` + `CF_HDROP` 真实路径，仅 `DROPEFFECT_COPY`；不使用虚拟/延迟文件。本地模式直接提供素材库文件。服务器模式先确保所选文件完整位于下载缓存 `<数据目录>/cache/<library_id>/<file_id>-<ETag 哈希 16 位>/<原文件名>`（状态栏显示进度，可取消；若松开鼠标前未就绪，提示「已准备好，请再次拖动」）。文件名取 §8 `download=1` 的 `Content-Disposition`：优先 `filename*=UTF-8''…`（百分号解码），否则 `filename`，再否则记录文件名；替换 Windows 非法字符、处理保留名（CON/NUL/COM1…）和末尾点/空格，例如 `filename="audio-7.wav"; filename*=UTF-8''%E9%9B%B7%E5%A3%B0%20%E8%BF%91.wav` → `雷声 近.wav`。复用：已有完整文件先 `HEAD …?download=1` 复核 ETag（最多等 2.5 秒；超时、根离线、服务器启动中或忙时直接用该缓存文件，不等磁盘唤醒）；试听内存中已有完整且 ETag（同一 `/audio/{id}/stream`）和长度一致的原始副本则直接复制；否则 `GET …/stream?download=1` 写 `.part`（`Content-Length` 驱动进度，断点用 `Range` + `If-Range` 续传，校验 ETag/长度后改名）。离线时用该文件最新的缓存版本。容量上限 4 GiB，按最近使用淘汰，只作用于带 `.audiolib-downloads` 标记的库目录和其中 `<id>-<16 位十六进制>` 条目目录，不跟随链接，不触碰 `cache/` 下其他内容（如 `cache/waveforms`）。
 - CLI：`remote edit <id[,id…]> [--tags] [--tag-mode replace|append|remove] [--color '#RRGGBB'|''] [--notes] [--favorite]`（单 id + replace 走 PATCH，否则走批量），`remote plays <id>`，`remote download <id[,id…]>`；输出 `revision_before`/`revision` 和缓存结果（`applied` 或执行的同步）。
 - WebDAV：每个扫描根一行，可编辑。有效地址优先级：**用户填写的地址（按根名保存）> 服务端 `/roots.webdav_url`（仅为默认建议）> 全局 `base_url + "/" + 根名`**；留空或与服务端建议相同即表示使用服务端默认。记录路径按最长 `server_path` 前缀（按路径分量匹配）替换为有效地址，剩余部分逐段百分号编码。「测试连接」按根检查有效地址（PROPFIND Depth:0，405/501 时回退 HEAD），并标明来源（用户/服务器/基础地址）。WebDAV 是可选项（试听默认走 §8 服务器流）：未配置地址的根显示「– 未配置 WebDAV，试听走服务器流」，已配置但不可达只算警告（!），都不让测试整体失败。测试另外用本机已同步快照中的一条未缺失记录请求 `GET /audio/{id}/stream`（`Range: bytes=0-0`）：206/200 通过，401、503（含根离线 `ROOT_OFFLINE`）、不可达和超时算失败（超时附「磁盘可能正在唤醒」提示），404（该记录文件缺失）算警告；没有该库快照时跳过。`AudioLibCli remote test` 只在必需步骤失败时返回 `REMOTE_TEST_FAILED`，警告放在 `warnings` 数组。
@@ -1399,7 +1402,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 7. 库身份是否迁入未来 schema（§3）。
 8. 增量同步 `GET /library/changes`（§6.5 草案）：变更日志放库内触发器（schema v5）还是服务端旁路；保留多久；410 的阈值。
 9. 列表缩略波形（§9.1–§9.3，服务端已实现）：客户端评审结论见 §9.3；按需队列的让路已定（只在试听开始后的前 3 秒让路，试听期间最多 1 个解码名额，不因扫描暂停；预生成在试听整个期间和扫描期间让路，§9.2）。`list_waveform_cache_mb` 默认 640 MiB 已确认够用：909,342 条的满库约 465 MiB（§9.1 容量估算），超出时按分片淘汰并在 `/waveforms/status` 报 `over_budget`。
-10. ~~列表波形缓存管理（§9.5）~~：已与客户端评审定：停止用 `POST …/stop`；`rebuild` 需 `confirm`；暂停跨重启保留；失败明细不持久化，重启后 `failed` 回退为 `missing`（`job.mode_effective`）；ETA = 剩余 / 60 秒窗口速度；暂不提供 `GET /waveforms/jobs/{id}`。
+10. ~~列表波形缓存管理（§9.5）~~：已与客户端评审定：停止用 `POST …/stop`；`rebuild` 需 `confirm`；暂停跨重启保留；失败明细不持久化，重启后 `failed` 回退为 `missing`（`job.mode_effective`）；HTTP ETA = 剩余 / 60 秒窗口速度（当前桌面另用客户端滚动估计）；暂不提供 `GET /waveforms/jobs/{id}`。
 
 - [Schema v6 合并升级契约](Schema_V6_Iteration.md)：修订后的结构升级、本机历史与兼容验收目标。
 
