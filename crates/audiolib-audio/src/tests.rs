@@ -552,3 +552,72 @@ fn registered_stream_sources_decode_like_files_and_unregister_cleanly() {
         assert!(Decoder::open(&virtual_path).is_err());
     }
 }
+#[test]
+fn read_buffered_waveform_matches_unbuffered_for_every_source_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let pattern = |len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|i| ((i * 2_654_435_761) >> 13) as u8)
+            .collect()
+    };
+    let mut files = Vec::new();
+    for (name, channels, bits, tag) in [
+        ("pcm16.wav", 2_u16, 16_u16, 1_u16),
+        ("pcm24.wav", 1, 24, 1),
+        ("pcm8.wav", 2, 8, 1),
+    ] {
+        let path = temp.path().join(name);
+        write_wav(
+            &path,
+            48000,
+            channels,
+            bits,
+            tag,
+            &pattern(300_001 * usize::from(channels) * usize::from(bits / 8)),
+            true,
+            false,
+        );
+        files.push(path);
+    }
+    let float: Vec<u8> = (0..200_000)
+        .flat_map(|i| ((i as f32 * 0.001).sin()).to_le_bytes())
+        .collect();
+    let path = temp.path().join("float.wav");
+    write_wav(&path, 44100, 1, 32, 3, &float, false, true);
+    files.push(path);
+    // mu-law (Symphonia format reader) and IMA ADPCM (block reader).
+    let path = temp.path().join("mulaw.wav");
+    write_encoded_wav(&path, 7, 1, 150_000, &[], &pattern(150_000));
+    files.push(path);
+    let mut adpcm = Vec::new();
+    for block in 0..4000 {
+        adpcm.extend_from_slice(&((block * 37 % 3000) as i16).to_le_bytes());
+        adpcm.extend_from_slice(&[0, 0]);
+        adpcm.extend_from_slice(&pattern(12));
+    }
+    let path = temp.path().join("adpcm.wav");
+    write_encoded_wav(&path, 17, 16, 4000 * 25 - 7, &25_u16.to_le_bytes(), &adpcm);
+    files.push(path);
+
+    let cancel = AtomicBool::new(false);
+    for path in &files {
+        for samples_per_pixel in [97_u32, 4096] {
+            let request = WaveformRequest {
+                samples_per_pixel,
+                ..WaveformRequest::default()
+            };
+            let reference = waveform_with_cancel(path, request.clone(), &cancel).unwrap();
+            assert!(!reference.peaks[0].is_empty(), "{path:?}");
+            for read_buffer in [7, 4096, 2 * 1024 * 1024] {
+                let buffered =
+                    waveform_with_read_buffer(path, request.clone(), &cancel, read_buffer).unwrap();
+                assert_eq!(
+                    format!("{:?}", buffered.peaks),
+                    format!("{:?}", reference.peaks),
+                    "{path:?} spp={samples_per_pixel} buffer={read_buffer}"
+                );
+                assert_eq!(buffered.frames, reference.frames);
+            }
+        }
+    }
+}

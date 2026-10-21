@@ -72,12 +72,23 @@ pub fn waveform_with_cancel(
     request: WaveformRequest,
     cancel: &AtomicBool,
 ) -> Result<WaveformData> {
+    waveform_with_read_buffer(path, request, cancel, 0)
+}
+/// [`waveform_with_cancel`] reading a plain file through a `read_buffer`-byte buffer
+/// (0 = unbuffered), for whole-file passes over slow network storage. The output is
+/// identical to the unbuffered path.
+pub fn waveform_with_read_buffer(
+    path: &Path,
+    request: WaveformRequest,
+    cancel: &AtomicBool,
+    read_buffer: usize,
+) -> Result<WaveformData> {
     if request.samples_per_pixel == 0 {
         return Err(Error::Validation(
             "Waveform samples_per_pixel must be positive".into(),
         ));
     }
-    let mut decoder = Decoder::open(path)?;
+    let mut decoder = Decoder::open_with_read_buffer(path, read_buffer)?;
     let metadata = decoder.info.metadata.clone();
     let end = request
         .end_frame

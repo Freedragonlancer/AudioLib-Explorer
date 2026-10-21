@@ -206,6 +206,10 @@ pub fn merge_channels(peaks: &[Vec<WaveformPeak>]) -> Vec<i16> {
     values
 }
 
+/// Read buffer for list waveform computation: whole-file sequential passes, so large
+/// reads keep network shares streaming instead of issuing one small request per block.
+pub const LIST_WAVEFORM_READ_BUFFER: usize = 2 * 1024 * 1024;
+
 /// Blocking. Compute the list summary of a whole file (§9.1: `colors=0`,
 /// `samples_per_pixel = ceil(frames / 128)`); a 0-frame file has no columns.
 pub fn compute(path: &Path, cancel: &AtomicBool) -> Result<Vec<i16>> {
@@ -216,7 +220,7 @@ pub fn compute(path: &Path, cancel: &AtomicBool) -> Result<Vec<i16>> {
     let samples_per_pixel = u32::try_from(metadata.frames.div_ceil(u64::from(LIST_BUCKETS)))
         .unwrap_or(u32::MAX)
         .max(1);
-    let waveform = audiolib_audio::waveform_with_cancel(
+    let waveform = audiolib_audio::waveform_with_read_buffer(
         path,
         WaveformRequest {
             samples_per_pixel,
@@ -225,6 +229,7 @@ pub fn compute(path: &Path, cancel: &AtomicBool) -> Result<Vec<i16>> {
             include_colors: false,
         },
         cancel,
+        LIST_WAVEFORM_READ_BUFFER,
     )?;
     Ok(merge_channels(&waveform.peaks))
 }
