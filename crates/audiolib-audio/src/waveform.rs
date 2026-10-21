@@ -88,7 +88,48 @@ pub fn waveform_with_read_buffer(
             "Waveform samples_per_pixel must be positive".into(),
         ));
     }
-    let mut decoder = Decoder::open_with_read_buffer(path, read_buffer)?;
+    waveform_from_decoder(
+        Decoder::open_with_read_buffer(path, read_buffer)?,
+        request,
+        cancel,
+    )
+}
+/// Whole-file summary of `buckets` columns (`samples_per_pixel = ceil(frames / buckets)`,
+/// at least 1) from a single open: the frame count comes from the decoder's own header
+/// parse, which stops at the `data` chunk, so trailing chunks (ID3, SMED, iXML, ...) are
+/// never read. Identical to probing first and calling [`waveform_with_read_buffer`].
+pub fn summary_waveform_with_read_buffer(
+    path: &Path,
+    buckets: u32,
+    cancel: &AtomicBool,
+    read_buffer: usize,
+) -> Result<WaveformData> {
+    let decoder = Decoder::open_with_read_buffer(path, read_buffer)?;
+    let samples_per_pixel = u32::try_from(
+        decoder
+            .info
+            .metadata
+            .frames
+            .div_ceil(u64::from(buckets.max(1))),
+    )
+    .unwrap_or(u32::MAX)
+    .max(1);
+    waveform_from_decoder(
+        decoder,
+        WaveformRequest {
+            samples_per_pixel,
+            start_frame: 0,
+            end_frame: None,
+            include_colors: false,
+        },
+        cancel,
+    )
+}
+fn waveform_from_decoder(
+    mut decoder: Decoder,
+    request: WaveformRequest,
+    cancel: &AtomicBool,
+) -> Result<WaveformData> {
     let metadata = decoder.info.metadata.clone();
     let end = request
         .end_frame
