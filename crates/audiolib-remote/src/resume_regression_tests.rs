@@ -637,7 +637,7 @@ fn pruning_skips_live_publication_then_preserves_the_newly_recorded_snapshot() {
     std::fs::create_dir_all(&library).unwrap();
     std::fs::write(cache.database_path(&old), &good).unwrap();
     cache.save_state(&old).unwrap();
-    let stale = library.join("library-r6-stale.db");
+    let stale = library.join("library-r6-1.db");
     std::fs::write(&stale, &good).unwrap();
     let new = CacheState {
         revision: 8,

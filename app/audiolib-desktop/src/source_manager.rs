@@ -13,9 +13,9 @@
 //! runs on worker threads; results are discarded when the selection, page or window
 //! changed in the meantime.
 use super::{
-    ADDRESS_FORM_URL, Controller, LibraryOperation, ServerAddress, cn_or, format_clock,
-    format_time, host_of, post, set_address_parts, short_id, tokenless_note, unix_now,
-    without_status,
+    ADDRESS_FORM_URL, Controller, LibraryOperation, ServerAddress, cached_source_matches, cn_or,
+    format_clock, format_time, host_of, post, set_address_parts, short_id, tokenless_note,
+    unix_now, without_status,
 };
 use crate::{AppWindow, ServerRootRow, SourceRow};
 use audiolib_core::config::{ActiveSource, DataSourceMode, DataSourceSettings, TestSummary};
@@ -218,6 +218,8 @@ impl Controller {
         ui.on_sm_revert_requested(move || c.reload_selection());
         let c = self.clone();
         ui.on_sm_page_selected(move |page| c.show_page(page));
+        let c = self.clone();
+        ui.on_sm_open_cache_requested(move || c.open_selected_cache());
         let c = self.clone();
         ui.on_sm_library_refresh_requested(move || c.show_page(PAGE_LIBRARY));
         let c = self.clone();
@@ -1201,26 +1203,95 @@ impl Controller {
         });
     }
 
+    /// Resolve the displayed endpoint or a saved sibling's known shared library.
+    /// A newly opened library can precede its directly matching profile identity.
+    fn selected_cache_state(
+        &self,
+        profile: &ServerProfile,
+    ) -> (Option<String>, Option<CacheState>) {
+        let settings = self.config.lock().unwrap().data_source.clone();
+        let active = settings.active_source() == ActiveSource::Profile(profile.id.clone())
+            && cached_source_matches(&settings.server_url, &profile.server_url);
+        let matches = |state: &CacheState| {
+            if cached_source_matches(&state.server_url, &profile.server_url) {
+                return true;
+            }
+            let known_library = Some(state.library_id.as_str());
+            profile.library_id.as_deref() == known_library
+                && settings.profile(&profile.id).is_some_and(|saved| {
+                    saved.library_id.as_deref() == known_library
+                        && saved.group_key() == profile.group_key()
+                        && cached_source_matches(&saved.server_url, &profile.server_url)
+                })
+                && settings.profiles.iter().any(|sibling| {
+                    sibling.id != profile.id
+                        && sibling.group_key() == profile.group_key()
+                        && sibling.library_id.as_deref() == known_library
+                        && cached_source_matches(&state.server_url, &sibling.server_url)
+                })
+        };
+        let cache = RemoteCache::new(&self.data_root());
+        let open = (active && self.remote_read_only())
+            .then(|| self.remote.lock().unwrap().state.clone())
+            .flatten()
+            .filter(|state| {
+                matches(state)
+                    && !state.database_file.contains(['/', '\\'])
+                    && cache.database_path(state).is_file()
+            });
+        let library_id = open
+            .as_ref()
+            .map(|state| state.library_id.clone())
+            .or_else(|| profile.library_id.clone());
+        let state = open.or_else(|| {
+            library_id
+                .as_deref()
+                .and_then(|id| cache.state(id))
+                .filter(matches)
+        });
+        (library_id, state)
+    }
+
+    /// Open an existing, endpoint-bound mirror directory without creating a cache.
+    fn open_selected_cache(self: &Arc<Self>) {
+        let Some(profile) = self.selected_profile() else {
+            return;
+        };
+        let (_, state) = self.selected_cache_state(&profile);
+        let cache = RemoteCache::new(&self.data_root());
+        let directory = state.map(|state| cache.library_dir(&state.library_id));
+        if let Some(directory) = directory.filter(|path| path.is_dir()) {
+            self.open_explorer(directory.display().to_string(), false);
+        } else if let Some(ui) = self.ui.upgrade() {
+            ui.set_sm_cache_available(false);
+            ui.set_ds_message(
+                cn_or(
+                    self.chinese.load(Ordering::Acquire),
+                    "镜像目录尚不存在，请先同步快照。",
+                    "The mirror directory does not exist yet. Sync a snapshot first.",
+                )
+                .into(),
+            );
+        }
+    }
+
     /// 缓存与导出: what is cached locally for the selected server's library.
     fn publish_cache_info(&self, ui: &AppWindow) {
         let chinese = self.chinese.load(Ordering::Acquire);
+        ui.set_sm_cache_available(false);
         let Some(profile) = self.selected_profile() else {
             ui.set_sm_cache_info("".into());
             ui.set_sm_cache_summary("".into());
             ui.set_sm_cache_dir("".into());
             return;
         };
-        let active = self.config.lock().unwrap().data_source.active_source()
-            == ActiveSource::Profile(profile.id.clone());
         let cache = RemoteCache::new(&self.data_root());
-        let open = active
-            .then(|| self.remote.lock().unwrap().state.clone())
-            .flatten();
-        let library_id = open
-            .as_ref()
-            .map(|state| state.library_id.clone())
-            .or_else(|| profile.library_id.clone());
-        let state = open.or_else(|| library_id.as_deref().and_then(|id| cache.state(id)));
+        let (library_id, state) = self.selected_cache_state(&profile);
+        ui.set_sm_cache_available(
+            state
+                .as_ref()
+                .is_some_and(|state| cache.library_dir(&state.library_id).is_dir()),
+        );
         let directory = library_id
             .as_deref()
             .map(|id| cache.library_dir(id).display().to_string());
@@ -2581,6 +2652,155 @@ mod tests {
     use super::super::RemoteRuntime;
     use super::*;
     use audiolib_core::{DataProvider, ScanProgress};
+
+    #[test]
+    fn mirror_folder_resolution_rejects_other_endpoints_and_missing_snapshots() {
+        super::super::source_transition_tests::isolated_module(
+            "source_manager::tests",
+            "child_mirror_folder_identity",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated mirror directory identity and existence regression"]
+    fn child_mirror_folder_identity() {
+        use super::super::source_transition_tests::{configuration, root as test_root};
+        use audiolib_audio::{AudioEngine, PlaybackConfig};
+        use audiolib_db::SqliteProvider;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let config = configuration(&test_root().join("preferences"));
+        let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            ..Default::default()
+        };
+        let engine = AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+        let cache = RemoteCache::new(&controller.data_root());
+        let mut profile = ServerProfile {
+            id: "mirror".into(),
+            server_url: "https://SERVER:443/prefix/api/v1/".into(),
+            library_id: Some("mirror-library".into()),
+            ..Default::default()
+        };
+        let mut state = CacheState {
+            library_id: "mirror-library".into(),
+            database_file: "library-r1.db".into(),
+            server_url: "https://server/prefix".into(),
+            ..Default::default()
+        };
+        let database = cache.database_path(&state);
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        provider.backup_library(&database).unwrap();
+        cache.save_state(&state).unwrap();
+        assert_eq!(
+            controller.selected_cache_state(&profile).1,
+            Some(state.clone())
+        );
+
+        profile.server_url = "https://other-server/prefix".into();
+        assert!(controller.selected_cache_state(&profile).1.is_none());
+        profile.server_url = "https://server/prefix".into();
+        profile.library_id = Some("other-library".into());
+        assert!(controller.selected_cache_state(&profile).1.is_none());
+
+        // The supported external-profile workflow copies the group and known ID.
+        profile.name = "Mirror".into();
+        profile.library_id = Some(state.library_id.clone());
+        let mut siblings = controller.config.lock().unwrap().data_source.clone();
+        siblings.profiles = vec![profile.clone()];
+        let alias_id = siblings
+            .upsert_external_profile(&profile.id, "https://mirror.example/prefix", None)
+            .unwrap();
+        let alias = siblings.profile(&alias_id).unwrap().clone();
+        controller.config.lock().unwrap().data_source = siblings.clone();
+        assert_eq!(
+            controller.selected_cache_state(&alias).1,
+            Some(state.clone())
+        );
+
+        let mut unknown_alias = alias.clone();
+        unknown_alias.library_id = None;
+        assert!(controller.selected_cache_state(&unknown_alias).1.is_none());
+        let mut moved_alias = alias.clone();
+        moved_alias.server_url = "https://new.example/prefix".into();
+        assert!(controller.selected_cache_state(&moved_alias).1.is_none());
+
+        let mut unrelated = siblings.clone();
+        unrelated.profile_mut(&alias_id).unwrap().group = "unrelated-group".into();
+        let unrelated_alias = unrelated.profile(&alias_id).unwrap().clone();
+        controller.config.lock().unwrap().data_source = unrelated;
+        assert!(
+            controller
+                .selected_cache_state(&unrelated_alias)
+                .1
+                .is_none()
+        );
+
+        let mut unknown_sibling = siblings.clone();
+        unknown_sibling.profile_mut(&profile.id).unwrap().library_id = None;
+        controller.config.lock().unwrap().data_source = unknown_sibling;
+        assert!(controller.selected_cache_state(&alias).1.is_none());
+
+        let mut moved_sibling = siblings.clone();
+        moved_sibling.profile_mut(&profile.id).unwrap().server_url =
+            "https://unrecognised.example/prefix".into();
+        controller.config.lock().unwrap().data_source = moved_sibling;
+        assert!(controller.selected_cache_state(&alias).1.is_none());
+        controller.config.lock().unwrap().data_source = siblings;
+
+        // The opened identity can arrive before this endpoint's profile is updated.
+        profile.library_id = None;
+        {
+            let mut config = controller.config.lock().unwrap();
+            config.data_source.mode = DataSourceMode::Server;
+            config.data_source.active = Some(profile.id.clone());
+            config.data_source.server_url = profile.server_url.clone();
+            config.data_source.profiles = vec![profile.clone()];
+        }
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.remote.lock().unwrap().state = Some(state.clone());
+        controller.set_selection(Selection::Profile(profile.id.clone()));
+        controller.publish_cache_info(&ui);
+        assert!(ui.get_sm_cache_available());
+        assert_eq!(
+            controller.selected_cache_state(&profile).0,
+            Some(state.library_id.clone())
+        );
+        state.server_url = "https://other-server/prefix".into();
+        controller.remote.lock().unwrap().state = Some(state);
+        controller.publish_cache_info(&ui);
+        assert!(!ui.get_sm_cache_available());
+
+        profile.library_id = Some("never-synced".into());
+        controller.config.lock().unwrap().data_source.profiles = vec![profile];
+        let missing = cache.library_dir("never-synced");
+        controller.open_selected_cache();
+        assert!(
+            !missing.exists(),
+            "opening a mirror must not create its directory"
+        );
+        assert!(!ui.get_sm_cache_available());
+        assert!(ui.get_ds_message().contains("does not exist"));
+
+        std::fs::remove_file(&database).unwrap();
+        let mut profile = controller.selected_profile().unwrap();
+        profile.library_id = Some("mirror-library".into());
+        controller
+            .remote
+            .lock()
+            .unwrap()
+            .state
+            .as_mut()
+            .unwrap()
+            .server_url = profile.server_url.clone();
+        assert!(controller.selected_cache_state(&profile).1.is_none());
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
 
     #[test]
     fn snapshot_swaps_refresh_the_visible_server_manager_and_resume_scan_polling() {

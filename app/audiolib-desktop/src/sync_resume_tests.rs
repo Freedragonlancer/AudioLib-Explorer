@@ -160,11 +160,31 @@ fn held_source_activation(close: bool) {
     config.save().unwrap();
     let (entered, request_entered) = std::sync::mpsc::sync_channel(1);
     let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+    let (closed, observed_close) = std::sync::mpsc::sync_channel(1);
+    let observed_close = std::rc::Rc::new(observed_close);
     let server = std::thread::spawn(move || {
         let mut socket = accept(&listener);
         assert!(request(&mut socket).starts_with("GET /api/v1/health"));
         entered.send(()).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        // Never answer: observe the client's Abort, then retain the socket until
+        // every final source/provider assertion has completed.
+        match socket.peek(&mut [0u8; 1]) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                ) => {}
+            other => panic!("silent health connection did not close after cancellation: {other:?}"),
+        }
+        closed.send(Instant::now()).unwrap();
         wait_release.recv_timeout(Duration::from_secs(15)).unwrap();
+        drop(socket);
     });
     let playback = PlaybackConfig {
         volume: 0.0,
@@ -194,6 +214,7 @@ fn held_source_activation(close: bool) {
     let c = controller.clone();
     let stopped_observed = stopped.clone();
     let started_observed = requested_at.clone();
+    let close_before_action = observed_close.clone();
     run_until(&ui, move || {
         let ui = weak.upgrade().unwrap();
         if !stopped_observed.get() {
@@ -204,6 +225,13 @@ fn held_source_activation(close: bool) {
             }
             assert!(ui.get_ds_source_syncing());
             assert!(c.source_changing.load(Ordering::Acquire));
+            assert!(
+                matches!(
+                    close_before_action.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                "the silent health connection must remain open until pause or close"
+            );
             started_observed.set(Instant::now());
             if close {
                 c.request_close(&ui);
@@ -219,7 +247,13 @@ fn held_source_activation(close: bool) {
         !close && ui.get_ds_sync_paused() && !ui.get_ds_syncing() && c.available()
     });
     assert!(stopped.get());
-    assert!(requested_at.get().elapsed() < Duration::from_secs(3));
+    let closed_at = observed_close
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the silent health server must observe the cancelled connection close");
+    // The three-second bound covers network cancellation. First-time schema-current
+    // placeholder creation and provider/Metadata draining retain run_until's 12s bound.
+    assert!(closed_at >= requested_at.get());
+    assert!(closed_at.duration_since(requested_at.get()) < Duration::from_secs(3));
     assert!(!controller.remote_busy.load(Ordering::Acquire));
     assert_eq!(controller.metadata.lock().unwrap().sequence, 1);
     assert_eq!(

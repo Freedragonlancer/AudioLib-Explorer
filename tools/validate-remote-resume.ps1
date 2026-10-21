@@ -96,9 +96,9 @@ function Wait-Until([scriptblock]$Predicate, [string]$Message, [int]$Seconds = 2
 }
 
 function Close-Desktop($Child) {
-    Wait-Until { $Child.Process.Refresh(); $Child.Process.HasExited -or $Child.Process.MainWindowHandle -ne 0 } 'Owned desktop did not create its native window.'
+    Wait-Until { $Child.Process.Refresh(); $Child.Process.HasExited -or [AudioLibResumeWindow]::FindApplicationWindow($Child.Process.Id) -ne [IntPtr]::Zero } 'Owned desktop did not create its application window.'
     if ($Child.Process.HasExited) { throw 'Owned desktop exited before the requested native close.' }
-    $window = $Child.Process.MainWindowHandle
+    $window = [AudioLibResumeWindow]::FindApplicationWindow($Child.Process.Id)
     [uint32]$owner = 0
     $thread = [AudioLibResumeWindow]::GetWindowThreadProcessId($window,[ref]$owner)
     if ($thread -eq 0 -or $owner -ne $Child.Process.Id -or ![AudioLibResumeWindow]::IsWindow($window)) { throw 'Close target is not the owned desktop window.' }

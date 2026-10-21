@@ -215,6 +215,32 @@ public sealed class AudioLibResumeFixture : IDisposable
 
 public static class AudioLibResumeWindow
 {
+    private delegate bool EnumWindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int count);
+
+    // MainWindowHandle may select winit's utility target, whose close destroys
+    // event-loop wake delivery. Select only this process's visible application UI.
+    public static IntPtr FindApplicationWindow(uint process)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((window, parameter) => {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 || owner != process || !IsWindowVisible(window)) return true;
+            var title = new StringBuilder(256);
+            var kind = new StringBuilder(256);
+            GetWindowText(window, title, title.Capacity);
+            GetClassName(window, kind, kind.Capacity);
+            if (!String.Equals(title.ToString(), "AudioLib Explorer", StringComparison.Ordinal) ||
+                !String.Equals(kind.ToString(), "Window Class", StringComparison.Ordinal)) return true;
+            found = window;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr window, uint message, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);

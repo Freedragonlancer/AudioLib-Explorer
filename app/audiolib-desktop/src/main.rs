@@ -296,7 +296,7 @@ fn run() -> Result<()> {
                     ui.invoke_open_data_source();
                     ui.invoke_sm_select_row(-1);
                 }
-                "cache-export" => {
+                "cache-export" | "server-cache" => {
                     // Synthetic presentation-only fixture of 缓存与导出; never connects to a
                     // server or changes a working library. Smoke runs use an isolated data dir.
                     ui.set_library_visible(true);
@@ -316,12 +316,22 @@ fn run() -> Result<()> {
                     ])));
                     ui.set_sm_selected(1);
                     ui.set_sm_page(2);
+                    ui.set_sm_cache_available(true);
                     ui.set_sm_cache_summary(
-                        "音效库 1a2b3c4d · 快照 r794 · 3009 个音效 · 41.7 MiB · 最近检查 10-21 00:10".into(),
+                        if ui.get_chinese() {
+                            "音效库 1a2b3c4d · 快照 r794 · 3009 个音效 · 41.7 MiB · 最近检查 10-21 00:10"
+                        } else {
+                            "Library 1a2b3c4d · snapshot r794 · 3009 sounds · 41.7 MiB · checked 10-21 00:10"
+                        }
+                        .into(),
                     );
                     ui.set_sm_cache_dir(
-                        "缓存目录：D:/AudioLib/data/remote/1a2b3c4d-0000-4000-8000-000000000000"
-                            .into(),
+                        if ui.get_chinese() {
+                            "缓存目录：D:/AudioLib/data/remote/1a2b3c4d-0000-4000-8000-000000000000"
+                        } else {
+                            "Cache directory: D:/AudioLib/data/remote/1a2b3c4d-0000-4000-8000-000000000000"
+                        }
+                        .into(),
                     );
                     ui.set_sm_cache_info(
                         "音效库 1a2b3c4d（1a2b3c4d-0000-4000-8000-000000000000）".into(),

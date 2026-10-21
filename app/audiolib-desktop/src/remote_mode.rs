@@ -109,7 +109,9 @@ pub struct RemoteStartup {
 /// sync pipeline selects, prepares and opens the actual snapshot after the UI is visible.
 pub fn open_remote_placeholder(config: &AppConfig) -> anyhow::Result<RemoteStartup> {
     apply_audition_memory(&config.data_source);
-    let path = RemoteCache::new(&config.data_root()).placeholder_database()?;
+    let cache = RemoteCache::new(&config.data_root());
+    cache.cleanup_stale_temporaries();
+    let path = cache.placeholder_database()?;
     Ok(RemoteStartup {
         provider: Arc::new(SqliteProvider::open_read_only(&path)?),
         state: None,
@@ -140,11 +142,9 @@ pub fn open_remote_startup_with_progress(
     if removed > 0 {
         tracing::info!(removed, "old disk audition caches removed");
     }
-    // Staging copies older than an hour belong to no running preparation (a forced
-    // close may abandon one); remove them before preparing a new one.
-    if let Some(library_id) = cache.active_library_id() {
-        cache.prune_stale_staging(&library_id);
-    }
+    // Reclaim only abandoned top-level generated files. Leases protect live work;
+    // durable transfers and protected migration jobs retain their recovery state.
+    cache.cleanup_stale_temporaries();
     if let Some(state) = cache
         .active()
         .filter(|state| cached_source_matches(&state.server_url, &config.data_source.server_url))

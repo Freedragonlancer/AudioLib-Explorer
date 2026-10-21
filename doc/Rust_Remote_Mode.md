@@ -198,9 +198,10 @@ Layout under `<data dir>/remote/`:
 |------|---------|
 | `active.json` | Identity of the snapshot last opened in server mode |
 | `<library_id>/cache.json` | `CacheState`: library id, revision, schema, file name, server URL/version, download/check times, size, record count, last roots |
-| `<library_id>/library-r<revision>-<millis>.db` | Validated read-only snapshot (only the open one is kept) |
+| `<library_id>/library-r<revision>-<millis>.db` | Validated read-only snapshot; unused generated mirrors are pruned after a swap |
 | `.transfers/<endpoint-sha256>/payload.part` | Durable HTTP representation bytes retained for snapshot resume; zstd stays compressed |
 | `.transfers/<endpoint-sha256>/checkpoint.json` | Atomic transfer identity, encoding, lengths, durable offset and prefix SHA256; never contains credentials |
+| `.staging-locks/<library-key>.lock` | Retained OS lock shared by snapshot preparation and conservative housekeeping |
 | `placeholder/library.db` | Empty library in the current local schema shown before the first successful sync |
 | `secrets.bin` | DPAPI-protected token and WebDAV password |
 
@@ -215,24 +216,44 @@ error; it never replaces the old cache or deletes a source WAV. A sync
 itself never deletes anything: the previous snapshot and replaced library directories are
 removed only after the provider has swapped to the new snapshot
 (`RemoteCache::cleanup_after_swap`; it never deletes the open snapshot or the one
-`cache.json` names, and does nothing while a newer sync still waits for its swap). Snapshot
-staging files (`.download`, `.download.part-<pid>`) older than an hour are removed at
-startup and on a switch. This does not prune resumable files under `.transfers/`:
+`cache.json` names, and does nothing while a newer sync still waits for its swap). Known
+top-level snapshot staging files (`.download`, `.download.part-<pid>`) and `cache.tmp-*`
+older than an hour are checked across cached libraries at startup and on a switch.
+Cleanup takes nonblocking staging/publication leases and rereads current state;
+an active preparation or publication is skipped. Unknown files, linked paths,
+manual backups and `.snapshot-job-*` protected recovery jobs are retained.
+Recovery jobs also protect snapshots they may need. Cleanup does not descend into
+these directories or prune resumable files under `.transfers/`:
 paused or interrupted downloads survive application restart and are retained until
 successful sync, explicit restart, library replacement or server snapshot invalidation.
 Audition no longer writes to disk; the `audio-cache/` directories
-of earlier versions are deleted once (`remove_audition_caches`, at startup in server mode
-and on a server switch).
+of earlier versions are checked once (`remove_audition_caches`, at startup in server mode
+and on a server switch). Only their generated flat-file namespace is removed;
+unknown entries and linked paths are retained.
 
-**Replaced libraries.** When a sync of a server URL installs library B, every other
-`<library_id>/` directory whose `cache.json` names the same server URL is removed together
-(`RemoteCache::discard_replaced`, also run by the poll loop and when
-switching the data source, retried while a file is still open). Caches of other servers are
+**Replaced libraries.** When a sync of a server URL installs library B,
+`RemoteCache::discard_replaced` checks other libraries whose `cache.json` names the
+same server URL, also on polling and source switches. Under the same nonblocking
+leases it rechecks the active library and recorded state, then removes only
+identified generated mirrors and stale temporary files. A recovery job preserves
+the whole candidate library. Manual backups, unknown files and directories keep
+their directory/state available; no recursive cleanup is performed. Empty generated
+library directories can be removed, with open-file failures retried later. Caches of other servers are
 kept, so switching between servers does not re-download. The drag-out download cache
 (`<data dir>/cache/<library_id>/`) is not purged: it is one 4 GiB LRU across libraries, so
 files of the old library are evicted normally as new ones arrive. A new library never
 shows rows of the old one: its snapshot lives in a new directory and is downloaded from
 scratch.
+
+**Open the mirror directory.** Server Settings → Cache and export shows an
+**Open mirror folder** button beside the selected server's mirror information.
+It requires an existing snapshot with matching library/endpoint identity and an
+existing cache directory. A saved LAN/external sibling can share the mirror only
+when both profiles have the same known library ID and belong to the same group.
+The action rechecks this identity before opening Explorer;
+it creates no directory. A validated existing mirror can still be opened while a
+new snapshot is syncing. The cleanup note distinguishes automatic old-mirror/temp
+cleanup from retained resumable downloads, recovery backups and manual backups.
 
 Sync runs at startup in server mode, after switching to a server profile (or saving a
 changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:

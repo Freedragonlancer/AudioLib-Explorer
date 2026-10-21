@@ -6,6 +6,45 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel, platform::WindowEvent};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[test]
+fn mirror_folder_action_requires_an_existing_cache_and_remains_available_during_sync() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window()
+            .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+        ui.set_chinese(chinese);
+        ui.set_sm_sources(source_rows(true));
+        ui.set_remote_mode(true);
+        ui.invoke_open_library(0);
+        ui.set_sm_selected(1);
+        ui.set_sm_page(2);
+        let calls = Rc::new(RefCell::new(0));
+        let observed = calls.clone();
+        ui.on_sm_open_cache_requested(move || *observed.borrow_mut() += 1);
+        ui.show().unwrap();
+        let label = if chinese {
+            "打开镜像目录"
+        } else {
+            "Open mirror folder"
+        };
+        click_label(&ui, label);
+        assert_eq!(*calls.borrow(), 0, "a missing cache cannot be opened");
+        ui.set_sm_cache_available(true);
+        ui.set_ds_syncing(true);
+        click_label(&ui, label);
+        assert_eq!(*calls.borrow(), 1);
+        ui.set_sm_cache_available(false);
+        click_label(&ui, label);
+        assert_eq!(
+            *calls.borrow(),
+            1,
+            "changing to a missing cache disables the action"
+        );
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn snapshot_sync_controls_pause_once_and_offer_continue_and_restart_on_both_pages() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {

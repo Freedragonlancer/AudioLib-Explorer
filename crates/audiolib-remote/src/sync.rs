@@ -35,9 +35,8 @@ const ACTIVE_FILE: &str = "active.json";
 const BUSY_WINDOW: Duration = Duration::from_secs(240);
 /// Retries of a snapshot download that timed out or lost its connection.
 const TRANSIENT_RETRIES: u32 = 3;
-/// A snapshot staging file (`.download`, `.download.part-<pid>`, legacy `.db.part-<pid>`)
-/// untouched this long belongs to a sync that crashed or was killed.
-const STALE_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
+#[cfg(test)]
+use crate::cache_cleanup::STALE_STAGING_AGE;
 
 /// The same snapshot compatibility gate for sync, polling and connection diagnostics.
 pub(crate) fn snapshot_schema_error(version: i64, chinese: bool) -> Option<String> {
@@ -401,15 +400,21 @@ impl RemoteCache {
     /// every library folder; audition streams into memory now. Drag-out downloads live
     /// elsewhere (`<data dir>/cache/`) and are not touched. Returns the folders removed.
     pub fn remove_audition_caches(&self) -> usize {
+        if !crate::cache_cleanup::plain_directory_tree(&self.root) {
+            return 0;
+        }
         let Ok(libraries) = std::fs::read_dir(&self.root) else {
             return 0;
         };
         let mut removed = 0;
         for library in libraries.flatten() {
+            if library.file_name().to_string_lossy().starts_with('.')
+                || !crate::cache_cleanup::plain_directory(&library.path())
+            {
+                continue;
+            }
             let directory = library.path().join("audio-cache");
-            let is_dir =
-                std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir());
-            if is_dir && std::fs::remove_dir_all(&directory).is_ok() {
+            if crate::cache_cleanup::remove_audition_cache(&directory) {
                 removed += 1;
             }
         }
@@ -486,6 +491,8 @@ impl RemoteCache {
             check_cancelled(cancel)?;
             return Ok(state.clone());
         }
+        let _staging_lease =
+            crate::cache_cleanup::SnapshotStagingLease::acquire(self, &state.library_id)?;
         let directory = self.library_dir(&state.library_id);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -635,62 +642,17 @@ impl RemoteCache {
 
     /// Delete snapshot files of this library other than `keep` (best effort: files still
     /// open by a reader cannot be deleted on Windows and are retried next time). Staging
-    /// files of a download are removed only once stale ([`STALE_STAGING_AGE`]), so a sync
-    /// running in another process is never disturbed.
+    /// files are removed only after an hour and when no preparation or publication
+    /// owns the library. Current snapshots and recovery job directories are retained.
     pub fn prune(&self, library_id: &str, keep: &[&str]) {
-        let _publication = match crate::writes::try_cache_publication_lease(self, library_id) {
-            Ok(lease) => lease,
-            Err(error) => {
-                tracing::debug!(%error, "Snapshot cleanup deferred while cache publication is unavailable");
-                return;
-            }
-        };
-        // A newer publication can finish after the caller chose its keep set. Read
-        // cache.json only after obtaining the same lease that protects rename + save.
-        let recorded = self.state(library_id).map(|state| state.database_file);
-        let mut keep = keep.to_vec();
-        if let Some(recorded) = recorded.as_deref() {
-            keep.push(recorded);
-        }
-        self.prune_files(library_id, &keep, true);
+        crate::cache_cleanup::prune_files(self, library_id, keep, true);
     }
 
-    /// Remove only this library's stale staging files (older than [`STALE_STAGING_AGE`]),
+    /// Remove only this library's stale staging files (older than one hour),
     /// left behind by a preparation or download that was abandoned, for example by a
     /// forced exit. Snapshots are never touched, so this is safe before any swap.
     pub fn prune_stale_staging(&self, library_id: &str) {
-        self.prune_files(library_id, &[], false);
-    }
-
-    fn prune_files(&self, library_id: &str, keep: &[&str], snapshots: bool) {
-        let Ok(entries) = std::fs::read_dir(self.library_dir(library_id)) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let base = name
-                .strip_suffix("-journal")
-                .or_else(|| name.strip_suffix("-wal"))
-                .or_else(|| name.strip_suffix("-shm"))
-                .unwrap_or(&name);
-            if !base.starts_with("library-r") || keep.contains(&base) {
-                continue;
-            }
-            let staging = base.contains(".download") || base.contains(".db.part-");
-            if staging {
-                let stale = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > STALE_STAGING_AGE);
-                if stale {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            } else if snapshots && base.ends_with(".db") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+        crate::cache_cleanup::prune_files(self, library_id, &[], false);
     }
 
     /// Clean up after the desktop's provider switched to `opened`: delete this library's
@@ -717,40 +679,20 @@ impl RemoteCache {
     }
 }
 
-/// Delete every file under `directory` except `keep_name` at its top level, then empty
-/// directories; best effort (open files stay). `true` when only `keep_name` is left.
-fn remove_contents(directory: &Path, keep_name: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return false;
-    };
-    let mut clean = true;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if entry.file_name() == keep_name {
-            continue;
-        }
-        let removed = match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {
-                remove_contents(&path, "") && std::fs::remove_dir(&path).is_ok()
-            }
-            Ok(_) => std::fs::remove_file(&path).is_ok(),
-            Err(_) => false,
-        };
-        clean &= removed;
-    }
-    clean
-}
-
 impl RemoteCache {
     /// Remove the cached data of libraries this server no longer serves: every library
     /// directory whose `cache.json` names the same `server_url` as `active` but another
-    /// `library_id` (the server's database was replaced). Its snapshots, state and
-    /// playback audio cache are deleted; libraries of other servers are kept (switching
+    /// `library_id` (the server's database was replaced). Generated mirrors and obsolete
+    /// audition caches are removed; recovery jobs, manual backups and unknown files
+    /// retain their directory and state. Libraries of other servers are kept (switching
     /// servers back and forth needs no new download), and the drag-out cache
     /// (`<data dir>/cache`) is left to its own LRU eviction. Files still open (the old
     /// snapshot right before a swap, on Windows) stay with their `cache.json`, so a later
     /// call finishes the job. Returns the library ids removed completely.
     pub fn discard_replaced(&self, active: &CacheState) -> Vec<String> {
+        if !crate::cache_cleanup::plain_directory_tree(&self.root) {
+            return Vec::new();
+        }
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Vec::new();
         };
@@ -762,7 +704,9 @@ impl RemoteCache {
         let mut removed = Vec::new();
         for entry in entries.flatten() {
             let directory = entry.path();
-            if !directory.is_dir()
+            if entry.file_name().to_string_lossy().starts_with('.')
+                || entry.file_name() == "placeholder"
+                || !crate::cache_cleanup::plain_directory(&directory)
                 || directory == self.library_dir(&active.library_id)
                 || recorded.as_ref() == Some(&directory)
             {
@@ -777,27 +721,7 @@ impl RemoteCache {
             {
                 continue;
             }
-            let _publication = match crate::writes::try_cache_publication_lease(
-                self,
-                &state.library_id,
-            ) {
-                Ok(lease) => lease,
-                Err(error) => {
-                    tracing::debug!(%error, "Replaced-library cleanup deferred while cache publication is unavailable");
-                    continue;
-                }
-            };
-            // The candidate could have become active or changed its recorded file
-            // since enumeration. Its own lease prevents activation while it is removed.
-            if self.active_library_id().as_deref() == Some(state.library_id.as_str())
-                || read_json::<CacheState>(&directory.join(STATE_FILE)).as_ref() != Some(&state)
-            {
-                continue;
-            }
-            if remove_contents(&directory, STATE_FILE)
-                && std::fs::remove_file(directory.join(STATE_FILE)).is_ok()
-                && std::fs::remove_dir(&directory).is_ok()
-            {
+            if crate::cache_cleanup::discard_replaced(self, &state) {
                 tracing::info!(library_id = %state.library_id, "Removed replaced server library cache");
                 removed.push(state.library_id);
             } else {
@@ -1120,6 +1044,8 @@ fn sync_library_inner(
         });
     }
     let directory = cache.library_dir(&library.library_id);
+    let _staging_lease =
+        crate::cache_cleanup::SnapshotStagingLease::acquire(cache, &library.library_id)?;
     std::fs::create_dir_all(&directory)?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2699,6 +2625,7 @@ mod tests {
     #[test]
     fn discard_replaced_removes_only_this_servers_old_libraries() {
         let directory = tempfile::tempdir().unwrap();
+        let snapshot = sample_snapshot(&directory.path().join("server-fixture"));
         let cache = RemoteCache::new(directory.path());
         let make = |id: &str, server: &str| {
             let state = CacheState {
@@ -2710,7 +2637,7 @@ mod tests {
             };
             let dir = cache.library_dir(id);
             std::fs::create_dir_all(dir.join("audio-cache")).unwrap();
-            drop(SqliteProvider::open(&dir.join(&state.database_file)).unwrap());
+            std::fs::write(dir.join(&state.database_file), &snapshot).unwrap();
             std::fs::write(dir.join("audio-cache").join("7-x.wav"), b"RIFF").unwrap();
             std::fs::write(dir.join(STATE_FILE), serde_json::to_vec(&state).unwrap()).unwrap();
             state

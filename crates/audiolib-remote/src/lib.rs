@@ -36,6 +36,7 @@
 //!   removal, with per-profile tokens in [`RemoteSecrets`].
 mod abort;
 mod bandwidth;
+mod cache_cleanup;
 mod client;
 mod compatibility;
 mod download;

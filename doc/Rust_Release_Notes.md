@@ -1,5 +1,21 @@
 # AudioLib Explorer release notes
 
+## 0.6.0 local iteration: mirror cache management
+
+Based on main `e90596d`; local delivery does not publish a tag or deploy a server.
+
+- Server Settings → Cache and export adds **Open mirror folder** for the selected
+  server's existing, identity-matched snapshot. It remains available during sync.
+  Saved LAN/external profiles in the same group can share a known matching library.
+- Startup housekeeping reclaims known stale top-level temporary files across
+  cached libraries. Generated old mirrors are pruned after a successful swap.
+- Cleanup uses nonblocking OS leases and preserves the opened/current mirror,
+  resumable downloads, protected recovery jobs, manual backups and unknown files.
+  Replaced-library cleanup no longer recursively removes arbitrary contents.
+
+Exact local validation, package and installation identities are recorded in
+[Rust validation](Rust_Validation.md).
+
 ## Unreleased: resumable remote database sync
 
 This iteration is based on `origin/main` at `d64c0a7` (workspace version 0.6.0),
