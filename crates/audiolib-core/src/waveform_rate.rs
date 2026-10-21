@@ -2,6 +2,8 @@
 //! Client-side generation rate and ETA for the server Waveform cache (doc/api/README.md
 //! §9.5), estimated from successive `GET /waveforms/status` readings instead of the
 //! server's `current_rate` / `eta_secs` (which can lag far behind the real throughput).
+//! The ETA counts only active generation time: time spent paused or yielding (for example
+//! to auditions or scans) is excluded, so the real finish can be later than shown.
 //!
 //! Only time spent actively generating counts: an interval is used when both of its
 //! readings were `running` (not paused, yielding or idle) and close enough together.
