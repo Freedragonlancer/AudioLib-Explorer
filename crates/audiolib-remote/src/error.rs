@@ -144,6 +144,13 @@ pub enum RemoteError {
     Changed(String),
     #[error("Snapshot rejected: {0}")]
     Snapshot(String),
+    /// The snapshot or cache uses a newer database format than this client supports.
+    #[error("{}", audiolib_core::newer_database_message(what, *found, *supported, false))]
+    NewerDatabase {
+        what: String,
+        found: i64,
+        supported: i64,
+    },
     #[error("Operation cancelled")]
     Cancelled,
     #[error("I/O: {0}")]
@@ -485,6 +492,11 @@ impl RemoteError {
             } => format!("服务器错误 {status} {code}：{message}"),
             Self::Protocol(detail) => format!("服务器响应格式异常：{detail}"),
             Self::Snapshot(detail) => format!("快照校验失败，未替换本地缓存：{detail}"),
+            Self::NewerDatabase {
+                what,
+                found,
+                supported,
+            } => audiolib_core::newer_database_message(what, *found, *supported, true),
             Self::Changed(detail) => format!("服务器上的文件已变化，请重新试听或同步：{detail}"),
             Self::Cancelled => "操作已取消".into(),
             Self::Io(error) => format!("文件读写失败：{error}"),
@@ -578,6 +590,15 @@ impl From<RemoteError> for audiolib_core::Error {
             | RemoteError::PayloadTooLarge(message) => Self::Validation(message),
             RemoteError::Cancelled => Self::Cancelled,
             RemoteError::Io(error) => Self::Io(error),
+            RemoteError::NewerDatabase {
+                what,
+                found,
+                supported,
+            } => Self::NewerDatabase {
+                what,
+                found,
+                supported,
+            },
             other => Self::Database(other.to_string()),
         }
     }
@@ -686,6 +707,15 @@ impl RemoteError {
             Self::Protocol(detail) => Self::Protocol(detail.clone()),
             Self::Changed(detail) => Self::Changed(detail.clone()),
             Self::Snapshot(detail) => Self::Snapshot(detail.clone()),
+            Self::NewerDatabase {
+                what,
+                found,
+                supported,
+            } => Self::NewerDatabase {
+                what: what.clone(),
+                found: *found,
+                supported: *supported,
+            },
             Self::Cancelled => Self::Cancelled,
             Self::Io(error) => Self::Io(std::io::Error::new(error.kind(), error.to_string())),
             Self::Tls { kind, detail } => Self::Tls {
@@ -711,6 +741,15 @@ impl From<audiolib_core::Error> for RemoteError {
         match error {
             audiolib_core::Error::Io(error) => Self::Io(error),
             audiolib_core::Error::Cancelled => Self::Cancelled,
+            audiolib_core::Error::NewerDatabase {
+                what,
+                found,
+                supported,
+            } => Self::NewerDatabase {
+                what,
+                found,
+                supported,
+            },
             other => Self::Snapshot(other.to_string()),
         }
     }
@@ -933,6 +972,31 @@ mod tests {
         assert!(matches!(
             audiolib_core::Error::from(tls),
             audiolib_core::Error::Database(_)
+        ));
+    }
+
+    #[test]
+    fn newer_database_says_the_client_must_be_upgraded() {
+        let error = RemoteError::from(audiolib_core::Error::NewerDatabase {
+            what: "feature tokenization revision".into(),
+            found: 3,
+            supported: 1,
+        });
+        assert!(matches!(error, RemoteError::NewerDatabase { found: 3, .. }));
+        let chinese = error.localized(true);
+        assert!(
+            chinese.starts_with("客户端版本过旧") && chinese.contains("3 > 1"),
+            "{chinese}"
+        );
+        assert!(!chinese.contains("快照校验失败"), "{chinese}");
+        let english = error.localized(false);
+        assert!(
+            english.contains("too old") && english.contains("Upgrade AudioLib Explorer"),
+            "{english}"
+        );
+        assert!(matches!(
+            audiolib_core::Error::from(error),
+            audiolib_core::Error::NewerDatabase { supported: 1, .. }
         ));
     }
 

@@ -31,9 +31,18 @@ fn fixture(path: &Path) {
 
 fn assert_future_error<T>(result: audiolib_core::Result<T>, feature: &str) {
     match result {
-        Err(Error::Database(message)) => {
-            assert!(message.contains(feature), "{message}");
-            assert!(message.contains("newer than supported"), "{message}");
+        Err(error @ Error::NewerDatabase { .. }) => {
+            let Error::NewerDatabase {
+                what,
+                found,
+                supported,
+            } = &error
+            else {
+                unreachable!()
+            };
+            assert!(what.contains(feature), "{error}");
+            assert!(found > supported, "{error}");
+            assert!(error.to_string().contains("too old"), "{error}");
         }
         Err(error) => panic!("Unexpected error for {feature}: {error}"),
         Ok(_) => panic!("Future {feature} revision was accepted"),
@@ -370,4 +379,47 @@ fn cancelled_revision_two_fold_upgrade_rolls_back_text_and_revision() {
         )
         .unwrap();
     assert_eq!(revision, 2);
+}
+
+#[test]
+fn feature_revision_above_supported_tokenization_is_a_newer_database_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("future-tokenization.db");
+    fixture(&database);
+    let conn = Connection::open(&database).unwrap();
+    conn.execute(
+        "UPDATE audiolib_schema_features SET version=99 WHERE feature='tokenization'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    match SqliteProvider::open_read_only(&database) {
+        Err(error @ Error::NewerDatabase { .. }) => {
+            assert!(
+                matches!(&error, Error::NewerDatabase { what, found: 99, supported }
+                    if what == "feature tokenization revision" && *supported < 99),
+                "{error:?}"
+            );
+            let chinese = error.display_text(true);
+            assert!(chinese.starts_with("客户端版本过旧"), "{chinese}");
+            assert!(chinese.contains("请升级 AudioLib Explorer"), "{chinese}");
+            assert!(!error.to_string().starts_with("Database:"), "{error}");
+        }
+        other => panic!("expected NewerDatabase, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn feature_revision_newer_schema_version_is_a_newer_database_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("future-schema.db");
+    fixture(&database);
+    Connection::open(&database)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    assert!(matches!(
+        SqliteProvider::open_existing(&database),
+        Err(Error::NewerDatabase { ref what, found: 99, .. }) if what == "schema"
+    ));
 }

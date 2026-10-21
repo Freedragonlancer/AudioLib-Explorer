@@ -163,7 +163,10 @@ pub fn open_remote_startup_with_progress(
                 progress(StartupProgress::Opening);
                 SqliteProvider::open_read_only(&cache.database_path(&state))
                     .map(|provider| (provider, state))
-                    .map_err(|error| RemoteError::Snapshot(error.to_string()))
+                    .map_err(|error| match error {
+                        error @ audiolib_core::Error::NewerDatabase { .. } => error.into(),
+                        error => RemoteError::Snapshot(error.to_string()),
+                    })
             });
         match opened {
             Ok((provider, state)) => {
@@ -2157,7 +2160,7 @@ impl Controller {
                 } else {
                     SqliteProvider::open(&path)
                 }
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.display_text(chinese))?;
                 crate::startup::prepare_local_search(&next);
                 *self.sqlite.write().unwrap() = Arc::new(next);
                 self.remote_mode.store(false, Ordering::Release);
@@ -2176,7 +2179,8 @@ impl Controller {
             }
             DataSourceSwitch::Server { database, state } => {
                 let next =
-                    SqliteProvider::open_read_only(database).map_err(|error| error.to_string())?;
+                    SqliteProvider::open_read_only(database)
+                        .map_err(|error| error.display_text(chinese))?;
                 *self.sqlite.write().unwrap() = Arc::new(next);
                 self.remote_mode.store(true, Ordering::Release);
                 {

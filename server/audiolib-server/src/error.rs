@@ -307,7 +307,7 @@ impl From<audiolib_core::Error> for ApiError {
             Error::NotFound(_) => Self::new(StatusCode::NOT_FOUND, "NOT_FOUND", message),
             Error::Busy(_) => Self::new(StatusCode::CONFLICT, "BUSY", message),
             Error::Cancelled => Self::new(StatusCode::CONFLICT, "CANCELLED", message),
-            Error::Database(_) => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE", message),
+            Error::Database(_) | Error::NewerDatabase { .. } => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "DATABASE", message),
             Error::Audio(_) => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "AUDIO", message),
             Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => Self::new(
                 StatusCode::INSUFFICIENT_STORAGE,

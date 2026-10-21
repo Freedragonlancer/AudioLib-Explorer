@@ -84,6 +84,47 @@ pub enum Error {
     Busy(String),
     #[error("Not found: {0}")]
     NotFound(String),
+    /// The database or snapshot was written by a newer AudioLib Explorer: its schema
+    /// version or a feature revision exceeds what this client supports.
+    #[error("{}", newer_database_message(what, *found, *supported, false))]
+    NewerDatabase {
+        what: String,
+        found: i64,
+        supported: i64,
+    },
+}
+
+/// User-facing text for [`Error::NewerDatabase`]: the client is too old and must be upgraded.
+pub fn newer_database_message(what: &str, found: i64, supported: i64, chinese: bool) -> String {
+    if chinese {
+        format!(
+            "客户端版本过旧：服务器快照使用了更新的数据库格式（{what} {found} > {supported}），请升级 AudioLib Explorer 后重新同步。"
+        )
+    } else {
+        format!(
+            "This client is too old: the server snapshot uses a newer database format ({what} {found} > {supported}). Upgrade AudioLib Explorer, then sync again."
+        )
+    }
+}
+
+impl Error {
+    /// Localized text for [`Error::NewerDatabase`]; `None` for every other error.
+    pub fn newer_database_text(&self, chinese: bool) -> Option<String> {
+        match self {
+            Error::NewerDatabase {
+                what,
+                found,
+                supported,
+            } => Some(newer_database_message(what, *found, *supported, chinese)),
+            _ => None,
+        }
+    }
+
+    /// Localized text for a newer database, otherwise this error's ordinary display.
+    pub fn display_text(&self, chinese: bool) -> String {
+        self.newer_database_text(chinese)
+            .unwrap_or_else(|| self.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
