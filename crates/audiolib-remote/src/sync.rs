@@ -10,7 +10,7 @@
 //!   [`RemoteCache::cleanup_after_swap`] once its provider has switched to the new file.
 //! * `<library_id>/audio-cache/` - the disk audition cache of earlier versions (audition
 //!   now streams into memory); [`RemoteCache::remove_audition_caches`] deletes it once.
-use crate::client::{RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, SnapshotProgress};
+use crate::client::{RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta};
 use crate::error::{RemoteError, Result};
 use crate::util::{fnv64, unix_now, write_atomic};
 #[cfg(test)]
@@ -177,6 +177,7 @@ pub fn refresh_cached_roots(
     let roots = client.roots().ok()?;
     if let Some(library) = confirmed_library
         && snapshot_schema_supported(library.schema_version)
+        && let Ok(_publication) = crate::writes::cache_publication_lease(cache, &library.library_id)
         && let Some(mut state) = cache.active()
         && state.library_id == library.library_id
         && same_api_endpoint(&state.server_url, client.api_url())
@@ -236,6 +237,18 @@ struct ActiveLibrary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncProgress {
     Checking,
+    /// Rebuild decoder state from a durable wire prefix before opening a suffix request.
+    Replaying {
+        received: u64,
+        total: Option<u64>,
+    },
+    /// A cancellable network retry; `wait_seconds` counts down to the next attempt.
+    Retrying {
+        attempt: u32,
+        wait_seconds: u64,
+    },
+    /// The server no longer has the fixed representation; a fresh object is required.
+    Restarting,
     /// Network response-body bytes, using the compressed Content-Length for zstd.
     Downloading {
         received: u64,
@@ -287,6 +300,13 @@ pub struct SyncOutcome {
     pub library_changed: bool,
     pub previous: Option<CacheState>,
     pub elapsed_ms: u64,
+}
+
+/// A pause is a normal terminal result and never publishes a partial database.
+#[derive(Clone, Debug)]
+pub enum SyncRunOutcome {
+    Completed(Box<SyncOutcome>),
+    Paused(crate::PendingSync),
 }
 
 /// Owner of `<data dir>/remote`.
@@ -516,6 +536,13 @@ impl RemoteCache {
             remove_owned_staging(&staging);
             return Err(error);
         }
+        let _publication = crate::writes::cache_publication_lease(self, &state.library_id)?;
+        if self.state(&state.library_id).is_some_and(|current| {
+            current.revision != state.revision || current.database_file != state.database_file
+        }) {
+            remove_owned_staging(&staging);
+            return Err(RemoteError::Changed("Cached snapshot changed while preparing its owned copy; retry with the current cache".into()));
+        }
         let target = directory.join(&name);
         if let Err(error) = std::fs::rename(&staging, &target) {
             remove_owned_staging(&staging);
@@ -569,7 +596,21 @@ impl RemoteCache {
     /// files of a download are removed only once stale ([`STALE_STAGING_AGE`]), so a sync
     /// running in another process is never disturbed.
     pub fn prune(&self, library_id: &str, keep: &[&str]) {
-        self.prune_files(library_id, keep, true);
+        let _publication = match crate::writes::try_cache_publication_lease(self, library_id) {
+            Ok(lease) => lease,
+            Err(error) => {
+                tracing::debug!(%error, "Snapshot cleanup deferred while cache publication is unavailable");
+                return;
+            }
+        };
+        // A newer publication can finish after the caller chose its keep set. Read
+        // cache.json only after obtaining the same lease that protects rename + save.
+        let recorded = self.state(library_id).map(|state| state.database_file);
+        let mut keep = keep.to_vec();
+        if let Some(recorded) = recorded.as_deref() {
+            keep.push(recorded);
+        }
+        self.prune_files(library_id, &keep, true);
     }
 
     /// Remove only this library's stale staging files (older than [`STALE_STAGING_AGE`]),
@@ -628,6 +669,9 @@ impl RemoteCache {
         }
         self.prune(&opened.library_id, &keep);
         self.discard_replaced(opened);
+        if let Err(error) = self.finish_sync_transfer(opened) {
+            tracing::warn!(%error, "Opened snapshot retained; transfer cleanup deferred");
+        }
     }
 }
 
@@ -688,6 +732,23 @@ impl RemoteCache {
             if state.server_url != active.server_url
                 || state.library_id == active.library_id
                 || directory != self.library_dir(&state.library_id)
+            {
+                continue;
+            }
+            let _publication = match crate::writes::try_cache_publication_lease(
+                self,
+                &state.library_id,
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    tracing::debug!(%error, "Replaced-library cleanup deferred while cache publication is unavailable");
+                    continue;
+                }
+            };
+            // The candidate could have become active or changed its recorded file
+            // since enumeration. Its own lease prevents activation while it is removed.
+            if self.active_library_id().as_deref() == Some(state.library_id.as_str())
+                || read_json::<CacheState>(&directory.join(STATE_FILE)).as_ref() != Some(&state)
             {
                 continue;
             }
@@ -845,6 +906,61 @@ pub fn sync_library(
     cancel: &AtomicBool,
     force: bool,
 ) -> Result<SyncOutcome> {
+    let mut transfer =
+        crate::snapshot_transfer::TransferSession::open(cache, client.api_url(), false)?;
+    // Compatibility callers are automatic (for example write reconciliation). A user
+    // pause must not be undone merely because a metadata write asks for a refresh.
+    if transfer.pending().manual_paused {
+        return Err(RemoteError::Cancelled);
+    }
+    let result = sync_library_inner(client, cache, progress, cancel, force, &mut transfer);
+    if matches!(&result, Err(RemoteError::Snapshot(_))) {
+        transfer.discard_payload()?;
+    }
+    let outcome = result?;
+    transfer.record_publication(&outcome.state)?;
+    Ok(outcome)
+}
+
+/// Explicit sync/resume/restart with durable pause intent and a per-endpoint OS lease.
+pub fn sync_library_with_options(
+    client: &RemoteClient,
+    cache: &RemoteCache,
+    progress: &mut dyn FnMut(SyncProgress),
+    control: &crate::SyncControl,
+    options: crate::SyncOptions,
+) -> Result<SyncRunOutcome> {
+    let mut transfer =
+        crate::snapshot_transfer::TransferSession::open(cache, client.api_url(), options.restart)?;
+    transfer.set_paused(false)?;
+    let result = sync_library_inner(
+        client,
+        cache,
+        progress,
+        control.cancellation(),
+        options.force || options.restart,
+        &mut transfer,
+    );
+    if matches!(&result, Err(RemoteError::Snapshot(_))) {
+        transfer.discard_payload()?;
+    }
+    if control.is_paused() {
+        transfer.set_paused(true)?;
+        return Ok(SyncRunOutcome::Paused(transfer.pending()));
+    }
+    let outcome = result?;
+    transfer.record_publication(&outcome.state)?;
+    Ok(SyncRunOutcome::Completed(Box::new(outcome)))
+}
+
+fn sync_library_inner(
+    client: &RemoteClient,
+    cache: &RemoteCache,
+    progress: &mut dyn FnMut(SyncProgress),
+    cancel: &AtomicBool,
+    force: bool,
+    transfer: &mut crate::snapshot_transfer::TransferSession,
+) -> Result<SyncOutcome> {
     let started = Instant::now();
     progress(SyncProgress::Checking);
     let server_version = match client.health_cancellable(cancel) {
@@ -872,6 +988,7 @@ pub fn sync_library(
     if let Some(message) = snapshot_schema_error(library.schema_version, false) {
         return Err(RemoteError::Snapshot(message));
     }
+    transfer.bind_library(&library.library_id)?;
     let roots = match client.roots_cancellable(cancel) {
         Ok(roots) => Some(roots),
         Err(error) if error.is_unauthorized() || matches!(error, RemoteError::Cancelled) => {
@@ -889,6 +1006,10 @@ pub fn sync_library(
     let existing = cache.state(&library.library_id);
     let now = unix_now();
     if !force
+        && (transfer.pending().downloaded_bytes == 0
+            || existing
+                .as_ref()
+                .is_some_and(|state| transfer.published_matches(state)))
         && let Some(mut state) = existing
             .clone()
             .filter(|state| state.revision == library.revision)
@@ -911,6 +1032,20 @@ pub fn sync_library(
         if cancel.load(Ordering::Acquire) {
             return Err(RemoteError::Cancelled);
         }
+        let _publication = crate::writes::cache_publication_lease(cache, &library.library_id)?;
+        if let Some(current) = cache.state(&library.library_id)
+            && current.revision >= state.revision
+        {
+            // A short annotation reply may have advanced the cache while the check
+            // was in flight. Refresh only connection fields, never its record state.
+            state = CacheState {
+                roots: state.roots,
+                server_url: state.server_url,
+                server_version: state.server_version,
+                checked_at: state.checked_at,
+                ..current
+            };
+        }
         cache.save_state(&state)?;
         return Ok(SyncOutcome {
             state,
@@ -922,11 +1057,15 @@ pub fn sync_library(
     }
     let directory = cache.library_dir(&library.library_id);
     std::fs::create_dir_all(&directory)?;
-    let millis = std::time::SystemTime::now()
+    let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
-    let file_name = format!("library-r{}-{millis}.db", library.revision);
+        .as_nanos();
+    let file_name = format!(
+        "library-r{}-{}-{nonce}.db",
+        library.revision,
+        std::process::id()
+    );
     let staging = directory.join(format!("{file_name}.download"));
     let result = (|| -> Result<(SnapshotMeta, audiolib_core::LibraryInfo)> {
         progress(SyncProgress::Downloading {
@@ -940,28 +1079,14 @@ pub fn sync_library(
         let busy_started = Instant::now();
         let mut attempt = 0;
         let mut transient = 0;
+        let mut restarted = false;
         let meta = loop {
-            let report = std::cell::RefCell::new(&mut *progress);
-            let downloaded = client.download_snapshot_staged(
-                &staging,
-                &mut |stage| {
-                    (report.borrow_mut())(match stage {
-                        SnapshotProgress::Downloading { received, total } => {
-                            SyncProgress::Downloading { received, total }
-                        }
-                        SnapshotProgress::Decompressing { written, total } => {
-                            SyncProgress::Decompressing { written, total }
-                        }
-                    })
-                },
-                &mut |stage| match stage {
-                    crate::client::DownloadStage::Writing => {
-                        (report.borrow_mut())(SyncProgress::Writing)
-                    }
-                },
-                cancel,
-            );
-            match downloaded {
+            match transfer.download(client, &staging, progress, cancel) {
+                Err(RemoteError::Changed(_)) if !restarted => {
+                    restarted = true;
+                    transfer.discard_payload()?;
+                    progress(SyncProgress::Restarting);
+                }
                 Err(RemoteError::Busy {
                     message,
                     retry_after,
@@ -979,7 +1104,19 @@ pub fn sync_library(
                 {
                     transient += 1;
                     tracing::info!(transient, %error, "Snapshot download interrupted; retrying");
-                    wait_unless_cancelled(transient_backoff(transient), cancel)?;
+                    let wait = transient_backoff(transient);
+                    let deadline = Instant::now() + wait;
+                    loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        progress(SyncProgress::Retrying {
+                            attempt: transient,
+                            wait_seconds: remaining.as_secs().saturating_add(1),
+                        });
+                        wait_unless_cancelled(remaining.min(Duration::from_secs(1)), cancel)?;
+                    }
                 }
                 other => break other?,
             }
@@ -1023,6 +1160,19 @@ pub fn sync_library(
         remove_owned_staging(&staging);
         return Err(RemoteError::Cancelled);
     }
+    progress(SyncProgress::Saving);
+    if cancel.load(Ordering::Acquire) {
+        remove_owned_staging(&staging);
+        return Err(RemoteError::Cancelled);
+    }
+    let _publication = crate::writes::cache_publication_lease(cache, &library.library_id)?;
+    if cache
+        .state(&library.library_id)
+        .is_some_and(|current| current.revision > meta.revision.unwrap_or(library.revision))
+    {
+        remove_owned_staging(&staging);
+        return Err(RemoteError::Snapshot("The downloaded revision is older than the current cache; the newer cache was kept. Sync again to download a fresh snapshot".into()));
+    }
     let target = directory.join(&file_name);
     std::fs::rename(&staging, &target)?;
     let state = CacheState {
@@ -1043,7 +1193,6 @@ pub fn sync_library(
             .or_else(|| existing.as_ref().map(|state| state.roots.clone()))
             .unwrap_or_default(),
     };
-    progress(SyncProgress::Saving);
     if cancel.load(Ordering::Acquire) {
         remove_owned_staging(&target);
         return Err(RemoteError::Cancelled);

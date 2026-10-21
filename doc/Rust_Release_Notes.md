@@ -1,5 +1,25 @@
 # AudioLib Explorer release notes
 
+## Unreleased: resumable remote database sync (0.5.1 main baseline)
+
+This iteration is based on `origin/main` at `c90c0fe` (workspace version 0.5.1),
+including its Waveform management, Metadata publication ordering and keyboard
+audition fixes. It is a local development build; it does not replace a published
+tag or deploy the production server. Older candidate sections below are history.
+
+- Snapshot downloads retain compressed checkpoints and resume after interrupted
+  connections or client restarts while continuing to decompress during transfer.
+- Both sync pages expose Pause, Continue Sync and Restart Download. A deliberate
+  pause persists through startup, polling and write reconciliation.
+- A 30-second network stall triggers bounded retries. Exhaustion retains the
+  checkpoint; authentication, corrupt data and disk errors stop automatic retries.
+- Matching client/server builds use fixed snapshot IDs, strong ETags and byte
+  ranges. Expired objects or a server restart safely require a fresh snapshot.
+- CLI `remote sync` reuses checkpoints; `--restart` discards the current endpoint's
+  transfer. Existing libraries, schema 5 and snapshot support for schemas 3–5 remain.
+
+See [remote mode](Rust_Remote_Mode.md) for protocol, disk-space and recovery details.
+
 ## Unreleased: upgrade recovery and integrated client/server
 
 This candidate includes `origin/main` at `71bb1fd`, client integration at `c50bd27`

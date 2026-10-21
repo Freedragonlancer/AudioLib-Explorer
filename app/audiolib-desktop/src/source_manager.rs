@@ -107,6 +107,8 @@ pub(super) struct SourceManager {
     /// A structural roots refresh waits for the current management completion before
     /// replacing its page generation and request ownership.
     root_refresh_pending: bool,
+    /// Close requested by Save-on-Close, once its active-source sync commits.
+    close_after_sync: bool,
 }
 
 impl SourceManager {
@@ -281,6 +283,7 @@ impl Controller {
         let c = self.clone();
         ui.on_sm_closed(move || {
             let mut remote = c.remote.lock().unwrap();
+            remote.manager.close_after_sync = false;
             remote.manager.form_generation += 1;
             remote.manager.invalidate_library();
             drop(remote);
@@ -340,6 +343,7 @@ impl Controller {
 
     fn set_selection(&self, selection: Selection) {
         let mut remote = self.remote.lock().unwrap();
+        remote.manager.close_after_sync = false;
         remote.manager.selected = selection;
         remote.manager.form_generation += 1;
         remote.manager.invalidate_library();
@@ -568,7 +572,11 @@ impl Controller {
 
     fn show_page(self: &Arc<Self>, page: i32) {
         let Some(ui) = self.ui.upgrade() else { return };
-        self.remote.lock().unwrap().manager.invalidate_library();
+        {
+            let mut remote = self.remote.lock().unwrap();
+            remote.manager.close_after_sync = false;
+            remote.manager.invalidate_library();
+        }
         self.publish_manage_busy(&ui);
         ui.set_sm_root_controls(false);
         ui.set_sm_root_selected(-1);
@@ -826,7 +834,7 @@ impl Controller {
                 if resync {
                     // Editing the active connection already changed its endpoint.
                     // Keep the original rollback until this sync opens its provider.
-                    c2.start_sync(false, true);
+                    c2.start_sync_requested(false, true, false);
                 } else {
                     c2.finish_source_change(&ui, true);
                     if !matches!(after, AfterSave::Switch) {
@@ -837,7 +845,13 @@ impl Controller {
                     AfterSave::Nothing => {}
                     AfterSave::Close => {
                         ui.set_sm_pending_select(-2);
-                        ui.set_library_visible(false);
+                        // Keep local recovery reachable while a changed active
+                        // connection is syncing under the source-change gate.
+                        if !resync {
+                            ui.set_library_visible(false);
+                        } else {
+                            c2.remote.lock().unwrap().manager.close_after_sync = true;
+                        }
                     }
                     AfterSave::Switch => {
                         if !resync {
@@ -869,6 +883,15 @@ impl Controller {
                 }
             });
         });
+    }
+
+    /// Complete Save-on-Close only after its provider is committed. Navigation or
+    /// failure cancels that request so local recovery remains visible.
+    pub(super) fn finish_source_manager_sync(&self, ui: &AppWindow, committed: bool) {
+        let close = std::mem::take(&mut self.remote.lock().unwrap().manager.close_after_sync);
+        if close && committed {
+            ui.set_library_visible(false);
+        }
     }
 
     /// Worker half of [`Self::save_selected`]: the saved id and whether the active
@@ -2990,6 +3013,187 @@ mod tests {
         assert_eq!(saved.data_source.active_source(), ActiveSource::Local);
         let secrets = audiolib_remote::load_secrets(&root).unwrap();
         assert_eq!(secrets.webdav_password, "existing-password");
+    }
+
+    #[test]
+    fn close_after_active_connection_save_keeps_local_recovery_available() {
+        super::super::source_transition_tests::isolated_module(
+            "source_manager::tests",
+            "child_close_during_active_connection_sync",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Slint local recovery after saving an active connection on close"]
+    fn child_close_during_active_connection_sync() {
+        use super::super::source_transition_tests::{
+            accept, configuration, request, root as test_root, run_until,
+        };
+        use audiolib_audio::{AudioEngine, PlaybackConfig};
+        use audiolib_core::config::AppConfig;
+        use audiolib_db::SqliteProvider;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = test_root();
+        let mut config = configuration(&root.join("preferences"));
+        config.data_source.mode = DataSourceMode::Server;
+        config.data_source.server_url = "http://127.0.0.1:9".into();
+        config.data_source.poll_interval_secs = 0;
+        config.data_source.migrate_profiles();
+        config.save().unwrap();
+        let local = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let placeholder = super::super::open_remote_placeholder(&config).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let new_url = format!("http://{}", listener.local_addr().unwrap());
+        let (entered, request_entered) = std::sync::mpsc::sync_channel(1);
+        let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            assert!(request(&mut socket).starts_with("GET /api/v1/health"));
+            entered.send(()).unwrap();
+            wait_release.recv_timeout(Duration::from_secs(15)).unwrap();
+            drop(socket);
+        });
+        let playback = PlaybackConfig::default();
+        let engine = AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        let controller =
+            Controller::new(&ui, placeholder.provider, engine.handle(), config, playback);
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.publish_data_source(&ui);
+        ui.show().unwrap();
+        ui.invoke_open_data_source();
+        ui.set_ds_server_url(new_url.clone().into());
+        ui.set_ds_dirty(true);
+        ui.invoke_close_library_manager();
+        assert_eq!(ui.get_sm_pending_select(), -3);
+        ui.invoke_sm_pending_save_requested(-3);
+        assert!(ui.get_library_visible() && ui.get_ds_applying());
+        let requested = std::rc::Rc::new(std::cell::Cell::new(false));
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let expected_path = local.database_path().to_path_buf();
+        let weak = ui.as_weak();
+        let c = controller.clone();
+        run_until(&ui, move || {
+            let ui = weak.upgrade().unwrap();
+            if !requested.get() {
+                match request_entered.try_recv() {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                    Err(error) => panic!("active connection resync request: {error}"),
+                }
+                assert!(ui.get_library_visible(), "resync hid the recovery controls");
+                assert!(ui.get_ds_syncing() && ui.get_ds_source_syncing());
+                assert!(c.remote.lock().unwrap().manager.close_after_sync);
+                assert_eq!(ui.get_sm_pending_select(), -2);
+                assert_eq!(c.config.lock().unwrap().data_source.server_url, new_url);
+                crate::ui_tests::click_label(&ui, "Local settings");
+                assert_eq!(ui.get_sm_selected(), 0);
+                assert!(!c.remote.lock().unwrap().manager.close_after_sync);
+                crate::ui_tests::click_label(&ui, "Switch to this source");
+                assert!(!ui.get_ds_syncing());
+                requested.set(true);
+                return false;
+            }
+            if !c.available()
+                || c.remote_read_only()
+                || c.provider().database_path() != expected_path
+            {
+                return false;
+            }
+            if !released.get() {
+                release.send(()).unwrap();
+                released.set(true);
+            }
+            !c.remote_busy.load(Ordering::Acquire)
+                && c.remote_plays.lock().unwrap().publication_gates == 0
+        });
+        server.join().unwrap();
+        assert!(ui.get_library_visible());
+        assert!(!controller.remote_read_only());
+        assert_eq!(
+            AppConfig::load_in(root.join("preferences"))
+                .unwrap()
+                .data_source
+                .active_source(),
+            ActiveSource::Local
+        );
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
+
+    #[test]
+    fn save_on_close_follows_source_handoff_success_and_cancellation() {
+        super::super::source_transition_tests::isolated_module(
+            "source_manager::tests",
+            "child_save_on_close_handoff_completion",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Slint Save-on-Close handoff completion regression"]
+    fn child_save_on_close_handoff_completion() {
+        use super::super::source_transition_tests::{configuration, root as test_root, run_until};
+        use audiolib_audio::{AudioEngine, PlaybackConfig};
+        use audiolib_db::SqliteProvider;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let config = configuration(&test_root().join("preferences"));
+        let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let playback = PlaybackConfig::default();
+        let engine = AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
+        ui.set_library_visible(true);
+        let barrier = controller.begin_source_change(&ui).unwrap();
+        controller.wait_metadata(barrier, true).unwrap();
+        controller.remote.lock().unwrap().manager.close_after_sync = true;
+        // Cache publication invalidates library requests before provider commit;
+        // that invalidation must retain the original Save-on-Close request.
+        controller
+            .remote
+            .lock()
+            .unwrap()
+            .manager
+            .invalidate_library();
+        controller.finish_source_change(&ui, true);
+        assert!(
+            !ui.get_library_visible(),
+            "successful handoff must finish Close"
+        );
+        assert!(!controller.remote.lock().unwrap().manager.close_after_sync);
+
+        ui.set_library_visible(true);
+        let barrier = controller.begin_source_change(&ui).unwrap();
+        controller.wait_metadata(barrier, true).unwrap();
+        controller.remote.lock().unwrap().manager.close_after_sync = true;
+        controller.select_source(0);
+        assert!(!controller.remote.lock().unwrap().manager.close_after_sync);
+        controller.finish_source_change(&ui, true);
+        assert!(
+            ui.get_library_visible(),
+            "navigation supersedes the old Close"
+        );
+
+        let barrier = controller.begin_source_change(&ui).unwrap();
+        controller.wait_metadata(barrier, true).unwrap();
+        controller.remote.lock().unwrap().manager.close_after_sync = true;
+        controller.finish_source_change(&ui, false);
+        assert!(ui.get_library_visible(), "failure must keep recovery open");
+        assert!(!controller.remote.lock().unwrap().manager.close_after_sync);
+        let c = controller.clone();
+        run_until(&ui, move || c.available());
+        assert!(ui.get_library_visible());
+        // A later successful transition must not inherit a failed request's Close.
+        let barrier = controller.begin_source_change(&ui).unwrap();
+        controller.wait_metadata(barrier, true).unwrap();
+        controller.finish_source_change(&ui, true);
+        assert!(ui.get_library_visible());
+        controller.shutdown();
+        ui.hide().unwrap();
     }
 
     fn root(name: &str) -> RemoteRoot {

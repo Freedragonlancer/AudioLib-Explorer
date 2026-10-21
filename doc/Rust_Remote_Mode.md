@@ -199,19 +199,28 @@ Layout under `<data dir>/remote/`:
 | `active.json` | Identity of the snapshot last opened in server mode |
 | `<library_id>/cache.json` | `CacheState`: library id, revision, schema, file name, server URL/version, download/check times, size, record count, last roots |
 | `<library_id>/library-r<revision>-<millis>.db` | Validated read-only snapshot (only the open one is kept) |
+| `.transfers/<endpoint-sha256>/payload.part` | Durable HTTP representation bytes retained for snapshot resume; zstd stays compressed |
+| `.transfers/<endpoint-sha256>/checkpoint.json` | Atomic transfer identity, encoding, lengths, durable offset and prefix SHA256; never contains credentials |
 | `placeholder/library.db` | Empty schema-v5 library shown before the first successful sync |
 | `secrets.bin` | DPAPI-protected token and WebDAV password |
 
 Snapshots use unique file names instead of a fixed `library.db` because Windows cannot
 replace a SQLite file that a reader still has open. Only one snapshot stays on disk: the
 previous file is pruned after the swap, and the poll loop retries while Windows still has
-it open. Disk use therefore peaks at old + new snapshot only during a download. A sync
+it open. A resumable transfer also retains the wire representation: disk use peaks at
+the old validated database + the new decompressed database + the compressed spool
+(identity responses can require a second database-sized wire file). Leave room for
+SQLite validation and derived-state preparation as well. Insufficient space is a clear
+error; it never replaces the old cache or deletes a source WAV. A sync
 itself never deletes anything: the previous snapshot and replaced library directories are
 removed only after the provider has swapped to the new snapshot
 (`RemoteCache::cleanup_after_swap`; it never deletes the open snapshot or the one
 `cache.json` names, and does nothing while a newer sync still waits for its swap). Snapshot
 staging files (`.download`, `.download.part-<pid>`) older than an hour are removed at
-startup and on a switch. Audition no longer writes to disk; the `audio-cache/` directories
+startup and on a switch. This does not prune resumable files under `.transfers/`:
+paused or interrupted downloads survive application restart and are retained until
+successful sync, explicit restart, library replacement or server snapshot invalidation.
+Audition no longer writes to disk; the `audio-cache/` directories
 of earlier versions are deleted once (`remove_audition_caches`, at startup in server mode
 and on a server switch).
 
@@ -233,9 +242,12 @@ changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:
 2. `GET /roots`; on failure other than 401 the cached roots are kept.
 3. If a cache exists with the same `library_id` and `revision`, only `checked_at` is
    updated (`AudioLibCli remote sync --force` re-downloads anyway).
-4. Otherwise `GET /library/snapshot` streams to disk in 256 KiB chunks (never buffered in
-   memory) into `.part-<pid>`, renamed to `<file>.download` when complete (Content-Length
-   checked, cancellable during HTTP response headers and body reads). The desktop shows "The server is preparing the
+4. Otherwise `GET /library/snapshot` streams to an endpoint-specific durable wire
+   spool and simultaneously decodes into an owned `.download` file (never buffers the
+   whole snapshot in memory). The wire bytes are written before the decoder consumes
+   them. An atomic checkpoint records a flushed prefix at most every 8 MiB or 2 s,
+   and on an orderly pause/interruption. Content-Length is checked; headers and body
+   reads remain cancellable. The desktop shows "The server is preparing the
    snapshot…" until the first byte (the server copies the library first: about 7 s for
    645 MB). The connection and cache/export pages then show separate download and
    decompression rows and progress bars for zstd snapshots. Download bytes count the
@@ -243,7 +255,11 @@ changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:
    written against `X-Uncompressed-Length`. These operations overlap while streaming:
    download can reach 100% while decompression continues. A 19,495,989,248-byte database
    therefore shows 18592.8 MiB as the decompression total, never as the compressed
-   download total. Either missing total keeps only its own bar indeterminate; identity
+   download total. On resume, already downloaded wire bytes stay in the download
+   counter. The incomplete decoded database is rebuilt by replaying the local prefix
+   through one decoder and then reading the resumed HTTP suffix; this costs local
+   decompression time but does not download that prefix again. Replayed bytes do not
+   count toward network throughput. Either missing total keeps only its own bar indeterminate; identity
    responses show download only. Both counters are retained across coalesced GUI updates
    (at most every 200 ms, except stage appearances and completion), and validation/cache
    preparation replace the transfer rows when streaming finishes. `409 BUSY` and `503 BUSY` are retried for up to 240 s from the first request (`BUSY_WINDOW`), waiting the server's
@@ -260,6 +276,56 @@ changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:
 7. Atomic rename to the final file, `cache.json`/`active.json` update, provider swap
    through the existing library-operation machinery (metadata FIFO drained, reader and UI
    generations invalidated, selection and drafts cleared).
+
+### Interrupted downloads and resume
+
+This change extends the `0.5.1` source baseline. An existing `0.5.1` binary may
+predate resume support; detect server support from the response headers below.
+
+A resumable server reply provides a strong representation-specific `ETag`,
+`X-Snapshot-Id`, identity/schema/revision headers, `Accept-Ranges: bytes` and a known
+wire length. The client saves these with its durable prefix and hashes that prefix
+again before reuse. A transfer lease excludes another desktop/CLI writer for the same
+normalized API endpoint. Profiles with different endpoints never append to one
+another's partial file; neither tokens nor WebDAV credentials enter the checkpoint.
+
+After a disconnect or 30 s with no network read progress, the client retries up to
+three times after 2, 5 and 10 s. It requests the same immutable snapshot using
+`snapshot_id`, `Range: bytes=<offset>-` and `If-Range`. Only a matching `206` whose
+Content-Range, ETag, encoding, identity and lengths agree can append. A full `200`
+response cannot be appended to a prefix. Expired/missing snapshots, a replaced
+library or a changed representation start a fresh safe transfer; the previous
+validated cache remains available. A complete wire spool can finish local decoding
+and validation without downloading the snapshot again. Older servers lacking the
+resume headers still support a full download, with retry starting from zero.
+
+The server retains immutable representations for at most 24 h of inactivity in the
+current process. The registry is bounded to 4 representations and 64 GiB; capacity
+pressure may evict inactive entries sooner. An active response lease prevents its
+files being deleted while streaming. A known ID that expired, was evicted, belongs
+to a replaced library or disappeared after a server restart returns `410`; clients
+discard that checkpoint and safely start a new snapshot. Resume therefore does not
+guarantee that a server restart or 24-hour interruption can reuse the old bytes.
+
+The desktop exposes Pause/Continue and Restart Download while retaining separate
+download/decompression progress. Manual pause persists and suppresses background
+automatic sync, including startup and revision polling, until explicit continuation.
+Closing the application cancels its socket, saves the durable checkpoint and drains
+the worker; the next startup can resume. Pausing a first sync leaves a matching
+validated cache or the empty placeholder usable. No partially decoded database is
+published or opened as the library.
+
+Wire files remain until the validated cache has been published and its provider
+has opened successfully. Cleanup acknowledges the exact published database file
+under the endpoint lease, so a late acknowledgement cannot remove a newer transfer
+or pause. CLI sync acknowledges its validated publication before returning.
+
+`AudioLibCli remote sync` resumes a compatible interrupted transfer automatically.
+`--force` still forces a sync when the active cache already has that revision;
+`--restart` explicitly discards the pending transfer and starts at byte zero.
+Ctrl+C preserves a resumable prefix. Retrying exhausted network failures in a later
+CLI invocation uses the same checkpoint. A persistently paused GUI transfer is
+resumed only by an explicit user sync/continue action.
 
 A changed `library_id` (server database copied to a new location) shows a warning and
 resyncs; an in-place restore keeps the id and bumps the revision. If the server is
@@ -297,8 +363,8 @@ an unchanged prepared snapshot is reused without copying, downloading or rebuild
 
 Timeouts: connect 3 s, ordinary JSON responses 15 s (bodies 30 s), library statistics
 response/body 60 s, root path PATCH and root DELETE responses up to 1 h (bodies 30 s),
-snapshot response 240 s and body
-up to 1 h, audio stream first byte 100 s (a NAS disk spinning up, see *Playback*). Errors map to localized messages for unreachable server, timeout, 401
+snapshot response 240 s and a 30 s network-read stall limit (no one-hour total
+transfer deadline), audio stream first byte 100 s (a NAS disk spinning up, see *Playback*). The stall limit excludes local prefix replay, decompression and disk work. Errors map to localized messages for unreachable server, timeout, 401
 (invalid token, or "token required" when none is configured), 404, BUSY, validation and
 server `INTERNAL` errors. Root PATCH/DELETE have no generic server 30 s request limit.
 A server `408 TIMEOUT` (a request exceeding its applicable server time limit) is treated exactly like a client timeout: transient, shown as
@@ -308,8 +374,10 @@ stream after its first response, never reported as a token or protocol problem.
 Sync health/library/roots checks and snapshot transfers use a scoped cancellation
 transport. Cancel closes the active socket, and scoped reads poll at most every 100 ms
 so a Windows blocked read also exits while a peer remains silent. Snapshot cancellation
-returns after file cleanup and the cancellation watcher joins; existing cache state and
-snapshot bytes are retained. Owned SQLite validation/upgrades still drain safely.
+returns after its durable resume checkpoint is saved and the cancellation watcher
+joins; existing cache state and validated snapshot bytes are retained. Incomplete
+decoded output is disposable and rebuilt on resume. Owned SQLite validation/upgrades
+still drain safely.
 
 ## Revision polling
 
@@ -1017,6 +1085,21 @@ envelope's `warnings` array and the command still succeeds.
 The CLI uses the same settings and secrets file as the desktop and never prints secrets.
 
 ## Tests
+
+`pwsh -File tools/validate-remote-resume.ps1 -BinaryDirectory <current-binary-directory>`
+builds an owned 32-WAV synthetic library, obtains its valid zstd snapshot from an owned
+loopback server, and injects truncated/silent response bodies with a second loopback
+listener. It checks automatic Range recovery after truncation and after an actual
+30-second silent-read timeout, a new CLI process reusing the saved
+prefix, preservation of an existing validated cache after an interrupted replacement,
+explicit `--restart` beginning at zero, and native desktop WM_CLOSE during a
+silent body followed by desktop restart/resume. Requests must retain the strong ETag
+and snapshot ID. `-ServerBinary <path>` selects a separately built current server;
+`-SkipDesktop` runs only CLI cases and is reported as such. All settings, snapshots,
+source WAVs and server state live in a checked owned temporary tree, and normal
+environment variables are restored. Failure preserves that fixture for diagnosis.
+The report is `.rust-validation/remote-resume/report.json`; it describes synthetic
+loopback coverage, not real WAN performance, CLI Ctrl+C or server graceful shutdown.
 
 `cargo test -p audiolib-remote` runs the client against a loopback `TcpListener` test
 server (no external network). HTTPS tests use an rcgen test CA (trusted through a

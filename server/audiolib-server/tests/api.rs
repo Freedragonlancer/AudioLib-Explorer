@@ -411,7 +411,7 @@ async fn snapshots_are_cached_per_revision_and_offered_with_zstd() {
     assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
     let revision = header_str(&plain, "x-library-revision".parse().unwrap()).to_string();
     let plain_etag = header_str(&plain, header::ETAG).to_string();
-    assert!(plain_etag.starts_with("W/\""), "{plain_etag}");
+    assert!(plain_etag.starts_with("\"snapshot-"), "{plain_etag}");
     assert_eq!(
         header_str(&plain, "x-uncompressed-length".parse().unwrap()),
         header_str(&plain, header::CONTENT_LENGTH)
@@ -521,10 +521,283 @@ async fn snapshots_are_cached_per_revision_and_offered_with_zstd() {
         )
         .unwrap();
     assert_eq!(favorite, 1);
-    // The outdated copies are gone once nothing streams them.
+    // The transmitted old representations remain available for interrupted clients.
     let now = snapshot_dirs(&f);
-    assert_eq!(now.len(), 1, "{now:?}");
-    assert!(!cached.contains(&now[0]));
+    assert_eq!(now.len(), 3, "{now:?}");
+    assert!(cached.iter().all(|path| now.contains(path)));
+}
+
+#[tokio::test]
+async fn pinned_snapshots_resume_exact_bytes_after_writes_in_both_encodings() {
+    for encoding in ["identity", "zstd"] {
+        let f = fixture();
+        let first = send_with(
+            &f.state,
+            Method::GET,
+            "/api/v1/library/snapshot",
+            &[(header::ACCEPT_ENCODING, encoding)],
+        )
+        .await;
+        let first_headers = first.headers().clone();
+        let id = first_headers["x-snapshot-id"].to_str().unwrap();
+        assert_eq!(uuid::Uuid::parse_str(id).unwrap().to_string(), id);
+        let etag = first_headers[header::ETAG].to_str().unwrap();
+        assert!(!etag.starts_with("W/"));
+        let expected = bytes(first).await;
+        let path = format!("/api/v1/library/snapshot?snapshot_id={id}");
+        let changed = send_json(
+            &f.state,
+            Method::PATCH,
+            &format!("/api/v1/audio/{}/metadata", audio_id(&f, "door.wav")),
+            Some(r#"{"favorite":true}"#),
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(changed.status(), StatusCode::OK);
+        drop(bytes(changed).await);
+        // Force the latest cache to a different revision before resuming the old id.
+        let latest = send_with(
+            &f.state,
+            Method::GET,
+            "/api/v1/library/snapshot",
+            &[(header::ACCEPT_ENCODING, encoding)],
+        )
+        .await;
+        assert_ne!(latest.headers()["x-snapshot-id"], id);
+        assert_ne!(
+            latest.headers()["x-library-revision"],
+            first_headers["x-library-revision"]
+        );
+        drop(bytes(latest).await);
+
+        let split = expected.len() / 2;
+        let mut joined = Vec::new();
+        for range in [format!("bytes=0-{}", split - 1), format!("bytes={split}-")] {
+            let part = send_with(
+                &f.state,
+                Method::GET,
+                &path,
+                &[
+                    (header::ACCEPT_ENCODING, encoding),
+                    (header::RANGE, &range),
+                    (header::IF_RANGE, etag),
+                ],
+            )
+            .await;
+            assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
+            for name in [
+                "etag",
+                "x-snapshot-id",
+                "x-library-id",
+                "x-library-revision",
+                "x-schema-version",
+                "x-uncompressed-length",
+            ] {
+                assert_eq!(part.headers()[name], first_headers[name], "{name}");
+            }
+            assert_eq!(part.headers()[header::ACCEPT_RANGES], "bytes");
+            assert!(
+                part.headers()[header::CONTENT_RANGE]
+                    .to_str()
+                    .unwrap()
+                    .ends_with(&format!("/{}", expected.len()))
+            );
+            let content_length: usize = part.headers()[header::CONTENT_LENGTH]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let part_bytes = bytes(part).await;
+            assert_eq!(part_bytes.len(), content_length);
+            joined.extend(part_bytes);
+        }
+        assert_eq!(joined, expected);
+        if encoding == "zstd" {
+            assert!(
+                zstd::decode_all(&joined[..])
+                    .unwrap()
+                    .starts_with(b"SQLite format 3\0")
+            );
+            let refused = send_with(&f.state, Method::GET, &path, &[]).await;
+            assert_eq!(refused.status(), StatusCode::NOT_ACCEPTABLE);
+        }
+        let refused = send_with(
+            &f.state,
+            Method::GET,
+            &path,
+            &[(header::ACCEPT_ENCODING, "identity;q=0, zstd;q=0")],
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::NOT_ACCEPTABLE);
+        for validator in ["\"other\"".to_owned(), format!("W/{etag}")] {
+            let full = send_with(
+                &f.state,
+                Method::GET,
+                &path,
+                &[
+                    (header::ACCEPT_ENCODING, encoding),
+                    (header::RANGE, "bytes=1-"),
+                    (header::IF_RANGE, &validator),
+                ],
+            )
+            .await;
+            assert_eq!(full.status(), StatusCode::OK);
+            assert_eq!(bytes(full).await, expected);
+        }
+        let not_modified = send_with(
+            &f.state,
+            Method::GET,
+            &path,
+            &[
+                (header::ACCEPT_ENCODING, encoding),
+                (header::IF_NONE_MATCH, etag),
+            ],
+        )
+        .await;
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers()["x-snapshot-id"], id);
+        let invalid_range = format!("bytes={}-", expected.len());
+        let unsatisfiable = send_with(
+            &f.state,
+            Method::GET,
+            &path,
+            &[
+                (header::ACCEPT_ENCODING, encoding),
+                (header::RANGE, &invalid_range),
+                (header::IF_RANGE, etag),
+            ],
+        )
+        .await;
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            unsatisfiable.headers()[header::CONTENT_RANGE],
+            format!("bytes */{}", expected.len())
+        );
+        assert!(
+            unsatisfiable
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .is_none()
+        );
+        let error: ErrorBody = json(unsatisfiable).await;
+        assert_eq!(error.error_code, "RANGE_NOT_SATISFIABLE");
+    }
+}
+
+#[tokio::test]
+async fn snapshot_ids_require_authentication_validation_and_the_same_live_server_library() {
+    let f = fixture();
+    let response = send(&f.state, "/api/v1/library/snapshot", Some(TOKEN)).await;
+    let id = response.headers()["x-snapshot-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let old_etag = response.headers()[header::ETAG].clone();
+    drop(bytes(response).await);
+    let path = format!("/api/v1/library/snapshot?snapshot_id={id}");
+    assert_eq!(
+        send(&f.state, &path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let other_library = fixture();
+    let missing = send(&other_library.state, &path, Some(TOKEN)).await;
+    assert_eq!(missing.status(), StatusCode::GONE);
+    let error: ErrorBody = json(missing).await;
+    assert_eq!(error.error_code, "SNAPSHOT_EXPIRED");
+    for value in [
+        "../payload",
+        "not-a-uuid",
+        "",
+        "00000000-0000-0000-0000-000000000000&snapshot_id=x",
+    ] {
+        let response = send(
+            &f.state,
+            &format!("/api/v1/library/snapshot?snapshot_id={value}"),
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    f.state.shutdown(Duration::from_secs(5)).unwrap();
+    let restarted = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
+    let missing = send(&restarted, &path, Some(TOKEN)).await;
+    assert_eq!(missing.status(), StatusCode::GONE);
+    let fresh = send(&restarted, "/api/v1/library/snapshot", Some(TOKEN)).await;
+    assert_eq!(fresh.status(), StatusCode::OK);
+    assert_ne!(fresh.headers()["x-snapshot-id"], id);
+    assert_ne!(fresh.headers()[header::ETAG], old_etag);
+    drop(bytes(fresh).await);
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+#[tokio::test]
+async fn dropping_snapshot_responses_releases_slots_and_compressed_streams_do_not_pin_plain() {
+    let f = fixture();
+    let prepared = f.state.prepare_snapshot().unwrap();
+    let old_plain = prepared.plain.path.clone();
+    drop(prepared);
+    let first = send_with(
+        &f.state,
+        Method::GET,
+        "/api/v1/library/snapshot",
+        &[(header::ACCEPT_ENCODING, "zstd")],
+    )
+    .await;
+    let id = first.headers()["x-snapshot-id"].to_str().unwrap();
+    let path = format!("/api/v1/library/snapshot?snapshot_id={id}");
+    let second = send_with(
+        &f.state,
+        Method::GET,
+        &path,
+        &[(header::ACCEPT_ENCODING, "zstd")],
+    )
+    .await;
+    let busy = send_with(
+        &f.state,
+        Method::GET,
+        &path,
+        &[(header::ACCEPT_ENCODING, "zstd")],
+    )
+    .await;
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    drop(second);
+    let changed = send_json(
+        &f.state,
+        Method::PATCH,
+        &format!("/api/v1/audio/{}/metadata", audio_id(&f, "door.wav")),
+        Some(r#"{"favorite":true}"#),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    drop(bytes(changed).await);
+    let fresh = send_with(&f.state, Method::GET, "/api/v1/library/snapshot", &[]).await;
+    assert_eq!(fresh.status(), StatusCode::OK);
+    assert!(
+        !old_plain.exists(),
+        "zstd body must not retain the old source database"
+    );
+    drop(bytes(fresh).await);
+    let resumed = send_with(
+        &f.state,
+        Method::GET,
+        &path,
+        &[
+            (header::ACCEPT_ENCODING, "zstd"),
+            (header::RANGE, "bytes=1-"),
+        ],
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::PARTIAL_CONTENT);
+    drop(resumed);
+    f.state.shutdown(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        snapshot_dirs(&f).len(),
+        1,
+        "the in-flight zstd response stays owned"
+    );
+    drop(first);
+    assert!(snapshot_dirs(&f).is_empty());
 }
 
 /// Send an authenticated request with extra headers.

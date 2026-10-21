@@ -26,12 +26,16 @@ impl Bytes {
             (false, false) => "Downloading snapshot",
             (false, true) => "Decompressing snapshot",
         };
+        format!("{stage} {}", self.amount())
+    }
+
+    fn amount(self) -> String {
         let mib = self.received as f64 / 1_048_576.0;
         match self.total {
             Some(total) if total > 0 => {
-                format!("{stage} {mib:.1} / {:.1} MiB", total as f64 / 1_048_576.0)
+                format!("{mib:.1} / {:.1} MiB", total as f64 / 1_048_576.0)
             }
-            _ => format!("{stage} {mib:.1} MiB"),
+            _ => format!("{mib:.1} MiB"),
         }
     }
 }
@@ -58,6 +62,7 @@ impl ProgressDisplay {
 pub(super) struct ProgressReporter {
     download: Bytes,
     decompression: Option<Bytes>,
+    replaying_from: Option<u64>,
     last_post: Option<Instant>,
     last_progress: Option<SyncProgress>,
 }
@@ -74,11 +79,21 @@ impl ProgressReporter {
         let mut transfer_changed = false;
         let mut completed = false;
         match progress {
+            SyncProgress::Replaying { received, total } => {
+                self.download = Bytes { received, total };
+                self.decompression = None;
+                self.replaying_from = Some(received);
+                transfer_changed = true;
+            }
             SyncProgress::Downloading { received, total } => {
+                if self.replaying_from.is_some_and(|offset| received > offset) {
+                    self.replaying_from = None;
+                    transfer_changed = true;
+                }
                 completed = total.is_some_and(|total| {
                     total > 0 && self.download.received < total && received >= total
                 });
-                transfer_changed = self.download.total != total
+                transfer_changed |= self.download.total != total
                     || received < self.download.received
                     || (received == 0 && self.decompression.is_some());
                 if received == 0 {
@@ -102,7 +117,11 @@ impl ProgressReporter {
                     total,
                 });
             }
-            _ => self.decompression = None,
+            SyncProgress::Retrying { .. } => self.decompression = None,
+            _ => {
+                self.decompression = None;
+                self.replaying_from = None;
+            }
         }
         let repeating_count = match (self.last_progress, progress) {
             (Some(previous), current) if transfer(previous) && transfer(current) => true,
@@ -147,17 +166,47 @@ impl ProgressReporter {
                 ),
                 -1.0,
             ),
-            SyncProgress::Downloading { .. } | SyncProgress::Decompressing { .. } => {
-                ProgressDisplay {
-                    text: self.download.label(chinese, false),
-                    fraction: self.download.fraction(),
-                    decompression_text: self
-                        .decompression
-                        .map(|bytes| bytes.label(chinese, true))
-                        .unwrap_or_default(),
-                    decompression_fraction: self.decompression.map_or(-1.0, Bytes::fraction),
-                }
-            }
+            SyncProgress::Downloading { .. }
+            | SyncProgress::Decompressing { .. }
+            | SyncProgress::Replaying { .. } => ProgressDisplay {
+                text: if self.replaying_from.is_some() {
+                    format!(
+                        "{} · {} {}",
+                        stage("正在重放已下载快照", "Replaying saved snapshot"),
+                        stage("已保留", "retained"),
+                        self.download.amount(),
+                    )
+                } else {
+                    self.download.label(chinese, false)
+                },
+                fraction: self.download.fraction(),
+                decompression_text: self
+                    .decompression
+                    .map(|bytes| bytes.label(chinese, true))
+                    .unwrap_or_default(),
+                decompression_fraction: self.decompression.map_or(-1.0, Bytes::fraction),
+            },
+            SyncProgress::Retrying {
+                attempt,
+                wait_seconds,
+            } => ProgressDisplay::stage(
+                if chinese {
+                    format!(
+                        "连接中断，{wait_seconds} 秒后重试（第 {attempt} 次） · {}",
+                        self.download.label(true, false)
+                    )
+                } else {
+                    format!(
+                        "Connection interrupted; retry {attempt} in {wait_seconds} s · {}",
+                        self.download.label(false, false)
+                    )
+                },
+                self.download.fraction(),
+            ),
+            SyncProgress::Restarting => ProgressDisplay::stage(
+                stage("正在重新下载快照…", "Restarting snapshot download…"),
+                -1.0,
+            ),
             SyncProgress::Writing => {
                 ProgressDisplay::stage(stage("写入磁盘中…", "Writing to disk…"), -1.0)
             }
@@ -192,6 +241,106 @@ fn transfer(progress: SyncProgress) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_prefix_replay_resets_output_and_keeps_download_offset_until_new_bytes() {
+        let now = Instant::now();
+        let mut reporter = ProgressReporter::default();
+        reporter.report(
+            SyncProgress::Downloading {
+                received: 600,
+                total: Some(1000),
+            },
+            false,
+            now,
+        );
+        reporter.report(
+            SyncProgress::Decompressing {
+                written: 4000,
+                total: Some(8000),
+            },
+            false,
+            now,
+        );
+        let replay = reporter
+            .report(
+                SyncProgress::Replaying {
+                    received: 600,
+                    total: Some(1000),
+                },
+                false,
+                now,
+            )
+            .unwrap();
+        assert!((replay.fraction - 0.6).abs() < 0.001);
+        assert!(replay.text.contains("Replaying"));
+        assert!(replay.decompression_text.is_empty());
+        let output = reporter
+            .report(
+                SyncProgress::Decompressing {
+                    written: 100,
+                    total: Some(8000),
+                },
+                false,
+                now,
+            )
+            .unwrap();
+        assert!((output.fraction - 0.6).abs() < 0.001);
+        assert!((output.decompression_fraction - 0.0125).abs() < 0.001);
+        assert!(output.text.contains("Replaying"));
+        let resumed = reporter
+            .report(
+                SyncProgress::Downloading {
+                    received: 700,
+                    total: Some(1000),
+                },
+                false,
+                now,
+            )
+            .unwrap();
+        assert!((resumed.fraction - 0.7).abs() < 0.001);
+        assert!(!resumed.text.contains("Replaying"));
+    }
+
+    #[test]
+    fn retry_wait_preserves_download_fraction_and_discards_abandoned_output() {
+        let now = Instant::now();
+        let mut reporter = ProgressReporter::default();
+        reporter.report(
+            SyncProgress::Downloading {
+                received: 512,
+                total: Some(1024),
+            },
+            true,
+            now,
+        );
+        reporter.report(
+            SyncProgress::Decompressing {
+                written: 2048,
+                total: Some(4096),
+            },
+            true,
+            now,
+        );
+        let waiting = reporter
+            .report(
+                SyncProgress::Retrying {
+                    attempt: 2,
+                    wait_seconds: 5,
+                },
+                true,
+                now,
+            )
+            .unwrap();
+        assert_eq!(waiting.fraction, 0.5);
+        assert!(waiting.text.contains("5 秒后重试"));
+        assert!(waiting.decompression_text.is_empty());
+        let restarted = reporter
+            .report(SyncProgress::Restarting, true, now)
+            .unwrap();
+        assert_eq!(restarted.fraction, -1.0);
+        assert!(restarted.decompression_text.is_empty());
+    }
 
     #[test]
     fn known_download_total_is_published_without_waiting_for_the_body() {

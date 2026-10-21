@@ -13,8 +13,8 @@ use crate::{
     scans::{CurrentScanResponse, ScanAction, ScanRequest, ScanResponse},
     service::{FAILED_MESSAGE, Readiness, Service},
     state::{
-        AudioWriteResponse, BatchWriteResponse, OpenError, OpenProgress, PreparedSnapshot,
-        SLOW_OPEN_WARNING, ServedAudio, SnapshotEncoding, WaveformReply,
+        AudioWriteResponse, BatchWriteResponse, OpenError, OpenProgress, SLOW_OPEN_WARNING,
+        ServedAudio, SnapshotEncoding, WaveformReply,
     },
     stream::{self, ByteRange},
     waveform::WaveformParams,
@@ -1931,105 +1931,199 @@ fn accepts_zstd(headers: &HeaderMap) -> bool {
         })
 }
 
-/// `GET /library/snapshot`: the SQLite snapshot of the current revision, zstd-compressed
-/// when `Accept-Encoding` allows it. See doc/api/README.md §6.1.
+#[derive(Deserialize)]
+struct SnapshotQuery {
+    snapshot_id: Option<String>,
+}
+
+/// A pinned response must preserve its encoding, including an explicit identity refusal.
+fn accepts_snapshot_encoding(headers: &HeaderMap, encoding: SnapshotEncoding) -> bool {
+    let wanted = match encoding {
+        SnapshotEncoding::Identity => "identity",
+        SnapshotEncoding::Zstd => "zstd",
+    };
+    let mut explicit = None;
+    let mut wildcard = None;
+    for item in headers
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+    {
+        let mut parts = item.split(';').map(str::trim);
+        let coding = parts.next().unwrap_or_default();
+        let quality = parts
+            .find_map(|part| {
+                part.strip_prefix("q=")
+                    .or_else(|| part.strip_prefix("Q="))
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+            })
+            .unwrap_or(1.0);
+        if coding.eq_ignore_ascii_case(wanted) {
+            explicit = Some(quality > 0.0);
+        } else if coding == "*" {
+            wildcard = Some(quality > 0.0);
+        }
+    }
+    explicit
+        .or(wildcard)
+        .unwrap_or(encoding == SnapshotEncoding::Identity)
+}
+
+/// `GET /library/snapshot`: latest snapshot, or an exact retained representation selected
+/// by `snapshot_id`. Range offsets always refer to the selected encoded file's bytes.
 async fn snapshot(
     Extension(state): Extension<AppState>,
+    query: Result<Query<SnapshotQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let encoding = if accepts_zstd(&headers) {
+    let Query(query) = query.map_err(|rejection| {
+        ApiError::validation(format!("Invalid snapshot query: {}", rejection.body_text()))
+    })?;
+    if let Some(id) = &query.snapshot_id
+        && !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+    {
+        return Err(ApiError::validation("snapshot_id must be a canonical UUID"));
+    }
+    let wanted_encoding = if accepts_zstd(&headers) {
         SnapshotEncoding::Zstd
     } else {
         SnapshotEncoding::Identity
     };
-    // A client that already holds this revision in this encoding needs no body.
-    if let Some(value) = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-    {
-        let poll_state = state.clone();
-        let revision = blocking(move || poll_state.poll_revision()).await?;
-        let etag = PreparedSnapshot::etag(&revision.library_id, revision.revision, encoding);
-        if stream::none_match(value, &etag) {
-            let mut response = StatusCode::NOT_MODIFIED.into_response();
-            let headers = response.headers_mut();
-            headers.insert(header::ETAG, header_value(etag)?);
-            headers.insert("x-library-id", header_value(revision.library_id)?);
-            headers.insert(
-                "x-library-revision",
-                header_value(revision.revision.to_string())?,
-            );
-            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            return Ok(response);
-        }
-    }
     let permit = state.snapshot_slots().try_acquire_owned().map_err(|_| {
         ApiError::from(audiolib_core::Error::Busy(
             "Too many library snapshots are being prepared; retry shortly".into(),
         ))
     })?;
-    // The preparation runs detached (single flight per encoding); past the wait budget the
-    // client gets 503 BUSY + Retry-After instead of a response that never starts, and the
-    // retry joins the finished or still running preparation.
-    let (prepared, file) = state
-        .snapshot_within_budget(encoding == SnapshotEncoding::Zstd)
+    let lease = if let Some(id) = query.snapshot_id {
+        // A pinned request never polls the revision or prepares a replacement.
+        let lookup = state.clone();
+        blocking(move || Ok(lookup.retained_snapshot(&id)))
+            .await?
+            .ok_or_else(ApiError::snapshot_expired)?
+    } else {
+        // Detached single-flight preparation continues past the response wait budget.
+        let (prepared, file) = state
+            .snapshot_within_budget(wanted_encoding == SnapshotEncoding::Zstd)
+            .await
+            .ok_or_else(ApiError::snapshot_preparing)??;
+        let retain = state.clone();
+        blocking(move || retain.retain_snapshot(prepared, file, wanted_encoding)).await?
+    };
+    let representation = lease.representation();
+    if !accepts_snapshot_encoding(&headers, representation.encoding) {
+        return Err(ApiError::new(
+            StatusCode::NOT_ACCEPTABLE,
+            "SNAPSHOT_ENCODING_NOT_ACCEPTABLE",
+            "Accept-Encoding does not accept the retained snapshot representation",
+        ));
+    }
+    let mut file_handle = tokio::fs::File::open(&representation.file.path)
         .await
-        .ok_or_else(ApiError::snapshot_preparing)??;
-    let path = file
-        .as_ref()
-        .map_or(&prepared.plain.path, |file| &file.path);
-    let file_handle = tokio::fs::File::open(path)
-        .await
-        .map_err(|error| ApiError::from(audiolib_core::Error::Io(error)))?;
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ApiError::snapshot_expired()
+            } else {
+                ApiError::from(audiolib_core::Error::Io(error))
+            }
+        })?;
     let length = file_handle
         .metadata()
         .await
         .map_err(|error| ApiError::from(audiolib_core::Error::Io(error)))?
         .len();
-    let etag = PreparedSnapshot::etag(&prepared.library_id, prepared.revision, encoding);
+    if length != representation.file.bytes {
+        return Err(ApiError::snapshot_expired());
+    }
+    let etag = representation.file.etag();
     let disposition = header_value(format!(
         "attachment; filename=\"audiolib-{}-r{}.db\"",
-        filename_token(&prepared.library_id),
-        prepared.revision
+        filename_token(&representation.library_id),
+        representation.revision
     ))?;
-    tracing::info!(
-        bytes = length,
-        revision = prepared.revision,
-        encoding = ?encoding,
-        "Streaming library snapshot"
-    );
     let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response_headers.insert(header::CONTENT_DISPOSITION, disposition);
+    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(header::ETAG, header_value(etag.clone())?);
+    response_headers.insert(
+        "x-snapshot-id",
+        header_value(representation.file.id.clone())?,
+    );
+    response_headers.insert(
+        "x-library-id",
+        header_value(representation.library_id.clone())?,
+    );
+    response_headers.insert(
+        "x-library-revision",
+        header_value(representation.revision.to_string())?,
+    );
+    response_headers.insert(
+        "x-schema-version",
+        header_value(representation.schema_version.to_string())?,
+    );
+    response_headers.insert(
+        "x-uncompressed-length",
+        HeaderValue::from(representation.uncompressed_bytes),
+    );
+    let header_text = |name: HeaderName| headers.get(name).and_then(|value| value.to_str().ok());
+    if header_text(header::IF_NONE_MATCH).is_some_and(|value| stream::none_match(value, &etag)) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().extend(response_headers);
+        return Ok(response);
+    }
+    let range = stream::select_range(
+        header_text(header::RANGE),
+        header_text(header::IF_RANGE),
+        &etag,
+        length,
+    );
+    let Some(body_len) = range.body_len(length) else {
+        let mut response = ApiError::range_not_satisfiable(format!(
+            "Requested range is outside the {length}-byte snapshot"
+        ))
+        .into_response();
+        response.headers_mut().extend(response_headers);
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            header_value(format!("bytes */{length}"))?,
+        );
+        return Ok(response);
+    };
+    let status = if let ByteRange::Partial { start, end } = range {
+        file_handle
+            .seek(SeekFrom::Start(start))
+            .await
+            .map_err(|error| ApiError::from(audiolib_core::Error::Io(error)))?;
+        response_headers.insert(
+            header::CONTENT_RANGE,
+            header_value(format!("bytes {start}-{end}/{length}"))?,
+        );
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
     response_headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
-    response_headers.insert(header::CONTENT_DISPOSITION, disposition);
-    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response_headers.insert(header::ETAG, header_value(etag)?);
-    response_headers.insert("x-library-id", header_value(prepared.library_id.clone())?);
-    response_headers.insert(
-        "x-library-revision",
-        header_value(prepared.revision.to_string())?,
-    );
-    response_headers.insert(
-        "x-schema-version",
-        header_value(prepared.schema_version.to_string())?,
-    );
-    response_headers.insert(
-        "x-uncompressed-length",
-        HeaderValue::from(prepared.plain.bytes),
-    );
-    if encoding == SnapshotEncoding::Zstd {
+    response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body_len));
+    if representation.encoding == SnapshotEncoding::Zstd {
         response_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
     }
-    // The snapshot entry (files) and the slot permit live until the body is fully sent
-    // or dropped; a cached entry stays for later requests of the same revision.
+    tracing::info!(
+        bytes = body_len,
+        revision = representation.revision,
+        encoding = ?representation.encoding,
+        "Streaming library snapshot"
+    );
+    // A compressed response retains only its representation, not the source database.
     let stream = GuardedStream {
-        inner: ReaderStream::with_capacity(file_handle, STREAM_CHUNK_BYTES),
-        _guard: (prepared, file, permit),
+        inner: ReaderStream::with_capacity(file_handle.take(body_len), STREAM_CHUNK_BYTES),
+        _guard: (lease, permit),
     };
     let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = status;
     response.headers_mut().extend(response_headers);
     Ok(response)
 }

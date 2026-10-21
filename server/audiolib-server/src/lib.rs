@@ -20,6 +20,7 @@ pub mod routes;
 pub mod scans;
 pub mod server;
 pub mod service;
+mod snapshot_registry;
 pub mod state;
 pub mod stream;
 pub mod tls;

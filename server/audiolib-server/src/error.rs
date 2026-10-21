@@ -167,6 +167,14 @@ impl ApiError {
             message,
         )
     }
+    /// 410 `SNAPSHOT_EXPIRED`: the process-local immutable snapshot is no longer retained.
+    pub fn snapshot_expired() -> Self {
+        Self::new(
+            StatusCode::GONE,
+            "SNAPSHOT_EXPIRED",
+            "The snapshot is no longer retained; start a new snapshot download",
+        )
+    }
     /// 501 `UNSUPPORTED` for operations deliberately unavailable in remote mode.
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, "UNSUPPORTED", message)

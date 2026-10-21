@@ -324,7 +324,7 @@ audiolib.example.com:8443 {
 ### 6.1 `GET /library/snapshot`
 
 - 服务端用现有 `backup_library`（SQLite backup API，单个读事务内的一致快照）写入 `snapshot_dir` 下的临时目录，再以 `application/octet-stream` 流式返回。
-- **按 revision 缓存**：服务端保留最新一份快照，键为 `(library_id, revision)`；请求到来时先检查变更（同 `/library`），`revision` 未变就直接发送缓存的文件，**绝不会把缓存的文件当作另一个 revision 发送**。`revision` 一变，下一次请求重新生成并替换缓存，旧文件在没有响应再使用它之后删除。准备过程单飞：并发请求等同一份拷贝。
+- **按 revision 准备**：未指定 `snapshot_id` 时选择最新 `(library_id, revision)`，revision 未变复用准备结果，准备过程单飞。已发送的固定表示另受下述续传保留规则保护，不会因为播放或 Metadata 写入推进 revision 就失效。
 - **压缩（可选）**：请求带 `Accept-Encoding: zstd`（`q=0` 表示不接受）时返回 zstd 压缩（level 3，多线程）的同一个 SQLite 文件，`Content-Encoding: zstd`；压缩版也按 revision 缓存，第一次请求时生成。不带时照旧返回原始文件。
 - 响应头（200）：
 
@@ -333,17 +333,22 @@ audiolib.example.com:8443 {
   | `Content-Length` | 实际发送的字节数（压缩时为**压缩后**长度） |
   | `X-Uncompressed-Length` | 未压缩 SQLite 文件的字节数（不压缩时等于 `Content-Length`） |
   | `Content-Encoding` | 仅压缩时为 `zstd` |
-  | `ETag` | 弱 ETag `W/"<library_id>-r<revision>"`，压缩版为 `W/"<library_id>-r<revision>-zstd"`（两种表示的 ETag 不同） |
+  | `ETag` | 精确不可变表示的强 ETag `"snapshot-<UUID>"`；重新生成或切换编码时不同 |
+  | `X-Snapshot-Id` | 固定传输表示的 UUID，客户端应作为不透明标识保存 |
+  | `Accept-Ranges` | `bytes`；续传偏移是实际传输表示的字节位置 |
+  | `Content-Range` | 206 时为 `bytes <start>-<end>/<whole-length>`；416 时为 `bytes */<whole-length>` |
   | `X-Library-Id` / `X-Library-Revision` | 快照所属的库和 **生成它所依据的 revision**（已有头，名称不变）；快照内容不旧于该 revision |
   | `X-Schema-Version` | 快照文件自身的 `user_version`（当前服务端为 `5`；客户端接受 `3..=5`，见 §3.1） |
   | `Vary` | 总是 `accept-encoding`（含 304 和错误响应） |
   | `Content-Disposition` | `attachment; filename="audiolib-<library_id>-r<revision>.db"` |
   | `Cache-Control` | `no-store` |
 
-- `If-None-Match`：与当前 revision、当前编码的 ETag 匹配时返回 **304**（带 `ETag`、`X-Library-Id`、`X-Library-Revision`，不生成快照），客户端已有该 revision 时可用它省掉下载。
+- `GET /library/snapshot?snapshot_id=<UUID>` 只访问该固定表示，不准备或替换成最新快照；仍须鉴权，且对象必须属于当前库。支持单区间 `Range` 和强 `If-Range`：命中返回 206，不匹配返回该对象完整 200，不可满足的范围返回 416。zstd 范围针对压缩字节，不能将后缀单独解压。对象编码不被接受返回 406 `SNAPSHOT_ENCODING_NOT_ACCEPTABLE`，不存在或失效返回 410 `SNAPSHOT_EXPIRED`。
+- `If-None-Match` 与所选不可变表示的 ETag 匹配时返回 **304**；不能仅凭相同 revision 推定重新生成的字节相同。
+- **续传保留上限**：进程内最多 4 个表示、合计 64 GiB、空闲最多 24 小时；容量压力按 LRU 提前淘汰无活动响应的对象。活动响应持租约，不被淘汰；无法容纳新对象时返回 507。仅保留实际传输表示，原始备份与压缩暂存另占磁盘空间。服务端重启会使旧 ID 失效；客户端须提示后安全重新下载，绝不能混接两个对象。
 - 并发：同时进行中的快照响应（准备 + 发送）最多 2 个，超出返回 409 `BUSY`，客户端稍后重试。
 - **磁盘空间检查**：生成原始快照前按库文件大小（含 WAL）、生成 zstd 副本前按原始大小的 1/8（实测约 6–7 %）检查 `snapshot_dir`（默认系统临时目录）所在卷的剩余空间，另留 max(64 MiB, 2 %) 余量；不足时在写任何字节前返回 **507 `INSUFFICIENT_STORAGE`**（磁盘写到一半满了同样映射为 507）。无法取得剩余空间的平台（非 Unix）跳过检查。`backup_library`（桌面端备份）使用同一检查。
-- **准备在后台进行**：快照（及 zstd 副本）的准备在独立的后台线程里做，不绑定发起它的请求（每种编码单飞）。请求最多等 `snapshot_wait_secs`（服务端配置，1..=3600，默认 90，须小于客户端 120 秒的响应头超时）；超时返回 **503 `BUSY` + `Retry-After: 5`**，准备继续，客户端重试时加入同一次准备（或直接拿到已完成的快照），不会再拷贝一份。客户端对 503 `BUSY` 按 `Retry-After` 重试。
+- **准备在后台进行**：快照（及 zstd 副本）的准备在独立的后台线程里做，不绑定发起它的请求（每种编码单飞）。请求最多等 `snapshot_wait_secs`（服务端配置，1..=3600，默认 90，常规部署须小于客户端 240 秒的响应头超时）；超时返回 **503 `BUSY` + `Retry-After: 5`**，准备继续，客户端重试时加入同一次准备（或直接拿到已完成的快照），不会再拷贝一份。客户端对 503 `BUSY` 按 `Retry-After` 重试。
 - 匿名实际库的历史实测（记录数、容量及存储位置不公开）：首次生成 1.9 秒（旧实现每 256 页停 10 ms，需 11–12 秒），缓存命中首字节 < 1 ms；zstd 压缩 0.19 秒，压缩后为原大小的 6.7%，客户端解压约 0.2 秒。压缩耗时对比：zstd -9 为 0.6 秒、-19 为 21 秒，gzip -6 为 4 秒。准备期间 `/library` 照常（实测 36 ms），写入不被阻塞。磁盘占用：缓存的原始 + 压缩版各一份，revision 切换时短暂可能多一份。这些时间仅描述该次测量，不保证其他库的准备时间。
 - 进程崩溃/被杀后遗留的 `audiolib-snapshot-*` 临时目录在服务端下次启动时清理（配置了 `snapshot_dir` 时清理其中所有此类目录；用系统临时目录时只清理 24 小时以前的，避免误删其他实例正在用的）。因此**不要让两个服务端实例共用同一个 `snapshot_dir`**。
 

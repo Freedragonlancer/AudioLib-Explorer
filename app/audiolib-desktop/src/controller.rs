@@ -591,7 +591,7 @@ pub struct Controller {
     /// Registered play workers include their reply and listener/cache settlement.
     remote_plays: Mutex<remote_mode::RemotePlayState>,
     remote_plays_wake: Condvar,
-    remote_cancel: Mutex<Arc<AtomicBool>>,
+    remote_cancel: Mutex<audiolib_remote::SyncControl>,
     remote_audio_cancel: Mutex<Arc<AtomicBool>>,
     /// The selected record whose Load has not been confirmed. Local or server
     /// cancellation may leave the previous record in the engine, so Play reloads
@@ -773,7 +773,7 @@ impl Controller {
             remote_close_grace: Mutex::new(REMOTE_CLOSE_GRACE),
             remote_plays: Mutex::new(remote_mode::RemotePlayState::default()),
             remote_plays_wake: Condvar::new(),
-            remote_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            remote_cancel: Mutex::new(audiolib_remote::SyncControl::new()),
             remote_audio_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             audio_reload: Mutex::new(None),
             remote_stream: Mutex::new(None),
@@ -3925,7 +3925,14 @@ impl Controller {
         if self.shutdown.load(Ordering::Acquire) {
             return;
         }
-        if self.library_busy.load(Ordering::Acquire) || self.source_changing.load(Ordering::Acquire)
+        // The source transition already drained its old-provider drafts before
+        // saving the new credentials. A pending network sync can be cancelled
+        // immediately; recapturing those drafts here would retarget their writes.
+        let pending_source_sync = ui.get_ds_source_syncing()
+            && self.source_changing.load(Ordering::Acquire)
+            && !self.library_busy.load(Ordering::Acquire);
+        if self.library_busy.load(Ordering::Acquire)
+            || (self.source_changing.load(Ordering::Acquire) && !pending_source_sync)
         {
             self.close_after_operation.store(true, Ordering::Release);
             return;
@@ -3934,14 +3941,19 @@ impl Controller {
             return;
         }
         *self.audio_table.lock().unwrap() = table_preferences(ui);
-        self.capture_metadata(ui);
-        let barrier = match self.enqueue_transition_metadata() {
-            Ok(sequence) => sequence,
-            Err(error) => {
-                ui.set_status(error.into());
-                return;
+        let barrier = if pending_source_sync {
+            self.metadata.lock().unwrap().sequence
+        } else {
+            self.capture_metadata(ui);
+            match self.enqueue_transition_metadata() {
+                Ok(sequence) => sequence,
+                Err(error) => {
+                    ui.set_status(error.into());
+                    return;
+                }
             }
         };
+        self.close_after_operation.store(false, Ordering::Release);
         *self.close_completion.lock().unwrap() = None;
         {
             let _plays = self.remote_plays.lock().unwrap();
@@ -5703,6 +5715,8 @@ fn resume_after_failed_close(ui: &AppWindow, error: &str, scanning: bool) {
     // The close worker also drains cancelled remote work on a save failure.
     // Its obsolete/rejected publication cannot restore these indicators.
     ui.set_ds_syncing(false);
+    ui.set_ds_sync_pausing(false);
+    ui.set_ds_sync_can_pause(false);
     ui.set_ds_progress(0.0);
     ui.set_ds_decompression_info("".into());
     ui.set_ds_decompression_progress(-1.0);

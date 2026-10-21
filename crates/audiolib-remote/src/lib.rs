@@ -45,9 +45,12 @@ mod mapping;
 mod poll;
 mod probe;
 mod profiles;
+#[cfg(test)]
+mod resume_regression_tests;
 mod roots;
 mod route;
 mod secrets;
+mod snapshot_transfer;
 mod stream;
 mod sync;
 #[cfg(test)]
@@ -104,14 +107,15 @@ pub use route::{
 pub use secrets::{
     ProfileSecret, RemoteSecrets, load_profile_secrets, load_secrets, save_secrets, secrets_path,
 };
+pub use snapshot_transfer::{PendingSync, SyncControl, SyncOptions};
 pub use stream::{
     DEFAULT_MEMORY_CACHE_BYTES, FIRST_BYTE_TIMEOUT, MIN_MEMORY_CACHE_BYTES, MemoryCache,
     MemoryReader, MemoryStream, PreviewFormat, READ_STALL_TIMEOUT, SEEK_JUMP_BYTES, STREAM_RETRIES,
     SourceAuth, StreamProbe, StreamSource, WAKING_HINT_AFTER, WebDavAuth, probe_stream,
 };
 pub use sync::{
-    CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress, refresh_cached_roots,
-    sync_library, validate_snapshot,
+    CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress, SyncRunOutcome,
+    refresh_cached_roots, sync_library, sync_library_with_options, validate_snapshot,
 };
 pub use tls::{TRUST_STORE, TlsInfo};
 pub use util::encode_path_segment;

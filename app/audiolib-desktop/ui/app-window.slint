@@ -651,7 +651,15 @@ export component AppWindow inherits Window {
     in property <string> ds-sync-info: "";
     in property <bool> ds-testing: false;
     in property <bool> ds-syncing: false;
+    in property <bool> ds-sync-pausing: false;
+    in property <bool> ds-sync-paused: false;
+    in property <bool> ds-sync-pending: false;
+    in property <bool> ds-sync-can-pause: false;
     in property <bool> ds-applying: false;
+    // A source selection has been saved and is waiting for its server snapshot.
+    // Local escape closes before provider opening or settings rollback begins.
+    in property <bool> ds-source-syncing: false;
+    private property <bool> sm-local-escape: root.ds-source-syncing && !root.closing;
     in property <float> ds-progress: 0;
     in property <string> ds-decompression-info: "";
     in property <float> ds-decompression-progress: -1;
@@ -677,6 +685,8 @@ export component AppWindow inherits Window {
     callback data-source-use-public-url();
     callback data-source-test-requested();
     callback data-source-sync-requested();
+    callback data-source-sync-pause-requested();
+    callback data-source-sync-restart-requested();
     callback remote-write-refused();
     // Unified library manager with local and server settings; shown by
     // library-visible. Row 0 of sm-sources is the local library, then one row per server
@@ -846,7 +856,7 @@ export component AppWindow inherits Window {
     }
     // Select a source row (click, Up/Down, 添加服务器): unsaved 连接 edits prompt first.
     public function sm-select-row(index: int) {
-        if index == root.sm-selected || root.ds-applying || root.library-busy || root.sm-manage-busy {
+        if index == root.sm-selected || ((root.ds-applying || root.library-busy) && !(index == 0 && root.sm-local-escape)) || root.sm-manage-busy {
             return;
         }
         if root.ds-dirty && root.sm-server {
@@ -873,6 +883,12 @@ export component AppWindow inherits Window {
     }
     public function sm-step(down: bool) {
         if root.sm-pending-select != -2 {
+            return;
+        }
+        if root.sm-local-escape {
+            if !down && root.sm-selected != 0 {
+                root.sm-select-row(0);
+            }
             return;
         }
         if root.sm-selected < 0 {
@@ -1273,7 +1289,7 @@ export component AppWindow inherits Window {
         if root.remote-mode && root.remote-notice != "": Rectangle { height: 34px; background: Theme.panel; border-radius: 6px; border-width: 1px; border-color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning;
             HorizontalLayout { padding-left: 10px; padding-right: 2px; padding-top: 2px; padding-bottom: 2px; spacing: 8px;
                 Text { horizontal-stretch: 1; min-width: 0px; text: root.remote-notice; color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning; font-size: 11px; vertical-alignment: center; overflow: elide; }
-                if root.remote-notice-kind != 0: Action { width: 96px; primary: root.remote-notice-kind == 1; enabled: root.menu-ready && !root.ds-syncing; label: root.remote-notice-kind == 1 ? (root.chinese ? "同步" : "Sync") : root.remote-notice-kind == 3 ? (root.chinese ? "设置…" : "Settings…") : (root.chinese ? "立即重试" : "Retry now"); clicked => { root.remote-notice-action(); } }
+                if root.remote-notice-kind != 0: Action { width: 96px; primary: root.remote-notice-kind == 1; enabled: root.menu-ready && !root.ds-syncing; label: root.remote-notice-kind == 1 ? (root.ds-sync-paused ? (root.chinese ? "继续同步" : "Continue") : (root.chinese ? "同步" : "Sync")) : root.remote-notice-kind == 3 ? (root.chinese ? "设置…" : "Settings…") : (root.chinese ? "立即重试" : "Retry now"); clicked => { root.remote-notice-action(); } }
                 Action { width: 30px; subtle: true; label: "×"; accessible-label: root.chinese ? "关闭提示" : "Dismiss notice"; clicked => { root.remote-notice-dismissed(); } }
             }
         }
@@ -1935,7 +1951,7 @@ export component AppWindow inherits Window {
         property <bool> reverse-wrap: false;
         capture-key-pressed(event) => {
             if event.text == Key.Escape { root.dismiss-modal(); return accept; }
-            if root.confirmation-visible || root.library-busy || root.closing { return accept; }
+            if root.confirmation-visible || (root.library-busy && !root.sm-local-escape) || root.closing { return accept; }
             if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && library-close-action.has-focus {
                 self.reverse-wrap = true;
                 library-tab-end.focus();
@@ -1960,7 +1976,7 @@ export component AppWindow inherits Window {
                     library-close-action := Action { width: 60px; enabled: !root.library-busy && !root.ds-applying && !root.sm-manage-busy; label: root.chinese ? "关闭" : "Close"; clicked => { root.close-library-manager(); } }
                 }
                 HorizontalLayout { height: 34px; spacing: 8px;
-                    Action { width: 160px; active: !root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "本地设置" : "Local settings"; clicked => { root.sm-select-row(0); } }
+                    Action { width: 160px; active: !root.sm-server; enabled: (!root.ds-applying && !root.library-busy) || root.sm-local-escape; label: root.chinese ? "本地设置" : "Local settings"; clicked => { root.sm-select-row(0); } }
                     Action { width: 160px; active: root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "服务器设置" : "Server settings"; clicked => { if !root.sm-server { root.sm-select-row(root.sm-sources.length > 1 ? 1 : -1); } } }
                     Rectangle { horizontal-stretch: 1; }
                 }
@@ -1991,7 +2007,7 @@ export component AppWindow inherits Window {
                                             Text { text: source.subtitle; color: Theme.muted; font-size: 10px; overflow: elide; }
                                             Text { text: source.active ? ((root.chinese ? "当前数据源" : "Active") + (source.status != "" ? " · " + source.status : "")) : source.status; color: source.status-kind == 3 ? Theme.warning : (source.status-kind == 1 ? Theme.accent : Theme.dim); font-size: 10px; overflow: elide; }
                                         }
-                                        source-hit := TouchArea { enabled: !root.ds-applying && !root.library-busy; mouse-cursor: pointer; clicked => { source-keys.focus(); root.sm-select-row(index); } }
+                                        source-hit := TouchArea { enabled: (!root.ds-applying && !root.library-busy) || (index == 0 && root.sm-local-escape); mouse-cursor: pointer; clicked => { source-keys.focus(); root.sm-select-row(index); } }
                                     }
                                     if root.sm-new: Rectangle { height: 40px; border-radius: 5px; background: Theme.selected;
                                         Text { x: 8px; height: parent.height; vertical-alignment: center; text: root.chinese ? "＋ 新服务器（未保存）" : "+ New server (unsaved)"; color: Theme.ink; font-size: 12px; }
@@ -2022,7 +2038,7 @@ export component AppWindow inherits Window {
                     VerticalLayout { horizontal-stretch: 1; spacing: 8px;
                         HorizontalLayout { height: 32px; spacing: 8px;
                             Text { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; color: Theme.ink; font-size: 15px; font-weight: 600; text: root.sm-title; }
-                            if root.library-visible && !root.sm-new && !root.sm-active: Action { width: 150px; primary: true; enabled: !root.ds-applying && !root.library-busy && !root.ds-syncing; label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
+                            if root.library-visible && !root.sm-new && !root.sm-active: Action { width: 150px; primary: true; enabled: (!root.ds-applying && !root.library-busy) || (!root.sm-server && root.sm-local-escape); label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
                         }
                         if root.library-visible && root.sm-server: HorizontalLayout { height: 30px; spacing: 6px;
                             Action { width: 96px; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接" : "Connection"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
@@ -2036,8 +2052,10 @@ export component AppWindow inherits Window {
                             Text { height: 16px; vertical-alignment: center; overflow: elide; color: Theme.ink; font-size: 11px; text: root.sm-cache-summary; }
                             if root.sm-cache-dir != "": Text { height: 14px; vertical-alignment: center; overflow: elide; color: Theme.dim; font-size: 10px; text: root.sm-cache-dir; }
                             HorizontalLayout { height: 28px; spacing: 8px;
-                                if root.sm-active: Action { width: 96px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
-                                if root.sm-active && root.ds-syncing: Rectangle { width: 80px; height: 6px; y: (parent.height - self.height) / 2; background: Theme.border; border-radius: 3px;
+                                if root.sm-active: Action { width: 110px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-sync-pending ? (root.chinese ? "继续同步" : "Continue sync") : root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
+                                if root.sm-active && root.ds-syncing: Action { width: 110px; enabled: root.ds-sync-can-pause && !root.ds-sync-pausing && !root.closing; label: root.ds-sync-pausing ? (root.chinese ? "正在暂停…" : "Pausing…") : (root.chinese ? "暂停同步" : "Pause sync"); clicked => { root.data-source-sync-pause-requested(); } }
+                                if root.sm-active && root.ds-sync-pending && !root.ds-syncing: Action { width: 130px; enabled: !root.ds-applying && !root.library-busy && !root.closing; label: root.chinese ? "重新下载" : "Restart download"; clicked => { root.data-source-sync-restart-requested(); } }
+                                if root.sm-active && (root.ds-syncing || root.ds-sync-pending): Rectangle { width: 80px; height: 6px; y: (parent.height - self.height) / 2; background: Theme.border; border-radius: 3px;
                                     Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                                 }
                                 if root.sm-active: Label { horizontal-stretch: 1; vertical-alignment: center; font-size: 11px; overflow: elide; text: root.ds-syncing && root.ds-elapsed != "" ? root.ds-sync-info + " · " + root.ds-elapsed : root.ds-sync-info; }
@@ -2303,7 +2321,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 Label { wrap: word-wrap; font-size: 11px; text: root.ds-sync-info; }
-                                if root.ds-syncing: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
+                                if root.ds-syncing || root.ds-sync-pending: Rectangle { height: 6px; background: Theme.border; border-radius: 3px;
                                     Rectangle { x: root.ds-progress >= 0 ? 0px : (parent.width - self.width) * root.ds-motion; width: root.ds-progress >= 0 ? parent.width * clamp(root.ds-progress, 0, 1) : parent.width * 0.3; height: parent.height; background: Theme.accent; border-radius: 3px; }
                                 }
                                 if root.ds-syncing && root.ds-decompression-info != "": VerticalLayout { vertical-stretch: 0; spacing: 6px;
@@ -2316,7 +2334,9 @@ export component AppWindow inherits Window {
                                 if root.ds-message != "": Label { wrap: word-wrap; font-size: 11px; color: Theme.warning; text: root.ds-message; }
                                 HorizontalLayout { height: 33px; spacing: 8px;
                                     Action { width: 110px; enabled: !root.ds-testing && !root.ds-applying; label: root.ds-testing ? (root.chinese ? "测试中…" : "Testing…") : (root.chinese ? "测试连接" : "Test connection"); clicked => { root.data-source-test-requested(); } }
-                                    if root.sm-active: Action { width: 110px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
+                                    if root.sm-active: Action { width: 110px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-sync-pending ? (root.chinese ? "继续同步" : "Continue sync") : root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
+                                    if root.sm-active && root.ds-syncing: Action { width: 110px; enabled: root.ds-sync-can-pause && !root.ds-sync-pausing && !root.closing; label: root.ds-sync-pausing ? (root.chinese ? "正在暂停…" : "Pausing…") : (root.chinese ? "暂停同步" : "Pause sync"); clicked => { root.data-source-sync-pause-requested(); } }
+                                    if root.sm-active && root.ds-sync-pending && !root.ds-syncing: Action { width: 130px; enabled: !root.ds-applying && !root.library-busy && !root.closing; label: root.chinese ? "重新下载" : "Restart download"; clicked => { root.data-source-sync-restart-requested(); } }
                                     Rectangle { horizontal-stretch: 1; }
                                     Action { width: 84px; enabled: root.sm-pending-select == -2 && root.ds-dirty && !root.ds-applying; label: root.chinese ? "还原" : "Revert"; clicked => { root.sm-revert-requested(); } }
                                     Action { width: 132px; primary: true; enabled: root.sm-pending-select == -2 && !root.ds-applying && !root.library-busy; label: root.ds-applying ? (root.chinese ? "保存中…" : "Saving…") : (root.sm-new ? (root.chinese ? "保存为新服务器" : "Save new server") : (root.chinese ? "保存" : "Save")); clicked => { root.sm-save-requested(); } }

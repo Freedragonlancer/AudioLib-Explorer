@@ -63,6 +63,9 @@ token_env = "AUDIOLIB_SERVER_TOKEN"
 revision_poll_secs = 3
 
 # Optional directory for temporary GET /library/snapshot files (default: system temp dir).
+# Sent representations are retained in this process for 24 idle hours, within 4 entries /
+# 64 GiB; active transfers are protected. Restarting the server invalidates snapshot ids.
+# This retained-payload budget excludes current preparation and compression staging files.
 # snapshot_dir = "/var/lib/audiolib/tmp"
 # A snapshot that must first be prepared (a million-file library: 30-60 s) is waited for
 # at most snapshot_wait_secs (1..=3600, default 90; keep it below client/proxy header

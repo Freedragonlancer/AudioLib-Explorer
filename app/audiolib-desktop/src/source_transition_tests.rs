@@ -179,7 +179,7 @@ fn selected(controller: &Controller, ui: &AppWindow, notes: &str) {
     ui.set_metadata_dirty(true);
 }
 
-fn indexed_sounds(root: &Path) -> (Arc<SqliteProvider>, AudioFile) {
+pub(super) fn indexed_sounds(root: &Path) -> (Arc<SqliteProvider>, AudioFile) {
     let sounds = root.join("sounds");
     std::fs::create_dir_all(&sounds).unwrap();
     let mut wav = Vec::new();
@@ -1254,6 +1254,25 @@ fn cached_library(config: &AppConfig, name: &str, server_url: &str) -> CacheStat
     state
 }
 
+fn reject_cancelled_request(socket: &mut std::net::TcpStream, body: &str) {
+    if let Err(error) = write!(
+        socket,
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ) {
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::NotConnected
+            ),
+            "send response after client cancellation: {error}"
+        );
+    }
+}
+
 #[test]
 fn gui_defers_server_cache_to_manager_and_close_drains_cache_worker() {
     isolated("child_deferred_server_cache");
@@ -1382,6 +1401,382 @@ fn rejected_snapshot_cache(unsupported: bool) {
 #[test]
 fn cache_provider_open_keeps_manager_progress_until_the_swap_finishes() {
     isolated("child_cache_provider_progress");
+}
+
+#[test]
+fn local_source_switch_recovers_from_unfinished_or_failed_server_startup_sync() {
+    isolated("child_local_switch_during_startup_sync");
+    isolated("child_local_switch_after_failed_startup_sync");
+}
+
+#[test]
+#[ignore = "isolated local source recovery during a held server request"]
+fn child_local_switch_during_startup_sync() {
+    local_switch_from_startup_sync(false);
+}
+
+#[test]
+#[ignore = "isolated local source recovery after a failed server request"]
+fn child_local_switch_after_failed_startup_sync() {
+    local_switch_from_startup_sync(true);
+}
+
+fn local_switch_from_startup_sync(failed: bool) {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let (local, file) = indexed_sounds(&root.join("local"));
+    let mut config = configuration(&root.join("preferences"));
+    config.paths.database = local.database_path().into();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    config.data_source.mode = DataSourceMode::Server;
+    config.data_source.server_url = format!("http://{}", listener.local_addr().unwrap());
+    config.data_source.poll_interval_secs = 0;
+    config.data_source.migrate_profiles();
+    config.save().unwrap();
+    let (entered, request_entered) = std::sync::mpsc::sync_channel(1);
+    let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let mut socket = accept(&listener);
+        let request = request(&mut socket);
+        assert!(request.starts_with("GET /api/v1/health"), "{request}");
+        entered.send(()).unwrap();
+        wait_release.recv_timeout(Duration::from_secs(15)).unwrap();
+        reject_cancelled_request(
+            &mut socket,
+            r#"{"error_code":"FORBIDDEN","message":"held startup sync rejected"}"#,
+        );
+    });
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    let (provider, startup) = crate::startup::show_while_opening(&ui, config.clone())
+        .unwrap()
+        .unwrap();
+    assert!(startup.as_ref().unwrap().state.is_none());
+    assert_ne!(provider.database_path(), local.database_path());
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let controller = Controller::new_with_source(
+        &ui,
+        provider,
+        engine.handle(),
+        config.clone(),
+        playback,
+        startup,
+    );
+    request_entered
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert!(ui.get_library_visible() && ui.get_ds_syncing());
+    assert!(controller.remote.lock().unwrap().state.is_none());
+    let old_cancel = controller.remote_cancel.lock().unwrap().clone();
+    let generation = controller.remote_generation.load(Ordering::Acquire);
+    let release = std::rc::Rc::new(std::cell::RefCell::new(Some(release)));
+    if failed {
+        release.borrow_mut().take().unwrap().send(()).unwrap();
+    }
+    let requested = std::rc::Rc::new(std::cell::Cell::new(false));
+    let switched = std::rc::Rc::new(std::cell::Cell::new(false));
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    let expected_path = local.database_path().to_path_buf();
+    run_until(&ui, move || {
+        let ui = weak.upgrade().unwrap();
+        if !requested.get() {
+            if failed && (c.remote_busy.load(Ordering::Acquire) || ui.get_ds_syncing()) {
+                return false;
+            }
+            if failed {
+                assert!(c.remote.lock().unwrap().last_error.is_some());
+            } else {
+                assert!(c.remote_busy.load(Ordering::Acquire));
+                assert!(ui.get_ds_syncing());
+                // Exercise all cancellation display fields, including a download or
+                // decompression update queued by a still-running sync.
+                ui.set_ds_progress(0.4);
+                ui.set_ds_decompression_info("Old server snapshot".into());
+                ui.set_ds_decompression_progress(0.5);
+            }
+            crate::ui_tests::click_label(&ui, "Local settings");
+            assert_eq!(ui.get_sm_selected(), 0);
+            crate::ui_tests::click_label(&ui, "Switch to this source");
+            assert!(old_cancel.cancellation().load(Ordering::Acquire));
+            assert!(c.remote_generation.load(Ordering::Acquire) > generation);
+            assert!(!ui.get_ds_syncing());
+            assert_eq!(ui.get_ds_progress(), 0.0);
+            assert_eq!(ui.get_ds_decompression_info(), "");
+            assert_eq!(ui.get_ds_decompression_progress(), -1.0);
+            requested.set(true);
+            return false;
+        }
+        if !c.available() || c.remote_read_only() || c.provider().database_path() != expected_path {
+            return false;
+        }
+        if !switched.get() {
+            assert_eq!(
+                c.config.lock().unwrap().data_source.active_source(),
+                ActiveSource::Local
+            );
+            if !failed {
+                // Local activation must finish before this server response is
+                // released, even if cancellation already drained the HTTP worker.
+                ui.set_ds_message("Local choice remains active".into());
+                release.borrow_mut().take().unwrap().send(()).unwrap();
+            }
+            switched.set(true);
+        }
+        !c.remote_busy.load(Ordering::Acquire)
+            && c.remote_plays.lock().unwrap().publication_gates == 0
+    });
+    server.join().unwrap();
+    assert!(!controller.remote_read_only());
+    assert!(controller.remote.lock().unwrap().state.is_none());
+    assert!(!ui.get_ds_syncing());
+    assert!(!ui.get_ds_applying());
+    if !failed {
+        assert_eq!(ui.get_ds_message(), "Local choice remains active");
+    }
+    assert_eq!(
+        AppConfig::load_in(root.join("preferences"))
+            .unwrap()
+            .data_source
+            .active_source(),
+        ActiveSource::Local
+    );
+    let results = controller
+        .provider()
+        .search(&SearchRequest {
+            query: "metal".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .results;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, file.id);
+    assert_eq!(results[0].file_path, file.file_path);
+    assert!(RemoteCache::new(&config.data_root()).active().is_none());
+    controller.shutdown();
+    ui.hide().unwrap();
+}
+
+#[test]
+fn local_source_switch_supersedes_a_pending_explicit_server_activation() {
+    isolated("child_local_switch_during_server_activation");
+}
+
+#[test]
+#[ignore = "isolated local recovery from an explicit server activation"]
+fn child_local_switch_during_server_activation() {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let (local, file) = indexed_sounds(&root.join("local"));
+    let mut config = configuration(&root.join("preferences"));
+    config.paths.database = local.database_path().into();
+    config.data_source.poll_interval_secs = 0;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    config.data_source.profiles = vec![ServerProfile {
+        id: "pending".into(),
+        name: "Pending server".into(),
+        server_url: format!("http://{}", listener.local_addr().unwrap()),
+        ..Default::default()
+    }];
+    config.save().unwrap();
+    let (entered, request_entered) = std::sync::mpsc::sync_channel(1);
+    let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let mut socket = accept(&listener);
+        assert!(request(&mut socket).starts_with("GET /api/v1/health"));
+        entered.send(()).unwrap();
+        wait_release.recv_timeout(Duration::from_secs(15)).unwrap();
+        reject_cancelled_request(
+            &mut socket,
+            r#"{"error_code":"FORBIDDEN","message":"superseded server activation"}"#,
+        );
+    });
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    let controller = Controller::new(&ui, local.clone(), engine.handle(), config, playback);
+    *controller.selected.lock().unwrap() = Some(file.clone());
+    present_file(&ui, &file);
+    ui.set_edit_notes("Keep the local draft before switching".into());
+    ui.set_metadata_dirty(true);
+    ui.show().unwrap();
+    ui.invoke_open_library(0);
+    crate::ui_tests::click_label(&ui, "Server settings");
+    crate::ui_tests::click_label(&ui, "Switch to this source");
+    assert!(controller.source_changing.load(Ordering::Acquire));
+    let requested = std::rc::Rc::new(std::cell::Cell::new(false));
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    run_until(&ui, move || {
+        let ui = weak.upgrade().unwrap();
+        if !requested.get() {
+            match request_entered.try_recv() {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                Err(error) => panic!("server activation request: {error}"),
+            }
+            assert!(ui.get_ds_source_syncing());
+            assert!(ui.get_ds_applying() && ui.get_library_busy());
+            assert!(c.source_changing.load(Ordering::Acquire));
+            assert!(!c.remote_read_only());
+            assert_eq!(c.metadata.lock().unwrap().sequence, 1);
+            assert_eq!(c.metadata.lock().unwrap().completed, 1);
+            assert_eq!(
+                c.config.lock().unwrap().data_source.active_source(),
+                ActiveSource::Profile("pending".into())
+            );
+            let cancel = c.remote_cancel.lock().unwrap().clone();
+            crate::ui_tests::click_label(&ui, "Local settings");
+            assert_eq!(ui.get_sm_selected(), 0);
+            crate::ui_tests::click_label(&ui, "Switch to this source");
+            assert!(cancel.cancellation().load(Ordering::Acquire));
+            assert!(!ui.get_ds_source_syncing());
+            assert!(!ui.get_ds_syncing());
+            requested.set(true);
+            return false;
+        }
+        if !c.available() {
+            return false;
+        }
+        assert_eq!(
+            c.config.lock().unwrap().data_source.active_source(),
+            ActiveSource::Local
+        );
+        assert!(!c.remote_read_only());
+        if !released.get() {
+            assert_eq!(c.metadata.lock().unwrap().sequence, 1);
+            ui.set_ds_message("Local activation superseded server".into());
+            release.send(()).unwrap();
+            released.set(true);
+        }
+        !c.remote_busy.load(Ordering::Acquire)
+            && c.remote_plays.lock().unwrap().publication_gates == 0
+    });
+    server.join().unwrap();
+    assert!(Arc::ptr_eq(&local, &controller.provider()));
+    assert_eq!(ui.get_ds_message(), "Local activation superseded server");
+    assert_eq!(
+        AppConfig::load_in(root.join("preferences"))
+            .unwrap()
+            .data_source
+            .active_source(),
+        ActiveSource::Local
+    );
+    let result = local
+        .search(&SearchRequest {
+            query: "metal".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        result.results[0].notes,
+        "Keep the local draft before switching"
+    );
+    assert!(controller.remote.lock().unwrap().source_rollback.is_none());
+    controller.shutdown();
+    ui.hide().unwrap();
+}
+
+#[test]
+fn local_source_switch_invalidates_a_server_sync_waiting_for_an_old_worker() {
+    isolated("child_local_switch_during_sync_retry");
+}
+
+#[test]
+#[ignore = "isolated local recovery before a delayed server sync retry"]
+fn child_local_switch_during_sync_retry() {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let (local, _) = indexed_sounds(&root.join("local"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut config = configuration(&root.join("preferences"));
+    config.paths.database = local.database_path().into();
+    config.data_source.poll_interval_secs = 0;
+    config.data_source.profiles = vec![ServerProfile {
+        id: "waiting".into(),
+        name: "Waiting server".into(),
+        server_url: format!("http://{}", listener.local_addr().unwrap()),
+        ..Default::default()
+    }];
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    let controller = Controller::new(&ui, local.clone(), engine.handle(), config, playback);
+    // An older sync owns this flag until its worker drains. The selected server
+    // must wait instead of starting another sync against the shared cache.
+    controller.remote_busy.store(true, Ordering::Release);
+    ui.show().unwrap();
+    ui.invoke_open_library(0);
+    crate::ui_tests::click_label(&ui, "Server settings");
+    crate::ui_tests::click_label(&ui, "Switch to this source");
+    let requested = std::rc::Rc::new(std::cell::Cell::new(false));
+    let released = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    run_until(&ui, move || {
+        let ui = weak.upgrade().unwrap();
+        if !requested.get() {
+            if !ui.get_ds_source_syncing() {
+                return false;
+            }
+            assert_eq!(
+                c.config.lock().unwrap().data_source.active_source(),
+                ActiveSource::Profile("waiting".into())
+            );
+            crate::ui_tests::click_label(&ui, "Local settings");
+            crate::ui_tests::click_label(&ui, "Switch to this source");
+            assert!(!ui.get_ds_source_syncing());
+            requested.set(true);
+            return false;
+        }
+        if !c.available() {
+            return false;
+        }
+        if released.get().is_none() {
+            assert_eq!(
+                c.config.lock().unwrap().data_source.active_source(),
+                ActiveSource::Local
+            );
+            assert!(c.remote_busy.load(Ordering::Acquire));
+            c.remote_busy.store(false, Ordering::Release);
+            released.set(Some(Instant::now()));
+        }
+        // Allow the retry's 50ms polling interval and queued UI callback to run.
+        released
+            .get()
+            .is_some_and(|time| time.elapsed() >= Duration::from_millis(200))
+    });
+    assert!(!ui.get_ds_syncing());
+    assert!(!ui.get_ds_source_syncing());
+    assert!(!controller.remote_busy.load(Ordering::Acquire));
+    assert!(Arc::ptr_eq(&local, &controller.provider()));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert_eq!(
+        AppConfig::load_in(root.join("preferences"))
+            .unwrap()
+            .data_source
+            .active_source(),
+        ActiveSource::Local
+    );
+    controller.shutdown();
+    ui.hide().unwrap();
 }
 
 #[test]
@@ -1571,6 +1966,198 @@ fn startup_refuses_another_servers_active_snapshot_and_accepts_effective_same_ur
 #[test]
 fn invalid_new_snapshot_rolls_back_both_connection_and_active_cache_for_restart() {
     isolated("child_invalid_snapshot_rollback");
+}
+
+#[test]
+fn failed_local_escape_restores_cache_after_the_cancelled_sync_publishes() {
+    isolated("child_failed_local_escape_cache_rollback");
+}
+
+#[test]
+#[ignore = "isolated failed local recovery with a pending cache publication"]
+fn child_failed_local_escape_cache_rollback() {
+    failed_local_escape_cache_rollback(false);
+}
+
+#[test]
+fn close_during_failed_local_escape_uses_the_bounded_remote_cache_drain() {
+    isolated("child_close_during_failed_local_escape");
+}
+
+#[test]
+#[ignore = "isolated native close during a failed local recovery cache drain"]
+fn child_close_during_failed_local_escape() {
+    failed_local_escape_cache_rollback(true);
+}
+
+fn failed_local_escape_cache_rollback(close_during_rollback: bool) {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = root();
+    let mut config = configuration(&root.join("preferences"));
+    config.data_source.mode = DataSourceMode::Server;
+    config.data_source.server_url = "http://127.0.0.1:18790".into();
+    config.data_source.poll_interval_secs = 0;
+    config.data_source.active = Some("a".into());
+    config.data_source.profiles = vec![
+        ServerProfile {
+            id: "a".into(),
+            name: "Original server".into(),
+            server_url: config.data_source.server_url.clone(),
+            ..Default::default()
+        },
+        ServerProfile {
+            id: "b".into(),
+            name: "Pending server".into(),
+            server_url: "http://127.0.0.1:18791".into(),
+            ..Default::default()
+        },
+    ];
+    config.save().unwrap();
+    let state_a = cached_library(&config, "original", &config.data_source.server_url);
+    let state_b = cached_library(&config, "pending", "http://127.0.0.1:18791");
+    let cache = RemoteCache::new(&config.data_root());
+    cache.save_state(&state_a).unwrap();
+    // The path exists, so the local-source preflight accepts it, but opening it
+    // must fail without replacing the currently displayed server provider.
+    std::fs::write(&config.paths.database, b"invalid local SQLite library").unwrap();
+    let provider =
+        Arc::new(SqliteProvider::open_read_only(&cache.database_path(&state_a)).unwrap());
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+    let close_grace = Duration::from_millis(100);
+    *controller.remote_close_grace.lock().unwrap() = close_grace;
+    let close_controller = controller.clone();
+    let close_ui = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = close_ui.upgrade() {
+            close_controller.request_close(&ui);
+        }
+        slint::CloseRequestResponse::KeepWindowShown
+    });
+    controller.remote_mode.store(true, Ordering::Release);
+    controller.remote.lock().unwrap().state = Some(state_a.clone());
+    let barrier = controller.begin_source_change(&ui).unwrap();
+    controller.wait_transition_metadata(barrier).unwrap();
+    let mut pending = controller.config.lock().unwrap().data_source.clone();
+    let mut secrets = RemoteSecrets::default();
+    audiolib_remote::activate_source(
+        &mut pending,
+        &mut secrets,
+        &ActiveSource::Profile("b".into()),
+    )
+    .unwrap();
+    controller
+        .save_data_source(pending, secrets, false, true)
+        .unwrap();
+    // Model an old sync already inside its non-cancellable state-file write.
+    // Its final B publication happens only after the failed local handoff has
+    // entered rollback, and its busy ownership ends after that publication.
+    controller.remote_busy.store(true, Ordering::Release);
+    let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+    let old_cache = cache.clone();
+    let old_controller = controller.clone();
+    let publisher = std::thread::spawn(move || {
+        wait_release.recv_timeout(Duration::from_secs(8)).unwrap();
+        old_cache.save_state(&state_b).unwrap();
+        old_controller.remote_busy.store(false, Ordering::Release);
+    });
+    ui.set_ds_applying(true);
+    ui.set_ds_syncing(true);
+    ui.set_ds_source_syncing(true);
+    ui.show().unwrap();
+    ui.invoke_open_data_source();
+    crate::ui_tests::click_label(&ui, "Local settings");
+    crate::ui_tests::click_label(&ui, "Switch to this source");
+    let rollback_started = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let close_requested = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));
+    let requested = close_requested.clone();
+    let release_cache = release.clone();
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    run_until(&ui, move || {
+        if requested.get().is_some() {
+            // Let the ordinary close poll consume its bounded grace and quit the
+            // native event loop without releasing this synthetic cache worker.
+            assert!(c.remote_busy.load(Ordering::Acquire));
+            return false;
+        }
+        if !released.get() {
+            if c.remote.lock().unwrap().source_rollback.is_some() {
+                return false;
+            }
+            assert!(c.source_changing.load(Ordering::Acquire));
+            assert!(c.remote_busy.load(Ordering::Acquire));
+            assert!(
+                !c.available(),
+                "rollback finished before cache work drained"
+            );
+            if c.config.lock().unwrap().data_source.active_source()
+                != ActiveSource::Profile("a".into())
+            {
+                return false;
+            }
+            // Keep exercising the event loop while the synthetic publication is
+            // pending; rollback must retain its source gate throughout this gap.
+            let started = rollback_started.get().unwrap_or_else(|| {
+                let now = Instant::now();
+                rollback_started.set(Some(now));
+                now
+            });
+            if started.elapsed() < Duration::from_millis(200) {
+                return false;
+            }
+            if close_during_rollback {
+                requested.set(Some(Instant::now()));
+                weak.upgrade()
+                    .unwrap()
+                    .window()
+                    .dispatch_event(slint::platform::WindowEvent::CloseRequested);
+                assert!(c.close_after_operation.load(Ordering::Acquire));
+                return false;
+            }
+            release_cache.send(()).unwrap();
+            released.set(true);
+        }
+        !c.source_changing.load(Ordering::Acquire)
+    });
+    if close_during_rollback {
+        let elapsed = close_requested.get().unwrap().elapsed();
+        assert!(elapsed >= close_grace);
+        assert!(elapsed < Duration::from_secs(3), "close took {elapsed:?}");
+        assert!(!ui.window().is_visible());
+        assert!(controller.closing.load(Ordering::Acquire));
+        assert!(!controller.source_changing.load(Ordering::Acquire));
+        assert!(controller.remote_busy.load(Ordering::Acquire));
+        release.send(()).unwrap();
+    }
+    publisher.join().unwrap();
+    assert_eq!(controller.available(), !close_during_rollback);
+    assert!(controller.remote_read_only());
+    assert!(Arc::ptr_eq(&provider, &controller.provider()));
+    assert_eq!(cache.state(&state_a.library_id).unwrap(), state_a);
+    let persisted = AppConfig::load_in(controller.data_root()).unwrap();
+    assert_eq!(
+        persisted.data_source.active_source(),
+        ActiveSource::Profile("a".into())
+    );
+    let restarted = open_remote_startup(&persisted).unwrap();
+    if close_during_rollback {
+        // An exit during an unfinished cache publication can leave B active, but
+        // endpoint validation must reject it instead of opening B with A's URL.
+        assert!(restarted.state.is_none());
+    } else {
+        assert_eq!(cache.active().unwrap(), state_a);
+        assert_eq!(restarted.state.unwrap().library_id, state_a.library_id);
+    }
+    controller.shutdown();
+    ui.hide().unwrap();
 }
 
 #[test]

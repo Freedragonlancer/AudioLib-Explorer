@@ -1,5 +1,43 @@
 # Rust 验证报告
 
+## 远程数据库断点续传（2026-10-21，0.5.1 main 基线）
+
+本轮基于 `origin/main` 的 `c90c0fe3675480a5776431ecb1b756fbafd1b92f`，
+workspace 版本为 **0.5.1**，迭代位于 `codex/snapshot-resume-main` 工作树。
+保留 main 的 Waveform 管理、默认单击试听、键盘试听修复及 Metadata 保存发布顺序；
+旧 0.4.11 工作树及原有未提交修改没有被覆盖。下方旧构建结果是历史记录，不计入本轮验收。
+
+本轮实现固定快照 Range 续传、压缩字节持久断点、单解码器本地重放后惰性连接后缀、
+暂停/继续/重新下载、30 秒正文无数据重试，以及客户端关闭后的恢复。
+缓存发布与清理共用 OS 锁；清理确认精确数据库文件，迟到事件不能删除新断点或暂停意图。
+Windows 回归发现并修复了 CloseHandle 后锁释放延迟，两个 lease 均显式 unlock。
+服务端仍使用 schema 5，快照支持 3–5；没有修改业务库 schema、工作库或源 WAV。
+
+Rust 1.97.1 MSVC 下，格式检查与四个受影响包的严格 all-targets Clippy 通过。
+定向验证为：远程客户端 **203 passed**；服务端单元 **110 passed / 1 ignored**、
+API **65 passed**、关闭清理 **6 passed**；桌面暂停/发布窗口 4、传输进度 6、
+切源 23、单击偏好 1、启动管理器判断 2，共 **36 个父层测试 passed**；
+CLI identity **5 passed**；数据库 feature revision **9 passed**。
+隔离 Slint 子进程 helper 在普通列表中标为 ignored，由其父测试显式执行。
+未重复无关 workspace/ASIO 测试、百万条基准、播放或真实 ACL 回归。
+
+使用校验过的 Steinberg ASIO SDK 2.3.4，标准 release 构建通过，耗时 **311.065 秒**。
+`validate-review-fixes.ps1 -CleanCheckout` 的 **10 项检查通过**。
+原生空库关闭 **6 轮通过**（每轮两个重复关闭请求），正常退出耗时 **66.66–75.63 ms**。
+新 release 的远程故障脚本在 32 条合成记录、381,560 字节 zstd 快照上通过：
+断线后从 190,780 字节续传；真实 30 秒静默连接后在 **32,100 ms** 完成自动恢复；
+多次失败后新 CLI 进程从 357,712 字节续传；显式 restart 从零下载且保留旧缓存；
+桌面在静默正文中正常关闭耗时 **136 ms**，重启后从 190,780 字节恢复。
+脚本核对最终内容、Range 偏移及旧缓存身份，未使用真实工作库。
+Windows 服务端包的校验和、边界、解包版本/哈希及隔离 health/schema 检查通过；
+包启动脚本不测试优雅停机，服务端关闭行为由上面的 6 项 shutdown 测试覆盖。
+
+便携包与服务端包的合成边界回归通过。原生运行、构建和安装证据分别记录在本机忽略目录的
+`.rust-validation/remote-resume/report.json`、`.rust-validation/desktop-close/report.json`、
+`.rust-validation/resume-main-build.json` 及固定安装目录所在工作树的
+`.rust-validation/local-install-resume-main.json`；以最终 EXE SHA256 绑定本轮构建。
+本轮仅在 Windows x64 本机验证；macOS/Linux、生产外网链路和生产部署未验证或执行。
+
 ## 远程快照下载与解压双进度（2026-10-21，0.4.11 修复构建）
 
 开发集成源码修复为 `aecd59b0f376d992940bea4d592407eec1ebd122`，已推送。最小 main backport 为 `d479a2c3d02a5e286e5d09dc939d597854d38aab`，通过 [PR #16](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/16) 合并为 `88d8bf39a086d2040927f48bb841e144cfa1099f`；未夹带集成分支的 84 个前置提交或其他任务文档。

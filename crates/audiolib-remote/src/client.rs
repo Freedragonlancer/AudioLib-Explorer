@@ -19,7 +19,6 @@ const JSON_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const LIBRARY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const LIBRARY_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(240);
-const SNAPSHOT_BODY_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 /// Metadata writes: the server answers `408 TIMEOUT` after 30 s, so wait a little longer
 /// for that classified reply before giving up locally (both mean "outcome uncertain").
@@ -324,7 +323,7 @@ pub(crate) fn cancellable_io<T>(
                     }
                 }
             })?;
-        let _transport_scope = abort.enter(None);
+        let _transport_scope = abort.enter(Some(Duration::from_secs(30)));
         let result = exchange();
         let _ = done.send(());
         match result {
@@ -349,7 +348,7 @@ impl RemoteClient {
             token: token.trim().to_owned(),
             agent: agent(RESPONSE_TIMEOUT, JSON_BODY_TIMEOUT),
             library: agent(LIBRARY_RESPONSE_TIMEOUT, LIBRARY_BODY_TIMEOUT),
-            bulk: agent(SNAPSHOT_RESPONSE_TIMEOUT, SNAPSHOT_BODY_TIMEOUT),
+            bulk: Timeouts::new(SNAPSHOT_RESPONSE_TIMEOUT, None),
             writes: agent(WRITE_RESPONSE_TIMEOUT, JSON_BODY_TIMEOUT),
             expected_library_id: None,
             library_changed: Arc::new(AtomicBool::new(false)),
@@ -1048,7 +1047,11 @@ pub enum DownloadStage {
 /// `sync_all` on a worker thread the caller can abandon on cancel: the worker keeps
 /// the file, finishes the flush, closes it and then deletes `partial` itself (a file
 /// still open cannot be removed on Windows).
-fn flush_abandonable(file: std::fs::File, partial: &Path, cancel: &AtomicBool) -> Result<()> {
+pub(crate) fn flush_abandonable(
+    file: std::fs::File,
+    partial: &Path,
+    cancel: &AtomicBool,
+) -> Result<()> {
     let started = std::time::Instant::now();
     tracing::info!("Snapshot stage start: writing to disk");
     let abandoned = std::sync::Arc::new(AtomicBool::new(false));

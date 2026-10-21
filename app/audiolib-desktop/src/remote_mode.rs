@@ -20,12 +20,13 @@ use audiolib_db::SqliteProvider;
 use audiolib_remote::{
     AudioRoute, AutoSyncGate, CacheState, CachedIdentity, DEFAULT_DOWNLOAD_CACHE_BYTES,
     DownloadCache, DownloadItem, DownloadProgress, ListWaveformStore, ListWaveformsCapability,
-    MemoryCache, MemoryStream, PollSchedule, RemoteCache, RemoteClient, RemoteError,
+    MemoryCache, MemoryStream, PendingSync, PollSchedule, RemoteCache, RemoteClient, RemoteError,
     RemoteListWaveforms, RemoteProvider, RemoteRoot, RemoteSecrets, RemoteWriter, RevisionCheck,
-    RootState, RouteOptions, SourceAuth, StreamSource, SyncProgress, UrlSource, WAKING_HINT_AFTER,
-    WaveformQuery, WaveformReply, WebDavAuth, WriteEvent, WriteListener, bandwidth,
-    check_revision_with_roots, choose_route, effective_roots, load_profile_secrets,
-    map_server_path, root_for_path, root_status_text, sync_library,
+    RootState, RouteOptions, SourceAuth, StreamSource, SyncControl, SyncOptions, SyncProgress,
+    SyncRunOutcome, UrlSource, WAKING_HINT_AFTER, WaveformQuery, WaveformReply, WebDavAuth,
+    WriteEvent, WriteListener, bandwidth, check_revision_with_roots, choose_route, effective_roots,
+    load_profile_secrets, map_server_path, root_for_path, root_status_text,
+    sync_library_with_options,
 };
 use slint::{ModelRc, VecModel};
 use std::collections::HashMap;
@@ -103,6 +104,9 @@ mod snapshot_refresh_tests;
 mod source_transition_tests;
 #[path = "remote_sources.rs"]
 mod sources;
+#[cfg(test)]
+#[path = "sync_resume_tests.rs"]
+mod sync_resume_tests;
 
 /// Provider chosen before the window opens when settings select server mode.
 pub struct RemoteStartup {
@@ -226,6 +230,23 @@ fn cached_source_matches(cached: &str, configured: &str) -> bool {
         && cached.prefix == configured.prefix
 }
 
+fn pending_sync_text(pending: &PendingSync, chinese: bool) -> String {
+    let stage = match (pending.manual_paused, chinese) {
+        (true, true) => "同步已暂停，已保留",
+        (true, false) => "Sync paused; retained",
+        (false, true) => "同步未完成，已保留",
+        (false, false) => "Sync incomplete; retained",
+    };
+    let received = pending.downloaded_bytes as f64 / 1_048_576.0;
+    match pending.total_bytes {
+        Some(total) => format!(
+            "{stage} {received:.1} / {:.1} MiB",
+            total as f64 / 1_048_576.0
+        ),
+        None => format!("{stage} {received:.1} MiB"),
+    }
+}
+
 /// Target of a data-source provider swap, executed as a library operation.
 #[derive(Clone)]
 pub(super) enum DataSourceSwitch {
@@ -278,6 +299,9 @@ pub(super) struct RemoteRuntime {
     /// A new revision is known but automatic sync waits for the server to settle
     /// (see [`AutoSyncGate`]).
     auto_deferred: bool,
+    /// Latest owned transfer state. A manual pause blocks all automatic starts,
+    /// including startup and write-triggered resyncs, until an explicit user action.
+    pending_sync: Option<PendingSync>,
     /// Root status (§6.4) from the latest successful `/roots` (revision poll or sync);
     /// `None` while the server is unreachable, so no stale status is shown.
     live_roots: Option<Vec<RemoteRoot>>,
@@ -1156,7 +1180,33 @@ impl Controller {
                 return;
             }
             // Sync now follows the revision rule; the CLI offers --force re-downloads.
-            c.start_sync(false, false);
+            c.start_sync_requested(false, false, false);
+        });
+        let c = self.clone();
+        ui.on_data_source_sync_pause_requested(move || {
+            if c.remote_busy.load(Ordering::Acquire)
+                && !c.closing.load(Ordering::Acquire)
+                && let Some(ui) = c.ui.upgrade()
+                && ui.get_ds_sync_can_pause()
+                && !ui.get_ds_sync_pausing()
+            {
+                c.remote_cancel.lock().unwrap().pause();
+                ui.set_ds_sync_pausing(true);
+                ui.set_ds_sync_info(
+                    cn_or(
+                        c.chinese.load(Ordering::Acquire),
+                        "正在暂停并保存下载进度…",
+                        "Pausing and saving download progress…",
+                    )
+                    .into(),
+                );
+            }
+        });
+        let c = self.clone();
+        ui.on_data_source_sync_restart_requested(move || {
+            if c.remote_read_only() && c.available() {
+                c.start_sync_requested(true, false, true);
+            }
         });
         let c = self.clone();
         ui.on_remote_notice_action(move || {
@@ -1164,7 +1214,7 @@ impl Controller {
             match ui.get_remote_notice_kind() {
                 NOTICE_UPDATE => {
                     if c.remote_read_only() && c.available() {
-                        c.start_sync(false, false);
+                        c.start_sync_requested(false, false, false);
                     }
                 }
                 NOTICE_RETRY => c.retry_remote_notice(),
@@ -1521,6 +1571,9 @@ impl Controller {
         let chinese = self.chinese.load(Ordering::Acquire);
         let auto_sync = self.config.lock().unwrap().data_source.auto_sync;
         let remote = self.remote.lock().unwrap();
+        if let Some(pending) = remote.pending_sync.as_ref().filter(|p| p.manual_paused) {
+            return Some(pending_sync_text(pending, chinese));
+        }
         let auto = AutoSync::from_settings(auto_sync, remote.auto_deferred);
         remote
             .check
@@ -1544,6 +1597,9 @@ impl Controller {
         let visible = self.remote_read_only() && key.is_some() && remote.dismissed_notice != key;
         let notice = visible
             .then(|| {
+                if let Some(pending) = remote.pending_sync.as_ref().filter(|p| p.manual_paused) {
+                    return Some((pending_sync_text(pending, chinese), NOTICE_UPDATE));
+                }
                 remote
                     .check
                     .as_ref()
@@ -1634,7 +1690,22 @@ impl Controller {
         };
         ui.set_data_source_label(label.into());
         if !ui.get_ds_syncing() {
-            ui.set_ds_sync_info(self.sync_info(chinese).into());
+            let pending = self.remote.lock().unwrap().pending_sync.clone();
+            ui.set_ds_sync_paused(pending.as_ref().is_some_and(|p| p.manual_paused));
+            ui.set_ds_sync_pending(pending.is_some());
+            if let Some(pending) = pending {
+                ui.set_ds_sync_info(pending_sync_text(&pending, chinese).into());
+                ui.set_ds_progress(
+                    pending
+                        .total_bytes
+                        .filter(|total| *total > 0)
+                        .map_or(-1.0, |total| {
+                            (pending.downloaded_bytes as f64 / total as f64).clamp(0.0, 1.0) as f32
+                        }),
+                );
+            } else {
+                ui.set_ds_sync_info(self.sync_info(chinese).into());
+            }
         }
         self.publish_remote_notice(ui);
         if ui.get_library_visible() {
@@ -1791,24 +1862,88 @@ impl Controller {
     /// swap the provider. `apply` also switches from local mode, falling back to the last
     /// cache (or the empty placeholder) with a clear error when the server is unavailable.
     pub(super) fn start_sync(self: &Arc<Self>, force: bool, apply: bool) {
-        if self.shutdown.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
+        self.start_sync_with_request(
+            SyncOptions {
+                force,
+                restart: false,
+            },
+            apply,
+            false,
+        );
+    }
+
+    /// An explicit continue, restart or source selection releases a persisted
+    /// manual pause. Background checks and write recovery use `start_sync` instead.
+    pub(super) fn start_sync_requested(self: &Arc<Self>, force: bool, apply: bool, restart: bool) {
+        self.start_sync_with_request(SyncOptions { force, restart }, apply, true);
+    }
+
+    fn start_sync_with_request(
+        self: &Arc<Self>,
+        options: SyncOptions,
+        apply: bool,
+        requested: bool,
+    ) {
+        if self.shutdown.load(Ordering::Acquire)
+            || self.closing.load(Ordering::Acquire)
+            || self.config.lock().unwrap().data_source.mode != DataSourceMode::Server
+        {
             return;
         }
+        if !requested
+            && self
+                .remote
+                .lock()
+                .unwrap()
+                .pending_sync
+                .as_ref()
+                .is_some_and(|p| p.manual_paused)
+        {
+            return;
+        }
+        if apply
+            && self.source_changing.load(Ordering::Acquire)
+            && let Some(ui) = self.ui.upgrade()
+        {
+            // Settings are now saved; local escape is safe until provider opening.
+            ui.set_ds_source_syncing(true);
+        }
         let already_busy = {
-            let _plays = self.remote_plays.lock().unwrap();
-            self.remote_busy.swap(true, Ordering::AcqRel)
+            let plays = self.remote_plays.lock().unwrap();
+            // Owned cache work releases `remote_busy` before its event-loop
+            // publication so close can drain without UI delivery. Until that
+            // publication settles, another sync must not supersede its generation.
+            if self.remote_busy.load(Ordering::Acquire) || plays.publication_gates != 0 {
+                true
+            } else {
+                self.remote_busy.store(true, Ordering::Release);
+                false
+            }
         };
         if already_busy {
-            if apply {
+            if apply || requested {
                 // A running sync would be superseded; restart after it notices cancel.
+                let generation = self.remote_generation.load(Ordering::Acquire);
+                let source_generation = self.source_generation.load(Ordering::Acquire);
                 let c = self.clone();
                 std::thread::spawn(move || {
                     let deadline = Instant::now() + Duration::from_secs(10);
-                    while c.remote_busy.load(Ordering::Acquire) && Instant::now() < deadline {
+                    while c.remote_sync_pending() && Instant::now() < deadline {
+                        if c.remote_generation.load(Ordering::Acquire) != generation
+                            || c.source_generation.load(Ordering::Acquire) != source_generation
+                        {
+                            return;
+                        }
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     let c2 = c.clone();
-                    post(c.ui.clone(), move |_| c2.start_sync(force, apply));
+                    post(c.ui.clone(), move |_| {
+                        if c2.remote_generation.load(Ordering::Acquire) == generation
+                            && c2.source_generation.load(Ordering::Acquire) == source_generation
+                        {
+                            c2.start_sync_with_request(options, apply, requested);
+                        }
+                    });
                 });
             }
             return;
@@ -1822,19 +1957,27 @@ impl Controller {
         };
         let chinese = self.chinese.load(Ordering::Acquire);
         let generation = self.remote_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let cancel = Arc::new(AtomicBool::new(false));
-        *self.remote_cancel.lock().unwrap() = cancel.clone();
+        let control = SyncControl::new();
+        *self.remote_cancel.lock().unwrap() = control.clone();
         let settings = self.config.lock().unwrap().data_source.clone();
         let secrets = self.secrets();
         let data_root = self.data_root();
+        if requested && let Some(pending) = self.remote.lock().unwrap().pending_sync.as_mut() {
+            pending.manual_paused = false;
+        }
         if let Some(ui) = self.ui.upgrade() {
             ui.set_ds_syncing(true);
+            ui.set_ds_sync_pausing(false);
+            ui.set_ds_sync_paused(false);
+            ui.set_ds_sync_pending(false);
+            ui.set_ds_sync_can_pause(true);
             ui.set_ds_progress(-1.0);
             ui.set_ds_decompression_info("".into());
             ui.set_ds_decompression_progress(-1.0);
             ui.set_ds_sync_info(
                 cn_or(chinese, "正在检查服务器版本…", "Checking server revision…").into(),
             );
+            self.publish_remote_notice(&ui);
         }
         let c = self.clone();
         std::thread::spawn(move || {
@@ -1859,7 +2002,10 @@ impl Controller {
                 };
                 let c2 = c.clone();
                 post(c.ui.clone(), move |ui| {
-                    if c2.remote_generation.load(Ordering::Acquire) == generation {
+                    if c2.remote_generation.load(Ordering::Acquire) == generation
+                        && !ui.get_ds_sync_pausing()
+                    {
+                        ui.set_ds_sync_can_pause(!matches!(progress, SyncProgress::Saving));
                         ui.set_ds_progress(display.fraction);
                         ui.set_ds_sync_info(display.text.clone().into());
                         ui.set_ds_decompression_progress(display.decompression_fraction);
@@ -1877,13 +2023,60 @@ impl Controller {
                 .wait_remote_plays()
                 .map_err(|_| RemoteError::Cancelled)
                 .and_then(|_| RemoteClient::new(&settings.server_url, &secrets.token))
-                .and_then(|client| sync_library(&client, &cache, &mut report, &cancel, force));
+                .and_then(|client| {
+                    if !requested
+                        && let Some(pending) = cache.pending_sync(client.api_url())?
+                        && pending.manual_paused
+                    {
+                        return Ok(SyncRunOutcome::Paused(pending));
+                    }
+                    sync_library_with_options(&client, &cache, &mut report, &control, options)
+                });
+            let pending = match &result {
+                Ok(SyncRunOutcome::Paused(pending)) => Some(pending.clone()),
+                _ => audiolib_remote::api_base_url(&settings.server_url)
+                    .ok()
+                    .and_then(|api| cache.pending_sync(&api).ok().flatten()),
+            };
+            // A deliberate pause commits the requested source to a verified cache
+            // or the owned placeholder. Never leave its old provider attached to
+            // newly saved credentials, nor hold the source gate while paused.
+            let paused_target = if matches!(result, Ok(SyncRunOutcome::Paused(_)))
+                && apply
+                && !c.closing.load(Ordering::Acquire)
+                && !c.shutdown.load(Ordering::Acquire)
+            {
+                let cached = pending
+                    .as_ref()
+                    .and_then(|p| p.library_id.as_deref())
+                    .and_then(|id| cache.state(id))
+                    .or_else(|| cache.active())
+                    .filter(|state| cached_source_matches(&state.server_url, &settings.server_url));
+                let prepared = cached.and_then(|state| {
+                    cache
+                        .prepare_cached_state_with_progress_cancellable(
+                            &state,
+                            &mut |stage| report(SyncProgress::Preparing(stage)),
+                            &c.closing,
+                        )
+                        .map(|state| (cache.database_path(&state), Some(state)))
+                        .ok()
+                });
+                prepared.or_else(|| {
+                    cache
+                        .placeholder_database()
+                        .ok()
+                        .map(|database| (database, None))
+                })
+            } else {
+                None
+            };
             let fallback = if result
                 .as_ref()
                 .is_err_and(|error| !matches!(error, RemoteError::Cancelled))
                 && !cached_preparation_incomplete.get()
                 && apply
-                && !cancel.load(Ordering::Acquire)
+                && !control.cancellation().load(Ordering::Acquire)
             {
                 // Offline startup uses the same preparation stages as sync. Never
                 // open another endpoint's cache or retry its failed preparation.
@@ -1896,7 +2089,7 @@ impl Controller {
                             .prepare_cached_state_with_progress_cancellable(
                                 &state,
                                 &mut |stage| report(SyncProgress::Preparing(stage)),
-                                &cancel,
+                                control.cancellation(),
                             )
                             .map(|state| (cache.database_path(&state), Some(state)))
                             .map_err(
@@ -1919,13 +2112,58 @@ impl Controller {
                 {
                     return;
                 }
+                ui.set_ds_source_syncing(false);
                 ui.set_ds_syncing(false);
+                ui.set_ds_sync_pausing(false);
+                ui.set_ds_sync_can_pause(false);
                 ui.set_ds_progress(0.0);
                 ui.set_ds_decompression_info("".into());
                 ui.set_ds_decompression_progress(-1.0);
-                c2.complete_sync(&ui, result, fallback, &cache);
+                c2.remote.lock().unwrap().pending_sync = pending;
+                match result {
+                    Ok(SyncRunOutcome::Completed(outcome)) => {
+                        c2.complete_sync(&ui, Ok(*outcome), fallback, &cache);
+                    }
+                    Ok(SyncRunOutcome::Paused(pending)) => {
+                        c2.complete_paused_sync(&ui, pending, paused_target);
+                    }
+                    Err(error) => c2.complete_sync(&ui, Err(error), fallback, &cache),
+                }
             });
         });
+    }
+
+    /// Both worker ownership and its queued UI publication exclude another sync.
+    /// Closing deliberately drains only worker ownership, retaining bounded exit.
+    fn remote_sync_pending(&self) -> bool {
+        let plays = self.remote_plays.lock().unwrap();
+        self.remote_busy.load(Ordering::Acquire) || plays.publication_gates != 0
+    }
+
+    fn complete_paused_sync(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        pending: PendingSync,
+        target: Option<(PathBuf, Option<CacheState>)>,
+    ) {
+        let message = pending_sync_text(&pending, self.chinese.load(Ordering::Acquire));
+        {
+            let mut remote = self.remote.lock().unwrap();
+            remote.last_error = None;
+            // A persisted or requested pause is a normal startup outcome; a later
+            // explicit resume must not inherit the startup-only manager policy.
+            remote.startup_check = false;
+        }
+        ui.set_ds_message("".into());
+        ui.set_status(message.into());
+        if let Some((database, state)) = target {
+            self.swap_to(ui, DataSourceSwitch::Server { database, state });
+        } else if self.source_changing.load(Ordering::Acquire) {
+            // Even an inability to create an owned placeholder must restore the
+            // previous credential/provider pair through the ordinary rollback.
+            self.finish_source_change(ui, false);
+        }
+        self.publish_data_source(ui);
     }
 
     fn complete_sync(
@@ -1980,6 +2218,15 @@ impl Controller {
                     let resume_reads = self.source_changing.load(Ordering::Acquire);
                     self.finish_source_change(ui, true);
                     self.remote.lock().unwrap().state = Some(outcome.state.clone());
+                    // The provider already has this exact file open. Acknowledge any
+                    // deferred wire cleanup without performing disk I/O on the UI loop.
+                    let cache = cache.clone();
+                    let opened = outcome.state.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = cache.finish_sync_transfer(&opened) {
+                            tracing::warn!(%error, "Opened snapshot retained; transfer cleanup deferred");
+                        }
+                    });
                     if roots_changed {
                         self.refresh_source_manager_roots(ui);
                     }
@@ -2217,10 +2464,7 @@ impl Controller {
     /// Cancel any in-flight server sync (shutdown or mode change).
     pub(super) fn cancel_remote(&self) {
         self.remote_generation.fetch_add(1, Ordering::AcqRel);
-        self.remote_cancel
-            .lock()
-            .unwrap()
-            .store(true, Ordering::Release);
+        self.remote_cancel.lock().unwrap().cancel();
     }
 
     /// Path the audio engine plays.

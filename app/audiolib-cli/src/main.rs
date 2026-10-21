@@ -255,6 +255,9 @@ enum RemoteCommand {
     Sync {
         #[arg(long)]
         force: bool,
+        /// Discard this endpoint's pending transfer and download a fresh snapshot.
+        #[arg(long)]
+        restart: bool,
     },
     /// Edit annotations on the server: one ID uses PATCH, several IDs (or a tag mode other
     /// than replace) the atomic batch. The cached snapshot follows by the revision rule,
@@ -991,12 +994,27 @@ fn remote_operation(config: &AppConfig, command: &RemoteCommand) -> anyhow::Resu
             }
             Ok(reply)
         }
-        RemoteCommand::Sync { force } => {
+        RemoteCommand::Sync { force, restart } => {
             require_server()?;
             let client = audiolib_remote::RemoteClient::new(&settings.server_url, &secrets.token)?;
-            let cancel = std::sync::atomic::AtomicBool::new(false);
-            let outcome =
-                audiolib_remote::sync_library(&client, &cache, &mut |_| {}, &cancel, *force)?;
+            let control = audiolib_remote::SyncControl::new();
+            let signal = control.clone();
+            ctrlc::set_handler(move || signal.cancel())?;
+            let outcome = match audiolib_remote::sync_library_with_options(
+                &client,
+                &cache,
+                &mut |_| {},
+                &control,
+                audiolib_remote::SyncOptions {
+                    force: *force,
+                    restart: *restart,
+                },
+            )? {
+                audiolib_remote::SyncRunOutcome::Completed(outcome) => *outcome,
+                audiolib_remote::SyncRunOutcome::Paused(_) => {
+                    anyhow::bail!("Sync paused; run remote sync to continue")
+                }
+            };
             prune_after_cli_sync(&cache, &outcome.state);
             Ok(json!({
                 "library_id": outcome.state.library_id,
@@ -1215,6 +1233,9 @@ type WriteResult = Result<
 /// (whose audio cache a desktop may still use) are left to the desktop's post-swap cleanup.
 fn prune_after_cli_sync(cache: &audiolib_remote::RemoteCache, state: &audiolib_remote::CacheState) {
     cache.prune(&state.library_id, &[state.database_file.as_str()]);
+    if let Err(error) = cache.finish_sync_transfer(state) {
+        eprintln!("Published snapshot retained; transfer cleanup deferred: {error}");
+    }
 }
 
 /// Report a server write; when the cache could not follow (or the outcome is uncertain)

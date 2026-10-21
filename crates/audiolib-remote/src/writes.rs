@@ -25,13 +25,82 @@ use audiolib_core::{
 use audiolib_db::SqliteProvider;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(test)]
 use std::time::Duration;
 
 /// Serializes read-modify-write of `cache.json` + snapshot between concurrent writes
 /// (an edit and a play finishing at the same time).
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
+
+/// Short cache publication lease shared by snapshot installs and annotation replies.
+/// The file is deliberately retained after unlocking, including across processes.
+pub(crate) struct CachePublicationLease {
+    _file: std::fs::File,
+    _process: Option<MutexGuard<'static, ()>>,
+}
+
+impl Drop for CachePublicationLease {
+    fn drop(&mut self) {
+        // Unlock before releasing the process mutex: Windows may defer lock release
+        // when relying only on CloseHandle, making an immediate cleanup look busy.
+        let _ = self._file.unlock();
+    }
+}
+
+pub(crate) fn cache_publication_lease(
+    cache: &RemoteCache,
+    library_id: &str,
+) -> Result<CachePublicationLease> {
+    let process = APPLY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    publication_file_lease(cache, library_id, Some(process))
+}
+
+/// Cleanup uses the per-library OS lock only: independent open handles exclude both
+/// local and other-process publishers without being stalled by an unrelated library.
+pub(crate) fn try_cache_publication_lease(
+    cache: &RemoteCache,
+    library_id: &str,
+) -> Result<CachePublicationLease> {
+    publication_file_lease(cache, library_id, None)
+}
+
+fn publication_file_lease(
+    cache: &RemoteCache,
+    library_id: &str,
+    process: Option<MutexGuard<'static, ()>>,
+) -> Result<CachePublicationLease> {
+    // Keep locks outside library payloads: swap cleanup can remove an old library.
+    let directory = cache.root().join(".publication-locks");
+    if std::fs::symlink_metadata(&directory).is_ok_and(|metadata| !metadata.file_type().is_dir()) {
+        return Err(RemoteError::Validation(
+            "Cache publication directory must not be linked".into(),
+        ));
+    }
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{}.lock", crate::sync::directory_name(library_id)));
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+        return Err(RemoteError::Validation(
+            "Cache publication lock must be a regular file".into(),
+        ));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.try_lock().map_err(|_| RemoteError::Busy {
+        message: "Another process is publishing this library cache".into(),
+        retry_after: None,
+    })?;
+    Ok(CachePublicationLease {
+        _process: process,
+        _file: file,
+    })
+}
 
 /// Order this process's non-idempotent write requests through their cache publication.
 /// Locking only application permits a faster later reply to outrun an earlier one and
@@ -69,9 +138,14 @@ pub fn apply_server_write(
     revision_before: u64,
     revision: u64,
 ) -> CacheUpdate {
-    let _guard = APPLY_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = match cache_publication_lease(cache, library_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return CacheUpdate::Resync {
+                reason: format!("cache publication is unavailable: {error}"),
+            };
+        }
+    };
     let Some(mut state) = cache.state(library_id) else {
         return CacheUpdate::Resync {
             reason: "no cached snapshot for this library".into(),

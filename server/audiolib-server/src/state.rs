@@ -9,6 +9,7 @@ use crate::roots::{
     RootMonitor, RootPolicy, RootState, RootStatus, is_transient_network_error, probe_root,
 };
 use crate::scans::ScanManager;
+use crate::snapshot_registry::{SnapshotLease, SnapshotRegistry, SnapshotRepresentation};
 use crate::waveform::{self, WaveformCache, WaveformKey, WaveformParams};
 use crate::{
     auth::Security,
@@ -236,6 +237,30 @@ pub struct SnapshotFile {
     pub path: PathBuf,
     /// File size in bytes.
     pub bytes: u64,
+    /// Process-local identity of these exact immutable bytes, distinct per encoding.
+    pub id: String,
+}
+
+impl SnapshotFile {
+    /// Strong entity tag of this immutable representation; a new file gets a new id.
+    pub fn etag(&self) -> String {
+        format!("\"snapshot-{}\"", self.id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_file(bytes: u64) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = snapshot_owner(directory.path()).unwrap();
+        let path = directory.path().join("payload");
+        fs::File::create(&path).unwrap().set_len(bytes).unwrap();
+        Self {
+            _owner: owner,
+            directory,
+            path,
+            bytes,
+            id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
 }
 
 /// Snapshot body encoding chosen from `Accept-Encoding`.
@@ -249,11 +274,11 @@ pub enum SnapshotEncoding {
 
 /// A consistent library copy built for exactly one `(library_id, revision)`. The server
 /// keeps the newest one and serves it again while the revision is unchanged; it is
-/// never served for another revision. Files are deleted once the entry is replaced and
-/// no response uses it any more.
+/// never served for another revision. After replacement, transmitted representations
+/// remain only in the bounded retention registry or their active response leases.
 pub struct PreparedSnapshot {
     /// The SQLite copy.
-    pub plain: SnapshotFile,
+    pub plain: Arc<SnapshotFile>,
     /// zstd-compressed copy, built on the first request that accepts it.
     zstd: Mutex<Option<Arc<SnapshotFile>>>,
     /// Library identity at preparation time.
@@ -265,16 +290,6 @@ pub struct PreparedSnapshot {
 }
 
 impl PreparedSnapshot {
-    /// Entity tag of one encoding: weak (the bytes of two copies of one revision may
-    /// differ), distinct per encoding, stable for a `(library_id, revision)`.
-    pub fn etag(library_id: &str, revision: u64, encoding: SnapshotEncoding) -> String {
-        let suffix = match encoding {
-            SnapshotEncoding::Identity => "",
-            SnapshotEncoding::Zstd => "-zstd",
-        };
-        format!("W/\"{library_id}-r{revision}{suffix}\"")
-    }
-
     /// Blocking. The zstd copy, compressing the plain copy on first use.
     pub fn zstd_file(&self) -> Result<Arc<SnapshotFile>> {
         self.zstd_file_cancellable(&AtomicBool::new(false))
@@ -344,6 +359,7 @@ impl PreparedSnapshot {
             directory,
             path,
             bytes,
+            id: uuid::Uuid::new_v4().to_string(),
         });
         *slot = Some(file.clone());
         Ok(file)
@@ -409,8 +425,8 @@ pub type SnapshotOutput = (Arc<PreparedSnapshot>, Option<Arc<SnapshotFile>>);
 /// the next request joins it instead of starting another copy.
 ///
 /// The state only keeps a `Weak` pointer: the finished result (and with it the snapshot
-/// files) is owned by the requests that wait for it, so outdated copies are deleted as
-/// soon as nothing streams them.
+/// files) is owned by the requests that wait for it. Only the selected representation
+/// is then handed to the bounded retention registry, independently of this job.
 struct SnapshotJobState {
     result: Mutex<Option<Arc<Result<SnapshotOutput>>>>,
     done: tokio::sync::Notify,
@@ -556,6 +572,7 @@ struct Inner {
     snapshot_dir: Option<PathBuf>,
     snapshot_slots: Arc<Semaphore>,
     snapshot_cache: Mutex<Option<Arc<PreparedSnapshot>>>,
+    snapshot_registry: SnapshotRegistry,
     /// The snapshot preparation in flight (or last finished), per [`SnapshotEncoding`].
     snapshot_jobs: Mutex<[Option<SnapshotJob>; 2]>,
     /// How long `GET /library/snapshot` waits for a preparation (`snapshot_wait_secs`).
@@ -758,6 +775,7 @@ impl AppState {
                 snapshot_dir: config.snapshot_dir.clone(),
                 snapshot_slots: Arc::new(Semaphore::new(SNAPSHOT_SLOTS)),
                 snapshot_cache: Mutex::new(None),
+                snapshot_registry: SnapshotRegistry::default(),
                 snapshot_jobs: Mutex::new([None, None]),
                 snapshot_wait: Duration::from_secs(config.snapshot_wait_secs),
                 stream_slots: Arc::new(Semaphore::new(config.max_streams)),
@@ -873,6 +891,7 @@ impl AppState {
     /// files, then checkpoint and persist the revision baseline. A timeout stays visible.
     pub fn shutdown(&self, timeout: Duration) -> Result<()> {
         self.inner.stopping.store(true, Ordering::Release);
+        self.inner.snapshot_registry.close();
         self.inner.list.shutdown();
         let started = Instant::now();
         if !self.inner.scans.shutdown(timeout) {
@@ -962,6 +981,28 @@ impl AppState {
 
     pub(crate) fn snapshot_slots(&self) -> Arc<Semaphore> {
         self.inner.snapshot_slots.clone()
+    }
+
+    /// Retain only the selected representation, independently of its prepared source.
+    pub(crate) fn retain_snapshot(
+        &self,
+        prepared: Arc<PreparedSnapshot>,
+        file: Option<Arc<SnapshotFile>>,
+        encoding: SnapshotEncoding,
+    ) -> Result<SnapshotLease> {
+        self.inner.snapshot_registry.admit(SnapshotRepresentation {
+            file: file.unwrap_or_else(|| prepared.plain.clone()),
+            library_id: prepared.library_id.clone(),
+            revision: prepared.revision,
+            schema_version: prepared.schema_version,
+            encoding,
+            uncompressed_bytes: prepared.plain.bytes,
+        })
+    }
+
+    /// Find an exact process-local representation belonging to this library only.
+    pub(crate) fn retained_snapshot(&self, id: &str) -> Option<SnapshotLease> {
+        self.inner.snapshot_registry.get(id, self.library_id())
     }
 
     pub(crate) fn stream_slots(&self) -> Arc<Semaphore> {
@@ -1829,12 +1870,13 @@ impl AppState {
             "Prepared library snapshot"
         );
         let entry = Arc::new(PreparedSnapshot {
-            plain: SnapshotFile {
+            plain: Arc::new(SnapshotFile {
                 _owner: owner,
                 directory,
                 path,
                 bytes: report.bytes,
-            },
+                id: uuid::Uuid::new_v4().to_string(),
+            }),
             zstd: Mutex::new(None),
             library_id: revision.library_id,
             revision: revision.revision,
@@ -1921,7 +1963,12 @@ pub fn spawn_revision_poller(state: AppState, every: Duration) -> tokio::task::J
                 return;
             }
             let poll_state = state.clone();
-            match tokio::task::spawn_blocking(move || poll_state.poll_revision()).await {
+            match tokio::task::spawn_blocking(move || {
+                poll_state.inner.snapshot_registry.prune();
+                poll_state.poll_revision()
+            })
+            .await
+            {
                 Ok(Ok(revision)) => state.refresh_stats_if_stale(&revision),
                 Ok(Err(error)) => tracing::warn!(%error, "Library change check failed"),
                 Err(error) => tracing::warn!(%error, "Library change check task failed"),
