@@ -477,7 +477,12 @@ async fn running_job_reports_rate_eta_and_current_item() {
     let f = fixture("list_waveform_rate = 2\n");
     let started = start(&f.state, r#"{"mode":"missing"}"#).await;
     assert_eq!(started.run_state, "running");
-    assert_eq!(started.pending, Some(3));
+    // The first file may already be done when the start response is built.
+    assert_eq!(
+        started.pending,
+        Some(3 - started.job.as_ref().unwrap().done),
+        "{started:?}"
+    );
     let s = wait_for(&f.state, "rate measured", |s| {
         s.job.as_ref().unwrap().done >= 1 && s.job.as_ref().unwrap().finished_at.is_none()
     })
