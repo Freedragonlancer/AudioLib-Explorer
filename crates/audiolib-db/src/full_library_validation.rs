@@ -496,6 +496,8 @@ fn integrated_sort_diagnostics() -> R<()> {
                 (63, "metal", SortOrder::SampleRate, false, 0),
                 (69, "metal", SortOrder::Tags, false, 0),
                 (62, "door", SortOrder::Duration, true, 200),
+                (65, "metal", SortOrder::Modified, false, 0),
+                (67, "metal", SortOrder::Channels, false, 0),
             ]
             .into_iter()
             .map(|(case, query, order_by, descending, offset)| {
@@ -524,10 +526,12 @@ fn integrated_sort_diagnostics() -> R<()> {
             let key = match request.order_by {
                 SortOrder::SampleRate => "af.sample_rate",
                 SortOrder::Duration => "af.duration",
+                SortOrder::Modified => "af.modified_at",
+                SortOrder::Channels => "af.channels",
                 SortOrder::Tags => {
                     "COALESCE(audiolib_user_tags_key(af.user_tags),af.source_tags_text) COLLATE NOCASE"
                 }
-                _ => return Err("diagnostic supports sample_rate, duration and tags only".into()),
+                _ => return Err("diagnostic supports scalar and tag sorts only".into()),
             };
             let compiled = crate::compile_query(&crate::load_tokenizer(), &request.query)?;
             let mut variants = vec![
@@ -543,6 +547,8 @@ fn integrated_sort_diagnostics() -> R<()> {
                 variants.push(("numeric_covering", false, Some(index)));
             } else if request.order_by == SortOrder::Tags {
                 variants.push(("tagged_covering", false, None));
+            } else if matches!(request.order_by, SortOrder::Modified | SortOrder::Channels) {
+                variants.push(("scalar_covering", false, None));
             }
             for (variant, include_missing_predicate, covering_index) in variants {
                 let c = ro(path)?;
@@ -594,7 +600,7 @@ fn integrated_sort_diagnostics() -> R<()> {
                         ORDER BY sort_value {direction},af.id ASC LIMIT ?2 OFFSET ?3"
                     )
                 };
-                let page = if variant == "tagged_covering" {
+                let page = if matches!(variant, "tagged_covering" | "scalar_covering") {
                     crate::search_sorted::page_sql(
                         &c,
                         request,
@@ -632,7 +638,7 @@ fn integrated_sort_diagnostics() -> R<()> {
                 }
                 records.push(json!({"dataset":dataset,"case":case,"request":request,
                     "variant":variant,"covering_index":covering_index,
-                    "narrow_is_reference":variant == "tagged_covering",
+                    "narrow_is_reference":matches!(variant, "tagged_covering" | "scalar_covering"),
                     "include_missing_predicate":include_missing_predicate,"not_present":not_present,
                     "columns":columns,"count":count,"page":page,"narrow":narrow,
                     "mmap_bytes":c.pragma_query_value(None,"mmap_size",|r|r.get::<_,i64>(0))?}));
