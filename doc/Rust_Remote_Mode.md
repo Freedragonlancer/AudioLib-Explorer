@@ -218,7 +218,8 @@ removed only after the provider has swapped to the new snapshot
 (`RemoteCache::cleanup_after_swap`; it never deletes the open snapshot or the one
 `cache.json` names, and does nothing while a newer sync still waits for its swap). Known
 top-level snapshot staging files (`.download`, `.download.part-<pid>`) and `cache.tmp-*`
-older than an hour are checked across cached libraries at startup and on a switch.
+older than an hour are checked across cached libraries at startup. After a successful
+provider switch, cleanup checks the opened library and same-server replaced libraries.
 Cleanup takes nonblocking staging/publication leases and rereads current state;
 an active preparation or publication is skipped. Unknown files, linked paths,
 manual backups and `.snapshot-job-*` protected recovery jobs are retained.
