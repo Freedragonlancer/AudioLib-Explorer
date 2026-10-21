@@ -7,7 +7,8 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $payloadRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd') +
-    @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json)
+    # Windows PowerShell 5.1 emits a JSON array as one Object[]; unroll it explicitly.
+    @((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json) | ForEach-Object { $_ })
 $privatePrefixes = [Collections.Generic.List[string]]::new()
 foreach ($prefix in @($taskRoot, $env:USERPROFILE, $env:CARGO_HOME, $env:RUSTUP_HOME, $env:CARGO_TARGET_DIR)) {
     if ($prefix) {
