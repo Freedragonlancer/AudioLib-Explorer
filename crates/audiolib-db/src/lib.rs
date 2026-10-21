@@ -652,6 +652,13 @@ impl SqliteProvider {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(db_error)?;
         schema::validate_library_identity(&probe)?;
+        if version > schema::SCHEMA_VERSION {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: schema::SCHEMA_VERSION,
+            });
+        }
         if !(1..=schema::SCHEMA_VERSION).contains(&version) {
             return Err(Error::Validation(format!(
                 "Use Import to create a copy first; supported Rust schema is 1..={}, found {version}",
