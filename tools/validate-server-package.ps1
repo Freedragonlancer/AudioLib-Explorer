@@ -39,6 +39,17 @@ function Assert-Within([string]$Path, [string]$Parent) {
     $boundary = [IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar)
     if (!$full.StartsWith($boundary + [IO.Path]::DirectorySeparatorChar, $comparison)) { throw 'Server validation path escaped its owned boundary.' }
 }
+function Get-ComparableLibraryPath([string]$Path) {
+    # Rust canonicalize returns Win32 verbatim paths; the owned fixture uses an
+    # ordinary absolute path. Unify these spellings before comparing identities.
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($IsWindows -and $full.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        $full = '\\' + $full.Substring(8)
+    } elseif ($IsWindows -and $full -match '^\\\\\?\\[A-Za-z]:\\') {
+        $full = $full.Substring(4)
+    }
+    return [IO.Path]::GetFullPath($full)
+}
 function Assert-UnlinkedTree([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked server validation path is not supported.' }
@@ -282,7 +293,7 @@ try {
     $library = Read-Endpoint '/library'
     if ($server.HasExited -or $library.library_id -isnot [string] -or !$library.library_id -or
         $library.schema_version -ne 6 -or $library.identity_bound_writes -isnot [bool] -or !$library.identity_bound_writes -or
-        $library.stats.audio_files -ne 1 -or ![IO.Path]::GetFullPath($library.database).Equals([IO.Path]::GetFullPath($database), $comparison)) { throw 'Extracted server could not serve its isolated synthetic library.' }
+        $library.stats.audio_files -ne 1 -or !(Get-ComparableLibraryPath $library.database).Equals((Get-ComparableLibraryPath $database), $comparison)) { throw 'Extracted server could not serve its isolated synthetic library.' }
     if ($library.snapshot_format.id -cne 'ale-s6-cld1-t3-m2-p1' -or
         $library.snapshot_format.format.features.play_history_retired -ne 2) {
         throw 'Extracted server snapshot format does not declare playback-history retirement.'
