@@ -1,10 +1,72 @@
 # AudioLib Explorer - Testing Strategy
 
-> Current validation uses the Rust workspace. See [Rust Validation](Rust_Validation.md) for executed checks; Python-specific commands below are legacy references.
+## 当前 Rust 验证策略
 
-## Current Rust database regressions
+按改动风险选择最小充分验证，并记录执行范围和结果。[Rust Validation](Rust_Validation.md) 中的历史结果是已执行证据，不是每次开发都要重跑的清单。保留现有正式测试；GitHub 常规 CI 只检查格式，所有功能测试在本地按范围执行，不增加测试依赖。
 
-Run `cargo test -p audiolib-core -p audiolib-db --all-targets --locked` for schema, migration, search and library administration fixtures. `library_management.rs` verifies consistent WAL backup, restore/rollback with reused readers, rejection of invalid inputs, FTS5/trigger repair, read-only source preservation, atomic batch/import edits, relinking and database-only removal. `scan_management.rs` covers Unicode full-scan deletion, removed counts, per-path errors and changed WAV valid bits. Desktop tests cover draft draining and generation invalidation across library changes. Validate the release CLI with `tools/validate-library-management.ps1`; its fixtures use isolated libraries and synthetic WAVs. Preserve the original library and real WAV hashes. See [operation semantics](Rust_Library_Management.md) and [actual verification](Rust_Validation.md).
+| 改动范围 | 日常本地验证 |
+| --- | --- |
+| 纯文档、注释 | 检查内容、链接和 `git diff --check`；不运行 Cargo、发布构建或安装。 |
+| CI 工作流、验证脚本 | 检查 YAML/PowerShell 语法和受影响命令路由/冒烟测试；应用二进制未改时不重建、重装。 |
+| 单个 Rust 模块或功能 | 格式检查一次，受影响 package 的严格 Clippy，以及覆盖改变行为的定向测试。 |
+| UI 文案、布局、图标及资源 | 编译受影响桌面目标，人工验收对应界面；涉及 Rust 代码时加格式和严格 Clippy。只有真实状态、事件或行为回归才新增测试。 |
+| 公共 DTO、DataProvider 或跨层 contract | 验证实现层和直接消费者；按调用关系扩大 package 和测试范围。 |
+| 锁文件、共享构建配置或影响范围无法判断 | 本地执行全 workspace 的格式、严格 Clippy 和测试。 |
+| 持久化、并发写入、路径或音频后端 | 定向测试加下表对应回归；不能用一次界面启动替代数据完整性验证。 |
+
+先读改动和直接调用方，再选命令。下列示例使用仓库现有 package 和测试名称，按任务选用，不是依次执行的清单：
+
+```powershell
+# Rust 改动：格式检查一次；仅对受影响 package 做严格 Clippy。
+cargo fmt --all -- --check
+cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
+
+# 核心输入 contract：只运行相关单元测试。
+cargo test -p audiolib-core --lib --locked batch_rejects_empty_fields_and_invalid_ids_before_writing
+
+# 库管理改动：选择相关集成测试文件；仅一个行为变化时可继续按名称过滤。
+cargo test -p audiolib-db --test library_management --locked
+cargo test -p audiolib-db --test scan_management --locked unicode_nonrecursive_cleanup_counts_only_newly_missing_files
+
+# UI 文案/布局需要确认 Slint 和资源能够编译；已有等效编译结果时不重复执行。
+cargo check -p audiolib-desktop --bin AudioLibExplorer --locked
+```
+
+Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试、构建和 Clippy 目的不同，但每一步只选一次所需范围。不要为了增加数量而写与实现镜像的断言或重复用例；优先补真实错误、边界、状态转换和用户行为的回归。
+
+### 重型回归的触发条件
+
+| 检查 | 何时运行 |
+| --- | --- |
+| `tools/validate-review-fixes.ps1` | 修改扫描协调、配置持久化或 Metadata 保存等行为时。普通布局、文案变化不触发。 |
+| `tools/validate-library-management.ps1` | 修改备份/恢复、schema、重链接/移除、导入/导出、扫描历史或多库管理时。相关 `library_management`、`schema_v5`、`administration_isolation` 等定向测试仍需按影响运行。 |
+| `tools/validate-playback-ipc.ps1` | 修改实际播放、transport 或跨进程控制行为时。 |
+| `tools/validate-runtime.ps1` | 修改旧库迁移、扫描或 WAV Metadata 解码的相关路径，且真实 fixture 可用时；缺失时明确记录未验证。 |
+| `tools/validate-access-denial.ps1` | 修改权限错误、路径/文件访问或拒绝写入处理时。真实 ACL 操作限于已验证的自有临时子树，并在 `finally` 恢复。 |
+| `tools/validate-desktop-close.ps1` | 修改关闭流程、写入排空或扫描取消时。 |
+| `tools/validate-spectral-ui.ps1`、`tools/validate-window-repaint.ps1` | 修改对应的 Spectral/Waveform UI 或重绘行为时。 |
+| `tools/test-package-boundary.ps1`、`tools/test-server-package.ps1` | 打包规则变化时在本地运行合成回归；云端仅保留实际产物白名单、隐私与身份检查。 |
+| 百万记录基准、真实库搜索、`tools/validate-gui-search-performance.ps1`、播放起音测量 | 修改性能相关路径、处理性能回归，或用户明确要求测量时。日常功能和文档改动不跑。 |
+
+备份恢复、schema 迁移、扫描锁/管理租约、丢失写入、路径验证和源 WAV 保留属于数据安全边界，必须保留与改动直接相关的回归。`scan_management` 覆盖扫描清理、错误明细和 WAV Metadata 变化；`library_management` 覆盖 WAL 备份恢复、回滚、FTS5 修复、原子编辑、重链接和仅数据库移除。桌面草稿排空与旧请求失效也应在相关状态变化时验证。所有测试数据库与音频样本使用自有临时目录，不能修改工作库、旧库或源 WAV。
+
+性能目标仍为 **P95 latency <500ms for 1M+ records**。报告实际测试规模、条件及测量结果；驱动报告的延迟不能替代按钮到实际出声的测量。不为普通开发验收反复读取或哈希整套真实库和源音频。
+
+### 本地验证与云端最小检查
+
+GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。在相关 `main` / `codex/**` 推送和 Pull Request 触发，纯文档和截图变化跳过。云端发布只构建、打包及核对版本/标签、实际包白名单、隐私、身份和校验和，不跑 Rust 测试、Clippy、ASIO 测试矩阵、GUI/CLI 功能冒烟或服务 health 测试。云端报告将运行时验证标为 `not-run`；它不是本地验收通过的证明。
+
+本地全量入口为 `./tools/check-local.ps1`（格式、默认配置严格 Clippy、workspace 测试），加 `-Asio` 追加已验证 SDK 的 ASIO 配置。打发布标签前在本地运行 `./tools/check-local.ps1 -Asio`，并完成相关专项回归及实际发布包的 portable/服务启动验收；服务包使用 `tools/validate-server-package.ps1`。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
+
+原云端 macOS 数据库/服务端生命周期测试、Linux 服务端 Clippy/测试改由匹配平台的本地环境按影响运行。例如在 macOS ARM64 使用 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`；在 Linux 使用 `cargo test -p audiolib-server -p audiolib-db --all-targets --locked --target x86_64-unknown-linux-gnu`。使用原生 Rust 工具链覆盖仓库默认 Windows target；缺少相应主机或音频硬件时，明确记录未验证，不能以云端冒烟通过代替。
+
+应用变更交付仍需从最新源代码构建、打包并更新固定的 `local_release/`；构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
+
+同一代码、feature、工具链和环境下已通过的检查可复用结果；后续改动只重跑受影响检查。仅在出现失败、修改相关路径或结果失效时扩大范围。交付记录说明已运行项目、未覆盖范围及原因，不能把未运行的检查写成通过。
+
+## 历史设计参考
+
+以下 Version 1.0 正文保留旧 Python 设计与示例；覆盖率比例、测试清单和 Python 命令不作为当前 Rust 每次开发的执行要求，也不恢复旧运行时。
 
 **Version:** 1.0
 **Date:** 2025-11-24
@@ -227,17 +289,4 @@ pytest -m performance tests/performance/
 ---
 
 **END OF TESTING STRATEGY**
-# Rust implementation checks
-
-The primary runtime is now the Rust workspace. Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --all-targets --locked`. ASIO feature builds use the verified SDK via `tools/prepare-asio.ps1`.
-
-Rust acceptance covers legacy migration preservation, actual Chinese recall, FTS5 update/delete correctness, matching filter counts, incremental scanning, cancellation, inaccessible directory protection, stream decoding/resampling, transport state and bounded Waveform memory. Tests use temporary state and do not write the original WAV fixtures or SQLite library.
-
-Release-level checks are `tools/validate-runtime.ps1` (migration/search/scanning), `tools/validate-playback-ipc.ps1` (confirmed desktop transport and muted bounded-memory playback) and `tools/validate-access-denial.ps1` (real Windows ACL denial in an owned temporary subtree, restored in finally). Run `cargo run --release --locked -p audiolib-db --bin search-benchmark -- --records 1000000 --queries 100` for the real provider benchmark. The program refuses to replace an existing library.
-
-After packaging, `tools/validate-portable.ps1` checks the actual package binaries, first-launch import, Chinese UI snapshot, CLI statistics, license materials and fatal-startup logging. It uses isolated user data and leaves the original database unchanged.
-
-`tools/validate-review-fixes.ps1` exercises the release CLI after the code-review fixes, including child-first directory import, deleted BWF fields, Unicode case folding, one-time legacy preferences and cross-process scan contention/release. Desktop regression tests additionally exercise selection/edit revisions and asynchronous close with pending saves. See [Review fixes](Rust_Review_Fixes.md).
-
-The performance target is **P95 latency <500ms for 1M+ records** through the actual Rust DataProvider. Warm-cache numbers and prepared/device-open audio latency must be reported separately from uncached/cold measurements. Actual ASIO output routing and audible latency require hardware validation; device enumeration alone is not evidence of them. See [Rust Validation](Rust_Validation.md) for recorded results.
 

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   windows:
-    name: Validate and build Windows client and server
+    name: Build and package Windows client and server
     runs-on: windows-latest
     timeout-minutes: 120
     defaults:
@@ -33,7 +33,7 @@ jobs:
       - name: Check release version policy
         run: ./tools/check-release.ps1 -Tag $env:RELEASE_TAG
 
-      - name: Validate, build (default + ASIO) and verify the portable package
+      - name: Build ASIO release and verify the portable payload
         run: ./tools/ci-release.ps1 -Tag $env:RELEASE_TAG
 
       - name: Prepare release assets
@@ -49,7 +49,6 @@ jobs:
           "$digest  $zipName" | Set-Content -LiteralPath "dist/release/$zipName.sha256" -Encoding ASCII
           Copy-Item -LiteralPath doc/Rust_CI_Release.json -Destination dist/release/Rust_CI_Release.json -Force
           ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc -Asio
-          ./tools/validate-server-package.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc -Asio
 
       - name: Upload validated Windows assets
         uses: actions/upload-artifact@v4
@@ -65,7 +64,7 @@ jobs:
             dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64-report.json
 
   server-unix:
-    name: Validate and build server (${{ matrix.target }})
+    name: Build and package server (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -92,24 +91,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev pkg-config
-      - name: Install pinned Rust with Clippy
+      - name: Install pinned Rust
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          rustup toolchain install 1.97.1 --profile minimal
           if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
       - uses: Swatinem/rust-cache@v2
         with:
           key: server-${{ matrix.target }}
-      - name: Validate server and database
-        run: |
-          cargo clippy -p audiolib-server -p audiolib-db --all-targets --locked --target $env:SERVER_TARGET -- -D warnings
-          if ($LASTEXITCODE -ne 0) { throw 'Server Clippy failed.' }
-          cargo test -p audiolib-server -p audiolib-db --all-targets --locked --target $env:SERVER_TARGET
-          if ($LASTEXITCODE -ne 0) { throw 'Server/database tests failed.' }
+      # Runtime and platform tests run locally; package scripts still verify
+      # the actual payload, executable version, archive identity and checksum.
       - name: Build and package server
         run: |
           ./tools/build-server-release.ps1 -Target $env:SERVER_TARGET
           ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target $env:SERVER_TARGET
-          ./tools/validate-server-package.ps1 -Tag $env:RELEASE_TAG -Target $env:SERVER_TARGET
       - name: Upload validated server assets
         uses: actions/upload-artifact@v4
         with:

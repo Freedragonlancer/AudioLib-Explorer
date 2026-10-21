@@ -1,0 +1,45 @@
+# 工作区遗漏提交核对（2026-10-22）
+
+## 基线与方法
+
+- 原工作区：`codex/debug-snapshot-reports`，`HEAD=c5c6ca1`，34 个已跟踪文件有改动，16 个未跟踪文件。
+- 核对主线：`main=4f98838e4cf14e3ed2982d0efed9bcd0d5a43cb8`。
+- 按文件、原工作区新增 hunk、函数/测试和 Git 历史比较。文件与 main 不同并不等于尚未提交；保留主线后续修复，只有真实遗漏才移植。
+- 在基于最新 main 的独立工作树补交，原工作区内容保持原样。
+
+## 已进入 main 的工作
+
+| 原工作区内容 | 主线证据与结论 |
+| --- | --- |
+| CLI、GUI 同步暂停/续传、下载与解压双进度、关闭恢复、`sync_resume_tests.rs` | `df4ee20` 已集成；`4f98838` 进一步处理客户端草稿、选择与关闭上下文。原测试函数均在主线，不能整文件覆盖。 |
+| remote 的 `snapshot_transfer.rs`、`resume_regression_tests.rs`、`SyncControl` 及同步写入逻辑 | `df4ee20` 已集成；`32949b3` 增加格式兼容与发布回执，`301c42f` / `5e35abb` 增加 90 秒正文停滞识别。 |
+| `cache_cleanup.rs`、镜像文件夹打开与清理、GUI 缓存布局 | `6c32228` / `87cd274` 已集成；主线对 junction、目录边界及锁的保护更完整。 |
+| server pinned snapshot、Range/If-Range、ETag、registry 与 API 回归 | `df4ee20` 已集成；原 `snapshot_registry.rs` 与该提交完全一致，主线另有 `32949b3` 的格式协商。 |
+| 存储 B、迁移兼容 API 文档、远程续传验证脚本及 C# fixture、远程模式/API 文档改动 | main 已含对应内容及后续更新，保留主线版本。 |
+| 普通 CI 的 format-only 分流 | main 已含；保留 `main` / `codex/**`、PR 触发及文档/截图忽略条件。 |
+
+上述应用源码没有发现需要补交的遗漏 hunk。本次不修改 Rust 或 Slint 源码。
+
+## 本次补交
+
+1. `tools/check-local.ps1`：本地全量验证显式入口，含可选 target、ASIO SDK 准备、失败即停、日志与环境恢复。
+2. 按改动范围选择验证的规则和文档：AGENTS、双语 README、Testing Strategy、Versioning、INDEX；保留当前主线手动触发 Release 的策略。
+3. 云端 Release 验证分流：保留实际构建、打包、版本/提交身份和公开产物隐私检查；功能回归在本地执行。公开报告将 portable 运行时状态写为 `not-run`，四个结果字段均为 JSON `null`；隐私校验与合成回归拒绝伪造结果。
+4. 客户端审阅基线更正：原审阅基于 `c5c6ca1` 加未提交工作区，并非干净提交。此次文档更新没有增加新的客户端发现；修复结果见 [Client UI fixes](Client_UI_Fixes_2026-10-22.md)。
+5. 补存 [服务端原始审阅](Server_Review_2026-10-22.md) 与 [历史进度交接](../Snapshot_Progress_Redo_Handoff.md)，标明旧基线和历史范围。服务端报告需对当前实现重新核查，本次补交不代表报告中的问题均已修复或仍存在。
+6. `.gitignore` 忽略 `/local_release.rar` 和 `/release-upload/`：两者是本机生成的发布归档，保留本地文件，不上传 Git。数据库、设置、日志、音频和安装目录均未改动。
+
+## 验证结果
+
+| 检查 | 结果 |
+| --- | --- |
+| 4 个变更 PowerShell 脚本 AST 解析 | 通过 |
+| Release YAML、命令路由及现有触发/权限策略检查 | 通过；普通 CI 未改动 |
+| `tools/test-package-boundary.ps1` 合成包边界回归 | 通过；覆盖已完成报告、严格 `not-run/null` 及五类伪造结果拒绝 |
+| 本地/Release 验证入口 mock 路由 | 20/20 通过；覆盖默认/target/ASIO、逐阶段失败即停、身份拒绝、目录和环境恢复；未运行真实 Cargo |
+| 修改及新增文档的相对文件链接 | 通过 |
+| `git diff --check` | 通过 |
+
+路由验证的本机证据保留在被忽略的 `.rust-validation/workspace-audit/`，不作为公开运行时验收报告。本次仅改流程、验证脚本和文档，应用二进制未变，因此没有重复 Cargo 功能测试、发布构建或安装；此前 `4f98838` 的应用交付记录仍见客户端修复报告。
+
+核对时另发现主线既有的远程续传验收差异：生产正文停滞阈值已改为 90 秒，但 `validate-remote-resume.ps1` 的相关断言和远程模式文档仍写 30 秒。这不属于原工作区漏交内容，本次不改动该验收行为；下次运行该专项回归前应同步阈值与等待预算。

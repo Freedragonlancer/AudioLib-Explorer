@@ -46,13 +46,15 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
 ```
 
-开发检查：
+开发检查（以下以数据库片段搜索改动为例，按实际改动选择 package 和测试目标）：
 
 ```powershell
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
+cargo test -p audiolib-db --test search_fragments --locked
 ```
+
+纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。影响广泛时在本地运行 `./tools/check-local.ps1`，打发布标签前加 `-Asio` 完成本地发布矩阵；专项回归和性能测量按实际行为变化触发。GitHub 常规 CI 只检查格式。详见[验证范围](AGENTS.md#development-checks-by-change-scope)和[测试示例](doc/Testing_Strategy.md)。
 
 ## 使用
 
@@ -84,7 +86,7 @@ audiolib-server --config /etc/audiolib/config.toml
 
 当前开发分支为 `0.6.0-dev.1`，已合入发布的 0.5.0 主线。此分支的 schema-v6 改动尚未发布或部署，现有安装和工作库保持不变。
 
-GitHub Actions 在每次推送和 Pull Request 时运行格式、Clippy 与测试（`.github/workflows/ci.yml`）。推送 `v*` 标签会运行 `.github/workflows/release.yml`：校验版本规范、构建 Windows 便携包，并发布为带 SHA-256 文件的 GitHub Release。
+GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256 和公开构建报告。
 
 ## 文档
 

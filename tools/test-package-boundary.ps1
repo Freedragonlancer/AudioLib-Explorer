@@ -75,6 +75,27 @@ try {
         try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath } catch { $rejected = $true }
         if (!$rejected) { throw "Public report leak was not rejected: $leak" }
     }
+    # Cloud releases keep the report schema but leave runtime validation unrun.
+    # These nulls must never be accepted as measured success, counts or flags.
+    $notRun = $report | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $notRun.portable.mode = 'not-run'
+    foreach ($field in @('success','records','source_unchanged','python_runtime_required')) { $notRun.portable.$field = $null }
+    $notRun | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+    & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath
+    foreach ($invalid in @('success','records','source_unchanged','python_runtime_required','mode')) {
+        $bad = $notRun | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+        switch ($invalid) {
+            'success' { $bad.portable.success = $true }
+            'records' { $bad.portable.records = 0 }
+            'source_unchanged' { $bad.portable.source_unchanged = $false }
+            'python_runtime_required' { $bad.portable.python_runtime_required = $false }
+            'mode' { $bad.portable.mode = 'unknown' }
+        }
+        $bad | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+        $rejected = $false
+        try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath } catch { $rejected = $true }
+        if (!$rejected) { throw "Unrun portable report accepted invalid state: $invalid" }
+    }
     $dist = [IO.Path]::GetFullPath((Join-Path $testRoot 'dist'))
     $redirected = [IO.Path]::GetFullPath((Join-Path $testRoot 'redirected-output'))
     if (!$dist.StartsWith($testRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
@@ -95,7 +116,7 @@ try {
             Remove-Item -LiteralPath $dist -Force
         }
     }
-    Write-Host 'Package boundary regression passed: stale state/ignored reports/untracked assets excluded; local paths, unsafe reports, wrong binary identities and junction ancestors rejected.'
+    Write-Host 'Package boundary regression passed: stale state/ignored reports/untracked assets excluded; completed and unrun reports accepted; local paths, unsafe reports, false runtime results, wrong binary identities and junction ancestors rejected.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         if (!$testRoot.StartsWith($testParent + '\', [StringComparison]::OrdinalIgnoreCase) -or

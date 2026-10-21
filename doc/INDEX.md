@@ -64,7 +64,7 @@ The local original database and `config/audiolib_config.yaml` remain read-only i
 
 ## Supported verification
 
-Rust unit and integration tests live with the Cargo workspace packages. Select the smallest affected scope in [AGENTS.md](../AGENTS.md): formatting, strict package Clippy and relevant tests for Rust behavior changes, plus direct-consumer compilation for public contracts. Ordinary GitHub-hosted CI checks formatting only; functional validation runs locally. ASIO checks apply to affected audio/device or feature wiring, and full workspace checks are an explicit release or broad-impact entry point.
+Rust unit and integration tests live with the Cargo workspace packages. Select the smallest affected scope in [AGENTS.md](../AGENTS.md#development-checks-by-change-scope) and [Testing Strategy](Testing_Strategy.md): formatting, strict package Clippy and relevant tests for Rust behavior changes, plus direct-consumer compilation for public contracts. Ordinary GitHub-hosted CI checks formatting only; functional validation runs locally. ASIO checks apply to affected audio/device or feature wiring, and full workspace checks are an explicit release or broad-impact entry point.
 
 | Tool | Purpose |
 |------|---------|
@@ -76,9 +76,21 @@ Rust unit and integration tests live with the Cargo workspace packages. Select t
 | [Spectral UI validation](../tools/validate-spectral-ui.ps1) | Waveform and UI snapshots with isolated data |
 | [Portable validation](../tools/validate-portable.ps1) | Packaged executable identity, startup and license materials |
 | [Rust search benchmark](../crates/audiolib-db/src/bin/search-benchmark.rs) | Actual-service P50/P95/P99 measurements on 1M+ records |
+| [Local full checks](../tools/check-local.ps1) | Explicit local format, strict Clippy and workspace tests; optional ASIO matrix before release |
 | [Release CI](../tools/ci-release.ps1) | Tag/version identity, release build, packaging, privacy and checksum checks; runtime validation stays local |
 
 These scripts are maintained regression tooling. Legacy import acceptance requires its explicit fixture; local portable validation's `-CleanCheckout` mode generates a synthetic WAV and starts from an isolated empty library. Cloud release reports record runtime validation as `not-run`.
+
+## Review and audit records
+
+These records retain the source identity and scope of each review; historical findings are not claims about the current main branch.
+
+| Record | Scope |
+|---|---|
+| [Client UI review, 2026-10-22](reviews/Client_UI_Review_2026-10-22.md) and [verified fixes](reviews/Client_UI_Fixes_2026-10-22.md) | Original working-copy review plus the subsequent main-branch verification and fixes |
+| [Server review, 2026-10-22](reviews/Server_Review_2026-10-22.md) | Static review of the older working copy; its findings require rechecking against the current server |
+| [Workspace omissions audit, 2026-10-22](reviews/Workspace_Omissions_Audit_2026-10-22.md) | Comparison of uncommitted work with main, distinguishing already integrated changes from missing process and validation work |
+| [Archived snapshot-progress handoff](Snapshot_Progress_Redo_Handoff.md) | Historical notes from an abandoned task; current implementation and contracts take precedence |
 
 ## Retained requirements and historical design
 

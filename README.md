@@ -64,13 +64,15 @@ The server builds on Windows, Linux and macOS (it does not need audio playback s
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
 ```
 
-Development checks:
+Development checks (example for a database search change; select the affected package and test target):
 
 ```powershell
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
+cargo test -p audiolib-db --test search_fragments --locked
 ```
+
+Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Run full workspace checks locally with `./tools/check-local.ps1` for broad changes; add `-Asio` for the local release matrix before tagging. Run subsystem regressions and performance measurements when their behavior is affected. Ordinary GitHub CI checks formatting only. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [testing examples](doc/Testing_Strategy.md).
 
 ## Usage
 
@@ -102,7 +104,7 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 This development branch builds `0.6.0-dev.1` and includes the released 0.5.0 mainline baseline. Its schema-v6 changes are unpublished and have not been deployed; the existing installation and working library remain unchanged.
 
-GitHub Actions run formatting, Clippy and tests on `main` pushes and pull requests (`.github/workflows/ci.yml`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which verifies the version policy and builds the Windows x64 ASIO client, Windows x64 server and Linux x64 server. The release is published only after all build jobs pass; each archive has a SHA-256 file and a public validation report. Linux GNU server binaries are built on Ubuntu 22.04.
+GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built, validated and uploaded locally. `.github/workflows/release.yml` remains available for manual dispatch; tag pushes do not start it. Its cloud checks verify actual package allowlists, privacy, executable/archive identity and checksums, and report runtime validation as `not-run`. Each published archive has a SHA-256 file and a public build report.
 
 Portable payloads use `tools/portable-files.json` and fresh staging. Generated local reports, user screenshots and runtime state are excluded. Release builds remap compiler paths, and `tools/validate-package-privacy.ps1` checks the payload and public report schema before publication. These checks do not remove information from already published Git history or releases.
 

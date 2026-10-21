@@ -3,7 +3,7 @@
 > 后续核对与修复记录见 [Client_UI_Fixes_2026-10-22.md](Client_UI_Fixes_2026-10-22.md)。下文保留原始审阅基线与发现，部分事项在最新 main 已有变化。
 
 - 日期：2026-10-22
-- 基线：分支 `codex/debug-snapshot-reports`，提交 `c5c6ca1`（工作区干净）
+- 基线：分支 `codex/debug-snapshot-reports` 的工作区，即提交 `c5c6ca1` 加上审阅时尚未提交的改动（`controller.rs`、`app-window.slint`、`remote_mode.rs`、`source_manager.rs` 等文件有修改）。行号以审阅时的工作区为准。
 - 范围：`app/audiolib-desktop`（Rust 控制器 + Slint UI）为主，按需查看 `crates/audiolib-audio`、`crates/audiolib-ipc`、`crates/audiolib-core` 中被客户端直接依赖的部分。服务端 `server/audiolib-server` 未做专项审阅：下文涉及服务器模式的问题，根因和修复点都在客户端。
 - 方法：通读 `app-window.slint`、`audition-panel.slint`、`theme.slint`、`main.rs`、`controller.rs`（非测试部分）、`startup.rs`、`dialogs.rs`、`diagnostics.rs`、`metadata_recovery.rs`、`window_repaint.rs`，以及 `remote_mode.rs`、`source_manager.rs` 的交互主路径；静态推理为主，未做实机点按。
 - 验证：见文末“验证记录”。

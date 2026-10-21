@@ -72,9 +72,16 @@ if ($ReleaseReport) {
     $portableFields = @('success','mode','records','source_unchanged','python_runtime_required')
     if (@($report.portable.PSObject.Properties.Name | Where-Object { $_ -notin $portableFields }).Count -or
         @($portableFields | Where-Object { $_ -notin $report.portable.PSObject.Properties.Name }).Count) { throw 'Public portable report schema mismatch.' }
-    if (!$report.success -or !$report.portable.success -or !$report.portable.source_unchanged -or
-        $report.portable.mode -ne 'clean-checkout-synthetic' -or $report.portable.records -ne 1 -or
-        $report.portable.python_runtime_required -or $report.commit -notmatch '^[0-9a-f]{40}$' -or
+    if ($report.portable.mode -isnot [string]) { throw 'Public portable report has invalid validation mode.' }
+    if ($report.portable.mode -ceq 'clean-checkout-synthetic') {
+        if (!$report.portable.success -or !$report.portable.source_unchanged -or
+            $report.portable.records -ne 1 -or $report.portable.python_runtime_required) { throw 'Public portable report has invalid validation results.' }
+    } elseif ($report.portable.mode -ceq 'not-run') {
+        foreach ($field in @('success','records','source_unchanged','python_runtime_required')) {
+            if ($null -ne $report.portable.$field) { throw 'Unrun portable validation must contain only null results.' }
+        }
+    } else { throw 'Public portable report has invalid validation mode.' }
+    if (!$report.success -or $report.commit -notmatch '^[0-9a-f]{40}$' -or
         $report.version -notmatch '^\d+\.\d+\.\d+$' -or $report.tag -notmatch ('^v' + [regex]::Escape($report.version) + '(?:-rc\.\d+)?$')) { throw 'Public release report has invalid build/validation identity.' }
     if (@($report.binaries.PSObject.Properties.Name | Sort-Object) -join ',' -ne 'AudioLibCli.exe,AudioLibExplorer.exe') { throw 'Public binary report schema mismatch.' }
     foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {

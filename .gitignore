@@ -1,6 +1,8 @@
 /target/
 /dist/
 /local_release/
+/local_release.rar
+/release-upload/
 /tools/.build-tools/
 /.rust-validation/
 
