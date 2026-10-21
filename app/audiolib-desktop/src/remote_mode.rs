@@ -2178,9 +2178,8 @@ impl Controller {
                 })
             }
             DataSourceSwitch::Server { database, state } => {
-                let next =
-                    SqliteProvider::open_read_only(database)
-                        .map_err(|error| error.display_text(chinese))?;
+                let next = SqliteProvider::open_read_only(database)
+                    .map_err(|error| error.display_text(chinese))?;
                 *self.sqlite.write().unwrap() = Arc::new(next);
                 self.remote_mode.store(true, Ordering::Release);
                 {
