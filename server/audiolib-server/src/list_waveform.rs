@@ -18,7 +18,7 @@ use crate::{
         self, CurrentItem, JobMode, JobRecord, JobState, JobView, LastError, RateWindow, StateFile,
     },
 };
-use audiolib_audio::{WAVEFORM_CACHE_VERSION, WaveformPeak, WaveformRequest};
+use audiolib_audio::{WAVEFORM_CACHE_VERSION, WaveformPeak};
 use audiolib_core::{Error, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -206,9 +206,30 @@ pub fn merge_channels(peaks: &[Vec<WaveformPeak>]) -> Vec<i16> {
     values
 }
 
+/// Read buffer for list waveform computation: whole-file sequential passes, so large
+/// reads keep network shares streaming instead of issuing one small request per block.
+pub const LIST_WAVEFORM_READ_BUFFER: usize = 2 * 1024 * 1024;
+
 /// Blocking. Compute the list summary of a whole file (§9.1: `colors=0`,
 /// `samples_per_pixel = ceil(frames / 128)`); a 0-frame file has no columns.
 pub fn compute(path: &Path, cancel: &AtomicBool) -> Result<Vec<i16>> {
+    // One open and header parse; the trailing metadata chunks are never fetched.
+    let waveform = audiolib_audio::summary_waveform_with_read_buffer(
+        path,
+        LIST_BUCKETS,
+        cancel,
+        LIST_WAVEFORM_READ_BUFFER,
+    )?;
+    if waveform.frames == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(merge_channels(&waveform.peaks))
+}
+
+/// The previous two-pass implementation (`probe`, then a full waveform); kept for the
+/// equivalence test.
+#[cfg(test)]
+fn compute_probed(path: &Path, cancel: &AtomicBool) -> Result<Vec<i16>> {
     let metadata = audiolib_audio::probe(path)?;
     if metadata.frames == 0 {
         return Ok(Vec::new());
@@ -216,15 +237,16 @@ pub fn compute(path: &Path, cancel: &AtomicBool) -> Result<Vec<i16>> {
     let samples_per_pixel = u32::try_from(metadata.frames.div_ceil(u64::from(LIST_BUCKETS)))
         .unwrap_or(u32::MAX)
         .max(1);
-    let waveform = audiolib_audio::waveform_with_cancel(
+    let waveform = audiolib_audio::waveform_with_read_buffer(
         path,
-        WaveformRequest {
+        audiolib_audio::WaveformRequest {
             samples_per_pixel,
             start_frame: 0,
             end_frame: None,
             include_colors: false,
         },
         cancel,
+        LIST_WAVEFORM_READ_BUFFER,
     )?;
     Ok(merge_channels(&waveform.peaks))
 }
@@ -3396,6 +3418,74 @@ mod tests {
             min,
             max,
             ..WaveformPeak::default()
+        }
+    }
+
+    #[test]
+    fn single_open_compute_matches_the_probed_two_pass_summary() {
+        fn chunk(id: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                out.push(0);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        for (frames, trailing) in [(0_u32, true), (1, false), (127, true), (99_991, true)] {
+            let mut fmt = Vec::new();
+            for value in [1_u16, 2] {
+                fmt.extend_from_slice(&value.to_le_bytes());
+            }
+            fmt.extend_from_slice(&48_000_u32.to_le_bytes());
+            fmt.extend_from_slice(&192_000_u32.to_le_bytes());
+            fmt.extend_from_slice(&4_u16.to_le_bytes());
+            fmt.extend_from_slice(&16_u16.to_le_bytes());
+            let samples: Vec<u8> = (0..frames as usize * 4)
+                .map(|i| ((i * 2_654_435_761) >> 11) as u8)
+                .collect();
+            let mut body = Vec::new();
+            chunk(b"fmt ", &fmt, &mut body);
+            chunk(b"data", &samples, &mut body);
+            if trailing {
+                chunk(b"SMED", &[3; 4097], &mut body);
+                chunk(b"iXML", b"<BWFXML/>", &mut body);
+            }
+            let mut wav = b"RIFF".to_vec();
+            wav.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+            wav.extend_from_slice(b"WAVE");
+            wav.extend_from_slice(&body);
+            let path = dir.path().join(format!("{frames}.wav"));
+            std::fs::write(&path, wav).unwrap();
+            assert_eq!(
+                compute(&path, &cancel).unwrap(),
+                compute_probed(&path, &cancel).unwrap(),
+                "frames={frames}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_wav_containers_are_rejected_by_both_compute_paths() {
+        // The decoder is WAV-only (RIFF/RF64/BW64; Symphonia is built with wav/pcm/adpcm
+        // only), so FLAC/MP3 never reach the single-open frame count: both paths fail
+        // at the container check and no list summary is produced.
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut flac = b"fLaC".to_vec();
+        flac.extend_from_slice(&[0x80, 0, 0, 34]);
+        flac.extend_from_slice(&[0; 34]);
+        let mut mp3 = b"ID3\x04\0\0\0\0\0\0".to_vec();
+        for _ in 0..8 {
+            mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x64]);
+            mp3.extend_from_slice(&[0; 413]);
+        }
+        for (name, bytes) in [("a.flac", flac), ("a.mp3", mp3)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(compute(&path, &cancel).is_err(), "{name}");
+            assert!(compute_probed(&path, &cancel).is_err(), "{name}");
         }
     }
 

@@ -107,9 +107,11 @@ fn fixture(extra: &str) -> Fixture {
         )
         .unwrap();
     assert_eq!(progress.added, 3, "{progress:?}");
+    // One list waveform worker: these tests pace a job file by file (`list_waveform_rate`)
+    // and read its cursor and progress between files.
     let config = ServerConfig::from_toml_str(
         &format!(
-            "bind = \"127.0.0.1:0\"\nlibrary_db = 'library/library.db'\nsnapshot_dir = 'snapshots'\n{extra}\
+            "bind = \"127.0.0.1:0\"\nlibrary_db = 'library/library.db'\nsnapshot_dir = 'snapshots'\nlist_waveform_workers = 1\n{extra}\
              [[roots]]\nname = \"SFX\"\nserver_path = '{}'\n",
             sounds.display()
         ),
@@ -475,7 +477,12 @@ async fn running_job_reports_rate_eta_and_current_item() {
     let f = fixture("list_waveform_rate = 2\n");
     let started = start(&f.state, r#"{"mode":"missing"}"#).await;
     assert_eq!(started.run_state, "running");
-    assert_eq!(started.pending, Some(3));
+    // The first file may already be done when the start response is built.
+    assert_eq!(
+        started.pending,
+        Some(3 - started.job.as_ref().unwrap().done),
+        "{started:?}"
+    );
     let s = wait_for(&f.state, "rate measured", |s| {
         s.job.as_ref().unwrap().done >= 1 && s.job.as_ref().unwrap().finished_at.is_none()
     })

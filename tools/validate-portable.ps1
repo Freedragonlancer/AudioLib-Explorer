@@ -62,8 +62,10 @@ try {
         $identityCheck = 'packaged EXE hashes match published release report'
     } else {
         if ($ExpectedTag -or $ExpectedCommit) { throw 'Expected tag/commit requires a published release report.' }
+        # Same release output as package-portable.ps1: CARGO_TARGET_DIR when set, else <repo>/target.
+        $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR } else { Join-Path $taskRoot $env:CARGO_TARGET_DIR })) } else { Join-Path $taskRoot 'target' }
         foreach ($binary in @('AudioLibExplorer.exe','AudioLibCli.exe')) {
-            $sourceHash = (Get-FileHash -LiteralPath (Join-Path $taskRoot ('target/x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
+            $sourceHash = (Get-FileHash -LiteralPath (Join-Path $targetRoot ('x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
             $packageHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binary) -Algorithm SHA256).Hash
             if ($sourceHash -ne $packageHash) { throw "Packaged binary differs from release: $binary" }
         }

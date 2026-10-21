@@ -151,7 +151,7 @@ fn future_source_derived_revisions_are_rejected_before_owned_or_live_writes() {
             SqliteProvider::open_existing(&path).map(|_| ()),
         ] {
             assert!(
-                matches!(result, Err(Error::Database(ref message)) if message.contains(key) && message.contains("newer than supported")),
+                matches!(result, Err(Error::NewerDatabase { ref what, found: 3, supported: 2 }) if what.contains(key)),
                 "{key}: {result:?}"
             );
             assert_eq!(fs::read(&path).unwrap(), original);

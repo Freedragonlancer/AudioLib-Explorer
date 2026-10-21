@@ -110,7 +110,7 @@ if ($Asio) {
 Assert-Unlinked $taskRoot
 $manifestPath = Join-Path $PSScriptRoot 'server-files.json'
 Assert-Unlinked $manifestPath
-$publicFiles = @(Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json)
+$publicFiles = @((Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json) | ForEach-Object { $_ })
 if (!$publicFiles.Count -or @($publicFiles | Where-Object { $_ -isnot [string] }).Count) { throw 'Server file allowlist must be a nonempty string array.' }
 $publicSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($relative in $publicFiles) {
