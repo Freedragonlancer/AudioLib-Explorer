@@ -694,6 +694,12 @@ impl Input<'_, '_> {
             .map_err(|error| {
                 if self.cancel.load(Ordering::Acquire) {
                     RemoteError::Cancelled
+                } else if is_read_stall(&error) {
+                    // The per-read stall limit fired: retryable, resumed with Range.
+                    RemoteError::Timeout(format!(
+                        "snapshot body: no data for {} s",
+                        snapshot_read_stall().as_secs_f32()
+                    ))
                 } else {
                     RemoteError::from_io(&error, "snapshot body")
                 }
@@ -892,6 +898,16 @@ fn snapshot_response(
     Ok((response, object))
 }
 
+/// ureq reports a transport read timeout inside the body reader as an `io::Error`
+/// wrapping `ureq::Error::Timeout`; `from_io` alone would see only its outer kind.
+fn is_read_stall(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::TimedOut)
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+            .is_some_and(|inner| matches!(inner, ureq::Error::Timeout(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -966,8 +982,14 @@ mod tests {
                         false,
                     ),
                     // Send a prefix, then go silent far longer than the stall limit.
-                    None => response(original.clone(), None, original.len(), original.len(), false)
-                        .slow(cut, Duration::from_secs(5)),
+                    None => response(
+                        original.clone(),
+                        None,
+                        original.len(),
+                        original.len(),
+                        false,
+                    )
+                    .slow(cut, Duration::from_secs(5)),
                 }
             })
         };
@@ -988,7 +1010,11 @@ mod tests {
                 matches!(error, RemoteError::Timeout(_)) && error.is_slow(),
                 "{error:?}"
             );
-            assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "{:?}",
+                started.elapsed()
+            );
             assert_eq!(session.pending().downloaded_bytes, cut as u64);
             assert!(!output.exists());
         }
@@ -1008,7 +1034,10 @@ mod tests {
             crate::client::SNAPSHOT_READ_STALL_TIMEOUT,
             Duration::from_secs(90)
         );
-        assert_eq!(crate::client::snapshot_read_stall(), Duration::from_secs(90));
+        assert_eq!(
+            crate::client::snapshot_read_stall(),
+            Duration::from_secs(90)
+        );
     }
 
     #[test]
