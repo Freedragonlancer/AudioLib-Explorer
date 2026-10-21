@@ -64,7 +64,7 @@ pub(super) fn check_cancel(cancel: &AtomicBool) -> Result<()> {
 
 pub(super) fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1 COLLATE NOCASE)",
         [table],
         |row| row.get(0),
     )
@@ -234,10 +234,17 @@ pub(super) fn inspect_connection(
         "ixml_take",
     ]
     .iter()
-    .all(|required| columns.iter().any(|column| column == required));
-    let retirement_ready = format.features.get("play_history_retired") != Some(&1)
-        || (!columns.iter().any(|column| column == "play_count")
-            && !table_exists(conn, "play_history")?);
+    .all(|required| {
+        columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(required))
+    });
+    let retirement_ready = !matches!(format.features.get("play_history_retired"), Some(1 | 2))
+        || (!columns.iter().any(|column| {
+            column.eq_ignore_ascii_case("play_count")
+                || (format.features.get("play_history_retired") == Some(&2)
+                    && column.eq_ignore_ascii_case("last_played_at"))
+        }) && !table_exists(conn, "play_history")?);
     let search_ready = pending.is_none()
         && retirement_ready
         && format.snapshot_format_id().is_some()
@@ -334,9 +341,9 @@ pub(super) fn business_digest_retained(
         let mut columns: Vec<String> = info
             .iter()
             .filter(|(name, _)| {
-                table != "audio_files"
-                    || (!search_storage::DERIVED_COLUMNS.contains(&name.as_str())
-                        && name != "source_tags_text")
+                !table.eq_ignore_ascii_case("audio_files")
+                    || (!search_storage::is_derived_column(name)
+                        && !name.eq_ignore_ascii_case("source_tags_text"))
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -371,7 +378,7 @@ pub(super) fn business_digest_retained(
             columns = reference
                 .tables
                 .iter()
-                .find(|entry| entry.table == table)
+                .find(|entry| entry.table.eq_ignore_ascii_case(&table))
                 .ok_or_else(|| Error::Validation("Missing digest reference".into()))?
                 .columns
                 .clone();
@@ -383,11 +390,11 @@ pub(super) fn business_digest_retained(
                 .collect::<Vec<_>>()
                 .join(",")
         };
-        let filter = if table == "library_meta" {
+        let filter = if table.eq_ignore_ascii_case("library_meta") {
             " WHERE key NOT IN ('source_search_rev','source_tags_rev','source_tags_progress','source_tags_progress_rev')".to_owned()
-        } else if table == "sqlite_sequence" && !retired_tables.is_empty() {
+        } else if table.eq_ignore_ascii_case("sqlite_sequence") && !retired_tables.is_empty() {
             format!(
-                " WHERE name NOT IN ({})",
+                " WHERE name COLLATE NOCASE NOT IN ({})",
                 std::iter::repeat_n("?", retired_tables.len())
                     .collect::<Vec<_>>()
                     .join(",")
@@ -402,7 +409,7 @@ pub(super) fn business_digest_retained(
             quote_list(&order)
         );
         let mut statement = conn.prepare(&sql).map_err(db_error)?;
-        let bindings = if table == "sqlite_sequence" {
+        let bindings = if table.eq_ignore_ascii_case("sqlite_sequence") {
             retired_tables
         } else {
             &[]

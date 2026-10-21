@@ -484,9 +484,14 @@ async fn scans_run_to_completion_bump_the_revision_only_for_changes_and_feed_the
             .status(),
         StatusCode::OK
     );
-    let plays: Vec<audiolib_core::PlayRecord> = get(state, "/history/plays?limit=10").await;
+    let plays: Vec<serde_json::Value> = get(state, "/history/plays?limit=10").await;
     assert!(plays.is_empty(), "playback tracking is retired");
-    assert_eq!(f.state.provider().get_audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.provider().get_audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
 }
 
 #[tokio::test]

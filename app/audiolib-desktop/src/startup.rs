@@ -3,7 +3,7 @@
 use crate::{AppWindow, controller};
 use anyhow::{Context, Result};
 use audiolib_core::config::{AppConfig, DataSourceMode};
-use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider, import_legacy};
+use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider, import_legacy_local};
 use audiolib_remote::CachePreparation;
 use slint::ComponentHandle;
 use std::{
@@ -167,20 +167,29 @@ fn open_library_cancellable(
             && let Some(source) = &config.paths.legacy_database
         {
             progress(StartupProgress::Importing);
-            let report =
-                import_legacy(source, &config.paths.database).context("Import legacy library")?;
+            let report = import_legacy_local(
+                source,
+                &config.paths.database,
+                &config.data_root(),
+                config.play_history_limit,
+            )
+            .context("Import legacy library")?;
             tracing::info!(?report, "Legacy library imported; source preserved");
         }
         progress(StartupProgress::Opening);
         let sqlite = if config.paths.database.exists() {
-            SqliteProvider::open_existing_with_progress_cancellable(
+            SqliteProvider::open_existing_local_with_progress_cancellable(
                 &config.paths.database,
+                &config.data_root(),
+                config.play_history_limit,
                 cancel,
                 |stage| progress(StartupProgress::Local(stage)),
             )
         } else {
-            SqliteProvider::open_with_progress_cancellable(
+            SqliteProvider::open_local_with_progress_cancellable(
                 &config.paths.database,
+                &config.data_root(),
+                config.play_history_limit,
                 cancel,
                 |stage| progress(StartupProgress::Local(stage)),
             )

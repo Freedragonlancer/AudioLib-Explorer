@@ -702,10 +702,9 @@ mod tests {
             let path = cache.database_path(&outcome.state);
             let readonly = SqliteProvider::open_read_only(&path).unwrap();
             assert_eq!(readonly.database_path(), path);
-            assert_eq!(
-                readonly.get_audio(1).unwrap().play_count,
-                if stale { 0 } else { 17 }
-            );
+            let value = serde_json::to_value(readonly.get_audio(1).unwrap()).unwrap();
+            assert!(value.get("play_count").is_none());
+            assert!(value["attributes"].get("last_played_at").is_none());
             assert_eq!(readonly.get_audio(1).unwrap().notes, "retained note");
             assert_eq!(
                 readonly

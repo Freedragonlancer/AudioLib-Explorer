@@ -28,11 +28,15 @@ pub(crate) fn changes() -> Vec<SchemaChange> {
             column: (*column).into(),
         })
         .collect();
-    // User authorized these two objects for the next schema upgrade, 2026-10-21.
-    // last_played_at and any unknown extension remain outside this retirement.
+    // Final v6 contract retires only the two playback fields and history table.
+    // Client-local history import runs after backup and before this recipe.
     result.push(SchemaChange::RetireColumn {
         table: "audio_files".into(),
         column: "play_count".into(),
+    });
+    result.push(SchemaChange::RetireColumn {
+        table: "audio_files".into(),
+        column: "last_played_at".into(),
     });
     result.push(SchemaChange::RetireTable {
         table: "play_history".into(),
@@ -42,7 +46,7 @@ pub(crate) fn changes() -> Vec<SchemaChange> {
 
 pub(super) fn identity() -> String {
     let mut hash = Sha256::new();
-    hash.update(b"ale-schema6-storage1-retire-plays1;");
+    hash.update(b"ale-schema6-storage1-retire-plays2;");
     // Index batches and query compilation must keep one implementation identity,
     // including source Metadata projection and the exact locked dependency graph.
     hash.update(super::plan::tokenizer_identity().as_bytes());
@@ -53,6 +57,11 @@ pub(super) fn identity() -> String {
     hash.update(include_bytes!("../search_storage.rs"));
     hash.update(include_bytes!("../schema.rs"));
     hash.update(include_bytes!("../schema/current.rs"));
+    hash.update(include_bytes!("../schema/legacy.rs"));
+    hash.update(include_bytes!("../local_play_history.rs"));
+    hash.update(include_bytes!("../import_lease.rs"));
+    hash.update(include_bytes!("../migration.rs"));
+    hash.update(include_bytes!("../../../audiolib-core/src/config.rs"));
     hash.update(include_bytes!("../schema/definition.rs"));
     hash.update(include_bytes!("../schema/search_upgrade.rs"));
     hash.update(include_bytes!("inspect.rs"));

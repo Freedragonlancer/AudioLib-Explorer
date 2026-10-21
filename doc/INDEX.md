@@ -89,3 +89,7 @@ These documents preserve product intent and design history. Python, SQLAlchemy, 
 - [Code Optimization Proposal](archive/Code_Optimization_Proposal.md), [UI Redesign Proposal](archive/UI_Redesign_Proposal.md) and [UI Color Scheme Guide](UI_Color_Scheme_Guide.md): historical implementation/UI proposals.
 
 Use **Waveform**, **Metadata**, **FTS5** and **DAW** consistently, and express the primary performance metric as **P95 latency <500ms for 1M+ records**. Measurements must identify dataset size, cache conditions, configuration and remaining limitations.
+
+- [Schema v6 合并升级契约](api/Schema_V6_Iteration.md)：修订后的结构升级、本机历史与兼容验收目标。
+
+- [v6 逐列审计](api/Schema_V6_Column_Audit.md)：57 项列用途与保留建议，不授权额外删除。

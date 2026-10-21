@@ -614,9 +614,22 @@ fn play_source_switch(transition: PlayTransition) {
             });
         }
     }
-    controller.provider().record_play(id).unwrap();
+    controller
+        .record_local_history(Path::new(&file.file_path))
+        .unwrap();
     // Dispatch twice across the transition; neither may send a play request.
-    controller.provider().record_play(id).unwrap();
+    controller
+        .record_local_history(Path::new(&file.file_path))
+        .unwrap();
+    let local_history = audiolib_db::local_play_history::LocalPlayHistory::open(
+        &controller.data_root(),
+        &format!("server-{}", state.library_id),
+        audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
+    )
+    .unwrap();
+    assert_eq!(local_history.page(10, 0).unwrap().len(), 2);
+    let history_path = local_history.database_path().to_path_buf();
+
     if snapshot_swap {
         let DataSourceSwitch::Server { state, .. } = &mut target else {
             unreachable!()
@@ -673,6 +686,8 @@ fn play_source_switch(transition: PlayTransition) {
                 })
     });
     assert!(matches!(a.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    assert!(history_path.is_file());
+    assert_eq!(local_history.page(10, 0).unwrap().len(), 2);
     if close {
         assert!(!ui.window().is_visible());
         assert_eq!(controller.remote_plays.lock().unwrap().workers, 0);
@@ -680,7 +695,12 @@ fn play_source_switch(transition: PlayTransition) {
         let active = cache.active().unwrap();
         assert!(cached_source_matches(&active.server_url, &state.server_url));
         assert_eq!(active.revision, 1);
-        assert_eq!(controller.provider().get_audio(id).unwrap().play_count, 0);
+        assert!(
+            serde_json::to_value(controller.provider().get_audio(id).unwrap())
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
         controller.shutdown();
         b.finish();
         return;
@@ -689,7 +709,12 @@ fn play_source_switch(transition: PlayTransition) {
         assert_eq!(b.requests.load(Ordering::Acquire), 0);
         let current = controller.provider().get_audio(id).unwrap();
         assert_eq!(current.notes, "New server snapshot");
-        assert_eq!(current.play_count, 0);
+        assert!(
+            serde_json::to_value(&current)
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
         let active = cache.active().unwrap();
         assert!(cached_source_matches(&active.server_url, &state.server_url));
         // The provider swap is separate from sync's cache promotion. Playback
@@ -712,7 +737,12 @@ fn play_source_switch(transition: PlayTransition) {
     assert_eq!(b.snapshots.load(Ordering::Acquire), 1);
     let current = controller.provider().get_audio(id).unwrap();
     assert_eq!(current.notes, "B snapshot Metadata");
-    assert_eq!(current.play_count, 0);
+    assert!(
+        serde_json::to_value(&current)
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     let active = cache.active().unwrap();
     assert!(cached_source_matches(&active.server_url, &b.url));
     assert_eq!(active.revision, 1);

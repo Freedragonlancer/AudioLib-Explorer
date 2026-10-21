@@ -19,7 +19,7 @@
 //! * [`RevisionCheck`] / [`PollSchedule`]: background revision check decisions and backoff.
 //! * [`RemoteSecrets`]: API token and WebDAV password, DPAPI-protected on Windows and
 //!   never logged or written to settings.json.
-//! * [`RemoteWriter`] / [`RemoteProvider`]: metadata writes and plays (§6.3) applied to
+//! * [`RemoteWriter`] / [`RemoteProvider`]: Metadata writes (§6.3) applied to
 //!   the snapshot by the revision rule (`revision_before` match, else full sync).
 //! * [`DownloadCache`]: complete local copies for drag and drop (`?download=1`, §8).
 //! * Server library management (`manage` module): [`Capabilities`] (`manage_mode`),

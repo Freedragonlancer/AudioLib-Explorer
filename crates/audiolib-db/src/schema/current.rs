@@ -7,6 +7,15 @@ use rusqlite::{params, params_from_iter, types::Value};
 use std::collections::BTreeMap;
 
 pub(crate) fn current_format_ready(conn: &Connection) -> Result<bool> {
+    format_ready(conn, false)
+}
+
+/// Completed p0 snapshots remain readable; all new library writes require p1.
+pub(crate) fn readable_format_ready(conn: &Connection) -> Result<bool> {
+    format_ready(conn, true)
+}
+
+fn format_ready(conn: &Connection, allow_p0: bool) -> Result<bool> {
     ensure_ready(conn)?;
     validate_supported_feature_revisions(conn)?;
     let version: i64 = conn
@@ -24,19 +33,25 @@ pub(crate) fn current_format_ready(conn: &Connection) -> Result<bool> {
         .map_err(db_error)?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()
         .map_err(db_error)?;
-    if features != LibraryFormat::target().features
+    let mut expected = LibraryFormat::target().features;
+    let p0 = allow_p0 && features.get("play_history_retired") == Some(&1);
+    if p0 {
+        expected.insert("play_history_retired".into(), 1);
+    }
+    if features != expected
         || !source_tags_ready(conn)?
         || !source_search_marked(conn)?
         || !search_storage::structure_matches(conn)?
-        || search_storage::columns(conn)?
-            .iter()
-            .any(|column| column == "play_count")
+        || search_storage::columns(conn)?.iter().any(|column| {
+            column.eq_ignore_ascii_case("play_count")
+                || (!p0 && column.eq_ignore_ascii_case("last_played_at"))
+        })
     {
         return Ok(false);
     }
     let history: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='play_history')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='play_history' COLLATE NOCASE)",
             [],
             |row| row.get(0),
         )
@@ -67,6 +82,20 @@ pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
 
 pub(crate) fn mark_current(conn: &Connection) -> Result<()> {
     search_storage::transaction_required(conn)?;
+    let retired: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
+          WHERE name COLLATE NOCASE IN ('play_count','last_played_at'))
+          OR EXISTS(SELECT 1 FROM sqlite_schema WHERE name='play_history' COLLATE NOCASE)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if retired {
+        return Err(Error::Validation(
+            "Playback retirement must complete in the owned migration before publishing p1".into(),
+        ));
+    }
     // Repair only explicitly owned derived objects, preserving ID watermark data.
     definition::repair_owned(conn)?;
     for (name, version) in LibraryFormat::target().features {
@@ -92,10 +121,27 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
             "New library creation requires an empty SQLite file".into(),
         ));
     }
-    let mut legacy = Connection::open_in_memory().map_err(db_error)?;
-    register_tokenizer(&legacy, crate::load_tokenizer())?;
-    migrate(&mut legacy)?;
-    let blueprint = search_storage::blueprint_with(&legacy, &migration::schema_changes())?;
+    let mut template = Connection::open_in_memory().map_err(db_error)?;
+    register_tokenizer(&template, crate::load_tokenizer())?;
+    // Build the current business template directly. No playback table/column is
+    // created, even transiently; old-source normalization is isolated in legacy.rs.
+    let seed = template.transaction().map_err(db_error)?;
+    seed.execute_batch(BASE_SCHEMA).map_err(db_error)?;
+    for (name, definition) in AUDIO_COLUMNS {
+        if !search_storage::is_derived_column(name) {
+            ensure_column(&seed, "audio_files", name, definition)?;
+        }
+    }
+    for (name, definition) in FOLDER_COLUMNS {
+        ensure_column(&seed, "folders", name, definition)?;
+    }
+    seed.execute_batch(BASE_INDEXES).map_err(db_error)?;
+    add_management_schema(&seed)?;
+    apply_indexes(&seed)?;
+    add_current_features(&seed)?;
+    seed.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
+    seed.commit().map_err(db_error)?;
+    let blueprint = search_storage::blueprint_with(&template, &migration::schema_changes())?;
     let tx = conn.transaction().map_err(db_error)?;
     for (_, sql) in &blueprint.tables {
         search_storage::execute_schema(&tx, sql)?;
@@ -116,7 +162,7 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
             .map(|column| search_storage::quote_identifier(column))
             .collect::<Vec<_>>()
             .join(",");
-        let mut source = legacy
+        let mut source = template
             .prepare(&format!("SELECT {selected} FROM {quote}"))
             .map_err(db_error)?;
         let mut rows = source.query([]).map_err(db_error)?;

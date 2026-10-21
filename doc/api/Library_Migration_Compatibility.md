@@ -20,30 +20,31 @@
 
 ## 2. 多维版本描述
 
-同一次发布的桌面客户端、CLI 和服务端继续采用同一个 workspace SemVer；release manifest 同时记录 commit 和迁移目录摘要。已部署两端允许暂时处于不同程序版本，只要双方声明的互操作范围相交。
+同一次发布的桌面客户端、CLI 和服务端继续采用同一个 workspace SemVer。已部署两端允许暂时处于不同程序版本，但现代握手须各自明确接纳对方的实际版本并共享 API 协议，不能只看两个版本区间是否有交集；实际格式另行检查。
 
-每个构建内置只读 compatibility manifest：
+每个构建内置只读 compatibility manifest；当前 `/capabilities.compatibility` 的实际字段为：
 
 ```text
-application_version / build_commit
-compatibility_catalog_revision
-peer_application_ranges       # SemVer 区间，可多段；由经过测试的发布目录生成
+application_version
+catalog_revision              # 目录语义版本，独立于程序/API/schema
+peer_application_ranges       # SemVer requirement 字符串数组，由已测发布目录生成
 legacy_peer_application_ranges # 明确允许缺少能力目录的已发布旧端；缺失字段按空集处理
 direct_use_application_ranges # 测试过无需迁移的发布组合；必须再核对实际格式
 auto_migrate_application_ranges # 测试过可自动迁移的来源发布组合；必须存在迁移图路径
 api_protocols                 # 例如 api/v1；不能用来推断数据库格式
-snapshot_read_formats         # schema + 所有必需 feature 的范围/集合
+snapshot_read_formats         # 完整格式 ID 的精确集合，不接受整数上界推断
 database_write_formats        # 可以安全写入的格式，通常比可读范围窄
-migration_source_formats      # 有受支持迁移路径的源格式
+migration_source_schemas      # 有候选转换路径的源 schema；仍须检查实际格式和迁移证据
 migration_target_format
 migration_protocols
-sqlite_version / source_id / required_fixes
-tokenizer_and_dictionary_identity
+minimum_sqlite_version
 ```
+
+`/health.commit` 单独报告构建提交，`/health.compatibility_catalog_revision` 对应目录中的 `catalog_revision`。这些不是目录内的 `build_commit` 或 `compatibility_catalog_revision` 字段。执行器、分词器和词典等身份另由持久迁移计划绑定，不把规划信息误作 HTTP 目录字段。API 协议、数据库 schema、feature revision 与完整格式 ID 各有职责；`api/v1` 或 schema 6 都不能代替 p0/p1 的完整格式判定。
 
 程序版本区间用于快速判断部署组合是否经过支持；最终能否打开/写入仍由实际数据库格式和能力检查决定。不能写成“所有 0.4.x 数据库都相同”，也不能仅用 `schema <= max` 接受未知 feature。
 
-区间采用闭开边界 `[min_inclusive, max_exclusive)`，可声明多段并排除已知有缺陷的构建；预发布版本默认不进入正式兼容范围。同一个构建可能读取旧库、生成新库，因此来源程序版本仅是规划提示，不能替代库内格式描述。`direct_use` 和 `auto_migrate` 两类范围分别表示已验证的零迁移路径与有迁移路径；**没有“按版本号强制全量重建”的范围**。
+范围采用 Rust `semver::VersionReq` 的需求字符串；当前目录使用已测版本的精确 `=版本` 项，并非一段默认包含任意 patch 的闭开区间。将来声明区间时必须显式给出边界；预发布版本须显式接纳。同一个构建可能读取旧库、生成新库，因此来源程序版本仅是规划提示，不能替代库内格式描述。`direct_use` 和 `auto_migrate` 两类范围分别表示已验证的零迁移路径与有迁移路径；**没有“按版本号强制全量重建”的范围**。
 
 判定顺序固定为：验证库身份 → 检查实际格式与进行中的迁移 → 检查双方程序/协议支持范围 → 判断直接支持所需操作 → 搜索有损失保护的迁移路径 → 对无法规划的情况运行专门诊断。读兼容不自动授予写兼容；客户端和服务端必须分别检查对方范围，不能只做单边版本比较。
 
@@ -54,7 +55,8 @@ tokenizer_and_dictionary_identity
 | 来源实际状态 | 新版读取/使用 | 迁移政策 |
 |---|---|---|
 | schema 5、rev 3、external-content、完整派生状态 | 支持旧格式只读搜索，不因程序 patch 版本不同而强制迁移 | 若需本地写入或主动采用 B，规划 v5 → v6 |
-| schema 6、storage 1、rev 3、Metadata 提取 rev 2 | 满足 SQLite 修复要求的新构建可直接读写 | 无迁移 |
+| schema 6，完整格式 `ale-s6-cld1-t3-m2-p1`，`play_history_retired=2`，其余 features/派生标记完整匹配 | 满足 SQLite 修复要求的新构建可直接读写；HTTP 写入还须通过客户端目录准入 | 无迁移 |
+| schema 6，旧 B 格式 `ale-s6-cld1-t3-m2-p0`，`play_history_retired=1`，仍保留 `last_played_at` | 支持只读；不能因为 schema、storage、tokenization 相同就授予写入 | 需要写入时通过 owned 候选迁移到 p1 |
 | schema 3–5，旧 tokenization/派生状态落后 | 不能假装搜索语义已就绪 | 在 owned 副本完成已有受支持升级步骤，再进入 B；只公开最终完成态 |
 | schema 1–2 / 旧 Python 库 | 不在普通原地打开/自动写入范围内 | 使用既有只读导入路径创建 owned Rust 库，再评估 B；先验证支持的源身份 |
 | rev 3 升级未完成，含临时 tokenization=4 | 不作为完成的 rev 4 打开 | 识别旧协议并 resume/rollback；不可直接覆盖旧迁移清单 |
@@ -88,8 +90,10 @@ CR 开发目录明确接纳已测旧端 `=0.4.11`、`=0.5.0`，以及须有现�
 升级窗口；不兼容、无效 JSON、重复或超过 4096 字节的声明返回
 `409 PEER_VERSION_UNSUPPORTED`，不改变业务数据、revision 或 `data_version`。
 此声明不代替 `X-AudioLib-Library-Id` 身份绑定，也不授予客户端修改服务端库格式的能力。
-为保留既有 JSON API，未携带该头的历史客户端仍使用原鉴权/身份/参数校验路径；服务端
-无法从缺失的声明推断其程序版本。快照下载仍单独要求 schema 6 的完整格式协商。
+p1 删除旧必填 DTO 字段后，实际库写入必须同时携带有效现代目录并声明能读取服务器当前完整格式；
+缺失或无效目录返回 `409 PEER_VERSION_UNSUPPORTED`；有效目录未声明可读当前完整格式（例如仅支持 p0/旧 schema）返回 `409 SNAPSHOT_FORMAT_UNSUPPORTED`，均在业务执行前提示升级，不能先写成功再解析响应失败。
+两个只读兼容播放路由保持 headerless 校验和 HTTP 200。设置等非库写入仍在提供目录时校验双方范围。
+快照下载单独要求 schema 6 的完整格式协商。
 
 服务端权威库需要升级时，由服务端内置迁移器执行。客户端不能因连接到新服务端而修改服务端库，也不能把自己的较新库反向覆盖服务端。服务端完成升级后生成新格式快照。
 
@@ -138,13 +142,15 @@ CLI 在加载默认设置或打开 DataProvider 前分派这些命令。所有�
 ```powershell
 AudioLibCli --database .\owned-library.db db migration inspect --deep --writable
 AudioLibCli --database .\owned-library.db db migration diagnose
-AudioLibCli --database .\owned-library.db db migration plan --output .\migration-plan.json
+New-Item -ItemType Directory -Path .\owned-client-data
+AudioLibCli --database .\owned-library.db db migration plan --output .\migration-plan.json --local-history-root .\owned-client-data
 AudioLibCli --database .\owned-library.db db migration apply --plan .\migration-plan.json
 AudioLibCli --database .\owned-library.db db migration resume
 AudioLibCli --database .\owned-library.db db migration verify
 AudioLibCli --database .\owned-library.db db migration rollback
 ```
 
+服务端/快照计划省略 `--local-history-root`；客户端本地计划须显式传入已存在的数据根，计划不创建该目录。
 `inspect`/`diagnose`/`plan` 只读访问来源；计划文件必须是新文件，不覆盖已有文件。`apply` 要求计划中
 的规范化来源路径与 `--database` 一致，并复核来源数据、结构和编译步骤身份。后三个命令
 定位该库最近一次登记的持久化任务；进度 JSON 写 stderr，stdout 保留单个命令结果。
@@ -287,25 +293,25 @@ SQLite 会忽略 `UPDATE OF` 中不存在的列，所以不能只靠 `DROP COLUM
 保留可查询归档或显式授权的退役政策，并保留完整升级前备份与回滚能力。自动迁移的默认
 路线仍要求业务无损；仅一个通用 `DROP COLUMN` 能力不代表获准删除任何历史数据。
 
-**播放统计的最新授权边界（覆盖此前保留计划）：** 用户已明确要求下一次结构升级删除
-`play_history` 表和 `audio_files.play_count` 列。隔离实现把它们注册为显式退役步骤；
-升级前备份完整保留旧表、旧值，失败回滚恢复它们。其余业务内容不因退役而排除校验，
-包括实际列名 `last_played_at`；该列不在本次删除清单中。退役不扫描或删除 WAV。
-当前工作库不执行这些步骤。
+**播放统计的最新授权边界（2026-10-21 定稿 v6，覆盖此前保留 last_played_at 的计划）：**
+下一次结构升级同时删除 `play_history`、`audio_files.play_count` 和 `audio_files.last_played_at`。
+共享 recipe 逐项注册退役，完整备份保留原表、原值；本地模式先从已验证的备份幂等导入
+`<data_root>/play-history/<safe_library_id>/history.db`，成功才允许改变主库。
+导入失败保持旧主库，服务端和快照均不导入。新历史只存本机、不计次数，默认每库 5000 条，
+可配置为 0 禁用。其余业务内容和未知扩展不因退役而排除校验。当前工作库不执行这些步骤。
+详见 [Schema v6 合并升级契约](Schema_V6_Iteration.md)。
 
-可读的旧 `play_history` 若只含指向已不存在音频的引用，仍可随已授权表退役；原始记录和
-无效引用一并保留在完整备份中，回滚还原原状。保留表的断裂引用仍阻止迁移。旧播放表
-本身不可读时不会假装已完成完整保全，诊断须阻止自动执行。
+新目标 schema 6 使用 `play_history_retired=2`、`ale-s6-cld1-t3-m2-p1`，实际检查三个对象确实不存在。
+此前未发布的 p0 / retired=1 只读兼容且可迁移到 p1，不复用格式 ID。旧格式的原始计数仍在
+原库和备份里，但新版 AudioFile JSON 不再输出 play_count，attributes 不再输出 last_played_at，
+CSV 不再输出计数。新版客户端宽容忽略旧 JSON 的多余字段。旧二进制的 play_count 是必填字段，
+所以保留播放路由 HTTP 200 不构成旧 DTO 解析兼容保证；必须先升级客户端，再升级服务端。
+快照协商会在发送不支持的 v6 正文前拒绝，保留旧缓存；版本不同本身不构成必须重建。
 
-目标 schema 6 增加 feature `play_history_retired=1`；完整格式标识调整为
-`ale-s6-cld1-t3-m2-p0`。检查同时确认指定表/列确实不存在，不能只相信 feature 标记。
-之前全库研究样本保留播放数据，仍是历史实验结果，不等于已验证带退役步骤的最终格式。
-最终共享迁移器的 909,342 行隔离验证已包含退役及回滚，详见
-[集成验证报告](Search_Storage_B_Integrated_Validation.md#0-最终构建复验当前结论)。报告记录最终工具与步骤身份；
-目标中表/列不存在，回滚恢复 752 条播放记录及合计 759 次计数，保留的最后播放时间逐项一致。
-尚未迁移的旧格式可返回原有非零 `play_count`，旧 API 示例中的 `0` 不是其固定值；
-结构升级后的兼容 DTO 保留字段并返回 `0`、历史返回 `[]`，不得再读已删除的列或表。
-客户端/服务端适配与兼容测试完成前不能发布该目标格式。
+可读的旧播放表中指向已不存在素材的历史在本地导入时保留其历史路径/名称并标为不能定位，
+不静默丢弃。服务端退役的原始记录及失效引用保留在完整备份中。保留表的断裂引用仍阻止迁移。
+旧播放表本身不可读时不得声称保全完成。历史 p0 全库验证报告只证明旧 recipe；本轮 p1 须重新
+记录最终工具、导入、完整业务投影和回滚证据，不能将旧测量直接标成新版验收。
 
 结构演进回归至少包含：有旧值的播放统计与历史、添加 nullable/default 字段、生成列、
 删除派生列、业务字段退役有无归档、未知扩展保留、依赖阻断、引用约束、分批中断恢复、

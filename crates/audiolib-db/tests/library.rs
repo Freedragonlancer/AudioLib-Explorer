@@ -79,9 +79,18 @@ fn imports_legacy_losslessly_and_rebuilds_chinese_fts() {
         })
         .unwrap();
     assert_eq!(legacy_rating, 4);
-    assert_eq!(audio.play_count, 0);
+
     assert_eq!(audio.color.as_deref(), Some("#123456"));
     assert_eq!(audio.notes, "车辆发动机的环境声");
+    let dto = serde_json::to_value(&audio).unwrap();
+    assert!(dto.get("play_count").is_none());
+    assert!(audio.attributes.get("last_played_at").is_none());
+    assert!(
+        !support::connection(&target)
+            .unwrap()
+            .column_exists(None, "audio_files", "last_played_at")
+            .unwrap()
+    );
     for query in ["爆炸", "火焰", "发动机", "oldtag"] {
         assert_eq!(search(&provider, query), 1, "{query}");
     }
@@ -94,10 +103,6 @@ fn imports_legacy_losslessly_and_rebuilds_chinese_fts() {
         (
             "SELECT created_at FROM audio_files WHERE id=42",
             "2024-01-01 01:02:03",
-        ),
-        (
-            "SELECT last_played_at FROM audio_files WHERE id=42",
-            "2024-01-03 03:04:05",
         ),
         ("SELECT notes FROM playlist_items WHERE id=17", "item notes"),
         (
@@ -160,15 +165,28 @@ fn failed_import_does_not_publish_a_destination_or_leave_staging_files() {
     assert!(import_legacy(&source, &target).is_err());
     assert!(!target.exists());
     assert_eq!(fs::read(&source).unwrap(), before);
-    let names: Vec<_> = fs::read_dir(temp.path())
+    let mut names: Vec<_> = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [".audiolib-import-leases", "bad.db"].map(std::ffi::OsString::from),
+        "Only the untouched source and persistent import lease directory may remain; owned staging db, WAL and SHM must disappear"
+    );
+    let leases = temp.path().join(".audiolib-import-leases");
+    assert!(leases.is_dir());
+    let lease_names: Vec<_> = fs::read_dir(&leases)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(
-        names.len(),
-        1,
-        "Owned staging db, WAL and SHM must disappear: {names:?}"
+        lease_names,
+        [std::ffi::OsString::from("target.db")],
+        "The persistent lease directory must contain only this destination's lock, without staging db, WAL or SHM"
     );
+    assert!(leases.join("target.db").is_file());
 }
 
 #[test]
@@ -198,8 +216,7 @@ fn metadata_updates_fts_old_terms_and_deletion_leave_no_stale_postings() {
     for query in ["newtag", "森林", "鸟鸣"] {
         assert_eq!(search(&provider, query), 1);
     }
-    provider.record_play(42).unwrap();
-    assert_eq!(provider.get_audio(42).unwrap().play_count, 0);
+
     provider.delete_audio(42).unwrap();
     assert_eq!(search(&provider, "newtag"), 0);
     let conn = support::connection(&target).unwrap();

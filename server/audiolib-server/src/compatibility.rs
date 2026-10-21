@@ -1,5 +1,5 @@
 // server/audiolib-server/src/compatibility.rs
-//! Snapshot negotiation happens before copying/compressing or streaming the library.
+//! Negotiate snapshot reads and business writes against the actual library format.
 use crate::ApiError;
 use audiolib_core::compatibility::{
     ACCEPT_FORMATS_HEADER, CLIENT_COMPATIBILITY_HEADER, CompatibilityManifest,
@@ -64,7 +64,7 @@ fn admit_peer(headers: &HeaderMap) -> Result<CompatibilityManifest, ApiError> {
             ApiError::new(
                 StatusCode::CONFLICT,
                 "PEER_VERSION_UNSUPPORTED",
-                "A valid client compatibility catalog is required",
+                "A valid client compatibility catalog is required; upgrade the client before writing",
             )
         })?;
     if !peer_versions_compatible(
@@ -75,17 +75,31 @@ fn admit_peer(headers: &HeaderMap) -> Result<CompatibilityManifest, ApiError> {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "PEER_VERSION_UNSUPPORTED",
-            "Client and server application compatibility ranges do not agree",
+            "Client and server application compatibility ranges do not agree; upgrade the client",
         ));
     }
     Ok(peer)
 }
 
-/// Legacy JSON callers may omit the catalog. A supplied catalog is always checked;
-/// malformed, duplicate or incompatible declarations never fall back to legacy mode.
+/// Settings, cache jobs and the playback no-op permit legacy JSON callers to omit
+/// the catalog. A supplied malformed or incompatible catalog is always refused.
 pub(crate) fn admit_mutation(headers: &HeaderMap) -> Result<(), ApiError> {
     if headers.contains_key(CLIENT_COMPATIBILITY_HEADER) {
         admit_peer(headers)?;
+    }
+    Ok(())
+}
+
+/// A library write can return current AudioFile values, so the peer must explicitly
+/// understand the complete actual format. Legacy JSON admission only applies to
+/// settings, cache jobs and the deprecated playback no-op, never business writes.
+pub(crate) fn admit_library_mutation(
+    headers: &HeaderMap,
+    format: &SnapshotFormat,
+) -> Result<(), ApiError> {
+    let peer = admit_peer(headers)?;
+    if !format.is_readable_by(&peer) {
+        return Err(unsupported(format));
     }
     Ok(())
 }
@@ -214,5 +228,27 @@ mod tests {
             HeaderValue::from_static(PLAN_B_FORMAT),
         );
         assert!(admit(&duplicate, &format).is_err());
+    }
+
+    #[test]
+    fn library_writes_require_catalog_and_complete_actual_format() {
+        let (mut headers, format) = fixture();
+        // Snapshot-transfer headers do not substitute for or constrain the catalog
+        // used by a JSON mutation. The full actual library descriptor still does.
+        headers.remove(ACCEPT_FORMATS_HEADER);
+        headers.remove("x-audiolib-snapshot-schema-max");
+        admit_library_mutation(&headers, &format).unwrap();
+        assert!(admit_library_mutation(&HeaderMap::new(), &format).is_err());
+        let mut old = compatibility_manifest();
+        old.snapshot_read_formats =
+            vec![audiolib_core::compatibility::PLAN_B_INITIAL_FORMAT.into()];
+        headers.insert(
+            CLIENT_COMPATIBILITY_HEADER,
+            HeaderValue::from_str(&serde_json::to_string(&old).unwrap()).unwrap(),
+        );
+        assert!(admit_library_mutation(&headers, &format).is_err());
+        let (headers, mut unknown) = fixture();
+        unknown.format.features.insert("future_feature".into(), 1);
+        assert!(admit_library_mutation(&headers, &unknown).is_err());
     }
 }

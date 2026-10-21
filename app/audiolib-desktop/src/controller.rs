@@ -20,7 +20,7 @@ use audiolib_audio::{
 use audiolib_core::config::{AppConfig, AudioTablePreferences};
 use audiolib_core::{
     AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder, LibraryExportFormat,
-    ListWaveformSource, MaintenanceAction, MetadataPatch, PlayRecord, ScanSession, SearchFilters,
+    ListWaveformSource, MaintenanceAction, MetadataPatch, ScanSession, SearchFilters,
     SearchRequest, SortOrder, TagEditMode,
 };
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
@@ -28,6 +28,8 @@ use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffe
 
 const PAGE_SIZE: usize = 200;
 const HISTORY_SIZE: usize = 50;
+#[path = "controller_history.rs"]
+mod history;
 
 fn table_sort_order(index: i32) -> SortOrder {
     match index {
@@ -524,7 +526,8 @@ pub struct Controller {
     selection_anchor: Mutex<Option<i64>>,
     history_generation: AtomicU64,
     history_offset: Mutex<usize>,
-    plays: Mutex<Vec<PlayRecord>>,
+    plays: Mutex<Vec<audiolib_db::local_play_history::LocalPlayRecord>>,
+    pending_history_clear: Mutex<Option<history::PendingClear>>,
     scans: Mutex<Vec<ScanSession>>,
     audio: AudioHandle,
     config: Arc<Mutex<AppConfig>>,
@@ -631,7 +634,7 @@ impl Controller {
         self.sqlite.read().unwrap().clone()
     }
 
-    /// Provider for annotation writes and plays: the local library, or in server mode the
+    /// Provider for annotation writes: the local library, or in server mode the
     /// server API (`RemoteProvider`; the snapshot follows by the revision rule).
     fn metadata_provider(self: &Arc<Self>) -> Result<Arc<dyn DataProvider>, String> {
         if self.remote_read_only() {
@@ -713,6 +716,7 @@ impl Controller {
             history_generation: AtomicU64::new(0),
             history_offset: Mutex::new(0),
             plays: Mutex::new(Vec::new()),
+            pending_history_clear: Mutex::new(None),
             scans: Mutex::new(Vec::new()),
             audio,
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
@@ -834,6 +838,9 @@ impl Controller {
             if let Some(ui) = c.ui.upgrade() {
                 ui.set_confirmation_visible(false);
             }
+            if c.confirm_history_clear(accepted) {
+                return;
+            }
             let pending = c.pending_operation.lock().unwrap().take();
             if accepted && let Some(operation) = pending {
                 c.run_library_operation(operation);
@@ -906,6 +913,8 @@ impl Controller {
         ui.on_history_requested(move |delta| c.load_history(delta));
         let c = self.clone();
         ui.on_history_selected(move |index| c.history_selected(index));
+        let c = self.clone();
+        ui.on_history_clear_requested(move || c.propose_history_clear());
         let c = self.clone();
         ui.on_search_requested(move |immediate| {
             if let Some(ui) = c.ui.upgrade() {
@@ -1579,6 +1588,7 @@ impl Controller {
     }
 
     fn propose_operation(self: &Arc<Self>, operation: LibraryOperation) {
+        self.pending_history_clear.lock().unwrap().take();
         if !self.available() {
             return;
         }
@@ -1829,11 +1839,24 @@ impl Controller {
                         } else {
                             path.canonicalize().map_err(|error| error.to_string())?
                         };
+                        let history_config = c.config.lock().unwrap().clone();
                         let next = Arc::new(
                             if *create {
-                                SqliteProvider::open(&selected_path)
+                                SqliteProvider::open_local_with_progress_cancellable(
+                                    &selected_path,
+                                    &history_config.data_root(),
+                                    history_config.play_history_limit,
+                                    &AtomicBool::new(false),
+                                    |_| {},
+                                )
                             } else {
-                                SqliteProvider::open_existing(&selected_path)
+                                SqliteProvider::open_existing_local_with_progress_cancellable(
+                                    &selected_path,
+                                    &history_config.data_root(),
+                                    history_config.play_history_limit,
+                                    &AtomicBool::new(false),
+                                    |_| {},
+                                )
                             }
                             .map_err(|e| e.to_string())?,
                         );
@@ -2011,6 +2034,9 @@ impl Controller {
         }
         self.plays.lock().unwrap().clear();
         self.scans.lock().unwrap().clear();
+        if self.pending_history_clear.lock().unwrap().take().is_some() {
+            ui.set_confirmation_visible(false);
+        }
         ui.set_selected_row(-1);
         ui.set_selected_id("".into());
         ui.set_selected_folder(-1);
@@ -2033,6 +2059,7 @@ impl Controller {
         ui.set_folders(ModelRc::new(VecModel::<FolderRow>::default()));
         ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
         ui.set_history_rows(ModelRc::new(VecModel::<slint::SharedString>::default()));
+        ui.set_history_missing(ModelRc::new(VecModel::<bool>::default()));
         ui.set_history_detail("".into());
         ui.set_scan_summary("".into());
         ui.set_scan_error("".into());
@@ -2165,143 +2192,6 @@ impl Controller {
         };
         let offset = *offset;
         self.request_history_page(offset);
-    }
-
-    fn request_history_page(self: &Arc<Self>, offset: usize) {
-        if !self.available() {
-            return;
-        }
-        let Some(ui) = self.ui.upgrade() else { return };
-        let kind = ui.get_history_kind();
-        ui.set_history_detail("".into());
-        ui.set_history_rows(ModelRc::new(VecModel::<slint::SharedString>::default()));
-        // The compatibility playback-history API returns an empty list; scan
-        // history continues to come from the active library snapshot.
-        let provider = if kind == 1 {
-            self.metadata_provider()
-        } else {
-            Ok(self.provider() as Arc<dyn DataProvider>)
-        }
-        .map_err(audiolib_core::Error::Validation);
-        let generation = self.history_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let c = self.clone();
-        std::thread::spawn(move || {
-            let (scans, plays) = match provider {
-                Ok(provider) => (
-                    if kind == 0 {
-                        provider.scan_history(HISTORY_SIZE, offset).map(Some)
-                    } else {
-                        Ok(None)
-                    },
-                    if kind == 1 {
-                        provider.play_history(HISTORY_SIZE, offset).map(Some)
-                    } else {
-                        Ok(None)
-                    },
-                ),
-                Err(error) => (Err(error), Ok(None)),
-            };
-            let c2 = c.clone();
-            post(c.ui.clone(), move |ui| {
-                if c2.history_generation.load(Ordering::Acquire) != generation || !c2.available() {
-                    return;
-                }
-                let rows = match (scans, plays) {
-                    (Ok(Some(scans)), _) => {
-                        let rows = scans
-                            .iter()
-                            .map(|s| {
-                                slint::SharedString::from(format!(
-                                    "{} · {} · {} · +{} / ~{} / −{} · {} {}\n{}",
-                                    s.start_time,
-                                    if c2.chinese.load(Ordering::Acquire) {
-                                        if s.scan_type == "full" {
-                                            "完整"
-                                        } else {
-                                            "增量"
-                                        }
-                                    } else {
-                                        &s.scan_type
-                                    },
-                                    scan_state_label(s.state, c2.chinese.load(Ordering::Acquire)),
-                                    s.added,
-                                    s.updated,
-                                    s.removed,
-                                    s.errors,
-                                    if c2.chinese.load(Ordering::Acquire) {
-                                        "个错误"
-                                    } else {
-                                        "errors"
-                                    },
-                                    s.scan_path
-                                ))
-                            })
-                            .collect::<Vec<_>>();
-                        *c2.scans.lock().unwrap() = scans;
-                        rows
-                    }
-                    (_, Ok(Some(plays))) => {
-                        let rows = plays
-                            .iter()
-                            .map(|p| {
-                                slint::SharedString::from(format!(
-                                    "{} · {}{}\n{}",
-                                    p.played_at,
-                                    if p.missing {
-                                        if c2.chinese.load(Ordering::Acquire) {
-                                            "[缺失] "
-                                        } else {
-                                            "[Missing] "
-                                        }
-                                    } else {
-                                        ""
-                                    },
-                                    p.filename,
-                                    p.file_path
-                                ))
-                            })
-                            .collect::<Vec<_>>();
-                        *c2.plays.lock().unwrap() = plays;
-                        rows
-                    }
-                    (Err(error), _) | (_, Err(error)) => {
-                        ui.set_history_detail(
-                            if c2.chinese.load(Ordering::Acquire) {
-                                format!("无法读取音效库历史：{error}")
-                            } else {
-                                format!("Could not load sound library history: {error}")
-                            }
-                            .into(),
-                        );
-                        ui.set_management_report(error.to_string().into());
-                        return;
-                    }
-                    _ => Vec::new(),
-                };
-                ui.set_history_next(rows.len() == HISTORY_SIZE);
-                ui.set_history_previous(offset > 0);
-                ui.set_history_page((offset / HISTORY_SIZE + 1).to_string().into());
-                ui.set_history_rows(ModelRc::new(VecModel::from(rows)));
-            });
-        });
-    }
-
-    fn history_selected(self: &Arc<Self>, index: i32) {
-        if !self.available() {
-            return;
-        }
-        let Some(ui) = self.ui.upgrade() else { return };
-        if ui.get_history_kind() == 0 {
-            if let Some(scan) = self.scans.lock().unwrap().get(index as usize) {
-                ui.set_history_detail(
-                    scan_session_detail(scan, self.chinese.load(Ordering::Acquire)).into(),
-                );
-            }
-        } else if let Some(play) = self.plays.lock().unwrap().get(index as usize).cloned() {
-            ui.set_library_visible(false);
-            ui.set_inspector_visible(true);
-            self.select_id(play.audio_file_id, false);
-        }
     }
 
     fn start_workers(self: &Arc<Self>) {
@@ -2795,7 +2685,7 @@ impl Controller {
                         continue;
                     }
                     let library_generation = c.library_generation.load(Ordering::Acquire);
-                    let provider = c.provider();
+                    let source_generation = c.source_generation.load(Ordering::Acquire);
                     let mut status = c.audio.status();
                     c.list_waveforms.observe_playback(matches!(
                         status.state,
@@ -2844,24 +2734,7 @@ impl Controller {
                         {
                             return Ok(false);
                         }
-                        if c.remote_read_only() {
-                            // Server mode: plays are not sent (no POST /audio/{id}/plays)
-                            // and play counts are not recorded. A local server-mode play
-                            // history needs a client-side store (pending decision).
-                            return Ok(true);
-                        }
-                        let found = provider.find_audio_by_path(path)?;
-                        if !c.available()
-                            || c.library_generation.load(Ordering::Acquire) != library_generation
-                        {
-                            return Ok(false);
-                        }
-                        if let Some(file) = found {
-                            provider.record_play(file.id)?;
-                            crate::diagnostics::record(
-                                crate::diagnostics::Event::PlaybackHistoryRecorded,
-                            );
-                        }
+                        c.record_history_best_effort(path, library_generation, source_generation);
                         Ok(true)
                     }) {
                         crate::diagnostics::record(
@@ -6970,6 +6843,7 @@ mod tests {
             language: "en".into(),
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
+            play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             audio_table: Default::default(),

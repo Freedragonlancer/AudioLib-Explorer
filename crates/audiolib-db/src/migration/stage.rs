@@ -67,17 +67,19 @@ pub(super) fn normalize(
     let mut projection = business_digest(&conn, cancel)?;
     for change in &job.plan.schema_changes {
         match change {
-            SchemaChange::RetireTable { table } => {
-                projection.tables.retain(|entry| &entry.table != table)
-            }
+            SchemaChange::RetireTable { table } => projection
+                .tables
+                .retain(|entry| !entry.table.eq_ignore_ascii_case(table)),
             SchemaChange::DropDerivedColumn { table, column }
             | SchemaChange::RetireColumn { table, column } => {
                 if let Some(entry) = projection
                     .tables
                     .iter_mut()
-                    .find(|entry| &entry.table == table)
+                    .find(|entry| entry.table.eq_ignore_ascii_case(table))
                 {
-                    entry.columns.retain(|name| name != column);
+                    entry
+                        .columns
+                        .retain(|name| !name.eq_ignore_ascii_case(column));
                 }
             }
             SchemaChange::AddColumn { .. } => {}
@@ -225,7 +227,14 @@ fn copy_table(
     // Added fields use their declared defaults. A recipe's postcondition must check
     // the new values; existing columns never get positional SELECT * treatment.
     let implicit = has_rowid.then(|| columns[0].clone());
-    columns.retain(|column| input_columns.contains(column) || implicit.as_ref() == Some(column));
+    columns.retain(|column| {
+        input_columns
+            .iter()
+            .any(|input| input.eq_ignore_ascii_case(column))
+            || implicit
+                .as_ref()
+                .is_some_and(|alias| alias.eq_ignore_ascii_case(column))
+    });
     let projection = list(&columns);
     // Recompute this explicitly derived field while copying, before installing
     // extension triggers. A schema-6 repair must not retain stale source-tag keys
@@ -233,7 +242,9 @@ fn copy_table(
     let source_projection = columns
         .iter()
         .map(|column| {
-            if table == "audio_files" && column == "source_tags_text" {
+            if table.eq_ignore_ascii_case("audio_files")
+                && column.eq_ignore_ascii_case("source_tags_text")
+            {
                 "audiolib_source_tags_key(metadata_json)".into()
             } else {
                 search_storage::quote_identifier(column)
@@ -378,7 +389,7 @@ pub(super) fn build(
                     "DELETE FROM sqlite_sequence;
                     INSERT INTO sqlite_sequence(rowid,name,seq)
                     SELECT rowid,name,seq FROM input.sqlite_sequence
-                    WHERE name IN (SELECT name FROM main.sqlite_schema WHERE type='table');",
+                    WHERE name COLLATE NOCASE IN (SELECT name FROM main.sqlite_schema WHERE type='table');",
                 )
                 .map_err(db_error)?;
             }
@@ -450,8 +461,10 @@ pub(super) fn verify_connection(
         .collect::<std::collections::BTreeMap<_, _>>();
     for change in &job.plan.schema_changes {
         if let SchemaChange::AddColumn { table, column, .. } = change
-            && let Some(columns) = expected_shape.get_mut(table)
-            && !columns.contains(column)
+            && let Some((_, columns)) = expected_shape
+                .iter_mut()
+                .find(|(name, _)| name.eq_ignore_ascii_case(table))
+            && !columns.iter().any(|name| name.eq_ignore_ascii_case(column))
         {
             columns.push(column.clone());
         }
@@ -487,7 +500,7 @@ pub(super) fn verify_connection(
             if let SchemaChange::AddColumn { table, column, .. } = change {
                 let default: Option<String> = conn
                     .query_row(
-                        "SELECT dflt_value FROM pragma_table_xinfo(?1) WHERE name=?2",
+                        "SELECT dflt_value FROM pragma_table_xinfo(?1) WHERE name=?2 COLLATE NOCASE",
                         params![table, column],
                         |row| row.get(0),
                     )
@@ -548,9 +561,10 @@ pub(super) fn verify_connection(
         )));
     }
     if table_exists(conn, "play_history")?
-        || search_storage::columns(conn)?
-            .iter()
-            .any(|column| column == "play_count")
+        || search_storage::columns(conn)?.iter().any(|column| {
+            column.eq_ignore_ascii_case("play_count")
+                || column.eq_ignore_ascii_case("last_played_at")
+        })
     {
         return Err(invalid("Authorized playback retirement is incomplete"));
     }

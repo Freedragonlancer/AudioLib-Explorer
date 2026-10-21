@@ -19,7 +19,7 @@
 //! means nothing was removed.
 //!
 //! `manage_mode` (§6.9) gates scan control, database removals, directory browsing and
-//! root management (metadata edits, plays and ordinary library reads are not gated);
+//! root management (Metadata edits and ordinary library reads are not gated);
 //! refusals are `403 MANAGE_FORBIDDEN`
 //! ([`RemoteError::Forbidden`], show the server's message). [`RemoteClient::capabilities`]
 //! reports `can_manage` for this request's network path; a server without the endpoint

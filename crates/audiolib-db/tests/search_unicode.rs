@@ -498,7 +498,6 @@ fn retained_business_data(provider: &SqliteProvider, id: i64) -> serde_json::Val
     serde_json::json!({
         "audio": provider.get_audio(id).unwrap(),
         "scans": provider.scan_history(10, 0).unwrap(),
-        "plays": provider.play_history(10, 0).unwrap(),
     })
 }
 
@@ -543,7 +542,7 @@ fn real_porter_v1_index_upgrades_owned_readers_and_writers_without_business_data
             },
         )
         .unwrap();
-    provider.record_play(id).unwrap();
+
     let original = retained_business_data(&provider, id);
     drop(provider);
     let legacy = temp.path().join("library.db");
@@ -645,7 +644,7 @@ fn restore_checks_legacy_porter_triggers_before_rebuilding_the_index() {
     provider
         .maintain_library(MaintenanceAction::RebuildSearch)
         .unwrap();
-    provider.record_play(42).unwrap();
+
     let original = retained_business_data(&provider, 42);
     let legacy = temp.path().join("legacy.db");
     support::legacy_copy(&database, &legacy);

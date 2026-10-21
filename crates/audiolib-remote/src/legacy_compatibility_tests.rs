@@ -130,8 +130,10 @@ fn legacy_server(
                     state.file.notes = note.into();
                     state.revision += 1;
                 }
+                let mut file = serde_json::to_value(&state.file).unwrap();
+                file["play_count"] = HISTORICAL_PLAY_COUNT.into();
                 json(&serde_json::json!({
-                    "file":state.file, "revision_before":before, "revision":state.revision,
+                    "file":file, "revision_before":before, "revision":state.revision,
                 }))
             }
             ("GET", "/api/v1/audio/7/stream") => {
@@ -163,7 +165,7 @@ fn cached_identity(cache: &RemoteCache) -> CachedIdentity {
 }
 
 #[test]
-fn published_legacy_peers_sync_poll_probe_patch_and_retire_playback_locally() {
+fn published_legacy_peers_sync_poll_probe_patch_and_ignore_retired_json_fields() {
     for version in ["0.4.11", "0.5.0"] {
         let owned = tempfile::tempdir().unwrap();
         let original = owned.path().join("original-schema5.db");
@@ -241,10 +243,15 @@ fn published_legacy_peers_sync_poll_probe_patch_and_retire_playback_locally() {
             let reader = SqliteProvider::open_read_only(&cache.database_path(&state)).unwrap();
             assert_eq!(reader.database_path(), cache.database_path(&state));
             assert_eq!(reader.get_audio(AUDIO_ID).unwrap().notes, note);
-            assert_eq!(
-                reader.get_audio(AUDIO_ID).unwrap().play_count,
-                u64::try_from(HISTORICAL_PLAY_COUNT).unwrap()
+            assert!(
+                serde_json::to_value(&outcome.value)
+                    .unwrap()
+                    .get("play_count")
+                    .is_none()
             );
+            let value = serde_json::to_value(reader.get_audio(AUDIO_ID).unwrap()).unwrap();
+            assert!(value.get("play_count").is_none());
+            assert!(value["attributes"].get("last_played_at").is_none());
             assert_eq!(
                 reader
                     .search(&SearchRequest {
@@ -281,11 +288,11 @@ fn published_legacy_peers_sync_poll_probe_patch_and_retire_playback_locally() {
         let before_state = cache.active().unwrap();
         let before_bytes = std::fs::read(&path).unwrap();
         let before_requests = observed.lock().unwrap().requests.clone();
-        provider.record_play(AUDIO_ID).unwrap();
-        let explicit = provider.writer().record_play(AUDIO_ID).unwrap();
-        assert_eq!(explicit.revision, before_state.revision);
-        assert_eq!(explicit.revision_before, before_state.revision);
-        assert!(provider.play_history(100, 0).unwrap().is_empty());
+        // Ordinary cached reads have no playback API or history side effect.
+        // Client-local playback/history workflows are tested by the desktop owner.
+        let value = serde_json::to_value(provider.get_audio(AUDIO_ID).unwrap()).unwrap();
+        assert!(value.get("play_count").is_none());
+        assert!(value["attributes"].get("last_played_at").is_none());
         assert_eq!(cache.active().unwrap(), before_state);
         assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
         assert_eq!(observed.lock().unwrap().requests, before_requests);

@@ -226,11 +226,13 @@ audiolib.example.com:8443 {
 - **库身份**：`GET /library` 返回 `library_id`、`schema_version` 和 `revision`。客户端每次连接比对 `library_id`，变了就清空选择、草稿和缓存（对应现有的 library generation 机制）。
   - `library_id` 保存在服务端自有的旁路文件 `<db>.server-state.json`（与库文件同目录，原子写入），在服务端**第一次打开该 db 路径**时生成（UUID v4）。schema v3/v4 本身没有库身份字段。
   - 原地还原（restore）保留 `library_id`，`revision` 递增；把库复制到另一路径再提供服务会得到新的 `library_id`。旁路文件损坏时服务端拒绝启动，不会悄悄换新 id。
-  - 以后可考虑 schema v5 在库内保存身份（例如元数据表或 SQLite `application_id` + UUID），届时旁路文件只作迁移来源。
+  - 以后可另行设计在库内保存身份（例如元数据表或 SQLite `application_id` + UUID），届时旁路文件只作迁移来源。
 - **路径**：服务端**暴露绝对路径**——`GET /roots` 的 `server_path`、`GET /library` 的 `database`，以及 `AudioFile.file_path` / `Folder.path` 均为服务端（Mac）上的原始绝对路径。客户端把库里的路径前缀 `server_path` 替换为该根的 WebDAV 地址来访问音频（见 §7）。目前只在局域网使用，因此接受路径暴露；以后若开放到局域网之外再重新评估。
 - **扫描根**：服务端配置允许的根（`[[roots]]`，对应 `allowed_scan_roots`），客户端只能从 `GET /roots` 里选，不能传任意路径。
 
-### 3.1 快照 schema 3 → 4（只加索引）
+### 3.1 历史：快照 schema 3 → 5
+
+以下记录已发布 v5 的演进与兼容行为。当前开发分支为 schema 6 / `ale-s6-cld1-t3-m2-p1`，读取边界为 3..=6，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6 的实际格式准入。
 
 - `SCHEMA_VERSION` = **5**（`crates/audiolib-db/src/schema.rs`，由 `audiolib_db::SCHEMA_VERSION` 导出）。`MIN_SNAPSHOT_SCHEMA_VERSION` = **3**（同文件，客户端的 `MIN_SNAPSHOT_SCHEMA` 直接引用它，不重复定义）。`GET /library` 的 `schema_version` 与快照响应头 `X-Schema-Version` 现在都是 `5`。
 - v4 **只新增索引**：不改任何表、列、触发器、FTS，不改行数据，所以 v3 与 v4 用同一套查询；`/library` 的 `stats` 条件由 `COALESCE(missing,0)=0` 改为 `missing=0`（`missing` 列是 `NOT NULL DEFAULT 0`），可命中部分索引。
@@ -241,7 +243,7 @@ audiolib.example.com:8443 {
   | 索引 | 定义 | 用途 |
   | --- | --- | --- |
   | `idx_audio_visible_stats` | `audio_files(folder_id,duration,file_size) WHERE missing=0` | `/library` 统计与文件夹聚合（覆盖索引） |
-  | `idx_play_history_audio` | `play_history(audio_file_id)` | 移除文件/文件夹时的外键级联与按素材查历史 |
+  | `idx_play_history_audio`（旧 v5） | `play_history(audio_file_id)` | v6 随退役表删除；本机历史不使用主库索引 |
   | `idx_playlist_items_audio` | `playlist_items(audio_file_id)` | 同上 |
   | `idx_project_references_audio` | `project_references(audio_file_id)` | 同上 |
   | `idx_waveform_cache_audio` | `waveform_cache(audio_file_id)` | 同上 |
@@ -266,7 +268,7 @@ audiolib.example.com:8443 {
 - `revision` 是保守的变更提示：服务端用专用只读连接轮询 `PRAGMA data_version`（其他连接/进程的每次提交都会改变它，包括只写进 WAL、尚未 checkpoint 的提交），并比对**主库文件**的大小/mtime（默认每 3 秒一次，每次 `/library` 和快照请求也会检查）。WAL 文件的大小/mtime 不参与运行期比对（它们在每次打开/关闭时都会变化，以前会导致每次重启都递增）。服务端停机期间的改动在下次启动时递增一次：主库文件变化，或 WAL 签名（WAL 文件长度 + 32 字节文件头中的 checkpoint 序号和 salt，不含 mtime）变化。服务端退出时故意不关闭自己的 SQLite 连接，避免最后一个连接关闭时把 WAL checkpoint 进主库、下次启动被误判为变更；因此**单纯重启服务端不会递增 `revision`**；**播放计数也不会递增 `revision`**（见下文）。它**可能在没有实际变更时递增**（如其他进程做 WAL checkpoint），但**不会漏掉已提交的变更**。`revision` 先于数据读取，所以返回的数据不会比所标的 `revision` 旧。
 - Metadata 编辑：先写服务端，成功后再更新本地缓存。写入端点（§6.3）返回写入后的完整记录以及 `revision_before` / `revision`：服务端在同一个临界区里（所有服务端写入串行）先把此前所有未计入的提交计入 `revision`，记下 `revision_before`，执行写入，然后把 `revision` 设为 `revision_before + 1` 并更新轮询基线，所以这次写入**只递增一次**，轮询不会再为它递增。
   - **客户端规则**：若本地缓存的 `revision == revision_before`，把返回的记录（`file` 或 `files`）写入本地缓存，并把本地 `revision` 设为返回的 `revision`；否则（期间有别的改动）按正常流程下载完整快照同步。写入失败（4xx/5xx）时 `revision` 不变，本地缓存也不要改。
-  - 播放（`POST /audio/{id}/plays`，**已弃用**）：空操作，什么都不写，返回 `revision == revision_before`。新版客户端播放不再发送该请求，历史列表返回 `[]`；本实现不新增客户端播放历史存储。旧格式已有数据保留到下一次显式结构迁移；schema 6 的授权退役及完整回滚见迁移契约。
+  - 播放（`POST /audio/{id}/plays`，**已弃用**）：空操作，什么都不写，返回 `revision == revision_before`。新版客户端播放不再发送该请求，服务端历史列表返回 `[]`。本开发分支在客户端独立 history.db 记录本机播放事件，主库不再记录播放次数；本地 v5 旧历史在验证备份后导入，服务端和快照不导入，详见 [v6 契约](Schema_V6_Iteration.md)。
   - 已知窄窗口：服务端写入执行期间若恰好有其他进程提交，那次提交会并入同一次递增；客户端按上面的规则只应用返回的记录，那次外部改动要等下一次变更（`revision` 再变）才会同步到。
   - 写入端点受 30 秒请求超时约束；若超时返回 408，写入可能已经提交，`revision` 会照常变化，客户端下一次轮询会走快照同步。
 - 远程扫描（§6.6）：扫描期间 `revision` 冻结，结束时有改动才递增一次（无改动的增量扫描不递增）；客户端照常按 `revision` 变化同步。
@@ -279,7 +281,7 @@ audiolib.example.com:8443 {
 - 两个字母以上支持词内连续片段：`expl`、`plos`、`sion` 匹配 `explosion`，多个词之间为 AND；用户文本中的标点、`OR` 等不作为 FTS5 运算符。当前服务端 **尚未实现**下表的 `POST /search` 与 `/search/folders`，正常服务器模式在本地快照查询，因此不存在当前 HTTP 搜索端点的单字母 400/500 响应；若未来开放端点，按 §2.1 的现有映射应为 HTTP 400 `VALIDATION`。
 - v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。理由：与本地实现完全一致，remote 改动最小。
 - 游标分页（服务端提议）列为待定：如果服务端需要快照一致性，建议游标为不透明字符串 `next_cursor`，内部编码排序键 + 最后一个 id；`SearchRequest` 再加可选 `cursor` 字段，有游标时忽略 `offset`。
-- 历史类列表（扫描历史、播放历史）同样用 `limit` + `offset`。
+- 扫描历史与客户端本机播放历史使用 `limit` + `offset`；服务端兼容 `/history/plays` 始终返回 `[]`。
 
 ## 6. 端点清单
 
@@ -287,7 +289,7 @@ audiolib.example.com:8443 {
 
 | 状态 | 方法 | 路径 | 对应 `DataProvider` | 请求 | 响应 |
 |---|---|---|---|---|---|
-| ✅ | GET | `/health` | — | 免鉴权 | `{ "status": "ok" \| "starting" \| "error", "version": "0.3.x", "api_version": "v1", "schema_version": 5, "commit": "abc1234" \| "unknown", "message"?: "…", "public_url": "…" \| null }`，见 §6.2 |
+| ✅ | GET | `/health` | — | 免鉴权 | `{ "status": "ok" \| "starting" \| "error", "version": "0.6.0-dev.1", "api_version": "v1", "schema_version": 6, "commit": "abc1234" \| "unknown", "message"?: "…", "public_url": "…" \| null }`，见 §6.2 |
 | ✅ | GET | `/library` | `library_info` | — | `LibraryInfo` 字段（含 `database`、`schema_version`、`stats`、`database_bytes`、`wal_bytes`）+ `library_id`、`revision`；`stats` 按 revision 缓存（内存 + 库旁 `<库文件>.stats.json`，重启后立即可用）：revision 变化后若上次计算耗时 >250 ms，先返回上一份统计并在后台重算（计数只可能滞后最近几次写入），否则同步重算；播放记录与元数据修改不影响这些统计，写入后缓存直接沿用到新 revision（不整表重算）；启动时后台预热（库旁缓存已是当前 revision 时跳过）；`database_bytes` = 主库文件 + `-wal` 文件的字节数（库实际占用），`wal_bytes` 为其中 WAL 部分 |
 | ✅ | GET | `/library/snapshot` | `backup_library`（只读导出） | — | SQLite 快照字节，见 §6.1 |
 | ✅ | GET | `/roots` | `folders`（求 `file_count`）+ 根状态缓存 + 扫描历史 | — | `[{ "name", "server_path", "webdav_url": "…" \| null（功能未完善，见 §7）, "file_count": n \| null, "missing_count": n, "online": bool, "status": "checking" \| "online" \| "waking" \| "offline", "status_message": "…" \| null, "checked_at": unix秒 \| null, "last_scan": { … } \| null, "scanning": bool }]`，见 §6.4 |
@@ -379,7 +381,9 @@ audiolib.example.com:8443 {
 - `/health` 和 503 `UNAVAILABLE` 的 `message` 都只给固定文字，不含路径或密钥；具体原因只写入服务端日志。
 - 客户端：`/health` 为 `starting`/`error` 或收到 503 `UNAVAILABLE` 时，按“服务器暂不可用”处理并稍后重试，不要当成空库或 token 错误。503 `UNAVAILABLE` 只表示库未就绪；库根离线是另一个错误码 `ROOT_OFFLINE`（§2.1、§6.4），此时服务器和库都可用。
 
-#### 派生搜索索引升级与维护窗口
+#### 历史：v5 派生搜索索引升级与维护窗口
+
+以下是 v5 的原地派生状态升级，不是 v6 执行器。新版会在完整备份后构建 owned 候选库，以持久任务及批次游标支持恢复，并在校验后发布；见 [v6 契约](Schema_V6_Iteration.md)。
 
 schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升为 3 时会重新计算全部派生搜索文本并重建 FTS5，`search_indexes` 修订 1 另补覆盖索引。不会重扫源 WAV，也不改用户 Metadata、标注和扩展字段。大库首次启动需要维护窗口：先通过受支持的备份流程保存库，再启动新版；按数据与可用磁盘空间预留时间，不以搜索的 **P95 latency <500ms for 1M+ records** 目标推断升级时长。
 
@@ -405,7 +409,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
     "id": 3, "file_path": "/srv/audiolib/music/SFX/door.wav", "filename": "door.wav", "folder_id": 1,
     "file_size": 52, "sample_rate": 48000, "bit_depth": 16, "channels": 1, "duration": 0.0000833,
     "tags": "loud door", "color": "#FF8800", "notes": "slam", "favorite": true,
-    "bext_description": "", "play_count": 0, "attributes": {}, "missing": false
+    "bext_description": "", "attributes": {}, "missing": false
   },
   "revision_before": 41,
   "revision": 42
@@ -425,16 +429,21 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 ```
 
 `POST /audio/{id}/plays`，无请求体：验证库身份、id 与记录存在性后返回现有 `AudioFile`，
-不写数据库、不增加 revision 或 `data_version`。响应 200，保留旧 DTO 形状：
+不写数据库、不增加 revision 或 `data_version`。响应 200，外层 revision 响应不变，内部 AudioFile 按下述 v6 字段契约：
 
 ```json
-{ "file": { "id": 3, "play_count": 0, "…": "…" }, "revision_before": 43, "revision": 43 }
+{ "file": { "id": 3, "…": "…" }, "revision_before": 43, "revision": 43 }
 ```
 
-`play_count: 0` 对未迁移旧库只是示例值，已有历史计数仍原样返回；schema 6 已退役该列，
-兼容 DTO 返回 0。库身份不一致仍为 409，非法 id 为 400，无此记录为 404。普通新版客户端
-播放不再发送该请求，也不生成缓存写入或重同步通知。删除旧播放结构只在下一次明确的
-结构迁移中执行，完整旧值保存在回滚备份；见 [迁移契约 §7](Library_Migration_Compatibility.md#7-通用结构演进与播放统计退役)。
+下一版 p1 的实际库修改（Metadata、批量修改、移除、根目录及扫描）须携带
+`X-AudioLib-Client-Compatibility`，同时通过两端程序/协议范围及当前完整库格式的读取能力检查。
+缺失、无效或只接受旧格式的客户端在写入前收到 409 升级提示，revision/data_version 不变。
+鉴权及管理权限优先；库 ID 校验继续独立生效。无写入的两个旧播放路由保留原 headerless 行为。
+
+下一版 v6 的 AudioFile JSON 删除 `play_count`，`attributes` 不再附加 `last_played_at`；CSV 同样不导出计数。
+旧服务器响应中的多余字段被新客户端忽略。已发布旧客户端的计数是必填字段，不能将旧播放路由的
+HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口升级服务端。两个旧播放路由仍保留
+校验和无写入语义。播放历史转为客户端本机独立存储，详见 [v6 契约](Schema_V6_Iteration.md)。
 
 错误：`color` 不是空串或 `#RRGGBB`、`tags` > 16 KiB、`notes` > 1 MiB、非法 JSON / 字段类型不对、非整数 id、空 `ids` 或空 `patch`、未知 `tag_mode` → 400 `VALIDATION`；无此 id → 404 `NOT_FOUND`；需要 token 时（§2.2）token 缺失或错误 → 401。任何错误都不改库，`revision` 不变。
 
@@ -630,7 +639,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 
 - 按 §2.2 鉴权，再受库管理权限 `manage_mode` 限制（§6.9；被拒绝时 403 `MANAGE_FORBIDDEN`）。检查顺序：鉴权 401 → `manage_mode` 403 → 请求参数 400 → 扫描占用 409 → （文件夹）不存在 404 → 库根顶层文件夹 400。
 - **扫描期间不可用**：本服务端有扫描在运行或暂停中（§6.6），或另一个进程（CLI、本地模式桌面端）正在扫描/维护同一个库 → 409 `BUSY`（`message` 含会话 id），即使请求的 id 都不存在也是 409。客户端稍后重试，或先取消/等扫描结束。
-- 与本地模式 `remove_audio` / `remove_folder` 相同，被移除记录的播放列表条目、工程引用、波形缓存行和**播放历史**也一并删除（`/history/plays` 里不再出现）。扫描历史不受影响。
+- 被移除记录的播放列表条目、工程引用和主库波形缓存行一并删除，扫描历史不受影响。v6 的播放历史独立保存在客户端本机，不随服务端或本地库记录移除而删除；历史条目保留，无法定位当前素材时显示缺失。`/history/plays` 始终为 `[]`，不代表本机历史已清空。
 - **revision**：与 metadata 写入相同的临界区（§4）；真正删除了东西时 `revision = revision_before + 1`，按 revision 缓存的快照随之失效；什么都没删时不写库、`revision == revision_before`。
 - 受 30 秒请求超时约束（实测一次较大批量删除约 0.5 秒，生产记录量已从公开记录移除）。
 
@@ -1391,3 +1400,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 8. 增量同步 `GET /library/changes`（§6.5 草案）：变更日志放库内触发器（schema v5）还是服务端旁路；保留多久；410 的阈值。
 9. 列表缩略波形（§9.1–§9.3，服务端已实现）：客户端评审结论见 §9.3；按需队列的让路已定（只在试听开始后的前 3 秒让路，试听期间最多 1 个解码名额，不因扫描暂停；预生成在试听整个期间和扫描期间让路，§9.2）。`list_waveform_cache_mb` 默认 640 MiB 已确认够用：909,342 条的满库约 465 MiB（§9.1 容量估算），超出时按分片淘汰并在 `/waveforms/status` 报 `over_budget`。
 10. ~~列表波形缓存管理（§9.5）~~：已与客户端评审定：停止用 `POST …/stop`；`rebuild` 需 `confirm`；暂停跨重启保留；失败明细不持久化，重启后 `failed` 回退为 `missing`（`job.mode_effective`）；ETA = 剩余 / 60 秒窗口速度；暂不提供 `GET /waveforms/jobs/{id}`。
+
+- [Schema v6 合并升级契约](Schema_V6_Iteration.md)：修订后的结构升级、本机历史与兼容验收目标。
+
+- [v6 逐列审计](Schema_V6_Column_Audit.md)：57 项列用途与保留建议，不授权额外删除。

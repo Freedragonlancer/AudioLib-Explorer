@@ -160,6 +160,27 @@ pub(crate) fn prepare_writable(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(SnapshotUpgradeProgress),
 ) -> Result<()> {
+    prepare_writable_with_history(path, None, cancel, progress)
+}
+
+/// Prepare a local client library with backup-first legacy history import. Never
+/// call this for a server authority, downloaded snapshot or restore staging file.
+pub fn prepare_local_writable(
+    path: &Path,
+    data_root: &Path,
+    limit: u32,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(SnapshotUpgradeProgress),
+) -> Result<()> {
+    prepare_writable_with_history(path, Some((data_root, limit)), cancel, progress)
+}
+
+fn prepare_writable_with_history(
+    path: &Path,
+    history: Option<(&Path, u32)>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(SnapshotUpgradeProgress),
+) -> Result<()> {
     super::inspect::check_cancel(cancel)?;
     let conn = job::open_read(path)?;
     let version: i64 = conn
@@ -181,6 +202,14 @@ pub(crate) fn prepare_writable(
                 "Library was explicitly rolled back; use migration plan/apply to opt into upgrading again".into())),
             MigrationPhase::Complete => {},
             _ => {
+                match (&job.plan.local_history, history) {
+                    (Some(bound), Some((root, _)))
+                        if root.canonicalize()? == bound.data_root
+                            && crate::local_play_history::local_library_id(path)? == bound.library_id => {},
+                    (None, None) => {},
+                    _ => return Err(Error::Validation(
+                        "Migration owner/history destination differs; use the matching client or explicit migration resume".into())),
+                }
                 let total=job.plan.source.business.as_ref().and_then(|digest|digest.tables.iter().find(|table|table.table=="audio_files")).map_or(0,|table|table.rows);
                 resume(&job.directory,cancel,&mut |event|{relay(event,total,progress);super::inspect::check_cancel(cancel)})?;
                 return Ok(());
@@ -197,7 +226,10 @@ pub(crate) fn prepare_writable(
             "Legacy libraries must be imported into an owned copy before upgrading".into(),
         ));
     }
-    let plan = plan(path, cancel)?;
+    let plan = match history {
+        Some((root, limit)) => super::plan_local(path, root, limit, cancel)?,
+        None => plan(path, cancel)?,
+    };
     let total = plan
         .source
         .business

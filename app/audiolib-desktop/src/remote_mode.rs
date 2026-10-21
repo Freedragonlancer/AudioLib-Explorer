@@ -67,16 +67,6 @@ pub(super) struct RemotePlayState {
 }
 
 #[allow(dead_code)] // plays are no longer sent to the server
-struct RemotePlayWorker(Arc<Controller>);
-
-impl Drop for RemotePlayWorker {
-    fn drop(&mut self) {
-        let mut plays = self.0.remote_plays.lock().unwrap();
-        plays.workers -= 1;
-        self.0.remote_plays_wake.notify_all();
-    }
-}
-
 /// Cache promotion finishes on the sync worker before its UI/provider publication.
 /// Keep new play writes out of that interval without making close wait for UI delivery.
 struct RemotePlayPublicationGate(Arc<Controller>);
@@ -1046,15 +1036,6 @@ impl Controller {
                 .0;
         }
         Ok(())
-    }
-
-    #[allow(dead_code)] // plays are no longer sent to the server
-    fn remote_play_current(&self, generation: u64, source_generation: u64) -> bool {
-        self.available()
-            && !self.remote_busy.load(Ordering::Acquire)
-            && self.library_generation.load(Ordering::Acquire) == generation
-            && self.source_generation.load(Ordering::Acquire) == source_generation
-            && self.remote_plays.lock().unwrap().publication_gates == 0
     }
 
     fn data_root(&self) -> PathBuf {
@@ -2159,9 +2140,21 @@ impl Controller {
                     ));
                 }
                 let next = if path.exists() {
-                    SqliteProvider::open_existing(&path)
+                    SqliteProvider::open_existing_local_with_progress_cancellable(
+                        &path,
+                        &config.data_root(),
+                        config.play_history_limit,
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
                 } else {
-                    SqliteProvider::open(&path)
+                    SqliteProvider::open_local_with_progress_cancellable(
+                        &path,
+                        &config.data_root(),
+                        config.play_history_limit,
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
                 }
                 .map_err(|error| error.to_string())?;
                 crate::startup::prepare_local_search(&next);

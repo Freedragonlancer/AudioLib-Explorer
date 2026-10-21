@@ -480,20 +480,13 @@ fn own_and_external_commits_removal_and_restore_invalidate_rankings_and_refresh_
     assert_exact(&conn, &request, &page);
     assert!(provider.search(&request).unwrap().cache_hit);
 
-    provider.record_play(1).unwrap();
     let page = provider.search(&request).unwrap();
     assert!(
         page.cache_hit,
         "retired playback tracking must not invalidate rankings"
     );
-    assert_eq!(
-        page.results
-            .iter()
-            .find(|row| row.id == 1)
-            .unwrap()
-            .play_count,
-        0
-    );
+    let dto = serde_json::to_value(page.results.iter().find(|row| row.id == 1).unwrap()).unwrap();
+    assert!(dto.get("play_count").is_none());
     assert_exact(&conn, &request, &page);
     assert!(provider.search(&request).unwrap().cache_hit);
 

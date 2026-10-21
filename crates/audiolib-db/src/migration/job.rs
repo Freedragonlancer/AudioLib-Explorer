@@ -179,6 +179,15 @@ pub(super) fn file_hash(path: &Path, cancel: &AtomicBool) -> Result<String> {
 }
 
 fn validate_plan_identity(plan: &MigrationPlan) -> Result<()> {
+    if let Some(local) = &plan.local_history
+        && (!local.data_root.is_absolute()
+            || local.library_id
+                != crate::local_play_history::local_library_id(&plan.source.source)?)
+    {
+        return Err(invalid(
+            "Local history migration destination/library identity is invalid",
+        ));
+    }
     if plan.protocol != 1
         || plan.catalog_revision != CATALOG_REVISION
         || plan.application_version != env!("CARGO_PKG_VERSION")
@@ -188,6 +197,17 @@ fn validate_plan_identity(plan: &MigrationPlan) -> Result<()> {
     {
         return Err(invalid(
             "Migration job requires its original supported tool/catalog/tokenizer",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_local_history_destination(plan: &MigrationPlan) -> Result<()> {
+    if let Some(local) = &plan.local_history
+        && (!local.data_root.is_dir() || local.data_root.canonicalize()? != local.data_root)
+    {
+        return Err(invalid(
+            "Local history migration data root changed; preserve the original destination before resuming",
         ));
     }
     Ok(())
@@ -334,6 +354,7 @@ pub fn apply(
     observer: &mut Observer<'_>,
 ) -> Result<MigrationJob> {
     validate_plan_identity(plan)?;
+    validate_local_history_destination(plan)?;
     check_cancel(cancel)?;
     let _leases = Leases::acquire(&plan.source.source)?;
     let source = open_read(&plan.source.source)?;
@@ -405,6 +426,37 @@ pub fn resume(
     run(job, cancel, observer)
 }
 
+fn import_local_history(job: &MigrationJob, cancel: &AtomicBool) -> Result<()> {
+    let Some(local) = &job.plan.local_history else {
+        return Ok(());
+    };
+    check_cancel(cancel)?;
+    validate_local_history_destination(&job.plan)?;
+    // A p0-to-p1 upgrade has no remaining history table and must not create an
+    // empty import receipt which could hide a later real legacy restore.
+    let backup_path = job.artifact("backup.db")?;
+    let backup = open_read(&backup_path)?;
+    if !table_exists(&backup, "play_history")? {
+        return Ok(());
+    }
+    let history = crate::local_play_history::LocalPlayHistory::open(
+        &local.data_root,
+        &local.library_id,
+        local.limit,
+    )?;
+    history.import_v5_local(
+        &backup,
+        crate::local_play_history::LocalHistoryImportSource {
+            library_id: &local.library_id,
+            verified_backup_path: &backup_path,
+            verified_backup_sha256: job.backup_sha256.as_deref().ok_or_else(|| {
+                invalid("Local history import requires a verified rollback backup")
+            })?,
+        },
+    )?;
+    check_cancel(cancel)
+}
+
 fn run(
     mut job: MigrationJob,
     cancel: &AtomicBool,
@@ -418,6 +470,9 @@ fn run(
     }
     if job.phase == MigrationPhase::RollingBack {
         return rollback_locked(job, &mut source, cancel, observer);
+    }
+    if job.phase != MigrationPhase::Complete {
+        validate_local_history_destination(&job.plan)?;
     }
     if !matches!(job.phase, MigrationPhase::Backup | MigrationPhase::Guarding) {
         backup_valid(&job, cancel)?;
@@ -439,6 +494,11 @@ fn run(
                 }
                 check_source(&open_read(&backup)?, &job.plan, cancel)?;
                 job.backup_sha256 = Some(file_hash(&backup, cancel)?);
+                // Persist the verified rollback identity before an external local
+                // history store is touched. A failed import leaves the source's
+                // schema/data untouched and remains idempotently resumable here.
+                job.save()?;
+                import_local_history(&job, cancel)?;
                 job.advance(MigrationPhase::Guarding)?;
             }
             MigrationPhase::Guarding => {

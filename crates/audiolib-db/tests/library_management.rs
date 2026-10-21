@@ -88,30 +88,22 @@ fn older_schema_upgrade_retires_counts_without_inventing_events() {
         upgraded.library_info().unwrap().schema_version,
         audiolib_db::SCHEMA_VERSION
     );
-    assert_eq!(upgraded.get_audio(1).unwrap().play_count, 0);
-    assert!(upgraded.play_history(20, 0).unwrap().is_empty());
+
     let conn = support::connection(&owned).unwrap();
     let before: i64 = conn
         .query_row("PRAGMA data_version", [], |r| r.get(0))
         .unwrap();
-    upgraded.record_play(1).unwrap();
-    assert!(matches!(
-        upgraded.record_play(99999),
-        Err(Error::NotFound(_))
-    ));
+
+    assert!(matches!(upgraded.get_audio(99999), Err(Error::NotFound(_))));
     assert_eq!(
         conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         before
     );
-    assert_eq!(
-        conn.query_row(
-            "SELECT last_played_at FROM audio_files WHERE id=1",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "2024-01-02"
+    assert!(
+        !conn
+            .column_exists(None, "audio_files", "last_played_at")
+            .unwrap()
     );
     assert!(!conn.table_exists(None, "play_history").unwrap());
     assert!(
@@ -238,7 +230,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     let id = f.ids[0];
     let original = fs::read(&f.paths[0]).unwrap();
     f.provider.update_metadata(id, &patch("snapshot")).unwrap();
-    f.provider.record_play(id).unwrap();
+
     let backup = f.temp.path().join("backup.db");
     let report = f.provider.backup_library(&backup).unwrap();
     assert_eq!(report.total_records, 2);
@@ -247,7 +239,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     assert!(f.provider.backup_library(&backup).is_err());
     assert_eq!(fs::read(&backup).unwrap(), backup_bytes);
     f.provider.update_metadata(id, &patch("later")).unwrap();
-    f.provider.record_play(id).unwrap();
+
     assert_eq!(
         f.provider
             .search(&SearchRequest {
@@ -261,7 +253,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     let restored = f.provider.restore_library(&backup).unwrap();
     assert!(restored.rollback_backup.is_file());
     assert_eq!(tags(&f, id), "snapshot");
-    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 0);
+
     assert_eq!(
         f.provider
             .search(&SearchRequest {
@@ -284,7 +276,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     );
     let rollback = SqliteProvider::open_read_only(&restored.rollback_backup).unwrap();
     assert_eq!(rollback.get_audio(id).unwrap().tags, "later");
-    assert_eq!(rollback.get_audio(id).unwrap().play_count, 0);
+
     assert!(f.provider.check_library().unwrap().is_ok());
     assert_eq!(fs::read(&f.paths[0]).unwrap(), original);
 }
@@ -488,7 +480,7 @@ fn relink_refreshes_headers_preserves_identity_annotations_and_rejects_collision
             },
         )
         .unwrap();
-    f.provider.record_play(id).unwrap();
+
     assert!(f.provider.relink_audio(id, &f.paths[1]).is_err());
     assert_eq!(f.provider.get_audio(id).unwrap().sample_rate, 48000);
     let target = f.temp.path().join("moved.wav");
@@ -498,7 +490,7 @@ fn relink_refreshes_headers_preserves_identity_annotations_and_rejects_collision
     assert_eq!(updated.id, id);
     assert_eq!(updated.sample_rate, 96000);
     assert_eq!(updated.tags, "keep");
-    assert_eq!(updated.play_count, 0);
+
     assert!(!updated.missing);
     assert_eq!(
         f.provider.find_audio_by_path(&target).unwrap().unwrap().id,
@@ -544,7 +536,7 @@ fn recursive_folder_removal_cleans_relations_and_keeps_source_wavs() {
         [f.ids[1]],
     )
     .unwrap();
-    f.provider.record_play(f.ids[1]).unwrap();
+
     assert_eq!(f.provider.remove_folder(child).unwrap(), 1);
     assert!(f.provider.get_audio(f.ids[1]).is_err());
     for table in ["playlist_items", "project_references", "waveform_cache"] {
@@ -798,7 +790,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
             },
         )
         .unwrap();
-    f.provider.record_play(first.id).unwrap();
+
     let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension','keep') WHERE id=?1",
@@ -870,13 +862,8 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
     let moved = f.provider.get_audio(first.id).unwrap();
     assert_eq!(moved.folder_id, first.folder_id);
     assert_eq!(
-        (
-            moved.tags.as_str(),
-            moved.notes.as_str(),
-            moved.favorite,
-            moved.play_count
-        ),
-        ("retained tag", "retained note", true, 0)
+        (moved.tags.as_str(), moved.notes.as_str(), moved.favorite),
+        ("retained tag", "retained note", true)
     );
     assert_eq!(moved.attributes["unknown_extension"], "keep");
     assert_eq!(
@@ -885,7 +872,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
     );
     assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
     assert_eq!(f.provider.stats().unwrap().audio_files, 2);
-    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 0);
+
     let rescanned = ScanService::new(f.provider.clone())
         .scan(
             &target,
@@ -991,7 +978,7 @@ fn root_relocation_resolves_parent_aliases_after_unicode_case_only_rename() {
             },
         )
         .unwrap();
-    provider.record_play(ids[0]).unwrap();
+
     let before: Vec<_> = ids
         .iter()
         .map(|id| provider.get_audio(*id).unwrap())
@@ -1036,15 +1023,13 @@ fn root_relocation_resolves_parent_aliases_after_unicode_case_only_rename() {
                 &current.tags,
                 &current.notes,
                 current.favorite,
-                &current.color,
-                current.play_count
+                &current.color
             ),
             (
                 &previous.tags,
                 &previous.notes,
                 previous.favorite,
-                &previous.color,
-                previous.play_count
+                &previous.color
             )
         );
         assert_eq!(fs::read(&moved).unwrap(), *bytes);
@@ -1055,7 +1040,7 @@ fn root_relocation_resolves_parent_aliases_after_unicode_case_only_rename() {
     );
     assert_eq!(provider.folders(Some(root_id)).unwrap()[0].id, child_id);
     assert_eq!(provider.stats().unwrap().audio_files, 2);
-    assert_eq!(provider.play_history(10, 0).unwrap().len(), 0);
+
     let rescanned = ScanService::new(provider.clone())
         .scan(
             &target,
@@ -1115,7 +1100,7 @@ fn root_relocation_resolves_existing_source_aliases() {
             },
         )
         .unwrap();
-    f.provider.record_play(f.ids[0]).unwrap();
+
     let extension = serde_json::json!({ "marker": "keep", "values": [1, 2] });
     let conn = support::connection(f.provider.database_path()).unwrap();
     for id in &f.ids {
@@ -1184,7 +1169,7 @@ fn root_relocation_resolves_existing_source_aliases() {
         assert_eq!(current.tags, old.tags);
         assert_eq!(current.notes, old.notes);
         assert_eq!(current.favorite, old.favorite);
-        assert_eq!(current.play_count, old.play_count);
+
         assert_eq!(preserved_attributes(&current), preserved_attributes(old));
         assert_eq!(current.attributes["unknown_extension"], extension);
         assert_eq!(fs::read(&old.file_path).unwrap(), bytes);
@@ -1196,7 +1181,7 @@ fn root_relocation_resolves_existing_source_aliases() {
     );
     assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
     assert_eq!(f.provider.stats().unwrap().audio_files, 4);
-    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 0);
+
     // A subsequent physical move leaves the stored canonical source missing.
     // It must still be usable to relocate the same records rather than fail its
     // canonicalization or silently return zero.
@@ -1218,7 +1203,7 @@ fn root_relocation_resolves_existing_source_aliases() {
         assert_eq!(current.tags, old.tags);
         assert_eq!(current.notes, old.notes);
         assert_eq!(current.favorite, old.favorite);
-        assert_eq!(current.play_count, old.play_count);
+
         assert_eq!(preserved_attributes(&current), preserved_attributes(old));
         assert_eq!(current.attributes["unknown_extension"], extension);
     }

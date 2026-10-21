@@ -1243,7 +1243,12 @@ async fn library_mutations_require_the_identity_of_the_captured_library() {
     }
     assert_eq!(f.state.revision().unwrap(), before);
     assert!(f.state.audio(id).unwrap().notes.is_empty());
-    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     assert!(f.state.scans().current().is_none());
     // Root rechecks do not target cached database ids and remain header-free.
     let response = guard_request(
@@ -1291,7 +1296,12 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
             "ORIGIN_FORBIDDEN"
         );
     }
-    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     let metadata_path = format!("/api/v1/audio/{id}/metadata");
     for content_type in [
         None,
@@ -1347,7 +1357,12 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     // The deprecated play route is a no-op: nothing is counted.
-    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1475,9 +1490,11 @@ async fn plays_return_the_unchanged_record_without_writes_or_revision_changes() 
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let body: AudioWriteResponse = json(response).await;
+        let value: serde_json::Value = json(response).await;
+        assert!(value["file"].get("play_count").is_none());
+        assert!(value["file"]["attributes"].get("last_played_at").is_none());
+        let body: AudioWriteResponse = serde_json::from_value(value).unwrap();
         assert_eq!(body.file.id, id);
-        assert_eq!(body.file.play_count, 0);
         assert_eq!(body.revision_before, start);
         assert_eq!(body.revision, start);
     }
@@ -1496,7 +1513,12 @@ async fn plays_return_the_unchanged_record_without_writes_or_revision_changes() 
     drop(f.state);
     let reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
     assert_eq!(library_revision(&reopened).await, start);
-    assert_eq!(reopened.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(reopened.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     let history = send_json(
         &reopened,
         Method::GET,
@@ -1506,7 +1528,7 @@ async fn plays_return_the_unchanged_record_without_writes_or_revision_changes() 
     )
     .await;
     assert_eq!(history.status(), StatusCode::OK);
-    let history: Vec<audiolib_core::PlayRecord> = json(history).await;
+    let history: Vec<serde_json::Value> = json(history).await;
     assert!(history.is_empty());
     let response = send_json(
         &reopened,

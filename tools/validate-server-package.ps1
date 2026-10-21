@@ -283,8 +283,8 @@ try {
     if ($server.HasExited -or $library.library_id -isnot [string] -or !$library.library_id -or
         $library.schema_version -ne 6 -or $library.identity_bound_writes -isnot [bool] -or !$library.identity_bound_writes -or
         $library.stats.audio_files -ne 1 -or ![IO.Path]::GetFullPath($library.database).Equals([IO.Path]::GetFullPath($database), $comparison)) { throw 'Extracted server could not serve its isolated synthetic library.' }
-    if ($library.snapshot_format.id -cne 'ale-s6-cld1-t3-m2-p0' -or
-        $library.snapshot_format.format.features.play_history_retired -ne 1) {
+    if ($library.snapshot_format.id -cne 'ale-s6-cld1-t3-m2-p1' -or
+        $library.snapshot_format.format.features.play_history_retired -ne 2) {
         throw 'Extracted server snapshot format does not declare playback-history retirement.'
     }
     # Safe public result only: neither endpoint responses nor process logs are exported.

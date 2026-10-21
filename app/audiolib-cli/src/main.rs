@@ -6,12 +6,16 @@ use audiolib_core::{
     MetadataPatch, SearchFilters, SearchRequest, SortOrder, TagEditMode, config::AppConfig,
 };
 use audiolib_db::{
-    SqliteProvider, import_legacy,
+    SqliteProvider, import_legacy_local,
     scanner::{ScanCancellation, ScanOptions, ScanService},
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
+};
 
 #[derive(Parser)]
 #[command(name = "AudioLibCli", version, about = "AudioLib Explorer Rust CLI")]
@@ -367,7 +371,13 @@ fn open_provider(
         .unwrap_or(std::path::Path::new("."))
         .join("library.db");
     let provider = if path.exists() {
-        SqliteProvider::open_existing(path)?
+        SqliteProvider::open_existing_local_with_progress_cancellable(
+            path,
+            &config.data_root(),
+            config.play_history_limit,
+            &AtomicBool::new(false),
+            |_| {},
+        )?
     } else {
         anyhow::ensure!(
             explicit.is_none() && !config.paths.settings.exists() && path == &default_database,
@@ -375,8 +385,14 @@ fn open_provider(
             path.display()
         );
         if let Some(source) = &config.paths.legacy_database {
-            import_legacy(source, path)?;
-            SqliteProvider::open_existing(path)?
+            import_legacy_local(source, path, &config.data_root(), config.play_history_limit)?;
+            SqliteProvider::open_existing_local_with_progress_cancellable(
+                path,
+                &config.data_root(),
+                config.play_history_limit,
+                &AtomicBool::new(false),
+                |_| {},
+            )?
         } else {
             SqliteProvider::open(path)?
         }
@@ -388,6 +404,33 @@ fn open_provider(
         config.save()?;
     }
     Ok(provider)
+}
+
+fn server_local_play_history(
+    config: &AppConfig,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<Value> {
+    let library_id = config
+        .data_source
+        .active_profile()
+        .and_then(|profile| profile.library_id.clone())
+        .or_else(|| {
+            let state = audiolib_remote::RemoteCache::new(&config.data_root()).active()?;
+            (state.server_url == config.data_source.server_url).then_some(state.library_id)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Synchronize the selected server once to establish its local history identity"
+            )
+        })?;
+    let scope = format!("server-{library_id}");
+    let history = audiolib_db::local_play_history::LocalPlayHistory::open(
+        &config.data_root(),
+        &scope,
+        config.play_history_limit,
+    )?;
+    Ok(json!(history.page(limit, offset)?))
 }
 
 /// Read commands without `--database` use the configured default library, which
@@ -504,6 +547,12 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
     if let Command::Remote { command } = &args.command {
         return remote_operation(&config, command);
     }
+    if args.database.is_none()
+        && config.data_source.mode == audiolib_core::config::DataSourceMode::Server
+        && let Command::PlayHistory { limit, offset } = &args.command
+    {
+        return server_local_play_history(&config, *limit, *offset);
+    }
     let mut _preferences_guard = None;
     match &args.command {
         Command::Db {
@@ -521,7 +570,13 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
         } => {
             _preferences_guard = Some(require_closed_desktop(&config.paths.settings)?);
             config = AppConfig::load_default()?;
-            let provider = SqliteProvider::open_existing(path)?;
+            let provider = SqliteProvider::open_existing_local_with_progress_cancellable(
+                path,
+                &config.data_root(),
+                config.play_history_limit,
+                &AtomicBool::new(false),
+                |_| {},
+            )?;
             let integrity = provider.check_library()?;
             anyhow::ensure!(
                 integrity.is_ok(),
@@ -561,7 +616,8 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
     } = &args.command
     {
         let path = args.database.as_ref().unwrap_or(&config.paths.database);
-        let report = import_legacy(source, path)?;
+        let report =
+            import_legacy_local(source, path, &config.data_root(), config.play_history_limit)?;
         if args.database.is_none() && !config.paths.settings.exists() {
             config.save()?;
         }
@@ -706,7 +762,16 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
         Command::Remove { ids, .. } => json!({"removed":provider.remove_audio(ids)?}),
         Command::RemoveFolder { id, .. } => json!({"removed":provider.remove_folder(*id)?}),
         Command::ScanHistory { limit, offset } => json!(provider.scan_history(*limit, *offset)?),
-        Command::PlayHistory { limit, offset } => json!(provider.play_history(*limit, *offset)?),
+        Command::PlayHistory { limit, offset } => {
+            let library_id =
+                audiolib_db::local_play_history::local_library_id(provider.database_path())?;
+            let history = audiolib_db::local_play_history::LocalPlayHistory::open(
+                &config.data_root(),
+                &library_id,
+                config.play_history_limit,
+            )?;
+            json!(history.page(*limit, *offset)?)
+        }
         Command::Export {
             destination,
             export_format,
@@ -1313,6 +1378,7 @@ mod tests {
             },
             language: "cn".into(),
             audition_play_on_single_click: false,
+            play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             audio_table: Default::default(),
@@ -1321,6 +1387,37 @@ mod tests {
             data_source: Default::default(),
             data_source_fallback: None,
         }
+    }
+
+    #[test]
+    fn server_history_reads_only_the_selected_client_store_without_opening_a_library() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = isolated_config(root.path());
+        config.data_source.mode = audiolib_core::config::DataSourceMode::Server;
+        config.data_source.active = Some("history-server".into());
+        config
+            .data_source
+            .profiles
+            .push(audiolib_core::profiles::ServerProfile {
+                id: "history-server".into(),
+                library_id: Some("library-id".into()),
+                ..Default::default()
+            });
+        // A deliberately absent working library proves this path does not open/create it.
+        let working = config.paths.database.clone();
+        let history = audiolib_db::local_play_history::LocalPlayHistory::open(
+            &config.data_root(),
+            "server-library-id",
+            config.play_history_limit,
+        )
+        .unwrap();
+        history
+            .record(Some(7), "remote/one.wav", "one.wav")
+            .unwrap();
+        let reply = server_local_play_history(&config, 10, 0).unwrap();
+        assert_eq!(reply.as_array().unwrap().len(), 1);
+        assert_eq!(reply[0]["audio_id"], 7);
+        assert!(!working.exists());
     }
 
     #[test]

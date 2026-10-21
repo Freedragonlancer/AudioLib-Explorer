@@ -32,6 +32,12 @@ pub(super) enum Command {
     Plan {
         #[arg(long)]
         output: PathBuf,
+        /// Import old local playback history after backup. Omit for server/snapshot jobs.
+        #[arg(long)]
+        local_history_root: Option<PathBuf>,
+        /// Maximum local event rows; 0 disables recording and the legacy event import.
+        #[arg(long, default_value_t = audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY)]
+        history_limit: u32,
     },
     /// Apply a reviewed plan; rejects changed source data or a different tool recipe.
     Apply {
@@ -92,9 +98,28 @@ fn execute(
             *deep,
             cancel
         )?)),
-        Command::Plan { output } => {
-            // Validate the route before creating any output; never truncate an existing file.
-            let plan = migration::plan(&database, cancel)?;
+        Command::Plan {
+            output,
+            local_history_root,
+            history_limit,
+        } => {
+            // Check a durable local import owner before calling privileged planner APIs.
+            // Read-only plans do not create an import sidecar when one is absent.
+            let local = local_history_root
+                .as_ref()
+                .map(|root| -> anyhow::Result<_> {
+                    Ok(migration::LocalHistoryMigration {
+                        data_root: root.canonicalize()?,
+                        library_id: audiolib_db::local_play_history::local_library_id(&database)?,
+                        limit: *history_limit,
+                    })
+                })
+                .transpose()?;
+            let _owner = migration::admit_import_owner(&database, local, false)?;
+            let plan = match local_history_root {
+                Some(root) => migration::plan_local(&database, root, *history_limit, cancel)?,
+                None => migration::plan(&database, cancel)?,
+            };
             let bytes = serde_json::to_vec_pretty(&plan)?;
             let mut file = OpenOptions::new()
                 .write(true)
@@ -111,11 +136,17 @@ fn execute(
                 plan.source.source == database,
                 "Plan belongs to a different library; --database must match its canonical source"
             );
+            let _owner =
+                migration::admit_import_owner(&database, plan.local_history.clone(), false)?;
             Ok(json!(migration::apply(&plan, cancel, observer)?))
         }
         Command::Resume | Command::Verify | Command::Rollback => {
             let job = migration::discover(&database)?
                 .ok_or_else(|| anyhow::anyhow!("No active migration job for this library"))?;
+            let recovery = matches!(command, Command::Verify | Command::Rollback)
+                || job.phase == migration::MigrationPhase::RollingBack;
+            let _owner =
+                migration::admit_import_owner(&database, job.plan.local_history.clone(), recovery)?;
             let result = match command {
                 Command::Resume => json!(migration::resume(&job.directory, cancel, observer)?),
                 Command::Verify => json!({
@@ -134,6 +165,55 @@ fn execute(
 mod tests {
     use super::*;
     use audiolib_db::SqliteProvider;
+
+    #[test]
+    fn explicit_plan_and_apply_cannot_bypass_a_pending_local_import_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.db");
+        let path = root.path().join("imported.db");
+        let data = root.path().join("client-data");
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
+        conn.execute_batch(include_str!(
+            "../../../crates/audiolib-db/tests/fixtures/schema-v5.sql"
+        ))
+        .unwrap();
+        conn.execute_batch("INSERT INTO audio_files(id,file_path,filename) VALUES(1,'one.wav','one.wav');
+          INSERT INTO play_history(audio_file_id,played_at,filename,file_path) VALUES(1,'invalid UTC','one.wav','one.wav');").unwrap();
+        drop(conn);
+        assert!(audiolib_db::import_legacy_local(&source, &path, &data, 5000).is_err());
+        assert!(path.is_file());
+        assert_eq!(
+            migration::discover(&path).unwrap().unwrap().phase,
+            migration::MigrationPhase::Backup
+        );
+        let original = std::fs::read(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let output = root.path().join("server-plan.json");
+        let command = Command::Plan {
+            output: output.clone(),
+            local_history_root: None,
+            history_limit: 5000,
+        };
+        assert!(execute(&path, &command, &cancel, &mut |_| Ok(())).is_err());
+        assert!(!output.exists());
+        // The application boundary must also reject a privileged raw plan loaded
+        // from disk, before it can create another job or bypass the local import.
+        let raw = migration::plan(&path, &cancel).unwrap();
+        std::fs::write(&output, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let job_before = migration::discover(&path).unwrap().unwrap().id;
+        assert!(
+            execute(
+                &path,
+                &Command::Apply { plan: output },
+                &cancel,
+                &mut |_| Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(migration::discover(&path).unwrap().unwrap().id, job_before);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
 
     #[test]
     fn inspection_does_not_create_a_missing_library_or_upgrade_an_existing_one() {
@@ -196,6 +276,8 @@ mod tests {
         let output = root.path().join("plan.json");
         let command = Command::Plan {
             output: output.clone(),
+            local_history_root: None,
+            history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         };
         execute(&first, &command, &cancel, &mut |_| Ok(())).unwrap();
         let bytes = std::fs::read(&output).unwrap();
@@ -228,6 +310,8 @@ mod tests {
             &path,
             &Command::Plan {
                 output: plan_file.clone(),
+                local_history_root: None,
+                history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             },
             &cancel,
             &mut |_| Ok(()),

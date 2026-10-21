@@ -26,7 +26,7 @@ fn official_backups_with_different_page_sizes_restore_into_wal_without_modifying
             .unwrap();
         drop(fixture);
         provider.update_metadata(1, &patch("saved-state")).unwrap();
-        provider.record_play(1).unwrap();
+
         let source = temp.path().join("alternate-page-size.db");
         provider.backup_library(&source).unwrap();
         let source_conn = Connection::open(&source).unwrap();
@@ -65,8 +65,7 @@ fn official_backups_with_different_page_sizes_restore_into_wal_without_modifying
         assert_eq!(report.library.schema_version, 6);
         assert!(provider.check_library().unwrap().is_ok());
         assert_eq!(provider.get_audio(1).unwrap().tags, "saved-state");
-        assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
-        assert!(provider.play_history(10, 0).unwrap().is_empty());
+
         assert_eq!(
             provider
                 .search(&SearchRequest {
@@ -106,8 +105,6 @@ fn official_backups_with_different_page_sizes_restore_into_wal_without_modifying
         provider
             .update_metadata(1, &patch("usable-after-restore"))
             .unwrap();
-        provider.record_play(1).unwrap();
-        assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
     }
 }
 
@@ -135,7 +132,6 @@ fn readonly_check_export_and_backup_do_not_create_administration_sidecars() {
             .is_err()
     );
     assert!(readonly.update_metadata(1, &patch("blocked")).is_err());
-    assert!(readonly.record_play(1).is_err());
     assert!(!temp.path().join("readonly.db.admin.lock").exists());
     assert!(!temp.path().join("readonly.db.scan.lock").exists());
     assert_eq!(fs::read(source).unwrap(), before);

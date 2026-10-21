@@ -888,10 +888,6 @@ impl SqliteProvider {
                     scanned:unsigned(row,6)?,added:unsigned(row,7)?,updated:unsigned(row,8)?,removed:unsigned(row,9)?,unchanged:unsigned(row,10)?,errors:unsigned(row,11)?,error_details:details,errors_truncated:unsigned(row,13)?})
             }).map_err(db_error)?.collect::<rusqlite::Result<_>>().map_err(db_error)
     }
-    pub(crate) fn management_plays(&self, limit: usize, offset: usize) -> Result<Vec<PlayRecord>> {
-        check_page(limit, offset)?;
-        Ok(Vec::new())
-    }
 
     /// Relocate an indexed root in one transaction. Validation and the rollback
     /// backup happen under both OS leases, so scans and other writers cannot alter
@@ -1496,7 +1492,6 @@ const CSV_COLUMNS: &[&str] = &[
     "notes",
     "favorite",
     "bext_description",
-    "play_count",
     "attributes",
     "missing",
 ];

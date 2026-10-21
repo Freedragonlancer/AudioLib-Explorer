@@ -9,7 +9,10 @@ use audiolib_core::{
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{path::Path, sync::atomic::AtomicBool};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
 
 /// Conservative additional free-space estimate, never a promised final size.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -20,6 +23,17 @@ pub struct SpaceBudget {
     pub additional_bytes: u64,
     /// Whether a separate owned legacy normalization copy is required.
     pub normalizes_legacy: bool,
+}
+
+/// Explicit client-local legacy history destination; never inferred for server/snapshot jobs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LocalHistoryMigration {
+    /// Client data root, independent of the library and snapshot cache directories.
+    pub data_root: PathBuf,
+    /// Canonical local library identity shared with desktop and CLI history reads.
+    pub library_id: String,
+    /// Retention policy captured when this reviewed job was created.
+    pub limit: u32,
 }
 
 /// Reviewable, source-bound request. Apply rechecks every field under write exclusion.
@@ -37,6 +51,9 @@ pub struct MigrationPlan {
     pub recipe_identity: String,
     /// Exact reviewed additions/removals, including authorized historical-data retirement.
     pub schema_changes: Vec<super::SchemaChange>,
+    /// Only an explicit local client opens a history store. None means no history import.
+    #[serde(default)]
+    pub local_history: Option<LocalHistoryMigration>,
     /// Fully traversed source evidence.
     pub source: super::LibraryInspection,
     /// Actual SQL schema identity, excluding only this executor's internal objects.
@@ -215,6 +232,7 @@ pub fn plan(path: &Path, cancel: &AtomicBool) -> Result<MigrationPlan> {
         tokenizer_identity: tokenizer_identity(),
         recipe_identity: super::recipe::identity(),
         schema_changes: super::recipe::changes(),
+        local_history: None,
         schema_sha256: schema_digest(&conn)?,
         source,
         space: SpaceBudget {
@@ -223,6 +241,29 @@ pub fn plan(path: &Path, cancel: &AtomicBool) -> Result<MigrationPlan> {
             normalizes_legacy,
         },
     })
+}
+
+/// Plan the same protected conversion for a client-owned local library. The plan
+/// records its history destination so a restart cannot silently skip the import.
+pub fn plan_local(
+    path: &Path,
+    data_root: &Path,
+    limit: u32,
+    cancel: &AtomicBool,
+) -> Result<MigrationPlan> {
+    let mut reviewed = plan(path, cancel)?;
+    // Planning remains read-only: the client owns and creates its data root
+    // before this API. Persist the real directory, never a re-pointable alias.
+    let data_root = data_root.canonicalize()?;
+    if !data_root.is_dir() {
+        return Err(invalid("History data root must be an existing directory"));
+    }
+    reviewed.local_history = Some(LocalHistoryMigration {
+        library_id: crate::local_play_history::local_library_id(&reviewed.source.source)?,
+        data_root,
+        limit,
+    });
+    Ok(reviewed)
 }
 
 #[cfg(test)]

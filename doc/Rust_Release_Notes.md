@@ -16,11 +16,17 @@ the corresponding tested peer-version ranges.
   not authorize rebuilding a library. Unknown formats block unsafe use.
 - Migration preserves stable IDs, Metadata, annotations, references, scan history
   and unknown supported extensions. The explicitly authorized retirement removes
-  `play_history` and `audio_files.play_count`; `last_played_at` is retained. Original
-  playback data remains recoverable in the complete pre-upgrade backup.
-- Playback no longer writes counts/history or advances the library revision.
-  Existing response shapes and ID validation are retained; old unchanged libraries
-  may still return their stored nonzero counter values.
+  `play_history`, `audio_files.play_count` and `audio_files.last_played_at`.
+  Original playback data remains recoverable in the complete pre-upgrade backup.
+  The p1 format declares play_history_retired=2; earlier unpublished p0 is read-only
+  compatible and migratable.
+- Playback events live only in client-local history.db, default 5000 per library.
+  Local legacy history imports after backup and before retirement; server/snapshot
+  history is not imported. Cache replacement leaves this independent store intact.
+- AudioFile JSON/CSV no longer contain play_count; attributes no longer append
+  last_played_at. New clients ignore these extra fields in old server responses.
+  Existing server playback routes keep validation and no-write behavior. Deploy
+  clients before servers: old binaries require the removed JSON counter field.
 - Download/decompression counters and migration phases/counts reach the UI.
   Invalid checkpoints stop resumption; process-crash recovery is tested for copy,
   indexing, publication and rollback. Cache retries preserve the previous snapshot

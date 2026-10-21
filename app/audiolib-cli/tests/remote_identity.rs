@@ -206,7 +206,12 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
     let snapshot = SqliteProvider::open_read_only(&cache.database_path(&state)).unwrap();
     let file = snapshot.get_audio(7).unwrap();
     assert_eq!(file.notes, "saved notes");
-    assert_eq!(file.play_count, 0);
+    assert!(
+        serde_json::to_value(&file)
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     let requests = requests.lock().unwrap();
     assert_eq!(requests[0], ("GET".into(), "/api/v1/library".into()));
     let mutations = requests

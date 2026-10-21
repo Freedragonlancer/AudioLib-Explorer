@@ -98,10 +98,10 @@ fn failed_maintenance_excludes_other_instances_and_keeps_acknowledged_writes() {
     editor
         .update_metadata(1, &patch("acknowledged-before"))
         .unwrap();
-    editor.record_play(1).unwrap();
+
     let blocker = support::connection(provider.database_path()).unwrap();
     // A damaged trigger causes the final maintenance check to fail. BEGIN IMMEDIATE
-    // only controls interleaving; all annotation/play writes below use the public API.
+    // only controls interleaving; all annotation writes below use the public API.
     blocker
         .execute_batch("DROP TRIGGER audio_files_au; BEGIN IMMEDIATE;")
         .unwrap();
@@ -113,18 +113,16 @@ fn failed_maintenance_excludes_other_instances_and_keeps_acknowledged_writes() {
         editor.update_metadata(1, &patch("must-not-be-acknowledged")),
         Err(Error::Busy(_))
     ));
-    editor.record_play(1).unwrap(); // Playback only validates the existing ID.
+
     blocker.execute_batch("ROLLBACK;").unwrap();
     assert!(worker.join().unwrap().is_err());
     assert_eq!(provider.get_audio(1).unwrap().tags, "acknowledged-before");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
-    assert_eq!(provider.play_history(10, 0).unwrap().len(), 0);
+
     editor
         .update_metadata(1, &patch("acknowledged-after"))
         .unwrap();
-    editor.record_play(1).unwrap();
+
     assert_eq!(provider.get_audio(1).unwrap().tags, "acknowledged-after");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -143,16 +141,15 @@ fn restore_holds_isolation_through_install_and_releases_it_afterward() {
         editor.update_metadata(1, &patch("blocked")),
         Err(Error::Busy(_))
     ));
-    editor.record_play(1).unwrap(); // Playback only validates the existing ID.
+
     blocker.execute_batch("ROLLBACK;").unwrap();
     let report = worker.join().unwrap().unwrap();
     assert_eq!(provider.get_audio(1).unwrap().tags, "before");
     let rollback = SqliteProvider::open_read_only(&report.rollback_backup).unwrap();
     assert_eq!(rollback.get_audio(1).unwrap().tags, "pre-restore");
     editor.update_metadata(1, &patch("after-restore")).unwrap();
-    editor.record_play(1).unwrap();
+
     assert_eq!(provider.get_audio(1).unwrap().tags, "after-restore");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -185,7 +182,7 @@ fn exclusive_administration_lock_covers_all_writing_entry_points_and_open() {
         provider.update_metadata(1, &patch("blocked")),
         Err(Error::Busy(_))
     ));
-    provider.record_play(1).unwrap(); // No write lease is needed for a no-op.
+
     assert!(matches!(
         provider.ensure_source_tags_current(),
         Err(Error::Busy(_))
@@ -261,7 +258,7 @@ fn scans_allow_metadata_and_play_noops_from_another_provider() {
             |_| {
                 if !edited {
                     editor.update_metadata(1, &patch("during-scan")).unwrap();
-                    editor.record_play(1).unwrap();
+
                     edited = true;
                 }
             },
@@ -269,7 +266,6 @@ fn scans_allow_metadata_and_play_noops_from_another_provider() {
         .unwrap();
     assert!(edited);
     assert_eq!(provider.get_audio(1).unwrap().tags, "during-scan");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -300,7 +296,6 @@ fn cross_process_administration_blocks_edits_then_releases_without_losing_writes
         provider.get_audio(1).unwrap().tags,
         "cross-process-acknowledged"
     );
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -317,8 +312,7 @@ fn api_writer_child() {
         if !matches!(
             provider.update_metadata(1, &patch("must-block")),
             Err(Error::Busy(_))
-        ) || provider.record_play(1).is_err()
-        {
+        ) {
             return Err("Writer entered the exclusive administration window".into());
         }
         fs::write(directory.join("blocked-ok"), []).unwrap();
@@ -326,7 +320,7 @@ fn api_writer_child() {
         provider
             .update_metadata(1, &patch("cross-process-acknowledged"))
             .map_err(|e| e.to_string())?;
-        provider.record_play(1).map_err(|e| e.to_string())?;
+
         fs::write(directory.join("done"), []).unwrap();
         Ok(())
     })();

@@ -12,7 +12,9 @@ pub const TARGET_SCHEMA: u32 = 6;
 /// Completed tokenizer encoding; 4 in an old live upgrade is a temporary marker.
 pub const TOKENIZATION_REVISION: u32 = 3;
 /// Format identifiers are exact sets, not a promise that all lower integers work.
-pub const PLAN_B_FORMAT: &str = "ale-s6-cld1-t3-m2-p0";
+pub const PLAN_B_FORMAT: &str = "ale-s6-cld1-t3-m2-p1";
+/// Earlier unpublished Plan B retained the last playback timestamp; read-only source.
+pub const PLAN_B_INITIAL_FORMAT: &str = "ale-s6-cld1-t3-m2-p0";
 /// Snapshot protocol is separate from both schema and application versions.
 pub const API_PROTOCOL: &str = "api/v1";
 /// Minimum engine with corrected contentless-delete aggregate statistics.
@@ -86,7 +88,7 @@ impl LibraryFormat {
                 ("search_indexes", 1),
                 ("tokenization", TOKENIZATION_REVISION),
                 ("search_storage", 1),
-                ("play_history_retired", 1),
+                ("play_history_retired", 2),
             ]
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
@@ -112,8 +114,14 @@ impl LibraryFormat {
             {
                 Some(format!("ale-s{schema}-ext-t3-m2"))
             }
-            (SearchStorage::ContentlessDelete, TARGET_SCHEMA) if self == &Self::target() => {
-                Some(PLAN_B_FORMAT.into())
+            (SearchStorage::ContentlessDelete, TARGET_SCHEMA) => {
+                if self == &Self::target() {
+                    Some(PLAN_B_FORMAT.into())
+                } else {
+                    let mut initial = Self::target();
+                    initial.features.insert("play_history_retired".into(), 1);
+                    (self == &initial).then(|| PLAN_B_INITIAL_FORMAT.into())
+                }
             }
             _ => None,
         }
@@ -230,11 +238,8 @@ fn decision(
 fn unknown_requirement(format: &LibraryFormat) -> Option<&str> {
     for (key, revision) in &format.features {
         let maximum = match key.as_str() {
-            "stable_audio_ids"
-            | "foreign_key_indexes"
-            | "search_indexes"
-            | "search_storage"
-            | "play_history_retired" => 1,
+            "stable_audio_ids" | "foreign_key_indexes" | "search_indexes" | "search_storage" => 1,
+            "play_history_retired" => 2,
             "tokenization" => TOKENIZATION_REVISION,
             _ => return Some(key),
         };
@@ -386,6 +391,7 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
             "ale-s3-ext-t3-m2".into(),
             "ale-s4-ext-t3-m2".into(),
             "ale-s5-ext-t3-m2".into(),
+            PLAN_B_INITIAL_FORMAT.into(),
             PLAN_B_FORMAT.into(),
         ],
         database_write_formats: vec![PLAN_B_FORMAT.into()],
@@ -463,6 +469,32 @@ mod tests {
         );
         assert!(
             assess_library(&LibraryFormat::target(), &evidence(), LibraryAccess::Write).direct_use
+        );
+    }
+
+    #[test]
+    fn prior_schema6_requires_timestamp_retirement_for_writes() {
+        let mut initial = LibraryFormat::target();
+        initial.features.insert("play_history_retired".into(), 1);
+        assert_eq!(
+            initial.snapshot_format_id().as_deref(),
+            Some(PLAN_B_INITIAL_FORMAT)
+        );
+        assert!(
+            compatibility_manifest()
+                .snapshot_read_formats
+                .contains(&PLAN_B_INITIAL_FORMAT.into())
+        );
+        assert!(assess_library(&initial, &evidence(), LibraryAccess::Read).direct_use);
+        assert_eq!(
+            assess_library(&initial, &evidence(), LibraryAccess::Write).disposition,
+            Some(MigrationDisposition::Migratable)
+        );
+        initial.features.insert("play_history_retired".into(), 3);
+        assert_eq!(initial.snapshot_format_id(), None);
+        assert_eq!(
+            assess_library(&initial, &evidence(), LibraryAccess::Write).reasons,
+            vec![CompatibilityReason::ToolUpgradeRequired]
         );
     }
 

@@ -5,7 +5,9 @@ mod folder_rollup_tests;
 #[cfg(test)]
 mod full_library_validation;
 mod id_membership;
+mod import_lease;
 mod list_waveforms;
+pub mod local_play_history;
 mod management;
 pub mod migration;
 mod owned_cancellation;
@@ -32,8 +34,8 @@ use audiolib_core::AudioMetadata;
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
     FileVisibility, Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats,
-    MaintenanceAction, MaintenanceReport, MetadataPatch, PlayRecord, RestoreReport, Result,
-    ScanSession, SearchPage, SearchRequest, SortOrder, TransferReport,
+    MaintenanceAction, MaintenanceReport, MetadataPatch, RestoreReport, Result, ScanSession,
+    SearchPage, SearchRequest, SortOrder, TransferReport,
 };
 use jieba_rs::Jieba;
 use rusqlite::{
@@ -314,6 +316,27 @@ pub struct MigrationReport {
 /// Snapshot a read-only legacy source through SQLite's backup API, including committed WAL.
 /// Existing destinations are never replaced. Original library tables and IDs remain intact.
 pub fn import_legacy(source: &Path, destination: &Path) -> Result<MigrationReport> {
+    import_legacy_with_history(source, destination, None)
+}
+
+/// Client-local import of a read-only old library. A reviewed old-format copy is
+/// published first, then its durable final-path job backs up/imports local history
+/// before retirement. A later failure leaves that owned target/job recoverable;
+/// another source cannot replace it. The original source always remains intact.
+pub fn import_legacy_local(
+    source: &Path,
+    destination: &Path,
+    data_root: &Path,
+    history_limit: u32,
+) -> Result<MigrationReport> {
+    import_legacy_with_history(source, destination, Some((data_root, history_limit)))
+}
+
+fn import_legacy_with_history(
+    source: &Path,
+    destination: &Path,
+    history: Option<(&Path, u32)>,
+) -> Result<MigrationReport> {
     if !source.is_file() {
         return Err(Error::NotFound(source.display().to_string()));
     }
@@ -325,6 +348,8 @@ pub fn import_legacy(source: &Path, destination: &Path) -> Result<MigrationRepor
     if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
+    let destination_lease = import_lease::ImportDestinationLease::acquire(destination)?;
+    let destination = destination_lease.destination();
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -356,6 +381,69 @@ pub fn import_legacy(source: &Path, destination: &Path) -> Result<MigrationRepor
             schema::migrate(&mut dst)?;
             schema::backfill_source_tags(&mut dst)?;
         }
+    }
+    if let Some((root, limit)) = history {
+        let copy = Connection::open_with_flags(staging.path(), OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(db_error)?;
+        let mode: String = copy
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .map_err(db_error)?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(Error::Validation(
+                "Owned import copy must be standalone before publication".into(),
+            ));
+        }
+        drop(copy);
+        let cancel = AtomicBool::new(false);
+        let diagnosis = migration::diagnose(staging.path(), &cancel)?;
+        if diagnosis.decision.disposition
+            != Some(audiolib_core::compatibility::MigrationDisposition::Compatible)
+            || diagnosis.decision.execution_state
+                != audiolib_core::compatibility::ExecutionState::Ready
+            || !diagnosis.findings.is_empty()
+        {
+            // This read-only preflight rejects directly known dependency failures
+            // before either the final path or client history is touched. Legacy
+            // normalization stays in the shared durable engine, including its
+            // business-preservation checks and any deferred dependency diagnosis.
+            migration::plan(staging.path(), &cancel)?;
+        }
+        fs::create_dir_all(root)?;
+        let root = root.canonicalize()?;
+        destination_lease.write_local_intent(&root, limit)?;
+        staging.as_file().sync_all()?;
+        staging
+            .persist_noclobber(destination)
+            .map_err(|error| Error::Io(error.error))?;
+        SqliteProvider::validate_existing_for_open(destination)?;
+        // The explicit owner is checked against this real final file. Public
+        // opens cannot bypass the shared lease while this import still owns it.
+        let provider = SqliteProvider::open_with_history_owner_cancellable(
+            destination,
+            Some((&root, limit)),
+            &cancel,
+            |_| {},
+            Some(&destination_lease),
+        )?;
+        provider.check_integrity()?;
+        let integrity = provider.check_library()?;
+        if !integrity.is_ok() {
+            return Err(Error::Database(integrity.errors.join("; ")));
+        }
+        let report = MigrationReport {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            schema_version: schema::SCHEMA_VERSION,
+            audio_files: provider
+                .reader()?
+                .query_row("SELECT COUNT(*) FROM audio_files", [], |row| {
+                    unsigned(row, 0)
+                })
+                .map_err(db_error)?,
+            source_preserved: true,
+        };
+        provider.checkpoint_wal()?;
+        return Ok(report);
     }
     let provider = SqliteProvider::open(staging.path())?;
     provider.check_integrity()?;
@@ -418,7 +506,44 @@ impl SqliteProvider {
     pub fn open_with_progress_cancellable(
         path: &Path,
         cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_history_cancellable(path, None, cancel, progress)
+    }
+
+    /// Explicit client-local create/open. Legacy history is imported from the
+    /// verified rollback backup before the shared migration changes the library.
+    /// Server authorities and remote snapshots must use their existing entry points.
+    pub fn open_local_with_progress_cancellable(
+        path: &Path,
+        data_root: &Path,
+        history_limit: u32,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_history_cancellable(
+            path,
+            Some((data_root, history_limit)),
+            cancel,
+            progress,
+        )
+    }
+
+    fn open_with_history_cancellable(
+        path: &Path,
+        history: Option<(&Path, u32)>,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_history_owner_cancellable(path, history, cancel, progress, None)
+    }
+
+    fn open_with_history_owner_cancellable(
+        path: &Path,
+        history: Option<(&Path, u32)>,
+        cancel: &AtomicBool,
         mut progress: impl FnMut(SnapshotUpgradeProgress),
+        import_owner: Option<&import_lease::ImportDestinationLease>,
     ) -> Result<Self> {
         if cancel.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
@@ -431,11 +556,58 @@ impl SqliteProvider {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
+        let (open_path, creation_lease, existing_import_lease) = if let Some(owner) = import_owner {
+            let canonical = path.canonicalize()?;
+            if canonical != owner.destination() {
+                return Err(Error::Validation(
+                    "Import lease belongs to a different library destination".into(),
+                ));
+            }
+            (canonical, None, None)
+        } else if path.exists() {
+            let lease = import_lease::ExistingImportOpenLease::acquire(path)?;
+            (lease.destination().to_path_buf(), None, Some(lease))
+        } else {
+            // The exclusive lease rechecks the path after acquisition. It may
+            // already exist if another creator finished after our first probe.
+            let lease = import_lease::ImportDestinationLease::acquire_for_create(path)?;
+            (lease.destination().to_path_buf(), Some(lease), None)
+        };
+        let path = open_path.as_path();
+        // The same persistent inode carries a local owner receipt written before
+        // publication. A process crash before job registration cannot erase it.
+        let import_intent = if let Some(owner) = import_owner {
+            owner.authorize_history(history)?
+        } else if let Some(lease) = &creation_lease {
+            lease.authorize_history(history)?
+        } else if let Some(lease) = &existing_import_lease {
+            lease.authorize_history(history)?
+        } else {
+            unreachable!("Every writable open must own an import lease")
+        };
+        let history = history.map(|(root, limit)| {
+            (
+                root,
+                import_intent
+                    .as_ref()
+                    .map_or(limit, |intent| intent.limit()),
+            )
+        });
         // Establish a new empty file only where the caller explicitly permits create.
         // Existing-library CLI paths validate existence before reaching this method.
-        drop(Connection::open(path).map_err(db_error)?);
+        let flags = if creation_lease.is_some() {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        };
+        drop(Connection::open_with_flags(path, flags).map_err(db_error)?);
         progress(SnapshotUpgradeProgress::Preparing);
-        migration::prepare_writable(path, cancel, &mut progress)?;
+        match history {
+            Some((root, limit)) => {
+                migration::prepare_local_writable(path, root, limit, cancel, &mut progress)?
+            }
+            None => migration::prepare_writable(path, cancel, &mut progress)?,
+        }
         let _isolation = management::AdministrationLease::shared(path)?;
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(db_error)?;
@@ -457,7 +629,7 @@ impl SqliteProvider {
         let tokenizer = load_tokenizer();
         schema::register_tokenizer(&conn, tokenizer.clone())?;
         let derived = schema::source_tags_ready(&conn)?;
-        Ok(Self {
+        let provider = Self {
             path: path.to_path_buf(),
             read_only: false,
             writer: Mutex::new(conn),
@@ -471,7 +643,20 @@ impl SqliteProvider {
             derived_tags: AtomicBool::new(derived),
             list_waveform_memory: Default::default(),
             _owned_snapshot_directory: None,
-        })
+        };
+        // Only a completed local/p1 provider can retire the durable import owner.
+        // Keep its lock inode; contention during shared-to-exclusive cleanup
+        // leaves the receipt available for the next matching local open.
+        if let Some(intent) = &import_intent {
+            if let Some(owner) = import_owner {
+                owner.clear_completed_intent(intent)?;
+            } else if let Some(lease) = &creation_lease {
+                lease.clear_completed_intent(intent)?;
+            } else if let Some(lease) = &existing_import_lease {
+                lease.try_clear_completed_intent(intent)?;
+            }
+        }
+        Ok(provider)
     }
 
     /// Upgrade older source-keyword text through checked maintenance. Idempotent;
@@ -612,6 +797,24 @@ impl SqliteProvider {
         cancel: &AtomicBool,
         progress: impl FnMut(SnapshotUpgradeProgress),
     ) -> Result<Self> {
+        Self::validate_existing_for_open(path)?;
+        Self::open_with_progress_cancellable(path, cancel, progress)
+    }
+
+    /// Open an existing local client library, importing legacy local history
+    /// before retirement. Missing/unrelated sources are rejected without creating files.
+    pub fn open_existing_local_with_progress_cancellable(
+        path: &Path,
+        data_root: &Path,
+        history_limit: u32,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::validate_existing_for_open(path)?;
+        Self::open_local_with_progress_cancellable(path, data_root, history_limit, cancel, progress)
+    }
+
+    fn validate_existing_for_open(path: &Path) -> Result<()> {
         if !path.is_file() {
             return Err(Error::NotFound(path.display().to_string()));
         }
@@ -627,8 +830,7 @@ impl SqliteProvider {
                 schema::SCHEMA_VERSION
             )));
         }
-        drop(probe);
-        Self::open_with_progress_cancellable(path, cancel, progress)
+        Ok(())
     }
 
     /// Open a schema-current library without writing its source file. Older derived
@@ -709,7 +911,7 @@ impl SqliteProvider {
     }
 
     /// Server mode: write the annotation values of records returned by the server (after a
-    /// metadata write or a recorded play) into a downloaded snapshot, so the read-only
+    /// metadata write) into a downloaded snapshot, so the read-only
     /// provider that has it open sees them without a new download. Keeps the snapshot's
     /// rollback-journal mode (no WAL, no migrations) and refreshes the tokenized FTS
     /// columns exactly like `update_metadata`. One transaction: an id missing from the
@@ -737,7 +939,7 @@ impl SqliteProvider {
         schema::ensure_ready(&conn)?;
         schema::validate_library_identity(&conn)?;
         schema::register_tokenizer(&conn, tokenizer.clone())?;
-        if version == schema::SCHEMA_VERSION && !schema::current_format_ready(&conn)? {
+        if version == schema::SCHEMA_VERSION && !schema::readable_format_ready(&conn)? {
             return Err(Error::Validation(
                 "Snapshot format is not ready for incremental Metadata".into(),
             ));
@@ -749,8 +951,8 @@ impl SqliteProvider {
                     if version==schema::SCHEMA_VERSION {
                         "UPDATE audio_files SET user_tags=?1,user_notes=?2,favorite=?3,user_color=?4 WHERE id=?5"
                     } else {"UPDATE audio_files SET user_tags=?1,user_tags_tokenized=?2,user_notes=?3,
-                    user_notes_tokenized=?4,favorite=?5,user_color=?6,play_count=?7
-                    WHERE id=?8"},
+                    user_notes_tokenized=?4,favorite=?5,user_color=?6
+                    WHERE id=?7"},
                 )
                 .map_err(db_error)?;
             for file in files {
@@ -770,7 +972,6 @@ impl SqliteProvider {
                         tokenize(tokenizer, &file.notes),
                         i64::from(file.favorite),
                         file.color.as_deref().filter(|color| !color.is_empty()),
-                        i64::try_from(file.play_count).unwrap_or(i64::MAX),
                         file.id,
                     ])
                 }
@@ -1972,21 +2173,6 @@ impl DataProvider for SqliteProvider {
         .map_err(db_error)
     }
 
-    fn record_play(&self, id: i64) -> Result<()> {
-        let exists: bool = self
-            .reader()?
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM audio_files WHERE id=?1)",
-                [id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        if !exists {
-            return Err(Error::NotFound(format!("Audio {id}")));
-        }
-        Ok(())
-    }
-
     fn stats(&self) -> Result<LibraryStats> {
         self.reader()?
             .query_row(
@@ -2050,9 +2236,6 @@ impl DataProvider for SqliteProvider {
     }
     fn scan_history(&self, limit: usize, offset: usize) -> Result<Vec<ScanSession>> {
         self.management_scans(limit, offset)
-    }
-    fn play_history(&self, limit: usize, offset: usize) -> Result<Vec<PlayRecord>> {
-        self.management_plays(limit, offset)
     }
     fn export_library(
         &self,
@@ -2272,25 +2455,20 @@ fn search_sql(
 const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE(af.file_size,0),
  COALESCE(af.sample_rate,0),COALESCE(af.bit_depth,0),COALESCE(af.channels,0),COALESCE(af.duration,0),
  COALESCE(af.user_tags,''),af.user_color,COALESCE(af.user_notes,''),af.favorite,
- COALESCE(af.bwf_description,''),COALESCE(af.play_count,0),af.metadata_json,
+ COALESCE(af.bwf_description,''),af.metadata_json,
  af.bwf_originator,af.bwf_originator_reference,af.bwf_origination_date,af.bwf_origination_time,
  af.bwf_time_reference,af.bwf_version,af.bwf_umid,af.ixml_scene,af.ixml_take,af.ixml_tape,
  af.ixml_circled,af.ixml_wild_track,af.ixml_no_good,af.codec,af.created_at,af.modified_at,
- af.last_played_at,af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0)";
+ af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0)";
 
-fn audio_projection(conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(db_error)?;
-    Ok(if version >= schema::SCHEMA_VERSION {
-        std::borrow::Cow::Owned(AUDIO_SELECT.replace("COALESCE(af.play_count,0)", "0"))
-    } else {
-        std::borrow::Cow::Borrowed(AUDIO_SELECT)
-    })
+fn audio_projection(_conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
+    // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
+    // retired library playback fields are never selected or surfaced.
+    Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
 }
 
 fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
-    let raw: String = row.get(15)?;
+    let raw: String = row.get(14)?;
     let mut attributes =
         serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}));
     if !attributes.is_object() {
@@ -2302,39 +2480,38 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         object.insert("bwf_description".into(), description.into());
     }
     for (index, name) in [
-        (16, "bwf_originator"),
-        (17, "bwf_originator_reference"),
-        (18, "bwf_origination_date"),
-        (19, "bwf_origination_time"),
-        (22, "bwf_umid"),
-        (23, "ixml_scene"),
-        (24, "ixml_take"),
-        (25, "ixml_tape"),
-        (29, "encoding"),
-        (30, "created_at"),
-        (31, "modified_at"),
-        (32, "last_played_at"),
+        (15, "bwf_originator"),
+        (16, "bwf_originator_reference"),
+        (17, "bwf_origination_date"),
+        (18, "bwf_origination_time"),
+        (21, "bwf_umid"),
+        (22, "ixml_scene"),
+        (23, "ixml_take"),
+        (24, "ixml_tape"),
+        (28, "encoding"),
+        (29, "created_at"),
+        (30, "modified_at"),
     ] {
         if let Some(value) = row.get::<_, Option<String>>(index)? {
             object.insert(name.into(), value.into());
         }
     }
     for (index, name) in [
-        (33, "peak_amplitude"),
-        (34, "rms_level"),
-        (35, "spectral_centroid"),
-        (36, "zero_crossing_rate"),
+        (31, "peak_amplitude"),
+        (32, "rms_level"),
+        (33, "spectral_centroid"),
+        (34, "zero_crossing_rate"),
     ] {
         if let Some(value) = row.get::<_, Option<f64>>(index)? {
             object.insert(name.into(), value.into());
         }
     }
     for (index, name) in [
-        (20, "bwf_time_reference"),
-        (21, "bwf_version"),
-        (26, "ixml_circled"),
-        (27, "ixml_wild_track"),
-        (28, "ixml_no_good"),
+        (19, "bwf_time_reference"),
+        (20, "bwf_version"),
+        (25, "ixml_circled"),
+        (26, "ixml_wild_track"),
+        (27, "ixml_no_good"),
     ] {
         if let Some(value) = row.get::<_, Option<i64>>(index)? {
             object.insert(name.into(), value.into());
@@ -2355,9 +2532,8 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         notes: row.get(11)?,
         favorite: row.get(12)?,
         bext_description: row.get(13)?,
-        play_count: unsigned(row, 14)?,
         attributes,
-        missing: row.get(37)?,
+        missing: row.get(35)?,
     })
 }
 

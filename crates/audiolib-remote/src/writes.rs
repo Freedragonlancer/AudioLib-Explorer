@@ -19,8 +19,8 @@ use audiolib_core::waveform_cache::{
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
     Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats, ListWaveformBatch,
-    ListWaveformSource, MaintenanceAction, MaintenanceReport, MetadataPatch, PlayRecord,
-    RestoreReport, ScanSession, SearchPage, SearchRequest, TransferReport,
+    ListWaveformSource, MaintenanceAction, MaintenanceReport, MetadataPatch, RestoreReport,
+    ScanSession, SearchPage, SearchRequest, TransferReport,
 };
 use audiolib_db::SqliteProvider;
 use std::path::Path;
@@ -235,25 +235,6 @@ impl RemoteWriter {
             cache: outcome.cache,
         })
     }
-
-    /// Compatibility no-op for explicit callers. Validate the cached record
-    /// without a network request, cache write, revision bump or Metadata write lease.
-    pub fn record_play(&self, id: i64) -> Result<WriteOutcome<AudioFile>> {
-        let state = self
-            .cache
-            .state(&self.library_id)
-            .ok_or_else(|| RemoteError::Snapshot("No cached snapshot for this library".into()))?;
-        let snapshot = SqliteProvider::open_read_only(&self.cache.database_path(&state))?;
-        let value = snapshot.get_audio(id)?;
-        Ok(WriteOutcome {
-            value,
-            revision_before: state.revision,
-            revision: state.revision,
-            cache: CacheUpdate::Applied {
-                revision: state.revision,
-            },
-        })
-    }
 }
 
 /// Cache effect of a write, reported to the GUI through [`RemoteProvider`]'s listener.
@@ -316,19 +297,6 @@ impl RemoteProvider {
 
     pub fn writer(&self) -> &RemoteWriter {
         &self.writer
-    }
-
-    /// Validate an existing record while the playback source is current. Playback
-    /// tracking is retired: this never sends an HTTP request or emits a write event.
-    pub fn record_play_if(
-        &self,
-        id: i64,
-        still_current: impl Fn() -> bool,
-    ) -> audiolib_core::Result<()> {
-        if !still_current() {
-            return Err(Error::Cancelled);
-        }
-        self.snapshot.get_audio(id).map(drop)
     }
 
     fn emit(&self, event: WriteEvent) {
@@ -428,9 +396,6 @@ impl DataProvider for RemoteProvider {
     fn update_metadata(&self, id: i64, patch: &MetadataPatch) -> audiolib_core::Result<AudioFile> {
         self.settle(self.writer.update_metadata(id, patch))
     }
-    fn record_play(&self, id: i64) -> audiolib_core::Result<()> {
-        self.record_play_if(id, || true)
-    }
     fn stats(&self) -> audiolib_core::Result<LibraryStats> {
         self.snapshot.stats()
     }
@@ -475,13 +440,6 @@ impl DataProvider for RemoteProvider {
     }
     fn scan_history(&self, limit: usize, offset: usize) -> audiolib_core::Result<Vec<ScanSession>> {
         self.snapshot.scan_history(limit, offset)
-    }
-    fn play_history(
-        &self,
-        _limit: usize,
-        _offset: usize,
-    ) -> audiolib_core::Result<Vec<PlayRecord>> {
-        Ok(Vec::new())
     }
     fn export_library(
         &self,
@@ -878,65 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_playback_is_local_and_history_stays_empty() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = cached_library(directory.path(), 41);
-        let reader = Arc::new(snapshot(&cache));
-        let seen = Arc::new(StdMutex::new(Vec::new()));
-        let server = server(seen.clone(), |method, path| match (method, path) {
-            ("POST", "/api/v1/audio/3/plays") => TestResponse::json(
-                200,
-                &format!(
-                    r#"{{"file":{},"revision_before":41,"revision":42}}"#,
-                    file_json(3, "", 0, "", 1)
-                ),
-            ),
-            ("GET", "/api/v1/history/plays?limit=10000&offset=17") => TestResponse::json(
-                200,
-                r#"[{"id":9,"audio_file_id":3,"played_at":"2026-10-11 09:00:00","filename":"door.wav","file_path":"/v/door.wav","missing":false}]"#,
-            ),
-            _ => TestResponse::json(404, "{}"),
-        });
-        let writer = RemoteWriter::new(
-            RemoteClient::new(&server.url, "").unwrap(),
-            cache.clone(),
-            LIBRARY,
-        );
-        let provider = RemoteProvider::new(reader.clone(), writer, false, None);
-        provider.record_play(3).unwrap();
-        assert_eq!(cache.state(LIBRARY).unwrap().revision, 41);
-        assert_eq!(reader.get_audio(3).unwrap().play_count, 0);
-        assert!(reader.play_history(100, 0).unwrap().is_empty());
-
-        let history = provider.play_history(usize::MAX, 17).unwrap();
-        assert!(history.is_empty());
-        let seen = seen.lock().unwrap();
-        assert!(seen.is_empty());
-    }
-
-    #[test]
-    fn provider_retired_history_needs_no_server_permission() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = cached_library(directory.path(), 1);
-        let seen = Arc::new(StdMutex::new(Vec::new()));
-        let server = server(seen.clone(), |_, _| {
-            TestResponse::json(
-                401,
-                r#"{"error_code":"UNAUTHORIZED","message":"Missing or invalid token"}"#,
-            )
-        });
-        let writer = RemoteWriter::new(
-            RemoteClient::new(&server.url, "").unwrap(),
-            cache.clone(),
-            LIBRARY,
-        );
-        let provider = RemoteProvider::new(Arc::new(snapshot(&cache)), writer, true, None);
-        assert!(provider.play_history(0, 7).unwrap().is_empty());
-        assert!(seen.lock().unwrap().is_empty());
-        assert_eq!(cache.state(LIBRARY).unwrap().revision, 1);
-    }
-
-    #[test]
     fn patch_applies_on_matching_revision_and_asks_for_sync_otherwise() {
         let directory = tempfile::tempdir().unwrap();
         let cache = cached_library(directory.path(), 41);
@@ -1092,10 +991,20 @@ mod tests {
         );
         let reader = snapshot(&cache);
         assert_eq!(reader.get_audio(7).unwrap().tags, "rain wood");
-        // Old response DTOs may still contain a historical count. Schema 6 must
-        // not recreate the retired field while applying ordinary Metadata.
-        assert_eq!(files[0].play_count, 2);
-        assert_eq!(reader.get_audio(7).unwrap().play_count, 0);
+        // Old JSON may contain retired fields; the owned DTO ignores them and
+        // serializing a new response must not reintroduce those fields.
+        assert!(
+            serde_json::to_value(&files[0])
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(reader.get_audio(7).unwrap())
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
         assert_eq!(reader.get_audio(3).unwrap().tags, "door wood");
     }
 
@@ -1269,65 +1178,6 @@ mod tests {
     }
 
     #[test]
-    fn plays_keep_cache_bytes_revision_and_events_unchanged() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = cached_library(directory.path(), 43);
-        let seen = Arc::new(StdMutex::new(Vec::new()));
-        let server = server(seen.clone(), |_, _| {
-            TestResponse::json(
-                200,
-                &format!(
-                    r#"{{"file":{},"revision_before":43,"revision":44}}"#,
-                    file_json(3, "", 0, "", 1)
-                ),
-            )
-        });
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let listener: WriteListener = {
-            let events = events.clone();
-            Arc::new(move |event| events.lock().unwrap().push(event))
-        };
-        let provider = RemoteProvider::new(
-            Arc::new(snapshot(&cache)),
-            RemoteWriter::new(
-                RemoteClient::new(&server.url, "").unwrap(),
-                cache.clone(),
-                LIBRARY,
-            ),
-            false,
-            Some(listener),
-        );
-        let before = cache.active().unwrap();
-        let bytes = std::fs::read(cache.database_path(&before)).unwrap();
-        let conn = rusqlite::Connection::open_with_flags(
-            cache.database_path(&before),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let version: i64 = conn
-            .pragma_query_value(None, "data_version", |row| row.get(0))
-            .unwrap();
-        provider.record_play(3).unwrap();
-        let explicit = provider.writer().record_play(3).unwrap();
-        assert_eq!((explicit.revision_before, explicit.revision), (43, 43));
-        assert!(matches!(
-            provider.record_play_if(3, || false),
-            Err(Error::Cancelled)
-        ));
-        assert!(matches!(provider.record_play(999), Err(Error::NotFound(_))));
-        assert!(events.lock().unwrap().is_empty());
-        assert!(seen.lock().unwrap().is_empty());
-        assert_eq!(provider.get_audio(3).unwrap().play_count, 0);
-        assert_eq!(cache.active().unwrap(), before);
-        assert_eq!(std::fs::read(cache.database_path(&before)).unwrap(), bytes);
-        assert_eq!(
-            conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
-                .unwrap(),
-            version
-        );
-    }
-
-    #[test]
     fn concurrent_metadata_writers_publish_each_reply_before_sending_the_next_write() {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         use std::time::Duration;
@@ -1390,19 +1240,21 @@ mod tests {
             first.update_metadata(3, &MetadataPatch::default()).unwrap()
         });
         first_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        // Playback remains local even while Metadata owns the network-write gate.
-        let (play_tx, play_rx) = std::sync::mpsc::sync_channel(1);
-        let playback = writer();
-        let play = std::thread::spawn(move || play_tx.send(playback.record_play(3)).unwrap());
+        // Snapshot reads remain local even while Metadata owns the network-write gate.
+        let (read_tx, read_rx) = std::sync::mpsc::sync_channel(1);
+        let reading_cache = cache.clone();
+        let read = std::thread::spawn(move || {
+            read_tx.send(snapshot(&reading_cache).get_audio(3)).unwrap()
+        });
         assert_eq!(
-            play_rx
+            read_rx
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap()
                 .unwrap()
-                .revision,
-            43
+                .id,
+            3
         );
-        play.join().unwrap();
+        read.join().unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 1);
         // Independent writer instances must share ordering through cache publication.
         let second = writer();

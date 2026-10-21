@@ -12,7 +12,7 @@
 
 保留现有搜索语义，把六列膨胀的派生分词文本从业务表中移除，只在写入 FTS5 时生成。保留 SQLite 单文件业务库及快照，不引入独立搜索服务。
 
-- 原始 Metadata、用户标注、未知扩展字段、ID、路径、目录关系、扫描历史、播放列表和项目引用全部保留；按用户后续授权退役 `play_history` 和 `play_count`，原值完整保存在回滚备份，`last_played_at` 继续保留；源 WAV 不读写。
+- 原始 Metadata、用户标注、未知扩展字段、ID、路径、目录关系、扫描历史、播放列表和项目引用全部保留；按定稿 v6 方案退役 `play_history`、`play_count` 和 `last_played_at`，原值完整保存在回滚备份，本地旧历史先导入独立 `history.db`；源 WAV 不读写。
 - 保留 FTS5 的 12 个逻辑检索列、列顺序、词频、位置、文档长度及现有 BM25 规则。
 - 本次采用 **tokenization rev 3**。紧凑字对 rev 4 是独立候选优化，不与本次存储验证混用，也不把两项空间收益相加。
 - 目标仍为 **P95 latency <500ms for 1M+ records**。真实样本不足百万条时，不据此宣称通过百万级目标。
@@ -78,7 +78,7 @@ CREATE VIRTUAL TABLE audio_search USING fts5(
 | `PRAGMA user_version` | `6` | 六个业务派生列不再存在，旧写入路径不兼容 |
 | `audiolib_schema_features.tokenization` | `3` | 检索编码不变 |
 | `audiolib_schema_features.search_storage` | `1` | 本文定义的 contentless-delete 格式 |
-| `audiolib_schema_features.play_history_retired` | `1` | 按用户最新授权删除 `play_history` 与 `audio_files.play_count`；原值保存在回滚备份 |
+| `audiolib_schema_features.play_history_retired` | `2` | 删除 `play_history`、`audio_files.play_count` 和 `last_played_at`；本地旧历史在验证备份后先导入本机历史，原值保存在回滚备份 |
 | `library_meta.source_search_rev` | `2` | 源 Metadata 提取规则不变 |
 | `library_meta.source_tags_rev` | `2` | 标签筛选投影不变 |
 
@@ -86,7 +86,7 @@ CREATE VIRTUAL TABLE audio_search USING fts5(
 
 迁移进行态不能占用完成态的 tokenization 编号。**现有代码把 tokenization=4 用于未完成的 rev 3 升级**；新程序遇到该组合须检查旧升级表、target revision 和备份，交由旧恢复流程完成或恢复备份。不得把它视为已完成的紧凑编码 rev 4，也不得直接作为 B 的迁移输入。
 
-schema 6 的检查必须同时验证 feature、FTS 建表选项、列顺序及业务列结构；仅检查 `user_version` 不足。研究样本使用 schema 6 标记，保证未适配旧程序拒绝打开，不伪装为可生产使用的 schema 5。早期样本尚未包含播放退役，下一版目标格式以 `ale-s6-cld1-t3-m2-p0` 为准；除这两个明确退役对象外继续保留所有业务数据，包括 `last_played_at` 和未知扩展。
+schema 6 的检查必须同时验证 feature、FTS 建表选项、列顺序及业务列结构；仅检查 `user_version` 不足。研究样本使用 schema 6 标记，保证未适配旧程序拒绝打开，不伪装为可生产使用的 schema 5。早期样本尚未包含播放退役，修订后的目标格式为 `ale-s6-cld1-t3-m2-p1`。此前未发布的 p0 保留最后播放时间，作为只读/迁移来源；三个明确退役对象之外继续保留全部业务数据和未知扩展。见 [v6 合并升级契约](Schema_V6_Iteration.md)。
 
 ## 5. owned 副本迁移与恢复
 
@@ -116,13 +116,13 @@ contentless-delete 的旧 posting 随 segment merge 回收，应验证连续更�
 {
   "schema_version": 6,
   "snapshot_format": {
-    "id": "ale-s6-cld1-t3-m2-p0",
+    "id": "ale-s6-cld1-t3-m2-p1",
     "format": {
       "schema_version": 6,
       "storage": "contentless_delete",
       "features": {
         "foreign_key_indexes": 1,
-        "play_history_retired": 1,
+        "play_history_retired": 2,
         "search_indexes": 1,
         "search_storage": 1,
         "stable_audio_ids": 1,
@@ -143,7 +143,7 @@ schema 6 的快照下载必须带客户端支持声明：
 X-AudioLib-Snapshot-Schema-Max: 6
 X-AudioLib-Search-Storage-Max: 1
 X-AudioLib-Tokenization-Max: 3
-X-AudioLib-Accept-Snapshot-Formats: ale-s5-ext-t3-m2, ale-s6-cld1-t3-m2-p0
+X-AudioLib-Accept-Snapshot-Formats: ale-s5-ext-t3-m2, ale-s6-cld1-t3-m2-p0, ale-s6-cld1-t3-m2-p1
 ```
 
 同时必须发送 `X-AudioLib-Client-Compatibility`，值为客户端内置的完整

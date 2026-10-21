@@ -379,56 +379,119 @@ fn child_failed_close_resumes_reads() {
 }
 
 #[test]
-fn server_play_history_is_empty_offline_while_scan_history_uses_the_snapshot() {
+fn local_history_isolated_by_source_and_clear_requires_current_confirmation() {
     isolated("child_server_history_routes_provider");
 }
 
 #[test]
-#[ignore = "isolated Slint local mock server history provider helper"]
+#[ignore = "isolated client-local history, clear confirmation and zero-network regression"]
 fn child_server_history_routes_provider() {
+    use audiolib_db::local_play_history::{LocalPlayHistory, local_library_id};
     let (provider, _engine, ui, controller) = fixture();
     let files = provider.search(&SearchRequest::default()).unwrap().results;
-    provider.record_play(files[0].id).unwrap();
+    controller
+        .record_local_history(Path::new(&files[0].file_path))
+        .unwrap();
+    let data_root = controller.config.lock().unwrap().data_root();
+    let local_id = local_library_id(provider.database_path()).unwrap();
+    let local = LocalPlayHistory::open(&data_root, &local_id, 5000).unwrap();
+    assert_eq!(local.page(50, 0).unwrap().len(), 1);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
-    // A stale UI list must be cleared by the completed empty-history response.
-    controller.plays.lock().unwrap().push(PlayRecord {
-        id: 999,
-        ..Default::default()
-    });
     controller.config.lock().unwrap().data_source.server_url = format!("http://{address}");
+    // A server is allowed to use exactly the local library's raw ID. Namespaces
+    // must still isolate the two sources rather than relying on improbable IDs.
+    let remote_scope = format!("server-{local_id}");
     controller.remote.lock().unwrap().state = Some(audiolib_remote::CacheState {
-        library_id: "history-test-library".into(),
+        library_id: local_id.clone(),
         database_file: "snapshot.db".into(),
         server_url: format!("http://{address}"),
         ..Default::default()
     });
     controller.remote_mode.store(true, Ordering::Release);
+    controller
+        .record_local_history(Path::new(&files[1].file_path))
+        .unwrap();
+    let remote = LocalPlayHistory::open(&data_root, &remote_scope, 5000).unwrap();
+    assert_eq!(remote.page(50, 0).unwrap().len(), 1);
+    // Old-source rows must be replaced even though no server history API is called.
+    *controller.plays.lock().unwrap() = local.page(50, 0).unwrap();
     ui.set_history_kind(1);
     controller.load_history(0);
     let c = controller.clone();
     let window = ui.as_weak();
     let stage = Rc::new(Cell::new(0));
     let observed = stage.clone();
+    let expected = files[1].filename.clone();
     run_until(&ui, move || {
         let ui = window.upgrade().unwrap();
         match observed.get() {
-            0 if c.plays.lock().unwrap().is_empty() => {
-                assert_eq!(ui.get_history_rows().row_count(), 0);
-                ui.set_history_kind(0);
-                c.load_history(0);
+            0 if ui.get_history_rows().row_count() == 1
+                && c.plays
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .is_some_and(|play| play.library_id == remote_scope) =>
+            {
+                assert!(
+                    ui.get_history_rows()
+                        .row_data(0)
+                        .unwrap()
+                        .contains(&expected)
+                );
+                ui.invoke_history_clear_requested();
                 observed.set(1);
             }
-            1 if ui.get_history_rows().row_count() == 1 => {
+            1 if ui.get_confirmation_visible() => {
+                ui.invoke_confirmation_requested(false);
+                assert_eq!(remote.page(50, 0).unwrap().len(), 1);
+                assert!(c.pending_history_clear.lock().unwrap().is_none());
+                ui.invoke_history_clear_requested();
+                observed.set(2);
+            }
+            2 if ui.get_confirmation_visible() => {
+                c.source_generation.fetch_add(1, Ordering::AcqRel);
+                ui.invoke_confirmation_requested(true);
+                assert_eq!(
+                    remote.page(50, 0).unwrap().len(),
+                    1,
+                    "a stale confirmation clears no source"
+                );
+                ui.invoke_history_clear_requested();
+                observed.set(3);
+            }
+            3 if ui.get_confirmation_visible() => {
+                ui.invoke_confirmation_requested(true);
+                observed.set(4);
+            }
+            4 if ui.get_history_rows().row_count() == 0
+                && remote.page(50, 0).unwrap().is_empty() =>
+            {
+                assert_eq!(
+                    local.page(50, 0).unwrap().len(),
+                    1,
+                    "clear affects only the selected library"
+                );
+                assert!(local.database_path().is_file());
+                c.remote_mode.store(false, Ordering::Release);
+                c.load_history(0);
+                observed.set(5);
+            }
+            5 if ui.get_history_rows().row_count() == 1 => {
+                assert_eq!(c.plays.lock().unwrap()[0].library_id, local_id);
+                ui.set_history_kind(0);
+                c.load_history(0);
+                observed.set(6);
+            }
+            6 if c.scans.lock().unwrap().len() == 1 => {
                 assert!(
                     ui.get_history_rows()
                         .row_data(0)
                         .unwrap()
                         .contains("sounds")
                 );
-                assert_eq!(c.scans.lock().unwrap().len(), 1);
-                observed.set(2);
+                observed.set(7);
                 return true;
             }
             _ => {}
@@ -438,8 +501,236 @@ fn child_server_history_routes_provider() {
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
-    assert!(provider.play_history(50, 0).unwrap().is_empty());
+    controller.shutdown();
+    ui.hide().unwrap();
+    assert_eq!(stage.get(), 7);
+}
+
+#[test]
+fn history_missing_rows_and_nullable_id_path_fallback_locate_the_sound() {
+    isolated("child_nullable_history_location");
+}
+
+#[test]
+fn restored_library_does_not_bind_history_to_another_sound_with_the_same_id() {
+    isolated("child_restored_history_location");
+}
+
+#[test]
+#[ignore = "isolated restore with reused audio ID and historical-path fallback regression"]
+fn child_restored_history_location() {
+    use audiolib_db::local_play_history::{LocalPlayHistory, local_library_id};
+    let (provider, _engine, ui, controller) = fixture();
+    let original = provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .into_iter()
+        .min_by_key(|file| file.id)
+        .unwrap();
+    controller
+        .record_local_history(Path::new(&original.file_path))
+        .unwrap();
+    let root = provider.database_path().parent().unwrap();
+    let sounds = root.join("replacement-sounds");
+    std::fs::create_dir_all(&sounds).unwrap();
+    std::fs::copy(&original.file_path, sounds.join("replacement.wav")).unwrap();
+    std::fs::copy(&original.file_path, sounds.join("fallback.wav")).unwrap();
+    let replacement = Arc::new(SqliteProvider::open(&root.join("replacement.db")).unwrap());
+    ScanService::new(replacement.clone())
+        .scan(
+            &sounds,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let files = replacement
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results;
+    let other = files.iter().min_by_key(|file| file.id).unwrap().clone();
+    let fallback = files
+        .iter()
+        .find(|file| file.id != other.id)
+        .unwrap()
+        .clone();
+    assert_eq!(other.id, original.id);
+    assert_ne!(other.file_path, original.file_path);
+    let backup = root.join("replacement.snapshot.db");
+    replacement.backup_library(&backup).unwrap();
+    controller.invalidate_library_reads();
+    provider.restore_library(&backup).unwrap();
+    controller.library_generation.fetch_add(1, Ordering::AcqRel);
+    controller.reset_library_view(&ui, true, false);
+    assert_eq!(
+        provider.get_audio(original.id).unwrap().file_path,
+        other.file_path
+    );
+    assert!(
+        provider
+            .find_audio_by_path(Path::new(&original.file_path))
+            .unwrap()
+            .is_none()
+    );
+    let config = controller.config.lock().unwrap().clone();
+    let local_id = local_library_id(provider.database_path()).unwrap();
+    let history =
+        LocalPlayHistory::open(&config.data_root(), &local_id, config.play_history_limit).unwrap();
+    // The same stale ID can still locate a sound by its historical path, rather
+    // than requiring the ID to match after a restore.
+    history
+        .record(Some(other.id), &fallback.file_path, &fallback.filename)
+        .unwrap();
+    ui.set_history_kind(1);
+    controller.load_history(0);
+    let c = controller.clone();
+    let window = ui.as_weak();
+    let stage = Rc::new(Cell::new(0));
+    let observed = stage.clone();
+    run_until(&ui, move || {
+        let ui = window.upgrade().unwrap();
+        match observed.get() {
+            0 if ui.get_history_rows().row_count() == 2 => {
+                let plays = c.plays.lock().unwrap();
+                assert_eq!(plays[1].file_path, original.file_path);
+                assert_eq!(plays[1].audio_id, Some(other.id));
+                drop(plays);
+                ui.invoke_history_selected(1);
+                observed.set(1);
+            }
+            1 if ui
+                .get_history_detail()
+                .contains("This sound is unavailable in the current library") =>
+            {
+                assert!(c.selected.lock().unwrap().is_none());
+                assert!(ui.get_selected_id().is_empty());
+                ui.invoke_history_selected(0);
+                observed.set(2);
+            }
+            2 if c.selected.lock().unwrap().as_ref().is_some_and(|file| {
+                file.id == fallback.id && file.file_path == fallback.file_path
+            }) =>
+            {
+                observed.set(3);
+                return true;
+            }
+            _ => {}
+        }
+        false
+    });
+    assert_eq!(history.page(50, 0).unwrap().len(), 2);
+    controller.shutdown();
+    ui.hide().unwrap();
+    assert_eq!(stage.get(), 3);
+}
+
+#[test]
+#[ignore = "isolated missing-history row and nullable ID location regression"]
+fn child_nullable_history_location() {
+    use audiolib_db::local_play_history::{LocalPlayHistory, local_library_id};
+    let (provider, _engine, ui, controller) = fixture();
+    let file = provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .remove(0);
+    let config = controller.config.lock().unwrap().clone();
+    let id = local_library_id(provider.database_path()).unwrap();
+    let history =
+        LocalPlayHistory::open(&config.data_root(), &id, config.play_history_limit).unwrap();
+    history
+        .record(None, "/owned/nonexistent-history-sound.wav", "missing.wav")
+        .unwrap();
+    let expected = history
+        .record(None, &file.file_path, &file.filename)
+        .unwrap()
+        .unwrap();
+    ui.set_history_kind(1);
+    controller.load_history(0);
+    let c = controller.clone();
+    let window = ui.as_weak();
+    let stage = Rc::new(Cell::new(0));
+    let observed = stage.clone();
+    let expected_time = chrono::DateTime::parse_from_rfc3339(&expected.played_at)
+        .unwrap()
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    run_until(&ui, move || {
+        let ui = window.upgrade().unwrap();
+        if observed.get() == 0 && ui.get_history_rows().row_count() == 2 {
+            assert_eq!(ui.get_history_missing().row_data(0), Some(false));
+            assert_eq!(ui.get_history_missing().row_data(1), Some(true));
+            assert!(
+                ui.get_history_rows()
+                    .row_data(0)
+                    .unwrap()
+                    .starts_with(&expected_time)
+            );
+            ui.invoke_history_selected(0);
+            observed.set(1);
+        } else if observed.get() == 1
+            && c.selected
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|selected| selected.id == file.id)
+        {
+            observed.set(2);
+            return true;
+        }
+        false
+    });
     controller.shutdown();
     ui.hide().unwrap();
     assert_eq!(stage.get(), 2);
+}
+
+#[test]
+fn history_write_failure_consumes_the_session_without_changing_audio() {
+    isolated("child_history_write_failure");
+}
+
+#[test]
+#[ignore = "isolated best-effort playback-history storage failure regression"]
+fn child_history_write_failure() {
+    let (provider, _engine, ui, controller) = fixture();
+    let file = provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results
+        .remove(0);
+    let config = controller.config.lock().unwrap().clone();
+    let source = controller.source_generation.load(Ordering::Acquire);
+    let library = controller.library_generation.load(Ordering::Acquire);
+    controller.source_generation.fetch_add(1, Ordering::AcqRel);
+    assert!(matches!(
+        controller.record_history_for_generation(Path::new(&file.file_path), library, source),
+        Err(audiolib_core::Error::Cancelled)
+    ));
+    // A filesystem object blocks creation of the owned history directory. This
+    // failure must consume one queued session instead of retrying every status tick.
+    std::fs::write(
+        config.data_root().join("play-history"),
+        b"owned test blocker",
+    )
+    .unwrap();
+    let before = controller.audio.status();
+    let mut tracker = PlaybackHistoryTracker::default();
+    tracker.enqueue(1, 1, Path::new(&file.file_path));
+    tracker
+        .flush(|path| {
+            controller.record_history_best_effort(path, library, source + 1);
+            Ok(true)
+        })
+        .unwrap();
+    assert!(tracker.pending.is_empty());
+    let after = controller.audio.status();
+    assert_eq!(after.generation, before.generation);
+    assert_eq!(after.play_session_id, before.play_session_id);
+    assert_eq!(after.state, before.state);
+    assert_eq!(provider.get_audio(file.id).unwrap().notes, file.notes);
+    controller.shutdown();
+    ui.hide().unwrap();
 }

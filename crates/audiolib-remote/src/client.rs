@@ -29,7 +29,7 @@ pub const MAX_WRITE_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Required on mutations: identifies the cached library to which record/session IDs belong.
 pub const LIBRARY_ID_HEADER: &str = "X-AudioLib-Library-Id";
 
-/// Reply to `PATCH /audio/{id}/metadata` and `POST /audio/{id}/plays` (§6.3): the record
+/// Reply to `PATCH /audio/{id}/metadata` (§6.3): the record
 /// after the write and the library revision before/after it.
 #[derive(Clone, Debug, Deserialize)]
 pub struct FileWrite {

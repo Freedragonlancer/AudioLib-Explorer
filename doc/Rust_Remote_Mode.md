@@ -522,7 +522,8 @@ of that page, and folder counts stay as in the snapshot.
 | `current_scan` | `GET /scans/current` → `{"scan": … \| null}` | attach on (re)connect |
 | `scan_status` | `GET /scans/{id}` | poll about every 500 ms until `active` is false; a changed `revision` means sync |
 | `control_scan` | `POST /scans/{id}/pause\|resume\|cancel` | idempotent; `409 SCAN_STATE` → `RemoteError::ScanState` |
-| `scan_history` / `play_history` | `GET /history/scans\|plays?limit=&offset=` | newest first, limit clamped to 1–10000; prefer over the snapshot copy |
+| `scan_history` | `GET /history/scans?limit=&offset=` | newest first, limit clamped to 1–10000 |
+| Recent playback | client-local `play-history/<library_id>/history.db` | no playback HTTP calls; independent of snapshot/cache cleanup |
 | `capabilities` | `GET /capabilities` → `{manage_mode, external, can_manage, root_management}` | `may_manage()` = `can_manage` (never inferred locally); missing `root_management` disables root editing; `404` (older server) → no management |
 | `browse_directory` | `GET /fs` or `GET /fs?path=&hidden=0` | no path returns server locations; absolute server path returns one bounded, non-recursive directory listing |
 | `add_root` | `POST /roots {name,path}` | register an existing server folder; no implicit scan |

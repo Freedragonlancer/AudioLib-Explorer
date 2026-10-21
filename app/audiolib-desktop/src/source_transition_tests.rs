@@ -67,6 +67,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         })
         .unwrap(),
         audition_play_on_single_click: false,
+        play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
         audio_table: Default::default(),

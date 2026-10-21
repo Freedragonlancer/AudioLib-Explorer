@@ -20,8 +20,7 @@ use crate::{
     waveform::WaveformParams,
 };
 use audiolib_core::{
-    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, PlayRecord, ScanSession,
-    TagEditMode,
+    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, ScanSession, TagEditMode,
 };
 use axum::{
     Json, Router,
@@ -343,6 +342,21 @@ async fn require_bearer(
                     )
                     .into_response();
                 }
+                // The historical playback route only reads an existing row. Every
+                // real library mutation requires a modern peer that can consume the
+                // actual complete format, including retired DTO fields/features.
+                if !legacy_playback_mutation(&request) {
+                    let inspecting = state.clone();
+                    let format = match blocking(move || inspecting.snapshot_format()).await {
+                        Ok(format) => format,
+                        Err(error) => return error.into_response(),
+                    };
+                    if let Err(error) =
+                        crate::compatibility::admit_library_mutation(request.headers(), &format)
+                    {
+                        return error.into_response();
+                    }
+                }
             }
             request.extensions_mut().insert(state);
             next.run(request).await
@@ -419,6 +433,15 @@ fn library_mutation(request: &Request) -> bool {
         .any(|mutation| path.ends_with(*mutation)),
         _ => false,
     }
+}
+
+/// Match only the deprecated no-op endpoint, never a caller-controlled URI suffix.
+fn legacy_playback_mutation(request: &Request) -> bool {
+    request.method() == Method::POST
+        && request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str().ends_with("/audio/{id}/plays"))
 }
 
 /// Native clients omit Origin. Browser mutations must prove the same authority and
@@ -570,7 +593,7 @@ async fn patch_settings(
         security.authorize(&headers, connection.as_ref())?;
         security.authorize_manage(&headers, connection.as_ref())?;
         // Settings remains available during library startup, but its writes use
-        // the same modern-peer admission as protected library mutations.
+        // optional modern-peer validation; it does not return library DTOs.
         crate::compatibility::admit_mutation(&headers)?;
         let value: serde_json::Value = json_body(&headers, body)?;
         if !value.is_object() {
@@ -1159,11 +1182,11 @@ async fn scan_history(
     ))
 }
 
-/// `GET /history/plays?limit=&offset=` (deprecated): always an empty `PlayRecord[]`.
+/// `GET /history/plays?limit=&offset=` (deprecated): always an empty array.
 /// Play history is recorded locally by clients only; paging is still validated.
 async fn play_history(
     query: Result<Query<PageQuery>, QueryRejection>,
-) -> Result<Json<Vec<PlayRecord>>, ApiError> {
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     page(query)?;
     Ok(Json(Vec::new()))
 }

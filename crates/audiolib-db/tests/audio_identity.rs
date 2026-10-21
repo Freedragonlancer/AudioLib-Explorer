@@ -104,10 +104,7 @@ fn schema_three_upgrade_keeps_unknown_data_and_starts_after_existing_ids() {
         audiolib_db::SCHEMA_VERSION
     );
     let old = provider.get_audio(42).unwrap();
-    assert_eq!(
-        (&*old.tags, &*old.notes, old.play_count),
-        ("keep-tag", "keep-note", 0)
-    );
+    assert_eq!((&*old.tags, &*old.notes), ("keep-tag", "keep-note"));
     let conn = support::connection(&database).unwrap();
     assert_eq!(
         conn.query_row(

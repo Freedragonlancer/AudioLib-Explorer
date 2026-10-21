@@ -226,10 +226,7 @@ fn all_get_audio_and_history_decode_flags_without_changing_original_values() {
         assert_eq!(audio.missing, id != 5);
         assert_eq!(audio.notes, format!("retain-{id}"));
         assert_eq!(audio.attributes["private"]["id"], id);
-        provider.record_play(id).unwrap();
     }
-    let history = provider.play_history(20, 0).unwrap();
-    assert!(history.is_empty(), "playback tracking is retired");
     let flags = conn
         .prepare("SELECT missing FROM audio_files ORDER BY id")
         .unwrap()

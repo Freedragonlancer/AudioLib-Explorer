@@ -267,7 +267,7 @@ pub(super) fn diagnose_connection(
         serde_json::to_string(&retired).map_err(|error| super::plan::invalid(error.to_string()))?;
     let references = conn.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check
-        WHERE \"table\" NOT IN (SELECT value FROM json_each(?1))",
+        WHERE \"table\" COLLATE NOCASE NOT IN (SELECT value FROM json_each(?1))",
         [&retired],
         |row| row.get::<_, i64>(0),
     );

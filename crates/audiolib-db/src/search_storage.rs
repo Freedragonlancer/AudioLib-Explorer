@@ -14,6 +14,13 @@ pub(crate) const DERIVED_COLUMNS: &[&str] = &[
     "user_notes_tokenized",
 ];
 
+/// SQLite identifiers fold ASCII case; retained spelling is not a new field.
+pub(crate) fn is_derived_column(name: &str) -> bool {
+    DERIVED_COLUMNS
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case(name))
+}
+
 pub(crate) const FTS_COLUMNS: &str = "filename,filename_tokenized,user_tags,user_tags_tokenized,\
     bwf_description,bwf_description_tokenized,ixml_scene,ixml_scene_tokenized,\
     ixml_take,ixml_take_tokenized,user_notes,user_notes_tokenized";
@@ -354,7 +361,7 @@ pub(crate) fn blueprint_with(
     let unsupported_virtual: bool = source
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main'
-             AND type='virtual' AND name<>'audio_search')",
+             AND type='virtual' AND name<>'audio_search' COLLATE NOCASE)",
             [],
             |row| row.get(0),
         )
@@ -381,7 +388,7 @@ pub(crate) fn blueprint_with(
     let mut statement = source
         .prepare(
             "SELECT name,sql FROM sqlite_schema WHERE type IN ('index','view','trigger')
-             AND sql IS NOT NULL AND name NOT IN ('audio_files_ai','audio_files_au','audio_files_ad')
+             AND sql IS NOT NULL AND name COLLATE NOCASE NOT IN ('audio_files_ai','audio_files_au','audio_files_ad')
              ORDER BY CASE type WHEN 'index' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",
         )
         .map_err(db_error)?;
@@ -423,7 +430,7 @@ pub(crate) fn blueprint_with(
             | SchemaChange::RetireColumn { table, column } => {
                 let exists: bool = memory
                     .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo(?1) WHERE name=?2)",
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo(?1) WHERE name=?2 COLLATE NOCASE)",
                         rusqlite::params![table, column],
                         |row| row.get(0),
                     )
@@ -452,7 +459,7 @@ pub(crate) fn blueprint_with(
     for (name, _) in &tables {
         let exists: bool = memory
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1 COLLATE NOCASE)",
                 [name],
                 |row| row.get(0),
             )
@@ -470,7 +477,7 @@ pub(crate) fn blueprint_with(
         for parent in parents {
             let exists: bool = memory
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1 COLLATE NOCASE)",
                     [&parent],
                     |row| row.get(0),
                 )
@@ -544,10 +551,7 @@ pub(crate) fn columns(conn: &Connection) -> Result<Vec<String>> {
 
 /// Structural validation rejects misleading format markers and lost synchronization.
 pub(crate) fn structure_matches(conn: &Connection) -> Result<bool> {
-    if columns(conn)?
-        .iter()
-        .any(|name| DERIVED_COLUMNS.contains(&name.as_str()))
-    {
+    if columns(conn)?.iter().any(|name| is_derived_column(name)) {
         return Ok(false);
     }
     let expected = Connection::open_in_memory().map_err(db_error)?;

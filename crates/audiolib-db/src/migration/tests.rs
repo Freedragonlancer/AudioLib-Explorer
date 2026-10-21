@@ -351,6 +351,274 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     (directory, path)
 }
 
+fn identifier_case_fixture(mixed: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("library.db");
+    let mut sql = include_str!("../../tests/fixtures/schema-v5.sql").replace("\r\n", "\n");
+    let history = if mixed {
+        "Play_History"
+    } else {
+        "PLAY_HISTORY"
+    };
+    let count = if mixed { "Play_Count" } else { "PLAY_COUNT" };
+    sql = sql.replace("play_count INTEGER", &format!("{count} INTEGER"));
+    let last = if mixed {
+        "Last_Played_At"
+    } else {
+        "LAST_PLAYED_AT"
+    };
+    sql = sql.replace("last_played_at TEXT", &format!("{last} TEXT"));
+    sql = sql.replace(
+        "CREATE TABLE play_history (\n        id INTEGER PRIMARY KEY,",
+        &format!("CREATE TABLE {history} (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,"),
+    );
+    assert!(sql.contains(&format!("CREATE TABLE {history}")));
+    for (column, mixed_name) in crate::search_storage::DERIVED_COLUMNS.iter().zip([
+        "Filename_Tokenized",
+        "User_Tags_Tokenized",
+        "Bwf_Description_Tokenized",
+        "Ixml_Scene_Tokenized",
+        "Ixml_Take_Tokenized",
+        "User_Notes_Tokenized",
+    ]) {
+        let alias = if mixed {
+            mixed_name.to_owned()
+        } else {
+            column.to_ascii_uppercase()
+        };
+        sql = sql.replace(&format!("{column} TEXT"), &format!("{alias} TEXT"));
+    }
+    let conn = Connection::open(&path).unwrap();
+    schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
+    conn.execute_batch(&sql).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE audio_files ADD COLUMN play_count_note TEXT;
+         ALTER TABLE audio_files ADD COLUMN last_played_at_note TEXT DEFAULT 'keep last note';
+         ALTER TABLE audio_files ADD COLUMN filename_tokenized_note TEXT;
+         INSERT INTO audio_files(id,file_path,filename,play_count,last_played_at,play_count_note,filename_tokenized_note)
+           VALUES(1,'owned.wav','metal.wav',17,'2026-10-21T09:30:00Z','keep count note','keep token note');
+         INSERT INTO play_history(id,audio_file_id,played_at,filename,file_path)
+           VALUES(5,1,'2026-10-20','metal.wav','owned.wav');
+         UPDATE sqlite_sequence SET seq=700 WHERE name='play_history' COLLATE NOCASE;
+         CREATE TABLE play_history_archive(id INTEGER PRIMARY KEY AUTOINCREMENT,payload BLOB);
+         INSERT INTO play_history_archive VALUES(44,x'0017ff');
+         UPDATE sqlite_sequence SET seq=900 WHERE name='play_history_archive';",
+    ).unwrap();
+    drop(conn);
+    (directory, path)
+}
+
+#[test]
+fn identifier_case_variants_retire_exact_fields_and_restore_original_schema_and_values() {
+    let cancel = AtomicBool::new(false);
+    for mixed in [false, true] {
+        let (_directory, path) = identifier_case_fixture(mixed);
+        let conn = Connection::open(&path).unwrap();
+        let original_schema = super::plan::schema_digest(&conn).unwrap();
+        drop(conn);
+        let reviewed = plan(&path, &cancel).unwrap();
+        let original_business = reviewed.source.business.clone().unwrap();
+        let audio = original_business
+            .tables
+            .iter()
+            .find(|table| table.table == "audio_files")
+            .unwrap();
+        assert!(
+            audio
+                .columns
+                .iter()
+                .any(|column| column.eq_ignore_ascii_case("play_count"))
+        );
+        assert!(
+            !audio
+                .columns
+                .iter()
+                .any(|column| crate::search_storage::is_derived_column(column))
+        );
+        let job = apply(&reviewed, &cancel, &mut |_| Ok(())).unwrap();
+        verify(&job.directory, &cancel).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        assert!(schema::current_format_ready(&conn).unwrap());
+        let columns = crate::search_storage::columns(&conn).unwrap();
+        assert!(
+            !columns
+                .iter()
+                .any(|column| column.eq_ignore_ascii_case("play_count")
+                    || column.eq_ignore_ascii_case("last_played_at")
+                    || crate::search_storage::is_derived_column(column))
+        );
+        assert!(!inspect::table_exists(&conn, "play_history").unwrap());
+        assert_eq!(conn.query_row(
+            "SELECT last_played_at_note,play_count_note,filename_tokenized_note FROM audio_files WHERE id=1", [],
+            |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)),
+        ).unwrap(), ("keep last note".into(),"keep count note".into(),"keep token note".into()));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_sequence WHERE name='play_history' COLLATE NOCASE",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='play_history_archive'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            900
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT payload FROM play_history_archive WHERE id=44",
+                [],
+                |row| row.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            vec![0, 23, 255]
+        );
+        drop(conn);
+        rollback(&job.directory, &cancel, &mut |_| Ok(())).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(super::plan::schema_digest(&conn).unwrap(), original_schema);
+        assert_eq!(digest_business(&conn, &cancel).unwrap(), original_business);
+        assert_eq!(
+            conn.query_row("SELECT play_count FROM audio_files WHERE id=1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            17
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM play_history WHERE id=5", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='play_history' COLLATE NOCASE",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            700
+        );
+    }
+}
+
+#[test]
+fn identifier_case_dependencies_block_without_modifying_source() {
+    let cancel = AtomicBool::new(false);
+    for dependency in [
+        "CREATE VIEW extension_dependency AS SELECT PLAY_COUNT FROM audio_files;",
+        "CREATE VIEW extension_dependency AS SELECT FILENAME_TOKENIZED FROM audio_files;",
+        "CREATE VIEW extension_dependency AS SELECT LAST_PLAYED_AT FROM audio_files;",
+        "CREATE VIEW extension_dependency AS SELECT * FROM play_history;",
+        "CREATE TRIGGER extension_dependency AFTER UPDATE OF PLAY_COUNT ON audio_files BEGIN SELECT 1; END;",
+        "CREATE TABLE extension_dependency(id INTEGER PRIMARY KEY,play_id INTEGER REFERENCES play_history(id)); INSERT INTO extension_dependency VALUES(1,5);",
+    ] {
+        let (_directory, path) = identifier_case_fixture(true);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(dependency).unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        assert!(plan(&path, &cancel).is_err(), "{dependency}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn schema6_identifier_case_aliases_require_owned_repair_and_rollback_preserves_aliases() {
+    let cancel = AtomicBool::new(false);
+    for mixed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("library.db");
+        drop(crate::SqliteProvider::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
+        let count = if mixed { "Play_Count" } else { "PLAY_COUNT" };
+        let history = if mixed {
+            "Play_History"
+        } else {
+            "PLAY_HISTORY"
+        };
+        conn.execute_batch(&format!(
+            "ALTER TABLE audio_files ADD COLUMN {count} INTEGER DEFAULT 0;
+             ALTER TABLE audio_files ADD COLUMN Last_Played_At TEXT;
+             ALTER TABLE audio_files ADD COLUMN last_played_at_note TEXT DEFAULT 'retained time note';
+             ALTER TABLE audio_files ADD COLUMN Filename_Tokenized TEXT;
+             ALTER TABLE audio_files ADD COLUMN play_count_note TEXT;
+             CREATE TABLE {history}(id INTEGER PRIMARY KEY AUTOINCREMENT,audio_file_id INTEGER REFERENCES audio_files(id));
+             INSERT INTO audio_files(id,file_path,filename,play_count,last_played_at,play_count_note,Filename_Tokenized)
+               VALUES(1,'owned.wav','metal.wav',17,'2026-10-21','retained note','obsolete');
+             INSERT INTO play_history VALUES(5,1);"
+        )).unwrap();
+        let original_schema = super::plan::schema_digest(&conn).unwrap();
+        let original_business = digest_business(&conn, &cancel).unwrap();
+        assert!(!schema::current_format_ready(&conn).unwrap());
+        assert!(!crate::search_storage::structure_matches(&conn).unwrap());
+        drop(conn);
+        let inspection = inspect(
+            &path,
+            audiolib_core::compatibility::LibraryAccess::Write,
+            true,
+            &cancel,
+        )
+        .unwrap();
+        assert!(!inspection.evidence.search_ready);
+        assert_eq!(
+            inspection.decision.disposition,
+            Some(audiolib_core::compatibility::MigrationDisposition::Migratable)
+        );
+        let job = apply(&plan(&path, &cancel).unwrap(), &cancel, &mut |_| Ok(())).unwrap();
+        verify(&job.directory, &cancel).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        assert!(schema::current_format_ready(&conn).unwrap());
+        assert!(!inspect::table_exists(&conn, "play_history").unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT last_played_at_note,play_count_note FROM audio_files WHERE id=1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("retained time note".into(), "retained note".into())
+        );
+        drop(conn);
+        rollback(&job.directory, &cancel, &mut |_| Ok(())).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(super::plan::schema_digest(&conn).unwrap(), original_schema);
+        assert_eq!(digest_business(&conn, &cancel).unwrap(), original_business);
+        assert_eq!(
+            conn.query_row("SELECT play_count FROM audio_files WHERE id=1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            17
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT Filename_Tokenized FROM audio_files WHERE id=1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "obsolete"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM play_history WHERE id=5", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+    }
+}
+
 #[test]
 fn full_job_retires_only_authorized_objects_and_rollback_restores_history() {
     let (_directory, path) = fixture();
@@ -366,14 +634,11 @@ fn full_job_retires_only_authorized_objects_and_rollback_restores_history() {
             .unwrap()
             .contains(&"play_count".into())
     );
-    let last: String = conn
-        .query_row(
-            "SELECT last_played_at FROM audio_files WHERE id=1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(last, "2026-10-20");
+    assert!(
+        !conn
+            .column_exists(None, "audio_files", "last_played_at")
+            .unwrap()
+    );
     let retained: (i64, i64, i64, String, Vec<u8>) = conn
         .query_row(
             "SELECT pi.audio_file_id,pi.position,pr.reference_count,pi.notes,w.min_values
@@ -563,6 +828,8 @@ fn update_of_removed_columns_blocks_before_a_job_and_keeps_unrelated_triggers() 
     let conn = Connection::open(&path).unwrap();
     for columns in [
         "play_count",
+        "last_played_at",
+        "\"LAST_PLAYED_AT\"",
         "\"PLAY_COUNT\"",
         "`filename_tokenized`",
         "[play_count],user_notes",
@@ -820,7 +1087,8 @@ fn current_definition_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
     conn.execute_batch(
         "ALTER TABLE audio_files ADD COLUMN extension_blob BLOB;
-         INSERT INTO audio_files(id,file_path,filename,user_notes,last_played_at,extension_blob)
+         ALTER TABLE audio_files ADD COLUMN last_played_at_note TEXT;
+         INSERT INTO audio_files(id,file_path,filename,user_notes,last_played_at_note,extension_blob)
          VALUES(1,'1.wav','metal.wav','preserved','2026-10-20',x'00ff'),
                (2,'2.wav','water.wav','preserved',NULL,NULL);
          UPDATE audiolib_audio_id_sequence SET high_water=900;
@@ -1199,9 +1467,9 @@ fn current_provider_creation_metadata_snapshot_patch_and_play_noop_share_the_tar
         .unwrap();
     let mut patched = provider.get_audio(1).unwrap();
     patched.tags = "remotechanged".into();
-    patched.play_count = 999;
+
     crate::SqliteProvider::apply_snapshot_records(&path, &[patched]).unwrap();
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
+
     assert_eq!(
         provider
             .search(&SearchRequest {
@@ -1213,11 +1481,11 @@ fn current_provider_creation_metadata_snapshot_patch_and_play_noop_share_the_tar
         1
     );
     assert_eq!(provider.search(&request).unwrap().total_count, 0);
-    let before = provider.foreign_data_version().unwrap();
-    provider.record_play(1).unwrap();
-    assert_eq!(provider.foreign_data_version().unwrap(), before);
-    assert!(provider.play_history(10, 0).unwrap().is_empty());
-    assert!(matches!(provider.record_play(99), Err(Error::NotFound(_))));
+    let dto = serde_json::to_value(provider.get_audio(1).unwrap()).unwrap();
+    assert!(dto.get("play_count").is_none());
+    assert!(dto["attributes"].get("last_played_at").is_none());
+
+    assert!(matches!(provider.get_audio(99), Err(Error::NotFound(_))));
     provider.check_library().unwrap();
     assert!(crate::search_storage::structure_matches(&provider.writer().unwrap()).unwrap());
 }
@@ -1227,10 +1495,10 @@ fn current_provider_auto_migrates_old_library_but_honors_explicit_rollback() {
     use audiolib_core::DataProvider;
     let (_directory, path) = fixture();
     let legacy = crate::SqliteProvider::open_read_only(&path).unwrap();
-    assert_eq!(legacy.get_audio(1).unwrap().play_count, 17);
+    assert_eq!(legacy.get_audio(1).unwrap().notes, "user annotation");
     drop(legacy);
     let provider = crate::SqliteProvider::open_existing(&path).unwrap();
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
+
     assert_eq!(provider.library_info().unwrap().schema_version, 6);
     drop(provider);
     let job = discover(&path).unwrap().unwrap();
@@ -1241,7 +1509,7 @@ fn current_provider_auto_migrates_old_library_but_honors_explicit_rollback() {
         Err(Error::Busy(_))
     ));
     let legacy = crate::SqliteProvider::open_read_only(&path).unwrap();
-    assert_eq!(legacy.get_audio(1).unwrap().play_count, 17);
+    assert_eq!(legacy.get_audio(1).unwrap().notes, "user annotation");
     drop(legacy);
     let requested = plan(&path, &AtomicBool::new(false)).unwrap();
     apply(&requested, &AtomicBool::new(false), &mut |_| Ok(())).unwrap();
@@ -1258,7 +1526,7 @@ fn current_import_restore_maintenance_and_removal_preserve_unretired_business() 
     assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
     let provider = crate::SqliteProvider::open_existing(&destination).unwrap();
     assert_eq!(provider.library_info().unwrap().schema_version, 6);
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
+
     assert_eq!(provider.get_audio(1).unwrap().notes, "user annotation");
     assert!(provider.check_library().unwrap().is_ok());
     let before = digest_business(&provider.writer().unwrap(), &AtomicBool::new(false)).unwrap();

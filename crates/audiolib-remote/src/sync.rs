@@ -1950,6 +1950,72 @@ mod tests {
     }
 
     #[test]
+    fn ready_snapshot_schemas_3_through_6_read_without_retired_dto_fields() {
+        let owned = tempfile::tempdir().unwrap();
+        for version in 3..=6 {
+            let path = owned.path().join(format!("ready-v{version}.db"));
+            if version == 6 {
+                drop(SqliteProvider::open(&path).unwrap());
+            }
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            audiolib_db::register_library_functions(&connection).unwrap();
+            if version < 6 {
+                // Synthetic supported-version combinations use the captured legacy
+                // layout, matching the historic snapshot matrix below. No real
+                // archived v3/v4 user database is available in this checkout.
+                connection
+                    .execute_batch(include_str!(
+                        "../../audiolib-db/tests/fixtures/schema-v5.sql"
+                    ))
+                    .unwrap();
+                connection
+                    .pragma_update(None, "user_version", version)
+                    .unwrap();
+            }
+            connection
+                .execute(
+                    "INSERT INTO audio_files(id,file_path,path_key,filename,user_notes,duration)
+                 VALUES(7,'/owned/metal.wav','/owned/metal.wav','metal.wav','retainednote',1.0)",
+                    [],
+                )
+                .unwrap();
+            if version < 6 {
+                connection
+                    .execute(
+                        "UPDATE audio_files SET filename_tokenized=audiolib_tokenize(filename),
+                     user_notes_tokenized=audiolib_tokenize(user_notes),play_count=17,
+                     last_played_at='2026-01-02T03:04:05Z' WHERE id=7",
+                        [],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE;")
+                .unwrap();
+            drop(connection);
+            let before = std::fs::read(&path).unwrap();
+            let provider = SqliteProvider::open_read_only(&path).unwrap();
+            assert_eq!(provider.database_path(), path, "schema {version}");
+            assert_eq!(provider.library_info().unwrap().schema_version, version);
+            assert_eq!(provider.stats().unwrap().audio_files, 1);
+            let page = provider
+                .search(&audiolib_core::SearchRequest {
+                    query: "retainednote".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(page.total_count, 1, "schema {version}");
+            assert_eq!(page.results[0].id, 7);
+            assert_eq!(page.results[0].notes, "retainednote");
+            let value = serde_json::to_value(&page.results[0]).unwrap();
+            assert!(value.get("play_count").is_none());
+            assert!(value["attributes"].get("last_played_at").is_none());
+            drop(provider);
+            assert_eq!(std::fs::read(&path).unwrap(), before, "schema {version}");
+        }
+    }
+
+    #[test]
     fn snapshot_schema_3_to_5_preserves_source_and_upgrades_only_owned_staging() {
         let directory = tempfile::tempdir().unwrap();
         let bytes = sample_snapshot(directory.path());

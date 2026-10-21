@@ -434,7 +434,18 @@ fn child_local_switch() {
     fixture.ui.invoke_sm_switch_requested();
     drain_operation(&fixture);
     assert!(!fixture.controller.remote_read_only());
-    assert_eq!(fixture.controller.provider().database_path(), local_path);
+    // Writable opens freeze the leased canonical destination. Windows may expose
+    // its verbatim prefix even when the configured path uses ordinary spelling.
+    assert_eq!(
+        fixture
+            .controller
+            .provider()
+            .database_path()
+            .canonicalize()
+            .unwrap(),
+        local_path.canonicalize().unwrap(),
+        "the real local-source switch must open the configured local library"
+    );
     assert!(
         fixture
             .controller

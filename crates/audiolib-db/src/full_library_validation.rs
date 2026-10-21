@@ -266,13 +266,10 @@ fn bench(path: &Path, out: &Path, only: Option<usize>) -> R<()> {
                 continue;
             }
             let started = Instant::now();
-            let mut page = p.search(r)?;
+            let page = p.search(r)?;
             let page_ms = started.elapsed().as_secs_f64() * 1000.0;
-            // Only the explicitly retired DTO counter is normalized. All other fields
-            // (including last_played_at), ordered IDs and facets remain exact.
-            for file in &mut page.results {
-                file.play_count = 0;
-            }
+            // Both sources use the current DTO projection. No result fields are
+            // normalized here: all returned Metadata, ordered IDs and facets must match.
             let fstart = Instant::now();
             let folders = p.search_folders(r)?;
             let folder_ms = fstart.elapsed().as_secs_f64() * 1000.0;
@@ -356,10 +353,11 @@ fn integrated_equivalence() -> R<()> {
         )?,
         0
     );
-    assert_eq!(b.query_row("SELECT count(*) FROM pragma_table_info('audio_files') WHERE name='play_count' OR name LIKE '%_tokenized'",[],|r|r.get::<_,i64>(0))?,0);
+    assert_eq!(b.query_row("SELECT count(*) FROM pragma_table_info('audio_files') WHERE name IN('play_count','last_played_at') OR name LIKE '%_tokenized'",[],|r|r.get::<_,i64>(0))?,0);
     let metadata_a = digest_sql(&a, "SELECT id,last_played_at FROM audio_files ORDER BY id")?;
-    let metadata_b = digest_sql(&b, "SELECT id,last_played_at FROM audio_files ORDER BY id")?;
-    assert_eq!(metadata_a, metadata_b, "last_played_at retention");
+    // Raw retired values remain in the immutable rollback backup, independently
+    // verified by the migration/rollback oracle. They must not exist in the target.
+    assert_eq!(b.query_row("SELECT count(*) FROM pragma_table_info('audio_files') WHERE name='last_played_at' COLLATE NOCASE", [], |r|r.get::<_,i64>(0))?, 0);
     let docsize_a = digest_sql(&a, "SELECT id,sz FROM audio_search_docsize ORDER BY id")?;
     let docsize_b = digest_sql(&b, "SELECT id,sz FROM audio_search_docsize ORDER BY id")?;
     assert_eq!(docsize_a, docsize_b, "document lengths");
@@ -402,7 +400,7 @@ fn integrated_equivalence() -> R<()> {
     save(
         &report,
         &json!({"complete":true,"source":source,"target":target,
-        "sqlite":rusqlite::version(),"last_played_at":metadata_a,"docsize":docsize_a,
+        "sqlite":rusqlite::version(),"retired_last_played_at_source_digest":metadata_a,"docsize":docsize_a,
         "aggregate_statistics_equal":true,"vocabulary":vocabulary_a,
         "retired_play_schema_absent":true,"queries":comparisons,"custom_bm25":custom}),
     )
