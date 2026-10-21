@@ -1,6 +1,7 @@
 // app/audiolib-desktop/src/waveform_cache_page.rs
 //! The 「波形缓存」 (Waveform cache) section of the 服务器音效库 page (doc/api/README.md
-//! §9.5): run state, progress, rate, ETA (「估算中」 while the server has none), the last
+//! §9.5): run state, progress, rate, ETA (both estimated on the client from recent status
+//! readings, see `audiolib_core::waveform_rate`; 「估算中」 until enough samples), the last
 //! error, the auto-generate switch, generation jobs (补齐缺失 / 重试失败 / 全部重建 with a
 //! two-step confirmation), pause / resume / stop and the rate setting.
 //!
@@ -19,6 +20,7 @@ use audiolib_core::waveform_cache::{
     WaveformCacheErrorKind, WaveformCacheResult, WaveformCacheSettings, WaveformCacheSettingsPatch,
     WaveformCacheStatus, WaveformJobControl, WaveformJobMode, WaveformRunState,
 };
+use audiolib_core::waveform_rate::WaveformRateEstimator;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -47,6 +49,8 @@ pub(super) struct WaveformCacheState {
     pub(super) forbidden: bool,
     /// The library page generation this state belongs to.
     pub(super) generation: Option<u64>,
+    /// Client-side rate over recent status readings (reset with the page).
+    pub(super) rate: WaveformRateEstimator,
 }
 
 impl WaveformCacheState {
@@ -66,9 +70,21 @@ impl WaveformCacheState {
                 settings,
                 forbidden: same && self.forbidden,
                 generation: Some(generation),
+                rate: if same {
+                    self.rate.clone()
+                } else {
+                    WaveformRateEstimator::default()
+                },
             },
             !same,
         )
+    }
+
+    /// Feed one status reading to the rate estimator (UI thread, per poll).
+    pub(super) fn observe(&mut self, status: &WaveformCacheStatus, at: std::time::Instant) {
+        let active =
+            status.effective_run_state() == WaveformRunState::Running && status.state != "yielding";
+        self.rate.observe(at, status.cached, active);
     }
 
     fn jobs(&self) -> bool {
@@ -214,22 +230,37 @@ pub(super) fn waveform_cache_view(
             format!("{} skipped (root offline)", status.skipped_offline)
         });
     }
-    // Older servers send no `current_rate`: no rate line rather than a made-up 0.0.
-    let rate_text = if let Some(rate) = status.current_rate {
-        let eta = match (status.eta_secs, chinese) {
-            (Some(seconds), _) => duration_text(seconds, chinese),
-            (None, true) => "估算中".to_owned(),
-            (None, false) => "estimating".to_owned(),
-        };
+    // Older servers send no `current_rate` (no §9.5.2 progress): no rate line. The
+    // speed and ETA themselves come from the client's rolling window, not the server's
+    // `current_rate` / `eta_secs`, which can lag far behind the real throughput.
+    let rate_text = if status.current_rate.is_some() {
+        let estimating = if chinese { "估算中" } else { "estimating" };
+        let rate = state.rate.rate().map_or_else(
+            || estimating.to_owned(),
+            |rate| {
+                if chinese {
+                    format!("{rate:.1} 个/秒")
+                } else {
+                    format!("{rate:.1} files/s")
+                }
+            },
+        );
+        let eta = status
+            .effective_pending()
+            .and_then(|pending| state.rate.eta_secs(pending))
+            .map_or_else(
+                || estimating.to_owned(),
+                |seconds| duration_text(seconds, chinese),
+            );
         let limit = state
             .settings
             .as_ref()
             .and_then(|settings| settings.list_waveform_rate)
             .unwrap_or(status.rate);
         if chinese {
-            format!("速度 {rate:.1} 个/秒（限速 {limit}）· 预计剩余 {eta}")
+            format!("速度 {rate}（限速 {limit}）· 预计剩余 {eta}")
         } else {
-            format!("rate {rate:.1} files/s (limit {limit}) · ETA {eta}")
+            format!("rate {rate} (limit {limit}) · ETA {eta}")
         }
     } else {
         String::new()
@@ -403,11 +434,14 @@ impl Controller {
     ) {
         let (state, new_page) = {
             let mut remote = self.remote.lock().unwrap();
-            let (state, new_page) = remote.manager.wave_cache.reloaded(
+            let (mut state, new_page) = remote.manager.wave_cache.reloaded(
                 generation,
                 fetch.capabilities.as_ref().ok().cloned(),
                 fetch.settings.as_ref().ok().cloned(),
             );
+            if let Ok(status) = &fetch.status {
+                state.observe(status, std::time::Instant::now());
+            }
             remote.manager.wave_cache = state.clone();
             (state, new_page)
         };
@@ -508,11 +542,18 @@ impl Controller {
                         }
                     }
                     let status = provider.waveform_cache_status();
+                    let at = std::time::Instant::now();
                     interval = next_poll_interval(interval, status.is_ok());
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.library_current(generation) {
-                            let state = c2.remote.lock().unwrap().manager.wave_cache.clone();
+                            let state = {
+                                let mut remote = c2.remote.lock().unwrap();
+                                if let Ok(status) = &status {
+                                    remote.manager.wave_cache.observe(status, at);
+                                }
+                                remote.manager.wave_cache.clone()
+                            };
                             c2.publish_waveform_cache_status(&ui, &state, &status, chinese);
                         }
                     });
@@ -684,6 +725,7 @@ mod tests {
             }),
             forbidden: false,
             generation: Some(1),
+            rate: WaveformRateEstimator::default(),
         }
     }
 
@@ -716,7 +758,10 @@ mod tests {
     fn eta_shows_estimating_until_the_server_has_one() {
         let view = waveform_cache_view(&state(true, true), &running(), true);
         assert_eq!(view.run_state, "运行中");
-        assert_eq!(view.rate_text, "速度 9.6 个/秒（限速 20）· 预计剩余 估算中");
+        assert_eq!(
+            view.rate_text, "速度 估算中（限速 20）· 预计剩余 估算中",
+            "the server's current_rate is not shown"
+        );
         assert_eq!(view.progress_text, "已缓存 40 / 100 · 待生成 60 · 失败 2");
         assert!((view.progress - 0.5).abs() < 1e-6, "job progress");
         assert!(view.job_active && view.has_failed && !view.paused);
@@ -726,14 +771,31 @@ mod tests {
             view.job_text
         );
         assert!(view.job_text.contains("根离线跳过 3"), "{}", view.job_text);
+        // Server says 0.3/s and 754 h; the client saw 1/s over 60 s of running.
         let mut known = running();
-        known.eta_secs = Some(3725);
-        let view = waveform_cache_view(&state(true, true), &known, false);
-        assert!(
-            view.rate_text.ends_with("ETA 1 h 2 min"),
-            "{}",
-            view.rate_text
+        known.current_rate = Some(0.3);
+        known.eta_secs = Some(754 * 3600);
+        known.pending = Some(3725);
+        let mut measured = state(true, true);
+        let t0 = std::time::Instant::now();
+        for i in 0..=12u64 {
+            known.cached = 40 + i * 5;
+            measured.observe(&known, t0 + Duration::from_secs(i * 5));
+        }
+        let view = waveform_cache_view(&measured, &known, false);
+        assert_eq!(
+            view.rate_text,
+            "rate 1.0 files/s (limit 20) · ETA 1 h 2 min"
         );
+        // Paused readings do not count toward the rate.
+        let mut paused = known.clone();
+        paused.run_state = Some(WaveformRunState::Paused);
+        let mut idle = state(true, true);
+        for i in 0..=12u64 {
+            paused.cached = 40 + i * 5;
+            idle.observe(&paused, t0 + Duration::from_secs(i * 5));
+        }
+        assert!(idle.rate.rate().is_none());
     }
 
     #[test]
