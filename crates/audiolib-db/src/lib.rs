@@ -1747,7 +1747,12 @@ impl SqliteProvider {
                 cache_hit: false,
             });
         }
-        let sorted_duration_sql = search_sorted::page_sql(&tx, request, no_missing, total)?;
+        let sorted_page_sql =
+            if request.order_by == SortOrder::Tags && !self.derived_tags.load(Ordering::Acquire) {
+                None
+            } else {
+                search_sorted::page_sql(&tx, request, no_missing, total)?
+            };
         let order = match request.order_by {
             SortOrder::Relevance if has_query => "bm25(audio_search)",
             SortOrder::Relevance | SortOrder::Filename => "af.filename COLLATE NOCASE",
@@ -1774,7 +1779,7 @@ impl SqliteProvider {
         // very broad matches. Hydrate only the ranked page after confirming visibility
         // in this transaction; the scores are exactly FTS5's default BM25 scores.
         let projection = audio_projection(&tx)?;
-        let page_sql = if let Some(sql) = sorted_duration_sql {
+        let page_sql = if let Some(sql) = sorted_page_sql {
             sql
         } else if no_missing && request.order_by == SortOrder::Relevance {
             format!(

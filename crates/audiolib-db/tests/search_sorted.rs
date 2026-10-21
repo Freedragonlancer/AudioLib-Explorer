@@ -23,11 +23,16 @@ fn oracle(conn: &Connection, request: &SearchRequest) -> (u64, Vec<i64>) {
         .unwrap();
     let total = u64::try_from(total).unwrap();
     let direction = if request.descending { "DESC" } else { "ASC" };
+    let column = match request.order_by {
+        SortOrder::Duration => "af.duration",
+        SortOrder::SampleRate => "af.sample_rate",
+        _ => panic!("unsupported numeric oracle ordering"),
+    };
     let ids = if request.offset as u64 >= total {
         Vec::new()
     } else {
         conn.prepare(&format!(
-            "SELECT af.id {matched} ORDER BY af.duration {direction},af.id ASC LIMIT ?1 OFFSET ?2"
+            "SELECT af.id {matched} ORDER BY {column} {direction},af.id ASC LIMIT ?1 OFFSET ?2"
         ))
         .unwrap()
         .query_map(
@@ -42,10 +47,10 @@ fn oracle(conn: &Connection, request: &SearchRequest) -> (u64, Vec<i64>) {
 }
 
 #[test]
-fn broad_duration_pages_match_native_order_before_and_after_visibility_changes() {
+fn broad_numeric_pages_match_native_order_before_and_after_visibility_changes() {
     let directory = tempfile::tempdir().unwrap();
     let legacy = directory.path().join("nullable-legacy.db");
-    let path = directory.path().join("broad-duration.db");
+    let path = directory.path().join("broad-numeric.db");
     // Supported legacy imports preserve nullable visibility storage. A fresh
     // current table deliberately has a NOT NULL constraint instead.
     let source = Connection::open(&legacy).unwrap();
@@ -53,7 +58,7 @@ fn broad_duration_pages_match_native_order_before_and_after_visibility_changes()
     source
         .execute_batch(
             "CREATE TABLE audio_files(id INTEGER PRIMARY KEY,file_path TEXT NOT NULL UNIQUE,
-             filename TEXT NOT NULL,duration REAL,missing INTEGER);
+             filename TEXT NOT NULL,duration REAL,sample_rate INTEGER,missing INTEGER);
              CREATE TABLE folders(id INTEGER PRIMARY KEY,folder_path TEXT NOT NULL UNIQUE,
              folder_name TEXT NOT NULL,parent_id INTEGER);",
         )
@@ -65,14 +70,24 @@ fn broad_duration_pages_match_native_order_before_and_after_visibility_changes()
     audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "WITH RECURSIVE n(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM n WHERE id<32768)
-        INSERT INTO audio_files(id,file_path,filename,duration,missing)
+        INSERT INTO audio_files(id,file_path,filename,duration,sample_rate,missing)
         SELECT id,printf('root/%d.wav',id),'explosion.wav',
-            CASE WHEN id%13=0 THEN NULL WHEN id%7=0 THEN 0 ELSE (id%17)*0.25 END,0 FROM n;
-        INSERT INTO audio_files(id,file_path,filename,duration,missing)
-            VALUES(-7,'root/negative.wav','explosion.wav',NULL,0),
-            (40000,'root/unmatched.wav','wind.wav',99999,0);",
+            CASE WHEN id%13=0 THEN NULL WHEN id%7=0 THEN 0 ELSE (id%17)*0.25 END,
+            CASE WHEN id%11=0 THEN NULL WHEN id%7=0 THEN 0 WHEN id%3=0 THEN 48000 ELSE 96000 END,0 FROM n;
+        INSERT INTO audio_files(id,file_path,filename,duration,sample_rate,missing)
+            VALUES(-7,'root/negative.wav','explosion.wav',NULL,NULL,0),
+            (40000,'root/unmatched.wav','wind.wav',99999,192000,0);",
     )
     .unwrap();
+    // Full signed rowid values must survive JSON/IN membership and stable ties.
+    for (id, rate) in [(i64::MIN, None), (0, Some(48000)), (i64::MAX, Some(96000))] {
+        conn.execute(
+            "INSERT INTO audio_files(id,file_path,filename,duration,sample_rate,missing)
+             VALUES(?1,?2,'explosion.wav',0,?3,0)",
+            params![id, format!("root/signed-{id}.wav"), rate],
+        )
+        .unwrap();
+    }
     provider
         .maintain_library(audiolib_core::MaintenanceAction::RebuildSearch)
         .unwrap();
@@ -80,65 +95,76 @@ fn broad_duration_pages_match_native_order_before_and_after_visibility_changes()
         if changed_visibility {
             conn.execute_batch("UPDATE audio_files SET missing=CASE id WHEN 1 THEN NULL WHEN 2 THEN 2 WHEN 3 THEN -1 ELSE 1 END WHERE id IN(1,2,3,4)").unwrap();
         }
-        for visibility in [
-            FileVisibility::Present,
-            FileVisibility::All,
-            FileVisibility::Missing,
-        ] {
-            for descending in [false, true] {
-                for offset in [0, 7, 32760, usize::MAX] {
-                    let request = SearchRequest {
-                        query: "on".into(),
-                        order_by: SortOrder::Duration,
-                        descending,
-                        limit: 7,
-                        offset,
-                        filters: SearchFilters {
-                            visibility,
+        for order_by in [SortOrder::Duration, SortOrder::SampleRate] {
+            for visibility in [
+                FileVisibility::Present,
+                FileVisibility::All,
+                FileVisibility::Missing,
+            ] {
+                for descending in [false, true] {
+                    for offset in [0, 7, 32760, usize::MAX] {
+                        let request = SearchRequest {
+                            query: "on".into(),
+                            order_by,
+                            descending,
+                            limit: 7,
+                            offset,
+                            filters: SearchFilters {
+                                visibility,
+                                ..Default::default()
+                            },
                             ..Default::default()
-                        },
-                        ..Default::default()
-                    };
-                    let (total, ids) = oracle(&conn, &request);
-                    let page = provider.search(&request).unwrap();
-                    assert_eq!(page.total_count, total);
-                    assert_eq!(
-                        page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
-                        ids,
-                        "changed={changed_visibility},visibility={visibility:?},descending={descending},offset={offset}"
-                    );
-                    assert_eq!(page.returned_count, page.results.len());
-                    assert!(!page.cache_hit);
+                        };
+                        let (total, ids) = oracle(&conn, &request);
+                        let page = provider.search(&request).unwrap();
+                        assert_eq!(page.total_count, total);
+                        assert_eq!(
+                            page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
+                            ids,
+                            "changed={changed_visibility},order_by={order_by:?},visibility={visibility:?},descending={descending},offset={offset}"
+                        );
+                        assert_eq!(page.returned_count, page.results.len());
+                        assert!(!page.cache_hit);
+                    }
                 }
             }
         }
     }
-    // An otherwise readable snapshot may lack this optional performance index.
-    conn.execute_batch("DROP INDEX idx_duration").unwrap();
-    let request = SearchRequest {
-        query: "on".into(),
-        order_by: SortOrder::Duration,
-        descending: true,
-        filters: SearchFilters {
-            visibility: FileVisibility::All,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let (total, ids) = oracle(&conn, &request);
-    let page = provider.search(&request).unwrap();
-    assert_eq!(page.total_count, total);
-    assert_eq!(
-        page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
-        ids
-    );
-    // A same-name partial index also cannot satisfy an All-visibility scan.
-    conn.execute_batch("CREATE INDEX idx_duration ON audio_files(duration) WHERE missing=0")
-        .unwrap();
-    let page = provider.search(&request).unwrap();
-    assert_eq!(page.total_count, total);
-    assert_eq!(
-        page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
-        ids
-    );
+    for (order_by, index, column) in [
+        (SortOrder::Duration, "idx_duration", "duration"),
+        (SortOrder::SampleRate, "idx_sample_rate", "sample_rate"),
+    ] {
+        // Missing, same-name partial, and wrong-column optional indexes must all
+        // keep the complete fallback. They are not a required snapshot identity.
+        for replacement in [
+            format!("DROP INDEX {index}"),
+            format!("CREATE INDEX {index} ON audio_files({column}) WHERE missing=0"),
+            format!("DROP INDEX {index}; CREATE INDEX {index} ON audio_files(filename)"),
+        ] {
+            conn.execute_batch(&replacement).unwrap();
+            for descending in [false, true] {
+                let request = SearchRequest {
+                    query: "on".into(),
+                    order_by,
+                    descending,
+                    offset: 7,
+                    limit: 7,
+                    filters: SearchFilters {
+                        visibility: FileVisibility::All,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let (total, ids) = oracle(&conn, &request);
+                let page = provider.search(&request).unwrap();
+                assert_eq!(page.total_count, total);
+                assert_eq!(
+                    page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
+                    ids,
+                    "index={index},replacement={replacement},descending={descending}"
+                );
+                assert_eq!(page.returned_count, ids.len());
+            }
+        }
+    }
 }

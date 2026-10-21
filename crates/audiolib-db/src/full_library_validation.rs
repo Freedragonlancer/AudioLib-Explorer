@@ -417,3 +417,241 @@ fn integrated_provider_benchmark() -> R<()> {
         .transpose()?;
     bench(&database, &report, only)
 }
+
+// Diagnostic phases intentionally share one pinned connection: COUNT, full DTO
+// page, then narrow page. Fresh variants do not imply a cold OS file cache.
+fn diagnose_sort_statement(
+    c: &Connection,
+    sql: &str,
+    values: &[rusqlite::types::Value],
+    mode: &str,
+) -> R<Value> {
+    use rusqlite::{StatementStatus, params_from_iter};
+    let plan = c
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+        .query_map(params_from_iter(values), |r| r.get::<_, String>(3))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let bytecode = c
+        .prepare(&format!("EXPLAIN {sql}"))?
+        .query_map(params_from_iter(values), |r| {
+            Ok(json!([
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?
+            ]))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let started = Instant::now();
+    let mut s = c.prepare(sql)?;
+    let cols = s.column_count();
+    let mut rows = s.query(params_from_iter(values))?;
+    let mut ids = Vec::<i64>::new();
+    let mut digest = Sha256::new();
+    let mut count = None;
+    while let Some(r) = rows.next()? {
+        if mode == "count" {
+            count = Some(r.get::<_, i64>(0)?);
+        } else {
+            ids.push(r.get(0)?);
+            digest.update([255]);
+            if mode == "dto" {
+                digest.update(serde_json::to_vec(&crate::audio_from_row(r)?)?);
+            } else {
+                for col in 0..cols {
+                    digest_value(&mut digest, r.get_ref(col)?);
+                }
+            }
+        }
+    }
+    drop(rows);
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    Ok(json!({"ms":ms,"count":count,"ids":ids,
+        "sha256":format!("{:x}",digest.finalize()),"eqp":plan,"vdbe":bytecode,
+        "vm_steps":s.get_status(StatementStatus::VmStep),
+        "sorts":s.get_status(StatementStatus::Sort),
+        "fullscan_steps":s.get_status(StatementStatus::FullscanStep)}))
+}
+
+#[test]
+#[ignore = "requires two explicit isolated libraries and a new report; native sort diagnostics"]
+fn integrated_sort_diagnostics() -> R<()> {
+    use rusqlite::types::Value as SqlValue;
+    let source = input("AUDIOLIB_VALIDATION_SOURCE")?;
+    let target = input("AUDIOLIB_VALIDATION_TARGET")?;
+    let report = input("AUDIOLIB_VALIDATION_REPORT")?;
+    assert_ne!(source.canonicalize()?, target.canonicalize()?);
+    let requests: Vec<(usize, SearchRequest)> =
+        if std::env::var_os("AUDIOLIB_VALIDATION_SORT_REQUESTS").is_some() {
+            let path = input("AUDIOLIB_VALIDATION_SORT_REQUESTS")?;
+            serde_json::from_slice::<Vec<SearchRequest>>(&fs::read(path)?)?
+                .into_iter()
+                .enumerate()
+                .collect()
+        } else {
+            [
+                (63, "metal", SortOrder::SampleRate, false, 0),
+                (69, "metal", SortOrder::Tags, false, 0),
+                (62, "door", SortOrder::Duration, true, 200),
+            ]
+            .into_iter()
+            .map(|(case, query, order_by, descending, offset)| {
+                (
+                    case,
+                    SearchRequest {
+                        query: query.into(),
+                        order_by,
+                        descending,
+                        offset,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+        };
+    assert!(!requests.is_empty(), "no diagnostic requests");
+    create_report(&report)?;
+    let mut records = Vec::new();
+    let mut expected = std::collections::BTreeMap::new();
+    for (dataset, path) in [("source", &source), ("target", &target)] {
+        for (case, request) in &requests {
+            request.validate()?;
+            assert!(request.folder_id.is_none() && !request.query.trim().is_empty());
+            assert_eq!(request.filters, SearchFilters::default());
+            let key = match request.order_by {
+                SortOrder::SampleRate => "af.sample_rate",
+                SortOrder::Duration => "af.duration",
+                SortOrder::Tags => {
+                    "COALESCE(audiolib_user_tags_key(af.user_tags),af.source_tags_text) COLLATE NOCASE"
+                }
+                _ => return Err("diagnostic supports sample_rate, duration and tags only".into()),
+            };
+            let compiled = crate::compile_query(&crate::load_tokenizer(), &request.query)?;
+            let mut variants = vec![
+                ("fts_join_visible", true, None),
+                ("fts_join_all", false, None),
+            ];
+            let numeric_index = match request.order_by {
+                SortOrder::Duration => Some("idx_duration"),
+                SortOrder::SampleRate => Some("idx_sample_rate"),
+                _ => None,
+            };
+            if let Some(index) = numeric_index {
+                variants.push(("numeric_covering", false, Some(index)));
+            } else if request.order_by == SortOrder::Tags {
+                variants.push(("tagged_covering", false, None));
+            }
+            for (variant, include_missing_predicate, covering_index) in variants {
+                let c = ro(path)?;
+                crate::register_library_functions(&c)?;
+                c.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
+                let not_present: i64 = c.query_row(
+                    "SELECT count(*) FROM audio_files WHERE missing IS NOT 0",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(
+                    not_present, 0,
+                    "omitting visibility requires a fully present snapshot"
+                );
+                let columns = c
+                    .prepare("SELECT cid,name FROM pragma_table_info('audio_files')")?
+                    .query_map([], |r| {
+                        Ok(json!([r.get::<_, i64>(0)?, r.get::<_, String>(1)?]))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let count = diagnose_sort_statement(
+                    &c,
+                    "SELECT count(*) FROM audio_search WHERE audio_search MATCH ?1",
+                    &[SqlValue::Text(compiled.clone())],
+                    "count",
+                )?;
+                let direction = if request.descending { "DESC" } else { "ASC" };
+                let visibility = if include_missing_predicate {
+                    "af.missing=0 AND "
+                } else {
+                    ""
+                };
+                // This independent diagnostic mirrors the production duration
+                // strategy without changing its eligibility or accepted sorts.
+                // MATCH membership is uncorrelated, the numeric index supplies
+                // the narrow ordering, and only the selected page hydrates DTOs.
+                let ranked = if let Some(index) = covering_index {
+                    format!(
+                        "SELECT af.id,{key} AS sort_value
+                        FROM audio_files af INDEXED BY {index}
+                        WHERE af.id IN (SELECT rowid FROM audio_search WHERE audio_search MATCH ?1)
+                        ORDER BY {key} {direction},af.id ASC LIMIT ?2 OFFSET ?3"
+                    )
+                } else {
+                    format!(
+                        "SELECT af.id,{key} AS sort_value FROM audio_search
+                        CROSS JOIN audio_files af ON af.id=audio_search.rowid
+                        WHERE {visibility}audio_search MATCH ?1
+                        ORDER BY sort_value {direction},af.id ASC LIMIT ?2 OFFSET ?3"
+                    )
+                };
+                let page = if variant == "tagged_covering" {
+                    crate::search_sorted::page_sql(
+                        &c,
+                        request,
+                        true,
+                        count["count"].as_u64().ok_or("missing count")?,
+                    )?
+                    .ok_or("tagged covering plan unavailable")?
+                } else {
+                    format!(
+                        "WITH ranked AS MATERIALIZED ({ranked})
+                        SELECT {} FROM ranked JOIN audio_files af ON af.id=ranked.id
+                        ORDER BY ranked.sort_value {direction},af.id ASC",
+                        crate::audio_projection(&c)?
+                    )
+                };
+                let values = [
+                    SqlValue::Text(compiled.clone()),
+                    SqlValue::Integer(i64::try_from(request.limit)?),
+                    SqlValue::Integer(i64::try_from(request.offset)?),
+                ];
+                let page = diagnose_sort_statement(&c, &page, &values, "dto")?;
+                let narrow = diagnose_sort_statement(&c, &ranked, &values, "narrow")?;
+                assert_eq!(page["ids"], narrow["ids"], "narrow/full page ordering");
+                let identity = json!([
+                    count["count"],
+                    page["ids"],
+                    page["sha256"],
+                    narrow["sha256"]
+                ]);
+                if let Some(old) = expected.insert(*case, identity.clone()) {
+                    assert_eq!(
+                        old, identity,
+                        "source/target and visibility variants must agree"
+                    );
+                }
+                records.push(json!({"dataset":dataset,"case":case,"request":request,
+                    "variant":variant,"covering_index":covering_index,
+                    "narrow_is_reference":variant == "tagged_covering",
+                    "include_missing_predicate":include_missing_predicate,"not_present":not_present,
+                    "columns":columns,"count":count,"page":page,"narrow":narrow,
+                    "mmap_bytes":c.pragma_query_value(None,"mmap_size",|r|r.get::<_,i64>(0))?}));
+                c.execute_batch("COMMIT")?;
+                save(
+                    &report,
+                    &json!({"sqlite":rusqlite::version(),"complete":false,"records":records}),
+                )?;
+                log(
+                    json!({"phase":"sort_diagnostic","dataset":dataset,"case":case,
+                    "variant":variant,
+                    "include_missing_predicate":include_missing_predicate}),
+                );
+            }
+        }
+    }
+    save(
+        &report,
+        &json!({"sqlite":rusqlite::version(),"complete":true,"records":records,
+        "conditions":"fresh read-only connection per request/input/variant; pinned snapshot; COUNT then full DTO page then narrow page; 64MiB SQLite cache; memory temp; normal reader mmap policy; OS cache uncontrolled"}),
+    )
+}
