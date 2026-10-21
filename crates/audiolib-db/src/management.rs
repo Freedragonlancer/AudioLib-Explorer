@@ -184,6 +184,7 @@ fn normalize_page_size(staging: &Connection, target_page_size: i64) -> Result<()
         .pragma_query_value(None, "page_size", |row| row.get(0))
         .map_err(db_error)?;
     if source_page_size != target_page_size {
+        let before = migration::digest_business(staging, &AtomicBool::new(false))?;
         // SQLite backup cannot change the page size of a WAL destination. Rewrite only
         // the owned staging snapshot in DELETE mode, leaving the source backup intact.
         staging
@@ -193,6 +194,11 @@ fn normalize_page_size(staging: &Connection, target_page_size: i64) -> Result<()
             .pragma_update(None, "page_size", target_page_size)
             .map_err(db_error)?;
         staging.execute_batch("VACUUM;").map_err(db_error)?;
+        if migration::digest_business(staging, &AtomicBool::new(false))? != before {
+            return Err(validation(
+                "Page-size adaptation changed implicit business identities; restore is blocked and the working library is intact",
+            ));
+        }
     }
     Ok(())
 }
@@ -294,20 +300,47 @@ fn check_connection(conn: &Connection) -> Result<IntegrityReport> {
             report.foreign_key_violations
         ));
     }
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    let current = version == schema::SCHEMA_VERSION;
     match conn.execute(
-        "INSERT INTO audio_search(audio_search,rank) VALUES('integrity-check',1)",
+        if current {
+            "INSERT INTO audio_search(audio_search) VALUES('integrity-check')"
+        } else {
+            "INSERT INTO audio_search(audio_search,rank) VALUES('integrity-check',1)"
+        },
         [],
     ) {
         Ok(_) => report.fts_ok = true,
-        Err(error) => report
-            .errors
-            .push(format!("FTS5 external-content consistency: {error}")),
+        Err(error) => report.errors.push(format!("FTS5 consistency: {error}")),
     }
-    if !schema::triggers_match(conn)? {
+    let structure = if current {
+        // Missing performance indexes are repairable derived state, not FTS
+        // corruption. Keep this pre-upgrade integrity gate focused on the FTS
+        // table and synchronization triggers; publication checks full readiness.
+        crate::search_storage::structure_matches(conn)?
+    } else {
+        schema::triggers_match(conn)?
+    };
+    if !structure {
         report.fts_ok = false;
         report.errors.push(
             "FTS5 table or synchronization triggers are missing or differ from the supported schema".into(),
         );
+    }
+    if current {
+        let unmatched:i64=conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM audio_files af LEFT JOIN audio_search_docsize ds ON af.id=ds.id WHERE ds.id IS NULL)
+             +(SELECT COUNT(*) FROM audio_search_docsize ds LEFT JOIN audio_files af ON af.id=ds.id WHERE af.id IS NULL)",
+            [],|row|row.get(0),
+        ).map_err(db_error)?;
+        if unmatched != 0 {
+            report.fts_ok = false;
+            report
+                .errors
+                .push(format!("FTS5 document identity mismatch: {unmatched}"));
+        }
     }
     Ok(report)
 }
@@ -331,13 +364,7 @@ pub(crate) fn rollback_path(database: &Path) -> Result<PathBuf> {
     drop(stage);
     Ok(path)
 }
-fn patch_row(
-    conn: &Connection,
-    jieba: &Jieba,
-    id: i64,
-    patch: &MetadataPatch,
-    mode: TagEditMode,
-) -> Result<()> {
+fn patch_row(conn: &Connection, id: i64, patch: &MetadataPatch, mode: TagEditMode) -> Result<()> {
     patch.validate()?;
     let current: Option<String> = conn
         .query_row(
@@ -383,18 +410,12 @@ fn patch_row(
         if tags.len() > 16_384 {
             return Err(validation("Combined tags exceed the allowed size"));
         }
-        assignments.extend(["user_tags=?".into(), "user_tags_tokenized=?".into()]);
-        values.extend([
-            Value::Text(tags.clone()),
-            Value::Text(tokenize(jieba, &tags)),
-        ]);
+        assignments.push("user_tags=?".into());
+        values.push(Value::Text(tags));
     }
     if let Some(notes) = &patch.notes {
-        assignments.extend(["user_notes=?".into(), "user_notes_tokenized=?".into()]);
-        values.extend([
-            Value::Text(notes.clone()),
-            Value::Text(tokenize(jieba, notes)),
-        ]);
+        assignments.push("user_notes=?".into());
+        values.push(Value::Text(notes.clone()));
     }
     if let Some(favorite) = patch.favorite {
         assignments.push("favorite=?".into());
@@ -420,12 +441,7 @@ fn patch_row(
     Ok(())
 }
 fn remove_one(conn: &Connection, id: i64) -> Result<u64> {
-    for table in [
-        "playlist_items",
-        "project_references",
-        "waveform_cache",
-        "play_history",
-    ] {
+    for table in ["playlist_items", "project_references", "waveform_cache"] {
         conn.execute(&format!("DELETE FROM {table} WHERE audio_file_id=?1"), [id])
             .map_err(db_error)?;
     }
@@ -443,6 +459,15 @@ impl SqliteProvider {
             .map_err(db_error)?
         {
             return Err(validation("Library was opened read-only"));
+        }
+        let version: i64 = self
+            .writer_unlocked()?
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(db_error)?;
+        if version != schema::SCHEMA_VERSION {
+            return Err(validation(
+                "Reopen the library before writing an older format",
+            ));
         }
         Ok(())
     }
@@ -609,15 +634,18 @@ impl SqliteProvider {
             return Err(validation("Restore source is the active library"));
         }
         // Validate and migrate only an owned snapshot; malformed/future sources never touch the current library.
-        let stage = tempfile::Builder::new()
-            .prefix("audiolib-restore-")
-            .suffix(".db")
-            .tempfile_in(
+        let owned = tempfile::Builder::new()
+            .prefix("audiolib-restore-owned-")
+            .tempdir_in(
                 self.path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or(Path::new(".")),
             )?;
+        let stage = tempfile::Builder::new()
+            .prefix("audiolib-restore-")
+            .suffix(".db")
+            .tempfile_in(owned.path())?;
         {
             let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(db_error)?;
@@ -629,8 +657,10 @@ impl SqliteProvider {
             // Validate the original owned snapshot first so that rebuilding
             // cannot conceal damaged postings or synchronization triggers.
             checked(&check_connection(&target)?)?;
-            schema::migrate(&mut target)?;
-            schema::backfill_source_tags(&mut target)?;
+            drop(target);
+            Self::upgrade_owned_snapshot(stage.path())?;
+            let target = Connection::open(stage.path()).map_err(db_error)?;
+            schema::register_tokenizer(&target, self.tokenizer.clone())?;
             // A restore may bring back fewer/lower IDs than this installation has
             // already issued. Keep those identities retired even after replacement.
             let high_water = {
@@ -716,7 +746,7 @@ impl SqliteProvider {
                             )
                             .map_err(db_error)?;
                         writer
-                            .execute_batch("REINDEX; PRAGMA optimize; VACUUM;")
+                            .execute_batch("REINDEX; PRAGMA optimize;")
                             .map_err(db_error)?;
                     }
                     MaintenanceAction::RebuildSearch => schema::rebuild_search(&mut writer)?,
@@ -763,7 +793,7 @@ impl SqliteProvider {
         let mut writer = self.writer()?;
         let tx = writer.transaction().map_err(db_error)?;
         for id in &ids {
-            patch_row(&tx, &self.tokenizer, *id, &request.patch, request.tag_mode)?;
+            patch_row(&tx, *id, &request.patch, request.tag_mode)?;
         }
         tx.commit().map_err(db_error)?;
         Ok(BatchMetadataReport {
@@ -772,7 +802,18 @@ impl SqliteProvider {
     }
     pub(crate) fn management_lookup(&self, path: &Path) -> Result<Option<AudioFile>> {
         let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        self.reader()?.query_row(&format!("SELECT {AUDIO_SELECT} FROM audio_files af WHERE path_key=?1 ORDER BY id LIMIT 1"),[path_key(&display_path(&resolved))],audio_from_row).optional().map_err(db_error)
+        let reader = self.reader()?;
+        let projection = audio_projection(&reader)?;
+        reader
+            .query_row(
+                &format!(
+                    "SELECT {projection} FROM audio_files af WHERE path_key=?1 ORDER BY id LIMIT 1"
+                ),
+                [path_key(&display_path(&resolved))],
+                audio_from_row,
+            )
+            .optional()
+            .map_err(db_error)
     }
     pub(crate) fn management_remove(&self, ids: &[i64]) -> Result<u64> {
         let _lease = LibraryLease::acquire(&self.path)?;
@@ -846,11 +887,6 @@ impl SqliteProvider {
                     state:match status.as_deref(){Some("completed")=>ScanState::Completed,Some("cancelled")=>ScanState::Cancelled,Some("failed")=>ScanState::Failed,_=>ScanState::Running},
                     scanned:unsigned(row,6)?,added:unsigned(row,7)?,updated:unsigned(row,8)?,removed:unsigned(row,9)?,unchanged:unsigned(row,10)?,errors:unsigned(row,11)?,error_details:details,errors_truncated:unsigned(row,13)?})
             }).map_err(db_error)?.collect::<rusqlite::Result<_>>().map_err(db_error)
-    }
-    pub(crate) fn management_plays(&self, limit: usize, offset: usize) -> Result<Vec<PlayRecord>> {
-        let (limit, offset) = check_page(limit, offset)?;
-        self.reader()?.prepare("SELECT ph.id,ph.audio_file_id,ph.played_at,ph.filename,ph.file_path,(af.missing IS NOT 0) FROM play_history ph JOIN audio_files af ON af.id=ph.audio_file_id ORDER BY ph.played_at DESC,ph.id DESC LIMIT ?1 OFFSET ?2").map_err(db_error)?
-            .query_map(params![limit,offset],|r|Ok(PlayRecord{id:r.get(0)?,audio_file_id:r.get(1)?,played_at:r.get(2)?,filename:r.get(3)?,file_path:r.get(4)?,missing:r.get(5)?})).map_err(db_error)?.collect::<rusqlite::Result<_>>().map_err(db_error)
     }
 
     /// Relocate an indexed root in one transaction. Validation and the rollback
@@ -1044,8 +1080,9 @@ impl SqliteProvider {
             }
             moved_folders.push((*id, new_path));
         }
+        let projection = audio_projection(&writer)?;
         let mut statement = writer
-            .prepare(&format!("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION SELECT f.id FROM folders f JOIN tree ON f.parent_id=tree.id) SELECT {AUDIO_SELECT} FROM audio_files af WHERE af.folder_id IN (SELECT id FROM tree)"))
+            .prepare(&format!("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION SELECT f.id FROM folders f JOIN tree ON f.parent_id=tree.id) SELECT {projection} FROM audio_files af WHERE af.folder_id IN (SELECT id FROM tree)"))
             .map_err(db_error)?;
         let files = statement
             .query_map([root], audio_from_row)
@@ -1255,9 +1292,10 @@ impl SqliteProvider {
             None,
         )?;
         refresh_folder_statistics(&tx)?;
+        let projection = audio_projection(&tx)?;
         let result = tx
             .query_row(
-                &format!("SELECT {AUDIO_SELECT} FROM audio_files af WHERE af.id=?1"),
+                &format!("SELECT {projection} FROM audio_files af WHERE af.id=?1"),
                 [id],
                 audio_from_row,
             )
@@ -1280,9 +1318,10 @@ impl SqliteProvider {
         let mut stage = output_stage(destination, "audiolib-export-")?;
         let mut reader = self.reader()?;
         let tx = reader.transaction().map_err(db_error)?;
+        let projection = audio_projection(&tx)?;
         let mut statement = tx
             .prepare(&format!(
-                "SELECT {AUDIO_SELECT} FROM audio_files af ORDER BY af.id"
+                "SELECT {projection} FROM audio_files af ORDER BY af.id"
             ))
             .map_err(db_error)?;
         let mut rows = statement.query([]).map_err(db_error)?;
@@ -1380,7 +1419,7 @@ impl SqliteProvider {
                 )));
             }
             if let Some(id) = ids.first() {
-                patch_row(&tx, &self.tokenizer, *id, &patch, TagEditMode::Replace)?;
+                patch_row(&tx, *id, &patch, TagEditMode::Replace)?;
                 records += 1;
             } else {
                 skipped += 1;
@@ -1453,7 +1492,6 @@ const CSV_COLUMNS: &[&str] = &[
     "notes",
     "favorite",
     "bext_description",
-    "play_count",
     "attributes",
     "missing",
 ];

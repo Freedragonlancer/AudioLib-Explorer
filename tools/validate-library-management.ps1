@@ -3,20 +3,49 @@
 param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release')
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+function Normalize-Path([string]$Path) {
+    $candidate = $Path
+    if ($candidate.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        if ($candidate -cmatch '^\\\\\?\\[A-Za-z]:\\') {
+            $candidate = $candidate.Substring(4)
+        } elseif ($candidate.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+            $tail = $candidate.Substring(8)
+            if ($tail -notmatch '^[^\\/:?*"<>|]+\\[^\\/:?*"<>|]+(?:\\|$)') {
+                throw 'Unsupported extended UNC validation path.'
+            }
+            $candidate = '\\' + $tail
+        } else {
+            throw 'Unsupported extended Windows validation path.'
+        }
+    }
+    if ($candidate.StartsWith('\\.\', [StringComparison]::Ordinal) -or
+        $candidate.StartsWith('\??\', [StringComparison]::Ordinal) -or
+        $candidate.StartsWith('\\??\', [StringComparison]::Ordinal) -or
+        $candidate.StartsWith('\Device\', [StringComparison]::OrdinalIgnoreCase) -or
+        $candidate -match '(^|[\\/])\.\.([\\/]|$)') {
+        throw 'Device namespaces and parent traversal are not supported validation paths.'
+    }
+    $absolute = [IO.Path]::GetFullPath($candidate)
+    if ($absolute.StartsWith('\\?\', [StringComparison]::Ordinal) -or $absolute.StartsWith('\\.\', [StringComparison]::Ordinal)) {
+        throw 'Unsupported Windows device validation path.'
+    }
+    return $absolute
+}
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $cli = Join-Path $binaryRoot 'AudioLibCli.exe'
-$tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
+$tempParent = (Normalize-Path ([IO.Path]::GetTempPath())).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $ownedName = 'AudioLibManagement-' + [guid]::NewGuid().ToString('N')
-$testRoot = [IO.Path]::GetFullPath((Join-Path $tempParent $ownedName))
+$testRoot = Normalize-Path (Join-Path $tempParent $ownedName)
 $database = Join-Path $testRoot 'library.db'
 $savedDataRoot = $env:AUDIOLIB_DATA_DIR
 $checks = [Collections.Generic.List[string]]::new()
 $ownsDirectory = $false
 
 function Assert-OwnedPath([string]$Path) {
-    $absolute = [IO.Path]::GetFullPath($Path)
-    if ($absolute -ne $testRoot -and !$absolute.StartsWith($testRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    $absolute = Normalize-Path $Path
+    $ownedRoot = (Normalize-Path $testRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (![string]::Equals($absolute, $ownedRoot, [StringComparison]::OrdinalIgnoreCase) -and !$absolute.StartsWith($ownedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Validation path escaped its owned directory: $absolute"
     }
 }
@@ -67,8 +96,6 @@ function Assert-Annotations($File) {
     Assert-Check ($File.tags -match 'beta' -and $File.tags -notmatch 'alpha') 'Append/remove tags did not survive this operation.'
     Assert-Check ($File.notes -eq 'private, notes' -and $File.favorite -and $File.color -eq '#123456') 'Annotations were not preserved.'
 }
-function Normalize-Path([string]$Path) { return [IO.Path]::GetFullPath($Path.Replace('\\?\', '')) }
-
 try {
     Assert-Check ($testRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) 'Owned temporary directory escaped the system temporary parent.'
     Assert-Check ((Split-Path -Leaf $testRoot) -eq $ownedName) 'Owned directory identity changed.'
@@ -233,8 +260,10 @@ try {
 } finally {
     $env:AUDIOLIB_DATA_DIR = $savedDataRoot
     if ($ownsDirectory -and (Test-Path -LiteralPath $testRoot)) {
-        $resolved = [IO.Path]::GetFullPath((Get-Item -LiteralPath $testRoot).FullName)
-        if ($resolved -ne $testRoot -or (Split-Path -Leaf $resolved) -ne $ownedName -or !$resolved.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        $resolved = Normalize-Path ((Get-Item -LiteralPath $testRoot).FullName)
+        $expectedRoot = Normalize-Path $testRoot
+        $expectedParent = (Normalize-Path $tempParent).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        if (![string]::Equals($resolved, $expectedRoot, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolved) -ne $ownedName -or !$resolved.StartsWith($expectedParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Refusing cleanup outside the verified owned validation directory.'
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force

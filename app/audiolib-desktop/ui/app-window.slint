@@ -500,6 +500,7 @@ export component AppWindow inherits Window {
     in-out property <string> batch-notes: "";
     in-out property <int> history-kind: 0;
     in property <[string]> history-rows;
+    in property <[bool]> history-missing;
     in property <string> history-page: "1";
     in property <bool> history-previous: false;
     in property <bool> history-next: false;
@@ -513,6 +514,7 @@ export component AppWindow inherits Window {
     callback batch-requested();
     callback history-requested(int);
     callback history-selected(int);
+    callback history-clear-requested();
 
     in-out property <bool> peaks-visible: false;
     in-out property <int> peak-mode: 1;
@@ -940,7 +942,7 @@ export component AppWindow inherits Window {
         }
     }
     public function open-library(kind: int) { root.open-source-manager(kind, 1); }
-    // 扫描历史 / 最近播放: the open library's history (local, or the active snapshot's).
+    // Scan history belongs to the library; recent playback is stored only on this device.
     public function open-history(kind: int) { root.open-source-manager(kind, 2); }
     function open-source-manager(kind: int, focus: int) {
         root.advanced-maintenance-visible = false;
@@ -2185,18 +2187,20 @@ export component AppWindow inherits Window {
                                             HorizontalLayout { height: 32px; spacing: 8px;
                                                 ComboBox { width: 174px; enabled: !root.library-busy; model: root.chinese ? ["扫描历史", "最近播放"] : ["Scan history", "Recent playback"]; current-index <=> root.history-kind; selected => { root.history-requested(0); } }
                                                 Action { width: 80px; enabled: !root.library-busy; label: root.chinese ? "刷新历史" : "Refresh"; clicked => { root.history-requested(0); } }
+                                                if root.history-kind == 1: Action { width: 172px; enabled: !root.library-busy; label: root.chinese ? "清除播放历史…" : "Clear playback history…"; clicked => { root.history-clear-requested(); } }
                                                 Rectangle { horizontal-stretch: 1; }
                                                 Action { width: 35px; enabled: root.history-previous && !root.library-busy; label: "‹"; clicked => { root.history-requested(-1); } }
                                                 Label { width: 68px; text: root.history-page; horizontal-alignment: center; }
                                                 Action { width: 35px; enabled: root.history-next && !root.library-busy; label: "›"; clicked => { root.history-requested(1); } }
                                             }
+                                            if root.history-kind == 1: Label { wrap: word-wrap; font-size: 11px; text: root.chinese ? "仅本机记录，不上传服务器。时间按本地时区显示。" : "Stored on this device only; never uploaded. Times use your local time zone."; }
                                             ListView { height: 150px;
                                                 for history[index] in root.history-rows: Rectangle { height: 56px; background: Math.mod(index,2) == 0 ? Theme.raised : Theme.panel;
-                                                    Text { x: 10px; width: parent.width - 20px; height: parent.height; text: history; color: Theme.ink; font-size: 11px; wrap: word-wrap; overflow: elide; vertical-alignment: center; }
+                                                    Text { x: 10px; width: parent.width - 20px; height: parent.height; text: history; color: root.history-kind == 1 && root.history-missing[index] ? Theme.dim : Theme.ink; font-size: 11px; wrap: word-wrap; overflow: elide; vertical-alignment: center; }
                                                     TouchArea { enabled: !root.library-busy; mouse-cursor: pointer; clicked => { root.history-selected(index); } }
                                                 }
                                             }
-                                            if root.history-rows.length == 0: Text { height: 32px; text: root.chinese ? "暂无历史记录。扫描文件夹后，可在这里查看结果与错误详情。" : "No history yet. Scan a folder to see results and error details here."; color: Theme.dim; wrap: word-wrap; font-size: 11px; }
+                                            if root.history-rows.length == 0: Text { height: 32px; text: root.history-kind == 1 ? (root.chinese ? "暂无播放记录。播放过的文件会显示在这里（仅保存在本机）。" : "No playback history yet. Played files will appear here, stored only on this device.") : (root.chinese ? "暂无扫描记录。扫描文件夹后，可在这里查看结果与错误详情。" : "No scan history yet. Scan a folder to see results and error details here."); color: Theme.dim; wrap: word-wrap; font-size: 11px; }
                                             if root.history-detail != "": TextEdit { height: 110px; read-only: true; text: root.history-detail; }
                                             Label { height: 22px; text: root.chinese ? "点击扫描记录查看结果；点击播放记录查看声音详情。" : "Click a scan for its results, or a play record for sound details."; font-size: 10px; }
                                             library-maintenance-action := Action { height: 32px; enabled: !root.library-busy; subtle: true; label: root.advanced-maintenance-visible ? (root.chinese ? "高级维护 ▾" : "Advanced maintenance ▾") : (root.chinese ? "高级维护 ▸" : "Advanced maintenance ▸"); clicked => { root.advanced-maintenance-visible = !root.advanced-maintenance-visible; } }

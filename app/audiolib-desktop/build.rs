@@ -1,10 +1,18 @@
 // app/audiolib-desktop/build.rs
 fn main() {
+    // ElementHandle-based tests need Slint metadata even in optimized builds.
+    // Unset overrides retain the normal profile-dependent packaging default.
+    let emit_debug_info = match std::env::var("SLINT_EMIT_DEBUG_INFO").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => std::env::var("PROFILE").as_deref() != Ok("release"),
+    };
+    println!("cargo:rerun-if-env-changed=SLINT_EMIT_DEBUG_INFO");
     slint_build::compile_with_config(
         "ui/app-window.slint",
         slint_build::CompilerConfiguration::new()
             .with_style("fluent".into())
-            .with_debug_info(std::env::var("PROFILE").as_deref() != Ok("release")),
+            .with_debug_info(emit_debug_info),
     )
     .expect("compile AudioLib desktop UI");
     println!("cargo:rerun-if-changed=ui/app-window.slint");

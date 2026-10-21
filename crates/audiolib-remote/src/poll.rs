@@ -97,6 +97,9 @@ impl RevisionCheck {
         if let Some(message) = snapshot_schema_error(library.schema_version, chinese) {
             return Self::Failed(message);
         }
+        if let Err(error) = crate::compatibility::library(&library, false) {
+            return Self::Failed(error.localized(chinese));
+        }
         match cached {
             None => Self::NotSynced {
                 server_id: library.library_id,
@@ -143,7 +146,11 @@ pub fn check_revision(
     cached: Option<&CachedIdentity>,
     chinese: bool,
 ) -> RevisionCheck {
-    RevisionCheck::classify(cached, client.library(), chinese)
+    let result = client.library().and_then(|library| {
+        crate::compatibility::live_library(client, &library, None)?;
+        Ok(library)
+    });
+    RevisionCheck::classify(cached, result, chinese)
 }
 
 /// [`check_revision`] plus `GET /roots`. `/roots` never touches the NAS and answers at once
@@ -445,9 +452,9 @@ mod tests {
     }
 
     #[test]
-    fn polling_accepts_snapshot_schemas_3_to_5_and_rejects_both_unsupported_bounds() {
+    fn polling_requires_a_format_declaration_for_schema_6() {
         let current = cached("lib-1", 7);
-        for version in [2, 3, 4, 5, 6] {
+        for version in [2, 3, 4, 5, 6, 7] {
             let check =
                 RevisionCheck::classify(Some(&current), Ok(library("lib-1", 7, version)), false);
             if (3..=5).contains(&version) {
@@ -455,7 +462,7 @@ mod tests {
                 assert!(check.reachable());
             } else {
                 assert!(
-                    matches!(&check, RevisionCheck::Failed(message) if message.contains(&format!("schema {version}")))
+                    matches!(&check, RevisionCheck::Failed(message) if version == 6 || message.contains(&format!("schema {version}")))
                 );
                 assert!(!check.reachable() && !check.update_available());
             }

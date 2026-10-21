@@ -1,14 +1,14 @@
 # AudioLib Explorer 版本规范
 
-三套版本各管各的，互不推导。
+本文对应合入 0.5.0 主线后的隔离 CR 分支 `0.6.0-dev.1`，不表示已发布或修改了当前安装。程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。此前 `0.5.0-dev.1` 验证保留为历史证据。
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.4.11 | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.6.0-dev.1（未发布） | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
-| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 5 | SQLite 资料库结构（`user_version`） |
+| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 6 | SQLite 资料库结构（`user_version`） |
 
-快照兼容范围：`MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=5`）。客户端先验证快照身份、结构和完整性；派生搜索状态已准备的快照直接只读打开，需要修复的旧状态仅在客户端拥有的 staging/copy 中升级，原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
+schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；派生搜索状态已准备的快照直接只读打开，需要修复的旧状态仅在客户端拥有的 staging/copy 中升级，原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
 
 ## 规则
 
@@ -26,7 +26,7 @@
 
 ## 发布流程
 
-**v0.4.11 已发布，不得覆盖其标签或把新的开发包当作该 Release 的原产物。** 当前升级恢复、WAL 清理及客户端/服务端集成处于发布准备阶段，工作区仍使用 0.4.11 开发版本。下一次正式发布前，须同步更新工作区及锁文件中的程序版本、发布说明版本行，再以新标签执行完整发布流程。基准应使用已发布的 v0.4.11；本轮尚未创建发布标签，也未部署 8790。未完成的搜索性能验收须继续在发布说明中列明。
+**v0.4.11 和 v0.5.0 已发布，不得覆盖其标签或把新的开发包当作这些 Release 的原产物。** 本隔离工作区使用 `0.6.0-dev.1` 继续验证 schema 6、共享迁移及客户端/服务端集成；该开发标识不用于现有正式 Release 标签流程。下一次正式发布前，须确定发布号，同步更新工作区及锁文件、经过测试的双方程序范围与发布说明版本行，再以新标签执行完整发布流程。本轮只整理 PR，不创建发布标签或部署服务端。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。

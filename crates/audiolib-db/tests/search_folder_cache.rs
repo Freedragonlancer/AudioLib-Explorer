@@ -19,17 +19,16 @@ fn fixture() -> (tempfile::TempDir, PathBuf, SqliteProvider) {
     let database = directory.path().join("folder-cache.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES
          (1,'root','root',NULL),(2,'root/left','left',1),(3,'root/right','right',1);
          INSERT INTO folder_closure VALUES
          (1,1,0),(2,2,0),(3,3,0),(1,2,1),(1,3,1);
-         INSERT INTO audio_files(id,file_path,filename,folder_id,missing,user_tags,
-           user_tags_tokenized,user_rating,favorite,sample_rate) VALUES
-         (1,'root/left/plain-a.wav','plain-a.wav',2,0,'metal','metal',5,1,48000),
-         (2,'root/left/plain-b.wav','plain-b.wav',2,0,'wood','wood',1,0,96000),
-         (3,'root/right/plain-c.wav','plain-c.wav',3,1,'metal','metal',4,1,48000),
-         (4,'root/right/plain-d.wav','plain-d.wav',3,0,'wood','wood',4,0,96000);",
+         INSERT INTO audio_files(id,file_path,filename,folder_id,missing,user_tags,user_rating,favorite,sample_rate) VALUES(1,'root/left/plain-a.wav','plain-a.wav',2,0,'metal',5,1,48000),
+         (2,'root/left/plain-b.wav','plain-b.wav',2,0,'wood',1,0,96000),
+         (3,'root/right/plain-c.wav','plain-c.wav',3,1,'metal',4,1,48000),
+         (4,'root/right/plain-d.wav','plain-d.wav',3,0,'wood',4,0,96000);",
     )
     .unwrap();
     drop(conn);
@@ -61,6 +60,7 @@ fn oracle(database: &Path, request: &SearchRequest) -> BTreeMap<i64, u64> {
         FileVisibility::All => "1=1",
     };
     let conn = Connection::open(database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let sql = format!(
         "SELECT closure.ancestor_id,COUNT(*) FROM audio_files af
          JOIN audio_search ON audio_search.rowid=af.id
@@ -131,11 +131,12 @@ fn own_and_external_commits_refresh_directory_counts_and_owned_folder_values() {
     assert!(!provider.search(&all).unwrap().cache_hit);
 
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "BEGIN;
          UPDATE audio_files SET folder_id=3 WHERE id=2;
          UPDATE audio_files SET missing=0 WHERE id=3;
-         UPDATE audio_files SET user_tags='metal',user_tags_tokenized='metal' WHERE id=4;
+         UPDATE audio_files SET user_tags='metal' WHERE id=4;
          UPDATE folders SET folder_name='renamed',folder_path='root/renamed' WHERE id=3;
          COMMIT;",
     )
@@ -165,6 +166,7 @@ fn own_and_external_commits_refresh_directory_counts_and_owned_folder_values() {
 
     assert!(!provider.search(&all).unwrap().cache_hit);
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute("DELETE FROM audio_files WHERE id=2", [])
         .unwrap();
     drop(conn);
@@ -260,6 +262,7 @@ fn precancelled_uncached_and_cached_facets_do_not_poison_later_reads() {
 fn chunked_ranked_ids_preserve_visibility_scope_and_signed_identities() {
     let (_directory, database, provider) = fixture();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "WITH RECURSIVE records(id) AS (
            VALUES(10) UNION ALL SELECT id+1 FROM records WHERE id<8210
@@ -321,7 +324,9 @@ fn chunked_ranked_ids_preserve_visibility_scope_and_signed_identities() {
 fn filtered_fixture(extra_candidates: bool) -> (tempfile::TempDir, PathBuf, SqliteProvider) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("small-filtered-ranking.db");
-    let conn = Connection::open(&database).unwrap();
+    let legacy = directory.path().join("legacy-nullable.db");
+    let conn = Connection::open(&legacy).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     // Migration retains a nullable legacy visibility column. This database is
     // created only inside the owned fixture, never from a working library.
     conn.execute_batch(
@@ -331,8 +336,10 @@ fn filtered_fixture(extra_candidates: bool) -> (tempfile::TempDir, PathBuf, Sqli
     )
     .unwrap();
     drop(conn);
+    audiolib_db::import_legacy(&legacy, &database).unwrap();
     let provider = SqliteProvider::open(&database).unwrap();
     let mut conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES
          (1,'root','root',NULL),(2,'root/left','left',1),(3,'root/right','right',1);
@@ -427,6 +434,7 @@ fn small_filtered_rankings_and_candidate_overflow_preserve_full_facets_and_scope
         };
         assert_eq!(provider.search(&all).unwrap().total_count, 8);
         let conn = Connection::open(&database).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
         for request in &requests {
             let expected_folders = match request.filters.visibility {
                 FileVisibility::Present => BTreeMap::from([(1, 2), (2, 1), (3, 1)]),

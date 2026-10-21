@@ -313,12 +313,24 @@ impl MockServer {
         format!("http://{}", self.address)
     }
 
+    #[track_caller]
     fn next(&self) -> MockRequest {
-        self.requests.recv_timeout(Duration::from_secs(5)).unwrap()
+        self.next_at("HTTP request")
     }
 
+    #[track_caller]
+    fn next_at(&self, phase: &str) -> MockRequest {
+        let caller = std::panic::Location::caller();
+        self.requests
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!("Mock server waiting for {phase}, requested at {caller}: {error:?}")
+            })
+    }
+
+    #[track_caller]
     fn next_write(&self, revision: usize) -> MockRequest {
-        let preflight = self.next();
+        let preflight = self.next_at("mutation GET /library identity preflight");
         assert!(
             preflight.raw.starts_with("GET /api/v1/library "),
             "Every mutation must verify server identity before writing: {}",
@@ -329,10 +341,20 @@ impl MockServer {
             serde_json::json!({
                 "library_id": LIBRARY_ID,
                 "revision": revision,
+                "schema_version": 5,
                 "identity_bound_writes": true
             }),
         );
-        self.next()
+        let health = self.next_at("mutation GET /health compatibility preflight");
+        assert!(health.raw.starts_with("GET /api/v1/health "));
+        health.reply(
+            "200 OK",
+            serde_json::json!({"status":"ok", "version":"0.4.11"}),
+        );
+        let capabilities = self.next_at("mutation GET /capabilities compatibility preflight");
+        assert!(capabilities.raw.starts_with("GET /api/v1/capabilities "));
+        capabilities.reply("404 Not Found", serde_json::json!({}));
+        self.next_at("bound mutation after compatibility preflight")
     }
 }
 

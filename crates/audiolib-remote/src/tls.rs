@@ -520,7 +520,7 @@ pub(crate) mod tests {
                         .push((path.clone(), authorization.clone()));
                     let (status, extra, body) = match (path.as_str(), authorization.as_deref()) {
                         ("/api/v1/health", _) => {
-                            (200, "", r#"{"status":"ok","version":"tls-test"}"#.to_owned())
+                            (200, "", r#"{"status":"ok","version":"0.4.11"}"#.to_owned())
                         }
                         (_, None) => (
                             401,
@@ -568,7 +568,7 @@ pub(crate) mod tests {
         let (port, seen) = trusted_server();
         for host in ["localhost", "127.0.0.1"] {
             let client = RemoteClient::new(&format!("https://{host}:{port}"), "tok").unwrap();
-            assert_eq!(client.health().unwrap().version, "tls-test");
+            assert_eq!(client.health().unwrap().version, "0.4.11");
             assert_eq!(client.library().unwrap().library_id, "tls-lib");
             // The stream probe and the abortable agent (playback, downloads) use the same
             // TLS configuration.

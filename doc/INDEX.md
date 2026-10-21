@@ -35,6 +35,19 @@ JSON and text files named `Rust_*` in this directory record specific verificatio
 
 ## Code and configuration
 
+The isolated next-version database work is tracked in
+[Plan B storage](api/Search_Storage_B.md),
+[compatibility and migration](api/Library_Migration_Compatibility.md),
+[historical full-library measurements](api/Search_Storage_B_Validation.md), and
+[implementation status](api/Implementation_B_Status.md).
+[Plan B code review](api/Search_Storage_B_CR.md) records the fixes and their historical validation.
+The local candidate `c81eca2` integrates main `c90c0fe` (0.5.1, including keyboard audition) and keeps version `0.6.0-dev.1`;
+targeted local validation passed; the optimized UI regression build fix is `c0870a8`. See the [Schema v6 contract](api/Schema_V6_Iteration.md),
+[column audit](api/Schema_V6_Column_Audit.md), and [future LAN acceptance](api/Schema_V6_LAN_Acceptance.md).
+The exact legacy peer exceptions are 0.4.11 / 0.5.0 / 0.5.1; they do not admit old clients to p1 library writes.
+PR #20 remains a draft. This work does not deploy, install or upgrade the working library;
+LAN acceptance waits for the user's deployment notification. Full-library evidence retains its original source identity.
+
 | Entry | Responsibility |
 |-------|----------------|
 | [Desktop entry point](../app/audiolib-desktop/src/main.rs) | Startup, instance lease and Slint event loop |
@@ -51,7 +64,7 @@ The local original database and `config/audiolib_config.yaml` remain read-only i
 
 ## Supported verification
 
-Rust unit and integration tests live with the Cargo workspace packages. Use the format, strict Clippy and test commands in [AGENTS.md](../AGENTS.md) for default and ASIO configurations.
+Rust unit and integration tests live with the Cargo workspace packages. Select the smallest affected scope in [AGENTS.md](../AGENTS.md): formatting, strict package Clippy and relevant tests for Rust behavior changes, plus direct-consumer compilation for public contracts. Ordinary GitHub-hosted CI checks formatting only; functional validation runs locally. ASIO checks apply to affected audio/device or feature wiring, and full workspace checks are an explicit release or broad-impact entry point.
 
 | Tool | Purpose |
 |------|---------|
@@ -63,9 +76,9 @@ Rust unit and integration tests live with the Cargo workspace packages. Use the 
 | [Spectral UI validation](../tools/validate-spectral-ui.ps1) | Waveform and UI snapshots with isolated data |
 | [Portable validation](../tools/validate-portable.ps1) | Packaged executable identity, startup and license materials |
 | [Rust search benchmark](../crates/audiolib-db/src/bin/search-benchmark.rs) | Actual-service P50/P95/P99 measurements on 1M+ records |
-| [Release CI](../tools/ci-release.ps1) | Exact-tag default/ASIO checks, release build and clean-checkout packaging |
+| [Release CI](../tools/ci-release.ps1) | Tag/version identity, release build, packaging, privacy and checksum checks; runtime validation stays local |
 
-These scripts are maintained regression tooling. First-run import checks use the development workspace's original library; CI's `-CleanCheckout` portable mode generates its own synthetic WAV and starts from an isolated empty library.
+These scripts are maintained regression tooling. Legacy import acceptance requires its explicit fixture; local portable validation's `-CleanCheckout` mode generates a synthetic WAV and starts from an isolated empty library. Cloud release reports record runtime validation as `not-run`.
 
 ## Retained requirements and historical design
 

@@ -180,8 +180,28 @@ mod tests {
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
         let server = TestServer::start(move |request| {
+            if request.method == "GET" && request.path == "/api/v1/health" {
+                return TestResponse::json(200, r#"{"status":"ok","version":"0.5.0"}"#);
+            }
+            if request.method == "GET" && request.path == "/api/v1/capabilities" {
+                return TestResponse::json(200, r#"{"manage_mode":"all","can_manage":true}"#);
+            }
             if request.method == "GET" && request.path == "/api/v1/library" {
                 return TestResponse::json(200, LIBRARY);
+            }
+            if request.method != "GET" {
+                assert_eq!(request.header(crate::LIBRARY_ID_HEADER), Some("lib-wc"));
+                let catalog: audiolib_core::compatibility::CompatibilityManifest =
+                    serde_json::from_str(
+                        request
+                            .header(audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    catalog,
+                    audiolib_core::compatibility::compatibility_manifest()
+                );
             }
             log.lock().unwrap().push((
                 request.method.clone(),

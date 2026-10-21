@@ -10,6 +10,7 @@ fn deferred_metadata_hydration_matches_direct_sql_for_every_sort_and_visibility(
     let path = temp.path().join("paging.db");
     let provider = SqliteProvider::open(&path).unwrap();
     let conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
         INSERT INTO folder_closure VALUES(1,1,0);",
@@ -130,6 +131,7 @@ fn unfiltered_fts_counts_subtract_only_matching_missing_records_for_every_sort()
     let path = temp.path().join("count-missing.db");
     let provider = SqliteProvider::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     for (index, (filename, missing)) in [
         ("Metal A.wav", false),
         ("Metal a.wav", true),
@@ -245,6 +247,7 @@ fn table_column_sorts_keep_annotation_priority_source_fallback_and_stable_pages(
     let path = temp.path().join("table-sorts.db");
     let provider = SqliteProvider::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     for (id, channels, tags, source, missing) in [
         (1, 2, "Zulu", "aardvark", false),
         (2, 1, "Beta", "zulu", false),
@@ -329,6 +332,7 @@ fn sparse_and_dense_missing_boundaries_keep_exact_counts_and_filename_pages() {
     let path = temp.path().join("count-boundaries.db");
     let provider = SqliteProvider::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<512)
          INSERT INTO audio_files(id,file_path,filename,missing,user_notes)

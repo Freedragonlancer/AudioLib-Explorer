@@ -12,6 +12,7 @@ fn fixture() -> (tempfile::TempDir, SqliteProvider) {
     let path = temp.path().join("facets.db");
     let provider = SqliteProvider::open(&path).unwrap();
     let conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,parent_id,total_file_count) VALUES
          (1,'root','root',NULL,999),(2,'root/child','child',1,999),
@@ -32,9 +33,7 @@ fn fixture() -> (tempfile::TempDir, SqliteProvider) {
         (7, None, "gore unfiled.wav", false),
     ] {
         conn.execute(
-            "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,folder_id,
-             missing,sample_rate,bit_depth,channels,duration,user_rating,favorite,user_tags,user_color)
-             VALUES(?1,?2,?2,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,missing,sample_rate,bit_depth,channels,duration,user_rating,favorite,user_tags,user_color) VALUES(?1,?2,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![id, name, folder, missing, if id % 2 == 0 { 48000 } else { 96000 },
                 if id % 2 == 0 { 24 } else { 16 }, if id % 2 == 0 { 2 } else { 1 },
                 f64::from(id), id % 6, id % 2 == 0,

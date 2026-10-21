@@ -2,9 +2,14 @@
 //! SQLite library data, lossless legacy import, and bounded background scanning.
 #[cfg(test)]
 mod folder_rollup_tests;
+#[cfg(test)]
+mod full_library_validation;
 mod id_membership;
+mod import_lease;
 mod list_waveforms;
+pub mod local_play_history;
 mod management;
+pub mod migration;
 mod owned_cancellation;
 #[cfg(feature = "scanner")]
 pub mod scanner;
@@ -15,8 +20,10 @@ mod search_candidates;
 mod search_facets;
 mod search_rank_parallel;
 mod search_sorted;
+mod search_storage;
 mod search_text;
 mod space;
+pub mod sqlite_engine;
 mod sqlite_mmap;
 mod wal;
 pub use wal::CheckpointStage;
@@ -27,8 +34,8 @@ use audiolib_core::AudioMetadata;
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
     FileVisibility, Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats,
-    MaintenanceAction, MaintenanceReport, MetadataPatch, PlayRecord, RestoreReport, Result,
-    ScanSession, SearchPage, SearchRequest, SortOrder, TransferReport,
+    MaintenanceAction, MaintenanceReport, MetadataPatch, RestoreReport, Result, ScanSession,
+    SearchPage, SearchRequest, SortOrder, TransferReport,
 };
 use jieba_rs::Jieba;
 use rusqlite::{
@@ -45,6 +52,16 @@ pub const MIN_SNAPSHOT_SCHEMA: i64 = schema::MIN_SNAPSHOT_SCHEMA_VERSION;
 /// use an owned copy when their derived search state needs upgrading; the source is preserved.
 pub const MAX_SNAPSHOT_SCHEMA: i64 = schema::SCHEMA_VERSION;
 const _: () = assert!(MIN_SNAPSHOT_SCHEMA <= MAX_SNAPSHOT_SCHEMA);
+
+/// Register the exact shared scalar functions required by library indexes/triggers.
+///
+/// Owned import/validation tools must configure each raw SQLite connection before
+/// executing statements that invoke these functions. This does not acquire a
+/// library lease or authorize writes; application business writes use DataProvider.
+/// Registration itself changes neither database contents nor schema.
+pub fn register_library_functions(conn: &Connection) -> Result<()> {
+    schema::register_tokenizer(conn, load_tokenizer())
+}
 
 pub use search_rank_parallel::{
     ParallelRankingDiagnostics, SQLITE_AUXILIARY_READER_CACHE_KB, auxiliary_search_reader_count,
@@ -65,6 +82,17 @@ pub enum SnapshotUpgradeProgress {
     Preparing,
     /// Save and validate the original library before changing its derived search data.
     BackingUp,
+    /// Business rows durably copied into the owned candidate.
+    Copying {
+        /// Completed audio rows in the candidate.
+        completed: u64,
+        /// Total source audio rows.
+        total: u64,
+    },
+    /// Merge candidate FTS segments without changing business identities.
+    Compacting,
+    /// Atomically publish the fully validated candidate.
+    Publishing,
     /// Recompute derived search text for this many of the snapshot's audio records.
     Tokenizing {
         /// Audio records whose derived text has been recomputed.
@@ -288,6 +316,27 @@ pub struct MigrationReport {
 /// Snapshot a read-only legacy source through SQLite's backup API, including committed WAL.
 /// Existing destinations are never replaced. Original library tables and IDs remain intact.
 pub fn import_legacy(source: &Path, destination: &Path) -> Result<MigrationReport> {
+    import_legacy_with_history(source, destination, None)
+}
+
+/// Client-local import of a read-only old library. A reviewed old-format copy is
+/// published first, then its durable final-path job backs up/imports local history
+/// before retirement. A later failure leaves that owned target/job recoverable;
+/// another source cannot replace it. The original source always remains intact.
+pub fn import_legacy_local(
+    source: &Path,
+    destination: &Path,
+    data_root: &Path,
+    history_limit: u32,
+) -> Result<MigrationReport> {
+    import_legacy_with_history(source, destination, Some((data_root, history_limit)))
+}
+
+fn import_legacy_with_history(
+    source: &Path,
+    destination: &Path,
+    history: Option<(&Path, u32)>,
+) -> Result<MigrationReport> {
     if !source.is_file() {
         return Err(Error::NotFound(source.display().to_string()));
     }
@@ -299,14 +348,19 @@ pub fn import_legacy(source: &Path, destination: &Path) -> Result<MigrationRepor
     if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
+    let destination_lease = import_lease::ImportDestinationLease::acquire(destination)?;
+    let destination = destination_lease.destination();
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
+    let owned = tempfile::Builder::new()
+        .prefix("audiolib-import-owned-")
+        .tempdir_in(parent)?;
     let staging = tempfile::Builder::new()
         .prefix("audiolib-import-")
         .suffix(".db")
-        .tempfile_in(parent)?;
+        .tempfile_in(owned.path())?;
     let _stage_sidecar = management::OwnedAdministrationSidecar::new(staging.path())?;
     let src =
         Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(db_error)?;
@@ -318,6 +372,78 @@ pub fn import_legacy(source: &Path, destination: &Path) -> Result<MigrationRepor
         backup
             .run_to_completion(256, Duration::from_millis(10), None)
             .map_err(db_error)?;
+        drop(backup);
+        let version: i64 = dst
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(db_error)?;
+        if version < schema::MIN_SNAPSHOT_SCHEMA_VERSION {
+            schema::register_tokenizer(&dst, load_tokenizer())?;
+            schema::migrate(&mut dst)?;
+            schema::backfill_source_tags(&mut dst)?;
+        }
+    }
+    if let Some((root, limit)) = history {
+        let copy = Connection::open_with_flags(staging.path(), OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(db_error)?;
+        let mode: String = copy
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .map_err(db_error)?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(Error::Validation(
+                "Owned import copy must be standalone before publication".into(),
+            ));
+        }
+        drop(copy);
+        let cancel = AtomicBool::new(false);
+        let diagnosis = migration::diagnose(staging.path(), &cancel)?;
+        if diagnosis.decision.disposition
+            != Some(audiolib_core::compatibility::MigrationDisposition::Compatible)
+            || diagnosis.decision.execution_state
+                != audiolib_core::compatibility::ExecutionState::Ready
+            || !diagnosis.findings.is_empty()
+        {
+            // This read-only preflight rejects directly known dependency failures
+            // before either the final path or client history is touched. Legacy
+            // normalization stays in the shared durable engine, including its
+            // business-preservation checks and any deferred dependency diagnosis.
+            migration::plan(staging.path(), &cancel)?;
+        }
+        fs::create_dir_all(root)?;
+        let root = root.canonicalize()?;
+        destination_lease.write_local_intent(&root, limit)?;
+        staging.as_file().sync_all()?;
+        staging
+            .persist_noclobber(destination)
+            .map_err(|error| Error::Io(error.error))?;
+        SqliteProvider::validate_existing_for_open(destination)?;
+        // The explicit owner is checked against this real final file. Public
+        // opens cannot bypass the shared lease while this import still owns it.
+        let provider = SqliteProvider::open_with_history_owner_cancellable(
+            destination,
+            Some((&root, limit)),
+            &cancel,
+            |_| {},
+            Some(&destination_lease),
+        )?;
+        provider.check_integrity()?;
+        let integrity = provider.check_library()?;
+        if !integrity.is_ok() {
+            return Err(Error::Database(integrity.errors.join("; ")));
+        }
+        let report = MigrationReport {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            schema_version: schema::SCHEMA_VERSION,
+            audio_files: provider
+                .reader()?
+                .query_row("SELECT COUNT(*) FROM audio_files", [], |row| {
+                    unsigned(row, 0)
+                })
+                .map_err(db_error)?,
+            source_preserved: true,
+        };
+        provider.checkpoint_wal()?;
+        return Ok(report);
     }
     let provider = SqliteProvider::open(staging.path())?;
     provider.check_integrity()?;
@@ -380,7 +506,44 @@ impl SqliteProvider {
     pub fn open_with_progress_cancellable(
         path: &Path,
         cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_history_cancellable(path, None, cancel, progress)
+    }
+
+    /// Explicit client-local create/open. Legacy history is imported from the
+    /// verified rollback backup before the shared migration changes the library.
+    /// Server authorities and remote snapshots must use their existing entry points.
+    pub fn open_local_with_progress_cancellable(
+        path: &Path,
+        data_root: &Path,
+        history_limit: u32,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_history_cancellable(
+            path,
+            Some((data_root, history_limit)),
+            cancel,
+            progress,
+        )
+    }
+
+    fn open_with_history_cancellable(
+        path: &Path,
+        history: Option<(&Path, u32)>,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::open_with_history_owner_cancellable(path, history, cancel, progress, None)
+    }
+
+    fn open_with_history_owner_cancellable(
+        path: &Path,
+        history: Option<(&Path, u32)>,
+        cancel: &AtomicBool,
         mut progress: impl FnMut(SnapshotUpgradeProgress),
+        import_owner: Option<&import_lease::ImportDestinationLease>,
     ) -> Result<Self> {
         if cancel.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
@@ -393,32 +556,67 @@ impl SqliteProvider {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
-        let mut conn = Connection::open(path).map_err(db_error)?;
-        let upgrade = schema::needs_upgrade(&conn)?;
-        let mut scan_lease = if upgrade {
-            Some(management::LibraryLease::acquire(path)?)
+        let (open_path, creation_lease, existing_import_lease) = if let Some(owner) = import_owner {
+            let canonical = path.canonicalize()?;
+            if canonical != owner.destination() {
+                return Err(Error::Validation(
+                    "Import lease belongs to a different library destination".into(),
+                ));
+            }
+            (canonical, None, None)
+        } else if path.exists() {
+            let lease = import_lease::ExistingImportOpenLease::acquire(path)?;
+            (lease.destination().to_path_buf(), None, Some(lease))
         } else {
-            None
+            // The exclusive lease rechecks the path after acquisition. It may
+            // already exist if another creator finished after our first probe.
+            let lease = import_lease::ImportDestinationLease::acquire_for_create(path)?;
+            (lease.destination().to_path_buf(), Some(lease), None)
         };
-        let mut isolation = if upgrade {
-            management::AdministrationLease::exclusive(path)?
+        let path = open_path.as_path();
+        // The same persistent inode carries a local owner receipt written before
+        // publication. A process crash before job registration cannot erase it.
+        let import_intent = if let Some(owner) = import_owner {
+            owner.authorize_history(history)?
+        } else if let Some(lease) = &creation_lease {
+            lease.authorize_history(history)?
+        } else if let Some(lease) = &existing_import_lease {
+            lease.authorize_history(history)?
         } else {
-            management::AdministrationLease::shared(path)?
+            unreachable!("Every writable open must own an import lease")
         };
-        // Recheck after acquiring the lease: another administrator may have restored
-        // an older snapshot between the read-only probe and this shared acquisition.
-        if !upgrade && schema::needs_upgrade(&conn)? {
-            drop(isolation);
-            scan_lease = Some(management::LibraryLease::acquire(path)?);
-            isolation = management::AdministrationLease::exclusive(path)?;
+        let history = history.map(|(root, limit)| {
+            (
+                root,
+                import_intent
+                    .as_ref()
+                    .map_or(limit, |intent| intent.limit()),
+            )
+        });
+        // Establish a new empty file only where the caller explicitly permits create.
+        // Existing-library CLI paths validate existence before reaching this method.
+        let flags = if creation_lease.is_some() {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        };
+        drop(Connection::open_with_flags(path, flags).map_err(db_error)?);
+        progress(SnapshotUpgradeProgress::Preparing);
+        match history {
+            Some((root, limit)) => {
+                migration::prepare_local_writable(path, root, limit, cancel, &mut progress)?
+            }
+            None => migration::prepare_writable(path, cancel, &mut progress)?,
         }
-        let _scan_lease = scan_lease;
-        let _isolation = isolation;
-        let _upgrade = if _scan_lease.is_some() {
-            Some(management::SearchUpgradeLease::acquire(path, true)?)
-        } else {
-            None
-        };
+        let _isolation = management::AdministrationLease::shared(path)?;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(db_error)?;
+        // An administrator may replace a file between preparation and lease acquisition.
+        if !schema::current_format_ready(&conn)? {
+            return Err(Error::Busy(
+                "Library changed during startup; retry the shared migration check".into(),
+            ));
+        }
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(db_error)?;
         conn.execute_batch(
@@ -430,28 +628,8 @@ impl SqliteProvider {
         conn.pragma_update(None, "mmap_size", 0).map_err(db_error)?;
         let tokenizer = load_tokenizer();
         schema::register_tokenizer(&conn, tokenizer.clone())?;
-        progress(SnapshotUpgradeProgress::Preparing);
-        // This startup connection is not yet published. Interrupting its current
-        // statement rolls back only that batch; earlier committed watermarks survive.
-        owned_cancellation::run(&mut conn, cancel, |conn| {
-            schema::migrate_resumable(conn, path, cancel, &mut |event| {
-                progress(event);
-                if cancel.load(Ordering::Acquire) {
-                    Err(Error::Cancelled)
-                } else {
-                    Ok(())
-                }
-            })
-        })?;
-        // Batched and resumable: an interrupted run continues from `source_tags_progress`.
-        // On failure (e.g. Busy) the library still opens and tag filters use the JSON path.
-        progress(SnapshotUpgradeProgress::SourceTags);
-        let derived =
-            schema::backfill_source_tags(&mut conn).is_ok() && schema::source_tags_ready(&conn)?;
-        if upgrade {
-            wal::truncate(&conn)?;
-        }
-        Ok(Self {
+        let derived = schema::source_tags_ready(&conn)?;
+        let provider = Self {
             path: path.to_path_buf(),
             read_only: false,
             writer: Mutex::new(conn),
@@ -465,7 +643,20 @@ impl SqliteProvider {
             derived_tags: AtomicBool::new(derived),
             list_waveform_memory: Default::default(),
             _owned_snapshot_directory: None,
-        })
+        };
+        // Only a completed local/p1 provider can retire the durable import owner.
+        // Keep its lock inode; contention during shared-to-exclusive cleanup
+        // leaves the receipt available for the next matching local open.
+        if let Some(intent) = &import_intent {
+            if let Some(owner) = import_owner {
+                owner.clear_completed_intent(intent)?;
+            } else if let Some(lease) = &creation_lease {
+                lease.clear_completed_intent(intent)?;
+            } else if let Some(lease) = &existing_import_lease {
+                lease.try_clear_completed_intent(intent)?;
+            }
+        }
+        Ok(provider)
     }
 
     /// Upgrade older source-keyword text through checked maintenance. Idempotent;
@@ -542,68 +733,38 @@ impl SqliteProvider {
     }
 
     /// Upgrade an exclusively owned snapshot with synchronous phase and row progress.
-    /// Tokenization and FTS construction share one transaction; cancellation before
-    /// its commit rolls it back. Callers discard owned staging on later cancellation.
+    /// Uses the shared durable migration engine inside the caller's owned directory.
+    /// Callers may discard that entire directory on cancellation or retain it to resume.
     /// Callbacks must return promptly and must not access the upgrading database.
     pub fn upgrade_owned_snapshot_with_progress_cancellable(
         path: &Path,
         cancel: &AtomicBool,
         mut progress: impl FnMut(SnapshotUpgradeProgress),
     ) -> Result<bool> {
-        let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(db_error)?;
-        conn.busy_timeout(Duration::from_secs(5))
+        schema::validate_library_identity(&conn)?;
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
-        owned_cancellation::run(&mut conn, cancel, |conn| {
-            let mut report = |event| {
-                progress(event);
-                if cancel.load(Ordering::Acquire) {
-                    Err(Error::Cancelled)
-                } else {
-                    Ok(())
-                }
-            };
-            report(SnapshotUpgradeProgress::Preparing)?;
-            schema::validate_library_identity(conn)?;
-            let version: i64 = conn
-                .pragma_query_value(None, "user_version", |row| row.get(0))
-                .map_err(db_error)?;
-            if version > MAX_SNAPSHOT_SCHEMA {
-                return Err(Error::NewerDatabase {
-                    what: "schema".into(),
-                    found: version,
-                    supported: MAX_SNAPSHOT_SCHEMA,
-                });
-            }
-            if !snapshot_schema_supported(version) {
-                return Err(Error::Database(format!(
-                    "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
-                )));
-            }
-            if !schema::needs_upgrade(conn)? {
-                return Ok(false);
-            }
-            let mode: String = conn
-                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
-                .map_err(db_error)?;
-            if !mode.eq_ignore_ascii_case("delete") {
-                return Err(Error::Database(
-                    "Owned snapshot must use rollback-journal mode".into(),
-                ));
-            }
-            // Match ordinary writer caching without changing the owned snapshot's
-            // rollback journal or synchronous durability. Large FTS builds otherwise
-            // fall back to SQLite's small default cache and disk-backed sort work.
-            conn.execute_batch(
-                "PRAGMA foreign_keys=ON; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;",
-            )
-            .map_err(db_error)?;
-            schema::register_tokenizer(conn, load_tokenizer())?;
-            schema::migrate_with_progress(conn, &mut report)?;
-            report(SnapshotUpgradeProgress::SourceTags)?;
-            schema::backfill_source_tags(conn)?;
-            Ok(true)
-        })
+        if version > MAX_SNAPSHOT_SCHEMA {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: MAX_SNAPSHOT_SCHEMA,
+            });
+        }
+        if !snapshot_schema_supported(version) {
+            return Err(Error::Database(format!(
+                "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
+            )));
+        }
+        if version == schema::SCHEMA_VERSION && schema::current_format_ready(&conn)? {
+            return Ok(false);
+        }
+        drop(conn);
+        migration::prepare_writable(path, cancel, &mut progress)?;
+        Ok(true)
     }
 
     /// `PRAGMA data_version` of this provider's writer connection. SQLite changes it only
@@ -643,6 +804,24 @@ impl SqliteProvider {
         cancel: &AtomicBool,
         progress: impl FnMut(SnapshotUpgradeProgress),
     ) -> Result<Self> {
+        Self::validate_existing_for_open(path)?;
+        Self::open_with_progress_cancellable(path, cancel, progress)
+    }
+
+    /// Open an existing local client library, importing legacy local history
+    /// before retirement. Missing/unrelated sources are rejected without creating files.
+    pub fn open_existing_local_with_progress_cancellable(
+        path: &Path,
+        data_root: &Path,
+        history_limit: u32,
+        cancel: &AtomicBool,
+        progress: impl FnMut(SnapshotUpgradeProgress),
+    ) -> Result<Self> {
+        Self::validate_existing_for_open(path)?;
+        Self::open_local_with_progress_cancellable(path, data_root, history_limit, cancel, progress)
+    }
+
+    fn validate_existing_for_open(path: &Path) -> Result<()> {
         if !path.is_file() {
             return Err(Error::NotFound(path.display().to_string()));
         }
@@ -665,8 +844,7 @@ impl SqliteProvider {
                 schema::SCHEMA_VERSION
             )));
         }
-        drop(probe);
-        Self::open_with_progress_cancellable(path, cancel, progress)
+        Ok(())
     }
 
     /// Open a schema-current library without writing its source file. Older derived
@@ -754,7 +932,7 @@ impl SqliteProvider {
     }
 
     /// Server mode: write the annotation values of records returned by the server (after a
-    /// metadata write or a recorded play) into a downloaded snapshot, so the read-only
+    /// metadata write) into a downloaded snapshot, so the read-only
     /// provider that has it open sees them without a new download. Keeps the snapshot's
     /// rollback-journal mode (no WAL, no migrations) and refreshes the tokenized FTS
     /// columns exactly like `update_metadata`. One transaction: an id missing from the
@@ -762,6 +940,8 @@ impl SqliteProvider {
     pub fn apply_snapshot_records(path: &Path, files: &[AudioFile]) -> Result<()> {
         static TOKENIZER: std::sync::OnceLock<Arc<Jieba>> = std::sync::OnceLock::new();
         let tokenizer = TOKENIZER.get_or_init(load_tokenizer);
+        let _administration = management::AdministrationLease::shared(path)?;
+        let _upgrade = management::SearchUpgradeLease::acquire(path, false)?;
         let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(db_error)?;
         conn.busy_timeout(Duration::from_secs(5))
@@ -784,28 +964,46 @@ impl SqliteProvider {
         // The probe rejects all known newer feature revisions before any write.
         // An older search revision remains compatible with annotation patching.
         let _current_search_text = schema::search_text_is_current(&conn)?;
+        schema::ensure_ready(&conn)?;
+        schema::validate_library_identity(&conn)?;
+        schema::register_tokenizer(&conn, tokenizer.clone())?;
+        if version == schema::SCHEMA_VERSION && !schema::readable_format_ready(&conn)? {
+            return Err(Error::Validation(
+                "Snapshot format is not ready for incremental Metadata".into(),
+            ));
+        }
         let tx = conn.transaction().map_err(db_error)?;
         {
             let mut update = tx
                 .prepare(
-                    "UPDATE audio_files SET user_tags=?1,user_tags_tokenized=?2,user_notes=?3,
-                    user_notes_tokenized=?4,favorite=?5,user_color=?6,play_count=?7
-                    WHERE id=?8",
+                    if version==schema::SCHEMA_VERSION {
+                        "UPDATE audio_files SET user_tags=?1,user_notes=?2,favorite=?3,user_color=?4 WHERE id=?5"
+                    } else {"UPDATE audio_files SET user_tags=?1,user_tags_tokenized=?2,user_notes=?3,
+                    user_notes_tokenized=?4,favorite=?5,user_color=?6
+                    WHERE id=?7"},
                 )
                 .map_err(db_error)?;
             for file in files {
-                let changed = update
-                    .execute(params![
+                let changed = if version == schema::SCHEMA_VERSION {
+                    update.execute(params![
+                        file.tags,
+                        file.notes,
+                        i64::from(file.favorite),
+                        file.color.as_deref().filter(|color| !color.is_empty()),
+                        file.id
+                    ])
+                } else {
+                    update.execute(params![
                         file.tags,
                         tokenize(tokenizer, &file.tags),
                         file.notes,
                         tokenize(tokenizer, &file.notes),
                         i64::from(file.favorite),
                         file.color.as_deref().filter(|color| !color.is_empty()),
-                        i64::try_from(file.play_count).unwrap_or(i64::MAX),
                         file.id,
                     ])
-                    .map_err(db_error)?;
+                }
+                .map_err(db_error)?;
                 if changed == 0 {
                     return Err(Error::NotFound(format!("Audio {}", file.id)));
                 }
@@ -821,6 +1019,14 @@ impl SqliteProvider {
         let isolation = management::AdministrationLease::shared(&self.path)?;
         let conn = self.writer_unlocked()?;
         schema::ensure_ready(&conn)?;
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(db_error)?;
+        if version != schema::SCHEMA_VERSION {
+            return Err(Error::Busy(
+                "Library format changed; reopen before writing".into(),
+            ));
+        }
         Ok(WriteLease {
             conn,
             _isolation: isolation,
@@ -1060,33 +1266,25 @@ impl SqliteProvider {
                 .and_then(|value| value.as_str());
             let ix_take = attributes.get("ixml_take").and_then(|value| value.as_str());
             let description = item.metadata.bext_description.as_str();
-            let filename_tokens = tokenize(&self.tokenizer, &filename);
-            let description_tokens = tokenize(
-                &self.tokenizer,
-                &audiolib_core::source_metadata_search_text(description, &attributes),
-            );
-            let ix_scene_tokens = tokenize(&self.tokenizer, ix_scene.unwrap_or(""));
-            let ix_take_tokens = tokenize(&self.tokenizer, ix_take.unwrap_or(""));
             if let Some(id) = existing {
                 tx.prepare_cached("UPDATE audio_files SET filename=?2,file_size=?3,sample_rate=?4,bit_depth=?5,channels=?6,
                     duration=?7,codec=?8,bwf_description=?9,folder_id=?10,source_mtime_ns=?11,metadata_json=?12,
-                    filename_tokenized=?13,bwf_description_tokenized=?14,ixml_scene=?15,ixml_take=?16,
-                    ixml_scene_tokenized=?17,ixml_take_tokenized=?18,seen_scan_id=?19,source_tags_text=?20,missing=0,
+                    ixml_scene=?13,ixml_take=?14,seen_scan_id=?15,source_tags_text=?16,missing=0,
                     modified_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1").map_err(db_error)?.execute(params![id,
                     filename,file_size,item.metadata.sample_rate,item.metadata.bit_depth,item.metadata.channels,
                     item.metadata.duration,item.metadata.encoding,description,folder_id,item.mtime_ns,
-                    attributes.to_string(),filename_tokens,description_tokens,ix_scene,ix_take,ix_scene_tokens,ix_take_tokens,session_id,source_tags_text]).map_err(db_error)?;
+                    attributes.to_string(),ix_scene,ix_take,session_id,source_tags_text]).map_err(db_error)?;
                 updated += 1;
             } else {
                 let id = schema::allocate_audio_id(tx)?;
                 tx.prepare_cached("INSERT INTO audio_files(file_path,path_key,filename,file_size,sample_rate,bit_depth,channels,
-                    duration,codec,bwf_description,folder_id,source_mtime_ns,metadata_json,filename_tokenized,
-                    bwf_description_tokenized,ixml_scene,ixml_take,ixml_scene_tokenized,ixml_take_tokenized,seen_scan_id,
-                    id,missing,created_at,modified_at,source_tags_text) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,0,
-                    strftime('%Y-%m-%d %H:%M:%f','now'),strftime('%Y-%m-%d %H:%M:%f','now'),?22)").map_err(db_error)?.execute(params![
+                    duration,codec,bwf_description,folder_id,source_mtime_ns,metadata_json,
+                    ixml_scene,ixml_take,seen_scan_id,
+                    id,missing,created_at,modified_at,source_tags_text) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,
+                    strftime('%Y-%m-%d %H:%M:%f','now'),strftime('%Y-%m-%d %H:%M:%f','now'),?18)").map_err(db_error)?.execute(params![
                     display_path(&item.path),key,filename,file_size,item.metadata.sample_rate,item.metadata.bit_depth,item.metadata.channels,
                     item.metadata.duration,item.metadata.encoding,description,folder_id,item.mtime_ns,
-                    attributes.to_string(),filename_tokens,description_tokens,ix_scene,ix_take,ix_scene_tokens,ix_take_tokens,session_id,id,source_tags_text]).map_err(db_error)?;
+                    attributes.to_string(),ix_scene,ix_take,session_id,id,source_tags_text]).map_err(db_error)?;
                 added += 1;
             }
             // Missing supported header fields clear legacy columns after successful probing.
@@ -1368,13 +1566,15 @@ impl SqliteProvider {
                 self.derived_tags.load(Ordering::Acquire),
             )?;
             let exclude = visibility_only && request.filters.visibility == FileVisibility::Present;
+            let filter_from = search_candidates::covering_numeric_filter_from(tx, request)?
+                .unwrap_or(from.as_str());
             let sql = if exclude {
                 "SELECT id FROM audio_files INDEXED BY idx_audio_files_not_present WHERE missing IS NOT 0".to_string()
             } else if visibility_only && request.filters.visibility == FileVisibility::Missing {
                 "SELECT id FROM audio_files WHERE missing=1".to_string()
             } else {
                 format!(
-                    "SELECT af.id FROM {from} WHERE {}",
+                    "SELECT af.id FROM {filter_from} WHERE {}",
                     conditions.join(" AND ")
                 )
             };
@@ -1428,7 +1628,8 @@ impl SqliteProvider {
         }
         check_cancel()?;
         let json = serde_json::to_string(&page_ids).map_err(|e| Error::Database(e.to_string()))?;
-        let mut statement = tx.prepare(&format!("SELECT {AUDIO_SELECT} FROM audio_files af WHERE af.id IN (SELECT value FROM json_each(?1))"))
+        let projection = audio_projection(tx)?;
+        let mut statement = tx.prepare(&format!("SELECT {projection} FROM audio_files af WHERE af.id IN (SELECT value FROM json_each(?1))"))
             .map_err(db_error)?;
         let mut files = statement
             .query_map([json], audio_from_row)
@@ -1574,7 +1775,12 @@ impl SqliteProvider {
                 cache_hit: false,
             });
         }
-        let sorted_duration_sql = search_sorted::page_sql(&tx, request, no_missing, total)?;
+        let sorted_page_sql =
+            if request.order_by == SortOrder::Tags && !self.derived_tags.load(Ordering::Acquire) {
+                None
+            } else {
+                search_sorted::page_sql(&tx, request, no_missing, total)?
+            };
         let order = match request.order_by {
             SortOrder::Relevance if has_query => "bm25(audio_search)",
             SortOrder::Relevance | SortOrder::Filename => "af.filename COLLATE NOCASE",
@@ -1600,14 +1806,15 @@ impl SqliteProvider {
         // SQLite's bounded top-N sorter is faster than FTS5's internal rank sorter for
         // very broad matches. Hydrate only the ranked page after confirming visibility
         // in this transaction; the scores are exactly FTS5's default BM25 scores.
-        let page_sql = if let Some(sql) = sorted_duration_sql {
+        let projection = audio_projection(&tx)?;
+        let page_sql = if let Some(sql) = sorted_page_sql {
             sql
         } else if no_missing && request.order_by == SortOrder::Relevance {
             format!(
                 "WITH ranked AS MATERIALIZED (
                     SELECT rowid,bm25(audio_search) AS score FROM audio_search
                     WHERE audio_search MATCH ? ORDER BY score,rowid ASC LIMIT ? OFFSET ?
-                ) SELECT {AUDIO_SELECT} FROM ranked
+                ) SELECT {projection} FROM ranked
                 INNER JOIN audio_files af ON af.id=ranked.rowid
                 ORDER BY ranked.score ASC,af.id ASC"
             )
@@ -1619,7 +1826,7 @@ impl SqliteProvider {
                 "WITH ranked AS MATERIALIZED (
                     SELECT af.id,{order} AS sort_value FROM {from} WHERE {where_sql}
                     ORDER BY sort_value {direction},af.id ASC LIMIT ? OFFSET ?
-                ) SELECT {AUDIO_SELECT} FROM ranked JOIN audio_files af ON af.id=ranked.id
+                ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
                 ORDER BY ranked.sort_value {direction},af.id ASC"
             )
         };
@@ -1744,6 +1951,9 @@ impl SqliteProvider {
         } else if use_filter_ids {
             let mut filter_request = request.clone();
             filter_request.query.clear();
+            // Facets count all matching folders, independent of the selected
+            // folder. Keep the covering-index proof aligned with that SQL scope.
+            filter_request.folder_id = None;
             let filter_sql = search_sql(
                 &self.tokenizer,
                 &filter_request,
@@ -1761,7 +1971,11 @@ impl SqliteProvider {
             let filter_from = if cold_basic_filter {
                 search_candidates::visible_filter_from(&tx)?
             } else {
-                filter_sql.from.as_str()
+                // A cached BM25 ranking changes only the source of query IDs.
+                // Its numeric membership scan still needs the same covering
+                // index; otherwise idx_duration fetches wide Metadata rows.
+                search_candidates::covering_numeric_filter_from(&tx, &filter_request)?
+                    .unwrap_or(filter_sql.from.as_str())
             };
             let filter_query = format!(
                 "SELECT af.id FROM {filter_from} WHERE {}",
@@ -1901,9 +2115,11 @@ impl DataProvider for SqliteProvider {
     }
 
     fn get_audio(&self, id: i64) -> Result<AudioFile> {
-        self.reader()?
+        let reader = self.reader()?;
+        let projection = audio_projection(&reader)?;
+        reader
             .query_row(
-                &format!("SELECT {AUDIO_SELECT} FROM audio_files af WHERE af.id=?1"),
+                &format!("SELECT {projection} FROM audio_files af WHERE af.id=?1"),
                 [id],
                 audio_from_row,
             )
@@ -1944,21 +2160,16 @@ impl DataProvider for SqliteProvider {
     fn update_metadata(&self, id: i64, patch: &MetadataPatch) -> Result<AudioFile> {
         patch.validate()?;
         let conn = self.writer()?;
-        let mut assignments = vec!["modified_at=strftime('%Y-%m-%d %H:%M:%f','now')".into()];
+        let mut assignments: Vec<String> =
+            vec!["modified_at=strftime('%Y-%m-%d %H:%M:%f','now')".into()];
         let mut values = Vec::<Value>::new();
         if let Some(tags) = &patch.tags {
-            assignments.extend(["user_tags=?".to_string(), "user_tags_tokenized=?".into()]);
-            values.extend([
-                Value::Text(tags.clone()),
-                Value::Text(tokenize(&self.tokenizer, tags)),
-            ]);
+            assignments.push("user_tags=?".into());
+            values.push(Value::Text(tags.clone()));
         }
         if let Some(notes) = &patch.notes {
-            assignments.extend(["user_notes=?".to_string(), "user_notes_tokenized=?".into()]);
-            values.extend([
-                Value::Text(notes.clone()),
-                Value::Text(tokenize(&self.tokenizer, notes)),
-            ]);
+            assignments.push("user_notes=?".into());
+            values.push(Value::Text(notes.clone()));
         }
         if let Some(value) = patch.favorite {
             assignments.push("favorite=?".into());
@@ -1986,37 +2197,13 @@ impl DataProvider for SqliteProvider {
         {
             return Err(Error::NotFound(format!("Audio {id}")));
         }
+        let projection = audio_projection(&conn)?;
         conn.query_row(
-            &format!("SELECT {AUDIO_SELECT} FROM audio_files af WHERE af.id=?1"),
+            &format!("SELECT {projection} FROM audio_files af WHERE af.id=?1"),
             [id],
             audio_from_row,
         )
         .map_err(db_error)
-    }
-
-    fn record_play(&self, id: i64) -> Result<()> {
-        let mut writer = self.writer()?;
-        let tx = writer.transaction().map_err(db_error)?;
-        if tx
-            .execute(
-                // Play counts are no longer recorded (the column stays, unwritten);
-                // the play history row below is.
-                "UPDATE audio_files SET
-            last_played_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1",
-                [id],
-            )
-            .map_err(db_error)?
-            == 0
-        {
-            return Err(Error::NotFound(format!("Audio {id}")));
-        }
-        tx.execute(
-            "INSERT INTO play_history(audio_file_id,played_at,filename,file_path)
-            SELECT id,last_played_at,filename,file_path FROM audio_files WHERE id=?1",
-            [id],
-        )
-        .map_err(db_error)?;
-        tx.commit().map_err(db_error)
     }
 
     fn stats(&self) -> Result<LibraryStats> {
@@ -2082,9 +2269,6 @@ impl DataProvider for SqliteProvider {
     }
     fn scan_history(&self, limit: usize, offset: usize) -> Result<Vec<ScanSession>> {
         self.management_scans(limit, offset)
-    }
-    fn play_history(&self, limit: usize, offset: usize) -> Result<Vec<PlayRecord>> {
-        self.management_plays(limit, offset)
     }
     fn export_library(
         &self,
@@ -2304,14 +2488,20 @@ fn search_sql(
 const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE(af.file_size,0),
  COALESCE(af.sample_rate,0),COALESCE(af.bit_depth,0),COALESCE(af.channels,0),COALESCE(af.duration,0),
  COALESCE(af.user_tags,''),af.user_color,COALESCE(af.user_notes,''),af.favorite,
- COALESCE(af.bwf_description,''),COALESCE(af.play_count,0),af.metadata_json,
+ COALESCE(af.bwf_description,''),af.metadata_json,
  af.bwf_originator,af.bwf_originator_reference,af.bwf_origination_date,af.bwf_origination_time,
  af.bwf_time_reference,af.bwf_version,af.bwf_umid,af.ixml_scene,af.ixml_take,af.ixml_tape,
  af.ixml_circled,af.ixml_wild_track,af.ixml_no_good,af.codec,af.created_at,af.modified_at,
- af.last_played_at,af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0)";
+ af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0)";
+
+fn audio_projection(_conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
+    // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
+    // retired library playback fields are never selected or surfaced.
+    Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
+}
 
 fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
-    let raw: String = row.get(15)?;
+    let raw: String = row.get(14)?;
     let mut attributes =
         serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}));
     if !attributes.is_object() {
@@ -2323,39 +2513,38 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         object.insert("bwf_description".into(), description.into());
     }
     for (index, name) in [
-        (16, "bwf_originator"),
-        (17, "bwf_originator_reference"),
-        (18, "bwf_origination_date"),
-        (19, "bwf_origination_time"),
-        (22, "bwf_umid"),
-        (23, "ixml_scene"),
-        (24, "ixml_take"),
-        (25, "ixml_tape"),
-        (29, "encoding"),
-        (30, "created_at"),
-        (31, "modified_at"),
-        (32, "last_played_at"),
+        (15, "bwf_originator"),
+        (16, "bwf_originator_reference"),
+        (17, "bwf_origination_date"),
+        (18, "bwf_origination_time"),
+        (21, "bwf_umid"),
+        (22, "ixml_scene"),
+        (23, "ixml_take"),
+        (24, "ixml_tape"),
+        (28, "encoding"),
+        (29, "created_at"),
+        (30, "modified_at"),
     ] {
         if let Some(value) = row.get::<_, Option<String>>(index)? {
             object.insert(name.into(), value.into());
         }
     }
     for (index, name) in [
-        (33, "peak_amplitude"),
-        (34, "rms_level"),
-        (35, "spectral_centroid"),
-        (36, "zero_crossing_rate"),
+        (31, "peak_amplitude"),
+        (32, "rms_level"),
+        (33, "spectral_centroid"),
+        (34, "zero_crossing_rate"),
     ] {
         if let Some(value) = row.get::<_, Option<f64>>(index)? {
             object.insert(name.into(), value.into());
         }
     }
     for (index, name) in [
-        (20, "bwf_time_reference"),
-        (21, "bwf_version"),
-        (26, "ixml_circled"),
-        (27, "ixml_wild_track"),
-        (28, "ixml_no_good"),
+        (19, "bwf_time_reference"),
+        (20, "bwf_version"),
+        (25, "ixml_circled"),
+        (26, "ixml_wild_track"),
+        (27, "ixml_no_good"),
     ] {
         if let Some(value) = row.get::<_, Option<i64>>(index)? {
             object.insert(name.into(), value.into());
@@ -2376,9 +2565,8 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         notes: row.get(11)?,
         favorite: row.get(12)?,
         bext_description: row.get(13)?,
-        play_count: unsigned(row, 14)?,
         attributes,
-        missing: row.get(37)?,
+        missing: row.get(35)?,
     })
 }
 
@@ -2508,6 +2696,7 @@ mod search_folder_plan_tests {
         let directory = tempfile::tempdir().unwrap();
         let provider = SqliteProvider::open(&directory.path().join("facet-plan.db")).unwrap();
         let conn = Connection::open(provider.database_path()).unwrap();
+        schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
         conn.execute_batch(
             "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
              INSERT INTO folder_closure VALUES(1,1,0);
@@ -2793,6 +2982,7 @@ mod search_count_tests {
         let path = dir.path().join("library.db");
         let provider = SqliteProvider::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
+        schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
         conn.execute_batch(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<4096)
              INSERT INTO audio_files(id,file_path,filename,missing)
@@ -2859,6 +3049,7 @@ mod search_cancellation_tests {
         let path = dir.path().join("library.db");
         let provider = SqliteProvider::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
+        schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
         conn.execute(
             "INSERT INTO audio_files(file_path,filename) VALUES('metal.wav','metal.wav')",
             [],
@@ -3032,7 +3223,7 @@ mod search_cancellation_tests {
         let path = directory.path().join("library.db");
         let provider = SqliteProvider::open(&path).unwrap();
         let connection = Connection::open(&path).unwrap();
-        schema::register_casefold(&connection).unwrap();
+        schema::register_tokenizer(&connection, load_tokenizer()).unwrap();
         for (id, tag) in [(1, "Straße"), (2, "strassz")] {
             let metadata =
                 serde_json::json!({"wav_metadata": {"fields": {"category": tag}}}).to_string();
@@ -3069,7 +3260,7 @@ mod search_cancellation_tests {
         let path = directory.path().join("unicode-tags.db");
         let provider = SqliteProvider::open(&path).unwrap();
         let connection = Connection::open(&path).unwrap();
-        schema::register_casefold(&connection).unwrap();
+        schema::register_tokenizer(&connection, load_tokenizer()).unwrap();
         for (id, tags, source, missing) in [
             (1, None, "Straße", false),
             (2, Some(""), "strassz", false),

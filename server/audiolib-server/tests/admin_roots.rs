@@ -4,6 +4,8 @@
 //! admin scan wrappers, against temporary libraries and roots of tiny generated WAVs.
 //! Nothing here touches anything outside the temporary directories; every WAV must still
 //! be on disk after a root was removed.
+mod support;
+
 use audiolib_core::{DataProvider, MetadataPatch};
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_server::{
@@ -142,6 +144,7 @@ impl Fixture {
 
     fn count(&self, sql: &str) -> i64 {
         let conn = rusqlite::Connection::open(&self.db).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
         conn.query_row(sql, [], |row| row.get(0)).unwrap()
     }
 }
@@ -164,6 +167,9 @@ async fn request(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    if path.starts_with("/api/v1/") {
+        request = support::modern(request);
+    }
     if let Ok(state) = service.app_state() {
         request = request.header(
             "x-audiolib-library-id",
@@ -561,6 +567,7 @@ async fn client_root_mutations_require_the_opened_library_identity() {
                 .method(method.clone())
                 .uri(format!("/api/v1{path}"))
                 .header("content-type", "application/json");
+            builder = support::modern(builder);
             if let Some(identity) = identity {
                 builder = builder.header("x-audiolib-library-id", identity);
             }
@@ -604,8 +611,8 @@ async fn root_path_update_preserves_ids_annotations_extension_metadata_and_tree_
             },
         )
         .unwrap();
-    f.state.provider().record_play(first.id).unwrap();
     let conn = rusqlite::Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute("UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension','keep') WHERE id=?1", [first.id]).unwrap();
     let folder_ids: Vec<i64> = conn
         .prepare("SELECT id FROM folders ORDER BY id")
@@ -637,15 +644,15 @@ async fn root_path_update_preserves_ids_annotations_extension_metadata_and_tree_
         (
             changed.tags.as_str(),
             changed.notes.as_str(),
-            changed.favorite,
-            changed.play_count
+            changed.favorite
         ),
-        ("custom tag", "Keep me", true, 0)
+        ("custom tag", "Keep me", true)
     );
     assert_eq!(changed.attributes["unknown_extension"], "keep");
     assert_eq!(changed.folder_id, first.folder_id);
     assert_eq!(revision(&f.state).await, before + 1);
     let conn = rusqlite::Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let after_ids: Vec<i64> = conn
         .prepare("SELECT id FROM folders ORDER BY id")
         .unwrap()
@@ -654,7 +661,10 @@ async fn root_path_update_preserves_ids_annotations_extension_metadata_and_tree_
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(folder_ids, after_ids);
-    assert_eq!(f.count("SELECT COUNT(*) FROM play_history"), 1);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM sqlite_schema WHERE name='play_history'"),
+        0
+    );
     assert!(
         fs::read_dir(f.db.parent().unwrap().join("backups"))
             .unwrap()
@@ -740,8 +750,8 @@ async fn case_only_root_rename_preserves_records_and_recovers_the_exact_committe
             },
         )
         .unwrap();
-    f.state.provider().record_play(first.id).unwrap();
     let conn = rusqlite::Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension','keep') WHERE id=?1",
         [first.id],
@@ -789,10 +799,9 @@ async fn case_only_root_rename_preserves_records_and_recovers_the_exact_committe
         (
             changed.tags.as_str(),
             changed.notes.as_str(),
-            changed.favorite,
-            changed.play_count
+            changed.favorite
         ),
-        ("case rename tag", "case rename note", true, 1)
+        ("case rename tag", "case rename note", true)
     );
     assert_eq!(changed.attributes["unknown_extension"], "keep");
     assert_eq!(
@@ -855,8 +864,8 @@ async fn another_live_server_reloads_a_relocated_root_before_scan() {
             },
         )
         .unwrap();
-    f.state.provider().record_play(first.id).unwrap();
     let conn = rusqlite::Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension','keep') WHERE id=?1",
         [first.id],
@@ -920,10 +929,9 @@ async fn another_live_server_reloads_a_relocated_root_before_scan() {
         (
             retained.tags.as_str(),
             retained.notes.as_str(),
-            retained.favorite,
-            retained.play_count
+            retained.favorite
         ),
-        ("shared root tag", "shared root note", true, 0)
+        ("shared root tag", "shared root note", true)
     );
     assert_eq!(retained.attributes["unknown_extension"], "keep");
 }

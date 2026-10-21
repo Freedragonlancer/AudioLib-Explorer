@@ -1,7 +1,8 @@
 // crates/audiolib-db/tests/feature_revision.rs
 //! Additive implementation revisions never downgrade a future library or snapshot.
-use audiolib_core::{DataProvider, Error, MaintenanceAction, SearchRequest};
-use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider};
+mod support;
+use audiolib_core::{DataProvider, Error, SearchRequest};
+use audiolib_db::{SCHEMA_VERSION, SnapshotUpgradeProgress, SqliteProvider};
 use rusqlite::Connection;
 use std::{
     fs,
@@ -10,8 +11,9 @@ use std::{
 };
 
 fn fixture(path: &Path) {
-    let provider = SqliteProvider::open(path).unwrap();
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
+    conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+        .unwrap();
     conn.execute_batch(
         "INSERT INTO audio_files(id,file_path,filename,filename_tokenized,
          user_tags,user_tags_tokenized,user_notes,user_notes_tokenized,user_rating,favorite,metadata_json)
@@ -20,9 +22,8 @@ fn fixture(path: &Path) {
     )
     .unwrap();
     drop(conn);
-    drop(provider);
     // Capture a self-contained database; no committed changes remain in WAL sidecars.
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     let mode: String = conn
         .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
         .unwrap();
@@ -54,7 +55,7 @@ fn assert_business_data(provider: &SqliteProvider) {
     assert_eq!(file.filename, "café.wav");
     assert_eq!(file.tags, "retain tags");
     assert_eq!(file.notes, "private notes");
-    let legacy_rating: i64 = Connection::open(provider.database_path())
+    let legacy_rating: i64 = support::connection(provider.database_path())
         .unwrap()
         .query_row(
             "SELECT user_rating FROM audio_files WHERE id=42",
@@ -100,10 +101,10 @@ fn future_known_revisions_are_rejected_without_changing_source_bytes() {
             replacement.tags = "new café tags".into();
             replacement.notes = "must not overwrite future annotations".into();
             replacement.favorite = false;
-            let conn = Connection::open(&database).unwrap();
+            let conn = support::connection(&database).unwrap();
             conn.execute(
                 "UPDATE audiolib_schema_features SET version=?1 WHERE feature=?2",
-                rusqlite::params![if feature == "tokenization" { 4 } else { 2 }, feature],
+                rusqlite::params![if feature == "tokenization" { 5 } else { 2 }, feature],
             )
             .unwrap();
             if old_tokenization {
@@ -140,6 +141,7 @@ fn current_revisions_keep_owned_and_readonly_snapshots_compatible() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("current.db");
     fixture(&database);
+    drop(SqliteProvider::open_existing(&database).unwrap());
     let original = fs::read(&database).unwrap();
     assert!(SqliteProvider::has_current_search_text(&database).unwrap());
     assert!(!SqliteProvider::upgrade_owned_snapshot(&database).unwrap());
@@ -158,7 +160,7 @@ fn absent_revisions_still_upgrade_owned_copies_and_existing_libraries() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("old-v3.db");
     fixture(&database);
-    let conn = Connection::open(&database).unwrap();
+    let conn = support::connection(&database).unwrap();
     conn.execute_batch("DROP TABLE audiolib_schema_features;")
         .unwrap();
     drop(conn);
@@ -188,7 +190,7 @@ fn missing_performance_indexes_upgrade_only_owned_snapshot_and_keep_search_text(
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("missing-search-index.db");
     fixture(&database);
-    let conn = Connection::open(&database).unwrap();
+    let conn = support::connection(&database).unwrap();
     conn.execute_batch(
         "DROP INDEX idx_audio_search_facets;
          DROP INDEX idx_audio_visible_tagged_folders;
@@ -196,11 +198,9 @@ fn missing_performance_indexes_upgrade_only_owned_snapshot_and_keep_search_text(
     )
     .unwrap();
     let before_text: String = conn
-        .query_row(
-            "SELECT filename_tokenized FROM audio_files WHERE id=42",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT filename FROM audio_files WHERE id=42", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     drop(conn);
     let original = fs::read(&database).unwrap();
@@ -209,17 +209,15 @@ fn missing_performance_indexes_upgrade_only_owned_snapshot_and_keep_search_text(
     let readonly = SqliteProvider::open_read_only(&database).unwrap();
     assert_ne!(readonly.database_path(), database.as_path());
     assert_business_data(&readonly);
-    let upgraded = Connection::open(readonly.database_path()).unwrap();
+    let upgraded = support::connection(readonly.database_path()).unwrap();
     let after_text: String = upgraded
-        .query_row(
-            "SELECT filename_tokenized FROM audio_files WHERE id=42",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT filename FROM audio_files WHERE id=42", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(
         before_text, after_text,
-        "index-only upgrade must not retokenize text"
+        "format repair must preserve source text"
     );
     assert!(SqliteProvider::has_current_search_state(readonly.database_path()).unwrap());
     drop(upgraded);
@@ -231,8 +229,9 @@ fn missing_performance_indexes_upgrade_only_owned_snapshot_and_keep_search_text(
 }
 
 fn revision_two_fold_fixture(path: &Path) {
-    let provider = SqliteProvider::open(path).unwrap();
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
+    conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+        .unwrap();
     conn.execute(
         "INSERT INTO audio_files(id,file_path,filename,user_tags,user_notes,favorite,metadata_json)
          VALUES(42,'N:/fixture/plain.wav','plain.wav',?1,'anchor',1,?2)",
@@ -242,13 +241,7 @@ fn revision_two_fold_fixture(path: &Path) {
         ],
     )
     .unwrap();
-    drop(conn);
-    provider
-        .maintain_library(MaintenanceAction::RebuildSearch)
-        .unwrap();
-    provider.record_play(42).unwrap();
-    drop(provider);
-    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("UPDATE audio_files SET filename_tokenized='plain wav', user_notes_tokenized='anchor', play_count=1;").unwrap();
     // Ordinary words keep exactly the revision-2 representation. Its only
     // differing values here are the original one-grapheme fold tokens below;
     // the existing triggers synchronize these old values with valid postings.
@@ -289,11 +282,11 @@ fn assert_fold_upgrade(provider: &SqliteProvider) {
     assert_eq!(file.tags, "ß");
     assert_eq!(file.notes, "anchor");
     assert!(file.favorite);
-    assert_eq!(file.play_count, 0);
+
     assert_eq!(file.attributes["private"], "keep");
     assert_eq!(file.attributes["wav_metadata"]["fields"]["keywords"], "ﬃ");
-    assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);
-    let conn = Connection::open(provider.database_path()).unwrap();
+
+    let conn = support::connection(provider.database_path()).unwrap();
     let revision: i64 = conn
         .query_row(
             "SELECT version FROM audiolib_schema_features WHERE feature='tokenization'",
@@ -323,7 +316,6 @@ fn revision_two_fold_tokens_upgrade_readonly_copies_owned_and_existing_libraries
     let provider = SqliteProvider::open_read_only(&owned).unwrap();
     assert_eq!(provider.database_path(), owned.as_path());
     assert_fold_upgrade(&provider);
-    drop(provider);
     let upgraded = fs::read(&owned).unwrap();
     assert!(!SqliteProvider::upgrade_owned_snapshot(&owned).unwrap());
     assert_eq!(fs::read(&owned).unwrap(), upgraded);
@@ -332,14 +324,13 @@ fn revision_two_fold_tokens_upgrade_readonly_copies_owned_and_existing_libraries
     fs::copy(&source, &existing).unwrap();
     let provider = SqliteProvider::open_existing(&existing).unwrap();
     assert_fold_upgrade(&provider);
-    drop(provider);
     let reopened = SqliteProvider::open_existing(&existing).unwrap();
     assert_fold_upgrade(&reopened);
     assert_eq!(fs::read(&source).unwrap(), original);
 }
 
 #[test]
-fn cancelled_revision_two_fold_upgrade_rolls_back_text_and_revision() {
+fn cancelled_revision_two_fold_upgrade_preserves_source_and_resumes() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("fold-v2.db");
     revision_two_fold_fixture(&source);
@@ -354,7 +345,7 @@ fn cancelled_revision_two_fold_upgrade_rolls_back_text_and_revision() {
         |event| {
             if matches!(
                 event,
-                SnapshotUpgradeProgress::Tokenizing {
+                SnapshotUpgradeProgress::Indexing {
                     completed: 1,
                     total: 1
                 }
@@ -366,11 +357,19 @@ fn cancelled_revision_two_fold_upgrade_rolls_back_text_and_revision() {
     );
     assert!(retokenized);
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
-    assert_eq!(fs::read(&owned).unwrap(), original);
     assert_eq!(fs::read(&source).unwrap(), original);
-    assert!(!SqliteProvider::has_current_search_text(&owned).unwrap());
-    assert!(SqliteProvider::check_owned_file(&owned).unwrap().is_ok());
-    let conn = Connection::open(&owned).unwrap();
+    let job = audiolib_db::migration::discover(&owned).unwrap().unwrap();
+    assert_eq!(job.phase, audiolib_db::migration::MigrationPhase::Indexing);
+    let backup = support::connection(job.directory.join("backup.db")).unwrap();
+    assert_eq!(
+        backup
+            .query_row("SELECT play_count FROM audio_files WHERE id=42", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    let conn = support::connection(&owned).unwrap();
     let revision: i64 = conn
         .query_row(
             "SELECT version FROM audiolib_schema_features WHERE feature='tokenization'",
@@ -379,6 +378,21 @@ fn cancelled_revision_two_fold_upgrade_rolls_back_text_and_revision() {
         )
         .unwrap();
     assert_eq!(revision, 2);
+    assert_eq!(
+        conn.query_row(
+            "SELECT user_tags_tokenized FROM audio_files WHERE id=42",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "s000073000073"
+    );
+    drop(conn);
+    cancel.store(false, Ordering::Release);
+    audiolib_db::migration::resume(&job.directory, &cancel, &mut |_| Ok(())).unwrap();
+    let provider = SqliteProvider::open_read_only(&owned).unwrap();
+    assert_fold_upgrade(&provider);
+    assert_eq!(fs::read(&source).unwrap(), original);
 }
 
 #[test]
@@ -418,15 +432,19 @@ fn feature_revision_newer_schema_version_is_a_newer_database_error() {
         .unwrap()
         .pragma_update(None, "user_version", 99)
         .unwrap();
+    let original = fs::read(&database).unwrap();
     for result in [
         SqliteProvider::open_existing(&database).map(|_| ()),
+        SqliteProvider::open(&database).map(|_| ()),
         SqliteProvider::open_read_only(&database).map(|_| ()),
         SqliteProvider::upgrade_owned_snapshot(&database).map(|_| ()),
     ] {
         assert!(
-            matches!(&result, Err(Error::NewerDatabase { what, found: 99, .. }) if what == "schema"),
+            matches!(&result, Err(Error::NewerDatabase { what, found: 99, supported })
+                if what == "schema" && *supported == SCHEMA_VERSION),
             "{result:?}"
         );
+        assert_eq!(fs::read(&database).unwrap(), original);
     }
 }
 
@@ -444,7 +462,8 @@ fn feature_revision_newer_local_library_uses_local_wording() {
         .unwrap_err();
     let chinese = error.local_display_text(true);
     assert!(
-        chinese.starts_with("客户端版本过旧：这个音效库") && chinese.contains("schema 99 > 5"),
+        chinese.starts_with("客户端版本过旧：这个音效库")
+            && chinese.contains(&format!("schema 99 > {SCHEMA_VERSION}")),
         "{chinese}"
     );
     assert!(

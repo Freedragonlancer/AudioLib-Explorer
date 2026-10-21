@@ -5,6 +5,18 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Explicit supported legacy handshake for tests focused on unrelated API operations.
+pub(crate) fn legacy_handshake(path: &str) -> Option<TestResponse> {
+    match path {
+        "/api/v1/health" => Some(TestResponse::json(
+            200,
+            r#"{"status":"ok","version":"0.4.11"}"#,
+        )),
+        "/api/v1/capabilities" => Some(TestResponse::json(404, "{}")),
+        _ => None,
+    }
+}
+
 pub(crate) struct TestRequest {
     pub method: String,
     pub path: String,

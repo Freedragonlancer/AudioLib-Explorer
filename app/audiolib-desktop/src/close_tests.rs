@@ -38,6 +38,7 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
         language: "en".into(),
         playback: serde_json::to_value(&playback).unwrap(),
         audition_play_on_single_click: false,
+        play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
         audio_table: Default::default(),
@@ -131,7 +132,19 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
             .total_count,
         0
     );
-    assert!(provider.play_history(10, 0).unwrap().is_empty());
+    let library_id =
+        audiolib_db::local_play_history::local_library_id(provider.database_path()).unwrap();
+    assert!(
+        audiolib_db::local_play_history::LocalPlayHistory::open(
+            &root,
+            &library_id,
+            audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY
+        )
+        .unwrap()
+        .page(10, 0)
+        .unwrap()
+        .is_empty()
+    );
     drop(ui);
     drop(controller);
     drop(provider);

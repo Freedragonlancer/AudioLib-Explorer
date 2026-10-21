@@ -4,16 +4,43 @@ use audiolib_core::{Error, Result};
 use jieba_rs::Jieba;
 use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
 use std::sync::Arc;
+mod current;
+pub(crate) mod definition;
+mod legacy;
 mod search_upgrade;
-pub(crate) use search_upgrade::{ensure_ready, migrate_resumable, pending};
+pub(crate) use current::{
+    create_current, current_format_ready, mark_current, needs_upgrade, readable_format_ready,
+};
+pub(crate) use search_upgrade::{migrate_resumable, pending};
 
-pub const SCHEMA_VERSION: i64 = 5;
+/// Writable target format; legacy normalization remains pinned to v5 below.
+pub const SCHEMA_VERSION: i64 = 6;
+pub const LEGACY_SCHEMA_VERSION: i64 = 5;
 /// Read-only source snapshots remain compatible across schemas 3..=5. Obsolete
 /// derived search state is repaired only in an owned staging or temporary copy.
 pub const MIN_SNAPSHOT_SCHEMA_VERSION: i64 = 3;
 // Revision 3 also indexes multi-letter folds of a single source grapheme, while
 // preserving its exact single-grapheme token for multi-term queries.
 const SEARCH_TEXT_VERSION: i64 = 3;
+
+fn feature_table_exists(conn: &Connection) -> Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='audiolib_schema_features')",
+        [],|row|row.get(0)).map_err(db_error)
+}
+
+pub(crate) fn ensure_ready(conn: &Connection) -> Result<()> {
+    search_upgrade::ensure_ready(conn)?;
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='audiolib_storage_migration')",
+        [], |row| row.get(0),
+    ).map_err(db_error)?;
+    if pending {
+        return Err(Error::Busy(
+            "Storage migration is incomplete; resume or roll back its job".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn feature_version(conn: &Connection, feature: &str) -> Result<Option<i64>> {
     let exists: bool = conn
@@ -42,11 +69,38 @@ fn validate_supported_feature_revisions(conn: &Connection) -> Result<()> {
 }
 
 fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()> {
+    if feature_table_exists(conn)? {
+        let names = conn
+            .prepare("SELECT feature FROM audiolib_schema_features")
+            .map_err(db_error)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?;
+        for name in names {
+            if ![
+                "stable_audio_ids",
+                "foreign_key_indexes",
+                "tokenization",
+                "search_indexes",
+                "search_storage",
+                "play_history_retired",
+            ]
+            .contains(&name.as_str())
+            {
+                return Err(Error::Database(format!(
+                    "Unknown required database feature {name}"
+                )));
+            }
+        }
+    }
     for (feature, supported) in [
         ("stable_audio_ids", 1),
         ("foreign_key_indexes", 1),
         ("tokenization", tokenization),
         ("search_indexes", 1),
+        ("search_storage", 1),
+        ("play_history_retired", 2),
     ] {
         if let Some(version) = feature_version(conn, feature)?
             && version > supported
@@ -88,7 +142,7 @@ fn set_feature_version(conn: &Connection, feature: &str, version: i64) -> Result
 
 /// Probe additive implementation revisions and indexes before upgrading a library.
 /// Read-only connections can probe this without creating tables or changing the source.
-pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
+pub(crate) fn legacy_needs_upgrade(conn: &Connection) -> Result<bool> {
     if pending(conn)? {
         return Ok(true);
     }
@@ -96,7 +150,7 @@ pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    if version != SCHEMA_VERSION {
+    if version != LEGACY_SCHEMA_VERSION {
         return Ok(true);
     }
     if feature_version(conn, "stable_audio_ids")? != Some(1)
@@ -145,6 +199,12 @@ pub(crate) fn search_text_is_current(conn: &Connection) -> Result<bool> {
 
 /// Derived text and the required directory/visibility indexes must all be readable.
 pub(crate) fn search_state_is_current(conn: &Connection) -> Result<bool> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version == SCHEMA_VERSION {
+        return readable_format_ready(conn);
+    }
     if !search_text_is_current(conn)?
         || !source_tags_ready(conn)?
         || feature_version(conn, "search_indexes")? != Some(1)
@@ -275,7 +335,6 @@ fn add_current_features(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_playlist_items_audio_file ON playlist_items(audio_file_id);
          CREATE INDEX IF NOT EXISTS idx_project_references_audio_file ON project_references(audio_file_id);
          CREATE INDEX IF NOT EXISTS idx_waveform_cache_audio_file ON waveform_cache(audio_file_id);
-         CREATE INDEX IF NOT EXISTS idx_play_history_audio_file ON play_history(audio_file_id);
          CREATE INDEX IF NOT EXISTS idx_closure_descendant ON folder_closure(descendant_id);
          CREATE INDEX IF NOT EXISTS idx_audio_files_not_present ON audio_files(id) WHERE missing IS NOT 0;
          CREATE INDEX IF NOT EXISTS idx_audio_search_facets ON audio_files(id,missing,folder_id);
@@ -642,18 +701,24 @@ pub(crate) fn migrate_with_progress(
             supported: SCHEMA_VERSION,
         });
     }
-    if version == SCHEMA_VERSION && !needs_upgrade(conn)? {
+    if version > LEGACY_SCHEMA_VERSION {
+        return Err(Error::Database(format!(
+            "Legacy normalization supports schema up to {LEGACY_SCHEMA_VERSION}, found {version}"
+        )));
+    }
+    if version == LEGACY_SCHEMA_VERSION && !legacy_needs_upgrade(conn)? {
         return Ok(());
     }
     let tx = conn.transaction().map_err(db_error)?;
-    if (1..=SCHEMA_VERSION).contains(&version) {
+    if (1..=LEGACY_SCHEMA_VERSION).contains(&version) {
         add_management_schema(&tx)?;
+        legacy::add_playback_schema(&tx)?;
         apply_indexes(&tx)?;
         add_current_features(&tx)?;
         if !search_text_is_current(&tx)? {
             rebuild_search_in_transaction_with_progress(&tx, progress)?;
         }
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        tx.pragma_update(None, "user_version", LEGACY_SCHEMA_VERSION)
             .map_err(db_error)?;
         return tx.commit().map_err(db_error);
     }
@@ -671,19 +736,11 @@ pub(crate) fn migrate_with_progress(
     )
     .map_err(db_error)?;
     retokenize_audio_files(&tx, true, progress)?;
-    tx.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_audio_files_folder ON audio_files(folder_id);
-        CREATE INDEX IF NOT EXISTS idx_audio_files_path_key ON audio_files(path_key);
-        CREATE INDEX IF NOT EXISTS idx_sample_rate ON audio_files(sample_rate);
-        CREATE INDEX IF NOT EXISTS idx_duration ON audio_files(duration);
-        CREATE INDEX IF NOT EXISTS idx_audio_files_missing ON audio_files(missing) WHERE missing=1;
-        CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
-        CREATE INDEX IF NOT EXISTS idx_closure_descendant ON folder_closure(descendant_id);",
-    )
-    .map_err(db_error)?;
+    tx.execute_batch(BASE_INDEXES).map_err(db_error)?;
     progress(SnapshotUpgradeProgress::BuildingFts)?;
     tx.execute_batch(FTS_SCHEMA).map_err(db_error)?;
     add_management_schema(&tx)?;
+    legacy::add_playback_schema(&tx)?;
     apply_indexes(&tx)?;
     add_current_features(&tx)?;
     tx.execute(
@@ -693,7 +750,7 @@ pub(crate) fn migrate_with_progress(
     .map_err(db_error)?;
     set_feature_version(&tx, "tokenization", SEARCH_TEXT_VERSION)?;
     tx.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+    tx.pragma_update(None, "user_version", LEGACY_SCHEMA_VERSION)
         .map_err(db_error)?;
     tx.commit().map_err(db_error)
 }
@@ -705,16 +762,18 @@ fn add_management_schema(conn: &Connection) -> Result<()> {
         "errors_truncated",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS play_history (
-        id INTEGER PRIMARY KEY, audio_file_id INTEGER NOT NULL REFERENCES audio_files(id) ON DELETE CASCADE,
-        played_at TEXT NOT NULL, filename TEXT NOT NULL, file_path TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(played_at DESC,id DESC);")
-        .map_err(db_error)
+    Ok(())
 }
 
 /// Recreate authoritative triggers and rebuild derived search text transactionally.
 pub(crate) fn rebuild_search(conn: &mut Connection) -> Result<()> {
     validate_supported_feature_revisions(conn)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version == SCHEMA_VERSION {
+        return current::rebuild_search(conn);
+    }
     let tx = conn.transaction().map_err(db_error)?;
     rebuild_search_in_transaction(&tx)?;
     tx.commit().map_err(db_error)
@@ -892,7 +951,6 @@ const PERFORMANCE_INDEXES:&str="
  CREATE INDEX IF NOT EXISTS idx_audio_visible_favorite ON audio_files(filename COLLATE NOCASE,id) WHERE missing=0 AND favorite=1;
  CREATE INDEX IF NOT EXISTS idx_audio_files_missing ON audio_files(missing) WHERE missing=1;
  CREATE INDEX IF NOT EXISTS idx_audio_visible_stats ON audio_files(folder_id,duration,file_size) WHERE missing=0;
- CREATE INDEX IF NOT EXISTS idx_play_history_audio ON play_history(audio_file_id);
  CREATE INDEX IF NOT EXISTS idx_playlist_items_audio ON playlist_items(audio_file_id);
  CREATE INDEX IF NOT EXISTS idx_project_references_audio ON project_references(audio_file_id);
  CREATE INDEX IF NOT EXISTS idx_waveform_cache_audio ON waveform_cache(audio_file_id);
@@ -937,8 +995,6 @@ const AUDIO_COLUMNS: &[(&str, &str)] = &[
     ("user_notes", "TEXT"),
     ("created_at", "TEXT"),
     ("modified_at", "TEXT"),
-    ("last_played_at", "TEXT"),
-    ("play_count", "INTEGER DEFAULT 0"),
     ("filename_tokenized", "TEXT"),
     ("user_tags_tokenized", "TEXT"),
     ("folder_id", "INTEGER"),
@@ -966,6 +1022,15 @@ const FOLDER_COLUMNS: &[(&str, &str)] = &[
     ("updated_at", "TEXT"),
     ("last_scanned", "TEXT"),
 ];
+
+const BASE_INDEXES: &str = "
+ CREATE INDEX IF NOT EXISTS idx_audio_files_folder ON audio_files(folder_id);
+ CREATE INDEX IF NOT EXISTS idx_audio_files_path_key ON audio_files(path_key);
+ CREATE INDEX IF NOT EXISTS idx_sample_rate ON audio_files(sample_rate);
+ CREATE INDEX IF NOT EXISTS idx_duration ON audio_files(duration);
+ CREATE INDEX IF NOT EXISTS idx_audio_files_missing ON audio_files(missing) WHERE missing=1;
+ CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
+ CREATE INDEX IF NOT EXISTS idx_closure_descendant ON folder_closure(descendant_id);";
 
 const BASE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS audio_files (

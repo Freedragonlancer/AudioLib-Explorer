@@ -233,6 +233,9 @@ impl RemoteError {
             (_, "SCAN_STATE") => Self::ScanState(message),
             (_, "JOB_STATE") => Self::JobState(message),
             (_, "LIBRARY_CHANGED" | "LIBRARY_ID_REQUIRED") => Self::LibraryChanged(message),
+            (_, "SNAPSHOT_FORMAT_UNSUPPORTED" | "PEER_VERSION_UNSUPPORTED") => {
+                Self::Snapshot(message)
+            }
             // Before the 503 arm: a `503 BUSY` is a full stream cap, not a starting server.
             (409, _) | (_, "BUSY") | (_, "CANCELLED") => Self::Busy {
                 message,

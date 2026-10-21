@@ -424,8 +424,7 @@ impl RevisionTracker {
     }
 
     /// Blocking. Run a server-side write that only touches data clients do not need to
-    /// re-download a snapshot for (play bookkeeping: `play_count`, `last_played_at`,
-    /// `play_history`). Under the tracker lock, pending commits from other writers are
+    /// re-download a snapshot for. Under the tracker lock, pending commits from other writers are
     /// counted first (so `revision_before` covers them), then `write` runs and its commit
     /// becomes the new polling baseline (persisted, so a restart does not bump either)
     /// without advancing the revision: `revision == revision_before`. During a hold the

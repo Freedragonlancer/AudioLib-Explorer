@@ -54,6 +54,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 libc = "0.2"
 
 [dev-dependencies]
+audiolib-remote = { path = "../../crates/audiolib-remote" }
 audiolib-db = { path = "../../crates/audiolib-db", features = ["scanner"] }
 http-body-util.workspace = true
 # Self-signed certificate for the native TLS listener test.

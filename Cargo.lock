@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-audio"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "audioadapter-buffers",
  "audiolib-core",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-cli"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "anyhow",
  "audiolib-audio",
@@ -504,8 +504,9 @@ dependencies = [
 
 [[package]]
 name = "audiolib-core"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -516,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-db"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "audiolib-audio",
  "audiolib-core",
@@ -528,6 +529,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tracing",
  "unicode-segmentation",
@@ -535,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-desktop"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "anyhow",
  "audiolib-audio",
@@ -559,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-ipc"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "audiolib-core",
  "serde_json",
@@ -569,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-remote"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "audiolib-core",
  "audiolib-db",
@@ -591,12 +593,13 @@ dependencies = [
 
 [[package]]
 name = "audiolib-server"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "anyhow",
  "audiolib-audio",
  "audiolib-core",
  "audiolib-db",
+ "audiolib-remote",
  "axum",
  "futures-core",
  "http-body-util",
@@ -624,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-windows"
-version = "0.5.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "audiolib-core",
  "cc",
@@ -846,6 +849,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eff00be299a18769011411c9def0d827e8f2d7bf0c3dbf53633147a8867fd1f"
 dependencies = [
  "no_std_io2",
+]
+
+[[package]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+dependencies = [
+ "generic-array",
 ]
 
 [[package]]
@@ -1338,6 +1350,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1504,6 +1525,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
 ]
 
 [[package]]
@@ -3252,8 +3283,6 @@ dependencies = [
 [[package]]
 name = "libsqlite3-sys"
 version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5262,6 +5291,17 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]

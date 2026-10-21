@@ -11,6 +11,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 serde_yaml = "0.9"
 unicode-segmentation = "=1.13.3"
+semver.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

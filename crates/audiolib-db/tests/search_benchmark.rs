@@ -14,6 +14,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     let database = directory.path().join("existing.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,depth)
          VALUES(1,'synthetic','synthetic',0);
@@ -31,6 +32,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     drop(provider);
     // Capture a self-contained library so its complete bytes can be compared.
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let mode: String = conn
         .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
         .unwrap();
@@ -257,6 +259,7 @@ fn concurrent_writer_refuses_existing_libraries_before_opening_them() {
 fn first_only_custom_requests_keep_real_scope_results_and_source_bytes() {
     let (directory, database) = fixture();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,depth) VALUES(9,'other','other',0);
          INSERT INTO folder_closure VALUES(9,9,0);
@@ -405,6 +408,7 @@ fn first_only_refuses_generation_invalid_requests_and_implicit_upgrades() {
         );
     }
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch("DROP INDEX idx_audio_search_facets")
         .unwrap();
     drop(conn);

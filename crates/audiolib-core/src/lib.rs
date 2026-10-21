@@ -8,6 +8,7 @@ use std::sync::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod compatibility;
 pub mod config;
 pub mod library;
 pub mod list_waveform;
@@ -185,7 +186,6 @@ pub struct AudioFile {
     pub notes: String,
     pub favorite: bool,
     pub bext_description: String,
-    pub play_count: u64,
     pub attributes: serde_json::Value,
     #[serde(default)]
     pub missing: bool,
@@ -486,7 +486,6 @@ pub trait DataProvider: Send + Sync {
         Err(Error::NotFound(format!("Folder {id}")))
     }
     fn update_metadata(&self, id: i64, patch: &MetadataPatch) -> Result<AudioFile>;
-    fn record_play(&self, id: i64) -> Result<()>;
     fn stats(&self) -> Result<LibraryStats>;
     fn library_info(&self) -> Result<LibraryInfo>;
     fn check_library(&self) -> Result<IntegrityReport>;
@@ -519,7 +518,6 @@ pub trait DataProvider: Send + Sync {
     fn remove_audio(&self, ids: &[i64]) -> Result<u64>;
     fn remove_folder(&self, id: i64) -> Result<u64>;
     fn scan_history(&self, limit: usize, offset: usize) -> Result<Vec<ScanSession>>;
-    fn play_history(&self, limit: usize, offset: usize) -> Result<Vec<PlayRecord>>;
     fn export_library(
         &self,
         destination: &Path,
@@ -795,6 +793,24 @@ mod tests {
             assert!(!request.needs_more_search_text(), "{query:?}");
             assert!(request.validate().is_ok(), "{query:?}");
         }
+    }
+
+    #[test]
+    fn audio_dto_ignores_retired_and_unknown_legacy_json_fields() {
+        let file = AudioFile {
+            id: 7,
+            filename: "owned.wav".into(),
+            notes: "retain this annotation".into(),
+            attributes: serde_json::json!({"unknown_extension":{"preserved":true}}),
+            ..Default::default()
+        };
+        let clean = serde_json::to_value(&file).unwrap();
+        let mut legacy = clean.clone();
+        legacy["play_count"] = serde_json::json!(17);
+        legacy["last_played_at"] = serde_json::json!("2026-01-02T03:04:05Z");
+        legacy["future_optional_response_field"] = serde_json::json!([1, 2]);
+        let decoded: AudioFile = serde_json::from_value(legacy).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), clean);
     }
 
     #[test]

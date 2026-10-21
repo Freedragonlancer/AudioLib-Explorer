@@ -1,5 +1,6 @@
 // app/audiolib-desktop/src/remote_sync_progress.rs
 //! Coalesced snapshot progress: wire downloads and streamed decompression stay visible together.
+use audiolib_db::SnapshotUpgradeProgress;
 use audiolib_remote::{CachePreparation, SyncProgress};
 use std::time::{Duration, Instant};
 
@@ -104,19 +105,21 @@ impl ProgressReporter {
             }
             _ => self.decompression = None,
         }
+        if let Some((phase, done, total)) = counted(progress) {
+            if let Some((previous_phase, previous_done, previous_total)) =
+                self.last_progress.and_then(counted)
+            {
+                transfer_changed =
+                    phase != previous_phase || total != previous_total || done < previous_done;
+                completed = total > 0 && previous_done < total && done >= total;
+            } else {
+                transfer_changed = true;
+            }
+        }
         let repeating_count = match (self.last_progress, progress) {
             (Some(previous), current) if transfer(previous) && transfer(current) => true,
-            (Some(SyncProgress::Preparing(previous)), SyncProgress::Preparing(current)) => {
-                matches!(
-                    (previous, current),
-                    (
-                        CachePreparation::Copying { .. },
-                        CachePreparation::Copying { .. }
-                    ) | (
-                        CachePreparation::Tokenizing { .. },
-                        CachePreparation::Tokenizing { .. }
-                    )
-                )
+            (Some(previous), current) => {
+                matches!((counted(previous), counted(current)), (Some((left, _, _)), Some((right, _, _))) if left == right)
             }
             _ => false,
         };
@@ -182,6 +185,28 @@ impl ProgressReporter {
     }
 }
 
+// Distinct identities keep SQLite-page copying separate from migration row copying.
+fn counted(progress: SyncProgress) -> Option<(u8, u64, u64)> {
+    match progress {
+        SyncProgress::Preparing(CachePreparation::Copying { completed, total }) => {
+            Some((0, completed, total))
+        }
+        SyncProgress::Preparing(CachePreparation::Tokenizing { completed, total }) => {
+            Some((1, completed, total))
+        }
+        SyncProgress::Preparing(CachePreparation::Migrating(
+            SnapshotUpgradeProgress::Copying { completed, total },
+        )) => Some((2, completed, total)),
+        SyncProgress::Preparing(CachePreparation::Migrating(
+            SnapshotUpgradeProgress::Indexing { completed, total },
+        )) => Some((3, completed, total)),
+        SyncProgress::Preparing(CachePreparation::Migrating(
+            SnapshotUpgradeProgress::Tokenizing { completed, total },
+        )) => Some((4, completed, total)),
+        _ => None,
+    }
+}
+
 fn transfer(progress: SyncProgress) -> bool {
     matches!(
         progress,
@@ -192,6 +217,49 @@ fn transfer(progress: SyncProgress) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_rows_flush_at_phase_changes_completion_and_resume_without_a_transfer_percentage() {
+        let now = Instant::now();
+        let mut reporter = ProgressReporter::default();
+        for indexing in [false, true] {
+            let event = |completed| {
+                SyncProgress::Preparing(CachePreparation::Migrating(if indexing {
+                    SnapshotUpgradeProgress::Indexing {
+                        completed,
+                        total: 10003,
+                    }
+                } else {
+                    SnapshotUpgradeProgress::Copying {
+                        completed,
+                        total: 10003,
+                    }
+                }))
+            };
+            let display = reporter.report(event(5000), false, now).unwrap();
+            assert!(display.text.contains("5000/10003 records saved"));
+            assert!(display.fraction < 0.0);
+            assert!(display.decompression_text.is_empty());
+            assert!(reporter.report(event(7500), false, now).is_none());
+            let display = reporter.report(event(10003), true, now).unwrap();
+            assert!(display.text.contains("已保存 10003/10003 条"));
+            assert!(display.fraction < 0.0);
+            assert!(reporter.report(event(10003), true, now).is_none());
+            // A resumed job can supply a lower committed cursor without being hidden.
+            assert!(reporter.report(event(5000), true, now).is_some());
+        }
+        let display = reporter
+            .report(
+                SyncProgress::Preparing(CachePreparation::Migrating(
+                    SnapshotUpgradeProgress::Publishing,
+                )),
+                false,
+                now,
+            )
+            .unwrap();
+        assert_eq!(display.text, "Applying the validated library upgrade");
+        assert!(display.fraction < 0.0);
+    }
 
     #[test]
     fn known_download_total_is_published_without_waiting_for_the_body() {

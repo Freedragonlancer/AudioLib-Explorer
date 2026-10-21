@@ -67,6 +67,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         })
         .unwrap(),
         audition_play_on_single_click: false,
+        play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
         audio_table: Default::default(),
@@ -144,6 +145,21 @@ pub(super) fn accept(listener: &std::net::TcpListener) -> std::net::TcpStream {
 
 pub(super) fn respond(socket: &mut std::net::TcpStream, status: &str, body: &str) {
     write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+}
+
+fn legacy_peer_preflight(listener: &std::net::TcpListener) {
+    for (path, status, body) in [
+        (
+            "/api/v1/health",
+            "200 OK",
+            r#"{"status":"ok","version":"0.4.11"}"#,
+        ),
+        ("/api/v1/capabilities", "404 Not Found", "{}"),
+    ] {
+        let mut socket = accept(listener);
+        assert!(request(&mut socket).starts_with(&format!("GET {path} ")));
+        respond(&mut socket, status, body);
+    }
 }
 
 pub(super) fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
@@ -1311,19 +1327,20 @@ fn rejected_snapshot_cache(unsupported: bool) {
                 "/api/v1/health" => respond(
                     &mut socket,
                     "200 OK",
-                    r#"{"status":"ok","version":"0.4.1"}"#,
+                    r#"{"status":"ok","version":"0.4.11"}"#,
                 ),
                 "/api/v1/library" => respond(
                     &mut socket,
                     "200 OK",
                     &format!(
                         r#"{{"library_id":"test-library-fallback","schema_version":{},"revision":2}}"#,
-                        if unsupported {
-                            99
-                        } else {
-                            audiolib_db::SCHEMA_VERSION
-                        }
+                        if unsupported { 99 } else { 5 }
                     ),
+                ),
+                "/api/v1/capabilities" => respond(
+                    &mut socket,
+                    "404 Not Found",
+                    r#"{"error_code":"NOT_FOUND","message":"legacy server"}"#,
                 ),
                 "/api/v1/roots" => respond(&mut socket, "200 OK", "[]"),
                 "/api/v1/library/snapshot" => {
@@ -1407,7 +1424,7 @@ fn child_cache_provider_progress() {
         &ui,
         DataSourceSwitch::Server {
             database: cache.database_path(&state),
-            state: Some(state.clone()),
+            state: Some(Box::new(state.clone())),
         },
     );
     // Completion is queued on the event loop, so this observes the real opening
@@ -1613,7 +1630,7 @@ fn child_invalid_snapshot_rollback() {
     std::fs::write(&invalid, b"invalid SQLite snapshot").unwrap();
     controller.run_library_operation(LibraryOperation::DataSource(DataSourceSwitch::Server {
         database: invalid,
-        state: Some(state_b),
+        state: Some(Box::new(state_b)),
     }));
     let c = controller.clone();
     run_until(&ui, move || !c.source_changing.load(Ordering::Acquire));
@@ -1674,6 +1691,7 @@ fn source_switch_flow(edit_active_profile: bool) {
             "200 OK",
             r#"{"library_id":"a-library","identity_bound_writes":true,"revision":1,"schema_version":5}"#,
         );
+        legacy_peer_preflight(&a);
         let mut socket = accept(&a);
         sent.send(request(&mut socket)).unwrap();
         wait_release.recv_timeout(Duration::from_secs(8)).unwrap();
@@ -1848,6 +1866,7 @@ fn child_failed_annotation_snapshot() {
             "200 OK",
             r#"{"library_id":"same-library","identity_bound_writes":true,"revision":1,"schema_version":5}"#,
         );
+        legacy_peer_preflight(&listener);
         let mut socket = accept(&listener);
         let request = request(&mut socket);
         respond(
@@ -1878,12 +1897,12 @@ fn child_failed_annotation_snapshot() {
     selected(&controller, &ui, "failed draft must survive");
     controller.run_library_operation(LibraryOperation::DataSource(DataSourceSwitch::Server {
         database: next_snapshot,
-        state: Some(CacheState {
+        state: Some(Box::new(CacheState {
             library_id: "same-library".into(),
             revision: 2,
             database_file: "snapshot-r2.db".into(),
             ..Default::default()
-        }),
+        })),
     }));
     let c = controller.clone();
     run_until(&ui, move || !c.library_busy.load(Ordering::Acquire));

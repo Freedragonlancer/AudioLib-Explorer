@@ -1657,6 +1657,9 @@ mod tests {
         let server = {
             let patches = patches.clone();
             TestServer::start(move |request| {
+                if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                    return response;
+                }
                 match (request.method.as_str(), request.path.as_str()) {
                     ("GET", "/api/v1/library") => TestResponse::json(
                         200,

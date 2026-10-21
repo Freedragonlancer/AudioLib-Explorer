@@ -67,16 +67,6 @@ pub(super) struct RemotePlayState {
 }
 
 #[allow(dead_code)] // plays are no longer sent to the server
-struct RemotePlayWorker(Arc<Controller>);
-
-impl Drop for RemotePlayWorker {
-    fn drop(&mut self) {
-        let mut plays = self.0.remote_plays.lock().unwrap();
-        plays.workers -= 1;
-        self.0.remote_plays_wake.notify_all();
-    }
-}
-
 /// Cache promotion finishes on the sync worker before its UI/provider publication.
 /// Keep new play writes out of that interval without making close wait for UI delivery.
 struct RemotePlayPublicationGate(Arc<Controller>);
@@ -232,7 +222,7 @@ pub(super) enum DataSourceSwitch {
     Local,
     Server {
         database: PathBuf,
-        state: Option<CacheState>,
+        state: Option<Box<CacheState>>,
     },
 }
 
@@ -1049,15 +1039,6 @@ impl Controller {
                 .0;
         }
         Ok(())
-    }
-
-    #[allow(dead_code)] // plays are no longer sent to the server
-    fn remote_play_current(&self, generation: u64, source_generation: u64) -> bool {
-        self.available()
-            && !self.remote_busy.load(Ordering::Acquire)
-            && self.library_generation.load(Ordering::Acquire) == generation
-            && self.source_generation.load(Ordering::Acquire) == source_generation
-            && self.remote_plays.lock().unwrap().publication_gates == 0
     }
 
     fn data_root(&self) -> PathBuf {
@@ -2033,7 +2014,7 @@ impl Controller {
                     ui,
                     DataSourceSwitch::Server {
                         database,
-                        state: Some(outcome.state),
+                        state: Some(Box::new(outcome.state)),
                     },
                 );
             }
@@ -2103,7 +2084,13 @@ impl Controller {
                         } else {
                             cn_or(chinese, "\n尚无本地缓存：显示空素材库，连接恢复后请点击“立即同步”。", "\nNo cache yet: showing an empty library; use Sync now once the server is reachable.")
                         });
-                        self.swap_to(ui, DataSourceSwitch::Server { database, state });
+                        self.swap_to(
+                            ui,
+                            DataSourceSwitch::Server {
+                                database,
+                                state: state.map(Box::new),
+                            },
+                        );
                     }
                 } else if self.remote_read_only() && self.remote.lock().unwrap().state.is_some() {
                     message.push_str(&cn_or(
@@ -2156,9 +2143,21 @@ impl Controller {
                     ));
                 }
                 let next = if path.exists() {
-                    SqliteProvider::open_existing(&path)
+                    SqliteProvider::open_existing_local_with_progress_cancellable(
+                        &path,
+                        &config.data_root(),
+                        config.play_history_limit,
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
                 } else {
-                    SqliteProvider::open(&path)
+                    SqliteProvider::open_local_with_progress_cancellable(
+                        &path,
+                        &config.data_root(),
+                        config.play_history_limit,
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
                 }
                 .map_err(|error| error.local_display_text(chinese))?;
                 crate::startup::prepare_local_search(&next);
@@ -2184,7 +2183,7 @@ impl Controller {
                 self.remote_mode.store(true, Ordering::Release);
                 {
                     let mut remote = self.remote.lock().unwrap();
-                    remote.state = state.clone();
+                    remote.state = state.as_deref().cloned();
                     remote.library_changed = false;
                     remote.manager.invalidate_library();
                 }
@@ -3610,6 +3609,10 @@ mod tests {
                 let response = if head.starts_with("GET /api/v1/library ") {
                     // Writer preflight binds mutations to the displayed snapshot.
                     r#"{"library_id":"lib-1","identity_bound_writes":true,"revision":1,"schema_version":5}"#.to_owned()
+                } else if head.starts_with("GET /api/v1/health ") {
+                    r#"{"status":"ok","version":"0.4.11"}"#.to_owned()
+                } else if head.starts_with("GET /api/v1/capabilities ") {
+                    "{}".to_owned()
                 } else {
                     response.clone()
                 };
@@ -4438,7 +4441,7 @@ mod tests {
         controller
             .switch_data_source(&DataSourceSwitch::Server {
                 database: snapshot.clone(),
-                state: cache.state("lib-1"),
+                state: cache.state("lib-1").map(Box::new),
             })
             .unwrap();
         controller.remote_write_event(

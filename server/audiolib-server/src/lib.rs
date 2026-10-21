@@ -8,6 +8,7 @@
 pub mod admin;
 pub mod auth;
 pub mod browse;
+mod compatibility;
 pub mod config;
 pub mod error;
 pub mod list_waveform;

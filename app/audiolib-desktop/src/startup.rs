@@ -3,7 +3,7 @@
 use crate::{AppWindow, controller};
 use anyhow::{Context, Result};
 use audiolib_core::config::{AppConfig, DataSourceMode};
-use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider, import_legacy};
+use audiolib_db::{SnapshotUpgradeProgress, SqliteProvider, import_legacy_local};
 use audiolib_remote::CachePreparation;
 use slint::ComponentHandle;
 use std::{
@@ -33,8 +33,18 @@ pub(crate) enum StartupProgress {
 
 impl StartupProgress {
     pub(crate) fn label(self, chinese: bool) -> String {
+        if let Self::Remote(CachePreparation::Migrating(stage)) = self {
+            return Self::Local(stage).label(chinese);
+        }
         if let Self::Local(stage) = self {
             return match stage {
+                SnapshotUpgradeProgress::Copying { completed, total } => {
+                    if chinese {
+                        format!("正在迁移数据库 · 已保存 {completed}/{total} 条")
+                    } else {
+                        format!("Migrating library · {completed}/{total} records saved")
+                    }
+                }
                 SnapshotUpgradeProgress::Tokenizing { completed, total } => {
                     if chinese {
                         format!("正在重建搜索文本 · 已保存 {completed}/{total} 条")
@@ -65,6 +75,13 @@ impl StartupProgress {
                         SnapshotUpgradeProgress::SourceTags => {
                             ("正在准备提取标签", "Preparing extracted tags")
                         }
+                        SnapshotUpgradeProgress::Compacting => {
+                            ("正在整理搜索索引", "Merging search index segments")
+                        }
+                        SnapshotUpgradeProgress::Publishing => (
+                            "正在应用已验证的数据库升级",
+                            "Applying the validated library upgrade",
+                        ),
                         _ => ("正在准备搜索升级", "Preparing search upgrade"),
                     };
                     if chinese { cn } else { en }.into()
@@ -102,7 +119,7 @@ impl StartupProgress {
                 ("正在准备提取标签", "Preparing extracted tags")
             }
             Self::Remote(CachePreparation::Saving) => ("正在保存缓存", "Saving the cache"),
-            Self::Local(_) => unreachable!(),
+            Self::Local(_) | Self::Remote(CachePreparation::Migrating(_)) => unreachable!(),
         };
         if chinese { cn } else { en }.to_owned()
     }
@@ -150,20 +167,29 @@ fn open_library_cancellable(
             && let Some(source) = &config.paths.legacy_database
         {
             progress(StartupProgress::Importing);
-            let report =
-                import_legacy(source, &config.paths.database).context("Import legacy library")?;
+            let report = import_legacy_local(
+                source,
+                &config.paths.database,
+                &config.data_root(),
+                config.play_history_limit,
+            )
+            .context("Import legacy library")?;
             tracing::info!(?report, "Legacy library imported; source preserved");
         }
         progress(StartupProgress::Opening);
         let sqlite = if config.paths.database.exists() {
-            SqliteProvider::open_existing_with_progress_cancellable(
+            SqliteProvider::open_existing_local_with_progress_cancellable(
                 &config.paths.database,
+                &config.data_root(),
+                config.play_history_limit,
                 cancel,
                 |stage| progress(StartupProgress::Local(stage)),
             )
         } else {
-            SqliteProvider::open_with_progress_cancellable(
+            SqliteProvider::open_local_with_progress_cancellable(
                 &config.paths.database,
+                &config.data_root(),
+                config.play_history_limit,
                 cancel,
                 |stage| progress(StartupProgress::Local(stage)),
             )
@@ -360,6 +386,33 @@ mod tests {
         assert!(local.label(true).contains("已保存 5000/900000"));
         assert!(local.label(false).contains("5000/900000 records saved"));
         assert!(local.fraction() < 0.0);
+        for stage in [
+            SnapshotUpgradeProgress::Copying {
+                completed: 5000,
+                total: 10003,
+            },
+            SnapshotUpgradeProgress::Indexing {
+                completed: 10003,
+                total: 10003,
+            },
+            SnapshotUpgradeProgress::BackingUp,
+            SnapshotUpgradeProgress::Validating,
+            SnapshotUpgradeProgress::Compacting,
+            SnapshotUpgradeProgress::Publishing,
+            SnapshotUpgradeProgress::Checkpoint,
+        ] {
+            let remote = StartupProgress::Remote(CachePreparation::Migrating(stage));
+            for chinese in [true, false] {
+                assert_eq!(
+                    remote.label(chinese),
+                    StartupProgress::Local(stage).label(chinese)
+                );
+            }
+            assert!(
+                remote.fraction() < 0.0,
+                "rows cannot imply a total-upgrade percentage"
+            );
+        }
         let text = StartupProgress::Remote(CachePreparation::Tokenizing {
             completed: 5_000,
             total: 900_000,
@@ -404,6 +457,38 @@ mod tests {
                 },
             ),
             ("index-en", false, CachePreparation::Upgrading),
+            (
+                "migration-copy-cn",
+                true,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Copying {
+                    completed: 5000,
+                    total: 909342,
+                }),
+            ),
+            (
+                "migration-copy-en",
+                false,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Copying {
+                    completed: 5000,
+                    total: 909342,
+                }),
+            ),
+            (
+                "migration-index-cn",
+                true,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                    completed: 909342,
+                    total: 909342,
+                }),
+            ),
+            (
+                "migration-index-en",
+                false,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                    completed: 909342,
+                    total: 909342,
+                }),
+            ),
         ] {
             ui.set_chinese(chinese);
             let weak = ui.as_weak();

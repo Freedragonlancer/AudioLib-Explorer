@@ -20,8 +20,7 @@ use crate::{
     waveform::WaveformParams,
 };
 use audiolib_core::{
-    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, PlayRecord, ScanSession,
-    TagEditMode,
+    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, ScanSession, TagEditMode,
 };
 use axum::{
     Json, Router,
@@ -74,6 +73,9 @@ struct ManagedAdmission;
 /// `GET /health` reply (always HTTP 200 while the process serves requests).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
+    /// Compatibility catalog semantics of this build, independent of the library.
+    #[serde(default)]
+    pub compatibility_catalog_revision: u32,
     /// Startup maintenance phase and committed batch counts, omitted when ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<audiolib_db::SnapshotUpgradeProgress>,
@@ -305,6 +307,13 @@ async fn require_bearer(
     if let Err(error) = authorized {
         return error.into_response();
     }
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) && let Err(error) = crate::compatibility::admit_mutation(request.headers())
+    {
+        return error.into_response();
+    }
     if managed {
         request.extensions_mut().insert(ManagedAdmission);
     }
@@ -332,6 +341,21 @@ async fn require_bearer(
                         "The server library changed; synchronize before writing",
                     )
                     .into_response();
+                }
+                // The historical playback route only reads an existing row. Every
+                // real library mutation requires a modern peer that can consume the
+                // actual complete format, including retired DTO fields/features.
+                if !legacy_playback_mutation(&request) {
+                    let inspecting = state.clone();
+                    let format = match blocking(move || inspecting.snapshot_format()).await {
+                        Ok(format) => format,
+                        Err(error) => return error.into_response(),
+                    };
+                    if let Err(error) =
+                        crate::compatibility::admit_library_mutation(request.headers(), &format)
+                    {
+                        return error.into_response();
+                    }
                 }
             }
             request.extensions_mut().insert(state);
@@ -411,6 +435,15 @@ fn library_mutation(request: &Request) -> bool {
     }
 }
 
+/// Match only the deprecated no-op endpoint, never a caller-controlled URI suffix.
+fn legacy_playback_mutation(request: &Request) -> bool {
+    request.method() == Method::POST
+        && request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str().ends_with("/audio/{id}/plays"))
+}
+
 /// Native clients omit Origin. Browser mutations must prove the same authority and
 /// listener scheme; forwarded headers never establish a trusted browser origin.
 async fn guard_api_mutation(request: Request, next: Next) -> Response {
@@ -471,6 +504,7 @@ async fn capabilities(
     let origin = classify(request.headers(), connection.as_ref());
     let manage_mode = service.security().manage_mode();
     Json(CapabilitiesResponse {
+        compatibility: audiolib_core::compatibility::compatibility_manifest(),
         manage_mode,
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
@@ -558,6 +592,9 @@ async fn patch_settings(
         let lease = security.settings_lease()?;
         security.authorize(&headers, connection.as_ref())?;
         security.authorize_manage(&headers, connection.as_ref())?;
+        // Settings remains available during library startup, but its writes use
+        // optional modern-peer validation; it does not return library DTOs.
+        crate::compatibility::admit_mutation(&headers)?;
         let value: serde_json::Value = json_body(&headers, body)?;
         if !value.is_object() {
             return Err(ApiError::validation(
@@ -796,6 +833,7 @@ async fn health(State(service): State<Service>) -> Json<HealthResponse> {
         Readiness::Failed(_) => ("error", Some(FAILED_MESSAGE.to_string())),
     };
     Json(HealthResponse {
+        compatibility_catalog_revision: audiolib_core::compatibility::CATALOG_REVISION,
         upgrade: service.upgrade_progress(),
         status: status.into(),
         version: VERSION.into(),
@@ -1144,11 +1182,11 @@ async fn scan_history(
     ))
 }
 
-/// `GET /history/plays?limit=&offset=` (deprecated): always an empty `PlayRecord[]`.
+/// `GET /history/plays?limit=&offset=` (deprecated): always an empty array.
 /// Play history is recorded locally by clients only; paging is still validated.
 async fn play_history(
     query: Result<Query<PageQuery>, QueryRejection>,
-) -> Result<Json<Vec<PlayRecord>>, ApiError> {
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     page(query)?;
     Ok(Json(Vec::new()))
 }
@@ -1937,6 +1975,9 @@ async fn snapshot(
     Extension(state): Extension<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let format_state = state.clone();
+    let format = blocking(move || format_state.snapshot_format()).await?;
+    crate::compatibility::admit(&headers, &format)?;
     let encoding = if accepts_zstd(&headers) {
         SnapshotEncoding::Zstd
     } else {
@@ -1960,6 +2001,7 @@ async fn snapshot(
                 header_value(revision.revision.to_string())?,
             );
             headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            crate::compatibility::response_headers(headers, &format)?;
             return Ok(response);
         }
     }
@@ -1975,6 +2017,7 @@ async fn snapshot(
         .snapshot_within_budget(encoding == SnapshotEncoding::Zstd)
         .await
         .ok_or_else(ApiError::snapshot_preparing)??;
+    crate::compatibility::admit(&headers, &prepared.snapshot_format)?;
     let path = file
         .as_ref()
         .map_or(&prepared.plain.path, |file| &file.path);
@@ -1999,6 +2042,7 @@ async fn snapshot(
         "Streaming library snapshot"
     );
     let mut response_headers = HeaderMap::new();
+    crate::compatibility::response_headers(&mut response_headers, &prepared.snapshot_format)?;
     response_headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),

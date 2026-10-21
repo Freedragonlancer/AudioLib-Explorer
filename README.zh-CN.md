@@ -6,9 +6,10 @@
 
 AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它把大型 WAV 音效库索引到 SQLite（FTS5）中，提供即时搜索，通过 WASAPI（可选 ASIO）试听，也可以浏览由自带的 `audiolib-server` 提供的远程音效库。
 
-- **程序版本：** 0.4.11（工作区 `Cargo.toml`）
+- **开发版本：** 0.6.0-dev.1（工作区 `Cargo.toml`，尚未发布）
 - **HTTP API：** `/api/v1/`（客户端与服务端）
-- **数据库 schema：** 5（快照兼容范围 3..=5）
+- **数据库 schema：** 6（快照读取范围 3..=6，仍须验证实际格式）
+- **可写库格式：** `ale-s6-cld1-t3-m2-p1`；此前 p0 库仅作为只读来源，经 owned 候选迁移后写入
 - **许可证：** [GPL-3.0-only](LICENSE)
 
 ## 功能
@@ -18,8 +19,10 @@ AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件�
 - 流式解码播放、设备采样率重采样、波形与频谱视图、独立的音高/速率试听（SoundTouch），支持 WASAPI 与可选 ASIO 输出。
 - 资料库管理：添加文件夹、修复被移动或改名的文件、批量标注、备份/恢复、完整性检查、JSONL/CSV 交换。
 - 命令行工具 `AudioLibCli`（JSON/表格/CSV 输出、库管理、控制正在运行的桌面实例播放）。
-- 服务器模式：`server/audiolib-server` 通过 `/api/v1/` 提供一个资料库（快照、Range 流式音频、预览、Waveform、令牌认证、仅局域网管理页）。客户端只读打开经过校验的快照；Metadata 和管理写入使用绑定库身份的 HTTP 请求。远程写入须同时升级客户端和服务端，旧服务端仍可读取。
+- 服务器模式：`server/audiolib-server` 通过 `/api/v1/` 提供一个资料库（快照、Range 流式音频、预览、Waveform、令牌认证、仅局域网管理页）。客户端只读打开经过校验的快照；Metadata 和管理写入使用绑定库身份的 HTTP 请求。已测旧服务端 0.4.11 和 0.5.0 仍可读取。
 - 中英文双语界面。
+
+部署 schema v6 前先升级客户端，再在维护窗口迁移服务端。实际库修改必须携带有效现代兼容目录，明确支持服务端当前完整格式。旧播放路由继续返回空操作结果，但 HTTP 200 不保证旧客户端能反序列化响应。播放历史仅保存在各客户端本机。详见 [v6 契约](doc/api/Schema_V6_Iteration.md)。
 
 ## 构建
 
@@ -75,11 +78,11 @@ audiolib-server --config /etc/audiolib/config.toml
 
 ## 版本规范
 
-三套互相独立的版本：程序版本（工作区 `Cargo.toml`，`MAJOR.MINOR.PATCH`，客户端、CLI、服务端共用）、API 版本（URL 前缀 `/api/v1/`）、数据库 schema 版本（`SCHEMA_VERSION`，当前为 5）。schema 变化时程序版本至少升 MINOR。发布标签为 `vX.Y.Z` 或 `vX.Y.Z-rc.N`，必须与 `Cargo.toml` 一致，由 `tools/check-release.ps1` 检查。详见 [doc/Rust_Versioning.md](doc/Rust_Versioning.md)。
+程序 SemVer（工作区 `Cargo.toml`，客户端、CLI、服务端共用）、HTTP API 版本（`/api/v1/`）、数据库 schema（`SCHEMA_VERSION`，当前为 6）互相独立。允许的操作还须由兼容目录及完整 feature/format 描述判定；同为 schema 6 的 p0 只读，p1 才是当前可写目标。详见[迁移兼容契约](doc/api/Library_Migration_Compatibility.md)。schema 变化时程序版本至少升 MINOR。发布标签为 `vX.Y.Z` 或 `vX.Y.Z-rc.N`，必须与 `Cargo.toml` 一致，由 `tools/check-release.ps1` 检查。详见 [doc/Rust_Versioning.md](doc/Rust_Versioning.md)。
 
 ## 发布与 CI
 
-当前计划发布 v0.4.6。最近成功发布的版本仍为 v0.4.3；v0.4.4 和 v0.4.5 的发布验证未通过，已有标签保留。
+当前开发分支为 `0.6.0-dev.1`，已合入发布的 0.5.0 主线。此分支的 schema-v6 改动尚未发布或部署，现有安装和工作库保持不变。
 
 GitHub Actions 在每次推送和 Pull Request 时运行格式、Clippy 与测试（`.github/workflows/ci.yml`）。推送 `v*` 标签会运行 `.github/workflows/release.yml`：校验版本规范、构建 Windows 便携包，并发布为带 SHA-256 文件的 GitHub Release。
 

@@ -1,8 +1,8 @@
 // crates/audiolib-db/tests/keyword_list_search.rs
 //! Regression: every item of a `;`-separated embedded keyword list is full-text searchable.
+mod support;
 use audiolib_core::{DataProvider, MaintenanceAction, SearchRequest};
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
-use rusqlite::Connection;
 use std::{fs, path::Path, sync::Arc};
 
 fn append(bytes: &mut Vec<u8>, name: &[u8; 4], value: &[u8]) {
@@ -106,7 +106,7 @@ fn sql_seeded_metadata_json_keywords_are_searchable_after_rebuild() {
     let provider = SqliteProvider::open(&db).unwrap();
     let json = r#"{"wav_metadata":{"fields":{"keywords":"Zebragroan; thunderclap"}}}"#;
     {
-        let conn = Connection::open(&db).unwrap();
+        let conn = support::connection(&db).unwrap();
         for id in [364, 2104] {
             conn.execute(
                 "INSERT INTO audio_files(id,file_path,filename,metadata_json,missing) VALUES(?1,?2,?2,?3,0)",

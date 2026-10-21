@@ -1,6 +1,7 @@
 // server/audiolib-server/tests/api.rs
 //! End-to-end router tests against temporary libraries built through the normal db APIs.
 //! Everything lives in per-test temporary directories; no real library or audio is touched.
+mod support;
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_server::{
     AppState, AudioWriteResponse, AuthMode, BatchWriteResponse, BearerToken, ConnectionInfo,
@@ -112,7 +113,7 @@ fn fixture_with(extra: &str) -> Fixture {
 }
 
 async fn send(state: &(impl Into<Service> + Clone), path: &str, token: Option<&str>) -> Response {
-    let mut request = Request::get(path);
+    let mut request = support::modern(Request::get(path));
     if let Some(token) = token {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -154,7 +155,8 @@ async fn health_is_public_and_reports_crate_version() {
         commit == "unknown" || (commit.len() >= 7 && commit.chars().all(|c| c.is_ascii_hexdigit())),
         "{body}"
     );
-    assert_eq!(body.as_object().unwrap().len(), 6, "{body}");
+    assert_eq!(body["compatibility_catalog_revision"], 1);
+    assert_eq!(body.as_object().unwrap().len(), 7, "{body}");
 }
 
 #[tokio::test]
@@ -230,7 +232,7 @@ async fn library_reports_identity_schema_and_monotonic_revision() {
     let first: LibraryResponse = json(send(&f.state, "/api/v1/library", Some(TOKEN)).await).await;
     assert!(first.identity_bound_writes);
     assert!(!first.library_id.is_empty());
-    assert_eq!(first.info.schema_version, 5);
+    assert_eq!(first.info.schema_version, audiolib_db::SCHEMA_VERSION);
     assert_eq!(first.info.stats.audio_files, 3);
     assert!(first.revision >= 1);
     let raw: serde_json::Value = json(send(&f.state, "/api/v1/library", Some(TOKEN)).await).await;
@@ -329,7 +331,10 @@ async fn snapshot_streams_an_openable_sqlite_copy_and_cleans_up() {
         .parse()
         .unwrap();
     assert!(revision >= info.revision);
-    assert_eq!(headers["x-schema-version"], "5");
+    assert_eq!(
+        headers["x-schema-version"],
+        audiolib_db::SCHEMA_VERSION.to_string()
+    );
     let length: usize = headers[header::CONTENT_LENGTH]
         .to_str()
         .unwrap()
@@ -538,6 +543,7 @@ async fn send_with(
         .method(method)
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+    request = support::modern(request);
     for (name, value) in headers {
         request = request.header(name, *value);
     }
@@ -561,13 +567,13 @@ fn audio_id(f: &Fixture, filename: &str) -> i64 {
 
 /// Point a library row at another path directly in SQLite (simulates stale or hostile rows).
 fn set_file_path(f: &Fixture, id: i64, path: &Path) {
-    Connection::open(&f.db)
-        .unwrap()
-        .execute(
-            "UPDATE audio_files SET file_path=?1 WHERE id=?2",
-            rusqlite::params![path.to_string_lossy(), id],
-        )
-        .unwrap();
+    let conn = Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET file_path=?1 WHERE id=?2",
+        rusqlite::params![path.to_string_lossy(), id],
+    )
+    .unwrap();
 }
 
 fn header_str(response: &Response, name: header::HeaderName) -> &str {
@@ -1052,7 +1058,7 @@ async fn auth_disabled_serves_every_endpoint_without_a_token() {
             Some("Bearer wrong-token-0123456789abcdef"),
             Some("Basic x"),
         ] {
-            let mut request = Request::get(path.as_str());
+            let mut request = support::modern(Request::get(path.as_str()));
             if let Some(value) = authorization {
                 request = request.header(header::AUTHORIZATION, value);
             }
@@ -1105,6 +1111,7 @@ async fn send_without_auth(
     headers: &[(header::HeaderName, &str)],
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    request = support::modern(request);
     for (name, value) in headers {
         request = request.header(name, *value);
     }
@@ -1130,6 +1137,7 @@ async fn send_json(
             state.revision().unwrap().library_id,
         )
         .header(header::CONTENT_TYPE, "application/json");
+    request = support::modern(request);
     if let Some(token) = token {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -1168,6 +1176,7 @@ async fn guard_request(
         .method(method)
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+    request = support::modern(request);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
@@ -1234,7 +1243,12 @@ async fn library_mutations_require_the_identity_of_the_captured_library() {
     }
     assert_eq!(f.state.revision().unwrap(), before);
     assert!(f.state.audio(id).unwrap().notes.is_empty());
-    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     assert!(f.state.scans().current().is_none());
     // Root rechecks do not target cached database ids and remain header-free.
     let response = guard_request(
@@ -1282,7 +1296,12 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
             "ORIGIN_FORBIDDEN"
         );
     }
-    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     let metadata_path = format!("/api/v1/audio/{id}/metadata");
     for content_type in [
         None,
@@ -1338,7 +1357,12 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     // The deprecated play route is a no-op: nothing is counted.
-    assert_eq!(f.state.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(f.state.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1448,11 +1472,15 @@ async fn batch_metadata_returns_the_report_and_changed_files_in_request_order() 
 }
 
 #[tokio::test]
-async fn plays_are_a_no_op_that_return_the_record_and_leave_the_revision_alone() {
+async fn plays_return_the_unchanged_record_without_writes_or_revision_changes() {
     let f = fixture();
     let id = audio_id(&f, "flyby_02.wav");
     let start = library_revision(&f.state).await;
-    for play in 1..=2_u64 {
+    let observer = Connection::open(&f.db).unwrap();
+    let data_version: i64 = observer
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap();
+    for _ in 0..2 {
         let response = send_json(
             &f.state,
             Method::POST,
@@ -1462,19 +1490,35 @@ async fn plays_are_a_no_op_that_return_the_record_and_leave_the_revision_alone()
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let body: AudioWriteResponse = json(response).await;
+        let value: serde_json::Value = json(response).await;
+        assert!(value["file"].get("play_count").is_none());
+        assert!(value["file"]["attributes"].get("last_played_at").is_none());
+        let body: AudioWriteResponse = serde_json::from_value(value).unwrap();
         assert_eq!(body.file.id, id);
-        // Deprecated no-op: the play is not recorded.
-        assert_eq!(body.file.play_count, 0, "play {play}");
         assert_eq!(body.revision_before, start);
         assert_eq!(body.revision, start);
     }
-    // Nothing was written: polling and restarting see the same revision.
     assert_eq!(library_revision(&f.state).await, start);
+    assert_eq!(
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        data_version
+    );
+    let history: serde_json::Value =
+        json(send(&f.state, "/api/v1/history/plays", Some(TOKEN)).await).await;
+    assert_eq!(history, serde_json::json!([]));
+
+    // The no-op stays a no-op after restart; the next content write still bumps once.
     drop(f.state);
     let reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
     assert_eq!(library_revision(&reopened).await, start);
-    assert_eq!(reopened.audio(id).unwrap().play_count, 0);
+    assert!(
+        serde_json::to_value(reopened.audio(id).unwrap())
+            .unwrap()
+            .get("play_count")
+            .is_none()
+    );
     let history = send_json(
         &reopened,
         Method::GET,
@@ -1484,13 +1528,8 @@ async fn plays_are_a_no_op_that_return_the_record_and_leave_the_revision_alone()
     )
     .await;
     assert_eq!(history.status(), StatusCode::OK);
-    let history: Vec<audiolib_core::PlayRecord> = json(history).await;
-    assert!(
-        history.is_empty(),
-        "play history is not recorded by the server"
-    );
-
-    // A content write after the plays still bumps exactly once.
+    let history: Vec<serde_json::Value> = json(history).await;
+    assert!(history.is_empty());
     let response = send_json(
         &reopened,
         Method::PATCH,
@@ -1673,6 +1712,7 @@ async fn external_wal_commits_bump_and_restarts_do_not() {
 
     // Another process commits in WAL mode without checkpointing: the main file is unchanged.
     let external = Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&external).unwrap();
     external
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
         .unwrap();
@@ -1688,7 +1728,21 @@ async fn external_wal_commits_bump_and_restarts_do_not() {
     assert_eq!(library_revision(&f.state).await, start + 1);
     assert_eq!(library_revision(&f.state).await, start + 1, "counted once");
 
-    // A server write right after continues from there.
+    // The compatibility play route leaves the externally advanced revision unchanged.
+    let response = send_json(
+        &f.state,
+        Method::POST,
+        &format!("/api/v1/audio/{id}/plays"),
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let played: AudioWriteResponse = json(response).await;
+    assert_eq!(played.revision_before, start + 1);
+    assert_eq!(played.revision, start + 1);
+
+    // A subsequent content write continues the revision chain exactly once.
     let response = send_json(
         &f.state,
         Method::PATCH,
@@ -1697,6 +1751,7 @@ async fn external_wal_commits_bump_and_restarts_do_not() {
         Some(TOKEN),
     )
     .await;
+    assert_eq!(response.status(), StatusCode::OK);
     let written: AudioWriteResponse = json(response).await;
     assert_eq!(written.revision_before, start + 1);
     assert_eq!(written.revision, start + 2);
@@ -1774,13 +1829,13 @@ async fn startup_removes_only_stale_snapshot_directories() {
 fn rename_to_chinese(f: &Fixture, id: i64) -> std::path::PathBuf {
     let path = f.dir.path().join("sounds").join("雷声 近.wav");
     fs::rename(f.dir.path().join("sounds").join("door.wav"), &path).unwrap();
-    Connection::open(&f.db)
-        .unwrap()
-        .execute(
-            "UPDATE audio_files SET file_path=?1, filename=?2 WHERE id=?3",
-            rusqlite::params![path.to_string_lossy(), "雷声 近.wav", id],
-        )
-        .unwrap();
+    let conn = Connection::open(&f.db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET file_path=?1, filename=?2 WHERE id=?3",
+        rusqlite::params![path.to_string_lossy(), "雷声 近.wav", id],
+    )
+    .unwrap();
     path
 }
 
@@ -3455,6 +3510,7 @@ async fn call(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    request = support::modern(request);
     if let Ok(state) = service.clone().into().app_state() {
         request = request.header(
             "x-audiolib-library-id",

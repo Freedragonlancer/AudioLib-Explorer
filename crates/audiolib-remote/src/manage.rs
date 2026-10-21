@@ -19,7 +19,7 @@
 //! means nothing was removed.
 //!
 //! `manage_mode` (§6.9) gates scan control, database removals, directory browsing and
-//! root management (metadata edits, plays and ordinary library reads are not gated);
+//! root management (Metadata edits and ordinary library reads are not gated);
 //! refusals are `403 MANAGE_FORBIDDEN`
 //! ([`RemoteError::Forbidden`], show the server's message). [`RemoteClient::capabilities`]
 //! reports `can_manage` for this request's network path; a server without the endpoint
@@ -68,6 +68,9 @@ pub enum ManageMode {
 /// `GET /capabilities` reply (§6.9; normal authentication).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Capabilities {
+    /// Present on servers supporting mutual version and exact snapshot negotiation.
+    #[serde(default)]
+    pub compatibility: Option<audiolib_core::compatibility::CompatibilityManifest>,
     /// False when the server has no `/capabilities` endpoint (`404`).
     #[serde(skip, default = "known")]
     pub supported: bool,
@@ -102,6 +105,7 @@ fn known() -> bool {
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
+            compatibility: None,
             supported: true,
             manage_mode: ManageMode::All,
             external: None,
@@ -389,6 +393,9 @@ impl RemoteClient {
         let library_id = (method != "GET")
             .then(|| self.write_library_id())
             .transpose()?;
+        let compatibility = (method != "GET")
+            .then(crate::compatibility::client_header)
+            .transpose()?;
         let result = match method {
             // Reads may be resent once on a stale keep-alive connection; writes never are.
             "GET" => crate::abort::call_fresh(|| {
@@ -399,10 +406,17 @@ impl RemoteClient {
                 }
             }),
             "DELETE" => {
-                let mut request = agent.unwrap_or(&self.writes).delete(&url).header(
-                    crate::client::LIBRARY_ID_HEADER,
-                    library_id.as_deref().unwrap_or_default(),
-                );
+                let mut request = agent
+                    .unwrap_or(&self.writes)
+                    .delete(&url)
+                    .header(
+                        crate::client::LIBRARY_ID_HEADER,
+                        library_id.as_deref().unwrap_or_default(),
+                    )
+                    .header(
+                        audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                        compatibility.as_deref().unwrap_or_default(),
+                    );
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
@@ -417,6 +431,10 @@ impl RemoteClient {
                 .header(
                     crate::client::LIBRARY_ID_HEADER,
                     library_id.as_deref().unwrap_or_default(),
+                )
+                .header(
+                    audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                    compatibility.as_deref().unwrap_or_default(),
                 );
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
@@ -671,9 +689,21 @@ mod tests {
     fn server(
         reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
     ) -> (TestServer, Arc<Mutex<Vec<Seen>>>) {
+        server_with_catalog(false, reply)
+    }
+
+    fn server_with_catalog(
+        probe_catalog: bool,
+        reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
+    ) -> (TestServer, Arc<Mutex<Vec<Seen>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
         let server = TestServer::start(move |request| {
+            if (request.path != "/api/v1/capabilities" || !probe_catalog)
+                && let Some(response) = crate::test_server::legacy_handshake(&request.path)
+            {
+                return response;
+            }
             if request.method == "GET" && request.path == "/api/v1/library" {
                 return TestResponse::json(
                     200,
@@ -703,7 +733,7 @@ mod tests {
 
     #[test]
     fn capabilities_drive_management_and_404_means_read_only() {
-        let (current, seen) = server(|_, path| match path {
+        let (current, seen) = server_with_catalog(true, |_, path| match path {
             "/api/v1/capabilities" => TestResponse::json(
                 200,
                 r#"{"manage_mode":"lan","external":true,"can_manage":false,"new":1}"#,
@@ -737,7 +767,8 @@ mod tests {
         let odd: Capabilities = serde_json::from_str(r#"{"manage_mode":"weekends"}"#).unwrap();
         assert!(!odd.may_manage());
         // A server without /capabilities: read-only, no management offered.
-        let (old, _) = server(|_, _| error(404, "NOT_FOUND", "No such endpoint"));
+        let (old, _) =
+            server_with_catalog(true, |_, _| error(404, "NOT_FOUND", "No such endpoint"));
         let caps = RemoteClient::new(&old.url, "")
             .unwrap()
             .capabilities()
@@ -745,7 +776,9 @@ mod tests {
         assert!(!caps.supported && !caps.may_manage());
         assert_eq!(caps.manage_mode, ManageMode::Unknown);
         // A token problem is still an error, not "unknown".
-        let (secured, _) = server(|_, _| error(401, "UNAUTHORIZED", "Missing or invalid token"));
+        let (secured, _) = server_with_catalog(true, |_, _| {
+            error(401, "UNAUTHORIZED", "Missing or invalid token")
+        });
         assert!(matches!(
             RemoteClient::new(&secured.url, "").unwrap().capabilities(),
             Err(RemoteError::TokenRequired(_))

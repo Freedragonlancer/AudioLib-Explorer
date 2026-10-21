@@ -1,11 +1,58 @@
 # AudioLib Explorer release notes
 
-## Unreleased: upgrade recovery and integrated client/server
+## Unreleased: Plan B storage and shared migration (`0.6.0-dev.1`)
+
+Development identity: program `0.6.0-dev.1` | API `/api/v1/` | schema 6 |
+snapshot schema boundary 3..=6, subject to the complete format/capability catalog.
+This isolated development build has not been published, deployed or installed over
+the current application. A future release requires a chosen release version/tag and
+the corresponding tested peer-version ranges.
+
+- Plan B removes six persisted derived-token columns while retaining tokenization
+  revision 3, all twelve logical FTS5 columns, full positions and document lengths.
+  Schema 6 uses contentless-delete storage and the pinned SQLite statistics fixes.
+- Client, CLI and server share compatibility diagnosis and the owned
+  inspect/plan/apply/resume/verify/rollback executor. Version differences alone do
+  not authorize rebuilding a library. Unknown formats block unsafe use.
+- Migration preserves stable IDs, Metadata, annotations, references, scan history
+  and unknown supported extensions. The explicitly authorized retirement removes
+  `play_history`, `audio_files.play_count` and `audio_files.last_played_at`.
+  Original playback data remains recoverable in the complete pre-upgrade backup.
+  The p1 format declares play_history_retired=2; earlier unpublished p0 is read-only
+  compatible and migratable.
+- Playback events live only in client-local history.db, default 5000 per library.
+  Local legacy history imports after backup and before retirement; server/snapshot
+  history is not imported. Cache replacement leaves this independent store intact.
+- AudioFile JSON/CSV no longer contain play_count; attributes no longer append
+  last_played_at. New clients ignore these extra fields in old server responses.
+  Existing server playback routes keep validation and no-write behavior. Deploy
+  clients before servers: old binaries require the removed JSON counter field.
+- Download/decompression counters and migration phases/counts reach the UI.
+  Invalid checkpoints stop resumption; process-crash recovery is tested for copy,
+  indexing, publication and rollback. Cache retries preserve the previous snapshot
+  and leave abandoned jobs intact for owner review.
+- The CR branch incorporates released 0.5.0, retains its Waveform cache management
+  and same-revision replies, and explicitly tests both 0.4.11 and 0.5.0 legacy peers.
+  It rejects stale/unbound snapshots, checks UPDATE OF retirement dependencies,
+  binds recovery to actual tokenizer sources and admits settings mutations through
+  the same peer-catalog check. See [the CR record](api/Search_Storage_B_CR.md).
+- Full-copy validation reduced the 909,342-record library by 45.572%, with complete
+  rollback and search-result checks. First-use sorting still has a reproducible
+  latency regression despite passing measured P95 targets; resolve its release
+  acceptance before deploying this draft candidate.
+
+See the [migration contract](api/Library_Migration_Compatibility.md),
+[v6 iteration and acceptance](api/Schema_V6_Iteration.md) and
+[CR validation record](api/Search_Storage_B_CR.md) for exact evidence and
+remaining limits. Database timings do not substitute for the separate GUI or Mac
+acceptance work recorded below.
+
+## Previous unreleased baseline: upgrade recovery and integrated client/server
 
 This candidate includes `origin/main` at `71bb1fd`, client integration at `c50bd27`
 and server integration at `3eef19c`, followed by the upgrade and shutdown repairs.
 The previously rejected `47ddd03` through `c0e8af9` builds must not be published.
-The workspace still reports 0.4.11 during preparation; publication requires a new
+That earlier baseline reported 0.4.11 during preparation; publication requires a new
 shared program version and matching tag. Do not replace the published v0.4.11 tag.
 
 - Existing writable libraries upgrade search text and FTS5 in committed batches,
