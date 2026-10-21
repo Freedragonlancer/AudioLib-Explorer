@@ -49,6 +49,7 @@ fn broad_duration_pages_match_native_order_before_and_after_visibility_changes()
     // Supported legacy imports preserve nullable visibility storage. A fresh
     // current table deliberately has a NOT NULL constraint instead.
     let source = Connection::open(&legacy).unwrap();
+    audiolib_db::register_library_functions(&source).unwrap();
     source
         .execute_batch(
             "CREATE TABLE audio_files(id INTEGER PRIMARY KEY,file_path TEXT NOT NULL UNIQUE,
@@ -61,6 +62,7 @@ fn broad_duration_pages_match_native_order_before_and_after_visibility_changes()
     import_legacy(&legacy, &path).unwrap();
     let provider = SqliteProvider::open_existing(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "WITH RECURSIVE n(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM n WHERE id<32768)
         INSERT INTO audio_files(id,file_path,filename,duration,missing)

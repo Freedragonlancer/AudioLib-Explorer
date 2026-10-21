@@ -91,6 +91,33 @@ pub(super) fn visible_filter_from(tx: &Connection) -> Result<&'static str> {
     })
 }
 
+/// Relevance ranking also intersects numeric filters with complete MATCH IDs.
+/// Keep this membership scan on a proven covering index: idx_duration alone
+/// otherwise visits wide Metadata rows solely to test missing=0.
+pub(super) fn covering_numeric_filter_from(
+    tx: &Connection,
+    request: &audiolib_core::SearchRequest,
+) -> Result<Option<&'static str>> {
+    use audiolib_core::{FileVisibility, SearchFilters};
+    let filters = &request.filters;
+    if request.folder_id.is_some()
+        || filters.visibility != FileVisibility::Present
+        || (filters.sample_rate.is_none()
+            && filters.duration_min.is_none()
+            && filters.duration_max.is_none())
+        || (SearchFilters {
+            sample_rate: None,
+            duration_min: None,
+            duration_max: None,
+            ..filters.clone()
+        }) != SearchFilters::default()
+    {
+        return Ok(None);
+    }
+    let from = visible_filter_from(tx)?;
+    Ok((from == "audio_files af INDEXED BY idx_audio_visible_filter").then_some(from))
+}
+
 /// Use a bounded full narrow-filter scan for a cold query, keeping the ordinary
 /// small-ranking heuristic unchanged for warm rankings and other filter shapes.
 pub(super) fn filtered_ids_full_scan(
@@ -208,6 +235,113 @@ mod tests {
     use crate::Error;
     use rusqlite::params;
     use std::cell::Cell;
+
+    #[test]
+    fn numeric_membership_uses_proven_covering_index_with_complete_visibility() {
+        use audiolib_core::{FileVisibility, SearchFilters, SearchRequest};
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audio_files(id INTEGER PRIMARY KEY,missing INTEGER,sample_rate INTEGER,duration REAL,metadata_json TEXT);
+             CREATE INDEX idx_duration ON audio_files(duration);
+             CREATE INDEX idx_audio_visible_filter ON audio_files(sample_rate,duration,id) WHERE missing=0;
+             INSERT INTO audio_files VALUES(-7,0,48000,1,'wide');
+             INSERT INTO audio_files VALUES(2,0,44100,10,'wide');
+             INSERT INTO audio_files VALUES(3,1,48000,5,'wide');
+             INSERT INTO audio_files VALUES(4,NULL,48000,5,'wide');
+             INSERT INTO audio_files VALUES(5,2,48000,5,'wide');
+             INSERT INTO audio_files VALUES(6,0,48000,NULL,'wide');",
+        ).unwrap();
+        let request = SearchRequest {
+            query: "metal".into(),
+            filters: SearchFilters {
+                duration_min: Some(1.0),
+                duration_max: Some(10.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let from = covering_numeric_filter_from(&conn, &request)
+            .unwrap()
+            .unwrap();
+        let sql = format!(
+            "SELECT af.id FROM {from} WHERE af.missing=0 AND af.duration>=?1 AND af.duration<=?2"
+        );
+        let ids: Vec<i64> = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map([1.0, 10.0], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let mut sorted = ids;
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![-7, 2]);
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map([1.0, 10.0], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("COVERING INDEX idx_audio_visible_filter"))
+        );
+        for filters in [
+            SearchFilters {
+                channels: Some(2),
+                ..request.filters.clone()
+            },
+            SearchFilters {
+                visibility: FileVisibility::All,
+                ..request.filters.clone()
+            },
+            SearchFilters {
+                tagged_only: true,
+                ..request.filters.clone()
+            },
+        ] {
+            assert!(
+                covering_numeric_filter_from(
+                    &conn,
+                    &SearchRequest {
+                        filters,
+                        ..request.clone()
+                    }
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        assert!(
+            covering_numeric_filter_from(
+                &conn,
+                &SearchRequest {
+                    folder_id: Some(1),
+                    ..request.clone()
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        conn.execute_batch(
+            "DROP INDEX idx_audio_visible_filter;
+            CREATE INDEX idx_audio_visible_filter ON audio_files(duration,id) WHERE missing=1;",
+        )
+        .unwrap();
+        assert!(
+            covering_numeric_filter_from(&conn, &request)
+                .unwrap()
+                .is_none()
+        );
+        conn.execute_batch("DROP INDEX idx_audio_visible_filter;")
+            .unwrap();
+        assert!(
+            covering_numeric_filter_from(&conn, &request)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn query_fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

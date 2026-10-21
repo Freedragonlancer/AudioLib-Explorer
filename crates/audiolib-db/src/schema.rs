@@ -4,16 +4,40 @@ use audiolib_core::{Error, Result};
 use jieba_rs::Jieba;
 use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
 use std::sync::Arc;
+mod current;
+pub(crate) mod definition;
 mod search_upgrade;
-pub(crate) use search_upgrade::{ensure_ready, migrate_resumable, pending};
+pub(crate) use current::{create_current, current_format_ready, mark_current, needs_upgrade};
+pub(crate) use search_upgrade::{migrate_resumable, pending};
 
-pub const SCHEMA_VERSION: i64 = 5;
+/// Writable target format; legacy normalization remains pinned to v5 below.
+pub const SCHEMA_VERSION: i64 = 6;
+pub const LEGACY_SCHEMA_VERSION: i64 = 5;
 /// Read-only source snapshots remain compatible across schemas 3..=5. Obsolete
 /// derived search state is repaired only in an owned staging or temporary copy.
 pub const MIN_SNAPSHOT_SCHEMA_VERSION: i64 = 3;
 // Revision 3 also indexes multi-letter folds of a single source grapheme, while
 // preserving its exact single-grapheme token for multi-term queries.
 const SEARCH_TEXT_VERSION: i64 = 3;
+
+fn feature_table_exists(conn: &Connection) -> Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='audiolib_schema_features')",
+        [],|row|row.get(0)).map_err(db_error)
+}
+
+pub(crate) fn ensure_ready(conn: &Connection) -> Result<()> {
+    search_upgrade::ensure_ready(conn)?;
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='audiolib_storage_migration')",
+        [], |row| row.get(0),
+    ).map_err(db_error)?;
+    if pending {
+        return Err(Error::Busy(
+            "Storage migration is incomplete; resume or roll back its job".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn feature_version(conn: &Connection, feature: &str) -> Result<Option<i64>> {
     let exists: bool = conn
@@ -42,11 +66,38 @@ fn validate_supported_feature_revisions(conn: &Connection) -> Result<()> {
 }
 
 fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()> {
+    if feature_table_exists(conn)? {
+        let names = conn
+            .prepare("SELECT feature FROM audiolib_schema_features")
+            .map_err(db_error)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?;
+        for name in names {
+            if ![
+                "stable_audio_ids",
+                "foreign_key_indexes",
+                "tokenization",
+                "search_indexes",
+                "search_storage",
+                "play_history_retired",
+            ]
+            .contains(&name.as_str())
+            {
+                return Err(Error::Database(format!(
+                    "Unknown required database feature {name}"
+                )));
+            }
+        }
+    }
     for (feature, supported) in [
         ("stable_audio_ids", 1),
         ("foreign_key_indexes", 1),
         ("tokenization", tokenization),
         ("search_indexes", 1),
+        ("search_storage", 1),
+        ("play_history_retired", 1),
     ] {
         if let Some(version) = feature_version(conn, feature)?
             && version > supported
@@ -84,7 +135,7 @@ fn set_feature_version(conn: &Connection, feature: &str, version: i64) -> Result
 
 /// Probe additive implementation revisions and indexes before upgrading a library.
 /// Read-only connections can probe this without creating tables or changing the source.
-pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
+pub(crate) fn legacy_needs_upgrade(conn: &Connection) -> Result<bool> {
     if pending(conn)? {
         return Ok(true);
     }
@@ -92,7 +143,7 @@ pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    if version != SCHEMA_VERSION {
+    if version != LEGACY_SCHEMA_VERSION {
         return Ok(true);
     }
     if feature_version(conn, "stable_audio_ids")? != Some(1)
@@ -141,6 +192,12 @@ pub(crate) fn search_text_is_current(conn: &Connection) -> Result<bool> {
 
 /// Derived text and the required directory/visibility indexes must all be readable.
 pub(crate) fn search_state_is_current(conn: &Connection) -> Result<bool> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version == SCHEMA_VERSION {
+        return current_format_ready(conn);
+    }
     if !search_text_is_current(conn)?
         || !source_tags_ready(conn)?
         || feature_version(conn, "search_indexes")? != Some(1)
@@ -631,23 +688,23 @@ pub(crate) fn migrate_with_progress(
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    if version > SCHEMA_VERSION {
+    if version > LEGACY_SCHEMA_VERSION {
         return Err(Error::Database(format!(
-            "Database schema {version} is newer than supported {SCHEMA_VERSION}"
+            "Database schema {version} is newer than supported {LEGACY_SCHEMA_VERSION}"
         )));
     }
-    if version == SCHEMA_VERSION && !needs_upgrade(conn)? {
+    if version == LEGACY_SCHEMA_VERSION && !legacy_needs_upgrade(conn)? {
         return Ok(());
     }
     let tx = conn.transaction().map_err(db_error)?;
-    if (1..=SCHEMA_VERSION).contains(&version) {
+    if (1..=LEGACY_SCHEMA_VERSION).contains(&version) {
         add_management_schema(&tx)?;
         apply_indexes(&tx)?;
         add_current_features(&tx)?;
         if !search_text_is_current(&tx)? {
             rebuild_search_in_transaction_with_progress(&tx, progress)?;
         }
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        tx.pragma_update(None, "user_version", LEGACY_SCHEMA_VERSION)
             .map_err(db_error)?;
         return tx.commit().map_err(db_error);
     }
@@ -687,7 +744,7 @@ pub(crate) fn migrate_with_progress(
     .map_err(db_error)?;
     set_feature_version(&tx, "tokenization", SEARCH_TEXT_VERSION)?;
     tx.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+    tx.pragma_update(None, "user_version", LEGACY_SCHEMA_VERSION)
         .map_err(db_error)?;
     tx.commit().map_err(db_error)
 }
@@ -709,6 +766,12 @@ fn add_management_schema(conn: &Connection) -> Result<()> {
 /// Recreate authoritative triggers and rebuild derived search text transactionally.
 pub(crate) fn rebuild_search(conn: &mut Connection) -> Result<()> {
     validate_supported_feature_revisions(conn)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version == SCHEMA_VERSION {
+        return current::rebuild_search(conn);
+    }
     let tx = conn.transaction().map_err(db_error)?;
     rebuild_search_in_transaction(&tx)?;
     tx.commit().map_err(db_error)

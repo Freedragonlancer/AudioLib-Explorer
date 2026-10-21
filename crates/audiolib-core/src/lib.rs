@@ -8,6 +8,7 @@ use std::sync::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod compatibility;
 pub mod config;
 pub mod library;
 pub mod list_waveform;

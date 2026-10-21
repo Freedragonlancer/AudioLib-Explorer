@@ -174,33 +174,20 @@ try {
         if ($baselineMemory -le 0 -or $largeMemory -le 0) { throw 'Windows process memory counters are unavailable.' }
         $memoryDelta = $largeMemory - $baselineMemory
         if ($largePlayback.duration -lt 100 -or $memoryDelta -gt 64MB) { throw 'Large WAV did not remain within the bounded streaming memory budget.' }
-        $historyDeadline = [DateTime]::UtcNow.AddSeconds(2)
-        do {
-            $history = @(Invoke-Control @('play-history','--limit','100'))
-            $actualHistory = @($history | Where-Object {
-                [IO.Path]::GetFullPath($_.file_path).Replace('\\?\','') -eq $largest.FullName
-            })
-            if ($actualHistory.Count -eq 0) { Start-Sleep -Milliseconds 65 }
-        } while ($actualHistory.Count -eq 0 -and [DateTime]::UtcNow -lt $historyDeadline)
-        if ($history.Count -ne 1 -or $actualHistory.Count -ne 1) {
-            throw 'Playback history did not resolve the actual IPC source or recorded the GUI-selected/unindexed file.'
-        }
-        $checks.Add('playback history resolves actual indexed IPC source while GUI selection differs')
-        # The indexed source remains muted throughout these replay/history checks.
+        $history = @(Invoke-Control @('play-history','--limit','100'))
+        if ($history.Count -ne 0) { throw 'Playback unexpectedly created retired playback history.' }
+        $checks.Add('indexed IPC playback keeps retired history empty')
+        # The indexed source remains muted throughout these replay checks.
         $null = Invoke-Control @('play')
         Start-Sleep -Milliseconds 120
         $null = Invoke-Control @('pause')
         $continuedHistory = @(Invoke-Control @('play-history','--limit','100'))
-        if ($continuedHistory.Count -ne 1) { throw 'Pause/resume duplicated the playback history session.' }
+        if ($continuedHistory.Count -ne 0) { throw 'Pause/resume unexpectedly wrote playback history.' }
         $null = Invoke-Control @('stop')
         $replayed = Invoke-Control @('play')
         if ($replayed.generation -ne $largePlayback.generation) { throw 'Stop/replay unexpectedly reloaded the source.' }
-        $replayDeadline = [DateTime]::UtcNow.AddSeconds(2)
-        do {
-            $replayedHistory = @(Invoke-Control @('play-history','--limit','100'))
-            if ($replayedHistory.Count -lt 2) { Start-Sleep -Milliseconds 65 }
-        } while ($replayedHistory.Count -lt 2 -and [DateTime]::UtcNow -lt $replayDeadline)
-        if ($replayedHistory.Count -ne 2) { throw 'Stop/replay did not create exactly one new playback history session.' }
+        $replayedHistory = @(Invoke-Control @('play-history','--limit','100'))
+        if ($replayedHistory.Count -ne 0) { throw 'Stop/replay unexpectedly wrote playback history.' }
         $null = Invoke-Control @('pause')
         $null = Invoke-Control @('seek',[string]($largePlayback.duration - 0.02))
         $null = Invoke-Control @('play')
@@ -211,14 +198,10 @@ try {
         } while ($ended.state -ne 'ended' -and [DateTime]::UtcNow -lt $endDeadline)
         if ($ended.state -ne 'ended') { throw 'The muted near-end source did not finish naturally.' }
         $null = Invoke-Control @('play')
-        $replayDeadline = [DateTime]::UtcNow.AddSeconds(2)
-        do {
-            $replayedHistory = @(Invoke-Control @('play-history','--limit','100'))
-            if ($replayedHistory.Count -lt 3) { Start-Sleep -Milliseconds 65 }
-        } while ($replayedHistory.Count -lt 3 -and [DateTime]::UtcNow -lt $replayDeadline)
-        if ($replayedHistory.Count -ne 3) { throw 'Natural end/replay did not create exactly one new playback history session.' }
+        $replayedHistory = @(Invoke-Control @('play-history','--limit','100'))
+        if ($replayedHistory.Count -ne 0) { throw 'Natural end/replay unexpectedly wrote playback history.' }
         $null = Invoke-Control @('pause')
-        $checks.Add('pause/resume and seek preserve history; stop/replay and natural end/replay each add one session')
+        $checks.Add('pause/resume, seek, stop/replay and natural end/replay keep playback history empty')
         $null = Invoke-Control @('volume','0.37')
         $checks.Add('indexed long WAV decodes muted without full-file PCM memory')
     }

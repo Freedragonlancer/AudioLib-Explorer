@@ -22,9 +22,10 @@ fn prepare_cache(root: &Path, cached_url: &str, configured_url: &str) -> RemoteC
     let database = directory.join("library-r1-test.db");
     drop(SqliteProvider::open(&database).unwrap());
     let conn = rusqlite::Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
-        "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,user_notes)
-         VALUES(7,'/A/original.wav','/A/original.wav','original.wav','original','A notes');",
+        "INSERT INTO audio_files(id,file_path,path_key,filename,user_notes)
+         VALUES(7,'/A/original.wav','/A/original.wav','original.wav','A notes');",
     )
     .unwrap();
     conn.query_row("PRAGMA journal_mode=DELETE", [], |row| {
@@ -147,6 +148,9 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
         let requests = requests.clone();
         let revision = revision.clone();
         TestServer::start(move |request| {
+            if let Some(response) = test_server::legacy_handshake(&request.path) {
+                return response;
+            }
             requests
                 .lock()
                 .unwrap()
@@ -158,7 +162,7 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
                     &json!({"library_id": LIBRARY, "identity_bound_writes":true, "schema_version":5,"revision":*revision})
                         .to_string(),
                 ),
-                ("PATCH", "/api/v1/audio/7/metadata") | ("POST", "/api/v1/audio/7/plays") => {
+                ("PATCH", "/api/v1/audio/7/metadata") => {
                     assert_eq!(request.header(audiolib_remote::LIBRARY_ID_HEADER), Some(LIBRARY));
                     if request.method == "PATCH" {
                         let patch: Value = serde_json::from_slice(&request.body).unwrap();
@@ -201,11 +205,11 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
         assert_eq!(cli(directory.path(), &args)["success"], true);
     }
     let state = cache.active().unwrap();
-    assert_eq!(state.revision, 3);
+    assert_eq!(state.revision, 2);
     let snapshot = SqliteProvider::open_read_only(&cache.database_path(&state)).unwrap();
     let file = snapshot.get_audio(7).unwrap();
     assert_eq!(file.notes, "saved notes");
-    assert_eq!(file.play_count, 1);
+    assert_eq!(file.play_count, 0);
     let requests = requests.lock().unwrap();
     assert_eq!(requests[0], ("GET".into(), "/api/v1/library".into()));
     let mutations = requests
@@ -215,10 +219,7 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
         .collect::<Vec<_>>();
     assert_eq!(
         mutations,
-        [
-            ("PATCH".into(), "/api/v1/audio/7/metadata".into()),
-            ("POST".into(), "/api/v1/audio/7/plays".into()),
-        ]
+        [("PATCH".into(), "/api/v1/audio/7/metadata".into()),]
     );
     assert!(
         requests
@@ -251,20 +252,20 @@ fn legacy_server_remains_readable_but_cli_never_sends_cached_id_writes() {
     let cache = prepare_cache(directory.path(), &server.url, &server.url);
     let state = cache.active().unwrap();
     let before = std::fs::read(cache.database_path(&state)).unwrap();
-    for args in [
-        vec!["remote", "edit", "7", "--notes", "saved notes"],
-        vec!["remote", "plays", "7"],
-    ] {
-        let reply = cli(directory.path(), &args);
-        assert_eq!(reply["success"], false, "{reply}");
-        assert!(
-            reply["error"]
-                .as_str()
-                .unwrap()
-                .contains("update the server"),
-            "{reply}"
-        );
-    }
+    let reply = cli(
+        directory.path(),
+        &["remote", "edit", "7", "--notes", "saved notes"],
+    );
+    assert_eq!(reply["success"], false, "{reply}");
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("update the server"),
+        "{reply}"
+    );
+    let played = cli(directory.path(), &["remote", "plays", "7"]);
+    assert_eq!(played["success"], true, "{played}");
     assert!(
         requests
             .lock()
@@ -291,7 +292,7 @@ fn remote_test_reports_incompatible_schema_and_retains_api_and_cache_evidence() 
                 "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.0"}"#),
                 "/api/v1/library" => TestResponse::json(
                     200,
-                    &json!({"library_id": LIBRARY, "schema_version":6,"revision":282}).to_string(),
+                    &json!({"library_id": LIBRARY, "schema_version":7,"revision":282}).to_string(),
                 ),
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
                 _ => TestResponse::json(500, "{}"),
@@ -304,7 +305,7 @@ fn remote_test_reports_incompatible_schema_and_retains_api_and_cache_evidence() 
     let reply = cli(directory.path(), &["remote", "test"]);
     assert_eq!(reply["success"], false, "{reply}");
     assert_eq!(reply["error_code"], "REMOTE_TEST_FAILED");
-    assert_eq!(reply["data"]["library"]["schema_version"], 6);
+    assert_eq!(reply["data"]["library"]["schema_version"], 7);
     assert_eq!(reply["data"]["server_version"], "0.4.0");
     assert!(reply["data"].get("unauthorized").is_none());
     let steps = reply["data"]["steps"].as_array().unwrap();
@@ -315,12 +316,12 @@ fn remote_test_reports_incompatible_schema_and_retains_api_and_cache_evidence() 
     );
     let library = steps.iter().find(|step| step["step"] == "library").unwrap();
     assert_eq!(library["ok"], false);
-    assert!(library["message"].as_str().unwrap().contains("schema 6"));
+    assert!(library["message"].as_str().unwrap().contains("schema 7"));
     assert!(
         library["message"]
             .as_str()
             .unwrap()
-            .contains("newer than this client supports (5)")
+            .contains("newer than this client supports (6)")
     );
     assert_eq!(cache.active().unwrap(), state);
     assert_eq!(std::fs::read(cache.database_path(&state)).unwrap(), before);

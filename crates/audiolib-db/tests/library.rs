@@ -1,13 +1,14 @@
 // crates/audiolib-db/tests/library.rs
+mod support;
 use audiolib_core::{
     DataProvider, MetadataPatch, ScanState, SearchFilters, SearchRequest, SortOrder,
 };
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider, import_legacy};
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use std::{fs, path::Path, sync::Arc};
 
 fn legacy(path: &Path, audio_path: &Path) {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     conn.execute_batch("CREATE TABLE audio_files(id INTEGER PRIMARY KEY,file_path TEXT UNIQUE NOT NULL,filename TEXT,
         file_size INTEGER,sample_rate INTEGER,bit_depth INTEGER,channels INTEGER,duration REAL,
         user_tags TEXT,user_rating INTEGER,user_color TEXT,user_notes TEXT,
@@ -71,20 +72,20 @@ fn imports_legacy_losslessly_and_rebuilds_chinese_fts() {
     let audio = provider.get_audio(42).unwrap();
     assert_eq!(audio.tags, "火焰,oldtag");
     // Legacy rating data stays in the column (read by nothing in the product).
-    let legacy_rating: i64 = Connection::open(&target)
+    let legacy_rating: i64 = support::connection(&target)
         .unwrap()
         .query_row("SELECT user_rating FROM audio_files WHERE id=42", [], |r| {
             r.get(0)
         })
         .unwrap();
     assert_eq!(legacy_rating, 4);
-    assert_eq!(audio.play_count, 12);
+    assert_eq!(audio.play_count, 0);
     assert_eq!(audio.color.as_deref(), Some("#123456"));
     assert_eq!(audio.notes, "车辆发动机的环境声");
     for query in ["爆炸", "火焰", "发动机", "oldtag"] {
         assert_eq!(search(&provider, query), 1, "{query}");
     }
-    let conn = Connection::open(&target).unwrap();
+    let conn = support::connection(&target).unwrap();
     for (sql, expected) in [
         (
             "SELECT custom_user_field FROM audio_files WHERE id=42",
@@ -93,6 +94,10 @@ fn imports_legacy_losslessly_and_rebuilds_chinese_fts() {
         (
             "SELECT created_at FROM audio_files WHERE id=42",
             "2024-01-01 01:02:03",
+        ),
+        (
+            "SELECT last_played_at FROM audio_files WHERE id=42",
+            "2024-01-03 03:04:05",
         ),
         ("SELECT notes FROM playlist_items WHERE id=17", "item notes"),
         (
@@ -124,7 +129,7 @@ fn backup_reads_committed_wal_without_writing_source() {
     let source = temp.path().join("source.db");
     let target = temp.path().join("target.db");
     legacy(&source, &temp.path().join("audio.wav"));
-    let conn = Connection::open(&source).unwrap();
+    let conn = support::connection(&source).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;UPDATE audio_files SET user_notes='committed wal';",
     )
@@ -148,7 +153,7 @@ fn failed_import_does_not_publish_a_destination_or_leave_staging_files() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("bad.db");
     let target = temp.path().join("target.db");
-    let conn = Connection::open(&source).unwrap();
+    let conn = support::connection(&source).unwrap();
     conn.execute_batch("PRAGMA user_version=999;CREATE TABLE private_data(value TEXT);INSERT INTO private_data VALUES('keep');").unwrap();
     drop(conn);
     let before = fs::read(&source).unwrap();
@@ -194,10 +199,10 @@ fn metadata_updates_fts_old_terms_and_deletion_leave_no_stale_postings() {
         assert_eq!(search(&provider, query), 1);
     }
     provider.record_play(42).unwrap();
-    assert_eq!(provider.get_audio(42).unwrap().play_count, 13);
+    assert_eq!(provider.get_audio(42).unwrap().play_count, 0);
     provider.delete_audio(42).unwrap();
     assert_eq!(search(&provider, "newtag"), 0);
-    let conn = Connection::open(&target).unwrap();
+    let conn = support::connection(&target).unwrap();
     assert_eq!(
         conn.query_row(
             "SELECT COUNT(*) FROM audio_search WHERE audio_search MATCH 'newtag'",
@@ -273,7 +278,7 @@ fn scanner_incremental_rescan_keeps_annotations_and_filters_counts() {
         )
         .unwrap();
     // Background probing cannot erase extension/plugin fields it does not understand.
-    let extra = Connection::open(provider.database_path()).unwrap();
+    let extra = support::connection(provider.database_path()).unwrap();
     extra
         .execute("UPDATE audio_files SET user_rating=4 WHERE id=?1", [id])
         .unwrap();
@@ -292,7 +297,7 @@ fn scanner_incremental_rescan_keeps_annotations_and_filters_counts() {
     assert_eq!((again.added, again.updated, again.unchanged), (0, 0, 2));
     assert_eq!(provider.get_audio(id).unwrap().tags, "foley");
     let cache_count = || {
-        Connection::open(provider.database_path())
+        support::connection(provider.database_path())
             .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM waveform_cache WHERE audio_file_id=?1",
@@ -363,7 +368,7 @@ fn scanner_incremental_rescan_keeps_annotations_and_filters_counts() {
         0,
         "A changed size/mtime fingerprint invalidates Waveform cache"
     );
-    let kept_rating: i64 = Connection::open(provider.database_path())
+    let kept_rating: i64 = support::connection(provider.database_path())
         .unwrap()
         .query_row(
             "SELECT user_rating FROM audio_files WHERE id=?1",
@@ -484,7 +489,7 @@ fn cancelled_and_failed_file_scans_do_not_clean_up_missing_files() {
 fn query_validation_and_pagination_are_stable() {
     let temp = tempfile::tempdir().unwrap();
     let provider = SqliteProvider::open(&temp.path().join("lib.db")).unwrap();
-    let conn = Connection::open(provider.database_path()).unwrap();
+    let conn = support::connection(provider.database_path()).unwrap();
     for id in 1..=3 {
         conn.execute("INSERT INTO audio_files(id,file_path,filename,user_rating,sample_rate,duration) VALUES(?1,?2,'same.wav',4,48000,0)",params![id,format!("{id}.wav")]).unwrap();
     }
@@ -574,39 +579,24 @@ fn concurrent_readers_see_consistent_count_and_owned_results_while_tags_change()
 }
 
 #[test]
-fn version_three_upgrades_indexes_without_rebuilding_or_changing_legacy_data() {
+fn missing_search_index_is_repaired_without_changing_retained_legacy_data() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("old.db");
     let target = temp.path().join("new.db");
     legacy(&source, &temp.path().join("file.wav"));
     import_legacy(&source, &target).unwrap();
-    let conn = Connection::open(&target).unwrap();
-    let search_root: i64 = conn
-        .query_row(
-            "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    conn.execute_batch("DROP INDEX idx_audio_visible_name; PRAGMA user_version=1;")
+    let conn = support::connection(&target).unwrap();
+    conn.execute_batch("DROP INDEX idx_audio_visible_name; DELETE FROM audiolib_schema_features WHERE feature='search_indexes';")
         .unwrap();
     drop(conn);
     let provider = SqliteProvider::open(&target).unwrap();
     assert_eq!(provider.get_audio(42).unwrap().notes, "车辆发动机的环境声");
     assert_eq!(search(&provider, "发动机"), 1);
-    let conn = Connection::open(&target).unwrap();
-    let migrated_root: i64 = conn
-        .query_row(
-            "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(search_root, migrated_root);
+    let conn = support::connection(&target).unwrap();
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        5
+        audiolib_db::SCHEMA_VERSION
     );
     assert_eq!(
         conn.query_row(
@@ -633,7 +623,7 @@ fn read_only_provider_searches_but_cannot_edit_or_migrate() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("lib.db");
     let provider = SqliteProvider::open(&path).unwrap();
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     conn.execute(
         "INSERT INTO audio_files(file_path,filename) VALUES('metal.wav','metal.wav')",
         [],
@@ -657,7 +647,7 @@ fn read_only_provider_searches_but_cannot_edit_or_migrate() {
     );
     drop(readonly);
     assert_eq!(original, std::fs::read(&path).unwrap());
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     conn.execute_batch("PRAGMA user_version=1;").unwrap();
     drop(conn);
     assert!(SqliteProvider::open_read_only(&path).is_err());
@@ -667,7 +657,7 @@ fn read_only_provider_searches_but_cannot_edit_or_migrate() {
 fn literal_tag_and_color_filters_share_count_and_pagination_predicates() {
     let temp = tempfile::tempdir().unwrap();
     let provider = SqliteProvider::open(&temp.path().join("lib.db")).unwrap();
-    let conn = Connection::open(provider.database_path()).unwrap();
+    let conn = support::connection(provider.database_path()).unwrap();
     for (id, tags, color) in [
         (1, "Metal_100%", "#abcdef"),
         (2, "METAL_100% outdoor", "#ABCDEF"),
@@ -732,7 +722,7 @@ fn literal_tag_and_color_filters_share_count_and_pagination_predicates() {
 fn relevance_with_missing_records_keeps_exact_count_and_bm25_order() {
     let temp = tempfile::tempdir().unwrap();
     let provider = SqliteProvider::open(&temp.path().join("lib.db")).unwrap();
-    let conn = Connection::open(provider.database_path()).unwrap();
+    let conn = support::connection(provider.database_path()).unwrap();
     for id in 1..=6 {
         conn.execute("INSERT INTO audio_files(id,file_path,filename,user_tags,missing) VALUES(?1,?2,'metal.wav',?3,?4)",params![id,format!("{id}.wav"),if id%2==0 {"metal metal"} else {"wood"},id==2]).unwrap();
     }

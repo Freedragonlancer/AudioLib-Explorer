@@ -74,6 +74,9 @@ struct ManagedAdmission;
 /// `GET /health` reply (always HTTP 200 while the process serves requests).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
+    /// Compatibility catalog semantics of this build, independent of the library.
+    #[serde(default)]
+    pub compatibility_catalog_revision: u32,
     /// Startup maintenance phase and committed batch counts, omitted when ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<audiolib_db::SnapshotUpgradeProgress>,
@@ -288,6 +291,13 @@ async fn require_bearer(
     if let Err(error) = authorized {
         return error.into_response();
     }
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) && let Err(error) = crate::compatibility::admit_mutation(request.headers())
+    {
+        return error.into_response();
+    }
     if managed {
         request.extensions_mut().insert(ManagedAdmission);
     }
@@ -450,6 +460,7 @@ async fn capabilities(
     let origin = classify(request.headers(), connection.as_ref());
     let manage_mode = service.security().manage_mode();
     Json(CapabilitiesResponse {
+        compatibility: audiolib_core::compatibility::compatibility_manifest(),
         manage_mode,
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
@@ -635,6 +646,7 @@ async fn health(State(service): State<Service>) -> Json<HealthResponse> {
         Readiness::Failed(_) => ("error", Some(FAILED_MESSAGE.to_string())),
     };
     Json(HealthResponse {
+        compatibility_catalog_revision: audiolib_core::compatibility::CATALOG_REVISION,
         upgrade: service.upgrade_progress(),
         status: status.into(),
         version: VERSION.into(),
@@ -1777,6 +1789,9 @@ async fn snapshot(
     Extension(state): Extension<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let format_state = state.clone();
+    let format = blocking(move || format_state.snapshot_format()).await?;
+    crate::compatibility::admit(&headers, &format)?;
     let encoding = if accepts_zstd(&headers) {
         SnapshotEncoding::Zstd
     } else {
@@ -1800,6 +1815,7 @@ async fn snapshot(
                 header_value(revision.revision.to_string())?,
             );
             headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            crate::compatibility::response_headers(headers, &format)?;
             return Ok(response);
         }
     }
@@ -1815,6 +1831,7 @@ async fn snapshot(
         .snapshot_within_budget(encoding == SnapshotEncoding::Zstd)
         .await
         .ok_or_else(ApiError::snapshot_preparing)??;
+    crate::compatibility::admit(&headers, &prepared.snapshot_format)?;
     let path = file
         .as_ref()
         .map_or(&prepared.plain.path, |file| &file.path);
@@ -1839,6 +1856,7 @@ async fn snapshot(
         "Streaming library snapshot"
     );
     let mut response_headers = HeaderMap::new();
+    crate::compatibility::response_headers(&mut response_headers, &prepared.snapshot_format)?;
     response_headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),

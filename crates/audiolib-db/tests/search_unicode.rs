@@ -1,5 +1,6 @@
 // crates/audiolib-db/tests/search_unicode.rs
 //! Scanner/provider regressions for Unicode word boundaries and derived-index upgrades.
+mod support;
 use audiolib_core::{DataProvider, MaintenanceAction, MetadataPatch, SearchRequest};
 use audiolib_db::{
     ScanCancellation, ScanOptions, ScanService, SnapshotUpgradeProgress, SqliteProvider,
@@ -119,6 +120,7 @@ fn existing_library_upgrade_reports_rows_and_preserves_business_metadata() {
     let database = temp.path().join("library.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "WITH RECURSIVE records(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM records WHERE id<5001)
          INSERT INTO audio_files(id,file_path,filename,user_tags,user_notes,favorite,user_color,metadata_json)
@@ -139,38 +141,43 @@ fn existing_library_upgrade_reports_rows_and_preserves_business_metadata() {
         progress.push(event);
     })
     .unwrap();
+    assert_eq!(progress.first(), Some(&SnapshotUpgradeProgress::Preparing));
+    for copying in [true, false] {
+        let mut counts: Vec<_> = progress
+            .iter()
+            .filter_map(|e| match e {
+                SnapshotUpgradeProgress::Copying { completed, total } if copying => {
+                    Some((*completed, *total))
+                }
+                SnapshotUpgradeProgress::Indexing { completed, total } if !copying => {
+                    Some((*completed, *total))
+                }
+                _ => None,
+            })
+            .collect();
+        counts.dedup();
+        assert_eq!(counts, [(5000, 5001), (5001, 5001)]);
+    }
+    let terminal: Vec<_> = progress
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                SnapshotUpgradeProgress::Validating
+                    | SnapshotUpgradeProgress::Compacting
+                    | SnapshotUpgradeProgress::Publishing
+                    | SnapshotUpgradeProgress::Checkpoint
+            )
+        })
+        .copied()
+        .collect();
     assert_eq!(
-        progress,
+        terminal,
         [
-            SnapshotUpgradeProgress::Preparing,
-            SnapshotUpgradeProgress::BackingUp,
-            SnapshotUpgradeProgress::Tokenizing {
-                completed: 0,
-                total: 5001
-            },
-            SnapshotUpgradeProgress::Tokenizing {
-                completed: 5000,
-                total: 5001
-            },
-            SnapshotUpgradeProgress::Tokenizing {
-                completed: 5001,
-                total: 5001
-            },
-            SnapshotUpgradeProgress::Indexing {
-                completed: 0,
-                total: 5001
-            },
-            SnapshotUpgradeProgress::Indexing {
-                completed: 5000,
-                total: 5001
-            },
-            SnapshotUpgradeProgress::Indexing {
-                completed: 5001,
-                total: 5001
-            },
             SnapshotUpgradeProgress::Validating,
-            SnapshotUpgradeProgress::Checkpoint,
-            SnapshotUpgradeProgress::SourceTags,
+            SnapshotUpgradeProgress::Compacting,
+            SnapshotUpgradeProgress::Publishing,
+            SnapshotUpgradeProgress::Checkpoint
         ]
     );
     assert_eq!(
@@ -195,13 +202,7 @@ fn existing_library_upgrade_reports_rows_and_preserves_business_metadata() {
         progress.push(event);
     })
     .unwrap();
-    assert_eq!(
-        progress,
-        [
-            SnapshotUpgradeProgress::Preparing,
-            SnapshotUpgradeProgress::SourceTags
-        ]
-    );
+    assert_eq!(progress, [SnapshotUpgradeProgress::Preparing]);
     assert_eq!(
         serde_json::to_value(unchanged.get_audio(1).unwrap()).unwrap(),
         before
@@ -327,7 +328,7 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
     let audio = root.join("embedded.wav");
     wav(&audio, Some("café 爆炸声音"));
     let original = fs::read(&audio).unwrap();
-    let database = temp.path().join("library.db");
+    let database = temp.path().join("current.db");
     let provider = Arc::new(SqliteProvider::open(&database).unwrap());
     scan(&provider, &root);
     let id = provider.search(&SearchRequest::default()).unwrap().results[0].id;
@@ -344,7 +345,11 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
         .unwrap();
     let before = provider.get_audio(id).unwrap();
     drop(provider);
+    let legacy = temp.path().join("library.db");
+    support::legacy_copy(&database, &legacy);
+    let database = legacy;
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     // Simulate the previous v3 tokenizer's derived postings and absent feature marker.
     conn.execute_batch(
         "UPDATE audio_files SET bwf_description_tokenized='caf é 爆炸 声音';
@@ -391,6 +396,7 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
     assert_eq!(fs::read(&audio).unwrap(), original);
     drop(provider);
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let rootpage: i64 = conn
         .query_row(
             "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
@@ -401,7 +407,7 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        5
+        audiolib_db::SCHEMA_VERSION
     );
     assert_eq!(
         conn.query_row(
@@ -415,6 +421,7 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
     drop(conn);
     drop(SqliteProvider::open_existing(&database).unwrap());
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert_eq!(
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
@@ -428,6 +435,7 @@ fn existing_v3_rebuilds_old_derived_words_once_without_changing_annotations() {
 
 fn recreate_legacy_porter_index(path: &Path, source_words: &str) {
     let mut conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let table: String = conn
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE type='table' AND name='audio_search'",
@@ -520,7 +528,7 @@ fn real_porter_v1_index_upgrades_owned_readers_and_writers_without_business_data
     let audio = root.join("explosion.wav");
     wav(&audio, Some("café 爆炸声音"));
     let source_audio = fs::read(&audio).unwrap();
-    let database = temp.path().join("library.db");
+    let database = temp.path().join("current.db");
     let provider = Arc::new(SqliteProvider::open(&database).unwrap());
     scan(&provider, &root);
     let id = provider.search(&SearchRequest::default()).unwrap().results[0].id;
@@ -538,6 +546,9 @@ fn real_porter_v1_index_upgrades_owned_readers_and_writers_without_business_data
     provider.record_play(id).unwrap();
     let original = retained_business_data(&provider, id);
     drop(provider);
+    let legacy = temp.path().join("library.db");
+    support::legacy_copy(&database, &legacy);
+    let database = legacy;
     recreate_legacy_porter_index(&database, "café 爆炸 声音");
     let source_database = fs::read(&database).unwrap();
     assert!(!SqliteProvider::has_current_search_text(&database).unwrap());
@@ -563,6 +574,7 @@ fn real_porter_v1_index_upgrades_owned_readers_and_writers_without_business_data
     assert_eq!(fs::read(&audio).unwrap(), source_audio);
     drop(provider);
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let table_before: String = conn
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE name='audio_search'",
@@ -594,6 +606,7 @@ fn real_porter_v1_index_upgrades_owned_readers_and_writers_without_business_data
     assert_explosion_fragments(&reopened);
     drop(reopened);
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert_eq!(
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema WHERE name='audio_search_data'",
@@ -620,11 +633,12 @@ fn restore_checks_legacy_porter_triggers_before_rebuilding_the_index() {
     let database = temp.path().join("current.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
-        "INSERT INTO audio_files(id,file_path,filename,filename_tokenized,
-         user_tags,user_tags_tokenized,user_notes,user_notes_tokenized,favorite,metadata_json)
-         VALUES(42,'fixture/explosion.wav','explosion.wav','explosion wav',
-         'retain','retain','private notes','private notes',1,'{\"private\":\"keep\"}');",
+        "INSERT INTO audio_files(id,file_path,filename,
+         user_tags,user_notes,favorite,metadata_json)
+         VALUES(42,'fixture/explosion.wav','explosion.wav',
+         'retain','private notes',1,'{\"private\":\"keep\"}');",
     )
     .unwrap();
     drop(conn);
@@ -634,7 +648,7 @@ fn restore_checks_legacy_porter_triggers_before_rebuilding_the_index() {
     provider.record_play(42).unwrap();
     let original = retained_business_data(&provider, 42);
     let legacy = temp.path().join("legacy.db");
-    provider.backup_library(&legacy).unwrap();
+    support::legacy_copy(&database, &legacy);
     recreate_legacy_porter_index(&legacy, "");
     let legacy_bytes = fs::read(&legacy).unwrap();
 
@@ -642,6 +656,7 @@ fn restore_checks_legacy_porter_triggers_before_rebuilding_the_index() {
         let broken = temp.path().join(format!("broken-{modified}.db"));
         fs::copy(&legacy, &broken).unwrap();
         let conn = Connection::open(&broken).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
         conn.execute_batch("DROP TRIGGER audio_files_au;").unwrap();
         if modified {
             conn.execute_batch(

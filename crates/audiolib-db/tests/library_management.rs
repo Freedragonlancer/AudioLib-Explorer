@@ -1,7 +1,7 @@
 // crates/audiolib-db/tests/library_management.rs
+mod support;
 use audiolib_core::*;
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
-use rusqlite::Connection;
 use std::{fs, path::Path, sync::Arc};
 
 fn wav(path: &Path, rate: u32) {
@@ -65,33 +65,67 @@ fn patch(tags: &str) -> MetadataPatch {
 }
 
 #[test]
-fn version_two_upgrade_preserves_old_counts_without_inventing_events() {
-    let f = fixture();
-    let conn = Connection::open(f.provider.database_path()).unwrap();
-    conn.execute(
-        "UPDATE audio_files SET play_count=7 WHERE id=?1",
-        [f.ids[0]],
+fn older_schema_upgrade_retires_counts_without_inventing_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("older.db");
+    let conn = support::connection(&path).unwrap();
+    // Historical additive layout, before playback history was present.
+    conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO audio_files(id,file_path,filename,play_count,last_played_at)
+        VALUES(1,'old.wav','old.wav',7,'2024-01-02');
+        DROP TABLE play_history; PRAGMA user_version=2;",
     )
     .unwrap();
-    conn.execute_batch("DROP TABLE play_history;PRAGMA user_version=2;")
-        .unwrap();
     drop(conn);
-    let upgraded = SqliteProvider::open_existing(f.provider.database_path()).unwrap();
-    assert_eq!(upgraded.library_info().unwrap().schema_version, 5);
-    assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 7);
+    let original = fs::read(&path).unwrap();
+    let owned = temp.path().join("imported.db");
+    audiolib_db::import_legacy(&path, &owned).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let upgraded = SqliteProvider::open_existing(&owned).unwrap();
+    assert_eq!(
+        upgraded.library_info().unwrap().schema_version,
+        audiolib_db::SCHEMA_VERSION
+    );
+    assert_eq!(upgraded.get_audio(1).unwrap().play_count, 0);
     assert!(upgraded.play_history(20, 0).unwrap().is_empty());
-    upgraded.record_play(f.ids[0]).unwrap();
-    assert_eq!(upgraded.get_audio(f.ids[0]).unwrap().play_count, 8);
-    assert_eq!(upgraded.play_history(20, 0).unwrap().len(), 1);
-    assert!(upgraded.record_play(99999).is_err());
-    assert_eq!(upgraded.play_history(20, 0).unwrap().len(), 1);
+    let conn = support::connection(&owned).unwrap();
+    let before: i64 = conn
+        .query_row("PRAGMA data_version", [], |r| r.get(0))
+        .unwrap();
+    upgraded.record_play(1).unwrap();
+    assert!(matches!(
+        upgraded.record_play(99999),
+        Err(Error::NotFound(_))
+    ));
+    assert_eq!(
+        conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT last_played_at FROM audio_files WHERE id=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "2024-01-02"
+    );
+    assert!(!conn.table_exists(None, "play_history").unwrap());
+    assert!(
+        !conn
+            .column_exists(None, "audio_files", "play_count")
+            .unwrap()
+    );
     assert!(upgraded.scan_history(0, 0).is_err());
 }
 
 #[test]
 fn missing_visibility_lookup_and_stats_cover_hidden_records() {
     let f = fixture();
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute("UPDATE audio_files SET missing=1 WHERE id=?1", [f.ids[0]])
         .unwrap();
     assert!(
@@ -227,7 +261,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     let restored = f.provider.restore_library(&backup).unwrap();
     assert!(restored.rollback_backup.is_file());
     assert_eq!(tags(&f, id), "snapshot");
-    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 1);
+    assert_eq!(f.provider.get_audio(id).unwrap().play_count, 0);
     assert_eq!(
         f.provider
             .search(&SearchRequest {
@@ -250,7 +284,7 @@ fn backups_restore_wal_annotations_with_warm_readers_and_keep_rollback_copy() {
     );
     let rollback = SqliteProvider::open_read_only(&restored.rollback_backup).unwrap();
     assert_eq!(rollback.get_audio(id).unwrap().tags, "later");
-    assert_eq!(rollback.get_audio(id).unwrap().play_count, 2);
+    assert_eq!(rollback.get_audio(id).unwrap().play_count, 0);
     assert!(f.provider.check_library().unwrap().is_ok());
     assert_eq!(fs::read(&f.paths[0]).unwrap(), original);
 }
@@ -296,7 +330,7 @@ fn invalid_or_future_restore_sources_preserve_current_library_and_existing_open_
     assert_eq!(tags(&f, id), "safe");
     let future = f.temp.path().join("future.db");
     f.provider.backup_library(&future).unwrap();
-    Connection::open(&future)
+    support::connection(&future)
         .unwrap()
         .execute_batch("PRAGMA user_version=999;")
         .unwrap();
@@ -306,7 +340,7 @@ fn invalid_or_future_restore_sources_preserve_current_library_and_existing_open_
     assert_eq!(tags(&f, id), "safe");
     assert_eq!(fs::read(&future).unwrap(), before);
     let legacy = f.temp.path().join("legacy.db");
-    Connection::open(&legacy)
+    support::connection(&legacy)
         .unwrap()
         .execute_batch("CREATE TABLE private(value TEXT);INSERT INTO private VALUES('keep');")
         .unwrap();
@@ -317,7 +351,7 @@ fn invalid_or_future_restore_sources_preserve_current_library_and_existing_open_
     assert_eq!(f.provider.stats().unwrap().audio_files, 2);
     assert_eq!(fs::read(&legacy).unwrap(), before);
     let empty = f.temp.path().join("empty.db");
-    Connection::open(&empty)
+    support::connection(&empty)
         .unwrap()
         .execute_batch("VACUUM;")
         .unwrap();
@@ -328,7 +362,7 @@ fn invalid_or_future_restore_sources_preserve_current_library_and_existing_open_
 }
 
 #[test]
-fn fts_external_content_and_trigger_damage_is_detected_and_rebuilt_with_rollback() {
+fn fts_contentless_storage_and_trigger_damage_is_detected_and_rebuilt_with_rollback() {
     let f = fixture();
     let id = f.ids[0];
     f.provider.update_metadata(id, &patch("known")).unwrap();
@@ -342,7 +376,7 @@ fn fts_external_content_and_trigger_damage_is_detected_and_rebuilt_with_rollback
             .total_count,
         1
     );
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute(
         "INSERT INTO audio_search(audio_search) VALUES('delete-all')",
         [],
@@ -416,7 +450,7 @@ fn fts_external_content_and_trigger_damage_is_detected_and_rebuilt_with_rollback
             .integrity
             .is_ok()
     );
-    // A standalone FTS5 replacement must not pass external-content validation.
+    // A standalone FTS5 replacement must not pass contentless-delete validation.
     let original_sql: String = conn
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE name='audio_search'",
@@ -424,7 +458,7 @@ fn fts_external_content_and_trigger_damage_is_detected_and_rebuilt_with_rollback
             |row| row.get(0),
         )
         .unwrap();
-    let standalone = original_sql.replace("content='audio_files',content_rowid='id',", "");
+    let standalone = original_sql.replace("content='',contentless_delete=1,", "");
     assert_ne!(standalone, original_sql);
     conn.execute_batch(&format!("DROP TABLE audio_search; {standalone};"))
         .unwrap();
@@ -464,7 +498,7 @@ fn relink_refreshes_headers_preserves_identity_annotations_and_rejects_collision
     assert_eq!(updated.id, id);
     assert_eq!(updated.sample_rate, 96000);
     assert_eq!(updated.tags, "keep");
-    assert_eq!(updated.play_count, 1);
+    assert_eq!(updated.play_count, 0);
     assert!(!updated.missing);
     assert_eq!(
         f.provider.find_audio_by_path(&target).unwrap().unwrap().id,
@@ -492,7 +526,7 @@ fn relink_refreshes_headers_preserves_identity_annotations_and_rejects_collision
 fn recursive_folder_removal_cleans_relations_and_keeps_source_wavs() {
     let f = fixture();
     let child = f.provider.get_audio(f.ids[1]).unwrap().folder_id.unwrap();
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute_batch("INSERT INTO playlists(id,name) VALUES(1,'keep playlist');")
         .unwrap();
     conn.execute(
@@ -513,12 +547,7 @@ fn recursive_folder_removal_cleans_relations_and_keeps_source_wavs() {
     f.provider.record_play(f.ids[1]).unwrap();
     assert_eq!(f.provider.remove_folder(child).unwrap(), 1);
     assert!(f.provider.get_audio(f.ids[1]).is_err());
-    for table in [
-        "playlist_items",
-        "project_references",
-        "waveform_cache",
-        "play_history",
-    ] {
+    for table in ["playlist_items", "project_references", "waveform_cache"] {
         assert_eq!(
             conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
                 .get::<_, i64>(0))
@@ -549,7 +578,7 @@ fn full_stream_exports_and_jsonl_csv_annotation_roundtrips_are_transactional() {
             },
         )
         .unwrap();
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute("UPDATE audio_files SET missing=1 WHERE id=?1", [f.ids[1]])
         .unwrap();
     for (extension, format) in [
@@ -770,7 +799,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
         )
         .unwrap();
     f.provider.record_play(first.id).unwrap();
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension','keep') WHERE id=?1",
         [first.id],
@@ -847,7 +876,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
             moved.favorite,
             moved.play_count
         ),
-        ("retained tag", "retained note", true, 1)
+        ("retained tag", "retained note", true, 0)
     );
     assert_eq!(moved.attributes["unknown_extension"], "keep");
     assert_eq!(
@@ -856,7 +885,7 @@ fn root_relocation_after_a_case_only_rename_preserves_records_and_source_audio()
     );
     assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
     assert_eq!(f.provider.stats().unwrap().audio_files, 2);
-    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 1);
+    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 0);
     let rescanned = ScanService::new(f.provider.clone())
         .scan(
             &target,
@@ -880,7 +909,7 @@ fn root_relocation_rejects_ambiguous_indexed_source_aliases() {
     fs::create_dir(&target).unwrap();
     let canonical = source.canonicalize().unwrap();
     let root_id = f.provider.folders(None).unwrap()[0].id;
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute(
         "UPDATE folders SET folder_path=?2 WHERE id=?1",
         rusqlite::params![
@@ -1026,7 +1055,7 @@ fn root_relocation_resolves_parent_aliases_after_unicode_case_only_rename() {
     );
     assert_eq!(provider.folders(Some(root_id)).unwrap()[0].id, child_id);
     assert_eq!(provider.stats().unwrap().audio_files, 2);
-    assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);
+    assert_eq!(provider.play_history(10, 0).unwrap().len(), 0);
     let rescanned = ScanService::new(provider.clone())
         .scan(
             &target,
@@ -1088,7 +1117,7 @@ fn root_relocation_resolves_existing_source_aliases() {
         .unwrap();
     f.provider.record_play(f.ids[0]).unwrap();
     let extension = serde_json::json!({ "marker": "keep", "values": [1, 2] });
-    let conn = Connection::open(f.provider.database_path()).unwrap();
+    let conn = support::connection(f.provider.database_path()).unwrap();
     for id in &f.ids {
         conn.execute(
             "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.unknown_extension',json(?1)) WHERE id=?2",
@@ -1167,7 +1196,7 @@ fn root_relocation_resolves_existing_source_aliases() {
     );
     assert_eq!(f.provider.folders(Some(root_id)).unwrap()[0].id, child_id);
     assert_eq!(f.provider.stats().unwrap().audio_files, 4);
-    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 1);
+    assert_eq!(f.provider.play_history(10, 0).unwrap().len(), 0);
     // A subsequent physical move leaves the stored canonical source missing.
     // It must still be usable to relocate the same records rather than fail its
     // canonicalization or silently return zero.

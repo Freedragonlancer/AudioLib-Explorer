@@ -817,6 +817,11 @@ fn run_scan_inner(
     }));
     let result =
         outcome.unwrap_or_else(|_| Err(Error::Database("The scan thread panicked".into())));
+    // A failed start has no first callback to release this reservation. The
+    // scanner has returned, so release it before revision/Waveform bookkeeping
+    // can wait on other workers. The error still stays private until ScanCleanup
+    // releases the job slot below.
+    drop(cleanup.settings_lease.take());
     let session_started = job.session_id() > 0;
     // Conservative: count the scan as a change unless it provably changed nothing
     // client-visible and no other connection committed meanwhile.

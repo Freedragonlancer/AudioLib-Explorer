@@ -1,7 +1,7 @@
 // crates/audiolib-db/tests/administration_isolation.rs
+mod support;
 use audiolib_core::*;
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
-use rusqlite::Connection;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -20,12 +20,12 @@ fn patch(tags: &str) -> MetadataPatch {
 fn fixture() -> (tempfile::TempDir, Arc<SqliteProvider>) {
     let temp = tempfile::tempdir().unwrap();
     let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
-    let conn = Connection::open(provider.database_path()).unwrap();
+    let conn = support::connection(provider.database_path()).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'owned','owned');
          INSERT INTO folder_closure VALUES(1,1,0);
-         INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,folder_id)
-         VALUES(1,'owned.wav','owned.wav','owned.wav','owned.wav',1);",
+         INSERT INTO audio_files(id,file_path,path_key,filename,folder_id)
+         VALUES(1,'owned.wav','owned.wav','owned.wav',1);",
     )
     .unwrap();
     provider.update_metadata(1, &patch("before")).unwrap();
@@ -70,7 +70,7 @@ fn rollback_ready(directory: &Path) -> bool {
 #[test]
 fn failed_import_after_open_removes_only_its_owned_staging_sidecar() {
     let (temp, provider) = fixture();
-    let source = Connection::open(provider.database_path()).unwrap();
+    let source = support::connection(provider.database_path()).unwrap();
     source
         .execute_batch(
             "PRAGMA foreign_keys=OFF;
@@ -99,7 +99,7 @@ fn failed_maintenance_excludes_other_instances_and_keeps_acknowledged_writes() {
         .update_metadata(1, &patch("acknowledged-before"))
         .unwrap();
     editor.record_play(1).unwrap();
-    let blocker = Connection::open(provider.database_path()).unwrap();
+    let blocker = support::connection(provider.database_path()).unwrap();
     // A damaged trigger causes the final maintenance check to fail. BEGIN IMMEDIATE
     // only controls interleaving; all annotation/play writes below use the public API.
     blocker
@@ -113,18 +113,18 @@ fn failed_maintenance_excludes_other_instances_and_keeps_acknowledged_writes() {
         editor.update_metadata(1, &patch("must-not-be-acknowledged")),
         Err(Error::Busy(_))
     ));
-    assert!(matches!(editor.record_play(1), Err(Error::Busy(_))));
+    editor.record_play(1).unwrap(); // Playback only validates the existing ID.
     blocker.execute_batch("ROLLBACK;").unwrap();
     assert!(worker.join().unwrap().is_err());
     assert_eq!(provider.get_audio(1).unwrap().tags, "acknowledged-before");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
-    assert_eq!(provider.play_history(10, 0).unwrap().len(), 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
+    assert_eq!(provider.play_history(10, 0).unwrap().len(), 0);
     editor
         .update_metadata(1, &patch("acknowledged-after"))
         .unwrap();
     editor.record_play(1).unwrap();
     assert_eq!(provider.get_audio(1).unwrap().tags, "acknowledged-after");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 2);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn restore_holds_isolation_through_install_and_releases_it_afterward() {
     let backup = temp.path().join("source.db");
     provider.backup_library(&backup).unwrap();
     editor.update_metadata(1, &patch("pre-restore")).unwrap();
-    let blocker = Connection::open(provider.database_path()).unwrap();
+    let blocker = support::connection(provider.database_path()).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
     let worker_provider = provider.clone();
     let worker = thread::spawn(move || worker_provider.restore_library(&backup));
@@ -143,7 +143,7 @@ fn restore_holds_isolation_through_install_and_releases_it_afterward() {
         editor.update_metadata(1, &patch("blocked")),
         Err(Error::Busy(_))
     ));
-    assert!(matches!(editor.record_play(1), Err(Error::Busy(_))));
+    editor.record_play(1).unwrap(); // Playback only validates the existing ID.
     blocker.execute_batch("ROLLBACK;").unwrap();
     let report = worker.join().unwrap().unwrap();
     assert_eq!(provider.get_audio(1).unwrap().tags, "before");
@@ -152,7 +152,7 @@ fn restore_holds_isolation_through_install_and_releases_it_afterward() {
     editor.update_metadata(1, &patch("after-restore")).unwrap();
     editor.record_play(1).unwrap();
     assert_eq!(provider.get_audio(1).unwrap().tags, "after-restore");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn exclusive_administration_lock_covers_all_writing_entry_points_and_open() {
     let (temp, provider) = fixture();
     // Require actual backfill work, so an unchecked fast path cannot make this
     // writing entry point appear safe while restore owns the administration lease.
-    Connection::open(provider.database_path())
+    support::connection(provider.database_path())
         .unwrap()
         .execute_batch(
             "UPDATE audio_files SET source_tags_text='',
@@ -185,7 +185,7 @@ fn exclusive_administration_lock_covers_all_writing_entry_points_and_open() {
         provider.update_metadata(1, &patch("blocked")),
         Err(Error::Busy(_))
     ));
-    assert!(matches!(provider.record_play(1), Err(Error::Busy(_))));
+    provider.record_play(1).unwrap(); // No write lease is needed for a no-op.
     assert!(matches!(
         provider.ensure_source_tags_current(),
         Err(Error::Busy(_))
@@ -213,7 +213,7 @@ fn exclusive_administration_lock_covers_all_writing_entry_points_and_open() {
     assert_eq!(fs::read(&wal_path).ok(), original_wal);
     exclusive.unlock().unwrap();
     assert_eq!(provider.ensure_source_tags_current().unwrap(), 1);
-    let derived: String = Connection::open(provider.database_path())
+    let derived: String = support::connection(provider.database_path())
         .unwrap()
         .query_row(
             "SELECT source_tags_text FROM audio_files WHERE id=1",
@@ -227,9 +227,9 @@ fn exclusive_administration_lock_covers_all_writing_entry_points_and_open() {
     shared.lock_shared().unwrap();
     let reopened = SqliteProvider::open_existing(provider.database_path()).unwrap();
     reopened.update_metadata(1, &patch("shared-edit")).unwrap();
-    Connection::open(provider.database_path())
+    support::connection(provider.database_path())
         .unwrap()
-        .execute_batch("PRAGMA user_version=2;")
+        .execute_batch("DELETE FROM library_meta WHERE key='source_tags_rev';")
         .unwrap();
     assert!(matches!(
         SqliteProvider::open_existing(provider.database_path()),
@@ -242,12 +242,12 @@ fn exclusive_administration_lock_covers_all_writing_entry_points_and_open() {
             .library_info()
             .unwrap()
             .schema_version,
-        5
+        audiolib_db::SCHEMA_VERSION
     );
 }
 
 #[test]
-fn scans_allow_metadata_and_play_updates_from_another_provider() {
+fn scans_allow_metadata_and_play_noops_from_another_provider() {
     let (temp, provider) = fixture();
     let editor = SqliteProvider::open_existing(provider.database_path()).unwrap();
     let root = temp.path().join("audio");
@@ -269,7 +269,7 @@ fn scans_allow_metadata_and_play_updates_from_another_provider() {
         .unwrap();
     assert!(edited);
     assert_eq!(provider.get_audio(1).unwrap().tags, "during-scan");
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn cross_process_administration_blocks_edits_then_releases_without_losing_writes
         provider.get_audio(1).unwrap().tags,
         "cross-process-acknowledged"
     );
-    assert_eq!(provider.get_audio(1).unwrap().play_count, 1);
+    assert_eq!(provider.get_audio(1).unwrap().play_count, 0);
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn api_writer_child() {
         if !matches!(
             provider.update_metadata(1, &patch("must-block")),
             Err(Error::Busy(_))
-        ) || !matches!(provider.record_play(1), Err(Error::Busy(_)))
+        ) || provider.record_play(1).is_err()
         {
             return Err("Writer entered the exclusive administration window".into());
         }

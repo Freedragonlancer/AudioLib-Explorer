@@ -6,8 +6,11 @@ use rusqlite::Connection;
 use std::{fs, path::Path};
 
 fn fixture(path: &Path) {
-    drop(SqliteProvider::open(path).unwrap());
     let conn = Connection::open(path).unwrap();
+    // This suite exercises the supported external-content snapshot family.
+    // A freshly created schema-6 database cannot represent those historical inputs.
+    conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+        .unwrap();
     conn.execute_batch(
         "INSERT INTO audio_files(id,file_path,filename,filename_tokenized,
          user_tags,user_tags_tokenized,user_notes,user_rating,favorite,metadata_json)

@@ -4,6 +4,14 @@
 
 ## 1. 目标与边界
 
+下一版数据库工作在隔离分支进行，当前安装和工作库不升级：
+[方案 B 存储设计](Search_Storage_B.md)、
+[版本兼容与迁移契约](Library_Migration_Compatibility.md)、
+[历史全库实验](Search_Storage_B_Validation.md)、
+[共享迁移器全库与回滚实测](Search_Storage_B_Integrated_Validation.md)、
+[实现与验收边界](Implementation_B_Status.md)。
+隔离分支已完成两端实现、兼容测试及全库复验；这些新协商字段尚未发布或部署。
+
 - 服务器模式 = 一个实现 `audiolib_core::DataProvider` 的远程提供者（`crates/audiolib-remote`）+ 服务端进程（`server/audiolib-server`）。UI / CLI 不感知本地还是远程。
 - 服务端直接复用 `audiolib-core` 的 DTO（`AudioFile`、`Folder`、`SearchRequest`、`SearchPage`、`MetadataPatch`、`ScanProgress`、`LibraryStats`、`LibraryInfo` 等），JSON 字段名与 serde 序列化结果一致，remote 端可以直接反序列化。
 - 源音频永远只在服务端磁盘上；客户端通过 WebDAV（见 §7）或流端点（见 §8）读取，不直接打开服务端路径。
@@ -295,8 +303,8 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/roots` | 持久化根目录设置 | `{ "name", "path" }` | 201 根目录条目；受 `manage_mode` 限制，见 §6.10 |
 | ✅ | PATCH | `/roots/{name}` | 原子重定位根目录记录 + 持久化设置 | `{ "path" }` | 200 根目录条目；保留 ID、Metadata 与标注，见 §6.10 |
 | ✅ | DELETE | `/roots/{name}` | 数据库记录移除 + 持久化设置 | — | 200 `{ "name", "removed", "folders_removed", "revision_before", "revision" }`；不删除源 WAV，见 §6.10 |
-| ✅ | POST | `/audio/{id}/plays` | `record_play` | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n+1 }`（`play_count` 在快照里，所以也走 revision 规则），见 §6.3 |
-| ✅ | GET | `/history/plays?limit=&offset=` | `play_history` | `limit` 默认 100（1..=10000），`offset` 默认 0 | `PlayRecord[]`，新的在前，见 §6.7 |
+| ✅ | POST | `/audio/{id}/plays` | 兼容空操作 | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n }`，不再写入播放数据，见 §6.3 |
+| ✅ | GET | `/history/plays?limit=&offset=` | 兼容空历史 | `limit` 默认 100（1..=10000），`offset` 默认 0 | `[]`，保留路由与参数校验，见 §6.7 |
 | ✅ | GET | `/history/scans?limit=&offset=` | `scan_history` | 同上 | `ScanSession[]`，新的在前，见 §6.7 |
 | ✅ | POST | `/scans` | 扫描（`ScanService::scan`；受 `manage_mode` 限制，§6.9） | `{ "root": "<name>", "subpath": "", "mode": "incremental" \| "full", "workers": null }` | 200 `ScanResponse`（`ScanProgress` 字段 + `root`/`subpath`/`mode`/`active`/`pause_requested`/`cancel_requested`/`revision`，含新的 `session_id`），见 §6.6 |
 | ✅ | GET | `/scans/current` | 扫描进度 | — | 200 `{ "scan": ScanResponse \| null }`（没有扫描时为 `null`，不是 404），见 §6.6 |
@@ -378,7 +386,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 
 ### 6.3 Metadata 写入（已实现）
 
-三个写入端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。请求体为 JSON，必须声明 `Content-Type: application/json`（可带 `charset`，见 §2），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。成功后 `revision == revision_before + 1`，客户端按 §4 的规则应用返回的记录。
+两个 Metadata 写入端点及播放兼容端点都按 §2.2 鉴权，库未就绪时 503 `UNAVAILABLE`，受 30 秒超时约束。Metadata 请求体为 JSON，必须声明 `Content-Type: application/json`（可带 `charset`，见 §2），最大 8 MiB（超出 413 `PAYLOAD_TOO_LARGE`）。只改库，永远不写源 WAV。Metadata 成功后 `revision == revision_before + 1`，客户端按 §4 的规则应用返回的记录。播放兼容端点不改变 revision。
 
 `PATCH /audio/{id}/metadata`，请求体 `MetadataPatch`，省略的字段不变（`color` 传 `""` 清除颜色）：
 
@@ -413,11 +421,17 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 { "report": { "updated": 2 }, "files": [ { "id": 3, "…": "…" }, { "id": 7, "…": "…" } ], "revision_before": 42, "revision": 43 }
 ```
 
-`POST /audio/{id}/plays`，无请求体：`play_count` +1 并写入播放历史。响应 200，形状与 `PATCH /audio/{id}/metadata` 相同（`file.play_count` 为新值）：
+`POST /audio/{id}/plays`，无请求体：验证库身份、id 与记录存在性后返回现有 `AudioFile`，
+不写数据库、不增加 revision 或 `data_version`。响应 200，保留旧 DTO 形状：
 
 ```json
-{ "file": { "id": 3, "play_count": 1, "…": "…" }, "revision_before": 43, "revision": 44 }
+{ "file": { "id": 3, "play_count": 0, "…": "…" }, "revision_before": 43, "revision": 43 }
 ```
+
+`play_count: 0` 对未迁移旧库只是示例值，已有历史计数仍原样返回；schema 6 已退役该列，
+兼容 DTO 返回 0。库身份不一致仍为 409，非法 id 为 400，无此记录为 404。普通新版客户端
+播放不再发送该请求，也不生成缓存写入或重同步通知。删除旧播放结构只在下一次明确的
+结构迁移中执行，完整旧值保存在回滚备份；见 [迁移契约 §7](Library_Migration_Compatibility.md#7-通用结构演进与播放统计退役)。
 
 错误：`color` 不是空串或 `#RRGGBB`、`tags` > 16 KiB、`notes` > 1 MiB、非法 JSON / 字段类型不对、非整数 id、空 `ids` 或空 `patch`、未知 `tag_mode` → 400 `VALIDATION`；无此 id → 404 `NOT_FOUND`；需要 token 时（§2.2）token 缺失或错误 → 401。任何错误都不改库，`revision` 不变。
 
@@ -595,14 +609,13 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
      "errors": 0, "error_details": [], "errors_truncated": 0 }]
   ```
 
-- `GET /history/plays` → `PlayRecord[]`，按播放时间从新到旧：
+- `GET /history/plays` → `[]`，保留鉴权与分页参数校验，不再读取播放历史：
 
   ```json
-  [{ "id": 5, "audio_file_id": 3, "played_at": "2026-10-08 17:25:02.511", "filename": "door.wav",
-     "file_path": "/srv/audiolib/music/SFX/door.wav", "missing": false }]
+  []
   ```
 
-- 两者都是 `audiolib-core` DTO 原样（与本地模式 `scan_history` / `play_history` 相同）；其中的时间是 SQLite 记录的 **UTC 文本**（`YYYY-MM-DD HH:MM:SS.fff`），不是 Unix 秒。`ScanSession.state` 为 `running` 而本服务端没有在扫描（`GET /scans/current` 为 `null`）时表示那次扫描被中断或由另一进程执行（见 §6.6 停机）。
+- 扫描历史是 `audiolib-core` DTO 原样（与本地模式 `scan_history` 相同）；其中的时间是 SQLite 记录的 **UTC 文本**（`YYYY-MM-DD HH:MM:SS.fff`），不是 Unix 秒。`ScanSession.state` 为 `running` 而本服务端没有在扫描（`GET /scans/current` 为 `null`）时表示那次扫描被中断或由另一进程执行（见 §6.6 停机）。
 
 ### 6.8 从库中移除：`POST /audio/remove`、`DELETE /folders/{id}`（已实现）
 

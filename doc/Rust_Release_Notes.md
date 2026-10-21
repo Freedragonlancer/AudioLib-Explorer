@@ -1,11 +1,43 @@
 # AudioLib Explorer release notes
 
-## Unreleased: upgrade recovery and integrated client/server
+## Unreleased: Plan B storage and shared migration (`0.5.0-dev.1`)
+
+Development identity: program `0.5.0-dev.1` | API `/api/v1/` | schema 6 |
+snapshot schema boundary 3..=6, subject to the complete format/capability catalog.
+This isolated development build has not been published, deployed or installed over
+the current application. A future release requires a chosen release version/tag and
+the corresponding tested peer-version ranges.
+
+- Plan B removes six persisted derived-token columns while retaining tokenization
+  revision 3, all twelve logical FTS5 columns, full positions and document lengths.
+  Schema 6 uses contentless-delete storage and the pinned SQLite statistics fixes.
+- Client, CLI and server share compatibility diagnosis and the owned
+  inspect/plan/apply/resume/verify/rollback executor. Version differences alone do
+  not authorize rebuilding a library. Unknown formats block unsafe use.
+- Migration preserves stable IDs, Metadata, annotations, references, scan history
+  and unknown supported extensions. The explicitly authorized retirement removes
+  `play_history` and `audio_files.play_count`; `last_played_at` is retained. Original
+  playback data remains recoverable in the complete pre-upgrade backup.
+- Playback no longer writes counts/history or advances the library revision.
+  Existing response shapes and ID validation are retained; old unchanged libraries
+  may still return their stored nonzero counter values.
+- Download/decompression counters and migration phases/counts reach the UI.
+  Invalid checkpoints stop resumption; process-crash recovery is tested for copy,
+  indexing, publication and rollback. Cache retries preserve the previous snapshot
+  and leave abandoned jobs intact for owner review.
+
+See the [migration contract](api/Library_Migration_Compatibility.md),
+[full-library measurements](api/Search_Storage_B_Integrated_Validation.md) and
+[current validation record](api/Implementation_B_Status.md) for exact evidence and
+remaining limits. Database timings do not substitute for the separate GUI or Mac
+acceptance work recorded below.
+
+## Previous unreleased baseline: upgrade recovery and integrated client/server
 
 This candidate includes `origin/main` at `71bb1fd`, client integration at `c50bd27`
 and server integration at `3eef19c`, followed by the upgrade and shutdown repairs.
 The previously rejected `47ddd03` through `c0e8af9` builds must not be published.
-The workspace still reports 0.4.11 during preparation; publication requires a new
+That earlier baseline reported 0.4.11 during preparation; publication requires a new
 shared program version and matching tag. Do not replace the published v0.4.11 tag.
 
 - Existing writable libraries upgrade search text and FTS5 in committed batches,

@@ -237,7 +237,16 @@ changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:
    memory) into `.part-<pid>`, renamed to `<file>.download` when complete (Content-Length
    checked, cancellable during HTTP response headers and body reads). The desktop shows "The server is preparing the
    snapshot…" until the first byte (the server copies the library first: about 7 s for
-   645 MB) and then "Downloading snapshot x / y MiB" with a progress bar. `409 BUSY` and `503 BUSY` are retried for up to 240 s from the first request (`BUSY_WINDOW`), waiting the server's
+   645 MB). The connection and cache/export pages then show separate download and
+   decompression rows and progress bars for zstd snapshots. Download bytes count the
+   compressed HTTP body against `Content-Length`; decompression counts database bytes
+   written against `X-Uncompressed-Length`. These operations overlap while streaming:
+   download can reach 100% while decompression continues. A 19,495,989,248-byte database
+   therefore shows 18592.8 MiB as the decompression total, never as the compressed
+   download total. Either missing total keeps only its own bar indeterminate; identity
+   responses show download only. Both counters are retained across coalesced GUI updates
+   (at most every 200 ms, except stage appearances and completion), and validation/cache
+   preparation replace the transfer rows when streaming finishes. `409 BUSY` and `503 BUSY` are retried for up to 240 s from the first request (`BUSY_WINDOW`), waiting the server's
    `Retry-After` when sent (capped at 10 s per wait), else exponential backoff (0.5 s, 1 s, 2 s, 4 s, then 10 s). An anonymized large-library measurement took the server about 125 s to prepare its first snapshot and its first HTTP response was a `503 BUSY` with `Retry-After` after about 90 s; the 240 s window (and the 240 s snapshot response timeout) covers that measurement with margin, so the client does not fail early.
 5. The `X-Library-Id` header must match `/library`; the revision comes from
    `X-Library-Revision` (falls back to `/library`).

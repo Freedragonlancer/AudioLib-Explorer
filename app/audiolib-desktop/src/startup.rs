@@ -33,8 +33,18 @@ pub(crate) enum StartupProgress {
 
 impl StartupProgress {
     pub(crate) fn label(self, chinese: bool) -> String {
+        if let Self::Remote(CachePreparation::Migrating(stage)) = self {
+            return Self::Local(stage).label(chinese);
+        }
         if let Self::Local(stage) = self {
             return match stage {
+                SnapshotUpgradeProgress::Copying { completed, total } => {
+                    if chinese {
+                        format!("正在迁移数据库 · 已保存 {completed}/{total} 条")
+                    } else {
+                        format!("Migrating library · {completed}/{total} records saved")
+                    }
+                }
                 SnapshotUpgradeProgress::Tokenizing { completed, total } => {
                     if chinese {
                         format!("正在重建搜索文本 · 已保存 {completed}/{total} 条")
@@ -65,6 +75,13 @@ impl StartupProgress {
                         SnapshotUpgradeProgress::SourceTags => {
                             ("正在准备提取标签", "Preparing extracted tags")
                         }
+                        SnapshotUpgradeProgress::Compacting => {
+                            ("正在整理搜索索引", "Merging search index segments")
+                        }
+                        SnapshotUpgradeProgress::Publishing => (
+                            "正在应用已验证的数据库升级",
+                            "Applying the validated library upgrade",
+                        ),
                         _ => ("正在准备搜索升级", "Preparing search upgrade"),
                     };
                     if chinese { cn } else { en }.into()
@@ -102,7 +119,7 @@ impl StartupProgress {
                 ("正在准备提取标签", "Preparing extracted tags")
             }
             Self::Remote(CachePreparation::Saving) => ("正在保存缓存", "Saving the cache"),
-            Self::Local(_) => unreachable!(),
+            Self::Local(_) | Self::Remote(CachePreparation::Migrating(_)) => unreachable!(),
         };
         if chinese { cn } else { en }.to_owned()
     }
@@ -360,6 +377,33 @@ mod tests {
         assert!(local.label(true).contains("已保存 5000/900000"));
         assert!(local.label(false).contains("5000/900000 records saved"));
         assert!(local.fraction() < 0.0);
+        for stage in [
+            SnapshotUpgradeProgress::Copying {
+                completed: 5000,
+                total: 10003,
+            },
+            SnapshotUpgradeProgress::Indexing {
+                completed: 10003,
+                total: 10003,
+            },
+            SnapshotUpgradeProgress::BackingUp,
+            SnapshotUpgradeProgress::Validating,
+            SnapshotUpgradeProgress::Compacting,
+            SnapshotUpgradeProgress::Publishing,
+            SnapshotUpgradeProgress::Checkpoint,
+        ] {
+            let remote = StartupProgress::Remote(CachePreparation::Migrating(stage));
+            for chinese in [true, false] {
+                assert_eq!(
+                    remote.label(chinese),
+                    StartupProgress::Local(stage).label(chinese)
+                );
+            }
+            assert!(
+                remote.fraction() < 0.0,
+                "rows cannot imply a total-upgrade percentage"
+            );
+        }
         let text = StartupProgress::Remote(CachePreparation::Tokenizing {
             completed: 5_000,
             total: 900_000,
@@ -404,6 +448,38 @@ mod tests {
                 },
             ),
             ("index-en", false, CachePreparation::Upgrading),
+            (
+                "migration-copy-cn",
+                true,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Copying {
+                    completed: 5000,
+                    total: 909342,
+                }),
+            ),
+            (
+                "migration-copy-en",
+                false,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Copying {
+                    completed: 5000,
+                    total: 909342,
+                }),
+            ),
+            (
+                "migration-index-cn",
+                true,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                    completed: 909342,
+                    total: 909342,
+                }),
+            ),
+            (
+                "migration-index-en",
+                false,
+                CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                    completed: 909342,
+                    total: 909342,
+                }),
+            ),
         ] {
             ui.set_chinese(chinese);
             let weak = ui.as_weak();
@@ -531,6 +607,98 @@ mod tests {
             slint::run_event_loop().unwrap();
             ui.hide().unwrap();
             ui.set_ds_syncing(false);
+        }
+        // Streaming zstd transfer keeps the compressed download and database
+        // decompression visible together, including after network reads finish.
+        // These presentation fixtures never connect to a server or open a database.
+        for chinese in [true, false] {
+            for page in [0, 2] {
+                for unknown_decompression in [false, true] {
+                    let database_total = 19_495_989_248u64;
+                    let database_written = database_total * 3 / 8;
+                    let wire_mib = if unknown_decompression { 750.0 } else { 1500.0 };
+                    let download_text = format!(
+                        "{} {wire_mib:.1} / 1500.0 MiB",
+                        if chinese {
+                            "正在下载快照"
+                        } else {
+                            "Downloading snapshot"
+                        }
+                    );
+                    let decompression_text = format!(
+                        "{} {:.1}{} MiB",
+                        if chinese {
+                            "正在解压快照"
+                        } else {
+                            "Decompressing snapshot"
+                        },
+                        database_written as f64 / 1_048_576.0,
+                        if unknown_decompression {
+                            String::new()
+                        } else {
+                            format!(" / {:.1}", database_total as f64 / 1_048_576.0)
+                        }
+                    );
+                    let download_fraction = if unknown_decompression { 0.5 } else { 1.0 };
+                    let decompression_fraction = if unknown_decompression { -1.0 } else { 0.375 };
+                    ui.set_chinese(chinese);
+                    ui.set_remote_mode(true);
+                    ui.set_library_visible(true);
+                    ui.set_sm_page(page);
+                    ui.set_ds_applying(false);
+                    ui.set_library_busy(false);
+                    ui.set_ds_syncing(true);
+                    ui.set_ds_sync_info(download_text.clone().into());
+                    ui.set_ds_progress(download_fraction);
+                    ui.set_ds_decompression_info(decompression_text.clone().into());
+                    ui.set_ds_decompression_progress(decompression_fraction);
+                    let weak = ui.as_weak();
+                    let timer = slint::Timer::default();
+                    timer.start(
+                        slint::TimerMode::SingleShot,
+                        Duration::from_millis(100),
+                        move || {
+                            let ui = weak.upgrade().unwrap();
+                            assert!(ui.get_ds_syncing() && ui.window().is_visible());
+                            assert_eq!(ui.get_sm_page(), page);
+                            assert_eq!(ui.get_ds_sync_info(), download_text);
+                            assert_eq!(ui.get_ds_progress(), download_fraction);
+                            assert_eq!(ui.get_ds_decompression_info(), decompression_text);
+                            assert_eq!(ui.get_ds_decompression_progress(), decompression_fraction);
+                            let pixels = ui.window().take_snapshot().unwrap();
+                            assert!(pixels.width() >= 1080 && pixels.height() >= 700);
+                            if let Some(directory) =
+                                std::env::var_os("AUDIOLIB_STARTUP_SCREENSHOT_DIR")
+                            {
+                                let language = if chinese { "cn" } else { "en" };
+                                let panel = if page == 0 { "connection" } else { "cache" };
+                                let transfer = if unknown_decompression {
+                                    "unknown-decompression"
+                                } else {
+                                    "download-complete"
+                                };
+                                image::save_buffer(
+                                    std::path::Path::new(&directory).join(format!(
+                                        "manager-transfer-{panel}-{transfer}-{language}.png"
+                                    )),
+                                    pixels.as_bytes(),
+                                    pixels.width(),
+                                    pixels.height(),
+                                    image::ColorType::Rgba8,
+                                )
+                                .unwrap();
+                            }
+                            slint::quit_event_loop().unwrap();
+                        },
+                    );
+                    ui.show().unwrap();
+                    slint::run_event_loop().unwrap();
+                    ui.hide().unwrap();
+                    ui.set_ds_syncing(false);
+                    ui.set_ds_decompression_info("".into());
+                    ui.set_ds_decompression_progress(-1.0);
+                }
+            }
         }
     }
 

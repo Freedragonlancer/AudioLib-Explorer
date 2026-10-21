@@ -1,7 +1,7 @@
 // crates/audiolib-db/src/search_sorted.rs
 //! Native alternative ordering over bounded exact MATCH membership sets.
 use crate::{
-    AUDIO_SELECT, Result, audio_from_row, db_error, search_cache::MAX_RANKED_IDS,
+    Result, audio_from_row, audio_projection, db_error, search_cache::MAX_RANKED_IDS,
     search_candidates, search_sql,
 };
 use audiolib_core::{Error, FileVisibility, SearchFilters, SearchPage, SearchRequest, SortOrder};
@@ -109,7 +109,10 @@ pub(super) fn filtered_filename_page(
     let offset = i64::try_from(request.offset)
         .map_err(|_| Error::Validation("Offset is too large".into()))?;
     let mut statement = tx
-        .prepare(&filtered_filename_page_sql(request.descending))
+        .prepare(&filtered_filename_page_sql(
+            request.descending,
+            &audio_projection(tx)?,
+        ))
         .map_err(db_error)?;
     let results = statement
         .query_map(params![json, request.limit as i64, offset], audio_from_row)
@@ -150,7 +153,7 @@ fn visible_filename_index(tx: &Connection) -> Result<bool> {
     }))
 }
 
-fn filtered_filename_page_sql(descending: bool) -> String {
+fn filtered_filename_page_sql(descending: bool, projection: &str) -> String {
     let direction = if descending { "DESC" } else { "ASC" };
     format!(
         "WITH ranked AS MATERIALIZED (
@@ -158,7 +161,7 @@ fn filtered_filename_page_sql(descending: bool) -> String {
             FROM audio_files af INDEXED BY idx_audio_visible_name
             WHERE af.missing=0 AND af.id IN (SELECT value FROM json_each(?1))
             ORDER BY sort_value {direction},af.id ASC LIMIT ?2 OFFSET ?3
-        ) SELECT {AUDIO_SELECT} FROM ranked JOIN audio_files af ON af.id=ranked.id
+        ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
         ORDER BY ranked.sort_value COLLATE NOCASE {direction},af.id ASC"
     )
 }
@@ -205,13 +208,14 @@ pub(super) fn page_sql(
         return Ok(None);
     }
     let direction = if request.descending { "DESC" } else { "ASC" };
+    let projection = audio_projection(tx)?;
     Ok(Some(format!(
         "WITH ranked AS MATERIALIZED (
             SELECT af.id,af.duration AS sort_value
             FROM audio_files af INDEXED BY idx_duration
             WHERE af.id IN (SELECT rowid FROM audio_search WHERE audio_search MATCH ?)
             ORDER BY af.duration {direction},af.id ASC LIMIT ? OFFSET ?
-        ) SELECT {AUDIO_SELECT} FROM ranked JOIN audio_files af ON af.id=ranked.id
+        ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
         ORDER BY ranked.sort_value {direction},af.id ASC"
     )))
 }
@@ -233,7 +237,7 @@ mod tests {
             let plan = conn
                 .prepare(&format!(
                     "EXPLAIN QUERY PLAN {}",
-                    filtered_filename_page_sql(descending)
+                    filtered_filename_page_sql(descending, &audio_projection(&conn).unwrap())
                 ))
                 .unwrap()
                 .query_map(params![ids, 2, 1], |row| row.get::<_, String>(3))
@@ -355,6 +359,7 @@ mod tests {
         let path = directory.path().join("sorted.db");
         let provider = SqliteProvider::open(&path).unwrap();
         let conn = Connection::open(path).unwrap();
+        crate::schema::register_tokenizer(&conn, crate::load_tokenizer()).unwrap();
         for (id, duration) in [
             (i64::MIN, None),
             (-7, Some(-0.0)),

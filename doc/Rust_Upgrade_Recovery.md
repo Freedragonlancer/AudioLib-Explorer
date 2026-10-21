@@ -1,5 +1,7 @@
 # Search upgrade recovery and WAL lifecycle
 
+The protocol described below is the retained rev-3 search-upgrade protocol. In the isolated `0.5.0-dev.1` branch, schema-6 upgrades use the [shared migration executor](api/Library_Migration_Compatibility.md): original backup, guarded source, owned candidate, validated checkpoints, publication and rollback. Old interrupted rev-3 jobs are normalized only in an owned copy. The new recipe retires playback history/counts while preserving `last_played_at`; this historical protocol description does not override that explicit retirement. Current installations are unchanged.
+
 The `47ddd03` through `c0e8af9` builds remain excluded from the planned Release.
 The reported Mac startup took 954 seconds (411 seconds tokenization, 542 seconds FTS5),
 and retained an 18.9 GB WAL. These builds are not release candidates. The user has

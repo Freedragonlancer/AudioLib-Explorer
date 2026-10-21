@@ -37,6 +37,7 @@
 mod abort;
 mod bandwidth;
 mod client;
+mod compatibility;
 mod download;
 mod error;
 mod list_waveforms;
@@ -60,8 +61,8 @@ pub use abort::set_connection_warming;
 pub use bandwidth::{Bandwidth, bandwidth};
 pub use client::{
     BatchWrite, CONNECT_TIMEOUT, FileWrite, HealthInfo, LIBRARY_ID_HEADER, MAX_WRITE_BODY_BYTES,
-    RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, WaveformQuery, WaveformReply,
-    api_base_url,
+    RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, SnapshotProgress, WaveformQuery,
+    WaveformReply, api_base_url,
 };
 pub use download::{
     DEFAULT_DOWNLOAD_CACHE_BYTES, DownloadCache, DownloadItem, DownloadProbe, DownloadProgress,
@@ -108,8 +109,8 @@ pub use stream::{
     SourceAuth, StreamProbe, StreamSource, WAKING_HINT_AFTER, WebDavAuth, probe_stream,
 };
 pub use sync::{
-    CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress, refresh_cached_roots,
-    sync_library, validate_snapshot,
+    CacheFormat, CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress,
+    refresh_cached_roots, sync_library, validate_snapshot,
 };
 pub use tls::{TRUST_STORE, TlsInfo};
 pub use util::encode_path_segment;

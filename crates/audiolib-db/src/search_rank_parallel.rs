@@ -968,6 +968,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let provider = SqliteProvider::open(&directory.path().join("parallel.db")).unwrap();
         let mut writer = Connection::open(provider.database_path()).unwrap();
+        crate::schema::register_tokenizer(&writer, crate::load_tokenizer()).unwrap();
         let tx = writer.transaction().unwrap();
         for index in 0..512_i64 {
             let id = if index < 256 {
@@ -1290,6 +1291,7 @@ mod tests {
     fn sparse_lengths_keep_native_ranking_after_parallel_phrase_preparation() {
         let (_directory, provider) = fixture();
         let writer = Connection::open(provider.database_path()).unwrap();
+        crate::schema::register_tokenizer(&writer, crate::load_tokenizer()).unwrap();
         writer
             .execute(
                 "INSERT INTO audio_files(id,file_path,filename,missing)

@@ -1,5 +1,16 @@
 # Rust 验证报告
 
+## 方案 B 隔离验证（2026-10-21，0.5.0-dev.1，未发布）
+
+共享迁移器、兼容目录、播放结构退役和断点恢复的当前证据见
+[实现与验收记录](api/Implementation_B_Status.md)及
+[最终全库复验](api/Search_Storage_B_Integrated_Validation.md#0-最终构建复验当前结论)。
+最终 ASIO 全工作区为 **1,137 passed、0 failed、75 ignored（67 targets）**，
+格式化和严格 Clippy 通过；隔离 release/便携包及库管理、Metadata/扫描回归通过。
+909,342 行真实快照从 19.496 GB 降到 10.612 GB，查询一致性和完整回滚通过；
+1M 合成库的最终 26 类请求首次搜索 P95 为 298.915 ms（OS 缓存未清空）。
+当前安装和工作库不变，不替代下面记录的其他 GUI、音频或 Mac 验收。
+
 ## 升级恢复与最新客户端/服务端集成（2026-10-20，0.4.11 开发候选）
 
 本轮首先修复首次升级无法续跑、WAL 未截断及停机快照残留，再按用户要求拉取并合并最新远端代码。最终可执行源码为 `1d81a784e7372a21a71968470eef83061807133c`，包含 `origin/main` 的 `71bb1fd`、客户端 `integ/client-list-waveforms` 的 `c50bd27`、服务端 `integ/list-waveforms-final` 的 `3eef19c`，以及 `bd58b3f` 的升级恢复修复。构建完成后再次 fetch 并验证三条远端分支都是当前提交的祖先。发布说明保留 Unreleased 状态，未创建新 tag、未发布 GitHub Release、未部署 8790。

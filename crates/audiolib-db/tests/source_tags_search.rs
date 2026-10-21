@@ -1,6 +1,7 @@
 // crates/audiolib-db/tests/source_tags_search.rs
 //! Extracted (source) tags take part in tagged-only / tag-contains filters and full-text
 //! search; the one-time local search-text migration is marker-guarded and idempotent.
+mod support;
 use audiolib_core::{DataProvider, SearchFilters, SearchRequest};
 use audiolib_db::SqliteProvider;
 use rusqlite::Connection;
@@ -12,8 +13,18 @@ fn tags_json(keywords: &str, category: &str) -> String {
 }
 
 fn make_library(path: &Path) {
-    drop(SqliteProvider::open(path).unwrap());
-    let conn = Connection::open(path).unwrap();
+    seed_library(path, false);
+}
+
+fn seed_library(path: &Path, historical: bool) {
+    if !historical {
+        drop(SqliteProvider::open(path).unwrap());
+    }
+    let conn = support::connection(path).unwrap();
+    if historical {
+        conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+            .unwrap();
+    }
     let rows = [
         (1, "plain.wav", "hand", "{}".to_string()),
         (
@@ -62,7 +73,7 @@ fn ids(provider: &SqliteProvider, query: &str, filters: SearchFilters) -> Vec<i6
 }
 
 fn marker(path: &Path) -> Option<String> {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     conn.query_row(
         "SELECT value FROM library_meta WHERE key='source_search_rev'",
         [],
@@ -114,8 +125,11 @@ fn search_text_migration_is_marked_and_idempotent() {
     assert!(!provider.ensure_source_search_current().unwrap());
     // Simulate a library created before the extracted fields were indexed.
     {
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE library_meta;").unwrap();
+        let conn = support::connection(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE library_meta; INSERT INTO audio_search(audio_search) VALUES('delete-all');",
+        )
+        .unwrap();
     }
     assert!(ids(&provider, "Rattle", Default::default()).is_empty());
     assert!(provider.ensure_source_search_current().unwrap());
@@ -128,7 +142,7 @@ fn search_text_migration_is_marked_and_idempotent() {
     let provider = SqliteProvider::open_existing(&path).unwrap();
     assert!(!provider.ensure_source_search_current().unwrap());
     assert_eq!(ids(&provider, "Rattle", Default::default()), [2]);
-    let rows: i64 = Connection::open(&path)
+    let rows: i64 = support::connection(&path)
         .unwrap()
         .query_row("SELECT COUNT(*) FROM audio_files", [], |row| row.get(0))
         .unwrap();
@@ -154,7 +168,7 @@ fn derived_tag_filters_use_the_partial_index_without_sorter_or_scan() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
     make_library(&path);
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     conn.create_scalar_function(
         "audiolib_casefold",
         1,
@@ -177,7 +191,7 @@ fn derived_tag_filters_use_the_partial_index_without_sorter_or_scan() {
 }
 
 fn source_tags_column(path: &Path) -> Vec<String> {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     let mut statement = conn
         .prepare("SELECT source_tags_text FROM audio_files ORDER BY id")
         .unwrap();
@@ -195,7 +209,7 @@ fn derived_column_is_maintained_by_scans_and_matches_search_text() {
     make_library(&path);
     {
         // Library from before the column was populated.
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         conn.execute_batch(
             "UPDATE audio_files SET source_tags_text='';
              DELETE FROM library_meta WHERE key='source_tags_rev';",
@@ -219,9 +233,10 @@ fn backfill_resumes_from_progress_and_filters_fall_back_until_done() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
     make_library(&path);
+    let provider = SqliteProvider::open(&path).unwrap();
     // Unfinished backfill: no marker, column still empty.
     {
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         conn.execute_batch(
             "UPDATE audio_files SET source_tags_text='';
              DELETE FROM library_meta WHERE key='source_tags_rev';
@@ -231,11 +246,11 @@ fn backfill_resumes_from_progress_and_filters_fall_back_until_done() {
         .unwrap();
     }
     // Resumed after id 2: row 2 is skipped (already "done"), nothing after it has tags.
-    let provider = SqliteProvider::open_existing(&path).unwrap();
+    assert_eq!(provider.ensure_source_tags_current().unwrap(), 0);
     assert_eq!(source_tags_column(&path), ["", "", "", ""]);
     // Rows 1..=2 were claimed done, so reset progress to simulate a fresh interrupted start.
     {
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         conn.execute_batch(
             "DELETE FROM library_meta WHERE key IN ('source_tags_rev','source_tags_progress');",
         )
@@ -260,7 +275,7 @@ fn escaped_source_keys_repair_completed_and_partial_old_backfills() {
         let path = dir.path().join("library.db");
         make_library(&path);
         let escaped = r#"{"wav_metadata":{"fields":{"\u006beywords":"OnlySource"}},"private":{"retain":true}}"#;
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         conn.execute(
             "UPDATE audio_files SET metadata_json=?1,source_tags_text='' WHERE id=2",
             [escaped],
@@ -305,7 +320,7 @@ fn escaped_source_keys_repair_completed_and_partial_old_backfills() {
         let file = provider.get_audio(2).unwrap();
         assert_eq!(file.tags, "");
         assert_eq!(file.attributes["private"]["retain"], true);
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         let stored: String = conn
             .query_row(
                 "SELECT metadata_json FROM audio_files WHERE id=2",
@@ -338,8 +353,8 @@ fn escaped_source_keys_repair_completed_and_partial_old_backfills() {
 fn escaped_source_key_repairs_owned_snapshot_without_changing_original() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
-    make_library(&path);
-    let conn = Connection::open(&path).unwrap();
+    seed_library(&path, true);
+    let conn = support::connection(&path).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=?1,source_tags_text='',
          bwf_description_tokenized='OnlySource' WHERE id=2",
@@ -386,7 +401,7 @@ fn extracted_compound_codes_keep_numeric_and_single_letter_components_searchable
     make_library(&path);
     let keywords = "FX_123 A.wav 1_AB_2 4_5";
     let metadata = tags_json(keywords, "");
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=?1 WHERE id=2",
         [&metadata],
@@ -412,7 +427,7 @@ fn extracted_compound_codes_keep_numeric_and_single_letter_components_searchable
         file.attributes["wav_metadata"]["fields"]["keywords"],
         keywords
     );
-    let stored: String = Connection::open(&path)
+    let stored: String = support::connection(&path)
         .unwrap()
         .query_row(
             "SELECT metadata_json FROM audio_files WHERE id=2",
@@ -432,7 +447,7 @@ fn source_tag_backfill_keeps_the_full_signed_legacy_id_range() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
     drop(SqliteProvider::open(&path).unwrap());
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     for id in [i64::MIN, -5, 0] {
         conn.execute(
             "INSERT INTO audio_files(id,file_path,filename,metadata_json,missing)
@@ -463,9 +478,9 @@ fn source_tag_backfill_keeps_the_full_signed_legacy_id_range() {
 fn old_snapshots_without_the_column_repair_owned_tags_without_changing_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
-    make_library(&path);
+    seed_library(&path, true);
     {
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         conn.execute_batch(
             "DROP INDEX idx_audio_visible_tagged_any;
              DROP INDEX idx_audio_visible_tagged_folders;
@@ -478,7 +493,10 @@ fn old_snapshots_without_the_column_repair_owned_tags_without_changing_source() 
     let original = std::fs::read(&path).unwrap();
     let provider = SqliteProvider::open_read_only(&path).unwrap();
     assert_ne!(provider.database_path(), path.as_path());
-    assert_eq!(provider.library_info().unwrap().schema_version, 5);
+    assert_eq!(
+        provider.library_info().unwrap().schema_version,
+        audiolib_db::SCHEMA_VERSION
+    );
     let tagged = SearchFilters {
         tagged_only: true,
         ..Default::default()

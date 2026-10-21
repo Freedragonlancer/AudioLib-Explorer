@@ -329,9 +329,19 @@ impl MockServer {
             serde_json::json!({
                 "library_id": LIBRARY_ID,
                 "revision": revision,
+                "schema_version": 5,
                 "identity_bound_writes": true
             }),
         );
+        let health = self.next();
+        assert!(health.raw.starts_with("GET /api/v1/health "));
+        health.reply(
+            "200 OK",
+            serde_json::json!({"status":"ok", "version":"0.4.11"}),
+        );
+        let capabilities = self.next();
+        assert!(capabilities.raw.starts_with("GET /api/v1/capabilities "));
+        capabilities.reply("404 Not Found", serde_json::json!({}));
         self.next()
     }
 }

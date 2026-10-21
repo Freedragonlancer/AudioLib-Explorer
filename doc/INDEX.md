@@ -35,6 +35,13 @@ JSON and text files named `Rust_*` in this directory record specific verificatio
 
 ## Code and configuration
 
+The isolated next-version database work is tracked in
+[Plan B storage](api/Search_Storage_B.md),
+[compatibility and migration](api/Library_Migration_Compatibility.md),
+[historical full-library measurements](api/Search_Storage_B_Validation.md), and
+[implementation status](api/Implementation_B_Status.md).
+It does not upgrade the current installation or working library.
+
 | Entry | Responsibility |
 |-------|----------------|
 | [Desktop entry point](../app/audiolib-desktop/src/main.rs) | Startup, instance lease and Slint event loop |

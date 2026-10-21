@@ -1,6 +1,7 @@
 // crates/audiolib-db/tests/schema_v5.rs
 //! Schema v5 indexes and derived source tags: upgrade behaviour, owned snapshot repair,
 //! query plans, and tolerance of legacy rating data. `user_rating` stays.
+mod support;
 use audiolib_core::{DataProvider, LibraryExportFormat, SearchFilters, SearchRequest};
 use audiolib_db::{MIN_SNAPSHOT_SCHEMA_VERSION, SCHEMA_VERSION, SqliteProvider};
 use rusqlite::Connection;
@@ -9,7 +10,6 @@ use std::path::Path;
 /// Indexes v4 added to v3 that v5 keeps (the two rating ones are gone).
 const V4_KEPT_INDEXES: &[&str] = &[
     "idx_audio_visible_stats",
-    "idx_play_history_audio",
     "idx_playlist_items_audio",
     "idx_project_references_audio",
     "idx_waveform_cache_audio",
@@ -42,8 +42,9 @@ fn index_exists(conn: &Connection, name: &str) -> bool {
 }
 
 fn make_library(path: &Path) {
-    drop(SqliteProvider::open(path).unwrap());
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
+    conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+        .unwrap();
     for id in 1..=40i64 {
         conn.execute(
             "INSERT INTO audio_files(id,file_path,filename,folder_id,duration,file_size,user_tags,user_color,user_rating,bit_depth,channels,missing,favorite)
@@ -74,7 +75,7 @@ fn make_library(path: &Path) {
 }
 
 fn source_tags(path: &Path) -> Vec<String> {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     let mut s = conn
         .prepare("SELECT source_tags_text FROM audio_files ORDER BY id")
         .unwrap();
@@ -85,7 +86,7 @@ fn source_tags(path: &Path) -> Vec<String> {
 }
 
 fn ratings(path: &Path) -> Vec<i64> {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     let mut s = conn
         .prepare("SELECT user_rating FROM audio_files ORDER BY id")
         .unwrap();
@@ -95,9 +96,10 @@ fn ratings(path: &Path) -> Vec<i64> {
         .collect()
 }
 
-/// Turn a freshly created library into what a v3 (`version == 3`) or v4 library looked like.
+/// Remove additive v5 fields/indexes from the captured historical layout.
+/// This is a version-band fixture, not an archived original v3/v4 database.
 fn downgrade(path: &Path, version: i64) {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     if version == 3 {
         for name in V4_KEPT_INDEXES {
             conn.execute_batch(&format!("DROP INDEX IF EXISTS {name};"))
@@ -125,9 +127,9 @@ fn downgrade(path: &Path, version: i64) {
 }
 
 fn definitions(path: &Path) -> Vec<String> {
-    let conn = Connection::open(path).unwrap();
+    let conn = support::connection(path).unwrap();
     let mut s = conn
-        .prepare("SELECT sql FROM sqlite_master WHERE type IN ('table','trigger') AND name<>'audio_files' ORDER BY name")
+        .prepare("SELECT sql FROM sqlite_master WHERE type IN ('table','trigger') AND name<>'audio_files' AND name NOT LIKE 'audio_search%' AND name NOT IN ('audio_files_ai','audio_files_au','audio_files_ad','play_history','audiolib_migration_receipts') ORDER BY name")
         .unwrap();
     s.query_map([], |r| r.get::<_, Option<String>>(0))
         .unwrap()
@@ -136,8 +138,8 @@ fn definitions(path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn constants_are_v5_with_v3_to_v5_snapshots_accepted() {
-    assert_eq!(SCHEMA_VERSION, 5);
+fn constants_are_v6_with_legacy_snapshots_accepted() {
+    assert_eq!(SCHEMA_VERSION, 6);
     assert_eq!(MIN_SNAPSHOT_SCHEMA_VERSION, 3);
 }
 
@@ -152,9 +154,12 @@ fn v3_and_v4_libraries_upgrade_indexes_and_derived_tags_and_keep_rating_data() {
         assert!(before.iter().any(|r| *r > 0));
         let tables_before = definitions(&path);
         let provider = SqliteProvider::open_existing(&path).unwrap();
-        assert_eq!(provider.library_info().unwrap().schema_version, 5);
+        assert_eq!(
+            provider.library_info().unwrap().schema_version,
+            SCHEMA_VERSION
+        );
         drop(provider);
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         for name in RATING_INDEXES {
             assert!(
                 !index_exists(&conn, name),
@@ -169,7 +174,7 @@ fn v3_and_v4_libraries_upgrade_indexes_and_derived_tags_and_keep_rating_data() {
         assert_eq!(
             definitions(&path),
             tables_before,
-            "v5 must not change other tables or triggers"
+            "migration must preserve unrelated tables and triggers"
         );
         assert!(index_exists(&conn, NEW_TAG_INDEX));
         assert!(!index_exists(&conn, OLD_TAG_INDEX));
@@ -185,7 +190,7 @@ fn v3_and_v4_libraries_upgrade_indexes_and_derived_tags_and_keep_rating_data() {
             };
             assert_eq!(text, expected, "v{from} row {id}");
         }
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         let marker: String = conn
             .query_row(
                 "SELECT value FROM library_meta WHERE key='source_tags_rev'",
@@ -200,11 +205,11 @@ fn v3_and_v4_libraries_upgrade_indexes_and_derived_tags_and_keep_rating_data() {
         SqliteProvider::open_existing(&path).unwrap();
         assert_eq!(ratings(&path), before);
         assert_eq!(source_tags(&path), derived);
-        let version: i64 = Connection::open(&path)
+        let version: i64 = support::connection(&path)
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }
 
@@ -216,20 +221,23 @@ fn v3_v4_v5_snapshots_repair_owned_copies_without_migrating_the_source() {
     downgrade(&path, 3);
     let original = std::fs::read(&path).unwrap();
     let provider = SqliteProvider::open_read_only(&path).unwrap();
-    assert_eq!(provider.library_info().unwrap().schema_version, 5);
+    assert_eq!(
+        provider.library_info().unwrap().schema_version,
+        SCHEMA_VERSION
+    );
     assert_ne!(provider.database_path(), path.as_path());
     assert!(SqliteProvider::has_current_search_state(provider.database_path()).unwrap());
     drop(provider);
     assert_eq!(std::fs::read(&path).unwrap(), original);
     // Still v3 with its old indexes: only the exclusively owned copy is repaired.
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(version, 3);
     assert!(!index_exists(&conn, "idx_audio_visible_stats"));
     assert!(index_exists(&conn, "idx_audio_visible_rating"));
-    for bad in [2, 6] {
+    for bad in [2, 7] {
         conn.pragma_update(None, "user_version", bad).unwrap();
         assert!(
             SqliteProvider::open_read_only(&path).is_err(),
@@ -242,7 +250,7 @@ fn v3_v4_v5_snapshots_repair_owned_copies_without_migrating_the_source() {
         let provider = SqliteProvider::open_read_only(&path).unwrap();
         assert_eq!(
             provider.library_info().unwrap().schema_version,
-            5,
+            SCHEMA_VERSION,
             "schema {good}"
         );
         assert_ne!(provider.database_path(), path.as_path());
@@ -259,7 +267,7 @@ fn client_selects_never_reference_user_rating() {
     downgrade(&path, 4);
     // A snapshot from a server that has no rating column at all must still be readable.
     {
-        let conn = Connection::open(&path).unwrap();
+        let conn = support::connection(&path).unwrap();
         conn.execute_batch(
             "DROP INDEX idx_audio_visible_favorite; DROP INDEX idx_user_rating;
              DROP INDEX idx_audio_visible_rating_desc; DROP INDEX idx_audio_visible_rating;
@@ -295,7 +303,7 @@ fn query_plans_use_the_remaining_indexes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
     make_library(&path);
-    let conn = Connection::open(&path).unwrap();
+    let conn = support::connection(&path).unwrap();
     let cases = [
         (
             "SELECT af.id FROM audio_files af WHERE af.missing=0 AND (COALESCE(trim(af.user_tags),'')<>'' OR af.source_tags_text<>'') ORDER BY af.filename COLLATE NOCASE ASC,af.id ASC LIMIT 50",

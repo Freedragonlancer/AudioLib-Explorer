@@ -311,7 +311,7 @@ fn child_snapshot_handoff() {
         .run_library_operation(LibraryOperation::DataSource(
             remote_mode::DataSourceSwitch::Server {
                 database: fixture.root.join("missing-snapshot.db"),
-                state: Some(fixture.replacement.clone()),
+                state: Some(Box::new(fixture.replacement.clone())),
             },
         ));
     drain_operation(&fixture);
@@ -374,7 +374,7 @@ fn child_snapshot_handoff() {
         .run_library_operation(LibraryOperation::DataSource(
             remote_mode::DataSourceSwitch::Server {
                 database: target.clone(),
-                state: Some(fixture.replacement.clone()),
+                state: Some(Box::new(fixture.replacement.clone())),
             },
         ));
     drain_operation(&fixture);
@@ -557,7 +557,7 @@ fn child_ordinary_failure() {
         .run_library_operation(LibraryOperation::DataSource(
             remote_mode::DataSourceSwitch::Server {
                 database: cache.database_path(&fixture.replacement),
-                state: Some(fixture.replacement.clone()),
+                state: Some(Box::new(fixture.replacement.clone())),
             },
         ));
     drain_operation(&fixture);

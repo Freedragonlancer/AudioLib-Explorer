@@ -1,9 +1,9 @@
 // crates/audiolib-db/tests/audio_identity.rs
 #![cfg(feature = "scanner")]
 //! Retired identities survive scans, process lifetimes, imports and restores.
+mod support;
 use audiolib_core::{DataProvider, Error, MetadataPatch};
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider, import_legacy};
-use rusqlite::Connection;
 use std::{fs, path::Path, sync::Arc};
 
 fn wav(root: &Path, name: &str) -> std::path::PathBuf {
@@ -81,8 +81,10 @@ fn removed_maximum_id_cannot_select_or_edit_a_different_wav_after_restart() {
 fn schema_three_upgrade_keeps_unknown_data_and_starts_after_existing_ids() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("old-v3.db");
-    let provider = SqliteProvider::open(&database).unwrap();
-    let conn = Connection::open(&database).unwrap();
+    let conn = support::connection(&database).unwrap();
+    // Captured v5 layout with the stable-ID extension removed exercises older feature state.
+    conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
+        .unwrap();
     conn.execute_batch(
         "ALTER TABLE audio_files ADD COLUMN private_attribute BLOB;
          CREATE TABLE private_plugin_state(value TEXT);
@@ -95,16 +97,18 @@ fn schema_three_upgrade_keeps_unknown_data_and_starts_after_existing_ids() {
          PRAGMA user_version=3;",
     ).unwrap();
     drop(conn);
-    drop(provider);
 
     let provider = Arc::new(SqliteProvider::open_existing(&database).unwrap());
-    assert_eq!(provider.library_info().unwrap().schema_version, 5);
+    assert_eq!(
+        provider.library_info().unwrap().schema_version,
+        audiolib_db::SCHEMA_VERSION
+    );
     let old = provider.get_audio(42).unwrap();
     assert_eq!(
         (&*old.tags, &*old.notes, old.play_count),
-        ("keep-tag", "keep-note", 7)
+        ("keep-tag", "keep-note", 0)
     );
-    let conn = Connection::open(&database).unwrap();
+    let conn = support::connection(&database).unwrap();
     assert_eq!(
         conn.query_row(
             "SELECT private_attribute FROM audio_files WHERE id=42",
@@ -146,7 +150,7 @@ fn explicit_sql_insert_tracks_a_retired_high_id_across_reopening() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("library.db");
     let provider = SqliteProvider::open(&database).unwrap();
-    Connection::open(&database)
+    support::connection(&database)
         .unwrap()
         .execute(
             "INSERT INTO audio_files(id,file_path,filename) VALUES(?1,'external.wav','external.wav')",
@@ -164,7 +168,7 @@ fn explicit_sql_insert_tracks_a_retired_high_id_across_reopening() {
 fn legacy_autoincrement_import_keeps_the_sequence_of_deleted_high_ids() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("legacy.db");
-    let conn = Connection::open(&source).unwrap();
+    let conn = support::connection(&source).unwrap();
     conn.execute_batch(
         "CREATE TABLE audio_files(id INTEGER PRIMARY KEY AUTOINCREMENT,
          file_path TEXT NOT NULL UNIQUE,filename TEXT NOT NULL);
@@ -246,7 +250,7 @@ fn restoring_an_older_backup_preserves_the_active_librarys_retired_ids() {
 fn identity_exhaustion_fails_without_wrapping_or_modifying_source_audio() {
     let temp = tempfile::tempdir().unwrap();
     let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
-    Connection::open(provider.database_path())
+    support::connection(provider.database_path())
         .unwrap()
         .execute(
             "UPDATE audiolib_audio_id_sequence SET high_water=?1 WHERE singleton=1",

@@ -1,5 +1,5 @@
 // crates/audiolib-remote/src/writes.rs
-//! Server-mode metadata writes and plays (API §6.3) and the revision rule that keeps the
+//! Server-mode metadata writes (API §6.3) and the revision rule that keeps the
 //! local snapshot current without a full download.
 //!
 //! Every write reply carries `revision_before` and `revision`. When the cached snapshot
@@ -21,11 +21,12 @@ use audiolib_core::{
 use audiolib_db::SqliteProvider;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 
 /// Serializes read-modify-write of `cache.json` + snapshot between concurrent writes
-/// (an edit and a play finishing at the same time).
+/// from different Metadata operations.
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 
 /// Order this process's non-idempotent write requests through their cache publication.
@@ -34,27 +35,6 @@ static APPLY_LOCK: Mutex<()> = Mutex::new(());
 /// reads, UI work and audio callbacks never acquire it. Other clients' writes still
 /// produce an ordinary revision mismatch and require a validated snapshot sync.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-fn play_write_lease(still_current: impl Fn() -> bool) -> Result<MutexGuard<'static, ()>> {
-    loop {
-        if !still_current() {
-            return Err(RemoteError::Cancelled);
-        }
-        let guard = match WRITE_LOCK.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                std::thread::sleep(Duration::from_millis(20));
-                continue;
-            }
-        };
-        return if still_current() {
-            Ok(guard)
-        } else {
-            Err(RemoteError::Cancelled)
-        };
-    }
-}
 
 /// What happened to the local snapshot after a successful server write.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +95,7 @@ pub fn apply_server_write(
     }
 }
 
-/// Metadata writes and plays for one server library, applied to its local cache.
+/// Metadata writes for one server library, applied to its local cache.
 #[derive(Clone, Debug)]
 pub struct RemoteWriter {
     client: RemoteClient,
@@ -249,30 +229,23 @@ impl RemoteWriter {
         })
     }
 
-    /// `POST /audio/{id}/plays`, then the revision rule.
+    /// Compatibility no-op for the explicit CLI command. Validate the cached record
+    /// without a network request, cache write, revision bump or Metadata write lease.
     pub fn record_play(&self, id: i64) -> Result<WriteOutcome<AudioFile>> {
-        self.record_play_while(id, || true)
-    }
-
-    /// Cancellation applies only before dispatch. Once a non-idempotent request has
-    /// been sent, retain its reply and existing bounded outcome/uncertainty handling.
-    fn record_play_while(
-        &self,
-        id: i64,
-        still_current: impl Fn() -> bool,
-    ) -> Result<WriteOutcome<AudioFile>> {
-        let _write = play_write_lease(still_current)?;
-        let FileWrite {
-            file,
-            revision_before,
-            revision,
-        } = self.client.record_play(id)?;
-        Ok(self.finish(
-            file.clone(),
-            std::slice::from_ref(&file),
-            revision_before,
-            revision,
-        ))
+        let state = self
+            .cache
+            .state(&self.library_id)
+            .ok_or_else(|| RemoteError::Snapshot("No cached snapshot for this library".into()))?;
+        let snapshot = SqliteProvider::open_read_only(&self.cache.database_path(&state))?;
+        let value = snapshot.get_audio(id)?;
+        Ok(WriteOutcome {
+            value,
+            revision_before: state.revision,
+            revision: state.revision,
+            cache: CacheUpdate::Applied {
+                revision: state.revision,
+            },
+        })
     }
 }
 
@@ -292,7 +265,7 @@ pub enum WriteEvent {
 pub type WriteListener = Arc<dyn Fn(WriteEvent) + Send + Sync>;
 
 /// `DataProvider` for server mode: reads come from the read-only snapshot, metadata
-/// writes and plays go to the server ([`RemoteWriter`]) and are applied to the snapshot
+/// writes go to the server ([`RemoteWriter`]) and are applied to the snapshot
 /// by the revision rule. Record and folder removal go to the server's management
 /// endpoints (database records only; servers without them answer "unsupported") and are
 /// followed by a full sync when they changed the revision. Restore, maintenance, relink and import are not offered by
@@ -338,16 +311,17 @@ impl RemoteProvider {
         &self.writer
     }
 
-    /// Record a play only while its source/library is current. A queued, unsent play
-    /// may be cancelled during close or a source switch without delaying Metadata.
-    /// An already dispatched write still completes normally to preserve its outcome.
+    /// Validate an existing record while the playback source is current. Playback
+    /// tracking is retired: this never sends an HTTP request or emits a write event.
     pub fn record_play_if(
         &self,
         id: i64,
         still_current: impl Fn() -> bool,
     ) -> audiolib_core::Result<()> {
-        self.settle(self.writer.record_play_while(id, still_current))
-            .map(drop)
+        if !still_current() {
+            return Err(Error::Cancelled);
+        }
+        self.snapshot.get_audio(id).map(drop)
     }
 
     fn emit(&self, event: WriteEvent) {
@@ -445,7 +419,7 @@ impl DataProvider for RemoteProvider {
         self.settle(self.writer.update_metadata(id, patch))
     }
     fn record_play(&self, id: i64) -> audiolib_core::Result<()> {
-        self.settle(self.writer.record_play(id)).map(drop)
+        self.record_play_if(id, || true)
     }
     fn stats(&self) -> audiolib_core::Result<LibraryStats> {
         self.snapshot.stats()
@@ -492,14 +466,12 @@ impl DataProvider for RemoteProvider {
     fn scan_history(&self, limit: usize, offset: usize) -> audiolib_core::Result<Vec<ScanSession>> {
         self.snapshot.scan_history(limit, offset)
     }
-    fn play_history(&self, limit: usize, offset: usize) -> audiolib_core::Result<Vec<PlayRecord>> {
-        // Applying a play reply updates audio_files and the cached revision, but the
-        // reply does not carry the server's new history row. Read authoritative history
-        // through the API so a caught-up revision never hides our own recent plays.
-        self.writer
-            .client()
-            .play_history(limit, offset)
-            .map_err(|error| core_error(error, self.chinese))
+    fn play_history(
+        &self,
+        _limit: usize,
+        _offset: usize,
+    ) -> audiolib_core::Result<Vec<PlayRecord>> {
+        Ok(Vec::new())
     }
     fn export_library(
         &self,
@@ -670,6 +642,9 @@ mod tests {
             let cached = cache.state(LIBRARY).unwrap();
             let before = std::fs::read(cache.database_path(&cached)).unwrap();
             let server = TestServer::start(move |request| {
+                if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                    return response;
+                }
                 if request.path == "/api/v1/library" {
                     return TestResponse::json(
                         200,
@@ -715,10 +690,11 @@ mod tests {
         let database = library_dir.join("library-r1-1.db");
         drop(SqliteProvider::open(&database).unwrap());
         let conn = rusqlite::Connection::open(&database).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
         conn.execute_batch(
-            "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized)
-             VALUES(3,'/v/door.wav','/v/door.wav','door.wav','door'),
-                   (7,'/v/thunder.wav','/v/thunder.wav','雷声 近.wav','雷声 近');",
+            "INSERT INTO audio_files(id,file_path,path_key,filename)
+             VALUES(3,'/v/door.wav','/v/door.wav','door.wav'),
+                   (7,'/v/thunder.wav','/v/thunder.wav','雷声 近.wav');",
         )
         .unwrap();
         conn.query_row("PRAGMA journal_mode=DELETE", [], |row| {
@@ -762,6 +738,9 @@ mod tests {
         reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
     ) -> TestServer {
         TestServer::start(move |request| {
+            if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                return response;
+            }
             if request.method == "GET" && request.path == "/api/v1/library" {
                 return TestResponse::json(
                     200,
@@ -868,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_play_history_reads_server_after_play_advances_snapshot_revision() {
+    fn provider_playback_is_local_and_history_stays_empty() {
         let directory = tempfile::tempdir().unwrap();
         let cache = cached_library(directory.path(), 41);
         let reader = Arc::new(snapshot(&cache));
@@ -894,21 +873,18 @@ mod tests {
         );
         let provider = RemoteProvider::new(reader.clone(), writer, false, None);
         provider.record_play(3).unwrap();
-        assert_eq!(cache.state(LIBRARY).unwrap().revision, 42);
-        assert_eq!(reader.get_audio(3).unwrap().play_count, 1);
+        assert_eq!(cache.state(LIBRARY).unwrap().revision, 41);
+        assert_eq!(reader.get_audio(3).unwrap().play_count, 0);
         assert!(reader.play_history(100, 0).unwrap().is_empty());
 
         let history = provider.play_history(usize::MAX, 17).unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].audio_file_id, 3);
-        assert_eq!(history[0].filename, "door.wav");
+        assert!(history.is_empty());
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
-        assert_eq!(seen[1].path, "/api/v1/history/plays?limit=10000&offset=17");
+        assert!(seen.is_empty());
     }
 
     #[test]
-    fn provider_play_history_preserves_remote_error_and_minimum_page_limit() {
+    fn provider_retired_history_needs_no_server_permission() {
         let directory = tempfile::tempdir().unwrap();
         let cache = cached_library(directory.path(), 1);
         let seen = Arc::new(StdMutex::new(Vec::new()));
@@ -924,12 +900,8 @@ mod tests {
             LIBRARY,
         );
         let provider = RemoteProvider::new(Arc::new(snapshot(&cache)), writer, true, None);
-        let error = provider.play_history(0, 7).unwrap_err();
-        assert!(matches!(error, Error::Database(ref text) if text.contains("服务器要求访问令牌")));
-        assert_eq!(
-            seen.lock().unwrap()[0].path,
-            "/api/v1/history/plays?limit=1&offset=7"
-        );
+        assert!(provider.play_history(0, 7).unwrap().is_empty());
+        assert!(seen.lock().unwrap().is_empty());
         assert_eq!(cache.state(LIBRARY).unwrap().revision, 1);
     }
 
@@ -1089,7 +1061,10 @@ mod tests {
         );
         let reader = snapshot(&cache);
         assert_eq!(reader.get_audio(7).unwrap().tags, "rain wood");
-        assert_eq!(reader.get_audio(7).unwrap().play_count, 2);
+        // Old response DTOs may still contain a historical count. Schema 6 must
+        // not recreate the retired field while applying ordinary Metadata.
+        assert_eq!(files[0].play_count, 2);
+        assert_eq!(reader.get_audio(7).unwrap().play_count, 0);
         assert_eq!(reader.get_audio(3).unwrap().tags, "door wood");
     }
 
@@ -1263,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn plays_post_without_body_and_apply_the_new_play_count() {
+    fn plays_keep_cache_bytes_revision_and_events_unchanged() {
         let directory = tempfile::tempdir().unwrap();
         let cache = cached_library(directory.path(), 43);
         let seen = Arc::new(StdMutex::new(Vec::new()));
@@ -1291,27 +1266,39 @@ mod tests {
             false,
             Some(listener),
         );
+        let before = cache.active().unwrap();
+        let bytes = std::fs::read(cache.database_path(&before)).unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            cache.database_path(&before),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+            .unwrap();
         provider.record_play(3).unwrap();
+        let explicit = provider.writer().record_play(3).unwrap();
+        assert_eq!((explicit.revision_before, explicit.revision), (43, 43));
+        assert!(matches!(
+            provider.record_play_if(3, || false),
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(provider.record_play(999), Err(Error::NotFound(_))));
+        assert!(events.lock().unwrap().is_empty());
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(provider.get_audio(3).unwrap().play_count, 0);
+        assert_eq!(cache.active().unwrap(), before);
+        assert_eq!(std::fs::read(cache.database_path(&before)).unwrap(), bytes);
         assert_eq!(
-            events.lock().unwrap().as_slice(),
-            [WriteEvent::Applied { revision: 44 }]
+            conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            version
         );
-        let seen = seen.lock().unwrap();
-        assert_eq!(
-            (
-                seen[0].method.as_str(),
-                seen[0].path.as_str(),
-                seen[0].body.as_str()
-            ),
-            ("POST", "/api/v1/audio/3/plays", "")
-        );
-        assert_eq!(provider.get_audio(3).unwrap().play_count, 1);
-        assert_eq!(cache.state(LIBRARY).unwrap().revision, 44);
     }
 
     #[test]
-    fn concurrent_play_writers_publish_each_reply_before_sending_the_next_write() {
-        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    fn concurrent_metadata_writers_publish_each_reply_before_sending_the_next_write() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         use std::time::Duration;
 
         let directory = tempfile::tempdir().unwrap();
@@ -1326,7 +1313,7 @@ mod tests {
             let calls = calls.clone();
             let second_cached_revision = second_cached_revision.clone();
             server(Arc::new(StdMutex::new(Vec::new())), move |method, path| {
-                assert_eq!((method, path), ("POST", "/api/v1/audio/3/plays"));
+                assert_eq!((method, path), ("PATCH", "/api/v1/audio/3/metadata"));
                 let call = calls.fetch_add(1, Ordering::AcqRel);
                 let (before, after) = if call < 2 {
                     (43 + call as u64, 44 + call as u64)
@@ -1342,7 +1329,7 @@ mod tests {
                     200,
                     &format!(
                         r#"{{"file":{},"revision_before":{before},"revision":{after}}}"#,
-                        file_json(3, "", 0, "", call as u64 + 1)
+                        file_json(3, &format!("edit{call}"), 0, "", 0)
                     ),
                 );
                 if call == 0 {
@@ -1368,34 +1355,31 @@ mod tests {
             )
         };
         let first = writer();
-        let first = std::thread::spawn(move || first.record_play(3).unwrap());
-        first_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        // Closing cancels an unsent play waiting behind an in-flight write. The
-        // requested write's reply must still drain; the waiting play sends nothing.
-        let current = Arc::new(AtomicBool::new(true));
-        let waiting_current = current.clone();
-        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(1);
-        let waiting_writer = writer();
-        let waiting = std::thread::spawn(move || {
-            let first_check = AtomicBool::new(true);
-            waiting_writer.record_play_while(3, || {
-                if first_check.swap(false, Ordering::AcqRel) {
-                    waiting_tx.send(()).unwrap();
-                }
-                waiting_current.load(Ordering::Acquire)
-            })
+        let first = std::thread::spawn(move || {
+            first.update_metadata(3, &MetadataPatch::default()).unwrap()
         });
-        waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        current.store(false, Ordering::Release);
-        assert!(matches!(
-            waiting.join().unwrap(),
-            Err(RemoteError::Cancelled)
-        ));
+        first_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Playback remains local even while Metadata owns the network-write gate.
+        let (play_tx, play_rx) = std::sync::mpsc::sync_channel(1);
+        let playback = writer();
+        let play = std::thread::spawn(move || play_tx.send(playback.record_play(3)).unwrap());
+        assert_eq!(
+            play_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+                .revision,
+            43
+        );
+        play.join().unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 1);
-        // Desktop playback dispatch creates a new writer per event, so this must
-        // exercise independent instances rather than a cloned instance's mutex.
+        // Independent writer instances must share ordering through cache publication.
         let second = writer();
-        let second = std::thread::spawn(move || second.record_play(3).unwrap());
+        let second = std::thread::spawn(move || {
+            second
+                .update_metadata(3, &MetadataPatch::default())
+                .unwrap()
+        });
         first_release_tx.send(()).unwrap();
         assert_eq!(
             first.join().unwrap().cache,
@@ -1407,9 +1391,12 @@ mod tests {
         );
         assert_eq!(second_cached_revision.load(Ordering::Acquire), 44);
         assert_eq!(cache.state(LIBRARY).unwrap().revision, 45);
-        assert_eq!(snapshot(&cache).get_audio(3).unwrap().play_count, 2);
+        assert_eq!(snapshot(&cache).get_audio(3).unwrap().tags, "edit1");
         assert!(matches!(
-            writer().record_play(3).unwrap().cache,
+            writer()
+                .update_metadata(3, &MetadataPatch::default())
+                .unwrap()
+                .cache,
             CacheUpdate::Resync { .. }
         ));
         assert_eq!(cache.state(LIBRARY).unwrap().revision, 45);

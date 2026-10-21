@@ -736,9 +736,18 @@ pub fn test_connection(
             let started = Instant::now();
             let library = client.library();
             let authorized = library.is_ok();
-            let compatible = library.as_ref().is_ok_and(|library| {
-                snapshot_schema_error(library.schema_version, chinese).is_none()
+            let incompatibility = library.as_ref().ok().and_then(|library| {
+                snapshot_schema_error(library.schema_version, chinese).or_else(|| {
+                    crate::compatibility::live_library(
+                        client,
+                        library,
+                        report.server_version.as_deref(),
+                    )
+                    .err()
+                    .map(|error| error.localized(chinese))
+                })
             });
+            let compatible = authorized && incompatibility.is_none();
             report.unauthorized = library
                 .as_ref()
                 .err()
@@ -772,8 +781,6 @@ pub fn test_connection(
                                     .unwrap_or_default()
                             )
                         };
-                        let incompatibility =
-                            snapshot_schema_error(library.schema_version, chinese);
                         report.library = Some(library);
                         match incompatibility {
                             Some(message) => Err(format!("{text} · {message}")),
@@ -897,7 +904,7 @@ mod tests {
 
     #[test]
     fn connection_test_checks_schema_without_losing_successful_api_evidence() {
-        for version in [2, 3, 4, 5, 6] {
+        for version in [2, 3, 4, 5, 6, 7] {
             for chinese in [false, true] {
                 let requests = Arc::new(Mutex::new(Vec::new()));
                 let server = {
@@ -909,7 +916,7 @@ mod tests {
                             .push((request.method.clone(), request.path.clone()));
                         match request.path.as_str() {
                             "/api/v1/health" => {
-                                TestResponse::json(200, r#"{"status":"ok","version":"0.4.0"}"#)
+                                TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
                             }
                             "/api/v1/library" => TestResponse::json(
                                 200,
@@ -917,6 +924,7 @@ mod tests {
                                     r#"{{"library_id":"schema-test","schema_version":{version},"revision":42,"stats":{{"audio_files":123456}}}}"#
                                 ),
                             ),
+                            "/api/v1/capabilities" => TestResponse::json(404, "{}"),
                             "/api/v1/roots" => TestResponse::json(200, "[]"),
                             _ => TestResponse::json(500, "{}"),
                         }
@@ -932,7 +940,7 @@ mod tests {
                 let supported = (3..=5).contains(&version);
                 assert_eq!(report.ok(), supported, "{}", report.summary(chinese));
                 assert!(!report.unauthorized && !report.server_starting());
-                assert_eq!(report.server_version.as_deref(), Some("0.4.0"));
+                assert_eq!(report.server_version.as_deref(), Some("0.4.11"));
                 let library = report.library.as_ref().unwrap();
                 assert_eq!((library.schema_version, library.revision), (version, 42));
                 assert_eq!(library.audio_files(), Some(123456));
@@ -943,7 +951,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(step.ok, supported);
                 assert!(step.message.contains(&format!("schema {version}")));
-                if !supported {
+                if !(3..=6).contains(&version) {
                     assert!(step.message.contains(if chinese {
                         "本客户端支持"
                     } else {
@@ -954,14 +962,15 @@ mod tests {
                 assert!(report.steps.iter().all(|step| {
                     !matches!(step.step, ProbeStep::Health | ProbeStep::Roots) || step.ok
                 }));
-                assert_eq!(
-                    requests.lock().unwrap().as_slice(),
-                    [
-                        ("GET".into(), "/api/v1/health".into()),
-                        ("GET".into(), "/api/v1/library".into()),
-                        ("GET".into(), "/api/v1/roots".into()),
-                    ]
-                );
+                let mut expected = vec![
+                    ("GET".into(), "/api/v1/health".into()),
+                    ("GET".into(), "/api/v1/library".into()),
+                ];
+                if supported {
+                    expected.push(("GET".into(), "/api/v1/capabilities".into()));
+                }
+                expected.push(("GET".into(), "/api/v1/roots".into()));
+                assert_eq!(*requests.lock().unwrap(), expected);
             }
         }
     }
@@ -1099,7 +1108,7 @@ mod tests {
         let api = TestServer::start(move |request| match request.path.as_str() {
             "/api/v1/health" => TestResponse::json(
                 200,
-                r#"{"status":"ok","version":"1.0","public_url":"https://AudioLib.Example.com:8443/"}"#,
+                r#"{"status":"ok","version":"0.4.11","public_url":"https://AudioLib.Example.com:8443/"}"#,
             ),
             _ if request.header("authorization") != Some("Bearer tok") => TestResponse::json(
                 401,
@@ -1217,7 +1226,9 @@ mod tests {
                 return TestResponse::json(400, r#"{"message":"unexpected Authorization"}"#);
             }
             match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"1"}"#),
+                "/api/v1/health" => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                }
                 "/api/v1/library" => TestResponse::json(
                     200,
                     r#"{"library_id":"open","schema_version":3,"revision":1}"#,
@@ -1240,7 +1251,7 @@ mod tests {
         assert!(report.steps[3].ok && report.steps[4].ok);
 
         let secured = TestServer::start(|request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"1"}"#),
+            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
             _ => TestResponse::json(
                 401,
                 r#"{"error_code":"UNAUTHORIZED","message":"missing token"}"#,
@@ -1263,6 +1274,7 @@ mod tests {
             library_id: "L".into(),
             revision: 4,
             schema_version: 3,
+            format: None,
             database_file: "library-r4.db".into(),
             server_url: String::new(),
             server_version: String::new(),
@@ -1276,6 +1288,7 @@ mod tests {
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
         drop(audiolib_db::SqliteProvider::open(&database).unwrap());
         let connection = rusqlite::Connection::open(&database).unwrap();
+        audiolib_db::register_library_functions(&connection).unwrap();
         connection
             .execute_batch(
                 "INSERT INTO audio_files(id,file_path,filename,missing) VALUES
@@ -1303,10 +1316,11 @@ mod tests {
             let mode = mode.clone();
             TestServer::start(move |request| {
                 match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"1.0"}"#),
+                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
                 _ if request.header("authorization") != Some("Bearer tok") => {
                     TestResponse::json(401, r#"{"error_code":"UNAUTHORIZED"}"#)
                 }
+                "/api/v1/capabilities" => TestResponse::json(404, "{}"),
                 "/api/v1/library" => {
                     TestResponse::json(200, r#"{"library_id":"L","schema_version":3,"revision":4}"#)
                 }

@@ -2,7 +2,6 @@
 //! Selection/page ordering, failed-close recovery and authoritative server history.
 use super::*;
 use std::cell::Cell;
-use std::io::{Read, Write};
 use std::rc::Rc;
 
 const ROOT_ENV: &str = "AUDIOLIB_REQUEST_RECOVERY_TEST_ROOT";
@@ -380,7 +379,7 @@ fn child_failed_close_resumes_reads() {
 }
 
 #[test]
-fn server_play_history_reads_the_api_while_scan_history_uses_the_snapshot() {
+fn server_play_history_is_empty_offline_while_scan_history_uses_the_snapshot() {
     isolated("child_server_history_routes_provider");
 }
 
@@ -390,44 +389,13 @@ fn child_server_history_routes_provider() {
     let (provider, _engine, ui, controller) = fixture();
     let files = provider.search(&SearchRequest::default()).unwrap().results;
     provider.record_play(files[0].id).unwrap();
-    let record = PlayRecord {
-        id: 999,
-        audio_file_id: files[1].id,
-        played_at: "2026-10-11 00:00:00".into(),
-        filename: files[1].filename.clone(),
-        file_path: files[1].file_path.clone(),
-        missing: false,
-    };
-    let body = serde_json::to_string(&[record]).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
-    let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut socket = loop {
-            match listener.accept() {
-                Ok((socket, _)) => break socket,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "History API was not requested");
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("Mock server accept: {error}"),
-            }
-        };
-        socket.set_nonblocking(false).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut bytes = Vec::new();
-        let mut chunk = [0; 2048];
-        while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
-            let count = socket.read(&mut chunk).unwrap();
-            assert!(count > 0);
-            bytes.extend_from_slice(&chunk[..count]);
-        }
-        let request = String::from_utf8(bytes).unwrap();
-        assert!(request.starts_with("GET /api/v1/history/plays?limit=50&offset=0 "));
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    // A stale UI list must be cleared by the completed empty-history response.
+    controller.plays.lock().unwrap().push(PlayRecord {
+        id: 999,
+        ..Default::default()
     });
     controller.config.lock().unwrap().data_source.server_url = format!("http://{address}");
     controller.remote.lock().unwrap().state = Some(audiolib_remote::CacheState {
@@ -446,9 +414,8 @@ fn child_server_history_routes_provider() {
     run_until(&ui, move || {
         let ui = window.upgrade().unwrap();
         match observed.get() {
-            0 if ui.get_history_rows().row_count() == 1 => {
-                assert!(ui.get_history_rows().row_data(0).unwrap().contains("B.wav"));
-                assert_eq!(c.plays.lock().unwrap()[0].id, 999);
+            0 if c.plays.lock().unwrap().is_empty() => {
+                assert_eq!(ui.get_history_rows().row_count(), 0);
                 ui.set_history_kind(0);
                 c.load_history(0);
                 observed.set(1);
@@ -468,8 +435,10 @@ fn child_server_history_routes_provider() {
         }
         false
     });
-    server.join().unwrap();
-    assert_eq!(provider.play_history(50, 0).unwrap()[0].filename, "A.wav");
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(provider.play_history(50, 0).unwrap().is_empty());
     controller.shutdown();
     ui.hide().unwrap();
     assert_eq!(stage.get(), 2);

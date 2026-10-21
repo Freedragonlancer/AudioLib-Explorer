@@ -1,6 +1,7 @@
 // server/audiolib-server/tests/scans.rs
 //! Remote scans (`POST /scans` and friends), history lists and the `/roots` scan fields,
 //! against temporary libraries and roots of tiny generated WAVs. Nothing real is touched.
+mod support;
 use audiolib_core::DataProvider;
 use audiolib_db::SqliteProvider;
 use audiolib_server::{
@@ -203,6 +204,7 @@ async fn call(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    request = support::modern(request);
     request = request.header(
         "x-audiolib-library-id",
         state.revision().unwrap().library_id,
@@ -483,8 +485,7 @@ async fn scans_run_to_completion_bump_the_revision_only_for_changes_and_feed_the
         StatusCode::OK
     );
     let plays: Vec<audiolib_core::PlayRecord> = get(state, "/history/plays?limit=10").await;
-    assert_eq!(plays.len(), 1);
-    assert_eq!(plays[0].audio_file_id, id);
+    assert!(plays.is_empty(), "playback tracking is retired");
 }
 
 #[tokio::test]

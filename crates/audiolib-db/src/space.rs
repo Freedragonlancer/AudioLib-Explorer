@@ -1,3 +1,4 @@
+// crates/audiolib-db/src/space.rs
 //! Free-space check before large copies (backup, remote snapshot, compression).
 use audiolib_core::{Error, Result};
 use std::path::Path;
@@ -6,7 +7,7 @@ use std::path::Path;
 const MARGIN_MIN: u64 = 64 << 20;
 
 /// Free bytes available to this user on the volume holding `dir`; `None` where it cannot
-/// be determined (non-Unix platforms, odd filesystems).
+/// be determined (unsupported platforms, inaccessible filesystems).
 pub fn free_space(dir: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
@@ -19,7 +20,37 @@ pub fn free_space(dir: &Path) -> Option<u64> {
         }
         Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetDiskFreeSpaceExW(
+                directory: *const u16,
+                available: *mut u64,
+                total: *mut u64,
+                free: *mut u64,
+            ) -> i32;
+        }
+        let mut path: Vec<u16> = dir.as_os_str().encode_wide().collect();
+        if path.contains(&0) {
+            return None;
+        }
+        path.push(0);
+        let mut available = 0u64;
+        // SAFETY: path is a live NUL-terminated UTF-16 buffer; available is a
+        // writable aligned u64. Optional total/free output pointers may be null.
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                path.as_ptr(),
+                &mut available,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        (ok != 0).then_some(available)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = dir;
         None

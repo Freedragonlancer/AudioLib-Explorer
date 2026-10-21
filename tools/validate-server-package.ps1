@@ -278,16 +278,20 @@ try {
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $deadline)
     if ($null -eq $health -or $health.status -cne 'ok' -or $health.version -cne $version -or
-        $health.api_version -cne 'v1' -or $health.schema_version -ne 5 -or $health.commit -cne $shortCommit) { throw 'Extracted server health identity/API/schema check failed.' }
+        $health.api_version -cne 'v1' -or $health.schema_version -ne 6 -or $health.commit -cne $shortCommit) { throw 'Extracted server health identity/API/schema check failed.' }
     $library = Read-Endpoint '/library'
     if ($server.HasExited -or $library.library_id -isnot [string] -or !$library.library_id -or
-        $library.schema_version -ne 5 -or $library.identity_bound_writes -isnot [bool] -or !$library.identity_bound_writes -or
+        $library.schema_version -ne 6 -or $library.identity_bound_writes -isnot [bool] -or !$library.identity_bound_writes -or
         $library.stats.audio_files -ne 1 -or ![IO.Path]::GetFullPath($library.database).Equals([IO.Path]::GetFullPath($database), $comparison)) { throw 'Extracted server could not serve its isolated synthetic library.' }
+    if ($library.snapshot_format.id -cne 'ale-s6-cld1-t3-m2-p0' -or
+        $library.snapshot_format.format.features.play_history_retired -ne 1) {
+        throw 'Extracted server snapshot format does not declare playback-history retirement.'
+    }
     # Safe public result only: neither endpoint responses nor process logs are exported.
     [ordered]@{
         success=$true; tag=$Tag; version=$version; target=$Target; commit=$commit
         archive_sha256=$archiveHash; binary_sha256=$report.binary_sha256
-        checks=@('archive checksum/report schema', 'public archive contents', 'extracted binary version/hash', 'isolated health API v1/schema 5/commit', 'synthetic library available')
+        checks=@('archive checksum/report schema', 'public archive contents', 'extracted binary version/hash', 'isolated health API v1/schema 6/commit', 'synthetic library available')
         shutdown=$(if ($IsWindows) { 'owned test process termination; graceful drain not tested' } else { 'owned test process SIGTERM with bounded termination fallback' })
     } | ConvertTo-Json -Depth 4
 } finally {

@@ -69,6 +69,8 @@ pub struct RemoveFolderResponse {
 /// Reply of `GET /capabilities`: what this client may do on this server.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapabilitiesResponse {
+    /// Shared application/version and database-format compatibility catalog.
+    pub compatibility: audiolib_core::compatibility::CompatibilityManifest,
     /// Effective `manage_mode`: `all`, `lan` or `off`.
     pub manage_mode: ManageMode,
     /// Whether this request was classified as external (through a reverse proxy or from

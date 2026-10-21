@@ -1665,6 +1665,8 @@ impl Controller {
             // manager while the write gate drains drafts/scans and installs it.
             ui.set_ds_syncing(true);
             ui.set_ds_progress(-1.0);
+            ui.set_ds_decompression_info("".into());
+            ui.set_ds_decompression_progress(-1.0);
             ui.set_ds_sync_info(
                 if self.chinese.load(Ordering::Acquire) {
                     "正在打开缓存音效库…"
@@ -2173,7 +2175,8 @@ impl Controller {
         let kind = ui.get_history_kind();
         ui.set_history_detail("".into());
         ui.set_history_rows(ModelRc::new(VecModel::<slint::SharedString>::default()));
-        // Playback history is live server data; scan history remains a snapshot read.
+        // The compatibility playback-history API returns an empty list; scan
+        // history continues to come from the active library snapshot.
         let provider = if kind == 1 {
             self.metadata_provider()
         } else {
@@ -5686,6 +5689,8 @@ fn resume_after_failed_close(ui: &AppWindow, error: &str, scanning: bool) {
     // Its obsolete/rejected publication cannot restore these indicators.
     ui.set_ds_syncing(false);
     ui.set_ds_progress(0.0);
+    ui.set_ds_decompression_info("".into());
+    ui.set_ds_decompression_progress(-1.0);
     ui.set_status(error.into());
 }
 

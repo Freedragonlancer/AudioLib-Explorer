@@ -3,6 +3,7 @@
 //! and the `manage_mode` gate (doc/api/README.md §6.8), against temporary libraries and
 //! roots of tiny generated WAVs. Removal only ever touches the temporary library; the
 //! tests check that every WAV is still on disk afterwards.
+mod support;
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_server::{
     AppState, BearerToken, CapabilitiesResponse, ConnectionInfo, ErrorBody, LibraryResponse,
@@ -206,6 +207,7 @@ async fn call_service(
     body: Option<&str>,
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
+    request = support::modern(request);
     if let Ok(state) = service.app_state() {
         request = request.header(
             "x-audiolib-library-id",
@@ -649,6 +651,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
+            compatibility: audiolib_core::compatibility::compatibility_manifest(),
             manage_mode: ManageMode::All,
             external: false,
             can_manage: true,
@@ -660,6 +663,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, proxied, LAN).await,
         CapabilitiesResponse {
+            compatibility: audiolib_core::compatibility::compatibility_manifest(),
             manage_mode: ManageMode::All,
             external: true,
             can_manage: true,
@@ -736,6 +740,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, proxied, LAN).await,
         CapabilitiesResponse {
+            compatibility: audiolib_core::compatibility::compatibility_manifest(),
             manage_mode: ManageMode::Lan,
             external: true,
             can_manage: false,
@@ -747,6 +752,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, public, PUBLIC).await,
         CapabilitiesResponse {
+            compatibility: audiolib_core::compatibility::compatibility_manifest(),
             manage_mode: ManageMode::Lan,
             external: true,
             can_manage: false,
@@ -758,6 +764,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
+            compatibility: audiolib_core::compatibility::compatibility_manifest(),
             manage_mode: ManageMode::Lan,
             external: false,
             can_manage: true,
@@ -827,6 +834,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
+            compatibility: audiolib_core::compatibility::compatibility_manifest(),
             manage_mode: ManageMode::Off,
             external: false,
             can_manage: false,

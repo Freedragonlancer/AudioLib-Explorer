@@ -2,7 +2,7 @@
 //! Isolated regressions for automatic server refresh during audition and search retention.
 use super::super::*;
 use super::source_transition_tests::{
-    accept, configuration, isolated_module, request, respond, root, run_until,
+    configuration, isolated_module, request, respond, root, run_until,
 };
 use super::*;
 use audiolib_core::config::{ActiveSource, ServerProfile};
@@ -107,7 +107,7 @@ fn fixture(
         engine,
         DataSourceSwitch::Server {
             database: cache.database_path(&next),
-            state: Some(next),
+            state: Some(Box::new(next)),
         },
         sounds,
     )
@@ -441,8 +441,9 @@ impl SnapshotServer {
                 let path = request.split_whitespace().nth(1).unwrap();
                 match path {
                     "/api/v1/health" => {
-                        respond(&mut socket, "200 OK", r#"{"status":"ok","version":"test"}"#)
+                        respond(&mut socket, "200 OK", &serde_json::json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}).to_string())
                     }
+                    "/api/v1/capabilities" => respond(&mut socket, "200 OK", &serde_json::json!({"compatibility":audiolib_core::compatibility::compatibility_manifest()}).to_string()),
                     "/api/v1/library" => respond(
                         &mut socket,
                         "200 OK",
@@ -450,14 +451,18 @@ impl SnapshotServer {
                             "library_id": library_id,
                             "identity_bound_writes": true,
                             "revision": revision,
-                            "schema_version": 5,
+                            "schema_version": audiolib_db::SCHEMA_VERSION,
+                            "snapshot_format": {"id":audiolib_core::compatibility::PLAN_B_FORMAT,"format":audiolib_core::compatibility::LibraryFormat::target()},
                         })
                         .to_string(),
                     ),
                     "/api/v1/roots" => respond(&mut socket, "200 OK", "[]"),
                     "/api/v1/library/snapshot" => {
                         downloaded.fetch_add(1, Ordering::AcqRel);
-                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nX-Library-Id: {library_id}\r\nX-Library-Revision: {revision}\r\nX-Schema-Version: 5\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                        let format = serde_json::to_string(&audiolib_core::compatibility::LibraryFormat::target()).unwrap();
+                        let manifest = serde_json::to_string(&audiolib_core::compatibility::compatibility_manifest()).unwrap();
+                        let format_id = audiolib_core::compatibility::PLAN_B_FORMAT;
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nX-Library-Id: {library_id}\r\nX-Library-Revision: {revision}\r\nX-Schema-Version: 6\r\nX-Audiolib-Snapshot-Format: {format_id}\r\nX-Audiolib-Library-Format: {format}\r\nX-Audiolib-Server-Compatibility: {manifest}\r\nX-Search-Storage-Revision: 1\r\nX-Tokenization-Revision: 3\r\nX-Source-Search-Revision: 2\r\nX-Source-Tags-Revision: 2\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
                         socket.write_all(&bytes).unwrap();
                     }
                     _ => respond(
@@ -484,7 +489,7 @@ impl SnapshotServer {
 }
 
 #[test]
-fn a_profile_switch_drains_sent_plays_before_another_endpoint_uses_the_cache() {
+fn a_profile_switch_keeps_play_noops_off_the_network() {
     isolated_module("snapshot_refresh_tests", "child_play_profile_switch");
 }
 
@@ -495,34 +500,34 @@ fn child_play_profile_switch() {
 }
 
 #[test]
-fn editing_the_active_profile_endpoint_drains_sent_plays() {
+fn editing_the_active_profile_endpoint_keeps_play_noops_off_the_network() {
     isolated_module("snapshot_refresh_tests", "child_play_profile_edit");
 }
 
 #[test]
-#[ignore = "isolated Slint play/active endpoint edit drain regression"]
+#[ignore = "isolated Slint play/active endpoint edit regression"]
 fn child_play_profile_edit() {
     play_source_switch(PlayTransition::ProfileEdit);
 }
 
 #[test]
-fn closing_drains_a_sent_play_through_its_cache_settlement() {
+fn closing_finishes_play_noops_without_cache_changes() {
     isolated_module("snapshot_refresh_tests", "child_play_close");
 }
 
 #[test]
-#[ignore = "isolated Slint play/close drain regression"]
+#[ignore = "isolated Slint play/close regression"]
 fn child_play_close() {
     play_source_switch(PlayTransition::Close);
 }
 
 #[test]
-fn a_provider_swap_drains_sent_plays_before_publishing_its_snapshot() {
+fn a_provider_swap_preserves_metadata_after_play_noops() {
     isolated_module("snapshot_refresh_tests", "child_play_provider_swap");
 }
 
 #[test]
-#[ignore = "isolated Slint play/provider swap drain regression"]
+#[ignore = "isolated Slint play/provider swap regression"]
 fn child_play_provider_swap() {
     play_source_switch(PlayTransition::SnapshotSwap);
 }
@@ -556,12 +561,10 @@ fn play_source_switch(transition: PlayTransition) {
             unreachable!()
         };
         let mut snapshot_file = file.clone();
-        snapshot_file.play_count += 1;
-        snapshot_file.notes = "Server snapshot after play".into();
+        snapshot_file.notes = "New server snapshot".into();
         SqliteProvider::apply_snapshot_records(database, &[snapshot_file]).unwrap();
     }
-    // B is a server clone: the same UUID and revision initially, but its Metadata
-    // and play count are independent. A's late full record must never overlay B.
+    // B has the same UUID/revision but independently edited Metadata.
     let clone_path = root().join("server-b.db");
     controller.provider().backup_library(&clone_path).unwrap();
     let clone = SqliteProvider::open(&clone_path).unwrap();
@@ -584,36 +587,7 @@ fn play_source_switch(transition: PlayTransition) {
     );
     let a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url_a = format!("http://{}", a.local_addr().unwrap());
-    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let library_id = state.library_id.clone();
-    let a_worker = std::thread::spawn(move || {
-        let mut preflight = accept(&a);
-        assert!(request(&mut preflight).starts_with("GET /api/v1/library"));
-        respond(
-            &mut preflight,
-            "200 OK",
-            &serde_json::json!({
-                "library_id": library_id,
-                "identity_bound_writes": true,
-                "revision": 1,
-                "schema_version": 5,
-            })
-            .to_string(),
-        );
-        let mut socket = accept(&a);
-        assert!(request(&mut socket).starts_with(&format!("POST /api/v1/audio/{id}/plays")));
-        entered_tx.send(()).unwrap();
-        release_rx.recv_timeout(Duration::from_secs(8)).unwrap();
-        let mut played = file;
-        played.play_count += 1;
-        played.notes = "A delayed play reply".into();
-        respond(
-            &mut socket,
-            "200 OK",
-            &serde_json::json!({"file":played,"revision_before":1,"revision":2}).to_string(),
-        );
-    });
+    a.set_nonblocking(true).unwrap();
     state.server_url = url_a.clone();
     let cache = RemoteCache::new(&controller.data_root());
     cache.save_state(&state).unwrap();
@@ -640,8 +614,7 @@ fn play_source_switch(transition: PlayTransition) {
     }
     let generation = controller.library_generation.load(Ordering::Acquire);
     controller.remote_record_play(id, generation);
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    // A second, unsent play waits behind A's request and must cancel at the gate.
+    // Dispatch twice across the transition; neither may send a play request.
     controller.remote_record_play(id, generation);
     if snapshot_swap {
         let DataSourceSwitch::Server { state, .. } = &mut target else {
@@ -667,32 +640,8 @@ fn play_source_switch(transition: PlayTransition) {
         controller.source_changing.load(Ordering::Acquire)
     });
     let c = controller.clone();
-    let old_provider = controller.provider();
     let url_b = b.url.clone();
-    let requests_b = b.requests.clone();
-    let started = Instant::now();
-    let released = Arc::new(AtomicBool::new(false));
-    let was_released = released.clone();
-    let window = ui.as_weak();
     run_until(&ui, move || {
-        if started.elapsed() < Duration::from_millis(250) {
-            assert_eq!(c.config.lock().unwrap().data_source.server_url, url_a);
-            assert_eq!(requests_b.load(Ordering::Acquire), 0);
-            assert!(c.remote_plays.lock().unwrap().workers > 0);
-            if snapshot_swap {
-                assert!(c.library_busy.load(Ordering::Acquire));
-                assert_eq!(c.remote.lock().unwrap().state.as_ref().unwrap().revision, 1);
-                assert!(Arc::ptr_eq(&old_provider, &c.provider()));
-            }
-            if close {
-                let ui = window.upgrade().unwrap();
-                assert!(ui.window().is_visible() && ui.get_closing());
-            }
-            return false;
-        }
-        if !released.swap(true, Ordering::AcqRel) {
-            release_tx.send(()).unwrap();
-        }
         if close {
             // Completion must hide the window and quit its own event loop.
             return false;
@@ -722,16 +671,15 @@ fn play_source_switch(transition: PlayTransition) {
                     state.revision == 1 && cached_source_matches(&state.server_url, &url_b)
                 })
     });
-    assert!(was_released.load(Ordering::Acquire));
-    a_worker.join().unwrap();
+    assert!(matches!(a.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
     if close {
         assert!(!ui.window().is_visible());
         assert_eq!(controller.remote_plays.lock().unwrap().workers, 0);
         assert_eq!(b.requests.load(Ordering::Acquire), 0);
         let active = cache.active().unwrap();
         assert!(cached_source_matches(&active.server_url, &state.server_url));
-        assert_eq!(active.revision, 2);
-        assert_eq!(controller.provider().get_audio(id).unwrap().play_count, 1);
+        assert_eq!(active.revision, 1);
+        assert_eq!(controller.provider().get_audio(id).unwrap().play_count, 0);
         controller.shutdown();
         b.finish();
         return;
@@ -739,22 +687,21 @@ fn play_source_switch(transition: PlayTransition) {
     if snapshot_swap {
         assert_eq!(b.requests.load(Ordering::Acquire), 0);
         let current = controller.provider().get_audio(id).unwrap();
-        assert_eq!(current.notes, "Server snapshot after play");
-        assert_eq!(current.play_count, 1);
+        assert_eq!(current.notes, "New server snapshot");
+        assert_eq!(current.play_count, 0);
         let active = cache.active().unwrap();
         assert!(cached_source_matches(&active.server_url, &state.server_url));
-        // This directly exercises the provider operation; sync_library owns
-        // cache promotion. The old play must settle into its original cache,
-        // leaving the separately supplied new provider's Metadata untouched.
+        // The provider swap is separate from sync's cache promotion. Playback
+        // must leave the previous cached revision and Metadata untouched.
         assert_eq!(active.database_file, state.database_file);
-        assert_eq!(active.revision, 2);
+        assert_eq!(active.revision, 1);
         assert_eq!(
             SqliteProvider::open_read_only(&cache.database_path(&active))
                 .unwrap()
                 .get_audio(id)
                 .unwrap()
                 .notes,
-            "A delayed play reply"
+            file.notes
         );
         controller.shutdown();
         ui.hide().unwrap();

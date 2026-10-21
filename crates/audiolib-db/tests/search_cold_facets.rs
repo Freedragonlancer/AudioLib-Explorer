@@ -19,7 +19,9 @@ const BOOM: &str = "({filename user_tags user_notes bwf_description ixml_scene i
 fn fixture(extra_candidates: bool) -> (tempfile::TempDir, PathBuf, SqliteProvider) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("cold-facets.db");
-    let conn = Connection::open(&database).unwrap();
+    let legacy = directory.path().join("legacy-nullable.db");
+    let conn = Connection::open(&legacy).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     // Retain legacy NULL and nonbinary visibility rather than normalizing them.
     conn.execute_batch(
         "CREATE TABLE audio_files(id INTEGER PRIMARY KEY,file_path TEXT NOT NULL UNIQUE,
@@ -27,8 +29,10 @@ fn fixture(extra_candidates: bool) -> (tempfile::TempDir, PathBuf, SqliteProvide
     )
     .unwrap();
     drop(conn);
+    audiolib_db::import_legacy(&legacy, &database).unwrap();
     let provider = SqliteProvider::open(&database).unwrap();
     let mut conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES
          (1,'root','root',NULL),(2,'root/a','a',1),(3,'root/b','b',1);
@@ -124,6 +128,7 @@ fn request() -> SearchRequest {
 
 fn oracle(database: &Path, request: &SearchRequest, folders: bool) -> Vec<(i64, u64)> {
     let conn = Connection::open(database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let visibility = match request.filters.visibility {
         FileVisibility::Present => "af.missing=0",
         FileVisibility::Missing => "af.missing=1",
@@ -268,6 +273,7 @@ fn cold_cover_filters_and_general_candidate_overflow_keep_every_predicate() {
         ..request()
     };
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     for replacement in [
         "DROP INDEX idx_audio_visible_filter; CREATE INDEX idx_audio_visible_filter
          ON audio_files(sample_rate,duration,id) WHERE missing=1;",
@@ -302,6 +308,7 @@ fn cancelled_cold_facets_leave_the_reader_and_future_ranking_usable() {
 fn damaged_fts_shadow_storage_is_an_error_instead_of_partial_facets() {
     let (_directory, database, provider) = fixture(false);
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     // Damage only this owned fixture. Neither an empty ranking cache nor the
     // optional fast-path fallback may turn a broken MATCH into successful counts.
     conn.execute_batch("DROP TABLE audio_search_data;").unwrap();

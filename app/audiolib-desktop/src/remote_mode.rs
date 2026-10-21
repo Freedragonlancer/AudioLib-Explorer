@@ -9,6 +9,8 @@
 //! worker threads; results return through the Slint event loop and stale generations
 //! are discarded.
 use super::{Controller, LibraryOperation, post};
+#[path = "remote_sync_progress.rs"]
+mod remote_sync_progress;
 use crate::{AppWindow, DataRootRow};
 use audiolib_audio::{WaveformData, WaveformRequest};
 use audiolib_core::AudioFile;
@@ -202,7 +204,7 @@ pub(super) enum DataSourceSwitch {
     Local,
     Server {
         database: PathBuf,
-        state: Option<CacheState>,
+        state: Option<Box<CacheState>>,
     },
 }
 
@@ -1838,6 +1840,8 @@ impl Controller {
         if let Some(ui) = self.ui.upgrade() {
             ui.set_ds_syncing(true);
             ui.set_ds_progress(-1.0);
+            ui.set_ds_decompression_info("".into());
+            ui.set_ds_decompression_progress(-1.0);
             ui.set_ds_sync_info(
                 cn_or(chinese, "正在检查服务器版本…", "Checking server revision…").into(),
             );
@@ -1847,8 +1851,7 @@ impl Controller {
             // On unwind, later cache locals drain before this guard releases busy.
             let sync_busy_guard = busy_guard;
             let cache = RemoteCache::new(&data_root);
-            let mut last_post = Instant::now() - Duration::from_secs(1);
-            let mut last_progress = None;
+            let mut progress_reporter = remote_sync_progress::ProgressReporter::default();
             let cached_preparation_incomplete = std::cell::Cell::new(false);
             let mut report = |progress| {
                 match progress {
@@ -1860,104 +1863,23 @@ impl Controller {
                     SyncProgress::Saving => cached_preparation_incomplete.set(false),
                     _ => {}
                 }
-                let now = Instant::now();
-                let repeating_count = match (last_progress, progress) {
-                    (Some(SyncProgress::Downloading { .. }), SyncProgress::Downloading { .. }) => {
-                        true
-                    }
-                    (Some(SyncProgress::Preparing(previous)), SyncProgress::Preparing(current)) => {
-                        matches!(
-                            (previous, current),
-                            (
-                                audiolib_remote::CachePreparation::Copying { .. },
-                                audiolib_remote::CachePreparation::Copying { .. }
-                            ) | (
-                                audiolib_remote::CachePreparation::Tokenizing { .. },
-                                audiolib_remote::CachePreparation::Tokenizing { .. }
-                            )
-                        )
-                    }
-                    _ => false,
-                };
-                if now.duration_since(last_post) < Duration::from_millis(200) && repeating_count {
+                let Some(display) = progress_reporter.report(progress, chinese, Instant::now())
+                else {
                     return;
-                }
-                last_post = now;
-                last_progress = Some(progress);
-                let (text, fraction) = match progress {
-                    SyncProgress::Checking => (
-                        cn_or(chinese, "正在检查服务器版本…", "Checking server revision…"),
-                        -1.0,
-                    ),
-                    // The server copies the library before the first byte
-                    // (several seconds for a few hundred MB).
-                    SyncProgress::Downloading {
-                        received: 0,
-                        total: None,
-                    } => (
-                        cn_or(
-                            chinese,
-                            "服务器正在准备快照…",
-                            "The server is preparing the snapshot…",
-                        ),
-                        -1.0,
-                    ),
-                    SyncProgress::Downloading { received, total } => {
-                        let mib = received as f64 / 1_048_576.0;
-                        match total {
-                            Some(total) if total > 0 => (
-                                if chinese {
-                                    format!(
-                                        "正在下载快照 {mib:.1} / {:.1} MiB",
-                                        total as f64 / 1_048_576.0
-                                    )
-                                } else {
-                                    format!(
-                                        "Downloading snapshot {mib:.1} / {:.1} MiB",
-                                        total as f64 / 1_048_576.0
-                                    )
-                                },
-                                received as f32 / total as f32,
-                            ),
-                            _ => (
-                                if chinese {
-                                    format!("正在下载快照 {mib:.1} MiB")
-                                } else {
-                                    format!("Downloading snapshot {mib:.1} MiB")
-                                },
-                                -1.0,
-                            ),
-                        }
-                    }
-                    SyncProgress::Validating => (
-                        cn_or(
-                            chinese,
-                            "正在校验快照完整性…",
-                            "Validating snapshot integrity…",
-                        ),
-                        -1.0,
-                    ),
-                    SyncProgress::Saving => (
-                        cn_or(chinese, "正在更新本地缓存…", "Updating local cache…"),
-                        -1.0,
-                    ),
-                    SyncProgress::Preparing(stage) => {
-                        let stage = crate::startup::StartupProgress::Remote(stage);
-                        let fraction = stage.fraction();
-                        let text = if fraction >= 0.0 {
-                            format!("{} · {:.0}%", stage.label(chinese), fraction * 100.0)
-                        } else {
-                            stage.label(chinese)
-                        };
-                        (text, fraction)
-                    }
                 };
                 let c2 = c.clone();
                 post(c.ui.clone(), move |ui| {
                     if c2.remote_generation.load(Ordering::Acquire) == generation {
-                        ui.set_ds_progress(fraction);
-                        ui.set_ds_sync_info(text.clone().into());
-                        ui.set_status(text.into());
+                        ui.set_ds_progress(display.fraction);
+                        ui.set_ds_sync_info(display.text.clone().into());
+                        ui.set_ds_decompression_progress(display.decompression_fraction);
+                        ui.set_ds_decompression_info(display.decompression_text.clone().into());
+                        let status = if display.decompression_text.is_empty() {
+                            display.text
+                        } else {
+                            format!("{} · {}", display.text, display.decompression_text)
+                        };
+                        ui.set_status(status.into());
                     }
                 });
             };
@@ -2009,6 +1931,8 @@ impl Controller {
                 }
                 ui.set_ds_syncing(false);
                 ui.set_ds_progress(0.0);
+                ui.set_ds_decompression_info("".into());
+                ui.set_ds_decompression_progress(-1.0);
                 c2.complete_sync(&ui, result, fallback, &cache);
             });
         });
@@ -2113,7 +2037,7 @@ impl Controller {
                     ui,
                     DataSourceSwitch::Server {
                         database,
-                        state: Some(outcome.state),
+                        state: Some(Box::new(outcome.state)),
                     },
                 );
             }
@@ -2183,7 +2107,13 @@ impl Controller {
                         } else {
                             cn_or(chinese, "\n尚无本地缓存：显示空素材库，连接恢复后请点击“立即同步”。", "\nNo cache yet: showing an empty library; use Sync now once the server is reachable.")
                         });
-                        self.swap_to(ui, DataSourceSwitch::Server { database, state });
+                        self.swap_to(
+                            ui,
+                            DataSourceSwitch::Server {
+                                database,
+                                state: state.map(Box::new),
+                            },
+                        );
                     }
                 } else if self.remote_read_only() && self.remote.lock().unwrap().state.is_some() {
                     message.push_str(&cn_or(
@@ -2264,7 +2194,7 @@ impl Controller {
                 self.remote_mode.store(true, Ordering::Release);
                 {
                     let mut remote = self.remote.lock().unwrap();
-                    remote.state = state.clone();
+                    remote.state = state.as_deref().cloned();
                     remote.library_changed = false;
                     remote.manager.invalidate_library();
                 }
@@ -3629,6 +3559,10 @@ mod tests {
                 let response = if head.starts_with("GET /api/v1/library ") {
                     // Writer preflight binds mutations to the displayed snapshot.
                     r#"{"library_id":"lib-1","identity_bound_writes":true,"revision":1,"schema_version":5}"#.to_owned()
+                } else if head.starts_with("GET /api/v1/health ") {
+                    r#"{"status":"ok","version":"0.4.11"}"#.to_owned()
+                } else if head.starts_with("GET /api/v1/capabilities ") {
+                    "{}".to_owned()
                 } else {
                     response.clone()
                 };
@@ -4457,7 +4391,7 @@ mod tests {
         controller
             .switch_data_source(&DataSourceSwitch::Server {
                 database: snapshot.clone(),
-                state: cache.state("lib-1"),
+                state: cache.state("lib-1").map(Box::new),
             })
             .unwrap();
         controller.remote_write_event(

@@ -291,6 +291,7 @@ fn extensible_valid_bits_are_removed_after_pcm_replacement_preserving_user_data(
         .unwrap();
     provider.record_play(audio.id).unwrap();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.plugin_private','keep') WHERE id=?1",
         [audio.id],
@@ -315,6 +316,6 @@ fn extensible_valid_bits_are_removed_after_pcm_replacement_preserving_user_data(
             current.favorite,
             current.play_count
         ),
-        ("user tag", "private notes", Some("#123456"), true, 1)
+        ("user tag", "private notes", Some("#123456"), true, 0)
     );
 }

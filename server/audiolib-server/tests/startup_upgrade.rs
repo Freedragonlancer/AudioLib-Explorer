@@ -25,8 +25,11 @@ impl Write for LogWriter {
 fn server_startup_logs_upgrade_phases_rows_and_elapsed_time() {
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("library.db");
-    drop(SqliteProvider::open(&database).unwrap());
     let conn = Connection::open(&database).unwrap();
+    conn.execute_batch(include_str!(
+        "../../../crates/audiolib-db/tests/fixtures/schema-v5.sql"
+    ))
+    .unwrap();
     conn.execute_batch(
         "WITH RECURSIVE records(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM records WHERE id<5001)
          INSERT INTO audio_files(id,file_path,filename,user_notes)
@@ -49,11 +52,10 @@ fn server_startup_logs_upgrade_phases_rows_and_elapsed_time() {
     let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
     let expected = [
         "phase=\"preparing\"",
-        "phase=\"tokenizing\" completed=0 total=5001",
-        "phase=\"tokenizing\" completed=5000 total=5001",
-        "phase=\"tokenizing\" completed=5001 total=5001",
-        "phase=\"indexing\"",
-        "phase=\"source_tags\"",
+        "phase=\"copying\" completed=5000 total=5001",
+        "phase=\"copying\" completed=5001 total=5001",
+        "phase=\"indexing\" completed=5000 total=5001",
+        "phase=\"indexing\" completed=5001 total=5001",
         "Library startup: database opened",
     ];
     let mut after = 0;

@@ -284,6 +284,7 @@ fn successful_probe_removes_absent_bwf_ixml_and_fts_but_preserves_user_data() {
         .unwrap();
     let conn = Connection::open(provider.database_path()).unwrap();
     // Legacy rating data lives only in the column now; a rescan must leave it alone.
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute("UPDATE audio_files SET user_rating=5 WHERE id=?1", [id])
         .unwrap();
     conn.execute("UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.plugin_private','keep','$.bwf_plugin_private','independent') WHERE id=?1",[id]).unwrap();
@@ -375,6 +376,7 @@ fn unicode_tag_folding_is_literal_and_shared_by_counts_pages_and_readonly_connec
     let path = temp.path().join("db.sqlite");
     let provider = SqliteProvider::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     for (id, tags) in [
         (1, "ÉCHO_100% Straße Σ"),
         (2, "écho_100% STRASSE ς"),

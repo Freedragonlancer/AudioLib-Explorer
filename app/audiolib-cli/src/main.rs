@@ -1,5 +1,6 @@
 // app/audiolib-cli/src/main.rs
 //! Rust command-line library operations and local desktop transport control.
+mod migration;
 use audiolib_core::{
     BatchMetadataRequest, DataProvider, FileVisibility, LibraryExportFormat, MaintenanceAction,
     MetadataPatch, SearchFilters, SearchRequest, SortOrder, TagEditMode, config::AppConfig,
@@ -321,6 +322,11 @@ enum HistoryKind {
 }
 #[derive(Subcommand)]
 enum DbCommand {
+    /// Inspect or manage a source-bound database migration without opening a provider.
+    Migration {
+        #[command(subcommand)]
+        command: migration::Command,
+    },
     Status,
     Import {
         source: PathBuf,
@@ -452,6 +458,12 @@ fn desktop_profile_running(reply: &Value, settings: &std::path::Path) -> bool {
 }
 
 fn operation(args: &Arguments) -> anyhow::Result<Value> {
+    if let Command::Db {
+        command: DbCommand::Migration { command },
+    } = &args.command
+    {
+        return migration::run(args.database.as_deref(), command);
+    }
     match &args.command {
         Command::Probe { path } => return Ok(json!(audiolib_audio::probe(path)?)),
         Command::Play { path } => {
@@ -1451,10 +1463,11 @@ mod tests {
             .is_some()
         );
         let connection = Connection::open(&path).unwrap();
+        audiolib_db::register_library_functions(&connection).unwrap();
         connection
             .execute_batch(
-                "INSERT INTO audio_files(file_path,path_key,filename,filename_tokenized)
-                 VALUES('populated.wav','populated.wav','populated.wav','populated');",
+                "INSERT INTO audio_files(file_path,path_key,filename)
+                 VALUES('populated.wav','populated.wav','populated.wav');",
             )
             .unwrap();
         let page = provider.search(&request).unwrap();
