@@ -418,8 +418,14 @@ fn feature_revision_newer_schema_version_is_a_newer_database_error() {
         .unwrap()
         .pragma_update(None, "user_version", 99)
         .unwrap();
-    assert!(matches!(
-        SqliteProvider::open_existing(&database),
-        Err(Error::NewerDatabase { ref what, found: 99, .. }) if what == "schema"
-    ));
+    for result in [
+        SqliteProvider::open_existing(&database).map(|_| ()),
+        SqliteProvider::open_read_only(&database).map(|_| ()),
+        SqliteProvider::upgrade_owned_snapshot(&database).map(|_| ()),
+    ] {
+        assert!(
+            matches!(&result, Err(Error::NewerDatabase { what, found: 99, .. }) if what == "schema"),
+            "{result:?}"
+        );
+    }
 }

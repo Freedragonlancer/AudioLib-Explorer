@@ -568,6 +568,13 @@ impl SqliteProvider {
             let version: i64 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .map_err(db_error)?;
+            if version > MAX_SNAPSHOT_SCHEMA {
+                return Err(Error::NewerDatabase {
+                    what: "schema".into(),
+                    found: version,
+                    supported: MAX_SNAPSHOT_SCHEMA,
+                });
+            }
             if !snapshot_schema_supported(version) {
                 return Err(Error::Database(format!(
                     "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
@@ -670,6 +677,13 @@ impl SqliteProvider {
         let version: i64 = source
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
+        if version > MAX_SNAPSHOT_SCHEMA {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: MAX_SNAPSHOT_SCHEMA,
+            });
+        }
         if !snapshot_schema_supported(version) {
             return Err(Error::Database(format!(
                 "Read-only database requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
@@ -748,6 +762,13 @@ impl SqliteProvider {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
+        if version > MAX_SNAPSHOT_SCHEMA {
+            return Err(Error::NewerDatabase {
+                what: "schema".into(),
+                found: version,
+                supported: MAX_SNAPSHOT_SCHEMA,
+            });
+        }
         if !snapshot_schema_supported(version) {
             return Err(Error::Database(format!(
                 "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
