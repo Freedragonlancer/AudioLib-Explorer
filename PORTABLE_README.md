@@ -57,7 +57,7 @@ $env:AUDIOLIB_DATA_DIR = "$env:LOCALAPPDATA/AudioLibExplorer/imported-v1"
 
 启动失败时会显示错误提示，并在用户数据目录的 `logs/AudioLibExplorer-startup-error.log` 同步记录诊断。日常运行日志为同一目录的 `AudioLibExplorer.log.*`。
 
-搜索支持中文、筛选、分页及排序。Metadata 的标签、颜色、评分、备注和收藏只写入资料库；选择其他文件前会保存已编辑内容。单击查看 Metadata 和 Waveform，双击试听。Waveform 点击跳转，暂停后点击播放从原位置继续。
+搜索支持中文、筛选、分页及排序。Metadata 的标签、颜色、评分、备注和收藏只写入资料库；选择其他文件前会保存已编辑内容。声音列表底部的“单击播放”默认开启，单击即选中并试听；取消勾选后单击查看 Metadata 和 Waveform，双击试听。Waveform 点击跳转，暂停后点击播放从原位置继续。
 
 “文件 → 退出”、`Ctrl+Q` 和关闭窗口共用退出流程：等待已请求的 Metadata 保存，成功后取消当前扫描，并在后台等待扫描结束和数据库锁释放后退出；保存失败时保留窗口和编辑内容供重试。同一资料库同时只能运行一轮扫描，其他 GUI/CLI 扫描请求会明确提示忙碌。升级保留原有用户数据目录、显式 `AUDIOLIB_DATA_DIR` 和配置的库路径，不用便携包覆盖工作库。迁移后使用新的 Rust 设置，旧 YAML 的后续变动不影响启动。
 
