@@ -89,13 +89,13 @@ revision_poll_secs = 3
 # List thumbnail waveforms (POST /waveforms, doc/api/README.md §9.1-§9.2) live in
 # waveform_cache_dir/list/ with their own limit list_waveform_cache_mb (16..=1048576,
 # default 640 MiB; not part of waveform_cache_mb). Misses are computed in the background
-# by list_waveform_workers workers (1..=64, default 1, never more than max_waveforms - 1)
+# by list_waveform_workers workers (1..=64, default 3, never more than max_waveforms - 1)
 # that share the max_waveforms slots. pregenerate_list_waveforms = true fills the whole
 # library at most list_waveform_rate files per second (1..=1000, default 10), yielding to
 # scans and audio streams; the admin page and PATCH /api/v1/settings can override it.
 # pregenerate_list_waveforms = false
 # list_waveform_cache_mb = 640
-# list_waveform_workers = 1
+# list_waveform_workers = 3
 # list_waveform_rate = 10
 # true: POST /waveforms reads no file metadata (in the request or in the background) during
 # the 3 s prebuffer window after a stream or preview starts; ids it would read answer

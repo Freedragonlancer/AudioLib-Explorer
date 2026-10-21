@@ -107,9 +107,11 @@ fn fixture(extra: &str) -> Fixture {
         )
         .unwrap();
     assert_eq!(progress.added, 3, "{progress:?}");
+    // One list waveform worker: these tests pace a job file by file (`list_waveform_rate`)
+    // and read its cursor and progress between files.
     let config = ServerConfig::from_toml_str(
         &format!(
-            "bind = \"127.0.0.1:0\"\nlibrary_db = 'library/library.db'\nsnapshot_dir = 'snapshots'\n{extra}\
+            "bind = \"127.0.0.1:0\"\nlibrary_db = 'library/library.db'\nsnapshot_dir = 'snapshots'\nlist_waveform_workers = 1\n{extra}\
              [[roots]]\nname = \"SFX\"\nserver_path = '{}'\n",
             sounds.display()
         ),
