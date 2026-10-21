@@ -307,6 +307,41 @@ pub(crate) fn cancellable_io<T>(
     cancel: &AtomicBool,
     exchange: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    cancellable_io_with_stall(cancel, Duration::from_secs(30), exchange)
+}
+
+/// Longest wait for the next snapshot body byte. A slow but moving transfer never trips
+/// it and the whole download has no total limit (snapshots can be many GB); a silent
+/// connection fails with a [`RemoteError::Timeout`] that the resumable sync retries
+/// from its committed prefix with `Range`.
+pub(crate) const SNAPSHOT_READ_STALL_TIMEOUT: Duration = Duration::from_secs(90);
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_READ_STALL_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Override [`SNAPSHOT_READ_STALL_TIMEOUT`] for snapshot downloads on this test thread.
+#[cfg(test)]
+pub(crate) fn override_snapshot_read_stall(stall: Option<Duration>) {
+    SNAPSHOT_READ_STALL_OVERRIDE.with(|value| value.set(stall));
+}
+
+pub(crate) fn snapshot_read_stall() -> Duration {
+    #[cfg(test)]
+    if let Some(stall) = SNAPSHOT_READ_STALL_OVERRIDE.with(std::cell::Cell::get) {
+        return stall;
+    }
+    SNAPSHOT_READ_STALL_TIMEOUT
+}
+
+/// [`cancellable_io`] with an explicit per-read stall limit (never a total limit).
+pub(crate) fn cancellable_io_with_stall<T>(
+    cancel: &AtomicBool,
+    read_stall: Duration,
+    exchange: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     if cancel.load(Ordering::Acquire) {
         return Err(RemoteError::Cancelled);
     }
@@ -328,7 +363,7 @@ pub(crate) fn cancellable_io<T>(
                     }
                 }
             })?;
-        let _transport_scope = abort.enter(Some(Duration::from_secs(30)));
+        let _transport_scope = abort.enter(Some(read_stall));
         let result = exchange();
         let _ = done.send(());
         match result {
@@ -880,7 +915,7 @@ impl RemoteClient {
         stage: &mut dyn FnMut(DownloadStage),
         cancel: &AtomicBool,
     ) -> Result<SnapshotMeta> {
-        cancellable_io(cancel, || {
+        cancellable_io_with_stall(cancel, snapshot_read_stall(), || {
             self.download_snapshot_io(destination, progress, stage, cancel)
         })
     }
