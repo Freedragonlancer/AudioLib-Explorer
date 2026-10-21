@@ -1,8 +1,8 @@
 # AudioLib Explorer release notes
 
-## Unreleased: Plan B storage and shared migration (`0.6.0-dev.1`)
+## 0.6.0: Plan B storage and shared migration
 
-Development identity: program `0.6.0-dev.1` | API `/api/v1/` | schema 6 |
+Release identity: program `0.6.0` | API `/api/v1/` | schema 6 |
 snapshot schema boundary 3..=6, subject to the complete format/capability catalog.
 This isolated development build has not been published, deployed or installed over
 the current application. A future release requires a chosen release version/tag and
