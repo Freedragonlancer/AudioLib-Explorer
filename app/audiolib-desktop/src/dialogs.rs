@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Select one filesystem folder with the Windows common dialog on a worker thread.
 /// Cancellation returns `None` so the caller can retain the existing typed path.
 #[cfg(windows)]
-pub fn choose_folder(chinese: bool) -> Result<Option<PathBuf>, String> {
+pub fn choose_folder(chinese: bool, owner: usize) -> Result<Option<PathBuf>, String> {
     use std::{ffi::c_void, os::windows::ffi::OsStringExt, ptr};
 
     #[repr(C)]
@@ -81,7 +81,12 @@ pub fn choose_folder(chinese: bool) -> Result<Option<PathBuf>, String> {
     let check = |result: i32| {
         if result < 0 {
             Err(format!(
-                "Windows folder dialog failed: {:#x}",
+                "{}: {:#x}",
+                if chinese {
+                    "Windows 文件夹选择窗口失败"
+                } else {
+                    "Windows folder dialog failed"
+                },
                 result as u32
             ))
         } else {
@@ -132,7 +137,7 @@ pub fn choose_folder(chinese: bool) -> Result<Option<PathBuf>, String> {
         // FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST.
         check((table.set_options)(dialog.0, options | 0x20 | 0x40 | 0x800))?;
         check((table.set_title)(dialog.0, title.as_ptr()))?;
-        let result = (table.show)(dialog.0, ptr::null_mut());
+        let result = (table.show)(dialog.0, owner as *mut c_void);
         if result as u32 == 0x8007_04c7 {
             return Ok(None);
         }
@@ -166,13 +171,14 @@ pub fn choose_folder(chinese: bool) -> Result<Option<PathBuf>, String> {
 
 /// Folder selection is available only on the Windows desktop target.
 #[cfg(not(windows))]
-pub fn choose_folder(_chinese: bool) -> Result<Option<PathBuf>, String> {
+pub fn choose_folder(_chinese: bool, _owner: usize) -> Result<Option<PathBuf>, String> {
     Err("Native folder selection requires Windows".into())
 }
 
 #[derive(Clone, Copy)]
 pub enum FileKind {
     Database,
+    NewLibrary,
     Wav,
     JsonLines,
     Csv,
@@ -180,7 +186,12 @@ pub enum FileKind {
 }
 
 #[cfg(windows)]
-pub fn choose(save: bool, kind: FileKind, chinese: bool) -> Result<Option<PathBuf>, String> {
+pub fn choose(
+    save: bool,
+    kind: FileKind,
+    chinese: bool,
+    owner: usize,
+) -> Result<Option<PathBuf>, String> {
     use std::{ffi::c_void, mem::size_of};
     #[repr(C)]
     struct OpenFileName {
@@ -214,33 +225,63 @@ pub fn choose(save: bool, kind: FileKind, chinese: bool) -> Result<Option<PathBu
         fn GetSaveFileNameW(value: *mut OpenFileName) -> i32;
         fn CommDlgExtendedError() -> u32;
     }
-    let (filter, ext) = match kind {
-        FileKind::Database => ("SQLite database (*.db)\0*.db\0All files\0*.*\0\0", "db"),
-        FileKind::Wav => ("WAV / BWF audio\0*.wav\0\0", "wav"),
-        FileKind::JsonLines => ("JSON Lines (*.jsonl)\0*.jsonl\0\0", "jsonl"),
-        FileKind::Csv => ("CSV (*.csv)\0*.csv\0\0", "csv"),
-        FileKind::Annotations => (
+    let (filter, ext) = match (kind, chinese) {
+        (FileKind::Database | FileKind::NewLibrary, true) => {
+            ("音效库 SQLite 数据库 (*.db)\0*.db\0所有文件\0*.*\0\0", "db")
+        }
+        (FileKind::Database | FileKind::NewLibrary, false) => (
+            "Library SQLite database (*.db)\0*.db\0All files\0*.*\0\0",
+            "db",
+        ),
+        (FileKind::Wav, _) => ("WAV / BWF\0*.wav\0\0", "wav"),
+        (FileKind::JsonLines, _) => ("JSON Lines (*.jsonl)\0*.jsonl\0\0", "jsonl"),
+        (FileKind::Csv, _) => ("CSV (*.csv)\0*.csv\0\0", "csv"),
+        (FileKind::Annotations, true) => ("音效库标注\0*.jsonl;*.csv\0所有文件\0*.*\0\0", "jsonl"),
+        (FileKind::Annotations, false) => (
             "Library annotations\0*.jsonl;*.csv\0All files\0*.*\0\0",
             "jsonl",
         ),
     };
     let filter = filter.encode_utf16().collect::<Vec<_>>();
     let ext = ext.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let title = (if chinese {
-        if save { "保存文件" } else { "选择文件" }
-    } else if save {
-        "Save file"
-    } else {
-        "Select file"
-    })
+    let title = match (kind, save, chinese) {
+        (FileKind::NewLibrary, _, true) => "新建音效库",
+        (FileKind::NewLibrary, _, false) => "Create sound library",
+        (FileKind::Database, true, true) => "备份音效库",
+        (FileKind::Database, true, false) => "Back up sound library",
+        (FileKind::Database, false, true) => "选择音效库数据库",
+        (FileKind::Database, false, false) => "Choose sound library database",
+        (FileKind::Wav, _, true) => "选择 WAV，修复文件引用",
+        (FileKind::Wav, _, false) => "Choose WAV to repair file reference",
+        (_, true, true) => "导出音效库标注",
+        (_, true, false) => "Export library annotations",
+        (_, false, true) => "导入音效库标注",
+        (_, false, false) => "Import library annotations",
+    }
     .encode_utf16()
     .chain(Some(0))
     .collect::<Vec<_>>();
     let mut file = vec![0u16; 32_768];
+    if save {
+        let date = chrono::Local::now().format("%Y-%m-%d");
+        let name = match kind {
+            FileKind::Database => format!("AudioLib-backup-{date}.db"),
+            FileKind::NewLibrary => "AudioLib-library.db".into(),
+            FileKind::Csv => format!("AudioLib-annotations-{date}.csv"),
+            FileKind::JsonLines | FileKind::Annotations => {
+                format!("AudioLib-annotations-{date}.jsonl")
+            }
+            FileKind::Wav => String::new(),
+        };
+        for (target, value) in file.iter_mut().zip(name.encode_utf16()) {
+            *target = value;
+        }
+    }
     // SAFETY: The Win32 POD is zero-initializable. All pointed buffers remain alive for
     // the synchronous call, writable file capacity equals file_size, and no hook exists.
     let mut value: OpenFileName = unsafe { std::mem::zeroed() };
     value.size = size_of::<OpenFileName>() as u32;
+    value.owner = owner as *mut c_void;
     value.filter = filter.as_ptr();
     value.filter_index = 1;
     value.file = file.as_mut_ptr();
@@ -264,7 +305,11 @@ pub fn choose(save: bool, kind: FileKind, chinese: bool) -> Result<Option<PathBu
         return if error == 0 {
             Ok(None)
         } else {
-            Err(format!("Windows file dialog failed: {error:#x}"))
+            Err(if chinese {
+                format!("Windows 文件选择窗口失败：{error:#x}")
+            } else {
+                format!("Windows file dialog failed: {error:#x}")
+            })
         };
     }
     let end = file
@@ -275,6 +320,40 @@ pub fn choose(save: bool, kind: FileKind, chinese: bool) -> Result<Option<PathBu
 }
 
 #[cfg(not(windows))]
-pub fn choose(_save: bool, _kind: FileKind, _chinese: bool) -> Result<Option<PathBuf>, String> {
+pub fn choose(
+    _save: bool,
+    _kind: FileKind,
+    _chinese: bool,
+    _owner: usize,
+) -> Result<Option<PathBuf>, String> {
     Err("Native file selection requires Windows".into())
+}
+
+/// Capture the main window's HWND on the UI thread before starting a dialog worker.
+/// A zero handle is used by headless tests and platforms without a Win32 window.
+pub fn owner_handle(window: &slint::Window) -> usize {
+    #[cfg(windows)]
+    {
+        use slint::winit_030::{
+            WinitWindowAccessor,
+            winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
+        };
+        window
+            .with_winit_window(|native| {
+                native
+                    .window_handle()
+                    .ok()
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        0
+    }
 }

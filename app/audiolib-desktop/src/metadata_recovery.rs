@@ -1,5 +1,5 @@
 // app/audiolib-desktop/src/metadata_recovery.rs
-//! Preserve annotations from a replaced server library before handoff or close.
+//! Preserve unsaved annotations durably before an explicitly requested recovery exit.
 use super::*;
 use std::io::Write;
 
@@ -29,11 +29,31 @@ impl Controller {
         sequence: u64,
     ) -> Result<(), String> {
         self.wait_metadata(sequence, false)?;
-        let Some(snapshot) = self.remote_recovery_snapshot() else {
+        if self.remote_recovery_snapshot().is_none() {
             return self.wait_metadata(sequence, true).map(|_| ());
+        }
+        self.preserve_metadata_recovery(true)
+    }
+
+    /// Archive drained drafts without submitting them again. Ordinary save failure
+    /// recovery is entered only by the explicit "recovery file and exit" action.
+    pub(in crate::controller) fn preserve_metadata_recovery(
+        &self,
+        replaced: bool,
+    ) -> Result<(), String> {
+        let snapshot = if replaced {
+            self.remote_recovery_snapshot()
+        } else if self.remote_read_only() {
+            self.remote.lock().unwrap().state.clone()
+        } else {
+            None
         };
+        if replaced && snapshot.is_none() {
+            return Err("The original server snapshot changed before Metadata recovery".into());
+        }
         let provider = self.provider();
         let generation = self.library_generation.load(Ordering::Acquire);
+        let selected = self.selected.lock().unwrap().clone();
         let (revision, completed, drafts, actions, failures) = {
             let state = self.metadata.lock().unwrap();
             if !state.jobs.is_empty() || state.in_flight.is_some() {
@@ -62,36 +82,38 @@ impl Controller {
         let records = ids
             .iter()
             .map(|id| {
-                // These reads belong to the still-open old snapshot, never the server.
-                let file = provider.get_audio(*id).map_err(|error| {
-                    format!("Could not read old-library record {id} for Metadata recovery: {error}. The original drafts were retained.")
-                })?;
+                // A removed record must not prevent recovery of its owned patch.
+                // Reads stay on the displayed library, never the remote server.
+                let fetched = provider.get_audio(*id);
+                let read_error = fetched.as_ref().err().map(ToString::to_string);
+                let file = fetched.ok().or_else(|| selected.as_ref().filter(|file| file.id == *id).cloned());
                 let patch = drafts.get(id).map(|draft| draft.patch.clone()).or_else(|| {
-                    actions.get(id).and_then(|action| {
-                        quick_metadata_patch(*action, file.favorite)
-                    })
+                    // Without the original value a favorite toggle cannot be
+                    // reconstructed safely; retain its exact quick action below.
+                    actions.get(id).and_then(|action| file.as_ref().and_then(|file| quick_metadata_patch(*action, file.favorite)))
                 });
-                Ok::<_, String>(serde_json::json!({
+                serde_json::json!({
                     "record_id": id,
-                    "file_path": file.file_path,
-                    "filename": file.filename,
+                    "file_path": file.as_ref().map(|file| &file.file_path),
+                    "filename": file.as_ref().map(|file| &file.filename),
                     "patch": patch,
                     "draft_revision": drafts.get(id).map(|draft| draft.revision),
                     "quick_action": actions.get(id),
                     "had_failed_write": failures.contains(id),
-                    "snapshot_metadata": {
+                    "read_error": read_error,
+                    "snapshot_metadata": file.as_ref().filter(|_| read_error.is_none()).map(|file| serde_json::json!({
                         "tags": file.tags, "notes": file.notes,
                         "favorite": file.favorite, "color": file.color,
-                    },
-                }))
+                    })),
+                })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
         let payload = serde_json::json!({
             "format": FORMAT,
-            "reason": "server_library_replaced",
-            "library_id": snapshot.library_id,
-            "snapshot_file": snapshot.database_file,
-            "snapshot_revision": snapshot.revision,
+            "reason": if replaced { "server_library_replaced" } else { "user_requested_recovery_exit" },
+            "library_id": snapshot.as_ref().map(|snapshot| &snapshot.library_id),
+            "snapshot_file": snapshot.as_ref().map(|snapshot| &snapshot.database_file),
+            "snapshot_revision": snapshot.as_ref().map(|snapshot| snapshot.revision),
             "provider_database": provider.database_path(),
             "metadata_revision": revision,
             "completed_sequence": completed,
@@ -100,10 +122,12 @@ impl Controller {
         });
         if !Arc::ptr_eq(&provider, &self.provider())
             || self.library_generation.load(Ordering::Acquire) != generation
-            || !self.remote_snapshot_current(&snapshot)
-            || self.remote_recovery_snapshot().is_none()
+            || snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !self.remote_snapshot_current(snapshot))
+            || (replaced && self.remote_recovery_snapshot().is_none())
         {
-            return Err("The displayed server snapshot changed during Metadata recovery".into());
+            return Err("The displayed library changed during Metadata recovery".into());
         }
         // A source change drains twice (connection, then provider). Reuse only a
         // fully readable, identical durable artifact; lost files are recreated.
@@ -120,10 +144,9 @@ impl Controller {
                 write_recovery(&self.config.lock().unwrap().data_root(), &payload)
             })?;
         tracing::warn!(
-            library_id = %snapshot.library_id,
             records = ids.len(),
             path = %path.display(),
-            "Unsaved server Metadata preserved in a local recovery file"
+            "Unsaved Metadata preserved in a local recovery file"
         );
         *self.metadata_recovery_notice.lock().unwrap() = Some(path);
         // Keep drafts/failures in memory until the actual provider handoff succeeds.
@@ -138,12 +161,12 @@ impl Controller {
         };
         let message = if self.chinese.load(Ordering::Acquire) {
             format!(
-                "旧服务器素材库的未保存 Metadata 已保存在本机恢复文件中，请按原素材库身份核对后使用：{}",
+                "未保存 Metadata 已保存在本机恢复文件中，请按原素材库身份核对后使用：{}",
                 path.display()
             )
         } else {
             format!(
-                "Unsaved Metadata from the previous server library is preserved locally. Review it against the original library before applying it: {}",
+                "Unsaved Metadata is preserved locally. Review it against the original library before applying it: {}",
                 path.display()
             )
         };

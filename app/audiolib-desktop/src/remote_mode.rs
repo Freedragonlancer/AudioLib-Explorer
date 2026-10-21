@@ -11,7 +11,7 @@
 use super::{Controller, LibraryOperation, post};
 #[path = "remote_sync_progress.rs"]
 mod remote_sync_progress;
-use crate::{AppWindow, DataRootRow};
+use crate::AppWindow;
 use audiolib_audio::{WaveformData, WaveformRequest};
 use audiolib_core::AudioFile;
 use audiolib_core::config::{AppConfig, DataSourceMode, DataSourceSettings};
@@ -25,10 +25,8 @@ use audiolib_remote::{
     RootState, RouteOptions, SourceAuth, StreamSource, SyncControl, SyncOptions, SyncProgress,
     SyncRunOutcome, UrlSource, WAKING_HINT_AFTER, WaveformQuery, WaveformReply, WebDavAuth,
     WriteEvent, WriteListener, bandwidth, check_revision_with_roots, choose_route, effective_roots,
-    load_profile_secrets, map_server_path, root_for_path, root_status_text,
-    sync_library_with_options,
+    load_profile_secrets, map_server_path, root_for_path, sync_library_with_options,
 };
-use slint::{ModelRc, VecModel};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -273,8 +271,6 @@ pub(super) struct RemoteRuntime {
     /// Snapshot currently opened by the provider (server mode only).
     pub(super) state: Option<CacheState>,
     /// Roots shown in the dialog and the text currently in each row's URL field.
-    dialog_roots: Vec<RemoteRoot>,
-    root_values: HashMap<String, String>,
     last_error: Option<String>,
     /// Latest background revision check (or sync failure) for the open snapshot.
     check: Option<RevisionCheck>,
@@ -655,6 +651,33 @@ fn short_id(id: &str) -> String {
 }
 
 impl Controller {
+    /// Annotation writes are unavailable while the known server state is read-only.
+    /// Slow responses remain retryable; cached playback and browsing stay available.
+    pub(super) fn require_metadata_writable(&self) -> Result<(), String> {
+        self.require_remote_write_identity()?;
+        if self.remote_metadata_blocked() {
+            Err(cn_or(
+                self.chinese.load(Ordering::Acquire),
+                "服务器暂时无法保存标注：本地缓存只读。请重新连接后重试；已有草稿仍然保留。",
+                "The server cannot currently save annotations: the local cache is read-only. Reconnect and retry; existing drafts are retained.",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn remote_metadata_blocked(&self) -> bool {
+        self.remote_read_only()
+            && matches!(
+                self.remote.lock().unwrap().check,
+                Some(
+                    RevisionCheck::Offline(_)
+                        | RevisionCheck::Unauthorized(_)
+                        | RevisionCheck::Starting { .. }
+                )
+            )
+    }
+
     /// True while the provider is a server snapshot (structural writes refused; annotation
     /// writes and plays go to the server).
     pub(super) fn remote_read_only(&self) -> bool {
@@ -1120,13 +1143,6 @@ impl Controller {
     /// Bind the data source callbacks (the unified window's in `source_manager`).
     pub(super) fn bind_remote(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_source_manager(ui);
-        let c = self.clone();
-        ui.on_data_source_root_edited(move |index, text| {
-            let mut remote = c.remote.lock().unwrap();
-            if let Some(root) = remote.dialog_roots.get(index as usize).cloned() {
-                remote.root_values.insert(root.name, text.to_string());
-            }
-        });
         let c = self.clone();
         ui.on_remote_write_refused(move || {
             c.refuse_remote_write();
@@ -1612,6 +1628,10 @@ impl Controller {
         let remote = self.remote_read_only();
         ui.set_remote_mode(remote);
         ui.set_remote_writes_blocked(remote && self.remote.lock().unwrap().library_changed);
+        ui.set_metadata_writes_blocked(
+            self.remote_metadata_blocked()
+                || (remote && self.remote.lock().unwrap().library_changed),
+        );
         self.publish_server_manage(ui);
         let label = if !remote {
             cn_or(chinese, "本地模式", "Local mode")
@@ -1727,64 +1747,6 @@ impl Controller {
             ),
             _ => cn_or(chinese, "当前使用本地素材库。", "Using the local library."),
         }
-    }
-
-    fn root_rows(&self, chinese: bool) -> Vec<DataRootRow> {
-        let settings = self.config.lock().unwrap().data_source.clone();
-        let remote = self.remote.lock().unwrap();
-        let mut webdav = settings.webdav.clone();
-        for (name, value) in &remote.root_values {
-            webdav.root_urls.insert(name.clone(), value.clone());
-        }
-        let effective = effective_roots(&remote.dialog_roots, &webdav);
-        remote
-            .dialog_roots
-            .iter()
-            .zip(effective)
-            .map(|(root, effective)| DataRootRow {
-                name: root.name.clone().into(),
-                server_path: root.server_path.clone().into(),
-                server_url: root.webdav_url.clone().unwrap_or_default().into(),
-                url: remote
-                    .root_values
-                    .get(&root.name)
-                    .cloned()
-                    .unwrap_or_default()
-                    .into(),
-                source: effective.source.label(chinese).into(),
-                status: root_status_text(root, chinese).into(),
-                offline: root.state() == RootState::Offline,
-            })
-            .collect()
-    }
-
-    fn publish_root_rows(&self, ui: &AppWindow) {
-        let rows = self.root_rows(self.chinese.load(Ordering::Acquire));
-        ui.set_ds_roots(ModelRc::new(VecModel::from(rows)));
-    }
-
-    /// Replace the dialog's root list, keeping any URL the user already typed.
-    fn set_dialog_roots(&self, roots: Vec<RemoteRoot>, reset_values: bool) {
-        let settings = self.config.lock().unwrap().data_source.clone();
-        let mut remote = self.remote.lock().unwrap();
-        if reset_values {
-            remote.root_values.clear();
-        }
-        for root in &roots {
-            if !remote.root_values.contains_key(&root.name) {
-                // Pre-fill: the user's saved override, else the server's suggestion.
-                let value = settings
-                    .webdav
-                    .root_urls
-                    .get(&root.name)
-                    .filter(|url| !url.trim().is_empty())
-                    .cloned()
-                    .or_else(|| root.webdav_url.clone())
-                    .unwrap_or_default();
-                remote.root_values.insert(root.name.clone(), value);
-            }
-        }
-        remote.dialog_roots = roots;
     }
 
     fn known_roots(&self) -> Vec<RemoteRoot> {
@@ -4433,6 +4395,14 @@ mod tests {
         );
         assert_eq!(ui.get_remote_notice_kind(), super::NOTICE_RETRY);
         assert!(ui.get_remote_notice().contains("offline"));
+        assert!(ui.get_metadata_writes_blocked());
+        assert!(controller.require_metadata_writable().is_err());
+        let offline_sequence = controller.metadata.lock().unwrap().sequence;
+        controller.file_action(file.id, 5);
+        assert_eq!(
+            controller.metadata.lock().unwrap().sequence,
+            offline_sequence
+        );
         ui.invoke_remote_notice_dismissed();
         assert!(
             ui.get_remote_notice().is_empty(),

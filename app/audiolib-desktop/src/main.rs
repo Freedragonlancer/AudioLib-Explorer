@@ -14,6 +14,8 @@ mod progressive_waveform;
 mod responsive_layout_tests;
 mod startup;
 #[cfg(test)]
+mod ui_review_tests;
+#[cfg(test)]
 mod ui_tests;
 mod waveform_view;
 mod window_repaint;
@@ -107,9 +109,20 @@ fn report_fatal_error(error: &anyhow::Error) {
         writeln!(log, "{timestamp}: {message}")?;
         log.sync_all()
     })();
-    let diagnostic = match result {
-        Ok(()) => format!("{message}\n\nLog: {}", log_path.display()),
-        Err(log_error) => format!("{message}\n\nUnable to write log: {log_error}"),
+    let chinese = std::fs::read(root.join("settings.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|settings| settings["language"].as_str() == Some("cn"));
+    let diagnostic = match (result, chinese) {
+        (Ok(()), true) => format!(
+            "启动失败，请查看以下诊断信息。\n{message}\n\n日志：{}",
+            log_path.display()
+        ),
+        (Err(log_error), true) => {
+            format!("启动失败，请查看以下诊断信息。\n{message}\n\n无法写入日志：{log_error}")
+        }
+        (Ok(()), false) => format!("{message}\n\nLog: {}", log_path.display()),
+        (Err(log_error), false) => format!("{message}\n\nUnable to write log: {log_error}"),
     };
     if !std::env::args().any(|argument| argument == "--headless-smoke" || argument == "--smoke-ui")
     {

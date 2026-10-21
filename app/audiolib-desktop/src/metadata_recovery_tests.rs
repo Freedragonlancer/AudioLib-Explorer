@@ -303,7 +303,15 @@ fn child_snapshot_handoff() {
         .into_iter()
         .find(|file| file.filename == "favorite.wav")
         .unwrap();
-    fixture.controller.file_action(favorite.id, 5);
+    // Model a quick action accepted before the replacement was known. New UI
+    // actions are now refused once the original IDs are known to be invalid.
+    fixture
+        .controller
+        .metadata
+        .lock()
+        .unwrap()
+        .enqueue(favorite.id, MetadataWrite::QuickAction(5));
+    fixture.controller.metadata_wake.notify_all();
     let sequence = fixture.controller.metadata.lock().unwrap().sequence;
     fixture.controller.wait_metadata(sequence, false).unwrap();
     fixture
@@ -598,6 +606,214 @@ fn child_ordinary_failure() {
             .is_none()
     );
     assert!(!recovery_directory(&fixture.root.join("preferences")).exists());
+    assert_no_mutations(&fixture);
+    fixture.controller.shutdown();
+    fixture.ui.hide().unwrap();
+}
+
+#[test]
+fn explicit_recovery_exit_preserves_ordinary_failed_drafts_without_retrying() {
+    isolated("child_explicit_recovery_exit");
+}
+
+#[test]
+#[ignore = "isolated explicit recovery exit after a same-library save failure"]
+fn child_explicit_recovery_exit() {
+    let fixture = fixture(false);
+    fixture.controller.request_close(&fixture.ui);
+    let c = fixture.controller.clone();
+    run_until(&fixture.ui, move || !c.closing.load(Ordering::Acquire));
+    assert!(fixture.ui.get_close_recovery_available());
+    let request_count = fixture.requests.lock().unwrap().len();
+    let sequence = fixture.controller.metadata.lock().unwrap().sequence;
+    // Recovery must preserve even an invalid editor value without resubmitting it.
+    fixture.ui.set_edit_tags("x".repeat(16_385).into());
+    fixture.ui.set_metadata_dirty(true);
+    let obstacle = fixture.root.join("preferences/recovery");
+    std::fs::write(&obstacle, "owned recovery failure obstacle").unwrap();
+    fixture.ui.invoke_recover_metadata_and_close();
+    let c = fixture.controller.clone();
+    run_until(&fixture.ui, move || !c.closing.load(Ordering::Acquire));
+    assert!(fixture.ui.window().is_visible());
+    assert!(fixture.ui.get_close_recovery_available());
+    assert_eq!(fixture.ui.get_edit_tags().len(), 16_385);
+    assert!(
+        fixture
+            .controller
+            .metadata_recovery_notice
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+    std::fs::remove_file(&obstacle).unwrap();
+    fixture.ui.invoke_recover_metadata_and_close();
+    let weak = fixture.ui.as_weak();
+    run_until(&fixture.ui, move || {
+        !weak.upgrade().unwrap().window().is_visible()
+    });
+    assert!(!fixture.ui.window().is_visible());
+    assert_eq!(
+        fixture.controller.metadata.lock().unwrap().sequence,
+        sequence
+    );
+    assert_eq!(fixture.requests.lock().unwrap().len(), request_count);
+    let (path, payload) = artifact(&fixture);
+    assert!(path.is_file());
+    assert_eq!(payload["reason"], "user_requested_recovery_exit");
+    assert_eq!(
+        payload["records"][0]["patch"]["tags"]
+            .as_str()
+            .unwrap()
+            .len(),
+        16_385
+    );
+    assert_no_mutations(&fixture);
+    fixture.controller.shutdown();
+}
+
+#[test]
+fn restore_discards_only_current_failed_draft_and_menu_favorite_stays_a_draft() {
+    isolated("child_restore_current_draft");
+}
+
+#[test]
+#[ignore = "isolated explicit restore and consistent inspector/menu favorite semantics"]
+fn child_restore_current_draft() {
+    let fixture = fixture(false);
+    let before = fixture.controller.metadata.lock().unwrap().sequence;
+    fixture.controller.file_action(fixture.file.id, 5);
+    assert!(fixture.ui.get_edit_favorite());
+    assert!(fixture.ui.get_metadata_dirty());
+    assert_eq!(fixture.controller.metadata.lock().unwrap().sequence, before);
+    fixture.controller.metadata.lock().unwrap().edit(
+        -9,
+        MetadataPatch {
+            notes: Some("another retained draft".into()),
+            ..Default::default()
+        },
+    );
+    fixture.ui.invoke_restore_metadata();
+    let weak = fixture.ui.as_weak();
+    run_until(&fixture.ui, move || {
+        !weak.upgrade().unwrap().get_metadata_dirty()
+    });
+    assert_eq!(fixture.ui.get_edit_notes(), "original baseline");
+    assert!(!fixture.ui.get_edit_favorite());
+    let state = fixture.controller.metadata.lock().unwrap();
+    assert!(!state.drafts.contains_key(&fixture.file.id));
+    assert!(!state.failures.contains_key(&fixture.file.id));
+    assert!(state.drafts.contains_key(&-9));
+    drop(state);
+    assert_no_mutations(&fixture);
+    fixture.controller.shutdown();
+    fixture.ui.hide().unwrap();
+}
+
+#[test]
+fn recovery_preserves_owned_patches_even_when_the_record_is_already_gone() {
+    isolated("child_missing_record_recovery");
+}
+
+#[test]
+#[ignore = "isolated missing-record recovery without a readable Metadata baseline"]
+fn child_missing_record_recovery() {
+    let fixture = fixture(false);
+    fixture.controller.metadata.lock().unwrap().edit(
+        -99,
+        MetadataPatch {
+            notes: Some("deleted record draft".into()),
+            ..Default::default()
+        },
+    );
+    fixture
+        .controller
+        .preserve_metadata_recovery(false)
+        .unwrap();
+    let (_, payload) = artifact(&fixture);
+    let record = payload["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["record_id"] == -99)
+        .unwrap();
+    assert_eq!(record["patch"]["notes"], "deleted record draft");
+    assert!(record["read_error"].is_string());
+    assert!(record["snapshot_metadata"].is_null());
+    assert_no_mutations(&fixture);
+    fixture.controller.shutdown();
+    fixture.ui.hide().unwrap();
+}
+
+#[test]
+fn restore_keeps_confirmed_server_metadata_while_the_snapshot_is_stale() {
+    isolated("child_restore_confirmed_server_metadata");
+}
+
+#[test]
+#[ignore = "isolated confirmed-server baseline, stale snapshot and saved-cache eviction"]
+fn child_restore_confirmed_server_metadata() {
+    let fixture = fixture(false);
+    let mut confirmed = fixture.file.clone();
+    confirmed.notes = "last confirmed server value".into();
+    confirmed.favorite = true;
+    {
+        // Model the Metadata worker's successful response while RemoteWriter
+        // has requested resync instead of applying it to the older snapshot.
+        let mut state = fixture.controller.metadata.lock().unwrap();
+        state.enqueue_draft(confirmed.id).unwrap();
+        let job = state.next().unwrap();
+        state.complete(&job, &Ok(confirmed.clone()));
+    }
+    *fixture.controller.selected.lock().unwrap() = Some(confirmed.clone());
+    present_file(&fixture.ui, &confirmed);
+    assert_eq!(
+        fixture.provider.get_audio(confirmed.id).unwrap().notes,
+        "original baseline"
+    );
+    for evict_saved_cache in [false, true] {
+        fixture.ui.set_edit_notes("new unsaved edit".into());
+        fixture.ui.set_metadata_dirty(true);
+        fixture.controller.capture_metadata(&fixture.ui);
+        if evict_saved_cache {
+            let mut state = fixture.controller.metadata.lock().unwrap();
+            for id in -((PAGE_SIZE + 1) as i64)..0 {
+                state.enqueue(id, MetadataWrite::QuickAction(5));
+                let job = state.next().unwrap();
+                state.complete(
+                    &job,
+                    &Ok(AudioFile {
+                        id,
+                        ..Default::default()
+                    }),
+                );
+            }
+            assert!(!state.saved.contains_key(&confirmed.id));
+        }
+        let before = fixture.controller.metadata.lock().unwrap().sequence;
+        fixture.ui.invoke_restore_metadata();
+        let weak = fixture.ui.as_weak();
+        run_until(&fixture.ui, move || {
+            !weak.upgrade().unwrap().get_metadata_dirty()
+        });
+        assert_eq!(fixture.ui.get_edit_notes(), confirmed.notes);
+        assert!(fixture.ui.get_edit_favorite());
+        assert_eq!(
+            fixture
+                .controller
+                .enqueue_current_metadata(&fixture.ui)
+                .unwrap(),
+            before
+        );
+        assert!(
+            fixture
+                .controller
+                .metadata
+                .lock()
+                .unwrap()
+                .drafts
+                .is_empty()
+        );
+    }
     assert_no_mutations(&fixture);
     fixture.controller.shutdown();
     fixture.ui.hide().unwrap();

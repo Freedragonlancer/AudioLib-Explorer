@@ -353,7 +353,11 @@ fn child_failed_close_resumes_reads() {
                 assert_eq!(c.tree.lock().unwrap().matches[0].file_count, 1);
                 assert_eq!(ui.get_selected_name(), "A.wav");
                 assert_eq!(ui.get_selected_row(), -1);
-                assert!(ui.get_status().starts_with("Not found:"));
+                assert!(ui.get_status().contains(&format!(
+                    "Metadata for record {} could not be saved",
+                    removed_id.get()
+                )));
+                assert!(ui.get_status().contains("Not found:"));
                 assert!(!ui.get_searching() && !ui.get_closing());
                 let state = c.metadata.lock().unwrap();
                 assert_eq!(state.sequence, close_sequence.get());

@@ -28,6 +28,16 @@ use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffe
 
 const PAGE_SIZE: usize = 200;
 const HISTORY_SIZE: usize = 50;
+/// Owned scan presentation can be regenerated after a runtime language change.
+#[derive(Clone)]
+enum ScanPresentation {
+    Progress(audiolib_core::ScanProgress, bool),
+    Complete(audiolib_core::ScanProgress, bool),
+    Failure(String, String),
+}
+#[cfg(test)]
+#[path = "client_review_tests.rs"]
+mod client_review_tests;
 #[path = "controller_history.rs"]
 mod history;
 
@@ -74,6 +84,9 @@ mod click_preview_tests;
 #[cfg(test)]
 #[path = "folder_search_tests.rs"]
 mod folder_search_tests;
+#[cfg(test)]
+#[path = "library_context_tests.rs"]
+mod library_context_tests;
 #[path = "metadata_recovery.rs"]
 mod metadata_recovery;
 #[path = "remote_mode.rs"]
@@ -144,6 +157,36 @@ impl LibraryOperation {
         )
     }
 
+    fn is_read_only(&self) -> bool {
+        matches!(self, Self::Backup(_) | Self::Check | Self::Export(..))
+    }
+
+    fn retains_library_identity(&self) -> bool {
+        matches!(
+            self,
+            Self::Import(_)
+                | Self::RemoveAudio(_)
+                | Self::RemoveFolder(_)
+                | Self::Relink(..)
+                | Self::Batch(_)
+        )
+    }
+
+    fn affects_playback(&self, file: Option<&AudioFile>, removed_folders: &HashSet<i64>) -> bool {
+        match self {
+            Self::Restore(_) | Self::Switch { .. } | Self::DataSource(_) | Self::ServerRoot(_) => {
+                true
+            }
+            Self::RemoveAudio(ids) => file.is_some_and(|file| ids.contains(&file.id)),
+            Self::RemoveFolder(_) => file.is_some_and(|file| {
+                file.folder_id
+                    .is_some_and(|id| removed_folders.contains(&id))
+            }),
+            Self::Relink(id, _) => file.is_some_and(|file| file.id == *id),
+            _ => false,
+        }
+    }
+
     fn confirmation(&self, cn: bool) -> String {
         match self {
             Self::Restore(path) => {
@@ -187,8 +230,9 @@ impl LibraryOperation {
                     )
                 } else {
                     format!(
-                        "Remove {} records and their annotations/references from the library? This changes only the database and never deletes WAV files.",
-                        ids.len()
+                        "Remove {} {} and their annotations/references from the library? This changes only the database and never deletes WAV files.",
+                        ids.len(),
+                        if ids.len() == 1 { "record" } else { "records" }
                     )
                 }
             }
@@ -346,6 +390,8 @@ impl Model for FolderTreeModel {
 struct MetadataDraft {
     revision: u64,
     patch: MetadataPatch,
+    /// Last confirmed value survives bounded saved-row cache eviction while editing.
+    baseline: Option<Box<AudioFile>>,
 }
 
 #[derive(Clone)]
@@ -385,12 +431,22 @@ impl MetadataState {
         {
             return;
         }
+        let baseline = self
+            .saved
+            .get(&id)
+            .map(|(_, file)| Box::new(file.clone()))
+            .or_else(|| {
+                self.drafts
+                    .get(&id)
+                    .and_then(|draft| draft.baseline.clone())
+            });
         self.revision += 1;
         self.drafts.insert(
             id,
             MetadataDraft {
                 revision: self.revision,
                 patch,
+                baseline,
             },
         );
     }
@@ -461,6 +517,10 @@ impl MetadataState {
                 {
                     self.drafts.remove(&job.id);
                 }
+                if let Some(draft) = self.drafts.get_mut(&job.id) {
+                    // A save may complete underneath a newer unsaved edit.
+                    draft.baseline = Some(Box::new(file.clone()));
+                }
                 self.saved.insert(job.id, (job.sequence, file.clone()));
                 self.saved_order.retain(|id| *id != job.id);
                 self.saved_order.push_back(job.id);
@@ -493,8 +553,11 @@ impl MetadataState {
         }
     }
 
-    fn failure(&self) -> Option<String> {
-        self.failures.values().next().cloned()
+    fn failure(&self) -> Option<(i64, String)> {
+        self.failures
+            .iter()
+            .min_by_key(|(id, _)| *id)
+            .map(|(id, error)| (*id, error.clone()))
     }
 
     /// After the library barrier drains, discard library-owned data while keeping
@@ -530,6 +593,8 @@ pub struct Controller {
     pending_history_clear: Mutex<Option<history::PendingClear>>,
     scans: Mutex<Vec<ScanSession>>,
     audio: AudioHandle,
+    /// A removed loaded record cannot be replayed through the UI until a new Load.
+    removed_audio_generation: AtomicU64,
     config: Arc<Mutex<AppConfig>>,
     /// Latest GUI preference; its worker serializes disk writes with other settings.
     single_click_play: AtomicBool,
@@ -579,6 +644,7 @@ pub struct Controller {
     device_generation: AtomicU64,
     scan_generation: AtomicU64,
     scan_validating: AtomicBool,
+    scan_presentation: Mutex<Option<ScanPresentation>>,
     scan_cancel: Mutex<Option<ScanCancellation>>,
     shutdown: AtomicBool,
     chinese: AtomicBool,
@@ -637,6 +703,7 @@ impl Controller {
     /// Provider for annotation writes: the local library, or in server mode the
     /// server API (`RemoteProvider`; the snapshot follows by the revision rule).
     fn metadata_provider(self: &Arc<Self>) -> Result<Arc<dyn DataProvider>, String> {
+        self.require_metadata_writable()?;
         if self.remote_read_only() {
             Ok(self.remote_provider()? as Arc<dyn DataProvider>)
         } else {
@@ -649,6 +716,15 @@ impl Controller {
             && !self.source_changing.load(Ordering::Acquire)
             && !self.closing.load(Ordering::Acquire)
             && !self.shutdown.load(Ordering::Acquire)
+    }
+
+    fn localized(&self, chinese: &str, english: &str) -> slint::SharedString {
+        if self.chinese.load(Ordering::Acquire) {
+            chinese
+        } else {
+            english
+        }
+        .into()
     }
 
     /// Bind desktop callbacks while all database and analysis work stays off the event loop.
@@ -719,6 +795,7 @@ impl Controller {
             pending_history_clear: Mutex::new(None),
             scans: Mutex::new(Vec::new()),
             audio,
+            removed_audio_generation: AtomicU64::new(u64::MAX),
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
             list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms)
                 .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
@@ -767,6 +844,7 @@ impl Controller {
             device_generation: AtomicU64::new(0),
             scan_generation: AtomicU64::new(0),
             scan_validating: AtomicBool::new(false),
+            scan_presentation: Mutex::new(None),
             scan_cancel: Mutex::new(None),
             shutdown: AtomicBool::new(false),
             chinese: AtomicBool::new(chinese),
@@ -930,6 +1008,7 @@ impl Controller {
         let c = self.clone();
         ui.on_reset_filters(move || {
             if let Some(ui) = c.ui.upgrade() {
+                ui.set_visibility_index(0);
                 ui.set_sample_filter(0);
                 ui.set_bit_filter(0);
                 ui.set_channel_filter(0);
@@ -1108,10 +1187,28 @@ impl Controller {
             }
         });
         let c = self.clone();
+        ui.on_restore_metadata(move || c.restore_metadata());
+        let c = self.clone();
+        ui.on_recover_metadata_and_close(move || {
+            if let Some(ui) = c.ui.upgrade()
+                && ui.get_close_recovery_available()
+                && c.available()
+            {
+                c.request_close_mode(&ui, true);
+            }
+        });
+        let c = self.clone();
         ui.on_reveal_requested(move || c.reveal());
         let c = self.clone();
         ui.on_play_requested(move || {
             if !c.available() {
+                return;
+            }
+            if c.audio.status().generation == c.removed_audio_generation.load(Ordering::Acquire) {
+                let selected = c.selected.lock().unwrap().as_ref().map(|file| file.id);
+                if let Some(id) = selected {
+                    c.select_id(id, true);
+                }
                 return;
             }
             let play = c.audio.status().state != PlaybackState::Playing;
@@ -1268,6 +1365,8 @@ impl Controller {
                 c.request_search(&ui, true, false);
                 c.refresh_library_info();
                 c.publish_data_source(&ui);
+                c.refresh_generated_text(&ui);
+                c.refresh_generated_source_text(&ui);
                 if ui.get_library_visible() {
                     c.load_history(0);
                 }
@@ -1275,6 +1374,13 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_devices_requested(move |backend| c.refresh_devices(backend));
+        let c = self.clone();
+        ui.on_output_settings_requested(move || {
+            if let Some(ui) = c.ui.upgrade() {
+                c.restore_output_form(&ui);
+                c.refresh_devices(ui.get_backend_index());
+            }
+        });
         let c = self.clone();
         ui.on_device_selected(move |index| c.describe_device(index));
         let c = self.clone();
@@ -1475,7 +1581,8 @@ impl Controller {
         }
         use crate::dialogs::FileKind;
         let (save, kind) = match action {
-            1 | 6 => (true, FileKind::Database),
+            1 => (true, FileKind::Database),
+            6 => (true, FileKind::NewLibrary),
             2 | 7 => (false, FileKind::Database),
             8 => (true, FileKind::JsonLines),
             9 => (true, FileKind::Csv),
@@ -1506,12 +1613,18 @@ impl Controller {
         }
         let scan_was_running = self.scan_cancel.lock().unwrap().is_some()
             || self.ui.upgrade().is_some_and(|ui| ui.get_scanning());
+        let owner = self
+            .ui
+            .upgrade()
+            .map_or(0, |ui| crate::dialogs::owner_handle(ui.window()));
         if let Some(ui) = self.ui.upgrade() {
             ui.set_library_busy(true);
+            ui.set_file_choice_busy(true);
         }
         let c = self.clone();
         std::thread::spawn(move || {
-            let result = crate::dialogs::choose(save, kind, c.chinese.load(Ordering::Acquire));
+            let result =
+                crate::dialogs::choose(save, kind, c.chinese.load(Ordering::Acquire), owner);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 c2.complete_file_choice(&ui, result, scan_was_running, operation);
@@ -1529,6 +1642,7 @@ impl Controller {
     ) {
         self.library_busy.store(false, Ordering::Release);
         ui.set_library_busy(false);
+        ui.set_file_choice_busy(false);
         let scanning = self.scan_cancel.lock().unwrap().is_some();
         ui.set_scanning(scanning);
         ui.set_scan_validating(scanning && self.scan_validating.load(Ordering::Acquire));
@@ -1568,6 +1682,10 @@ impl Controller {
             return;
         }
         let generation = self.library_generation.load(Ordering::Acquire);
+        let owner = self
+            .ui
+            .upgrade()
+            .map_or(0, |ui| crate::dialogs::owner_handle(ui.window()));
         if let Some(ui) = self.ui.upgrade() {
             ui.set_library_busy(true);
             ui.set_scan_browse_busy(true);
@@ -1575,7 +1693,7 @@ impl Controller {
         }
         let c = self.clone();
         std::thread::spawn(move || {
-            let result = crate::dialogs::choose_folder(c.chinese.load(Ordering::Acquire));
+            let result = crate::dialogs::choose_folder(c.chinese.load(Ordering::Acquire), owner);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 c2.library_busy.store(false, Ordering::Release);
@@ -1608,7 +1726,7 @@ impl Controller {
         if operation.needs_confirmation() {
             if let Some(ui) = self.ui.upgrade() {
                 // Server mode: the 服务器音效库 page's wording for record removals.
-                let text = match &operation {
+                let mut text = match &operation {
                     LibraryOperation::RemoveAudio(ids) if self.remote_read_only() => {
                         self.server_removal_confirmation(Some(ids.len()), 0)
                     }
@@ -1617,6 +1735,13 @@ impl Controller {
                     }
                     _ => operation.confirmation(self.chinese.load(Ordering::Acquire)),
                 };
+                if let LibraryOperation::RemoveAudio(ids) = &operation {
+                    text.push_str(&removal_selection_preview(
+                        ids,
+                        &self.records.lock().unwrap(),
+                        self.chinese.load(Ordering::Acquire),
+                    ));
+                }
                 ui.set_confirmation_text(text.into());
                 *self.pending_operation.lock().unwrap() = Some(operation);
                 ui.set_confirmation_visible(true);
@@ -1657,14 +1782,23 @@ impl Controller {
         let Some(ui) = self.ui.upgrade() else { return };
         let retain_search = matches!(&operation, LibraryOperation::DataSource(target)
             if self.is_same_library_snapshot_refresh(target));
+        let retain_context = operation.retains_library_identity();
+        let read_only = operation.is_read_only();
+        let selected_id = ui.get_selected_id().parse::<i64>().ok();
         self.capture_metadata(&ui);
         let recovering_handoff = matches!(operation, LibraryOperation::DataSource(_));
-        let barrier = match if recovering_handoff {
+        let mut metadata_warning = None;
+        let enqueue_result = if recovering_handoff {
             self.enqueue_transition_metadata()
         } else {
             self.metadata.lock().unwrap().enqueue_all()
-        } {
+        };
+        let barrier = match enqueue_result {
             Ok(sequence) => sequence,
+            Err(error) if read_only => {
+                metadata_warning = Some(error);
+                self.metadata.lock().unwrap().sequence
+            }
             Err(error) => {
                 ui.set_status(error.clone().into());
                 ui.set_management_report(error.into());
@@ -1717,13 +1851,26 @@ impl Controller {
         std::thread::spawn(move || {
             // Ids of removed server records, when known (a folder removal hides its subtree).
             let mut removed_ids: Option<Vec<i64>> = None;
+            let mut refreshed_selection = None;
+            let mut removed_folders = HashSet::new();
+            let mut retained_checked = None;
+            let mut removed_audio_generation = None;
             let result = (|| -> Result<String, String> {
                 // Keep the old snapshot and its drafts when a save fails. A refresh
                 // must never discard an annotation merely because a newer snapshot exists.
                 if recovering_handoff {
                     c.wait_transition_metadata(barrier)?;
                 } else {
-                    c.wait_metadata(barrier, true)?;
+                    c.wait_metadata(barrier, !read_only)?;
+                    if read_only {
+                        metadata_warning = metadata_warning.take().or_else(|| {
+                            c.metadata
+                                .lock()
+                                .unwrap()
+                                .failure()
+                                .map(|(id, error)| c.metadata_failure_message(id, &error))
+                        });
+                    }
                 }
                 c.wait_remote_plays()?;
                 // The busy gate keeps list Waveform work from starting; cancel a running
@@ -1737,10 +1884,28 @@ impl Controller {
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                if operation.changes_records() {
+                if let LibraryOperation::RemoveFolder(id) = &operation {
+                    removed_folders = required_folder_subtree(provider.as_ref(), *id)
+                        .map_err(|error| error.to_string())?;
+                }
+                let playing = c.audio.status();
+                let playing_file = playing.file_path.as_deref().and_then(|path| {
+                    if c.remote_read_only() {
+                        c.remote_wave_file(path)
+                    } else {
+                        provider.find_audio_by_path(path).ok().flatten()
+                    }
+                });
+                if operation.affects_playback(playing_file.as_ref(), &removed_folders) {
                     c.audio
                         .send_and_wait(AudioCommand::Stop, Duration::from_secs(4))
                         .map_err(|error| error.to_string())?;
+                    if matches!(
+                        operation,
+                        LibraryOperation::RemoveAudio(_) | LibraryOperation::RemoveFolder(_)
+                    ) {
+                        removed_audio_generation = Some(playing.generation);
+                    }
                 }
                 let json = |value: serde_json::Value| {
                     serde_json::to_string_pretty(&value).unwrap_or_default()
@@ -1790,7 +1955,7 @@ impl Controller {
                         // Read the subtree first: the snapshot still lists it afterwards,
                         // but the server's folder no longer exists.
                         let subtree = if server_removal {
-                            c.removed_folder_subtree(*id)
+                            removed_folders.clone()
                         } else {
                             HashSet::new()
                         };
@@ -1838,17 +2003,20 @@ impl Controller {
                     LibraryOperation::ServerRoot(root) => c.execute_server_root(root)?,
                     LibraryOperation::Switch { path, create } => {
                         if *create && path.exists() {
-                            return Err(
-                                "New database destination already exists; choose a new filename"
-                                    .into(),
-                            );
+                            return Err(c.localized("新建音效库的文件已存在，请选择新的文件名", "New database destination already exists; choose a new filename").to_string());
                         }
                         let selected_path = if *create {
                             path.parent()
                                 .unwrap_or(Path::new("."))
                                 .canonicalize()
                                 .map_err(|error| error.to_string())?
-                                .join(path.file_name().ok_or("Database filename is required")?)
+                                .join(path.file_name().ok_or_else(|| {
+                                    c.localized(
+                                        "请输入数据库文件名",
+                                        "Database filename is required",
+                                    )
+                                    .to_string()
+                                })?)
                         } else {
                             path.canonicalize().map_err(|error| error.to_string())?
                         };
@@ -1876,7 +2044,11 @@ impl Controller {
                         let integrity = next.check_library().map_err(|error| error.to_string())?;
                         if !integrity.is_ok() {
                             return Err(format!(
-                                "Selected library failed validation: {}",
+                                "{}: {}",
+                                c.localized(
+                                    "所选音效库未通过校验",
+                                    "Selected library failed validation"
+                                ),
                                 serde_json::to_string(&integrity).unwrap_or_default()
                             ));
                         }
@@ -1900,8 +2072,46 @@ impl Controller {
                         )
                     }
                 };
+                if let Some(generation) = removed_audio_generation {
+                    c.removed_audio_generation
+                        .store(generation, Ordering::Release);
+                }
                 if operation.changes_records() {
                     c.library_generation.fetch_add(1, Ordering::AcqRel);
+                }
+                if retain_context {
+                    refreshed_selection = selected_id.and_then(|id| provider.get_audio(id).ok());
+                    if let Some(file) = &refreshed_selection
+                        && (removed_ids
+                            .as_ref()
+                            .is_some_and(|ids| ids.contains(&file.id))
+                            || file
+                                .folder_id
+                                .is_some_and(|id| removed_folders.contains(&id)))
+                    {
+                        refreshed_selection = None;
+                    }
+                    if matches!(
+                        operation,
+                        LibraryOperation::RemoveAudio(_) | LibraryOperation::RemoveFolder(_)
+                    ) {
+                        let checked = c.multi_selection.lock().unwrap().clone();
+                        retained_checked = Some(
+                            checked
+                                .into_iter()
+                                .filter(|id| {
+                                    if removed_ids.as_ref().is_some_and(|ids| ids.contains(id)) {
+                                        return false;
+                                    }
+                                    provider.get_audio(*id).is_ok_and(|file| {
+                                        !file
+                                            .folder_id
+                                            .is_some_and(|id| removed_folders.contains(&id))
+                                    })
+                                })
+                                .collect(),
+                        );
+                    }
                 }
                 Ok(report)
             })();
@@ -1916,6 +2126,9 @@ impl Controller {
                 ui.set_scanning(false);
                 ui.set_scan_validating(false);
                 ui.set_searching(false);
+                if removed_audio_generation.is_some() && result.is_ok() {
+                    ui.set_audio_ready(false);
+                }
                 let succeeded = result.is_ok();
                 if matches!(operation, LibraryOperation::DataSource(_))
                     && c2.source_changing.load(Ordering::Acquire)
@@ -1933,16 +2146,27 @@ impl Controller {
                 match result {
                     Ok(report) => {
                         if operation.changes_records() {
-                            c2.reset_library_view(
-                                &ui,
-                                matches!(
-                                    operation,
-                                    LibraryOperation::Switch { .. }
-                                        | LibraryOperation::Restore(_)
-                                        | LibraryOperation::DataSource(_)
-                                ) && !retain_search,
-                                retain_search,
-                            );
+                            if retain_context {
+                                if let Some(checked) = retained_checked {
+                                    *c2.multi_selection.lock().unwrap() = checked;
+                                }
+                                c2.refresh_same_library_view(
+                                    &ui,
+                                    refreshed_selection,
+                                    &removed_folders,
+                                );
+                            } else {
+                                c2.reset_library_view(
+                                    &ui,
+                                    matches!(
+                                        operation,
+                                        LibraryOperation::Switch { .. }
+                                            | LibraryOperation::Restore(_)
+                                            | LibraryOperation::DataSource(_)
+                                    ) && !retain_search,
+                                    retain_search,
+                                );
+                            }
                             crate::diagnostics::record(if retain_search {
                                 crate::diagnostics::Event::SnapshotRefreshed
                             } else {
@@ -2000,7 +2224,17 @@ impl Controller {
                 }
                 c2.refresh_library_info();
                 c2.reload_tree();
-                c2.request_search(&ui, true, false);
+                if let Some(error) = metadata_warning.filter(|_| succeeded) {
+                    let notice = if c2.chinese.load(Ordering::Acquire) {
+                        format!("操作已完成，但部分标注尚未保存（未包含在结果中）：{error}")
+                    } else {
+                        format!("Operation completed with unsaved annotations excluded: {error}")
+                    };
+                    ui.set_library_feedback(notice.clone().into());
+                    c2.resume_search(&ui, Some(notice));
+                } else {
+                    c2.request_search(&ui, true, false);
+                }
                 if ui.get_library_visible() {
                     c2.load_history(0);
                 }
@@ -2026,6 +2260,74 @@ impl Controller {
         }
     }
 
+    /// Same-library mutations retain navigation and checked IDs; refresh the inspector
+    /// from the worker's post-operation read without loading/stopping unrelated audio.
+    fn refresh_same_library_view(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        selected: Option<AudioFile>,
+        removed_folders: &HashSet<i64>,
+    ) {
+        *self.latest_selection.lock().unwrap() = None;
+        {
+            let mut metadata = self.metadata.lock().unwrap();
+            metadata.saved.clear();
+            metadata.saved_order.clear();
+        }
+        {
+            let mut tree = self.tree.lock().unwrap();
+            tree.stats = None;
+            tree.expanded.retain(|id| !removed_folders.contains(id));
+            Arc::make_mut(&mut tree.known).retain(|id, _| !removed_folders.contains(id));
+            Arc::make_mut(&mut tree.matches).retain(|folder| !removed_folders.contains(&folder.id));
+            if tree
+                .selected
+                .is_some_and(|id| removed_folders.contains(&id))
+            {
+                tree.selected = None;
+                let mut request = self.request.lock().unwrap();
+                request.folder_id = None;
+                request.offset = 0;
+                ui.set_selected_folder(-1);
+                ui.set_selected_folder_path("".into());
+            }
+        }
+        ui.set_checked_count(self.multi_selection.lock().unwrap().len() as i32);
+        ui.set_metadata_dirty(false);
+        if let Some(file) = selected {
+            let changed_path =
+                self.selected.lock().unwrap().as_ref().is_none_or(|old| {
+                    old.missing != file.missing || old.file_path != file.file_path
+                });
+            *self.selected.lock().unwrap() = Some(file.clone());
+            present_file(ui, &file);
+            if changed_path {
+                self.mark_audio_reload(file.id);
+            }
+            if !file.missing {
+                self.queue_waveform(&file);
+            }
+        } else {
+            *self.selected.lock().unwrap() = None;
+            ui.set_selected_id("".into());
+            ui.set_selected_row(-1);
+            ui.set_has_selection(false);
+            ui.set_selected_missing(false);
+            ui.set_selected_name("".into());
+            ui.set_selected_path("".into());
+            ui.set_selected_format("".into());
+            ui.set_selected_attributes("".into());
+            ui.set_selected_description("".into());
+            ui.set_selected_source_tags("".into());
+            ui.set_edit_tags("".into());
+            ui.set_edit_notes("".into());
+            ui.set_edit_favorite(false);
+            ui.set_waveform_ready(false);
+            ui.set_waveform_image(Image::default());
+            ui.set_waveform_info("".into());
+        }
+    }
+
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
         *self.latest_selection.lock().unwrap() = None;
         self.metadata.lock().unwrap().reset_library();
@@ -2047,6 +2349,7 @@ impl Controller {
         }
         self.plays.lock().unwrap().clear();
         self.scans.lock().unwrap().clear();
+        *self.scan_presentation.lock().unwrap() = None;
         if self.pending_history_clear.lock().unwrap().take().is_some() {
             ui.set_confirmation_visible(false);
         }
@@ -2130,12 +2433,14 @@ impl Controller {
         match result {
             Ok(info) => {
                 self.tree.lock().unwrap().stats = Some(info.stats.clone());
+                let visible_audio_files = info
+                    .stats
+                    .audio_files
+                    .saturating_sub(self.hidden_record_count());
                 ui.set_library_summary(
                     format!(
                         "{} {} · {}",
-                        info.stats
-                            .audio_files
-                            .saturating_sub(self.hidden_record_count()),
+                        visible_audio_files,
                         if self.chinese.load(Ordering::Acquire) {
                             "个声音"
                         } else {
@@ -2150,12 +2455,12 @@ impl Controller {
                     if self.chinese.load(Ordering::Acquire) {
                         format!(
                             "{} 个可用音效 · {} 个文件夹 · {} 个引用待修复",
-                            info.stats.audio_files, info.stats.folders, info.stats.missing_files
+                            visible_audio_files, info.stats.folders, info.stats.missing_files
                         )
                     } else {
                         format!(
                             "{} available sounds · {} folders · {} references to repair",
-                            info.stats.audio_files, info.stats.folders, info.stats.missing_files
+                            visible_audio_files, info.stats.folders, info.stats.missing_files
                         )
                     }
                     .into(),
@@ -2163,7 +2468,7 @@ impl Controller {
                 ui.set_database_info(
                     format!(
                         "{} {} · {} {} · DB {:.1} MiB + WAL {:.1} MiB · schema {} · SQLite {}",
-                        info.stats.audio_files,
+                        visible_audio_files,
                         if self.chinese.load(Ordering::Acquire) {
                             "存在"
                         } else {
@@ -2356,10 +2661,13 @@ impl Controller {
                                         }
                                         .into(),
                                     );
-                                    c2.request_search(&ui, true, false);
+                                    c2.publish_metadata_update(&ui, &saved);
                                 }
                             }
-                            Err(error) => ui.set_status(error.into()),
+                            Err(error) => {
+                                let message = c2.metadata_failure_message(job.id, &error);
+                                ui.set_status(message.into());
+                            }
                         }
                     });
                     drop(state);
@@ -2693,6 +3001,7 @@ impl Controller {
                 let mut playback_history = PlaybackHistoryTracker::default();
                 let mut external_wave_generation = None;
                 let mut last_audition = None;
+                let mut last_playback_error = None;
                 let mut playback_progress = PlaybackProgress::default();
                 // Network audition waiting for data: since when, and whether the hint shows.
                 let mut buffering_since: Option<Instant> = None;
@@ -2776,6 +3085,8 @@ impl Controller {
                         }
                     }
                     let audition_changed = last_audition != Some(status.audition);
+                    let error_changed = last_playback_error != status.error;
+                    last_playback_error = status.error.clone();
                     let progress_continues = playback_progress.observe(&status);
                     last_audition = Some(status.audition);
                     c.playback.lock().unwrap().audition = status.audition;
@@ -2795,20 +3106,24 @@ impl Controller {
                         let ready = !matches!(
                             status.state,
                             PlaybackState::Empty | PlaybackState::Loading | PlaybackState::Error
-                        ) && status.file_path.is_some();
+                        ) && status.file_path.is_some()
+                            && status.generation
+                                != c2.removed_audio_generation.load(Ordering::Acquire);
                         ui.set_audio_ready(ready);
                         if let Some(name) = &playback_name {
                             ui.set_playback_name(name.as_str().into());
                         }
-                        if (ui.get_volume() - status.volume).abs() > 0.001 {
-                            ui.set_volume(status.volume);
+                        if !ui.get_volume_adjusting() {
+                            if (ui.get_volume() - status.volume).abs() > 0.001 {
+                                ui.set_volume(status.volume);
+                            }
+                            publish_volume(&ui, status.volume);
                         }
-                        publish_volume(&ui, status.volume);
                         if audition_changed {
                             publish_audition(&ui, status.audition);
                         }
                         ui.set_output_summary(output_summary(&status).into());
-                        if let Some(error) = status.error {
+                        if error_changed && let Some(error) = status.error {
                             ui.set_status(error.into());
                         }
                     });
@@ -2816,6 +3131,40 @@ impl Controller {
                 }
             })
             .expect("spawn playback status worker");
+    }
+
+    /// Annotation saves do not affect the unfiltered result order or folder counts.
+    /// Refresh dependent searches, otherwise publish the confirmed row in place.
+    fn publish_metadata_update(self: &Arc<Self>, ui: &AppWindow, saved: &AudioFile) {
+        let request = self.request.lock().unwrap().clone();
+        let pending_page = self
+            .search_publication
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| state.page == SearchPagePhase::Pending);
+        if metadata_affects_search(&request) || pending_page {
+            self.request_search(ui, true, false);
+            return;
+        }
+        let checked = self.multi_selection.lock().unwrap().clone();
+        let rows = {
+            let mut records = self.records.lock().unwrap();
+            if let Some(file) = records.iter_mut().find(|file| file.id == saved.id) {
+                *file = saved.clone();
+            } else {
+                return;
+            }
+            records
+                .iter()
+                .map(|file| {
+                    let mut row = audio_row(file);
+                    row.checked = checked.contains(&file.id);
+                    row
+                })
+                .collect()
+        };
+        publish_audio_rows(ui, self.decorate_list_waveforms(rows));
     }
 
     fn request_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
@@ -2975,7 +3324,14 @@ impl Controller {
         let min = duration(ui.get_duration_min());
         let max = duration(ui.get_duration_max());
         let (Ok(min), Ok(max)) = (min, max) else {
-            ui.set_status("Duration must be a number in seconds".into());
+            ui.set_status(
+                if self.chinese.load(Ordering::Acquire) {
+                    "时长必须是以秒为单位的数字"
+                } else {
+                    "Duration must be a number in seconds"
+                }
+                .into(),
+            );
             return;
         };
         request.filters = SearchFilters {
@@ -3747,6 +4103,10 @@ impl Controller {
         if !self.available() {
             return;
         }
+        if let Err(error) = self.require_metadata_writable() {
+            ui.set_status(error.into());
+            return;
+        }
         match self.enqueue_current_metadata(ui) {
             Ok(_) => ui.set_status(
                 if self.chinese.load(Ordering::Acquire) {
@@ -3762,8 +4122,111 @@ impl Controller {
 
     fn capture_metadata(&self, ui: &AppWindow) {
         // Server mode records drafts too; the Metadata worker sends them to the server.
-        if self.available() {
-            capture_editor_draft(&mut self.metadata.lock().unwrap(), ui);
+        if self.available() && ui.get_metadata_dirty() {
+            let selected = self.selected.lock().unwrap().clone();
+            let mut state = self.metadata.lock().unwrap();
+            let id = ui.get_selected_id().parse::<i64>().ok();
+            let new_draft = id.is_some_and(|id| !state.drafts.contains_key(&id));
+            capture_editor_draft(&mut state, ui);
+            if new_draft
+                && let Some(id) = id
+                && let Some(draft) = state.drafts.get_mut(&id)
+                && draft.baseline.is_none()
+            {
+                // With no existing draft, the selected owned file is confirmed
+                // provider/save output; editor changes have not been applied to it.
+                draft.baseline = selected.filter(|file| file.id == id).map(Box::new);
+            }
+        }
+    }
+
+    /// Restore only the displayed draft, after previously requested saves settle.
+    /// A newer edit or selection must never be overwritten by this asynchronous read.
+    fn restore_metadata(self: &Arc<Self>) {
+        if !self.available() {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else { return };
+        let Ok(id) = ui.get_selected_id().parse::<i64>() else {
+            return;
+        };
+        self.capture_metadata(&ui);
+        let (revision, sequence) = {
+            let state = self.metadata.lock().unwrap();
+            (
+                state.drafts.get(&id).map(|draft| draft.revision),
+                state.sequence,
+            )
+        };
+        let provider = self.provider();
+        let remote = self.remote_read_only();
+        let generation = self.library_generation.load(Ordering::Acquire);
+        let c = self.clone();
+        std::thread::spawn(move || {
+            if c.wait_metadata(sequence, false).is_err() {
+                return;
+            }
+            let fetched = provider.get_audio(id).map_err(|error| error.to_string());
+            let c2 = c.clone();
+            post(c.ui.clone(), move |ui| {
+                if !c2.available()
+                    || c2.library_generation.load(Ordering::Acquire) != generation
+                    || ui.get_selected_id().as_str() != id.to_string()
+                {
+                    return;
+                }
+                let mut state = c2.metadata.lock().unwrap();
+                if state.drafts.get(&id).map(|draft| draft.revision) != revision {
+                    return;
+                }
+                // A server may have confirmed a write while its snapshot still
+                // needs resync. Never revert that response to older cached values.
+                let confirmed = remote
+                    .then(|| {
+                        state
+                            .saved
+                            .get(&id)
+                            .map(|(_, file)| file.clone())
+                            .or_else(|| {
+                                state
+                                    .drafts
+                                    .get(&id)
+                                    .and_then(|draft| draft.baseline.as_deref().cloned())
+                            })
+                    })
+                    .flatten();
+                match confirmed.map(Ok).unwrap_or(fetched) {
+                    Ok(file) => {
+                        state.drafts.remove(&id);
+                        state.failures.remove(&id);
+                        state.failed_actions.remove(&id);
+                        drop(state);
+                        *c2.selected.lock().unwrap() = Some(file.clone());
+                        present_file(&ui, &file);
+                        ui.set_status(
+                            if c2.chinese.load(Ordering::Acquire) {
+                                "已还原为已保存的 Metadata"
+                            } else {
+                                "Restored the saved Metadata"
+                            }
+                            .into(),
+                        );
+                    }
+                    Err(error) => ui.set_status(c2.metadata_failure_message(id, &error).into()),
+                }
+            });
+        });
+    }
+
+    fn metadata_failure_message(&self, id: i64, error: &str) -> String {
+        if self.chinese.load(Ordering::Acquire) {
+            format!(
+                "记录 {id} 的 Metadata 保存失败：{error}。草稿已保留，可重试、还原或保存恢复文件后退出。"
+            )
+        } else {
+            format!(
+                "Metadata for record {id} could not be saved: {error}. Drafts retained; retry, restore, or save a recovery file and exit."
+            )
         }
     }
 
@@ -3785,8 +4248,8 @@ impl Controller {
         while state.completed < sequence && !self.shutdown.load(Ordering::Acquire) {
             state = self.metadata_wake.wait(state).unwrap();
         }
-        if require_success && let Some(error) = state.failure() {
-            Err(error)
+        if require_success && let Some((id, error)) = state.failure() {
+            Err(self.metadata_failure_message(id, &error))
         } else if self.shutdown.load(Ordering::Acquire) {
             Err("Desktop is shutting down".into())
         } else {
@@ -3796,6 +4259,11 @@ impl Controller {
 
     /// Keep the window alive until dirty drafts persist and cancelled scanning drains.
     pub fn request_close(self: &Arc<Self>, ui: &AppWindow) {
+        self.request_close_mode(ui, false);
+    }
+
+    /// Recovery mode requires an explicit user action and never retries rejected writes.
+    fn request_close_mode(self: &Arc<Self>, ui: &AppWindow, recover: bool) {
         if self.shutdown.load(Ordering::Acquire) {
             return;
         }
@@ -3819,10 +4287,15 @@ impl Controller {
             self.metadata.lock().unwrap().sequence
         } else {
             self.capture_metadata(ui);
-            match self.enqueue_transition_metadata() {
+            match if recover {
+                Ok(self.metadata.lock().unwrap().sequence)
+            } else {
+                self.enqueue_transition_metadata()
+            } {
                 Ok(sequence) => sequence,
                 Err(error) => {
                     ui.set_status(error.into());
+                    ui.set_close_recovery_available(true);
                     return;
                 }
             }
@@ -3837,12 +4310,19 @@ impl Controller {
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
         self.invalidate_library_reads();
         ui.set_searching(false);
+        ui.set_close_recovery_available(false);
         ui.set_closing(true);
         self.metadata_wake.notify_all();
         self.schedule_close_poll(Some(Instant::now() + Duration::from_secs(5)));
         let c = self.clone();
         std::thread::spawn(move || {
-            let mut result = c.wait_transition_metadata(barrier).and_then(|_| {
+            let metadata_result = if recover {
+                c.wait_metadata(barrier, false)
+                    .and_then(|_| c.preserve_metadata_recovery(false))
+            } else {
+                c.wait_transition_metadata(barrier)
+            };
+            let mut result = metadata_result.and_then(|_| {
                 tracing::info!("Desktop Metadata drained; cancelling scan");
                 if let Some(cancel) = c.scan_cancel.lock().unwrap().as_ref() {
                     cancel.cancel();
@@ -3946,6 +4426,7 @@ impl Controller {
                 self.request_history_page(offset);
             }
             resume_after_failed_close(ui, &error, scanning);
+            ui.set_close_recovery_available(true);
             self.publish_metadata_recovery_notice(ui);
             ui.set_scan_validating(scanning && self.scan_validating.load(Ordering::Acquire));
             if let Err(error) = ui.show() {
@@ -4023,6 +4504,8 @@ impl Controller {
         progress: audiolib_core::ScanProgress,
         full: bool,
     ) {
+        *self.scan_presentation.lock().unwrap() =
+            Some(ScanPresentation::Progress(progress.clone(), full));
         ui.set_scan_finalizing(progress.finalizing);
         ui.set_scan_current_path(progress.current_path.clone().into());
         if ui.get_scan_cancelling() {
@@ -4096,6 +4579,7 @@ impl Controller {
         *current = Some(cancel.clone());
         let scan_generation = self.scan_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.scan_validating.store(true, Ordering::Release);
+        *self.scan_presentation.lock().unwrap() = None;
         drop(current);
         if let Some(ui) = self.ui.upgrade() {
             ui.set_scan_error("".into());
@@ -4290,12 +4774,18 @@ impl Controller {
         ui.set_scan_current_path("".into());
         match result {
             Ok(progress) => {
+                *self.scan_presentation.lock().unwrap() =
+                    Some(ScanPresentation::Complete(progress.clone(), full));
                 let message =
                     scan_result_summary(&progress, full, self.chinese.load(Ordering::Acquire));
                 ui.set_scan_summary(message.clone().into());
                 ui.set_status(message.into());
             }
             Err(audiolib_core::Error::Cancelled) if !admitted => {
+                *self.scan_presentation.lock().unwrap() = Some(ScanPresentation::Failure(
+                    "已取消，未开始扫描音效文件夹。".into(),
+                    "Cancelled before scanning the sound folder.".into(),
+                ));
                 let message = if self.chinese.load(Ordering::Acquire) {
                     "已取消，未开始扫描音效文件夹。"
                 } else {
@@ -4306,6 +4796,10 @@ impl Controller {
                 ui.set_status(message.into());
             }
             Err(error) => {
+                *self.scan_presentation.lock().unwrap() = Some(ScanPresentation::Failure(
+                    scan_error_message(&error, true),
+                    scan_error_message(&error, false),
+                ));
                 let message = scan_error_message(&error, self.chinese.load(Ordering::Acquire));
                 ui.set_scan_error(message.clone().into());
                 ui.set_scan_summary(message.clone().into());
@@ -4323,6 +4817,49 @@ impl Controller {
         if ui.get_library_visible() {
             self.load_history(0);
         }
+    }
+
+    /// Regenerate owned presentation without changing edits or reissuing writes.
+    fn refresh_generated_text(&self, ui: &AppWindow) {
+        if ui.get_devices_loading() {
+            ui.set_device_info(self.localized("正在查找输出设备…", "Finding output devices…"));
+        } else {
+            self.describe_device(ui.get_device_index());
+        }
+        let presentation = self.scan_presentation.lock().unwrap().clone();
+        match presentation {
+            Some(ScanPresentation::Progress(progress, full)) if ui.get_scanning() => {
+                self.publish_scan_progress(ui, progress, full);
+            }
+            Some(ScanPresentation::Complete(progress, full)) => {
+                ui.set_scan_summary(
+                    scan_result_summary(&progress, full, self.chinese.load(Ordering::Acquire))
+                        .into(),
+                );
+            }
+            Some(ScanPresentation::Failure(chinese, english)) => {
+                let message = self.localized(&chinese, &english);
+                ui.set_scan_summary(message.clone());
+                if !ui.get_scan_error().is_empty() {
+                    ui.set_scan_error(message);
+                }
+            }
+            _ => ui.set_scan_summary(if ui.get_scan_validating() {
+                self.localized("正在验证扫描文件夹…", "Validating scan folder…")
+            } else {
+                "".into()
+            }),
+        }
+    }
+
+    /// Reopen the output form from acknowledged engine configuration.
+    fn restore_output_form(&self, ui: &AppWindow) {
+        let playback = self.playback.lock().unwrap();
+        ui.set_backend_index(i32::from(playback.backend == AudioBackend::Asio));
+        ui.set_rate_index(i32::from(playback.rate_policy == RatePolicy::Native));
+        ui.set_buffer_frames(playback.buffer_frames.to_string().into());
+        ui.set_pair_index(playback.output_pair.to_string().into());
+        ui.set_source_pair(playback.source_pair.to_string().into());
     }
 
     fn refresh_devices(self: &Arc<Self>, backend: i32) {
@@ -4359,7 +4896,14 @@ impl Controller {
                         .or_else(|| devices.iter().position(|device| device.is_default))
                         .unwrap_or(0);
                     let names = if devices.is_empty() {
-                        vec!["No available devices".to_string()]
+                        vec![
+                            if c.chinese.load(Ordering::Acquire) {
+                                "没有可用设备"
+                            } else {
+                                "No available devices"
+                            }
+                            .to_string(),
+                        ]
                     } else {
                         devices.iter().map(|device| device.name.clone()).collect()
                     };
@@ -4389,7 +4933,7 @@ impl Controller {
                         }
                         ui.set_devices_loading(false);
                         ui.set_device_names(ModelRc::new(VecModel::from(vec![
-                            "Unavailable".into(),
+                            c2.localized("不可用", "Unavailable"),
                         ])));
                         ui.set_device_index(0);
                         ui.set_device_info(error.to_string().into());
@@ -4400,6 +4944,7 @@ impl Controller {
     }
 
     fn describe_device(&self, index: i32) {
+        let chinese = self.chinese.load(Ordering::Acquire);
         let pair = self
             .ui
             .upgrade()
@@ -4412,28 +4957,33 @@ impl Controller {
             .get(index as usize)
             .map(|device| {
                 let names=device.output_channel_names.iter().skip(pair*2).take(2).cloned().collect::<Vec<_>>().join(" / ");
-                format!(
-                    "{} output channels · default {:.1} kHz{} · buffer {}–{} frames · preferred {}{}",
+                let template_values = (
                     device.max_output_channels,
                     device.default_sample_rate as f64 / 1000.0,
                     if device.is_default {
-                        " · system default"
+                        if chinese { " · 系统默认" } else { " · system default" }
                     } else {
                         ""
                     },
                     device
                         .buffer_min
-                        .map_or("driver".into(), |value| value.to_string()),
+                        .map_or(if chinese { "驱动" } else { "driver" }.into(), |value| value.to_string()),
                     device
                         .buffer_max
-                        .map_or("default".into(), |value| value.to_string()),
+                        .map_or(if chinese { "默认" } else { "default" }.into(), |value| value.to_string()),
                     device
                         .buffer_preferred
-                        .map_or("driver default".into(), |value| value.to_string()),
+                        .map_or(if chinese { "驱动默认" } else { "driver default" }.into(), |value| value.to_string()),
                     if names.is_empty(){String::new()}else{format!("\n{names}")}
-                )
+                );
+                let (channels, rate, default, min, max, preferred, names) = template_values;
+                if chinese {
+                    format!("{channels} 个输出声道 · 默认 {rate:.1} kHz{default} · 缓冲 {min}–{max} 帧 · 首选 {preferred}{names}")
+                } else {
+                    format!("{channels} output channels · default {rate:.1} kHz{default} · buffer {min}–{max} frames · preferred {preferred}{names}")
+                }
             })
-            .unwrap_or_else(|| "No output devices available for this driver".into());
+            .unwrap_or_else(|| self.localized("此驱动没有可用的输出设备", "No output devices available for this driver").to_string());
         if let Some(ui) = self.ui.upgrade() {
             ui.set_device_info(info.into());
         }
@@ -4446,21 +4996,28 @@ impl Controller {
         let frames = match ui.get_buffer_frames().trim().parse::<u32>() {
             Ok(value) if value <= 65_536 => value,
             _ => {
-                ui.set_device_info("Buffer must be 0 (driver default) or 1–65536 frames".into());
+                ui.set_device_info(self.localized(
+                    "缓冲必须是 0（驱动默认）或 1–65536 帧",
+                    "Buffer must be 0 (driver default) or 1–65536 frames",
+                ));
                 return;
             }
         };
         let pair = match ui.get_pair_index().trim().parse::<u16>() {
             Ok(value) if value < 128 => value,
             _ => {
-                ui.set_device_info("Listening pair must be 0–127".into());
+                ui.set_device_info(
+                    self.localized("监听声道对必须是 0–127", "Listening pair must be 0–127"),
+                );
                 return;
             }
         };
         let source_pair = match ui.get_source_pair().trim().parse::<u16>() {
             Ok(value) if value < 128 => value,
             _ => {
-                ui.set_device_info("Source pair must be 0–127".into());
+                ui.set_device_info(
+                    self.localized("源声道对必须是 0–127", "Source pair must be 0–127"),
+                );
                 return;
             }
         };
@@ -4472,19 +5029,27 @@ impl Controller {
         let devices = self.devices.lock().unwrap();
         let device = devices.get(ui.get_device_index() as usize);
         if device.is_none() {
-            ui.set_device_info("Choose an available output device".into());
+            ui.set_device_info(
+                self.localized("请选择可用的输出设备", "Choose an available output device"),
+            );
             return;
         }
         let device = device.unwrap();
         if device.backend != backend {
-            ui.set_device_info("Wait for this driver's device list to finish loading".into());
+            ui.set_device_info(self.localized(
+                "请等待此驱动的设备列表加载完成",
+                "Wait for this driver's device list to finish loading",
+            ));
             return;
         }
         if frames > 0
             && (device.buffer_min.is_some_and(|min| frames < min)
                 || device.buffer_max.is_some_and(|max| frames > max))
         {
-            ui.set_device_info("Requested buffer is outside the device range".into());
+            ui.set_device_info(self.localized(
+                "所选缓冲超出了设备支持范围",
+                "Requested buffer is outside the device range",
+            ));
             return;
         }
         if frames > 0 {
@@ -4496,15 +5061,18 @@ impl Controller {
                 _ => true,
             };
             if !supported {
-                ui.set_device_info(
-                    "Requested buffer does not match the ASIO driver's step/power-of-two rule"
-                        .into(),
-                );
+                ui.set_device_info(self.localized(
+                    "所选缓冲不符合 ASIO 驱动的步长或二次幂规则",
+                    "Requested buffer does not match the ASIO driver's step/power-of-two rule",
+                ));
                 return;
             }
         }
         if pair * 2 >= device.max_output_channels {
-            ui.set_device_info("Listening pair is outside the device output channels".into());
+            ui.set_device_info(self.localized(
+                "监听声道对超出了设备输出声道范围",
+                "Listening pair is outside the device output channels",
+            ));
             return;
         }
         let playback = PlaybackConfig {
@@ -4816,8 +5384,14 @@ impl Controller {
         } else if quick_metadata_patch(action, false).is_none() && self.refuse_remote_write() {
             return;
         }
-        // Quick edits of the current file include its pending tags/notes. Other
-        // files receive a partial patch and never borrow the inspector's fields.
+        if quick_metadata_patch(action, false).is_some()
+            && let Err(error) = self.require_metadata_writable()
+        {
+            ui.set_status(error.into());
+            return;
+        }
+        // Match the inspector's favorite button: update its draft without
+        // implicitly submitting unrelated tags and notes. Selection autosaves it.
         if ui.get_selected_id().as_str() == id.to_string()
             && let Some(patch) = quick_metadata_patch(action, ui.get_edit_favorite())
         {
@@ -4825,7 +5399,7 @@ impl Controller {
                 ui.set_edit_favorite(favorite);
             }
             ui.set_metadata_dirty(true);
-            self.save_metadata(&ui);
+            self.capture_metadata(&ui);
             return;
         }
         if action == 20 {
@@ -4905,7 +5479,12 @@ impl Controller {
                 let mut files = Vec::with_capacity(ids.len());
                 for id in &ids {
                     if !c.drag_request_current(source_generation, library_generation, &cancel) {
-                        return Err("Drag cancelled because the data source changed".into());
+                        return Err(c
+                            .localized(
+                                "数据源已更改，已取消拖出",
+                                "Drag cancelled because the data source changed",
+                            )
+                            .to_string());
                     }
                     let file = provider.get_audio(*id).map_err(|error| error.to_string())?;
                     if !file.missing {
@@ -4920,7 +5499,12 @@ impl Controller {
                     });
                 }
                 if !c.drag_request_current(source_generation, library_generation, &cancel) {
-                    return Err("Drag cancelled because the data source changed".into());
+                    return Err(c
+                        .localized(
+                            "数据源已更改，已取消拖出",
+                            "Drag cancelled because the data source changed",
+                        )
+                        .to_string());
                 }
                 let Some(source) = source else {
                     return Ok(files
@@ -5374,6 +5958,75 @@ fn scan_error_message(error: &audiolib_core::Error, chinese: bool) -> String {
             }
         }
     }
+}
+
+/// Mirror the database removal's complete descendant scope, without a UI depth cap.
+/// Failing a read aborts before mutation rather than silently retaining deleted IDs.
+fn required_folder_subtree(
+    provider: &dyn DataProvider,
+    id: i64,
+) -> audiolib_core::Result<HashSet<i64>> {
+    provider.get_folder(id)?;
+    let mut seen = HashSet::from([id]);
+    let mut pending = vec![id];
+    while let Some(parent) = pending.pop() {
+        for folder in provider.folders(Some(parent))? {
+            if seen.insert(folder.id) {
+                pending.push(folder.id);
+            }
+        }
+    }
+    Ok(seen)
+}
+
+fn metadata_affects_search(request: &SearchRequest) -> bool {
+    !request.query.trim().is_empty()
+        || matches!(request.order_by, SortOrder::Tags | SortOrder::Modified)
+        || request.filters.favorites_only
+        || request.filters.tagged_only
+        || request.filters.tag_contains.is_some()
+        || request.filters.color.is_some()
+}
+
+fn removal_selection_preview(ids: &[i64], visible: &[AudioFile], chinese: bool) -> String {
+    let names: HashMap<_, _> = visible
+        .iter()
+        .map(|file| (file.id, file.filename.as_str()))
+        .collect();
+    let hidden = ids.iter().filter(|id| !names.contains_key(*id)).count();
+    let mut text = if chinese {
+        format!("\n\n其中 {hidden} 条不在当前列表中。将移除：")
+    } else {
+        format!(
+            "\n\n{hidden} selected {} outside the current list. Removing:",
+            if hidden == 1 {
+                "record is"
+            } else {
+                "records are"
+            }
+        )
+    };
+    for id in ids.iter().take(5) {
+        text.push_str("\n• ");
+        if let Some(name) = names.get(id) {
+            text.extend(name.chars().take(80));
+            if name.chars().count() > 80 {
+                text.push('…');
+            }
+        } else if chinese {
+            text.push_str(&format!("记录 #{id}（不在当前列表中）"));
+        } else {
+            text.push_str(&format!("Record #{id} (outside the current list)"));
+        }
+    }
+    if ids.len() > 5 {
+        text.push_str(&if chinese {
+            format!("\n另有 {} 条记录。", ids.len() - 5)
+        } else {
+            format!("\n… and {} more.", ids.len() - 5)
+        });
+    }
+    text
 }
 
 fn removal_summary(removed: u64, server: bool, chinese: bool) -> String {
@@ -6360,13 +7013,18 @@ mod tests {
             let transformed = transformed.clone();
             move |pitch, _, _, _| transformed.set(pitch == "7.00")
         });
-        let pitch = ElementHandle::find_by_accessible_label(&ui, "Pitch semitones, Enter to apply")
-            .next()
-            .unwrap();
-        let rate =
-            ElementHandle::find_by_accessible_label(&ui, "Pitch-preserving speed, Enter to apply")
-                .next()
-                .unwrap();
+        let pitch = ElementHandle::find_by_accessible_label(
+            &ui,
+            "Pitch semitones, applied on Enter or focus loss",
+        )
+        .next()
+        .unwrap();
+        let rate = ElementHandle::find_by_accessible_label(
+            &ui,
+            "Pitch-preserving speed, applied on Enter or focus loss",
+        )
+        .next()
+        .unwrap();
         assert!(
             pitch.absolute_position().x + pitch.size().width <= rate.absolute_position().x,
             "Narrow input paint and hit regions must not overlap the next field"
@@ -7911,7 +8569,7 @@ mod tests {
         state.enqueue_all().unwrap();
         let pending = state.next().unwrap();
         state.complete(&pending, &Err("database is busy".into()));
-        assert_eq!(state.failure().as_deref(), Some("database is busy"));
+        assert_eq!(state.failure(), Some((1, "database is busy".into())));
         assert_eq!(state.drafts[&1].patch.tags.as_deref(), Some("must survive"));
         let retry_barrier = state.enqueue_all().unwrap();
         let retry = state.next().unwrap();

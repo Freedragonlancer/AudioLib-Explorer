@@ -22,11 +22,11 @@ use audiolib_core::config::{ActiveSource, DataSourceMode, DataSourceSettings, Te
 use audiolib_core::profiles::{MAX_PROFILE_NAME_CHARS, ServerProfile, same_server_url};
 use audiolib_core::{ScanSession, ScanState};
 use audiolib_remote::{
-    CacheState, Capabilities, ListWaveformStatus, ManageMode, ProfileEdit, RemoteCache,
-    RemoteClient, RemoteError, RemoteRoot, RemoteSecrets, RootScan, RootState, ScanControl,
-    ScanMode, ScanRequest, ServerScan, ServerSettings, edit_transcode, manage_error_text,
-    remove_server_profile, root_status_text, save_profile_edit, save_secrets, test_connection,
-    use_external_address,
+    CacheState, Capabilities, ConnectionReport, ListWaveformStatus, ManageMode, ProfileEdit,
+    RemoteCache, RemoteClient, RemoteError, RemoteRoot, RemoteSecrets, RootScan, RootState,
+    ScanControl, ScanMode, ScanRequest, ServerScan, ServerSettings, edit_transcode,
+    manage_error_text, remove_server_profile, root_status_text, save_profile_edit, save_secrets,
+    test_connection, use_external_address,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::Arc;
@@ -109,6 +109,8 @@ pub(super) struct SourceManager {
     root_refresh_pending: bool,
     /// Close requested by Save-on-Close, once its active-source sync commits.
     close_after_sync: bool,
+    /// Structured connection verdict retained for language changes; no credential fields.
+    last_report: Option<(ConnectionReport, bool)>,
 }
 
 impl SourceManager {
@@ -196,9 +198,6 @@ struct FormInput {
     /// `None` keeps the saved token; `Some("")` clears it.
     token: Option<String>,
     transcode: bool,
-    /// The settings shared by every server, as shown.
-    shared: DataSourceSettings,
-    webdav_password: String,
 }
 
 impl Controller {
@@ -224,6 +223,8 @@ impl Controller {
         ui.on_sm_library_refresh_requested(move || c.show_page(PAGE_LIBRARY));
         let c = self.clone();
         ui.on_sm_save_requested(move || c.save_selected(AfterSave::Nothing));
+        let c = self.clone();
+        ui.on_shared_sync_save_requested(move || c.save_shared_sync_settings());
         let c = self.clone();
         ui.on_sm_pending_save_requested(move |index| {
             c.save_selected(if index == -3 {
@@ -538,11 +539,11 @@ impl Controller {
         );
         ui.set_ds_transcode_touched(false);
         ui.set_ds_transcode(edit_transcode(profile.as_ref(), &url));
-        ui.set_ds_webdav_user(settings.webdav.username.clone().into());
-        ui.set_ds_webdav_password(secrets.webdav_password.clone().into());
-        ui.set_ds_webdav_base(settings.webdav.base_url.clone().unwrap_or_default().into());
-        ui.set_ds_poll_interval(settings.poll_interval_secs.to_string().into());
-        ui.set_ds_auto_sync(settings.auto_sync);
+        if !ui.get_shared_sync_dirty() {
+            ui.set_ds_poll_interval(settings.poll_interval_secs.to_string().into());
+            ui.set_ds_auto_sync(settings.auto_sync);
+        }
+        self.remote.lock().unwrap().manager.last_report = None;
         ui.set_ds_report("".into());
         ui.set_ds_public_url("".into());
         ui.set_ds_last_test(last_test_line(profile.as_ref(), chinese).into());
@@ -553,8 +554,6 @@ impl Controller {
             let error = self.remote.lock().unwrap().last_error.clone();
             ui.set_ds_message(error.unwrap_or_default().into());
         }
-        self.set_dialog_roots(self.profile_roots(profile.as_ref(), active), true);
-        self.publish_root_rows(ui);
         self.refresh_address_hint(ui);
         ui.set_ds_dirty(false);
     }
@@ -658,7 +657,7 @@ impl Controller {
         edit_transcode(self.selected_profile().as_ref(), url)
     }
 
-    /// Read editable shared fields; the WebDAV placeholder preserves saved settings.
+    /// Read shared synchronization fields while preserving settings-file WebDAV configuration.
     fn shared_form(&self, ui: &AppWindow) -> DataSourceSettings {
         let mut settings = self.config.lock().unwrap().data_source.clone();
         let interval = ui.get_ds_poll_interval();
@@ -671,6 +670,83 @@ impl Controller {
         };
         settings.auto_sync = ui.get_ds_auto_sync();
         settings
+    }
+
+    /// Persist global polling preferences without replacing the active provider or drafts.
+    fn save_shared_sync_settings(self: &Arc<Self>) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if !self.available() || ui.get_ds_applying() {
+            return;
+        }
+        let chinese = self.chinese.load(Ordering::Acquire);
+        let settings = self.shared_form(&ui);
+        let mut checked = settings.clone();
+        checked.mode = DataSourceMode::Local;
+        if let Err(error) = checked.validate() {
+            ui.set_ds_message(error.to_string().into());
+            return;
+        }
+        ui.set_ds_applying(true);
+        let c = self.clone();
+        std::thread::spawn(move || {
+            let result = c.update_sources(chinese, false, |stored, _| {
+                stored.poll_interval_secs = settings.poll_interval_secs;
+                stored.auto_sync = settings.auto_sync;
+                Ok(())
+            });
+            let c2 = c.clone();
+            post(c.ui.clone(), move |ui| {
+                ui.set_ds_applying(false);
+                match result {
+                    Ok(()) => {
+                        ui.set_shared_sync_dirty(false);
+                        ui.set_ds_message(
+                            cn_or(
+                                c2.chinese.load(Ordering::Acquire),
+                                "同步设置已保存。",
+                                "Synchronization settings saved.",
+                            )
+                            .into(),
+                        );
+                        c2.wake_revision_poller();
+                        if ui.get_shared_sync_close_pending() {
+                            ui.set_shared_sync_close_pending(false);
+                            ui.invoke_close_library_manager();
+                        }
+                    }
+                    Err(error) => ui.set_ds_message(error.into()),
+                }
+            });
+        });
+    }
+
+    fn publish_connection_report(&self, ui: &AppWindow) {
+        let chinese = self.chinese.load(Ordering::Acquire);
+        let remote = self.remote.lock().unwrap();
+        let Some((report, tokenless)) = &remote.manager.last_report else {
+            return;
+        };
+        let mut summary = report.summary(chinese);
+        if *tokenless {
+            summary.insert_str(0, &tokenless_note(chinese));
+        }
+        if report.ok() {
+            summary.push_str(&super::connection_verdict(
+                report.warnings(chinese).len(),
+                chinese,
+            ));
+        }
+        ui.set_ds_report(summary.into());
+    }
+
+    /// Regenerate UI-owned text without discarding connection drafts or starting network I/O.
+    pub(in crate::controller) fn refresh_generated_source_text(&self, ui: &AppWindow) {
+        self.publish_connection_report(ui);
+        let chinese = self.chinese.load(Ordering::Acquire);
+        ui.set_ds_last_test(last_test_line(self.selected_profile().as_ref(), chinese).into());
+        if ui.get_library_visible() {
+            self.publish_cache_info(ui);
+        }
     }
 
     /// Read and check the connection page (messages in the desktop language).
@@ -704,8 +780,7 @@ impl Controller {
                 )
             });
         }
-        let shared = self.shared_form(ui);
-        let mut check = shared.clone();
+        let mut check = settings.clone();
         check.mode = DataSourceMode::Local;
         check.validate().map_err(|error| error.to_string())?;
         let typed = ui.get_ds_token().trim().to_owned();
@@ -721,8 +796,6 @@ impl Controller {
             url,
             token,
             transcode: ui.get_ds_transcode(),
-            shared,
-            webdav_password: self.secrets().webdav_password,
         })
     }
 
@@ -907,10 +980,6 @@ impl Controller {
         let mut secrets = self.secrets();
         let previous = self.config.lock().unwrap().data_source.clone();
         let mut settings = previous.clone();
-        settings.webdav = input.shared.webdav.clone();
-        settings.poll_interval_secs = input.shared.poll_interval_secs;
-        settings.auto_sync = input.shared.auto_sync;
-        secrets.webdav_password = input.webdav_password.clone();
         let edit = ProfileEdit {
             name: &input.name,
             server_url: &input.url,
@@ -927,11 +996,7 @@ impl Controller {
                 || before.map(|profile| (&profile.server_url, profile.transcode_enabled()))
                     != after.map(|profile| (&profile.server_url, profile.transcode_enabled()))
         };
-        let shared_changed = previous.webdav != settings.webdav
-            || previous.poll_interval_secs != settings.poll_interval_secs
-            || previous.auto_sync != settings.auto_sync
-            || self.secrets().webdav_password != secrets.webdav_password;
-        if active && (connection_changed || shared_changed) {
+        if active && connection_changed {
             // Same path as a switch: the old server's runtime state goes.
             self.save_data_source(settings, secrets, chinese, false)?;
         } else {
@@ -1165,17 +1230,8 @@ impl Controller {
                 if !c2.form_current(generation) {
                     return;
                 }
-                let mut summary = report.summary(chinese);
-                if tokenless {
-                    summary.insert_str(0, &tokenless_note(chinese));
-                }
-                if report.ok() {
-                    summary.push_str(&super::connection_verdict(
-                        report.warnings(chinese).len(),
-                        chinese,
-                    ));
-                }
-                ui.set_ds_report(summary.into());
+                c2.remote.lock().unwrap().manager.last_report = Some((report.clone(), tokenless));
+                c2.publish_connection_report(&ui);
                 let tested = TestSummary {
                     at: unix_now(),
                     ok: report.ok(),
@@ -1184,10 +1240,6 @@ impl Controller {
                 ui.set_ds_last_test(tested_line(&tested, record.is_some(), chinese).into());
                 // §6.2: offer the server's external address after e.g. a LAN test.
                 ui.set_ds_public_url(report.other_public_url().unwrap_or_default().into());
-                if !report.roots.is_empty() {
-                    c2.set_dialog_roots(report.roots.clone(), false);
-                    c2.publish_root_rows(&ui);
-                }
                 if report.unauthorized {
                     ui.set_ds_token_focus_serial(ui.get_ds_token_focus_serial().wrapping_add(1));
                     ui.set_ds_message(

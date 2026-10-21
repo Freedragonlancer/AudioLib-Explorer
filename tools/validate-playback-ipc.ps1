@@ -18,6 +18,79 @@ function Invoke-Control([string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0 -or !$reply.success) { throw "Playback command failed: $($reply.error)" }
     return $reply.data
 }
+function ConvertTo-ComparablePath([string]$Path) {
+    $value = $Path.Replace('/','\')
+    if ($value.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)) { $value = '\\' + $value.Substring(8) }
+    elseif ($value.StartsWith('\\?\',[StringComparison]::OrdinalIgnoreCase)) { $value = $value.Substring(4) }
+    return [IO.Path]::GetFullPath($value)
+}
+function Get-LocalHistoryLibraryId([string]$LibraryPath) {
+    # Match local_library_id's Windows canonical path and ASCII-only case folding.
+    # This library was created in this script's verified, non-linked temp subtree.
+    $canonical = (Resolve-Path -LiteralPath $LibraryPath).ProviderPath.Replace('/','\')
+    if (!$canonical.StartsWith('\\?\',[StringComparison]::Ordinal)) {
+        $canonical = if ($canonical.StartsWith('\\',[StringComparison]::Ordinal)) { '\\?\UNC\' + $canonical.Substring(2) } else { '\\?\' + $canonical }
+    }
+    $units = $canonical.ToCharArray()
+    for ($index = 0; $index -lt $units.Length; $index++) {
+        if ([int]$units[$index] -ge 65 -and [int]$units[$index] -le 90) { $units[$index] = [char]([int]$units[$index] + 32) }
+    }
+    $prefix = [Text.Encoding]::UTF8.GetBytes('audiolib-local-path-windows-v1;')
+    $pathBytes = [Text.Encoding]::Unicode.GetBytes((-join $units))
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return 'local-' + ([BitConverter]::ToString($hash.ComputeHash([byte[]]($prefix + $pathBytes)))).Replace('-','').ToLowerInvariant() }
+    finally { $hash.Dispose() }
+}
+function Wait-SourceHistory([string]$Path, [long]$AudioId, [string]$LibraryId, [int]$ExpectedCount) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(3)
+    $settledSince = $null
+    do {
+        $all = @(Invoke-Control @('play-history','--limit','100'))
+        if (@($all | Where-Object { $_.library_id -cne $LibraryId }).Count -ne 0) { throw 'Playback history escaped the owned client-local library identity.' }
+        $rows = @($all | Where-Object { [string]::Equals((ConvertTo-ComparablePath $_.file_path),(ConvertTo-ComparablePath $Path),[StringComparison]::OrdinalIgnoreCase) })
+        if (@($rows | Where-Object { $null -eq $_.audio_id -or $_.audio_id -ne $AudioId }).Count -ne 0) { throw 'IPC history was associated with a different GUI-selected record.' }
+        if ($rows.Count -gt $ExpectedCount) { throw "The source has $($rows.Count) local history records; expected exactly $ExpectedCount successful play sessions." }
+        if ($rows.Count -eq $ExpectedCount) {
+            if ($null -eq $settledSince) { $settledSince = [DateTime]::UtcNow }
+            # Observe several status-worker cycles so a duplicate deferred event fails.
+            if (([DateTime]::UtcNow - $settledSince).TotalMilliseconds -ge 200) { return $rows }
+        } else { $settledSince = $null }
+        Start-Sleep -Milliseconds 65
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Local playback history did not settle to $ExpectedCount source records before the deadline (observed $($rows.Count))."
+}
+function Assert-NoRetiredLibraryHistory([string]$LibraryPath) {
+    # Read the actual library directly, before any provider can perform migration.
+    # The current main-library schema has no retired play_history table at all.
+    if (!('AudioLibPlaybackHistoryProbe' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class AudioLibPlaybackHistoryProbe {
+    [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] static extern int sqlite3_open_v2(byte[] path, out IntPtr db, int flags, IntPtr vfs);
+    [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] static extern int sqlite3_prepare_v2(IntPtr db, byte[] sql, int size, out IntPtr statement, IntPtr tail);
+    [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] static extern int sqlite3_step(IntPtr statement);
+    [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] static extern long sqlite3_column_int64(IntPtr statement, int index);
+    [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] static extern int sqlite3_finalize(IntPtr statement);
+    [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] static extern int sqlite3_close(IntPtr db);
+    public static bool HasRetiredHistory(string path) {
+        IntPtr db = IntPtr.Zero, statement = IntPtr.Zero;
+        try {
+            if (sqlite3_open_v2(Encoding.UTF8.GetBytes(path + "\0"), out db, 1, IntPtr.Zero) != 0) throw new InvalidOperationException("Could not open the owned library read-only.");
+            byte[] sql = Encoding.UTF8.GetBytes("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='play_history' COLLATE NOCASE)\0");
+            if (sqlite3_prepare_v2(db, sql, -1, out statement, IntPtr.Zero) != 0 || sqlite3_step(statement) != 100) throw new InvalidOperationException("Could not inspect the owned library schema.");
+            return sqlite3_column_int64(statement, 0) != 0;
+        } finally {
+            if (statement != IntPtr.Zero) sqlite3_finalize(statement);
+            if (db != IntPtr.Zero) sqlite3_close(db);
+        }
+    }
+}
+'@
+    }
+    if ([AudioLibPlaybackHistoryProbe]::HasRetiredHistory($LibraryPath)) { throw 'Playback recreated retired history inside the main library.' }
+}
 function New-SilentFloatWav([string]$Path, [int]$Rate, [int]$Seconds) {
     $dataSize = $Rate * $Seconds * 8
     $writer = [IO.BinaryWriter]::new([IO.File]::Create($Path))
@@ -68,6 +141,7 @@ try {
     $settings = @{active_database=$libraryPath;language='en';playback=@{volume=0.0};allowed_scan_roots=@();data_source=@{mode='local';server_url=''}} | ConvertTo-Json -Depth 5
     [IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
     $null = Invoke-Control @('db','create',$libraryPath)
+    $localHistoryLibraryId = Get-LocalHistoryLibraryId $libraryPath
     $wavPath = Join-Path $testRoot 'silent-192k.wav'
     New-SilentFloatWav $wavPath 192000 5
     $fixtureRoot = Join-Path $testRoot 'indexed-fixtures'
@@ -89,6 +163,11 @@ try {
     $null = Invoke-Control @('scan',$fixtureRoot)
     $selected = Invoke-Control @('search','--limit','1')
     if ($selected.results[0].file_path -eq $largest.FullName) { throw 'The GUI selection must differ from the indexed IPC history source.' }
+    $indexed = Invoke-Control @('search','--limit','1000')
+    $historySource = @($indexed.results | Where-Object { [string]::Equals((ConvertTo-ComparablePath $_.file_path),(ConvertTo-ComparablePath $largest.FullName),[StringComparison]::OrdinalIgnoreCase) })
+    if ($historySource.Count -ne 1) { throw 'The long IPC source does not resolve to exactly one indexed owned-library record.' }
+    $sourceHash = (Get-FileHash -LiteralPath $largest.FullName -Algorithm SHA256).Hash
+    $floatSourceHash = (Get-FileHash -LiteralPath $wavPath -Algorithm SHA256).Hash
     $checks.Add('explicit isolated preferences/database and distinct indexed history source')
     $screenshot = Join-Path $testRoot 'ipc-ui.png'
     $ownedProcess = Start-Process -FilePath $desktop -WorkingDirectory $taskRoot -WindowStyle Hidden -ArgumentList @('--smoke-ui','--smoke-duration-ms','24000','--screenshot',('"' + $screenshot + '"')) -PassThru
@@ -165,6 +244,7 @@ try {
 
     $memoryDelta = $null
     if ($largest) {
+        $null = Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 0
         $baselineMemory = (Get-Process -Id $ownedProcess.Id).WorkingSet64
         $null = Invoke-Control @('volume','0')
         $largePlayback = Invoke-Control @('play',$largest.FullName)
@@ -174,34 +254,39 @@ try {
         if ($baselineMemory -le 0 -or $largeMemory -le 0) { throw 'Windows process memory counters are unavailable.' }
         $memoryDelta = $largeMemory - $baselineMemory
         if ($largePlayback.duration -lt 100 -or $memoryDelta -gt 64MB) { throw 'Large WAV did not remain within the bounded streaming memory budget.' }
-        $history = @(Invoke-Control @('play-history','--limit','100'))
-        if ($history.Count -ne 0) { throw 'Playback unexpectedly created retired playback history.' }
-        $checks.Add('indexed IPC playback keeps retired history empty')
+        if ($largePlayback.play_session_id -lt 1) { throw 'Successful indexed playback has no engine play session.' }
+        $history = @(Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 1)
+        $checks.Add('indexed IPC playback records one client-local session with the actual source ID/path/library identity')
         # The indexed source remains muted throughout these replay checks.
-        $null = Invoke-Control @('play')
+        $continued = Invoke-Control @('play')
+        if ($continued.generation -ne $largePlayback.generation -or $continued.play_session_id -ne $largePlayback.play_session_id) { throw 'Pause/resume changed the indexed source/session identity.' }
         Start-Sleep -Milliseconds 120
         $null = Invoke-Control @('pause')
-        $continuedHistory = @(Invoke-Control @('play-history','--limit','100'))
-        if ($continuedHistory.Count -ne 0) { throw 'Pause/resume unexpectedly wrote playback history.' }
+        $continuedHistory = @(Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 1)
+        if ($continuedHistory[0].id -ne $history[0].id) { throw 'Pause/resume replaced its original client-local history event.' }
         $null = Invoke-Control @('stop')
         $replayed = Invoke-Control @('play')
-        if ($replayed.generation -ne $largePlayback.generation) { throw 'Stop/replay unexpectedly reloaded the source.' }
-        $replayedHistory = @(Invoke-Control @('play-history','--limit','100'))
-        if ($replayedHistory.Count -ne 0) { throw 'Stop/replay unexpectedly wrote playback history.' }
+        if ($replayed.generation -ne $largePlayback.generation -or $replayed.play_session_id -ne $largePlayback.play_session_id + 1) { throw 'Stop/replay did not start exactly one new session in the retained source generation.' }
+        $replayedHistory = @(Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 2)
+        if ($replayedHistory[0].id -eq $history[0].id -or @($replayedHistory | Where-Object { $_.id -eq $history[0].id }).Count -ne 1) { throw 'Stop/replay lost or duplicated its previous history event.' }
         $null = Invoke-Control @('pause')
+        $beforeSeek = Invoke-Control @('status')
         $null = Invoke-Control @('seek',[string]($largePlayback.duration - 0.02))
-        $null = Invoke-Control @('play')
+        $nearEnd = Invoke-Control @('play')
+        if ($nearEnd.generation -ne $replayed.generation -or $nearEnd.play_session_id -ne $beforeSeek.play_session_id) { throw 'Paused seek/resume unexpectedly started another playback session.' }
         $endDeadline = [DateTime]::UtcNow.AddSeconds(3)
         do {
             $ended = Invoke-Control @('status')
             if ($ended.state -ne 'ended') { Start-Sleep -Milliseconds 65 }
         } while ($ended.state -ne 'ended' -and [DateTime]::UtcNow -lt $endDeadline)
         if ($ended.state -ne 'ended') { throw 'The muted near-end source did not finish naturally.' }
-        $null = Invoke-Control @('play')
-        $replayedHistory = @(Invoke-Control @('play-history','--limit','100'))
-        if ($replayedHistory.Count -ne 0) { throw 'Natural end/replay unexpectedly wrote playback history.' }
+        $null = Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 2
+        $naturalReplay = Invoke-Control @('play')
+        if ($naturalReplay.generation -ne $ended.generation -or $naturalReplay.play_session_id -ne $ended.play_session_id + 1) { throw 'Natural end/replay did not start exactly one new session in the retained generation.' }
+        $replayedHistory = @(Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 3)
+        if (@($replayedHistory.id | Select-Object -Unique).Count -ne 3) { throw 'The three successful play sessions did not receive distinct client-local history identities.' }
         $null = Invoke-Control @('pause')
-        $checks.Add('pause/resume, seek, stop/replay and natural end/replay keep playback history empty')
+        $checks.Add('pause/resume and seek retain one history event; Stop/Ended then Play each append exactly one new session')
         $null = Invoke-Control @('volume','0.37')
         $checks.Add('indexed long WAV decodes muted without full-file PCM memory')
     }
@@ -211,13 +296,18 @@ try {
     $null = Invoke-Control @('audition','--pitch','7','--rate','0.75','--mono')
     if (!$ownedProcess.WaitForExit(25000)) { throw 'Desktop did not complete the smoke shutdown.' }
     if ($ownedProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $screenshot)) { throw 'Desktop screenshot/shutdown failed.' }
+    Assert-NoRetiredLibraryHistory $libraryPath
+    $historyStores = @(Get-ChildItem -LiteralPath (Join-Path $env:AUDIOLIB_DATA_DIR 'play-history') -Filter 'history.db' -Recurse -File)
+    if ($historyStores.Count -ne 1 -or $historyStores[0].FullName -eq $libraryPath) { throw 'Playback history did not remain in its separate per-library client-local store.' }
+    if ((Get-FileHash -LiteralPath $largest.FullName -Algorithm SHA256).Hash -ne $sourceHash -or (Get-FileHash -LiteralPath $wavPath -Algorithm SHA256).Hash -ne $floatSourceHash) { throw 'Playback or audition transforms changed a source WAV.' }
+    $checks.Add('main library retains no retired history table; client-local history is separate and both played source WAV hashes are unchanged')
     $preferences = Get-Content -LiteralPath (Join-Path $testRoot 'userdata/settings.json') -Raw | ConvertFrom-Json
     if ([Math]::Abs($preferences.playback.volume - 0.37) -gt 0.0001) { throw 'Confirmed IPC volume was lost on desktop shutdown.' }
     $checks.Add('confirmed CLI volume survives desktop shutdown')
     if ($preferences.playback.audition.pitch_semitones -ne 7 -or $preferences.playback.audition.rate -ne 0.75 -or !$preferences.playback.audition.mono) { throw 'Confirmed audition settings were lost on desktop shutdown.' }
     $checks.Add('confirmed independent Pitch/Rate and mono survive desktop shutdown')
     $checks.Add('desktop snapshot and clean shutdown')
-    [PSCustomObject]@{ success=$true; checks=$checks; output_rate=$playing.device_sample_rate; actual_buffer_frames=$playing.actual_buffer_frames; synthetic_audio_is_silent=$true; fixture_kind=$fixtureKind; real_fixture_tested=(!$CleanCheckout); indexed_source_gain_is_zero=$true; large_fixture_bytes=$largest.Length; large_fixture_duration=$largePlayback.duration; working_set_before_bytes=$baselineMemory; working_set_large_bytes=$largeMemory; large_fixture_working_set_delta_bytes=$memoryDelta; acoustic_latency_measured=$false } | ConvertTo-Json -Depth 4
+    [PSCustomObject]@{ success=$true; checks=$checks; output_rate=$playing.device_sample_rate; actual_buffer_frames=$playing.actual_buffer_frames; synthetic_audio_is_silent=$true; fixture_kind=$fixtureKind; real_fixture_tested=(!$CleanCheckout); indexed_source_gain_is_zero=$true; large_fixture_bytes=$largest.Length; large_fixture_duration=$largePlayback.duration; working_set_before_bytes=$baselineMemory; working_set_large_bytes=$largeMemory; large_fixture_working_set_delta_bytes=$memoryDelta; local_history_library_id=$localHistoryLibraryId; indexed_source_history_sessions=$replayedHistory.Count; source_wav_hashes_preserved=$true; retired_library_history_absent=$true; acoustic_latency_measured=$false } | ConvertTo-Json -Depth 4
 } catch {
     $primaryError = $_
     throw

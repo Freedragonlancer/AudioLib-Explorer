@@ -3258,7 +3258,7 @@ fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages(
                 "Test connection"
             }
         ));
-        // Server settings open the first saved profile and show a disabled WebDAV placeholder.
+        // Server settings open the first saved profile without unimplemented WebDAV controls.
         click_label(
             &ui,
             if chinese {
@@ -3288,11 +3288,7 @@ fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages(
         } else {
             "WebDAV settings (not developed)"
         };
-        assert!(has_label(&ui, placeholder));
-        let field = ElementHandle::find_by_accessible_label(&ui, placeholder)
-            .find(|element| element.accessible_enabled() == Some(false))
-            .expect("disabled WebDAV placeholder");
-        assert_eq!(field.accessible_value().unwrap_or_default(), "");
+        assert!(!has_label(&ui, placeholder));
         assert!(!ui.get_ds_dirty());
         // Not active: the switch action is offered; unsaved edits turn it into save + switch.
         click_label(

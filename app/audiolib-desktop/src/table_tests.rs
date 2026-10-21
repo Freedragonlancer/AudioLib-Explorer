@@ -142,9 +142,10 @@ fn resized_table_cells_follow_headers_during_horizontal_scroll_and_menu_reset() 
     assert_cell_alignment(&ui);
 
     // The column menu restores every width and returns the viewport to the first column.
-    let customize = ElementHandle::find_by_accessible_label(&ui, "Customize table columns")
-        .next()
-        .unwrap();
+    let customize =
+        ElementHandle::find_by_accessible_label(&ui, "Column widths, Waveforms and sorting")
+            .next()
+            .unwrap();
     click(&ui, midpoint(&customize));
     settle();
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(350));
@@ -154,10 +155,11 @@ fn resized_table_cells_follow_headers_during_horizontal_scroll_and_menu_reset() 
     assert!(reset.size().width > 0.0 && reset.size().height > 0.0);
     // The testing API's pointer helpers use map_to_window, which omits child-popup
     // offsets. Route real keyboard input through the opened menu instead: its first
-    // entry is Reset column widths, selected by Down and activated by Return.
+    // entry toggles Waveforms, so select the second entry (Reset widths) with two Down events.
     crate::ui_tests::send_keys(
         &ui,
         &[
+            slint::platform::Key::DownArrow.into(),
             slint::platform::Key::DownArrow.into(),
             slint::platform::Key::Return.into(),
         ],

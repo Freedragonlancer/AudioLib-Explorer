@@ -13,6 +13,7 @@ component Tool inherits Rectangle {
     /// for the result list) keep working right after a click. Tabbed focus still
     /// activates the button with Space/Return.
     in property <bool> keyboard-active: true;
+    out property <bool> has-focus: focus.has-focus;
     callback clicked();
     width: 32px; height: 30px; border-radius: 4px;
     background: root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent) : (root.active ? Theme.selected : (hit.has-hover ? Theme.hover : Theme.raised));
@@ -56,6 +57,7 @@ export component AuditionPanel inherits Rectangle {
     in property <[string]> ruler-labels;
     in-out property <float> scroll: 0;
     in-out property <float> volume-db: -1.9;
+    out property <bool> volume-adjusting: volume-control.has-focus;
     in property <string> volume-label;
     in-out property <string> pitch-text: "0.00";
     in-out property <string> rate-text: "1.00";
@@ -103,18 +105,18 @@ export component AuditionPanel inherits Rectangle {
             Tool { icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; enabled: root.ready; clicked => { root.stop(); } }
             Tool { icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
-            Caption { text: "Pitch"; }
-            LineEdit { width: 62px; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车应用" : "Pitch semitones, Enter to apply"; accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
-            Caption { text: "st"; }
-            Caption { text: "Rate"; }
-            LineEdit { width: 57px; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车应用" : "Pitch-preserving speed, Enter to apply"; accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
+            Caption { text: root.chinese ? "音高" : "Pitch"; }
+            LineEdit { width: 62px; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
+            Caption { text: root.chinese ? "半音" : "st"; }
+            Caption { text: root.chinese ? "速度" : "Rate"; }
+            LineEdit { width: 57px; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
             Caption { text: "×"; }
             Tool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音量" : "Volume"; }
-            Slider { min-width: 76px; max-width: 160px; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
+            volume-control := Slider { min-width: 76px; max-width: 160px; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px; text: root.volume-label; horizontal-alignment: right; }
-            Tool { width: 54px; symbol: "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Tool { width: 54px; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: 9px; }
             Tool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; clicked => { root.peaks(); } }
             Tool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.output-settings(); } }
@@ -161,7 +163,7 @@ export component AuditionPanel inherits Rectangle {
             Tool { width: 38px; height: 18px; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
         }
         HorizontalLayout { height: 25px; spacing: 12px;
-            Text { accessible-role: text; accessible-label: "Audition time"; width: 208px; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: 14px; vertical-alignment: center; }
+            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: 14px; vertical-alignment: center; }
             Rectangle { width: 1px; background: Theme.player-border; }
             Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: 11px; vertical-alignment: center; }
             Caption { text: root.info; font-size: 10px; }
@@ -169,7 +171,19 @@ export component AuditionPanel inherits Rectangle {
     }
 }
 
-export component PeakSettings inherits Rectangle {
+export component PeakSettings inherits FocusScope {
+    forward-focus: peaks-close;
+    focus-on-click: false; focus-on-tab-navigation: false;
+    property <bool> reverse-wrap: false;
+    capture-key-pressed(event) => {
+        if event.text == Key.Escape { root.close(); return accept; }
+        if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && peaks-close.has-focus {
+            root.reverse-wrap = true; peaks-tab-end.focus(); root.reverse-wrap = false; return reject;
+        }
+        reject
+    }
+    key-pressed(event) => { if event.text == Key.Tab || event.text == Key.Backtab { return reject; } accept }
+    key-released(event) => { accept }
     in property <bool> chinese;
     in-out property <int> mode: 1;
     in-out property <float> gain-db: 0;
@@ -177,13 +191,13 @@ export component PeakSettings inherits Rectangle {
     in-out property <float> noise: 1;
     in-out property <float> variance: 0.38;
     callback changed(); callback close();
-    background: Theme.overlay;
+    Rectangle { background: Theme.overlay;
     TouchArea { }
     Rectangle { width: 480px; height: 384px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 8px; border-width: 1px; border-color: Theme.strong-border;
         VerticalLayout { padding: 20px; spacing: 12px;
             HorizontalLayout { height: 30px;
                 Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: 17px; font-weight: 600; vertical-alignment: center; }
-                Tool { symbol: "×"; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
+                peaks-close := Tool { symbol: "×"; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
             }
             HorizontalLayout { height: 30px; spacing: 12px;
                 Caption { width: 90px; text: root.chinese ? "显示增益" : "Display gain"; }
@@ -215,4 +229,6 @@ export component PeakSettings inherits Rectangle {
             Caption { text: root.chinese ? "黑色表示非音调内容；颜色随主频变化。显示增益不改变音量。" : "Noise fades to black; tones show frequency. Display gain is visual only."; font-size: 10px; }
         }
     }
+    }
+    peaks-tab-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !root.reverse-wrap { peaks-close.focus(); } } }
 }
