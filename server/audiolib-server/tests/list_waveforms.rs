@@ -2,6 +2,8 @@
 //! List thumbnail waveforms (doc/api/README.md §9.1–§9.2): `POST /waveforms`,
 //! `GET /waveforms/status`, pre-generation, `GET/PATCH /settings` and the
 //! `/capabilities` fields, against temporary libraries of generated WAVs.
+mod support;
+
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_server::{
     AppState, BearerToken, ConnectionInfo, ErrorBody, Listener, RootMonitor, RootPolicy, RootProbe,
@@ -145,9 +147,11 @@ async fn call(
     address: &str,
     body: Option<&str>,
 ) -> Response {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(format!("/api/v1{path}"));
+    let mut request = support::modern(
+        Request::builder()
+            .method(method)
+            .uri(format!("/api/v1{path}")),
+    );
     if body.is_some()
         && !headers
             .iter()
