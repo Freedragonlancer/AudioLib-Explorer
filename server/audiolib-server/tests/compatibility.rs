@@ -30,6 +30,8 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
     let token = "compatibility-test-token-0123456789";
     let state = AppState::open(&config, BearerToken::new(token).unwrap()).unwrap();
     let revision = state.revision().unwrap().revision;
+    let settings_path = config.admin_dir().join("admin-settings.json");
+    let original_settings = std::fs::read(&settings_path).ok();
     let conn = rusqlite::Connection::open_with_flags(
         &database,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -58,40 +60,45 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
             "oversized" => "x".repeat(4097),
             _ => serde_json::to_string(&catalog).unwrap(),
         };
-        let mut request = Request::patch("/api/v1/audio/1/metadata")
-            .header("Authorization", format!("Bearer {token}"))
-            .header("x-audiolib-library-id", state.library_id())
-            .header("Content-Type", "application/json")
-            .header(CLIENT_COMPATIBILITY_HEADER, &value);
-        if mode == "duplicate" {
-            request = request.header(CLIENT_COMPATIBILITY_HEADER, value);
-        }
-        let response = router(state.clone())
-            .oneshot(
-                request
-                    .body(Body::from(r#"{"notes":"must not apply"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{mode}");
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+        for (path, body) in [
+            ("/api/v1/audio/1/metadata", r#"{"notes":"must not apply"}"#),
+            ("/api/v1/settings", r#"{"list_waveform_rate":20}"#),
+        ] {
+            let mut request = Request::patch(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("x-audiolib-library-id", state.library_id())
+                .header("Content-Type", "application/json")
+                .header(CLIENT_COMPATIBILITY_HEADER, &value);
+            if mode == "duplicate" {
+                request = request.header(CLIENT_COMPATIBILITY_HEADER, &value);
+            }
+            let response = router(state.clone())
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
                 .unwrap();
-        assert_eq!(body["error_code"], "PEER_VERSION_UNSUPPORTED", "{mode}");
-        assert_eq!(state.revision().unwrap().revision, revision);
-        assert_eq!(
-            conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{mode} {path}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(
+                body["error_code"], "PEER_VERSION_UNSUPPORTED",
+                "{mode} {path}"
+            );
+            assert_eq!(std::fs::read(&settings_path).ok(), original_settings);
+            assert_eq!(state.revision().unwrap().revision, revision);
+            assert_eq!(
+                conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                data_version
+            );
+            assert_eq!(
+                conn.query_row("SELECT user_notes FROM audio_files WHERE id=1", [], |row| {
+                    row.get::<_, String>(0)
+                })
                 .unwrap(),
-            data_version
-        );
-        assert_eq!(
-            conn.query_row("SELECT user_notes FROM audio_files WHERE id=1", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap(),
-            "preserved"
-        );
+                "preserved"
+            );
+        }
     }
     // Existing headerless JSON clients retain their compatibility endpoint.
     let response = router(state.clone())
@@ -111,6 +118,96 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
             .unwrap(),
         data_version
     );
+
+    // Authentication and management policy still take precedence over a bad peer
+    // declaration. No settings or database write occurs on either refusal.
+    for (authenticated, manage_mode, status, code) in [
+        (
+            false,
+            audiolib_server::ManageMode::All,
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+        ),
+        (
+            true,
+            audiolib_server::ManageMode::Off,
+            StatusCode::FORBIDDEN,
+            "MANAGE_FORBIDDEN",
+        ),
+    ] {
+        state
+            .security()
+            .update_settings(|settings| settings.manage_mode = Some(manage_mode))
+            .unwrap();
+        let before_settings = std::fs::read(&settings_path).unwrap();
+        let mut request = Request::patch("/api/v1/settings")
+            .header("Content-Type", "application/json")
+            .header(CLIENT_COMPATIBILITY_HEADER, "{}");
+        if authenticated {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = router(state.clone())
+            .oneshot(
+                request
+                    .body(Body::from(r#"{"list_waveform_rate":20}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error_code"], code);
+        assert_eq!(std::fs::read(&settings_path).unwrap(), before_settings);
+        assert_eq!(state.revision().unwrap().revision, revision);
+        assert_eq!(
+            conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            data_version
+        );
+    }
+    state
+        .security()
+        .update_settings(|settings| settings.manage_mode = Some(audiolib_server::ManageMode::All))
+        .unwrap();
+    // Both the explicit legacy exception and a supported modern peer may change
+    // settings. These configuration writes must not bump the library revision.
+    for (modern, rate) in [(false, 20), (true, 21)] {
+        let mut request = Request::patch("/api/v1/settings")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json");
+        if modern {
+            request = request.header(
+                CLIENT_COMPATIBILITY_HEADER,
+                serde_json::to_string(&compatibility_manifest()).unwrap(),
+            );
+        }
+        let response = router(state.clone())
+            .oneshot(
+                request
+                    .body(Body::from(
+                        serde_json::json!({"list_waveform_rate": rate}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "modern={modern}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["list_waveform_rate"], rate);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(persisted["list_waveform_rate"], rate);
+        assert_eq!(state.revision().unwrap().revision, revision);
+        assert_eq!(
+            conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            data_version
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -184,22 +281,6 @@ async fn old_client_is_refused_before_preparation_and_modern_client_syncs_actual
         let before: i64 = observer
             .pragma_query_value(None, "data_version", |row| row.get(0))
             .unwrap();
-        let play = client
-            .clone()
-            .with_library_id(&remote.library_id)
-            .unwrap()
-            .record_play(1)
-            .unwrap();
-        assert_eq!(play.revision_before, remote.revision);
-        assert_eq!(play.revision, remote.revision);
-        assert_eq!(play.file.play_count, 0);
-        assert_eq!(
-            observer
-                .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
-                .unwrap(),
-            before
-        );
-        assert!(client.play_history(100, 0).unwrap().is_empty());
         let cache = RemoteCache::new(&data);
         let outcome =
             sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap();
@@ -220,7 +301,22 @@ async fn old_client_is_refused_before_preparation_and_modern_client_syncs_actual
             1
         );
         assert_eq!(cached.get_audio(1).unwrap().play_count, 0);
-        drop(cached);
+        let playback = audiolib_remote::RemoteProvider::new(
+            std::sync::Arc::new(cached),
+            RemoteWriter::new(client.clone(), cache.clone(), &remote.library_id),
+            false,
+            None,
+        );
+        playback.record_play(1).unwrap();
+        assert!(playback.play_history(100, 0).unwrap().is_empty());
+        assert_eq!(client.library().unwrap().revision, remote.revision);
+        assert_eq!(
+            observer
+                .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        drop(playback);
         let second =
             sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap();
         assert!(!second.downloaded);

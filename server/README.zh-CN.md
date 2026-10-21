@@ -14,7 +14,7 @@
 - `/audio/{id}/stream`：单段 `Range`、`ETag`、`If-Range`；`?download=1` 用于下载。
 - `/audio/{id}/preview` 低带宽试听：WAV 在进程内做 PCM 降采样（`codec=pcm`），可选 ffmpeg FLAC 转码（`codec=flac`）。
 - `/audio/{id}/waveform`，带磁盘 LRU 缓存。
-- 元数据写入、播放计数、远程扫描（开始/暂停/继续/取消）、记录与文件夹移除（可用 `manage_mode` 限制）。
+- 元数据写入（播放历史只在客户端本地记录；`POST /audio/{id}/plays` 已弃用为空操作，`GET /history/plays` 总是空）、远程扫描（开始/暂停/继续/取消）、记录与文件夹移除（可用 `manage_mode` 限制）。
 - Token 鉴权三种模式（`off`、`external`、`all`），token 在管理页生成（只保存哈希）或来自环境变量，可选原生 TLS 监听。
 - 内置管理页（`/admin`，仅局域网）：公网地址、鉴权模式、token、库根目录。
 

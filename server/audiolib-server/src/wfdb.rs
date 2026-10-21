@@ -256,6 +256,32 @@ impl WaveformsDb {
         }
     }
 
+    /// Blocking. Whether the database can be opened (created when it does not exist yet).
+    pub fn usable(&self) -> bool {
+        match self.connection(true) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::debug!(%error, "waveforms.db cannot be opened");
+                false
+            }
+        }
+    }
+
+    /// Blocking. Delete every row (and drop queued ones) for a `rebuild` job (§9.5.1).
+    pub fn clear(&self) -> Result<()> {
+        lock(&self.queue).0.clear();
+        lock(&self.queue).1 = None;
+        let Some(mut guard) = self.connection(false)? else {
+            return Ok(());
+        };
+        let Some(conn) = guard.as_mut() else {
+            return Ok(());
+        };
+        conn.execute("DELETE FROM list_waveforms", [])
+            .map_err(sql)?;
+        Ok(())
+    }
+
     /// Delete rows whose id is not in `keep`.
     pub fn retain(&self, keep: impl Fn(i64) -> bool) {
         self.flush();

@@ -1,6 +1,6 @@
 # Rust Architecture
 
-This isolated `0.5.0-dev.1` branch implements schema 6 / Plan B. The current installation and working library are unchanged. See the [shared migration contract](api/Library_Migration_Compatibility.md) for compatibility, retirement and recovery.
+This isolated `0.6.0-dev.1` CR branch implements schema 6 / Plan B on the released 0.5.0 baseline. The current installation and working library are unchanged. See the [shared migration contract](api/Library_Migration_Compatibility.md) and [CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier 0.5.0-dev.1 measurements remain historical evidence.
 
 This document supersedes Python-specific implementation choices in Technical_Architecture.md. Its Appendix A remains the terminology reference. The Python implementation and its test scripts have been removed from the working tree; earlier committed versions preserve their history. The original SQLite database and local config/audiolib_config.yaml remain read-only migration inputs. New features use the Rust workspace.
 

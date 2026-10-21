@@ -1121,6 +1121,18 @@ impl AppState {
             .record_own_write_if(|| operation(self.inner.provider.as_ref()), changed)
     }
 
+    /// Blocking. Run a provider write that changes no snapshot content clients must
+    /// re-download for (play bookkeeping); the revision stays put (see
+    /// [`RevisionTracker::record_own_write_quiet`]).
+    pub fn write_quiet<T>(
+        &self,
+        operation: impl FnOnce(&SqliteProvider) -> Result<T>,
+    ) -> Result<WriteOutcome<T>> {
+        self.inner
+            .tracker
+            .record_own_write_quiet(|| operation(self.inner.provider.as_ref()))
+    }
+
     /// Blocking. Run `query` on the read-only connection that also serves the `/roots`
     /// aggregates (never the writer, so it does not wait for writes).
     pub(crate) fn read_query<T>(

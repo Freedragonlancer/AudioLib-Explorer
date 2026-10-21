@@ -1346,6 +1346,7 @@ async fn browser_mutations_verify_origin_scheme_authority_and_json_media_type() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+    // The deprecated play route is a no-op: nothing is counted.
     assert_eq!(f.state.audio(id).unwrap().play_count, 0);
 }
 
@@ -1490,6 +1491,35 @@ async fn plays_return_the_unchanged_record_without_writes_or_revision_changes() 
     let history: serde_json::Value =
         json(send(&f.state, "/api/v1/history/plays", Some(TOKEN)).await).await;
     assert_eq!(history, serde_json::json!([]));
+
+    // The no-op stays a no-op after restart; the next content write still bumps once.
+    drop(f.state);
+    let reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
+    assert_eq!(library_revision(&reopened).await, start);
+    assert_eq!(reopened.audio(id).unwrap().play_count, 0);
+    let history = send_json(
+        &reopened,
+        Method::GET,
+        "/api/v1/history/plays",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(history.status(), StatusCode::OK);
+    let history: Vec<audiolib_core::PlayRecord> = json(history).await;
+    assert!(history.is_empty());
+    let response = send_json(
+        &reopened,
+        Method::PATCH,
+        &format!("/api/v1/audio/{id}/metadata"),
+        Some(r#"{"favorite":true}"#),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: AudioWriteResponse = json(response).await;
+    assert_eq!((body.revision_before, body.revision), (start, start + 1));
+    assert_eq!(library_revision(&reopened).await, start + 1);
 }
 
 #[tokio::test]
@@ -1685,9 +1715,24 @@ async fn external_wal_commits_bump_and_restarts_do_not() {
         Some(TOKEN),
     )
     .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let played: AudioWriteResponse = json(response).await;
+    assert_eq!(played.revision_before, start + 1);
+    assert_eq!(played.revision, start + 1);
+
+    // A subsequent content write continues the revision chain exactly once.
+    let response = send_json(
+        &f.state,
+        Method::PATCH,
+        &format!("/api/v1/audio/{id}/metadata"),
+        Some(r#"{"favorite":true}"#),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
     let written: AudioWriteResponse = json(response).await;
     assert_eq!(written.revision_before, start + 1);
-    assert_eq!(written.revision, start + 1);
+    assert_eq!(written.revision, start + 2);
 
     // Restarting the server (twice) does not bump.
     for _ in 0..2 {

@@ -405,6 +405,7 @@ fn child_write_callback_order() {
     ui.hide().unwrap();
 }
 
+#[allow(dead_code)]
 struct SnapshotServer {
     url: String,
     requests: Arc<AtomicUsize>,
@@ -413,6 +414,7 @@ struct SnapshotServer {
     worker: std::thread::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl SnapshotServer {
     fn start(library_id: &str, revision: u64, bytes: Vec<u8>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -612,10 +614,9 @@ fn play_source_switch(transition: PlayTransition) {
             });
         }
     }
-    let generation = controller.library_generation.load(Ordering::Acquire);
-    controller.remote_record_play(id, generation);
+    controller.provider().record_play(id).unwrap();
     // Dispatch twice across the transition; neither may send a play request.
-    controller.remote_record_play(id, generation);
+    controller.provider().record_play(id).unwrap();
     if snapshot_swap {
         let DataSourceSwitch::Server { state, .. } = &mut target else {
             unreachable!()

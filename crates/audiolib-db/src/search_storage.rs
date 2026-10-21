@@ -149,6 +149,184 @@ pub(crate) fn execute_schema(conn: &Connection, sql: &str) -> Result<()> {
     conn.execute(sql, []).map(drop).map_err(db_error)
 }
 
+#[derive(Debug)]
+enum TriggerToken {
+    Word(String),
+    Quoted(String),
+    Punctuation(char),
+}
+
+impl TriggerToken {
+    fn is_keyword(&self, keyword: &str) -> bool {
+        matches!(self, Self::Word(word) if word.eq_ignore_ascii_case(keyword))
+    }
+
+    fn identifier(&self) -> Option<&str> {
+        match self {
+            Self::Word(value) | Self::Quoted(value) => Some(value),
+            Self::Punctuation(_) => None,
+        }
+    }
+}
+
+/// Read SQLite's CREATE TRIGGER header, rather than searching its body or SQL
+/// strings. SQLite silently accepts unknown names in UPDATE OF, so preparing a
+/// trigger or EXPLAIN UPDATE cannot prove those dependencies are still valid.
+fn trigger_update_columns(sql: &str) -> Result<Vec<String>> {
+    let invalid = || Error::Validation("Unsupported stored trigger header".into());
+    let mut input = sql.chars().peekable();
+    let mut tokens = Vec::new();
+    while let Some(ch) = input.next() {
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+        if ch == '-' && input.peek() == Some(&'-') {
+            for ch in input.by_ref() {
+                if ch == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '/' && input.peek() == Some(&'*') {
+            input.next();
+            loop {
+                if input.next().ok_or_else(invalid)? == '*' && input.peek() == Some(&'/') {
+                    input.next();
+                    break;
+                }
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`' | '[') {
+            let end = if ch == '[' { ']' } else { ch };
+            let mut value = String::new();
+            loop {
+                let next = input.next().ok_or_else(invalid)?;
+                if next == end {
+                    if ch != '[' && input.peek() == Some(&end) {
+                        input.next();
+                        value.push(end);
+                        continue;
+                    }
+                    break;
+                }
+                value.push(next);
+            }
+            tokens.push(TriggerToken::Quoted(value));
+        } else if ch.is_alphanumeric() || matches!(ch, '_' | '$') || !ch.is_ascii() {
+            let mut word = ch.to_string();
+            while input.peek().is_some_and(|next| {
+                next.is_alphanumeric() || matches!(next, '_' | '$') || !next.is_ascii()
+            }) {
+                word.push(input.next().expect("peeked character"));
+            }
+            tokens.push(TriggerToken::Word(word));
+        } else {
+            tokens.push(TriggerToken::Punctuation(ch));
+        }
+    }
+    let mut cursor = 0;
+    let take = |cursor: &mut usize, keyword: &str| {
+        if tokens
+            .get(*cursor)
+            .is_some_and(|token| token.is_keyword(keyword))
+        {
+            *cursor += 1;
+            true
+        } else {
+            false
+        }
+    };
+    if !take(&mut cursor, "CREATE") {
+        return Err(invalid());
+    }
+    if !take(&mut cursor, "TEMP") {
+        take(&mut cursor, "TEMPORARY");
+    }
+    if !take(&mut cursor, "TRIGGER") {
+        return Err(invalid());
+    }
+    if take(&mut cursor, "IF") && !(take(&mut cursor, "NOT") && take(&mut cursor, "EXISTS")) {
+        return Err(invalid());
+    }
+    tokens
+        .get(cursor)
+        .and_then(TriggerToken::identifier)
+        .ok_or_else(invalid)?;
+    cursor += 1;
+    if matches!(tokens.get(cursor), Some(TriggerToken::Punctuation('.'))) {
+        cursor += 1;
+        tokens
+            .get(cursor)
+            .and_then(TriggerToken::identifier)
+            .ok_or_else(invalid)?;
+        cursor += 1;
+    }
+    if !take(&mut cursor, "BEFORE")
+        && !take(&mut cursor, "AFTER")
+        && take(&mut cursor, "INSTEAD")
+        && !take(&mut cursor, "OF")
+    {
+        return Err(invalid());
+    }
+    if !take(&mut cursor, "UPDATE") || !take(&mut cursor, "OF") {
+        return Ok(Vec::new());
+    }
+    let mut columns = Vec::new();
+    loop {
+        let column = tokens
+            .get(cursor)
+            .and_then(TriggerToken::identifier)
+            .ok_or_else(invalid)?;
+        columns.push(column.to_owned());
+        cursor += 1;
+        if take(&mut cursor, "ON") {
+            return Ok(columns);
+        }
+        if !matches!(tokens.get(cursor), Some(TriggerToken::Punctuation(','))) {
+            return Err(invalid());
+        }
+        cursor += 1;
+    }
+}
+
+fn check_trigger_column_dependencies(
+    conn: &Connection,
+    changes: &[crate::migration::SchemaChange],
+) -> Result<()> {
+    let mut statement = conn
+        .prepare(
+            "SELECT name,tbl_name,sql FROM sqlite_schema WHERE type='trigger' AND sql IS NOT NULL",
+        )
+        .map_err(db_error)?;
+    let triggers = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db_error)?;
+    for trigger in triggers {
+        let (name, owner, sql) = trigger.map_err(db_error)?;
+        let columns = trigger_update_columns(&sql)?;
+        for change in changes {
+            if let crate::migration::SchemaChange::DropDerivedColumn { table, column }
+            | crate::migration::SchemaChange::RetireColumn { table, column } = change
+                && owner.eq_ignore_ascii_case(table)
+                && columns.iter().any(|name| name.eq_ignore_ascii_case(column))
+            {
+                return Err(Error::Validation(format!(
+                    "Trigger {name} still depends on removed field {table}.{column} through UPDATE OF"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Transform only an empty in-memory schema. A view/index/constraint that depends
 /// on a removed column makes SQLite reject the plan before any source mutation.
 #[cfg(test)]
@@ -228,6 +406,7 @@ pub(crate) fn blueprint_with(
         }
     }
     schema::definition::repair_owned(&memory)?;
+    check_trigger_column_dependencies(&memory, changes)?;
     for change in changes {
         use crate::migration::SchemaChange;
         let sql = match change {

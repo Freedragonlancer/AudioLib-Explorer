@@ -264,6 +264,8 @@ pub enum SyncProgress {
         written: u64,
         total: Option<u64>,
     },
+    /// Flushing the downloaded snapshot to disk before validation.
+    Writing,
     Validating,
     Preparing(CachePreparation),
     Saving,
@@ -1013,10 +1015,11 @@ pub fn sync_library(
         let mut attempt = 0;
         let mut transient = 0;
         let meta = loop {
-            match client.download_snapshot(
+            let report = std::cell::RefCell::new(&mut *progress);
+            let downloaded = client.download_snapshot_staged(
                 &staging,
                 &mut |stage| {
-                    progress(match stage {
+                    (report.borrow_mut())(match stage {
                         SnapshotProgress::Downloading { received, total } => {
                             SyncProgress::Downloading { received, total }
                         }
@@ -1025,8 +1028,14 @@ pub fn sync_library(
                         }
                     })
                 },
+                &mut |stage| match stage {
+                    crate::client::DownloadStage::Writing => {
+                        (report.borrow_mut())(SyncProgress::Writing)
+                    }
+                },
                 cancel,
-            ) {
+            );
+            match downloaded {
                 Err(RemoteError::Busy {
                     message,
                     retry_after,
@@ -1063,11 +1072,19 @@ pub fn sync_library(
         }
         progress(SyncProgress::Validating);
         let source = crate::compatibility::downloaded(&staging, &library, &meta, cancel)?;
+        let validating = Instant::now();
+        tracing::info!("Snapshot stage start: validating");
         let info = validate_snapshot_with_progress_cancellable(
             &staging,
             &mut |stage| progress(SyncProgress::Preparing(stage)),
             cancel,
-        )?;
+        );
+        tracing::info!(
+            elapsed_ms = validating.elapsed().as_millis() as u64,
+            ok = info.is_ok(),
+            "Snapshot stage end: validating"
+        );
+        let info = info?;
         let local = observed_format(&staging, cancel)?;
         let format = CacheFormat {
             generation: u64::from(source != local),

@@ -557,6 +557,73 @@ fn retired_field_dependency_blocks_planning_and_added_defaults_are_explicit() {
 }
 
 #[test]
+fn update_of_removed_columns_blocks_before_a_job_and_keeps_unrelated_triggers() {
+    let (_directory, path) = fixture();
+    let cancel = AtomicBool::new(false);
+    let conn = Connection::open(&path).unwrap();
+    for columns in [
+        "play_count",
+        "\"PLAY_COUNT\"",
+        "`filename_tokenized`",
+        "[play_count],user_notes",
+        "'play_count'",
+        "user_notes,/* dependency */play_count",
+    ] {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER extension_dependency AFTER UPDATE OF {columns} ON audio_files
+             BEGIN INSERT INTO extension_rows(key) VALUES('audit'); END;"
+        ))
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = plan(&path, &cancel).unwrap_err().to_string();
+        assert!(error.contains("extension_dependency"), "{columns}: {error}");
+        assert!(error.contains("UPDATE OF"), "{columns}: {error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".audiolib-migrate-")
+                })
+        );
+        conn.execute_batch("DROP TRIGGER extension_dependency;")
+            .unwrap();
+    }
+    // Removed-column words in names, string literals and comments are not
+    // dependencies. A similar retained identifier must not be treated as a prefix.
+    conn.execute_batch(
+        "ALTER TABLE audio_files ADD COLUMN play_count_note TEXT;
+         CREATE TRIGGER \"play_count AFTER UPDATE OF filename_tokenized\"
+         AFTER UPDATE /* play_count */ OF play_count_note,extension_value ON audio_files
+         BEGIN INSERT INTO extension_rows(key) VALUES('UPDATE OF play_count'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let reviewed = plan(&path, &cancel).unwrap();
+    let job = apply(&reviewed, &cancel, &mut |_| Ok(())).unwrap();
+    verify(&job.directory, &cancel).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET play_count_note='changed' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM extension_rows WHERE key='UPDATE OF play_count'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn resume_at_every_outer_boundary_and_after_publication_receipt() {
     for phase in [
         MigrationPhase::Backup,

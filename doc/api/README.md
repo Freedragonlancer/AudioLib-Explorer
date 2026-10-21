@@ -10,6 +10,7 @@
 [历史全库实验](Search_Storage_B_Validation.md)、
 [共享迁移器全库与回滚实测](Search_Storage_B_Integrated_Validation.md)、
 [实现与验收边界](Implementation_B_Status.md)。
+CR、修复及合入 0.5.0 主线后的证据见 [方案 B CR](Search_Storage_B_CR.md)。
 隔离分支已完成两端实现、兼容测试及全库复验；这些新协商字段尚未发布或部署。
 
 - 服务器模式 = 一个实现 `audiolib_core::DataProvider` 的远程提供者（`crates/audiolib-remote`）+ 服务端进程（`server/audiolib-server`）。UI / CLI 不感知本地还是远程。
@@ -41,7 +42,7 @@
 | 需要 token 时（§2.2）token 缺失、错误或已撤销 | 401 | `UNAUTHORIZED`（附 `WWW-Authenticate: Bearer`；缺失和错误同一个码，只有 `message` 不同） |
 | 管理页 `/admin` 经反代、从公网或用非局域网主机名访问（§2.3） | 403 | `ADMIN_LAN_ONLY` |
 | 管理页的修改请求缺少 `X-AudioLib-Admin: 1` 或来自其他源（§2.3） | 403 | `ADMIN_HEADER_REQUIRED` |
-| 库管理（扫描及其暂停/继续/取消、记录/文件夹移除、远程目录浏览和根目录管理）被 `manage_mode` 拒绝：`lan` 模式下的外部请求，或 `off` 模式下的任何请求（§6.9–§6.10）；先过鉴权，缺 token 仍是 401 | 403 | `MANAGE_FORBIDDEN` |
+| 库管理（扫描及其暂停/继续/取消、记录/文件夹移除、远程目录浏览和根目录管理、列表波形任务开始/暂停/继续/停止（§9.5）、`PATCH /settings`（含 `pregenerate_list_waveforms`、`list_waveform_rate`））被 `manage_mode` 拒绝：`lan` 模式下的外部请求，或 `off` 模式下的任何请求（§6.9–§6.10）；先过鉴权，缺 token 仍是 401 | 403 | `MANAGE_FORBIDDEN` |
 | `NotFound` / 未知路由 / 音频文件缺失或不在配置的根下 | 404 | `NOT_FOUND` |
 | 路由存在但方法不对（如 `POST /library`） | 405 | `METHOD_NOT_ALLOWED`（JSON 错误体，保留 `Allow` 头） |
 | 受通用请求超时控制的端点超过 30 秒未完成（根目录 PATCH/DELETE 例外，§6.10；目录浏览另有 15 秒上限） | 408 | `TIMEOUT` |
@@ -52,6 +53,7 @@
 | JSON 修改请求的 Content-Type 缺少或不是 application/json | 415 | `JSON_CONTENT_TYPE_REQUIRED` |
 | `Cancelled` | 409 | `CANCELLED` |
 | 扫描会话当前状态不允许该操作（已结束、正在取消、已进入最终对账等，§6.6） | 409 | `SCAN_STATE` |
+| 列表波形任务当前状态不允许该操作（没有任务或已结束，§9.5，草案） | 409 | `JOB_STATE` |
 | JSON 请求体超过 8 MiB（§6.3） | 413 | `PAYLOAD_TOO_LARGE` |
 | 音频流 `Range` 无法满足（§8）、`pcm` 预览 `Range` 无法满足（§8.1） | 416 | `RANGE_NOT_SATISFIABLE`（附 `Content-Range: bytes */<长度>`） |
 | `flac` 预览的 `t=` 在时长之后（§8.1） | 416 | `RANGE_NOT_SATISFIABLE`（不带 `Content-Range`） |
@@ -261,9 +263,10 @@ audiolib.example.com:8443 {
 
 - 客户端在本机保存库缓存：`%LOCALAPPDATA%/AudioLibExplorer/v1/remote/<library_id>/library.db`。搜索、浏览、统计直接走本地缓存，延迟与本地模式一致。
 - 客户端轮询 `GET /library`；`revision` 变化时重新下载 `GET /library/snapshot`，校验后替换本地缓存（先下载到临时文件，校验 `X-Library-Id`、快照 `user_version` 的兼容范围和 SQLite 完整性，读取 `X-Schema-Version` 响应头，再原子替换）。
-- `revision` 是保守的变更提示：服务端用专用只读连接轮询 `PRAGMA data_version`（其他连接/进程的每次提交都会改变它，包括只写进 WAL、尚未 checkpoint 的提交），并比对**主库文件**的大小/mtime（默认每 3 秒一次，每次 `/library` 和快照请求也会检查）。WAL 文件的大小/mtime 不参与运行期比对（它们在每次打开/关闭时都会变化，以前会导致每次重启都递增）。服务端停机期间的改动在下次启动时递增一次：主库文件变化，或 WAL 签名（WAL 文件长度 + 32 字节文件头中的 checkpoint 序号和 salt，不含 mtime）变化。服务端退出时故意不关闭自己的 SQLite 连接，避免最后一个连接关闭时把 WAL checkpoint 进主库、下次启动被误判为变更；因此**单纯重启服务端不会递增 `revision`**。它**可能在没有实际变更时递增**（如其他进程做 WAL checkpoint），但**不会漏掉已提交的变更**。`revision` 先于数据读取，所以返回的数据不会比所标的 `revision` 旧。
+- `revision` 是保守的变更提示：服务端用专用只读连接轮询 `PRAGMA data_version`（其他连接/进程的每次提交都会改变它，包括只写进 WAL、尚未 checkpoint 的提交），并比对**主库文件**的大小/mtime（默认每 3 秒一次，每次 `/library` 和快照请求也会检查）。WAL 文件的大小/mtime 不参与运行期比对（它们在每次打开/关闭时都会变化，以前会导致每次重启都递增）。服务端停机期间的改动在下次启动时递增一次：主库文件变化，或 WAL 签名（WAL 文件长度 + 32 字节文件头中的 checkpoint 序号和 salt，不含 mtime）变化。服务端退出时故意不关闭自己的 SQLite 连接，避免最后一个连接关闭时把 WAL checkpoint 进主库、下次启动被误判为变更；因此**单纯重启服务端不会递增 `revision`**；**播放计数也不会递增 `revision`**（见下文）。它**可能在没有实际变更时递增**（如其他进程做 WAL checkpoint），但**不会漏掉已提交的变更**。`revision` 先于数据读取，所以返回的数据不会比所标的 `revision` 旧。
 - Metadata 编辑：先写服务端，成功后再更新本地缓存。写入端点（§6.3）返回写入后的完整记录以及 `revision_before` / `revision`：服务端在同一个临界区里（所有服务端写入串行）先把此前所有未计入的提交计入 `revision`，记下 `revision_before`，执行写入，然后把 `revision` 设为 `revision_before + 1` 并更新轮询基线，所以这次写入**只递增一次**，轮询不会再为它递增。
   - **客户端规则**：若本地缓存的 `revision == revision_before`，把返回的记录（`file` 或 `files`）写入本地缓存，并把本地 `revision` 设为返回的 `revision`；否则（期间有别的改动）按正常流程下载完整快照同步。写入失败（4xx/5xx）时 `revision` 不变，本地缓存也不要改。
+  - 播放（`POST /audio/{id}/plays`，**已弃用**）：空操作，什么都不写，返回 `revision == revision_before`。新版客户端播放不再发送该请求，历史列表返回 `[]`；本实现不新增客户端播放历史存储。旧格式已有数据保留到下一次显式结构迁移；schema 6 的授权退役及完整回滚见迁移契约。
   - 已知窄窗口：服务端写入执行期间若恰好有其他进程提交，那次提交会并入同一次递增；客户端按上面的规则只应用返回的记录，那次外部改动要等下一次变更（`revision` 再变）才会同步到。
   - 写入端点受 30 秒请求超时约束；若超时返回 408，写入可能已经提交，`revision` 会照常变化，客户端下一次轮询会走快照同步。
 - 远程扫描（§6.6）：扫描期间 `revision` 冻结，结束时有改动才递增一次（无改动的增量扫描不递增）；客户端照常按 `revision` 变化同步。
@@ -303,8 +306,8 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/roots` | 持久化根目录设置 | `{ "name", "path" }` | 201 根目录条目；受 `manage_mode` 限制，见 §6.10 |
 | ✅ | PATCH | `/roots/{name}` | 原子重定位根目录记录 + 持久化设置 | `{ "path" }` | 200 根目录条目；保留 ID、Metadata 与标注，见 §6.10 |
 | ✅ | DELETE | `/roots/{name}` | 数据库记录移除 + 持久化设置 | — | 200 `{ "name", "removed", "folders_removed", "revision_before", "revision" }`；不删除源 WAV，见 §6.10 |
-| ✅ | POST | `/audio/{id}/plays` | 兼容空操作 | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n }`，不再写入播放数据，见 §6.3 |
-| ✅ | GET | `/history/plays?limit=&offset=` | 兼容空历史 | `limit` 默认 100（1..=10000），`offset` 默认 0 | `[]`，保留路由与参数校验，见 §6.7 |
+| ⚠️ 已弃用 | POST | `/audio/{id}/plays` | — | 无请求体 | 200 `{ "file": AudioFile, "revision_before": n, "revision": n }`：**空操作**，不写库、不递增 revision，`file` 为当前记录（id 不存在仍 404）；仅为兼容旧客户端保留，新客户端不要调用，见 §6.3 |
+| ⚠️ 已弃用 | GET | `/history/plays?limit=&offset=` | — | `limit` 默认 100（1..=10000），`offset` 默认 0（仍校验） | 总是空数组 `[]`；仅为兼容旧客户端保留，见 §6.7 |
 | ✅ | GET | `/history/scans?limit=&offset=` | `scan_history` | 同上 | `ScanSession[]`，新的在前，见 §6.7 |
 | ✅ | POST | `/scans` | 扫描（`ScanService::scan`；受 `manage_mode` 限制，§6.9） | `{ "root": "<name>", "subpath": "", "mode": "incremental" \| "full", "workers": null }` | 200 `ScanResponse`（`ScanProgress` 字段 + `root`/`subpath`/`mode`/`active`/`pause_requested`/`cancel_requested`/`revision`，含新的 `session_id`），见 §6.6 |
 | ✅ | GET | `/scans/current` | 扫描进度 | — | 200 `{ "scan": ScanResponse \| null }`（没有扫描时为 `null`，不是 404），见 §6.6 |
@@ -597,7 +600,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 - 扫描期间成功的单条 metadata 写入照常递增：`revision_before` = 冻结值 + 1（已包含此前的扫描提交），`revision` = 冻结值 + 2；客户端按 §4 规则：`revision_before` 与本地不同就做快照同步。被拒绝的写入（例如 409 `BUSY` 的批量写入）不改变 `revision`。
 - 快照里也有扫描会话表，但无改动的扫描不递增 `revision`，所以本地快照里的扫描历史可能落后；**显示扫描历史请用 `GET /history/scans`**（§6.7）。
 
-### 6.7 历史 `GET /history/scans`、`GET /history/plays`（已实现）
+### 6.7 历史 `GET /history/scans`、`GET /history/plays`（后者已弃用）
 
 - 查询参数：`limit`（默认 100，`1..=10000`）、`offset`（默认 0，非负整数）；超出范围、不是整数或重复 → 400 `VALIDATION`。按 §2.2 鉴权，只读库，30 秒超时。
 - `GET /history/scans` → `ScanSession[]`，按会话 id 从新到旧：
@@ -672,7 +675,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 
 ### 6.9 库管理权限 `manage_mode` 与 `GET /capabilities`（已实现）
 
-服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`，以及 §6.10 的 `GET /fs`、`POST /roots`、`PATCH /roots/{name}`、`DELETE /roots/{name}`。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和其他 GET 不受影响。
+服务端设置 `manage_mode` 决定谁可以**管理库**：`POST /scans`、`POST /scans/{id}/pause|resume|cancel`、`POST /audio/remove`、`DELETE /folders/{id}`，以及 §6.10 的 `GET /fs`、`POST /roots`、`PATCH /roots/{name}`、`DELETE /roots/{name}`，以及 §9.5 的列表波形任务端点（`POST /waveforms/jobs`、`POST /waveforms/jobs/current/pause|resume|stop`，草案）。Metadata 写入（`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`）、播放计数（`POST /audio/{id}/plays`）和其他 GET 不受影响。
 
 | `manage_mode` | 局域网直连 | 外部请求（经反代 / 公网对端，判定同 §2.2） |
 |---|---|---|
@@ -701,6 +704,7 @@ schema 仍为 5；`audiolib_schema_features.tokenization` 从旧修订 1/2 升�
 | `root_management` | 本服务端提供 §6.10 的稳定根目录管理接口；缺字段的旧版本按 `false`，客户端隐藏目录浏览及根目录新增、改路径、删除按钮 |
 | `list_waveforms` | 支持 §9.1 的 `POST /waveforms`：`{ "version": 1, "buckets": [128], "max_ids": 200, "encoding": "i16le-minmax-base64" }`；缺字段 = 不支持 |
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
+| `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（库已打开但 `waveforms.db` 无法打开时也不声明，§9.5.7） |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
@@ -1136,6 +1140,197 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 增量（续传）：导入后用 §9.1（`known` = 包内该项的 etag）按 etag 增量拉取；打包期间或之后变化的条目 etag 已不同，会返回 `ok`，所以不会丢失。不按 `meta.revision` 或 `generated_at` 做任何过滤。
 - 实测（生成时间 / 大小）：Mac 0.48 s（只读连接 `VACUUM INTO` + 元数据 + SHA-256 ETag；仅 `VACUUM INTO` 的首测为 0.38 s），308 MB（与源文件同大小），客户端式校验（integrity_check + 白名单 + blob 长度）0.23 s；Windows（待测）。
 
+### 9.5 列表波形缓存管理：状态扩展、生成任务与限速设置（客户端已评审，服务端已实现）
+
+> 目的：让客户端在「服务器音效库」设置页查看列表缩略波形缓存（§9.1–§9.4）的完整进度，并手动发起「补齐缺失」「全部重建」「重试失败」任务、暂停/继续/停止任务、调整生成限速。**只新增端点和字段，已有字段语义不变**；不改主库 schema，快照（§6.1）不变。客户端用 `GET /capabilities` 的 `list_waveform_jobs` 判断是否支持（缺字段 = 不支持，隐藏这些按钮，只显示 §9.2 的开关与进度）。
+
+#### 9.5.1 任务模型
+
+- 服务端同一时间最多一个**列表波形任务**（job）。任务与 §9.2 的「预生成」共用同一组后台工作线程、限速和让路规则：
+  - 有任务在运行时，任务**取代**本轮预生成（预生成不另起一轮，任务结束后按 `pregenerate_list_waveforms` 继续）；
+  - §9.1 的按需队列始终优先于任务，不受任务暂停影响；
+  - 让路规则与 §9.2 的预生成完全相同（扫描运行/暂停中、试听整个期间让路，条件消失 5 秒后继续；根离线的记录跳过，根恢复后再处理）；已开始的解码不因让路中断。
+- 模式 `mode`：
+
+| `mode` | 处理范围 | 说明 |
+|---|---|---|
+| `missing` | 所有非 missing 记录中**没有缓存或缓存键不一致**（文件 ETag 已变，即 etag 不匹配）的项 | 已有且键一致的只做 `stat` 跳过，不计入限速（同 §9.2）。相当于“立即跑一轮预生成”，不要求开启 `pregenerate_list_waveforms` |
+| `rebuild` | 所有非 missing 记录 | 先**清空**本库的列表缓存（`list/<library_id 的哈希>/` 下的 i16 分片与 `waveforms.db` 的 `list_waveforms` 行），再全部重新生成。破坏性操作：客户端须二次确认（§9.5.6）。清空期间 `POST /waveforms` 的未命中项照常返回 `pending` |
+| `failed` | 当前已知解码失败（`failed`）的记录 | 清除这些记录的失败标记后重新解码；仍失败的再次记为失败 |
+
+- **持续生效**：任务只处理**开始时**确定的记录集合（按 id 升序遍历）；任务进行中扫描新增的记录不加入本任务（开启预生成时由预生成在任务结束后处理）。任务进行中被移除的记录跳过。
+- 任务结束状态：`completed`（全部处理完；有失败项也算完成，见 `failed`）、`cancelled`（被停止）、`error`（无法继续，如缓存目录不可写；见 `last_error`）。
+
+#### 9.5.2 `GET /api/v1/waveforms/status` 新增字段（向后兼容）
+
+已有字段（§9.2）全部保留、语义不变。新增：
+
+```json
+{
+  "enabled": true,
+  "state": "running",
+  "yield_reason": null,
+  "total": 909342,
+  "cached": 412000,
+  "remaining": 497342,
+  "queued_on_demand": 0,
+  "failed": 12,
+  "skipped_offline": 0,
+  "rate": 10,
+  "cache_bytes": 221000000,
+  "cache_limit_bytes": 671088640,
+  "over_budget": false,
+  "pass_started_at": 1700000000,
+  "pass_finished_at": null,
+
+  "pending": 497342,
+  "run_state": "running",
+  "current_rate": 9.6,
+  "eta_secs": 51800,
+  "last_error": null,
+  "job": {
+    "id": "wfj-1700000000-3f2a",
+    "mode": "missing",
+    "mode_effective": "missing",
+    "state": "running",
+    "started_at": 1700000000,
+    "updated_at": 1700003600,
+    "finished_at": null,
+    "total": 909342,
+    "done": 412000,
+    "generated": 35000,
+    "skipped": 377000,
+    "failed": 12,
+    "skipped_offline": 0,
+    "resumed": false,
+    "current": { "id": 412345, "started_at": 1700003599 }
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `pending` | 尚需生成的记录数：有任务时 = `job.total − job.done`；无任务时同 `remaining`（未开启预生成时为 `null`）。新客户端用它代替 `remaining` |
+| `run_state` | 归一化的运行状态：`idle` \| `running` \| `paused` \| `error`。`running` 包括已有 `state` 的 `running` 与 `yielding`（让路细节仍看 `state` / `yield_reason`）；`paused` = 任务或预生成被手动暂停（任务的暂停跨重启保留，重启后仍报 `paused`）；`error` = 最近一个任务以 `error` 结束且之后没有新任务；`off` 与 `idle` 都报 `idle` |
+| `current_rate` | 最近 60 秒滑动窗口内的实际处理速度（记录/秒，一位小数）；空闲或暂停时为 `0` |
+| `eta_secs` | 预计剩余秒数 = `pending` / `current_rate`（同一个 60 秒滑动窗口），向上取整；任务刚开始（窗口内尚无样本）、暂停中、`current_rate` 为 0 或 `pending` 为 `null` 时为 `null`，客户端显示「估算中」 |
+| `last_error` | 最近一次后台错误（任务级错误或最近一个文件解码失败）：`{ "at": <Unix 秒>, "error_code": "AUDIO", "message": "…", "id": 106 }`（`id` 可为 `null`；`message` 不含路径，同 §9.1 的 `error`），没有时为 `null`。进程重启后从持久化任务状态恢复（§9.5.5） |
+| `job` | 当前或最近一个任务；从未运行过任务时为 `null`。**必有字段**：`id`（不透明字符串，客户端用它判断任务是否已换成新的）、`mode`、`started_at`、`done`、`failed`、`total`，其余字段可能随版本增加。`mode_effective` = 实际执行的模式，通常等于 `mode`；`failed` 回退时为 `missing`（见 §9.5.5）。`state`：`running` \| `yielding` \| `paused` \| `completed` \| `cancelled` \| `error`。`done` = 已检查的记录数（`generated` + `skipped` + `failed` + `skipped_offline`）；`generated` = 实际解码写入的数；`skipped` = 键一致只做 `stat` 的数；`resumed` = 本任务是否在重启后恢复过；`current` = 正在处理的记录（没有时为 `null`）；结束的任务保留到下一个任务开始 |
+
+- 已有字段 `failed`、`remaining`、`pass_*` 的含义不变；有任务时 `pass_started_at` / `pass_finished_at` 跟随任务的 `started_at` / `finished_at`。
+- 仍按 §2.2 鉴权，**不受 `manage_mode` 限制**，30 秒超时。旧字段“进度在内存中，重启后从头统计”的说明改为：预生成进度仍在内存中；**任务**进度持久化（§9.5.5）。
+
+#### 9.5.3 任务端点
+
+所有任务端点：按 §2.2 鉴权，**受 `manage_mode` 限制**（§6.9，403 `MANAGE_FORBIDDEN`；先鉴权，缺 token 仍是 401）；浏览器请求须同源（§2）；是缓存而不是库记录，所以**不要求** `X-AudioLib-Library-Id`，不改 `revision`；30 秒超时（只登记任务，不在请求内解码）。成功时回复与 `GET /waveforms/status` 相同的完整状态（客户端无需再查一次）。
+
+**开始**：`POST /api/v1/waveforms/jobs`，`Content-Type: application/json`
+
+```json
+{ "mode": "missing" }
+```
+
+- `mode` 必填：`missing` \| `rebuild` \| `failed`；缺失、类型不对、未知值或含未知字段 → 400 `VALIDATION`（未知 `mode` 带 `"sub_code": "UNSUPPORTED_MODE"`）。
+- `rebuild` 必须同时带 `"confirm": "rebuild"`，否则 400 `VALIDATION`（`sub_code`: `CONFIRM_REQUIRED`）；防止误发。其他模式带 `confirm` 时忽略该字段。
+- 成功 → **202**，状态体中 `job.id` 为新任务 id（不透明字符串）、`job.state` 为 `running`。
+- 已有任务在 `running` / `yielding` / `paused` → **409 `BUSY`**（`message`：`A list waveform job is already in progress`，错误体附 `"job_id": "<当前任务 id>"`），不排队。结束状态的任务不妨碍新任务。
+- 库未打开 → 503 `UNAVAILABLE`（§6.2）；列表缓存不可用（`waveforms.db` 无法使用，同 §9.4.2）→ 503 `UNAVAILABLE` + `Retry-After`。
+- 扫描运行中也可以开始：任务登记后按让路规则等待扫描结束。
+
+**暂停 / 继续**：`POST /api/v1/waveforms/jobs/current/pause`、`POST /api/v1/waveforms/jobs/current/resume`（无请求体）
+
+- 暂停后不再取新文件（正在处理的那个完成后停下）；暂停状态会持久化，**重启后仍为暂停**（与 §9.2 预生成的手动暂停不同）。
+- 幂等：对已暂停的再暂停、对运行中的再继续都返回 200。
+- 没有任务、或当前任务已结束 → 409 `JOB_STATE`（新错误码，见 §9.5.7）。
+
+**停止**：`POST /api/v1/waveforms/jobs/current/stop`（无请求体）
+
+- 已定用 `POST …/stop`，不提供 `DELETE`：与 §6.6 扫描的 `POST /scans/{id}/cancel` 一样是“动作”，且停止后任务记录仍保留可查（`DELETE` 容易被理解成删除记录或缓存）。
+- 正在处理的文件完成后停下，任务变为 `cancelled`；**已生成的缓存保留**（`rebuild` 中途停止时，已清空且尚未重建的条目之后由按需队列或下一次 `missing` 补齐）。
+- 回复 200；没有进行中的任务 → 409 `JOB_STATE`。
+
+**查询**：目前没有 `GET /waveforms/jobs/{id}`，当前/最近任务只在 `GET /waveforms/status` 的 `job` 中给出；以后如需任务历史再增加。
+
+**与 §9.2 旧端点的关系**：`POST /waveforms/pregeneration/pause|resume` **保留**，行为扩展为：有进行中的任务时作用于任务（等同 `jobs/current/pause|resume`，但与旧行为保持一致，没有任务时也不报错）；没有任务时与原来相同，只暂停当前进程的预生成。新客户端在支持 `list_waveform_jobs` 时用新端点。
+
+#### 9.5.4 限速设置 `list_waveform_rate`
+
+- `GET /api/v1/settings` 新增 `list_waveform_rate`（生效值，整数，文件/秒）和 `list_waveform_rate_source`（`default` \| `config` \| `admin`）。
+- `PATCH /api/v1/settings` 接受 `{"list_waveform_rate": 20}`：整数 1..=1000，越界或类型不对 → 400 `VALIDATION`；`null` = 删除覆盖、回到 `config.toml`（默认 10）。规则与 `pregenerate_list_waveforms` 完全相同（§9.2：受 `manage_mode` 限制、写入 `admin-settings.json`、立即生效），对进行中的任务和预生成**立即生效**（下一个文件起）。按需队列仍不受限速。
+- `pregenerate_list_waveforms` 不变，即「新扫描到的文件自动生成缩略波形」开关；客户端设置页把两者放在一起显示。
+- 管理页：`PUT /admin/api/settings` 同样接受 `list_waveform_rate`（`null` / `""` = 删除覆盖）。
+
+#### 9.5.5 跨重启恢复：任务状态文件
+
+- 位置：本库列表缓存目录 `list/<library_id 的哈希>/` 下的 `job-state.json`（与 `waveforms.db` 同目录）。服务端内部文件，客户端不读取。
+- 写入：同目录临时文件 + `rename` 原子替换；任务开始、暂停/继续/停止、结束时立即写入，运行中最多每 **5 秒**或每 1,000 条记录写一次进度。
+- 格式（`version` 1）：
+
+```json
+{
+  "version": 1,
+  "library_id": "…",
+  "job": {
+    "id": "wfj-1700000000-3f2a",
+    "mode": "missing",
+    "mode_effective": "missing",
+    "state": "running",
+    "paused": false,
+    "started_at": 1700000000,
+    "updated_at": 1700003600,
+    "finished_at": null,
+    "cursor": 412345,
+    "max_id": 1203344,
+    "total": 909342,
+    "done": 412000,
+    "generated": 35000,
+    "skipped": 377000,
+    "failed": 12,
+    "skipped_offline": 0,
+    "rebuild_cleared": true
+  },
+  "last_error": null
+}
+```
+
+- 语义：
+  - `cursor` = 已完成处理的最大记录 id（按 id 升序遍历）；恢复时从 `cursor + 1` 继续，范围上限为任务开始时的 `max_id`。由于进度最多 5 秒落盘一次，恢复后可能重复处理最后几秒的记录：`missing` 下键一致只需 `stat`，重复无害。
+  - `rebuild`：`rebuild_cleared` 为 `false` 时（清空过程中被中断）恢复时重新清空；为 `true` 后按 `cursor` 继续生成。
+  - 启动时（打开 `waveforms.db` 之后）若 `state` 为 `running` / `yielding` / `paused`，恢复该任务，`job.resumed` = `true`；`paused` 恢复后仍暂停。
+  - `library_id` 与当前库不同、`version` 未知或文件损坏：忽略并改名为 `job-state.json.bad`，记 WARN，不恢复（不影响服务启动）。
+  - 已结束的任务也保留在文件中，供 `GET /waveforms/status` 的 `job` 与 `last_error` 在重启后仍可查。
+  - 失败记录的明细（哪些 id 失败）**不持久化**，只持久化计数。重启后恢复的 `mode: "failed"` 任务，以及重启后新开始、但本进程尚无已知失败项的 `failed` 任务，都**回退为 `missing`**：失败的文件没有缓存，`missing` 会覆盖它们（代价是也会补齐其他缺失项）。回退时 `job.mode` 仍为 `failed`，`job.mode_effective` 为 `missing`，客户端可据此提示「已按补齐缺失执行」。
+
+#### 实现细节（客户端不应依赖）
+
+- `done` 中「已删除 / 文件缺失 / 无法读取 Metadata」的记录计入 `skipped`；已知解码失败且文件未变的记录（`missing` 模式下）计入 `failed`。`current_rate` 按「已检查的记录」计（含只做 `stat` 跳过的），不含因根离线跳过的记录。
+- 根离线跳过的记录先计入 `skipped_offline`；任务运行期间该根恢复 `online` 时重新处理（从 `skipped_offline` / `done` 中扣回再重新计数）。任务**不等待**离线根：其余记录处理完即 `completed`，此时仍离线的记录保留在 `skipped_offline` 中，之后由按需队列或下一次任务补齐。
+- 重启后恢复的 `failed` 任务（`mode_effective` 回退为 `missing`）从头开始：`cursor`、`done` 及各计数清零，`total` 按当前库重新统计。
+- 结束（`completed` / `error`）时的状态文件在最后一条记录处理完后立即写入，可能比 `GET /waveforms/status` 晚几毫秒。
+- `GET /settings` 的 `list_waveform_rate_source`：`config.toml` 中的值等于内置默认 10 时报 `default`（无法区分“写了 10”与“没写”），其他值报 `config`。
+
+#### 9.5.6 整包与客户端行为
+
+- 任务进行中 `GET /waveforms/bundle`（§9.4.2）照常可用，返回当前已有的条目（`VACUUM INTO` 是 WAL 读事务，不阻塞任务写入）；`rebuild` 刚清空后整包可能接近空，客户端导入后用 §9.1 增量补齐即可（不会丢失：etag 规则不变）。`POST /waveforms` 照常可用。
+- 建议的客户端交互：设置页显示 `run_state`、`cached` / `total`、`pending`、`failed`、`current_rate`、`eta_secs`、`last_error`、`job.current`；按钮「补齐缺失」（`missing`）、「重试失败」（`failed`，`failed > 0` 时可用）、「全部重建」（`rebuild`，**两次确认**后才发送，第二次确认提示会清空现有缓存并重新读取所有文件，NAS 会长时间保持唤醒）、「暂停 / 继续」「停止」；限速输入框（1..=1000，留空 = 恢复默认）。`can_manage` / `can_change` 为假时只读。「波形缓存」面板打开时每 **2 秒**轮询一次 `GET /waveforms/status`，面板关闭即停止轮询（状态在内存中，开销很小；与 §9.3 第 5 条预生成进度的 5 秒轮询独立）。
+- 收到 409 `BUSY` 时刷新状态并显示当前任务；收到 409 `JOB_STATE` 时刷新状态即可。
+
+#### 9.5.7 能力声明与错误码
+
+`GET /capabilities` 新增：
+
+```json
+"list_waveform_jobs": { "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }
+```
+
+- 缺字段（旧服务端，或库已打开但 `waveforms.db`（§9.4）无法打开）= 不支持 §9.5 的任务端点与 `list_waveform_rate` 设置（后一种情况下任务端点返回 503 `UNAVAILABLE`）；`modes` 以后可扩展，客户端只显示列出的模式；`rate_setting` 表示 `PATCH /settings` 接受 `list_waveform_rate`。
+- §6.9 的 `manage_mode` 管理端点清单增加：`POST /waveforms/jobs`、`POST /waveforms/jobs/current/pause|resume|stop`。
+- §2.1 错误表新增：任务当前状态不允许该操作（没有任务或任务已结束时暂停/继续/停止）→ 409 `JOB_STATE`（类比 `SCAN_STATE`）。已有任务时再开始 → 409 `BUSY`（同扫描，§6.6）。
+
+#### 9.5.8 已知问题（随本功能一起修复）
+
+- **整包首次请求 500 `IO`（ENOENT）**：库的 `list/<library_id 的哈希>/` 目录尚未创建时，第一次 `GET /waveforms/bundle` 可能在创建目录与生成临时目录之间竞争，返回 500 `IO`（No such file or directory）。已修复：生成整包前在持有整包名额的情况下 `create_dir_all` 该目录（幂等）；目录无法创建时返回 503 `UNAVAILABLE` + `Retry-After`（`message` 不含路径），不返回 500。目录仍按需创建（第一次写入分片、`waveforms.db`、`job-state.json` 或整包时），库打开时不预先创建。旧服务端遇到该 500 时客户端可按 `Retry-After: 5` 重试一次。
+
 ## 10. 服务端部署
 
 - 部署方式：macOS 原生进程（不用容器），默认监听 `0.0.0.0:8790`，可用 launchd 用户代理常驻。启动时先监听端口，再在后台打开库；打不开时进程不退出而是重试（§6.2）。端口被占用、配置无效或（`auth = true` 时）token 缺失仍会直接退出。可选的原生 TLS 监听（§2.3）起不来时只在日志和管理页报错，不影响 HTTP 端口。管理页：`http://<host>:8790/admin`（§2.3）。
@@ -1168,7 +1363,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 版本轮询：服务器模式下后台线程每 `poll_interval_secs` 秒（默认 60，0 = 关闭，设置项 `data_source.poll_interval_secs`）调用 `GET /library`，与已打开快照的 `library_id`/`revision` 比对；有变化时在标题栏下方显示非阻塞提示和「同步」按钮（`auto_sync = true` 时自动同步，但要等 revision 稳定：同一 revision 至少保持一个轮询间隔才同步（「重试」、保存设置等额外检查不算），持续变化时最多推迟 15 分钟，避免分批扫描时每批都整库下载；`library_id` 变化或首次同步立即进行）。轮询能连上服务器时同时取 `GET /roots`（§6.4 状态缓存），标题栏显示「根目录离线：X」「磁盘唤醒中：Y」，数据源对话框按根显示状态；离线根的记录照常列出，不标为缺失。根离线提示上的「重试」对每个离线根调用 `POST /roots/{name}/check`（约 2 秒，不阻塞界面），用返回的条目更新状态，仍离线则保留提示；服务器没有该端点（404）时改为对所选记录发 `HEAD /audio/{id}/stream`。切到本地模式、改用离线缓存或保存设置时丢弃旧的根状态（保存设置后立即重新获取，成功同步会带来新的根状态）；只有快照中保存的根列表时不使用其中过时的状态。离线时继续用缓存并显示「离线」，按间隔翻倍退避（最长 15 分钟）；`503` 视为「服务器启动中，稍后重试」（10/20/40 秒…重试，且不早于 `Retry-After`，不当作令牌错误；`/health` 的 `status: starting|error` 在连接测试中单独显示）；401 提示检查令牌。
 - 标注写入（§6.3）：服务器模式下详情面板的收藏、标签、备注，以及右键/菜单的收藏、批量标注均可用，经 `DataProvider`（`audiolib_remote::RemoteProvider`）发到服务器；颜色含清除可通过 CLI 标注，标签支持替换/追加/移除。单条 `PATCH /audio/{id}/metadata`，批量 `POST /audio/metadata/batch {ids, patch, tag_mode}`；0.4.0 不提供评分编辑。**revision 规则**：成功后若本地快照 revision 等于 `revision_before`，把返回的 `file`/`files` 在一个事务中写入已打开的快照（用户标签/备注及其分词列，FTS5 触发器同步更新；收藏、颜色、播放次数），并把本地 revision 设为 `revision`（`cache.json` 与标题栏），不做整库同步；否则（期间有其他客户端写入、无缓存状态等）执行一次完整快照同步。错误映射：`400 VALIDATION` → 值无效（附服务器说明；发送前也做本地校验）；`404` → 记录在服务器上已不存在（批量整体回滚）；`409 BUSY` → 服务器正在扫描，稍后重试；`413 PAYLOAD_TOO_LARGE` → 请求过大（8 MiB 上限，客户端发送前也拦截）；`401` 同读取；`408 TIMEOUT`/超时/断线/响应不可读 → 结果不确定，提示错误并请求完整同步。写入不自动重试；保存失败时草稿保留为「未保存」。快照提供者切换必须先排空 Metadata 写入，排空失败则保留当前提供者与草稿，不安装新快照。
 - 仍只读：扫描/重扫（主窗口入口；扫描在「服务器音效库」页）、维护/还原、relink、导入、新建/打开库、在资源管理器中定位。菜单项置灰并带「（服务器模式只读）」后缀，音效库管理对话框有说明行，控制器（`refuse_remote_write`）和 `RemoteProvider` 都独立拒绝。移除记录或目录见上（需服务器 `can_manage`）。原始 WAV 从不修改。
-- 播放计数：服务器模式下播放历史判定为一次播放时（规则同本地），在独立短线程上 `POST /audio/{id}/plays`（无请求体，失败只记日志，不打扰用户），并应用 revision 规则；不在音频线程执行。
+- 播放计数：本地和服务器模式都不再写入计数或历史；服务器模式播放不请求 `/audio/{id}/plays`，也不产生缓存写入或重同步事件。低层兼容路由只服务旧调用方。客户端不新增历史存储；旧库中的播放结构在下一次明确迁移时退役，升级前完整备份保留旧值用于回滚（§6.3、迁移契约 §7）。
 - 拖出：结果行可拖到资源管理器/DAW（拖动已勾选的行则拖出全部勾选项），原生 OLE `DoDragDrop` + `CF_HDROP` 真实路径，仅 `DROPEFFECT_COPY`；不使用虚拟/延迟文件。本地模式直接提供素材库文件。服务器模式先确保所选文件完整位于下载缓存 `<数据目录>/cache/<library_id>/<file_id>-<ETag 哈希 16 位>/<原文件名>`（状态栏显示进度，可取消；若松开鼠标前未就绪，提示「已准备好，请再次拖动」）。文件名取 §8 `download=1` 的 `Content-Disposition`：优先 `filename*=UTF-8''…`（百分号解码），否则 `filename`，再否则记录文件名；替换 Windows 非法字符、处理保留名（CON/NUL/COM1…）和末尾点/空格，例如 `filename="audio-7.wav"; filename*=UTF-8''%E9%9B%B7%E5%A3%B0%20%E8%BF%91.wav` → `雷声 近.wav`。复用：已有完整文件先 `HEAD …?download=1` 复核 ETag（最多等 2.5 秒；超时、根离线、服务器启动中或忙时直接用该缓存文件，不等磁盘唤醒）；试听内存中已有完整且 ETag（同一 `/audio/{id}/stream`）和长度一致的原始副本则直接复制；否则 `GET …/stream?download=1` 写 `.part`（`Content-Length` 驱动进度，断点用 `Range` + `If-Range` 续传，校验 ETag/长度后改名）。离线时用该文件最新的缓存版本。容量上限 4 GiB，按最近使用淘汰，只作用于带 `.audiolib-downloads` 标记的库目录和其中 `<id>-<16 位十六进制>` 条目目录，不跟随链接，不触碰 `cache/` 下其他内容（如 `cache/waveforms`）。
 - CLI：`remote edit <id[,id…]> [--tags] [--tag-mode replace|append|remove] [--color '#RRGGBB'|''] [--notes] [--favorite]`（单 id + replace 走 PATCH，否则走批量），`remote plays <id>`，`remote download <id[,id…]>`；输出 `revision_before`/`revision` 和缓存结果（`applied` 或执行的同步）。
 - WebDAV：每个扫描根一行，可编辑。有效地址优先级：**用户填写的地址（按根名保存）> 服务端 `/roots.webdav_url`（仅为默认建议）> 全局 `base_url + "/" + 根名`**；留空或与服务端建议相同即表示使用服务端默认。记录路径按最长 `server_path` 前缀（按路径分量匹配）替换为有效地址，剩余部分逐段百分号编码。「测试连接」按根检查有效地址（PROPFIND Depth:0，405/501 时回退 HEAD），并标明来源（用户/服务器/基础地址）。WebDAV 是可选项（试听默认走 §8 服务器流）：未配置地址的根显示「– 未配置 WebDAV，试听走服务器流」，已配置但不可达只算警告（!），都不让测试整体失败。测试另外用本机已同步快照中的一条未缺失记录请求 `GET /audio/{id}/stream`（`Range: bytes=0-0`）：206/200 通过，401、503（含根离线 `ROOT_OFFLINE`）、不可达和超时算失败（超时附「磁盘可能正在唤醒」提示），404（该记录文件缺失）算警告；没有该库快照时跳过。`AudioLibCli remote test` 只在必需步骤失败时返回 `REMOTE_TEST_FAILED`，警告放在 `warnings` 数组。
@@ -1195,3 +1390,4 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 7. 库身份是否迁入未来 schema（§3）。
 8. 增量同步 `GET /library/changes`（§6.5 草案）：变更日志放库内触发器（schema v5）还是服务端旁路；保留多久；410 的阈值。
 9. 列表缩略波形（§9.1–§9.3，服务端已实现）：客户端评审结论见 §9.3；按需队列的让路已定（只在试听开始后的前 3 秒让路，试听期间最多 1 个解码名额，不因扫描暂停；预生成在试听整个期间和扫描期间让路，§9.2）。`list_waveform_cache_mb` 默认 640 MiB 已确认够用：909,342 条的满库约 465 MiB（§9.1 容量估算），超出时按分片淘汰并在 `/waveforms/status` 报 `over_budget`。
+10. ~~列表波形缓存管理（§9.5）~~：已与客户端评审定：停止用 `POST …/stop`；`rebuild` 需 `confirm`；暂停跨重启保留；失败明细不持久化，重启后 `failed` 回退为 `missing`（`job.mode_effective`）；ETA = 剩余 / 60 秒窗口速度；暂不提供 `GET /waveforms/jobs/{id}`。

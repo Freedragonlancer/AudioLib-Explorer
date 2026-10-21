@@ -1,8 +1,8 @@
 # AudioLib Explorer release notes
 
-## Unreleased: Plan B storage and shared migration (`0.5.0-dev.1`)
+## Unreleased: Plan B storage and shared migration (`0.6.0-dev.1`)
 
-Development identity: program `0.5.0-dev.1` | API `/api/v1/` | schema 6 |
+Development identity: program `0.6.0-dev.1` | API `/api/v1/` | schema 6 |
 snapshot schema boundary 3..=6, subject to the complete format/capability catalog.
 This isolated development build has not been published, deployed or installed over
 the current application. A future release requires a chosen release version/tag and
@@ -25,6 +25,11 @@ the corresponding tested peer-version ranges.
   Invalid checkpoints stop resumption; process-crash recovery is tested for copy,
   indexing, publication and rollback. Cache retries preserve the previous snapshot
   and leave abandoned jobs intact for owner review.
+- The CR branch incorporates released 0.5.0, retains its Waveform cache management
+  and same-revision replies, and explicitly tests both 0.4.11 and 0.5.0 legacy peers.
+  It rejects stale/unbound snapshots, checks UPDATE OF retirement dependencies,
+  binds recovery to actual tokenizer sources and admits settings mutations through
+  the same peer-catalog check. See [the CR record](api/Search_Storage_B_CR.md).
 
 See the [migration contract](api/Library_Migration_Compatibility.md),
 [full-library measurements](api/Search_Storage_B_Integrated_Validation.md) and

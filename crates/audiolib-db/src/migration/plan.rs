@@ -31,7 +31,7 @@ pub struct MigrationPlan {
     pub application_version: String,
     /// Compatibility catalog used to choose the route.
     pub catalog_revision: u32,
-    /// Tokenizer implementation/dictionary identity for deterministic resume.
+    /// Tokenizer/projection sources, dictionary and locked dependency identity for resume.
     pub tokenizer_identity: String,
     /// Stable compiled route identity; changing a step cannot silently resume an old job.
     pub recipe_identity: String,
@@ -51,8 +51,49 @@ pub(super) fn invalid(message: impl Into<String>) -> Error {
 
 pub(super) fn tokenizer_identity() -> String {
     let mut hash = Sha256::new();
-    hash.update(b"jieba-rs=0.11.0;tokenization=3;source_metadata=2;");
-    hash.update(include_bytes!("../../../../resources/audio_terms.txt"));
+    hash.update(b"ale-tokenizer-projection-sources-v1;tokenization=3;source_metadata=2;");
+    // Bind the actual loader, Unicode/token/query implementation, SQL-function
+    // adapters and Metadata projection, not only their manually maintained revs.
+    // Full source files deliberately fail closed on unrelated edits to these few
+    // modules. include_bytes! embeds text; it never invokes their identity functions.
+    // Manifests bind dependency features/patch selection; Cargo.lock binds versions
+    // and registry checksums, including Jieba's compiled dictionary dependencies.
+    const INPUTS: &[(&str, &[u8])] = &[
+        (
+            "dictionary",
+            include_bytes!("../../../../resources/audio_terms.txt"),
+        ),
+        ("db/lib.rs", include_bytes!("../lib.rs")),
+        ("db/search_text.rs", include_bytes!("../search_text.rs")),
+        ("db/schema.rs", include_bytes!("../schema.rs")),
+        (
+            "core/lib.rs",
+            include_bytes!("../../../audiolib-core/src/lib.rs"),
+        ),
+        (
+            "core/metadata.rs",
+            include_bytes!("../../../audiolib-core/src/metadata.rs"),
+        ),
+        (
+            "workspace/Cargo.toml",
+            include_bytes!("../../../../Cargo.toml"),
+        ),
+        ("db/Cargo.toml", include_bytes!("../../Cargo.toml")),
+        (
+            "core/Cargo.toml",
+            include_bytes!("../../../audiolib-core/Cargo.toml"),
+        ),
+        (
+            "workspace/Cargo.lock",
+            include_bytes!("../../../../Cargo.lock"),
+        ),
+    ];
+    for &(name, bytes) in INPUTS {
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
     format!("{:x}", hash.finalize())
 }
 
@@ -182,4 +223,74 @@ pub fn plan(path: &Path, cancel: &AtomicBool) -> Result<MigrationPlan> {
             normalizes_legacy,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migration::{MigrationPhase, apply, discover, resume, rollback, verify};
+
+    #[test]
+    fn old_tokenizer_identity_in_same_version_job_blocks_before_touching_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("library.db");
+        let mut conn = Connection::open(&path).unwrap();
+        schema::register_tokenizer(&conn, crate::load_tokenizer()).unwrap();
+        schema::migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<5001)
+             INSERT INTO audio_files(id,file_path,filename,metadata_json)
+             SELECT id,'owned/'||id||'.wav','metal.wav',
+                    '{\"wav_metadata\":{\"fields\":{\"keywords\":\"木头\"}}}' FROM ids;",
+        )
+        .unwrap();
+        drop(conn);
+        let cancel = AtomicBool::new(false);
+        let reviewed = plan(&path, &cancel).unwrap();
+        assert!(matches!(
+            apply(&reviewed, &cancel, &mut |event| {
+                if event.phase == MigrationPhase::Indexing && event.completed > 0 {
+                    Err(Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(Error::Cancelled)
+        ));
+        let mut job = discover(&path).unwrap().unwrap();
+        assert_eq!(job.phase, MigrationPhase::Indexing);
+        assert_eq!(job.plan.application_version, env!("CARGO_PKG_VERSION"));
+
+        // A real pre-fix identity: same application/version and dictionary, but no
+        // binding to the executable tokenizer or Metadata implementation. Persist
+        // it in an already partially indexed job, rather than only comparing hashes.
+        let mut old_identity = Sha256::new();
+        old_identity.update(b"jieba-rs=0.11.0;tokenization=3;source_metadata=2;");
+        old_identity.update(include_bytes!("../../../../resources/audio_terms.txt"));
+        job.plan.tokenizer_identity = format!("{:x}", old_identity.finalize());
+        job.save().unwrap();
+        let artifacts = [
+            path,
+            job.artifact("backup.db").unwrap(),
+            job.artifact("candidate.db").unwrap(),
+        ];
+        let before = artifacts
+            .each_ref()
+            .map(|path| std::fs::read(path).unwrap());
+        for result in [
+            resume(&job.directory, &cancel, &mut |_| Ok(())).map(|_| ()),
+            verify(&job.directory, &cancel).map(|_| ()),
+            rollback(&job.directory, &cancel, &mut |_| Ok(())).map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(Error::Validation(message))
+                if message.contains("original supported tool/catalog/tokenizer")));
+        }
+        for (path, bytes) in artifacts.iter().zip(before) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(
+            discover(&artifacts[0]).unwrap().unwrap().phase,
+            MigrationPhase::Indexing
+        );
+    }
 }

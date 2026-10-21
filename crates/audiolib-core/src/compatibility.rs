@@ -336,6 +336,10 @@ pub struct CompatibilityManifest {
     pub catalog_revision: u32,
     /// Each entry is an explicit semver requirement; pre-releases require opt-in.
     pub peer_application_ranges: Vec<String>,
+    /// Tested published peers that predate the catalog. This exception is bounded
+    /// independently of modern peers; an absent field grants no legacy admission.
+    #[serde(default)]
+    pub legacy_peer_application_ranges: Vec<String>,
     /// Tested application origins that may directly use supported read formats.
     pub direct_use_application_ranges: Vec<String>,
     /// Tested application origins with supported owned migration routes.
@@ -356,21 +360,27 @@ pub struct CompatibilityManifest {
     pub minimum_sqlite_version: String,
 }
 
-/// This development catalog admits the tested release baseline and the exact
-/// development version, not hypothetical future 0.4.x or 0.5.x releases.
+/// Exact published protocol baselines. Keep legacy admission and the exposed
+/// direct-use/migration ranges derived from this one reviewed release set.
+const LEGACY_APPLICATION_RANGES: &[&str] = &["=0.4.11", "=0.5.0"];
+
+/// This development catalog admits the tested published releases and the exact
+/// development version. Actual format inspection still decides direct use versus
+/// owned migration; neither the version nor these overlapping ranges grants writes.
 pub fn compatibility_manifest() -> CompatibilityManifest {
+    let legacy_ranges: Vec<String> = LEGACY_APPLICATION_RANGES
+        .iter()
+        .map(|requirement| (*requirement).to_owned())
+        .collect();
+    let mut supported_ranges = legacy_ranges.clone();
+    supported_ranges.push(format!("={}", env!("CARGO_PKG_VERSION")));
     CompatibilityManifest {
         application_version: env!("CARGO_PKG_VERSION").into(),
         catalog_revision: CATALOG_REVISION,
-        peer_application_ranges: vec![
-            ">=0.4.11, <0.4.12".into(),
-            format!("={}", env!("CARGO_PKG_VERSION")),
-        ],
-        direct_use_application_ranges: vec![
-            ">=0.4.11, <0.4.12".into(),
-            format!("={}", env!("CARGO_PKG_VERSION")),
-        ],
-        auto_migrate_application_ranges: vec!["=0.4.11".into()],
+        peer_application_ranges: supported_ranges.clone(),
+        legacy_peer_application_ranges: legacy_ranges,
+        direct_use_application_ranges: supported_ranges.clone(),
+        auto_migrate_application_ranges: supported_ranges,
         api_protocols: vec![API_PROTOCOL.into()],
         snapshot_read_formats: vec![
             "ale-s3-ext-t3-m2".into(),
@@ -388,14 +398,15 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
     }
 }
 
-fn accepts_version(manifest: &CompatibilityManifest, version: &Version) -> bool {
-    manifest.peer_application_ranges.iter().any(|requirement| {
+fn accepts_range(ranges: &[String], version: &Version) -> bool {
+    ranges.iter().any(|requirement| {
         VersionReq::parse(requirement).is_ok_and(|requirement| requirement.matches(version))
     })
 }
 
-/// Validate both directions of a modern handshake. A legacy 0.4.11 peer lacks
-/// this catalog; its format still requires independent download/file checks.
+/// Validate both directions of a modern handshake. Only releases explicitly
+/// recorded in the local legacy catalog may omit theirs; all downloaded formats
+/// still require independent header/file checks.
 pub fn peer_versions_compatible(
     local: &CompatibilityManifest,
     peer_version: &str,
@@ -407,20 +418,20 @@ pub fn peer_versions_compatible(
     ) else {
         return false;
     };
-    if !accepts_version(local, &peer_version) {
+    if !accepts_range(&local.peer_application_ranges, &peer_version) {
         return false;
     }
     match peer {
         Some(peer) => {
             Version::parse(&peer.application_version).ok().as_ref() == Some(&peer_version)
                 && peer.catalog_revision == CATALOG_REVISION
-                && accepts_version(peer, &local_version)
+                && accepts_range(&peer.peer_application_ranges, &local_version)
                 && peer
                     .api_protocols
                     .iter()
                     .any(|p| local.api_protocols.contains(p))
         }
-        None => peer_version == Version::new(0, 4, 11),
+        None => accepts_range(&local.legacy_peer_application_ranges, &peer_version),
     }
 }
 
@@ -508,10 +519,37 @@ mod tests {
     #[test]
     fn peer_checks_are_mutual_bounded_and_pre_release_explicit() {
         let local = compatibility_manifest();
-        assert!(peer_versions_compatible(&local, "0.4.11", None));
-        for unsupported in ["0.4.10", "0.4.12", "0.4.11-rc.1", "9.0.0", "invalid"] {
+        for supported in ["0.4.11", "0.5.0"] {
+            assert!(peer_versions_compatible(&local, supported, None));
+            let version = Version::parse(supported).unwrap();
+            for ranges in [
+                &local.peer_application_ranges,
+                &local.direct_use_application_ranges,
+                &local.auto_migrate_application_ranges,
+            ] {
+                assert!(accepts_range(ranges, &version));
+            }
+        }
+        for unsupported in [
+            "0.4.10",
+            "0.4.12",
+            "0.4.11-rc.1",
+            "0.5.0-rc.1",
+            "0.5.1",
+            "0.6.0",
+            "0.6.0-dev.2",
+            "9.0.0",
+            "invalid",
+        ] {
             assert!(!peer_versions_compatible(&local, unsupported, None));
         }
+        // A current prerelease opts into modern mutual negotiation only. Even an
+        // otherwise identical process cannot silently omit its capability catalog.
+        assert!(!peer_versions_compatible(
+            &local,
+            &local.application_version,
+            None
+        ));
         assert!(peer_versions_compatible(
             &local,
             &local.application_version,
@@ -524,6 +562,59 @@ mod tests {
             &peer.application_version,
             Some(&peer)
         ));
+    }
+
+    #[test]
+    fn catalog_controls_legacy_exception_without_bypassing_peer_ranges() {
+        let mut local = compatibility_manifest();
+        local.legacy_peer_application_ranges.clear();
+        assert!(!peer_versions_compatible(&local, "0.4.11", None));
+        assert!(!peer_versions_compatible(&local, "0.5.0", None));
+        // A catalog does not classify an untested release as legacy merely because
+        // its ordinary peer range admits that version.
+        local.peer_application_ranges.push("=0.5.1".into());
+        assert!(!peer_versions_compatible(&local, "0.5.1", None));
+        local.legacy_peer_application_ranges = vec!["=0.5.0".into()];
+        assert!(peer_versions_compatible(&local, "0.5.0", None));
+        local.peer_application_ranges = vec![format!("={}", local.application_version)];
+        assert!(!peer_versions_compatible(&local, "0.5.0", None));
+    }
+
+    #[test]
+    fn absent_legacy_catalog_is_conservative_without_breaking_modern_peers() {
+        let local = compatibility_manifest();
+        let mut json = serde_json::to_value(&local).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("legacy_peer_application_ranges");
+        let older_catalog: CompatibilityManifest = serde_json::from_value(json).unwrap();
+        assert!(older_catalog.legacy_peer_application_ranges.is_empty());
+        assert!(!peer_versions_compatible(&older_catalog, "0.5.0", None));
+        assert!(peer_versions_compatible(
+            &local,
+            &older_catalog.application_version,
+            Some(&older_catalog)
+        ));
+    }
+
+    #[test]
+    fn modern_peer_must_match_identity_catalog_and_protocol_in_both_directions() {
+        let local = compatibility_manifest();
+        for mode in ["identity", "catalog", "protocol", "range", "invalid_range"] {
+            let mut peer = local.clone();
+            match mode {
+                "identity" => peer.application_version = "0.5.0".into(),
+                "catalog" => peer.catalog_revision += 1,
+                "protocol" => peer.api_protocols = vec!["api/v99".into()],
+                "range" => peer.peer_application_ranges = vec!["=0.5.0".into()],
+                "invalid_range" => peer.peer_application_ranges = vec!["invalid".into()],
+                _ => unreachable!(),
+            }
+            assert!(
+                !peer_versions_compatible(&local, &local.application_version, Some(&peer)),
+                "{mode}"
+            );
+        }
     }
 
     #[test]

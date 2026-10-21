@@ -75,7 +75,6 @@ fn cli(root: &Path, args: &[&str]) -> Value {
 fn rejected_id_commands(root: &Path, message: &str) {
     for args in [
         vec!["remote", "edit", "7", "--notes", "wrong notes"],
-        vec!["remote", "plays", "7"],
         vec!["remote", "download", "7"],
     ] {
         let reply = cli(root, &args);
@@ -134,7 +133,7 @@ fn replaced_library_at_same_url_rejects_id_commands_and_preserves_snapshot() {
     let state = cache.active().unwrap();
     let before = std::fs::read(cache.database_path(&state)).unwrap();
     rejected_id_commands(directory.path(), "library changed");
-    assert_eq!(requests.lock().unwrap().as_slice(), ["/api/v1/library"; 3]);
+    assert_eq!(requests.lock().unwrap().as_slice(), ["/api/v1/library"; 2]);
     assert_eq!(cache.active().unwrap(), state);
     assert_eq!(std::fs::read(cache.database_path(&state)).unwrap(), before);
 }
@@ -179,7 +178,6 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
                                 file_path: "/A/original.wav".into(),
                                 filename: "original.wav".into(),
                                 notes: "saved notes".into(),
-                                play_count: u64::from(request.method == "POST"),
                                 ..Default::default()
                             },
                             "revision_before": before,
@@ -199,7 +197,6 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
     let cache = prepare_cache(directory.path(), &cached_url, &server.url);
     for args in [
         vec!["remote", "edit", "7", "--notes", "saved notes"],
-        vec!["remote", "plays", "7"],
         vec!["remote", "download", "7"],
     ] {
         assert_eq!(cli(directory.path(), &args)["success"], true);
@@ -264,8 +261,6 @@ fn legacy_server_remains_readable_but_cli_never_sends_cached_id_writes() {
             .contains("update the server"),
         "{reply}"
     );
-    let played = cli(directory.path(), &["remote", "plays", "7"]);
-    assert_eq!(played["success"], true, "{played}");
     assert!(
         requests
             .lock()

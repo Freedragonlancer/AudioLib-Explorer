@@ -470,7 +470,7 @@ async fn scans_run_to_completion_bump_the_revision_only_for_changes_and_feed_the
         .await;
     }
 
-    // Play history.
+    // Play history (deprecated): plays are accepted but never recorded.
     let id = f
         .state
         .provider()
@@ -486,6 +486,7 @@ async fn scans_run_to_completion_bump_the_revision_only_for_changes_and_feed_the
     );
     let plays: Vec<audiolib_core::PlayRecord> = get(state, "/history/plays?limit=10").await;
     assert!(plays.is_empty(), "playback tracking is retired");
+    assert_eq!(f.state.provider().get_audio(id).unwrap().play_count, 0);
 }
 
 #[tokio::test]

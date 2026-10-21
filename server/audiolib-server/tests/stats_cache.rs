@@ -160,6 +160,7 @@ fn stats_neutral_writes_carry_the_cache_forward_and_warm_up_skips_a_current_side
             },
         )
         .unwrap();
+    assert_eq!(edited.revision, first.revision + 1);
     let after = state.library_response().unwrap();
     assert_eq!(after.revision, edited.revision);
     assert_eq!(

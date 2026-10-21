@@ -153,7 +153,8 @@ X-AudioLib-Accept-Snapshot-Formats: ale-s5-ext-t3-m2, ale-s6-cld1-t3-m2-p0
 及不一致的修订号。精确字段见 `audiolib-core::compatibility::CompatibilityManifest`。
 
 - `Accept-Snapshot-Formats` 是明确的格式 ID 集合，每个 ID 在双方内置兼容目录中映射到完整的 schema、必需 feature、FTS 结构和运行时前置条件。服务端只能发送请求明确包含且自身目录认识的格式，未知 ID 不作通配符。上述 `Max` 头仅用于快速拒绝，不能把小于上限的任意组合都视为兼容；支持区间有空洞也不扩大其含义。客户端必须再次检查下载文件，不能只信任响应格式 ID。
-- 新客户端先读取 `/health`、`/capabilities`，核对双方程序版本/API 范围，再读取 `/library` 并检查实际格式，兼容后才下载。没有目录的旧端只接受明确支持的 `0.4.11`，不把全部 `0.4.x` 当作兼容。
+- 新客户端先读取 `/health`、`/capabilities`，核对双方程序版本/API 范围，再读取 `/library` 并检查实际格式，兼容后才下载。没有目录的旧端只接受明确支持的 `0.4.11`、`0.5.0`；其他版本必须按目录判断。
+- 已支持旧端同样必须提供快照的库身份与 revision。身份须与 `/library` 一致，revision 不得低于先前观察值；缺失头或较旧的 single-flight 快照会被拒绝，活动缓存保持不变。不能把 `/library` 的版本号套在未绑定的旧快照上。
 - schema 6 服务端对缺少格式声明或不兼容的请求返回 **409 `SNAPSHOT_FORMAT_UNSUPPORTED`**，正文给出 required format；客户端目录缺失、非法或双方版本范围不符返回 **409 `PEER_VERSION_UNSUPPORTED`**。在 ETag 判断、快照复制、压缩及发送正文之前拒绝；这两种错误不按 `BUSY` 重试。旧 schema 3–5 的请求行为保持现状。
 - 新客户端可继续读取已支持的旧快照；不因为服务端版本号较新便推断格式兼容。
 - 快照响应（含 304）除既有身份/revision/schema/ETag 外，携带

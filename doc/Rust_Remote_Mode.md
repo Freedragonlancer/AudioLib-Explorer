@@ -434,19 +434,21 @@ batch edits of the checked records (tags *replace* or *append*; the API's *remov
 available in the CLI). The desktop routes these through `DataProvider` like in local mode:
 in server mode the Metadata worker and the batch operation use
 `audiolib_remote::RemoteProvider`, whose reads come from the snapshot and whose
-`update_metadata`, `update_metadata_batch` and `record_play` call
+`update_metadata` and `update_metadata_batch` call the endpoints below. Playback
+and play history are local no-ops: they send no HTTP request and write no cache data.
 
 | Operation | Request | Response |
 |---|---|---|
 | single edit | `PATCH /api/v1/audio/{id}/metadata` (JSON patch, absent fields unchanged, `"color":""` clears) | `{file, revision_before, revision}` |
 | batch edit | `POST /api/v1/audio/metadata/batch` `{ids, patch, tag_mode}` (one transaction) | `{report:{updated}, files, revision_before, revision}` — `files` in request order, duplicates removed |
-| play | `POST /api/v1/audio/{id}/plays` (no body) | `{file, revision_before, revision}` |
 
 **Revision rule.** After a successful write, if the cached snapshot's revision equals
 `revision_before`, the returned record(s) are written into the open snapshot in one SQLite
-transaction (`audiolib_db::apply_snapshot_records`: user tags/notes with their tokenized
-columns — the FTS5 triggers keep search consistent — favorite, color, play count)
-and the cached revision becomes `revision` (`cache.json` and the header). Otherwise (another
+transaction (`audiolib_db::apply_snapshot_records`: tags/notes, favorite and color,
+with FTS5 maintained atomically). Legacy schema 3–5 keeps its derived columns and
+stored count; schema 6 derives the tokens at index writes and ignores retired counters.
+The cached revision becomes `revision` (`cache.json` and the header); a valid response
+with `revision == revision_before` also applies without requesting full sync. Otherwise (another
 client wrote in between, no cached state, a different snapshot open) a normal full
 snapshot sync runs. The background revision poll therefore does not report the client's
 own writes as "new revision".
@@ -774,6 +776,25 @@ client does.
     usual library-identity check.
   - Progress comes from `GET /api/v1/waveforms/status`, read with the page and then
     every 5 s, only while the page stays open on that server.
+- **波形缓存 (Waveform cache) section** (API §9.5 as implemented at server commit cdea7c9), shown only for the active, open
+  server source. All requests go through the server `DataProvider`
+  (`waveform_cache_*` methods on `RemoteProvider`; local providers answer
+  unsupported) on worker threads.
+  - Shows `run_state`, a progress bar (the active job's `done / total`, otherwise
+    `cached / total`), `pending`, `failed`, `current_rate` with the effective rate limit,
+    the ETA (「估算中」 while `eta_secs` is `null`), the job line (including the
+    `skipped_offline` count and the `mode_effective` fallback note) and `last_error`. Status is polled every 2 s only
+    while the page stays open; any page, selection or window change stops the poll.
+  - With `list_waveform_jobs`: 补齐缺失 / 重试失败 (only when something failed) /
+    全部重建 (two inline confirmations; only then `"confirm": "rebuild"` is sent), and
+    暂停 / 继续 / 停止 through `/waveforms/jobs/current/*`; the rate field
+    (1–1000, empty = server default) patches `list_waveform_rate` when `rate_setting`
+    is listed. Only modes listed in `modes` are offered.
+  - Without the capability (older servers): only the switch, status and pre-generation
+    pause/resume (`/waveforms/pregeneration/*`).
+  - `403 MANAGE_FORBIDDEN` (or `can_manage` false) disables the controls until the page
+    reloads; `409 BUSY` and `409 JOB_STATE` (`RemoteError::JobState`) show a message and
+    refresh the status.
 
 Read-only measurements (2026-10-19, LAN test server, about 0.9 M records, pre-generation
 off, release build; ids and server identity omitted). Each page held 200 consecutive ids
@@ -963,7 +984,6 @@ AudioLibCli remote test [--url URL]    # per-step connection report (exit code 1
 AudioLibCli remote sync [--force]
 AudioLibCli remote edit <id[,id…]> [--tags T] [--tag-mode replace|append|remove]
                         [--color '#RRGGBB'|''] [--notes N] [--favorite true|false]
-AudioLibCli remote plays <id>
 AudioLibCli remote download <id[,id…]>
 AudioLibCli remote profiles                 # saved servers, active source (no tokens, no network)
 AudioLibCli remote roots [--url URL]        # /roots incl. missing_count, scanning, last_scan
@@ -978,7 +998,8 @@ AudioLibCli remote history scans|plays [--limit N] [--offset N] [--url URL]
 otherwise the batch endpoint. The reply lists `revision_before`, `revision` and the cache
 effect: `{"applied": true, "revision": N}` when the revision rule applied the records, or
 `{"applied": false, "sync": {…}}` with the result of the full sync that ran instead (also
-after an uncertain error such as `408`). `remote plays` records one play the same way.
+after an uncertain error such as `408`). Playback tracking is retired; there is no
+`remote plays` command. `remote history plays` returns an empty list without an HTTP request.
 `remote download` fills the drag-out download cache and prints `id`, `path` and `bytes`
 per file.
 

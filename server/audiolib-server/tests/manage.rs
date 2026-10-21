@@ -657,7 +657,10 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             can_manage: true,
             root_management: true,
             list_waveforms: Some(ListWaveformsCapability::default()),
-            pregenerate_list_waveforms: false
+            pregenerate_list_waveforms: false,
+            list_waveform_jobs: Some(
+                audiolib_server::wf_job::ListWaveformJobsCapability::default()
+            ),
         }
     );
     assert_eq!(
@@ -669,7 +672,10 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             can_manage: true,
             root_management: true,
             list_waveforms: Some(ListWaveformsCapability::default()),
-            pregenerate_list_waveforms: false
+            pregenerate_list_waveforms: false,
+            list_waveform_jobs: Some(
+                audiolib_server::wf_job::ListWaveformJobsCapability::default()
+            ),
         }
     );
     // Authentication still comes first.
@@ -746,7 +752,10 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             can_manage: false,
             root_management: true,
             list_waveforms: Some(ListWaveformsCapability::default()),
-            pregenerate_list_waveforms: false
+            pregenerate_list_waveforms: false,
+            list_waveform_jobs: Some(
+                audiolib_server::wf_job::ListWaveformJobsCapability::default()
+            ),
         }
     );
     assert_eq!(
@@ -758,7 +767,10 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             can_manage: false,
             root_management: true,
             list_waveforms: Some(ListWaveformsCapability::default()),
-            pregenerate_list_waveforms: false
+            pregenerate_list_waveforms: false,
+            list_waveform_jobs: Some(
+                audiolib_server::wf_job::ListWaveformJobsCapability::default()
+            ),
         }
     );
     assert_eq!(
@@ -770,7 +782,10 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             can_manage: true,
             root_management: true,
             list_waveforms: Some(ListWaveformsCapability::default()),
-            pregenerate_list_waveforms: false
+            pregenerate_list_waveforms: false,
+            list_waveform_jobs: Some(
+                audiolib_server::wf_job::ListWaveformJobsCapability::default()
+            ),
         }
     );
     for (method, path, body) in &managed {
@@ -840,7 +855,10 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
             can_manage: false,
             root_management: true,
             list_waveforms: Some(ListWaveformsCapability::default()),
-            pregenerate_list_waveforms: false
+            pregenerate_list_waveforms: false,
+            list_waveform_jobs: Some(
+                audiolib_server::wf_job::ListWaveformJobsCapability::default()
+            ),
         }
     );
     for (method, path, body) in &managed {

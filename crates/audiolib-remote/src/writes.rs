@@ -12,6 +12,10 @@ use crate::client::{BatchWrite, FileWrite, RemoteClient};
 use crate::error::{RemoteError, Result};
 use crate::manage::{RemoveReport, manage_error_text};
 use crate::sync::RemoteCache;
+use audiolib_core::waveform_cache::{
+    WaveformCacheCapabilities, WaveformCacheResult, WaveformCacheSettings,
+    WaveformCacheSettingsPatch, WaveformCacheStatus, WaveformJobControl, WaveformJobMode,
+};
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
     Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats, ListWaveformBatch,
@@ -55,7 +59,8 @@ pub struct WriteOutcome<T> {
 }
 
 /// Apply the revision rule for one write reply: if the cached snapshot of `library_id`
-/// is at `revision_before`, write `files` into it and record `revision`; otherwise ask
+/// is at `revision_before`, write `files` into it and record `revision` (which may equal
+/// `revision_before` for a play, so no full sync is needed); otherwise ask
 /// for a full sync. Never downloads anything itself.
 pub fn apply_server_write(
     cache: &RemoteCache,
@@ -72,7 +77,9 @@ pub fn apply_server_write(
             reason: "no cached snapshot for this library".into(),
         };
     };
-    if state.revision != revision_before || revision <= revision_before {
+    // `revision == revision_before` is a write that changed no snapshot content the
+    // server versions (plays, no-op patches): apply the records, keep the revision.
+    if state.revision != revision_before || revision < revision_before {
         return CacheUpdate::Resync {
             reason: format!(
                 "cached revision {} does not match revision_before {revision_before} (server now {revision})",
@@ -229,7 +236,7 @@ impl RemoteWriter {
         })
     }
 
-    /// Compatibility no-op for the explicit CLI command. Validate the cached record
+    /// Compatibility no-op for explicit callers. Validate the cached record
     /// without a network request, cache write, revision bump or Metadata write lease.
     pub fn record_play(&self, id: i64) -> Result<WriteOutcome<AudioFile>> {
         let state = self
@@ -372,6 +379,7 @@ impl RemoteProvider {
                     | RemoteError::RootOffline { .. } => Error::Busy(text),
                     RemoteError::Cancelled => Error::Cancelled,
                     RemoteError::Validation(_)
+                    | RemoteError::JobValidation { .. }
                     | RemoteError::Forbidden(_)
                     | RemoteError::Unsupported(_) => Error::Validation(text),
                     _ => Error::Database(text),
@@ -396,7 +404,9 @@ pub fn core_error(error: RemoteError, chinese: bool) -> Error {
     match error {
         RemoteError::NotFound(_) => Error::NotFound(text),
         RemoteError::Busy { .. } | RemoteError::Starting { .. } => Error::Busy(text),
-        RemoteError::Validation(_) | RemoteError::PayloadTooLarge(_) => Error::Validation(text),
+        RemoteError::Validation(_)
+        | RemoteError::JobValidation { .. }
+        | RemoteError::PayloadTooLarge(_) => Error::Validation(text),
         RemoteError::Cancelled => Error::Cancelled,
         _ => Error::Database(text),
     }
@@ -509,6 +519,59 @@ impl DataProvider for RemoteProvider {
             core_error(error, self.chinese)
         })
     }
+    // List Waveform cache management (§9.5) goes to the server through the writer's
+    // client (identity-bound mutations; the snapshot is not involved).
+    fn waveform_cache_capabilities(&self) -> WaveformCacheResult<WaveformCacheCapabilities> {
+        let capabilities = self.waveform_cache(|client| client.capabilities())?;
+        Ok(WaveformCacheCapabilities {
+            jobs: capabilities
+                .list_waveform_jobs
+                .clone()
+                .filter(|jobs| jobs.version >= 1),
+            can_manage: capabilities.may_manage(),
+        })
+    }
+    fn waveform_cache_status(&self) -> WaveformCacheResult<WaveformCacheStatus> {
+        self.waveform_cache(|client| client.list_waveform_status())
+    }
+    fn waveform_cache_settings(&self) -> WaveformCacheResult<WaveformCacheSettings> {
+        self.waveform_cache(|client| client.server_settings())
+    }
+    fn update_waveform_cache_settings(
+        &self,
+        patch: &WaveformCacheSettingsPatch,
+    ) -> WaveformCacheResult<WaveformCacheSettings> {
+        self.waveform_cache(|client| client.update_list_waveform_settings(patch))
+    }
+    fn start_waveform_cache_job(
+        &self,
+        mode: WaveformJobMode,
+        confirm_rebuild: bool,
+    ) -> WaveformCacheResult<WaveformCacheStatus> {
+        self.waveform_cache(|client| client.start_list_waveform_job(mode, confirm_rebuild))
+    }
+    fn control_waveform_cache_job(
+        &self,
+        control: WaveformJobControl,
+    ) -> WaveformCacheResult<WaveformCacheStatus> {
+        self.waveform_cache(|client| client.control_list_waveform_job(control))
+    }
+    fn control_waveform_pregeneration(
+        &self,
+        control: WaveformJobControl,
+    ) -> WaveformCacheResult<()> {
+        self.waveform_cache(|client| client.control_list_waveform_pregeneration(control))
+    }
+}
+
+impl RemoteProvider {
+    fn waveform_cache<T>(
+        &self,
+        call: impl FnOnce(&RemoteClient) -> Result<T>,
+    ) -> WaveformCacheResult<T> {
+        call(self.writer.client())
+            .map_err(|error| crate::waveform_cache::waveform_cache_error(&error, self.chinese))
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -519,120 +582,6 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     const LIBRARY: &str = "lib-w";
-
-    #[test]
-    fn changed_library_blocks_all_bound_mutations_and_preserves_the_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = cached_library(directory.path(), 41);
-        let cached = cache.state(LIBRARY).unwrap();
-        let before = std::fs::read(cache.database_path(&cached)).unwrap();
-        let mutations = Arc::new(StdMutex::new(Vec::new()));
-        let identity = Arc::new(StdMutex::new("replacement".to_owned()));
-        let server = {
-            let mutations = mutations.clone();
-            let identity = identity.clone();
-            TestServer::start(move |request| {
-                if request.method == "GET" && request.path == "/api/v1/library" {
-                    return TestResponse::json(
-                        200,
-                        &format!(
-                            r#"{{"library_id":"{}","schema_version":5,"revision":41}}"#,
-                            identity.lock().unwrap(),
-                        ),
-                    );
-                }
-                // Simulate an older server that would ignore the new header.
-                mutations.lock().unwrap().push(request.path.clone());
-                TestResponse::json(200, "{}")
-            })
-        };
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let listener: WriteListener = {
-            let events = events.clone();
-            Arc::new(move |event| events.lock().unwrap().push(event))
-        };
-        let writer = RemoteWriter::new(
-            RemoteClient::new(&server.url, "").unwrap(),
-            cache.clone(),
-            LIBRARY,
-        );
-        let provider = RemoteProvider::new(
-            Arc::new(snapshot(&cache)),
-            writer.clone(),
-            false,
-            Some(listener),
-        );
-        assert!(
-            provider
-                .update_metadata(
-                    3,
-                    &MetadataPatch {
-                        favorite: Some(true),
-                        ..MetadataPatch::default()
-                    }
-                )
-                .is_err()
-        );
-        assert!(matches!(
-            events.lock().unwrap().as_slice(),
-            [WriteEvent::LibraryChanged { .. }]
-        ));
-        let client = writer.client();
-        let results = [
-            client
-                .patch_metadata(3, &MetadataPatch::default())
-                .map(drop),
-            client
-                .batch_metadata(&BatchMetadataRequest {
-                    ids: vec![3],
-                    patch: MetadataPatch {
-                        favorite: Some(true),
-                        ..MetadataPatch::default()
-                    },
-                    tag_mode: TagEditMode::Replace,
-                })
-                .map(drop),
-            client.record_play(3).map(drop),
-            client.remove_audio(&[3]).map(drop),
-            client.remove_folder(7).map(drop),
-            client
-                .start_scan(&crate::ScanRequest {
-                    root: "SFX".into(),
-                    ..crate::ScanRequest::default()
-                })
-                .map(drop),
-            client.control_scan(17, crate::ScanControl::Pause).map(drop),
-            client
-                .control_scan(17, crate::ScanControl::Resume)
-                .map(drop),
-            client
-                .control_scan(17, crate::ScanControl::Cancel)
-                .map(drop),
-        ];
-        for result in results {
-            assert!(
-                matches!(result, Err(RemoteError::LibraryChanged(_))),
-                "{result:?}"
-            );
-        }
-        // Once any GET reports a mismatch, observing the old ID again cannot revive
-        // the existing provider or silently rebind a client to different cached IDs.
-        *identity.lock().unwrap() = LIBRARY.into();
-        assert_eq!(client.library().unwrap().library_id, LIBRARY);
-        assert!(matches!(
-            client.record_play(3),
-            Err(RemoteError::LibraryChanged(_))
-        ));
-        assert!(matches!(
-            client.clone().with_library_id("replacement"),
-            Err(RemoteError::LibraryChanged(_))
-        ));
-        assert!(mutations.lock().unwrap().is_empty());
-        assert_eq!(cache.state(LIBRARY).unwrap(), cached);
-        assert_eq!(cache.active().unwrap(), cached);
-        assert_eq!(std::fs::read(cache.database_path(&cached)).unwrap(), before);
-        assert!(!provider.get_audio(3).unwrap().favorite);
-    }
 
     #[test]
     fn server_identity_conflicts_emit_invalidation_and_leave_the_cache_unchanged() {
@@ -737,8 +686,21 @@ mod tests {
         seen: Arc<StdMutex<Vec<Seen>>>,
         reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
     ) -> TestServer {
+        server_with_capability_probe(seen, false, reply)
+    }
+
+    fn server_with_capability_probe(
+        seen: Arc<StdMutex<Vec<Seen>>>,
+        probe_capabilities: bool,
+        reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
+    ) -> TestServer {
         TestServer::start(move |request| {
-            if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+            if probe_capabilities && request.path == "/api/v1/health" {
+                return TestResponse::json(200, r#"{"status":"ok","version":"0.5.0"}"#);
+            }
+            if (request.path != "/api/v1/capabilities" || !probe_capabilities)
+                && let Some(response) = crate::test_server::legacy_handshake(&request.path)
+            {
                 return response;
             }
             if request.method == "GET" && request.path == "/api/v1/library" {
@@ -759,6 +721,75 @@ mod tests {
             });
             reply(&request.method, &request.path)
         })
+    }
+
+    #[test]
+    fn provider_routes_waveform_cache_management_through_data_provider() {
+        use audiolib_core::waveform_cache::{WaveformCacheErrorKind, WaveformRunState};
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 1);
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let status = r#"{"state":"paused","total":4,"cached":1,"pending":3,"run_state":"paused","current_rate":0,"eta_secs":null,"job":{"id":"wfj-2","mode":"missing","started_at":1,"done":1,"failed":0,"total":4,"state":"paused"}}"#;
+        let server = server_with_capability_probe(seen.clone(), true, move |method, path| {
+            match (method, path) {
+                ("GET", "/api/v1/capabilities") => TestResponse::json(
+                    200,
+                    r#"{"manage_mode":"lan","can_manage":false,"list_waveform_jobs":{"version":1,"modes":["missing","rebuild","failed"],"rate_setting":true}}"#,
+                ),
+                ("GET", "/api/v1/waveforms/status") => TestResponse::json(200, status),
+                ("GET", "/api/v1/settings") => TestResponse::json(
+                    200,
+                    r#"{"pregenerate_list_waveforms":true,"list_waveform_rate":10,"list_waveform_rate_source":"default","can_change":false}"#,
+                ),
+                ("POST", "/api/v1/waveforms/jobs") => TestResponse::json(
+                    409,
+                    r#"{"error_code":"BUSY","message":"A list waveform job is already in progress","job_id":"wfj-2"}"#,
+                ),
+                ("POST", "/api/v1/waveforms/jobs/current/resume") => TestResponse::json(
+                    403,
+                    r#"{"error_code":"MANAGE_FORBIDDEN","message":"Management is limited to the LAN"}"#,
+                ),
+                (method, path) => panic!("unexpected {method} {path}"),
+            }
+        });
+        let writer = RemoteWriter::new(
+            RemoteClient::new(&server.url, "").unwrap(),
+            cache.clone(),
+            LIBRARY,
+        );
+        let provider: Arc<dyn DataProvider> = Arc::new(RemoteProvider::new(
+            Arc::new(snapshot(&cache)),
+            writer,
+            true,
+            None,
+        ));
+        let capabilities = provider.waveform_cache_capabilities().unwrap();
+        assert!(!capabilities.can_manage);
+        assert!(capabilities.jobs.unwrap().rate_setting);
+        let current = provider.waveform_cache_status().unwrap();
+        assert_eq!(current.effective_run_state(), WaveformRunState::Paused);
+        assert_eq!(current.eta_secs, None);
+        assert_eq!(
+            provider
+                .waveform_cache_settings()
+                .unwrap()
+                .list_waveform_rate,
+            Some(10)
+        );
+        let busy = provider
+            .start_waveform_cache_job(WaveformJobMode::Missing, false)
+            .unwrap_err();
+        assert_eq!(busy.kind, WaveformCacheErrorKind::Busy);
+        assert!(busy.message.contains("409"), "{}", busy.message);
+        let forbidden = provider
+            .control_waveform_cache_job(WaveformJobControl::Resume)
+            .unwrap_err();
+        assert_eq!(forbidden.kind, WaveformCacheErrorKind::Forbidden);
+        // A local provider offers none of it.
+        assert_eq!(
+            snapshot(&cache).waveform_cache_status().unwrap_err().kind,
+            WaveformCacheErrorKind::Unsupported
+        );
     }
 
     fn snapshot(cache: &RemoteCache) -> SqliteProvider {

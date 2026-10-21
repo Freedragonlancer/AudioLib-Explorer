@@ -165,6 +165,18 @@ pub(crate) fn downloaded(
     meta: &SnapshotMeta,
     cancel: &AtomicBool,
 ) -> Result<LibraryFormat> {
+    // Supported published legacy servers supply these identity headers too.
+    // A single-flight snapshot may predate /library; never publish that older
+    // response or infer its identity/revision from unrelated metadata.
+    if meta.library_id.as_deref() != Some(library.library_id.as_str())
+        || meta
+            .revision
+            .is_none_or(|revision| revision < library.revision)
+    {
+        return Err(invalid(
+            "Server snapshot identity or revision changed during negotiation; sync again",
+        ));
+    }
     let inspection = audiolib_db::migration::inspect(path, LibraryAccess::Read, false, cancel)?;
     if meta
         .schema_version
@@ -186,12 +198,7 @@ pub(crate) fn downloaded(
         ));
     }
     if let Some(expected) = &library.snapshot_format {
-        if meta.snapshot_format.as_ref() != Some(expected)
-            || meta.library_id.as_deref() != Some(library.library_id.as_str())
-            || meta
-                .revision
-                .is_none_or(|revision| revision < library.revision)
-        {
+        if meta.snapshot_format.as_ref() != Some(expected) {
             return Err(invalid(
                 "Server snapshot identity, revision or format changed during negotiation; sync again",
             ));
@@ -481,6 +488,110 @@ mod tests {
                 downloads.load(Ordering::Relaxed),
                 usize::from(matches!(mode, "header" | "bytes"))
             );
+        }
+    }
+
+    #[test]
+    fn legacy_stale_or_unbound_download_preserves_the_active_cache() {
+        for version in ["0.4.11", "0.5.0"] {
+            for mode in [
+                "stale",
+                "missing_revision",
+                "missing_identity",
+                "other_identity",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let source = root.path().join("legacy.db");
+                let conn = rusqlite::Connection::open(&source).unwrap();
+                audiolib_db::register_library_functions(&conn).unwrap();
+                conn.execute_batch(include_str!(
+                    "../../audiolib-db/tests/fixtures/schema-v5.sql"
+                ))
+                .unwrap();
+                conn.execute_batch(
+                    "INSERT INTO audio_files(id,file_path,filename,filename_tokenized,user_notes,play_count)
+                     VALUES(1,'legacy.wav','legacy.wav',audiolib_tokenize('legacy.wav'),'retained',17);",
+                )
+                .unwrap();
+                drop(conn);
+                let bytes = std::fs::read(&source).unwrap();
+                let cache = RemoteCache::new(&root.path().join("cache"));
+                let old = CacheState {
+                    library_id: "legacy".into(),
+                    revision: 11,
+                    schema_version: 5,
+                    database_file: "retained.db".into(),
+                    ..Default::default()
+                };
+                let retained_path = cache.database_path(&old);
+                std::fs::create_dir_all(retained_path.parent().unwrap()).unwrap();
+                std::fs::write(&retained_path, &bytes).unwrap();
+                cache.save_state(&old).unwrap();
+                let downloads = Arc::new(AtomicUsize::new(0));
+                let observed = downloads.clone();
+                let server = TestServer::start(move |request| match request.path.as_str() {
+                    "/api/v1/health" => TestResponse::json(
+                        200,
+                        &serde_json::json!({"status":"ok","version":version}).to_string(),
+                    ),
+                    "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+                    "/api/v1/library" => TestResponse::json(
+                        200,
+                        r#"{"library_id":"legacy","revision":12,"schema_version":5}"#,
+                    ),
+                    "/api/v1/roots" => TestResponse::json(200, "[]"),
+                    "/api/v1/library/snapshot" => {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        let mut reply = TestResponse::bytes(200, bytes.clone())
+                            .with_header("x-schema-version", "5");
+                        if mode != "missing_revision" {
+                            reply = reply.with_header(
+                                "x-library-revision",
+                                if mode == "stale" { "11" } else { "12" },
+                            );
+                        }
+                        if mode != "missing_identity" {
+                            reply = reply.with_header(
+                                "x-library-id",
+                                if mode == "other_identity" {
+                                    "other"
+                                } else {
+                                    "legacy"
+                                },
+                            );
+                        }
+                        reply
+                    }
+                    _ => TestResponse::json(404, "{}"),
+                });
+                let result = sync_library(
+                    &RemoteClient::new(&server.url, "").unwrap(),
+                    &cache,
+                    &mut |_| {},
+                    &AtomicBool::new(false),
+                    true,
+                );
+                assert!(
+                    matches!(result, Err(RemoteError::Snapshot(_))),
+                    "{version}/{mode}: {result:?}"
+                );
+                assert_eq!(
+                    downloads.load(Ordering::Relaxed),
+                    1,
+                    "must reach snapshot admission"
+                );
+                assert_eq!(cache.active().unwrap(), old);
+                assert_eq!(
+                    std::fs::read(&retained_path).unwrap(),
+                    std::fs::read(&source).unwrap()
+                );
+                assert_eq!(
+                    std::fs::read_dir(cache.library_dir("legacy"))
+                        .unwrap()
+                        .count(),
+                    2
+                );
+            }
         }
     }
 

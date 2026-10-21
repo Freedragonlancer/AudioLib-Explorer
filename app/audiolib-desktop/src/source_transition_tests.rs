@@ -1482,7 +1482,8 @@ fn child_deferred_server_cache() {
         playback,
         deferred,
     );
-    assert!(ui.get_library_visible() && ui.get_ds_syncing());
+    // A matching cached snapshot opens the main window; the sync runs in the background.
+    assert!(!ui.get_library_visible() && ui.get_ds_syncing());
     let c = controller.clone();
     let weak = ui.as_weak();
     let waiting = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));

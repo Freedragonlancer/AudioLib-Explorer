@@ -1,10 +1,10 @@
 # AudioLib Explorer 版本规范
 
-本文对应隔离开发分支 `0.5.0-dev.1`，不表示已发布或修改了当前安装。程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。
+本文对应合入 0.5.0 主线后的隔离 CR 分支 `0.6.0-dev.1`，不表示已发布或修改了当前安装。程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。此前 `0.5.0-dev.1` 验证保留为历史证据。
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.5.0-dev.1（未发布） | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.6.0-dev.1（未发布） | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 6 | SQLite 资料库结构（`user_version`） |
 
@@ -26,7 +26,7 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
 
 ## 发布流程
 
-**v0.4.11 已发布，不得覆盖其标签或把新的开发包当作该 Release 的原产物。** 本隔离工作区使用 `0.5.0-dev.1` 验证 schema 6、共享迁移及客户端/服务端集成；该开发标识不用于现有正式 Release 标签流程。下一次正式发布前，须确定发布号，同步更新工作区及锁文件、经过测试的双方程序范围与发布说明版本行，再以新标签执行完整发布流程。基准应使用已发布的 v0.4.11；本轮尚未创建发布标签，也未部署 8790。未完成的搜索性能验收须继续在发布说明中列明。
+**v0.4.11 和 v0.5.0 已发布，不得覆盖其标签或把新的开发包当作这些 Release 的原产物。** 本隔离工作区使用 `0.6.0-dev.1` 继续验证 schema 6、共享迁移及客户端/服务端集成；该开发标识不用于现有正式 Release 标签流程。下一次正式发布前，须确定发布号，同步更新工作区及锁文件、经过测试的双方程序范围与发布说明版本行，再以新标签执行完整发布流程。本轮只整理 PR，不创建发布标签或部署服务端。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。

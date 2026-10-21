@@ -168,6 +168,23 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
                 "/waveforms/pregeneration/resume",
                 post(resume_pregeneration).route_layer(manage()),
             )
+            // List waveform cache jobs (doc/api/README.md §9.5).
+            .route(
+                "/waveforms/jobs",
+                post(start_list_waveform_job).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/jobs/current/pause",
+                post(pause_list_waveform_job).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/jobs/current/resume",
+                post(resume_list_waveform_job).route_layer(manage()),
+            )
+            .route(
+                "/waveforms/jobs/current/stop",
+                post(stop_list_waveform_job).route_layer(manage()),
+            )
             .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES)),
     );
     let protected = timed_protected
@@ -353,6 +370,10 @@ fn managed_route(method: &Method, path: &str) -> bool {
             "/scans/{session_id}/cancel",
             "/waveforms/pregeneration/pause",
             "/waveforms/pregeneration/resume",
+            "/waveforms/jobs",
+            "/waveforms/jobs/current/pause",
+            "/waveforms/jobs/current/resume",
+            "/waveforms/jobs/current/stop",
         ]
         .iter()
         .any(|managed| path.ends_with(*managed)),
@@ -475,6 +496,13 @@ async fn capabilities(
             ..ListWaveformsCapability::default()
         }),
         pregenerate_list_waveforms: service.security().pregenerate_list_waveforms(),
+        // Not advertised once the library is open without a usable waveforms.db (the job
+        // endpoints answer 503 UNAVAILABLE then); while it opens they answer 503 too
+        // (retry), as for the bundle.
+        list_waveform_jobs: match service.readiness() {
+            Readiness::Ready(state) if !state.list_waveforms().jobs_available() => None,
+            _ => Some(crate::wf_job::ListWaveformJobsCapability::default()),
+        },
     })
 }
 
@@ -485,9 +513,12 @@ fn settings_response(
 ) -> SettingsResponse {
     let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
         security.pregenerate_list_waveforms_with_source();
+    let (list_waveform_rate, list_waveform_rate_source) = security.list_waveform_rate_with_source();
     SettingsResponse {
         pregenerate_list_waveforms,
         pregenerate_list_waveforms_source,
+        list_waveform_rate,
+        list_waveform_rate_source,
         can_change: security.manage_mode().allows(classify(headers, connection)),
     }
 }
@@ -512,6 +543,8 @@ async fn get_settings(
 struct SettingsPatch {
     #[serde(default, deserialize_with = "present_value")]
     pregenerate_list_waveforms: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "present_value")]
+    list_waveform_rate: Option<Option<u32>>,
 }
 
 /// `Some(None)` for an explicit JSON `null`, `None` for an absent field.
@@ -536,6 +569,9 @@ async fn patch_settings(
         let lease = security.settings_lease()?;
         security.authorize(&headers, connection.as_ref())?;
         security.authorize_manage(&headers, connection.as_ref())?;
+        // Settings remains available during library startup, but its writes use
+        // the same modern-peer admission as protected library mutations.
+        crate::compatibility::admit_mutation(&headers)?;
         let value: serde_json::Value = json_body(&headers, body)?;
         if !value.is_object() {
             return Err(ApiError::validation(
@@ -544,14 +580,32 @@ async fn patch_settings(
         }
         let patch: SettingsPatch = serde_json::from_value(value)
             .map_err(|error| ApiError::validation(format!("Invalid settings: {error}")))?;
-        if let Some(value) = patch.pregenerate_list_waveforms {
+        if let Some(Some(rate)) = patch.list_waveform_rate
+            && !(1..=1000).contains(&rate)
+        {
+            return Err(ApiError::validation(
+                "list_waveform_rate must be an integer in 1..=1000 or null",
+            ));
+        }
+        // One write of admin-settings.json for both fields: a failure changes neither.
+        if patch.list_waveform_rate.is_some() || patch.pregenerate_list_waveforms.is_some() {
             security.update_settings_locked(&lease, |settings| {
-                settings.pregenerate_list_waveforms = value;
+                if let Some(value) = patch.list_waveform_rate {
+                    settings.list_waveform_rate = value;
+                }
+                if let Some(value) = patch.pregenerate_list_waveforms {
+                    settings.pregenerate_list_waveforms = value;
+                }
             })?;
-            tracing::info!(
-                ?value,
-                "pregenerate_list_waveforms changed through PATCH /settings"
-            );
+            if let Some(value) = patch.list_waveform_rate {
+                tracing::info!(?value, "list_waveform_rate changed through PATCH /settings");
+            }
+            if let Some(value) = patch.pregenerate_list_waveforms {
+                tracing::info!(
+                    ?value,
+                    "pregenerate_list_waveforms changed through PATCH /settings"
+                );
+            }
         }
         drop(lease);
         Ok(settings_response(&security, &headers, connection.as_ref()))
@@ -624,6 +678,116 @@ async fn resume_pregeneration(
     Extension(state): Extension<AppState>,
 ) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
     set_pregeneration_paused(state, false).await
+}
+
+fn job_refusal(refusal: list_waveform::JobRefusal) -> ApiError {
+    match refusal {
+        list_waveform::JobRefusal::Busy(id) => ApiError::job_busy(id),
+        list_waveform::JobRefusal::NoJob => {
+            ApiError::job_state("No list waveform job is running or paused")
+        }
+        list_waveform::JobRefusal::Unavailable => {
+            ApiError::unavailable("The list waveform cache (waveforms.db) is unavailable")
+        }
+        list_waveform::JobRefusal::Failed(error) => ApiError::from(error),
+    }
+}
+
+/// `POST /waveforms/jobs` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobRequest {
+    mode: serde_json::Value,
+    #[serde(default)]
+    confirm: Option<serde_json::Value>,
+}
+
+/// `POST /waveforms/jobs` (§9.5.3; `manage_mode`): 202 with the full status.
+async fn start_list_waveform_job(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<(StatusCode, Json<list_waveform::ListWaveformStatus>), ApiError> {
+    let value: serde_json::Value = json_body(&headers, body)?;
+    if !value.is_object() {
+        return Err(ApiError::validation(
+            "The request body must be a JSON object",
+        ));
+    }
+    let request: JobRequest = serde_json::from_value(value)
+        .map_err(|error| ApiError::validation(format!("Invalid job request: {error}")))?;
+    let mode = match &request.mode {
+        serde_json::Value::String(name) => crate::wf_job::JobMode::parse(name).ok_or_else(|| {
+            ApiError::unsupported_mode(format!(
+                "unsupported list waveform job mode {name:?} (expected missing, rebuild or failed)"
+            ))
+        })?,
+        _ => return Err(ApiError::validation("mode must be a string")),
+    };
+    match (&request.confirm, mode) {
+        (None, crate::wf_job::JobMode::Rebuild) => {
+            return Err(ApiError::confirm_required(
+                "mode rebuild clears the list waveform cache; send \"confirm\": \"rebuild\"",
+            ));
+        }
+        (Some(serde_json::Value::String(text)), crate::wf_job::JobMode::Rebuild)
+            if text == "rebuild" => {}
+        (Some(_), crate::wf_job::JobMode::Rebuild) => {
+            return Err(ApiError::confirm_required(
+                "confirm must be \"rebuild\" for mode rebuild",
+            ));
+        }
+        // Ignored for the other modes.
+        _ => {}
+    }
+    let status = blocking_api(move || {
+        state
+            .list_waveforms()
+            .start_job(mode)
+            .map_err(job_refusal)?;
+        state
+            .list_waveforms()
+            .status(&state)
+            .map_err(ApiError::from)
+    })
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(status)))
+}
+
+async fn control_list_waveform_job(
+    state: AppState,
+    action: fn(&list_waveform::ListWaveforms) -> Result<(), list_waveform::JobRefusal>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    let status = blocking_api(move || {
+        action(state.list_waveforms()).map_err(job_refusal)?;
+        state
+            .list_waveforms()
+            .status(&state)
+            .map_err(ApiError::from)
+    })
+    .await?;
+    Ok(Json(status))
+}
+
+/// `POST /waveforms/jobs/current/pause` (idempotent; persists across restarts).
+async fn pause_list_waveform_job(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    control_list_waveform_job(state, |list| list.pause_job(true)).await
+}
+
+/// `POST /waveforms/jobs/current/resume` (idempotent).
+async fn resume_list_waveform_job(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    control_list_waveform_job(state, |list| list.pause_job(false)).await
+}
+
+/// `POST /waveforms/jobs/current/stop`: the job ends `cancelled`; generated entries stay.
+async fn stop_list_waveform_job(
+    Extension(state): Extension<AppState>,
+) -> Result<Json<list_waveform::ListWaveformStatus>, ApiError> {
+    control_list_waveform_job(state, list_waveform::ListWaveforms::stop_job).await
 }
 
 /// Run blocking library work off the async executor.
@@ -920,7 +1084,8 @@ async fn update_metadata_batch(
     ))
 }
 
-/// `POST /audio/{id}/plays`: count one play (body ignored), reply like the metadata patch.
+/// `POST /audio/{id}/plays` (deprecated): a no-op kept for old clients. Nothing is
+/// written; the reply has the metadata patch shape with `revision == revision_before`.
 async fn record_play(
     Extension(state): Extension<AppState>,
     Path(raw_id): Path<String>,
@@ -994,15 +1159,13 @@ async fn scan_history(
     ))
 }
 
-/// `GET /history/plays?limit=&offset=`: `PlayRecord[]`, newest first.
+/// `GET /history/plays?limit=&offset=` (deprecated): always an empty `PlayRecord[]`.
+/// Play history is recorded locally by clients only; paging is still validated.
 async fn play_history(
-    Extension(state): Extension<AppState>,
     query: Result<Query<PageQuery>, QueryRejection>,
 ) -> Result<Json<Vec<PlayRecord>>, ApiError> {
-    let (limit, offset) = page(query)?;
-    Ok(Json(
-        blocking(move || state.provider().play_history(limit, offset)).await?,
-    ))
+    page(query)?;
+    Ok(Json(Vec::new()))
 }
 
 /// Run blocking work that already answers with [`ApiError`].
@@ -1932,6 +2095,17 @@ async fn waveform_bundle(
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf();
+        // The library's list cache directory may not exist yet (nothing generated so
+        // far, or a rebuild in progress): create it (idempotent) instead of failing the
+        // temporary directory with ENOENT (500). If it cannot be created the bundle is
+        // unavailable: 503 UNAVAILABLE, never a path-bearing 500 (§9.4.2, §9.5.8).
+        std::fs::create_dir_all(&parent).map_err(|error| {
+            tracing::warn!(%error, "Cannot create the list waveform cache directory");
+            ApiError::unavailable(format!(
+                "The list waveform cache directory cannot be created ({})",
+                error.kind()
+            ))
+        })?;
         // We hold the only slot, so every other bundle directory is a leftover of a
         // crash or kill; remove them before writing a new ~300 MB copy.
         crate::wfdb::sweep_stale_bundles(&parent, std::time::Duration::ZERO);

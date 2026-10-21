@@ -189,9 +189,9 @@ rollback, backup and health check).
 `/health`, `/library`, `/library/snapshot`, `/roots`, `POST /roots/{name}/check`,
 `/audio/{id}`, `/audio/{id}/waveform`, `/audio/{id}/preview`, `/audio/{id}/stream`,
 metadata writes (`PATCH /audio/{id}/metadata`, `POST /audio/metadata/batch`,
-`POST /audio/{id}/plays`), remote scans (`POST /scans`, `GET /scans/current`,
+deprecated no-op `POST /audio/{id}/plays`), remote scans (`POST /scans`, `GET /scans/current`,
 `GET /scans/{id}`, `POST /scans/{id}/pause|resume|cancel`), history
-(`GET /history/scans|plays`), removal (`POST /audio/remove`, `DELETE /folders/{id}`) and
+(`GET /history/scans`; deprecated `GET /history/plays` is always empty, play history is client-local), removal (`POST /audio/remove`, `DELETE /folders/{id}`) and
 `GET /capabilities`. Details, error codes and examples: [doc/api/README.md](../doc/api/README.md).
 
 Library roots can be managed on the LAN-only admin page (`http://<LAN address>:8790/admin`):

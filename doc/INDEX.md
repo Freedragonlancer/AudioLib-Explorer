@@ -40,6 +40,8 @@ The isolated next-version database work is tracked in
 [compatibility and migration](api/Library_Migration_Compatibility.md),
 [historical full-library measurements](api/Search_Storage_B_Validation.md), and
 [implementation status](api/Implementation_B_Status.md).
+[Plan B code review](api/Search_Storage_B_CR.md) records the fixes and their validation
+after integrating the released 0.5.0 baseline.
 It does not upgrade the current installation or working library.
 
 | Entry | Responsibility |

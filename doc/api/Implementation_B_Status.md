@@ -1,5 +1,10 @@
 # Plan B implementation record
 
+The current CR branch is `0.6.0-dev.1`, incorporating released 0.5.0 at `c46f583`.
+Its review fixes and final revalidation are recorded in [the CR report](Search_Storage_B_CR.md).
+The detailed checkpoints below describe the preceding `0.5.0-dev.1` implementation;
+their build/recipe identities and timings must not be attributed to the CR build.
+
 User scope, 2026-10-21: implement Plan B, shared client/server migration tools,
 compatibility checks, resumable execution and rollback; diagnose duration-filter
 tail latency. Validate in isolation. Do not update the current installation or
@@ -12,7 +17,7 @@ this development phase.
 - Worktree: isolated `search-storage-b` checkout; the machine-local path is
   recorded in `.rust-validation/search-storage-b/*-run.json` (not packaged).
 - Baseline commit: `0527ff13e81a4cc4218c3ce4a9f3493d3764f83b`
-- Development identity: `0.5.0-dev.1`, shared by all workspace application crates.
+- Initial development identity: `0.5.0-dev.1`, shared by all workspace application crates.
   This is not a published version or a claim about future release numbering.
 - Original checkout and `local_release` remain outside this implementation.
 - Frozen experiment data:
@@ -56,7 +61,7 @@ and every filesystem/hardware failure mode are not claimed. The final-recipe
 full-library/performance rerun, rollback and document reconciliation are complete;
 the final ASIO suite adds the two cache-crash tests for 1,137 passing tests.
 
-## Current checkpoint
+## Pre-CR checkpoint (`0.5.0-dev.1`)
 
 2026-10-21 implementation in this isolated worktree:
 
