@@ -27,8 +27,24 @@ public static class AudioLibDesktopCloseNative {
 $taskSavedData = $env:AUDIOLIB_DATA_DIR
 $taskSavedBackend = $env:SLINT_BACKEND
 $taskSavedLog = $env:RUST_LOG
+$taskSavedUserName = $env:USERNAME
 $taskCases = @()
+
+function Get-CanonicalSettingsPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ($Path.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)) {
+        $Path = '\\' + $Path.Substring(8)
+    } elseif ($Path.StartsWith('\\?\',[StringComparison]::OrdinalIgnoreCase)) {
+        $Path = $Path.Substring(4)
+    }
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    return [IO.Path]::GetFullPath($resolved)
+}
+
 try {
+    # The playback pipe is per USERNAME, independent of AUDIOLIB_DATA_DIR. Give
+    # this invocation its own pipe without contacting another running desktop.
+    $env:USERNAME = 'AudioLibClose_' + [Guid]::NewGuid().ToString('N')
     foreach ($taskMessage in @('WM_CLOSE','SC_CLOSE')) {
         foreach ($taskCycle in 1..$Cycles) {
             $taskRoot = Join-Path $taskTempParent ('audiolib-desktop-close-' + [Guid]::NewGuid().ToString('N'))
@@ -51,12 +67,18 @@ try {
                     if ($taskProcess.HasExited) { throw "Owned desktop exited during startup: $($taskProcess.ExitCode)" }
                 } while ($taskProcess.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $taskDeadline)
                 # IPC starts only after the main controller and close handler bind.
-                # Read only this fixture's per-data-directory named pipe.
+                # Verify its settings identity as well as the isolated pipe name.
+                $taskExpectedSettings = Get-CanonicalSettingsPath (Join-Path $taskRoot 'settings.json')
+                $taskReadyMatches = $false
                 do {
                     $taskReady = (& $taskCli status | Out-String) | ConvertFrom-Json
-                    if (!$taskReady.success) { Start-Sleep -Milliseconds 100 }
-                } while (!$taskReady.success -and [DateTime]::UtcNow -lt $taskDeadline)
-                if (!$taskReady.success) { throw 'Owned main controller did not become ready.' }
+                    if ($taskReady.success) {
+                        $taskActualSettings = Get-CanonicalSettingsPath ([string]$taskReady.metadata.settings_path)
+                        $taskReadyMatches = $null -ne $taskActualSettings -and $taskActualSettings.Equals($taskExpectedSettings,[StringComparison]::OrdinalIgnoreCase)
+                    }
+                    if (!$taskReadyMatches) { Start-Sleep -Milliseconds 100 }
+                } while (!$taskReadyMatches -and [DateTime]::UtcNow -lt $taskDeadline)
+                if (!$taskReadyMatches) { throw 'Owned main controller did not become ready with the exact isolated settings identity.' }
                 Start-Sleep -Milliseconds (100 * $taskCycle)
                 $taskProcess.Refresh()
                 $taskHandle = $taskProcess.MainWindowHandle
@@ -103,4 +125,4 @@ try {
     $taskReport = [PSCustomObject]@{success=$true;binary_sha256=(Get-FileHash -LiteralPath $taskDesktop -Algorithm SHA256).Hash;isolated_empty_libraries=$true;native_close_cases=$taskCases}
     $taskReport | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $taskArtifacts 'report.json') -Encoding UTF8
     $taskReport | ConvertTo-Json -Depth 5
-} finally { $env:AUDIOLIB_DATA_DIR=$taskSavedData; $env:SLINT_BACKEND=$taskSavedBackend; $env:RUST_LOG=$taskSavedLog }
+} finally { $env:AUDIOLIB_DATA_DIR=$taskSavedData; $env:SLINT_BACKEND=$taskSavedBackend; $env:RUST_LOG=$taskSavedLog; $env:USERNAME=$taskSavedUserName }
