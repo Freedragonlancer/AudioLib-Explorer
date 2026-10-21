@@ -15,6 +15,11 @@ use std::{
 
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
 
+// The scoped log subscriber shares tracing's process-wide callsite interest cache
+// with the other startup tests. Keep these opens sequential so a parallel open
+// without that subscriber cannot suppress events being captured by the log test.
+static STARTUP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 impl Write for LogWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(bytes);
@@ -28,6 +33,9 @@ impl Write for LogWriter {
 
 #[test]
 fn server_startup_logs_upgrade_phases_rows_and_elapsed_time() {
+    let _startup = STARTUP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("library.db");
     let conn = Connection::open(&database).unwrap();
@@ -141,6 +149,9 @@ fn startup_fixture(format: &str) -> (tempfile::TempDir, ServerConfig) {
 
 #[test]
 fn server_startup_auto_migrates_supported_formats_preserves_data_and_honors_rollback() {
+    let _startup = STARTUP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let cancel = AtomicBool::new(false);
     for format in ["schema3", "schema4", "schema5", "p0", "p1"] {
         let (_root, config) = startup_fixture(format);
@@ -263,6 +274,9 @@ fn server_startup_auto_migrates_supported_formats_preserves_data_and_honors_roll
 
 #[test]
 fn server_startup_rejects_future_formats_without_migrating_the_database() {
+    let _startup = STARTUP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     for future in ["schema", "known_feature", "unknown_feature"] {
         let (_root, config) = startup_fixture("p1");
         let conn = Connection::open(&config.library_db).unwrap();
