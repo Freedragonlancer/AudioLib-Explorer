@@ -3467,6 +3467,29 @@ mod tests {
     }
 
     #[test]
+    fn non_wav_containers_are_rejected_by_both_compute_paths() {
+        // The decoder is WAV-only (RIFF/RF64/BW64; Symphonia is built with wav/pcm/adpcm
+        // only), so FLAC/MP3 never reach the single-open frame count: both paths fail
+        // at the container check and no list summary is produced.
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut flac = b"fLaC".to_vec();
+        flac.extend_from_slice(&[0x80, 0, 0, 34]);
+        flac.extend_from_slice(&[0; 34]);
+        let mut mp3 = b"ID3\x04\0\0\0\0\0\0".to_vec();
+        for _ in 0..8 {
+            mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x64]);
+            mp3.extend_from_slice(&[0; 413]);
+        }
+        for (name, bytes) in [("a.flac", flac), ("a.mp3", mp3)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(compute(&path, &cancel).is_err(), "{name}");
+            assert!(compute_probed(&path, &cancel).is_err(), "{name}");
+        }
+    }
+
+    #[test]
     fn base64_matches_rfc4648_vectors() {
         for (input, output) in [
             ("", ""),
