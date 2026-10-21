@@ -1,13 +1,16 @@
 // crates/audiolib-audio/src/decoder.rs
 use crate::{
-    source::{ByteSource, MediaAdapter, SourceBuffer, Tracked, open_source, source_buffer},
+    source::{
+        ByteSource, MediaAdapter, SourceBuffer, Tracked, is_stream_source, open_source,
+        source_buffer,
+    },
     wav::{WavInfo, read_info},
 };
 use audioadapter_buffers::direct::InterleavedSlice;
 use audiolib_core::{Error, Result};
 use rubato::{Fft, FixedSync, Resampler};
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::Path,
     sync::{
         Arc,
@@ -85,8 +88,25 @@ fn audio_error(error: impl std::fmt::Display) -> Error {
     Error::Audio(error.to_string())
 }
 
+/// Open `path`; with `read_buffer > 0` a plain file is read through a buffer of that many
+/// bytes, so small decoder reads become large sequential reads (registered stream sources
+/// keep their own buffering and are never wrapped).
+fn open_bytes(path: &Path, read_buffer: usize) -> Result<(Box<dyn ByteSource>, u64)> {
+    let (file, len) = open_source(path)?;
+    if read_buffer == 0 || is_stream_source(path) {
+        return Ok((file, len));
+    }
+    Ok((Box::new(BufReader::with_capacity(read_buffer, file)), len))
+}
+
 impl Decoder {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_read_buffer(path, 0)
+    }
+
+    /// [`Decoder::open`] reading a plain file through a `read_buffer`-byte buffer
+    /// (0 = unbuffered). Decoded samples are identical either way.
+    pub fn open_with_read_buffer(path: &Path, read_buffer: usize) -> Result<Self> {
         let info = read_info(path)?;
         let buffer = source_buffer(path);
         let mut probe = None;
@@ -99,12 +119,12 @@ impl Decoder {
                     "Unsupported PCM/float WAV sample width".into(),
                 ));
             }
-            let (file, _) = open_source(path)?;
+            let (file, _) = open_bytes(path, read_buffer)?;
             let mut file = tracked(file, &buffer, (f64::from(info.block_align), 0), &mut probe);
             file.seek(SeekFrom::Start(info.data_offset))?;
             Source::Pcm(file)
         } else {
-            let (inner, len) = open_source(path)?;
+            let (inner, len) = open_bytes(path, read_buffer)?;
             let bytes_per_frame = if info.metadata.frames > 0 {
                 info.data_bytes as f64 / info.metadata.frames as f64
             } else {
@@ -142,7 +162,7 @@ impl Decoder {
                 // and allowing bounded, sample-accurate seeks without a linear scan.
                 // The format reader's own source is no longer read: track the block reader.
                 probe = None;
-                let (file, _) = open_source(path)?;
+                let (file, _) = open_bytes(path, read_buffer)?;
                 // Whole blocks are read at a time: one block of slack.
                 let mut file = tracked(
                     file,

@@ -40,4 +40,5 @@ pub use wav_metadata::WAV_METADATA_VERSION;
 pub use waveform::{
     CACHE_VERSION as WAVEFORM_CACHE_VERSION, WaveformData, WaveformPeak, WaveformRequest,
     cached_waveform, cached_waveform_with_cancel, waveform, waveform_with_cancel,
+    waveform_with_read_buffer,
 };
