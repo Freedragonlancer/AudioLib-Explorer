@@ -120,8 +120,8 @@ fn stats_are_cached_persisted_and_a_slow_stale_cache_is_served_while_refreshing(
     assert_eq!(other.library_response().unwrap().info.stats.audio_files, 3);
 }
 
-/// Plays and metadata edits cannot change the aggregates: the cache is carried forward to
-/// the new revision (no full-table rescan per play), and the startup warm-up does not
+/// Plays keep the revision unchanged. Metadata edits carry aggregates forward to
+/// the new revision, and the startup warm-up does not
 /// recompute a sidecar that already matches the current revision.
 #[test]
 fn stats_neutral_writes_carry_the_cache_forward_and_warm_up_skips_a_current_sidecar() {
@@ -149,7 +149,8 @@ fn stats_neutral_writes_carry_the_cache_forward_and_warm_up_skips_a_current_side
         .results[0]
         .id;
     let played = state.record_play(id).unwrap();
-    assert_eq!(played.revision, first.revision, "plays do not bump");
+    assert_eq!(played.revision_before, first.revision);
+    assert_eq!(played.revision, first.revision);
     let edited = state
         .update_metadata(
             id,

@@ -201,7 +201,7 @@ Layout under `<data dir>/remote/`:
 | `<library_id>/library-r<revision>-<millis>.db` | Validated read-only snapshot (only the open one is kept) |
 | `.transfers/<endpoint-sha256>/payload.part` | Durable HTTP representation bytes retained for snapshot resume; zstd stays compressed |
 | `.transfers/<endpoint-sha256>/checkpoint.json` | Atomic transfer identity, encoding, lengths, durable offset and prefix SHA256; never contains credentials |
-| `placeholder/library.db` | Empty schema-v5 library shown before the first successful sync |
+| `placeholder/library.db` | Empty library in the current local schema shown before the first successful sync |
 | `secrets.bin` | DPAPI-protected token and WebDAV password |
 
 Snapshots use unique file names instead of a fixed `library.db` because Windows cannot
@@ -279,8 +279,9 @@ changed connection of the active one), on "Sync now" and on Refresh (F5). Steps:
 
 ### Interrupted downloads and resume
 
-This change extends the `0.5.1` source baseline. An existing `0.5.1` binary may
-predate resume support; detect server support from the response headers below.
+This change extends the `0.6.0` main baseline and retains its shared format catalog
+and protected migration rules. Detect resume support from the response headers
+below; application version alone does not establish protocol or file compatibility.
 
 A resumable server reply provides a strong representation-specific `ETag`,
 `X-Snapshot-Id`, identity/schema/revision headers, `Accept-Ranges: bytes` and a known
@@ -502,20 +503,21 @@ batch edits of the checked records (tags *replace* or *append*; the API's *remov
 available in the CLI). The desktop routes these through `DataProvider` like in local mode:
 in server mode the Metadata worker and the batch operation use
 `audiolib_remote::RemoteProvider`, whose reads come from the snapshot and whose
-`update_metadata`, `update_metadata_batch` and `record_play` call
+`update_metadata` and `update_metadata_batch` call the endpoints below. Playback
+and play history are local no-ops: they send no HTTP request and write no cache data.
 
 | Operation | Request | Response |
 |---|---|---|
 | single edit | `PATCH /api/v1/audio/{id}/metadata` (JSON patch, absent fields unchanged, `"color":""` clears) | `{file, revision_before, revision}` |
 | batch edit | `POST /api/v1/audio/metadata/batch` `{ids, patch, tag_mode}` (one transaction) | `{report:{updated}, files, revision_before, revision}` — `files` in request order, duplicates removed |
-| play | `POST /api/v1/audio/{id}/plays` (no body) | `{file, revision_before, revision}` with `revision == revision_before` (plays never advance the revision) |
 
 **Revision rule.** After a successful write, if the cached snapshot's revision equals
 `revision_before`, the returned record(s) are written into the open snapshot in one SQLite
-transaction (`audiolib_db::apply_snapshot_records`: user tags/notes with their tokenized
-columns — the FTS5 triggers keep search consistent — favorite, color, play count)
-and the cached revision becomes `revision` (`cache.json` and the header); a play reply has
-`revision == revision_before`, so the record is applied and the revision is kept. Otherwise (another
+transaction (`audiolib_db::apply_snapshot_records`: tags/notes, favorite and color,
+with FTS5 maintained atomically). Legacy schema 3–5 keeps its derived columns and
+stored count; schema 6 derives the tokens at index writes and ignores retired counters.
+The cached revision becomes `revision` (`cache.json` and the header); a valid response
+with `revision == revision_before` also applies without requesting full sync. Otherwise (another
 client wrote in between, no cached state, a different snapshot open) a normal full
 snapshot sync runs. The background revision poll therefore does not report the client's
 own writes as "new revision".
@@ -589,7 +591,8 @@ of that page, and folder counts stay as in the snapshot.
 | `current_scan` | `GET /scans/current` → `{"scan": … \| null}` | attach on (re)connect |
 | `scan_status` | `GET /scans/{id}` | poll about every 500 ms until `active` is false; a changed `revision` means sync |
 | `control_scan` | `POST /scans/{id}/pause\|resume\|cancel` | idempotent; `409 SCAN_STATE` → `RemoteError::ScanState` |
-| `scan_history` / `play_history` | `GET /history/scans\|plays?limit=&offset=` | newest first, limit clamped to 1–10000; prefer over the snapshot copy |
+| `scan_history` | `GET /history/scans?limit=&offset=` | newest first, limit clamped to 1–10000 |
+| Recent playback | client-local `play-history/<library_id>/history.db` | no playback HTTP calls; independent of snapshot/cache cleanup |
 | `capabilities` | `GET /capabilities` → `{manage_mode, external, can_manage, root_management}` | `may_manage()` = `can_manage` (never inferred locally); missing `root_management` disables root editing; `404` (older server) → no management |
 | `browse_directory` | `GET /fs` or `GET /fs?path=&hidden=0` | no path returns server locations; absolute server path returns one bounded, non-recursive directory listing |
 | `add_root` | `POST /roots {name,path}` | register an existing server folder; no implicit scan |
@@ -1051,7 +1054,6 @@ AudioLibCli remote test [--url URL]    # per-step connection report (exit code 1
 AudioLibCli remote sync [--force]
 AudioLibCli remote edit <id[,id…]> [--tags T] [--tag-mode replace|append|remove]
                         [--color '#RRGGBB'|''] [--notes N] [--favorite true|false]
-AudioLibCli remote plays <id>
 AudioLibCli remote download <id[,id…]>
 AudioLibCli remote profiles                 # saved servers, active source (no tokens, no network)
 AudioLibCli remote roots [--url URL]        # /roots incl. missing_count, scanning, last_scan
@@ -1066,7 +1068,8 @@ AudioLibCli remote history scans|plays [--limit N] [--offset N] [--url URL]
 otherwise the batch endpoint. The reply lists `revision_before`, `revision` and the cache
 effect: `{"applied": true, "revision": N}` when the revision rule applied the records, or
 `{"applied": false, "sync": {…}}` with the result of the full sync that ran instead (also
-after an uncertain error such as `408`). `remote plays` records one play the same way.
+after an uncertain error such as `408`). Playback tracking is retired; there is no
+`remote plays` command. `remote history plays` returns an empty list without an HTTP request.
 `remote download` fills the drag-out download cache and prints `id`, `path` and `bytes`
 per file.
 

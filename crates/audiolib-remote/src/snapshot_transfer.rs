@@ -1,6 +1,6 @@
 // crates/audiolib-remote/src/snapshot_transfer.rs
 //! Owned, leased wire-byte checkpoints for streaming snapshot downloads.
-use crate::client::{RemoteClient, SnapshotMeta, cancellable_io};
+use crate::client::{RemoteClient, RemoteLibrary, SnapshotMeta, cancellable_io};
 use crate::error::{RemoteError, Result};
 use crate::sync::{CacheState, RemoteCache, SyncProgress};
 use crate::util::{unix_now, write_atomic};
@@ -70,6 +70,8 @@ pub struct PendingSync {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Object {
+    #[serde(default)]
+    snapshot_format: Option<audiolib_core::compatibility::SnapshotFormat>,
     snapshot_id: Option<String>,
     etag: Option<String>,
     library_id: Option<String>,
@@ -272,6 +274,27 @@ impl TransferSession {
         self.state.pending()
     }
 
+    /// A fixed object with an already durable prefix can legitimately predate the
+    /// latest library revision. Bind negotiation to that exact saved identity/format;
+    /// fresh responses still use the current library's conservative admission rules.
+    pub(crate) fn pinned_library(&self, current: &RemoteLibrary) -> Option<RemoteLibrary> {
+        let object = self.state.object.as_ref()?;
+        let revision = object.revision?;
+        if !object.resumable
+            || self.state.committed == 0
+            || self.state.published_database_file.is_some()
+            || object.library_id.as_deref() != Some(current.library_id.as_str())
+            || revision >= current.revision
+        {
+            return None;
+        }
+        let mut pinned = current.clone();
+        pinned.revision = revision;
+        pinned.schema_version = object.schema_version?;
+        pinned.snapshot_format = object.snapshot_format.clone();
+        Some(pinned)
+    }
+
     pub(crate) fn set_paused(&mut self, paused: bool) -> Result<()> {
         self.state.manual_paused = paused;
         if paused {
@@ -443,7 +466,7 @@ impl TransferSession {
                 .zip(self.state.library_id.as_deref())
                 .is_some_and(|(actual, expected)| actual != expected)
             {
-                return Err(RemoteError::Changed(
+                return Err(RemoteError::Snapshot(
                     "Server library changed during snapshot preparation".into(),
                 ));
             }
@@ -568,6 +591,7 @@ impl TransferSession {
         drop(sink);
         let bytes = decoding?;
         Ok(SnapshotMeta {
+            snapshot_format: object.snapshot_format,
             bytes,
             library_id: object.library_id,
             revision: object.revision,
@@ -720,6 +744,9 @@ fn snapshot_response(
     previous: Option<&Object>,
     offset: u64,
 ) -> Result<(ureq::http::Response<ureq::Body>, Object)> {
+    let catalog = audiolib_core::compatibility::compatibility_manifest();
+    let catalog_json = crate::compatibility::client_header()?;
+    let accepted = catalog.snapshot_read_formats.join(", ");
     let url = match previous.and_then(|object| object.snapshot_id.as_deref()) {
         Some(id) => format!(
             "{}/library/snapshot?snapshot_id={}",
@@ -729,14 +756,28 @@ fn snapshot_response(
         None => format!("{}/library/snapshot", client.api_url()),
     };
     let response = crate::abort::call_fresh(|| {
-        let mut request = client.bulk.get(&url).header(
-            "Accept-Encoding",
-            if previous.is_some_and(|object| !object.compressed) {
-                "identity"
-            } else {
-                "zstd"
-            },
-        );
+        let mut request = client
+            .bulk
+            .get(&url)
+            .header(
+                "Accept-Encoding",
+                if previous.is_some_and(|object| !object.compressed) {
+                    "identity"
+                } else {
+                    "zstd"
+                },
+            )
+            .header(
+                audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                &catalog_json,
+            )
+            .header(
+                audiolib_core::compatibility::ACCEPT_FORMATS_HEADER,
+                &accepted,
+            )
+            .header("X-AudioLib-Snapshot-Schema-Max", "6")
+            .header("X-AudioLib-Search-Storage-Max", "1")
+            .header("X-AudioLib-Tokenization-Max", "3");
         if !client.token.is_empty() {
             request = request.header("Authorization", &format!("Bearer {}", client.token));
         }
@@ -760,6 +801,7 @@ fn snapshot_response(
             "Unexpected snapshot status {status}"
         )));
     }
+    let snapshot_format = crate::compatibility::response_format(response.headers())?;
     let header = |name: &str| {
         response
             .headers()
@@ -812,6 +854,7 @@ fn snapshot_response(
         content_length
     };
     let object = Object {
+        snapshot_format,
         snapshot_id: header("x-snapshot-id"),
         etag: header("etag"),
         library_id: header("x-library-id"),
@@ -831,6 +874,7 @@ fn snapshot_response(
     };
     if let Some(previous) = previous
         && (object.snapshot_id != previous.snapshot_id
+            || object.snapshot_format != previous.snapshot_format
             || object.etag != previous.etag
             || object.library_id != previous.library_id
             || object.revision != previous.revision

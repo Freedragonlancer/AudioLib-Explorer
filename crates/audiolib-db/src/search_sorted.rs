@@ -1,7 +1,7 @@
 // crates/audiolib-db/src/search_sorted.rs
 //! Native alternative ordering over bounded exact MATCH membership sets.
 use crate::{
-    AUDIO_SELECT, Result, audio_from_row, db_error, search_cache::MAX_RANKED_IDS,
+    Result, audio_from_row, audio_projection, db_error, search_cache::MAX_RANKED_IDS,
     search_candidates, search_sql,
 };
 use audiolib_core::{Error, FileVisibility, SearchFilters, SearchPage, SearchRequest, SortOrder};
@@ -9,7 +9,11 @@ use jieba_rs::Jieba;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Instant;
 
-const MIN_SORTED_MATCH_IDS: u64 = 32_768;
+const MIN_SORTED_MATCH_IDS: u64 = 16_384;
+// Extra tag-key materialization and the channels index's leading bit-depth scan
+// lose to the native plan on near-whole-library matches. Bound these costs
+// separately from the small ID-only membership used by naturally sorted indexes.
+const MAX_UNORDERED_SORT_MATCH_IDS: u64 = 131_072;
 
 /// Count a filtered filename page from complete narrow membership before touching
 /// wide Metadata. All collection, filtering, ordering and hydration must use the
@@ -109,7 +113,10 @@ pub(super) fn filtered_filename_page(
     let offset = i64::try_from(request.offset)
         .map_err(|_| Error::Validation("Offset is too large".into()))?;
     let mut statement = tx
-        .prepare(&filtered_filename_page_sql(request.descending))
+        .prepare(&filtered_filename_page_sql(
+            request.descending,
+            &audio_projection(tx)?,
+        ))
         .map_err(db_error)?;
     let results = statement
         .query_map(params![json, request.limit as i64, offset], audio_from_row)
@@ -150,7 +157,7 @@ fn visible_filename_index(tx: &Connection) -> Result<bool> {
     }))
 }
 
-fn filtered_filename_page_sql(descending: bool) -> String {
+fn filtered_filename_page_sql(descending: bool, projection: &str) -> String {
     let direction = if descending { "DESC" } else { "ASC" };
     format!(
         "WITH ranked AS MATERIALIZED (
@@ -158,7 +165,7 @@ fn filtered_filename_page_sql(descending: bool) -> String {
             FROM audio_files af INDEXED BY idx_audio_visible_name
             WHERE af.missing=0 AND af.id IN (SELECT value FROM json_each(?1))
             ORDER BY sort_value {direction},af.id ASC LIMIT ?2 OFFSET ?3
-        ) SELECT {AUDIO_SELECT} FROM ranked JOIN audio_files af ON af.id=ranked.id
+        ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
         ORDER BY ranked.sort_value COLLATE NOCASE {direction},af.id ASC"
     )
 }
@@ -180,7 +187,14 @@ pub(super) fn page_sql(
         });
     if !no_missing
         || request.query.trim().is_empty()
-        || request.order_by != SortOrder::Duration
+        || !matches!(
+            request.order_by,
+            SortOrder::Duration
+                | SortOrder::SampleRate
+                | SortOrder::Modified
+                | SortOrder::Channels
+                | SortOrder::Tags
+        )
         || request.folder_id.is_some()
         || !visibility_only
         || request.filters.visibility == FileVisibility::Missing
@@ -188,31 +202,130 @@ pub(super) fn page_sql(
     {
         return Ok(None);
     }
-    // This useful older index is not a required derived-state feature. Supported
-    // read-only snapshots without it must retain the existing complete fallback.
-    let has_index: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_index_list('audio_files')
-                 WHERE name='idx_duration' AND partial=0)
-             AND (SELECT COUNT(*) FROM pragma_index_info('idx_duration'))=1
-             AND EXISTS(SELECT 1 FROM pragma_index_info('idx_duration')
-                 WHERE name='duration' AND cid>=0)",
-            [],
-            |row| row.get(0),
+    if matches!(request.order_by, SortOrder::Tags | SortOrder::Channels)
+        && total > MAX_UNORDERED_SORT_MATCH_IDS
+    {
+        return Ok(None);
+    }
+    if request.order_by == SortOrder::Tags {
+        return tagged_page_sql(tx, request);
+    }
+    let (column, index, partial_definition) = match request.order_by {
+        SortOrder::Duration => ("duration", "idx_duration", None),
+        SortOrder::SampleRate => ("sample_rate", "idx_sample_rate", None),
+        SortOrder::Modified => (
+            "modified_at",
+            "idx_audio_visible_modified",
+            Some(
+                "CREATE INDEX idx_audio_visible_modified ON audio_files(modified_at,id) WHERE missing=0",
+            ),
+        ),
+        SortOrder::Channels => (
+            "channels",
+            "idx_audio_visible_format",
+            Some(
+                "CREATE INDEX idx_audio_visible_format ON audio_files(bit_depth,channels) WHERE missing=0",
+            ),
+        ),
+        _ => return Ok(None),
+    };
+    // These accelerators are optional. Read only a proven complete covering
+    // index, and keep the existing native fallback for older/altered snapshots.
+    let (has_index, visibility) = if let Some(definition) = partial_definition {
+        if request.filters.visibility != FileVisibility::Present {
+            return Ok(None);
+        }
+        (
+            crate::schema::definition::matches_sql(tx, index, "index", "audio_files", definition)?,
+            "af.missing=0 AND ",
         )
-        .map_err(db_error)?;
+    } else {
+        let has_index: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_index_list('audio_files')
+                 WHERE name=?1 AND partial=0)
+             AND (SELECT COUNT(*) FROM pragma_index_info(?1))=1
+             AND EXISTS(SELECT 1 FROM pragma_index_info(?1)
+                 WHERE name=?2 AND cid>=0)",
+                params![index, column],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        (has_index, "")
+    };
     if !has_index {
         return Ok(None);
     }
     let direction = if request.descending { "DESC" } else { "ASC" };
+    let projection = audio_projection(tx)?;
     Ok(Some(format!(
         "WITH ranked AS MATERIALIZED (
-            SELECT af.id,af.duration AS sort_value
-            FROM audio_files af INDEXED BY idx_duration
-            WHERE af.id IN (SELECT rowid FROM audio_search WHERE audio_search MATCH ?)
-            ORDER BY af.duration {direction},af.id ASC LIMIT ? OFFSET ?
-        ) SELECT {AUDIO_SELECT} FROM ranked JOIN audio_files af ON af.id=ranked.id
+            SELECT af.id,af.{column} AS sort_value
+            FROM audio_files af INDEXED BY {index}
+            WHERE {visibility}af.id IN (SELECT rowid FROM audio_search WHERE audio_search MATCH ?)
+            ORDER BY af.{column} {direction},af.id ASC LIMIT ? OFFSET ?
+        ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
         ORDER BY ranked.sort_value {direction},af.id ASC"
+    )))
+}
+
+/// The sparse tag index omits exactly the present rows whose derived key is
+/// empty. Read matching tagged keys from it, then supply the empty key for the
+/// remaining complete MATCH IDs. Do not parse wide source Metadata per match.
+fn tagged_page_sql(tx: &Connection, request: &SearchRequest) -> Result<Option<String>> {
+    // All visibility can include non-present rows absent from this partial index.
+    // Present is safe only after page_sql's snapshot-local no_missing proof.
+    if request.filters.visibility != FileVisibility::Present {
+        return Ok(None);
+    }
+    let known_index = crate::schema::definition::matches_sql(
+        tx,
+        "idx_audio_visible_tagged_folders",
+        "index",
+        "audio_files",
+        "CREATE INDEX idx_audio_visible_tagged_folders ON audio_files(folder_id,id,user_tags,source_tags_text)
+         WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'')",
+    )?;
+    // If a legacy nullable source key were NULL, an omitted row would sort as
+    // NULL rather than empty text. Retain the generic plan for that schema.
+    let nonnull_source: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('audio_files')
+         WHERE name='source_tags_text' AND \"notnull\"=1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    // The column's inherited collation also governs the partial predicate.
+    // RTRIM/custom collations can treat a nonempty source key as empty and omit
+    // it; the exact index SQL alone cannot prove that absent means empty text.
+    let binary_source: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_index_xinfo('idx_audio_visible_tagged_folders')
+         WHERE name='source_tags_text' AND key=1 AND coll='BINARY')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if !known_index || !nonnull_source || !binary_source {
+        return Ok(None);
+    }
+    let direction = if request.descending { "DESC" } else { "ASC" };
+    let projection = audio_projection(tx)?;
+    Ok(Some(format!(
+        "WITH matches AS MATERIALIZED (
+            SELECT rowid AS id FROM audio_search WHERE audio_search MATCH ?1
+        ), tagged AS MATERIALIZED (
+            SELECT af.id,COALESCE(audiolib_user_tags_key(af.user_tags),af.source_tags_text) AS sort_value
+            FROM audio_files af INDEXED BY idx_audio_visible_tagged_folders
+            WHERE af.missing=0 AND (COALESCE(trim(af.user_tags),'')<>'' OR af.source_tags_text<>'')
+              AND af.id IN (SELECT id FROM matches)
+        ), ranked AS MATERIALIZED (
+            SELECT matches.id,COALESCE(tagged.sort_value,'') COLLATE NOCASE AS sort_value
+            FROM matches LEFT JOIN tagged ON tagged.id=matches.id
+            ORDER BY sort_value {direction},matches.id ASC LIMIT ?2 OFFSET ?3
+        ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
+        ORDER BY ranked.sort_value COLLATE NOCASE {direction},af.id ASC"
     )))
 }
 
@@ -233,7 +346,7 @@ mod tests {
             let plan = conn
                 .prepare(&format!(
                     "EXPLAIN QUERY PLAN {}",
-                    filtered_filename_page_sql(descending)
+                    filtered_filename_page_sql(descending, &audio_projection(&conn).unwrap())
                 ))
                 .unwrap()
                 .query_map(params![ids, 2, 1], |row| row.get::<_, String>(3))
@@ -355,6 +468,7 @@ mod tests {
         let path = directory.path().join("sorted.db");
         let provider = SqliteProvider::open(&path).unwrap();
         let conn = Connection::open(path).unwrap();
+        crate::schema::register_tokenizer(&conn, crate::load_tokenizer()).unwrap();
         for (id, duration) in [
             (i64::MIN, None),
             (-7, Some(-0.0)),
@@ -534,6 +648,208 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn unordered_covering_plans_bound_extra_work_and_keep_native_large_match_fallback() {
+        let (_directory, conn) = fixture();
+        for order_by in [SortOrder::Tags, SortOrder::Channels] {
+            let request = SearchRequest {
+                order_by,
+                ..request()
+            };
+            assert!(
+                page_sql(&conn, &request, true, MAX_UNORDERED_SORT_MATCH_IDS)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                page_sql(&conn, &request, true, MAX_UNORDERED_SORT_MATCH_IDS + 1)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for order_by in [
+            SortOrder::Duration,
+            SortOrder::SampleRate,
+            SortOrder::Modified,
+        ] {
+            let request = SearchRequest {
+                order_by,
+                ..request()
+            };
+            assert!(
+                page_sql(&conn, &request, true, MAX_UNORDERED_SORT_MATCH_IDS + 1)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn present_scalar_plans_cover_sort_keys_and_reject_all_visibility() {
+        let (_directory, conn) = fixture();
+        for (order_by, index) in [
+            (SortOrder::Modified, "idx_audio_visible_modified"),
+            (SortOrder::Channels, "idx_audio_visible_format"),
+        ] {
+            for descending in [false, true] {
+                let request = SearchRequest {
+                    order_by,
+                    descending,
+                    ..request()
+                };
+                let sql = page_sql(&conn, &request, true, MIN_SORTED_MATCH_IDS)
+                    .unwrap()
+                    .unwrap();
+                let plan = conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap()
+                    .query_map(params_from_iter(values(2, 0)), |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert!(
+                    plan.iter()
+                        .any(|line| line.contains(&format!("COVERING INDEX {index}"))),
+                    "{plan:?}"
+                );
+                assert_eq!(
+                    plan.iter()
+                        .filter(|line| line.contains("SCAN audio_search VIRTUAL TABLE INDEX"))
+                        .count(),
+                    1,
+                    "{plan:?}"
+                );
+                assert!(
+                    !plan.iter().any(|line| line.contains("CORRELATED")),
+                    "{plan:?}"
+                );
+                let all = SearchRequest {
+                    filters: SearchFilters {
+                        visibility: FileVisibility::All,
+                        ..Default::default()
+                    },
+                    ..request
+                };
+                assert!(
+                    page_sql(&conn, &all, true, MIN_SORTED_MATCH_IDS)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tagged_plan_covers_keys_and_scans_match_once_before_page_hydration() {
+        let (_directory, conn) = fixture();
+        conn.execute("UPDATE audio_files SET user_tags='Zulu' WHERE id=9", [])
+            .unwrap();
+        let request = SearchRequest {
+            order_by: SortOrder::Tags,
+            ..request()
+        };
+        let sql = page_sql(&conn, &request, true, MIN_SORTED_MATCH_IDS)
+            .unwrap()
+            .unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values(2, 0)), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("COVERING INDEX idx_audio_visible_tagged_folders")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("AUTOMATIC COVERING INDEX (id=?) LEFT-JOIN")),
+            "{plan:?}"
+        );
+        assert_eq!(
+            plan.iter()
+                .filter(|line| line.contains("SCAN audio_search VIRTUAL TABLE INDEX"))
+                .count(),
+            1,
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.contains("CORRELATED")),
+            "{plan:?}"
+        );
+        let hydrate = plan
+            .iter()
+            .position(|line| line.contains("SEARCH af USING INTEGER PRIMARY KEY"))
+            .unwrap();
+        assert!(
+            plan.iter().position(|line| line == "SCAN ranked").unwrap() < hydrate,
+            "{plan:?}"
+        );
+        conn.progress_handler(1, Some(|| true)).unwrap();
+        let result = conn
+            .prepare(&sql)
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params_from_iter(values(2, 0)), |row| row.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(db_error);
+        assert!(matches!(result, Err(Error::Cancelled)));
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        let ids = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map(params_from_iter(values(2, 0)), |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec![i64::MIN, -7]);
+    }
+
+    #[test]
+    fn tagged_plan_keeps_proof_membership_keys_and_hydration_in_one_snapshot() {
+        let (directory, mut conn) = fixture();
+        let writer = Connection::open(directory.path().join("sorted.db")).unwrap();
+        crate::schema::register_tokenizer(&writer, crate::load_tokenizer()).unwrap();
+        let request = SearchRequest {
+            order_by: SortOrder::Tags,
+            ..request()
+        };
+        let tx = conn.transaction().unwrap();
+        let sql = page_sql(&tx, &request, true, MIN_SORTED_MATCH_IDS)
+            .unwrap()
+            .unwrap();
+        writer
+            .execute(
+                "UPDATE audio_files SET user_tags='Zulu' WHERE id=?",
+                [i64::MIN],
+            )
+            .unwrap();
+        let ids = tx
+            .prepare(&sql)
+            .unwrap()
+            .query_map(params_from_iter(values(2, 0)), |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec![i64::MIN, -7]);
+        tx.commit().unwrap();
+        let ids = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map(params_from_iter(values(2, 0)), |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec![-7, 1]);
     }
 
     #[test]

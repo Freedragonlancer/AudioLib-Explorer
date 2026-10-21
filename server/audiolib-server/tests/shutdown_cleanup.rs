@@ -10,6 +10,7 @@ fn fixture() -> (tempfile::TempDir, ServerConfig) {
     let database = dir.path().join("library.db");
     drop(SqliteProvider::open(&database).unwrap());
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "INSERT INTO audio_files(id,file_path,filename) VALUES(1,'fixture.wav','fixture.wav')",
         [],
@@ -29,6 +30,7 @@ fn shutdown_releases_snapshot_and_wal_and_preserves_restart_revision() {
     let (dir, config) = fixture();
     let state = AppState::open(&config, None).unwrap();
     let conn = Connection::open(&config.library_db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute("UPDATE audio_files SET favorite=1", [])
         .unwrap();
     let revision = state.poll_revision().unwrap();
@@ -62,6 +64,7 @@ fn shutdown_releases_snapshot_and_wal_and_preserves_restart_revision() {
     drop(reopened);
     // A real external commit while stopped must still advance the revision.
     let conn = Connection::open(&config.library_db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute("UPDATE audio_files SET favorite=0", [])
         .unwrap();
     drop(conn);
@@ -154,6 +157,7 @@ async fn shutdown_cancels_an_active_large_snapshot_and_removes_its_staging_files
     // A large unrelated payload exercises bounded backup/compression without adding
     // artificial FTS work or touching any real library.
     let conn = Connection::open(&config.library_db).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "CREATE TABLE snapshot_payload(bytes BLOB);
          INSERT INTO snapshot_payload VALUES(zeroblob(134217728));",

@@ -13,15 +13,19 @@ use std::{
 fn fixture() -> (tempfile::TempDir, PathBuf, SqliteProvider) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("filtered-filename.db");
-    let conn = Connection::open(&path).unwrap();
+    let legacy = directory.path().join("legacy-nullable.db");
+    let conn = Connection::open(&legacy).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "CREATE TABLE audio_files(id INTEGER PRIMARY KEY,file_path TEXT NOT NULL UNIQUE,
          filename TEXT NOT NULL,missing INTEGER);",
     )
     .unwrap();
     drop(conn);
+    audiolib_db::import_legacy(&legacy, &path).unwrap();
     let provider = SqliteProvider::open(&path).unwrap();
     let mut conn = Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let tx = conn.transaction().unwrap();
     for (id, name, rate, duration, missing) in [
         (i64::MIN, "A", Some(48_000), Some(0.0), Some(0)),
@@ -152,6 +156,7 @@ fn assert_page(provider: &SqliteProvider, conn: &Connection, request: &SearchReq
 fn complete_filtered_counts_and_both_filename_directions_match_native_nocase() {
     let (_directory, path, provider) = fixture();
     let conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let filters = [
         SearchFilters {
             sample_rate: Some(48_000),
@@ -212,6 +217,7 @@ fn complete_filtered_counts_and_both_filename_directions_match_native_nocase() {
 fn old_or_incompatible_optional_indexes_and_extra_filters_keep_complete_fallback() {
     let (_directory, path, provider) = fixture();
     let conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert_page(
         &provider,
         &conn,
@@ -265,6 +271,7 @@ fn old_or_incompatible_optional_indexes_and_extra_filters_keep_complete_fallback
 fn unfiltered_filename_pages_require_a_current_exact_all_present_proof() {
     let (_directory, path, provider) = fixture();
     let conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let plain = SearchRequest {
         filters: SearchFilters::default(),
         ..request()
@@ -304,6 +311,7 @@ fn unfiltered_filename_pages_require_a_current_exact_all_present_proof() {
 fn precancelled_filtered_filename_search_preserves_following_reader_use() {
     let (_directory, path, provider) = fixture();
     let conn = Connection::open(path).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert!(matches!(
         provider.search_cancellable(&request(), Arc::new(AtomicBool::new(true))),
         Err(Error::Cancelled)

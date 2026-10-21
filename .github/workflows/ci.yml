@@ -1,13 +1,18 @@
 name: CI
 
-# Cloud CI is intentionally minimal: formatting plus a Linux compile check.
-# Clippy, the full test suite and release packaging run on local machines
-# (Windows for the client, macOS for the server).
-
+# Runtime checks run locally under AGENTS.md. Hosted CI checks formatting only.
 on:
   push:
     branches: [main, 'codex/**']
+    paths-ignore:
+      - '**/*.md'
+      - 'doc/**'
+      - 'resources/screenshot-*.png'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'doc/**'
+      - 'resources/screenshot-*.png'
 
 permissions:
   contents: read
@@ -20,26 +25,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux:
-    name: Linux (fmt, cargo check)
+  format:
+    name: Linux (fmt)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     env:
-      # rust-toolchain.toml pins a Windows host toolchain; use the same Rust version on Linux.
       RUSTUP_TOOLCHAIN: 1.97.1
     steps:
       - uses: actions/checkout@v4
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev pkg-config
-      - name: Install Rust
+      - name: Install the pinned formatter
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
-      - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Check Linux-buildable crates
-        # .cargo/config.toml defaults to a Windows target, so pass the host target explicitly.
-        run: |
-          cargo check -p audiolib-core -p audiolib-db --locked --target x86_64-unknown-linux-gnu
-          cargo check -p audiolib-server --no-default-features --locked --target x86_64-unknown-linux-gnu

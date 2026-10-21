@@ -78,7 +78,17 @@ fn child_pending_sync_publication() {
         respond(
             &mut health,
             "200 OK",
-            r#"{"status":"ok","version":"0.5.1"}"#,
+            &serde_json::json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}).to_string(),
+        );
+        let mut capabilities = accept(&listener);
+        assert!(request(&mut capabilities).starts_with("GET /api/v1/capabilities "));
+        respond(
+            &mut capabilities,
+            "200 OK",
+            &serde_json::json!({
+                "compatibility": audiolib_core::compatibility::compatibility_manifest(),
+            })
+            .to_string(),
         );
         let mut library = accept(&listener);
         assert!(request(&mut library).starts_with("GET /api/v1/library"));
@@ -296,7 +306,7 @@ fn child_paused_startup() {
             library_id: "paused-cache".into(),
             server_url: url.clone(),
             revision: 1,
-            schema_version: 5,
+            schema_version: audiolib_db::SCHEMA_VERSION,
             database_file: "library-r1.db".into(),
             ..Default::default()
         })

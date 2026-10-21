@@ -47,12 +47,11 @@ fn fixture() -> Fixture {
     let database = directory.path().join("stale-folder-statistics.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let mut conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'synthetic','seed');
          INSERT INTO folder_closure VALUES(1,1,0);
-         INSERT INTO audio_files(id,file_path,filename,folder_id,sample_rate,favorite,
-           user_tags,user_tags_tokenized,missing)
-         VALUES(1,'synthetic/seed.wav','seed.wav',1,48000,1,'metal','metal',0);
+         INSERT INTO audio_files(id,file_path,filename,folder_id,sample_rate,favorite,user_tags,missing) VALUES(1,'synthetic/seed.wav','seed.wav',1,48000,1,'metal',0);
          ANALYZE;",
     )
     .unwrap();
@@ -110,9 +109,7 @@ fn fixture() -> Fixture {
             )
             .unwrap();
             tx.execute(
-                "INSERT INTO audio_files(id,file_path,filename,folder_id,sample_rate,
-                 favorite,user_tags,user_tags_tokenized,missing)
-                 VALUES(?1,?2,'input.wav',?3,?4,?5,?6,?6,?7)",
+                "INSERT INTO audio_files(id,file_path,filename,folder_id,sample_rate,favorite,user_tags,missing) VALUES(?1,?2,'input.wav',?3,?4,?5,?6,?7)",
                 params![
                     id,
                     format!("{folder_path}/input.wav"),
@@ -259,6 +256,7 @@ fn stale_single_folder_statistics_preserve_pages_and_exact_ancestor_rollup_after
         assert_eq!(actual_counts(&fixture.provider, &scoped), expected);
     }
     let conn = Connection::open(fixture.provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert_eq!(statistics(&conn), fixture.initial_statistics);
 }
 
@@ -285,6 +283,7 @@ fn cancelled_facets_with_stale_statistics_exit_and_leave_later_reads_usable() {
         cancel.store(true, Ordering::Release);
     }
     let conn = Connection::open(fixture.provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert_eq!(statistics(&conn), fixture.initial_statistics);
 }
 
@@ -299,6 +298,7 @@ fn missing_rollup_index_upgrades_owned_readonly_copy_and_is_repaired_on_writable
     let source = provider.database_path().to_path_buf();
     drop(provider);
     let conn = Connection::open(&source).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "DROP INDEX idx_closure_descendant;
          PRAGMA wal_checkpoint(TRUNCATE);
@@ -328,6 +328,7 @@ fn missing_rollup_index_upgrades_owned_readonly_copy_and_is_repaired_on_writable
     assert_eq!(writable.database_path(), source);
     assert!(SqliteProvider::has_current_search_state(&source).unwrap());
     let conn = Connection::open(&source).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     assert_eq!(
         conn.query_row(
             "SELECT COUNT(*) FROM sqlite_schema

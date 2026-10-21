@@ -248,10 +248,13 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
         let server = TestServer::start(move |request| {
+            if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                return response;
+            }
             if request.path == "/api/v1/library" {
                 return TestResponse::json(
                     200,
-                    r#"{"library_id":"library-roots","identity_bound_writes":true}"#,
+                    r#"{"library_id":"library-roots","schema_version":5,"identity_bound_writes":true}"#,
                 );
             }
             assert_eq!(
@@ -329,10 +332,13 @@ mod tests {
     #[test]
     fn root_errors_and_old_server_capabilities_remain_distinct() {
         let server = TestServer::start(|request| {
+            if request.path == "/api/v1/health" {
+                return crate::test_server::legacy_handshake(&request.path).unwrap();
+            }
             if request.path == "/api/v1/library" {
                 return TestResponse::json(
                     200,
-                    r#"{"library_id":"library-roots","identity_bound_writes":true}"#,
+                    r#"{"library_id":"library-roots","schema_version":5,"identity_bound_writes":true}"#,
                 );
             }
             let (status, code, message) = match request.path.as_str() {

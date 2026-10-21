@@ -69,13 +69,15 @@ public sealed class AudioLibResumeFixture : IDisposable
     private readonly Task accepting;
     private readonly byte[] health;
     private readonly byte[] roots;
+    private readonly byte[] capabilities;
     private volatile bool stopping;
     public readonly int Port;
 
-    public AudioLibResumeFixture(string healthJson, string rootsJson)
+    public AudioLibResumeFixture(string healthJson, string rootsJson, string capabilitiesJson)
     {
         health = Encoding.UTF8.GetBytes(healthJson);
         roots = Encoding.UTF8.GetBytes(rootsJson);
+        capabilities = Encoding.UTF8.GetBytes(capabilitiesJson);
         listener.Start();
         Port = ((IPEndPoint)listener.LocalEndpoint).Port;
         accepting = Task.Run((Action)Accept);
@@ -143,6 +145,7 @@ public sealed class AudioLibResumeFixture : IDisposable
                 if (path == "/health") { Json(output, 200, health); return; }
                 if (path == "/library") { Json(output, 200, Encoding.UTF8.GetBytes(scenario.Library)); return; }
                 if (path == "/roots") { Json(output, 200, roots); return; }
+                if (path == "/capabilities") { Json(output, 200, capabilities); return; }
                 if (path != "/library/snapshot") { Json(output, 404, Encoding.UTF8.GetBytes("{}")); return; }
                 string snapshotId = null;
                 foreach (string parameter in uri.Query.TrimStart('?').Split('&'))

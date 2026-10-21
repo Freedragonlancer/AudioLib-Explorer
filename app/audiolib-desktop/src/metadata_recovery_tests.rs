@@ -311,7 +311,7 @@ fn child_snapshot_handoff() {
         .run_library_operation(LibraryOperation::DataSource(
             remote_mode::DataSourceSwitch::Server {
                 database: fixture.root.join("missing-snapshot.db"),
-                state: Some(fixture.replacement.clone()),
+                state: Some(Box::new(fixture.replacement.clone())),
             },
         ));
     drain_operation(&fixture);
@@ -374,7 +374,7 @@ fn child_snapshot_handoff() {
         .run_library_operation(LibraryOperation::DataSource(
             remote_mode::DataSourceSwitch::Server {
                 database: target.clone(),
-                state: Some(fixture.replacement.clone()),
+                state: Some(Box::new(fixture.replacement.clone())),
             },
         ));
     drain_operation(&fixture);
@@ -434,7 +434,18 @@ fn child_local_switch() {
     fixture.ui.invoke_sm_switch_requested();
     drain_operation(&fixture);
     assert!(!fixture.controller.remote_read_only());
-    assert_eq!(fixture.controller.provider().database_path(), local_path);
+    // Writable opens freeze the leased canonical destination. Windows may expose
+    // its verbatim prefix even when the configured path uses ordinary spelling.
+    assert_eq!(
+        fixture
+            .controller
+            .provider()
+            .database_path()
+            .canonicalize()
+            .unwrap(),
+        local_path.canonicalize().unwrap(),
+        "the real local-source switch must open the configured local library"
+    );
     assert!(
         fixture
             .controller
@@ -557,7 +568,7 @@ fn child_ordinary_failure() {
         .run_library_operation(LibraryOperation::DataSource(
             remote_mode::DataSourceSwitch::Server {
                 database: cache.database_path(&fixture.replacement),
-                state: Some(fixture.replacement.clone()),
+                state: Some(Box::new(fixture.replacement.clone())),
             },
         ));
     drain_operation(&fixture);

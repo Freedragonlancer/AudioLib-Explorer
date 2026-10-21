@@ -19,7 +19,7 @@
 //! * [`RevisionCheck`] / [`PollSchedule`]: background revision check decisions and backoff.
 //! * [`RemoteSecrets`]: API token and WebDAV password, DPAPI-protected on Windows and
 //!   never logged or written to settings.json.
-//! * [`RemoteWriter`] / [`RemoteProvider`]: metadata writes and plays (§6.3) applied to
+//! * [`RemoteWriter`] / [`RemoteProvider`]: Metadata writes (§6.3) applied to
 //!   the snapshot by the revision rule (`revision_before` match, else full sync).
 //! * [`DownloadCache`]: complete local copies for drag and drop (`?download=1`, §8).
 //! * Server library management (`manage` module): [`Capabilities`] (`manage_mode`),
@@ -37,8 +37,11 @@
 mod abort;
 mod bandwidth;
 mod client;
+mod compatibility;
 mod download;
 mod error;
+#[cfg(test)]
+mod legacy_compatibility_tests;
 mod list_waveforms;
 mod manage;
 mod mapping;
@@ -114,8 +117,9 @@ pub use stream::{
     SourceAuth, StreamProbe, StreamSource, WAKING_HINT_AFTER, WebDavAuth, probe_stream,
 };
 pub use sync::{
-    CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress, SyncRunOutcome,
-    refresh_cached_roots, sync_library, sync_library_with_options, validate_snapshot,
+    CacheFormat, CachePreparation, CacheState, RemoteCache, SyncOutcome, SyncProgress,
+    SyncRunOutcome, refresh_cached_roots, sync_library, sync_library_with_options,
+    validate_snapshot,
 };
 pub use tls::{TRUST_STORE, TlsInfo};
 pub use util::encode_path_segment;

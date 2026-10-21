@@ -2,6 +2,8 @@
 //! List thumbnail waveforms (doc/api/README.md §9.1–§9.2): `POST /waveforms`,
 //! `GET /waveforms/status`, pre-generation, `GET/PATCH /settings` and the
 //! `/capabilities` fields, against temporary libraries of generated WAVs.
+mod support;
+
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_server::{
     AppState, BearerToken, ConnectionInfo, ErrorBody, Listener, RootMonitor, RootPolicy, RootProbe,
@@ -145,9 +147,11 @@ async fn call(
     address: &str,
     body: Option<&str>,
 ) -> Response {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(format!("/api/v1{path}"));
+    let mut request = support::modern(
+        Request::builder()
+            .method(method)
+            .uri(format!("/api/v1{path}")),
+    );
     if body.is_some()
         && !headers
             .iter()
@@ -1208,7 +1212,15 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     error(response, StatusCode::UNAUTHORIZED, "UNAUTHORIZED").await;
     // A second bundle while one is in progress: 503 BUSY + Retry-After.
     {
-        let _held = audiolib_server::wfdb::BUNDLE_SLOT.try_acquire().unwrap();
+        // Other parallel tests build bundles too; wait for their response lease to
+        // finish before deliberately owning the process-wide slot for this check.
+        let _held = tokio::time::timeout(
+            Duration::from_secs(30),
+            audiolib_server::wfdb::BUNDLE_SLOT.acquire(),
+        )
+        .await
+        .expect("another test kept the bundle slot for more than 30 seconds")
+        .expect("the bundle slot must remain open");
         let response = call(
             f.state.clone(),
             Method::GET,
@@ -1221,15 +1233,7 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
         assert_eq!(response.headers()["retry-after"], "5");
         error(response, StatusCode::SERVICE_UNAVAILABLE, "BUSY").await;
     }
-    let response = call(
-        f.state.clone(),
-        Method::GET,
-        "/waveforms/bundle?encoding=i8-minmax-base64",
-        &[],
-        LAN,
-        None,
-    )
-    .await;
+    let response = bundle_response(&f.state).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-type"],
@@ -1271,9 +1275,9 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     assert_eq!(leftovers, 0);
 }
 
-/// `GET /waveforms/bundle` (status, has `Retry-After`, body), retrying while another
+/// `GET /waveforms/bundle`, retrying while another
 /// test holds the process-wide bundle slot (503 `BUSY`).
-async fn bundle_response(state: &AppState) -> (StatusCode, bool, Vec<u8>) {
+async fn bundle_response(state: &AppState) -> Response {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = call(
@@ -1286,12 +1290,14 @@ async fn bundle_response(state: &AppState) -> (StatusCode, bool, Vec<u8>) {
         )
         .await;
         let status = response.status();
-        let retry = response.headers().contains_key("retry-after");
-        let body = bytes(response).await;
-        let busy = status == StatusCode::SERVICE_UNAVAILABLE
-            && serde_json::from_slice::<ErrorBody>(&body).is_ok_and(|b| b.error_code == "BUSY");
+        if status != StatusCode::SERVICE_UNAVAILABLE {
+            return response;
+        }
+        let (parts, response_body) = response.into_parts();
+        let body = response_body.collect().await.unwrap().to_bytes().to_vec();
+        let busy = serde_json::from_slice::<ErrorBody>(&body).is_ok_and(|b| b.error_code == "BUSY");
         if !busy || Instant::now() > deadline {
-            return (status, retry, body);
+            return Response::from_parts(parts, Body::from(body));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -1315,7 +1321,9 @@ async fn first_bundle_creates_a_missing_cache_directory() {
     // empty waveforms.db); make sure it is gone.
     let _ = fs::remove_dir_all(&dir);
     assert!(!dir.exists());
-    let (status, _, body) = bundle_response(&f.state).await;
+    let response = bundle_response(&f.state).await;
+    let status = response.status();
+    let body = bytes(response).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(dir.is_dir());
 }
@@ -1336,7 +1344,10 @@ async fn bundle_is_unavailable_when_the_cache_directory_cannot_be_created() {
     fs::create_dir_all(dir.parent().unwrap()).unwrap();
     // A file where the directory should be: create_dir_all fails.
     fs::write(&dir, b"not a directory").unwrap();
-    let (status, retry, body) = bundle_response(&f.state).await;
+    let response = bundle_response(&f.state).await;
+    let status = response.status();
+    let retry = response.headers().contains_key("retry-after");
+    let body = bytes(response).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(retry);
     let body: ErrorBody = serde_json::from_slice(&body).unwrap();

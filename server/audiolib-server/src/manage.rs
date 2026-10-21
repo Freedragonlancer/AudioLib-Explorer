@@ -4,7 +4,7 @@
 //!
 //! Removal is the library's own `remove_audio` / `remove_folder` (local-mode semantics):
 //! it deletes `audio_files` rows and the rows that reference them (`playlist_items`,
-//! `project_references`, `waveform_cache`, `play_history`), and for a folder the folder
+//! `project_references`, `waveform_cache`), and for a folder the folder
 //! rows of its subtree and their `folder_closure` entries, then refreshes the folder
 //! statistics, all in one transaction. **No file is touched**: files still on disk come
 //! back with the next scan. Both endpoints are refused with 409 `BUSY` while a scan (of
@@ -69,6 +69,8 @@ pub struct RemoveFolderResponse {
 /// Reply of `GET /capabilities`: what this client may do on this server.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapabilitiesResponse {
+    /// Shared application/version and database-format compatibility catalog.
+    pub compatibility: audiolib_core::compatibility::CompatibilityManifest,
     /// Effective `manage_mode`: `all`, `lan` or `off`.
     pub manage_mode: ManageMode,
     /// Whether this request was classified as external (through a reverse proxy or from

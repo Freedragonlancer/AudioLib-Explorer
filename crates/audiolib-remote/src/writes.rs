@@ -1,5 +1,5 @@
 // crates/audiolib-remote/src/writes.rs
-//! Server-mode metadata writes and plays (API §6.3) and the revision rule that keeps the
+//! Server-mode metadata writes (API §6.3) and the revision rule that keeps the
 //! local snapshot current without a full download.
 //!
 //! Every write reply carries `revision_before` and `revision`. When the cached snapshot
@@ -19,8 +19,8 @@ use audiolib_core::waveform_cache::{
 use audiolib_core::{
     AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest, DataProvider, Error,
     Folder, IntegrityReport, LibraryExportFormat, LibraryInfo, LibraryStats, ListWaveformBatch,
-    ListWaveformSource, MaintenanceAction, MaintenanceReport, MetadataPatch, PlayRecord,
-    RestoreReport, ScanSession, SearchPage, SearchRequest, TransferReport,
+    ListWaveformSource, MaintenanceAction, MaintenanceReport, MetadataPatch, RestoreReport,
+    ScanSession, SearchPage, SearchRequest, TransferReport,
 };
 use audiolib_db::SqliteProvider;
 use std::path::Path;
@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Serializes read-modify-write of `cache.json` + snapshot between concurrent writes
-/// (an edit and a play finishing at the same time).
+/// from different Metadata operations.
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 
 /// Short cache publication lease shared by snapshot installs and annotation replies.
@@ -176,7 +176,7 @@ pub fn apply_server_write(
     }
 }
 
-/// Metadata writes and plays for one server library, applied to its local cache.
+/// Metadata writes for one server library, applied to its local cache.
 #[derive(Clone, Debug)]
 pub struct RemoteWriter {
     client: RemoteClient,
@@ -327,7 +327,7 @@ pub enum WriteEvent {
 pub type WriteListener = Arc<dyn Fn(WriteEvent) + Send + Sync>;
 
 /// `DataProvider` for server mode: reads come from the read-only snapshot, metadata
-/// writes and plays go to the server ([`RemoteWriter`]) and are applied to the snapshot
+/// writes go to the server ([`RemoteWriter`]) and are applied to the snapshot
 /// by the revision rule. Record and folder removal go to the server's management
 /// endpoints (database records only; servers without them answer "unsupported") and are
 /// followed by a full sync when they changed the revision. Restore, maintenance, relink and import are not offered by
@@ -470,11 +470,6 @@ impl DataProvider for RemoteProvider {
     fn update_metadata(&self, id: i64, patch: &MetadataPatch) -> audiolib_core::Result<AudioFile> {
         self.settle(self.writer.update_metadata(id, patch))
     }
-    fn record_play(&self, _id: i64) -> audiolib_core::Result<()> {
-        // Plays are never sent to the server (no POST /audio/{id}/plays) and play
-        // counts are not recorded.
-        Ok(())
-    }
     fn stats(&self) -> audiolib_core::Result<LibraryStats> {
         self.snapshot.stats()
     }
@@ -519,10 +514,6 @@ impl DataProvider for RemoteProvider {
     }
     fn scan_history(&self, limit: usize, offset: usize) -> audiolib_core::Result<Vec<ScanSession>> {
         self.snapshot.scan_history(limit, offset)
-    }
-    fn play_history(&self, limit: usize, offset: usize) -> audiolib_core::Result<Vec<PlayRecord>> {
-        // Never read /history/plays from the server.
-        self.snapshot.play_history(limit, offset)
     }
     fn export_library(
         &self,
@@ -632,6 +623,9 @@ mod tests {
             let cached = cache.state(LIBRARY).unwrap();
             let before = std::fs::read(cache.database_path(&cached)).unwrap();
             let server = TestServer::start(move |request| {
+                if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                    return response;
+                }
                 if request.path == "/api/v1/library" {
                     return TestResponse::json(
                         200,
@@ -677,10 +671,11 @@ mod tests {
         let database = library_dir.join("library-r1-1.db");
         drop(SqliteProvider::open(&database).unwrap());
         let conn = rusqlite::Connection::open(&database).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
         conn.execute_batch(
-            "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized)
-             VALUES(3,'/v/door.wav','/v/door.wav','door.wav','door'),
-                   (7,'/v/thunder.wav','/v/thunder.wav','雷声 近.wav','雷声 近');",
+            "INSERT INTO audio_files(id,file_path,path_key,filename)
+             VALUES(3,'/v/door.wav','/v/door.wav','door.wav'),
+                   (7,'/v/thunder.wav','/v/thunder.wav','雷声 近.wav');",
         )
         .unwrap();
         conn.query_row("PRAGMA journal_mode=DELETE", [], |row| {
@@ -723,7 +718,23 @@ mod tests {
         seen: Arc<StdMutex<Vec<Seen>>>,
         reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
     ) -> TestServer {
+        server_with_capability_probe(seen, false, reply)
+    }
+
+    fn server_with_capability_probe(
+        seen: Arc<StdMutex<Vec<Seen>>>,
+        probe_capabilities: bool,
+        reply: impl Fn(&str, &str) -> TestResponse + Send + Sync + 'static,
+    ) -> TestServer {
         TestServer::start(move |request| {
+            if probe_capabilities && request.path == "/api/v1/health" {
+                return TestResponse::json(200, r#"{"status":"ok","version":"0.5.0"}"#);
+            }
+            if (request.path != "/api/v1/capabilities" || !probe_capabilities)
+                && let Some(response) = crate::test_server::legacy_handshake(&request.path)
+            {
+                return response;
+            }
             if request.method == "GET" && request.path == "/api/v1/library" {
                 return TestResponse::json(
                     200,
@@ -751,25 +762,27 @@ mod tests {
         let cache = cached_library(directory.path(), 1);
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let status = r#"{"state":"paused","total":4,"cached":1,"pending":3,"run_state":"paused","current_rate":0,"eta_secs":null,"job":{"id":"wfj-2","mode":"missing","started_at":1,"done":1,"failed":0,"total":4,"state":"paused"}}"#;
-        let server = server(seen.clone(), move |method, path| match (method, path) {
-            ("GET", "/api/v1/capabilities") => TestResponse::json(
-                200,
-                r#"{"manage_mode":"lan","can_manage":false,"list_waveform_jobs":{"version":1,"modes":["missing","rebuild","failed"],"rate_setting":true}}"#,
-            ),
-            ("GET", "/api/v1/waveforms/status") => TestResponse::json(200, status),
-            ("GET", "/api/v1/settings") => TestResponse::json(
-                200,
-                r#"{"pregenerate_list_waveforms":true,"list_waveform_rate":10,"list_waveform_rate_source":"default","can_change":false}"#,
-            ),
-            ("POST", "/api/v1/waveforms/jobs") => TestResponse::json(
-                409,
-                r#"{"error_code":"BUSY","message":"A list waveform job is already in progress","job_id":"wfj-2"}"#,
-            ),
-            ("POST", "/api/v1/waveforms/jobs/current/resume") => TestResponse::json(
-                403,
-                r#"{"error_code":"MANAGE_FORBIDDEN","message":"Management is limited to the LAN"}"#,
-            ),
-            (method, path) => panic!("unexpected {method} {path}"),
+        let server = server_with_capability_probe(seen.clone(), true, move |method, path| {
+            match (method, path) {
+                ("GET", "/api/v1/capabilities") => TestResponse::json(
+                    200,
+                    r#"{"manage_mode":"lan","can_manage":false,"list_waveform_jobs":{"version":1,"modes":["missing","rebuild","failed"],"rate_setting":true}}"#,
+                ),
+                ("GET", "/api/v1/waveforms/status") => TestResponse::json(200, status),
+                ("GET", "/api/v1/settings") => TestResponse::json(
+                    200,
+                    r#"{"pregenerate_list_waveforms":true,"list_waveform_rate":10,"list_waveform_rate_source":"default","can_change":false}"#,
+                ),
+                ("POST", "/api/v1/waveforms/jobs") => TestResponse::json(
+                    409,
+                    r#"{"error_code":"BUSY","message":"A list waveform job is already in progress","job_id":"wfj-2"}"#,
+                ),
+                ("POST", "/api/v1/waveforms/jobs/current/resume") => TestResponse::json(
+                    403,
+                    r#"{"error_code":"MANAGE_FORBIDDEN","message":"Management is limited to the LAN"}"#,
+                ),
+                (method, path) => panic!("unexpected {method} {path}"),
+            }
         });
         let writer = RemoteWriter::new(
             RemoteClient::new(&server.url, "").unwrap(),
@@ -1052,7 +1065,20 @@ mod tests {
         );
         let reader = snapshot(&cache);
         assert_eq!(reader.get_audio(7).unwrap().tags, "rain wood");
-        assert_eq!(reader.get_audio(7).unwrap().play_count, 2);
+        // Old JSON may contain retired fields; the owned DTO ignores them and
+        // serializing a new response must not reintroduce those fields.
+        assert!(
+            serde_json::to_value(&files[0])
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(reader.get_audio(7).unwrap())
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
         assert_eq!(reader.get_audio(3).unwrap().tags, "door wood");
     }
 
@@ -1223,5 +1249,113 @@ mod tests {
             Some(WriteEvent::Applied { revision: 10 })
         ));
         assert_eq!(seen.lock().unwrap()[1].method, "DELETE");
+    }
+
+    #[test]
+    fn concurrent_metadata_writers_publish_each_reply_before_sending_the_next_write() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 43);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let second_cached_revision = Arc::new(AtomicU64::new(0));
+        let (first_seen_tx, first_seen_rx) = std::sync::mpsc::sync_channel(1);
+        let (first_release_tx, first_release_rx) = std::sync::mpsc::sync_channel(1);
+        let first_release_rx = StdMutex::new(first_release_rx);
+        let server = {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            let second_cached_revision = second_cached_revision.clone();
+            server(Arc::new(StdMutex::new(Vec::new())), move |method, path| {
+                assert_eq!((method, path), ("PATCH", "/api/v1/audio/3/metadata"));
+                let call = calls.fetch_add(1, Ordering::AcqRel);
+                let (before, after) = if call < 2 {
+                    (43 + call as u64, 44 + call as u64)
+                } else {
+                    // Another client changed the server: serialization must not hide it.
+                    (48, 49)
+                };
+                if call == 1 {
+                    second_cached_revision
+                        .store(cache.state(LIBRARY).unwrap().revision, Ordering::Release);
+                }
+                let reply = TestResponse::json(
+                    200,
+                    &format!(
+                        r#"{{"file":{},"revision_before":{before},"revision":{after}}}"#,
+                        file_json(3, &format!("edit{call}"), 0, "", 0)
+                    ),
+                );
+                if call == 0 {
+                    first_seen_tx.send(()).unwrap();
+                    first_release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    // The previous implementation sends its second request during this
+                    // delay, applies revision 45 against cache 43 and requests a resync.
+                    reply.delayed(Duration::from_millis(400))
+                } else {
+                    reply
+                }
+            })
+        };
+        let writer = || {
+            RemoteWriter::new(
+                RemoteClient::new(&server.url, "").unwrap(),
+                cache.clone(),
+                LIBRARY,
+            )
+        };
+        let first = writer();
+        let first = std::thread::spawn(move || {
+            first.update_metadata(3, &MetadataPatch::default()).unwrap()
+        });
+        first_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Snapshot reads remain local even while Metadata owns the network-write gate.
+        let (read_tx, read_rx) = std::sync::mpsc::sync_channel(1);
+        let reading_cache = cache.clone();
+        let read = std::thread::spawn(move || {
+            read_tx.send(snapshot(&reading_cache).get_audio(3)).unwrap()
+        });
+        assert_eq!(
+            read_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+                .id,
+            3
+        );
+        read.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        // Independent writer instances must share ordering through cache publication.
+        let second = writer();
+        let second = std::thread::spawn(move || {
+            second
+                .update_metadata(3, &MetadataPatch::default())
+                .unwrap()
+        });
+        first_release_tx.send(()).unwrap();
+        assert_eq!(
+            first.join().unwrap().cache,
+            CacheUpdate::Applied { revision: 44 }
+        );
+        assert_eq!(
+            second.join().unwrap().cache,
+            CacheUpdate::Applied { revision: 45 }
+        );
+        assert_eq!(second_cached_revision.load(Ordering::Acquire), 44);
+        assert_eq!(cache.state(LIBRARY).unwrap().revision, 45);
+        assert_eq!(snapshot(&cache).get_audio(3).unwrap().tags, "edit1");
+        assert!(matches!(
+            writer()
+                .update_metadata(3, &MetadataPatch::default())
+                .unwrap()
+                .cache,
+            CacheUpdate::Resync { .. }
+        ));
+        assert_eq!(cache.state(LIBRARY).unwrap().revision, 45);
     }
 }

@@ -596,6 +596,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         missing_records = usize::try_from(stats.missing_files)?;
     } else {
         let mut conn = Connection::open(&path)?;
+        audiolib_db::register_library_functions(&conn)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
         INSERT INTO folders(id,folder_path,folder_name,depth) VALUES(1,'synthetic','synthetic',0);
@@ -616,9 +617,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         for begin in (0..records).step_by(10_000) {
             let tx = conn.transaction()?;
             {
-                let mut insert=tx.prepare("INSERT INTO audio_files(file_path,path_key,filename,filename_tokenized,user_tags,user_tags_tokenized,
-                user_notes,user_notes_tokenized,bwf_description,bwf_description_tokenized,folder_id,file_size,sample_rate,bit_depth,channels,duration,user_rating,favorite,missing,metadata_json,source_tags_text)
-                VALUES(?1,?1,?2,?2,?3,?3,?4,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)")?;
+                let mut insert=tx.prepare("INSERT INTO audio_files(file_path,path_key,filename,user_tags,
+                user_notes,bwf_description,folder_id,file_size,sample_rate,bit_depth,channels,duration,user_rating,favorite,missing,metadata_json,source_tags_text)
+                VALUES(?1,?1,?2,?3,?4,?5,1,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)")?;
                 for index in begin..(begin + 10_000).min(records) {
                     let kind = types[index % types.len()];
                     let filename = format!("{kind}_metal_{index:07}.wav");
@@ -631,22 +632,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             ""
                         },
-                        if index % 5 == 0 {
-                            "车辆 发动机 环境 声"
-                        } else {
-                            ""
-                        },
                         if index % 10 == 0 {
                             "大型金属爆炸"
                         } else {
                             ""
                         },
-                        format!(
-                            "{}{}{}",
-                            if index % 10 == 0 { "大型 金属 爆炸" } else { "" },
-                            if index % 4 == 0 { format!(" {kind} outdoor SFX") } else { String::new() },
-                            if index % 1000 == 0 { " rareword" } else { "" },
-                        ),
                         100_000 + (index % 5_000_000) as i64,
                         if index % 3 == 0 { 96000 } else { 48000 },
                         if index % 2 == 0 { 24 } else { 16 },

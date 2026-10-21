@@ -49,6 +49,7 @@ fn nonrecursive_reconciliation_keeps_descendants_and_legacy_non_wav_records() {
         )
         .unwrap();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "INSERT INTO audio_files(file_path,filename) VALUES(?1,'legacy.mp3')",
         params![root.join("legacy.mp3").to_string_lossy()],

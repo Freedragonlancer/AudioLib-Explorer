@@ -28,7 +28,7 @@ pub const MAX_WRITE_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Required on mutations: identifies the cached library to which record/session IDs belong.
 pub const LIBRARY_ID_HEADER: &str = "X-AudioLib-Library-Id";
 
-/// Reply to `PATCH /audio/{id}/metadata` and `POST /audio/{id}/plays` (§6.3): the record
+/// Reply to `PATCH /audio/{id}/metadata` (§6.3): the record
 /// after the write and the library revision before/after it.
 #[derive(Clone, Debug, Deserialize)]
 pub struct FileWrite {
@@ -84,6 +84,9 @@ impl HealthInfo {
 /// Unknown fields are ignored; absent optional fields default.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RemoteLibrary {
+    /// Actual completed format, independently checked again in the downloaded file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_format: Option<audiolib_core::compatibility::SnapshotFormat>,
     /// Stable identity generated when the server library was created.
     pub library_id: String,
     /// The server atomically enforces `X-AudioLib-Library-Id` on every mutation.
@@ -175,6 +178,8 @@ pub enum WaveformReply {
 /// Identity headers returned with `GET /library/snapshot`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SnapshotMeta {
+    /// Validated format declared by a modern server before reading the body.
+    pub snapshot_format: Option<audiolib_core::compatibility::SnapshotFormat>,
     pub bytes: u64,
     /// `X-Library-Id`
     pub library_id: Option<String>,
@@ -417,6 +422,7 @@ impl RemoteClient {
                 "The server cannot bind writes to the cached library identity; update the server before editing or managing this library".into(),
             ));
         }
+        crate::compatibility::live_library(self, &library, None)?;
         Ok(self
             .expected_library_id
             .clone()
@@ -517,12 +523,17 @@ impl RemoteClient {
         };
         let authorization = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
         let library_id = self.write_library_id()?;
+        let compatibility = crate::compatibility::client_header()?;
         let result = match method {
             "PATCH" => {
                 let mut request = self
                     .writes
                     .patch(&url)
-                    .header(LIBRARY_ID_HEADER, &library_id);
+                    .header(LIBRARY_ID_HEADER, &library_id)
+                    .header(
+                        audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                        &compatibility,
+                    );
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
@@ -534,7 +545,11 @@ impl RemoteClient {
                 let mut request = self
                     .writes
                     .post(&url)
-                    .header(LIBRARY_ID_HEADER, &library_id);
+                    .header(LIBRARY_ID_HEADER, &library_id)
+                    .header(
+                        audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                        &compatibility,
+                    );
                 if let Some(value) = &authorization {
                     request = request.header("Authorization", value);
                 }
@@ -771,6 +786,13 @@ impl RemoteClient {
         self.read_cancellable(cancel, |client| client.library())
     }
 
+    pub(crate) fn capabilities_cancellable(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<crate::manage::Capabilities> {
+        self.read_cancellable(cancel, |client| client.capabilities())
+    }
+
     pub(crate) fn roots_cancellable(&self, cancel: &AtomicBool) -> Result<Vec<RemoteRoot>> {
         self.read_cancellable(cancel, |client| client.roots())
     }
@@ -871,8 +893,26 @@ impl RemoteClient {
         cancel: &AtomicBool,
     ) -> Result<SnapshotMeta> {
         let url = format!("{}/library/snapshot", self.api);
+        let catalog = audiolib_core::compatibility::compatibility_manifest();
+        let catalog_json = serde_json::to_string(&catalog)
+            .map_err(|error| RemoteError::Protocol(error.to_string()))?;
+        let accepted = catalog.snapshot_read_formats.join(", ");
         let response = crate::abort::call_fresh(|| {
-            let mut request = self.bulk.get(&url).header("Accept-Encoding", "zstd");
+            let mut request = self
+                .bulk
+                .get(&url)
+                .header("Accept-Encoding", "zstd")
+                .header(
+                    audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                    &catalog_json,
+                )
+                .header(
+                    audiolib_core::compatibility::ACCEPT_FORMATS_HEADER,
+                    &accepted,
+                )
+                .header("X-AudioLib-Snapshot-Schema-Max", "6")
+                .header("X-AudioLib-Search-Storage-Max", "1")
+                .header("X-AudioLib-Tokenization-Max", "3");
             if !self.token.is_empty() {
                 request = request.header("Authorization", &format!("Bearer {}", self.token));
             }
@@ -880,6 +920,7 @@ impl RemoteClient {
         })
         .map_err(|error| RemoteError::from_transport(error, &url))?;
         let response = self.checked(response, "GET /library/snapshot")?;
+        let snapshot_format = crate::compatibility::response_format(response.headers())?;
         let header = |name: &str| {
             response
                 .headers()
@@ -907,6 +948,7 @@ impl RemoteClient {
             wire_length
         };
         let mut meta = SnapshotMeta {
+            snapshot_format,
             bytes: 0,
             library_id: header("x-library-id").filter(|value| !value.is_empty()),
             revision: header("x-library-revision").and_then(|value| value.parse().ok()),

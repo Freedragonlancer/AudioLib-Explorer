@@ -16,6 +16,7 @@ fn fixture() -> (tempfile::TempDir, SqliteProvider) {
     let database = temp.path().join("rankings.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES
          (1,'root','root',NULL),(2,'root/child','child',1),(3,'other','other',NULL);
@@ -24,10 +25,7 @@ fn fixture() -> (tempfile::TempDir, SqliteProvider) {
     .unwrap();
     for id in 1..=72_i64 {
         conn.execute(
-            "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,
-             folder_id,sample_rate,bit_depth,channels,duration,user_rating,favorite,
-             user_tags,user_tags_tokenized,user_notes,metadata_json,user_color,missing)
-             VALUES(?1,?2,?2,?3,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11,?12,?13,?14,?15)",
+            "INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,sample_rate,bit_depth,channels,duration,user_rating,favorite,user_tags,user_notes,metadata_json,user_color,missing) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 id,
                 format!("root/{id}.wav"),
@@ -163,6 +161,7 @@ fn assert_exact(conn: &Connection, request: &SearchRequest, page: &SearchPage) {
 fn alternative_sorts_with_complex_filters_keep_counts_pages_and_metadata_exact() {
     let (_temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "UPDATE audio_files SET filename='metal '||printf('%03d',73-id)||'.wav'",
         [],
@@ -207,6 +206,7 @@ fn alternative_sorts_with_complex_filters_keep_counts_pages_and_metadata_exact()
 fn configured_fts_rank_does_not_change_the_default_bm25_contract() {
     let (_temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "INSERT INTO audio_search(audio_search,rank) VALUES('rank','bm25(0.0)')",
         [],
@@ -229,11 +229,10 @@ fn configured_fts_rank_does_not_change_the_default_bm25_contract() {
 fn dense_missing_rows_keep_filtered_rankings_exact() {
     let (_temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     for id in 1000..1129_i64 {
         conn.execute(
-            "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,
-             folder_id,sample_rate,missing,metadata_json)
-             VALUES(?1,?2,?2,'metal.wav','metal.wav',2,48000,1,?3)",
+            "INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,sample_rate,missing,metadata_json) VALUES(?1,?2,?2,'metal.wav',2,48000,1,?3)",
             params![
                 id,
                 format!("root/child/{id}.wav"),
@@ -274,13 +273,12 @@ fn dense_missing_rows_keep_filtered_rankings_exact() {
 fn mixed_epoch_clusters_keep_filtered_bm25_pages_exact() {
     let (_temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     const EPOCH: i64 = 1_834_000_000_000_000;
     for offset in 0..256_i64 {
         let id = EPOCH + offset;
         conn.execute(
-            "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,
-             folder_id,sample_rate,user_rating,missing,user_notes,metadata_json,bit_depth)
-             VALUES(?1,?2,?2,'metal.wav','metal.wav',2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,sample_rate,user_rating,missing,user_notes,metadata_json,bit_depth) VALUES(?1,?2,?2,'metal.wav',2,?3,?4,?5,?6,?7,?8)",
             params![
                 id,
                 format!("root/child/{id}.wav"),
@@ -348,6 +346,7 @@ fn mixed_epoch_clusters_keep_filtered_bm25_pages_exact() {
 fn pages_folder_scopes_and_filters_reuse_exact_rankings_with_missing_rows_and_ties() {
     let (_temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let base = SearchRequest {
         query: "metal".into(),
         limit: 7,
@@ -432,6 +431,7 @@ fn pages_folder_scopes_and_filters_reuse_exact_rankings_with_missing_rows_and_ti
 fn own_and_external_commits_removal_and_restore_invalidate_rankings_and_refresh_dtos() {
     let (temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let request = SearchRequest {
         query: "metal".into(),
         limit: 100,
@@ -480,17 +480,13 @@ fn own_and_external_commits_removal_and_restore_invalidate_rankings_and_refresh_
     assert_exact(&conn, &request, &page);
     assert!(provider.search(&request).unwrap().cache_hit);
 
-    provider.record_play(1).unwrap();
     let page = provider.search(&request).unwrap();
-    assert!(!page.cache_hit);
-    assert_eq!(
-        page.results
-            .iter()
-            .find(|row| row.id == 1)
-            .unwrap()
-            .play_count,
-        0
+    assert!(
+        page.cache_hit,
+        "retired playback tracking must not invalidate rankings"
     );
+    let dto = serde_json::to_value(page.results.iter().find(|row| row.id == 1).unwrap()).unwrap();
+    assert!(dto.get("play_count").is_none());
     assert_exact(&conn, &request, &page);
     assert!(provider.search(&request).unwrap().cache_hit);
 
@@ -517,6 +513,7 @@ fn own_and_external_commits_removal_and_restore_invalidate_rankings_and_refresh_
 fn cancelling_a_cached_request_does_not_poison_later_rankings_or_readers() {
     let (_temp, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     let request = SearchRequest {
         query: "metal".into(),
         limit: 7,

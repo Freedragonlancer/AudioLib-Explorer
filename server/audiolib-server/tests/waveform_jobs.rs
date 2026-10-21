@@ -375,7 +375,6 @@ async fn missing_job_fills_the_cache_then_skips_up_to_date_entries() {
 
 #[tokio::test]
 async fn one_job_at_a_time_and_pause_resume_stop() {
-    // 1 file per second: the job is still running when it is paused.
     let f = fixture("list_waveform_rate = 1\n");
     // Nothing to control yet.
     for action in ["pause", "resume", "stop"] {
@@ -386,7 +385,25 @@ async fn one_job_at_a_time_and_pause_resume_stop() {
         )
         .await;
     }
+    // Keep a real stream response body unconsumed: its owned stream-slot permit
+    // makes cache workers yield until we explicitly drop it. This pins the job's
+    // running window across pause/resume/stop even if the test is descheduled for
+    // longer than the entire three-record job would otherwise take.
+    let playback = call(
+        f.state.clone(),
+        Method::GET,
+        &format!("/audio/{}/stream", f.id("tone.wav")),
+        &[],
+        LAN,
+        None,
+    )
+    .await;
+    assert_eq!(playback.status(), StatusCode::OK);
+    assert!(f.state.playback_active());
     let started = start(&f.state, r#"{"mode":"missing"}"#).await;
+    assert_eq!(started.state, "yielding");
+    assert_eq!(started.run_state, "running");
+    assert_eq!(started.job.as_ref().unwrap().done, 0);
     let id = started.job.unwrap().id;
     let paused = control(&f.state, "pause").await;
     assert_eq!(paused.run_state, "paused");
@@ -447,6 +464,8 @@ async fn one_job_at_a_time_and_pause_resume_stop() {
         "JOB_STATE",
     )
     .await;
+    drop(playback);
+    assert!(!f.state.playback_active(), "stream permit must be released");
 }
 
 #[tokio::test]

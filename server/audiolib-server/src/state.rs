@@ -83,6 +83,8 @@ pub struct BatchWriteResponse {
 /// `GET /library` reply: the core `LibraryInfo` fields plus identity and revision.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibraryResponse {
+    /// Completed persistent format positively identified from the actual library.
+    pub snapshot_format: audiolib_core::compatibility::SnapshotFormat,
     /// Stable library identifier (see [`crate::revision`]).
     pub library_id: String,
     /// Monotonic change revision.
@@ -277,6 +279,8 @@ pub enum SnapshotEncoding {
 /// never served for another revision. After replacement, transmitted representations
 /// remain only in the bounded retention registry or their active response leases.
 pub struct PreparedSnapshot {
+    /// Format inspected from the completed backup, not inferred from the server version.
+    pub snapshot_format: audiolib_core::compatibility::SnapshotFormat,
     /// The SQLite copy.
     pub plain: Arc<SnapshotFile>,
     /// zstd-compressed copy, built on the first request that accepts it.
@@ -708,6 +712,13 @@ impl AppState {
                         elapsed_seconds,
                         "Library startup: checking extracted source tags"
                     ),
+                    SnapshotUpgradeProgress::Copying { completed, total } => tracing::info!(
+                        phase = "copying",
+                        completed,
+                        total,
+                        elapsed_seconds,
+                        "Library startup: copying retained records (committed rows)"
+                    ),
                     SnapshotUpgradeProgress::Indexing { completed, total } => tracing::info!(
                         phase = "indexing",
                         completed,
@@ -994,7 +1005,7 @@ impl AppState {
             file: file.unwrap_or_else(|| prepared.plain.clone()),
             library_id: prepared.library_id.clone(),
             revision: prepared.revision,
-            schema_version: prepared.schema_version,
+            snapshot_format: prepared.snapshot_format.clone(),
             encoding,
             uncompressed_bytes: prepared.plain.bytes,
         })
@@ -1221,17 +1232,13 @@ impl AppState {
         })
     }
 
-    /// Blocking. Deprecated `POST /audio/{id}/plays`: play counts are not recorded by
-    /// the server any more (play history is client-local), so this writes nothing. It
-    /// only checks that the record exists and answers with the current record and
-    /// `revision == revision_before`, so old clients that still report plays keep working.
+    /// Compatibility endpoint: validate/read the record without recording playback.
     pub fn record_play(&self, id: i64) -> Result<AudioWriteResponse> {
-        let revision = self.inner.tracker.poll()?.revision;
-        let file = self.inner.provider.get_audio(id)?;
+        let outcome = self.write_if(|provider| provider.get_audio(id), |_| false)?;
         Ok(AudioWriteResponse {
-            file,
-            revision_before: revision,
-            revision,
+            file: outcome.value,
+            revision_before: outcome.revision_before,
+            revision: outcome.revision,
         })
     }
 
@@ -1274,11 +1281,17 @@ impl AppState {
         let mut info = self.inner.provider.library_info_with_stats(stats)?;
         info.database_bytes = info.database_bytes.saturating_add(info.wal_bytes);
         Ok(LibraryResponse {
+            snapshot_format: self.snapshot_format()?,
             library_id: revision.library_id,
             revision: revision.revision,
             identity_bound_writes: true,
             info,
         })
+    }
+
+    /// Inspect the actual ready library without copying it or scanning business rows.
+    pub fn snapshot_format(&self) -> Result<audiolib_core::compatibility::SnapshotFormat> {
+        inspected_snapshot_format(self.inner.provider.database_path(), &self.inner.stopping)
     }
 
     /// Library statistics for `GET /library`. The aggregates scan the whole `audio_files`
@@ -1870,6 +1883,7 @@ impl AppState {
             "Prepared library snapshot"
         );
         let entry = Arc::new(PreparedSnapshot {
+            snapshot_format: inspected_snapshot_format(&path, &self.inner.stopping)?,
             plain: Arc::new(SnapshotFile {
                 _owner: owner,
                 directory,
@@ -1885,6 +1899,26 @@ impl AppState {
         *cache = Some(entry.clone());
         Ok(entry)
     }
+}
+
+fn inspected_snapshot_format(
+    path: &Path,
+    cancel: &AtomicBool,
+) -> Result<audiolib_core::compatibility::SnapshotFormat> {
+    use audiolib_core::compatibility::{LibraryAccess, SnapshotFormat};
+    let inspection = audiolib_db::migration::inspect(path, LibraryAccess::Read, false, cancel)?;
+    if !inspection.evidence.search_ready {
+        return Err(Error::Busy(
+            "Library format is not ready for snapshot publication".into(),
+        ));
+    }
+    let id = inspection.format.snapshot_format_id().ok_or_else(|| {
+        Error::Validation("Library has no supported completed snapshot format".into())
+    })?;
+    Ok(SnapshotFormat {
+        id,
+        format: inspection.format,
+    })
 }
 
 fn snapshot_owner(directory: &Path) -> Result<fs::File> {

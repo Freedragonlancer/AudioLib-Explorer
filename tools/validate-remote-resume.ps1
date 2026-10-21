@@ -167,8 +167,19 @@ try {
     $health = $taskHttp.GetStringAsync($base + '/health').GetAwaiter().GetResult()
     $library = $taskHttp.GetStringAsync($base + '/library').GetAwaiter().GetResult()
     $roots = $taskHttp.GetStringAsync($base + '/roots').GetAwaiter().GetResult()
+    $capabilities = $taskHttp.GetStringAsync($base + '/capabilities').GetAwaiter().GetResult()
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$base + '/library/snapshot')
     $request.Headers.TryAddWithoutValidation('Accept-Encoding','zstd') | Out-Null
+    # The seed server and fixture client use this same build. Negotiate its actual
+    # format before capturing the immutable representation for fault injection.
+    $seedFormat = ($library | ConvertFrom-Json).snapshot_format
+    $seedCatalog = ($capabilities | ConvertFrom-Json).compatibility
+    if (!$seedFormat -or !$seedCatalog) { throw 'The owned seed server must expose its modern snapshot format and compatibility catalog.' }
+    $request.Headers.TryAddWithoutValidation('x-audiolib-client-compatibility',($seedCatalog | ConvertTo-Json -Depth 20 -Compress)) | Out-Null
+    $request.Headers.TryAddWithoutValidation('x-audiolib-accept-snapshot-formats',[string]$seedFormat.id) | Out-Null
+    $request.Headers.TryAddWithoutValidation('x-audiolib-snapshot-schema-max',[string]$seedFormat.format.schema_version) | Out-Null
+    $request.Headers.TryAddWithoutValidation('x-audiolib-search-storage-max',[string]$seedFormat.format.features.search_storage) | Out-Null
+    $request.Headers.TryAddWithoutValidation('x-audiolib-tokenization-max',[string]$seedFormat.format.features.tokenization) | Out-Null
     try {
         $response = $taskHttp.SendAsync($request).GetAwaiter().GetResult()
         try {
@@ -181,7 +192,7 @@ try {
         } finally { $response.Dispose() }
     } finally { $request.Dispose() }
     if (!$headers.ContainsKey('X-Snapshot-Id') -or !$headers.ContainsKey('ETag') -or $headers['ETag'].StartsWith('W/') -or $headers['Content-Encoding'] -cne 'zstd' -or $body.Length -lt 1024) { throw 'Build a current resume-capable server returning a strong ETag, snapshot ID and zstd body.' }
-    $taskFixture = [AudioLibResumeFixture]::new($health,$roots)
+    $taskFixture = [AudioLibResumeFixture]::new($health,$roots,$capabilities)
     $fixtureBase = 'http://127.0.0.1:' + $taskFixture.Port
     if (!$DesktopOnly) {
         Write-Host 'Checking automatic resume after a truncated compressed response...'

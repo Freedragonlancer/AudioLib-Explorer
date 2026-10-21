@@ -57,6 +57,13 @@ fn default_audition_memory() -> u32 {
     DEFAULT_AUDITION_MEMORY_MB
 }
 
+/// Default maximum client-local playback events retained separately for each library.
+pub const PLAY_HISTORY_LIMIT_PER_LIBRARY: u32 = 5_000;
+
+fn default_play_history_limit() -> u32 {
+    PLAY_HISTORY_LIMIT_PER_LIBRARY
+}
+
 /// Data source preferences persisted in settings.json. Secrets (API token and WebDAV
 /// password) are deliberately absent: they live in a protected sidecar file.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -359,6 +366,10 @@ pub struct AppConfig {
     /// explicitly saved value, including `false`, is kept as-is.
     #[serde(default = "default_true")]
     pub audition_play_on_single_click: bool,
+    /// Client-local playback event limit per library; zero disables new records.
+    /// History lives under the user data root, independently of libraries and caches.
+    #[serde(default = "default_play_history_limit")]
+    pub play_history_limit: u32,
     /// Local mode: pre-generate list thumbnail Waveforms in the background after scans
     /// (doc/api/README.md §9.3). Off by default: only visible rows are computed.
     #[serde(default)]
@@ -397,6 +408,8 @@ struct SavedPreferences {
     playback: serde_json::Value,
     #[serde(default = "default_true")]
     audition_play_on_single_click: bool,
+    #[serde(default = "default_play_history_limit")]
+    play_history_limit: u32,
     #[serde(default)]
     pregenerate_list_waveforms: bool,
     #[serde(default)]
@@ -477,6 +490,7 @@ impl AppConfig {
             language: english(),
             playback: default_playback(),
             audition_play_on_single_click: true,
+            play_history_limit: PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             audio_table: AudioTablePreferences::default(),
@@ -527,6 +541,7 @@ impl AppConfig {
             config.language = saved.language;
             config.playback = saved.playback;
             config.audition_play_on_single_click = saved.audition_play_on_single_click;
+            config.play_history_limit = saved.play_history_limit;
             config.pregenerate_list_waveforms = saved.pregenerate_list_waveforms;
             config.hold_list_waveform_batches_after_audition =
                 saved.hold_list_waveform_batches_after_audition;
@@ -571,6 +586,7 @@ impl AppConfig {
             language: self.language.clone(),
             playback: self.playback.clone(),
             audition_play_on_single_click: self.audition_play_on_single_click,
+            play_history_limit: self.play_history_limit,
             pregenerate_list_waveforms: self.pregenerate_list_waveforms,
             hold_list_waveform_batches_after_audition: self
                 .hold_list_waveform_batches_after_audition,
@@ -644,6 +660,33 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_local_history_limit_defaults_and_round_trips_without_moving_data_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(config.play_history_limit, PLAY_HISTORY_LIMIT_PER_LIBRARY);
+        let alternate = directory.path().join("elsewhere.db");
+        std::fs::write(&alternate, []).unwrap();
+        config.select_database(&alternate).unwrap();
+        for limit in [0, 12_345] {
+            config.play_history_limit = limit;
+            config.save().unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.play_history_limit, limit);
+            assert_eq!(loaded.data_root(), root);
+            assert_eq!(loaded.paths.database, alternate.canonicalize().unwrap());
+        }
+        std::fs::write(root.join("settings.json"), r#"{"language":"cn"}"#).unwrap();
+        assert_eq!(
+            AppConfig::load_with_roots(root, &[])
+                .unwrap()
+                .play_history_limit,
+            PLAY_HISTORY_LIMIT_PER_LIBRARY
+        );
+    }
+
     #[test]
     fn old_settings_without_field_enable_single_click_audition() {
         let directory = tempfile::tempdir().unwrap();

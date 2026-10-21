@@ -119,6 +119,7 @@ fn source_metadata_search_rebuild_upgrade_and_rescan_preserve_annotations() {
     assert_eq!(scan().unchanged, 1);
     // Simulate a pre-upgrade record without changing the source size or timestamp.
     let connection = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
     connection.execute("UPDATE audio_files SET metadata_json=json_set(json_remove(metadata_json,'$.wav_metadata'),'$.plugin_private','preserved') WHERE id=?1", [file.id]).unwrap();
     let refreshed = scan();
     assert_eq!(refreshed.updated, 1);
@@ -185,6 +186,7 @@ fn incremental_scan_refreshes_unsupported_and_old_extraction_versions() {
         )
         .unwrap();
     let connection = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
     let current_version = audiolib_audio::WAV_METADATA_VERSION;
     for marker in [
         format!(r#""{current_version}""#),

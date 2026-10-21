@@ -16,6 +16,7 @@ serde_json.workspace = true
 symphonia = { workspace = true, features = ["flac"] }
 thiserror.workspace = true
 tracing.workspace = true
+tempfile.workspace = true
 zstd = "0.13"
 # `platform-verifier`: certificates are checked against the OS trust store (Windows
 # certificate store, macOS keychain), so corporate and Windows-installed roots work.
@@ -27,6 +28,5 @@ ring = "0.17"
 rustls-platform-verifier.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 # Local TLS integration tests: a throwaway CA trusted only inside tests.
 rcgen.workspace = true

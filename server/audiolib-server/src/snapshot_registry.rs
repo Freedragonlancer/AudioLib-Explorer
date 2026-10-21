@@ -18,7 +18,7 @@ pub(crate) struct SnapshotRepresentation {
     pub file: Arc<SnapshotFile>,
     pub library_id: String,
     pub revision: u64,
-    pub schema_version: i64,
+    pub snapshot_format: audiolib_core::compatibility::SnapshotFormat,
     pub encoding: SnapshotEncoding,
     pub uncompressed_bytes: u64,
 }
@@ -210,7 +210,10 @@ mod tests {
             file: Arc::new(SnapshotFile::test_file(bytes)),
             library_id: "library".into(),
             revision: 1,
-            schema_version: 5,
+            snapshot_format: audiolib_core::compatibility::SnapshotFormat {
+                id: audiolib_core::compatibility::PLAN_B_FORMAT.into(),
+                format: audiolib_core::compatibility::LibraryFormat::target(),
+            },
             encoding: SnapshotEncoding::Identity,
             uncompressed_bytes: bytes,
         }

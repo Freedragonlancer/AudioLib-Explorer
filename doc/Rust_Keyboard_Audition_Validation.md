@@ -24,6 +24,8 @@
 
 ## 验证
 
+这个用例通过 Slint `ElementHandle` 定位结果行；若以 release profile 单独复验，须在编译时设置 `SLINT_EMIT_DEBUG_INFO=1`，再执行 `cargo test --release --locked -p audiolib-desktop --bin AudioLibExplorer controller::single_click_play_tests::keyboard_selection_auditions_in_single_click_mode -- --exact --ignored --nocapture`。构建脚本明确接受 `1` 开启、`0` 关闭；未设置时，普通 release 默认关闭，其他 profile 默认开启。未生成 Slint 调试信息的目标无法定位行，不能把这种测试构建条件缺失当成试听行为失败。
+
 | 项目 | 结果 |
 | --- | --- |
 | `cargo fmt --all -- --check` | 通过 |

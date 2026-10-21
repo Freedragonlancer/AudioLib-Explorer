@@ -15,6 +15,7 @@ use crate::error::{RemoteError, Result};
 use crate::util::{fnv64, unix_now, write_atomic};
 #[cfg(test)]
 use audiolib_core::DataProvider;
+use audiolib_core::compatibility::{LibraryAccess, LibraryFormat};
 use audiolib_core::server_url::ServerAddress;
 use audiolib_db::{
     MAX_SNAPSHOT_SCHEMA, MIN_SNAPSHOT_SCHEMA, SnapshotUpgradeProgress, SqliteProvider,
@@ -203,11 +204,27 @@ fn same_api_endpoint(cached: &str, current: &str) -> bool {
 }
 
 /// Persisted description of one cached server library.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CacheFormat {
+    /// Actual server bytes before any local conversion. None for historic caches
+    /// whose metadata did not record this; do not infer it from a converted file.
+    pub source: Option<LibraryFormat>,
+    /// Observed format of the local file currently named by `database_file`.
+    pub local: LibraryFormat,
+    /// Local conversion count for this downloaded snapshot; never a server revision.
+    pub generation: u64,
+}
+
+/// Persisted description of one cached server library.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct CacheState {
     pub library_id: String,
     pub revision: u64,
     pub schema_version: i64,
+    /// Absent in older metadata; offline reads remain available, but the next
+    /// online sync must download once to establish actual source provenance.
+    #[serde(default)]
+    pub format: Option<Box<CacheFormat>>,
     /// Snapshot file name inside the library cache directory.
     pub database_file: String,
     pub server_url: String,
@@ -268,7 +285,8 @@ pub enum SyncProgress {
 }
 
 /// Offline cache preparation stages. Copy counts are SQLite pages and tokenization
-/// counts are records; neither represents total startup progress.
+/// counts are records. Migration events keep their committed row counters and
+/// stage identity; none of these counters represents total startup progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CachePreparation {
     Checking,
@@ -278,6 +296,8 @@ pub enum CachePreparation {
     },
     Validating,
     Upgrading,
+    /// Exact shared-migrator stage; copy/index counts are audio rows, not cache pages.
+    Migrating(SnapshotUpgradeProgress),
     /// Recomputing derived text, counted against the snapshot's actual record count.
     Tokenizing {
         completed: u64,
@@ -450,7 +470,7 @@ impl RemoteCache {
     }
 
     /// Prepare a cache in an owned copy, cancelling copy, validation and index SQL.
-    /// Cancellation removes only this preparation's staging file and preserves the
+    /// Cancellation removes only this preparation's owned job subtree and preserves the
     /// active cache and any read-only provider which already owns its snapshot.
     pub fn prepare_cached_state_with_progress_cancellable(
         &self,
@@ -472,7 +492,13 @@ impl RemoteCache {
             .unwrap_or_default()
             .as_nanos();
         let name = format!("library-r{}-{nonce}.db", state.revision);
-        let staging = directory.join(format!("{name}.download"));
+        // Keep backup/registry/guard files inside the same owned subtree. The shared
+        // migrator retains them for standalone jobs; this disposable cache conversion
+        // can be retried from the unchanged cached source after cancellation.
+        let job = tempfile::Builder::new()
+            .prefix(".snapshot-job-")
+            .tempdir_in(&directory)?;
+        let staging = job.path().join("snapshot.download");
         // Reserve our unique staging file before SQLite opens it. Error cleanup may
         // remove only this owned file and its SQLite sidecars.
         let reserved = std::fs::OpenOptions::new()
@@ -480,7 +506,7 @@ impl RemoteCache {
             .create_new(true)
             .open(&staging)?;
         drop(reserved);
-        let result = (|| -> Result<audiolib_core::LibraryInfo> {
+        let result = (|| -> Result<(audiolib_core::LibraryInfo, LibraryFormat)> {
             let source = rusqlite::Connection::open_with_flags(
                 &source,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -522,10 +548,12 @@ impl RemoteCache {
             drop(backup);
             drop(target);
             drop(source);
-            validate_snapshot_with_progress_cancellable(&staging, progress, cancel)
+            let info = validate_snapshot_with_progress_cancellable(&staging, progress, cancel)?;
+            let format = observed_format(&staging, cancel)?;
+            Ok((info, format))
         })();
-        let info = match result {
-            Ok(info) => info,
+        let (info, local_format) = match result {
+            Ok(value) => value,
             Err(error) => {
                 remove_owned_staging(&staging);
                 return Err(error);
@@ -543,6 +571,12 @@ impl RemoteCache {
             remove_owned_staging(&staging);
             return Err(RemoteError::Changed("Cached snapshot changed while preparing its owned copy; retry with the current cache".into()));
         }
+        let generation = state
+            .format
+            .as_ref()
+            .map_or(0, |format| format.generation)
+            .checked_add(1)
+            .ok_or_else(|| RemoteError::Snapshot("Local format generation overflow".into()))?;
         let target = directory.join(&name);
         if let Err(error) = std::fs::rename(&staging, &target) {
             remove_owned_staging(&staging);
@@ -551,6 +585,14 @@ impl RemoteCache {
         let mut prepared = state.clone();
         prepared.database_file = name;
         prepared.schema_version = info.schema_version;
+        prepared.format = Some(Box::new(CacheFormat {
+            source: state
+                .format
+                .as_ref()
+                .and_then(|format| format.source.clone()),
+            local: local_format,
+            generation,
+        }));
         prepared.audio_files = info.stats.audio_files;
         prepared.snapshot_bytes = std::fs::metadata(&target)?.len();
         if let Err(error) = check_cancelled(cancel) {
@@ -813,6 +855,12 @@ fn validate_snapshot_with_progress_cancellable(
             serde_json::to_string(&report).unwrap_or_default()
         )));
     }
+    // Compatible legacy snapshots remain byte-format compatible. A new client
+    // version alone is not a reason to convert a complete read-only cache to v6.
+    if SqliteProvider::has_current_search_state(path)? {
+        check_cancelled(cancel)?;
+        return SqliteProvider::owned_snapshot_info_cancellable(path, cancel).map_err(Into::into);
+    }
     // Validate the downloaded bytes before repairing derived state, so an unexpected
     // or missing FTS trigger cannot be hidden by a successful rebuild. This file is
     // owned staging, not a live/user library; upgrade without creating WAL sidecars.
@@ -850,10 +898,13 @@ fn validate_snapshot_with_progress_cancellable(
                 }
                 SnapshotUpgradeProgress::BuildingFts => CachePreparation::BuildingFts,
                 SnapshotUpgradeProgress::SourceTags => CachePreparation::SourceTags,
-                SnapshotUpgradeProgress::Indexing { .. } => CachePreparation::BuildingFts,
-                SnapshotUpgradeProgress::Validating => CachePreparation::Validating,
-                SnapshotUpgradeProgress::BackingUp => CachePreparation::Upgrading,
-                SnapshotUpgradeProgress::Checkpoint => CachePreparation::Saving,
+                SnapshotUpgradeProgress::Indexing { .. }
+                | SnapshotUpgradeProgress::Validating
+                | SnapshotUpgradeProgress::BackingUp
+                | SnapshotUpgradeProgress::Checkpoint
+                | SnapshotUpgradeProgress::Copying { .. }
+                | SnapshotUpgradeProgress::Compacting
+                | SnapshotUpgradeProgress::Publishing => CachePreparation::Migrating(stage),
             });
         })
         .inspect_err(|error| {
@@ -891,6 +942,27 @@ fn remove_owned_staging(staging: &Path) {
     }
 }
 
+fn observed_format(path: &Path, cancel: &AtomicBool) -> Result<LibraryFormat> {
+    Ok(audiolib_db::migration::inspect(path, LibraryAccess::Read, false, cancel)?.format)
+}
+
+fn reusable_source(state: &CacheState, library: &RemoteLibrary, endpoint: &str) -> bool {
+    if state.revision != library.revision || !same_api_endpoint(&state.server_url, endpoint) {
+        return false;
+    }
+    let Some(source) = state
+        .format
+        .as_ref()
+        .and_then(|format| format.source.as_ref())
+    else {
+        return false;
+    };
+    match &library.snapshot_format {
+        Some(descriptor) => source == &descriptor.format,
+        None => source.schema_version as i64 == library.schema_version,
+    }
+}
+
 /// Bring the local cache up to the server's revision.
 ///
 /// `GET /library`; when no cache exists for its `library_id`, or the cached revision
@@ -913,11 +985,7 @@ pub fn sync_library(
     if transfer.pending().manual_paused {
         return Err(RemoteError::Cancelled);
     }
-    let result = sync_library_inner(client, cache, progress, cancel, force, &mut transfer);
-    if matches!(&result, Err(RemoteError::Snapshot(_))) {
-        transfer.discard_payload()?;
-    }
-    let outcome = result?;
+    let outcome = sync_library_inner(client, cache, progress, cancel, force, &mut transfer)?;
     transfer.record_publication(&outcome.state)?;
     Ok(outcome)
 }
@@ -941,9 +1009,6 @@ pub fn sync_library_with_options(
         options.force || options.restart,
         &mut transfer,
     );
-    if matches!(&result, Err(RemoteError::Snapshot(_))) {
-        transfer.discard_payload()?;
-    }
     if control.is_paused() {
         transfer.set_paused(true)?;
         return Ok(SyncRunOutcome::Paused(transfer.pending()));
@@ -963,11 +1028,9 @@ fn sync_library_inner(
 ) -> Result<SyncOutcome> {
     let started = Instant::now();
     progress(SyncProgress::Checking);
-    let server_version = match client.health_cancellable(cancel) {
-        Ok(health) => health.version,
-        Err(RemoteError::Cancelled) => return Err(RemoteError::Cancelled),
-        Err(_) => String::new(),
-    };
+    let server_version = client.health_cancellable(cancel)?.version;
+    let capabilities = client.capabilities_cancellable(cancel)?;
+    crate::compatibility::peer(&server_version, capabilities.compatibility.as_ref())?;
     let library: RemoteLibrary = match client.library_cancellable(cancel) {
         Ok(library) => library,
         Err(error) => {
@@ -988,6 +1051,7 @@ fn sync_library_inner(
     if let Some(message) = snapshot_schema_error(library.schema_version, false) {
         return Err(RemoteError::Snapshot(message));
     }
+    crate::compatibility::library(&library, capabilities.compatibility.is_some())?;
     transfer.bind_library(&library.library_id)?;
     let roots = match client.roots_cancellable(cancel) {
         Ok(roots) => Some(roots),
@@ -1012,7 +1076,7 @@ fn sync_library_inner(
                 .is_some_and(|state| transfer.published_matches(state)))
         && let Some(mut state) = existing
             .clone()
-            .filter(|state| state.revision == library.revision)
+            .filter(|state| reusable_source(state, &library, client.api_url()))
     {
         state = cache.prepare_cached_state_with_progress_cancellable(
             &state,
@@ -1066,8 +1130,11 @@ fn sync_library_inner(
         library.revision,
         std::process::id()
     );
-    let staging = directory.join(format!("{file_name}.download"));
-    let result = (|| -> Result<(SnapshotMeta, audiolib_core::LibraryInfo)> {
+    let job = tempfile::Builder::new()
+        .prefix(".snapshot-job-")
+        .tempdir_in(&directory)?;
+    let staging = job.path().join("snapshot.download");
+    let result = (|| -> Result<(SnapshotMeta, audiolib_core::LibraryInfo, CacheFormat)> {
         progress(SyncProgress::Downloading {
             received: 0,
             total: None,
@@ -1080,11 +1147,13 @@ fn sync_library_inner(
         let mut attempt = 0;
         let mut transient = 0;
         let mut restarted = false;
+        let mut pinned_library = transfer.pinned_library(&library);
         let meta = loop {
             match transfer.download(client, &staging, progress, cancel) {
                 Err(RemoteError::Changed(_)) if !restarted => {
                     restarted = true;
                     transfer.discard_payload()?;
+                    pinned_library = None;
                     progress(SyncProgress::Restarting);
                 }
                 Err(RemoteError::Busy {
@@ -1134,6 +1203,12 @@ fn sync_library_inner(
             return Err(RemoteError::Cancelled);
         }
         progress(SyncProgress::Validating);
+        let source = crate::compatibility::downloaded(
+            &staging,
+            pinned_library.as_ref().unwrap_or(&library),
+            &meta,
+            cancel,
+        )?;
         let validating = Instant::now();
         tracing::info!("Snapshot stage start: validating");
         let info = validate_snapshot_with_progress_cancellable(
@@ -1147,11 +1222,25 @@ fn sync_library_inner(
             "Snapshot stage end: validating"
         );
         let info = info?;
-        Ok((meta, info))
+        let local = observed_format(&staging, cancel)?;
+        let format = CacheFormat {
+            generation: u64::from(source != local),
+            source: Some(source),
+            local,
+        };
+        Ok((meta, info, format))
     })();
-    let (meta, info) = match result {
+    let (meta, info, format) = match result {
         Ok(value) => value,
         Err(error) => {
+            // Only a rejection of the actual downloaded bytes invalidates this
+            // object. Peer/preflight failures before this job preserve its prefix.
+            if matches!(
+                error,
+                RemoteError::Snapshot(_) | RemoteError::NewerDatabase { .. }
+            ) {
+                transfer.discard_payload()?;
+            }
             remove_owned_staging(&staging);
             return Err(error);
         }
@@ -1170,6 +1259,7 @@ fn sync_library_inner(
         .state(&library.library_id)
         .is_some_and(|current| current.revision > meta.revision.unwrap_or(library.revision))
     {
+        transfer.discard_payload()?;
         remove_owned_staging(&staging);
         return Err(RemoteError::Snapshot("The downloaded revision is older than the current cache; the newer cache was kept. Sync again to download a fresh snapshot".into()));
     }
@@ -1181,6 +1271,7 @@ fn sync_library_inner(
         // than the earlier /library reply); fall back to the /library revision.
         revision: meta.revision.unwrap_or(library.revision),
         schema_version: info.schema_version,
+        format: Some(Box::new(format)),
         database_file: file_name.clone(),
         server_url: client.api_url().to_owned(),
         server_version,
@@ -1283,12 +1374,18 @@ mod tests {
     }
 
     fn sample_snapshot(directory: &Path) -> Vec<u8> {
+        // Historical server fixture: preserve the real external-content schema,
+        // rather than relabeling a newly created schema-6 database as schema 5.
+        std::fs::create_dir_all(directory).unwrap();
         let source = directory.join("server.db");
-        let provider = SqliteProvider::open(&source).unwrap();
-        let backup = directory.join("backup.db");
-        provider.backup_library(&backup).unwrap();
-        drop(provider);
-        std::fs::read(backup).unwrap()
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
+        conn.execute_batch(include_str!(
+            "../../audiolib-db/tests/fixtures/schema-v5.sql"
+        ))
+        .unwrap();
+        drop(conn);
+        std::fs::read(source).unwrap()
     }
 
     fn old_unicode_snapshot(directory: &Path) -> Vec<u8> {
@@ -1363,12 +1460,10 @@ mod tests {
             },
             CachePreparation::Validating,
             CachePreparation::Upgrading,
-            CachePreparation::Tokenizing {
-                completed: 0,
+            CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                completed: 1,
                 total: 1,
-            },
-            CachePreparation::BuildingFts,
-            CachePreparation::SourceTags,
+            }),
             CachePreparation::Saving,
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -1456,23 +1551,24 @@ mod tests {
         for stage in [
             CachePreparation::Validating,
             CachePreparation::Upgrading,
-            CachePreparation::Tokenizing {
-                completed: 0,
+            CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                completed: 1,
                 total: 1,
-            },
-            CachePreparation::BuildingFts,
-            CachePreparation::SourceTags,
+            }),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let bytes = old_unicode_snapshot(directory.path());
             let server = TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"test"}"#),
+                "/api/v1/health" => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                }
                 "/api/v1/library" => TestResponse::json(200, &library_json(8)),
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
                 "/api/v1/library/snapshot" => TestResponse::bytes(200, bytes.clone())
                     .with_header("X-Library-Id", "lib-r")
                     .with_header("X-Library-Revision", "8")
-                    .with_header("X-Schema-Version", "3"),
+                    .with_header("X-Schema-Version", "5"),
+                "/api/v1/capabilities" => TestResponse::json(404, "{}"),
                 _ => panic!("unexpected request {}", request.path),
             });
             let cache = RemoteCache::new(&directory.path().join("data"));
@@ -1488,7 +1584,7 @@ mod tests {
             let database = cache.database_path(&state);
             std::fs::write(
                 &database,
-                std::fs::read(directory.path().join("backup.db")).unwrap(),
+                std::fs::read(directory.path().join("server.db")).unwrap(),
             )
             .unwrap();
             cache.save_state(&state).unwrap();
@@ -1547,6 +1643,122 @@ mod tests {
     }
 
     #[test]
+    fn cache_migration_crash_child() {
+        let Some(root) = std::env::var_os("AUDIOLIB_TEST_CACHE_CRASH_ROOT") else {
+            return;
+        };
+        let stop = std::env::var("AUDIOLIB_TEST_CACHE_CRASH_PHASE").unwrap();
+        let cache = RemoteCache::new(std::path::Path::new(&root));
+        let state = cache.active().unwrap();
+        cache
+            .prepare_cached_state_with_progress(&state, &mut |event| {
+                let reached = match event {
+                    CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                        completed,
+                        ..
+                    }) => stop == "indexing" && completed > 0,
+                    CachePreparation::Saving => stop == "saving",
+                    _ => false,
+                };
+                if reached {
+                    std::process::exit(73);
+                }
+            })
+            .unwrap();
+        panic!("cache crash phase was not reached");
+    }
+
+    #[test]
+    fn cache_process_crash_retains_previous_state_and_retries_without_touching_abandoned_jobs() {
+        fn files(
+            root: &std::path::Path,
+        ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let mut result = std::collections::BTreeMap::new();
+            for entry in std::fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    result.extend(files(&entry.path()));
+                } else {
+                    result.insert(entry.path(), std::fs::read(entry.path()).unwrap());
+                }
+            }
+            result
+        }
+        for stop in ["indexing", "saving"] {
+            let directory = tempfile::tempdir().unwrap();
+            let cache = RemoteCache::new(directory.path());
+            let state = CacheState {
+                library_id: "lib-crash".into(),
+                revision: 7,
+                schema_version: 3,
+                database_file: "library-r7-old.db".into(),
+                server_url: "http://offline.test".into(),
+                ..Default::default()
+            };
+            let library = cache.library_dir(&state.library_id);
+            std::fs::create_dir_all(&library).unwrap();
+            let path = cache.database_path(&state);
+            std::fs::write(&path, old_unicode_snapshot(directory.path())).unwrap();
+            cache.save_state(&state).unwrap();
+            let before = [
+                std::fs::read(&path).unwrap(),
+                std::fs::read(library.join(STATE_FILE)).unwrap(),
+                std::fs::read(cache.root.join(ACTIVE_FILE)).unwrap(),
+            ];
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sync::tests::cache_migration_crash_child"])
+                .env("AUDIOLIB_TEST_CACHE_CRASH_ROOT", directory.path())
+                .env("AUDIOLIB_TEST_CACHE_CRASH_PHASE", stop)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(73), "{stop}: {output:?}");
+            assert_eq!(cache.active().unwrap(), state);
+            assert_eq!(
+                [
+                    std::fs::read(&path).unwrap(),
+                    std::fs::read(library.join(STATE_FILE)).unwrap(),
+                    std::fs::read(cache.root.join(ACTIVE_FILE)).unwrap()
+                ],
+                before
+            );
+            let abandoned: Vec<_> = std::fs::read_dir(&library)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".snapshot-job-")
+                })
+                .collect();
+            assert_eq!(abandoned.len(), 1);
+            let retained = files(&abandoned[0].path());
+            assert!(!retained.is_empty());
+            // Restart from the intact cache; never adopt or recursively delete an older job.
+            let prepared = cache.prepare_cached_state(&state).unwrap();
+            assert_eq!(cache.active().unwrap(), prepared);
+            assert_eq!(prepared.revision, state.revision);
+            assert_eq!(prepared.format.as_ref().unwrap().generation, 1);
+            let provider = SqliteProvider::open_read_only(&cache.database_path(&prepared)).unwrap();
+            assert_unicode_source(&provider);
+            assert_eq!(std::fs::read(&path).unwrap(), before[0]);
+            assert_eq!(files(&abandoned[0].path()), retained);
+            assert_eq!(
+                std::fs::read_dir(&library)
+                    .unwrap()
+                    .filter(|entry| entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".snapshot-job-"))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn offline_cache_upgrade_keeps_original_bytes_and_open_provider() {
         let directory = tempfile::tempdir().unwrap();
         let cache = RemoteCache::new(directory.path());
@@ -1593,38 +1805,61 @@ mod tests {
             .enumerate()
             .filter_map(|(index, event)| (*event == CachePreparation::Validating).then_some(index))
             .collect::<Vec<_>>();
-        assert_eq!(validation_positions.len(), 2, "{events:?}");
-        let text_progress = events
-            .iter()
-            .enumerate()
-            .filter_map(|(index, event)| match *event {
-                CachePreparation::Tokenizing { completed, total } => {
-                    Some((index, completed, total))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(!text_progress.is_empty(), "{events:?}");
-        assert_eq!(
-            text_progress
-                .first()
-                .map(|(_, done, total)| (*done, *total)),
-            Some((0, 1))
-        );
-        assert_eq!(
-            text_progress.last().map(|(_, done, total)| (*done, *total)),
-            Some((1, 1))
-        );
-        assert!(text_progress.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+        assert!(validation_positions.len() >= 2, "{events:?}");
+        // Plan B computes text while copying/indexing instead of persisting six
+        // token columns first. It validates both before and after FTS construction.
         let fts_position = events
             .iter()
-            .position(|event| *event == CachePreparation::BuildingFts)
+            .position(|event| {
+                matches!(
+                    event,
+                    CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing { .. })
+                )
+            })
             .expect("the FTS5 build must have its own preparation stage");
-        assert!(validation_positions[0] < text_progress[0].0);
-        assert!(text_progress.last().unwrap().0 < fts_position);
-        assert!(fts_position < validation_positions[1]);
+        assert!(validation_positions[0] < fts_position);
+        assert!(fts_position < *validation_positions.last().unwrap());
+        // SQLite-page copying and the two committed row counters must remain
+        // distinguishable all the way through the remote progress API.
+        for indexing in [false, true] {
+            let rows: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    CachePreparation::Migrating(SnapshotUpgradeProgress::Copying {
+                        completed,
+                        total,
+                    }) if !indexing => Some((*completed, *total)),
+                    CachePreparation::Migrating(SnapshotUpgradeProgress::Indexing {
+                        completed,
+                        total,
+                    }) if indexing => Some((*completed, *total)),
+                    _ => None,
+                })
+                .collect();
+            assert!(!rows.is_empty(), "{events:?}");
+            assert_eq!(rows.last(), Some(&(1, 1)), "{events:?}");
+            assert!(
+                rows.iter()
+                    .all(|(done, total)| *total == 1 && done <= total)
+            );
+            assert!(rows.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        }
+        for phase in [
+            SnapshotUpgradeProgress::BackingUp,
+            SnapshotUpgradeProgress::Validating,
+            SnapshotUpgradeProgress::Compacting,
+            SnapshotUpgradeProgress::Publishing,
+            SnapshotUpgradeProgress::Checkpoint,
+        ] {
+            assert!(
+                events.contains(&CachePreparation::Migrating(phase)),
+                "{phase:?}: {events:?}"
+            );
+        }
         assert_ne!(prepared.database_file, state.database_file);
         assert_eq!(prepared.revision, state.revision);
+        assert_eq!(prepared.format.as_ref().unwrap().generation, 1);
+        assert!(prepared.format.as_ref().unwrap().source.is_none());
         assert_eq!(prepared.server_url, state.server_url);
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(original_provider.stats().unwrap().audio_files, 1);
@@ -1749,7 +1984,7 @@ mod tests {
 
         let prepared = cache.prepare_cached_state(&state).unwrap();
         assert_ne!(prepared.database_file, state.database_file);
-        assert_eq!(prepared.schema_version, 5);
+        assert_eq!(prepared.schema_version, 6);
         assert_eq!(prepared.library_id, state.library_id);
         assert_eq!(prepared.revision, state.revision);
         assert_eq!(prepared.server_url, state.server_url);
@@ -1771,7 +2006,7 @@ mod tests {
 
         let owned = cache.database_path(&prepared);
         let reader = SqliteProvider::open_read_only(&owned).unwrap();
-        assert_eq!(reader.library_info().unwrap().schema_version, 5);
+        assert_eq!(reader.library_info().unwrap().schema_version, 6);
         assert_eq!(reader.stats().unwrap().audio_files, 1);
         assert_eq!(
             serde_json::to_value(reader.get_audio(id).unwrap()).unwrap(),
@@ -1842,11 +2077,13 @@ mod tests {
         TestServer::start(move |request| {
             let mut fixture = fixture.lock().unwrap();
             match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#),
+                "/api/v1/health" => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                }
                 "/api/v1/library" => TestResponse::json(
                     200,
                     &format!(
-                        r#"{{"library_id":"{}","schema_version":3,"revision":{}}}"#,
+                        r#"{{"library_id":"{}","schema_version":5,"revision":{}}}"#,
                         fixture.library_id, fixture.revision
                     ),
                 ),
@@ -1863,11 +2100,77 @@ mod tests {
                     TestResponse::bytes(200, fixture.snapshot.clone())
                         .with_header("X-Library-Id", &fixture.library_id)
                         .with_header("X-Library-Revision", &fixture.revision.to_string())
-                        .with_header("X-Schema-Version", "3")
+                        .with_header("X-Schema-Version", "5")
                 }
                 _ => TestResponse::json(404, "{}"),
             }
         })
+    }
+
+    #[test]
+    fn ready_snapshot_schemas_3_through_6_read_without_retired_dto_fields() {
+        let owned = tempfile::tempdir().unwrap();
+        for version in 3..=6 {
+            let path = owned.path().join(format!("ready-v{version}.db"));
+            if version == 6 {
+                drop(SqliteProvider::open(&path).unwrap());
+            }
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            audiolib_db::register_library_functions(&connection).unwrap();
+            if version < 6 {
+                // Synthetic supported-version combinations use the captured legacy
+                // layout, matching the historic snapshot matrix below. No real
+                // archived v3/v4 user database is available in this checkout.
+                connection
+                    .execute_batch(include_str!(
+                        "../../audiolib-db/tests/fixtures/schema-v5.sql"
+                    ))
+                    .unwrap();
+                connection
+                    .pragma_update(None, "user_version", version)
+                    .unwrap();
+            }
+            connection
+                .execute(
+                    "INSERT INTO audio_files(id,file_path,path_key,filename,user_notes,duration)
+                 VALUES(7,'/owned/metal.wav','/owned/metal.wav','metal.wav','retainednote',1.0)",
+                    [],
+                )
+                .unwrap();
+            if version < 6 {
+                connection
+                    .execute(
+                        "UPDATE audio_files SET filename_tokenized=audiolib_tokenize(filename),
+                     user_notes_tokenized=audiolib_tokenize(user_notes),play_count=17,
+                     last_played_at='2026-01-02T03:04:05Z' WHERE id=7",
+                        [],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE;")
+                .unwrap();
+            drop(connection);
+            let before = std::fs::read(&path).unwrap();
+            let provider = SqliteProvider::open_read_only(&path).unwrap();
+            assert_eq!(provider.database_path(), path, "schema {version}");
+            assert_eq!(provider.library_info().unwrap().schema_version, version);
+            assert_eq!(provider.stats().unwrap().audio_files, 1);
+            let page = provider
+                .search(&audiolib_core::SearchRequest {
+                    query: "retainednote".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(page.total_count, 1, "schema {version}");
+            assert_eq!(page.results[0].id, 7);
+            assert_eq!(page.results[0].notes, "retainednote");
+            let value = serde_json::to_value(&page.results[0]).unwrap();
+            assert!(value.get("play_count").is_none());
+            assert!(value["attributes"].get("last_played_at").is_none());
+            drop(provider);
+            assert_eq!(std::fs::read(&path).unwrap(), before, "schema {version}");
+        }
     }
 
     #[test]
@@ -1896,15 +2199,12 @@ mod tests {
             std::fs::write(&staging, &source_bytes).unwrap();
             let info = validate_snapshot(&staging)
                 .unwrap_or_else(|error| panic!("v{version} snapshot rejected: {error}"));
-            // Validation may migrate this exclusively owned staging file to the
-            // current schema and record the actual upgraded version in cache state.
-            assert_eq!(info.schema_version, audiolib_db::SCHEMA_VERSION);
+            // Complete legacy search state is directly readable. No structural
+            // migration is justified just because the client can also create v6.
+            assert_eq!(info.schema_version, version);
             assert!(SqliteProvider::has_current_search_state(&staging).unwrap());
             let provider = SqliteProvider::open_read_only(&staging).unwrap();
-            assert_eq!(
-                provider.library_info().unwrap().schema_version,
-                audiolib_db::SCHEMA_VERSION
-            );
+            assert_eq!(provider.library_info().unwrap().schema_version, version);
             drop(provider);
             let source_conn = rusqlite::Connection::open_with_flags(
                 &source,
@@ -1922,7 +2222,7 @@ mod tests {
                 assert!(!PathBuf::from(sidecar).exists());
             }
         }
-        for version in [2, 6] {
+        for version in [2, 7] {
             let path = open_as(version);
             let error = validate_snapshot(&path).unwrap_err();
             assert!(
@@ -1935,7 +2235,7 @@ mod tests {
 
     #[test]
     fn unsupported_server_schema_rejects_sync_and_force_before_cache_or_download() {
-        for version in [2, 6] {
+        for version in [2, 7] {
             let directory = tempfile::tempdir().unwrap();
             let cache = RemoteCache::new(&directory.path().join("data"));
             let snapshot = sample_snapshot(directory.path());
@@ -1946,8 +2246,9 @@ mod tests {
                     requests.lock().unwrap().push(request.path.clone());
                     match request.path.as_str() {
                         "/api/v1/health" => {
-                            TestResponse::json(200, r#"{"status":"ok","version":"0.4.0"}"#)
+                            TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
                         }
+                        "/api/v1/capabilities" => TestResponse::json(404, "{}"),
                         "/api/v1/library" => TestResponse::json(
                             200,
                             &format!(
@@ -1983,7 +2284,7 @@ mod tests {
             }
             assert_eq!(
                 requests.lock().unwrap().as_slice(),
-                ["/api/v1/health", "/api/v1/library"].repeat(2)
+                ["/api/v1/health", "/api/v1/capabilities", "/api/v1/library"].repeat(2)
             );
             assert_eq!(
                 std::fs::read_dir(cache.library_dir(&state.library_id))
@@ -2009,9 +2310,11 @@ mod tests {
         let server = {
             let snapshots = snapshots.clone();
             TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#),
+                "/api/v1/health" => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                }
                 "/api/v1/library" => {
-                    TestResponse::json(200, r#"{"library_id":"L","schema_version":3,"revision":1}"#)
+                    TestResponse::json(200, r#"{"library_id":"L","schema_version":5,"revision":1}"#)
                 }
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
                 "/api/v1/library/snapshot" => {
@@ -2054,9 +2357,11 @@ mod tests {
         let server = {
             let (busy, waited) = (busy.clone(), waited.clone());
             TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#),
+                "/api/v1/health" => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                }
                 "/api/v1/library" => {
-                    TestResponse::json(200, r#"{"library_id":"L","schema_version":3,"revision":1}"#)
+                    TestResponse::json(200, r#"{"library_id":"L","schema_version":5,"revision":1}"#)
                 }
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
                 "/api/v1/library/snapshot" => {
@@ -2074,7 +2379,7 @@ mod tests {
                     TestResponse::bytes(200, snapshot.clone())
                         .with_header("X-Library-Id", "L")
                         .with_header("X-Library-Revision", "1")
-                        .with_header("X-Schema-Version", "3")
+                        .with_header("X-Schema-Version", "5")
                 }
                 _ => TestResponse::json(404, "{}"),
             })
@@ -2111,7 +2416,7 @@ mod tests {
         let wire_bytes = packed.len() as u64;
         assert!(wire_bytes < database_bytes);
         let server = TestServer::start(move |request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#),
+            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
             "/api/v1/library" => TestResponse::json(
                 200,
                 r#"{"library_id":"compressed","schema_version":5,"revision":1}"#,
@@ -2194,7 +2499,7 @@ mod tests {
         assert!(first.downloaded && !first.library_changed && first.previous.is_none());
         assert_eq!(fixture.lock().unwrap().busy, 0, "BUSY must be retried");
         assert!(phases.contains(&SyncProgress::Validating));
-        assert_eq!(first.state.server_version, "9.9");
+        assert_eq!(first.state.server_version, "0.4.11");
         assert_eq!(first.state.roots[0].server_path, "/Volumes/SFX");
         let db = cache.database_path(&first.state);
         assert!(db.is_file());
@@ -2510,13 +2815,14 @@ mod tests {
     }
 
     fn library_json(revision: u64) -> String {
-        format!(r#"{{"library_id":"lib-r","schema_version":3,"revision":{revision}}}"#)
+        format!(r#"{{"library_id":"lib-r","schema_version":5,"revision":{revision}}}"#)
     }
 
     #[test]
     fn cancelling_each_http_sync_phase_keeps_existing_cache_and_removes_staging() {
         for (path, stalled_body) in [
             ("/api/v1/health", false),
+            ("/api/v1/capabilities", false),
             ("/api/v1/library", false),
             ("/api/v1/roots", false),
             ("/api/v1/library/snapshot", false),
@@ -2531,14 +2837,15 @@ mod tests {
                 TestServer::start(move |request| {
                     let response = match request.path.as_str() {
                         "/api/v1/health" => {
-                            TestResponse::json(200, r#"{"status":"ok","version":"test"}"#)
+                            TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
                         }
                         "/api/v1/library" => TestResponse::json(200, &library_json(1)),
                         "/api/v1/roots" => TestResponse::json(200, "[]"),
                         "/api/v1/library/snapshot" => TestResponse::bytes(200, bytes.clone())
                             .with_header("X-Library-Id", "lib-r")
                             .with_header("X-Library-Revision", "1")
-                            .with_header("X-Schema-Version", "3"),
+                            .with_header("X-Schema-Version", "5"),
+                        "/api/v1/capabilities" => TestResponse::json(404, "{}"),
                         _ => panic!("unexpected request {}", request.path),
                     };
                     if enabled.load(Ordering::Acquire) && request.path == path {
@@ -2609,7 +2916,9 @@ mod tests {
         let server = {
             let state = state.clone();
             TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#),
+                "/api/v1/health" => {
+                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                }
                 "/api/v1/library" => TestResponse::json(200, &library_json(1)),
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
                 "/api/v1/library/snapshot" => {
@@ -2625,7 +2934,7 @@ mod tests {
                         TestResponse::bytes(200, snapshot.clone())
                             .with_header("X-Library-Id", "lib-r")
                             .with_header("X-Library-Revision", "1")
-                            .with_header("X-Schema-Version", "3")
+                            .with_header("X-Schema-Version", "5")
                     }
                 }
                 _ => TestResponse::json(404, "{}"),
@@ -2672,7 +2981,7 @@ mod tests {
                 let state = state.lock().unwrap();
                 match request.path.as_str() {
                     "/api/v1/health" => {
-                        TestResponse::json(200, r#"{"status":"ok","version":"9.9"}"#)
+                        TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
                     }
                     "/api/v1/library" if state.0 => TestResponse::json(
                         408,
@@ -2683,7 +2992,7 @@ mod tests {
                     "/api/v1/library/snapshot" => TestResponse::bytes(200, snapshot.clone())
                         .with_header("X-Library-Id", "lib-r")
                         .with_header("X-Library-Revision", "1")
-                        .with_header("X-Schema-Version", "3"),
+                        .with_header("X-Schema-Version", "5"),
                     _ => TestResponse::json(404, "{}"),
                 }
             })
@@ -2762,12 +3071,13 @@ mod tests {
             std::fs::read(&database).unwrap(),
         );
         let server = TestServer::start(|request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok"}"#),
+            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
             "/api/v1/library" => TestResponse::json(
                 408,
                 r#"{"error_code":"TIMEOUT","message":"library B timed out"}"#,
             ),
             "/api/v1/roots" => TestResponse::json(200, r#"[{"name":"B_ROOT","server_path":"/B"}]"#),
+            "/api/v1/capabilities" => TestResponse::json(404, "{}"),
             _ => panic!("unexpected request: {}", request.path),
         });
         let client = RemoteClient::new(&server.url, "fixture").unwrap();

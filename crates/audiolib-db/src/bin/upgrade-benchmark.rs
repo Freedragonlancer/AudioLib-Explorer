@@ -155,6 +155,11 @@ fn progress_event(progress: SnapshotUpgradeProgress, started: Instant) -> Value 
     let (phase, completed, total) = match progress {
         SnapshotUpgradeProgress::Preparing => ("preparing", None, None),
         SnapshotUpgradeProgress::BackingUp => ("backing_up", None, None),
+        SnapshotUpgradeProgress::Copying { completed, total } => {
+            ("copying", Some(completed), Some(total))
+        }
+        SnapshotUpgradeProgress::Compacting => ("compacting", None, None),
+        SnapshotUpgradeProgress::Publishing => ("publishing", None, None),
         SnapshotUpgradeProgress::Validating => ("validating", None, None),
         SnapshotUpgradeProgress::Checkpoint => ("checkpoint", None, None),
         SnapshotUpgradeProgress::Indexing { completed, total } => {
@@ -333,8 +338,9 @@ mod tests {
     fn measurement_upgrades_only_its_owned_copy_and_preserves_the_source() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("source.db");
-        let provider = SqliteProvider::open(&database).unwrap();
         let conn = Connection::open(&database).unwrap();
+        conn.execute_batch(include_str!("../../tests/fixtures/schema-v5.sql"))
+            .unwrap();
         conn.execute_batch(
             "INSERT INTO audio_files(id,file_path,filename,user_tags,user_notes,favorite,user_color,metadata_json)
              VALUES(1,'root/clip.wav','clip.wav','retained tag','retained note',1,'#abcdef',
@@ -343,7 +349,6 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        drop(provider);
         let before = std::fs::read(&database).unwrap();
 
         let report = measure(&database).unwrap();
@@ -358,7 +363,7 @@ mod tests {
             assert!(integrity.is_ok(), "{name}: {integrity:?}");
         }
         assert!(report["events"].as_array().unwrap().iter().any(|event| {
-            event["phase"] == "tokenizing" && event["completed"] == 1 && event["total"] == 1
+            event["phase"] == "indexing" && event["completed"] == 1 && event["total"] == 1
         }));
         assert_eq!(std::fs::read(&database).unwrap(), before);
         let source =

@@ -81,7 +81,7 @@ pub(crate) fn migrate_resumable(
         .map_err(db_error)?;
     if !pending(conn)? {
         validate_supported_feature_revisions(conn)?;
-        if !(1..=SCHEMA_VERSION).contains(&version) || search_text_is_current(conn)? {
+        if !(1..=LEGACY_SCHEMA_VERSION).contains(&version) || search_text_is_current(conn)? {
             return migrate_with_progress(conn, progress);
         }
         validate_library_identity(conn)?;
@@ -149,7 +149,7 @@ pub(crate) fn migrate_resumable(
     .map_err(db_error)?;
     loop {
         validate_feature_revisions(conn, IN_PROGRESS_REVISION)?;
-        if !(1..=SCHEMA_VERSION).contains(&version) {
+        if !(1..=LEGACY_SCHEMA_VERSION).contains(&version) {
             return Err(Error::Database(
                 "Unsupported schema for resumable search upgrade".into(),
             ));
@@ -214,7 +214,7 @@ pub(crate) fn migrate_resumable(
             tx.execute_batch(&format!("CREATE TRIGGER{triggers}"))
                 .map_err(db_error)?;
             tx.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            tx.pragma_update(None, "user_version", LEGACY_SCHEMA_VERSION)
                 .map_err(db_error)?;
             tx.execute(
                 "UPDATE audiolib_search_upgrade SET phase='checkpoint' WHERE singleton=1",

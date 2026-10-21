@@ -13,6 +13,7 @@ fn fixture() -> (tempfile::TempDir, SqliteProvider) {
     let database = directory.path().join("fragments.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
          INSERT INTO folder_closure VALUES(1,1,0);",
@@ -211,6 +212,7 @@ fn numeric_queries_keep_exact_tokens_while_letter_number_fragments_match() {
 fn single_letter_codes_in_multi_term_queries_include_extracted_source_metadata() {
     let (_directory, provider) = fixture();
     let conn = Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute(
         "UPDATE audio_files SET metadata_json=?1 WHERE id=1",
         [r#"{"wav_metadata":{"fields":{"keywords":"Z"}}}"#],
@@ -248,6 +250,7 @@ fn single_grapheme_fold_expansions_keep_fragments_exact_terms_and_word_boundarie
     let database = directory.path().join("fold-expansions.db");
     let provider = SqliteProvider::open(&database).unwrap();
     let conn = Connection::open(&database).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
          INSERT INTO folder_closure VALUES(1,1,0);",

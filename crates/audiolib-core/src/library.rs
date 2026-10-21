@@ -41,16 +41,6 @@ pub struct ScanSession {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PlayRecord {
-    pub id: i64,
-    pub audio_file_id: i64,
-    pub played_at: String,
-    pub filename: String,
-    pub file_path: String,
-    pub missing: bool,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LibraryInfo {
     pub database: PathBuf,
     pub schema_version: i64,

@@ -14,11 +14,16 @@ use std::sync::{Arc, Mutex};
 const LIBRARY: &str = "resume-regression-library";
 
 fn valid_snapshot(directory: &Path) -> Vec<u8> {
-    let provider = SqliteProvider::open(&directory.join("source.db")).unwrap();
-    let backup = directory.join("snapshot.db");
-    provider.backup_library(&backup).unwrap();
-    drop(provider);
-    std::fs::read(backup).unwrap()
+    let path = directory.join("legacy-snapshot.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../audiolib-db/tests/fixtures/schema-v5.sql"
+        ))
+        .unwrap();
+    drop(connection);
+    std::fs::read(path).unwrap()
 }
 
 fn library_response(revision: u64) -> TestResponse {
@@ -37,11 +42,170 @@ fn snapshot_response(body: Vec<u8>, revision: u64) -> TestResponse {
 
 fn ordinary_response(request: &TestRequest, revision: u64) -> TestResponse {
     match request.path.as_str() {
-        "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"test"}"#),
+        "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.5.1"}"#),
+        "/api/v1/capabilities" => TestResponse::json(404, "{}"),
         "/api/v1/library" => library_response(revision),
         "/api/v1/roots" => TestResponse::json(200, "[]"),
         _ => panic!("unexpected request {}", request.path),
     }
+}
+
+fn modern_snapshot_response(
+    body: Vec<u8>,
+    offset: Option<usize>,
+    wire_length: usize,
+    output_length: usize,
+) -> TestResponse {
+    use audiolib_core::compatibility::{
+        LIBRARY_FORMAT_HEADER, LibraryFormat, PLAN_B_FORMAT, SERVER_COMPATIBILITY_HEADER,
+        SNAPSHOT_FORMAT_HEADER, compatibility_manifest,
+    };
+    let mut reply = TestResponse::bytes(if offset.is_some() { 206 } else { 200 }, body)
+        .with_header("X-Library-Id", LIBRARY)
+        .with_header("X-Library-Revision", "7")
+        .with_header("X-Schema-Version", "6")
+        .with_header("X-Snapshot-Id", "modern-pinned-object")
+        .with_header("ETag", "\"modern-pinned-object\"")
+        .with_header("Accept-Ranges", "bytes")
+        .with_header("Content-Encoding", "zstd")
+        .with_header("X-Uncompressed-Length", &output_length.to_string())
+        .with_header(SNAPSHOT_FORMAT_HEADER, PLAN_B_FORMAT)
+        .with_header(
+            LIBRARY_FORMAT_HEADER,
+            &serde_json::to_string(&LibraryFormat::target()).unwrap(),
+        )
+        .with_header(
+            SERVER_COMPATIBILITY_HEADER,
+            &serde_json::to_string(&compatibility_manifest()).unwrap(),
+        )
+        .with_header("x-search-storage-revision", "1")
+        .with_header("x-tokenization-revision", "3")
+        .with_header("x-source-search-revision", "2")
+        .with_header("x-source-tags-revision", "2");
+    if let Some(offset) = offset {
+        reply = reply.with_header(
+            "Content-Range",
+            &format!("bytes {offset}-{}/{wire_length}", wire_length - 1),
+        );
+    }
+    reply
+}
+
+#[test]
+fn modern_pinned_resume_keeps_its_format_when_the_live_revision_advances() {
+    use audiolib_core::compatibility::{
+        ACCEPT_FORMATS_HEADER, CLIENT_COMPATIBILITY_HEADER, LibraryFormat, PLAN_B_FORMAT,
+        SnapshotFormat, compatibility_manifest,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let source = SqliteProvider::open(&directory.path().join("modern.db")).unwrap();
+    let backup = directory.path().join("modern-backup.db");
+    source.backup_library(&backup).unwrap();
+    drop(source);
+    let bytes = std::fs::read(backup).unwrap();
+    let packed = zstd::encode_all(bytes.as_slice(), 3).unwrap();
+    let cut = packed.len() / 2;
+    let offsets = Arc::new(Mutex::new(Vec::new()));
+    let revision = Arc::new(AtomicUsize::new(7));
+    let incompatible = Arc::new(AtomicBool::new(false));
+    let server = {
+        let offsets = offsets.clone();
+        let revision = revision.clone();
+        let incompatible = incompatible.clone();
+        TestServer::start(move |request| {
+            if request.path.starts_with("/api/v1/library/snapshot") {
+                let catalog: audiolib_core::compatibility::CompatibilityManifest =
+                    serde_json::from_str(request.header(CLIENT_COMPATIBILITY_HEADER).unwrap())
+                        .unwrap();
+                assert_eq!(catalog, compatibility_manifest());
+                assert!(
+                    request
+                        .header(ACCEPT_FORMATS_HEADER)
+                        .unwrap()
+                        .contains(PLAN_B_FORMAT)
+                );
+                let offset = request.header("Range").map(|range| {
+                    range
+                        .strip_prefix("bytes=")
+                        .unwrap()
+                        .strip_suffix('-')
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                });
+                offsets.lock().unwrap().push(offset);
+                if let Some(offset) = offset {
+                    assert_eq!(request.header("If-Range"), Some("\"modern-pinned-object\""));
+                    assert!(request.path.ends_with("?snapshot_id=modern-pinned-object"));
+                    modern_snapshot_response(
+                        packed[offset..].to_vec(),
+                        Some(offset),
+                        packed.len(),
+                        bytes.len(),
+                    )
+                } else {
+                    modern_snapshot_response(packed.clone(), None, packed.len(), bytes.len())
+                        .cut_after(cut)
+                }
+            } else {
+                match request.path.as_str() {
+                    "/api/v1/health" => TestResponse::json(200, &serde_json::json!({"status":"ok","version":if incompatible.load(Ordering::SeqCst) { "99.0.0" } else { env!("CARGO_PKG_VERSION") }}).to_string()),
+                    "/api/v1/capabilities" => TestResponse::json(200, &serde_json::json!({"compatibility":compatibility_manifest()}).to_string()),
+                    "/api/v1/library" => TestResponse::json(200, &serde_json::json!({
+                        "library_id":LIBRARY,"schema_version":6,"revision":revision.load(Ordering::SeqCst),
+                        "snapshot_format":SnapshotFormat { id:PLAN_B_FORMAT.into(),format:LibraryFormat::target() }
+                    }).to_string()),
+                    "/api/v1/roots" => TestResponse::json(200, "[]"),
+                    _ => panic!("unexpected request {}", request.path),
+                }
+            }
+        })
+    };
+    let cache = RemoteCache::new(&directory.path().join("client"));
+    let client = RemoteClient::new(&server.url, "").unwrap();
+    {
+        let mut session =
+            crate::snapshot_transfer::TransferSession::open(&cache, client.api_url(), false)
+                .unwrap();
+        session.bind_library(LIBRARY).unwrap();
+        let error = session
+            .download(
+                &client,
+                &directory.path().join("interrupted.db"),
+                &mut |_| {},
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+        assert!(error.is_unreachable(), "{error:?}");
+        assert_eq!(session.pending().downloaded_bytes, cut as u64);
+    }
+    incompatible.store(true, Ordering::SeqCst);
+    let error =
+        sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap_err();
+    assert!(matches!(error, RemoteError::Snapshot(_)), "{error:?}");
+    assert_eq!(
+        cache
+            .pending_sync(client.api_url())
+            .unwrap()
+            .unwrap()
+            .downloaded_bytes,
+        cut as u64,
+        "a failed peer preflight must not discard a valid durable prefix"
+    );
+    assert_eq!(*offsets.lock().unwrap(), vec![None]);
+    incompatible.store(false, Ordering::SeqCst);
+    revision.store(8, Ordering::SeqCst);
+    let outcome =
+        sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap();
+    assert_eq!(
+        outcome.state.revision, 7,
+        "the cache must name the actual pinned revision"
+    );
+    assert_eq!(outcome.state.schema_version, 6);
+    let format = outcome.state.format.unwrap();
+    assert_eq!(format.source, Some(LibraryFormat::target()));
+    assert_eq!(format.local, LibraryFormat::target());
+    assert_eq!(*offsets.lock().unwrap(), vec![None, Some(cut)]);
 }
 
 #[test]
@@ -213,7 +377,7 @@ fn pinned_old_revision_cannot_replace_a_cache_advanced_during_download() {
             if request.path == "/api/v1/library/snapshot" {
                 snapshot_response(good.clone(), 7)
             } else {
-                ordinary_response(request, 10)
+                ordinary_response(request, 7)
             }
         })
     };
