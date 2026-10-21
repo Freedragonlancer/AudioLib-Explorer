@@ -355,8 +355,9 @@ pub struct AppConfig {
     pub language: String,
     pub playback: serde_json::Value,
     /// Start preview playback when an audio list item is selected by a single click.
-    /// Disabled by default so established settings retain double-click audition.
-    #[serde(default)]
+    /// Enabled by default (new installs and settings files without the field); an
+    /// explicitly saved value, including `false`, is kept as-is.
+    #[serde(default = "default_true")]
     pub audition_play_on_single_click: bool,
     /// Local mode: pre-generate list thumbnail Waveforms in the background after scans
     /// (doc/api/README.md §9.3). Off by default: only visible rows are computed.
@@ -394,7 +395,7 @@ struct SavedPreferences {
     language: String,
     #[serde(default = "default_playback")]
     playback: serde_json::Value,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     audition_play_on_single_click: bool,
     #[serde(default)]
     pregenerate_list_waveforms: bool,
@@ -406,6 +407,9 @@ struct SavedPreferences {
     allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
     data_source: DataSourceSettings,
+}
+fn default_true() -> bool {
+    true
 }
 fn english() -> String {
     "en".into()
@@ -472,7 +476,7 @@ impl AppConfig {
             },
             language: english(),
             playback: default_playback(),
-            audition_play_on_single_click: false,
+            audition_play_on_single_click: true,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             audio_table: AudioTablePreferences::default(),
@@ -641,7 +645,7 @@ impl AppConfig {
 mod tests {
     use super::*;
     #[test]
-    fn old_settings_keep_double_click_audition() {
+    fn old_settings_without_field_enable_single_click_audition() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("settings.json"),
@@ -649,7 +653,7 @@ mod tests {
         )
         .unwrap();
         let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
-        assert!(!config.audition_play_on_single_click);
+        assert!(config.audition_play_on_single_click);
         assert!(!config.pregenerate_list_waveforms);
         assert!(!config.hold_list_waveform_batches_after_audition);
         assert_eq!(config.audio_table, AudioTablePreferences::default());
@@ -779,14 +783,26 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_saved_single_click_disabled_is_respected() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("settings.json"),
+            r#"{"language":"en","playback":{"volume":0.5},"audition_play_on_single_click":false}"#,
+        )
+        .unwrap();
+        let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
+        assert!(!config.audition_play_on_single_click);
+    }
+
+    #[test]
     fn single_click_audition_preference_survives_enabling_and_disabling() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().to_owned();
         let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
-        assert!(!config.audition_play_on_single_click);
+        assert!(config.audition_play_on_single_click);
         config.language = "cn".into();
         config.playback["volume"] = serde_json::json!(0.35);
-        for enabled in [true, false] {
+        for enabled in [false, true, false] {
             config.audition_play_on_single_click = enabled;
             config.save().unwrap();
             config.save().unwrap();
