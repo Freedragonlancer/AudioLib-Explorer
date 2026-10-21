@@ -429,3 +429,33 @@ fn feature_revision_newer_schema_version_is_a_newer_database_error() {
         );
     }
 }
+
+#[test]
+fn feature_revision_newer_local_library_uses_local_wording() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("future-local.db");
+    fixture(&database);
+    Connection::open(&database)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    let error = SqliteProvider::open_existing(&database)
+        .map(|_| ())
+        .unwrap_err();
+    let chinese = error.local_display_text(true);
+    assert!(
+        chinese.starts_with("客户端版本过旧：这个音效库") && chinese.contains("schema 99 > 5"),
+        "{chinese}"
+    );
+    assert!(
+        chinese.ends_with("请升级 AudioLib Explorer 后再打开。"),
+        "{chinese}"
+    );
+    let english = error.local_display_text(false);
+    assert!(
+        english.contains("this library uses a newer database format")
+            && english.ends_with("then open it again."),
+        "{english}"
+    );
+    assert!(error.display_text(true).contains("服务器快照"));
+}

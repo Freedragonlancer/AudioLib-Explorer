@@ -2160,7 +2160,7 @@ impl Controller {
                 } else {
                     SqliteProvider::open(&path)
                 }
-                .map_err(|error| error.display_text(chinese))?;
+                .map_err(|error| error.local_display_text(chinese))?;
                 crate::startup::prepare_local_search(&next);
                 *self.sqlite.write().unwrap() = Arc::new(next);
                 self.remote_mode.store(false, Ordering::Release);

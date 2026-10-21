@@ -107,7 +107,37 @@ pub fn newer_database_message(what: &str, found: i64, supported: i64, chinese: b
     }
 }
 
+/// User-facing text for [`Error::NewerDatabase`] raised while opening a local library.
+pub fn newer_local_database_message(
+    what: &str,
+    found: i64,
+    supported: i64,
+    chinese: bool,
+) -> String {
+    if chinese {
+        format!(
+            "客户端版本过旧：这个音效库使用了更新的数据库格式（{what} {found} > {supported}），请升级 AudioLib Explorer 后再打开。"
+        )
+    } else {
+        format!(
+            "This client is too old: this library uses a newer database format ({what} {found} > {supported}). Upgrade AudioLib Explorer, then open it again."
+        )
+    }
+}
+
 impl Error {
+    /// Like [`Error::display_text`], but worded for opening a local library.
+    pub fn local_display_text(&self, chinese: bool) -> String {
+        match self {
+            Error::NewerDatabase {
+                what,
+                found,
+                supported,
+            } => newer_local_database_message(what, *found, *supported, chinese),
+            other => other.to_string(),
+        }
+    }
+
     /// Localized text for [`Error::NewerDatabase`]; `None` for every other error.
     pub fn newer_database_text(&self, chinese: bool) -> Option<String> {
         match self {
