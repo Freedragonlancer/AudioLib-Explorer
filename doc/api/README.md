@@ -11,7 +11,7 @@
 [共享迁移器全库与回滚实测](Search_Storage_B_Integrated_Validation.md)、
 [实现与验收边界](Implementation_B_Status.md)。
 CR、修复及合入 0.5.0 主线后的证据见 [方案 B CR](Search_Storage_B_CR.md)。
-隔离分支已完成两端实现、兼容测试及全库复验；这些新协商字段尚未发布或部署。
+隔离分支此前已完成 p0 的两端实现、兼容测试及全库复验；新增 p1 和独立本机历史已完成实现及隔离验收，条件与首次排序退化见 [schema v6 合并升级](Schema_V6_Iteration.md)。这些新协商字段尚未发布或部署。
 
 - 服务器模式 = 一个实现 `audiolib_core::DataProvider` 的远程提供者（`crates/audiolib-remote`）+ 服务端进程（`server/audiolib-server`）。UI / CLI 不感知本地还是远程。
 - 服务端直接复用 `audiolib-core` 的 DTO（`AudioFile`、`Folder`、`SearchRequest`、`SearchPage`、`MetadataPatch`、`ScanProgress`、`LibraryStats`、`LibraryInfo` 等），JSON 字段名与 serde 序列化结果一致，remote 端可以直接反序列化。
@@ -637,7 +637,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 
 两个端点共同的规则：
 
-- 按 §2.2 鉴权，再受库管理权限 `manage_mode` 限制（§6.9；被拒绝时 403 `MANAGE_FORBIDDEN`）。检查顺序：鉴权 401 → `manage_mode` 403 → 请求参数 400 → 扫描占用 409 → （文件夹）不存在 404 → 库根顶层文件夹 400。
+- 按 §2.2 鉴权，再受库管理权限 `manage_mode` 限制（§6.9；被拒绝时 403 `MANAGE_FORBIDDEN`）。检查顺序：鉴权 401 → `manage_mode` 403 → 兼容目录/实际格式 409（§2）→ 请求参数 400 → 扫描占用 409 → （文件夹）不存在 404 → 库根顶层文件夹 400。
 - **扫描期间不可用**：本服务端有扫描在运行或暂停中（§6.6），或另一个进程（CLI、本地模式桌面端）正在扫描/维护同一个库 → 409 `BUSY`（`message` 含会话 id），即使请求的 id 都不存在也是 409。客户端稍后重试，或先取消/等扫描结束。
 - 被移除记录的播放列表条目、工程引用和主库波形缓存行一并删除，扫描历史不受影响。v6 的播放历史独立保存在客户端本机，不随服务端或本地库记录移除而删除；历史条目保留，无法定位当前素材时显示缺失。`/history/plays` 始终为 `[]`，不代表本机历史已清空。
 - **revision**：与 metadata 写入相同的临界区（§4）；真正删除了东西时 `revision = revision_before + 1`，按 revision 缓存的快照随之失效；什么都没删时不写库、`revision == revision_before`。

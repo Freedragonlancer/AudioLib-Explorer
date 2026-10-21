@@ -1,6 +1,12 @@
 # Rust 验证报告
 
-## 方案 B 隔离验证（2026-10-21，0.5.0-dev.1，未发布）
+## v6 / p1 与方案 B CR（2026-10-21，0.6.0-dev.1，未发布）
+
+源码 `e0df12a`：默认和 ASIO 两套格式、严格 Clippy、locked workspace/all-targets 测试通过；每套 **69 个顶层目标、1,230 passed、0 failed、79 ignored**。数量排除父用例继承的重复子进程汇总，未将全部 ignored 项目声称为已执行。release、便携包、library-management 和 review-fixes 回归通过；909,342 行主库 19,495,989,248 → 10,611,302,400 字节（-45.572%），完整迁移/回滚、752 条历史导入、58 类原生查询与 86×3 provider 一致性核验通过。百万条合成库 26 个 fresh-provider case 的搜索＋目录 P95 为 405.211 ms（不含打开；OS 缓存未控）。真实库首轮 P95 为 466.797 ms，但首次排序最大 2,517.621 ms 的退化已定点复现；现有桌面实例占用正常 IPC，正式 playback-ipc 验收未通过且未控制该实例。本任务不安装、不部署；最终 p1、本机历史、旧客户端及回滚证据以 [v6 迭代记录](api/Schema_V6_Iteration.md) 和 [CR 记录](api/Search_Storage_B_CR.md)为准。
+
+下面的 0.5.0-dev.1 / p0 测量属于此前构建，不能替代当前配方的验收。
+
+## 历史：方案 B 隔离验证（2026-10-21，0.5.0-dev.1，未发布）
 
 共享迁移器、兼容目录、播放结构退役和断点恢复的当前证据见
 [实现与验收记录](api/Implementation_B_Status.md)及

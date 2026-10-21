@@ -2,6 +2,8 @@
 
 The current CR branch is `0.6.0-dev.1`, incorporating released 0.5.0 at `c46f583`.
 Its review fixes and final revalidation are recorded in [the CR report](Search_Storage_B_CR.md).
+The revised v6 goal, independent client history and final p1 format are specified in
+[Schema_V6_Iteration.md](Schema_V6_Iteration.md); the evidence below is historical p0.
 The detailed checkpoints below describe the preceding `0.5.0-dev.1` implementation;
 their build/recipe identities and timings must not be attributed to the CR build.
 

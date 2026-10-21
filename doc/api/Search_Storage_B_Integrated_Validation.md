@@ -2,6 +2,7 @@
 
 本报告保留 `0.5.0-dev.1` 最终构建的证据。合入已发布 0.5.0 后的 `0.6.0-dev.1`
 执行器、CR 修复及复验见 [CR 报告](Search_Storage_B_CR.md)，不能混用两次工具身份。
+本页属于保留 last_played_at 的历史 p0；最终 p1 和本机历史的验收见 [v6 记录](Schema_V6_Iteration.md)。
 
 2026-10-21。对应 [存储设计](Search_Storage_B.md)、[迁移契约](Library_Migration_Compatibility.md)
 和 [实现记录](Implementation_B_Status.md)。这是隔离分支 `0.5.0-dev.1` 的实际应用迁移器记录，

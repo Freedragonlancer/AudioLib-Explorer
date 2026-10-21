@@ -36,10 +36,14 @@ the corresponding tested peer-version ranges.
   It rejects stale/unbound snapshots, checks UPDATE OF retirement dependencies,
   binds recovery to actual tokenizer sources and admits settings mutations through
   the same peer-catalog check. See [the CR record](api/Search_Storage_B_CR.md).
+- Full-copy validation reduced the 909,342-record library by 45.572%, with complete
+  rollback and search-result checks. First-use sorting still has a reproducible
+  latency regression despite passing measured P95 targets; resolve its release
+  acceptance before deploying this draft candidate.
 
 See the [migration contract](api/Library_Migration_Compatibility.md),
-[full-library measurements](api/Search_Storage_B_Integrated_Validation.md) and
-[current validation record](api/Implementation_B_Status.md) for exact evidence and
+[v6 iteration and acceptance](api/Schema_V6_Iteration.md) and
+[CR validation record](api/Search_Storage_B_CR.md) for exact evidence and
 remaining limits. Database timings do not substitute for the separate GUI or Mac
 acceptance work recorded below.
 
