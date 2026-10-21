@@ -10,6 +10,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Instant;
 
 const MIN_SORTED_MATCH_IDS: u64 = 16_384;
+// Extra tag-key materialization and the channels index's leading bit-depth scan
+// lose to the native plan on near-whole-library matches. Bound these costs
+// separately from the small ID-only membership used by naturally sorted indexes.
+const MAX_UNORDERED_SORT_MATCH_IDS: u64 = 131_072;
 
 /// Count a filtered filename page from complete narrow membership before touching
 /// wide Metadata. All collection, filtering, ordering and hydration must use the
@@ -195,6 +199,11 @@ pub(super) fn page_sql(
         || !visibility_only
         || request.filters.visibility == FileVisibility::Missing
         || !(MIN_SORTED_MATCH_IDS..=MAX_RANKED_IDS as u64).contains(&total)
+    {
+        return Ok(None);
+    }
+    if matches!(request.order_by, SortOrder::Tags | SortOrder::Channels)
+        && total > MAX_UNORDERED_SORT_MATCH_IDS
     {
         return Ok(None);
     }
@@ -639,6 +648,42 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn unordered_covering_plans_bound_extra_work_and_keep_native_large_match_fallback() {
+        let (_directory, conn) = fixture();
+        for order_by in [SortOrder::Tags, SortOrder::Channels] {
+            let request = SearchRequest {
+                order_by,
+                ..request()
+            };
+            assert!(
+                page_sql(&conn, &request, true, MAX_UNORDERED_SORT_MATCH_IDS)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                page_sql(&conn, &request, true, MAX_UNORDERED_SORT_MATCH_IDS + 1)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for order_by in [
+            SortOrder::Duration,
+            SortOrder::SampleRate,
+            SortOrder::Modified,
+        ] {
+            let request = SearchRequest {
+                order_by,
+                ..request()
+            };
+            assert!(
+                page_sql(&conn, &request, true, MAX_UNORDERED_SORT_MATCH_IDS + 1)
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 
     #[test]
