@@ -42,7 +42,9 @@ if (!(Test-Path -LiteralPath $payloadRoot -PathType Container)) { throw 'Portabl
 if ((Get-Item -LiteralPath $payloadRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
     @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Attributes ReparsePoint).Count -gt 0) { throw 'Linked payload is not supported.' }
 foreach ($file in (Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File)) {
-    $relative = [IO.Path]::GetRelativePath($payloadRoot, $file.FullName).Replace('\', '/')
+    # Windows PowerShell 5.1 (.NET Framework) lacks [IO.Path]::GetRelativePath; every
+    # enumerated file sits below $payloadRoot, so strip that prefix instead.
+    $relative = $file.FullName.Substring($payloadRoot.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\', '/')
     if ($relative -notin $allowedFiles -and !$relative.StartsWith('licenses/', [StringComparison]::Ordinal)) { throw "File is outside the public payload allowlist: $relative" }
     if ($file.Extension -in @('.db', '.sqlite', '.sqlite3', '.log') -or $file.Name -in @('settings.json', '.env')) { throw "Runtime state found in payload: $relative" }
     $bytes = [IO.File]::ReadAllBytes($file.FullName)
