@@ -20,7 +20,10 @@ $outputRoot = [IO.Path]::GetFullPath((Join-Path $latestRoot 'portable'))
 if (!$outputRoot.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Portable path escaped the intended workspace.'
 }
-$binaryRoot = Join-Path $taskRoot 'target/x86_64-pc-windows-msvc/release'
+# Cargo writes to CARGO_TARGET_DIR when it is set (e.g. a local SSD outside a network
+# share); fall back to <repo>/target otherwise.
+$targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR } else { Join-Path $taskRoot $env:CARGO_TARGET_DIR })) } else { Join-Path $taskRoot 'target' }
+$binaryRoot = Join-Path $targetRoot 'x86_64-pc-windows-msvc/release'
 foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
     if (!(Test-Path -LiteralPath (Join-Path $binaryRoot $binary))) { throw "Missing release executable: $binary" }
 }

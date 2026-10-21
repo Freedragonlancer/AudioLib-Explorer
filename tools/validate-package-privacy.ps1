@@ -7,7 +7,8 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $payloadRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd') +
-    @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json)
+    # Windows PowerShell 5.1 emits a JSON array as one Object[]; unroll it explicitly.
+    @((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json) | ForEach-Object { $_ })
 $privatePrefixes = [Collections.Generic.List[string]]::new()
 foreach ($prefix in @($taskRoot, $env:USERPROFILE, $env:CARGO_HOME, $env:RUSTUP_HOME, $env:CARGO_TARGET_DIR)) {
     if ($prefix) {
@@ -42,7 +43,9 @@ if (!(Test-Path -LiteralPath $payloadRoot -PathType Container)) { throw 'Portabl
 if ((Get-Item -LiteralPath $payloadRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
     @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Attributes ReparsePoint).Count -gt 0) { throw 'Linked payload is not supported.' }
 foreach ($file in (Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File)) {
-    $relative = [IO.Path]::GetRelativePath($payloadRoot, $file.FullName).Replace('\', '/')
+    # Windows PowerShell 5.1 (.NET Framework) lacks [IO.Path]::GetRelativePath; every
+    # enumerated file sits below $payloadRoot, so strip that prefix instead.
+    $relative = $file.FullName.Substring($payloadRoot.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\', '/')
     if ($relative -notin $allowedFiles -and !$relative.StartsWith('licenses/', [StringComparison]::Ordinal)) { throw "File is outside the public payload allowlist: $relative" }
     if ($file.Extension -in @('.db', '.sqlite', '.sqlite3', '.log') -or $file.Name -in @('settings.json', '.env')) { throw "Runtime state found in payload: $relative" }
     $bytes = [IO.File]::ReadAllBytes($file.FullName)
