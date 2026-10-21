@@ -1,8 +1,10 @@
+# Release packages are built and validated on local machines (Windows client,
+# macOS server) and uploaded with `gh release upload <tag> <files>`.
+# This workflow no longer runs on tag push; it is kept for manual use only.
 name: Release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
