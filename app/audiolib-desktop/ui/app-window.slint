@@ -2050,7 +2050,7 @@ export component AppWindow inherits Window {
                             Action { width: 110px; active: root.sm-page == 2; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "缓存与导出" : "Cache and export"; clicked => { root.sm-page = 2; root.sm-page-selected(2); } }
                             Rectangle { horizontal-stretch: 1; }
                         }
-                        if root.library-visible && root.sm-server && root.sm-page == 2: VerticalLayout { spacing: 4px;
+                        if root.library-visible && root.sm-server && root.sm-page == 2: VerticalLayout { vertical-stretch: 0; spacing: 4px;
                             // Compact header: one summary line, the elided cache directory, then sync on one row;
                             // the full library id / path / snapshot details open on demand (详情).
                             HorizontalLayout { height: 34px; spacing: 8px;
@@ -2060,7 +2060,7 @@ export component AppWindow inherits Window {
                                 }
                                 Action { width: 140px; height: 30px; vertical-stretch: 0; enabled: root.sm-cache-available; label: root.chinese ? "打开镜像目录" : "Open mirror folder"; clicked => { root.sm-open-cache-requested(); } }
                             }
-                            Label { wrap: word-wrap; font-size: 11px; color: Theme.muted; text: root.chinese ? "自动清理：切换镜像后清理旧快照；过期临时文件自动回收。保留当前镜像、续传文件、恢复备份和手动备份。" : "Automatic cleanup removes old snapshots after a swap and reclaims stale temporary files. Keeps the current mirror, resumable downloads, recovery backups and manual backups."; }
+                            Label { vertical-stretch: 0; wrap: word-wrap; font-size: 11px; color: Theme.muted; text: root.chinese ? "自动清理：切换镜像后清理旧快照；过期临时文件自动回收。保留当前镜像、续传文件、恢复备份和手动备份。" : "Automatic cleanup removes old snapshots after a swap and reclaims stale temporary files. Keeps the current mirror, resumable downloads, recovery backups and manual backups."; }
                             HorizontalLayout { height: 28px; spacing: 8px;
                                 if root.sm-active: Action { width: 110px; enabled: !root.ds-syncing && !root.ds-applying && root.remote-mode && !root.library-busy; label: root.ds-sync-pending ? (root.chinese ? "继续同步" : "Continue sync") : root.ds-syncing ? (root.chinese ? "同步中…" : "Syncing…") : (root.chinese ? "立即同步" : "Sync now"); clicked => { root.data-source-sync-requested(); } }
                                 if root.sm-active && root.ds-syncing: Action { width: 110px; enabled: root.ds-sync-can-pause && !root.ds-sync-pausing && !root.closing; label: root.ds-sync-pausing ? (root.chinese ? "正在暂停…" : "Pausing…") : (root.chinese ? "暂停同步" : "Pause sync"); clicked => { root.data-source-sync-pause-requested(); } }
