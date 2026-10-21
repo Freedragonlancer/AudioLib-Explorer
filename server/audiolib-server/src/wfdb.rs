@@ -1,3 +1,4 @@
+// server/audiolib-server/src/wfdb.rs
 //! `waveforms.db`: list thumbnail waveforms in the 8-bit encoding (doc/api/README.md §9.4).
 //!
 //! A separate SQLite file next to the list shard cache (never the library database):
@@ -9,7 +10,10 @@ use audiolib_core::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -80,6 +84,33 @@ pub struct WaveformsDb {
     /// Opened (and the file created) on first write, so an unused server leaves no file.
     conn: Mutex<Option<Connection>>,
     queue: Mutex<(Vec<Row>, Option<Instant>)>,
+    bundles: Mutex<BundleCache>,
+    bundles_closed: AtomicBool,
+}
+
+#[derive(Default)]
+struct BundleCache {
+    latest: Option<(BundleKey, Arc<PreparedBundle>)>,
+}
+
+/// Both local writes and commits by another connection invalidate the cached bundle.
+#[derive(PartialEq, Eq)]
+struct BundleKey {
+    library_id: String,
+    revision: u64,
+    data_version: i64,
+    total_changes: i64,
+}
+
+/// Immutable download payload. Old responses retain their own directory when replaced.
+pub(crate) struct PreparedBundle {
+    // Unlock before deleting the temporary directory.
+    _owner: std::fs::File,
+    _directory: tempfile::TempDir,
+    pub(crate) path: PathBuf,
+    pub(crate) etag: String,
+    pub(crate) library_id: String,
+    pub(crate) revision: u64,
 }
 
 fn sql(error: rusqlite::Error) -> Error {
@@ -135,12 +166,14 @@ impl WaveformsDb {
     /// `dir/waveforms.db`; opened lazily (an existing file is opened on first read,
     /// a missing one is created on first write).
     pub fn open(dir: &Path) -> Result<Self> {
-        // No bundle can be in progress yet: drop leftovers of a crash or kill -9.
+        // A second server can share this cache: only sweep released owner locks.
         sweep_stale_bundles(dir, Duration::ZERO);
         Ok(Self {
             path: dir.join(FILE_NAME),
             conn: Mutex::new(None),
             queue: Mutex::new((Vec::new(), None)),
+            bundles: Mutex::new(BundleCache::default()),
+            bundles_closed: AtomicBool::new(false),
         })
     }
 
@@ -326,6 +359,103 @@ impl WaveformsDb {
             .unwrap_or(0) as u64
     }
 
+    fn bundle_key(&self, library_id: &str, revision: u64) -> Result<BundleKey> {
+        let guard = self.connection(true)?.expect("created");
+        let conn = guard.as_ref().expect("open");
+        Ok(BundleKey {
+            library_id: library_id.to_string(),
+            revision,
+            data_version: conn
+                .pragma_query_value(None, "data_version", |row| row.get(0))
+                .map_err(sql)?,
+            total_changes: conn
+                .query_row("SELECT total_changes()", [], |row| row.get(0))
+                .map_err(sql)?,
+        })
+    }
+
+    /// Reuse identical waveform content, single-flight generation otherwise. The one
+    /// preparation permit is released before the immutable payload reaches a response.
+    pub(crate) fn prepared_bundle(
+        &self,
+        library_id: &str,
+        revision: u64,
+    ) -> Result<Arc<PreparedBundle>> {
+        let mut cache = lock(&self.bundles);
+        if self.bundles_closed.load(Ordering::Acquire) {
+            cache.latest = None;
+            return Err(Error::Cancelled);
+        }
+        self.flush();
+        let key = self.bundle_key(library_id, revision)?;
+        if let Some((cached_key, bundle)) = &cache.latest
+            && *cached_key == key
+            && bundle.path.is_file()
+        {
+            let bundle = bundle.clone();
+            drop(cache);
+            return self.finish_bundle(bundle);
+        }
+        let _preparing = BUNDLE_SLOT
+            .try_acquire()
+            .map_err(|_| Error::Busy("A waveforms bundle is being prepared".into()))?;
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        sweep_stale_bundles(parent, Duration::ZERO);
+        let directory = tempfile::Builder::new()
+            .prefix(BUNDLE_DIR_PREFIX)
+            .tempdir_in(parent)?;
+        let owner = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(directory.path().join(".owner.lock"))?;
+        owner
+            .try_lock()
+            .map_err(|error| Error::Busy(format!("Bundle ownership unavailable: {error}")))?;
+        let path = directory.path().join("waveforms-bundle.db");
+        let etag = self.bundle(&path, library_id, revision)?;
+        let bundle = Arc::new(PreparedBundle {
+            _owner: owner,
+            _directory: directory,
+            path,
+            etag,
+            library_id: library_id.to_string(),
+            revision,
+        });
+        // Writers may commit while VACUUM copies the read-only view. Such a response is
+        // valid, but must not be reused as a snapshot of the newer waveform contents.
+        if self.bundles_closed.load(Ordering::Acquire) {
+            cache.latest = None;
+            return Err(Error::Cancelled);
+        }
+        if self.bundle_key(library_id, revision)? == key {
+            cache.latest = Some((key, bundle.clone()));
+        }
+        drop(cache);
+        self.finish_bundle(bundle)
+    }
+
+    fn finish_bundle(&self, bundle: Arc<PreparedBundle>) -> Result<Arc<PreparedBundle>> {
+        // Close may set the flag after the publication check while try_lock still
+        // fails. Recheck after unlocking so that either closer or publisher cleans up.
+        if self.bundles_closed.load(Ordering::Acquire) {
+            lock(&self.bundles).latest = None;
+            return Err(Error::Cancelled);
+        }
+        Ok(bundle)
+    }
+
+    /// Release cached files at shutdown; admitted downloads keep their own references.
+    pub(crate) fn close_bundles(&self) {
+        self.bundles_closed.store(true, Ordering::Release);
+        // A detached VACUUM must not make shutdown wait beyond its drain budget. Its
+        // completion checks bundles_closed and releases any cached predecessor.
+        if let Ok(mut cache) = self.bundles.try_lock() {
+            cache.latest = None;
+        }
+    }
+
     /// Blocking. Write a read-only snapshot to `dest` (`VACUUM INTO` on a separate
     /// read-only connection, so writers and `POST /waveforms` lookups are not blocked),
     /// then stamp its `meta` with `generated_at`, `library_id`, `revision` and
@@ -400,8 +530,8 @@ pub fn file_etag(path: &Path) -> Result<String> {
 /// Prefix of the temporary directory each bundle is written to (next to `waveforms.db`).
 pub const BUNDLE_DIR_PREFIX: &str = "audiolib-wfbundle-";
 
-/// Remove `audiolib-wfbundle-*` entries in `dir` last modified at least `min_age` ago
-/// (left behind when the server was killed while building or sending a bundle).
+/// Remove owned, unlocked `audiolib-wfbundle-*` directories in `dir` last modified at
+/// least `min_age` ago. Unmarked entries, symlinks and active downloads are retained.
 /// Best effort; returns how many entries were removed.
 pub fn sweep_stale_bundles(dir: &Path, min_age: Duration) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -426,11 +556,35 @@ pub fn sweep_stale_bundles(dir: &Path, min_age: Duration) -> usize {
             continue;
         }
         let path = entry.path();
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
+        if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            continue;
+        }
+        let owner_path = path.join(".owner.lock");
+        let Ok(owner_metadata) = std::fs::symlink_metadata(&owner_path) else {
+            continue;
         };
+        // Creation and locking are separate syscalls. Give a new owner time to acquire
+        // its lock before another process can classify it as a crash leftover.
+        if !owner_metadata.is_file()
+            || !owner_metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.elapsed().ok())
+                .is_some_and(|age| age >= Duration::from_secs(30))
+        {
+            continue;
+        }
+        let Ok(owner) = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(owner_path)
+        else {
+            continue;
+        };
+        if owner.try_lock().is_err() {
+            continue;
+        }
+        let result = std::fs::remove_dir_all(&path);
         match result {
             Ok(()) => removed += 1,
             Err(error) => tracing::warn!(%error, "Cannot remove a stale waveforms bundle"),
@@ -442,7 +596,7 @@ pub fn sweep_stale_bundles(dir: &Path, min_age: Duration) -> usize {
     removed
 }
 
-/// One `GET /waveforms/bundle` preparation at a time; others get 503 `BUSY`.
+/// One uncached `GET /waveforms/bundle` preparation at a time; downloads do not hold it.
 pub static BUNDLE_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 impl Drop for WaveformsDb {
@@ -716,6 +870,15 @@ mod tests {
         let stale = dir.path().join(format!("{BUNDLE_DIR_PREFIX}abc"));
         std::fs::create_dir(&stale).unwrap();
         std::fs::write(stale.join("waveforms-bundle.db"), b"x").unwrap();
+        std::fs::write(stale.join(".owner.lock"), b"").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(stale.join(".owner.lock"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
         let stray_file = dir.path().join(format!("{BUNDLE_DIR_PREFIX}file"));
         std::fs::write(&stray_file, b"x").unwrap();
         let other = dir.path().join("keep-me");
@@ -728,14 +891,88 @@ mod tests {
         );
         assert!(stale.exists());
 
-        // Opening the store removes every leftover bundle, nothing else.
+        let live = tempfile::Builder::new()
+            .prefix(BUNDLE_DIR_PREFIX)
+            .tempdir_in(dir.path())
+            .unwrap();
+        let owner = std::fs::File::options()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(live.path().join(".owner.lock"))
+            .unwrap();
+        owner.try_lock().unwrap();
+        owner
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        // Opening another store only removes marked, unlocked leftovers.
         let db = WaveformsDb::open(dir.path()).unwrap();
-        assert!(!stale.exists() && !stray_file.exists());
+        assert!(!stale.exists() && stray_file.exists());
+        assert!(live.path().exists());
         assert!(other.exists());
         assert_eq!(db.path(), dir.path().join(FILE_NAME));
         assert_eq!(
             sweep_stale_bundles(&dir.path().join("missing"), Duration::ZERO),
             0
         );
+        owner.unlock().unwrap();
+        drop(owner);
+        assert_eq!(sweep_stale_bundles(dir.path(), Duration::ZERO), 1);
+        assert!(!live.path().exists());
+    }
+
+    #[test]
+    fn bundle_cache_tracks_waveform_commits_and_retains_active_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = WaveformsDb::open(dir.path()).unwrap();
+        let row = |etag: &str| Row {
+            file_id: 1,
+            etag: etag.into(),
+            src_mtime: 1,
+            src_size: 2,
+            n: 1,
+            blob: to_blob(&[-100, 100]),
+        };
+        db.queue(row("first"));
+        let first = db.prepared_bundle("lib", 7).unwrap();
+        let first_path = first.path.clone();
+        let repeated = db.prepared_bundle("lib", 7).unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert_eq!(BUNDLE_SLOT.available_permits(), 1);
+
+        // Waveform cache writes do not change the library revision.
+        db.queue(row("second"));
+        let second = db.prepared_bundle("lib", 7).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(first_path.is_file());
+        sweep_stale_bundles(dir.path(), Duration::ZERO);
+        assert!(first_path.is_file());
+        drop(first);
+        drop(repeated);
+        assert!(!first_path.exists());
+
+        // A different SQLite writer is detected through data_version.
+        let mut other = Connection::open(db.path()).unwrap();
+        upsert_rows(&mut other, &[row("external")]).unwrap();
+        let third = db.prepared_bundle("lib", 7).unwrap();
+        assert!(!Arc::ptr_eq(&second, &third));
+        let content = Connection::open(&third.path).unwrap();
+        assert_eq!(
+            content
+                .query_row("SELECT etag FROM list_waveforms", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "external"
+        );
+        drop(content);
+        db.clear().unwrap();
+        let empty = db.prepared_bundle("lib", 7).unwrap();
+        assert!(!Arc::ptr_eq(&third, &empty));
+        let empty_path = empty.path.clone();
+        db.close_bundles();
+        assert!(empty_path.is_file());
+        assert!(db.prepared_bundle("lib", 7).is_err());
+        drop(empty);
+        assert!(!empty_path.exists());
     }
 }

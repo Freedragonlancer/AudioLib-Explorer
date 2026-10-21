@@ -27,7 +27,7 @@ use std::{
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tower::ServiceExt;
 
-const TOKEN: &str = "test-token-0123456789abcdef";
+const TOKEN: &str = "test-token-0123456789abcdef0123456789abcdef";
 // The production filesystem budget is process-wide, including across AppStates.
 // Give these independent endpoint fixtures exclusive access so parallel test runners
 // do not turn ordinary local reads into unrelated BUSY responses. The separate
@@ -182,6 +182,12 @@ async fn request(
             .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
     {
         request = request.header("content-type", "application/json");
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request = request.header("host", "localhost");
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -566,6 +572,7 @@ async fn client_root_mutations_require_the_opened_library_identity() {
             let mut builder = Request::builder()
                 .method(method.clone())
                 .uri(format!("/api/v1{path}"))
+                .header("host", "localhost")
                 .header("content-type", "application/json");
             builder = support::modern(builder);
             if let Some(identity) = identity {
@@ -960,7 +967,7 @@ async fn shared_management_policy_denies_the_first_scan_and_root_mutations() {
         (Method::DELETE, "/roots/SFX", String::new()),
     ];
     // Every request uses an independently running server whose first API admission
-    // still has the old All policy. One denied request must not mask the others.
+    // still has the old LAN policy. One denied request must not mask the others.
     let second_servers: Vec<_> = requests
         .iter()
         .map(|_| AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap())
@@ -978,7 +985,7 @@ async fn shared_management_policy_denies_the_first_scan_and_root_mutations() {
     for (second, (method, path, body)) in second_servers.iter().zip(requests) {
         assert_eq!(
             second.security().manage_mode(),
-            audiolib_server::ManageMode::All
+            audiolib_server::ManageMode::Lan
         );
         error(
             client_root_request(

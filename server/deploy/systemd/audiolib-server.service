@@ -6,7 +6,7 @@
 #   install -d /etc/audiolib /opt/audiolib
 #   install -m 755 audiolib-server /opt/audiolib/audiolib-server
 #   install -m 644 config.toml /etc/audiolib/config.toml      # see server/audiolib-server/config.example.toml
-#   # Token (>= 16 visible ASCII characters); keep the file readable by root only:
+#   # Token (>= 32 visible ASCII characters); keep the file readable by root only:
 #   install -m 600 /dev/null /etc/audiolib/audiolib.env
 #   echo 'AUDIOLIB_SERVER_TOKEN=<replace-with-a-long-random-secret>' >> /etc/audiolib/audiolib.env
 #   systemctl daemon-reload && systemctl enable --now audiolib-server

@@ -24,7 +24,7 @@ use std::{
 };
 use tower::ServiceExt;
 
-const TOKEN: &str = "test-token-0123456789abcdef";
+const TOKEN: &str = "test-token-0123456789abcdef0123456789abcdef";
 
 /// A tiny silent 16-bit mono WAV whose length depends on `samples`.
 fn wav(path: &Path, samples: usize) {
@@ -220,6 +220,12 @@ async fn call_service(
             .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
     {
         request = request.header("content-type", "application/json");
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request = request.header("host", "localhost");
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -639,6 +645,10 @@ async fn capabilities(
 async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     let f = fixture(&[]);
     let state = &f.state;
+    state
+        .security()
+        .update_settings(|settings| settings.manage_mode = Some(ManageMode::All))
+        .unwrap();
     let bearer = format!("Bearer {TOKEN}");
     let proxied: &[(&str, &str)] = &[
         ("x-forwarded-for", "198.51.100.7"),
@@ -647,7 +657,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     let public: &[(&str, &str)] = &[("authorization", &bearer)];
     let wind = f.audio_id("wind.wav");
 
-    // Default `all`: everyone authorized may manage; `external` tells the two apart.
+    // Explicit `all`: everyone authorized may manage; `external` tells the two apart.
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
@@ -938,7 +948,7 @@ async fn manage_mode_round_trips_through_the_admin_page() {
     let state = &f.state;
     let status: serde_json::Value =
         ok(admin(state, Method::GET, "/admin/api/status", None).await).await;
-    assert_eq!(status["manage_mode"], "all");
+    assert_eq!(status["manage_mode"], "lan");
     assert_eq!(status["manage_mode_source"], "default");
     let status: serde_json::Value = ok(admin(
         state,
@@ -1012,7 +1022,7 @@ async fn manage_mode_round_trips_through_the_admin_page() {
     .await;
     assert_eq!(
         (&status["manage_mode"], &status["manage_mode_source"]),
-        (&"all".into(), &"default".into())
+        (&"lan".into(), &"default".into())
     );
     let page = bytes(admin(state, Method::GET, "/admin", None).await).await;
     assert!(String::from_utf8_lossy(&page).contains("name=\"manage\""));

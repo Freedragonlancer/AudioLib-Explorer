@@ -16,14 +16,21 @@ use hyper_util::{
     rt::{TokioIo, TokioTimer},
     service::TowerToHyperService,
 };
-use std::{future::Future, pin::pin, time::Duration};
-use tokio::{net::TcpListener, sync::watch, task::JoinSet};
+use std::{future::Future, pin::pin, sync::Arc, time::Duration};
+use tokio::{
+    net::TcpListener,
+    sync::{Semaphore, watch},
+    task::JoinSet,
+};
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 
 /// Connection-level limits for [`serve`].
 #[derive(Clone, Copy, Debug)]
 pub struct ServeOptions {
+    /// Maximum open connections per listener, including incomplete TLS handshakes.
+    /// Excess connections are closed immediately; zero is treated as one.
+    pub max_connections: usize,
     /// Maximum time for a client to send complete request headers (also bounds idle
     /// keep-alive connections waiting for their next request, and TLS handshakes).
     pub header_read_timeout: Duration,
@@ -34,6 +41,7 @@ pub struct ServeOptions {
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
+            max_connections: 1024,
             header_read_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(10),
         }
@@ -73,9 +81,13 @@ async fn serve_inner(
     options: ServeOptions,
 ) {
     let (close_tx, close_rx) = watch::channel(());
+    let slots = Arc::new(Semaphore::new(options.max_connections.max(1)));
     let mut connections = JoinSet::new();
     let mut shutdown = pin!(shutdown);
     loop {
+        // Reap completed tasks even under sustained accept pressure; their results
+        // must not accumulate after their connection permits have been returned.
+        while connections.try_join_next().is_some() {}
         tokio::select! {
             () = &mut shutdown => break,
             accepted = listener.accept() => {
@@ -87,6 +99,11 @@ async fn serve_inner(
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
+                };
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    tracing::debug!(%peer, "Connection limit reached");
+                    drop(stream);
+                    continue;
                 };
                 let _ = stream.set_nodelay(true);
                 let info = ConnectionInfo {
@@ -102,6 +119,8 @@ async fn serve_inner(
                 let close = close_rx.clone();
                 let tls = tls.clone();
                 connections.spawn(async move {
+                    // Retain the slot across the handshake and every keep-alive request.
+                    let _permit = permit;
                     match tls {
                         None => serve_connection(TokioIo::new(stream), service, options, close).await,
                         Some(acceptor) => {
@@ -150,6 +169,10 @@ async fn serve_inner(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
 
 async fn serve_connection<I, S>(
     io: I,

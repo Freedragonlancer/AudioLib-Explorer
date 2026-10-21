@@ -23,7 +23,7 @@ use std::{
 };
 use tower::ServiceExt;
 
-const TOKEN: &str = "test-token-0123456789abcdef";
+const TOKEN: &str = "test-token-0123456789abcdef0123456789abcdef";
 
 #[test]
 fn root_removal_cannot_pass_a_scan_reservation_during_inline_recheck() {
@@ -215,6 +215,12 @@ async fn call(
             .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
     {
         request = request.header("content-type", "application/json");
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request = request.header("host", "localhost");
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -765,8 +771,9 @@ async fn shutdown_cancels_the_running_scan_and_records_it() {
 
 #[tokio::test]
 async fn scan_and_history_endpoints_follow_the_auth_mode() {
+    // Isolate authentication from the independent LAN-only management default.
     // `auth` absent: external mode; TOKEN is the environment token.
-    let f = fixture("");
+    let f = fixture("manage_mode = 'all'\n");
     let state = &f.state;
     let lan = ConnectionInfo {
         peer: "10.0.0.20:50000".parse().unwrap(),

@@ -2,7 +2,7 @@
 //! `/api/v1` routing, bearer authentication and endpoint handlers.
 use crate::{
     ApiError, AppState, VERSION,
-    auth::{ConnectionInfo, RequestOrigin, classify, same_request_origin},
+    auth::{ConnectionInfo, RequestOrigin, same_request_origin},
     list_waveform::{self, BatchRequest, ListWaveformsCapability, SettingsResponse},
     manage::{
         AddRootRequest, CapabilitiesResponse, RemoveAudioRequest, RemoveAudioResponse,
@@ -58,6 +58,9 @@ use tower_http::{
 pub const API_BASE: &str = "/api/v1";
 /// Read size for streaming snapshot and audio files.
 const STREAM_CHUNK_BYTES: usize = 256 * 1024;
+/// Bundle download limits are independent of its short preparation lease.
+static BUNDLE_DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+const BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
 /// `/audio/{id}/preview` and `/audio/{id}/waveform`, which legitimately take long (large
 /// bodies, waking disks, decoding); exceeding it yields 408 `TIMEOUT`.
@@ -238,7 +241,10 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
         .layer(middleware::from_fn(guard_api_mutation));
     Router::new()
         .nest(API_BASE, api)
-        .merge(with_request_timeout(timeout, crate::admin::router()))
+        .merge(with_request_timeout(
+            timeout,
+            crate::admin::router(state.security().clone()),
+        ))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         // `ApiError` already logs every 5xx it produces (503 `UNAVAILABLE` at debug); the
@@ -501,7 +507,9 @@ async fn capabilities(
     request: Request,
 ) -> Json<CapabilitiesResponse> {
     let connection = request.extensions().get::<ConnectionInfo>().copied();
-    let origin = classify(request.headers(), connection.as_ref());
+    let origin = service
+        .security()
+        .classify(request.headers(), connection.as_ref());
     let manage_mode = service.security().manage_mode();
     Json(CapabilitiesResponse {
         compatibility: audiolib_core::compatibility::compatibility_manifest(),
@@ -542,7 +550,9 @@ fn settings_response(
         pregenerate_list_waveforms_source,
         list_waveform_rate,
         list_waveform_rate_source,
-        can_change: security.manage_mode().allows(classify(headers, connection)),
+        can_change: security
+            .manage_mode()
+            .allows(security.classify(headers, connection)),
     }
 }
 
@@ -1800,7 +1810,7 @@ async fn flac_preview(
     let (input, stdin) = {
         drop(file);
         (
-            path.to_string_lossy().into_owned(),
+            format!("file:{}", path.to_string_lossy()),
             std::process::Stdio::null(),
         )
     };
@@ -2177,8 +2187,8 @@ struct BundleQuery {
 }
 
 /// `GET /waveforms/bundle?encoding=i8-minmax-base64` (§9.4.2): a read-only SQLite
-/// snapshot of `waveforms.db` made with `VACUUM INTO` in a temporary directory that is
-/// removed once the body is sent or dropped.
+/// cached immutable snapshot of `waveforms.db`. Preparation and downloads have separate
+/// limits; a slow response cannot hold the generation permit.
 async fn waveform_bundle(
     Extension(state): Extension<AppState>,
     Query(query): Query<BundleQuery>,
@@ -2193,59 +2203,33 @@ async fn waveform_bundle(
             crate::wfdb::I8_ENCODING
         )));
     }
-    // One bundle at a time (503 BUSY + Retry-After). The permit moves into the blocking
-    // job and comes back with its result, so a client that disconnects while the bundle
-    // is being prepared does not free the slot before `VACUUM INTO` + hashing end; after
-    // that it is held by the body stream until the body is sent or dropped.
-    let permit = crate::wfdb::BUNDLE_SLOT
+    let permit = BUNDLE_DOWNLOAD_SLOTS
         .try_acquire()
         .map_err(|_| ApiError::bundle_busy())?;
-    let (dir, path, revision, etag, permit) = blocking_api(move || {
-        let permit = permit;
+    let (bundle, permit) = blocking_api(move || {
         let list = state.list_waveforms();
         let wfdb = list
             .wfdb()
             .ok_or_else(|| ApiError::unavailable("waveforms.db is unavailable"))?;
-        let parent = wfdb
-            .path()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
-        // The library's list cache directory may not exist yet (nothing generated so
-        // far, or a rebuild in progress): create it (idempotent) instead of failing the
-        // temporary directory with ENOENT (500). If it cannot be created the bundle is
-        // unavailable: 503 UNAVAILABLE, never a path-bearing 500 (§9.4.2, §9.5.8).
-        std::fs::create_dir_all(&parent).map_err(|error| {
+        let parent = wfdb.path().parent().unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| {
             tracing::warn!(%error, "Cannot create the list waveform cache directory");
             ApiError::unavailable(format!(
                 "The list waveform cache directory cannot be created ({})",
                 error.kind()
             ))
         })?;
-        // We hold the only slot, so every other bundle directory is a leftover of a
-        // crash or kill; remove them before writing a new ~300 MB copy.
-        crate::wfdb::sweep_stale_bundles(&parent, std::time::Duration::ZERO);
-        // Informational only (doc §9.4.2): read before `VACUUM INTO`, so it can be
-        // older than the bundle's content, never newer.
         let revision = state.revision().map_err(ApiError::from)?;
-        let dir = tempfile::Builder::new()
-            .prefix(crate::wfdb::BUNDLE_DIR_PREFIX)
-            .tempdir_in(&parent)
-            .map_err(|error| ApiError::from(audiolib_core::Error::from(error)))?;
-        let path = dir.path().join("waveforms-bundle.db");
-        let started = std::time::Instant::now();
-        let etag = wfdb
-            .bundle(&path, &revision.library_id, revision.revision)
-            .map_err(ApiError::from)?;
-        tracing::info!(
-            ms = started.elapsed().as_millis() as u64,
-            bytes = std::fs::metadata(&path).map_or(0, |m| m.len()),
-            "Prepared waveforms bundle"
-        );
-        Ok((dir, path, revision, etag, permit))
+        let bundle = wfdb
+            .prepared_bundle(&revision.library_id, revision.revision)
+            .map_err(|error| match error {
+                audiolib_core::Error::Busy(_) => ApiError::bundle_busy(),
+                other => ApiError::from(other),
+            })?;
+        Ok((bundle, permit))
     })
     .await?;
-    let file = tokio::fs::File::open(&path)
+    let file = tokio::fs::File::open(&bundle.path)
         .await
         .map_err(|error| ApiError::internal(format!("Cannot open the bundle: {error}")))?;
     let len = file
@@ -2253,11 +2237,11 @@ async fn waveform_bundle(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
         .len();
-    let stream = GuardedStream {
-        inner: ReaderStream::with_capacity(file, STREAM_CHUNK_BYTES),
-        _guard: (dir, permit),
-    };
-    let mut response = Response::new(Body::from_stream(stream));
+    let etag = bundle.etag.clone();
+    let library_id = bundle.library_id.clone();
+    let revision = bundle.revision;
+    let body = bounded_bundle_stream(file, (bundle, permit), BUNDLE_DOWNLOAD_TIMEOUT);
+    let mut response = Response::new(Body::from_stream(body));
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -2266,12 +2250,60 @@ async fn waveform_bundle(
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(header::ETAG, header_value(etag)?);
-    headers.insert("x-library-id", header_value(revision.library_id)?);
-    headers.insert(
-        "x-library-revision",
-        header_value(revision.revision.to_string())?,
-    );
+    headers.insert("x-library-id", header_value(library_id)?);
+    headers.insert("x-library-revision", header_value(revision.to_string())?);
     Ok(response)
+}
+
+/// Relay one buffered chunk with a wall-clock deadline. The task owns file/permit/lease,
+/// so expiry releases them even when HTTP backpressure stops polling the response body.
+fn bounded_bundle_stream(
+    mut file: tokio::fs::File,
+    guard: impl Send + 'static,
+    budget: Duration,
+) -> BundleBody {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let pump = async {
+            loop {
+                let mut buffer = vec![0; STREAM_CHUNK_BYTES];
+                match file.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        buffer.truncate(read);
+                        if sender.send(Ok(Bytes::from(buffer))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
+        };
+        if tokio::time::timeout(budget, pump).await.is_err() {
+            tracing::warn!("Waveforms bundle download exceeded its time limit");
+            let _ = sender.try_send(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Waveforms bundle download timed out",
+            )));
+        }
+    });
+    BundleBody { receiver }
+}
+
+struct BundleBody {
+    receiver: tokio::sync::mpsc::Receiver<io::Result<Bytes>>,
+}
+
+impl Stream for BundleBody {
+    type Item = io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().receiver.poll_recv(context)
+    }
 }
 
 fn header_value(value: String) -> Result<HeaderValue, ApiError> {
@@ -2494,6 +2526,26 @@ impl<S: Stream + Unpin, G: Unpin> Stream for GuardedStream<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unpolled_bundle_body_releases_its_download_lease_at_deadline() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len((STREAM_CHUNK_BYTES * 4) as u64).unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let body = bounded_bundle_stream(
+            tokio::fs::File::from_std(file),
+            permit,
+            Duration::from_millis(30),
+        );
+        // Never poll the body: a stream-local timeout would never wake up here.
+        let released = tokio::time::timeout(Duration::from_secs(2), slots.acquire())
+            .await
+            .expect("an unpolled download retained its lease")
+            .unwrap();
+        drop(released);
+        drop(body);
+    }
 
     struct Chunks(Vec<io::Result<Bytes>>);
 

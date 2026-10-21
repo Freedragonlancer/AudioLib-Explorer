@@ -39,9 +39,6 @@ const SNAPSHOT_SLOTS: usize = 2;
 const MAX_FOLDER_DEPTH: usize = 256;
 /// Name prefix of snapshot temporary directories (see [`AppState::prepare_snapshot`]).
 const SNAPSHOT_PREFIX: &str = "audiolib-snapshot-";
-/// Leftover snapshot directories in the shared system temp dir are removed only when
-/// older than this, since another server instance may be using that directory.
-const SHARED_TEMP_SNAPSHOT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Budget of the inline root recheck done by a stream on a root cached as offline and by
 /// `POST /roots/{name}/check`.
 pub const INLINE_RECHECK: Duration = Duration::from_secs(2);
@@ -677,11 +674,17 @@ impl AppState {
                 "auth = true requires a bearer token".into(),
             ));
         }
-        if let Some(dir) = &config.snapshot_dir {
-            remove_stale_snapshots(dir, None);
-        } else {
-            remove_stale_snapshots(&std::env::temp_dir(), Some(SHARED_TEMP_SNAPSHOT_AGE));
-        }
+        // Large snapshots belong on the library's storage, not an OS temp directory
+        // that may be an in-memory tmpfs on Linux.
+        let snapshot_dir = config.snapshot_dir.clone().unwrap_or_else(|| {
+            config
+                .library_db
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("snapshots")
+        });
+        // Allow another instance to finish creating and locking a new owner marker.
+        remove_stale_snapshots(&snapshot_dir, Some(Duration::from_secs(30)));
         let opened = Instant::now();
         let provider = Arc::new(SqliteProvider::open_existing_with_progress_cancellable(
             &config.library_db,
@@ -783,7 +786,7 @@ impl AppState {
                 snapshot_delay_ms: AtomicU64::new(0),
                 stat_delay_ms: AtomicU64::new(0),
                 security,
-                snapshot_dir: config.snapshot_dir.clone(),
+                snapshot_dir: Some(snapshot_dir),
                 snapshot_slots: Arc::new(Semaphore::new(SNAPSHOT_SLOTS)),
                 snapshot_cache: Mutex::new(None),
                 snapshot_registry: SnapshotRegistry::default(),
@@ -904,6 +907,9 @@ impl AppState {
         self.inner.stopping.store(true, Ordering::Release);
         self.inner.snapshot_registry.close();
         self.inner.list.shutdown();
+        if let Some(wfdb) = self.inner.list.wfdb() {
+            wfdb.close_bundles();
+        }
         let started = Instant::now();
         if !self.inner.scans.shutdown(timeout) {
             return Err(Error::Busy("A scan is still finishing".into()));
@@ -2075,6 +2081,27 @@ fn root_file_count(provider: &dyn DataProvider, root: &Path) -> Result<Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_snapshot_storage_is_beside_the_library() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("library.db");
+        drop(SqliteProvider::open(&database).unwrap());
+        let config =
+            ServerConfig::from_toml_str("library_db='library.db'", directory.path()).unwrap();
+        assert!(config.snapshot_dir.is_none());
+        let state = AppState::open(&config, None).unwrap();
+        let snapshot = state.prepare_snapshot().unwrap();
+        assert!(
+            snapshot
+                .plain
+                .path
+                .starts_with(directory.path().join("snapshots"))
+        );
+        assert!(snapshot.plain.path.is_file());
+        drop(snapshot);
+        state.shutdown(Duration::from_secs(5)).unwrap();
+    }
 
     #[test]
     fn folder_keys_match_library_normalization() {

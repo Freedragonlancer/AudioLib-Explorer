@@ -14,7 +14,7 @@ use crate::{
     ApiError, VERSION,
     auth::{
         AdminSettings, AuthMode, ConnectionInfo, ManageMode, RequestOrigin, Source, TlsSettings,
-        TokenInfo, classify, lan_ipv4_addresses, normalize_public_url,
+        TokenInfo, lan_ipv4_addresses, normalize_public_url,
     },
     manage::{AddRootRequest, RemoveRootResponse},
     routes::json_body,
@@ -36,7 +36,7 @@ use axum::{
     routing::{get, post, put},
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// Header every changing admin request must carry with value `1`.
 pub const ADMIN_HEADER: &str = "x-audiolib-admin";
@@ -50,7 +50,7 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; \
     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 /// Admin routes (merged at the root, outside `/api/v1`), guarded by [`guard`].
-pub fn router() -> Router<Service> {
+pub fn router(security: Arc<crate::Security>) -> Router<Service> {
     Router::new()
         .route("/admin", get(page))
         .route("/admin/", get(page))
@@ -76,31 +76,37 @@ pub fn router() -> Router<Service> {
             axum::routing::delete(revoke_token),
         )
         .layer(DefaultBodyLimit::max(MAX_ADMIN_BODY_BYTES))
-        .route_layer(middleware::from_fn(guard))
+        .route_layer(middleware::from_fn_with_state(security, guard))
 }
 
 /// LAN-only, LAN-host-only, and header + same-origin for changes; adds no-store and
 /// anti-framing headers to every admin response.
-async fn guard(request: Request, next: Next) -> Response {
-    if let Err(error) = check(&request) {
+async fn guard(
+    State(security): State<Arc<crate::Security>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(error) = check(&request, &security) {
         return with_admin_headers(error.into_response());
     }
     with_admin_headers(next.run(request).await)
 }
 
-fn check(request: &Request) -> Result<(), ApiError> {
+fn check(request: &Request, security: &crate::Security) -> Result<(), ApiError> {
     let headers = request.headers();
     let connection = request.extensions().get::<ConnectionInfo>();
-    if classify(headers, connection) == RequestOrigin::External {
+    if security.classify(headers, connection) == RequestOrigin::External {
         return Err(ApiError::admin_lan_only(
             "The admin page is only available directly from the LAN (not through a proxy)",
         ));
     }
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
-    if let Some(host) = host
-        && !is_lan_host(host)
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let host = hosts.next().and_then(|value| value.to_str().ok());
+    if hosts.next().is_some()
+        || match host {
+            Some(host) => !is_lan_host(host),
+            None => connection.is_some(),
+        }
     {
         return Err(ApiError::admin_lan_only(
             "Open the admin page by IP address (e.g. http://192.0.2.10:8790/admin), localhost or a .local name",
@@ -126,24 +132,7 @@ fn check(request: &Request) -> Result<(), ApiError> {
 /// `.internal` / `.localhost` name (with or without port). Public DNS names are refused
 /// so a rebinding attack page cannot reach the admin API.
 pub fn is_lan_host(host: &str) -> bool {
-    let name = if let Some(rest) = host.strip_prefix('[') {
-        match rest.split_once(']') {
-            Some((inner, _)) => return inner.parse::<std::net::Ipv6Addr>().is_ok(),
-            None => return false,
-        }
-    } else {
-        host.rsplit_once(':').map_or(host, |(name, _)| name)
-    };
-    if name.parse::<std::net::IpAddr>().is_ok() {
-        return true;
-    }
-    let name = name.trim_end_matches('.').to_ascii_lowercase();
-    !name.is_empty()
-        && (name == "localhost"
-            || !name.contains('.')
-            || [".local", ".lan", ".home.arpa", ".internal", ".localhost"]
-                .iter()
-                .any(|suffix| name.ends_with(suffix)))
+    crate::auth::is_lan_host(host)
 }
 
 fn with_admin_headers(mut response: Response) -> Response {
@@ -386,6 +375,21 @@ pub(crate) async fn with_fs_timeout<T>(
 /// [`FS_WAIT`] answer, so repeated clicks cannot pile up blocked threads.
 const FS_SLOT_COUNT: usize = 4;
 static FS_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(FS_SLOT_COUNT);
+/// Reserved for the administrator: client API filesystem requests cannot acquire it.
+static ADMIN_FS_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+async fn run_admin_fs_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    let permit = ADMIN_FS_SLOTS
+        .try_acquire()
+        .map_err(|_| ApiError::fs_busy("An administrator filesystem operation is still pending"))?;
+    run_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+}
 
 /// [`run_blocking`] holding one of the [`FS_SLOTS`] for as long as `work` runs; 503
 /// `BUSY` when all are taken.
@@ -567,7 +571,7 @@ async fn browse_fs(
             };
             let places = with_fs_timeout(
                 "starting places",
-                run_fs_blocking(move || Ok(crate::browse::places(&roots))),
+                run_admin_fs_blocking(move || Ok(crate::browse::places(&roots))),
             )
             .await?;
             Ok(Json(places).into_response())
@@ -577,7 +581,7 @@ async fn browse_fs(
             let shown = path.clone();
             let listing = with_fs_timeout(
                 &shown,
-                run_fs_blocking(move || crate::browse::list_directory(&path, hidden)),
+                run_admin_fs_blocking(move || crate::browse::list_directory(&path, hidden)),
             )
             .await?;
             Ok(Json(listing).into_response())
@@ -602,7 +606,11 @@ async fn add_root(
     let request: AddRootRequest = json_body(&headers, body)?;
     let state = service.app_state()?;
     let shown = request.path.clone();
-    let root = with_fs_timeout(&shown, run_fs_blocking(move || state.add_root(request))).await?;
+    let root = with_fs_timeout(
+        &shown,
+        run_admin_fs_blocking(move || state.add_root(request)),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(root)).into_response())
 }
 
@@ -708,6 +716,7 @@ mod tests {
         while FS_SLOTS.available_permits() > 0 {
             tokio::task::yield_now().await;
         }
+        run_admin_fs_blocking(|| Ok(())).await.unwrap();
         let refused = run_fs_blocking(|| Ok(())).await.unwrap_err();
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         for _ in 0..FS_SLOT_COUNT {
@@ -742,6 +751,13 @@ mod tests {
             "evil.example.com",
             "rebind.attacker.net:8790",
             "[nope]",
+            "[::1]:bad",
+            "[::1]garbage",
+            "localhost:bad",
+            "user@localhost",
+            "localhost:0",
+            "localhost..",
+            "-bad.lan",
             "",
         ] {
             assert!(!is_lan_host(host), "{host}");

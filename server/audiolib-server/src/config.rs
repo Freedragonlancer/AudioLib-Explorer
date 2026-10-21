@@ -30,7 +30,7 @@ pub const DEFAULT_MAX_TRANSCODES: usize = 4;
 /// Default limit of concurrent `/audio/{id}/preview` responses (both codecs).
 pub const DEFAULT_MAX_PREVIEWS: usize = 8;
 /// Minimum accepted bearer token length in characters.
-pub const MIN_TOKEN_CHARS: usize = 16;
+pub const MIN_TOKEN_CHARS: usize = 32;
 
 /// Parsed and validated server configuration. Relative paths are resolved against the
 /// directory containing the configuration file.
@@ -51,8 +51,13 @@ pub struct ServerConfig {
     /// `all` is accepted. The admin page can override it.
     #[serde(default)]
     pub auth_mode: Option<AuthMode>,
-    /// Who may manage the library (scans, record and folder removal): `all` (default),
-    /// `lan` or `off`; see `crate::auth::ManageMode`. The admin page can override it.
+    /// Trust private socket peers for token-free access and the password-free admin
+    /// page (default true). Set false behind NAT or proxies that hide client addresses.
+    /// This startup policy cannot be relaxed from the admin page.
+    #[serde(default = "default_trust_lan_peers")]
+    pub trust_lan_peers: bool,
+    /// Who may manage the library (scans, record and folder removal): `lan` (default),
+    /// `all` or `off`; see `crate::auth::ManageMode`. The admin page can override it.
     #[serde(default)]
     pub manage_mode: Option<ManageMode>,
     /// Public base URL clients use from outside the LAN (e.g. behind a reverse proxy),
@@ -75,7 +80,7 @@ pub struct ServerConfig {
     /// Seconds between background library change checks (1..=3600, default 3).
     #[serde(default = "default_poll_secs")]
     pub revision_poll_secs: u64,
-    /// Directory for temporary snapshot files; the system temporary directory when absent.
+    /// Directory for temporary snapshots; `<library_db directory>/snapshots` when absent.
     #[serde(default)]
     pub snapshot_dir: Option<PathBuf>,
     /// Seconds `GET /library/snapshot` waits for a snapshot that has to be prepared before
@@ -171,6 +176,9 @@ pub fn check_root_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn default_trust_lan_peers() -> bool {
+    true
+}
 fn default_bind() -> SocketAddr {
     DEFAULT_BIND.parse().expect("valid default bind address")
 }
@@ -598,11 +606,13 @@ mod tests {
     #[test]
     fn token_is_validated_compared_and_redacted() {
         assert!(BearerToken::new("short").is_err());
+        assert!(BearerToken::new("a".repeat(31)).is_err());
+        assert!(BearerToken::new("a".repeat(32)).is_ok());
         assert!(BearerToken::new("has a space in the token").is_err());
-        let token = BearerToken::new("0123456789abcdef-secret").unwrap();
-        assert!(token.matches("0123456789abcdef-secret"));
-        assert!(!token.matches("0123456789abcdef-secreT"));
-        assert!(!token.matches("0123456789abcdef-secret-longer"));
+        let token = BearerToken::new("0123456789abcdef0123456789abcdef-secret").unwrap();
+        assert!(token.matches("0123456789abcdef0123456789abcdef-secret"));
+        assert!(!token.matches("0123456789abcdef0123456789abcdef-secreT"));
+        assert!(!token.matches("0123456789abcdef0123456789abcdef-secret-longer"));
         assert!(!token.matches(""));
         assert_eq!(format!("{token:?}"), "BearerToken(<redacted>)");
     }

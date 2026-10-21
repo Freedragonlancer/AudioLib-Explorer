@@ -79,17 +79,25 @@ Authentication follows `auth_mode` (API doc §2.2):
 - `all` (or the legacy `auth = true`): every endpoint except `/health` needs a token.
 
 Accepted tokens are the environment token (the variable named by `token_env`, default
-`AUDIOLIB_SERVER_TOKEN`, at least 16 visible ASCII characters, never logged) and tokens
+`AUDIOLIB_SERVER_TOKEN`, at least 32 random visible ASCII characters, never logged) and tokens
 generated on the admin page. **Security:** for any deployment reachable from the internet use
 a reverse proxy with TLS and tokens; do not expose the plain HTTP port directly, and do not use
 `auth_mode = "off"`. In `external` mode LAN clients are trusted without a token.
+Set `trust_lan_peers = false` and `auth_mode = "all"` behind NAT, container port
+forwarding or a proxy that hides client addresses. This also disables the passwordless
+admin page; configure that deployment through its TOML file. Container defaults use
+this policy and publish the HTTP port on host loopback only. Library management defaults
+to `manage_mode = "lan"`; enable `all` only for clients trusted to browse server disks,
+add roots and scan them.
+Before upgrading, replace environment tokens shorter than 32 characters with a random
+secret of at least 32 visible ASCII characters. Generated `al_` tokens remain valid.
 
 ## Run
 
 ```sh
 audiolib-server --config /etc/audiolib/config.toml
 # with an environment token:
-AUDIOLIB_SERVER_TOKEN='<at least 16 visible ASCII chars>' audiolib-server --config /etc/audiolib/config.toml
+AUDIOLIB_SERVER_TOKEN='<at least 32 random visible ASCII chars>' audiolib-server --config /etc/audiolib/config.toml
 # or: AUDIOLIB_SERVER_CONFIG=/etc/audiolib/config.toml audiolib-server
 ```
 
@@ -98,7 +106,8 @@ Example locations: `/srv/audiolib/music` (audio), `/var/lib/audiolib` (library a
 
 Operational behavior:
 
-- Connections must send request headers within 10 s; non-streaming endpoints time out after
+- Each listener permits at most 1024 connections, including TLS handshakes; excess
+  connections are closed. Connections must send request headers within 10 s; non-streaming endpoints time out after
   30 s (408 `TIMEOUT`); on SIGTERM/Ctrl+C in-flight requests get at most 10 s.
 - Startup is listen-first: the port is served immediately while the library opens on a
   background thread. Until then `GET /api/v1/health` reports `"status":"starting"` and
@@ -113,6 +122,14 @@ Operational behavior:
   accounting and the pending Mac release acceptance.
 - ffmpeg is optional (only `preview?codec=flac`); without it that codec answers 503
   `TRANSCODER_UNAVAILABLE` and the server keeps running. The server does not bundle ffmpeg.
+- Native TLS checks certificate and key contents every minute. Valid replacements apply
+  to new handshakes without interrupting existing connections; invalid replacements keep
+  the previous certificate and report a warning in TLS status and server logs.
+- Failed bearer authentication is limited per socket-peer IP (60 failures per 60 s;
+  subsequent attempts return 429 with `Retry-After`). Logs include the peer address,
+  never the supplied token. A proxy shares one limit across its clients.
+- Requests using token-free access must use an IP/LAN `Host` or the configured public/LAN
+  URL hostname. A valid bearer token also permits other hostnames.
 
 ## First use (admin page)
 
@@ -175,7 +192,7 @@ treated as external. Full checklist and nginx/Caddy examples: API document §2.4
   513 s more on that large copy); reserve free disk about the size of the library for the
   rollback copy left during that step — see
   [deploy/README.md](deploy/README.md#search-index-backfill-and-fts-rebuild-db-rebuild-search).
-- **Disk space:** snapshots go to `snapshot_dir` (default system temp), waveforms to
+- **Disk space:** snapshots go to `snapshot_dir` (default `<library_db directory>/snapshots`), waveforms to
   `waveform_cache_dir` (limited by `waveform_cache_mb`), backups and rollback copies next to
   the library.
 
@@ -209,7 +226,7 @@ See [deploy/README.md](deploy/README.md). Examples: `deploy/systemd/`, `deploy/l
 Docker notes:
 
 - You must mount a volume that contains `/data/library.db`, or create the library with the client first; otherwise `/api/v1/health` keeps returning `status:"error"` (The library could not be opened; the server keeps retrying).
-- A container showing as healthy does not mean the library is usable — check the `status` field from `/api/v1/health`. The image's built-in HEALTHCHECK currently does not look at `status`.
+- The image's HEALTHCHECK requires HTTP success and `status:"ok"`; startup and failed library opens remain unhealthy.
 - Only `/data` is a volume (library.db, snapshots, caches, tokens.json). `/config` is not a volume: the image ships `/config/config.toml`, and you may optionally bind-mount your own file read-only over it (`-v ./my-config.toml:/config/config.toml:ro`).
 - The bundled Docker config uses `auth_mode = "all"`. With a plain `docker run` you must pass `-e AUDIOLIB_SERVER_TOKEN=...`; otherwise the server starts but every request answers 401. The compose file enforces it with `${AUDIOLIB_SERVER_TOKEN:?}`.
 

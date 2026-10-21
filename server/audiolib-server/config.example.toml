@@ -31,16 +31,25 @@ auth = false
 # page (stored hashed in tokens.json next to library_db, mode 0600).
 # auth_mode = "external"
 
+# Trust private socket peers for token-free LAN access and the password-free admin
+# page. Set false behind Docker Desktop/rootless containers, NAT with SNAT or a proxy
+# that hides client addresses; use auth_mode="all" there. This disables /admin,
+# including on loopback, and cannot be overridden by saved admin settings.
+# trust_lan_peers = true
+# Requests without a valid token must use an IP/LAN Host or a configured public_url /
+# lan_url hostname. Unlisted public DNS hosts receive 403 HOST_FORBIDDEN.
+
 # Library management (doc/api/README.md §6.9): who may start/pause/resume/cancel scans and
 # remove records (POST /audio/remove) or folders (DELETE /folders/{id}). Removal only
 # makes the library forget records, never touches audio files. The admin page can
 # override it. Metadata writes, play counts and all reads are never affected.
-#   "all" - default: every authorized request
-#   "lan" - only LAN-direct requests (external ones get 403 MANAGE_FORBIDDEN)
+#   "all" - every authorized request (including external tokens; opt in deliberately)
+#   "lan" - default: only LAN-direct requests (external ones get 403 MANAGE_FORBIDDEN)
 #   "off" - nobody (403 MANAGE_FORBIDDEN); use the server's CLI instead
-# manage_mode = "all"
+# manage_mode = "lan"
 
-# Name of the environment variable holding the bearer token (>= 16 visible ASCII chars).
+# Name of the environment variable holding the bearer token (>= 32 visible ASCII chars).
+# Use at least 32 random characters or an admin-generated al_ token, never a passphrase.
 # Required with auth = true, optional otherwise. Never stored in this file, never logged.
 token_env = "AUDIOLIB_SERVER_TOKEN"
 
@@ -62,7 +71,7 @@ token_env = "AUDIOLIB_SERVER_TOKEN"
 # Seconds between background library change checks (PRAGMA data_version + file size/mtime).
 revision_poll_secs = 3
 
-# Optional directory for temporary GET /library/snapshot files (default: system temp dir).
+# Optional directory for GET /library/snapshot files (default: beside library_db in snapshots/).
 # Sent representations are retained in this process for 24 idle hours, within 4 entries /
 # 64 GiB; active transfers are protected. Restarting the server invalidates snapshot ids.
 # This retained-payload budget excludes current preparation and compression staging files.

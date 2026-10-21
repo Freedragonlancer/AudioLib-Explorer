@@ -76,7 +76,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - `UNAVAILABLE`：**整个库**暂不可用（服务端启动中或开库失败正在重试，§6.2），任何需鉴权的端点都可能返回；按“服务器暂不可用、稍后重试”处理（类似连接失败，可沿用离线缓存）。
 - `ROOT_OFFLINE`：只出现在 `/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans`（§6.6）上（`POST /waveforms` 不整体返回它，而是逐项 `status: "root_offline"`，§9.1），表示**该文件所在（或要扫描）的库根**离线或暂时无响应；库本身可用（元数据、快照、写入照常），客户端可显示 `message` 中的原因、查看 `/roots` 的 `status`，或用 `POST /roots/{name}/check` 立即重查（§6.4）。
 
-500 的 `message` 可能包含服务端路径；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
+500 与 507 的 `message` 使用概括文字，原始路径和内部诊断只写服务端日志；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
 
 连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；`POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
 
@@ -87,7 +87,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 | 模式 | 局域网直连 | 外部请求（经反代 / 公网对端） |
 |---|---|---|
 | `off` | 不需要 token | 不需要 token（只在完全可信的网络里用） |
-| `external`（**默认**） | 不需要 token，`Authorization` 被**完全忽略** | 需要 `Authorization: Bearer <token>` |
+| `external`（**默认**） | 不需要 token；自定义公网 Host 需有效 token | 需要 `Authorization: Bearer <token>` |
 | `all` | 需要 token | 需要 token |
 
 - 旧配置 `auth = true` 等同 `all`（并且启动时必须有环境变量 token）；`auth = false` 或不写时为 `external`。示例配置是 `auth = false`，所以升级后局域网客户端的行为不变（不需要 token）。
@@ -96,6 +96,9 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - 认证头格式：`Authorization: Bearer <token>`（`Bearer` 不区分大小写）。`Basic` 等其他方案视为没有 token。
 - 错误：需要 token 而缺失 → 401 `UNAUTHORIZED`（`message`：`A bearer token is required for access from outside the LAN`；`all` 模式为 `A valid bearer token is required`）；token 错误或已撤销 → 401 `UNAUTHORIZED`（`message`：`The bearer token is invalid or has been revoked`）。都带 `WWW-Authenticate: Bearer realm="audiolib"`。客户端按状态码和 `error_code` 判断，不要匹配 `message`。没有新增错误码（`TOKEN_REQUIRED` / `TOKEN_INVALID` 不存在）。
 - token 的“最近使用时间”最多每分钟记一次（避免频繁写盘），在管理页显示。
+- **Host 防护**：未提供有效 token 的免鉴权请求（`off`、`external` 的 LAN 分支）必须携带单一合法 `Host`，主机为 IP、LAN 名称，或已配置 `public_url` / `lan_url` 的主机名；否则 403 `HOST_FORBIDDEN`。有效 bearer 可访问其他合法主机名。以攻击者公网域名同时填入 `Origin` 与 `Host` 不能绕过此规则。
+- **隐藏来源的部署**：`trust_lan_peers = false` 将全部对端按外部请求处理，并关闭免密码 `/admin`；同时使用 `auth_mode = "all"`。Docker Desktop、rootless 容器、SNAT 和未可靠保留来源的反代必须使用此配置，通过 TOML 管理。示例容器采用此策略，仅映射宿主机 `127.0.0.1:8790`。
+- **失败限速**：按 socket peer IP 记录失败（不信任转发头里的地址），60 秒内 60 次失败后返回 429 `AUTH_RATE_LIMITED` 和 `Retry-After: 60`。最多保留 1024 个来源；日志记录来源，不记录 bearer。代理后的客户端共用代理 IP 的限额。
 
 ### 2.3 管理页 `/admin`
 
@@ -105,7 +108,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - **公网地址**：例如 `https://audiolib.example.com:8443`，可带路径前缀（`https://example.com/audiolib`）。必须是 `http`/`https` URL，不能含用户名密码、查询串或片段；保存时规范化（小写协议和主机、去掉结尾 `/` 和多余的 `/api/v1`）。保存后 `/health` 的 `public_url` 立即更新。
 - **鉴权模式**：`off` / `external` / `all`，或恢复 `config.toml` 的默认值。
 - **库根目录**：列出当前根目录（名称、路径、在线状态、文件数、缺失数、最近扫描），添加 / 移除根目录（带服务器磁盘浏览器，可浏览已挂载的 SMB 卷），对某个根目录发起增量 / 完整扫描并显示进度、暂停 / 继续 / 取消。改动立即生效，无需重启，详见 §2.3.1。
-- **库管理权限**（`manage_mode`）：`all`（默认，所有通过鉴权的请求）/ `lan`（只允许局域网直连）/ `off`（全部禁止），或恢复 `config.toml` 的默认值；决定谁能远程扫描、从库中移除记录和文件夹（§6.9）。保存后立即生效。
+- **库管理权限**（`manage_mode`）：`lan`（默认，只允许局域网直连）/ `all`（所有通过鉴权的请求）/ `off`（全部禁止），或恢复 `config.toml` 的默认值；决定谁能远程扫描、从库中移除记录和文件夹（§6.9）。保存后立即生效。已有显式设置仍然保留。
 - **访问令牌**：填名称生成（明文只显示一次，带复制按钮）；列表显示名称、生成时间、最近使用时间；撤销。最多 256 个。
 - **原生 HTTPS（可选）**：证书链 PEM 路径 + 私钥 PEM 路径（绝对路径）+ HTTPS 端口（如 8791，不能等于 HTTP 端口）。保存前校验文件能加载、证书和私钥匹配；保存后**立即生效、无需重启**（服务端在与 `bind` 相同的地址上另开 rustls 监听，8790 的 HTTP 照常），页面显示监听状态或错误（如端口被占用）。停用同样即时。**本版本客户端只信任公共 CA 签发的证书（如 Let's Encrypt），自签名证书客户端不会接受。** 一般用反向代理提供 HTTPS（§2.4），不需要这个功能。
 
@@ -150,7 +153,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
   "truncated": false, "wav_files": 12, "other_files": 3, "counts_truncated": false }
 ```
 
-  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（共 4 个，浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
+  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（管理页独立保留 1 个，不受客户端 API 的 4 个名额占用影响，管理页浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
 
 **`POST /admin/api/roots`** `{"name","path"}` → 201，回复同 `GET /api/v1/roots` 的一项（新根目录尚未扫描，`file_count` 为 `null`）。校验（400 `VALIDATION`，不存在 404，权限 403 `FS_FORBIDDEN`）：`name` 非空、1..=128 字符、无首尾空白、不含 `/` `\` 和控制字符、与现有根目录不重名（不区分大小写）；`path` 是已存在的绝对目录；不能与现有根目录相同、位于其内部或包含它。保存的 `server_path` 是规范化后的真实路径。
 
@@ -164,6 +167,8 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 
 **扫描**：`POST /admin/api/scans`（请求体和回复同 `POST /api/v1/scans`）、`GET /admin/api/scans/current`、`GET /admin/api/scans/{id}`、`POST /admin/api/scans/{id}/pause|resume|cancel` 与 §6.6 的同名接口完全相同，只是走管理页的访问限制、不受 `manage_mode` 限制。`GET /admin/api/roots` 返回与 `GET /api/v1/roots` 相同的列表（不需要令牌）。
 
+原生 TLS 每分钟检查证书和私钥内容；有效续期替换只影响新握手，已有连接继续使用原会话。续期文件暂不匹配或不可读时保留旧证书，管理页 TLS 状态 `message` 与服务端日志报告原因，之后继续重试。每个 HTTP/TLS 监听器最多接纳 1024 个连接（含未完成 TLS 握手），超额连接立即关闭。
+
 ### 2.4 外网反代要求
 
 给配置公网反向代理（如 `https://audiolib.example.com:8443`）的人：
@@ -174,7 +179,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 4. **关闭缓冲**：`/audio/{id}/stream`、`/audio/{id}/preview`、`/library/snapshot` 是长时间的流式响应（`flac` 预览为 chunked），反代必须边收边发（nginx `proxy_buffering off;`），不能先缓存整个响应；请求体很小，`proxy_request_buffering` 无所谓。
 5. **长超时**：读超时至少 1 小时（`proxy_read_timeout 3600s; proxy_send_timeout 3600s;`）——慢速 NAS 唤醒时首字节可能要等 90 秒以上，大文件下载持续很久。
 6. **不要再压缩**：关掉反代的 gzip/br 压缩（服务端已对快照和波形使用 `Content-Encoding: zstd`，音频本身不可压缩）；保留服务端的 `Content-Encoding` 和 `Vary: Accept-Encoding`，不要解压或改写。
-7. HTTP/1.1 到上游（nginx `proxy_http_version 1.1;`），保持 `Host` 或设置为上游地址均可（服务端不依赖 `Host`，只有管理页检查它）。
+7. HTTP/1.1 到上游（nginx `proxy_http_version 1.1;`），保持 `Host` 或设置为上游地址均可（有效 token 请求可使用代理 Host；免 token 请求仍受 §2.2 Host 白名单约束）。
 8. TLS 证书必须由公共 CA 签发并覆盖所用域名（客户端本版本只信任公共 CA）。
 
 nginx 示例：
@@ -360,10 +365,10 @@ audiolib.example.com:8443 {
 - **ETag 格式变更**：旧版本为弱 ETag `W/"<library_id>-r<revision>"`，现为强 ETag `"snapshot-<UUID>"`。旧客户端保存的旧 ETag 不再匹配，只会多完整下载一次，之后照常。
 - **续传保留上限**：进程内最多 4 个表示、合计 64 GiB、空闲最多 24 小时；容量压力按 LRU 提前淘汰无活动响应的对象。活动响应持租约，不被淘汰。仅在单个表示超过 64 GiB，或活动传输（不可淘汰）的表示合计加上新对象超过 64 GiB 预算时返回 507 `INSUFFICIENT_STORAGE`；因并发上限 2 小于保留上限 4，实际不会因条目数满而返回 507。仅保留实际传输表示，原始备份与压缩暂存另占磁盘空间。服务端重启会使旧 ID 失效；客户端须提示后安全重新下载，绝不能混接两个对象。
 - 并发：同时进行中的快照响应（准备 + 发送）最多 2 个，带 `snapshot_id` 的续传请求同样占用这 2 个名额；超出返回 409 `BUSY`，客户端稍后重试。
-- **磁盘空间检查**：生成原始快照前按库文件大小（含 WAL）、生成 zstd 副本前按原始大小的 1/8（实测约 6–7 %）检查 `snapshot_dir`（默认系统临时目录）所在卷的剩余空间，另留 max(64 MiB, 2 %) 余量；不足时在写任何字节前返回 **507 `INSUFFICIENT_STORAGE`**（磁盘写到一半满了同样映射为 507）。无法取得剩余空间的平台（非 Unix）跳过检查。`backup_library`（桌面端备份）使用同一检查。
+- **磁盘空间检查**：生成原始快照前按库文件大小（含 WAL）、生成 zstd 副本前按原始大小的 1/8（实测约 6–7 %）检查 `snapshot_dir`（默认库文件旁 `snapshots/`）所在卷的剩余空间，另留 max(64 MiB, 2 %) 余量；不足时在写任何字节前返回 **507 `INSUFFICIENT_STORAGE`**（磁盘写到一半满了同样映射为 507）。无法取得剩余空间的平台（非 Unix）跳过检查。`backup_library`（桌面端备份）使用同一检查。
 - **准备在后台进行**：快照（及 zstd 副本）的准备在独立的后台线程里做，不绑定发起它的请求（每种编码单飞）。请求最多等 `snapshot_wait_secs`（服务端配置，1..=3600，默认 90，常规部署须小于客户端 240 秒的响应头超时）；超时返回 **503 `BUSY` + `Retry-After: 5`**，准备继续，客户端重试时加入同一次准备（或直接拿到已完成的快照），不会再拷贝一份。客户端对 503 `BUSY` 按 `Retry-After` 重试。
 - 匿名实际库的历史实测（记录数、容量及存储位置不公开）：首次生成 1.9 秒（旧实现每 256 页停 10 ms，需 11–12 秒），缓存命中首字节 < 1 ms；zstd 压缩 0.19 秒，压缩后为原大小的 6.7%，客户端解压约 0.2 秒。压缩耗时对比：zstd -9 为 0.6 秒、-19 为 21 秒，gzip -6 为 4 秒。准备期间 `/library` 照常（实测 36 ms），写入不被阻塞。磁盘占用见上文续传保留规则：最多保留 4 个已传输表示、合计 64 GiB、空闲 24 小时后过期，活动传输受保护不被淘汰；服务端重启后旧 `snapshot_id` 全部失效，启动时清理 `snapshot_dir` 中遗留的 `audiolib-snapshot-*` 目录（见下条）。这些时间仅描述该次测量，不保证其他库的准备时间。
-- 进程崩溃/被杀后遗留的 `audiolib-snapshot-*` 临时目录在服务端下次启动时清理（配置了 `snapshot_dir` 时清理其中所有此类目录；用系统临时目录时只清理 24 小时以前的，避免误删其他实例正在用的）。因此**不要让两个服务端实例共用同一个 `snapshot_dir`**。
+- 进程崩溃/被杀后遗留的 `audiolib-snapshot-*` 临时目录在服务端下次启动时清理。默认位于库文件旁的 `snapshots/`；只删除带所有权标记且锁已释放、目录至少 30 秒的残留，活动文件和未标记目录保留。
 
 ### 6.2 启动状态与 `/health`
 
@@ -695,8 +700,8 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 
 | `manage_mode` | 局域网直连 | 外部请求（经反代 / 公网对端，判定同 §2.2） |
 |---|---|---|
-| `all`（**默认**） | 允许 | 允许（仍需按 §2.2 带 token） |
-| `lan` | 允许 | 403 `MANAGE_FORBIDDEN` |
+| `all` | 允许 | 允许（仍需按 §2.2 带 token） |
+| `lan`（**默认**） | 允许 | 403 `MANAGE_FORBIDDEN` |
 | `off` | 403 `MANAGE_FORBIDDEN` | 403 `MANAGE_FORBIDDEN` |
 
 - 在管理页「库管理权限」设置（保存在 `admin-settings.json`，立即生效，§2.3），或 `config.toml` 的 `manage_mode`（管理页优先）。
@@ -1145,11 +1150,11 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 #### 9.4.2 整包下载（Bundle）
 
-- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端在**单独的只读连接**上用 `VACUUM INTO` 生成临时文件（WAL 读事务，不阻塞写入和 `POST /waveforms`），再流式发送，结束（含客户端断开）后删除临时文件。`encoding` 目前只接受 `i8-minmax-base64`，其他值（包括 `../x` 之类，从不用作路径）→ 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。省略 `encoding` 时按 `i8-minmax-base64` 处理（客户端应显式发送）。
+- `GET /api/v1/waveforms/bundle?encoding=i8-minmax-base64`（按 §2.2 鉴权，只读，不受 `manage_mode` 限制；不受 §2.1 的 30 秒上限）：返回 `waveforms.db` 的**只读 SQLite 快照**（`Content-Type: application/vnd.sqlite3`；纯峰值 90 万 × 256 B ≈ 230 MB，加上 etag 等列与页开销实测约 308 MB，见下）。服务端在**单独的只读连接**上用 `VACUUM INTO` 生成临时文件（WAL 读事务，不阻塞写入和 `POST /waveforms`），再共享缓存文件流式发送，旧文件在缓存替换且所有下载释放后删除。`encoding` 目前只接受 `i8-minmax-base64`，其他值（包括 `../x` 之类，从不用作路径）→ 400 `VALIDATION` / `UNSUPPORTED_ENCODING`。`/capabilities` 的 `list_waveforms.bundle: true` 表示支持。省略 `encoding` 时按 `i8-minmax-base64` 处理（客户端应显式发送）。
 - **不可用**：库已打开但服务端无法使用 `waveforms.db`（例如缓存目录无法创建）时，`/capabilities` 的 `list_waveforms.bundle` 为 `false`，本端点返回 503 `UNAVAILABLE` + `Retry-After`（不是 500）。库仍在打开时 `bundle` 照常为 `true`，本端点按 §6.2 返回 503 `UNAVAILABLE`，客户端按 `Retry-After` 重试。
-- **临时文件**：整包写在 `waveforms.db` 旁的 `audiolib-wfbundle-*` 临时目录里。服务端被强杀、崩溃或断电时可能残留，服务端在启动（打开 `waveforms.db`）时和每次生成新整包之前（已持有唯一名额）清理这些残留目录。
-- **并发**：同一时间只生成/发送**一个**整包（名额一直占到响应体发送完或客户端断开；客户端在服务端准备整包期间断开时，名额占到准备工作结束为止，不会同时生成第二个整包）；其他请求立即 503 `BUSY` + `Retry-After: 5`。客户端按 `Retry-After` 等待后重试，连续失败时指数退避（5 s、10 s、20 s……上限 5 分钟），期间照常用 §9.1 按页请求。
-- **超时**：本端点**不受** §2.1 的 30 秒请求上限（与 `/library/snapshot` 相同），慢速网络下载几百 MB 不会被切断。
+- **缓存与临时文件**：整包写在 `waveforms.db` 旁的 `audiolib-wfbundle-*` 临时目录里，按库身份、主库 revision 和波形 SQLite 内容变更标识复用同一只读文件。主库 revision 未变时的波形写入也会使缓存失效。旧下载保留自己的文件引用，缓存替换不破坏在途响应；文件无人引用后删除。每个目录持有所有权锁，清理只删除带标记且未锁定的残留，不删除另一实例活动文件。
+- **并发**：同一时间最多生成一个整包，准备完成即释放生成名额；缓存命中直接共享文件。同时最多 8 个下载，超限返回 503 `BUSY` + `Retry-After: 5`。客户端在准备期间断开时，准备名额仍保持到阻塞工作结束。客户端按 `Retry-After` 等待后重试，期间照常用 §9.1 按页请求。
+- **超时**：本端点不受 §2.1 的 30 秒请求上限；每个整包发送最多 15 分钟，超过后中断响应并释放文件引用及下载名额，即使 HTTP 背压已停止轮询响应体。客户端按下载不完整重试。
 - **响应头**：`ETag: "wfb1-<32 位十六进制>"`（整个包文件 SHA-256 的前 16 字节；同样内容同样 ETag，客户端可用于判断是否与上次导入的包相同，本端点不支持 `If-None-Match`）、`X-Library-Id`（同 `meta.library_id`）、`X-Library-Revision`（同 `meta.revision`）、`Content-Length`、`Cache-Control: no-store`。
 - `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`、`schema_version`、`encoding`。**`revision` 是主库的 `revision`（§4），仅供参考/诊断**：`waveforms.db` 的内容不随主库 revision 变化，也可能在同一 revision 下变化，客户端**不得**用它判断条目新旧；续传只按逐项 `etag`（下一条）。
 - 客户端流程：下载到临时文件 → **校验后才使用**：`PRAGMA integrity_check` 为 `ok`；表/列名在白名单内（`list_waveforms` 与 `meta`，列同上，不多不少）；每行 `blob` 恰好 256 B、`encoding` 等于请求值、`0 ≤ n ≤ 128`；`meta.library_id` 等于当前库 → **原子替换**本地 `waveforms.db`（同目录临时文件 + rename）。任一校验失败则丢弃，不覆盖现有缓存。
@@ -1352,8 +1357,8 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ## 10. 服务端部署
 
 - 部署方式：macOS 原生进程（不用容器），默认监听 `0.0.0.0:8790`，可用 launchd 用户代理常驻。启动时先监听端口，再在后台打开库；打不开时进程不退出而是重试（§6.2）。端口被占用、配置无效或（`auth = true` 时）token 缺失仍会直接退出。可选的原生 TLS 监听（§2.3）起不来时只在日志和管理页报错，不影响 HTTP 端口。管理页：`http://<host>:8790/admin`（§2.3）。
-- 配置：TOML 文件，通过 `--config <path>` 或环境变量 `AUDIOLIB_SERVER_CONFIG` 指定；字段 `bind`、`library_db`、`auth`（默认 `false`；`true` = `auth_mode = "all"`）、`auth_mode`（`off`/`external`/`all`，默认 `external`，§2.2）、`manage_mode`（`all`/`lan`/`off`，默认 `all`，§6.9）、`public_url`（可选，§2.3）、`tls_cert_path` + `tls_key_path` + `tls_port`（可选，三项同时设置，原生 TLS，§2.3）、`token_env`、`revision_poll_secs`、`snapshot_dir`、`max_streams`（默认 16）、`root_check_secs`（默认 300）、`root_offline_secs`（默认 120）、`waveform_cache_dir`（默认库文件旁的 `waveforms/`）、`waveform_cache_mb`（默认 1024）、`max_waveforms`（默认 4）、`pregenerate_list_waveforms`（默认 `false`，列表缩略波形预生成，管理页 / `PATCH /settings` 可覆盖，§9.2）、`list_waveform_cache_mb`（默认 640，列表缩略波形缓存子预算，不计入 `waveform_cache_mb`，§9.1）、`list_waveform_workers`（默认 3，占用 `max_waveforms` 名额的上限，§9.2）、`list_waveform_rate`（默认 10，预生成每秒最多开始处理的文件数，§9.2）、`list_waveform_pause_stats_on_playback`（默认 `false`，试听开始后 3 秒内暂停 `POST /waveforms` 的 `stat`，§9.2）、`ffmpeg_path`（默认 `/opt/homebrew/bin/ffmpeg`，须为绝对路径；不存在时服务端照常启动，只有 `flac` 预览返回 503 `TRANSCODER_UNAVAILABLE`）、`max_transcodes`（默认 4，1..=64）、`max_previews`（默认 8，1..=1024，`/preview` 两种编码共用的并发上限，与 `max_streams` 分开）、`[[roots]] { name, server_path, webdav_url? }`（`server_path` 填真实路径，不经符号链接，与扫描器写入库的路径一致）。示例见 `server/audiolib-server/config.example.toml`。服务端只打开已有的库，不会创建库。
-- token：环境变量 `AUDIOLIB_SERVER_TOKEN`（可用 `token_env` 改名），至少 16 个可见 ASCII 字符；配置文件里写 `token` 会被拒绝。`auth = true` 时必须设置；否则可选，设置了就和管理页生成的 token 一样有效（格式不对时记警告并忽略）。管理页生成的 token 和设置保存在库目录的 `tokens.json` / `admin-settings.json`（§2.3）。
+- 配置：TOML 文件，通过 `--config <path>` 或环境变量 `AUDIOLIB_SERVER_CONFIG` 指定；字段 `bind`、`library_db`、`auth`（默认 `false`；`true` = `auth_mode = "all"`）、`auth_mode`（`off`/`external`/`all`，默认 `external`，§2.2）、`manage_mode`（`all`/`lan`/`off`，默认 `lan`，§6.9）、`public_url`（可选，§2.3）、`tls_cert_path` + `tls_key_path` + `tls_port`（可选，三项同时设置，原生 TLS，§2.3）、`token_env`、`revision_poll_secs`、`trust_lan_peers`（默认 `true`，隐藏来源的部署设 `false`）、`snapshot_dir`（默认库文件旁的 `snapshots/`）、`max_streams`（默认 16）、`root_check_secs`（默认 300）、`root_offline_secs`（默认 120）、`waveform_cache_dir`（默认库文件旁的 `waveforms/`）、`waveform_cache_mb`（默认 1024）、`max_waveforms`（默认 4）、`pregenerate_list_waveforms`（默认 `false`，列表缩略波形预生成，管理页 / `PATCH /settings` 可覆盖，§9.2）、`list_waveform_cache_mb`（默认 640，列表缩略波形缓存子预算，不计入 `waveform_cache_mb`，§9.1）、`list_waveform_workers`（默认 3，占用 `max_waveforms` 名额的上限，§9.2）、`list_waveform_rate`（默认 10，预生成每秒最多开始处理的文件数，§9.2）、`list_waveform_pause_stats_on_playback`（默认 `false`，试听开始后 3 秒内暂停 `POST /waveforms` 的 `stat`，§9.2）、`ffmpeg_path`（默认 `/opt/homebrew/bin/ffmpeg`，须为绝对路径；不存在时服务端照常启动，只有 `flac` 预览返回 503 `TRANSCODER_UNAVAILABLE`）、`max_transcodes`（默认 4，1..=64）、`max_previews`（默认 8，1..=1024，`/preview` 两种编码共用的并发上限，与 `max_streams` 分开）、`[[roots]] { name, server_path, webdav_url? }`（`server_path` 填真实路径，不经符号链接，与扫描器写入库的路径一致）。示例见 `server/audiolib-server/config.example.toml`。服务端只打开已有的库，不会创建库。
+- token：环境变量 `AUDIOLIB_SERVER_TOKEN`（可用 `token_env` 改名），至少 32 个随机可见 ASCII 字符；配置文件里写 `token` 会被拒绝。`auth = true` 时必须设置；否则可选，设置了就和管理页生成的 token 一样有效（格式不对时记警告并忽略）。管理页生成的 token 和设置保存在库目录的 `tokens.json` / `admin-settings.json`（§2.3）。
 - macOS 部署：launchd 可通过固定不变的 `audiolib-launcher`（`server/launcher/`，可选，只编译签名一次）用 `posix_spawn` 启动服务端，macOS 的卷访问授权记在启动器上，之后只替换服务端二进制不会再弹授权；通用部署/升级/回滚说明和 systemd、launchd、Docker 示例见 `server/deploy/`。库文件、旁路文件和 `snapshots/`（以及波形缓存 `waveforms/`）建议放在本机磁盘，例如 `/var/lib/audiolib/`（macOS：`/usr/local/var/audiolib/`）。
 - 构建：在 `server/` 目录内运行 cargo（`server/rust-toolchain.toml` 与 `server/.cargo/config.toml` 覆盖仓库根的 Windows MSVC 默认设置），例如 `cargo build --release -p audiolib-server`。详见 `server/README.md`。
 

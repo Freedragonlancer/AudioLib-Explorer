@@ -28,7 +28,7 @@ use std::{
 };
 use tower::ServiceExt;
 
-const TOKEN: &str = "test-token-0123456789abcdef";
+const TOKEN: &str = "test-token-0123456789abcdef0123456789abcdef";
 const LAN: &str = "10.0.0.20:50000";
 const PUBLIC: &str = "203.0.113.9:50000";
 
@@ -158,6 +158,12 @@ async fn call(
             .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
     {
         request = request.header("content-type", "application/json");
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request = request.header("host", "localhost");
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -1261,7 +1267,14 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     assert_eq!(meta("encoding"), "i8-minmax-base64");
     assert!(meta("generated_at").parse::<u64>().unwrap() > 0);
     meta("revision").parse::<u64>().unwrap();
-    // The temporary bundle directory is gone once the body was sent.
+    // The immutable payload stays cached after sending. A second response reuses its
+    // exact bytes, and neither response retains the preparation permit.
+    let second = bundle_response(&f.state).await;
+    assert_eq!(second.headers()["etag"], bundle_etag);
+    let third = bundle_response(&f.state).await;
+    assert_eq!(third.headers()["etag"], bundle_etag);
+    assert_eq!(bytes(second).await, body);
+    assert_eq!(bytes(third).await, body);
     let leftovers = std::fs::read_dir(wfdb.path().parent().unwrap())
         .unwrap()
         .filter(|e| {
@@ -1272,7 +1285,7 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
                 .starts_with("audiolib-wfbundle-")
         })
         .count();
-    assert_eq!(leftovers, 0);
+    assert_eq!(leftovers, 1);
 }
 
 /// `GET /waveforms/bundle`, retrying while another

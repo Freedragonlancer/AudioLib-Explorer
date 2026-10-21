@@ -22,7 +22,7 @@ use std::{
 };
 use tower::ServiceExt;
 
-const TOKEN: &str = "test-token-0123456789abcdef";
+const TOKEN: &str = "test-token-0123456789abcdef0123456789abcdef";
 const LAN: &str = "10.0.0.20:50000";
 const PUBLIC: &str = "203.0.113.9:50000";
 
@@ -152,6 +152,12 @@ async fn call(
             .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
     {
         request = request.header("content-type", "application/json");
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request = request.header("host", "localhost");
     }
     for (name, value) in headers {
         request = request.header(*name, *value);

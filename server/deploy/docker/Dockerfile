@@ -47,5 +47,5 @@ VOLUME ["/data"]
 EXPOSE 8790
 ENV AUDIOLIB_SERVER_CONFIG=/config/config.toml
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8790/api/v1/health || exit 1
+  CMD curl -fsS http://127.0.0.1:8790/api/v1/health | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' || exit 1
 ENTRYPOINT ["audiolib-server"]

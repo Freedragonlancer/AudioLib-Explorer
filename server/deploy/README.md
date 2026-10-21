@@ -24,13 +24,18 @@ documentation placeholders: `192.0.2.10` (RFC 5737), `audiolib.example.com`,
   anyway), and make sure tokens are required (`external` through the proxy, or `all`).
   Never publish the plain HTTP port. Do not use `auth_mode = "off"` outside a closed test network.
 - The token is read from the environment variable named by `token_env`
-  (`AUDIOLIB_SERVER_TOKEN`): at least 16 visible ASCII characters. Keep it in a root-only
+  (`AUDIOLIB_SERVER_TOKEN`): at least 32 random visible ASCII characters. Keep it in a root-only
   file (`/etc/audiolib/audiolib.env`, mode 600) or the container environment, never in
   `config.toml` or in a world-readable plist. Tokens generated on the admin page are stored
   hashed in `tokens.json` next to the library (mode 0600).
-- `manage_mode` (`all` default, `lan`, `off`) limits who may start scans or remove records
+- `manage_mode` (`lan` default, `all`, `off`) limits who may start scans or remove records
   and folders. Removal never touches audio files. Use `lan` or `off` for public deployments.
 - Mount the music directory read-only where possible; the server only reads audio files.
+- When NAT, Docker Desktop, rootless containers or a proxy can hide the real client IP,
+  set `trust_lan_peers = false` and `auth_mode = "all"`. The passwordless `/admin` page
+  is then disabled; edit the TOML file for administration. Private socket-peer addresses
+  alone cannot establish that the original caller is trusted. The Docker example uses
+  these settings and maps `127.0.0.1:8790:8790`; publish through a TLS proxy.
 
 ## Install
 
@@ -85,9 +90,9 @@ AUDIOLIB_SERVER_TOKEN='<long random secret>' docker compose -f server/deploy/doc
 Notes / 说明:
 
 - You must mount a volume that contains `/data/library.db`, or create the library with the client first; otherwise `/api/v1/health` keeps returning `status:"error"` (The library could not be opened; the server keeps retrying).
-- A container showing as healthy does not mean the library is usable — check the `status` field from `/api/v1/health`. The image's built-in HEALTHCHECK currently does not look at `status`.
+- The image's HEALTHCHECK requires HTTP success and `status:"ok"`; startup and failed library opens remain unhealthy.
 - 必须挂载一个包含 `/data/library.db` 的卷，或者先用客户端建好库；否则 `/api/v1/health` 会一直返回 `status:"error"`（The library could not be opened; the server keeps retrying）。
-- 容器显示 healthy 不代表库能用，要看 `/api/v1/health` 返回的 `status`。Docker 自带的 HEALTHCHECK 目前并不看 `status`。
+- Docker HEALTHCHECK 同时要求 HTTP 成功和 `status:"ok"`；启动中或开库失败均为 unhealthy。
 - Only `/data` is a volume (library.db, snapshots, caches, tokens.json). `/config` is not a volume: the image ships `/config/config.toml`, and you may optionally bind-mount your own file read-only over it (`-v ./my-config.toml:/config/config.toml:ro`).
 - The bundled Docker config uses `auth_mode = "all"`. With a plain `docker run` you must pass `-e AUDIOLIB_SERVER_TOKEN=...`; otherwise the server starts but every request answers 401. The compose file enforces it with `${AUDIOLIB_SERVER_TOKEN:?}`.
 - 只有 `/data` 是卷（library.db、快照、缓存、tokens.json）。`/config` 不是卷：镜像自带 `/config/config.toml`，可选地用只读 bind mount 覆盖（`-v ./my-config.toml:/config/config.toml:ro`）。

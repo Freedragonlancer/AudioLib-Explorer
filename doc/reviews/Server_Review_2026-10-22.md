@@ -2,6 +2,8 @@
 
 > 补交原始审阅记录，以下结论与行号基于下述旧工作区。后续 main 已有 schema v6、格式兼容和客户端本地播放历史等变更；本文件不表示所有问题仍可在当前版本复现，修复前应重新核对当前实现。
 
+> 整改说明（2026-10-22）：本报告记录的是旧工作区基线；修复以远端 `main` 的 `4f98838` 为基线。问题处理、实际验证及覆盖限制见 [Server Review 修复记录](Server_Review_Fixes_2026-10-22.md)。原审查内容保留供对照。
+
 - 日期：2026-10-22
 - 基线：分支 `codex/debug-snapshot-reports` 的工作区，即提交 `c5c6ca1` 加上审阅时尚未提交的改动（`routes.rs`、`state.rs`、`error.rs` 等文件有修改，`snapshot_registry.rs` 是未跟踪的新文件）。行号以审阅时的工作区为准。
 - 范围：`server/audiolib-server`。重点是鉴权与请求来源判定（`auth.rs`）、管理页（`admin.rs`、`admin/`）、路由与准入中间件（`routes.rs`）、音频流的路径约束（`state.rs`）、预览转码（`preview.rs`）、快照与波形整包（`state.rs`、`wfdb.rs`）、根目录管理与目录浏览（`manage.rs`、`browse.rs`）、TLS（`tls.rs`）、监听循环（`server.rs`），以及部署样例（`deploy/docker`、`deploy/systemd`、`config.example.toml`）。`scans.rs`、`roots.rs`、`list_waveform.rs`、`pcm.rs` 只看了接口与限额，没有逐行审阅。

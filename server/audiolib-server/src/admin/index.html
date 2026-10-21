@@ -103,8 +103,8 @@
 <section>
   <h2>库管理权限</h2>
   <div class="muted">控制谁可以远程扫描（开始 / 暂停 / 继续 / 取消）以及「从库中移除」记录或目录（只删除库记录，不删除文件，重新扫描会恢复）。标注编辑和播放计数不受此设置影响（只按上面的鉴权模式）。保存后立即生效。</div>
-  <div class="row"><label><input type="radio" name="manage" value="all"> all（默认）：所有通过鉴权的客户端都可以</label></div>
-  <div class="row"><label><input type="radio" name="manage" value="lan"> lan：仅局域网直连的客户端可以；经反向代理或来自公网的请求返回 403（客户端按钮显示「仅局域网可用」）</label></div>
+  <div class="row"><label><input type="radio" name="manage" value="all"> all：所有通过鉴权的客户端都可以</label></div>
+  <div class="row"><label><input type="radio" name="manage" value="lan"> lan（默认）：仅局域网直连的客户端可以；经反向代理或来自公网的请求返回 403（客户端按钮显示「仅局域网可用」）</label></div>
   <div class="row"><label><input type="radio" name="manage" value="off"> off：任何客户端都不可以（403），只能在服务端本机操作</label></div>
   <div class="row"><button class="primary" id="save-manage">保存</button><button id="reset-manage">恢复配置文件默认</button><span class="muted" id="manage-source"></span></div>
 </section>

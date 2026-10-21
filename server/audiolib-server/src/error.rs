@@ -19,7 +19,7 @@ const SNAPSHOT_RETRY_SECS: &str = "5";
 pub struct ErrorBody {
     /// Stable machine-readable code, e.g. `VALIDATION` or `UNAUTHORIZED`.
     pub error_code: String,
-    /// Human-readable description; never contains the bearer token.
+    /// Human-readable description; server failures omit internal paths and details.
     pub message: String,
     /// Finer reason of some codes, e.g. `UNSUPPORTED_ENCODING` of `VALIDATION`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +212,7 @@ impl ApiError {
             ..Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "BUSY",
-                "Another waveform bundle is being prepared or sent; retry later",
+                "Waveform bundle preparation or download capacity is busy; retry later",
             )
         }
     }
@@ -340,11 +340,22 @@ impl IntoResponse for ApiError {
             tracing::debug!(code = self.code, message = %self.message, "Request rejected");
         }
         let status = self.status;
+        // Log the original diagnostic above, but do not expose filesystem paths or
+        // database/decoder diagnostics to remote callers, even with a valid token.
+        let message = match status {
+            StatusCode::INTERNAL_SERVER_ERROR => {
+                "An internal server error occurred; consult the server logs".to_string()
+            }
+            StatusCode::INSUFFICIENT_STORAGE => {
+                "The server has insufficient storage; contact the administrator".to_string()
+            }
+            _ => self.message,
+        };
         let mut response = (
             self.status,
             Json(ErrorBody {
                 error_code: self.code.to_string(),
-                message: self.message,
+                message,
                 sub_code: self.sub_code.map(str::to_string),
                 job_id: self.job_id,
             }),
@@ -354,6 +365,11 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static(seconds));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS && self.code == "AUTH_RATE_LIMITED" {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
         }
         if status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
@@ -369,6 +385,24 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use audiolib_core::Error;
+
+    #[tokio::test]
+    async fn internal_diagnostics_never_reach_error_bodies() {
+        use http_body_util::BodyExt;
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INSUFFICIENT_STORAGE,
+        ] {
+            let response =
+                ApiError::new(status, "IO", "secret /srv/private/library.db").into_response();
+            assert_eq!(response.status(), status);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: ErrorBody = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body.error_code, "IO");
+            assert!(!body.message.contains("secret"));
+            assert!(!body.message.contains("/srv/private"));
+        }
+    }
 
     #[test]
     fn core_errors_map_to_documented_status_and_codes() {

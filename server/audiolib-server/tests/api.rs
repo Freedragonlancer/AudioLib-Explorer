@@ -19,7 +19,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::{fs, path::Path, sync::Arc, time::Duration};
 use tower::ServiceExt;
 
-const TOKEN: &str = "test-token-0123456789abcdef";
+const TOKEN: &str = "test-token-0123456789abcdef0123456789abcdef";
 
 /// Write a tiny silent 16-bit mono WAV; never opens an output device.
 fn wav(path: &Path) {
@@ -1329,6 +1329,7 @@ async fn server_closes_connections_that_never_finish_their_headers() {
     let options = ServeOptions {
         header_read_timeout: Duration::from_millis(200),
         shutdown_grace: Duration::from_secs(1),
+        ..ServeOptions::default()
     };
     let (address, stop, task) = spawn_server(router(f.state.clone()), options).await;
 
@@ -1375,6 +1376,7 @@ async fn shutdown_waits_at_most_the_grace_period_for_stalled_responses() {
     let options = ServeOptions {
         header_read_timeout: Duration::from_secs(5),
         shutdown_grace: Duration::from_millis(300),
+        ..ServeOptions::default()
     };
     let (address, stop, task) = spawn_server(router(f.state.clone()), options).await;
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
@@ -1475,6 +1477,12 @@ async fn send_without_auth(
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
     request = support::modern(request);
+    if !headers
+        .iter()
+        .any(|(name, _)| name.as_str().eq_ignore_ascii_case("host"))
+    {
+        request = request.header(header::HOST, "localhost");
+    }
     for (name, value) in headers {
         request = request.header(name, *value);
     }
@@ -3874,6 +3882,12 @@ async fn call(
 ) -> Response {
     let mut request = Request::builder().method(method).uri(path);
     request = support::modern(request);
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request = request.header(header::HOST, "localhost");
+    }
     if let Ok(state) = service.clone().into().app_state() {
         request = request.header(
             "x-audiolib-library-id",

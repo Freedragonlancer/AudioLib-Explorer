@@ -7,6 +7,10 @@ library_db = "/data/library.db"
 
 # Every endpoint except /health needs a token (AUDIOLIB_SERVER_TOKEN, see docker-compose.yml).
 auth_mode = "all"
+trust_lan_peers = false
+# Container port forwarding may hide the real peer behind a private gateway address.
+# Disable password-free LAN/admin access; use a deliberate local config for management.
+manage_mode = "off"
 token_env = "AUDIOLIB_SERVER_TOKEN"
 
 snapshot_dir = "/data/tmp"

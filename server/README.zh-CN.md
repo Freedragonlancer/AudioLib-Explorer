@@ -54,18 +54,24 @@ cargo test  -p audiolib-server --locked --target x86_64-unknown-linux-gnu   # �
 
 鉴权由 `auth_mode` 决定（API 文档 §2.2）：
 
-- `external`（默认）：局域网直连请求不需要 token（`Authorization` 头被忽略）；经反向代理（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`X-Forwarded-Proto`/`-Host`）或来自非私有网段的请求需要 `Authorization: Bearer <token>`。
+- `external`（默认）：使用可信 Host 的局域网直连请求不需要 token；经反向代理（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`X-Forwarded-Proto`/`-Host`）或来自非私有网段的请求需要 `Authorization: Bearer <token>`。
 - `off`：任何接口都不需要 token。
 - `all`（或旧的 `auth = true`）：除 `/health` 外所有接口都需要 token。
 
-有效 token：环境变量 token（`token_env` 指定的变量，默认 `AUDIOLIB_SERVER_TOKEN`，至少 16 个可见 ASCII 字符，不会写入日志）和管理页生成的 token。**安全建议：** 任何可从公网访问的部署都应使用带 TLS 的反向代理并要求 token；不要直接暴露明文 HTTP 端口，也不要使用 `auth_mode = "off"`。`external` 模式下局域网客户端无需 token 即被信任。
+有效 token：环境变量 token（`token_env` 指定的变量，默认 `AUDIOLIB_SERVER_TOKEN`，至少 32 个随机可见 ASCII 字符，不会写入日志）和管理页生成的 token。**安全建议：** 任何可从公网访问的部署都应使用带 TLS 的反向代理并要求 token；不要直接暴露明文 HTTP 端口，也不要使用 `auth_mode = "off"`。`external` 模式下局域网客户端无需 token 即被信任。
+
+默认 `manage_mode = "lan"`，外部 token 不能浏览目录、添加根或扫描；显式配置 `all` 才授予完整管理权限。升级前请替换不足 32 字符的环境令牌，已生成的 `al_` 令牌仍有效。
+
+Docker Desktop、rootless 容器、SNAT 或隐藏真实来源的反代应设置 `trust_lan_peers = false` 与 `auth_mode = "all"`；此时无密码管理页关闭，通过 TOML 管理。容器示例已采用此配置，端口只绑定宿主机回环。免令牌 API 同时校验 Host，失败鉴权按实际 socket IP 每分钟最多 60 次。
+
+原生 TLS 每分钟检查续期文件，成功后只替换新握手的证书，失败时保留旧证书并显示原因。每个监听器最多 1024 连接（含握手）；波形整包复用缓存，最多 8 个下载，每次发送最长 15 分钟。
 
 ## 运行
 
 ```sh
 audiolib-server --config /etc/audiolib/config.toml
 # 使用环境变量 token：
-AUDIOLIB_SERVER_TOKEN='<至少 16 个可见 ASCII 字符>' audiolib-server --config /etc/audiolib/config.toml
+AUDIOLIB_SERVER_TOKEN='<至少 32 个随机可见 ASCII 字符>' audiolib-server --config /etc/audiolib/config.toml
 # 或：AUDIOLIB_SERVER_CONFIG=/etc/audiolib/config.toml audiolib-server
 ```
 
@@ -105,7 +111,7 @@ AUDIOLIB_SERVER_TOKEN='<至少 16 个可见 ASCII 字符>' audiolib-server --con
 - **大库首次快照慢：** 百万文件约需 30–60 秒准备；超过 `snapshot_wait_secs`（默认 90）返回 503 `BUSY` + `Retry-After`，后台继续准备，客户端会重试。
 - **409 `BUSY`**（如扫描中移除根目录）或 **503 `BUSY`**（流/试听并发已满）：按 `Retry-After` 稍后重试。
 - **启动后 503 `UNAVAILABLE`：** 库仍在打开（`/health` 为 `starting`）。v3/v4 → v5 升级在打开时做 schema 迁移与提取标签回填（2026-10-11 匿名实测：大库副本约 198 秒，较小库约 7 秒；记录数及库容量不公开）。全文索引**不会**自动重建，需之后手动运行 CLI：`AudioLibCli db rebuild-search`（同库另约 513 秒）；该步骤会留下一份与库差不多大的回滚备份，升级前请预留足够磁盘空间。见 [deploy/README.md](deploy/README.md#search-index-backfill-and-fts-rebuild-db-rebuild-search)。
-- **磁盘空间：** 快照在 `snapshot_dir`（默认系统临时目录），波形缓存在 `waveform_cache_dir`（受 `waveform_cache_mb` 限制），备份与回滚副本在库旁。
+- **磁盘空间：** 快照在 `snapshot_dir`（默认库文件旁的 `snapshots/`），波形缓存在 `waveform_cache_dir`（受 `waveform_cache_mb` 限制），备份与回滚副本在库旁。
 
 ## 升级、回滚与备份
 
@@ -124,7 +130,7 @@ AUDIOLIB_SERVER_TOKEN='<至少 16 个可见 ASCII 字符>' audiolib-server --con
 Docker 说明：
 
 - 必须挂载一个包含 `/data/library.db` 的卷，或者先用客户端建好库；否则 `/api/v1/health` 会一直返回 `status:"error"`（The library could not be opened; the server keeps retrying）。
-- 容器显示 healthy 不代表库能用，要看 `/api/v1/health` 返回的 `status`。Docker 自带的 HEALTHCHECK 目前并不看 `status`。
+- Docker HEALTHCHECK 同时要求 HTTP 成功与 JSON `status:"ok"`；开库失败或启动中均为 unhealthy。
 - 只有 `/data` 是卷（library.db、快照、缓存、tokens.json）。`/config` 不是卷：镜像自带 `/config/config.toml`，可选地用只读 bind mount 覆盖（`-v ./my-config.toml:/config/config.toml:ro`）。
 - 镜像内置配置使用 `auth_mode = "all"`。直接 `docker run` 时必须传 `-e AUDIOLIB_SERVER_TOKEN=...`，否则服务能启动，但所有请求都会返回 401；compose 文件用 `${AUDIOLIB_SERVER_TOKEN:?}` 强制要求填写。
 

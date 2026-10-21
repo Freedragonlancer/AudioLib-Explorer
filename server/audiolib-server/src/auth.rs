@@ -5,7 +5,7 @@
 //! * `off`: no endpoint needs a token.
 //! * `external` (default): requests that came through a reverse proxy (any forwarding
 //!   header) or from a socket peer outside the loopback / private LAN ranges need
-//!   `Authorization: Bearer <token>`; LAN-direct requests ignore the header entirely.
+//!   `Authorization: Bearer <token>`; LAN-direct requests with a trusted Host need none.
 //! * `all`: every endpoint except `/health` needs a token (the old `auth = true`).
 //!
 //! Accepted tokens: the environment token (`AUDIOLIB_SERVER_TOKEN`, when set) and tokens
@@ -15,19 +15,20 @@
 //! rewritten.
 //!
 //! Library management (`manage_mode`: scans, removing records and folders) is a second,
-//! independent gate checked after authentication: `all` (default) allows it to every
-//! authorized request, `lan` only to LAN-direct requests, `off` to nobody (403
+//! independent gate checked after authentication: `lan` (default) allows it only to
+//! LAN-direct requests, `all` to every authorized request, `off` to nobody (403
 //! `MANAGE_FORBIDDEN`).
 use crate::{ApiError, ServerConfig, config::BearerToken};
-use axum::http::{HeaderMap, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fmt,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex, PoisonError, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
 
@@ -43,6 +44,41 @@ pub const LAST_USED_RESOLUTION_SECS: i64 = 60;
 pub const MAX_TOKENS: usize = 256;
 /// Prefix of generated tokens (`al_` + 64 hex characters).
 pub const TOKEN_PREFIX: &str = "al_";
+/// Failed bearer attempts per socket peer IP in one minute; forwarded headers never
+/// supply this identity. The bounded table cannot grow with arbitrary remote peers.
+const AUTH_FAILURE_LIMIT: u32 = 60;
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_AUTH_FAILURE_PEERS: usize = 1024;
+
+#[derive(Default)]
+struct AuthFailures(HashMap<IpAddr, (Instant, u32)>);
+
+impl AuthFailures {
+    fn limited(&mut self, peer: IpAddr, now: Instant) -> bool {
+        self.0
+            .retain(|_, (started, _)| now.duration_since(*started) < AUTH_FAILURE_WINDOW);
+        self.0
+            .get(&peer)
+            .is_some_and(|(_, count)| *count >= AUTH_FAILURE_LIMIT)
+    }
+
+    fn record(&mut self, peer: IpAddr, now: Instant) {
+        if self.0.len() >= MAX_AUTH_FAILURE_PEERS
+            && !self.0.contains_key(&peer)
+            && let Some(oldest) = self
+                .0
+                .iter()
+                .min_by_key(|(_, (started, _))| *started)
+                .map(|(peer, _)| *peer)
+        {
+            self.0.remove(&oldest);
+        }
+        self.0
+            .entry(peer)
+            .and_modify(|(_, count)| *count += 1)
+            .or_insert((now, 1));
+    }
+}
 
 /// Cross-instance exclusion for root edits, scan admission or one settings write.
 /// The sidecar stays in place after unlocking to prevent file replacement races.
@@ -113,9 +149,9 @@ impl FromStr for AuthMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ManageMode {
-    /// Every authorized request may manage the library (default).
+    /// Every authorized request may manage the library.
     All,
-    /// Only LAN-direct requests (see [`classify`]); external ones get 403.
+    /// Only LAN-direct requests (default; see [`classify`]); external ones get 403.
     Lan,
     /// Nobody; every management request gets 403.
     Off,
@@ -379,6 +415,55 @@ fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
     Some((host, port))
 }
 
+/// Parse a Host authority without accepting userinfo, bad ports or invalid DNS labels.
+fn host_name(authority: &str) -> Option<String> {
+    let parsed: axum::http::uri::Authority = authority.parse().ok()?;
+    if parsed.as_str().contains('@') {
+        return None;
+    }
+    let (host, _) = split_host_port(authority)?;
+    if let Some(ip) = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    {
+        return ip
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|ip| ip.to_string());
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        return Some(ip.to_string());
+    }
+    let name = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    if name.len() > 253
+        || !name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return None;
+    }
+    Some(name)
+}
+
+/// Valid IP literal or LAN hostname, including an optional valid TCP port.
+pub(crate) fn is_lan_host(authority: &str) -> bool {
+    let Some(name) = host_name(authority) else {
+        return false;
+    };
+    name.parse::<IpAddr>().is_ok()
+        || name == "localhost"
+        || !name.contains('.')
+        || [".local", ".lan", ".home.arpa", ".internal", ".localhost"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
 /// Native TLS listener settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TlsSettings {
@@ -510,6 +595,7 @@ pub struct TlsStatus {
 struct Defaults {
     auth_mode: AuthMode,
     auth_mode_source: Source,
+    trust_lan_peers: bool,
     manage_mode: ManageMode,
     manage_mode_source: Source,
     pregenerate_list_waveforms: bool,
@@ -537,6 +623,7 @@ pub struct Security {
     tls_tx: watch::Sender<(u64, Option<TlsSettings>)>,
     tls_status: Mutex<TlsStatus>,
     warnings: Vec<String>,
+    auth_failures: Mutex<AuthFailures>,
 }
 
 impl fmt::Debug for Security {
@@ -621,7 +708,7 @@ impl Security {
         };
         let (manage_mode, manage_mode_source) = match config.manage_mode {
             Some(mode) => (mode, Source::Config),
-            None => (ManageMode::All, Source::Default),
+            None => (ManageMode::Lan, Source::Default),
         };
         let (pregenerate_list_waveforms, pregenerate_list_waveforms_source) =
             match config.pregenerate_list_waveforms {
@@ -638,6 +725,7 @@ impl Security {
         let defaults = Defaults {
             auth_mode,
             auth_mode_source,
+            trust_lan_peers: config.trust_lan_peers,
             manage_mode,
             manage_mode_source,
             pregenerate_list_waveforms,
@@ -669,7 +757,8 @@ impl Security {
         let defaults = Defaults {
             auth_mode,
             auth_mode_source: Source::Config,
-            manage_mode: ManageMode::All,
+            trust_lan_peers: true,
+            manage_mode: ManageMode::Lan,
             manage_mode_source: Source::Default,
             pregenerate_list_waveforms: false,
             pregenerate_list_waveforms_source: Source::Default,
@@ -713,6 +802,7 @@ impl Security {
                 ..TlsStatus::default()
             }),
             warnings,
+            auth_failures: Mutex::new(AuthFailures::default()),
         })
     }
 
@@ -802,6 +892,20 @@ impl Security {
         self.manage_mode_with_source().0
     }
 
+    /// Apply the startup trust policy before treating a private socket peer as LAN.
+    /// Disabling this trust also closes the password-free admin page.
+    pub fn classify(
+        &self,
+        headers: &HeaderMap,
+        connection: Option<&ConnectionInfo>,
+    ) -> RequestOrigin {
+        if self.defaults.trust_lan_peers {
+            classify(headers, connection)
+        } else {
+            RequestOrigin::External
+        }
+    }
+
     /// Check that an (already authorized) request may manage the library: scans, record
     /// and folder removal. 403 `MANAGE_FORBIDDEN` otherwise.
     pub fn authorize_manage(
@@ -811,7 +915,7 @@ impl Security {
     ) -> Result<(), ApiError> {
         match self.manage_mode() {
             ManageMode::All => Ok(()),
-            ManageMode::Lan if classify(headers, connection) == RequestOrigin::Lan => Ok(()),
+            ManageMode::Lan if self.classify(headers, connection) == RequestOrigin::Lan => Ok(()),
             ManageMode::Lan => Err(ApiError::manage_forbidden(
                 "Library management (scans, removing records or folders) is only allowed from the LAN on this server (manage_mode = lan)",
             )),
@@ -897,8 +1001,9 @@ impl Security {
     }
 
     /// Check a request against the effective mode: `Ok` when no token is needed or a
-    /// valid one is presented, else 401 `UNAUTHORIZED`. LAN-direct requests in `external`
-    /// mode never look at `Authorization`.
+    /// valid one is presented, else 401 `UNAUTHORIZED`. Token-free requests additionally
+    /// require a trusted Host (DNS rebinding protection). Failed authentication is
+    /// limited per socket IP; forwarding headers cannot change the limiter identity.
     pub fn authorize(
         self: &Arc<Self>,
         headers: &HeaderMap,
@@ -908,11 +1013,8 @@ impl Security {
         let required = match mode {
             AuthMode::Off => false,
             AuthMode::All => true,
-            AuthMode::External => classify(headers, connection) == RequestOrigin::External,
+            AuthMode::External => self.classify(headers, connection) == RequestOrigin::External,
         };
-        if !required {
-            return Ok(());
-        }
         let presented = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -920,19 +1022,88 @@ impl Security {
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .map(|(_, token)| token.trim())
             .filter(|token| !token.is_empty());
-        let Some(presented) = presented else {
-            return Err(match mode {
+        let host_forbidden = || {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                "HOST_FORBIDDEN",
+                "Token-free access requires an IP address, LAN hostname or configured server hostname",
+            )
+        };
+        if !required && self.trusted_host(headers, connection) {
+            return Ok(());
+        }
+        if !required && presented.is_none() {
+            return Err(host_forbidden());
+        }
+        if let Some(connection) = connection
+            && self
+                .auth_failures
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .limited(connection.peer.ip().to_canonical(), Instant::now())
+        {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "AUTH_RATE_LIMITED",
+                "Too many failed authentication attempts from this socket peer; retry in one minute",
+            ));
+        }
+        if presented.is_some_and(|token| self.verify(token)) {
+            return Ok(());
+        }
+        if let Some(connection) = connection {
+            self.auth_failures
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(connection.peer.ip().to_canonical(), Instant::now());
+            tracing::warn!(peer = %connection.peer, "Bearer authentication failed");
+        } else {
+            tracing::warn!("Bearer authentication failed for an embedded request");
+        }
+        Err(if !required {
+            host_forbidden()
+        } else if presented.is_none() {
+            match mode {
                 AuthMode::External => ApiError::token_required(
                     "A bearer token is required for access from outside the LAN",
                 ),
                 _ => ApiError::unauthorized(),
-            });
-        };
-        if self.verify(presented) {
-            Ok(())
+            }
         } else {
-            Err(ApiError::token_invalid())
+            ApiError::token_invalid()
+        })
+    }
+
+    fn trusted_host(&self, headers: &HeaderMap, connection: Option<&ConnectionInfo>) -> bool {
+        let mut hosts = headers.get_all(header::HOST).iter();
+        let Some(value) = hosts.next() else {
+            // Embedders do not have a network authority; real connections always must.
+            return connection.is_none();
+        };
+        if hosts.next().is_some() {
+            return false;
         }
+        let Ok(authority) = value.to_str() else {
+            return false;
+        };
+        if is_lan_host(authority) {
+            return true;
+        }
+        let Some(host) = host_name(authority) else {
+            return false;
+        };
+        [self.public_url(), self.lan_url_override()]
+            .into_iter()
+            .flatten()
+            .any(|url| {
+                url.parse::<axum::http::Uri>()
+                    .ok()
+                    .and_then(|uri| {
+                        uri.authority()
+                            .and_then(|authority| host_name(authority.as_str()))
+                    })
+                    .is_some_and(|configured| configured == host)
+            })
     }
 
     /// Whether `presented` is the environment token or a generated (not revoked) token.
@@ -1555,13 +1726,13 @@ mod tests {
     }
 
     #[test]
-    fn manage_mode_defaults_to_all_and_gates_external_requests() {
+    fn manage_mode_defaults_to_lan_and_preserves_explicit_all() {
         let dir = tempfile::tempdir().unwrap();
         let config = ServerConfig::from_toml_str("library_db = \"lib.db\"\n", dir.path()).unwrap();
         let security = Security::from_config(&config, None);
         assert_eq!(
             security.manage_mode_with_source(),
-            (ManageMode::All, Source::Default)
+            (ManageMode::Lan, Source::Default)
         );
         let lan = conn("10.0.0.20:1", Listener::Http);
         let public = conn("8.8.8.8:1", Listener::Http);
@@ -1575,23 +1746,24 @@ mod tests {
             (&forwarded, Some(&lan)),
             (&empty, Some(&public)),
         ];
-        for (headers, connection) in cases {
-            assert_eq!(code(security.authorize_manage(headers, connection)), None);
-        }
-        security
-            .update_settings(|s| s.manage_mode = Some(ManageMode::Lan))
-            .unwrap();
-        let expected = [
+        for ((headers, connection), expected) in cases.into_iter().zip([
             None,
             None,
             Some("MANAGE_FORBIDDEN"),
             Some("MANAGE_FORBIDDEN"),
-        ];
-        for ((headers, connection), expected) in cases.into_iter().zip(expected) {
+        ]) {
             assert_eq!(
                 code(security.authorize_manage(headers, connection)),
                 expected
             );
+        }
+        security
+            .update_settings(|s| s.manage_mode = Some(ManageMode::All))
+            .unwrap();
+        let reloaded = Security::from_config(&config, None);
+        assert_eq!(reloaded.manage_mode(), ManageMode::All);
+        for (headers, connection) in cases {
+            assert_eq!(code(reloaded.authorize_manage(headers, connection)), None);
         }
         security
             .update_settings(|s| s.manage_mode = Some(ManageMode::Off))
@@ -1610,7 +1782,7 @@ mod tests {
             (ManageMode::Off, Source::Admin)
         );
         security.update_settings(|s| s.manage_mode = None).unwrap();
-        assert_eq!(security.manage_mode(), ManageMode::All);
+        assert_eq!(security.manage_mode(), ManageMode::Lan);
         let configured = ServerConfig::from_toml_str(
             "library_db = \"lib.db\"\nmanage_mode = \"lan\"\n",
             dir.path(),
@@ -1628,13 +1800,14 @@ mod tests {
     fn modes_decide_who_needs_a_token() {
         let dir = tempfile::tempdir().unwrap();
         let config = ServerConfig::from_toml_str("library_db = \"lib.db\"\n", dir.path()).unwrap();
-        let env = BearerToken::new("env-token-0123456789abcdef").unwrap();
+        let env = BearerToken::new("env-token-0123456789abcdef0123456789abcdef").unwrap();
         let security = Security::from_config(&config, Some(env));
         let (_, secret) = security.create_token("t").unwrap();
         let public = conn("8.8.8.8:1", Listener::Http);
         let lan = conn("10.0.0.20:1", Listener::Http);
         let with = |token: Option<&str>| {
             let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("localhost"));
             if let Some(token) = token {
                 headers.insert(
                     header::AUTHORIZATION,
@@ -1661,7 +1834,10 @@ mod tests {
             None
         );
         assert_eq!(
-            code(security.authorize(&with(Some("env-token-0123456789abcdef")), Some(&public))),
+            code(security.authorize(
+                &with(Some("env-token-0123456789abcdef0123456789abcdef")),
+                Some(&public)
+            )),
             None
         );
         security
@@ -1679,5 +1855,21 @@ mod tests {
             .update_settings(|s| s.auth_mode = Some(AuthMode::Off))
             .unwrap();
         assert_eq!(code(security.authorize(&with(None), Some(&public))), None);
+    }
+
+    #[test]
+    fn failure_windows_expire_and_the_peer_table_is_bounded() {
+        let mut failures = AuthFailures::default();
+        let now = Instant::now();
+        let peer: IpAddr = "203.0.113.1".parse().unwrap();
+        for _ in 0..AUTH_FAILURE_LIMIT {
+            failures.record(peer, now);
+        }
+        assert!(failures.limited(peer, now));
+        assert!(!failures.limited(peer, now + AUTH_FAILURE_WINDOW));
+        for index in 0..MAX_AUTH_FAILURE_PEERS + 1 {
+            failures.record(IpAddr::V4(std::net::Ipv4Addr::from(index as u32)), now);
+        }
+        assert_eq!(failures.0.len(), MAX_AUTH_FAILURE_PEERS);
     }
 }
