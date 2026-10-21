@@ -1835,7 +1835,7 @@ impl Controller {
                             } else {
                                 SqliteProvider::open_existing(&selected_path)
                             }
-                            .map_err(|e| e.to_string())?,
+                            .map_err(|e| e.local_display_text(c.chinese.load(Ordering::Acquire)))?,
                         );
                         let integrity = next.check_library().map_err(|error| error.to_string())?;
                         if !integrity.is_ok() {
