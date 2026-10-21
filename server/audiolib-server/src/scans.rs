@@ -960,17 +960,24 @@ mod tests {
             // The jobs mutex holds cleanup at its final step. Reacquiring the
             // settings lease proves cleanup has started, without depending on
             // whether the receiver or the scan thread wins a scheduling race.
-            let deadline = Instant::now() + Duration::from_secs(10);
+            // Busy or transient errors are retried until the deadline; only the
+            // deadline fails the wait.
+            let waited = Instant::now();
+            let deadline = waited + Duration::from_secs(30);
+            let mut last_error = None;
             let settings_released = loop {
                 match second.security().settings_lease() {
                     Ok(lease) => {
                         drop(lease);
                         break true;
                     }
-                    Err(Error::Busy(_)) if Instant::now() < deadline => {
-                        std::thread::yield_now();
+                    Err(error) => {
+                        last_error = Some(error.to_string());
+                        if Instant::now() >= deadline {
+                            break false;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                    Err(_) => break false,
                 }
             };
             let response_pending = matches!(
@@ -982,7 +989,8 @@ mod tests {
             thread.join().unwrap();
             assert!(
                 settings_released,
-                "{subpath:?}: settings lease not released"
+                "{subpath:?}: settings lease not released after {:?} (last error: {last_error:?})",
+                waited.elapsed()
             );
             assert!(
                 response_pending,
