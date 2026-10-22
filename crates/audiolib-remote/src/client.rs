@@ -567,10 +567,39 @@ impl RemoteClient {
                 error
             });
         }
+        // No caller of `checked` sends a conditional header, so `304 Not Modified` (like
+        // any other 1xx/3xx; redirects are not followed) carries no usable body and is a
+        // protocol error here. Conditional requests use [`Self::checked_conditional`].
+        if status == 304 {
+            return Err(RemoteError::Protocol(format!(
+                "{context}: unexpected HTTP 304 Not Modified to an unconditional request"
+            )));
+        }
         if !(200..300).contains(&status) {
             return Err(RemoteError::Protocol(format!("{context}: HTTP {status}")));
         }
         Ok(response)
+    }
+
+    /// [`Self::checked`] for a request that may carry `If-None-Match`: `304 Not Modified`
+    /// is `Ok(None)` (the cached copy is current) when `conditional` is set, and a protocol
+    /// error otherwise. Every other status is classified like [`Self::checked`].
+    pub(crate) fn checked_conditional(
+        &self,
+        response: ureq::http::Response<ureq::Body>,
+        context: &str,
+        conditional: bool,
+    ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        if response.status().as_u16() == 304 {
+            return if conditional {
+                Ok(None)
+            } else {
+                Err(RemoteError::Protocol(format!(
+                    "{context}: HTTP 304 Not Modified without If-None-Match"
+                )))
+            };
+        }
+        self.checked(response, context).map(Some)
     }
 
     /// One non-idempotent JSON write (never retried here). A transport failure or an
