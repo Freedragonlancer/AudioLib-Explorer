@@ -430,7 +430,7 @@ impl RemoteError {
                     mdns_hint(detail, false)
                 ),
                 Self::HostForbidden(detail) => format!(
-                    "The server refused this host name (403 HOST_FORBIDDEN): requests without a token must use an IP address, a LAN name or the server's configured public_url / lan_url host. Connect with the server's LAN IP or its configured domain, or enter an access token under Data source settings → Access token. ({detail})"
+                    "The server refused this host name (403 HOST_FORBIDDEN): requests without a token must use an IP address, a LAN name or the server's configured public_url / lan_url host. Check the access token, or use the server's LAN IP / configured host name instead. ({detail})"
                 ),
                 Self::AdminLanOnly(detail) => format!(
                     "The server's admin page is only available directly on the local network (403 ADMIN_LAN_ONLY). Open /admin from another device on the LAN using the server's LAN IP, not through a reverse proxy or public domain. ({detail})"
@@ -439,7 +439,7 @@ impl RemoteError {
                     message,
                     retry_after,
                 } => format!(
-                    "Too many failed authentications; the server is temporarily refusing requests from this PC (429 AUTH_RATE_LIMITED). Try again in {} seconds and check the access token. ({message})",
+                    "Too many failed authentications; the server is temporarily refusing requests from this PC (429 AUTH_RATE_LIMITED). Until the wait ends even a correct token is rejected. Try again in {} seconds and check the access token. ({message})",
                     retry_after.unwrap_or(60)
                 ),
                 Self::Tls { kind, detail } => tls_message(*kind, detail, false),
@@ -499,7 +499,7 @@ impl RemoteError {
                 mdns_hint(detail, true)
             ),
             Self::HostForbidden(detail) => format!(
-                "服务器拒绝了此主机名（403 HOST_FORBIDDEN）：未带令牌的请求只能用 IP 地址、局域网名称或服务器配置的 public_url / lan_url 主机名访问。请改用服务器的局域网 IP 或已配置的域名，或在“数据源设置 → 访问令牌”中填入令牌。（{detail}）"
+                "服务器拒绝了此主机名（403 HOST_FORBIDDEN）：未带令牌的请求只能用 IP 地址、局域网名称或服务器配置的 public_url / lan_url 主机名访问。请检查 token，或改用服务器局域网 IP / 已配置的主机名。（{detail}）"
             ),
             Self::AdminLanOnly(detail) => format!(
                 "服务器管理页面仅限局域网内直接访问（403 ADMIN_LAN_ONLY）：请在局域网内的另一台设备上用服务器的局域网 IP 打开 /admin，不要经反向代理或公网域名访问。（{detail}）"
@@ -508,7 +508,7 @@ impl RemoteError {
                 message,
                 retry_after,
             } => format!(
-                "认证失败次数过多，服务器暂时拒绝来自本机的请求（429 AUTH_RATE_LIMITED），请 {} 秒后再试，并检查访问令牌是否正确。（{message}）",
+                "认证失败次数过多，服务器暂时拒绝来自本机的请求（429 AUTH_RATE_LIMITED），等待结束前即使令牌正确也会被拒绝；请 {} 秒后再试，并检查访问令牌是否正确。（{message}）",
                 retry_after.unwrap_or(60)
             ),
             Self::Tls { kind, detail } => tls_message(*kind, detail, true),
@@ -916,6 +916,11 @@ mod tests {
             }
         ));
         assert!(bare.localized(true).contains("60 秒"));
+        assert!(bare.localized(true).contains("即使令牌正确也会被拒绝"));
+        assert!(
+            bare.localized(false)
+                .contains("even a correct token is rejected")
+        );
         let host = r#"{"error_code":"HOST_FORBIDDEN","message":"no"}"#;
         assert!(matches!(
             RemoteError::from_status(403, host, "GET /library"),

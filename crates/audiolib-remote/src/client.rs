@@ -234,6 +234,34 @@ impl std::fmt::Debug for RemoteClient {
 }
 
 /// `Retry-After` in delta seconds (HTTP dates are ignored), capped at one hour.
+/// True for the server's own challenge, `WWW-Authenticate: Bearer realm="audiolib"`.
+fn is_audiolib_bearer_realm(value: &str) -> bool {
+    let value = value.trim();
+    value.len() > 6
+        && value[..6].eq_ignore_ascii_case("bearer")
+        && value[6..]
+            .split(',')
+            .filter_map(|part| part.split_once('='))
+            .any(|(key, val)| {
+                key.trim().eq_ignore_ascii_case("realm")
+                    && val.trim().trim_matches('"') == "audiolib"
+            })
+}
+
+/// Suffix (the `.local` API URL) that makes a 401 message carry the LAN-IP hint. `None`
+/// when the URL is not `.local` or the 401 came from the AudioLib server itself (its
+/// `Bearer realm="audiolib"` challenge or a JSON `UNAUTHORIZED` body).
+fn mdns_unauthorized_suffix(api: &str, server_realm: bool, body: &str) -> Option<String> {
+    if !crate::error::has_mdns_host(api) || server_realm {
+        return None;
+    }
+    let parsed: crate::error::ErrorBody = serde_json::from_str(body).unwrap_or_default();
+    if parsed.error_code == "UNAUTHORIZED" {
+        return None;
+    }
+    Some(format!(" ({api})"))
+}
+
 pub(crate) fn retry_after(headers: &ureq::http::HeaderMap) -> Option<u64> {
     headers
         .get("retry-after")?
@@ -509,6 +537,12 @@ impl RemoteClient {
         let status = response.status().as_u16();
         if status >= 400 {
             let retry_after = retry_after(response.headers());
+            let realm = response
+                .headers()
+                .get_all("www-authenticate")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(is_audiolib_bearer_realm);
             let body = response
                 .body_mut()
                 .with_config()
@@ -516,12 +550,13 @@ impl RemoteClient {
                 .read_to_string()
                 .unwrap_or_default();
             let mut error = RemoteError::from_response(status, &body, context, retry_after);
-            // Keep the `.local` server URL in a 401 so the message can suggest the LAN IP
-            // (a fake-IP proxy answering for the name returns its own 401).
+            // Keep the `.local` server URL in a 401 so the message can suggest the LAN IP,
+            // but only when the 401 is not the server's own (a fake-IP proxy answering for
+            // the name returns its own 401); a real wrong token must not get the hint.
             if let RemoteError::Unauthorized(message) = &mut error
-                && crate::error::has_mdns_host(&self.api)
+                && let Some(suffix) = mdns_unauthorized_suffix(&self.api, realm, &body)
             {
-                message.push_str(&format!(" ({})", self.api));
+                message.push_str(&suffix);
             }
             if matches!(error, RemoteError::LibraryChanged(_)) {
                 self.library_changed.store(true, Ordering::Release);
@@ -1376,6 +1411,55 @@ mod tests {
     }
 
     #[test]
+    fn mdns_hint_only_for_a_401_that_is_not_the_servers_own() {
+        let api = "http://example.local:8790/api/v1";
+        let own = r#"{"error_code":"UNAUTHORIZED","message":"invalid token"}"#;
+        // The server's own 401 (realm header and/or UNAUTHORIZED body): no hint.
+        assert!(is_audiolib_bearer_realm(r#"Bearer realm="audiolib""#));
+        assert!(is_audiolib_bearer_realm(
+            r#"bearer realm=audiolib, error="x""#
+        ));
+        assert!(!is_audiolib_bearer_realm(r#"Basic realm="proxy""#));
+        assert!(!is_audiolib_bearer_realm(r#"Bearer realm="other""#));
+        assert_eq!(mdns_unauthorized_suffix(api, true, ""), None);
+        assert_eq!(mdns_unauthorized_suffix(api, false, own), None);
+        assert_eq!(mdns_unauthorized_suffix(api, true, own), None);
+        // A bare 401 (proxy-blocked): hint.
+        let bare = mdns_unauthorized_suffix(api, false, "Unauthorized").unwrap();
+        let error = RemoteError::Unauthorized(format!("GET /library: HTTP 401{bare}"));
+        assert!(error.localized(true).contains("局域网 IP"));
+        assert!(error.localized(false).contains("LAN IP"));
+        let server = RemoteError::Unauthorized("GET /library: invalid token".into());
+        assert!(!server.localized(true).contains("fake-ip"));
+        // Not a .local URL: never a hint.
+        assert_eq!(
+            mdns_unauthorized_suffix("http://192.0.2.1:8790/api/v1", false, ""),
+            None
+        );
+        // Connect failures to a .local host keep the hint.
+        let down = RemoteError::Unreachable(format!("{api}/health: connection failed"));
+        assert!(down.localized(true).contains("局域网 IP"));
+    }
+
+    #[test]
+    fn server_401_end_to_end_has_no_mdns_suffix_and_bare_401_is_classified() {
+        let server = TestServer::start(|request| match request.path.as_str() {
+            "/api/v1/library" => TestResponse::json(
+                401,
+                r#"{"error_code":"UNAUTHORIZED","message":"invalid token"}"#,
+            )
+            .with_header("WWW-Authenticate", r#"Bearer realm="audiolib""#),
+            _ => TestResponse::json(401, "Unauthorized"),
+        });
+        let client = RemoteClient::new(&server.url, "wrong").unwrap();
+        let own = client.library().unwrap_err();
+        assert!(matches!(own, RemoteError::Unauthorized(_)), "{own:?}");
+        assert!(!own.localized(true).contains("fake-ip"));
+        let bare = client.roots().unwrap_err();
+        assert!(matches!(bare, RemoteError::Unauthorized(_)), "{bare:?}");
+    }
+
+    #[test]
     fn auth_rate_limit_and_host_errors_are_classified_without_retrying() {
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let server = {
@@ -1426,6 +1510,15 @@ mod tests {
         assert!(matches!(host, RemoteError::HostForbidden(_)), "{host:?}");
         assert!(host.localized(true).contains("局域网 IP"));
         assert!(host.localized(false).contains("HOST_FORBIDDEN"));
+        assert!(
+            host.localized(true)
+                .contains("请检查 token，或改用服务器局域网 IP / 已配置的主机名")
+        );
+        assert!(!host.localized(true).contains("填入令牌"));
+        assert!(
+            host.localized(false)
+                .contains("Check the access token, or use the server's LAN IP")
+        );
         let admin = client.health().unwrap_err();
         assert!(matches!(admin, RemoteError::AdminLanOnly(_)), "{admin:?}");
         assert!(admin.localized(true).contains("ADMIN_LAN_ONLY"));
