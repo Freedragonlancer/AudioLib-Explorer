@@ -170,3 +170,56 @@ fn completed_scan_and_output_validation_follow_runtime_language() {
     assert!(ui.get_device_info().contains("缓冲"));
     controller.shutdown();
 }
+
+#[test]
+fn preview_volume_label_follows_slider_while_dragging() {
+    use i_slint_backend_testing::{AccessibleRole, ElementQuery};
+    use slint::LogicalPosition;
+    use slint::platform::{PointerEventButton, WindowEvent};
+
+    let (_root, ui, _engine, controller) = fixture();
+    ui.set_audio_ready(true);
+    ui.set_has_selection(true);
+    ui.show().unwrap();
+    let slider = ElementQuery::from_root(&ui)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::Slider)
+        .find_all()
+        .into_iter()
+        .find(|item| item.accessible_value_minimum() == Some(-60.0))
+        .expect("volume slider");
+    let origin = slider.absolute_position();
+    let size = slider.size();
+    let y = origin.y + size.height / 2.0;
+    let at = |fraction: f32| LogicalPosition::new(origin.x + size.width * fraction, y);
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position: at(0.5),
+        button: PointerEventButton::Left,
+    });
+    let mut labels = Vec::new();
+    for fraction in [0.2, 0.4, 0.6, 0.8] {
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: at(fraction),
+        });
+        // Still mid-drag: the poll would not publish while adjusting, so the
+        // label must come from the slider callback itself.
+        let label = ui.get_volume_label().to_string();
+        assert_eq!(
+            label,
+            volume_label(gain_from_db(ui.get_volume_db())).as_str(),
+            "label lagged the dragged value at {fraction}"
+        );
+        labels.push(label);
+    }
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position: at(0.8),
+        button: PointerEventButton::Left,
+    });
+    labels.dedup();
+    assert_eq!(
+        labels.len(),
+        4,
+        "dB label did not change during drag: {labels:?}"
+    );
+    controller.shutdown();
+}
