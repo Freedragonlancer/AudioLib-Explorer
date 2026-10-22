@@ -56,6 +56,7 @@ pub fn router(security: Arc<crate::Security>) -> Router<Service> {
         .route("/admin/", get(page))
         .route("/admin/admin.js", get(script))
         .route("/admin/api/status", get(status))
+        .route("/admin/api/runtime", get(runtime))
         .route("/admin/api/update", get(update_status))
         .route("/admin/api/update/check", post(check_update))
         .route("/admin/api/update/install", post(install_update))
@@ -328,6 +329,131 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<Option<T>>, D::Error> {
     Ok(Some(Option::deserialize(deserializer)?))
+}
+
+/// Waveform cache usage of `GET /admin/api/runtime`.
+#[derive(Debug, Serialize)]
+struct CacheUsage {
+    /// Estimate (bytes measured by the last periodic trim plus writes since); `null`
+    /// until the first trim since startup.
+    estimated_bytes: Option<u64>,
+    limit_bytes: u64,
+}
+
+/// One root of `GET /admin/api/runtime` (cached monitor state, no filesystem access).
+#[derive(Debug, Serialize)]
+struct RootRuntime {
+    name: String,
+    online: bool,
+    state: crate::roots::RootState,
+    message: Option<String>,
+    checked_at: Option<u64>,
+}
+
+/// Snapshot and revision part of `GET /admin/api/runtime`.
+#[derive(Debug, Serialize)]
+struct SnapshotView {
+    library_id: String,
+    revision: u64,
+    #[serde(flatten)]
+    snapshot: crate::state::SnapshotRuntime,
+}
+
+/// Last update check part of `GET /admin/api/runtime`.
+#[derive(Debug, Serialize)]
+struct UpdateRuntime {
+    state: String,
+    channel: Option<&'static str>,
+    current_version: String,
+    /// Release tag selected by the last check, if any.
+    selected: Option<String>,
+    /// Why no release is offered: `disabled`, `up_to_date`, `error` or `null`.
+    skip_reason: Option<&'static str>,
+    message: String,
+    checked_at: Option<u64>,
+}
+
+/// `GET /admin/api/runtime`: in-memory state only (semaphores, scheduler, caches'
+/// counters, root monitor, revision tracker); never scans, walks or queries the library.
+#[derive(Debug, Serialize)]
+struct RuntimeStatus {
+    library: &'static str,
+    list_waveforms: Option<crate::list_waveform::ListWaveformRuntime>,
+    slots: Option<crate::state::SlotUsage>,
+    waveform_cache: Option<CacheUsage>,
+    snapshot: Option<SnapshotView>,
+    roots: Vec<RootRuntime>,
+    update: UpdateRuntime,
+}
+
+async fn runtime(State(service): State<Service>) -> Result<Json<RuntimeStatus>, ApiError> {
+    let update = service.updates().status();
+    let skip_reason = match update.state.as_str() {
+        "disabled" => Some("disabled"),
+        "current" => Some("up_to_date"),
+        "error" => Some("error"),
+        _ => None,
+    };
+    let update = UpdateRuntime {
+        skip_reason,
+        selected: update.tag,
+        state: update.state,
+        channel: update.channel,
+        current_version: update.current_version,
+        message: update.message,
+        checked_at: update.checked_at,
+    };
+    let readiness = service.readiness();
+    let library = match &readiness {
+        Readiness::Ready(_) => "ok",
+        Readiness::Starting => "starting",
+        Readiness::Failed(_) => "error",
+    };
+    let Readiness::Ready(state) = readiness else {
+        return Ok(Json(RuntimeStatus {
+            library,
+            list_waveforms: None,
+            slots: None,
+            waveform_cache: None,
+            snapshot: None,
+            roots: Vec::new(),
+            update,
+        }));
+    };
+    let monitor = state.root_monitor();
+    let roots = monitor
+        .roots()
+        .iter()
+        .enumerate()
+        .map(|(index, root)| {
+            let status = monitor.status(index);
+            RootRuntime {
+                name: root.name.clone(),
+                online: status.online(),
+                state: status.state,
+                message: status.message,
+                checked_at: status.checked_at,
+            }
+        })
+        .collect();
+    let revision = state.tracker().current()?;
+    let (estimated_bytes, limit_bytes) = state.waveform_cache_usage();
+    Ok(Json(RuntimeStatus {
+        library,
+        list_waveforms: Some(state.list_waveforms().runtime(&state)),
+        slots: Some(state.slot_usage()),
+        waveform_cache: Some(CacheUsage {
+            estimated_bytes,
+            limit_bytes,
+        }),
+        snapshot: Some(SnapshotView {
+            library_id: revision.library_id,
+            revision: revision.revision,
+            snapshot: state.snapshot_runtime(),
+        }),
+        roots,
+        update,
+    }))
 }
 
 /// `PUT /admin/api/settings`: only the fields present change; `null` or `""` removes the

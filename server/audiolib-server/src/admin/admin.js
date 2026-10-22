@@ -91,6 +91,15 @@ function render(status) {
     error: "错误：" + (tls.message || ""),
   }[tls.state] || tls.state;
 
+  $("pregen").checked = !!status.pregenerate_list_waveforms;
+  if (document.activeElement !== $("lw-rate")) {
+    $("lw-rate").value = status.list_waveform_rate_source === "admin" ? status.list_waveform_rate : "";
+    $("lw-rate").placeholder = status.list_waveform_rate + "（当前生效值）";
+  }
+  $("lw-source").textContent = "预生成：" + (status.pregenerate_list_waveforms ? "开" : "关") + "（来源：" +
+    SOURCES[status.pregenerate_list_waveforms_source] + "）；速率：" + status.list_waveform_rate + " 文件/秒（来源：" +
+    SOURCES[status.list_waveform_rate_source] + "）";
+
   $("files").textContent = [status.settings_file, status.tokens_file].filter(Boolean).join("，");
 }
 
@@ -487,8 +496,126 @@ $("fs-select").addEventListener("click", () => {
 });
 $("modal").addEventListener("click", (event) => { if (event.target === $("modal")) $("modal").style.display = "none"; });
 
+// ---- List waveform settings ----
+async function saveListWaveforms(body) {
+  try {
+    render(await api("PUT", "settings", body));
+    toast("已保存");
+    refreshRuntime();
+  } catch (error) { toast(error.message, true); }
+}
+$("save-lw").addEventListener("click", () => {
+  const text = $("lw-rate").value.trim();
+  const rate = text === "" ? null : Number(text);
+  if (rate !== null && !(Number.isInteger(rate) && rate >= 1 && rate <= 1000)) {
+    toast("速率必须是 1–1000 的整数", true);
+    return;
+  }
+  saveListWaveforms({ pregenerate_list_waveforms: $("pregen").checked, list_waveform_rate: rate });
+});
+$("reset-lw").addEventListener("click", () => saveListWaveforms({ pregenerate_list_waveforms: null, list_waveform_rate: null }));
+
+// ---- Runtime status (GET /admin/api/runtime) ----
+const RUNTIME_INTERVAL_MS = 5000;
+let runtimeTimer = null;
+
+function bytesText(bytes) {
+  if (bytes === null || bytes === undefined) return "未知";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return (unit ? value.toFixed(1) : String(value)) + " " + units[unit];
+}
+
+function usage(used, limit) {
+  if (used === null || used === undefined) return "未知 / " + bytesText(limit) + "（首次清理前未统计）";
+  return bytesText(used) + " / " + bytesText(limit) + (limit ? "（" + Math.round((used / limit) * 100) + "%）" : "");
+}
+
+function renderRuntime(rt) {
+  $("rt-updated").textContent = "更新于 " + new Date().toLocaleTimeString();
+  const list = rt.list_waveforms;
+  if (list) {
+    const job = list.job;
+    const progress = job
+      ? "任务 " + ({ running: "进行中", paused: "已暂停", completed: "已完成", cancelled: "已取消", error: "出错", yielding: "让行中" }[job.state] || job.state) +
+        "：已完成 " + numberText(job.done) + " / " + numberText(job.total) + "，待处理 " + numberText(list.pending ?? Math.max(0, job.total - job.done)) +
+        "，失败 " + numberText(job.failed)
+      : "无任务";
+    $("rt-list").textContent = (list.enabled ? "已开启" : "已关闭") + (list.paused ? "（暂停）" : "") + " · " + progress +
+      " · 解码失败记录 " + numberText(list.failed) + " · 按需队列 " + numberText(list.queued_on_demand) +
+      " · 当前速率 " + list.current_rate + " 文件/秒（上限 " + list.rate + "）" +
+      (list.last_error ? " · 最近错误：" + list.last_error.message : "");
+  } else {
+    $("rt-list").textContent = "库未就绪（" + rt.library + "）";
+  }
+  const slots = rt.slots;
+  const names = { streams: "流", previews: "预览", transcodes: "转码", waveforms: "波形" };
+  $("rt-slots").textContent = slots
+    ? Object.keys(names).map((key) => names[key] + " " + slots[key].active + " / " + slots[key].max).join(" · ")
+    : "—";
+  $("rt-cache").textContent = list && rt.waveform_cache
+    ? "波形缓存 " + usage(rt.waveform_cache.estimated_bytes, rt.waveform_cache.limit_bytes) + " · 列表波形缓存 " +
+      usage(list.cache_bytes, list.cache_limit_bytes) + "，" + numberText(list.cache_entries) + " 条" + (list.over_budget ? "（已超限淘汰）" : "")
+    : "—";
+  const snap = rt.snapshot;
+  $("rt-snapshot").textContent = snap
+    ? "revision " + snap.revision + " · " + (snap.preparing || snap.preparing_zstd ? "正在生成快照" : "空闲") +
+      (snap.cached ? " · 已缓存快照 r" + snap.cached.revision + "（" + bytesText(snap.cached.bytes) +
+        (snap.cached.zstd_bytes ? "，zstd " + bytesText(snap.cached.zstd_bytes) : "") + "）" : " · 无缓存快照")
+    : "—";
+  const roots = $("rt-roots");
+  roots.replaceChildren();
+  if (!rt.roots.length) roots.textContent = "—";
+  for (const root of rt.roots) {
+    const line = document.createElement("div");
+    line.className = root.online ? "" : "warn";
+    line.textContent = root.name + "：" + ({ online: "在线", checking: "检查中", waking: "唤醒中", offline: "离线" }[root.state] || root.state) +
+      "（最近检查 " + when(root.checked_at) + "）" + (root.message ? " " + root.message : "");
+    roots.appendChild(line);
+  }
+  const up = rt.update;
+  const skip = { disabled: "未启用自动更新", up_to_date: "已是最新", error: "检查出错" }[up.skip_reason];
+  $("rt-update").textContent = (up.channel || "—") + " 通道 · 当前 " + up.current_version + " · 选中 " + (up.selected || "无") +
+    (skip ? " · 跳过原因：" + skip : "") + " · " + up.message + " · 检查时间 " + when(up.checked_at);
+
+  const limits = $("rt-limits");
+  limits.replaceChildren();
+  const rows = [];
+  if (slots) {
+    rows.push(["max_streams", slots.streams.max], ["max_previews", slots.previews.max],
+      ["max_transcodes", slots.transcodes.max], ["max_waveforms", slots.waveforms.max]);
+  }
+  if (rt.waveform_cache) rows.push(["waveform_cache_mb", bytesText(rt.waveform_cache.limit_bytes)]);
+  if (list) rows.push(["list_waveform_cache_mb", bytesText(list.cache_limit_bytes)]);
+  for (const [name, value] of rows) {
+    const row = limits.insertRow();
+    row.insertCell().textContent = name;
+    row.cells[0].className = "mono";
+    row.insertCell().textContent = String(value);
+    row.insertCell().appendChild(badge("需重启", "link"));
+  }
+}
+
+async function refreshRuntime() {
+  clearTimeout(runtimeTimer);
+  runtimeTimer = null;
+  if (document.visibilityState !== "visible") return;
+  try {
+    renderRuntime(await api("GET", "runtime"));
+    $("rt-error").textContent = "";
+  } catch (error) { $("rt-error").textContent = "读取运行状态失败：" + error.message; }
+  if (document.visibilityState === "visible") runtimeTimer = setTimeout(refreshRuntime, RUNTIME_INTERVAL_MS);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshRuntime();
+  else { clearTimeout(runtimeTimer); runtimeTimer = null; }
+});
+
 refresh();
 refreshUpdate();
 refreshRoots();
+refreshRuntime();
 setInterval(() => { if (document.visibilityState === "visible") refreshUpdate(); }, 2000);
 setInterval(() => { if (document.visibilityState === "visible") { refresh(); if (!scanTimer || !$("scan-box").dataset.session || $("scan-box").classList.contains("hidden")) refreshRoots(); } }, 15000);

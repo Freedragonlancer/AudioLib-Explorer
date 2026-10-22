@@ -120,7 +120,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - 修改请求（`PUT`/`POST`/`DELETE`）必须带 `X-AudioLib-Admin: 1`，浏览器带 `Origin` 时必须与 `Host` 同源，否则 403 `ADMIN_HEADER_REQUIRED`（自定义头使跨站网页无法静默发起修改）。
 - 管理响应都带 `Cache-Control: no-store`、`X-Frame-Options: DENY`，页面另有严格的 `Content-Security-Policy`。
 
-**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。设置在处理该管理页请求的实例中即时生效，没有需要重启的项。
+**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。设置在处理该管理页请求的实例中即时生效，没有需要重启的项（页面上只读显示的 `config.toml` 资源限制除外，见 §2.3.2）。
 
 共享同一设置目录时，受 `manage_mode` 保护的 API 在准入时取得跨实例设置锁、重读最新设置，并在同一锁内依次检查 bearer 和管理权限，随后检查库身份。设置锁被另一操作占用时先返回 409 `BUSY`，不使用旧策略放行。另一实例已收紧或放宽策略后，首次获准进入权限核验的管理请求就使用新策略；已准入请求不因之后的策略更改撤回。普通读取、音频流及非管理写入使用该实例当前的鉴权状态，不等待耗时根目录编辑的设置锁；这不承诺所有设置与 token 在所有实例间实时广播。局域网 `/admin` 入口继续使用独立的 LAN、Host 与同源检查。
 
@@ -129,13 +129,52 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 | 请求 | 说明 |
 |---|---|
 | `GET /admin/api/status` | 版本、库状态、`auth_mode`(+`_source`: `default`/`config`/`admin`)、`manage_mode`(+`_source`，同上)、`public_url`(+`_source`)、`lan_url`、`lan_url_source`、`lan_url_candidates`、`http_port`、`env_token`（是否配置了环境变量 token）、`token_count`、`tls { configured, source, state: off/starting/listening/error, port, message }`、设置文件路径、`warnings` |
-| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）；回复同 status |
+| `GET /admin/api/runtime` | 只读运行状态，见下文 §2.3.2；每次请求只读内存状态 |
+| `GET /admin/api/update` | 更新状态 `{state, current_version, channel, tag, release_url, message, checked_at}`；`state` 为 `disabled`/`checking`/`current`/`available`/`downloading`/`ready`/`error`；`checked_at`（新增，Unix 秒）为本进程最近一次检查完成（成功或失败）的时间，未检查过为 `null` |
+| `POST /admin/api/update/check` | 开始一次后台检查，立即回复同 `GET /admin/api/update`；已有更新操作进行中 409 `BUSY`，未启用 503 `UNAVAILABLE` |
+| `POST /admin/api/update/install` | `{"tag"}`（必须等于检查得到的 `tag`）下载、校验并部署；扫描进行中 409 `UPDATE_BUSY` |
+| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?, "pregenerate_list_waveforms"?, "list_waveform_rate"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）；回复同 status |
 | `PUT /admin/api/tls` | `{"cert_path","key_path","port"}`，校验后保存并（重新）监听；回复同 status（最多等 4 秒拿到监听结果） |
 | `DELETE /admin/api/tls` | 停用（回到 `config.toml` 的 TLS 设置，默认没有） |
 | `GET /admin/api/tokens` | `{"tokens":[{"id","name","created_at","last_used_at"}]}`（不含哈希） |
 | `POST /admin/api/tokens` | `{"name"}` → 201 `{"token":{…},"secret":"al_…"}`，`secret` 只出现这一次 |
 | `DELETE /admin/api/tokens/{id}` | 撤销 → 204；不存在 → 404 `NOT_FOUND` |
 | `GET /admin/api/fs`、`GET`/`POST /admin/api/roots`、`DELETE /admin/api/roots/{name}`、`/admin/api/scans...` | 库根目录管理，见 §2.3.1 |
+
+#### 2.3.2 运行状态 `GET /admin/api/runtime`
+
+只读，访问限制同其他管理接口（局域网直连 + LAN `Host`，否则 403 `ADMIN_LAN_ONLY`；`Cache-Control: no-store`）。**只读取内存中的状态和已缓存的计数**（信号量、列表波形调度器、缓存计数器、根目录监控的缓存结果、revision 跟踪器、更新管理器），不扫描、不遍历文件系统、不查询库数据库，可以频繁轮询；管理页每 5 秒刷新一次，标签页隐藏时暂停。库启动中或打开失败时 `library` 为 `starting` / `error`，库相关字段为 `null`、`roots` 为空，`update` 照常。
+
+| 字段 | 说明 |
+|---|---|
+| `library` | `ok` / `starting` / `error` |
+| `list_waveforms` | `enabled`（生效的 `pregenerate_list_waveforms`）、`paused`、`rate`（生效的 `list_waveform_rate`，文件/秒）、`current_rate`（最近 60 秒实测，文件/秒，一位小数）、`job`（当前或最近一次缓存任务，同 `GET /api/v1/waveforms/status` 的 `job`：`done`/`total`/`generated`/`skipped`/`failed`…，没有为 `null`）、`pending`（进行中任务的 `total - done`，否则 `null`）、`failed`（当前文件版本解码失败的记录数）、`queued_on_demand`、`cache_entries`、`cache_bytes`、`cache_limit_bytes`（`list_waveform_cache_mb`）、`over_budget`、`last_error`。与 `GET /api/v1/waveforms/status` 不同，这里不计算 `total` / `remaining`（那两个需要查询数据库） |
+| `slots` | `streams` / `previews` / `transcodes` / `waveforms`：各为 `{active, max}`，`max` 即 `max_streams` / `max_previews` / `max_transcodes` / `max_waveforms`（`config.toml`，需重启生效） |
+| `waveform_cache` | `{estimated_bytes, limit_bytes}`：完整波形缓存。`estimated_bytes` 是最近一次定期清理（每若干次写入）测得的大小加上之后写入的字节数，为估算值；启动后首次清理前为 `null`。`limit_bytes` 即 `waveform_cache_mb`（需重启） |
+| `snapshot` | `library_id`、`revision`（内存中最近已知的值，不读数据库）、`preparing` / `preparing_zstd`（是否正在生成快照）、`cached`（复用的快照副本 `{revision, schema_version, bytes, zstd_bytes}`，没有为 `null`） |
+| `roots` | `[{name, online, state: checking/online/waking/offline, message, checked_at}]`，根目录监控的缓存结果；`checked_at` 为最近一次检查或流读取结果的 Unix 秒 |
+| `update` | 最近一次更新检查：`state`、`channel`、`current_version`、`selected`（检查选中的发布 tag，没有为 `null`）、`skip_reason`（未提供更新的原因：`disabled` 未启用 / `up_to_date` 已是最新 / `error` 检查失败，否则 `null`）、`message`、`checked_at` |
+
+示例（测试夹具）：
+
+```json
+{
+  "library": "ok",
+  "list_waveforms": { "enabled": false, "paused": false, "rate": 10, "current_rate": 0.0, "job": null, "pending": null,
+    "failed": 0, "queued_on_demand": 0, "cache_entries": 0, "cache_bytes": 0, "cache_limit_bytes": 671088640,
+    "over_budget": false, "last_error": null },
+  "slots": { "streams": { "active": 0, "max": 3 }, "previews": { "active": 0, "max": 5 },
+    "transcodes": { "active": 0, "max": 2 }, "waveforms": { "active": 0, "max": 4 } },
+  "waveform_cache": { "estimated_bytes": null, "limit_bytes": 1073741824 },
+  "snapshot": { "library_id": "86574ab3-929c-4510-92b9-69fb2295ad07", "revision": 1, "preparing": false,
+    "preparing_zstd": false, "cached": null },
+  "roots": [ { "name": "SFX_Main", "online": true, "state": "online", "message": null, "checked_at": 1792695833 } ],
+  "update": { "state": "disabled", "channel": null, "current_version": "0.6.4", "selected": null,
+    "skip_reason": "disabled", "message": "此进程未启用自动更新", "checked_at": null }
+}
+```
+
+管理页「列表波形与资源限制」可修改 `pregenerate_list_waveforms` 和 `list_waveform_rate`（经 `PUT /admin/api/settings`，立即生效）；建议速率 40 文件/秒或更低以保持较低资源占用。其他限制（`max_*`、`*_cache_mb`）只读显示并标注「需重启」，只能在 `config.toml` 修改。
 
 #### 2.3.1 库根目录管理（管理页专用 Web API）
 
