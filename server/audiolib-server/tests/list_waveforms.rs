@@ -136,6 +136,7 @@ fn peer(address: &str) -> ConnectionInfo {
     ConnectionInfo {
         peer: address.parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     }
 }
 
@@ -775,7 +776,7 @@ async fn settings_follow_config_admin_overrides_and_manage_mode() {
             .header("content-type", "application/json")
             .body(Body::from(body))
             .unwrap();
-        request.extensions_mut().insert(peer("127.0.0.1:1"));
+        request.extensions_mut().insert(peer("192.168.1.2:1"));
         router(f.state.clone()).oneshot(request)
     };
     let response = admin(r#"{"pregenerate_list_waveforms":true}"#)

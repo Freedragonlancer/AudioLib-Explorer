@@ -229,8 +229,9 @@ async fn call(
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .unwrap();
     let connection = connection.unwrap_or(ConnectionInfo {
-        peer: "127.0.0.1:1".parse().unwrap(),
+        peer: "192.168.1.2:1".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     });
     request.extensions_mut().insert(connection);
     router(Service::from(state.clone()))
@@ -778,10 +779,12 @@ async fn scan_and_history_endpoints_follow_the_auth_mode() {
     let lan = ConnectionInfo {
         peer: "10.0.0.20:50000".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     };
     let public = ConnectionInfo {
         peer: "203.0.113.9:50000".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     };
     let bearer = format!("Bearer {TOKEN}");
     let paths: &[(Method, &str, Option<&str>)] = &[
