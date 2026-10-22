@@ -72,6 +72,11 @@ paths and `launchctl bootstrap "gui/$(id -u)" <plist>`. Restart with
 for removable/network volume access after each binary swap, use the optional
 [launcher](../launcher/README.md).
 
+The example sets `EnvironmentVariables` → `AUDIOLIB_LAUNCHD_LABEL` to the plist `Label`.
+Keep the two identical: self-update exits with code 75 (so `KeepAlive` relaunches via the
+launcher chain) only on macOS when `AUDIOLIB_LAUNCHD_LABEL` is non-empty and exactly equals
+launchd's `XPC_SERVICE_NAME`; otherwise it `exec`s in place.
+
 ### Docker
 
 Build from the repository root (the build context needs the whole workspace):
