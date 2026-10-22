@@ -254,7 +254,10 @@ async fn library_reports_identity_schema_and_monotonic_revision() {
     }
     let database = raw["database"].as_str().expect("database is a string");
     assert!(!database.is_empty());
-    assert!(!database.contains('/') && !database.contains('\\'), "{database}");
+    assert!(
+        !database.contains('/') && !database.contains('\\'),
+        "{database}"
+    );
     assert_eq!(
         raw["revision"].as_u64(),
         Some(first.revision),
