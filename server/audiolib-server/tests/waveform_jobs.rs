@@ -132,6 +132,7 @@ fn peer(address: &str) -> ConnectionInfo {
     ConnectionInfo {
         peer: address.parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     }
 }
 

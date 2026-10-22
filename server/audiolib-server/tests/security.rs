@@ -29,6 +29,16 @@ fn fixture(extra: &str) -> (tempfile::TempDir, Arc<Security>, Service) {
 }
 
 async fn request(service: &Service, host: &str, token: bool, peer: &str) -> Response {
+    request_on(service, host, token, peer, None).await
+}
+
+async fn request_on(
+    service: &Service,
+    host: &str,
+    token: bool,
+    peer: &str,
+    local: Option<&str>,
+) -> Response {
     let mut request =
         support::modern(Request::get("/api/v1/capabilities")).header(header::HOST, host);
     if token {
@@ -38,8 +48,53 @@ async fn request(service: &Service, host: &str, token: bool, peer: &str) -> Resp
     request.extensions_mut().insert(ConnectionInfo {
         peer: peer.parse().unwrap(),
         listener: Listener::Http,
+        local: local.map(|local| local.parse().unwrap()),
     });
     router(service.clone()).oneshot(request).await.unwrap()
+}
+
+#[tokio::test]
+async fn same_host_peers_are_external_even_without_forwarding_headers() {
+    // A reverse proxy on this host (e.g. Lucky) connects from loopback or from the
+    // host's own LAN IP, so those peers must present a token like public traffic.
+    let (_directory, _security, service) = fixture("auth_mode = 'external'\n");
+    let same_host = [
+        ("127.0.0.1:4000", None),
+        ("127.0.0.1:4000", Some("127.0.0.1:8790")),
+        ("[::1]:4000", Some("[::1]:8790")),
+        ("[::ffff:127.0.0.1]:4000", None),
+        ("192.168.1.5:4000", Some("192.168.1.5:8790")),
+        ("[::ffff:192.168.1.5]:4000", Some("192.168.1.5:8790")),
+    ];
+    for (peer, local) in same_host {
+        for host in ["localhost:8790", "192.168.1.5:8790", "audio.example.com"] {
+            assert_eq!(
+                request_on(&service, host, false, peer, local)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED,
+                "{peer} {local:?} {host}"
+            );
+            assert_eq!(
+                request_on(&service, host, true, peer, local).await.status(),
+                StatusCode::OK,
+                "{peer} {local:?} {host}"
+            );
+        }
+    }
+    // Another LAN machine reaching the same local address needs no token.
+    assert_eq!(
+        request_on(
+            &service,
+            "audio.example.com",
+            false,
+            "192.168.1.2:4000",
+            Some("192.168.1.5:8790"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -88,7 +143,6 @@ async fn lan_peers_need_no_token_whatever_the_host_header() {
         for peer in [
             "192.168.1.2:4000",
             "10.0.0.5:4000",
-            "127.0.0.1:4000",
             "[fe80::1]:4000",
             "[fd00::2]:4000",
             "[::ffff:192.168.1.2]:4000",
@@ -143,6 +197,7 @@ async fn non_lan_or_forwarded_peers_still_need_a_token_in_external_mode() {
     request.extensions_mut().insert(ConnectionInfo {
         peer: "127.0.0.1:4000".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     });
     assert_eq!(
         router(service).oneshot(request).await.unwrap().status(),
@@ -162,6 +217,7 @@ async fn duplicate_and_missing_hosts_cannot_bypass_token_free_admission() {
         request.extensions_mut().insert(ConnectionInfo {
             peer: "203.0.113.7:4000".parse().unwrap(),
             listener: Listener::Http,
+            local: None,
         });
         assert_eq!(
             router(service.clone())
@@ -197,6 +253,7 @@ async fn disabling_lan_trust_requires_tokens_and_closes_the_password_free_admin(
     request.extensions_mut().insert(ConnectionInfo {
         peer: "172.18.0.1:4000".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     });
     assert_eq!(
         router(service).oneshot(request).await.unwrap().status(),
@@ -211,6 +268,7 @@ async fn disabling_lan_trust_requires_tokens_and_closes_the_password_free_admin(
                 Some(&ConnectionInfo {
                     peer: "172.18.0.1:4000".parse().unwrap(),
                     listener: Listener::Http,
+                    local: None,
                 })
             )
             .unwrap_err()
@@ -245,6 +303,7 @@ async fn failed_authentication_is_limited_by_socket_ip_not_forwarding_headers() 
             request.extensions_mut().insert(ConnectionInfo {
                 peer: format!("{peer}:4000").parse().unwrap(),
                 listener: Listener::Http,
+                local: None,
             });
             assert_eq!(
                 router(service.clone())
@@ -274,6 +333,7 @@ fn management_defaults_reject_external_tokens_but_explicit_all_is_preserved() {
     let peer = ConnectionInfo {
         peer: "203.0.113.1:4000".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     };
     assert_eq!(
         security
