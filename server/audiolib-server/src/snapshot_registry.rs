@@ -162,6 +162,31 @@ impl SnapshotRegistry {
         Some(SnapshotLease(entry.clone()))
     }
 
+    /// Release the least recently used retained entry without an active lease, so a
+    /// preparation short of disk space can reclaim it. Returns whether one was released.
+    pub fn evict_oldest_idle(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let oldest = inner
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| Arc::strong_count(entry) == 1)
+            .min_by_key(|(_, entry)| {
+                *entry
+                    .last_used
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            })
+            .map(|(index, _)| index);
+        match oldest {
+            Some(index) => {
+                inner.entries.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn prune(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         Self::prune_inner(&mut inner, Instant::now(), self.ttl);
@@ -234,6 +259,29 @@ mod tests {
     fn prune_after_ttl(registry: &SnapshotRegistry) {
         let mut inner = registry.inner.lock().unwrap();
         SnapshotRegistry::prune_inner(&mut inner, Instant::now() + IDLE_TTL, IDLE_TTL);
+    }
+
+    #[test]
+    fn evict_oldest_idle_releases_lru_idle_entries_only() {
+        let registry = registry(4, 100);
+        let old = registry.admit(representation(1)).unwrap();
+        let old_id = old.representation().file.id.clone();
+        drop(old);
+        age(&registry, &old_id, Duration::from_secs(60));
+        let newer = registry.admit(representation(1)).unwrap();
+        let newer_id = newer.representation().file.id.clone();
+        drop(newer);
+        let live = registry.admit(representation(1)).unwrap();
+        assert!(registry.evict_oldest_idle());
+        assert!(registry.get(&old_id, "library").is_none());
+        assert!(registry.get(&newer_id, "library").is_some());
+        assert!(registry.evict_oldest_idle());
+        assert!(!registry.evict_oldest_idle());
+        assert!(
+            registry
+                .get(&live.representation().file.id, "library")
+                .is_some()
+        );
     }
 
     #[test]
