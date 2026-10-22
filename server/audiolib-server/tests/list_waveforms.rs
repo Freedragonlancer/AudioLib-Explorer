@@ -1272,10 +1272,26 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     // exact bytes, and neither response retains the preparation permit.
     let second = bundle_response(&f.state).await;
     assert_eq!(second.headers()["etag"], bundle_etag);
+    let second_cc = second.headers()["cache-control"].clone();
     let third = bundle_response(&f.state).await;
     assert_eq!(third.headers()["etag"], bundle_etag);
     assert_eq!(bytes(second).await, body);
     assert_eq!(bytes(third).await, body);
+    assert_eq!(second_cc, "private, no-cache");
+    // Conditional requests: match / weak / list / `*` -> 304 without body; mismatch -> 200.
+    let weak = format!("W/{bundle_etag}");
+    let listed = format!("\"wfb1-other\", {bundle_etag}");
+    for tag in [bundle_etag.as_str(), weak.as_str(), listed.as_str(), "*"] {
+        let response = bundle_response_with(&f.state, &[("if-none-match", tag)]).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{tag}");
+        assert_eq!(response.headers()["etag"], bundle_etag, "{tag}");
+        assert_eq!(response.headers()["cache-control"], "private, no-cache");
+        assert!(bytes(response).await.is_empty(), "{tag}");
+    }
+    let response = bundle_response_with(&f.state, &[("if-none-match", "\"wfb1-stale\"")]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["etag"], bundle_etag);
+    assert_eq!(bytes(response).await, body);
     let leftovers = std::fs::read_dir(wfdb.path().parent().unwrap())
         .unwrap()
         .filter(|e| {
@@ -1292,13 +1308,18 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
 /// `GET /waveforms/bundle`, retrying while another
 /// test holds the process-wide bundle slot (503 `BUSY`).
 async fn bundle_response(state: &AppState) -> Response {
+    bundle_response_with(state, &[]).await
+}
+
+/// [`bundle_response`] with extra request headers (e.g. `If-None-Match`).
+async fn bundle_response_with(state: &AppState, headers: &[(&str, &str)]) -> Response {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = call(
             state.clone(),
             Method::GET,
             "/waveforms/bundle?encoding=i8-minmax-base64",
-            &[],
+            headers,
             LAN,
             None,
         )
