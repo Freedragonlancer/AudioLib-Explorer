@@ -554,6 +554,31 @@ mod tests {
     }
 
     #[test]
+    fn released_0_6_0_catalog_and_later_patch_catalogs() {
+        let local = compatibility_manifest();
+        // The shipped 0.6.0 catalog only admits legacy releases and exactly 0.6.0.
+        let mut released = local.clone();
+        released.application_version = "0.6.0".into();
+        let mut ranges: Vec<String> = LEGACY_APPLICATION_RANGES
+            .iter()
+            .map(|range| (*range).to_owned())
+            .collect();
+        ranges.push("=0.6.0".into());
+        released.peer_application_ranges = ranges.clone();
+        released.direct_use_application_ranges = ranges.clone();
+        released.auto_migrate_application_ranges = ranges;
+        let current = local.application_version.clone();
+        assert_ne!(current, "0.6.0");
+        assert!(!peer_versions_compatible(&local, "0.6.0", Some(&released)));
+        assert!(!peer_versions_compatible(&released, &current, Some(&local)));
+        // Later 0.6.x patches carrying the minor-line range accept each other.
+        let mut later = local.clone();
+        later.application_version = "0.6.9".into();
+        assert!(peer_versions_compatible(&local, "0.6.9", Some(&later)));
+        assert!(peer_versions_compatible(&later, &current, Some(&local)));
+    }
+
+    #[test]
     fn peer_checks_are_mutual_bounded_and_pre_release_explicit() {
         let local = compatibility_manifest();
         for supported in ["0.6.0", "0.6.1", "0.6.9"] {

@@ -10,9 +10,10 @@ Upgrade notes:
 - **One full snapshot download after upgrading from 0.6.0.** Snapshot ETags changed
   from weak `W/"<library_id>-r<revision>"` to strong `"snapshot-<UUID>"`, so the
   first sync re-downloads the library once; later syncs are incremental as before.
-- **Clients and server must both be 0.6.1.** 0.6.0 only accepts an exactly matching
-  0.6.0 peer. From 0.6.1 on, patch releases of the 0.6 line accept each other
-  (`>=0.6.0, <0.7.0`), so a 0.6.1 client can still connect to a 0.6.0 server.
+- **Clients and server must both be 0.6.1.** The version handshake is mutual and
+  0.6.0 only accepts an exactly matching 0.6.0 peer, so 0.6.0 and 0.6.1 cannot connect
+  in either direction. From 0.6.1 on, patch releases of the 0.6 line accept each other
+  (`>=0.6.0, <0.7.0`), so later 0.6.x upgrades need not be simultaneous.
 - **`manage_mode` now defaults to `lan`** (was `all`). Without an explicit setting,
   scans and deletions are only allowed from the LAN, even with a token.
   Set `manage_mode = "all"` to keep the previous behaviour.
