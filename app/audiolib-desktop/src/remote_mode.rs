@@ -3392,14 +3392,15 @@ pub(super) fn is_remote_cache_path(data_root: &Path, path: &Path) -> bool {
     path.starts_with(data_root.join("remote"))
 }
 
-/// Fill an empty `waveforms.db` from the server's bundle, or revalidate a bundle-filled one, (doc/api §9.4.2), on a
-/// background thread. `503 BUSY` is retried with `bundle_backoff` (5 s doubling, at most
-/// 5 minutes) while page lookups continue; the thread ends when the provider is replaced
-/// (its last strong reference is dropped) or on any other outcome.
+/// Fill an empty `waveforms.db` from the server's bundle, or revalidate a bundle-filled one
+/// (doc/api §9.4.2), on a background thread. `503 BUSY` is retried with `bundle_backoff`
+/// (5 s doubling, at most 5 minutes) while page lookups continue; the thread ends when the
+/// provider is replaced (its last strong reference is dropped) or on any other outcome.
 fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
     // An empty store downloads the bundle; a store filled by an earlier bundle revalidates
-    // it with `If-None-Match` (a `304` reuses the cache). A store filled only by page
-    // lookups (no recorded bundle ETag) keeps using page lookups.
+    // it with `If-None-Match`. A `304`, or a `200` with the same ETag from a server that
+    // ignores the condition, reuses the cache without reading a body. A store filled only by
+    // page lookups (no recorded bundle ETag) keeps using page lookups.
     let wanted = service.offers_bundle()
         && (service
             .i8_store()

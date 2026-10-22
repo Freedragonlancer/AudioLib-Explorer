@@ -317,8 +317,10 @@ impl RemoteClient {
     /// `503 BUSY` is [`RemoteError::Busy`] with `Retry-After`. The caller validates and
     /// removes the file.
     /// With `if_none_match` (the ETag of the bundle already installed) the request carries
-    /// `If-None-Match`; a `304` is [`BundleDownload::NotModified`] and `destination` is not
-    /// touched. A `304` to a request without `If-None-Match` is a protocol error.
+    /// `If-None-Match`; a `304` (whose `ETag`, if any, must equal `if_none_match`), or a `200`
+    /// whose `ETag` equals `if_none_match` (a server ignoring the condition; the body is not
+    /// read), is [`BundleDownload::NotModified`] and `destination` is not touched. A `304` to a
+    /// request without `If-None-Match` is a protocol error.
     pub fn download_list_waveform_bundle(
         &self,
         destination: &Path,
@@ -353,11 +355,38 @@ impl RemoteClient {
             request
         })
         .map_err(|error| RemoteError::from_transport(error, &url))?;
+        let raw_header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.trim().to_owned())
+        };
+        let (reply_etag, reply_library) = (raw_header("etag"), raw_header("x-library-id"));
         let Some(response) =
             self.checked_conditional(response, context, if_none_match.is_some())?
         else {
-            return Ok(BundleDownload::NotModified);
+            // A 304 names the representation it confirms: it must be the installed one.
+            if let (Some(known), Some(reply)) = (if_none_match, reply_etag.as_deref())
+                && reply != known
+            {
+                return Err(RemoteError::Protocol(format!(
+                    "{context}: 304 Not Modified with ETag {reply}, expected {known}"
+                )));
+            }
+            return Ok(BundleDownload::NotModified {
+                library_id: reply_library,
+            });
         };
+        // An older server ignores If-None-Match and answers 200 with the whole bundle (about
+        // 300 MB for a large library). When its ETag is the installed one, the body is not
+        // read: re-downloading would only replace the store and drop rows written since.
+        if if_none_match.is_some() && reply_etag.as_deref() == if_none_match {
+            drop(response);
+            return Ok(BundleDownload::NotModified {
+                library_id: reply_library,
+            });
+        }
         let header = |name: &str| {
             response
                 .headers()
@@ -839,8 +868,15 @@ impl RemoteListWaveforms {
                 known.as_deref(),
                 cancel,
             )? {
-                BundleDownload::NotModified => {
-                    tracing::info!(etag = ?known, "waveform bundle not modified; cached store reused");
+                BundleDownload::NotModified { library_id } => {
+                    if let Some(library_id) = library_id
+                        && library_id != self.library_id
+                    {
+                        return Err(RemoteError::LibraryChanged(format!(
+                            "waveform bundle check is for library {library_id:?}, not the open one"
+                        )));
+                    }
+                    tracing::info!(etag = ?known, "waveform bundle not modified; store reused");
                     return Ok(BundleImport::NotModified);
                 }
                 BundleDownload::Downloaded(meta) => meta,
@@ -859,12 +895,12 @@ impl RemoteListWaveforms {
                     .map_err(|error| RemoteError::Protocol(error.to_string()))?;
             // Drop the old tag first: a store replaced without a recorded tag only costs a
             // full download next time, while a stale tag could answer for the wrong bundle.
-            remove_bundle_etag(&etag_path)?;
+            remove_bundle_etag(&etag_path);
             store
                 .replace_with(&staged)
                 .map_err(|error| RemoteError::Io(std::io::Error::other(error.to_string())))?;
             if let Err(error) = write_bundle_etag(&etag_path, &meta.etag) {
-                tracing::warn!(%error, "waveform bundle ETag not saved; the next import downloads in full");
+                tracing::warn!(%error, "waveform bundle ETag not saved; next check downloads");
             }
             tracing::info!(rows, bytes = meta.bytes, etag = %meta.etag, "waveform bundle installed");
             Ok(BundleImport::Installed { rows })
@@ -1231,8 +1267,9 @@ pub struct BundleMeta {
 /// Outcome of [`RemoteClient::download_list_waveform_bundle`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BundleDownload {
-    /// `304` to `If-None-Match`: the installed bundle is current; nothing was written.
-    NotModified,
+    /// The installed bundle is current (`304`, or a `200` carrying the same `ETag` whose body
+    /// was not read); nothing was written. `library_id` is the reply's `X-Library-Id`.
+    NotModified { library_id: Option<String> },
     /// `200`: the bundle was written to the destination and its ETag verified.
     Downloaded(BundleMeta),
 }
@@ -1263,10 +1300,14 @@ fn is_bundle_etag(text: &str) -> bool {
         })
 }
 
-fn remove_bundle_etag(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
-        _ => Ok(()),
+/// Best effort: a tag that cannot be removed (for example denied by another process) is
+/// logged and the install continues; [`write_bundle_etag`] then replaces it, and a tag left
+/// stale only makes the next check download the bundle in full.
+fn remove_bundle_etag(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, "old waveform bundle ETag not removed; continuing");
     }
 }
 
@@ -2450,11 +2491,22 @@ mod bundle_tests {
         }
     }
 
-    /// A bundle server honouring `If-None-Match`; `force_304` answers `304` to every
-    /// request. Returns the `If-None-Match` value of each bundle request.
+    /// How [`conditional_server`] treats `If-None-Match`.
+    #[derive(Clone, Copy)]
+    enum Condition {
+        /// `304` when it matches the bundle's ETag.
+        Honour,
+        /// `304` to every request, with this ETag and `X-Library-Id`.
+        Always304(Option<&'static str>, &'static str),
+        /// An older server: always `200` with the whole bundle.
+        Ignore,
+    }
+
+    /// A bundle server treating `If-None-Match` per `mode`. Returns the `If-None-Match`
+    /// value of each bundle request.
     fn conditional_server(
         bytes: Vec<u8>,
-        force_304: bool,
+        mode: Condition,
     ) -> (TestServer, Arc<Mutex<Vec<Option<String>>>>) {
         let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
@@ -2463,8 +2515,20 @@ mod bundle_tests {
             if request.path.starts_with("/api/v1/waveforms/bundle") {
                 let condition = request.header("If-None-Match").map(str::to_owned);
                 log.lock().unwrap().push(condition.clone());
-                if force_304 || condition.as_deref() == Some(etag.as_str()) {
-                    return TestResponse::bytes(304, Vec::new()).with_header("ETag", &etag);
+                let not_modified = |tag: Option<&str>, library: &str| {
+                    let response =
+                        TestResponse::bytes(304, Vec::new()).with_header("X-Library-Id", library);
+                    match tag {
+                        Some(tag) => response.with_header("ETag", tag),
+                        None => response,
+                    }
+                };
+                match mode {
+                    Condition::Always304(tag, library) => return not_modified(tag, library),
+                    Condition::Honour if condition.as_deref() == Some(etag.as_str()) => {
+                        return not_modified(Some(&etag), LIBRARY);
+                    }
+                    _ => {}
                 }
                 return TestResponse::bytes(200, bytes.clone())
                     .with_header("Content-Type", "application/vnd.sqlite3")
@@ -2484,7 +2548,7 @@ mod bundle_tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = bundle_bytes(LIBRARY, "");
         let etag = etag_of(&bytes);
-        let (server, seen) = conditional_server(bytes, false);
+        let (server, seen) = conditional_server(bytes, Condition::Honour);
         let service = service(&server, directory.path());
         let cancel = AtomicBool::new(false);
         assert_eq!(service.installed_bundle_etag(), None);
@@ -2523,7 +2587,7 @@ mod bundle_tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = bundle_bytes(LIBRARY, "");
         let etag = etag_of(&bytes);
-        let (server, seen) = conditional_server(bytes, false);
+        let (server, seen) = conditional_server(bytes, Condition::Honour);
         let service = service(&server, directory.path());
         // A tag left beside an empty store (cache emptied) is ignored.
         std::fs::write(directory.path().join("waveforms.db.etag"), &etag).unwrap();
@@ -2545,7 +2609,10 @@ mod bundle_tests {
     #[test]
     fn a_304_to_an_unconditional_request_is_a_protocol_error() {
         let directory = tempfile::tempdir().unwrap();
-        let (server, seen) = conditional_server(bundle_bytes(LIBRARY, ""), true);
+        let (server, seen) = conditional_server(
+            bundle_bytes(LIBRARY, ""),
+            Condition::Always304(None, LIBRARY),
+        );
         let service = service(&server, directory.path());
         seed(&service);
         let error = service
@@ -2560,6 +2627,92 @@ mod bundle_tests {
         assert_eq!(store.len().unwrap(), 1, "store kept");
         assert!(leftovers(directory.path()).is_empty());
         assert!(!directory.path().join("waveforms.db.etag").exists());
+    }
+
+    /// Install the bundle into `directory` from an `If-None-Match`-honouring server, then
+    /// add a newer page-lookup row (id 9). Returns the installed ETag.
+    fn install_then_seed(directory: &Path) -> String {
+        let bytes = bundle_bytes(LIBRARY, "");
+        let etag = etag_of(&bytes);
+        let (server, _) = conditional_server(bytes, Condition::Honour);
+        let service = service(&server, directory);
+        assert_eq!(
+            service.import_bundle(&AtomicBool::new(false)).unwrap(),
+            BundleImport::Installed { rows: 1 }
+        );
+        seed(&service);
+        etag
+    }
+
+    fn assert_store_kept(service: &RemoteListWaveforms, directory: &Path, etag: &str) {
+        let store = service.i8_store.as_ref().unwrap();
+        assert_eq!(store.len().unwrap(), 2, "store not replaced");
+        assert!(
+            store.get(9).unwrap().is_some(),
+            "row written after install kept"
+        );
+        assert!(leftovers(directory).is_empty());
+        assert_eq!(service.installed_bundle_etag().as_deref(), Some(etag));
+    }
+
+    #[test]
+    fn a_server_ignoring_if_none_match_with_the_same_etag_is_not_modified() {
+        let directory = tempfile::tempdir().unwrap();
+        let etag = install_then_seed(directory.path());
+        let (server, seen) = conditional_server(bundle_bytes(LIBRARY, ""), Condition::Ignore);
+        let service = service(&server, directory.path());
+        for _ in 0..2 {
+            assert_eq!(
+                service.import_bundle(&AtomicBool::new(false)).unwrap(),
+                BundleImport::NotModified
+            );
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(etag.clone()), Some(etag.clone())]
+        );
+        assert_store_kept(&service, directory.path(), &etag);
+    }
+
+    #[test]
+    fn a_server_ignoring_if_none_match_with_a_new_bundle_installs_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let etag = install_then_seed(directory.path());
+        let newer = bundle_bytes(LIBRARY, "UPDATE meta SET value='4' WHERE key='revision';");
+        let newer_etag = etag_of(&newer);
+        assert_ne!(newer_etag, etag);
+        let (server, seen) = conditional_server(newer, Condition::Ignore);
+        let service = service(&server, directory.path());
+        assert_eq!(
+            service.import_bundle(&AtomicBool::new(false)).unwrap(),
+            BundleImport::Installed { rows: 1 }
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![Some(etag)]);
+        assert_eq!(service.installed_bundle_etag(), Some(newer_etag));
+    }
+
+    #[test]
+    fn a_304_for_another_etag_or_library_is_rejected_and_the_store_kept() {
+        let cases: [(Condition, Check); 2] = [
+            (
+                Condition::Always304(Some("\"wfb1-00000000000000000000000000000000\""), LIBRARY),
+                |e| matches!(e, RemoteError::Protocol(m) if m.contains("304")),
+            ),
+            (Condition::Always304(None, "other"), |e| {
+                matches!(e, RemoteError::LibraryChanged(_))
+            }),
+        ];
+        for (mode, expected) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let etag = install_then_seed(directory.path());
+            let (server, _) = conditional_server(bundle_bytes(LIBRARY, ""), mode);
+            let service = service(&server, directory.path());
+            let error = service
+                .import_bundle(&AtomicBool::new(false))
+                .expect_err("rejected 304");
+            assert!(expected(&error), "{error:?}");
+            assert_store_kept(&service, directory.path(), &etag);
+        }
     }
 
     #[test]
