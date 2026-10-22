@@ -1405,6 +1405,38 @@ pub struct ListWaveformStatus {
     pub job: Option<JobView>,
 }
 
+/// List-waveform part of `GET /admin/api/runtime`: scheduler state and cache counters
+/// only (no database queries, unlike [`ListWaveformStatus`]).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ListWaveformRuntime {
+    /// Effective `pregenerate_list_waveforms`.
+    pub enabled: bool,
+    /// The pre-generation pass is paused (`POST /waveforms/pause`).
+    pub paused: bool,
+    /// Effective `list_waveform_rate` (files per second).
+    pub rate: u32,
+    /// Records per second over the last 60 s (one decimal).
+    pub current_rate: f64,
+    /// Current or most recent job (`done` / `total` / `failed`, ...).
+    pub job: Option<JobView>,
+    /// Records of the active job still to check (`total - done`), else `null`.
+    pub pending: Option<u64>,
+    /// Records whose current file version failed to decode.
+    pub failed: u64,
+    /// Length of the on-demand queue.
+    pub queued_on_demand: u64,
+    /// Entries in the list cache.
+    pub cache_entries: u64,
+    /// Bytes of the list cache.
+    pub cache_bytes: u64,
+    /// `list_waveform_cache_mb` in bytes.
+    pub cache_limit_bytes: u64,
+    /// Shards had to be evicted to stay within the limit.
+    pub over_budget: bool,
+    /// Most recent background error.
+    pub last_error: Option<LastError>,
+}
+
 /// `list_waveforms` of `GET /capabilities`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListWaveformsCapability {
@@ -2286,6 +2318,46 @@ impl ListWaveforms {
     }
 
     /// Blocking. `GET /waveforms/status`.
+    /// Cheap runtime view for the admin page: only the scheduler lock and cache counters.
+    pub fn runtime(&self, state: &AppState) -> ListWaveformRuntime {
+        let enabled = state.security().pregenerate_list_waveforms();
+        let mut sched = self.sched();
+        let job = sched.job.as_ref().map(|job| job.view(false));
+        let pending = sched
+            .job
+            .as_ref()
+            .filter(|job| job.active())
+            .map(|job| job.record.total.saturating_sub(job.record.done));
+        let paused = sched.paused
+            || sched
+                .job
+                .as_ref()
+                .is_some_and(|job| job.active() && job.record.state == JobState::Paused);
+        let current_rate = if paused {
+            0.0
+        } else {
+            sched
+                .window
+                .rate(Instant::now())
+                .map_or(0.0, wf_job::one_decimal)
+        };
+        ListWaveformRuntime {
+            enabled,
+            paused,
+            rate: state.security().list_waveform_rate(),
+            current_rate,
+            job,
+            pending,
+            failed: sched.failures.len() as u64,
+            queued_on_demand: sched.on_demand.len() as u64,
+            cache_entries: self.cache.entries(),
+            cache_bytes: self.cache.bytes(),
+            cache_limit_bytes: self.cache.limit_bytes(),
+            over_budget: self.cache.over_budget(),
+            last_error: sched.last_error.clone(),
+        }
+    }
+
     pub fn status(&self, state: &AppState) -> Result<ListWaveformStatus> {
         let enabled = state.security().pregenerate_list_waveforms();
         let total = self.count_present(i64::MIN)?;

@@ -192,7 +192,13 @@ pub struct WaveformCache {
     dir: PathBuf,
     max_bytes: u64,
     writes: AtomicU64,
+    /// Bytes measured by the last trim plus bytes written since ([`UNKNOWN_BYTES`]
+    /// before the first trim). An estimate: overwrites are counted again.
+    estimated: AtomicU64,
 }
+
+/// [`WaveformCache::estimated`] before any trim measured the directory.
+const UNKNOWN_BYTES: u64 = u64::MAX;
 
 impl WaveformCache {
     /// Cache in `dir` (created on first write) limited to `max_mb` MiB.
@@ -201,7 +207,18 @@ impl WaveformCache {
             dir,
             max_bytes: max_mb.saturating_mul(1024 * 1024),
             writes: AtomicU64::new(0),
+            estimated: AtomicU64::new(UNKNOWN_BYTES),
         }
+    }
+
+    /// Limit in bytes (`waveform_cache_mb`).
+    pub fn limit_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Estimated cache size (see [`WaveformCache::estimated`]); never touches the disk.
+    pub fn estimated_bytes(&self) -> Option<u64> {
+        Some(self.estimated.load(Ordering::Relaxed)).filter(|bytes| *bytes != UNKNOWN_BYTES)
     }
 
     /// Cache directory.
@@ -229,6 +246,12 @@ impl WaveformCache {
         stage
             .persist(self.dir.join(key.file_name(zstd)))
             .map_err(|error| Error::Io(error.error))?;
+        let len = bytes.len() as u64;
+        let _ = self
+            .estimated
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |known| {
+                (known != UNKNOWN_BYTES).then(|| known.saturating_add(len).min(UNKNOWN_BYTES - 1))
+            });
         if self.writes.fetch_add(1, Ordering::Relaxed) % TRIM_EVERY == TRIM_EVERY - 1 {
             self.trim();
         }
@@ -260,6 +283,8 @@ impl WaveformCache {
             .collect();
         let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
         if total <= self.max_bytes {
+            self.estimated
+                .store(total.min(UNKNOWN_BYTES - 1), Ordering::Relaxed);
             return;
         }
         let target = self.max_bytes / 10 * 9;
@@ -274,6 +299,8 @@ impl WaveformCache {
                 removed += 1;
             }
         }
+        self.estimated
+            .store(total.min(UNKNOWN_BYTES - 1), Ordering::Relaxed);
         tracing::info!(removed, bytes = total, "Trimmed the waveform cache");
     }
 }
