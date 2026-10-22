@@ -43,50 +43,116 @@ async fn request(service: &Service, host: &str, token: bool, peer: &str) -> Resp
 }
 
 #[tokio::test]
-async fn token_free_api_rejects_rebinding_hosts_and_accepts_explicit_server_hosts() {
-    for mode in ["external", "off"] {
-        let (_directory, security, service) = fixture(&format!(
-            "auth_mode = '{mode}'\npublic_url = 'https://audio.example.com:8443'\n"
-        ));
-        security
-            .update_settings(|settings| {
-                settings.lan_url = Some("http://private.example.com:8790".into())
-            })
-            .unwrap();
-        for host in ["evil.example.com:8790", "localhost:bad", "[::1]garbage"] {
-            let response = request(&service, host, false, "192.168.1.2:4000").await;
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{mode} {host}");
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["error_code"], "HOST_FORBIDDEN");
-        }
-        for host in [
-            "192.168.1.10:8790",
-            "[::1]:8790",
-            "nas.lan:8790",
-            "audio.example.com:8443",
-            "private.example.com:8790",
-        ] {
-            assert_eq!(
-                request(&service, host, false, "192.168.1.2:4000")
-                    .await
-                    .status(),
-                StatusCode::OK,
-                "{mode} {host}"
-            );
-        }
+async fn token_free_off_mode_rejects_rebinding_hosts_from_non_lan_peers() {
+    let (_directory, security, service) =
+        fixture("auth_mode = 'off'\npublic_url = 'https://audio.example.com:8443'\n");
+    security
+        .update_settings(|settings| {
+            settings.lan_url = Some("http://private.example.com:8790".into())
+        })
+        .unwrap();
+    for host in ["evil.example.com:8790", "localhost:bad", "[::1]garbage"] {
+        let response = request(&service, host, false, "203.0.113.7:4000").await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{host}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "HOST_FORBIDDEN");
+    }
+    for host in [
+        "192.0.2.10:8790",
+        "[::1]:8790",
+        "nas.lan:8790",
+        "audio.example.com:8443",
+        "private.example.com:8790",
+    ] {
         assert_eq!(
-            request(&service, "evil.example.com:8790", true, "192.168.1.2:4000")
+            request(&service, host, false, "203.0.113.7:4000")
                 .await
                 .status(),
-            StatusCode::OK
+            StatusCode::OK,
+            "{host}"
         );
+    }
+    assert_eq!(
+        request(&service, "evil.example.com:8790", true, "203.0.113.7:4000")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn lan_peers_need_no_token_whatever_the_host_header() {
+    for mode in ["external", "off"] {
+        let (_directory, _security, service) = fixture(&format!("auth_mode = '{mode}'\n"));
+        for peer in [
+            "192.168.1.2:4000",
+            "10.0.0.5:4000",
+            "127.0.0.1:4000",
+            "[fe80::1]:4000",
+            "[fd00::2]:4000",
+            "[::ffff:192.168.1.2]:4000",
+        ] {
+            for host in [
+                "audio.example.com:8443",
+                "evil.example.com",
+                "192.0.2.10:8790",
+                "macnas.local:8790",
+                "localhost:bad",
+            ] {
+                assert_eq!(
+                    request(&service, host, false, peer).await.status(),
+                    StatusCode::OK,
+                    "{mode} {peer} {host}"
+                );
+            }
+        }
     }
 }
 
 #[tokio::test]
+async fn non_lan_or_forwarded_peers_still_need_a_token_in_external_mode() {
+    let (_directory, _security, service) =
+        fixture("auth_mode = 'external'\npublic_url = 'https://audio.example.com:8443'\n");
+    for host in [
+        "audio.example.com:8443",
+        "192.0.2.10:8790",
+        "evil.example.com",
+    ] {
+        assert_eq!(
+            request(&service, host, false, "203.0.113.7:4000")
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "{host}"
+        );
+        assert_eq!(
+            request(&service, host, true, "203.0.113.7:4000")
+                .await
+                .status(),
+            StatusCode::OK,
+            "{host}"
+        );
+    }
+    // A loopback reverse proxy that marks the request as forwarded is external.
+    let mut request = support::modern(Request::get("/api/v1/capabilities"))
+        .header(header::HOST, "audio.example.com:8443")
+        .header("x-forwarded-for", "203.0.113.7")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(ConnectionInfo {
+        peer: "127.0.0.1:4000".parse().unwrap(),
+        listener: Listener::Http,
+    });
+    assert_eq!(
+        router(service).oneshot(request).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn duplicate_and_missing_hosts_cannot_bypass_token_free_admission() {
-    let (_directory, _security, service) = fixture("");
+    let (_directory, _security, service) = fixture("auth_mode = 'off'\n");
     for hosts in [vec![], vec!["localhost", "evil.example.com"]] {
         let mut request = support::modern(Request::get("/api/v1/capabilities"));
         for host in hosts {
@@ -94,7 +160,7 @@ async fn duplicate_and_missing_hosts_cannot_bypass_token_free_admission() {
         }
         let mut request = request.body(Body::empty()).unwrap();
         request.extensions_mut().insert(ConnectionInfo {
-            peer: "192.168.1.2:4000".parse().unwrap(),
+            peer: "203.0.113.7:4000".parse().unwrap(),
             listener: Listener::Http,
         });
         assert_eq!(
@@ -155,9 +221,10 @@ async fn disabling_lan_trust_requires_tokens_and_closes_the_password_free_admin(
 
 #[tokio::test]
 async fn failed_authentication_is_limited_by_socket_ip_not_forwarding_headers() {
-    for (mode, expected) in [
-        ("all", StatusCode::UNAUTHORIZED),
-        ("external", StatusCode::FORBIDDEN),
+    // `external` uses a non-LAN socket peer: direct LAN peers need no token there.
+    for (mode, peer, other) in [
+        ("all", "192.168.1.2", "192.168.1.3"),
+        ("external", "198.51.100.2", "198.51.100.3"),
     ] {
         let host = "untrusted.example.com";
         let (_directory, _security, service) = fixture(&format!("auth_mode = '{mode}'\n"));
@@ -176,7 +243,7 @@ async fn failed_authentication_is_limited_by_socket_ip_not_forwarding_headers() 
                 .body(Body::empty())
                 .unwrap();
             request.extensions_mut().insert(ConnectionInfo {
-                peer: "192.168.1.2:4000".parse().unwrap(),
+                peer: format!("{peer}:4000").parse().unwrap(),
                 listener: Listener::Http,
             });
             assert_eq!(
@@ -185,14 +252,14 @@ async fn failed_authentication_is_limited_by_socket_ip_not_forwarding_headers() 
                     .await
                     .unwrap()
                     .status(),
-                expected
+                StatusCode::UNAUTHORIZED
             );
         }
-        let limited = request(&service, host, true, "192.168.1.2:5000").await;
+        let limited = request(&service, host, true, &format!("{peer}:5000")).await;
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(limited.headers()[header::RETRY_AFTER], "60");
         assert_eq!(
-            request(&service, "localhost", true, "192.168.1.3:5000")
+            request(&service, "localhost", true, &format!("{other}:5000"))
                 .await
                 .status(),
             StatusCode::OK

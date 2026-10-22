@@ -1001,8 +1001,8 @@ impl Security {
     }
 
     /// Check a request against the effective mode: `Ok` when no token is needed or a
-    /// valid one is presented, else 401 `UNAUTHORIZED`. Token-free requests additionally
-    /// require a trusted Host (DNS rebinding protection). Failed authentication is
+    /// valid one is presented, else 401 `UNAUTHORIZED`. Token-free requests from peers
+    /// that are not trusted direct LAN peers additionally require a trusted Host. Failed authentication is
     /// limited per socket IP; forwarding headers cannot change the limiter identity.
     pub fn authorize(
         self: &Arc<Self>,
@@ -1010,10 +1010,11 @@ impl Security {
         connection: Option<&ConnectionInfo>,
     ) -> Result<(), ApiError> {
         let mode = self.auth_mode();
+        let origin = self.classify(headers, connection);
         let required = match mode {
             AuthMode::Off => false,
             AuthMode::All => true,
-            AuthMode::External => self.classify(headers, connection) == RequestOrigin::External,
+            AuthMode::External => origin == RequestOrigin::External,
         };
         let presented = headers
             .get(header::AUTHORIZATION)
@@ -1029,7 +1030,12 @@ impl Security {
                 "Token-free access requires an IP address, LAN hostname or configured server hostname",
             )
         };
-        if !required && self.trusted_host(headers, connection) {
+        // A trusted direct LAN peer (no forwarding headers, private/loopback/link-local
+        // socket IP, `trust_lan_peers = true`) is admitted whatever its Host header says:
+        // LAN clients may reach the server via a public domain (hairpin NAT, split DNS).
+        // The Host check only guards token-free requests from other peers (`off` mode).
+        let lan_peer = connection.is_some() && origin == RequestOrigin::Lan;
+        if !required && (lan_peer || self.trusted_host(headers, connection)) {
             return Ok(());
         }
         if !required && presented.is_none() {
