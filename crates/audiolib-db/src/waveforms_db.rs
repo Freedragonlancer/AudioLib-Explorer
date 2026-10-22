@@ -314,10 +314,17 @@ fn remove_stale_bundle_files(path: &Path) {
     };
     let prefix = format!("{WAVEFORMS_DB_FILE}.bundle-");
     let own = format!("{prefix}{}-", std::process::id());
+    // `waveforms.db.etag-<pid>.tmp`: the bundle ETag being written by the remote client.
+    let etag_prefix = format!("{WAVEFORMS_DB_FILE}.etag-");
+    let own_etag = format!("{etag_prefix}{}.tmp", std::process::id());
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name.starts_with(&prefix) && name.contains(".tmp") && !name.starts_with(&own) {
+        let stale_bundle =
+            name.starts_with(&prefix) && name.contains(".tmp") && !name.starts_with(&own);
+        let stale_etag =
+            name.starts_with(&etag_prefix) && name.ends_with(".tmp") && name != own_etag;
+        if stale_bundle || stale_etag {
             match std::fs::remove_file(entry.path()) {
                 Ok(()) => tracing::info!(file = name, "removed a stale waveform bundle download"),
                 Err(error) => tracing::debug!(%error, file = name, "stale bundle file kept"),
@@ -548,12 +555,23 @@ mod tests {
         let stale_journal = dir.join("waveforms.db.bundle-0-3.tmp-journal");
         let own = dir.join(format!("waveforms.db.bundle-{}-0.tmp", std::process::id()));
         let unrelated = dir.join("library.db");
-        for file in [&stale, &stale_journal, &own, &unrelated] {
+        let stale_etag = dir.join("waveforms.db.etag-0.tmp");
+        let own_etag = dir.join(format!("waveforms.db.etag-{}.tmp", std::process::id()));
+        let etag = dir.join("waveforms.db.etag");
+        for file in [
+            &stale,
+            &stale_journal,
+            &own,
+            &unrelated,
+            &stale_etag,
+            &own_etag,
+            &etag,
+        ] {
             std::fs::write(file, b"x").unwrap();
         }
         let _db = WaveformsDb::open(&dir.join(WAVEFORMS_DB_FILE)).unwrap();
-        assert!(!stale.exists() && !stale_journal.exists());
-        assert!(own.exists() && unrelated.exists());
+        assert!(!stale.exists() && !stale_journal.exists() && !stale_etag.exists());
+        assert!(own.exists() && unrelated.exists() && own_etag.exists() && etag.exists());
     }
 
     #[test]

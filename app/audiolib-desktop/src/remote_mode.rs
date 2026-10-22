@@ -3392,15 +3392,20 @@ pub(super) fn is_remote_cache_path(data_root: &Path, path: &Path) -> bool {
     path.starts_with(data_root.join("remote"))
 }
 
-/// First fill of an empty `waveforms.db` from the server's bundle (doc/api §9.4.2), on a
-/// background thread. `503 BUSY` is retried with `bundle_backoff` (5 s doubling, at most
-/// 5 minutes) while page lookups continue; the thread ends when the provider is replaced
-/// (its last strong reference is dropped) or on any other outcome.
+/// Fill an empty `waveforms.db` from the server's bundle, or revalidate a bundle-filled one
+/// (doc/api §9.4.2), on a background thread. `503 BUSY` is retried with `bundle_backoff`
+/// (5 s doubling, at most 5 minutes) while page lookups continue; the thread ends when the
+/// provider is replaced (its last strong reference is dropped) or on any other outcome.
 fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
+    // An empty store downloads the bundle; a store filled by an earlier bundle revalidates
+    // it with `If-None-Match`. A `304`, or a `200` with the same ETag from a server that
+    // ignores the condition, reuses the cache without reading a body. A store filled only by
+    // page lookups (no recorded bundle ETag) keeps using page lookups.
     let wanted = service.offers_bundle()
-        && service
+        && (service
             .i8_store()
-            .is_some_and(|store| store.is_empty().unwrap_or(false));
+            .is_some_and(|store| store.is_empty().unwrap_or(false))
+            || service.installed_bundle_etag().is_some());
     if !wanted {
         return;
     }
@@ -3418,8 +3423,12 @@ fn spawn_waveform_bundle_import(service: &Arc<RemoteListWaveforms>) {
                 let outcome = service.import_bundle(&cancel);
                 done.store(true, std::sync::atomic::Ordering::Release);
                 let wait = match outcome {
-                    Ok(rows) => {
+                    Ok(audiolib_remote::BundleImport::Installed { rows }) => {
                         tracing::info!(rows, "list Waveform bundle imported");
+                        return;
+                    }
+                    Ok(audiolib_remote::BundleImport::NotModified) => {
+                        tracing::info!("list Waveform bundle not modified; cached store kept");
                         return;
                     }
                     Err(audiolib_remote::RemoteError::Busy { retry_after, .. }) => {
