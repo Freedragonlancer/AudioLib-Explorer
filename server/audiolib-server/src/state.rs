@@ -1017,6 +1017,24 @@ impl AppState {
         })
     }
 
+    /// Run a snapshot preparation step; when it fails for lack of disk space, release
+    /// the least recently used idle retained snapshot of an older revision and retry,
+    /// until it succeeds or an eviction frees no space (then the `StorageFull` error,
+    /// 507, is returned; issue #35). Entries of `revision`, the revision being prepared,
+    /// are never released: they cannot make room and may be its resumable copy.
+    fn with_snapshot_space<T>(
+        &self,
+        revision: Option<u64>,
+        step: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
+        retry_on_storage_full(step, || {
+            self.inner
+                .snapshot_registry
+                .evict_oldest_idle(self.library_id(), revision)
+                > 0
+        })
+    }
+
     /// Find an exact process-local representation belonging to this library only.
     pub(crate) fn retained_snapshot(&self, id: &str) -> Option<SnapshotLease> {
         self.inner.snapshot_registry.get(id, self.library_id())
@@ -1810,14 +1828,20 @@ impl AppState {
             if delay > 0 {
                 std::thread::sleep(Duration::from_millis(delay));
             }
-            let result = state.prepare_snapshot().and_then(|prepared| {
-                let file = if zstd {
-                    Some(prepared.zstd_file_cancellable(&state.inner.stopping)?)
-                } else {
-                    None
-                };
-                Ok((prepared, file))
-            });
+            let result = state
+                .with_snapshot_space(state.revision().ok().map(|info| info.revision), || {
+                    state.prepare_snapshot()
+                })
+                .and_then(|prepared| {
+                    let file = if zstd {
+                        Some(state.with_snapshot_space(Some(prepared.revision), || {
+                            prepared.zstd_file_cancellable(&state.inner.stopping)
+                        })?)
+                    } else {
+                        None
+                    };
+                    Ok((prepared, file))
+                });
             if let Err(error) = &result {
                 tracing::warn!(%error, "Library snapshot preparation failed");
             }
@@ -1989,6 +2013,24 @@ pub fn remove_stale_snapshots(dir: &Path, min_age: Option<Duration>) {
     }
 }
 
+/// Retry `step` while it fails with `StorageFull` and `release` reports freed space;
+/// stop with that error as soon as a release frees nothing.
+fn retry_on_storage_full<T>(
+    mut step: impl FnMut() -> Result<T>,
+    mut release: impl FnMut() -> bool,
+) -> Result<T> {
+    loop {
+        match step() {
+            Err(Error::Io(error))
+                if error.kind() == std::io::ErrorKind::StorageFull && release() =>
+            {
+                tracing::info!(%error, "Released an idle retained snapshot to free disk space");
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Spawn the background task that polls for library changes every `every`.
 pub fn spawn_revision_poller(state: AppState, every: Duration) -> tokio::task::JoinHandle<()> {
     // Warm the `GET /library` statistics cache in the background right after startup.
@@ -2081,6 +2123,40 @@ fn root_file_count(provider: &dyn DataProvider, root: &Path) -> Result<Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_full_releases_idle_snapshots_then_reports_507() {
+        let full = || Error::Io(std::io::Error::new(std::io::ErrorKind::StorageFull, "full"));
+        let mut idle = 2_u32;
+        let mut calls = 0;
+        let result: Result<()> = retry_on_storage_full(
+            || {
+                calls += 1;
+                Err(full())
+            },
+            || {
+                let released = idle > 0;
+                idle = idle.saturating_sub(1);
+                released
+            },
+        );
+        assert!(matches!(result, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::StorageFull));
+        assert_eq!(calls, 3);
+        let mut calls = 0;
+        let ok = retry_on_storage_full(
+            || {
+                calls += 1;
+                if calls == 1 { Err(full()) } else { Ok(7) }
+            },
+            || true,
+        );
+        assert_eq!(ok.unwrap(), 7);
+        let other: Result<()> = retry_on_storage_full(
+            || Err(Error::Cancelled),
+            || panic!("only StorageFull releases snapshots"),
+        );
+        assert!(matches!(other, Err(Error::Cancelled)));
+    }
 
     #[test]
     fn default_snapshot_storage_is_beside_the_library() {
