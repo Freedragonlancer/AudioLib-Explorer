@@ -457,6 +457,12 @@ export component AppWindow inherits Window {
     private property <length> table-tags-size: clamp(root.table-tags-width, 80, 2000) * 1px * Theme.ui-scale;
     private property <length> table-name-size: clamp(root.table-name-width, 120, 2000) * 1px * Theme.ui-scale;
     out property <length> table-columns-total: root.table-columns-size; // read by ui_scale_tests
+    // Horizontal table scroll state, read by ui_scale_tests.
+    out property <length> table-visible-width: result-list.visible-width;
+    out property <length> table-scroll-x: root.table-viewport-x;
+    public function scroll-table-to-end() {
+        root.table-viewport-x = min(0px, result-list.visible-width - root.table-content-size);
+    }
     private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
     private property <length> table-content-size: max(root.table-columns-size, result-list.visible-width);
     private property <bool> table-empty: root.rows.length == 0;

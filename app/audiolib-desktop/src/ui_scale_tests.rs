@@ -129,3 +129,48 @@ fn table_column_widths_scale_proportionally_with_ui_scale() {
         );
     }
 }
+
+fn save_snapshot(ui: &AppWindow, file: &str) {
+    let pixels = ui.window().take_snapshot().unwrap();
+    if let Some(directory) = std::env::var_os("AUDIOLIB_UI_SCALE_SNAPSHOT_DIR") {
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory).unwrap();
+        image::save_buffer(
+            directory.join(file),
+            pixels.as_bytes(),
+            pixels.width(),
+            pixels.height(),
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn wide_table_at_1_5_scrolls_horizontally_to_the_last_column() {
+    init_software_backend();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.global::<crate::Theme>().set_ui_scale(1.5);
+    ui.set_rows(synthetic_rows());
+    ui.set_folders(synthetic_folders());
+    ui.show().unwrap();
+    save_snapshot(&ui, "main-en-x1.5-scroll0.png");
+    let content = ui.get_table_columns_total();
+    let visible = ui.get_table_visible_width();
+    assert_eq!(ui.get_table_scroll_x(), 0.0);
+    assert!(
+        content > visible,
+        "content {content} should exceed viewport {visible}"
+    );
+    ui.invoke_scroll_table_to_end();
+    let scroll = ui.get_table_scroll_x();
+    assert!(scroll < 0.0, "table did not scroll: {scroll}");
+    let right_edge = content + scroll;
+    assert!(
+        (right_edge - visible).abs() < 0.5,
+        "last column right edge {right_edge} vs viewport {visible}"
+    );
+    save_snapshot(&ui, "main-en-x1.5-scrollmax.png");
+    ui.hide().unwrap();
+}
