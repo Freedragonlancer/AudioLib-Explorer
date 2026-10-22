@@ -1,5 +1,35 @@
 # AudioLib Explorer release notes
 
+## 0.6.1: server hardening, waveform bundle cache and patch compatibility
+
+Release identity: program `0.6.1` | API `/api/v1/` | schema 6 | snapshot format
+`ale-s6-cld1-t3-m2-p1`. No database migration; schema and snapshot formats are unchanged.
+
+Upgrade notes:
+
+- **One full snapshot download after upgrading from 0.6.0.** Snapshot ETags changed
+  from weak `W/"<library_id>-r<revision>"` to strong `"snapshot-<UUID>"`, so the
+  first sync re-downloads the library once; later syncs are incremental as before.
+- **Clients and server must both be 0.6.1.** 0.6.0 only accepts an exactly matching
+  0.6.0 peer. From 0.6.1 on, patch releases of the 0.6 line accept each other
+  (`>=0.6.0, <0.7.0`), so a 0.6.1 client can still connect to a 0.6.0 server.
+- **`manage_mode` now defaults to `lan`** (was `all`). Without an explicit setting,
+  scans and deletions are only allowed from the LAN, even with a token.
+  Set `manage_mode = "all"` to keep the previous behaviour.
+
+Changes:
+
+- Server: new **403 `HOST_FORBIDDEN`** for tokenless LAN requests whose Host is not
+  an IP, a LAN host name or a configured address (DNS-rebinding protection);
+  tokenless LAN access by IP or LAN host name is still allowed.
+- Server: new **429 `AUTH_RATE_LIMITED`** after 60 failed authentications from one
+  IP within 60 seconds. 500/507 error messages no longer include server paths.
+  Each listener accepts at most 1024 connections. Tokens must be at least 32 characters.
+- Waveform bundle downloads are cached.
+- Snapshot downloads abort a read that stalls for 90 seconds and resume with
+  `Range`; there is no limit on total transfer time.
+- Client UI review fixes; editing context is preserved.
+
 ## 0.6.0 local iteration: mirror cache management
 
 Based on main `e90596d`; local delivery does not publish a tag or deploy a server.
