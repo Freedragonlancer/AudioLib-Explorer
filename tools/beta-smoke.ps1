@@ -161,10 +161,15 @@ if ($StreamSamples -gt 0) {
             $picked.Add($file)
         }
         Log ("  picked {0} present records under configured roots" -f $picked.Count)
-        $failures = 0
+        $failures = 0; $timeouts = 0
         foreach ($file in $picked) {
             try { $response = Send GET "$api/audio/$($file.id)/stream" @{ 'Range' = 'bytes=0-4095' } -HeadersOnly -TimeoutSec $StreamTimeoutSec }
-            catch { $failures++; Log ("  stream id={0} FAIL: {1}" -f $file.id, $_.Exception.Message); continue }
+            catch {
+                $failures++; $timeouts++
+                Log ("  stream id={0} FAIL: {1}" -f $file.id, $_.Exception.Message)
+                if ($timeouts -ge 3) { Log '  3 stream requests failed to answer; skipping the remaining samples (root offline or waking?)'; break }
+                continue
+            }
             $code = [int]$response.StatusCode
             $type = [string]$response.Content.Headers.ContentType
             $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
