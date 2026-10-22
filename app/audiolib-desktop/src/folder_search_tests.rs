@@ -23,6 +23,24 @@ fn search_updates_navigation_counts_and_preserves_cross_folder_choices() {
     );
 }
 
+/// Remove a fixture directory, retrying briefly while Windows finishes closing
+/// handles released an instant ago (an Arc reaches zero strong references just
+/// before its SQLite connection is closed). Cleanup never fails the test.
+fn remove_test_dir(root: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::fs::remove_dir_all(root) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if Instant::now() >= deadline => {
+                eprintln!("warning: could not remove {}: {error}", root.display());
+                return;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
 #[test]
 #[ignore = "Slint event-loop proxy requires an isolated child process"]
 fn child_search_navigation() {
@@ -368,17 +386,22 @@ fn child_search_navigation() {
     controller.shutdown();
     ui.hide().unwrap();
     let released = Arc::downgrade(&controller);
+    let provider_released = Arc::downgrade(&provider);
     drop(timer);
     drop(ui);
     drop(controller);
     drop(engine);
     drop(provider);
     let deadline = Instant::now() + Duration::from_secs(3);
-    while released.strong_count() > 0 && Instant::now() < deadline {
+    // Detached workers hold their own provider clones; wait for the SQLite
+    // connection itself, not just the controller, before deleting its directory.
+    while (released.strong_count() > 0 || provider_released.strong_count() > 0)
+        && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(10));
     }
     let error = failure.borrow().clone();
-    std::fs::remove_dir_all(&root).unwrap();
+    remove_test_dir(&root);
     assert!(error.is_none(), "{error:?}");
     assert_eq!(stage.get(), 14);
 }
