@@ -495,3 +495,149 @@ fn releases_other_channels_ignore_stay_silent() {
     assert!(client.select(vec![beta, old]).unwrap().is_none());
     assert!(client.select(Vec::new()).unwrap().is_none());
 }
+
+/// Serves one canned JSON body per connection, in order, and records request targets.
+fn mock_releases(bodies: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        let mut targets = Vec::new();
+        for body in bodies {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut header = Vec::new();
+            let mut byte = [0];
+            while !header.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+            }
+            let line = String::from_utf8_lossy(&header);
+            targets.push(line.split(' ').nth(1).unwrap_or_default().to_owned());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        targets
+    });
+    (format!("http://{address}/repos/x/y/releases"), thread)
+}
+
+fn release_json(release: &Release) -> serde_json::Value {
+    serde_json::json!({
+        "tag_name": release.tag_name,
+        "body": release.body,
+        "draft": release.draft,
+        "prerelease": release.prerelease,
+        "assets": release.assets,
+    })
+}
+
+fn list_json(releases: &[Release]) -> String {
+    serde_json::Value::Array(releases.iter().map(release_json).collect()).to_string()
+}
+
+/// Client against a local plain-HTTP mock (only tests replace the HTTPS-only agent).
+fn mock_client(url: &str, current: &str) -> UpdateClient {
+    let mut client = UpdateClient::new(NATIVE_PRODUCT, Channel::Stable, current)
+        .unwrap()
+        .with_releases_api(url);
+    client.agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    client
+}
+
+#[test]
+fn default_releases_api_is_unchanged() {
+    let client = UpdateClient::new(NATIVE_PRODUCT, Channel::Stable, "0.6.1").unwrap();
+    assert_eq!(client.releases_api(), RELEASES_API);
+    assert_eq!(
+        RELEASES_API,
+        "https://api.github.com/repos/Freedragonlancer/AudioLib-Explorer/releases"
+    );
+}
+
+#[test]
+fn empty_first_page_is_retried_then_succeeds() {
+    let (url, server) = mock_releases(vec![
+        "[]".into(),
+        list_json(&[release("v0.6.2", false, false)]),
+    ]);
+    let update = mock_client(&url, "0.6.1").check().unwrap().unwrap();
+    assert_eq!(update.tag, "v0.6.2");
+    assert!(update.skipped_newer.is_none());
+    let targets = server.join().unwrap();
+    assert_eq!(
+        targets,
+        [
+            "/repos/x/y/releases?per_page=100&page=1",
+            "/repos/x/y/releases?per_page=100&page=1"
+        ]
+    );
+}
+
+#[test]
+fn empty_list_on_every_attempt_is_an_error_not_up_to_date() {
+    let bodies = vec!["[]".to_string(); 1 + EMPTY_LIST_RETRIES as usize];
+    let (url, server) = mock_releases(bodies);
+    let error = mock_client(&url, "0.6.1").check().unwrap_err().to_string();
+    assert!(error.contains("empty release list"), "{error}");
+    assert_eq!(
+        server.join().unwrap().len(),
+        1 + EMPTY_LIST_RETRIES as usize
+    );
+}
+
+#[test]
+fn newer_release_without_package_is_an_error_naming_the_version() {
+    let mut newest = release("v0.7.0", false, false);
+    newest.assets.clear();
+    let (url, server) = mock_releases(vec![list_json(&[newest, release("v0.6.0", false, false)])]);
+    let error = mock_client(&url, "0.6.1").check().unwrap_err().to_string();
+    assert!(error.contains("v0.7.0"), "{error}");
+    assert!(error.contains("no valid package"), "{error}");
+    server.join().unwrap();
+}
+
+#[test]
+fn newer_release_without_package_falls_back_and_reports_the_skip() {
+    let mut newest = release("v0.7.0", false, false);
+    newest.assets.clear();
+    let (url, server) = mock_releases(vec![list_json(&[newest, release("v0.6.2", false, false)])]);
+    let update = mock_client(&url, "0.6.1").check().unwrap().unwrap();
+    assert_eq!(update.tag, "v0.6.2");
+    let skipped = update.skipped_newer.unwrap();
+    assert!(
+        skipped.contains("v0.7.0") && skipped.contains("v0.6.2"),
+        "{skipped}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn full_pages_continue_to_the_next_page() {
+    let mut first: Vec<Release> = (0..100)
+        .map(|n| release(&format!("v0.5.{n}"), false, false))
+        .collect();
+    first[0] = release("v0.6.2", false, false);
+    let (url, server) = mock_releases(vec![
+        list_json(&first),
+        list_json(&[release("v0.6.3", false, false)]),
+    ]);
+    let update = mock_client(&url, "0.6.1").check().unwrap().unwrap();
+    assert_eq!(update.tag, "v0.6.3");
+    let targets = server.join().unwrap();
+    assert_eq!(
+        targets,
+        [
+            "/repos/x/y/releases?per_page=100&page=1",
+            "/repos/x/y/releases?per_page=100&page=2"
+        ]
+    );
+}
