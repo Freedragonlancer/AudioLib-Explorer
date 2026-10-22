@@ -1,5 +1,22 @@
 # AudioLib Explorer release notes
 
+## 0.6.4: preview volume dB label live refresh fix
+
+Release identity: program `0.6.4` | API `/api/v1/` | schema 6 | snapshot format
+`ale-s6-cld1-t3-m2-p1`. No database migration; schema and snapshot formats are unchanged.
+
+Versions: program 0.6.4 | API /api/v1/ | schema 6 | snapshot compat 3..=6
+
+Upgrade notes:
+
+- 0.6.4 is a patch release compatible with 0.6.x peers (`>=0.6.0, <0.7.0`); schema and
+  API are unchanged, so client and server can be upgraded independently.
+
+Changes:
+
+- Desktop: the preview volume bar's dB readout now refreshes live while dragging
+  (and shows `-inf dB` at 0), with a regression test (#58).
+
 ## 0.6.3: startup auto-update, WASAPI idle release, beta release flow
 
 Release identity: program `0.6.3` | API `/api/v1/` | schema 6 | snapshot format
