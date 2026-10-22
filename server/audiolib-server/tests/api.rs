@@ -4852,3 +4852,98 @@ async fn legacy_sort_rating_and_rating_min_query_params_are_ignored() {
         assert_eq!(response.status(), StatusCode::OK, "{path}");
     }
 }
+
+#[tokio::test]
+async fn admin_runtime_reports_in_memory_state_and_is_lan_only() {
+    let f = fixture_with("max_streams = 3\nmax_previews = 5\nmax_transcodes = 2\n");
+    let response = call(&f.state, Method::GET, "/admin/api/runtime", &[], None, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_str(&response, header::CACHE_CONTROL), "no-store");
+    let runtime: serde_json::Value = json(response).await;
+    println!(
+        "GET /admin/api/runtime sample:\n{}",
+        serde_json::to_string_pretty(&runtime).unwrap()
+    );
+    assert_eq!(runtime["library"], "ok");
+    let slots = &runtime["slots"];
+    assert_eq!(slots["streams"], serde_json::json!({"active": 0, "max": 3}));
+    assert_eq!(
+        slots["previews"],
+        serde_json::json!({"active": 0, "max": 5})
+    );
+    assert_eq!(
+        slots["transcodes"],
+        serde_json::json!({"active": 0, "max": 2})
+    );
+    assert!(slots["waveforms"]["max"].as_u64().unwrap() >= 1);
+    let list = &runtime["list_waveforms"];
+    assert_eq!(list["enabled"], false);
+    assert_eq!(list["rate"], 10);
+    assert!(list["cache_limit_bytes"].as_u64().unwrap() > 0);
+    assert!(list["job"].is_null());
+    assert!(runtime["waveform_cache"]["limit_bytes"].as_u64().unwrap() > 0);
+    let revision = f.state.revision().unwrap();
+    assert_eq!(runtime["snapshot"]["library_id"], revision.library_id);
+    assert_eq!(runtime["snapshot"]["revision"], revision.revision);
+    assert_eq!(runtime["snapshot"]["preparing"], false);
+    assert!(runtime["snapshot"]["cached"].is_null());
+    let names: Vec<&str> = runtime["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|root| root["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["SFX_Main", "Aircraft", "Unscanned"]);
+    assert_eq!(runtime["update"]["state"], "disabled");
+    assert_eq!(runtime["update"]["skip_reason"], "disabled");
+    assert!(runtime["update"]["selected"].is_null());
+
+    // A prepared snapshot and a changed rate show up without any extra work.
+    f.state.prepare_snapshot().unwrap();
+    let response = call(
+        &f.state,
+        Method::PUT,
+        "/admin/api/settings",
+        &[ADMIN],
+        None,
+        Some("{\"list_waveform_rate\":40}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let runtime: serde_json::Value =
+        json(call(&f.state, Method::GET, "/admin/api/runtime", &[], None, None).await).await;
+    assert_eq!(runtime["list_waveforms"]["rate"], 40);
+    let cached = &runtime["snapshot"]["cached"];
+    assert_eq!(cached["revision"], revision.revision);
+    assert!(cached["bytes"].as_u64().unwrap() > 0);
+
+    // Same guard as the other admin endpoints.
+    for (headers, connection) in [
+        (vec![("x-forwarded-for", "203.0.113.9")], None),
+        (vec![], Some(peer("203.0.113.9:1", Listener::Http))),
+        (vec![("host", "audiolib.example.com")], None),
+    ] {
+        let response = call(
+            &f.state,
+            Method::GET,
+            "/admin/api/runtime",
+            &headers,
+            connection,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: ErrorBody = json(response).await;
+        assert_eq!(body.error_code, "ADMIN_LAN_ONLY");
+    }
+    let response = call(
+        &f.state,
+        Method::POST,
+        "/admin/api/runtime",
+        &[ADMIN],
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}

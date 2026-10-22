@@ -348,6 +348,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn size_estimate_starts_unknown_and_follows_trims_and_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = WaveformCache::new(dir.path().join("wf"), 1);
+        assert_eq!(cache.estimated_bytes(), None);
+        assert_eq!(cache.limit_bytes(), 1024 * 1024);
+        let key = |id| WaveformKey {
+            hash: id as u64 + 1,
+        };
+        cache.put(&key(1), false, &[0; 100]).unwrap();
+        assert_eq!(cache.estimated_bytes(), None, "unknown until measured");
+        cache.trim();
+        assert_eq!(cache.estimated_bytes(), Some(100));
+        cache.put(&key(2), false, &[0; 50]).unwrap();
+        assert_eq!(cache.estimated_bytes(), Some(150));
+    }
+
+    #[test]
     fn parameters_are_validated_with_defaults() {
         let defaults = WaveformParams::parse(None, None, None, None).unwrap();
         assert_eq!(
