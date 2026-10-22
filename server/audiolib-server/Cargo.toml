@@ -57,5 +57,7 @@ libc = "0.2"
 audiolib-remote = { path = "../../crates/audiolib-remote" }
 audiolib-db = { path = "../../crates/audiolib-db", features = ["scanner"] }
 http-body-util.workspace = true
+# Backdate directory mtimes in snapshot cleanup tests (already in Cargo.lock).
+filetime = "0.2.29"
 # Self-signed certificate for the native TLS listener test.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
