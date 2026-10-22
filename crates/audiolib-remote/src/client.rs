@@ -233,7 +233,6 @@ impl std::fmt::Debug for RemoteClient {
     }
 }
 
-/// `Retry-After` in delta seconds (HTTP dates are ignored), capped at one hour.
 /// True for the server's own challenge, `WWW-Authenticate: Bearer realm="audiolib"`.
 fn is_audiolib_bearer_realm(value: &str) -> bool {
     let value = value.trim();
@@ -262,6 +261,7 @@ fn mdns_unauthorized_suffix(api: &str, server_realm: bool, body: &str) -> Option
     Some(format!(" ({api})"))
 }
 
+/// `Retry-After` in delta seconds (HTTP dates are ignored), capped at one hour.
 pub(crate) fn retry_after(headers: &ureq::http::HeaderMap) -> Option<u64> {
     headers
         .get("retry-after")?

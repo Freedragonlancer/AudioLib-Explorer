@@ -228,6 +228,8 @@ impl RemoteError {
         };
         match (status, parsed.error_code.as_str()) {
             // §2.3: failed-auth limiter; keep `Retry-After` so nothing retries early.
+            // The server currently only emits AUTH_RATE_LIMITED as 429, so every 429 maps
+            // to RateLimited; revisit if other 429 codes appear.
             (429, _) | (_, "AUTH_RATE_LIMITED") => Self::RateLimited {
                 message,
                 retry_after,
@@ -439,7 +441,7 @@ impl RemoteError {
                     message,
                     retry_after,
                 } => format!(
-                    "Too many failed authentications; the server is temporarily refusing requests from this PC (429 AUTH_RATE_LIMITED). Until the wait ends even a correct token is rejected. Try again in {} seconds and check the access token. ({message})",
+                    "Too many failed authentications; the server is temporarily refusing requests from this client's IP address as the server sees it (behind a proxy or NAT, that is the proxy's/router's IP) (429 AUTH_RATE_LIMITED). Until the wait ends even a correct token is rejected. Try again in {} seconds and check the access token. ({message})",
                     retry_after.unwrap_or(60)
                 ),
                 Self::Tls { kind, detail } => tls_message(*kind, detail, false),
@@ -508,7 +510,7 @@ impl RemoteError {
                 message,
                 retry_after,
             } => format!(
-                "认证失败次数过多，服务器暂时拒绝来自本机的请求（429 AUTH_RATE_LIMITED），等待结束前即使令牌正确也会被拒绝；请 {} 秒后再试，并检查访问令牌是否正确。（{message}）",
+                "认证失败次数过多，服务器暂时拒绝来自本客户端 IP 地址（以服务器所见为准；经代理或 NAT 时为代理/路由器的 IP）的请求（429 AUTH_RATE_LIMITED），等待结束前即使令牌正确也会被拒绝；请 {} 秒后再试，并检查访问令牌是否正确。（{message}）",
                 retry_after.unwrap_or(60)
             ),
             Self::Tls { kind, detail } => tls_message(*kind, detail, true),
@@ -704,7 +706,8 @@ impl RemoteError {
     /// configured while the server requires one).
     /// `429 AUTH_RATE_LIMITED` counts too: it follows repeated auth failures, and
     /// callers then back off (the poller waits at least `UNAUTHORIZED_RETRY`, longer than
-    /// the server's `Retry-After: 60`) instead of retrying.
+    /// the server's `Retry-After: 60`) instead of retrying. The server currently only
+    /// emits AUTH_RATE_LIMITED as 429; revisit if other 429 codes appear.
     pub fn is_unauthorized(&self) -> bool {
         matches!(
             self,
@@ -917,6 +920,13 @@ mod tests {
         ));
         assert!(bare.localized(true).contains("60 秒"));
         assert!(bare.localized(true).contains("即使令牌正确也会被拒绝"));
+        assert!(bare.localized(true).contains("本客户端 IP 地址"));
+        assert!(!bare.localized(true).contains("本机"));
+        assert!(
+            bare.localized(false)
+                .contains("this client's IP address as the server sees it")
+        );
+        assert!(!bare.localized(false).contains("this PC"));
         assert!(
             bare.localized(false)
                 .contains("even a correct token is rejected")
