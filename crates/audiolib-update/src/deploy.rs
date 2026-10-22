@@ -153,6 +153,17 @@ impl PreparedUpdate {
                 }
                 Err(error) => return Err(error),
             };
+            if restart_action(
+                cfg!(target_os = "macos"),
+                std::env::var_os("XPC_SERVICE_NAME"),
+            ) == RestartAction::ExitForLaunchd
+            {
+                // Running under launchd: exit so KeepAlive relaunches through the
+                // configured launchd -> audiolib-launcher -> run.sh chain. Exec'ing the
+                // binary directly bypasses the launcher and triggers macOS TCC prompts.
+                let _ = self.stage.keep();
+                std::process::exit(LAUNCHD_RESTART_EXIT_CODE);
+            }
             let error = restart_command(&plan).exec();
             if let Err(rollback_error) = rollback(&plan, stage, &changed) {
                 let retained = self.stage.keep();
@@ -165,6 +176,48 @@ impl PreparedUpdate {
         }
         #[cfg(not(unix))]
         self.spawn_after_exit(arguments)
+    }
+}
+
+/// Exit code used after installing an update under launchd. Nonzero (EX_TEMPFAIL)
+/// so both `KeepAlive = true` and `KeepAlive = { SuccessfulExit = false }` relaunch.
+pub const LAUNCHD_RESTART_EXIT_CODE: i32 = 75;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartAction {
+    /// Replace the current process image with the new binary (same PID).
+    Exec,
+    /// Exit and let launchd's KeepAlive restart the service via its own chain.
+    ExitForLaunchd,
+}
+
+/// Pure decision: exit for launchd only on macOS with a non-empty XPC_SERVICE_NAME.
+fn restart_action(is_macos: bool, xpc_service_name: Option<OsString>) -> RestartAction {
+    match xpc_service_name {
+        Some(name) if is_macos && !name.is_empty() => RestartAction::ExitForLaunchd,
+        _ => RestartAction::Exec,
+    }
+}
+
+#[cfg(test)]
+mod restart_action_tests {
+    use super::*;
+
+    #[test]
+    fn macos_under_launchd_exits() {
+        assert_eq!(
+            restart_action(true, Some("io.github.audiolib.server".into())),
+            RestartAction::ExitForLaunchd
+        );
+        assert_ne!(LAUNCHD_RESTART_EXIT_CODE, 0);
+    }
+
+    #[test]
+    fn otherwise_execs() {
+        assert_eq!(restart_action(true, None), RestartAction::Exec);
+        assert_eq!(restart_action(true, Some("".into())), RestartAction::Exec);
+        assert_eq!(restart_action(false, Some("x".into())), RestartAction::Exec);
+        assert_eq!(restart_action(false, None), RestartAction::Exec);
     }
 }
 

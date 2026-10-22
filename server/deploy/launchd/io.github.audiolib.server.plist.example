@@ -14,9 +14,10 @@
       #!/bin/sh
       AUDIOLIB_SERVER_TOKEN="$(cat /usr/local/var/audiolib/token)"; export AUDIOLIB_SERVER_TOKEN
       exec /opt/audiolib/audiolib-server --config /usr/local/var/audiolib/config.toml
-  (chmod 600 the token file). Optionally start it through the launcher in
-  server/launcher/ (macOS only, avoids repeated volume-access prompts):
-  ProgramArguments = [/opt/audiolib/audiolib-launcher, /bin/sh, /opt/audiolib/run.sh]
+  (chmod 600 the token file). It starts through the launcher in server/launcher/
+  (build it there; avoids repeated volume-access prompts). Self-update exits with
+  code 75 under launchd so KeepAlive (must restart on nonzero exit) relaunches via
+  this chain; with KeepAlive false the server stays stopped after an update.
 -->
 <plist version="1.0">
 <dict>
@@ -24,6 +25,7 @@
     <string>io.github.audiolib.server</string>
     <key>ProgramArguments</key>
     <array>
+        <string>/opt/audiolib/audiolib-launcher</string>
         <string>/bin/sh</string>
         <string>/opt/audiolib/run.sh</string>
     </array>
