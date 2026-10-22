@@ -9,6 +9,9 @@ $payloadRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirec
 $allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd', 'update-channel.txt', 'update-version.txt') +
     # Windows PowerShell 5.1 emits a JSON array as one Object[]; unroll it explicitly.
     @((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json) | ForEach-Object { $_ })
+# Checksum sidecars written by package-portable.ps1 next to the executables: allowed, not
+# required (a published archive does not carry them).
+$optionalFiles = @('AudioLibExplorer.exe.sha256', 'AudioLibCli.exe.sha256')
 $privatePrefixes = [Collections.Generic.List[string]]::new()
 foreach ($prefix in @($taskRoot, $env:USERPROFILE, $env:CARGO_HOME, $env:RUSTUP_HOME, $env:CARGO_TARGET_DIR)) {
     if ($prefix) {
@@ -53,7 +56,7 @@ foreach ($file in (Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File
     # Windows PowerShell 5.1 (.NET Framework) lacks [IO.Path]::GetRelativePath; every
     # enumerated file sits below $payloadRoot, so strip that prefix instead.
     $relative = $file.FullName.Substring($payloadRoot.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\', '/')
-    if ($relative -notin $allowedFiles -and !$relative.StartsWith('licenses/', [StringComparison]::Ordinal)) { throw "File is outside the public payload allowlist: $relative" }
+    if ($relative -notin $allowedFiles -and $relative -notin $optionalFiles -and !$relative.StartsWith('licenses/', [StringComparison]::Ordinal)) { throw "File is outside the public payload allowlist: $relative" }
     if ($file.Extension -in @('.db', '.sqlite', '.sqlite3', '.log') -or $file.Name -in @('settings.json', '.env')) { throw "Runtime state found in payload: $relative" }
     $bytes = [IO.File]::ReadAllBytes($file.FullName)
     Assert-NoPrivatePath ([Text.Encoding]::UTF8.GetString($bytes)) $relative
