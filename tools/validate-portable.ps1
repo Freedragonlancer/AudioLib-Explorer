@@ -70,6 +70,14 @@ try {
             if ($sourceHash -ne $packageHash) { throw "Packaged binary differs from release: $binary" }
         }
     }
+    # The archive next to the default package output must use updater-safe entry names.
+    $portableArchive = Join-Path (Split-Path -Parent $binaryRoot) 'AudioLibExplorer-latest-win-x64-portable.zip'
+    $zipCheck = $null
+    if (Test-Path -LiteralPath $portableArchive) {
+        $expectedEntries = @(Get-ChildItem -LiteralPath $binaryRoot -Recurse -Force -File | ForEach-Object { $_.FullName.Substring($binaryRoot.Length).TrimStart('\', '/').Replace('\', '/') })
+        & (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $portableArchive -ExpectedEntries $expectedEntries
+        $zipCheck = 'portable ZIP entry names use forward slashes'
+    }
     $initial = Invoke-DesktopSmoke @('--headless-smoke') 'headless'
     if ($initial.ExitCode -ne 0) { throw "Portable headless startup failed: $($initial.Error)" }
     $library = $initial.Output | ConvertFrom-Json

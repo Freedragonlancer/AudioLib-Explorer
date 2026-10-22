@@ -643,6 +643,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "tracing",
  "ureq",
  "zip",
 ]
