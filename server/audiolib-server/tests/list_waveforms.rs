@@ -1292,6 +1292,20 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["etag"], bundle_etag);
     assert_eq!(bytes(response).await, body);
+    // A changed item invalidates the tag: the old If-None-Match now gets 200 with a
+    // new ETag, and the new ETag revalidates to 304.
+    let mut changed = wfdb.get(tone).unwrap();
+    changed.etag = format!("{}-changed", changed.etag);
+    wfdb.queue(changed);
+    wfdb.flush();
+    let response = bundle_response_with(&f.state, &[("if-none-match", &bundle_etag)]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let new_etag = response.headers()["etag"].to_str().unwrap().to_string();
+    assert_ne!(new_etag, bundle_etag);
+    assert!(!bytes(response).await.is_empty());
+    let response = bundle_response_with(&f.state, &[("if-none-match", &new_etag)]).await;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert!(bytes(response).await.is_empty());
     let leftovers = std::fs::read_dir(wfdb.path().parent().unwrap())
         .unwrap()
         .filter(|e| {
