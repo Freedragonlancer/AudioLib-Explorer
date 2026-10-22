@@ -1,5 +1,29 @@
 # AudioLib Explorer release notes
 
+## 0.6.3: startup auto-update, WASAPI idle release, beta release flow
+
+Release identity: program `0.6.3` | API `/api/v1/` | schema 6 | snapshot format
+`ale-s6-cld1-t3-m2-p1`. No database migration; schema and snapshot formats are unchanged.
+
+Versions: program 0.6.3 | API /api/v1/ | schema 6 | snapshot compat 3..=6
+
+Upgrade notes:
+
+- 0.6.3 is compatible with 0.6.x peers (`>=0.6.0, <0.7.0`); client and server can be
+  upgraded independently.
+
+Changes:
+
+- Desktop and server: check GitHub Releases at startup and apply updates with
+  verified downloads, staged rollout and startup recovery (#53).
+- Audio: the WASAPI output stream is released when preview is idle, so other
+  applications and DAWs can use the device in exclusive or shared mode (#54).
+- Release flow: beta tags and pre-releases, side-by-side beta install, and a scripted
+  beta smoke test (`tools/beta-smoke.ps1`) (#51, #52).
+- Desktop: the preview volume dB label refreshes live while dragging (#50).
+- Server: waveform bundle supports `If-None-Match` (304); unauthenticated requests
+  still get 401 (#49).
+
 ## 0.6.2: snapshot download and low-disk fixes, clearer client errors
 
 Release identity: program `0.6.2` | API `/api/v1/` | schema 6 | snapshot format
