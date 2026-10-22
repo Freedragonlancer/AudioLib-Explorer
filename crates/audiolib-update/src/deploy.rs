@@ -182,8 +182,10 @@ impl PreparedUpdate {
 
 /// Exit code used after installing an update under launchd. Nonzero (EX_TEMPFAIL)
 /// so both `KeepAlive = true` and `KeepAlive = { SuccessfulExit = false }` relaunch.
+#[cfg(any(unix, test))]
 pub const LAUNCHD_RESTART_EXIT_CODE: i32 = 75;
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestartAction {
     /// Replace the current process image with the new binary (same PID).
@@ -196,6 +198,7 @@ enum RestartAction {
 /// `AUDIOLIB_LAUNCHD_LABEL` is non-empty and equals `XPC_SERVICE_NAME` exactly.
 /// `XPC_SERVICE_NAME` alone is unreliable (it is inherited, and is "0" in many
 /// non-launchd shells), and the parent pid is the launcher rather than 1.
+#[cfg(any(unix, test))]
 fn restart_action(
     is_macos: bool,
     launchd_label: Option<OsString>,
