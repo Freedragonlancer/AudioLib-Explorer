@@ -2177,10 +2177,27 @@ async fn startup_removes_only_stale_snapshot_directories() {
         b"x",
     )
     .unwrap();
+    // Startup only removes leftovers at least 30 s old; backdate the stale one
+    // after its contents are written (writing children bumps the dir mtime).
+    let old = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(120),
+    );
+    filetime::set_file_mtime(snapshots.join("audiolib-snapshot-stale"), old).unwrap();
+    // A freshly created, owned snapshot directory may belong to another
+    // instance that is still starting up, so it must be kept.
+    fs::create_dir_all(snapshots.join("audiolib-snapshot-fresh")).unwrap();
+    fs::write(
+        snapshots
+            .join("audiolib-snapshot-fresh")
+            .join(".owner.lock"),
+        b"",
+    )
+    .unwrap();
     fs::write(snapshots.join("audiolib-snapshot-file"), b"keep").unwrap();
     fs::create_dir_all(snapshots.join("keep-me")).unwrap();
     let _reopened = AppState::open(&f.config, BearerToken::new(TOKEN).unwrap()).unwrap();
     assert!(!snapshots.join("audiolib-snapshot-stale").exists());
+    assert!(snapshots.join("audiolib-snapshot-fresh").is_dir());
     assert!(snapshots.join("audiolib-snapshot-file").is_file());
     assert!(snapshots.join("keep-me").is_dir());
     #[cfg(unix)]
