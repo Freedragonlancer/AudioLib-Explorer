@@ -153,6 +153,18 @@ impl PreparedUpdate {
                 }
                 Err(error) => return Err(error),
             };
+            if restart_action(
+                cfg!(target_os = "macos"),
+                std::env::var_os("AUDIOLIB_LAUNCHD_LABEL"),
+                std::env::var_os("XPC_SERVICE_NAME"),
+            ) == RestartAction::ExitForLaunchd
+            {
+                // Running under launchd: exit so KeepAlive relaunches through the
+                // configured launchd -> audiolib-launcher -> run.sh chain. Exec'ing the
+                // binary directly bypasses the launcher and triggers macOS TCC prompts.
+                let _ = self.stage.keep();
+                std::process::exit(LAUNCHD_RESTART_EXIT_CODE);
+            }
             let error = restart_command(&plan).exec();
             if let Err(rollback_error) = rollback(&plan, stage, &changed) {
                 let retained = self.stage.keep();
@@ -165,6 +177,98 @@ impl PreparedUpdate {
         }
         #[cfg(not(unix))]
         self.spawn_after_exit(arguments)
+    }
+}
+
+/// Exit code used after installing an update under launchd. Nonzero (EX_TEMPFAIL)
+/// so both `KeepAlive = true` and `KeepAlive = { SuccessfulExit = false }` relaunch.
+#[cfg(any(unix, test))]
+pub const LAUNCHD_RESTART_EXIT_CODE: i32 = 75;
+
+#[cfg(any(unix, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartAction {
+    /// Replace the current process image with the new binary (same PID).
+    Exec,
+    /// Exit and let launchd's KeepAlive restart the service via its own chain.
+    ExitForLaunchd,
+}
+
+/// Pure decision: exit for launchd only on macOS when the plist-provided
+/// `AUDIOLIB_LAUNCHD_LABEL` is non-empty and equals `XPC_SERVICE_NAME` exactly.
+/// `XPC_SERVICE_NAME` alone is unreliable (it is inherited, and is "0" in many
+/// non-launchd shells), and the parent pid is the launcher rather than 1.
+#[cfg(any(unix, test))]
+fn restart_action(
+    is_macos: bool,
+    launchd_label: Option<OsString>,
+    xpc_service_name: Option<OsString>,
+) -> RestartAction {
+    match (launchd_label, xpc_service_name) {
+        (Some(label), Some(xpc)) if is_macos && !label.is_empty() && label == xpc => {
+            RestartAction::ExitForLaunchd
+        }
+        _ => RestartAction::Exec,
+    }
+}
+
+#[cfg(test)]
+mod restart_action_tests {
+    use super::*;
+
+    const LABEL: &str = "io.github.audiolib.server";
+
+    fn some(value: &str) -> Option<OsString> {
+        Some(value.into())
+    }
+
+    #[test]
+    fn macos_matching_label_exits() {
+        assert_eq!(
+            restart_action(true, some(LABEL), some(LABEL)),
+            RestartAction::ExitForLaunchd
+        );
+        assert_ne!(LAUNCHD_RESTART_EXIT_CODE, 0);
+    }
+
+    #[test]
+    fn unset_execs() {
+        assert_eq!(restart_action(true, None, None), RestartAction::Exec);
+        assert_eq!(restart_action(true, None, some(LABEL)), RestartAction::Exec);
+        assert_eq!(restart_action(true, some(LABEL), None), RestartAction::Exec);
+        assert_eq!(
+            restart_action(true, some(""), some("")),
+            RestartAction::Exec
+        );
+    }
+
+    #[test]
+    fn mismatch_execs() {
+        assert_eq!(
+            restart_action(true, some(LABEL), some("com.apple.Terminal")),
+            RestartAction::Exec
+        );
+        assert_eq!(
+            restart_action(true, some(LABEL), some("0")),
+            RestartAction::Exec
+        );
+    }
+
+    #[test]
+    fn xpc_zero_without_label_execs() {
+        assert_eq!(restart_action(true, None, some("0")), RestartAction::Exec);
+        assert_eq!(
+            restart_action(true, some(""), some("0")),
+            RestartAction::Exec
+        );
+    }
+
+    #[test]
+    fn non_macos_execs() {
+        assert_eq!(
+            restart_action(false, some(LABEL), some(LABEL)),
+            RestartAction::Exec
+        );
     }
 }
 
