@@ -1,9 +1,10 @@
 # tools/beta-smoke.ps1
 # Scripted basic test of a beta server and the side-by-side beta install.
 #   ./tools/beta-smoke.ps1 -BaseUrl <http://host:port> [-ExpectedCommit <sha>] [-Token <t>]
-#       [-Sync] [-MinEntries <n>] [-StreamSamples 20] [-ReleaseDir <beta_release>]
+#       [-Sync [-KeepSyncData]] [-MinEntries <n>] [-StreamSamples 20] [-ReleaseDir <beta_release>]
 # -BaseUrl (or AUDIOLIB_BETA_URL) is required; no server address is stored in the repo.
 # Read-only against the server: GET/HEAD only, never starts, stops or scans anything.
+# Stream reads time out after -StreamTimeoutSec (default 120; NAS disks may need to wake).
 # -Sync runs `AudioLibCli remote sync --force` from -ReleaseDir with AUDIOLIB_DATA_DIR set
 # to a fresh directory under $env:TEMP; the stable v1 and the beta data directories are
 # never read or written. A PASS/FAIL table is printed, a log is written to the temp run
@@ -17,7 +18,9 @@ param(
     [int]$MinEntries = 1,
     [int]$StreamSamples = 20,
     [string]$ReleaseDir,
-    [int]$SyncTimeoutSec = 900
+    [int]$SyncTimeoutSec = 900,
+    [switch]$KeepSyncData,
+    [int]$StreamTimeoutSec = 120
 )
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'Pass -BaseUrl <http://host:port> or set AUDIOLIB_BETA_URL.' }
@@ -43,16 +46,23 @@ function Record([string]$Name, [bool]$Ok, [string]$Detail) {
 }
 
 Add-Type -AssemblyName System.Net.Http
+# Audio records carry free-form attribute keys that can differ only in case, which
+# ConvertFrom-Json (Windows PowerShell 5) rejects; parse those with a case-sensitive reader.
+Add-Type -AssemblyName System.Web.Extensions
+$json = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+$json.MaxJsonLength = [int]::MaxValue
 $handler = New-Object System.Net.Http.HttpClientHandler
 $handler.AllowAutoRedirect = $false
 $http = New-Object System.Net.Http.HttpClient($handler)
 $http.Timeout = [TimeSpan]::FromMinutes(10)
-function Send([string]$Method, [string]$Url, [hashtable]$Headers = @{}, [switch]$NoAuth, [switch]$HeadersOnly) {
+function Send([string]$Method, [string]$Url, [hashtable]$Headers = @{}, [switch]$NoAuth, [switch]$HeadersOnly, [int]$TimeoutSec = 600) {
     $request = New-Object System.Net.Http.HttpRequestMessage((New-Object System.Net.Http.HttpMethod($Method)), $Url)
     if ($Token -and !$NoAuth) { [void]$request.Headers.TryAddWithoutValidation('Authorization', "Bearer $Token") }
     foreach ($key in $Headers.Keys) { [void]$request.Headers.TryAddWithoutValidation($key, [string]$Headers[$key]) }
     $option = if ($HeadersOnly) { [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead } else { [System.Net.Http.HttpCompletionOption]::ResponseContentRead }
-    return $http.SendAsync($request, $option).GetAwaiter().GetResult()
+    $cancel = New-Object System.Threading.CancellationTokenSource([TimeSpan]::FromSeconds($TimeoutSec))
+    try { return $http.SendAsync($request, $option, $cancel.Token).GetAwaiter().GetResult() }
+    catch { if (!$cancel.IsCancellationRequested) { throw }; throw "$Method $($Url.Substring($BaseUrl.Length)) timed out after $TimeoutSec s" }
 }
 function Body($Response) { $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult() }
 function Try-Check([string]$Name, [scriptblock]$Block) {
@@ -125,32 +135,46 @@ if ($etag) {
 # Random tracks: probe ids, keep present records, then a Range request on /audio/{id}/stream.
 if ($StreamSamples -gt 0) {
     Try-Check 'stream samples' {
+        # Only records under a configured root can stream (doc/api §8: others are 404).
+        $rootsResponse = Send GET "$api/roots"
+        $roots = @((Body $rootsResponse) | ConvertFrom-Json | ForEach-Object { $_ })
+        $prefixes = @($roots | ForEach-Object { ([string]$_.server_path).TrimEnd('/', '\') + '/' })
+        $covered = [int64]0; foreach ($root in $roots) { if ($root.file_count) { $covered += [int64]$root.file_count } }
+        Log ("Roots: {0} ({1} files under configured roots, library has {2})" -f (($roots | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '), $covered, $serverFiles)
+        if ($serverFiles -and $covered -lt $serverFiles) { Log ("  WARNING: {0} library records lie outside the configured roots and return 404 from /stream" -f ($serverFiles - $covered)) }
+        $outside = 0
         $random = New-Object System.Random
         $upper = [int][Math]::Max(100, $serverFiles * 1.5 + 100)
         $picked = New-Object System.Collections.Generic.List[object]
         $seen = @{}
-        for ($attempt = 0; $attempt -lt ($StreamSamples * 30) -and $picked.Count -lt $StreamSamples; $attempt++) {
+        for ($attempt = 0; $attempt -lt ($StreamSamples * 200) -and $picked.Count -lt $StreamSamples; $attempt++) {
             $id = $random.Next(1, $upper)
             if ($seen.ContainsKey($id)) { continue }
             $seen[$id] = $true
             $response = Send GET "$api/audio/$id"
             if ([int]$response.StatusCode -ne 200) { continue }
-            $file = (Body $response) | ConvertFrom-Json
+            $record = $json.DeserializeObject((Body $response))
+            $file = [pscustomobject]@{ id = $record['id']; missing = $record['missing']; file_path = $record['file_path'] }
             if ($file.missing) { continue }
+            $path = ([string]$file.file_path).Replace('\', '/')
+            if (!($prefixes | Where-Object { $path.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) })) { $outside++; continue }
             $picked.Add($file)
         }
+        Log ("  picked {0} present records under configured roots" -f $picked.Count)
         $failures = 0
         foreach ($file in $picked) {
-            $response = Send GET "$api/audio/$($file.id)/stream" @{ 'Range' = 'bytes=0-4095' } -HeadersOnly
+            try { $response = Send GET "$api/audio/$($file.id)/stream" @{ 'Range' = 'bytes=0-4095' } -HeadersOnly -TimeoutSec $StreamTimeoutSec }
+            catch { $failures++; Log ("  stream id={0} FAIL: {1}" -f $file.id, $_.Exception.Message); continue }
             $code = [int]$response.StatusCode
             $type = [string]$response.Content.Headers.ContentType
             $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
             $magic = if ($bytes.Length -ge 4) { [Text.Encoding]::ASCII.GetString($bytes, 0, 4) } else { '' }
+            $errorCode = if ($code -ge 400) { try { [string]$json.DeserializeObject([Text.Encoding]::UTF8.GetString($bytes))['error_code'] } catch { '' } } else { '' }
             $ok = ($code -eq 206) -and $bytes.Length -gt 0 -and ($type -like 'audio/*') -and ($type -ne 'audio/wav' -or $magic -in @('RIFF', 'RF64', 'BW64'))
             if (!$ok) { $failures++ }
-            Log ("  stream id={0} HTTP {1} {2} {3} bytes magic={4} {5}" -f $file.id, $code, $type, $bytes.Length, $magic, $(if ($ok) { 'ok' } else { 'FAIL' }))
+            Log ("  stream id={0} HTTP {1} {2} {3} bytes magic={4} {5} {6}" -f $file.id, $code, $type, $bytes.Length, $magic, $errorCode, $(if ($ok) { 'ok' } else { 'FAIL' }))
         }
-        Record 'stream samples' ($picked.Count -eq $StreamSamples -and $failures -eq 0) "$($picked.Count)/$StreamSamples random tracks sampled, $failures failed"
+        Record 'stream samples' ($picked.Count -eq $StreamSamples -and $failures -eq 0) "$($picked.Count)/$StreamSamples random tracks sampled, $failures failed ($outside probed records outside configured roots skipped)"
     }
 }
 
@@ -171,6 +195,7 @@ if ($Sync) {
             $out = Join-Path $runDir 'sync.out.txt'; $err = Join-Path $runDir 'sync.err.txt'
             $watch = [Diagnostics.Stopwatch]::StartNew()
             $process = Start-Process -FilePath $cli -ArgumentList 'remote', 'sync', '--force' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            $null = $process.Handle  # cache the handle so ExitCode is available after WaitForExit
             if (!$process.WaitForExit($SyncTimeoutSec * 1000)) { throw "sync did not finish within $SyncTimeoutSec s (left running, pid $($process.Id))" }
             $watch.Stop()
             $text = (Get-Content -LiteralPath $out -Raw)
@@ -180,7 +205,11 @@ if ($Sync) {
             $entries = [int64]$data.audio_files
             $ok = ($process.ExitCode -eq 0) -and ($reply.success -ne $false) -and $data.downloaded -and ($entries -ge $MinEntries) -and (!$serverFiles -or $entries -eq $serverFiles)
             Record 'sync' $ok ("exit {0}, downloaded={1}, entries={2} (server {3}, min {4}), snapshot {5:N1} MiB, {6:N1} s" -f $process.ExitCode, $data.downloaded, $entries, $serverFiles, $MinEntries, ($data.snapshot_bytes / 1MB), $watch.Elapsed.TotalSeconds)
-        } finally { $env:AUDIOLIB_DATA_DIR = $previous }
+        } finally {
+            $env:AUDIOLIB_DATA_DIR = $previous
+            # The synced snapshot can be many GB; keep it only on request.
+            if (!$KeepSyncData -and $process -and $process.HasExited) { Remove-Item -LiteralPath $dataDir -Recurse -Force -ErrorAction SilentlyContinue }
+        }
     }
 }
 
