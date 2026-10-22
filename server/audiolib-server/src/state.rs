@@ -1286,7 +1286,7 @@ impl AppState {
         let stats = self.library_stats(&revision)?;
         let mut info = self.inner.provider.library_info_with_stats(stats)?;
         info.database_bytes = info.database_bytes.saturating_add(info.wal_bytes);
-        // Remote callers only get the file name; the full server path stays in /admin.
+        // Remote callers only get the file name; the full path is not exposed over the API.
         info.database = info
             .database
             .file_name()

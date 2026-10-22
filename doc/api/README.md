@@ -234,7 +234,7 @@ audiolib.example.com:8443 {
   - `library_id` 保存在服务端自有的旁路文件 `<db>.server-state.json`（与库文件同目录，原子写入），在服务端**第一次打开该 db 路径**时生成（UUID v4）。schema v3/v4 本身没有库身份字段。
   - 原地还原（restore）保留 `library_id`，`revision` 递增；把库复制到另一路径再提供服务会得到新的 `library_id`。旁路文件损坏时服务端拒绝启动，不会悄悄换新 id。
   - 以后可另行设计在库内保存身份（例如元数据表或 SQLite `application_id` + UUID），届时旁路文件只作迁移来源。
-- **路径**：服务端**暴露绝对路径**——`GET /roots` 的 `server_path` 以及 `AudioFile.file_path` / `Folder.path` 均为服务端（Mac）上的原始绝对路径。客户端把库里的路径前缀 `server_path` 替换为该根的 WebDAV 地址来访问音频（见 §7）。目前只在局域网使用，因此接受路径暴露；以后若开放到局域网之外再重新评估。例外：`GET /library` 的 `database` 只返回库文件名（如 `library.db`），不含服务端目录；完整路径仅在 `/admin` 管理页显示。
+- **路径**：服务端**暴露绝对路径**——`GET /roots` 的 `server_path` 以及 `AudioFile.file_path` / `Folder.path` 均为服务端（Mac）上的原始绝对路径。客户端把库里的路径前缀 `server_path` 替换为该根的 WebDAV 地址来访问音频（见 §7）。目前只在局域网使用，因此接受路径暴露；以后若开放到局域网之外再重新评估。例外：`GET /library` 的 `database` 只返回库文件名（如 `library.db`），不含服务端目录；库文件的完整路径不通过 API 暴露。
 - **扫描根**：服务端配置允许的根（`[[roots]]`，对应 `allowed_scan_roots`），客户端只能从 `GET /roots` 里选，不能传任意路径。
 
 ### 3.1 历史：快照 schema 3 → 5
