@@ -2192,6 +2192,7 @@ struct BundleQuery {
 async fn waveform_bundle(
     Extension(state): Extension<AppState>,
     Query(query): Query<BundleQuery>,
+    request_headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let encoding = query
         .encoding
@@ -2229,6 +2230,27 @@ async fn waveform_bundle(
         Ok((bundle, permit))
     })
     .await?;
+    // Conditional request (§9.4.2): a matching If-None-Match (weak comparison, lists
+    // and `*`) gets 304 with the ETag and no body; the file is never opened or streamed.
+    // `private, no-cache` lets clients store the bundle but forces revalidation.
+    let cache_control = HeaderValue::from_static("private, no-cache");
+    if request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| stream::none_match(value, &bundle.etag))
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, cache_control);
+        headers.insert(header::ETAG, header_value(bundle.etag.clone())?);
+        headers.insert("x-library-id", header_value(bundle.library_id.clone())?);
+        headers.insert(
+            "x-library-revision",
+            header_value(bundle.revision.to_string())?,
+        );
+        drop((bundle, permit));
+        return Ok(response);
+    }
     let file = tokio::fs::File::open(&bundle.path)
         .await
         .map_err(|error| ApiError::internal(format!("Cannot open the bundle: {error}")))?;
@@ -2248,7 +2270,7 @@ async fn waveform_bundle(
         HeaderValue::from_static("application/vnd.sqlite3"),
     );
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::CACHE_CONTROL, cache_control);
     headers.insert(header::ETAG, header_value(etag)?);
     headers.insert("x-library-id", header_value(library_id)?);
     headers.insert("x-library-revision", header_value(revision.to_string())?);

@@ -1272,10 +1272,26 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
     // exact bytes, and neither response retains the preparation permit.
     let second = bundle_response(&f.state).await;
     assert_eq!(second.headers()["etag"], bundle_etag);
+    let second_cc = second.headers()["cache-control"].clone();
     let third = bundle_response(&f.state).await;
     assert_eq!(third.headers()["etag"], bundle_etag);
     assert_eq!(bytes(second).await, body);
     assert_eq!(bytes(third).await, body);
+    assert_eq!(second_cc, "private, no-cache");
+    // Conditional requests: match / weak / list / `*` -> 304 without body; mismatch -> 200.
+    let weak = format!("W/{bundle_etag}");
+    let listed = format!("\"wfb1-other\", {bundle_etag}");
+    for tag in [bundle_etag.as_str(), weak.as_str(), listed.as_str(), "*"] {
+        let response = bundle_response_with(&f.state, &[("if-none-match", tag)]).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{tag}");
+        assert_eq!(response.headers()["etag"], bundle_etag, "{tag}");
+        assert_eq!(response.headers()["cache-control"], "private, no-cache");
+        assert!(bytes(response).await.is_empty(), "{tag}");
+    }
+    let response = bundle_response_with(&f.state, &[("if-none-match", "\"wfb1-stale\"")]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["etag"], bundle_etag);
+    assert_eq!(bytes(response).await, body);
     let leftovers = std::fs::read_dir(wfdb.path().parent().unwrap())
         .unwrap()
         .filter(|e| {
@@ -1292,14 +1308,29 @@ async fn i8_encoding_etags_lengths_waveforms_db_and_bundle() {
 /// `GET /waveforms/bundle`, retrying while another
 /// test holds the process-wide bundle slot (503 `BUSY`).
 async fn bundle_response(state: &AppState) -> Response {
+    bundle_response_with(state, &[]).await
+}
+
+/// [`bundle_response`] with extra request headers (e.g. `If-None-Match`).
+async fn bundle_response_with(state: &AppState, headers: &[(&str, &str)]) -> Response {
+    bundle_request(state, Method::GET, headers, LAN).await
+}
+
+/// [`bundle_response_with`] with an explicit method and peer address.
+async fn bundle_request(
+    state: &AppState,
+    method: Method,
+    headers: &[(&str, &str)],
+    address: &str,
+) -> Response {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = call(
             state.clone(),
-            Method::GET,
+            method.clone(),
             "/waveforms/bundle?encoding=i8-minmax-base64",
-            &[],
-            LAN,
+            headers,
+            address,
             None,
         )
         .await;
@@ -1314,6 +1345,94 @@ async fn bundle_response(state: &AppState) -> Response {
             return Response::from_parts(parts, Body::from(body));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn bundle_if_none_match_never_bypasses_authentication() {
+    // A matching If-None-Match must not turn a missing token into 304: admission runs
+    // before the conditional check, so unauthenticated peers get 401 either way.
+    let f = fixture("");
+    let etag = bundle_response(&f.state).await.headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    // External mode (default): a public peer and a same-host (loopback) peer need a token.
+    for address in [PUBLIC, "127.0.0.1:50000"] {
+        for method in [Method::GET, Method::HEAD] {
+            for tag in [etag.as_str(), "*"] {
+                let response =
+                    bundle_request(&f.state, method.clone(), &[("if-none-match", tag)], address)
+                        .await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{address} {method} {tag}"
+                );
+            }
+        }
+        let bearer = format!("Bearer {TOKEN}");
+        let response = bundle_request(
+            &f.state,
+            Method::GET,
+            &[("if-none-match", &etag), ("authorization", &bearer)],
+            address,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{address}");
+    }
+    // `all` mode: even a LAN peer needs the token.
+    let f = fixture("auth_mode = 'all'\n");
+    let bearer = format!("Bearer {TOKEN}");
+    let etag = bundle_request(&f.state, Method::GET, &[("authorization", &bearer)], LAN)
+        .await
+        .headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let response = bundle_request(&f.state, Method::GET, &[("if-none-match", &etag)], LAN).await;
+    error(response, StatusCode::UNAUTHORIZED, "UNAUTHORIZED").await;
+    let response = bundle_request(
+        &f.state,
+        Method::GET,
+        &[("if-none-match", &etag), ("authorization", &bearer)],
+        LAN,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+async fn bundle_head_answers_headers_only() {
+    let f = fixture("");
+    let get = bundle_response(&f.state).await;
+    assert_eq!(get.status(), StatusCode::OK);
+    let etag = get.headers()["etag"].to_str().unwrap().to_string();
+    let length = bytes(get).await.len();
+    assert!(length > 0);
+    // No / stale If-None-Match: 200 with the GET headers and an empty body.
+    for headers in [&[][..], &[("if-none-match", "\"wfb1-stale\"")][..]] {
+        let response = bundle_request(&f.state, Method::HEAD, headers, LAN).await;
+        assert_eq!(response.status(), StatusCode::OK, "{headers:?}");
+        assert_eq!(response.headers()["etag"], etag.as_str());
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/vnd.sqlite3"
+        );
+        assert_eq!(
+            response.headers()["content-length"],
+            length.to_string().as_str()
+        );
+        assert_eq!(response.headers()["cache-control"], "private, no-cache");
+        assert!(bytes(response).await.is_empty(), "{headers:?}");
+    }
+    // Matching If-None-Match: 304, ETag, no body.
+    for tag in [etag.as_str(), "*"] {
+        let response = bundle_request(&f.state, Method::HEAD, &[("if-none-match", tag)], LAN).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{tag}");
+        assert_eq!(response.headers()["etag"], etag.as_str());
+        assert_eq!(response.headers()["cache-control"], "private, no-cache");
+        assert!(bytes(response).await.is_empty(), "{tag}");
     }
 }
 
