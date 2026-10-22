@@ -2317,7 +2317,6 @@ impl ListWaveforms {
         }
     }
 
-    /// Blocking. `GET /waveforms/status`.
     /// Cheap runtime view for the admin page: only the scheduler lock and cache counters.
     pub fn runtime(&self, state: &AppState) -> ListWaveformRuntime {
         let enabled = state.security().pregenerate_list_waveforms();

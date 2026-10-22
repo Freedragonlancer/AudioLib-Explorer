@@ -117,6 +117,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 
 - 只接受局域网直连：TCP 对端在上面的私有网段内，且**没有**任何转发头（`X-Forwarded-For` 等，即不是经反向代理来的），原生 TLS 监听上的公网对端也拒绝；否则 403 `ADMIN_LAN_ONLY`。
 - `Host` 必须是 IP 地址、`localhost`、不带点的主机名或 `.local` / `.lan` / `.home.arpa` / `.internal` 结尾的名字，否则 403 `ADMIN_LAN_ONLY`（防 DNS 重绑定：恶意网页无法借自己的域名访问管理接口）。
+- 只读请求（`GET`/`HEAD`/`OPTIONS`，如 `GET /admin/api/status`、`GET /admin/api/runtime`、`GET /admin/api/tokens`）只做上面两项检查（局域网直连 + LAN `Host`），**不需要** `X-AudioLib-Admin` 头，也不检查 `Origin`。
 - 修改请求（`PUT`/`POST`/`DELETE`）必须带 `X-AudioLib-Admin: 1`，浏览器带 `Origin` 时必须与 `Host` 同源，否则 403 `ADMIN_HEADER_REQUIRED`（自定义头使跨站网页无法静默发起修改）。
 - 管理响应都带 `Cache-Control: no-store`、`X-Frame-Options: DENY`，页面另有严格的 `Content-Security-Policy`。
 
@@ -133,13 +134,46 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 | `GET /admin/api/update` | 更新状态 `{state, current_version, channel, tag, release_url, message, checked_at}`；`state` 为 `disabled`/`checking`/`current`/`available`/`downloading`/`ready`/`error`；`checked_at`（新增，Unix 秒）为本进程最近一次检查完成（成功或失败）的时间，未检查过为 `null` |
 | `POST /admin/api/update/check` | 开始一次后台检查，立即回复同 `GET /admin/api/update`；已有更新操作进行中 409 `BUSY`，未启用 503 `UNAVAILABLE` |
 | `POST /admin/api/update/install` | `{"tag"}`（必须等于检查得到的 `tag`）下载、校验并部署；扫描进行中 409 `UPDATE_BUSY` |
-| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?, "pregenerate_list_waveforms"?, "list_waveform_rate"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）；回复同 status |
+| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?, "pregenerate_list_waveforms"?, "list_waveform_rate"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）。注意 `false` 与 `null` 不同：`"pregenerate_list_waveforms": false` 保存一个管理页覆盖（显式关闭，`config.toml` 改为 `true` 也不生效），`null`（或 `""`）才删除覆盖、回到 `config.toml` 的值；回复同 status |
 | `PUT /admin/api/tls` | `{"cert_path","key_path","port"}`，校验后保存并（重新）监听；回复同 status（最多等 4 秒拿到监听结果） |
 | `DELETE /admin/api/tls` | 停用（回到 `config.toml` 的 TLS 设置，默认没有） |
 | `GET /admin/api/tokens` | `{"tokens":[{"id","name","created_at","last_used_at"}]}`（不含哈希） |
 | `POST /admin/api/tokens` | `{"name"}` → 201 `{"token":{…},"secret":"al_…"}`，`secret` 只出现这一次 |
 | `DELETE /admin/api/tokens/{id}` | 撤销 → 204；不存在 → 404 `NOT_FOUND` |
 | `GET /admin/api/fs`、`GET`/`POST /admin/api/roots`、`DELETE /admin/api/roots/{name}`、`/admin/api/scans...` | 库根目录管理，见 §2.3.1 |
+
+原生 TLS 每分钟检查证书和私钥内容；有效续期替换只影响新握手，已有连接继续使用原会话。续期文件暂不匹配或不可读时保留旧证书，管理页 TLS 状态 `message` 与服务端日志报告原因，之后继续重试。每个 HTTP/TLS 监听器最多接纳 1024 个连接（含未完成 TLS 握手），超额连接立即关闭。
+
+#### 2.3.1 库根目录管理（管理页专用 Web API）
+
+> **客户端不得依赖本节接口**：它们只供管理页使用，可能随时改动，且只接受局域网直连（§2.3 的全部访问限制：非局域网 / 带转发头 403 `ADMIN_LAN_ONLY`，修改请求缺 `X-AudioLib-Admin: 1` 或跨源 403 `ADMIN_HEADER_REQUIRED`）。客户端读取根目录仍用 `GET /api/v1/roots`（形状不变），在管理页添加的根目录会出现在其中（`webdav_url` 为 `null`），移除的根目录消失。鉴权模式和 `manage_mode` 对这些接口无关（管理页本身就是服务端管理员的入口）。
+
+**根目录的保存与生效**：添加 / 移除后，当前完整的根目录列表写入 `admin-settings.json` 的 `roots`，**此后以它为准**，不再读取 `config.toml` 的 `[[roots]]`（和其他管理页设置一样，管理页覆盖 `config.toml`；`config.toml` 里原有的根目录也可以在页面移除）。改动立即生效，无需重启，重启后保持。
+
+**`GET /admin/api/fs`**（只读，从不写入、删除或递归扫描；每次请求只做一次 `read_dir`，在 SMB 上也很快）：
+
+- 不带 `path`：起点列表 `{"places":[{"kind":"root|volume|home|library_root","name","path","network":true|false|null}]}`：`/`、`/Volumes/*`（`network` 由一次 `statfs` 的文件系统类型判断，`smbfs`/`nfs`/`afpfs`/`webdav` 为 `true`）、主目录、现有根目录（Windows 上是各盘符）。
+- `?path=<绝对路径>[&hidden=1]`：列出该目录的子目录（默认不含 `.` 开头的隐藏目录），路径先 `canonicalize`（解析 `..` 和符号链接）：
+
+```json
+{ "path": "/srv/audiolib/music/Sounds", "parent": "/srv/audiolib/music", "network": false,
+  "entries": [ { "name": "Ambience", "path": "/srv/audiolib/music/Sounds/Ambience", "is_symlink": false } ],
+  "truncated": false, "wav_files": 12, "other_files": 3, "counts_truncated": false }
+```
+
+  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（管理页独立保留 1 个，不受客户端 API 的 4 个名额占用影响，管理页浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
+
+**`POST /admin/api/roots`** `{"name","path"}` → 201，回复同 `GET /api/v1/roots` 的一项（新根目录尚未扫描，`file_count` 为 `null`）。校验（400 `VALIDATION`，不存在 404，权限 403 `FS_FORBIDDEN`）：`name` 非空、1..=128 字符、无首尾空白、不含 `/` `\` 和控制字符、与现有根目录不重名（不区分大小写）；`path` 是已存在的绝对目录；不能与现有根目录相同、位于其内部或包含它。保存的 `server_path` 是规范化后的真实路径。
+
+**`DELETE /admin/api/roots/{name}`** → 200：
+
+```json
+{ "name": "Music", "removed": 3, "folders_removed": 2, "revision_before": 41, "revision": 42 }
+```
+
+先让库忘记该根目录下的全部记录（与 `DELETE /folders/{id}` 相同的清理：音频记录、文件夹记录、播放历史、歌单项、波形缓存），再把它从根目录列表移除；**绝不删除任何音频文件**，重新添加并扫描即可恢复。只有真的删掉记录时 `revision` 才加 1（从未扫描过的根目录：`removed` 为 0，`revision` 不变）。有扫描在运行或暂停时 → 409 `BUSY`；不存在 → 404 `NOT_FOUND`。
+
+**扫描**：`POST /admin/api/scans`（请求体和回复同 `POST /api/v1/scans`）、`GET /admin/api/scans/current`、`GET /admin/api/scans/{id}`、`POST /admin/api/scans/{id}/pause|resume|cancel` 与 §6.6 的同名接口完全相同，只是走管理页的访问限制、不受 `manage_mode` 限制。`GET /admin/api/roots` 返回与 `GET /api/v1/roots` 相同的列表（不需要令牌）。
 
 #### 2.3.2 运行状态 `GET /admin/api/runtime`
 
@@ -175,39 +209,6 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 ```
 
 管理页「列表波形与资源限制」可修改 `pregenerate_list_waveforms` 和 `list_waveform_rate`（经 `PUT /admin/api/settings`，立即生效）；建议速率 40 文件/秒或更低以保持较低资源占用。其他限制（`max_*`、`*_cache_mb`）只读显示并标注「需重启」，只能在 `config.toml` 修改。
-
-#### 2.3.1 库根目录管理（管理页专用 Web API）
-
-> **客户端不得依赖本节接口**：它们只供管理页使用，可能随时改动，且只接受局域网直连（§2.3 的全部访问限制：非局域网 / 带转发头 403 `ADMIN_LAN_ONLY`，修改请求缺 `X-AudioLib-Admin: 1` 或跨源 403 `ADMIN_HEADER_REQUIRED`）。客户端读取根目录仍用 `GET /api/v1/roots`（形状不变），在管理页添加的根目录会出现在其中（`webdav_url` 为 `null`），移除的根目录消失。鉴权模式和 `manage_mode` 对这些接口无关（管理页本身就是服务端管理员的入口）。
-
-**根目录的保存与生效**：添加 / 移除后，当前完整的根目录列表写入 `admin-settings.json` 的 `roots`，**此后以它为准**，不再读取 `config.toml` 的 `[[roots]]`（和其他管理页设置一样，管理页覆盖 `config.toml`；`config.toml` 里原有的根目录也可以在页面移除）。改动立即生效，无需重启，重启后保持。
-
-**`GET /admin/api/fs`**（只读，从不写入、删除或递归扫描；每次请求只做一次 `read_dir`，在 SMB 上也很快）：
-
-- 不带 `path`：起点列表 `{"places":[{"kind":"root|volume|home|library_root","name","path","network":true|false|null}]}`：`/`、`/Volumes/*`（`network` 由一次 `statfs` 的文件系统类型判断，`smbfs`/`nfs`/`afpfs`/`webdav` 为 `true`）、主目录、现有根目录（Windows 上是各盘符）。
-- `?path=<绝对路径>[&hidden=1]`：列出该目录的子目录（默认不含 `.` 开头的隐藏目录），路径先 `canonicalize`（解析 `..` 和符号链接）：
-
-```json
-{ "path": "/srv/audiolib/music/Sounds", "parent": "/srv/audiolib/music", "network": false,
-  "entries": [ { "name": "Ambience", "path": "/srv/audiolib/music/Sounds/Ambience", "is_symlink": false } ],
-  "truncated": false, "wav_files": 12, "other_files": 3, "counts_truncated": false }
-```
-
-  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（管理页独立保留 1 个，不受客户端 API 的 4 个名额占用影响，管理页浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
-
-**`POST /admin/api/roots`** `{"name","path"}` → 201，回复同 `GET /api/v1/roots` 的一项（新根目录尚未扫描，`file_count` 为 `null`）。校验（400 `VALIDATION`，不存在 404，权限 403 `FS_FORBIDDEN`）：`name` 非空、1..=128 字符、无首尾空白、不含 `/` `\` 和控制字符、与现有根目录不重名（不区分大小写）；`path` 是已存在的绝对目录；不能与现有根目录相同、位于其内部或包含它。保存的 `server_path` 是规范化后的真实路径。
-
-**`DELETE /admin/api/roots/{name}`** → 200：
-
-```json
-{ "name": "Music", "removed": 3, "folders_removed": 2, "revision_before": 41, "revision": 42 }
-```
-
-先让库忘记该根目录下的全部记录（与 `DELETE /folders/{id}` 相同的清理：音频记录、文件夹记录、播放历史、歌单项、波形缓存），再把它从根目录列表移除；**绝不删除任何音频文件**，重新添加并扫描即可恢复。只有真的删掉记录时 `revision` 才加 1（从未扫描过的根目录：`removed` 为 0，`revision` 不变）。有扫描在运行或暂停时 → 409 `BUSY`；不存在 → 404 `NOT_FOUND`。
-
-**扫描**：`POST /admin/api/scans`（请求体和回复同 `POST /api/v1/scans`）、`GET /admin/api/scans/current`、`GET /admin/api/scans/{id}`、`POST /admin/api/scans/{id}/pause|resume|cancel` 与 §6.6 的同名接口完全相同，只是走管理页的访问限制、不受 `manage_mode` 限制。`GET /admin/api/roots` 返回与 `GET /api/v1/roots` 相同的列表（不需要令牌）。
-
-原生 TLS 每分钟检查证书和私钥内容；有效续期替换只影响新握手，已有连接继续使用原会话。续期文件暂不匹配或不可读时保留旧证书，管理页 TLS 状态 `message` 与服务端日志报告原因，之后继续重试。每个 HTTP/TLS 监听器最多接纳 1024 个连接（含未完成 TLS 握手），超额连接立即关闭。
 
 ### 2.4 外网反代要求
 
