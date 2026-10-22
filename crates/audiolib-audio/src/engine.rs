@@ -1123,10 +1123,15 @@ impl RenderCallback {
     }
 }
 
+// Keep rapid auditions on the prepared stream, but do not retain a stopped WASAPI
+// client indefinitely while a DAW uses another backend on the same audio interface.
+const WASAPI_IDLE_RELEASE: Duration = Duration::from_millis(500);
+
 struct Worker {
     config: PlaybackConfig,
     status: Arc<Mutex<PlaybackStatus>>,
     output: Option<Output>,
+    output_idle_since: Option<std::time::Instant>,
     needs_recovery: bool,
     session_open: AtomicBool,
     subscribers: Subscribers,
@@ -1151,6 +1156,7 @@ impl Worker {
             config,
             status,
             output: None,
+            output_idle_since: None,
             needs_recovery: false,
             session_open: AtomicBool::new(session_open),
             subscribers,
@@ -1242,6 +1248,7 @@ impl Worker {
         });
     }
     fn close_output(&mut self) {
+        self.output_idle_since = None;
         if let Some(output) = self.output.take() {
             output.realtime.running.store(false, Ordering::Release);
             if let Some(stream) = &output.stream {
@@ -1258,6 +1265,30 @@ impl Worker {
             status.active_rate_policy = None;
             status.buffering = false;
         });
+    }
+    /// WASAPI Stop pauses streaming but retains the audio client and its driver
+    /// resources. Release it after a short idle grace; Play reconstructs output
+    /// from the retained position/configuration without changing a paused session.
+    /// The control worker owns this timer and stream destruction, never the callback.
+    fn release_idle_output(&mut self, now: std::time::Instant) {
+        let idle = matches!(
+            self.status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .state,
+            PlaybackState::Ready
+                | PlaybackState::Paused
+                | PlaybackState::Stopped
+                | PlaybackState::Ended
+        );
+        if !idle || self.output.as_ref().is_none_or(|output| output.asio) {
+            self.output_idle_since = None;
+            return;
+        }
+        let idle_since = self.output_idle_since.get_or_insert(now);
+        if now.saturating_duration_since(*idle_since) >= WASAPI_IDLE_RELEASE {
+            self.close_output();
+        }
     }
     fn suspend_output(&self) -> Result<()> {
         if let Some(output) = &self.output {
@@ -2007,6 +2038,7 @@ impl Worker {
             if self.check_output_failure() {
                 continue;
             }
+            self.release_idle_output(std::time::Instant::now());
             if self.snapshot().state != PlaybackState::Playing {
                 continue;
             }
@@ -2137,6 +2169,208 @@ mod tests {
             drain_deadline: None,
         }
     }
+    #[test]
+    fn idle_wasapi_output_releases_after_grace_without_changing_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("idle-wasapi.wav");
+        for state in [
+            PlaybackState::Ready,
+            PlaybackState::Paused,
+            PlaybackState::Stopped,
+            PlaybackState::Ended,
+        ] {
+            let output = prepared_output(&path);
+            output.realtime.running.store(false, Ordering::Release);
+            let before = PlaybackStatus {
+                generation: 4,
+                transport_revision: 11,
+                play_session_id: 7,
+                state,
+                file_path: Some(path.clone()),
+                position: 0.25,
+                duration: 1.0,
+                sample_rate: 1000,
+                channels: 1,
+                volume: 0.8,
+                active_backend: Some(AudioBackend::Wasapi),
+                active_device_id: Some("retained-device".into()),
+                actual_buffer_frames: 128,
+                device_sample_rate: 1000,
+                active_source_pair: Some(0),
+                active_output_pair: Some(0),
+                active_rate_policy: Some(RatePolicy::DeviceDefault),
+                ..Default::default()
+            };
+            let mut worker = worker(before.clone());
+            worker.output = Some(output);
+            let now = std::time::Instant::now();
+            worker.release_idle_output(now);
+            worker.release_idle_output(now + WASAPI_IDLE_RELEASE - Duration::from_millis(1));
+            assert!(worker.output.is_some(), "{state:?} lost fast stream reuse");
+            worker.release_idle_output(now + WASAPI_IDLE_RELEASE);
+            assert!(
+                worker.output.is_none(),
+                "{state:?} retained its audio client"
+            );
+            let expected = PlaybackStatus {
+                active_backend: None,
+                active_device_id: None,
+                actual_buffer_frames: 0,
+                device_sample_rate: 0,
+                active_source_pair: None,
+                active_output_pair: None,
+                active_rate_policy: None,
+                ..before
+            };
+            assert_eq!(
+                serde_json::to_value(worker.snapshot()).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "{state:?} changed its logical transport when releasing output"
+            );
+            worker.release_idle_output(now + Duration::from_secs(20));
+            assert!(
+                worker.output.is_none(),
+                "idle output must not reopen itself"
+            );
+        }
+    }
+
+    #[test]
+    fn playing_and_network_buffering_cancel_wasapi_idle_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("idle-resume.wav");
+        let output = prepared_output(&path);
+        let mut worker = worker(PlaybackStatus {
+            state: PlaybackState::Paused,
+            file_path: Some(path),
+            duration: 1.0,
+            play_session_id: 1,
+            ..Default::default()
+        });
+        worker.output = Some(output);
+        let now = std::time::Instant::now();
+        worker.release_idle_output(now);
+        worker.execute_command(AudioCommand::Play).unwrap();
+        worker.release_idle_output(now + WASAPI_IDLE_RELEASE);
+        assert!(worker.output.is_some());
+        assert!(worker.output_idle_since.is_none());
+        // Waiting for network data is still an active audition. The callback's
+        // running flag is false here, but its stream must remain available.
+        let output = worker.output.as_mut().unwrap();
+        output.buffering = Buffering::Waiting(1000);
+        output.realtime.running.store(false, Ordering::Release);
+        worker.update(|status| status.buffering = true);
+        worker.release_idle_output(now + Duration::from_secs(20));
+        assert!(worker.output.is_some(), "network buffering released output");
+        worker.execute_command(AudioCommand::Pause).unwrap();
+        let paused_at = now + Duration::from_secs(21);
+        worker.release_idle_output(paused_at);
+        worker.release_idle_output(paused_at + WASAPI_IDLE_RELEASE - Duration::from_millis(1));
+        assert!(
+            worker.output.is_some(),
+            "resume did not reset the idle grace"
+        );
+        worker.release_idle_output(paused_at + WASAPI_IDLE_RELEASE);
+        assert!(worker.output.is_none());
+    }
+
+    #[test]
+    fn idle_release_preserves_asio_stream_lifetime() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("idle-asio.wav");
+        let mut output = prepared_output(&path);
+        // This fake owns no CPAL driver. Keep the real ownership counter balanced
+        // so Output::drop follows the same counted-stream invariant as production.
+        ACTIVE_ASIO_STREAMS.fetch_add(1, Ordering::AcqRel);
+        output.asio = true;
+        let mut worker = worker(PlaybackStatus {
+            state: PlaybackState::Paused,
+            ..Default::default()
+        });
+        worker.output = Some(output);
+        let now = std::time::Instant::now();
+        worker.release_idle_output(now);
+        worker.release_idle_output(now + Duration::from_secs(60));
+        assert!(
+            worker.output.is_some(),
+            "ASIO lifetime changed with WASAPI policy"
+        );
+        assert!(worker.output_idle_since.is_none());
+    }
+
+    #[test]
+    fn released_wasapi_output_retains_seek_transforms_and_playback_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("idle-session.wav");
+        for state in [
+            PlaybackState::Paused,
+            PlaybackState::Stopped,
+            PlaybackState::Ended,
+        ] {
+            let output = prepared_output(&path);
+            let mut worker = worker(PlaybackStatus {
+                generation: 4,
+                play_session_id: 7,
+                state,
+                file_path: Some(path.clone()),
+                position: if state == PlaybackState::Ended {
+                    1.0
+                } else {
+                    0.0
+                },
+                duration: 1.0,
+                sample_rate: 1000,
+                channels: 1,
+                ..Default::default()
+            });
+            worker.output = Some(output);
+            let now = std::time::Instant::now();
+            worker.release_idle_output(now);
+            worker.release_idle_output(now + WASAPI_IDLE_RELEASE);
+            assert!(worker.output.is_none());
+            worker.execute_command(AudioCommand::Seek(0.25)).unwrap();
+            let settings = AuditionSettings {
+                mono: true,
+                pitch_semitones: 2.0,
+                rate: 0.8,
+                ..Default::default()
+            };
+            worker
+                .execute_command(AudioCommand::SetAudition(settings))
+                .unwrap();
+            worker
+                .execute_command(AudioCommand::Configure(PlaybackConfig {
+                    volume: 0.4,
+                    audition: settings,
+                    ..Default::default()
+                }))
+                .unwrap();
+            assert!(worker.output.is_none());
+            assert_eq!(worker.snapshot().position, 0.25);
+            assert_eq!(worker.snapshot().audition, settings);
+            // Substitute only device creation: reconstruct the decoder at the same
+            // logical position/configuration as start_output, then use real Play.
+            let mut resumed = prepared_output(&path);
+            resumed
+                .reset_source(|| Decoder::open(&path), 0.25, 0, false, settings)
+                .unwrap();
+            resumed.volume = worker.config.volume;
+            worker.output = Some(resumed);
+            worker.execute_command(AudioCommand::Play).unwrap();
+            let status = worker.snapshot();
+            assert_eq!(status.state, PlaybackState::Playing);
+            assert_eq!(status.position, 0.25);
+            assert_eq!(status.generation, 4);
+            assert_eq!(status.audition, settings);
+            assert_eq!(status.volume, 0.4);
+            assert_eq!(
+                status.play_session_id,
+                if state == PlaybackState::Paused { 7 } else { 8 },
+                "{state:?} changed playback history semantics after releasing output"
+            );
+        }
+    }
+
     #[test]
     fn an_interrupted_read_is_a_stop_not_an_error() {
         let temp = tempfile::tempdir().unwrap();

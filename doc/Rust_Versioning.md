@@ -13,7 +13,7 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
 ## 规则
 
 1. **schema 变了，程序版本至少升 MINOR**（`SCHEMA_VERSION` 与上一个发布标签相比不同）。
-2. 标签必须是 `vX.Y.Z`，预发布为 `vX.Y.Z-rc.N`，且 `X.Y.Z` 必须与 `Cargo.toml` 一致。其他预发布后缀（beta 等）会被拒绝。
+2. 标签必须是 `vX.Y.Z`，预发布为 `vX.Y.Z-rc.N` 或 `vX.Y.Z-beta.N`，且 `X.Y.Z` 必须与 `Cargo.toml` 一致。其他预发布后缀会被拒绝。
 3. 程序版本不得低于基准标签的版本。
 4. 服务端与远程客户端源码中出现的 `/api/vN` 必须只有一个版本。
 5. `doc/Rust_Release_Notes.md` 必须有**一行**同时写明程序版本、API 版本、schema 版本和快照兼容范围，例如：
@@ -42,3 +42,11 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
 
 - 通过：Cargo 0.4.6 + 版本行 + `-Tag v0.4.6 -BaseTag v0.4.5`
 - 失败：`-Tag v0.4.12`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
+
+## Beta 流程
+
+1. 功能 PR 合入 `beta` 分支；`main` 只接受经过 beta 测试的 `beta`（或 hotfix 分支）合并。
+2. 在 `beta` 的待测提交上打 `vX.Y.Z-beta.N`（`X.Y.Z` 与 `Cargo.toml` 一致），发布为 GitHub pre-release（`gh release create <tag> --prerelease --latest=false`；手动 `release.yml` 对带后缀的标签自动加 `--prerelease`）。
+3. 本机用 `tools/install-beta.ps1` 安装到独立目录（默认仓库下 `beta_release/`，可用 `-Destination` 指定），并通过 `AudioLibExplorer-beta.cmd` 启动；该脚本把 `AUDIOLIB_DATA_DIR` 设为 `%LOCALAPPDATA%/AudioLibExplorer/beta`，与正式版 `v1` 数据完全隔离。
+4. 每个 beta 待测提交按 [AGENTS.md](../AGENTS.md) 的 Beta testing flow 依次执行：Mac 上 `tools/beta-refresh.sh` 刷新 beta 服务端（含 commit 与库根读取自检），Windows 上 `tools/beta-smoke.ps1` 冒烟，再过 GUI 手动清单；任何一步失败都不得提升。
+5. beta 验收通过后，从 `beta` 开 PR 合入 `main`，再按上文流程打正式标签。

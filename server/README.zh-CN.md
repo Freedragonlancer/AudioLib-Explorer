@@ -10,6 +10,7 @@
 
 ## 功能
 
+- 每次启动在后台检查 GitHub Release；管理页提示新版本，确认后下载、校验、安全关闭并自动部署重启，见[自动更新](deploy/README.md#automatic-release-updates)。
 - 库快照（`/library/snapshot`，可选 zstd）和基于 revision 的变更轮询。
 - `/audio/{id}/stream`：单段 `Range`、`ETag`、`If-Range`；`?download=1` 用于下载。
 - `/audio/{id}/preview` 低带宽试听：WAV 在进程内做 PCM 降采样（`codec=pcm`），可选 ffmpeg FLAC 转码（`codec=flac`）。

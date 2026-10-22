@@ -16,6 +16,7 @@ name = "audiolib-server"
 path = "src/main.rs"
 
 [dependencies]
+audiolib-update = { path = "../../crates/audiolib-update" }
 audiolib-core = { path = "../../crates/audiolib-core" }
 # Remote scans (POST /scans) run the workspace scanner. Its audiolib-audio dependency is
 # already needed for waveforms; no playback device is ever opened.

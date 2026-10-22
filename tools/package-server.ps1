@@ -18,8 +18,8 @@ Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server packaging requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
-if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N.' }
+$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
+if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N / -beta.N.' }
 $version = $tagMatch.Groups[1].Value
 if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
 switch ($Target) {
@@ -179,6 +179,11 @@ try {
     $stageOwned = $true
     New-Item -ItemType Directory -Path $payloadRoot | Out-Null
     Copy-PublicFile $binarySource $binaryName
+    $updateChannel = if ($Tag.Contains('-')) { 'beta' } else { 'stable' }
+    Set-Content -LiteralPath (Join-Path $payloadRoot 'update-channel.txt') -Value $updateChannel -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $payloadRoot 'update-version.txt') -Value $Tag.Substring(1) -Encoding ascii
+    $null = $plannedFiles.Add('update-channel.txt')
+    $null = $plannedFiles.Add('update-version.txt')
     foreach ($relative in $publicFiles) { Copy-PublicFile (Join-Path $taskRoot $relative) $relative }
     if ($Asio) {
         Copy-PublicFile $sdkLicenseSource $sdkLicenseRelative

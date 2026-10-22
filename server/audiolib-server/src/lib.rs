@@ -25,6 +25,7 @@ mod snapshot_registry;
 pub mod state;
 pub mod stream;
 pub mod tls;
+pub mod update;
 pub mod waveform;
 pub mod wf_job;
 pub mod wfdb;

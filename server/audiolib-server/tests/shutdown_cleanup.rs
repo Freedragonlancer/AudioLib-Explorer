@@ -87,6 +87,20 @@ fn active_download_retains_its_owned_files_until_the_last_reference_drops() {
 }
 
 #[test]
+fn update_shutdown_joins_actual_list_workers_before_restart() {
+    let (_dir, config) = fixture();
+    let state = AppState::open(&config, None).unwrap();
+    let before = state.revision().unwrap();
+    audiolib_server::list_waveform::spawn_workers(&state);
+    state.shutdown(Duration::from_secs(5)).unwrap();
+    state
+        .list_waveforms()
+        .drain_for_update(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(state.revision().unwrap(), before);
+}
+
+#[test]
 fn stale_cleaner_requires_a_released_owner_lock() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = dir.path().join("audiolib-snapshot-legacy");

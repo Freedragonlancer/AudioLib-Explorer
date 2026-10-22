@@ -1241,6 +1241,11 @@ impl Controller {
         ui.on_volume_requested(move |volume| {
             c.command(AudioCommand::SetVolume(volume));
             c.playback.lock().unwrap().volume = volume;
+            // The status poll skips volume publishing while the slider keeps focus,
+            // so refresh the dB label here to follow the drag live.
+            if let Some(ui) = c.ui.upgrade() {
+                ui.set_volume_label(volume_label(volume));
+            }
         });
         let c = self.clone();
         ui.on_start_requested(move || {
@@ -6511,11 +6516,14 @@ fn publish_audition(ui: &AppWindow, settings: AuditionSettings) {
 fn publish_volume(ui: &AppWindow, volume: f32) {
     let db = db_from_gain(volume);
     ui.set_volume_db(db);
-    ui.set_volume_label(if volume <= 0.001 {
+    ui.set_volume_label(volume_label(volume));
+}
+fn volume_label(volume: f32) -> slint::SharedString {
+    if volume <= 0.001 {
         "−∞ dB".into()
     } else {
-        format!("{db:.1} dB").into()
-    });
+        format!("{:.1} dB", db_from_gain(volume)).into()
+    }
 }
 
 /// History follows successful playback sessions, not a polled Playing state.
@@ -6999,6 +7007,8 @@ mod tests {
             text: Key::RightArrow.into(),
         });
         assert!((ui.get_volume_db() + 29.9).abs() < 0.01);
+        assert_eq!(volume_label(gain_from_db(-6.0)).as_str(), "-6.0 dB");
+        assert_eq!(volume_label(0.0).as_str(), "−∞ dB");
 
         let favorite = ElementHandle::find_by_accessible_label(&ui, "Add to favorites")
             .next()

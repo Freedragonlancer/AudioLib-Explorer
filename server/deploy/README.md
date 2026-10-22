@@ -110,6 +110,70 @@ Program version = workspace `Cargo.toml`, API = `/api/v1/`, library schema = `SC
 `GET /api/v1/health` returns `status`, `version`, `api_version`, `schema_version` and
 `commit`; check all of them after every deployment.
 
+## Automatic release updates
+
+Every server start checks the official GitHub repository in the background. The listener
+and library opening do not wait for GitHub. Open the LAN-only `/admin` page to see the
+result, release notes, or retry a failed/offline check. Confirm the displayed release tag
+to download, validate its archive and checksum, drain requests and library work, install
+the package-owned files, and restart with the same arguments, environment and working
+directory. Database, audio files, configuration, tokens and generated runtime data stay
+outside the update payload. A running scan must finish or be cancelled before confirming.
+If graceful library shutdown fails, deployment is cancelled and installed files stay as
+they were; check the log and start the preserved server again.
+
+`update-channel.txt` beside the executable selects `stable` or `beta` (missing means
+stable). `update-version.txt` records the installed release tag, including the beta/rc
+sequence, so restarting the same beta does not offer it again. Stable ignores pre-releases;
+beta includes compatible beta/rc releases and newer stable releases. Only a matching
+platform's server archive is used. This requires a published package for that platform;
+source-only commits cannot be downloaded as program updates.
+
+For a manual `redeploy-server.sh` upgrade of an installation with these markers, pass
+both `UPDATE_CHANNEL` and the exact `UPDATE_VERSION` (without the `v` prefix). The script
+installs them before starting the candidate and restores the previous values before a
+rollback restart. It refuses a base-version change that would leave the old version
+marker beside a new binary. For example, replace the tag below with the actual release:
+
+```sh
+UPDATE_CHANNEL=stable UPDATE_VERSION=0.6.2 \
+  INSTALL_DIR=/opt/audiolib DATA_DIR=/var/lib/audiolib \
+  sh server/deploy/redeploy-server.sh new/audiolib-server
+```
+
+Use `UPDATE_CHANNEL=beta` and the complete `X.Y.Z-beta.N` or `X.Y.Z-rc.N` marker for a
+published prerelease. An untagged beta development snapshot uses `X.Y.Z-0`; do not assign
+a published prerelease sequence to an arbitrary same-version build. Unmarked existing
+installations retain their previous binary-only deployment behavior.
+
+The install directory must be writable by the server account. The hardened systemd
+example deliberately keeps `/opt/audiolib` read-only; an administrator who opts into
+self-updates must grant ownership of that application directory to the service user and
+add it to `ReadWritePaths` in a systemd override. Do not grant write access to unrelated
+paths or run the server as root just for updates. Permission/download/verification failure
+leaves the current process running. Container deployments should update and recreate their
+image instead of modifying container binaries; the startup check remains informative.
+Set `AUDIOLIB_UPDATE_DISABLE=1` to suppress checks and deployment in isolated tests or
+installations managed entirely by an external deployment tool.
+
+On Unix, deployment runs after the server has drained and its async runtime has stopped,
+then atomically replaces files and `exec`s the server in the same process. This retains
+systemd/launchd supervision and the macOS launcher's TCC responsible-process relationship;
+the stable launcher itself is never replaced. On Windows, a copied update helper waits
+for the old process to exit before replacing files and restarting. Schema upgrades can
+still require the maintenance planning and library backups described below; automatic
+binary deployment does not make an older client compatible with a newer library.
+
+Admin integration (same LAN/Host/origin and `X-AudioLib-Admin: 1` guard as other changes):
+
+| Route | Behavior |
+|---|---|
+| `GET /admin/api/update` | Owned status: state, running version, available tag and release page |
+| `POST /admin/api/update/check` | Start one background check; concurrent checks/downloads return 409 |
+| `POST /admin/api/update/install` | JSON `{"tag":"vX.Y.Z-beta.N"}` must match the offered tag; starts download and graceful restart |
+
+These endpoints never accept an arbitrary download URL, installation path or command.
+
 ## Upgrade runbook (binary and/or schema)
 
 Rules of thumb: deploy inside a maintenance window, never delete data files, never `cp`

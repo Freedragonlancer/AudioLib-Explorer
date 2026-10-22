@@ -5,6 +5,8 @@
 
 const $ = (id) => document.getElementById(id);
 let current = null;
+let currentUpdate = null;
+let updateRestarting = false;
 
 function toast(text, bad) {
   const box = $("toast");
@@ -129,6 +131,52 @@ async function refresh() {
     renderTokens(await api("GET", "tokens"));
   } catch (error) { toast("读取状态失败：" + error.message, true); }
 }
+
+function renderUpdate(status) {
+  currentUpdate = status;
+  const active = ["checking", "downloading", "ready"].includes(status.state);
+  $("update-status").textContent = "当前 " + status.current_version + (status.channel ? "（" + status.channel + "）" : "") + " · " + status.message;
+  $("update-status").className = status.state === "error" ? "warn" : (status.state === "available" ? "ok" : "");
+  $("update-check").disabled = active || status.state === "disabled";
+  $("update-install").disabled = status.state !== "available";
+  const release = $("update-release");
+  release.classList.toggle("hidden", !status.release_url);
+  if (status.release_url) release.href = status.release_url;
+  if (status.state === "ready") updateRestarting = true;
+}
+
+async function refreshUpdate() {
+  try {
+    const status = await api("GET", "update");
+    renderUpdate(status);
+    if (updateRestarting && !["downloading", "ready"].includes(status.state)) {
+      updateRestarting = false;
+      toast("服务端已重新连接");
+      await refresh();
+    }
+  } catch (error) {
+    if (updateRestarting || (currentUpdate && currentUpdate.state === "downloading")) {
+      updateRestarting = true;
+      $("update-status").textContent = "服务端正在重启，等待重新连接…";
+    } else {
+      $("update-status").textContent = "读取更新状态失败：" + error.message;
+    }
+  }
+}
+
+$("update-check").addEventListener("click", async () => {
+  $("update-check").disabled = true;
+  try { renderUpdate(await api("POST", "update/check")); }
+  catch (error) { toast(error.message, true); await refreshUpdate(); }
+});
+$("update-install").addEventListener("click", async () => {
+  const update = currentUpdate;
+  if (!update || update.state !== "available") return;
+  if (!confirm("下载并安装服务端 " + update.tag + "？校验完成后会短暂断开连接并自动重启。请先确认客户端兼容此版本；资料库和设置会保留。")) return;
+  $("update-install").disabled = true;
+  try { renderUpdate(await api("POST", "update/install", { tag: update.tag })); }
+  catch (error) { toast(error.message, true); await refreshUpdate(); }
+});
 
 async function change(method, path, body, done) {
   try {
@@ -440,5 +488,7 @@ $("fs-select").addEventListener("click", () => {
 $("modal").addEventListener("click", (event) => { if (event.target === $("modal")) $("modal").style.display = "none"; });
 
 refresh();
+refreshUpdate();
 refreshRoots();
+setInterval(() => { if (document.visibilityState === "visible") refreshUpdate(); }, 2000);
 setInterval(() => { if (document.visibilityState === "visible") { refresh(); if (!scanTimer || !$("scan-box").dataset.session || $("scan-box").classList.contains("hidden")) refreshRoots(); } }, 15000);

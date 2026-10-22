@@ -6,7 +6,7 @@ use audiolib_server::{
     API_BASE, AuthMode, BearerToken, Readiness, RetryPolicy, Security, ServeOptions, ServerConfig,
     Service, config::CONFIG_ENV, open_in_background, router, serve, tls,
 };
-use std::{path::PathBuf, time::Duration};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "Usage: audiolib-server [--config <path>]
@@ -57,24 +57,38 @@ const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(1);
 const SCAN_SHUTDOWN: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
+    if audiolib_update::handle_update_helper()? {
+        return Ok(());
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("Cannot start the async runtime")?;
     let result = runtime.block_on(run());
-    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
-    result
+    if matches!(&result, Ok(Some(_))) {
+        // Updating must wait for every admitted blocking task. Abandoning one before
+        // Unix exec could interrupt its database/cache write in the middle.
+        drop(runtime);
+    } else {
+        runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    }
+    if let Some((prepared, args)) = result? {
+        prepared.deploy_and_restart(&args)?;
+    }
+    Ok(())
 }
 
-async fn run() -> Result<()> {
+type Deployment = (audiolib_update::PreparedUpdate, Vec<OsString>);
+
+async fn run() -> Result<Option<Deployment>> {
     let config_arg = match parse_args(std::env::args().skip(1))? {
         Command::Help => {
             println!("{USAGE}");
-            return Ok(());
+            return Ok(None);
         }
         Command::Version => {
             println!("audiolib-server {}", audiolib_server::VERSION);
-            return Ok(());
+            return Ok(None);
         }
         Command::Serve(path) => path,
     };
@@ -142,6 +156,11 @@ async fn run() -> Result<()> {
         .await
         .with_context(|| format!("Cannot bind {}", config.bind))?;
     let service = Service::starting_with(security.clone());
+    let updates = service.updates().clone();
+    if let Err(error) = updates.start(std::env::args_os().skip(1).collect()) {
+        tracing::warn!(%error, "Automatic update check could not start; server remains available");
+    }
+    let mut update_stop = updates.shutdown_watch();
     let address = listener.local_addr()?;
     tracing::info!(%address, base = API_BASE, admin = %format!("http://{address}/admin"), "Serving");
     let bind_ip = config.bind.ip();
@@ -162,7 +181,15 @@ async fn run() -> Result<()> {
         listener,
         app,
         async move {
-            shutdown_signal().await;
+            tokio::select! {
+                () = shutdown_signal() => {},
+                _ = async {
+                    if update_stop.wait_for(|ready| *ready).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                } => tracing::info!("Verified update requested graceful shutdown"),
+            }
+            signal_service.updates().stop_admission();
             signal_service.request_stop();
             let _ = stop_tx.send(true);
             // Cancel a running scan right away; it finalizes while connections drain.
@@ -174,25 +201,61 @@ async fn run() -> Result<()> {
     )
     .await;
     let _ = tls_manager.await;
+    let updating = *updates.shutdown_watch().borrow();
+    let mut clean_shutdown = true;
     let waiting = std::time::Instant::now();
     while !opening.is_finished() && waiting.elapsed() < SCAN_SHUTDOWN {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     if opening.is_finished() {
-        let _ = opening.join();
+        match opening.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Unpublished library shutdown did not complete");
+                clean_shutdown = false;
+            }
+            Err(_) => {
+                tracing::warn!("Library startup thread panicked during shutdown");
+                clean_shutdown = false;
+            }
+        }
     } else {
         tracing::warn!("Library startup has not reached a cancellation boundary");
+        clean_shutdown = false;
     }
     if let Readiness::Ready(state) = service.readiness() {
-        match tokio::task::spawn_blocking(move || state.shutdown(SCAN_SHUTDOWN)).await {
+        match tokio::task::spawn_blocking(move || {
+            state.shutdown(SCAN_SHUTDOWN)?;
+            if updating {
+                state.list_waveforms().drain_for_update(SCAN_SHUTDOWN)?;
+            }
+            Ok::<(), audiolib_core::Error>(())
+        })
+        .await
+        {
             Ok(Ok(())) => tracing::info!("Library checkpoint and snapshot cleanup complete"),
-            Ok(Err(error)) => tracing::warn!(%error, "Library shutdown maintenance incomplete"),
-            Err(error) => tracing::warn!(%error, "Library shutdown task failed"),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Library shutdown maintenance incomplete");
+                clean_shutdown = false;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Library shutdown task failed");
+                clean_shutdown = false;
+            }
         }
     }
     drop(service);
     tracing::info!("Server stopped");
-    Ok(())
+    if updating && !clean_shutdown {
+        bail!(
+            "Update deployment cancelled because library shutdown did not complete; installed files were preserved"
+        );
+    }
+    Ok(if updating {
+        updates.take_prepared()
+    } else {
+        None
+    })
 }
 
 async fn shutdown_signal() {

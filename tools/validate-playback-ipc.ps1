@@ -18,6 +18,29 @@ function Invoke-Control([string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0 -or !$reply.success) { throw "Playback command failed: $($reply.error)" }
     return $reply.data
 }
+function Wait-IdleWasapiRelease($Before) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(4)
+    do {
+        Start-Sleep -Milliseconds 65
+        $current = Invoke-Control @('status')
+    } while ($null -ne $current.active_backend -and [DateTime]::UtcNow -lt $deadline)
+    if ($null -ne $current.active_backend -or $null -ne $current.active_device_id -or
+        $current.device_sample_rate -ne 0 -or $current.actual_buffer_frames -ne 0 -or
+        $null -ne $current.active_source_pair -or $null -ne $current.active_output_pair -or
+        $null -ne $current.active_rate_policy) { throw 'Idle WASAPI output retained its device connection.' }
+    if ($current.state -ne $Before.state -or $current.generation -ne $Before.generation -or
+        $current.play_session_id -ne $Before.play_session_id -or $current.file_path -ne $Before.file_path -or
+        $current.transport_revision -ne $Before.transport_revision -or
+        [Math]::Abs($current.position - $Before.position) -gt 0.002) { throw 'Idle device release changed the logical transport/session.' }
+    # An idle engine must stay disconnected, rather than periodically reopening.
+    Start-Sleep -Milliseconds 600
+    $stable = Invoke-Control @('status')
+    if ($null -ne $stable.active_backend -or $stable.state -ne $Before.state -or
+        $stable.transport_revision -ne $Before.transport_revision -or $stable.error -ne $Before.error) {
+        throw 'Idle WASAPI output reopened or changed transport without a playback request.'
+    }
+    return $stable
+}
 function ConvertTo-ComparablePath([string]$Path) {
     $value = $Path.Replace('/','\')
     if ($value.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)) { $value = '\\' + $value.Substring(8) }
@@ -215,8 +238,12 @@ try {
     $frozen = Invoke-Control @('status')
     if ($frozen.state -ne 'paused' -or [Math]::Abs($frozen.position - $paused.position) -gt 0.002) { throw 'Paused position continued advancing.' }
     $checks.Add('pause freezes audio position')
+    $null = Wait-IdleWasapiRelease $paused
+    $checks.Add('paused WASAPI releases its device and stays disconnected without changing transport')
     $resumed = Invoke-Control @('play')
-    if ($resumed.state -ne 'playing' -or $resumed.position -lt $paused.position -or $resumed.generation -ne $paused.generation) { throw 'Resume reloaded or rewound the source.' }
+    if ($resumed.state -ne 'playing' -or $resumed.position -lt $paused.position -or
+        $resumed.generation -ne $paused.generation -or $resumed.play_session_id -ne $paused.play_session_id -or
+        $resumed.active_backend -ne 'wasapi') { throw 'Resume failed to reopen WASAPI with the retained source/session/position.' }
     $checks.Add('resume preserves source generation and position')
     $null = Invoke-Control @('pause')
     $seeked = Invoke-Control @('seek','2')
@@ -280,6 +307,7 @@ try {
             if ($ended.state -ne 'ended') { Start-Sleep -Milliseconds 65 }
         } while ($ended.state -ne 'ended' -and [DateTime]::UtcNow -lt $endDeadline)
         if ($ended.state -ne 'ended') { throw 'The muted near-end source did not finish naturally.' }
+        $null = Wait-IdleWasapiRelease $ended
         $null = Wait-SourceHistory $largest.FullName $historySource[0].id $localHistoryLibraryId 2
         $naturalReplay = Invoke-Control @('play')
         if ($naturalReplay.generation -ne $ended.generation -or $naturalReplay.play_session_id -ne $ended.play_session_id + 1) { throw 'Natural end/replay did not start exactly one new session in the retained generation.' }
@@ -292,6 +320,8 @@ try {
     }
     $stopped = Invoke-Control @('stop')
     if ($stopped.state -ne 'stopped' -or $stopped.position -ne 0) { throw 'Stop did not rewind transport.' }
+    $null = Wait-IdleWasapiRelease $stopped
+    $checks.Add('natural end and Stop release WASAPI without idle reopen')
     $checks.Add('stop rewinds transport')
     $null = Invoke-Control @('audition','--pitch','7','--rate','0.75','--mono')
     if (!$ownedProcess.WaitForExit(25000)) { throw 'Desktop did not complete the smoke shutdown.' }

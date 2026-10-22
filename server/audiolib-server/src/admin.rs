@@ -56,6 +56,9 @@ pub fn router(security: Arc<crate::Security>) -> Router<Service> {
         .route("/admin/", get(page))
         .route("/admin/admin.js", get(script))
         .route("/admin/api/status", get(status))
+        .route("/admin/api/update", get(update_status))
+        .route("/admin/api/update/check", post(check_update))
+        .route("/admin/api/update/install", post(install_update))
         .route("/admin/api/settings", put(update_settings))
         .route("/admin/api/tls", put(update_tls).delete(disable_tls))
         .route("/admin/api/fs", get(browse_fs))
@@ -281,6 +284,43 @@ fn admin_status(service: &Service) -> AdminStatus {
 
 async fn status(State(service): State<Service>) -> Json<AdminStatus> {
     Json(admin_status(&service))
+}
+
+async fn update_status(State(service): State<Service>) -> Json<crate::update::UpdateStatus> {
+    Json(service.updates().status())
+}
+
+async fn check_update(
+    State(service): State<Service>,
+) -> Result<Json<crate::update::UpdateStatus>, ApiError> {
+    service.updates().check().map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallUpdateBody {
+    tag: String,
+}
+
+async fn install_update(
+    State(service): State<Service>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<crate::update::UpdateStatus>, ApiError> {
+    let body: InstallUpdateBody = json_body(&headers, body)?;
+    // Updating can repair a failed/opening library. Startup cancellation and its
+    // durable-boundary drain are checked by main before replacing any executable.
+    // Explicitly requested scans must still finish or be cancelled by the admin.
+    if let Readiness::Ready(state) = service.readiness()
+        && state.scans().current().is_some()
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "UPDATE_BUSY",
+            "Wait for the current scan to finish or cancel it before updating",
+        ));
+    }
+    service.updates().install(&body.tag).map(Json)
 }
 
 /// `Some(None)` for an explicit JSON `null`, `None` for an absent field.
