@@ -163,14 +163,22 @@ impl SnapshotRegistry {
     }
 
     /// Release the least recently used retained entry without an active lease, so a
-    /// preparation short of disk space can reclaim it. Returns whether one was released.
-    pub fn evict_oldest_idle(&self) -> bool {
+    /// preparation short of disk space can reclaim it. Entries of `library_id` at
+    /// `keep_revision` (the revision being prepared) are never released: they cannot
+    /// make room for that revision and may be its resumable copy. Returns the bytes
+    /// actually freed on disk: 0 when nothing idle is eligible, or when the released
+    /// file is still owned elsewhere (for example by the prepared-snapshot cache).
+    pub fn evict_oldest_idle(&self, library_id: &str, keep_revision: Option<u64>) -> u64 {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let oldest = inner
             .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| Arc::strong_count(entry) == 1)
+            .filter(|(_, entry)| {
+                let r = &entry.representation;
+                !(r.library_id == library_id && Some(r.revision) == keep_revision)
+            })
             .min_by_key(|(_, entry)| {
                 *entry
                     .last_used
@@ -178,12 +186,23 @@ impl SnapshotRegistry {
                     .unwrap_or_else(PoisonError::into_inner)
             })
             .map(|(index, _)| index);
-        match oldest {
-            Some(index) => {
-                inner.entries.remove(index);
-                true
+        let Some(index) = oldest else {
+            return 0;
+        };
+        let entry = inner.entries.remove(index);
+        drop(inner);
+        match Arc::try_unwrap(entry) {
+            Ok(entry) => {
+                let file = entry.representation.file;
+                let bytes = file.bytes;
+                // Only the last owner deletes the payload directory when dropped.
+                if Arc::strong_count(&file) == 1 {
+                    bytes
+                } else {
+                    0
+                }
             }
-            None => false,
+            Err(_) => 0,
         }
     }
 
@@ -272,16 +291,45 @@ mod tests {
         let newer_id = newer.representation().file.id.clone();
         drop(newer);
         let live = registry.admit(representation(1)).unwrap();
-        assert!(registry.evict_oldest_idle());
+        assert_eq!(registry.evict_oldest_idle("library", None), 1);
         assert!(registry.get(&old_id, "library").is_none());
         assert!(registry.get(&newer_id, "library").is_some());
-        assert!(registry.evict_oldest_idle());
-        assert!(!registry.evict_oldest_idle());
+        assert_eq!(registry.evict_oldest_idle("library", None), 1);
+        assert_eq!(registry.evict_oldest_idle("library", None), 0);
         assert!(
             registry
                 .get(&live.representation().file.id, "library")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn evict_oldest_idle_keeps_current_revision_and_reports_unfreed_files() {
+        let registry = registry(4, 100);
+        let mut current = representation(5);
+        current.revision = 2;
+        let current = registry.admit(current).unwrap();
+        let current_id = current.representation().file.id.clone();
+        drop(current);
+        age(&registry, &current_id, Duration::from_secs(60));
+        // The only idle entry is of the revision being prepared: nothing is freed.
+        assert_eq!(registry.evict_oldest_idle("library", Some(2)), 0);
+        assert!(registry.get(&current_id, "library").is_some());
+        // An older revision whose file is still owned elsewhere frees no space.
+        let shared = representation(3);
+        let file = shared.file.clone();
+        drop(registry.admit(shared).unwrap());
+        age(&registry, &file.id, Duration::from_secs(120));
+        assert_eq!(registry.evict_oldest_idle("library", Some(2)), 0);
+        assert!(registry.get(&current_id, "library").is_some());
+        drop(file);
+        // Another library's entry at the same revision number is eligible.
+        let mut other = representation(4);
+        other.revision = 2;
+        other.library_id = "other".into();
+        drop(registry.admit(other).unwrap());
+        assert_eq!(registry.evict_oldest_idle("library", Some(2)), 4);
+        assert!(registry.get(&current_id, "library").is_some());
     }
 
     #[test]
