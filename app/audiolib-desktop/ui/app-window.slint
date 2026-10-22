@@ -274,7 +274,7 @@ component TableDivider inherits Rectangle {
     width: 8px * Theme.ui-scale;
     accessible-role: button;
     accessible-label: root.label;
-    accessible-value: root.column-width / 1px + " px";
+    accessible-value: root.column-width / (1px * Theme.ui-scale) + " px"; // logical (unscaled) width, matching the stored setting
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.reset(); } }
     forward-focus: divider-focus;
@@ -355,6 +355,8 @@ component HelpPanel inherits FocusScope {
 export component AppWindow inherits Window {
     title: "AudioLib Explorer";
     icon: @image-url("../../../resources/icons/AudioLibExplorer.png");
+    // Window geometry intentionally stays unscaled: it is the OS window size in logical
+    // pixels, and Theme.ui-scale only enlarges the content laid out inside it.
     preferred-width: 1440px;
     preferred-height: 900px;
     min-width: 1080px;
@@ -405,7 +407,7 @@ export component AppWindow inherits Window {
     private property <bool> scan-controllable: root.scanning && !root.scan-cancelling && !root.scan-finalizing && !root.closing && !root.library-busy;
     in property <string> library-health: "";
     in-out property <int> selected-row: -1;
-    private property <length> result-row-height: 22px * Theme.ui-scale;
+    private property <length> result-row-height: round(22 * Theme.ui-scale) * 1px; // whole pixels, so e.g. 1.25x gives 28px rather than 27.5px
     in-out property <int> selected-folder: -1;
     in property <string> selected-folder-path: "";
     in property <[AudioRow]> rows;
@@ -449,11 +451,12 @@ export component AppWindow inherits Window {
     in-out property <float> table-format-width: 100;
     in-out property <float> table-channels-width: 64;
     in-out property <float> table-tags-width: 160;
-    private property <length> table-duration-size: clamp(root.table-duration-width, 60, 2000) * 1px;
-    private property <length> table-format-size: clamp(root.table-format-width, 82, 2000) * 1px;
-    private property <length> table-channels-size: clamp(root.table-channels-width, 48, 2000) * 1px;
-    private property <length> table-tags-size: clamp(root.table-tags-width, 80, 2000) * 1px;
-    private property <length> table-name-size: clamp(root.table-name-width, 120, 2000) * 1px;
+    private property <length> table-duration-size: clamp(root.table-duration-width, 60, 2000) * 1px * Theme.ui-scale;
+    private property <length> table-format-size: clamp(root.table-format-width, 82, 2000) * 1px * Theme.ui-scale;
+    private property <length> table-channels-size: clamp(root.table-channels-width, 48, 2000) * 1px * Theme.ui-scale;
+    private property <length> table-tags-size: clamp(root.table-tags-width, 80, 2000) * 1px * Theme.ui-scale;
+    private property <length> table-name-size: clamp(root.table-name-width, 120, 2000) * 1px * Theme.ui-scale;
+    out property <length> table-columns-total: root.table-columns-size; // read by ui_scale_tests
     private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
     private property <length> table-content-size: max(root.table-columns-size, result-list.visible-width);
     private property <bool> table-empty: root.rows.length == 0;
@@ -1082,11 +1085,11 @@ export component AppWindow inherits Window {
         root.table-layout-changed();
     }
     function resize-table-column(index: int, width: length) {
-        if index == 1 { root.table-name-width = clamp(width / 1px, 120, 2000); }
-        if index == 2 { root.table-duration-width = clamp(width / 1px, 60, 2000); }
-        if index == 3 { root.table-format-width = clamp(width / 1px, 82, 2000); }
-        if index == 4 { root.table-channels-width = clamp(width / 1px, 48, 2000); }
-        if index == 5 { root.table-tags-width = clamp(width / 1px, 80, 2000); }
+        if index == 1 { root.table-name-width = clamp(width / (1px * Theme.ui-scale), 120, 2000); }
+        if index == 2 { root.table-duration-width = clamp(width / (1px * Theme.ui-scale), 60, 2000); }
+        if index == 3 { root.table-format-width = clamp(width / (1px * Theme.ui-scale), 82, 2000); }
+        if index == 4 { root.table-channels-width = clamp(width / (1px * Theme.ui-scale), 48, 2000); }
+        if index == 5 { root.table-tags-width = clamp(width / (1px * Theme.ui-scale), 80, 2000); }
     }
     function reset-table-widths() {
         root.table-name-width = 360;
@@ -1386,7 +1389,7 @@ export component AppWindow inherits Window {
                     folder-list := ListView { viewport-width: self.visible-width; accessible-role: list; accessible-label: root.chinese ? "音效文件夹" : "Sound folders";
                         for folder[index] in root.folders: Rectangle { height: 34px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale; accessible-role: list-item; accessible-label: (root.chinese ? "文件夹：" : "Folder: ") + folder.name;
                             border-width: folder-focus.has-focus && root.selected-folder == index ? 1px : 0px; border-color: Theme.accent;
-                            // Fluent overlays a 14px scrollbar; reserve its track plus a gap.
+                            // Fluent overlays a fixed 14px scrollbar (not affected by Theme.ui-scale); the 18px * ui-scale padding reserves its track plus a gap and never shrinks below that at scale >= 1.0.
                             background: root.selected-folder == index ? Theme.selected : (folder-hit.has-hover ? Theme.raised : transparent);
                             HorizontalLayout { spacing: 4px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale;
                                 // Keep a readable name and count even in a narrow, deep folder tree.

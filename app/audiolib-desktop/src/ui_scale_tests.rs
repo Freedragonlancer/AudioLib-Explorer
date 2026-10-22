@@ -103,3 +103,29 @@ fn ui_scale_renders_without_panicking_at_1_0_1_5_and_2_0() {
         }
     }
 }
+
+#[test]
+fn table_column_widths_scale_proportionally_with_ui_scale() {
+    init_software_backend();
+    let total_at = |scale: f32| {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+        ui.global::<crate::Theme>().set_ui_scale(scale);
+        ui.set_table_name_width(300.0);
+        ui.set_table_tags_width(140.0);
+        let total = ui.get_table_columns_total();
+        // Stored widths stay logical: scaling must never rewrite them.
+        assert_eq!(ui.get_table_name_width(), 300.0);
+        total
+    };
+    let base = total_at(1.0);
+    assert!(base > 0.0);
+    for scale in [1.25_f32, 1.5, 2.0] {
+        let total = total_at(scale);
+        assert!(
+            (total - base * scale).abs() < 0.01,
+            "columns {total} at x{scale}, expected {}",
+            base * scale
+        );
+    }
+}
