@@ -369,6 +369,10 @@ pub struct CompatibilityManifest {
 /// direct-use/migration ranges derived from this one reviewed release set.
 const LEGACY_APPLICATION_RANGES: &[&str] = &["=0.4.11", "=0.5.0", "=0.5.1"];
 
+/// Published releases of the current minor line share one protocol baseline;
+/// patch releases of the same minor accept each other (0.6.0 onward).
+const CURRENT_MINOR_RANGE: &str = ">=0.6.0, <0.7.0";
+
 /// This development catalog admits the tested published releases and the exact
 /// development version. Actual format inspection still decides direct use versus
 /// owned migration; neither the version nor these overlapping ranges grants writes.
@@ -378,6 +382,7 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
         .map(|requirement| (*requirement).to_owned())
         .collect();
     let mut supported_ranges = legacy_ranges.clone();
+    supported_ranges.push(CURRENT_MINOR_RANGE.to_owned());
     supported_ranges.push(format!("={}", env!("CARGO_PKG_VERSION")));
     CompatibilityManifest {
         application_version: env!("CARGO_PKG_VERSION").into(),
@@ -549,8 +554,41 @@ mod tests {
     }
 
     #[test]
+    fn released_0_6_0_catalog_and_later_patch_catalogs() {
+        let local = compatibility_manifest();
+        // The shipped 0.6.0 catalog only admits legacy releases and exactly 0.6.0.
+        let mut released = local.clone();
+        released.application_version = "0.6.0".into();
+        let mut ranges: Vec<String> = LEGACY_APPLICATION_RANGES
+            .iter()
+            .map(|range| (*range).to_owned())
+            .collect();
+        ranges.push("=0.6.0".into());
+        released.peer_application_ranges = ranges.clone();
+        released.direct_use_application_ranges = ranges.clone();
+        released.auto_migrate_application_ranges = ranges;
+        let current = local.application_version.clone();
+        assert_ne!(current, "0.6.0");
+        assert!(!peer_versions_compatible(&local, "0.6.0", Some(&released)));
+        assert!(!peer_versions_compatible(&released, &current, Some(&local)));
+        // Later 0.6.x patches carrying the minor-line range accept each other.
+        let mut later = local.clone();
+        later.application_version = "0.6.9".into();
+        assert!(peer_versions_compatible(&local, "0.6.9", Some(&later)));
+        assert!(peer_versions_compatible(&later, &current, Some(&local)));
+    }
+
+    #[test]
     fn peer_checks_are_mutual_bounded_and_pre_release_explicit() {
         let local = compatibility_manifest();
+        for supported in ["0.6.0", "0.6.1", "0.6.9"] {
+            let version = Version::parse(supported).unwrap();
+            assert!(accepts_range(&local.peer_application_ranges, &version));
+            assert!(!accepts_range(
+                &local.legacy_peer_application_ranges,
+                &version
+            ));
+        }
         for supported in ["0.4.11", "0.5.0", "0.5.1"] {
             assert!(peer_versions_compatible(&local, supported, None));
             let version = Version::parse(supported).unwrap();
@@ -569,7 +607,7 @@ mod tests {
             "0.5.0-rc.1",
             "0.5.1-rc.1",
             "0.5.2",
-            "0.6.1",
+            "0.7.0",
             "0.6.0-dev.2",
             "9.0.0",
             "invalid",
