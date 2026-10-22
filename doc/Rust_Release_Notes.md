@@ -1,5 +1,32 @@
 # AudioLib Explorer release notes
 
+## 0.6.2: snapshot download and low-disk fixes, clearer client errors
+
+Release identity: program `0.6.2` | API `/api/v1/` | schema 6 | snapshot format
+`ale-s6-cld1-t3-m2-p1`. No database migration; schema and snapshot formats are unchanged.
+
+Versions: program 0.6.2 | API /api/v1/ | schema 6 | snapshot compat 3..=6
+
+Upgrade notes:
+
+- 0.6.2 is compatible with 0.6.0 and 0.6.1 peers (`>=0.6.0, <0.7.0`); client and
+  server can be upgraded independently.
+- v0.6.1 shipped only the macOS server package; the Windows client package resumes
+  with 0.6.2.
+
+Changes:
+
+- Server: fixed an occasional 500 on the first waveform bundle download (#43).
+- Server: when disk space is low, idle snapshots of old revisions are evicted before
+  the server answers 507 (#45).
+- Server: `/library` now reports only the database file name, not its path (#46).
+- Client: tolerates a missing `LibraryInfo.database`; clearer messages for
+  `HOST_FORBIDDEN`, `ADMIN_LAN_ONLY` and 429 rate limiting (showing `Retry-After`);
+  the `.local` host-name hint is shown only for 401 responses that did not come from
+  the AudioLib server (#44).
+- Desktop: the list-waveform worker releases its database connection when idle,
+  fixing a Windows test flake (#47).
+
 ## 0.6.1: server hardening, waveform bundle cache and patch compatibility
 
 Release identity: program `0.6.1` | API `/api/v1/` | schema 6 | snapshot format
