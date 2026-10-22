@@ -1261,9 +1261,15 @@ impl Controller {
         ui.on_pause_requested(move || c.command(AudioCommand::Pause));
         let c = self.clone();
         ui.on_volume_db_requested(move |db| {
+            // The audition slider reports dB through this callback (not
+            // volume-requested). The status poll skips volume publishing while the
+            // slider is being adjusted, so the label must follow the drag here.
             let volume = gain_from_db(db);
             c.command(AudioCommand::SetVolume(volume));
             c.playback.lock().unwrap().volume = volume;
+            if let Some(ui) = c.ui.upgrade() {
+                ui.set_volume_label(volume_label(volume));
+            }
         });
         let c = self.clone();
         ui.on_transform_requested(move |pitch, rate, mono, repeat| {
