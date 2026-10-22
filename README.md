@@ -102,6 +102,8 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 ## Releases and CI
 
+The desktop client and server check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
+
 This development branch builds `0.6.0-dev.1` and includes the released 0.5.0 mainline baseline. Its schema-v6 changes are unpublished and have not been deployed; the existing installation and working library remain unchanged.
 
 GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built, validated and uploaded locally. `.github/workflows/release.yml` remains available for manual dispatch; tag pushes do not start it. Its cloud checks verify actual package allowlists, privacy, executable/archive identity and checksums, and report runtime validation as `not-run`. Each published archive has a SHA-256 file and a public build report.

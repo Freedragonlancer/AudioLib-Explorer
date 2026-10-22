@@ -15,8 +15,8 @@ Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server validation requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
-if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N.' }
+$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
+if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH, vMAJOR.MINOR.PATCH-rc.N or vMAJOR.MINOR.PATCH-beta.N.' }
 $version = $tagMatch.Groups[1].Value
 if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
 switch ($Target) {
@@ -38,17 +38,6 @@ function Assert-Within([string]$Path, [string]$Parent) {
     $full = [IO.Path]::GetFullPath($Path)
     $boundary = [IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar)
     if (!$full.StartsWith($boundary + [IO.Path]::DirectorySeparatorChar, $comparison)) { throw 'Server validation path escaped its owned boundary.' }
-}
-function Get-ComparableLibraryPath([string]$Path) {
-    # Rust canonicalize returns Win32 verbatim paths; the owned fixture uses an
-    # ordinary absolute path. Unify these spellings before comparing identities.
-    $full = [IO.Path]::GetFullPath($Path)
-    if ($IsWindows -and $full.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
-        $full = '\\' + $full.Substring(8)
-    } elseif ($IsWindows -and $full -match '^\\\\\?\\[A-Za-z]:\\') {
-        $full = $full.Substring(4)
-    }
-    return [IO.Path]::GetFullPath($full)
 }
 function Assert-UnlinkedTree([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
@@ -125,6 +114,8 @@ if ($report.commit -cne $commit) { throw 'Server package report differs from the
 $publicFiles = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'server-files.json') -Raw | ConvertFrom-Json)
 $required = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $null = $required.Add($binaryName)
+$null = $required.Add('update-channel.txt')
+$null = $required.Add('update-version.txt')
 $null = $required.Add('licenses/dependencies.json')
 $sdkLicenseRelative = 'licenses/Steinberg-ASIO-SDK-2.3.4.txt'
 if ($Asio) { $null = $required.Add($sdkLicenseRelative) }
@@ -139,7 +130,10 @@ $testRoot = [IO.Path]::GetFullPath((Join-Path $tempParent ('AudioLibServerValida
 $extractRoot = Join-Path $testRoot 'package'
 $ownedProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 $server = $null; $http = $null; $handler = $null; $testOwned = $false
+$savedUpdateDisable = $env:AUDIOLIB_UPDATE_DISABLE
 try {
+    # Startup acceptance uses only its isolated fixture, never the public network.
+    $env:AUDIOLIB_UPDATE_DISABLE = '1'
     Assert-Within $testRoot $tempParent
     if (Test-Path -LiteralPath $testRoot) { throw 'Server validation temporary directory already exists.' }
     New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -246,6 +240,9 @@ try {
             if ([int][IO.File]::GetUnixFileMode($file.FullName) -ne $expectedMode) { throw 'Extracted server file permissions differ from the package contract.' }
         }
     }
+    $expectedChannel = if ($Tag.Contains('-')) { 'beta' } else { 'stable' }
+    if ((Get-Content -LiteralPath (Join-Path $extractRoot 'update-channel.txt') -Raw).Trim() -cne $expectedChannel -or
+        (Get-Content -LiteralPath (Join-Path $extractRoot 'update-version.txt') -Raw).Trim() -cne $Tag.Substring(1)) { throw 'Server update metadata differs from the release tag.' }
     $binary = Join-Path $extractRoot $binaryName
     if ((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -cne $report.binary_sha256) { throw 'Extracted server binary SHA256 differs from its report.' }
     $versionProcess = Start-OwnedProcess $binary @('--version') 'version' $extractRoot
@@ -254,7 +251,8 @@ try {
 
     $database = Join-Path $testRoot 'library.db'
     if ($IsWindows) {
-        $benchmark = Join-Path $taskRoot "target/$Target/release/search-benchmark.exe"
+        $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $taskRoot) } else { Join-Path $taskRoot 'target' }
+        $benchmark = Join-Path $targetRoot "$Target/release/search-benchmark.exe"
         if (!(Test-Path -LiteralPath $benchmark -PathType Leaf)) { throw 'Build the Windows release search-benchmark before server validation.' }
         Assert-UnlinkedTree $benchmark
         $seed = Start-OwnedProcess $benchmark @('--db', $database, '--records', '1', '--queries', '100') 'seed' $testRoot
@@ -293,7 +291,7 @@ try {
     $library = Read-Endpoint '/library'
     if ($server.HasExited -or $library.library_id -isnot [string] -or !$library.library_id -or
         $library.schema_version -ne 6 -or $library.identity_bound_writes -isnot [bool] -or !$library.identity_bound_writes -or
-        $library.stats.audio_files -ne 1 -or !(Get-ComparableLibraryPath $library.database).Equals((Get-ComparableLibraryPath $database), $comparison)) { throw 'Extracted server could not serve its isolated synthetic library.' }
+        $library.stats.audio_files -ne 1 -or $library.database -cne [IO.Path]::GetFileName($database)) { throw 'Extracted server could not serve its isolated synthetic library.' }
     if ($library.snapshot_format.id -cne 'ale-s6-cld1-t3-m2-p1' -or
         $library.snapshot_format.format.features.play_history_retired -ne 2) {
         throw 'Extracted server snapshot format does not declare playback-history retirement.'
@@ -306,6 +304,7 @@ try {
         shutdown=$(if ($IsWindows) { 'owned test process termination; graceful drain not tested' } else { 'owned test process SIGTERM with bounded termination fallback' })
     } | ConvertTo-Json -Depth 4
 } finally {
+    $env:AUDIOLIB_UPDATE_DISABLE = $savedUpdateDisable
     if ($null -ne $http) { $http.Dispose() }
     if ($null -ne $handler) { $handler.Dispose() }
     # Only Process objects returned by this invocation's Start-Process are stopped.

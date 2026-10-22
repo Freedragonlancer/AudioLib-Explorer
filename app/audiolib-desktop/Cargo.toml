@@ -22,6 +22,7 @@ audiolib-audio = { path = "../../crates/audiolib-audio", features = ["playback"]
 audiolib-ipc = { path = "../../crates/audiolib-ipc" }
 audiolib-windows = { path = "../../crates/audiolib-windows" }
 audiolib-remote = { path = "../../crates/audiolib-remote" }
+audiolib-update = { path = "../../crates/audiolib-update" }
 chrono.workspace = true
 serde_json.workspace = true
 slint.workspace = true

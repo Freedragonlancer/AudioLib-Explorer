@@ -47,6 +47,13 @@
 <div class="muted">只能在局域网内直接打开（经反向代理或公网访问一律 403）。版本 <span id="version">…</span> · 库状态 <span id="library">…</span></div>
 <div id="warnings" class="warn"></div>
 
+<section aria-live="polite">
+  <h2>程序更新</h2>
+  <div id="update-status">正在读取更新状态…</div>
+  <div class="muted">每次启动检查 GitHub Release。确认后下载、校验并自动部署；现有资料库、音频、配置和令牌保留。部署期间连接会短暂中断。</div>
+  <div class="row"><button id="update-check">检查更新</button><button id="update-install" class="primary" disabled>下载并更新服务端</button><a id="update-release" class="hidden" target="_blank" rel="noreferrer noopener">发布说明</a></div>
+</section>
+
 <section>
   <h2>库根目录</h2>
   <div class="muted">服务端扫描并共享给客户端的目录（客户端「根目录」列表即来自这里）。添加后立即生效，无需重启；移除只让库忘记该根目录下的记录（文件夹与音频记录、播放历史等），<b>绝不删除任何音频文件</b>，重新添加并扫描即可恢复。可选择服务器上的本地磁盘或已挂载的网络共享（SMB）。</div>

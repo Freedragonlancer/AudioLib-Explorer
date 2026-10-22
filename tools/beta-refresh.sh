@@ -4,7 +4,7 @@
 # 1. builds the current origin/beta head (detached worktree under $WORK_DIR)
 # 2. optional (--with-db): copies the production library with SQLite's online backup
 #    (read-only for production), resets library_id (drops <db>.server-state.json)
-# 3. swaps only the server binary via server/deploy/redeploy-server.sh; the fixed
+# 3. swaps the server binary and update markers via redeploy-server.sh; the fixed
 #    launcher (which holds the macOS file-access grants) is never touched
 # 4. checks /health is ok and serves the beta head commit
 # 5. root access probe: reads 4 KiB of one file under every configured root; a timeout
@@ -52,6 +52,15 @@ if [ -n "$PREBUILT" ]; then NEW="$PREBUILT"; else
     NEW="$WORK_DIR/target/aarch64-apple-darwin/release/audiolib-server"
 fi
 [ "$NEW" -ef "$BETA_APP_DIR/bin/audiolib-server.$SHA" ] || cp "$NEW" "$BETA_APP_DIR/bin/audiolib-server.$SHA"
+VERSION="$("$NEW" --version)"; VERSION="${VERSION#audiolib-server }"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "unexpected built server version"
+# The binary Cargo version omits the release suffix. Preserve an exact candidate
+# tag, or identify this source snapshot as a development baseline before beta.1.
+UPDATE_VERSION="$VERSION-0"
+for tag in $(git -C "$REPO" tag --points-at origin/beta --sort=-version:refname); do
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.(0|[1-9][0-9]*))?$ ]] &&
+        [ "${tag%%-*}" = "v$VERSION" ]; then UPDATE_VERSION="${tag#v}"; break; fi
+done
 
 if [ "$WITH_DB" = 1 ]; then
     : "${PROD_DB:?PROD_DB required with --with-db}"
@@ -67,11 +76,15 @@ if [ "$WITH_DB" = 1 ]; then
 fi
 
 log "swapping binary (launcher untouched)"
+# Keep binary and marker rollback in the same transaction. In particular, the
+# previous markers must be restored before the previous binary is restarted.
 INSTALL_DIR="$BETA_APP_DIR/bin" SERVICE_NAME="$SERVICE_NAME" SERVICE_MANAGER=launchd \
 DATA_DIR="$BETA_DATA_DIR" BACKUP_DIR="$WORK_DIR/beta-backups" PORT="$PORT" \
+UPDATE_CHANNEL=beta UPDATE_VERSION="$UPDATE_VERSION" \
 TOKEN="$(cat "$TOKEN_FILE")" EXPECT_COMMIT="$SHA" WAIT_SECS=600 \
     sh "$REPO/server/deploy/redeploy-server.sh" "$BETA_APP_DIR/bin/audiolib-server.$SHA" \
     || die "redeploy failed (rolled back by redeploy-server.sh)"
+log "update channel beta, installed version $UPDATE_VERSION"
 
 API="http://127.0.0.1:$PORT/api/v1"; AUTH="Authorization: Bearer $(cat "$TOKEN_FILE")"
 H="$(curl -s -m 10 "$API/health")"

@@ -15,6 +15,42 @@ fn window() -> AppWindow {
 }
 
 #[test]
+fn update_consent_blocks_background_keys_and_disables_install_while_downloading() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = window();
+        ui.set_chinese(chinese);
+        ui.set_update_available(true);
+        ui.set_update_visible(true);
+        let installs = Rc::new(RefCell::new(0));
+        let observed = installs.clone();
+        ui.on_update_install_requested(move || *observed.borrow_mut() += 1);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(5));
+        send_keys(&ui, &["z".into()]);
+        assert_eq!(ui.get_query(), "background query");
+        let label = if chinese {
+            "下载、安装并重启"
+        } else {
+            "Download, install & restart"
+        };
+        ui.set_update_busy(true);
+        click_label(&ui, label);
+        assert_eq!(*installs.borrow(), 0);
+        ui.set_update_busy(false);
+        ui.set_update_enabled(false);
+        click_label(&ui, label);
+        assert_eq!(*installs.borrow(), 0);
+        ui.set_update_enabled(true);
+        click_label(&ui, label);
+        assert_eq!(*installs.borrow(), 1);
+        send_keys(&ui, &[Key::Escape.into()]);
+        assert!(!ui.get_update_visible());
+        assert_eq!(*installs.borrow(), 1, "Dismissing never confirms an update");
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn offline_metadata_keeps_revert_and_recovery_exit_reachable() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {

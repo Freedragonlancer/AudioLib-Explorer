@@ -18,7 +18,7 @@ try {
     # Full Rust suites and data-safety regressions run locally via
     # tools/check-local.ps1 -Asio; cloud release checks cover the shipped payload.
     & (Join-Path $PSScriptRoot 'build-release.ps1')
-    & (Join-Path $PSScriptRoot 'package-portable.ps1') -SkipBuild
+    & (Join-Path $PSScriptRoot 'package-portable.ps1') -SkipBuild -Tag $Tag
     $binaries = @{}
     foreach ($name in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
         $binaries[$name] = (Get-FileHash -LiteralPath (Join-Path $taskRoot ('dist/latest/portable/' + $name)) -Algorithm SHA256).Hash

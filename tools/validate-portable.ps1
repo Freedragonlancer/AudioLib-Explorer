@@ -53,7 +53,7 @@ try {
         # Download and verify the published archive/checksum first. CI builds may
         # differ from a local build; retain the published report as their baseline
         # instead of replacing local build outputs to satisfy the default check.
-        if (!$CleanCheckout -or $ExpectedCommit -notmatch '^[0-9a-f]{40}$' -or $ExpectedTag -notmatch '^v\d+\.\d+\.\d+(?:-rc\.\d+)?$') { throw 'Published validation requires CleanCheckout and an explicit tag/commit identity.' }
+        if (!$CleanCheckout -or $ExpectedCommit -notmatch '^[0-9a-f]{40}$' -or $ExpectedTag -notmatch '^v\d+\.\d+\.\d+(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$') { throw 'Published validation requires CleanCheckout and an explicit tag/commit identity.' }
         & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $binaryRoot -ReleaseReport $PublishedReleaseReport
         $published = Get-Content -LiteralPath $PublishedReleaseReport -Raw | ConvertFrom-Json
         if ($published.tag -cne $ExpectedTag -or $published.commit -cne $ExpectedCommit) { throw 'Published release report does not match the expected tag/commit.' }
