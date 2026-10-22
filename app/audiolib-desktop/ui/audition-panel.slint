@@ -15,22 +15,22 @@ component Tool inherits Rectangle {
     in property <bool> keyboard-active: true;
     out property <bool> has-focus: focus.has-focus;
     callback clicked();
-    width: 32px; height: 30px; border-radius: 4px;
+    width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
     background: root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent) : (root.active ? Theme.selected : (hit.has-hover ? Theme.hover : Theme.raised));
     border-width: 1px; border-color: focus.has-focus || root.active ? Theme.accent : Theme.border;
     opacity: root.enabled ? 1 : 0.4;
     accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
-    if root.icon.width > 0: Image { source: root.icon; colorize: root.primary ? Theme.on-accent : Theme.ink; width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-    if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+    if root.icon.width > 0: Image { source: root.icon; colorize: root.primary ? Theme.on-accent : Theme.ink; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+    if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: 16px * Theme.ui-scale; horizontal-alignment: center; vertical-alignment: center; }
     focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; } reject } }
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
-    if hit.has-hover: Rectangle { z: 10; y: -28px; height: 24px; width: max(86px, tip.preferred-width + 16px); background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px;
-        tip := Text { text: root.label; color: Theme.ink; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+    if hit.has-hover: Rectangle { z: 10; y: -28px * Theme.ui-scale; height: 24px * Theme.ui-scale; width: max(86px * Theme.ui-scale, tip.preferred-width + 16px * Theme.ui-scale); background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px * Theme.ui-scale;
+        tip := Text { text: root.label; color: Theme.ink; font-size: 10px * Theme.ui-scale; horizontal-alignment: center; vertical-alignment: center; }
     }
 }
-component Caption inherits Text { color: Theme.dim; font-size: 11px; vertical-alignment: center; }
+component Caption inherits Text { color: Theme.dim; font-size: 11px * Theme.ui-scale; vertical-alignment: center; }
 
 export component AuditionPanel inherits Rectangle {
     in property <bool> compact: false;
@@ -96,9 +96,9 @@ export component AuditionPanel inherits Rectangle {
         }
         return reject;
     }
-    height: root.compact ? 190px : 222px; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px;
-    VerticalLayout { padding: 9px; spacing: 5px;
-        HorizontalLayout { height: 32px; spacing: 6px;
+    height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
+    VerticalLayout { padding: 9px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
+        HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
             Tool { icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; enabled: root.ready; clicked => { root.seek(0); } }
             Tool { icon: @image-url("icons/play.svg"); label: root.chinese ? "播放" : "Play"; primary: true; active: root.playing; enabled: root.ready; clicked => { root.play(); } }
             Tool { icon: @image-url("icons/pause.svg"); label: root.chinese ? "暂停" : "Pause"; active: root.ready && !root.playing && root.position > 0; enabled: root.ready; clicked => { root.pause(); } }
@@ -106,35 +106,35 @@ export component AuditionPanel inherits Rectangle {
             Tool { icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音高" : "Pitch"; }
-            LineEdit { width: 62px; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
+            LineEdit { width: 62px * Theme.ui-scale; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
             Caption { text: root.chinese ? "半音" : "st"; }
             Caption { text: root.chinese ? "速度" : "Rate"; }
-            LineEdit { width: 57px; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
+            LineEdit { width: 57px * Theme.ui-scale; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
             Caption { text: "×"; }
             Tool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音量" : "Volume"; }
-            volume-control := Slider { min-width: 76px; max-width: 160px; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
-            Caption { width: 66px; text: root.volume-label; horizontal-alignment: right; }
-            Tool { width: 54px; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-            Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: 9px; }
+            volume-control := Slider { min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
+            Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
+            Tool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: 9px * Theme.ui-scale; }
             Tool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; clicked => { root.peaks(); } }
             Tool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.output-settings(); } }
         }
-        wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: root.compact ? 45px : 70px; background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
+        wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: root.compact ? 45px * Theme.ui-scale : 70px * Theme.ui-scale; background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
             accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
             property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.view-start) / max(0.001, root.view-end - root.view-start), 0, 1) : 0;
             changed width => { root.resize(self.width / 1px, self.height / 1px); }
             changed height => { root.resize(self.width / 1px, self.height / 1px); }
             Image { source: root.waveform; width: parent.width; height: parent.height; image-fit: fill; }
-            if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: 11px; }
+            if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: 11px * Theme.ui-scale; }
             // These overlays are paint-only, leaving click/scroll ownership to scrub.
             if root.ready && root.duration > 0: Rectangle {
                 x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
                 background: root.spectral ? #183c3428 : #8faea622;
                 accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
                 accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
-                Rectangle { x: 0px; width: parent.width; y: parent.height - 3px; height: 3px; background: Theme.accent; }
+                Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
             }
             if root.ready && root.duration > 0 && root.visual-position >= root.view-start && root.visual-position <= root.view-end: Rectangle {
                 x: wave.played-fraction * (parent.width - 1px); width: 1px;
@@ -146,27 +146,27 @@ export component AuditionPanel inherits Rectangle {
                 scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
             }
         }
-        Rectangle { height: 24px; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
-            for tick in 51: Rectangle { x: tick * (parent.width - 1px) / 50; width: 1px; height: Math.mod(tick,5) == 0 ? 9px : 4px; background: Theme.muted; }
-            for label[index] in root.ruler-labels: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px; width: 55px; height: 13px; text: label; color: Theme.dim; font-size: 9px; horizontal-alignment: index == 10 ? right : left; }
+        Rectangle { height: 24px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
+            for tick in 51: Rectangle { x: tick * (parent.width - 1px) / 50; width: 1px; height: Math.mod(tick,5) == 0 ? 9px * Theme.ui-scale : 4px * Theme.ui-scale; background: Theme.muted; }
+            for label[index] in root.ruler-labels: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px * Theme.ui-scale; width: 55px * Theme.ui-scale; height: 13px * Theme.ui-scale; text: label; color: Theme.dim; font-size: 9px * Theme.ui-scale; horizontal-alignment: index == 10 ? right : left; }
             TouchArea { enabled: root.ready; mouse-cursor: pointer;
                 clicked => { root.seek-play(root.view-start + clamp(self.mouse-x/self.width,0,1)*(root.view-end - root.view-start)); }
                 scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
             }
         }
-        HorizontalLayout { height: 16px; spacing: 7px;
-            Caption { width: 42px; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: 10px; }
-            if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: 9px; }
+        HorizontalLayout { height: 16px * Theme.ui-scale; spacing: 7px * Theme.ui-scale;
+            Caption { width: 42px * Theme.ui-scale; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: 10px * Theme.ui-scale; }
+            if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: 9px * Theme.ui-scale; }
             Slider { horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
-            Tool { width: 24px; height: 18px; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
-            Tool { width: 24px; height: 18px; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
-            Tool { width: 38px; height: 18px; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
+            Tool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
+            Tool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
+            Tool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
         }
-        HorizontalLayout { height: 25px; spacing: 12px;
-            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: 14px; vertical-alignment: center; }
+        HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: 14px * Theme.ui-scale; vertical-alignment: center; }
             Rectangle { width: 1px; background: Theme.player-border; }
-            Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: 11px; vertical-alignment: center; }
-            Caption { text: root.info; font-size: 10px; }
+            Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: 11px * Theme.ui-scale; vertical-alignment: center; }
+            Caption { text: root.info; font-size: 10px * Theme.ui-scale; }
         }
     }
 }
@@ -193,40 +193,40 @@ export component PeakSettings inherits FocusScope {
     callback changed(); callback close();
     Rectangle { background: Theme.overlay;
     TouchArea { }
-    Rectangle { width: 480px; height: 384px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 8px; border-width: 1px; border-color: Theme.strong-border;
-        VerticalLayout { padding: 20px; spacing: 12px;
-            HorizontalLayout { height: 30px;
-                Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: 17px; font-weight: 600; vertical-alignment: center; }
+    Rectangle { width: 480px * Theme.ui-scale; height: 384px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 8px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
+        VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+            HorizontalLayout { height: 30px * Theme.ui-scale;
+                Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: 17px * Theme.ui-scale; font-weight: 600; vertical-alignment: center; }
                 peaks-close := Tool { symbol: "×"; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
             }
-            HorizontalLayout { height: 30px; spacing: 12px;
-                Caption { width: 90px; text: root.chinese ? "显示增益" : "Display gain"; }
+            HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                Caption { width: 90px * Theme.ui-scale; text: root.chinese ? "显示增益" : "Display gain"; }
                 Slider { surface: Theme.panel; horizontal-stretch: 1; minimum: -12; maximum: 36; step: 1; value <=> root.gain-db; changed => { root.changed(); } }
-                Caption { width: 60px; text: root.gain-db + " dB"; horizontal-alignment: right; }
+                Caption { width: 60px * Theme.ui-scale; text: root.gain-db + " dB"; horizontal-alignment: right; }
             }
-            HorizontalLayout { height: 30px; spacing: 12px;
-                Caption { width: 90px; text: root.chinese ? "显示模式" : "Display"; }
+            HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                Caption { width: 90px * Theme.ui-scale; text: root.chinese ? "显示模式" : "Display"; }
                 ComboBox { horizontal-stretch: 1; model: root.chinese ? ["普通波形", "彩色频谱峰值"] : ["Normal peaks", "Spectral peaks"]; current-index <=> root.mode; selected => { root.changed(); } }
             }
-            HorizontalLayout { height: 26px; spacing: 12px;
-                Caption { width: 90px; text: root.chinese ? "色彩强度" : "Color opacity"; }
+            HorizontalLayout { height: 26px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                Caption { width: 90px * Theme.ui-scale; text: root.chinese ? "色彩强度" : "Color opacity"; }
                 Slider { surface: Theme.panel; horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.01; value <=> root.opacity-value; changed => { root.changed(); } }
-                Caption { width: 60px; text: Math.round(root.opacity-value * 100) + "%"; horizontal-alignment: right; }
+                Caption { width: 60px * Theme.ui-scale; text: Math.round(root.opacity-value * 100) + "%"; horizontal-alignment: right; }
             }
             // Muted frequency anchors from audiolib-audio/src/spectral.rs.
-            Rectangle { height: 92px; background: @linear-gradient(90deg, #5bafb5, #707cbe, #b073ab, #c57564, #c0a954, #6fae79, #5bafb5, #707cbe); border-radius: 3px;
-                Rectangle { x: 0px; y: 0px; background: @linear-gradient(180deg, #0e0e0eff, #0e0e0e00); height: 65px; }
-                for frequency[index] in ["14 Hz", "36 Hz", "92 Hz", "239 Hz", "619 Hz", "1604 Hz", "4155 Hz"]: Text { x: 4px + index * (parent.width - 8px) / 7; y: 69px; height: 20px; text: frequency; color: #101820; font-size: 10px; font-weight: 600; vertical-alignment: center; }
+            Rectangle { height: 92px * Theme.ui-scale; background: @linear-gradient(90deg, #5bafb5, #707cbe, #b073ab, #c57564, #c0a954, #6fae79, #5bafb5, #707cbe); border-radius: 3px * Theme.ui-scale;
+                Rectangle { x: 0px; y: 0px; background: @linear-gradient(180deg, #0e0e0eff, #0e0e0e00); height: 65px * Theme.ui-scale; }
+                for frequency[index] in ["14 Hz", "36 Hz", "92 Hz", "239 Hz", "619 Hz", "1604 Hz", "4155 Hz"]: Text { x: 4px * Theme.ui-scale + index * (parent.width - 8px * Theme.ui-scale) / 7; y: 69px * Theme.ui-scale; height: 20px * Theme.ui-scale; text: frequency; color: #101820; font-size: 10px * Theme.ui-scale; font-weight: 600; vertical-alignment: center; }
             }
-            HorizontalLayout { height: 26px; spacing: 8px;
-                Caption { text: root.chinese ? "噪声阈值" : "Noise threshold"; width: 80px; }
+            HorizontalLayout { height: 26px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                Caption { text: root.chinese ? "噪声阈值" : "Noise threshold"; width: 80px * Theme.ui-scale; }
                 Slider { surface: Theme.panel; horizontal-stretch: 1; minimum: 0.1; maximum: 2; step: 0.05; value <=> root.noise; changed => { root.changed(); } }
-                Caption { width: 36px; text: Math.round(root.noise*100)/100; }
-                Caption { text: root.chinese ? "频率分散" : "Variance"; width: 68px; }
+                Caption { width: 36px * Theme.ui-scale; text: Math.round(root.noise*100)/100; }
+                Caption { text: root.chinese ? "频率分散" : "Variance"; width: 68px * Theme.ui-scale; }
                 Slider { surface: Theme.panel; horizontal-stretch: 1; minimum: 0.05; maximum: 1; step: 0.01; value <=> root.variance; changed => { root.changed(); } }
-                Caption { width: 36px; text: Math.round(root.variance*100)/100; }
+                Caption { width: 36px * Theme.ui-scale; text: Math.round(root.variance*100)/100; }
             }
-            Caption { text: root.chinese ? "黑色表示非音调内容；颜色随主频变化。显示增益不改变音量。" : "Noise fades to black; tones show frequency. Display gain is visual only."; font-size: 10px; }
+            Caption { text: root.chinese ? "黑色表示非音调内容；颜色随主频变化。显示增益不改变音量。" : "Noise fades to black; tones show frequency. Display gain is visual only."; font-size: 10px * Theme.ui-scale; }
         }
     }
     }
