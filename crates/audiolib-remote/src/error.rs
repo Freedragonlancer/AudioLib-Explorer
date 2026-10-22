@@ -108,6 +108,21 @@ pub enum RemoteError {
     /// structural write (scan, removal) for this request; the token is not at fault.
     #[error("Management forbidden by the server: {0}")]
     Forbidden(String),
+    /// `403 HOST_FORBIDDEN`: a tokenless request used a `Host` the server does not accept
+    /// (not an IP, LAN name or its configured `public_url` / `lan_url` host).
+    #[error("Host name refused by the server: {0}")]
+    HostForbidden(String),
+    /// `403 ADMIN_LAN_ONLY`: the admin page/API is only served to direct LAN peers using a
+    /// LAN host name (no reverse proxy, no public domain).
+    #[error("Admin page is LAN-only: {0}")]
+    AdminLanOnly(String),
+    /// `429 AUTH_RATE_LIMITED`: too many failed authentications from this address; wait
+    /// `retry_after` seconds (the server sends 60) before trying again.
+    #[error("Too many failed authentications: {message}")]
+    RateLimited {
+        message: String,
+        retry_after: Option<u64>,
+    },
     /// `409 SCAN_STATE` (API §6.6): the scan session's state does not allow this control
     /// (finished, cancelling, finalizing or not running in this server process). Unlike
     /// [`RemoteError::Busy`] retrying does not help; refresh the scan status instead.
@@ -212,6 +227,13 @@ impl RemoteError {
             format!("{context}: {}", parsed.message)
         };
         match (status, parsed.error_code.as_str()) {
+            // §2.3: failed-auth limiter; keep `Retry-After` so nothing retries early.
+            // The server currently only emits AUTH_RATE_LIMITED as 429, so every 429 maps
+            // to RateLimited; revisit if other 429 codes appear.
+            (429, _) | (_, "AUTH_RATE_LIMITED") => Self::RateLimited {
+                message,
+                retry_after,
+            },
             // §2.2: a missing and a wrong token are both `401 UNAUTHORIZED` (only the
             // message differs, which is not matched); requests sent without a token turn it
             // into `TokenRequired` through `without_token`.
@@ -229,6 +251,8 @@ impl RemoteError {
                 }
             }
             (_, "MANAGE_FORBIDDEN") => Self::Forbidden(message),
+            (_, "HOST_FORBIDDEN") => Self::HostForbidden(message),
+            (_, "ADMIN_LAN_ONLY") => Self::AdminLanOnly(message),
             // Before the generic 409 arm; other 409 codes stay `Busy`.
             (_, "SCAN_STATE") => Self::ScanState(message),
             (_, "JOB_STATE") => Self::JobState(message),
@@ -383,25 +407,42 @@ impl RemoteError {
     pub fn localized(&self, chinese: bool) -> String {
         if !chinese {
             return match self {
-                Self::Unreachable(detail) => match self.network_failure() {
-                    Some(NetworkFailure::Dns) => format!(
-                        "Cannot resolve the server name (DNS lookup failed). Check the spelling of the domain, your network connection and DNS settings. ({detail})"
-                    ),
-                    Some(NetworkFailure::Refused) => format!(
-                        "The server refused the connection: nothing is listening on that port. Check the port number and that the server or its reverse proxy is running. ({detail})"
-                    ),
-                    None => format!(
-                        "Cannot reach the server. Check the URL, network and that the server is running. ({detail})"
-                    ),
-                },
+                Self::Unreachable(detail) => {
+                    (match self.network_failure() {
+                        Some(NetworkFailure::Dns) => format!(
+                            "Cannot resolve the server name (DNS lookup failed). Check the spelling of the domain, your network connection and DNS settings. ({detail})"
+                        ),
+                        Some(NetworkFailure::Refused) => format!(
+                            "The server refused the connection: nothing is listening on that port. Check the port number and that the server or its reverse proxy is running. ({detail})"
+                        ),
+                        None => format!(
+                            "Cannot reach the server. Check the URL, network and that the server is running. ({detail})"
+                        ),
+                    }) + mdns_hint(detail, false)
+                }
                 Self::Timeout(detail) => format!("The server did not respond in time. ({detail})"),
-                Self::Unauthorized(_) => format!(
-                    "The server rejected the access token (401): it is wrong or has been revoked. {}",
-                    token_hint(false)
+                Self::Unauthorized(detail) => format!(
+                    "The server rejected the access token (401): it is wrong or has been revoked. {}{}",
+                    token_hint(false),
+                    mdns_hint(detail, false)
                 ),
-                Self::TokenRequired(_) => format!(
-                    "The server requires an access token (401). {}",
-                    token_hint(false)
+                Self::TokenRequired(detail) => format!(
+                    "The server requires an access token (401). {}{}",
+                    token_hint(false),
+                    mdns_hint(detail, false)
+                ),
+                Self::HostForbidden(detail) => format!(
+                    "The server refused this host name (403 HOST_FORBIDDEN): requests without a token must use an IP address, a LAN name or the server's configured public_url / lan_url host. Check the access token, or use the server's LAN IP / configured host name instead. ({detail})"
+                ),
+                Self::AdminLanOnly(detail) => format!(
+                    "The server's admin page is only available directly on the local network (403 ADMIN_LAN_ONLY). Open /admin from another device on the LAN using the server's LAN IP, not through a reverse proxy or public domain. ({detail})"
+                ),
+                Self::RateLimited {
+                    message,
+                    retry_after,
+                } => format!(
+                    "Too many failed authentications; the server is temporarily refusing requests from this client's IP address as the server sees it (behind a proxy or NAT, that is the proxy's/router's IP) (429 AUTH_RATE_LIMITED). Until the wait ends even a correct token is rejected. Try again in {} seconds and check the access token. ({message})",
+                    retry_after.unwrap_or(60)
                 ),
                 Self::Tls { kind, detail } => tls_message(*kind, detail, false),
                 Self::Starting { message, .. } => format!(
@@ -433,25 +474,45 @@ impl RemoteError {
             };
         }
         match self {
-            Self::Unreachable(detail) => match self.network_failure() {
-                Some(NetworkFailure::Dns) => format!(
-                    "无法解析服务器域名（DNS 失败），请检查域名拼写、网络连接和 DNS 设置。（{detail}）"
-                ),
-                Some(NetworkFailure::Refused) => format!(
-                    "服务器拒绝连接：该端口没有服务在监听。请检查端口号，以及服务器或反向代理是否已启动。（{detail}）"
-                ),
-                None => {
-                    format!("无法连接服务器，请检查地址、网络以及服务器是否已启动。（{detail}）")
-                }
-            },
-            Self::Timeout(detail) => format!("服务器响应超时。（{detail}）"),
-            Self::Unauthorized(_) => format!(
-                "服务器拒绝了访问令牌（401）：令牌错误或已被撤销。{}",
-                token_hint(true)
-            ),
-            Self::TokenRequired(_) => {
-                format!("服务器要求访问令牌（401）。{}", token_hint(true))
+            Self::Unreachable(detail) => {
+                (match self.network_failure() {
+                    Some(NetworkFailure::Dns) => format!(
+                        "无法解析服务器域名（DNS 失败），请检查域名拼写、网络连接和 DNS 设置。（{detail}）"
+                    ),
+                    Some(NetworkFailure::Refused) => format!(
+                        "服务器拒绝连接：该端口没有服务在监听。请检查端口号，以及服务器或反向代理是否已启动。（{detail}）"
+                    ),
+                    None => {
+                        format!(
+                            "无法连接服务器，请检查地址、网络以及服务器是否已启动。（{detail}）"
+                        )
+                    }
+                }) + mdns_hint(detail, true)
             }
+            Self::Timeout(detail) => format!("服务器响应超时。（{detail}）"),
+            Self::Unauthorized(detail) => format!(
+                "服务器拒绝了访问令牌（401）：令牌错误或已被撤销。{}{}",
+                token_hint(true),
+                mdns_hint(detail, true)
+            ),
+            Self::TokenRequired(detail) => format!(
+                "服务器要求访问令牌（401）。{}{}",
+                token_hint(true),
+                mdns_hint(detail, true)
+            ),
+            Self::HostForbidden(detail) => format!(
+                "服务器拒绝了此主机名（403 HOST_FORBIDDEN）：未带令牌的请求只能用 IP 地址、局域网名称或服务器配置的 public_url / lan_url 主机名访问。请检查 token，或改用服务器局域网 IP / 已配置的主机名。（{detail}）"
+            ),
+            Self::AdminLanOnly(detail) => format!(
+                "服务器管理页面仅限局域网内直接访问（403 ADMIN_LAN_ONLY）：请在局域网内的另一台设备上用服务器的局域网 IP 打开 /admin，不要经反向代理或公网域名访问。（{detail}）"
+            ),
+            Self::RateLimited {
+                message,
+                retry_after,
+            } => format!(
+                "认证失败次数过多，服务器暂时拒绝来自本客户端 IP 地址（以服务器所见为准；经代理或 NAT 时为代理/路由器的 IP）的请求（429 AUTH_RATE_LIMITED），等待结束前即使令牌正确也会被拒绝；请 {} 秒后再试，并检查访问令牌是否正确。（{message}）",
+                retry_after.unwrap_or(60)
+            ),
             Self::Tls { kind, detail } => tls_message(*kind, detail, true),
             Self::NotFound(detail) => format!("服务器上找不到请求的资源：{detail}"),
             Self::Busy { message, .. } => format!("服务器正忙，请稍后重试：{message}"),
@@ -525,6 +586,39 @@ pub(crate) fn forbidden_reason(message: &str, chinese: bool) -> &'static str {
         (false, true, false) => "remote management is disabled on the server",
         (false, false, true) => "服务器的管理权限设置拒绝了此请求",
         (false, false, false) => "the server's management setting refused the request",
+    }
+}
+
+/// True when `text` contains a URL whose host is an mDNS `.local` name.
+pub(crate) fn has_mdns_host(text: &str) -> bool {
+    text.match_indices("://").any(|(index, _)| {
+        let rest = &text[index + 3..];
+        let authority = rest
+            .split(['/', '?', '#', ' ', ')', '）'])
+            .next()
+            .unwrap_or("");
+        let host = authority.rsplit('@').next().unwrap_or("");
+        let host = match host.rsplit_once(':') {
+            Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+            _ => host,
+        };
+        host.trim_end_matches('.')
+            .to_ascii_lowercase()
+            .ends_with(".local")
+    })
+}
+
+/// Extra advice for a failed connection to a `.local` host name: proxies in fake-IP mode
+/// (and some Windows setups) do not resolve mDNS names, so use the server's LAN IP.
+fn mdns_hint(detail: &str, chinese: bool) -> &'static str {
+    match (has_mdns_host(detail), chinese) {
+        (false, _) => "",
+        (true, true) => {
+            " 提示：.local 主机名可能被代理（fake-ip 模式）或系统 DNS 接管而无法直连服务器，请改用服务器的局域网 IP 地址。"
+        }
+        (true, false) => {
+            " Hint: .local host names can be captured by a proxy (fake-IP mode) or fail to resolve; use the server's LAN IP address instead."
+        }
     }
 }
 
@@ -610,8 +704,15 @@ impl From<RemoteError> for audiolib_core::Error {
 impl RemoteError {
     /// The server refused the request for lack of a valid token (wrong token, or none
     /// configured while the server requires one).
+    /// `429 AUTH_RATE_LIMITED` counts too: it follows repeated auth failures, and
+    /// callers then back off (the poller waits at least `UNAUTHORIZED_RETRY`, longer than
+    /// the server's `Retry-After: 60`) instead of retrying. The server currently only
+    /// emits AUTH_RATE_LIMITED as 429; revisit if other 429 codes appear.
     pub fn is_unauthorized(&self) -> bool {
-        matches!(self, Self::Unauthorized(_) | Self::TokenRequired(_))
+        matches!(
+            self,
+            Self::Unauthorized(_) | Self::TokenRequired(_) | Self::RateLimited { .. }
+        )
     }
 
     /// For a request sent without a token: a `401` means the server requires one.
@@ -692,6 +793,15 @@ impl RemoteError {
                 message: message.clone(),
             },
             Self::Forbidden(detail) => Self::Forbidden(detail.clone()),
+            Self::HostForbidden(detail) => Self::HostForbidden(detail.clone()),
+            Self::AdminLanOnly(detail) => Self::AdminLanOnly(detail.clone()),
+            Self::RateLimited {
+                message,
+                retry_after,
+            } => Self::RateLimited {
+                message: message.clone(),
+                retry_after: *retry_after,
+            },
             Self::ScanState(detail) => Self::ScanState(detail.clone()),
             Self::JobState(detail) => Self::JobState(detail.clone()),
             Self::LibraryChanged(detail) => Self::LibraryChanged(detail.clone()),
@@ -733,7 +843,8 @@ impl RemoteError {
         match self {
             Self::Starting { retry_after, .. }
             | Self::Busy { retry_after, .. }
-            | Self::RootOffline { retry_after, .. } => *retry_after,
+            | Self::RootOffline { retry_after, .. }
+            | Self::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -761,6 +872,75 @@ impl From<audiolib_core::Error> for RemoteError {
 #[cfg(test)]
 mod tests {
     use super::{RemoteError, retry_wait};
+
+    #[test]
+    fn mdns_host_failures_suggest_the_lan_ip() {
+        assert!(super::has_mdns_host("http://example.local:8790/api/v1"));
+        assert!(super::has_mdns_host("https://Server.LOCAL./x"));
+        assert!(!super::has_mdns_host("http://203.0.113.2:8790/api/v1"));
+        assert!(!super::has_mdns_host("https://example.com/local"));
+        let unreachable = RemoteError::Unreachable(
+            "http://example.local:8790/api/v1/health: connection failed".into(),
+        );
+        assert!(unreachable.localized(true).contains("局域网 IP"));
+        assert!(unreachable.localized(false).contains("LAN IP"));
+        let unauthorized = RemoteError::Unauthorized(
+            "GET /library: invalid token (http://example.local:8790/api/v1)".into(),
+        );
+        assert!(unauthorized.localized(true).contains("局域网 IP"));
+        assert!(
+            unauthorized
+                .duplicate()
+                .without_token()
+                .localized(false)
+                .contains("LAN IP")
+        );
+        let plain = RemoteError::Unreachable("http://203.0.113.2:8790: connection failed".into());
+        assert!(!plain.localized(true).contains("fake-ip"));
+    }
+
+    #[test]
+    fn auth_rate_limit_and_lan_only_codes_map_to_dedicated_errors() {
+        let body = r#"{"error_code":"AUTH_RATE_LIMITED","message":"slow down"}"#;
+        let limited = RemoteError::from_response(429, body, "GET /library", Some(60));
+        assert!(matches!(
+            limited,
+            RemoteError::RateLimited {
+                retry_after: Some(60),
+                ..
+            }
+        ));
+        let bare = RemoteError::from_response(429, "", "GET /library", None);
+        assert!(matches!(
+            bare,
+            RemoteError::RateLimited {
+                retry_after: None,
+                ..
+            }
+        ));
+        assert!(bare.localized(true).contains("60 秒"));
+        assert!(bare.localized(true).contains("即使令牌正确也会被拒绝"));
+        assert!(bare.localized(true).contains("本客户端 IP 地址"));
+        assert!(!bare.localized(true).contains("本机"));
+        assert!(
+            bare.localized(false)
+                .contains("this client's IP address as the server sees it")
+        );
+        assert!(!bare.localized(false).contains("this PC"));
+        assert!(
+            bare.localized(false)
+                .contains("even a correct token is rejected")
+        );
+        let host = r#"{"error_code":"HOST_FORBIDDEN","message":"no"}"#;
+        assert!(matches!(
+            RemoteError::from_status(403, host, "GET /library"),
+            RemoteError::HostForbidden(_)
+        ));
+        let admin = r#"{"error_code":"ADMIN_LAN_ONLY","message":"no"}"#;
+        let admin = RemoteError::from_status(403, admin, "GET /admin");
+        assert!(matches!(admin, RemoteError::AdminLanOnly(_)));
+        assert!(!admin.is_unauthorized());
+    }
 
     #[test]
     fn insufficient_storage_is_a_disk_full_error_that_is_never_retried() {
@@ -1118,13 +1298,17 @@ mod tests {
                 RemoteError::Busy { .. }
             ));
         }
-        // Another 403 (e.g. the admin page's LAN rule) stays a plain server error.
+        // The admin page's LAN rule has its own error; an unknown 403 stays a server error.
         assert!(matches!(
             RemoteError::from_status(
                 403,
                 r#"{"error_code":"ADMIN_LAN_ONLY","message":"x"}"#,
                 "GET /x"
             ),
+            RemoteError::AdminLanOnly(_)
+        ));
+        assert!(matches!(
+            RemoteError::from_status(403, r#"{"error_code":"OTHER_403","message":"x"}"#, "GET /x"),
             RemoteError::Server { status: 403, .. }
         ));
     }

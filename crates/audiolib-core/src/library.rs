@@ -42,6 +42,9 @@ pub struct ScanSession {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LibraryInfo {
+    /// Server builds may omit the database path (it is a server-local detail); a missing
+    /// field deserializes as an empty path instead of failing the whole response.
+    #[serde(default)]
     pub database: PathBuf,
     pub schema_version: i64,
     pub sqlite_version: String,
@@ -150,6 +153,22 @@ pub struct TransferReport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_info_without_database_field_deserializes() {
+        let mut value = serde_json::to_value(super::LibraryInfo {
+            schema_version: 7,
+            sqlite_version: "3.50.0".into(),
+            database_bytes: 42,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(value.as_object_mut().unwrap().remove("database").is_some());
+        let info: super::LibraryInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(info.database, std::path::PathBuf::new());
+        assert_eq!(info.schema_version, 7);
+        assert_eq!(info.database_bytes, 42);
+    }
+
     use super::*;
     #[test]
     fn batch_rejects_empty_fields_and_invalid_ids_before_writing() {
