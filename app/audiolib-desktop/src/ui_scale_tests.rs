@@ -63,8 +63,7 @@ const VIEWS: &[(&str, Setup)] = &[
 
 fn render(scale: f32, chinese: bool, name: &str, setup: Setup) -> (u32, u32) {
     let ui = AppWindow::new().unwrap();
-    ui.window()
-        .set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     if scale != 1.0 {
         ui.global::<crate::Theme>().set_ui_scale(scale);
     }
