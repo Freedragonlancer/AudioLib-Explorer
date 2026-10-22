@@ -234,7 +234,7 @@ audiolib.example.com:8443 {
   - `library_id` 保存在服务端自有的旁路文件 `<db>.server-state.json`（与库文件同目录，原子写入），在服务端**第一次打开该 db 路径**时生成（UUID v4）。schema v3/v4 本身没有库身份字段。
   - 原地还原（restore）保留 `library_id`，`revision` 递增；把库复制到另一路径再提供服务会得到新的 `library_id`。旁路文件损坏时服务端拒绝启动，不会悄悄换新 id。
   - 以后可另行设计在库内保存身份（例如元数据表或 SQLite `application_id` + UUID），届时旁路文件只作迁移来源。
-- **路径**：服务端**暴露绝对路径**——`GET /roots` 的 `server_path`、`GET /library` 的 `database`，以及 `AudioFile.file_path` / `Folder.path` 均为服务端（Mac）上的原始绝对路径。客户端把库里的路径前缀 `server_path` 替换为该根的 WebDAV 地址来访问音频（见 §7）。目前只在局域网使用，因此接受路径暴露；以后若开放到局域网之外再重新评估。
+- **路径**：服务端**暴露绝对路径**——`GET /roots` 的 `server_path` 以及 `AudioFile.file_path` / `Folder.path` 均为服务端（Mac）上的原始绝对路径。客户端把库里的路径前缀 `server_path` 替换为该根的 WebDAV 地址来访问音频（见 §7）。目前只在局域网使用，因此接受路径暴露；以后若开放到局域网之外再重新评估。例外：`GET /library` 的 `database` 只返回库文件名（如 `library.db`），不含服务端目录；完整路径仅在 `/admin` 管理页显示。
 - **扫描根**：服务端配置允许的根（`[[roots]]`，对应 `allowed_scan_roots`），客户端只能从 `GET /roots` 里选，不能传任意路径。
 
 ### 3.1 历史：快照 schema 3 → 5
@@ -297,7 +297,7 @@ audiolib.example.com:8443 {
 | 状态 | 方法 | 路径 | 对应 `DataProvider` | 请求 | 响应 |
 |---|---|---|---|---|---|
 | ✅ | GET | `/health` | — | 免鉴权 | `{ "status": "ok" \| "starting" \| "error", "version": "0.6.0-dev.1", "api_version": "v1", "schema_version": 6, "commit": "abc1234" \| "unknown", "message"?: "…", "public_url": "…" \| null }`，见 §6.2 |
-| ✅ | GET | `/library` | `library_info` | — | `LibraryInfo` 字段（含 `database`、`schema_version`、`stats`、`database_bytes`、`wal_bytes`）+ `library_id`、`revision`；`stats` 按 revision 缓存（内存 + 库旁 `<库文件>.stats.json`，重启后立即可用）：revision 变化后若上次计算耗时 >250 ms，先返回上一份统计并在后台重算（计数只可能滞后最近几次写入），否则同步重算；播放记录与元数据修改不影响这些统计，写入后缓存直接沿用到新 revision（不整表重算）；启动时后台预热（库旁缓存已是当前 revision 时跳过）；`database_bytes` = 主库文件 + `-wal` 文件的字节数（库实际占用），`wal_bytes` 为其中 WAL 部分 |
+| ✅ | GET | `/library` | `library_info` | — | `LibraryInfo` 字段（含 `database`（仅文件名，如 `library.db`，不暴露服务端完整路径）、`schema_version`、`stats`、`database_bytes`、`wal_bytes`）+ `library_id`、`revision`；`stats` 按 revision 缓存（内存 + 库旁 `<库文件>.stats.json`，重启后立即可用）：revision 变化后若上次计算耗时 >250 ms，先返回上一份统计并在后台重算（计数只可能滞后最近几次写入），否则同步重算；播放记录与元数据修改不影响这些统计，写入后缓存直接沿用到新 revision（不整表重算）；启动时后台预热（库旁缓存已是当前 revision 时跳过）；`database_bytes` = 主库文件 + `-wal` 文件的字节数（库实际占用），`wal_bytes` 为其中 WAL 部分 |
 | ✅ | GET | `/library/snapshot` | `backup_library`（只读导出） | — | SQLite 快照字节，见 §6.1 |
 | ✅ | GET | `/roots` | `folders`（求 `file_count`）+ 根状态缓存 + 扫描历史 | — | `[{ "name", "server_path", "webdav_url": "…" \| null（功能未完善，见 §7）, "file_count": n \| null, "missing_count": n, "online": bool, "status": "checking" \| "online" \| "waking" \| "offline", "status_message": "…" \| null, "checked_at": unix秒 \| null, "last_scan": { … } \| null, "scanning": bool }]`，见 §6.4 |
 | ✅ | POST | `/roots/{name}/check` | 根状态 | 无请求体 | 立即重查该根（最多约 2 秒），返回该根的 `/roots` 条目；未知根名 404 `NOT_FOUND`，见 §6.4 |

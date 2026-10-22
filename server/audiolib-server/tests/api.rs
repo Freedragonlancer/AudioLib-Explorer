@@ -235,6 +235,12 @@ async fn library_reports_identity_schema_and_monotonic_revision() {
     assert_eq!(first.info.schema_version, audiolib_db::SCHEMA_VERSION);
     assert_eq!(first.info.stats.audio_files, 3);
     assert!(first.revision >= 1);
+    assert_eq!(
+        first.info.database,
+        std::path::PathBuf::from(first.info.database.file_name().unwrap()),
+        "GET /library must expose only the database file name"
+    );
+    assert!(!first.info.database.is_absolute());
     let raw: serde_json::Value = json(send(&f.state, "/api/v1/library", Some(TOKEN)).await).await;
     for field in [
         "library_id",
@@ -246,6 +252,9 @@ async fn library_reports_identity_schema_and_monotonic_revision() {
     ] {
         assert!(raw.get(field).is_some(), "missing {field} in {raw}");
     }
+    let database = raw["database"].as_str().expect("database is a string");
+    assert!(!database.is_empty());
+    assert!(!database.contains('/') && !database.contains('\\'), "{database}");
     assert_eq!(
         raw["revision"].as_u64(),
         Some(first.revision),

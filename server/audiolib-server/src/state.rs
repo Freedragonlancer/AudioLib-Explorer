@@ -1286,6 +1286,12 @@ impl AppState {
         let stats = self.library_stats(&revision)?;
         let mut info = self.inner.provider.library_info_with_stats(stats)?;
         info.database_bytes = info.database_bytes.saturating_add(info.wal_bytes);
+        // Remote callers only get the file name; the full server path stays in /admin.
+        info.database = info
+            .database
+            .file_name()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
         Ok(LibraryResponse {
             snapshot_format: self.snapshot_format()?,
             library_id: revision.library_id,
