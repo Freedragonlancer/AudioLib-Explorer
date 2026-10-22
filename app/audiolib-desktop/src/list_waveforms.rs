@@ -655,6 +655,10 @@ impl ListWaveforms {
             match state.next_step(Instant::now(), scanning, source) {
                 Step::Exit => return,
                 Step::Wait(timeout) => {
+                    // Never sleep holding the provider: an idle worker must not keep
+                    // the library database open once its host is gone (on Windows the
+                    // open file blocks deleting or replacing the library directory).
+                    drop(provider);
                     let timeout = timeout.unwrap_or(IDLE_POLL).min(IDLE_POLL);
                     drop(
                         self.shared
