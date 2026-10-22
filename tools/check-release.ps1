@@ -30,15 +30,15 @@ function Get-CargoVersion([string]$Text) {
     if ($m.Success) { [pscustomobject]@{ Major = [int]$m.Groups[1].Value; Minor = [int]$m.Groups[2].Value; Patch = [int]$m.Groups[3].Value; Text = "$($m.Groups[1].Value).$($m.Groups[2].Value).$($m.Groups[3].Value)" } }
 }
 
-# 1. Tag format: vX.Y.Z or vX.Y.Z-rc.N
-$tagMatch = [regex]::Match($Tag, '^v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$')
-if (!$tagMatch.Success) { Fail "Tag '$Tag' must look like vX.Y.Z or vX.Y.Z-rc.N." }
+# 1. Tag format: vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N
+$tagMatch = [regex]::Match($Tag, '^v(\d+)\.(\d+)\.(\d+)(?:-(?:rc|beta)\.(\d+))?$')
+if (!$tagMatch.Success) { Fail "Tag '$Tag' must look like vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N." }
 $tagCore = if ($tagMatch.Success) { "$($tagMatch.Groups[1].Value).$($tagMatch.Groups[2].Value).$($tagMatch.Groups[3].Value)" }
 
 # 2. Program version (workspace Cargo.toml) must equal the tag
 $program = Get-CargoVersion (Read-Utf8 'Cargo.toml')
 if (!$program) { Fail 'Cannot read MAJOR.MINOR.PATCH from [workspace.package] version in Cargo.toml.' }
-elseif ($tagCore -and $program.Text -ne $tagCore) { Fail "Tag $Tag does not match Cargo.toml workspace version $($program.Text) (expected tag v$($program.Text) or v$($program.Text)-rc.N)." }
+elseif ($tagCore -and $program.Text -ne $tagCore) { Fail "Tag $Tag does not match Cargo.toml workspace version $($program.Text) (expected tag v$($program.Text), v$($program.Text)-rc.N or v$($program.Text)-beta.N)." }
 
 # 3. Schema version
 $schema = Get-Schema (Read-Utf8 'crates/audiolib-db/src/schema.rs')

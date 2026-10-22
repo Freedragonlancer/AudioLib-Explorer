@@ -3,16 +3,14 @@ name: CI
 # Runtime checks run locally under AGENTS.md. Hosted CI checks formatting only.
 on:
   push:
-    branches: [main, 'codex/**']
+    branches: [main, beta, 'codex/**']
     paths-ignore:
       - '**/*.md'
       - 'doc/**'
       - 'resources/screenshot-*.png'
+  # No paths filter on PRs: "Linux (fmt)" is a required check on main/beta and
+  # must report for every PR, including doc-only changes.
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'doc/**'
-      - 'resources/screenshot-*.png'
 
 permissions:
   contents: read

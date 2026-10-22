@@ -18,8 +18,8 @@ Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server packaging requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
-if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N.' }
+$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.\d+)?$')
+if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N / -beta.N.' }
 $version = $tagMatch.Groups[1].Value
 if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
 switch ($Target) {
