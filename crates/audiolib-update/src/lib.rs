@@ -20,6 +20,7 @@ const RELEASES_API: &str =
     "https://api.github.com/repos/Freedragonlancer/AudioLib-Explorer/releases";
 const MAX_JSON: u64 = 8 * 1024 * 1024;
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
+const EMPTY_LIST_RETRIES: u32 = 2;
 
 /// Selects a product's exact release asset, independent of the active library.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,8 +182,25 @@ impl UpdateClient {
         // The finite bound prevents an untrusted/huge repository from stalling startup.
         for page in 1..=5 {
             let url = format!("{RELEASES_API}?per_page=100&page={page}");
-            let bytes = self.fetch(&url, MAX_JSON, Duration::from_secs(20))?;
-            let batch: Vec<Release> = serde_json::from_slice(&bytes)?;
+            let mut batch = self.fetch_releases(&url)?;
+            // GitHub (or an intermediate proxy) intermittently answers the first page
+            // with 200 and `[]`; this repository always has releases, so an empty first
+            // page is a failed lookup, never "up to date".
+            for attempt in 1..=EMPTY_LIST_RETRIES {
+                if page != 1 || !batch.is_empty() {
+                    break;
+                }
+                tracing::warn!(
+                    attempt,
+                    "update check: GitHub returned an empty release list; retrying"
+                );
+                std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+                batch = self.fetch_releases(&url)?;
+            }
+            ensure!(
+                page != 1 || !batch.is_empty(),
+                "GitHub returned an empty release list; the update check could not complete"
+            );
             let done = batch.len() < 100;
             releases.extend(batch);
             if done {
@@ -190,6 +208,11 @@ impl UpdateClient {
             }
         }
         self.select(releases)
+    }
+
+    fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
+        let bytes = self.fetch(url, MAX_JSON, Duration::from_secs(20))?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     fn select(&self, releases: Vec<Release>) -> Result<Option<ReleaseUpdate>> {
@@ -201,7 +224,10 @@ impl UpdateClient {
         releases: Vec<Release>,
         platform: Platform,
     ) -> Result<Option<ReleaseUpdate>> {
+        let total = releases.len();
         let mut selected: Option<(Version, ReleaseUpdate)> = None;
+        // Newer releases this channel would accept but whose assets are missing or invalid.
+        let mut unusable: Option<Version> = None;
         for release in releases {
             if release.draft {
                 continue;
@@ -217,8 +243,10 @@ impl UpdateClient {
                 || (self.channel == Channel::Stable
                     && (release.prerelease || !version.pre.is_empty()))
                 || !supported_prerelease(&version)
-                || selected.as_ref().is_some_and(|(best, _)| best >= &version)
             {
+                continue;
+            }
+            if selected.as_ref().is_some_and(|(best, _)| best >= &version) {
                 continue;
             }
             let names = asset_names_for_platform(self.product, &release.tag_name, platform)?;
@@ -232,6 +260,13 @@ impl UpdateClient {
                     && valid_asset_url(checksum, &release.tag_name))
                 .then_some((asset, checksum))
             }) else {
+                tracing::warn!(
+                    tag = %release.tag_name,
+                    "update check: newer release has no valid package for this platform; skipped"
+                );
+                if unusable.as_ref().is_none_or(|worst| &version > worst) {
+                    unusable = Some(version);
+                }
                 continue;
             };
             selected = Some((
@@ -249,6 +284,24 @@ impl UpdateClient {
                 },
             ));
         }
+        match (&selected, &unusable) {
+            (None, Some(version)) => bail!(
+                "Release v{version} is newer but has no valid package for this platform; the update cannot be installed yet"
+            ),
+            (Some((chosen, _)), Some(version)) if version > chosen => tracing::warn!(
+                chosen = %chosen,
+                skipped = %version,
+                "update check: offering an older release because the newest has no valid package"
+            ),
+            _ => {}
+        }
+        tracing::info!(
+            releases = total,
+            current = %self.current,
+            channel = self.channel.marker(),
+            selected = selected.as_ref().map(|(v, _)| v.to_string()).as_deref().unwrap_or("none"),
+            "update check completed"
+        );
         Ok(selected.map(|(_, update)| update))
     }
 

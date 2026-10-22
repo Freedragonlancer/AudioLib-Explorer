@@ -96,19 +96,31 @@ fn releases_obey_numeric_beta_order_and_stable_channel() {
 }
 
 #[test]
-fn wrong_repository_duplicate_and_incomplete_assets_are_ignored() {
+fn wrong_repository_duplicate_and_incomplete_assets_are_reported() {
     let client = UpdateClient::new(NATIVE_PRODUCT, Channel::Stable, "0.6.1").unwrap();
     let mut wrong = release("v0.6.2", false, false);
     wrong.assets[0].browser_download_url = wrong.assets[0]
         .browser_download_url
         .replace("Freedragonlancer", "attacker");
-    assert!(client.select(vec![wrong]).unwrap().is_none());
+    let error = client.select(vec![wrong]).unwrap_err().to_string();
+    assert!(
+        error.contains("v0.6.2") && error.contains("no valid package"),
+        "{error}"
+    );
     let mut duplicate = release("v0.6.2", false, false);
     duplicate.assets.push(duplicate.assets[0].clone());
-    assert!(client.select(vec![duplicate]).unwrap().is_none());
+    let error = client.select(vec![duplicate]).unwrap_err().to_string();
+    assert!(
+        error.contains("v0.6.2") && error.contains("no valid package"),
+        "{error}"
+    );
     let mut incomplete = release("v0.6.2", false, false);
     incomplete.assets.pop();
-    assert!(client.select(vec![incomplete]).unwrap().is_none());
+    let error = client.select(vec![incomplete]).unwrap_err().to_string();
+    assert!(
+        error.contains("v0.6.2") && error.contains("no valid package"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -159,9 +171,8 @@ fn known_binary_only_mac_archives_are_not_offered_as_installable_updates() {
         assert!(
             client
                 .select_for_platform(vec![legacy], Platform::MacArm64)
-                .unwrap()
-                .is_none(),
-            "offered known binary-only archive {tag}"
+                .is_err(),
+            "known binary-only archive {tag} must be reported, not offered or hidden"
         );
         let flat = release_for_platform(Product::Server, tag, false, false, Platform::MacArm64);
         assert_eq!(
@@ -460,4 +471,27 @@ fn http_download_enforces_checksum_declared_size_and_response_bounds() {
         .into();
     assert!(client.fetch(&url, 4096, Duration::from_secs(5)).is_err());
     fixture.join().unwrap();
+}
+
+#[test]
+fn newest_release_without_package_falls_back_to_older_valid_release() {
+    let client = UpdateClient::new(NATIVE_PRODUCT, Channel::Stable, "0.6.1").unwrap();
+    let mut newest = release("v0.6.3", false, false);
+    newest.assets.clear();
+    let update = client
+        .select(vec![newest, release("v0.6.2", false, false)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(update.tag, "v0.6.2");
+}
+
+#[test]
+fn releases_other_channels_ignore_stay_silent() {
+    let client = UpdateClient::new(NATIVE_PRODUCT, Channel::Stable, "0.6.1").unwrap();
+    let mut beta = release("v0.6.2-beta.1", false, true);
+    beta.assets.clear();
+    let mut old = release("v0.6.0", false, false);
+    old.assets.clear();
+    assert!(client.select(vec![beta, old]).unwrap().is_none());
+    assert!(client.select(Vec::new()).unwrap().is_none());
 }
