@@ -18,11 +18,20 @@
   (build it there; avoids repeated volume-access prompts). Self-update exits with
   code 75 under launchd so KeepAlive (must restart on nonzero exit) relaunches via
   this chain; with KeepAlive false the server stays stopped after an update.
+  The exit path is used only when AUDIOLIB_LAUNCHD_LABEL (EnvironmentVariables below)
+  equals launchd's XPC_SERVICE_NAME, so keep it identical to Label; otherwise the
+  server execs in place.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>io.github.audiolib.server</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Must equal Label: marks this process as launchd-managed for self-update. -->
+        <key>AUDIOLIB_LAUNCHD_LABEL</key>
+        <string>io.github.audiolib.server</string>
+    </dict>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/audiolib/audiolib-launcher</string>

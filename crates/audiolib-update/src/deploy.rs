@@ -155,6 +155,7 @@ impl PreparedUpdate {
             };
             if restart_action(
                 cfg!(target_os = "macos"),
+                std::env::var_os("AUDIOLIB_LAUNCHD_LABEL"),
                 std::env::var_os("XPC_SERVICE_NAME"),
             ) == RestartAction::ExitForLaunchd
             {
@@ -191,10 +192,19 @@ enum RestartAction {
     ExitForLaunchd,
 }
 
-/// Pure decision: exit for launchd only on macOS with a non-empty XPC_SERVICE_NAME.
-fn restart_action(is_macos: bool, xpc_service_name: Option<OsString>) -> RestartAction {
-    match xpc_service_name {
-        Some(name) if is_macos && !name.is_empty() => RestartAction::ExitForLaunchd,
+/// Pure decision: exit for launchd only on macOS when the plist-provided
+/// `AUDIOLIB_LAUNCHD_LABEL` is non-empty and equals `XPC_SERVICE_NAME` exactly.
+/// `XPC_SERVICE_NAME` alone is unreliable (it is inherited, and is "0" in many
+/// non-launchd shells), and the parent pid is the launcher rather than 1.
+fn restart_action(
+    is_macos: bool,
+    launchd_label: Option<OsString>,
+    xpc_service_name: Option<OsString>,
+) -> RestartAction {
+    match (launchd_label, xpc_service_name) {
+        (Some(label), Some(xpc)) if is_macos && !label.is_empty() && label == xpc => {
+            RestartAction::ExitForLaunchd
+        }
         _ => RestartAction::Exec,
     }
 }
@@ -203,21 +213,59 @@ fn restart_action(is_macos: bool, xpc_service_name: Option<OsString>) -> Restart
 mod restart_action_tests {
     use super::*;
 
+    const LABEL: &str = "io.github.audiolib.server";
+
+    fn some(value: &str) -> Option<OsString> {
+        Some(value.into())
+    }
+
     #[test]
-    fn macos_under_launchd_exits() {
+    fn macos_matching_label_exits() {
         assert_eq!(
-            restart_action(true, Some("io.github.audiolib.server".into())),
+            restart_action(true, some(LABEL), some(LABEL)),
             RestartAction::ExitForLaunchd
         );
         assert_ne!(LAUNCHD_RESTART_EXIT_CODE, 0);
     }
 
     #[test]
-    fn otherwise_execs() {
-        assert_eq!(restart_action(true, None), RestartAction::Exec);
-        assert_eq!(restart_action(true, Some("".into())), RestartAction::Exec);
-        assert_eq!(restart_action(false, Some("x".into())), RestartAction::Exec);
-        assert_eq!(restart_action(false, None), RestartAction::Exec);
+    fn unset_execs() {
+        assert_eq!(restart_action(true, None, None), RestartAction::Exec);
+        assert_eq!(restart_action(true, None, some(LABEL)), RestartAction::Exec);
+        assert_eq!(restart_action(true, some(LABEL), None), RestartAction::Exec);
+        assert_eq!(
+            restart_action(true, some(""), some("")),
+            RestartAction::Exec
+        );
+    }
+
+    #[test]
+    fn mismatch_execs() {
+        assert_eq!(
+            restart_action(true, some(LABEL), some("com.apple.Terminal")),
+            RestartAction::Exec
+        );
+        assert_eq!(
+            restart_action(true, some(LABEL), some("0")),
+            RestartAction::Exec
+        );
+    }
+
+    #[test]
+    fn xpc_zero_without_label_execs() {
+        assert_eq!(restart_action(true, None, some("0")), RestartAction::Exec);
+        assert_eq!(
+            restart_action(true, some(""), some("0")),
+            RestartAction::Exec
+        );
+    }
+
+    #[test]
+    fn non_macos_execs() {
+        assert_eq!(
+            restart_action(false, some(LABEL), some(LABEL)),
+            RestartAction::Exec
+        );
     }
 }
 
