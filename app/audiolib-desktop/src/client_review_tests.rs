@@ -198,8 +198,9 @@ fn preview_volume_label_follows_slider_while_dragging() {
     });
     let mut labels = Vec::new();
     for fraction in [0.2, 0.4, 0.6, 0.8] {
-        ui.window()
-            .dispatch_event(WindowEvent::PointerMoved { position: at(fraction) });
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: at(fraction),
+        });
         // Still mid-drag: the poll would not publish while adjusting, so the
         // label must come from the slider callback itself.
         let label = ui.get_volume_label().to_string();
@@ -215,6 +216,10 @@ fn preview_volume_label_follows_slider_while_dragging() {
         button: PointerEventButton::Left,
     });
     labels.dedup();
-    assert_eq!(labels.len(), 4, "dB label did not change during drag: {labels:?}");
+    assert_eq!(
+        labels.len(),
+        4,
+        "dB label did not change during drag: {labels:?}"
+    );
     controller.shutdown();
 }
