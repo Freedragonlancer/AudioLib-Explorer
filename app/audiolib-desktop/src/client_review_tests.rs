@@ -174,8 +174,8 @@ fn completed_scan_and_output_validation_follow_runtime_language() {
 #[test]
 fn preview_volume_label_follows_slider_while_dragging() {
     use i_slint_backend_testing::{AccessibleRole, ElementQuery};
-    use slint::platform::{PointerEventButton, WindowEvent};
     use slint::LogicalPosition;
+    use slint::platform::{PointerEventButton, WindowEvent};
 
     let (_root, ui, _engine, controller) = fixture();
     ui.set_audio_ready(true);
