@@ -214,12 +214,17 @@ pub struct ConnectionInfo {
     pub peer: SocketAddr,
     /// Listener that accepted the connection.
     pub listener: Listener,
+    /// Local socket address the connection was accepted on, when known. A peer whose IP
+    /// equals it is this host itself (e.g. a same-host reverse proxy targeting the LAN IP).
+    pub local: Option<SocketAddr>,
 }
 
 /// Where a request came from, for authentication and the admin guard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestOrigin {
-    /// Directly from loopback or a private LAN address, without forwarding headers.
+    /// Directly from a private LAN address of another machine, without forwarding
+    /// headers. Loopback and same-host peers are never LAN: a reverse proxy on this
+    /// host makes public traffic arrive from them.
     Lan,
     /// Through a reverse proxy (forwarding header) or from a non-private peer, including
     /// public peers of the native TLS listener.
@@ -238,6 +243,16 @@ pub fn is_lan_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether the socket peer is this host itself: loopback (127/8, ::1, IPv4-mapped
+/// loopback) or the connection's own local socket IP (this host reached via its LAN IP).
+pub fn is_same_host_peer(info: &ConnectionInfo) -> bool {
+    let peer = info.peer.ip().to_canonical();
+    peer.is_loopback()
+        || info
+            .local
+            .is_some_and(|local| local.ip().to_canonical() == peer)
+}
+
 /// Whether any of [`FORWARDING_HEADERS`] is present (even empty).
 pub fn has_forwarding_headers(headers: &HeaderMap) -> bool {
     FORWARDING_HEADERS
@@ -251,7 +266,9 @@ pub fn classify(headers: &HeaderMap, connection: Option<&ConnectionInfo>) -> Req
         return RequestOrigin::External;
     }
     match connection {
-        Some(info) if !is_lan_ip(info.peer.ip()) => RequestOrigin::External,
+        Some(info) if !is_lan_ip(info.peer.ip()) || is_same_host_peer(info) => {
+            RequestOrigin::External
+        }
         _ => RequestOrigin::Lan,
     }
 }
@@ -1030,7 +1047,7 @@ impl Security {
                 "Token-free access requires an IP address, LAN hostname or configured server hostname",
             )
         };
-        // A trusted direct LAN peer (no forwarding headers, private/loopback/link-local
+        // A trusted direct LAN peer (no forwarding headers, private/link-local, not this host,
         // socket IP, `trust_lan_peers = true`) is admitted whatever its Host header says:
         // LAN clients may reach the server via a public domain (hairpin NAT, split DNS).
         // The Host check only guards token-free requests from other peers (`off` mode).
@@ -1496,6 +1513,7 @@ mod tests {
                 request.extensions_mut().insert(ConnectionInfo {
                     peer: "127.0.0.1:1".parse().unwrap(),
                     listener,
+                    local: None,
                 });
             }
             request
@@ -1545,6 +1563,7 @@ mod tests {
         ConnectionInfo {
             peer: peer.parse().unwrap(),
             listener,
+            local: None,
         }
     }
 

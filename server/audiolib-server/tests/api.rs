@@ -1553,8 +1553,9 @@ async fn guard_request(
     }
     let mut request = request.body(Body::from(body.to_owned())).unwrap();
     let connection = connection.unwrap_or(ConnectionInfo {
-        peer: "127.0.0.1:1".parse().unwrap(),
+        peer: "192.168.1.2:1".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     });
     request.extensions_mut().insert(connection);
     router(state.clone()).oneshot(request).await.unwrap()
@@ -3884,6 +3885,7 @@ fn peer(address: &str, listener: Listener) -> ConnectionInfo {
     ConnectionInfo {
         peer: address.parse().unwrap(),
         listener,
+        local: None,
     }
 }
 
@@ -3925,8 +3927,9 @@ async fn call(
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .unwrap();
     let connection = connection.unwrap_or(ConnectionInfo {
-        peer: "127.0.0.1:1".parse().unwrap(),
+        peer: "192.168.1.2:1".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     });
     request.extensions_mut().insert(connection);
     router(service.clone()).oneshot(request).await.unwrap()
@@ -3977,7 +3980,7 @@ async fn external_mode_needs_tokens_only_for_proxied_or_public_requests() {
 
     let lan = [
         None,
-        Some(peer("127.0.0.1:50000", Listener::Http)),
+        Some(peer("192.168.1.2:50000", Listener::Http)),
         Some(peer("10.0.0.20:50000", Listener::Http)),
         Some(peer("[fe80::1]:50000", Listener::Http)),
         Some(peer("10.0.0.20:50000", Listener::Tls)),
@@ -4022,7 +4025,7 @@ async fn external_mode_needs_tokens_only_for_proxied_or_public_requests() {
         (vec![("x-forwarded-for", "203.0.113.9")], None),
         (
             vec![("x-forwarded-for", "203.0.113.9")],
-            Some(peer("127.0.0.1:1", Listener::Http)),
+            Some(peer("192.168.1.2:1", Listener::Http)),
         ),
         (vec![("forwarded", "for=203.0.113.9;proto=https")], None),
         (vec![("x-real-ip", "203.0.113.9")], None),
@@ -4235,7 +4238,7 @@ async fn admin_is_lan_only_and_changes_need_the_admin_header() {
         Method::GET,
         "/admin/admin.js",
         &[],
-        Some(peer("127.0.0.1:2", Listener::Http)),
+        Some(peer("192.168.1.2:2", Listener::Http)),
         None,
     )
     .await;
@@ -4257,7 +4260,7 @@ async fn admin_is_lan_only_and_changes_need_the_admin_header() {
         (vec![("x-forwarded-for", "10.0.0.20")], None),
         (
             vec![("x-forwarded-for", "203.0.113.9")],
-            Some(peer("127.0.0.1:1", Listener::Http)),
+            Some(peer("192.168.1.2:1", Listener::Http)),
         ),
         (vec![("forwarded", "for=10.0.0.20")], None),
         (vec![("x-real-ip", "127.0.0.1")], None),
@@ -4589,12 +4592,21 @@ async fn native_tls_listener_follows_the_admin_settings_without_a_restart() {
     assert_eq!(status["tls"]["port"], port);
     assert_eq!(status["tls"]["source"], "admin");
 
-    // The API over TLS: 127.0.0.1 is a LAN peer, so no token is needed; a forwarded
-    // request through the TLS listener needs one.
+    // The API over TLS: 127.0.0.1 is this host (a same-host reverse proxy looks the
+    // same), so it is external and needs a token; health stays public. A forwarded
+    // request through the TLS listener needs one too.
     let health = tls_get(port, "/api/v1/health", "").await.unwrap();
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
     assert!(health.contains("\"status\":\"ok\""), "{health}");
     let library = tls_get(port, "/api/v1/library", "").await.unwrap();
+    assert!(library.starts_with("HTTP/1.1 401"), "{library}");
+    let library = tls_get(
+        port,
+        "/api/v1/library",
+        &format!("Authorization: Bearer {TOKEN}\r\n"),
+    )
+    .await
+    .unwrap();
     assert!(library.starts_with("HTTP/1.1 200"), "{library}");
     let forwarded = tls_get(port, "/api/v1/library", "X-Forwarded-For: 203.0.113.9\r\n")
         .await
@@ -4610,8 +4622,8 @@ async fn native_tls_listener_follows_the_admin_settings_without_a_restart() {
     assert!(authorized.starts_with("HTTP/1.1 200"), "{authorized}");
     let admin = tls_get(port, "/admin/api/status", "").await.unwrap();
     assert!(
-        admin.starts_with("HTTP/1.1 200"),
-        "LAN peer over TLS may use the admin API: {admin}"
+        admin.starts_with("HTTP/1.1 403") && admin.contains("ADMIN_LAN_ONLY"),
+        "a same-host (loopback) peer is not LAN, even over TLS: {admin}"
     );
 
     // Disabling closes the listener.

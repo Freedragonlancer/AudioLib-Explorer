@@ -155,6 +155,7 @@ fn peer(address: &str) -> ConnectionInfo {
     ConnectionInfo {
         peer: address.parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     }
 }
 
@@ -196,8 +197,9 @@ async fn request(
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .unwrap();
     let connection = connection.unwrap_or(ConnectionInfo {
-        peer: "127.0.0.1:1".parse().unwrap(),
+        peer: "192.168.1.2:1".parse().unwrap(),
         listener: Listener::Http,
+        local: None,
     });
     request.extensions_mut().insert(connection);
     router(service).oneshot(request).await.unwrap()

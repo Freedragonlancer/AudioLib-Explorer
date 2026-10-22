@@ -109,6 +109,7 @@ async fn serve_inner(
                 let info = ConnectionInfo {
                     peer,
                     listener: if tls.is_some() { Listener::Tls } else { Listener::Http },
+                    local: stream.local_addr().ok(),
                 };
                 let service = TowerToHyperService::new(app.clone().map_request(
                     move |mut request: Request<Incoming>| {
