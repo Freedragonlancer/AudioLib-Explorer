@@ -55,11 +55,37 @@ function Record([string]$Name, [bool]$Ok, [string]$Detail) {
 }
 
 Add-Type -AssemblyName System.Net.Http
-# Audio records carry free-form attribute keys that can differ only in case, which
-# ConvertFrom-Json (Windows PowerShell 5) rejects; parse those with a case-sensitive reader.
-Add-Type -AssemblyName System.Web.Extensions
-$json = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-$json.MaxJsonLength = [int]::MaxValue
+# Responses are parsed with ConvertFrom-Json in both Windows PowerShell 5.1 and PowerShell 7.
+# Audio records carry free-form `attributes` keys that can differ only in case, which a plain
+# ConvertFrom-Json rejects. PowerShell 7 uses -AsHashtable (case-sensitive keys); Windows
+# PowerShell 5.1 has no -AsHashtable, so there the top-level `attributes` member is dropped
+# before parsing (the smoke test only reads id, missing, file_path and error_code).
+function Remove-JsonMember([string]$Text, [string]$Name) {
+    $key = '"' + $Name + '"'
+    $start = $Text.IndexOf($key)
+    if ($start -lt 0) { return $Text }
+    $colon = $Text.IndexOf(':', $start + $key.Length)
+    $i = $colon + 1
+    while ($i -lt $Text.Length -and [char]::IsWhiteSpace($Text[$i])) { $i++ }
+    $depth = 0; $inString = $false; $escaped = $false
+    for (; $i -lt $Text.Length; $i++) {
+        $c = $Text[$i]
+        if ($inString) {
+            if ($escaped) { $escaped = $false } elseif ($c -eq '\') { $escaped = $true } elseif ($c -eq '"') { $inString = $false; if ($depth -eq 0) { $i++; break } }
+            continue
+        }
+        if ($c -eq '"') { $inString = $true }
+        elseif ($c -eq '{' -or $c -eq '[') { $depth++ }
+        elseif ($c -eq '}' -or $c -eq ']') { if ($depth -eq 0) { break }; $depth--; if ($depth -eq 0) { $i++; break } }
+        elseif ($c -eq ',' -and $depth -eq 0) { break }
+    }
+    return $Text.Substring(0, $start) + '"_' + $Name + '_dropped":null' + $Text.Substring($i)
+}
+function ConvertFrom-JsonText([string]$Text) {
+    if ($PSVersionTable.PSVersion.Major -ge 6) { return ($Text | ConvertFrom-Json -AsHashtable) }
+    try { return ($Text | ConvertFrom-Json) }
+    catch { return ((Remove-JsonMember $Text 'attributes') | ConvertFrom-Json) }
+}
 $handler = New-Object System.Net.Http.HttpClientHandler
 $handler.AllowAutoRedirect = $false
 $http = New-Object System.Net.Http.HttpClient($handler)
@@ -162,8 +188,8 @@ if ($StreamSamples -gt 0) {
             $seen[$id] = $true
             $response = Send GET "$api/audio/$id"
             if ([int]$response.StatusCode -ne 200) { continue }
-            $record = $json.DeserializeObject((Body $response))
-            $file = [pscustomobject]@{ id = $record['id']; missing = $record['missing']; file_path = $record['file_path'] }
+            $record = ConvertFrom-JsonText (Body $response)
+            $file = [pscustomobject]@{ id = $record.id; missing = $record.missing; file_path = $record.file_path }
             if ($file.missing) { continue }
             $path = ([string]$file.file_path).Replace('\', '/')
             if (!($prefixes | Where-Object { $path.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) })) { $outside++; continue }
@@ -182,7 +208,7 @@ if ($StreamSamples -gt 0) {
             $type = [string]$response.Content.Headers.ContentType
             $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
             $magic = if ($bytes.Length -ge 4) { [Text.Encoding]::ASCII.GetString($bytes, 0, 4) } else { '' }
-            $errorCode = if ($code -ge 400) { try { [string]$json.DeserializeObject([Text.Encoding]::UTF8.GetString($bytes))['error_code'] } catch { '' } } else { '' }
+            $errorCode = if ($code -ge 400) { try { [string](ConvertFrom-JsonText ([Text.Encoding]::UTF8.GetString($bytes))).error_code } catch { '' } } else { '' }
             $ok = ($code -eq 206) -and $bytes.Length -gt 0 -and ($type -like 'audio/*') -and ($type -ne 'audio/wav' -or $magic -in @('RIFF', 'RF64', 'BW64'))
             if (!$ok) { $failures++ }
             Log ("  stream id={0} HTTP {1} {2} {3} bytes magic={4} {5} {6}" -f $file.id, $code, $type, $bytes.Length, $magic, $errorCode, $(if ($ok) { 'ok' } else { 'FAIL' }))
