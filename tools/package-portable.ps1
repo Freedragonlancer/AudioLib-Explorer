@@ -115,7 +115,22 @@ $zipEpoch = [datetime]::new(1980, 1, 1)
 Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File |
     Where-Object { $_.LastWriteTime -lt $zipEpoch } |
     ForEach-Object { $_.LastWriteTime = $zipEpoch }
-Compress-Archive -Path (Join-Path $portableRoot '*') -DestinationPath $archivePath -Force
+# Write entries one by one with forward-slash names: Windows PowerShell 5's
+# Compress-Archive stores `\` separators, which the updater rejects as non-public.
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
+$packageFiles = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File | Sort-Object FullName)
+$plannedEntries = @($packageFiles | ForEach-Object { $_.FullName.Substring($portableRoot.Length).TrimStart('\', '/').Replace('\', '/') })
+$zip = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Create)
+try {
+    for ($index = 0; $index -lt $packageFiles.Count; $index++) {
+        $entry = $zip.CreateEntry($plannedEntries[$index], [IO.Compression.CompressionLevel]::Optimal)
+        $entry.LastWriteTime = [DateTimeOffset]$packageFiles[$index].LastWriteTime
+        $source = [IO.File]::OpenRead($packageFiles[$index].FullName)
+        try { $target = $entry.Open(); try { $source.CopyTo($target) } finally { $target.Dispose() } } finally { $source.Dispose() }
+    }
+} finally { $zip.Dispose() }
+& (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $archivePath -ExpectedEntries $plannedEntries
 $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
 Set-Content -LiteralPath ($archivePath + '.sha256') -Value ($hash + '  ' + [IO.Path]::GetFileName($archivePath)) -Encoding ASCII
 Write-Host "Portable package ready: $archivePath"

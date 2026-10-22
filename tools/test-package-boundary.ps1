@@ -12,7 +12,7 @@ try {
     $env:CARGO_TARGET_DIR = Join-Path $testRoot 'target'
     New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
     Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Value "[workspace.package]`nversion = `"0.4.4`"" -Encoding ASCII
-    foreach ($script in @('package-portable.ps1','validate-package-privacy.ps1','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
+    foreach ($script in @('package-portable.ps1','validate-portable-zip.ps1','validate-package-privacy.ps1','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $testRoot 'tools')
     }
     $files = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json
@@ -39,6 +39,17 @@ try {
     # Function scope masks Cargo only in this synthetic regression invocation.
     function cargo { '{"packages":[]}' ; $global:LASTEXITCODE = 0 }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
+    # Regression: entries must be forward-slash file names (no `\`, no directory entries).
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $portableZip = [IO.Compression.ZipFile]::OpenRead((Join-Path $testRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'))
+    try { $zipNames = @($portableZip.Entries | ForEach-Object { $_.FullName }) } finally { $portableZip.Dispose() }
+    if (@($zipNames | Where-Object { $_.Contains('\') -or $_.EndsWith('/') }).Count -or !($zipNames -ccontains 'doc/INDEX.md')) { throw 'Portable ZIP entry names are not updater-safe forward-slash paths.' }
+    $badZip = Join-Path $testRoot 'backslash.zip'
+    $badArchive = [IO.Compression.ZipFile]::Open($badZip, [IO.Compression.ZipArchiveMode]::Create)
+    try { $null = $badArchive.CreateEntry('config\rust_settings.example.json') } finally { $badArchive.Dispose() }
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/validate-portable-zip.ps1') -Archive $badZip } catch { $rejected = $_.Exception.Message -match 'separators' }
+    if (!$rejected) { throw 'Backslash ZIP entry names were accepted.' }
     & (Join-Path $testRoot 'tools/install-beta.ps1') -Source $staleRoot -Destination (Join-Path $testRoot 'development-beta') -Development
     if ((Get-Content -LiteralPath (Join-Path $testRoot 'development-beta/update-version.txt') -Raw).Trim() -cne '0.4.4-0' -or
         (Get-Content -LiteralPath (Join-Path $testRoot 'development-beta/update-channel.txt') -Raw).Trim() -cne 'beta') { throw 'Development beta baseline does not sort before a same-version prerelease.' }
