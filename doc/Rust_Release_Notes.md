@@ -1,5 +1,27 @@
 # AudioLib Explorer release notes
 
+## 0.6.5: update check and portable package fixes
+
+Release identity: program `0.6.5` | API `/api/v1/` | schema 6 | snapshot format
+`ale-s6-cld1-t3-m2-p1`. No database migration; schema and snapshot formats are unchanged.
+
+Versions: program 0.6.5 | API /api/v1/ | schema 6 | snapshot compat 3..=6
+
+Upgrade notes:
+
+- 0.6.5 is a patch release compatible with 0.6.x peers (`>=0.6.0, <0.7.0`); schema and
+  API are unchanged, so client and server can be upgraded independently.
+- The 0.6.4 Windows portable ZIP used backslash entry names and could not be installed by
+  the auto-updater; 0.6.5 packages install normally from 0.6.3 and 0.6.4.
+
+Changes:
+
+- Updater: an empty release list is retried and then reported as an error instead of
+  "up to date"; a newer release skipped for a missing or invalid package is reported
+  explicitly; successful checks are logged (#62).
+- Packaging: the Windows portable ZIP is written entry by entry with `/` separators, and
+  validation rejects backslash, directory, `..` and duplicate entries (#63).
+
 ## 0.6.4: preview volume dB label live refresh fix
 
 Release identity: program `0.6.4` | API `/api/v1/` | schema 6 | snapshot format

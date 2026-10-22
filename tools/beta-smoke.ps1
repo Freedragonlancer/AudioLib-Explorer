@@ -1,13 +1,19 @@
 # tools/beta-smoke.ps1
 # Scripted basic test of a beta server and the side-by-side beta install.
 #   ./tools/beta-smoke.ps1 -BaseUrl <http://host:port> [-ExpectedCommit <sha>] [-Token <t>]
-#       [-Sync [-KeepSyncData]] [-MinEntries <n>] [-StreamSamples 20] [-ReleaseDir <beta_release>]
+#       [-ReleaseDir <beta install dir> [-NoSync] [-KeepSyncData] [-MinEntries <n>]
+#        [-ExpectedExeSha256 <hex>] [-ExpectedHashFile <path>]] [-StreamSamples 20]
 # -BaseUrl (or AUDIOLIB_BETA_URL) is required; no server address is stored in the repo.
 # Read-only against the server: GET/HEAD only, never starts, stops or scans anything.
 # Stream reads time out after -StreamTimeoutSec (default 15).
-# -Sync runs `AudioLibCli remote sync --force` from -ReleaseDir with AUDIOLIB_DATA_DIR set
-# to a fresh directory under $env:TEMP; the stable v1 and the beta data directories are
-# never read or written. A PASS/FAIL table is printed, a log is written to the temp run
+# With -ReleaseDir, `AudioLibCli remote sync --force` runs by default (skip with -NoSync;
+# -Sync is kept for compatibility) with AUDIOLIB_DATA_DIR set to a fresh directory under
+# $env:TEMP, and the synced entry count must reach -MinEntries; the stable v1 and the beta
+# data directories are never read or written.
+# The SHA256 of AudioLibExplorer.exe in -ReleaseDir must equal -ExpectedExeSha256, or the
+# hash in -ExpectedHashFile, or the hash in a sidecar `AudioLibExplorer.exe.sha256` next
+# to it; a mismatch or a missing expected value is a FAIL. AudioLibCli.exe is compared
+# with `AudioLibCli.exe.sha256` when that sidecar exists and is only reported otherwise. A PASS/FAIL table is printed, a log is written to the temp run
 # directory, and the exit code is 0 only when every check passes.
 [CmdletBinding()]
 param(
@@ -15,12 +21,15 @@ param(
     [string]$ExpectedCommit,
     [string]$Token,
     [switch]$Sync,
+    [switch]$NoSync,
     [int]$MinEntries = 1,
     [int]$StreamSamples = 20,
     [string]$ReleaseDir,
     [int]$SyncTimeoutSec = 900,
     [switch]$KeepSyncData,
-    [int]$StreamTimeoutSec = 15
+    [int]$StreamTimeoutSec = 15,
+    [string]$ExpectedExeSha256,
+    [string]$ExpectedHashFile
 )
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'Pass -BaseUrl <http://host:port> or set AUDIOLIB_BETA_URL.' }
@@ -182,8 +191,9 @@ if ($StreamSamples -gt 0) {
     }
 }
 
-# 3. Optional full sync with the beta CLI into a fresh temp data directory.
-if ($Sync) {
+# 3. Full sync with the beta CLI into a fresh temp data directory (default with -ReleaseDir).
+if ($Sync -and $NoSync) { throw 'Pass either -Sync or -NoSync, not both.' }
+if (($Sync -or $ReleaseDir) -and !$NoSync) {
     Try-Check 'sync' {
         if (!$ReleaseDir) { throw '-Sync needs -ReleaseDir <beta install directory>' }
         $cli = Join-Path $ReleaseDir 'AudioLibCli.exe'
@@ -217,12 +227,31 @@ if ($Sync) {
     }
 }
 
-# 4. Optional binary hashes of the beta install.
+# 4. Binary hashes of the beta install, compared with the expected build output.
+function Read-HashFile([string]$Path) {
+    # Accepts `<hex>` or `<hex>  <name>` (sha256sum / package-portable.ps1 style).
+    $text = (Get-Content -LiteralPath $Path -Raw).Trim()
+    return ($text -split '\s+')[0]
+}
 if ($ReleaseDir) {
     foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
         Try-Check "sha256 $binary" {
-            $hash = (Get-FileHash -LiteralPath (Join-Path $ReleaseDir $binary) -Algorithm SHA256).Hash
-            Record "sha256 $binary" $true $hash
+            $path = Join-Path $ReleaseDir $binary
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            $sidecar = $path + '.sha256'
+            $expected = $null; $source = $null
+            if ($binary -eq 'AudioLibExplorer.exe' -and $ExpectedExeSha256) { $expected = $ExpectedExeSha256; $source = '-ExpectedExeSha256' }
+            elseif ($binary -eq 'AudioLibExplorer.exe' -and $ExpectedHashFile) { $expected = Read-HashFile $ExpectedHashFile; $source = $ExpectedHashFile }
+            elseif (Test-Path -LiteralPath $sidecar -PathType Leaf) { $expected = Read-HashFile $sidecar; $source = $sidecar }
+            if ($expected) {
+                $expected = $expected.Trim()
+                $ok = $expected -match '^[0-9A-Fa-f]{64}$' -and $hash -eq $expected.ToUpperInvariant()
+                Record "sha256 $binary" $ok ("actual {0}, expected {1} (from {2})" -f $hash, $expected, $source)
+            } elseif ($binary -eq 'AudioLibExplorer.exe') {
+                Record "sha256 $binary" $false "actual $hash, no expected value: pass -ExpectedExeSha256 or -ExpectedHashFile, or place $binary.sha256 next to it"
+            } else {
+                Log "  sha256 $binary (not scored, no $binary.sha256 next to it): $hash"
+            }
         }
     }
 }
