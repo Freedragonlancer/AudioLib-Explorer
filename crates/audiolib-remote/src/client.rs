@@ -515,7 +515,14 @@ impl RemoteClient {
                 .limit(64 * 1024)
                 .read_to_string()
                 .unwrap_or_default();
-            let error = RemoteError::from_response(status, &body, context, retry_after);
+            let mut error = RemoteError::from_response(status, &body, context, retry_after);
+            // Keep the `.local` server URL in a 401 so the message can suggest the LAN IP
+            // (a fake-IP proxy answering for the name returns its own 401).
+            if let RemoteError::Unauthorized(message) = &mut error
+                && crate::error::has_mdns_host(&self.api)
+            {
+                message.push_str(&format!(" ({})", self.api));
+            }
             if matches!(error, RemoteError::LibraryChanged(_)) {
                 self.library_changed.store(true, Ordering::Release);
             }
@@ -1366,6 +1373,62 @@ mod tests {
             matches!(error, RemoteError::Unreachable(_)),
             "a refused connection is offline, not slow: {error:?}"
         );
+    }
+
+    #[test]
+    fn auth_rate_limit_and_host_errors_are_classified_without_retrying() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = {
+            let hits = hits.clone();
+            TestServer::start(move |request| {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match request.path.as_str() {
+                    "/api/v1/library" => TestResponse::json(
+                        429,
+                        r#"{"error_code":"AUTH_RATE_LIMITED","message":"Too many failed authentication attempts"}"#,
+                    )
+                    .with_header("Retry-After", "60"),
+                    "/api/v1/roots" => TestResponse::json(
+                        403,
+                        r#"{"error_code":"HOST_FORBIDDEN","message":"Host not allowed"}"#,
+                    ),
+                    _ => TestResponse::json(
+                        403,
+                        r#"{"error_code":"ADMIN_LAN_ONLY","message":"LAN only"}"#,
+                    ),
+                }
+            })
+        };
+        let client = RemoteClient::new(&server.url, "wrong-token").unwrap();
+        let limited = client.library().unwrap_err();
+        assert!(
+            matches!(
+                limited,
+                RemoteError::RateLimited {
+                    retry_after: Some(60),
+                    ..
+                }
+            ),
+            "{limited:?}"
+        );
+        assert_eq!(limited.retry_after(), Some(60));
+        assert!(limited.is_unauthorized() && !limited.is_offline());
+        assert!(limited.localized(true).contains("60 秒"));
+        assert!(limited.localized(false).contains("429"));
+        // One request, no automatic retry; the poller then waits well past Retry-After.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let check = crate::RevisionCheck::classify(None, Err(limited), true);
+        assert!(matches!(check, crate::RevisionCheck::Unauthorized(_)));
+        let delay = crate::PollSchedule::new(30).next_delay(&check).unwrap();
+        assert!(delay >= std::time::Duration::from_secs(60), "{delay:?}");
+
+        let host = client.roots().unwrap_err();
+        assert!(matches!(host, RemoteError::HostForbidden(_)), "{host:?}");
+        assert!(host.localized(true).contains("局域网 IP"));
+        assert!(host.localized(false).contains("HOST_FORBIDDEN"));
+        let admin = client.health().unwrap_err();
+        assert!(matches!(admin, RemoteError::AdminLanOnly(_)), "{admin:?}");
+        assert!(admin.localized(true).contains("ADMIN_LAN_ONLY"));
     }
 
     #[test]
