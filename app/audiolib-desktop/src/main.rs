@@ -16,6 +16,8 @@ mod startup;
 #[cfg(test)]
 mod ui_review_tests;
 #[cfg(test)]
+mod ui_scale_tests;
+#[cfg(test)]
 mod ui_tests;
 mod updates;
 mod waveform_view;
