@@ -402,9 +402,7 @@ impl WaveformsDb {
         let parent = self.path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         sweep_stale_bundles(parent, Duration::ZERO);
-        let directory = tempfile::Builder::new()
-            .prefix(BUNDLE_DIR_PREFIX)
-            .tempdir_in(parent)?;
+        let directory = bundle_tempdir(parent)?;
         let owner = std::fs::File::options()
             .read(true)
             .write(true)
@@ -529,6 +527,32 @@ pub fn file_etag(path: &Path) -> Result<String> {
 
 /// Prefix of the temporary directory each bundle is written to (next to `waveforms.db`).
 pub const BUNDLE_DIR_PREFIX: &str = "audiolib-wfbundle-";
+
+/// Create a fresh bundle directory in `parent`. The cache directory may be missing or
+/// vanish between `create_dir_all` and `mkdir` (first requests racing a cache reset);
+/// recreate it and retry a few times instead of failing the request with a 500. Only
+/// `NotFound` (the directory vanished) is retried; any other error is permanent (a
+/// component is a file, permission denied, disk full, ...) and is returned at once.
+fn bundle_tempdir(parent: &Path) -> std::io::Result<tempfile::TempDir> {
+    const ATTEMPTS: usize = 4;
+    let mut attempt = 0;
+    loop {
+        let result = std::fs::create_dir_all(parent).and_then(|()| {
+            tempfile::Builder::new()
+                .prefix(BUNDLE_DIR_PREFIX)
+                .tempdir_in(parent)
+        });
+        match result {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                attempt += 1;
+                if attempt >= ATTEMPTS {
+                    return Err(error);
+                }
+            }
+            result => return result,
+        }
+    }
+}
 
 /// Remove owned, unlocked `audiolib-wfbundle-*` directories in `dir` last modified at
 /// least `min_age` ago. Unmarked entries, symlinks and active downloads are retained.
@@ -862,6 +886,78 @@ mod tests {
         validate_bundle(&out).unwrap();
         conn.execute("CREATE TABLE evil(x)", []).unwrap();
         assert!(validate_bundle(&out).is_err());
+    }
+
+    #[test]
+    fn bundle_tempdir_recreates_a_missing_cache_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("list").join("0123456789abcdef");
+        let created = bundle_tempdir(&parent).unwrap();
+        assert!(created.path().is_dir());
+        assert!(created.path().starts_with(&parent));
+        drop(created);
+        std::fs::remove_dir_all(dir.path().join("list")).unwrap();
+        assert!(bundle_tempdir(&parent).unwrap().path().is_dir());
+    }
+
+    #[test]
+    fn bundle_tempdir_returns_permanent_errors_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let error = bundle_tempdir(&file.join("cache")).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+    }
+
+    #[test]
+    fn bundle_dirs_survive_the_cache_dir_being_removed_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("list");
+        let parent = root.join("cache");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let remover = {
+            let (root, stop) = (root.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::remove_dir(root.join("cache"));
+                    let _ = std::fs::remove_dir(&root);
+                    std::thread::yield_now();
+                }
+            })
+        };
+        let mut created = 0;
+        for _ in 0..200 {
+            // Under a relentless remover a retry budget can be exhausted, and macOS may
+            // report EINVAL for a mkdir racing an rmdir; neither must panic or hang.
+            if bundle_tempdir(&parent).is_ok() {
+                created += 1;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        remover.join().unwrap();
+        assert!(created > 0);
+    }
+
+    #[test]
+    fn concurrent_first_bundle_dirs_do_not_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        for round in 0..20 {
+            let parent = dir.path().join(format!("round-{round}")).join("cache");
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let parent = parent.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        bundle_tempdir(&parent).map(|dir| dir.keep())
+                    })
+                })
+                .collect();
+            for thread in threads {
+                assert!(thread.join().unwrap().unwrap().is_dir());
+            }
+        }
     }
 
     #[test]
