@@ -6,7 +6,7 @@ param([string]$BinaryDirectory = 'dist/latest/portable', [string]$ReleaseReport)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $payloadRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
-$allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd', 'update-channel.txt', 'update-version.txt') +
+$allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd', 'update-channel.txt', 'update-version.txt', 'AudioLibExplorer.exe.sha256', 'AudioLibCli.exe.sha256') +
     # Windows PowerShell 5.1 emits a JSON array as one Object[]; unroll it explicitly.
     @((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json) | ForEach-Object { $_ })
 $privatePrefixes = [Collections.Generic.List[string]]::new()

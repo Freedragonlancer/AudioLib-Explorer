@@ -106,6 +106,16 @@ if (Test-Path -LiteralPath $outputRoot) {
 }
 Move-Item -LiteralPath $portableRoot -Destination $outputRoot
 $portableRoot = $outputRoot
+# `<exe>.sha256` sidecars (`<lowercase hex>  <file name>`, sha256sum style) sit next to the
+# executables for install-beta.ps1 / beta-smoke.ps1. They are not ZIP entries: the updater
+# accepts only the portable-files.json payload, so older clients would reject them.
+$sidecarNames = @('AudioLibExplorer.exe.sha256', 'AudioLibCli.exe.sha256')
+foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
+    $sidecar = Join-Path $portableRoot ($binary + '.sha256')
+    Assert-WorkspacePath $sidecar
+    $binaryHash = (Get-FileHash -LiteralPath (Join-Path $portableRoot $binary) -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText($sidecar, ($binaryHash + '  ' + $binary + "`n"), [Text.Encoding]::ASCII)
+}
 $archivePath = Join-Path $latestRoot 'AudioLibExplorer-latest-win-x64-portable.zip'
 Assert-WorkspacePath $archivePath
 Assert-WorkspacePath ($archivePath + '.sha256')
@@ -119,7 +129,7 @@ Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File |
 # Compress-Archive stores `\` separators, which the updater rejects as non-public.
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
-$packageFiles = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File | Sort-Object FullName)
+$packageFiles = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File | Where-Object { $_.DirectoryName -ne $portableRoot -or $sidecarNames -notcontains $_.Name } | Sort-Object FullName)
 $plannedEntries = @($packageFiles | ForEach-Object { $_.FullName.Substring($portableRoot.Length).TrimStart('\', '/').Replace('\', '/') })
 $zip = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Create)
 try {

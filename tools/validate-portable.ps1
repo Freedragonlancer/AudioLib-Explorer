@@ -86,13 +86,20 @@ try {
             $sourceHash = (Get-FileHash -LiteralPath (Join-Path $targetRoot ('x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
             $packageHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binary) -Algorithm SHA256).Hash
             if ($sourceHash -ne $packageHash) { throw "Packaged binary differs from release: $binary" }
+            # package-portable.ps1 writes `<exe>.sha256` as `<lowercase hex>  <file name>`.
+            $sidecar = Join-Path $binaryRoot ($binary + '.sha256')
+            if (!(Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw "Missing checksum sidecar: $binary.sha256" }
+            $sidecarText = [IO.File]::ReadAllText($sidecar).TrimEnd("`r", "`n")
+            if ($sidecarText -cnotmatch '^[0-9a-f]{64}  (\S.*)$' -or $Matches[1] -cne $binary) { throw "Checksum sidecar must read '<lowercase hex>  $binary': $binary.sha256" }
+            if ($sidecarText.Substring(0, 64) -cne $packageHash.ToLowerInvariant()) { throw "Checksum sidecar does not match the packaged binary: $binary.sha256" }
         }
+        $identityCheck = 'packaged EXE hashes match release and their .sha256 sidecars'
     }
     # The archive next to the default package output must use updater-safe entry names.
     $portableArchive = Join-Path (Split-Path -Parent $binaryRoot) 'AudioLibExplorer-latest-win-x64-portable.zip'
     $zipCheck = $null
     if (Test-Path -LiteralPath $portableArchive) {
-        $expectedEntries = @(Get-ChildItem -LiteralPath $binaryRoot -Recurse -Force -File | ForEach-Object { $_.FullName.Substring($binaryRoot.Length).TrimStart('\', '/').Replace('\', '/') })
+        $expectedEntries = @(Get-ChildItem -LiteralPath $binaryRoot -Recurse -Force -File | Where-Object { $_.DirectoryName -ne $binaryRoot -or $_.Name -notmatch '^AudioLib(Explorer|Cli)\.exe\.sha256$' } | ForEach-Object { $_.FullName.Substring($binaryRoot.Length).TrimStart('\', '/').Replace('\', '/') })
         & (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $portableArchive -ExpectedEntries $expectedEntries
         $zipCheck = 'portable ZIP entry names use forward slashes'
     }
