@@ -1,10 +1,18 @@
 # Release packages are built and validated on local machines (Windows client,
 # macOS server) and uploaded with `gh release upload <tag> <files>`.
 # This workflow no longer runs on tag push; it is kept for manual use only.
+# Dispatch it on a tag ref. Beta tags (vX.Y.Z-beta.N) and rc tags are always
+# published as GitHub pre-releases; see doc/Rust_Versioning.md (beta flow).
 name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Mark as pre-release (auto = yes for -beta.N / -rc.N tags)'
+        type: choice
+        options: [auto, 'true']
+        default: auto
 
 permissions:
   contents: read
@@ -126,6 +134,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+      PRERELEASE_INPUT: ${{ inputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -178,7 +187,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ghArgs = @($env:RELEASE_TAG, '--verify-tag', '--title', "AudioLib Explorer $($env:RELEASE_TAG)", '--notes-file', 'dist/notes.md')
-          if ($env:RELEASE_TAG.Contains('-')) { $ghArgs += '--prerelease' }
+          # Any suffixed tag (-beta.N, -rc.N) is a pre-release; beta tags can never be published as stable.
+          $isPrerelease = $env:RELEASE_TAG.Contains('-') -or $env:PRERELEASE_INPUT -eq 'true'
+          if ($env:RELEASE_TAG -match '-beta\.\d+$' -and !$isPrerelease) { throw 'Beta tags must be published as pre-releases.' }
+          if ($isPrerelease) { $ghArgs += '--prerelease', '--latest=false' }
           $ghArgs += @(Get-ChildItem -LiteralPath dist/publish -File | ForEach-Object FullName)
           gh release create @ghArgs
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

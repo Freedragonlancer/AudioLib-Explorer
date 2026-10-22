@@ -8,7 +8,9 @@ try {
     $metadata = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'Workspace metadata failed.' }
     $desktop = $metadata.packages | Where-Object name -eq 'audiolib-desktop'
-    if (!$desktop -or $Tag -cne ('v' + $desktop.version)) { throw 'Tag and Cargo version must match.' }
+    # Pre-release tags (vX.Y.Z-rc.N / vX.Y.Z-beta.N) build the X.Y.Z workspace version.
+    $tagCore = $Tag -replace '-(?:rc|beta)\.\d+$', ''
+    if (!$desktop -or ($Tag -cne ('v' + $desktop.version) -and $tagCore -cne ('v' + $desktop.version))) { throw 'Tag and Cargo version must match.' }
     $commit = (git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Unable to identify checkout commit.' }
     $tagCommit = (git rev-parse "$Tag`^{commit}").Trim()

@@ -2,6 +2,7 @@
 /dist/
 /local_release/
 /local_release.rar
+/beta_release/
 /release-upload/
 /tools/.build-tools/
 /.rust-validation/
