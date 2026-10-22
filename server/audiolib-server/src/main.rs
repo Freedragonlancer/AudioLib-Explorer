@@ -208,7 +208,17 @@ async fn run() -> Result<Option<Deployment>> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     if opening.is_finished() {
-        let _ = opening.join();
+        match opening.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Unpublished library shutdown did not complete");
+                clean_shutdown = false;
+            }
+            Err(_) => {
+                tracing::warn!("Library startup thread panicked during shutdown");
+                clean_shutdown = false;
+            }
+        }
     } else {
         tracing::warn!("Library startup has not reached a cancellation boundary");
         clean_shutdown = false;

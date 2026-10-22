@@ -21,6 +21,8 @@
 #   EXPECT_COMMIT          expected commit (short hash)       (optional)
 #   SERVICE_MANAGER        systemd | launchd | none           (default: auto-detect)
 #   WAIT_SECS              seconds to wait for health "ok"    (default 60)
+#   UPDATE_CHANNEL / UPDATE_VERSION  optional paired update markers (stable|beta,
+#                 full SemVer without v). Restored before a rollback restart.
 #
 # Run it in a maintenance window. It never deletes data files and never uses cp on the
 # running binary.
@@ -48,6 +50,24 @@ NEW="$1"
 CUR="$INSTALL_DIR/$BINARY"
 [ -f "$CUR" ] || die "$CUR not found (set INSTALL_DIR/BINARY)"
 command -v curl >/dev/null 2>&1 || die "curl is required"
+UPDATE_METADATA=0
+if [ -n "${UPDATE_CHANNEL:-}${UPDATE_VERSION:-}" ]; then
+    case "${UPDATE_CHANNEL:-}" in stable|beta) ;; *) die "UPDATE_CHANNEL must be stable or beta" ;; esac
+    printf '%s\n' "${UPDATE_VERSION:-}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.(0|[1-9][0-9]*)|-0)?$' || die "invalid UPDATE_VERSION"
+    case "$UPDATE_CHANNEL:$UPDATE_VERSION" in stable:*-*) die "stable channel cannot install a prerelease marker" ;; esac
+    new_version="$("$NEW" --version)"
+    [ "$new_version" = "audiolib-server ${UPDATE_VERSION%%-*}" ] || die "update marker differs from the new binary version"
+    for marker in update-channel.txt update-version.txt; do
+        [ ! -L "$INSTALL_DIR/$marker" ] || die "linked update marker is not supported"
+        [ ! -e "$INSTALL_DIR/$marker" ] || [ -f "$INSTALL_DIR/$marker" ] || die "update marker is not a regular file"
+    done
+    UPDATE_METADATA=1
+elif [ -e "$INSTALL_DIR/update-version.txt" ] || [ -L "$INSTALL_DIR/update-version.txt" ]; then
+    [ ! -L "$INSTALL_DIR/update-version.txt" ] && [ -f "$INSTALL_DIR/update-version.txt" ] || die "update version marker is not a regular file"
+    old_version="$(cat "$INSTALL_DIR/update-version.txt")"
+    new_version="$("$NEW" --version)"
+    [ "$new_version" = "audiolib-server ${old_version%%-*}" ] || die "existing update marker would become stale; set both UPDATE_CHANNEL and UPDATE_VERSION for this deployment"
+fi
 
 if [ -z "${SERVICE_MANAGER:-}" ]; then
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -145,17 +165,50 @@ else
     log "warning: $DB not found, library backup skipped"
 fi
 cp -p "$CUR" "$CUR.prev"
+if [ "$UPDATE_METADATA" = 1 ]; then
+    OLD_CHANNEL_PRESENT=0; OLD_VERSION_PRESENT=0
+    [ ! -f "$INSTALL_DIR/update-channel.txt" ] || OLD_CHANNEL_PRESENT=1
+    [ ! -f "$INSTALL_DIR/update-version.txt" ] || OLD_VERSION_PRESENT=1
+    for marker in update-channel.txt update-version.txt; do
+        if [ -f "$INSTALL_DIR/$marker" ]; then cp -p "$INSTALL_DIR/$marker" "$DEST/$marker"; fi
+    done
+fi
 
-# 3. Replace the binary: install under a new name, then atomic rename.
-log "installing new binary"
-install -m 755 "$NEW" "$CUR.new"
-mv -f "$CUR.new" "$CUR"
+write_marker() {
+    marker="$1"; value="$2"
+    staged="$(mktemp "$INSTALL_DIR/.$marker.new.XXXXXX")" || return 1
+    printf '%s\n' "$value" > "$staged" && chmod 644 "$staged" && mv -f "$staged" "$INSTALL_DIR/$marker" || {
+        rm -f "$staged"; return 1;
+    }
+}
+restore_markers() {
+    [ "$UPDATE_METADATA" = 1 ] || return 0
+    for marker in update-channel.txt update-version.txt; do
+        [ ! -L "$INSTALL_DIR/$marker" ] || return 1
+        original_present="$OLD_VERSION_PRESENT"
+        [ "$marker" != update-channel.txt ] || original_present="$OLD_CHANNEL_PRESENT"
+        if [ "$original_present" = 1 ]; then
+            staged="$(mktemp "$INSTALL_DIR/.$marker.new.XXXXXX")" || return 1
+            cp -p "$DEST/$marker" "$staged" && mv -f "$staged" "$INSTALL_DIR/$marker" || {
+                rm -f "$staged"; return 1;
+            }
+        else
+            # Remove only this exact script-owned marker when none existed before.
+            rm -f "$INSTALL_DIR/$marker" || return 1
+        fi
+    done
+}
 
-# 4. Restart and verify.
+TRANSACTION_STARTED=0; COMMITTED=0; ROLLBACK_DONE=0
 rollback() {
+    ROLLBACK_DONE=1
     log "ROLLBACK: restoring previous binary"
-    install -m 755 "$CUR.prev" "$CUR.new"
-    mv -f "$CUR.new" "$CUR"
+    install -m 755 "$CUR.prev" "$CUR.new" && mv -f "$CUR.new" "$CUR" || {
+        log "binary rollback failed; backup retained at $DEST"; return 1;
+    }
+    # The old process reads its release identity once during startup, so restore
+    # both markers before restarting it, rather than after this script returns.
+    restore_markers || { log "marker rollback failed; backup retained at $DEST"; return 1; }
     restart_service || true
     if wait_health; then
         log "rolled back; health is ok again (version $(json_field "$HEALTH" version))"
@@ -165,9 +218,27 @@ rollback() {
     log "If a schema migration already ran, an older binary refuses the newer library:"
     log "restore the library files from $DEST together with the old binary (see README)."
 }
+on_exit() {
+    result=$?
+    if [ "$TRANSACTION_STARTED" = 1 ] && [ "$COMMITTED" = 0 ] && [ "$ROLLBACK_DONE" = 0 ]; then rollback || true; fi
+    exit "$result"
+}
+trap on_exit EXIT
 
+# 3. Replace the binary and its optional release identity before starting it.
+log "installing new binary"
+TRANSACTION_STARTED=1
+install -m 755 "$NEW" "$CUR.new"
+mv -f "$CUR.new" "$CUR"
+if [ "$UPDATE_METADATA" = 1 ]; then
+    write_marker update-channel.txt "$UPDATE_CHANNEL"
+    write_marker update-version.txt "$UPDATE_VERSION"
+fi
+
+# 4. Restart and verify.
 restart_service || { rollback; die "restart failed"; }
 if wait_health && verify_health; then
+    COMMITTED=1
     log "OK: new binary is running (previous one kept as $CUR.prev, backups in $DEST)"
     exit 0
 fi

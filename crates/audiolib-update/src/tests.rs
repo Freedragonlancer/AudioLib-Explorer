@@ -10,7 +10,23 @@ const NATIVE_PRODUCT: Product = if cfg!(windows) {
 };
 
 fn release(tag: &str, draft: bool, prerelease: bool) -> Release {
-    let name = asset_name(NATIVE_PRODUCT, tag).unwrap();
+    release_for_platform(
+        NATIVE_PRODUCT,
+        tag,
+        draft,
+        prerelease,
+        native_platform().unwrap(),
+    )
+}
+
+fn release_for_platform(
+    product: Product,
+    tag: &str,
+    draft: bool,
+    prerelease: bool,
+    platform: Platform,
+) -> Release {
+    let name = asset_names_for_platform(product, tag, platform).unwrap()[0].clone();
     Release {
         tag_name: tag.into(),
         body: Some("notes".into()),
@@ -97,9 +113,11 @@ fn wrong_repository_duplicate_and_incomplete_assets_are_ignored() {
 
 #[test]
 fn historical_release_names_without_v_and_lowercase_server_are_supported() {
-    for product in [NATIVE_PRODUCT, Product::Server] {
-        let mut release = release("v0.6.2", false, false);
-        let historical = asset_names(product, "v0.6.2").unwrap()[1].clone();
+    for product in [Product::Desktop, Product::Server] {
+        let mut release =
+            release_for_platform(product, "v0.6.2", false, false, Platform::WindowsX64);
+        let historical =
+            asset_names_for_platform(product, "v0.6.2", Platform::WindowsX64).unwrap()[1].clone();
         for (index, asset) in release.assets.iter_mut().enumerate() {
             asset.name = if index == 0 {
                 historical.clone()
@@ -112,9 +130,94 @@ fn historical_release_names_without_v_and_lowercase_server_are_supported() {
             );
         }
         let client = UpdateClient::new(product, Channel::Stable, "0.6.1").unwrap();
-        let update = client.select(vec![release]).unwrap().unwrap();
+        let update = client
+            .select_for_platform(vec![release], Platform::WindowsX64)
+            .unwrap()
+            .unwrap();
         assert_eq!(update.asset.name, historical);
     }
+}
+
+#[test]
+fn known_binary_only_mac_archives_are_not_offered_as_installable_updates() {
+    let client = UpdateClient::new(Product::Server, Channel::Beta, "0.5.0-0").unwrap();
+    for tag in ["v0.5.0", "v0.5.1", "v0.6.0", "v0.6.1", "v0.6.2"] {
+        let mut legacy =
+            release_for_platform(Product::Server, tag, false, false, Platform::MacArm64);
+        let archive_name = format!("audiolib-server-{}-macos-arm64.tar.gz", &tag[1..]);
+        for (index, asset) in legacy.assets.iter_mut().enumerate() {
+            asset.name = if index == 0 {
+                archive_name.clone()
+            } else {
+                format!("{archive_name}.sha256")
+            };
+            asset.browser_download_url = format!(
+                "https://github.com/{REPOSITORY}/releases/download/{tag}/{}",
+                asset.name
+            );
+        }
+        assert!(
+            client
+                .select_for_platform(vec![legacy], Platform::MacArm64)
+                .unwrap()
+                .is_none(),
+            "offered known binary-only archive {tag}"
+        );
+        let flat = release_for_platform(Product::Server, tag, false, false, Platform::MacArm64);
+        assert_eq!(
+            client
+                .select_for_platform(vec![flat], Platform::MacArm64)
+                .unwrap()
+                .unwrap()
+                .tag,
+            tag,
+            "canonical full package must remain eligible"
+        );
+    }
+    let mut future =
+        release_for_platform(Product::Server, "v0.6.3", false, false, Platform::MacArm64);
+    for asset in &mut future.assets {
+        asset.name = asset.name.replace("AudioLibServer-v", "audiolib-server-");
+        asset.browser_download_url = format!(
+            "https://github.com/{REPOSITORY}/releases/download/v0.6.3/{}",
+            asset.name
+        );
+    }
+    assert!(
+        client
+            .select_for_platform(vec![future], Platform::MacArm64)
+            .unwrap()
+            .is_some(),
+        "do not ban future lowercase flat packages"
+    );
+}
+
+#[test]
+fn historical_binary_only_mac_layout_cannot_bypass_public_package_validation() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("legacy.tar.gz");
+    let encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&archive).unwrap(),
+        flate2::Compression::default(),
+    );
+    let mut tar = tar::Builder::new(encoder);
+    for name in [
+        "._audiolib-server-0.6.2-macos-arm64",
+        "audiolib-server-0.6.2-macos-arm64/audiolib-server",
+    ] {
+        let mut header = tar::Header::new_ustar();
+        header.set_path(name).unwrap();
+        header.set_size(3);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, b"old".as_slice()).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap();
+    let payload = root.path().join("payload");
+    std::fs::create_dir(&payload).unwrap();
+    assert!(package::extract(&archive, &payload, Product::Server, "legacy.tar.gz").is_err());
+    assert!(!payload.join("audiolib-server").exists());
+    assert!(!payload.join("audiolib-server.exe").exists());
 }
 
 #[test]

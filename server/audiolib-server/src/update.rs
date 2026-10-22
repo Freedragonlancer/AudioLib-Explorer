@@ -253,6 +253,11 @@ impl UpdateManager {
         self.inner.shutdown.subscribe()
     }
 
+    #[cfg(test)]
+    pub(crate) fn signal_shutdown_for_test(&self) {
+        self.inner.shutdown.send_replace(true);
+    }
+
     /// Refuse new checks/downloads once normal graceful shutdown begins.
     pub fn stop_admission(&self) {
         self.state().stopping = true;

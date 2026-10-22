@@ -193,6 +193,14 @@ impl UpdateClient {
     }
 
     fn select(&self, releases: Vec<Release>) -> Result<Option<ReleaseUpdate>> {
+        self.select_for_platform(releases, native_platform()?)
+    }
+
+    fn select_for_platform(
+        &self,
+        releases: Vec<Release>,
+        platform: Platform,
+    ) -> Result<Option<ReleaseUpdate>> {
         let mut selected: Option<(Version, ReleaseUpdate)> = None;
         for release in releases {
             if release.draft {
@@ -213,7 +221,7 @@ impl UpdateClient {
             {
                 continue;
             }
-            let names = asset_names(self.product, &release.tag_name)?;
+            let names = asset_names_for_platform(self.product, &release.tag_name, platform)?;
             let Some((asset, checksum)) = names.iter().find_map(|name| {
                 let asset = unique_asset(&release.assets, name)?;
                 let checksum = unique_asset(&release.assets, &format!("{name}.sha256"))?;
@@ -399,7 +407,34 @@ fn valid_asset_url(asset: &Asset, tag: &str) -> bool {
         )
 }
 
-fn asset_name(product: Product, tag: &str) -> Result<String> {
+#[derive(Clone, Copy)]
+enum Platform {
+    WindowsX64,
+    LinuxX64,
+    MacArm64,
+}
+
+fn native_platform() -> Result<Platform> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok(Platform::WindowsX64)
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok(Platform::LinuxX64)
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok(Platform::MacArm64)
+    } else {
+        bail!("Automatic updates are unavailable for this platform")
+    }
+}
+
+fn asset_names(product: Product, tag: &str) -> Result<Vec<String>> {
+    asset_names_for_platform(product, tag, native_platform()?)
+}
+
+fn asset_names_for_platform(
+    product: Product,
+    tag: &str,
+    platform: Platform,
+) -> Result<Vec<String>> {
     let version = Version::parse(
         tag.strip_prefix('v')
             .context("Release tag requires v prefix")?,
@@ -408,30 +443,35 @@ fn asset_name(product: Product, tag: &str) -> Result<String> {
         supported_prerelease(&version) && version.build.is_empty(),
         "Unsupported release tag"
     );
-    match product {
-        Product::Desktop if cfg!(all(target_os = "windows", target_arch = "x86_64")) => {
-            Ok(format!("AudioLibExplorer-{tag}-win-x64-portable.zip"))
+    let canonical = match (product, platform) {
+        (Product::Desktop, Platform::WindowsX64) => {
+            format!("AudioLibExplorer-{tag}-win-x64-portable.zip")
         }
-        Product::Server if cfg!(all(target_os = "windows", target_arch = "x86_64")) => {
-            Ok(format!("AudioLibServer-{tag}-win-x64.zip"))
+        (Product::Server, Platform::WindowsX64) => {
+            format!("AudioLibServer-{tag}-win-x64.zip")
         }
-        Product::Server if cfg!(all(target_os = "linux", target_arch = "x86_64")) => {
-            Ok(format!("AudioLibServer-{tag}-linux-x64.tar.gz"))
+        (Product::Server, Platform::LinuxX64) => {
+            format!("AudioLibServer-{tag}-linux-x64.tar.gz")
         }
-        Product::Server if cfg!(all(target_os = "macos", target_arch = "aarch64")) => {
-            Ok(format!("AudioLibServer-{tag}-macos-arm64.tar.gz"))
+        (Product::Server, Platform::MacArm64) => {
+            format!("AudioLibServer-{tag}-macos-arm64.tar.gz")
         }
         _ => bail!("Automatic updates are unavailable for this product/platform"),
-    }
-}
-
-fn asset_names(product: Product, tag: &str) -> Result<Vec<String>> {
-    let canonical = asset_name(product, tag)?;
+    };
     let legacy = match product {
         Product::Desktop => canonical.replacen("AudioLibExplorer-v", "AudioLibExplorer-", 1),
         Product::Server => canonical.replacen("AudioLibServer-v", "audiolib-server-", 1),
     };
-    let mut names = vec![canonical.clone(), legacy];
+    let mut names = vec![canonical.clone()];
+    // These published macOS archives contain a version-named directory with only
+    // the executable (and sometimes AppleDouble files), not a public server payload.
+    // Do not advertise a download the strict extractor will inevitably reject.
+    let binary_only_legacy = product == Product::Server
+        && matches!(platform, Platform::MacArm64)
+        && matches!(tag, "v0.5.0" | "v0.5.1" | "v0.6.0" | "v0.6.1" | "v0.6.2");
+    if !binary_only_legacy {
+        names.push(legacy);
+    }
     if product == Product::Server {
         names.push(canonical.replacen("AudioLibServer-v", "AudioLibServer-", 1));
     }

@@ -4,7 +4,7 @@
 # 1. builds the current origin/beta head (detached worktree under $WORK_DIR)
 # 2. optional (--with-db): copies the production library with SQLite's online backup
 #    (read-only for production), resets library_id (drops <db>.server-state.json)
-# 3. swaps only the server binary via server/deploy/redeploy-server.sh; the fixed
+# 3. swaps the server binary and update markers via redeploy-server.sh; the fixed
 #    launcher (which holds the macOS file-access grants) is never touched
 # 4. checks /health is ok and serves the beta head commit
 # 5. root access probe: reads 4 KiB of one file under every configured root; a timeout
@@ -76,28 +76,14 @@ if [ "$WITH_DB" = 1 ]; then
 fi
 
 log "swapping binary (launcher untouched)"
-MARKER_BACKUP="$(mktemp -d "$WORK_DIR/update-markers.XXXXXX")"
-for marker in update-channel.txt update-version.txt; do
-    [ ! -L "$BETA_APP_DIR/bin/$marker" ] || die "linked update marker is not supported"
-    if [ -f "$BETA_APP_DIR/bin/$marker" ]; then cp "$BETA_APP_DIR/bin/$marker" "$MARKER_BACKUP/$marker"; fi
-done
-restore_markers() {
-    for marker in update-channel.txt update-version.txt; do
-        if [ -f "$MARKER_BACKUP/$marker" ]; then cp "$MARKER_BACKUP/$marker" "$BETA_APP_DIR/bin/$marker";
-        else rm -f "$BETA_APP_DIR/bin/$marker"; fi
-    done
-}
-trap restore_markers EXIT
-printf '%s\n' beta > "$BETA_APP_DIR/bin/update-channel.txt"
-printf '%s\n' "$UPDATE_VERSION" > "$BETA_APP_DIR/bin/update-version.txt"
+# Keep binary and marker rollback in the same transaction. In particular, the
+# previous markers must be restored before the previous binary is restarted.
 INSTALL_DIR="$BETA_APP_DIR/bin" SERVICE_NAME="$SERVICE_NAME" SERVICE_MANAGER=launchd \
 DATA_DIR="$BETA_DATA_DIR" BACKUP_DIR="$WORK_DIR/beta-backups" PORT="$PORT" \
+UPDATE_CHANNEL=beta UPDATE_VERSION="$UPDATE_VERSION" \
 TOKEN="$(cat "$TOKEN_FILE")" EXPECT_COMMIT="$SHA" WAIT_SECS=600 \
     sh "$REPO/server/deploy/redeploy-server.sh" "$BETA_APP_DIR/bin/audiolib-server.$SHA" \
     || die "redeploy failed (rolled back by redeploy-server.sh)"
-trap - EXIT
-rm -f "$MARKER_BACKUP/update-channel.txt" "$MARKER_BACKUP/update-version.txt"
-rmdir "$MARKER_BACKUP"
 log "update channel beta, installed version $UPDATE_VERSION"
 
 API="http://127.0.0.1:$PORT/api/v1"; AUTH="Authorization: Bearer $(cat "$TOKEN_FILE")"

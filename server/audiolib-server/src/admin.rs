@@ -308,9 +308,12 @@ async fn install_update(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<crate::update::UpdateStatus>, ApiError> {
     let body: InstallUpdateBody = json_body(&headers, body)?;
-    // Do not interrupt an in-progress opening/migration or an explicitly requested scan.
-    let state = service.app_state()?;
-    if state.scans().current().is_some() {
+    // Updating can repair a failed/opening library. Startup cancellation and its
+    // durable-boundary drain are checked by main before replacing any executable.
+    // Explicitly requested scans must still finish or be cancelled by the admin.
+    if let Readiness::Ready(state) = service.readiness()
+        && state.scans().current().is_some()
+    {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "UPDATE_BUSY",

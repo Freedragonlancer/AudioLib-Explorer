@@ -129,6 +129,23 @@ beta includes compatible beta/rc releases and newer stable releases. Only a matc
 platform's server archive is used. This requires a published package for that platform;
 source-only commits cannot be downloaded as program updates.
 
+For a manual `redeploy-server.sh` upgrade of an installation with these markers, pass
+both `UPDATE_CHANNEL` and the exact `UPDATE_VERSION` (without the `v` prefix). The script
+installs them before starting the candidate and restores the previous values before a
+rollback restart. It refuses a base-version change that would leave the old version
+marker beside a new binary. For example, replace the tag below with the actual release:
+
+```sh
+UPDATE_CHANNEL=stable UPDATE_VERSION=0.6.2 \
+  INSTALL_DIR=/opt/audiolib DATA_DIR=/var/lib/audiolib \
+  sh server/deploy/redeploy-server.sh new/audiolib-server
+```
+
+Use `UPDATE_CHANNEL=beta` and the complete `X.Y.Z-beta.N` or `X.Y.Z-rc.N` marker for a
+published prerelease. An untagged beta development snapshot uses `X.Y.Z-0`; do not assign
+a published prerelease sequence to an arbitrary same-version build. Unmarked existing
+installations retain their previous binary-only deployment behavior.
+
 The install directory must be writable by the server account. The hardened systemd
 example deliberately keeps `/opt/audiolib` read-only; an administrator who opts into
 self-updates must grant ownership of that application directory to the service user and

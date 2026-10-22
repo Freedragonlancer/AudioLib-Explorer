@@ -96,3 +96,33 @@ async fn update_changes_require_admin_marker_and_disabled_process_does_not_check
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+#[tokio::test]
+async fn missing_library_does_not_gate_the_update_installation_coordinator() {
+    for failed in [false, true] {
+        let service = Service::starting(None);
+        if failed {
+            service.set_failed("Owned test library is unavailable");
+        }
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/admin/api/update/install")
+            .header("Host", "192.168.1.5:8790")
+            .header("X-AudioLib-Admin", "1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"tag":"v99.0.0"}"#))
+            .unwrap();
+        request.extensions_mut().insert(ConnectionInfo {
+            peer: "192.168.1.2:4000".parse().unwrap(),
+            listener: Listener::Http,
+            local: Some("192.168.1.5:8790".parse().unwrap()),
+        });
+        let response = router(service).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The embedded coordinator has no checked update. Reaching UPDATE_BUSY
+        // proves startup/failed readiness did not reject the repair action first.
+        assert_eq!(error["error_code"], "UPDATE_BUSY");
+    }
+}

@@ -7,7 +7,9 @@ $ErrorActionPreference = 'Stop'
 $testParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
 $testRoot = [IO.Path]::GetFullPath((Join-Path $testParent ('AudioLibPackageBoundary-' + [guid]::NewGuid().ToString('N'))))
 if (!$testRoot.StartsWith($testParent + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Package regression escaped owned test parent.' }
+$savedTargetDirectory = $env:CARGO_TARGET_DIR
 try {
+    $env:CARGO_TARGET_DIR = Join-Path $testRoot 'target'
     New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
     Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Value "[workspace.package]`nversion = `"0.4.4`"" -Encoding ASCII
     foreach ($script in @('package-portable.ps1','validate-package-privacy.ps1','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
@@ -144,6 +146,7 @@ try {
     }
     Write-Host 'Package boundary regression passed: stale state/ignored reports/untracked assets excluded; completed and unrun reports accepted; local paths, unsafe reports, false runtime results, wrong binary identities and junction ancestors rejected.'
 } finally {
+    $env:CARGO_TARGET_DIR = $savedTargetDirectory
     if (Test-Path -LiteralPath $testRoot) {
         if (!$testRoot.StartsWith($testParent + '\', [StringComparison]::OrdinalIgnoreCase) -or
             (Split-Path -Leaf $testRoot) -notmatch '^AudioLibPackageBoundary-[0-9a-f]{32}$' -or

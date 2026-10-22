@@ -181,13 +181,14 @@ impl Default for RetryPolicy {
 /// Open the library on a dedicated OS thread (not the Tokio blocking pool, so a stuck open
 /// never delays runtime shutdown), retrying failures per `retry`. On success the service
 /// becomes ready (sharing the service's [`Security`]) and the revision poller starts on
-/// the runtime behind `runtime`.
+/// the runtime behind `runtime`. Joining reports shutdown failures from a library
+/// that finished opening after cancellation, before it could be published.
 pub fn open_in_background(
     service: Service,
     config: ServerConfig,
     retry: RetryPolicy,
     runtime: tokio::runtime::Handle,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
+) -> std::io::Result<std::thread::JoinHandle<audiolib_core::Result<()>>> {
     let security = service.security().clone();
     std::thread::Builder::new()
         .name("audiolib-library-open".into())
@@ -196,7 +197,7 @@ pub fn open_in_background(
             let mut attempt: u32 = 1;
             loop {
                 if service.inner.stopping.load(Ordering::Acquire) {
-                    return;
+                    return Ok(());
                 }
                 tracing::info!(library = %config.library_db.display(), attempt, "Opening library");
                 // A panic inside the open must not leave the service `starting` forever.
@@ -217,33 +218,17 @@ pub fn open_in_background(
                 });
                 match opened {
                     Ok(state) => {
-                        if service.inner.stopping.load(Ordering::Acquire) {
-                            if let Err(error) = state.shutdown(Duration::from_secs(30)) {
-                                tracing::warn!(%error, "Startup shutdown maintenance incomplete");
-                            }
-                            return;
-                        }
-                        match state.revision() {
-                            Ok(revision) => tracing::info!(
-                                library = %config.library_db.display(),
-                                library_id = %revision.library_id,
-                                revision = revision.revision,
-                                roots = config.roots.len(),
-                                "Library opened"
-                            ),
-                            Err(error) => tracing::warn!(%error, "Library opened without revision"),
-                        }
-                        let _runtime = runtime.enter();
-                        spawn_revision_poller(
-                            state.clone(),
-                            Duration::from_secs(config.revision_poll_secs),
+                        return publish_opened(
+                            &service,
+                            state,
+                            &runtime,
+                            &config,
+                            Duration::from_secs(30),
                         );
-                        service.set_ready(state);
-                        return;
                     }
                     Err(error) => {
                         if service.inner.stopping.load(Ordering::Acquire) {
-                            return;
+                            return Ok(());
                         }
                         tracing::error!(
                             library = %config.library_db.display(),
@@ -258,7 +243,7 @@ pub fn open_in_background(
                 while let Some(remaining) = until.checked_duration_since(std::time::Instant::now())
                 {
                     if service.inner.stopping.load(Ordering::Acquire) {
-                        return;
+                        return Ok(());
                     }
                     std::thread::sleep(remaining.min(Duration::from_millis(100)));
                 }
@@ -266,4 +251,102 @@ pub fn open_in_background(
                 attempt = attempt.saturating_add(1);
             }
         })
+}
+
+fn publish_opened(
+    service: &Service,
+    state: AppState,
+    runtime: &tokio::runtime::Handle,
+    config: &ServerConfig,
+    shutdown_timeout: Duration,
+) -> audiolib_core::Result<()> {
+    if service.inner.stopping.load(Ordering::Acquire) {
+        // Main publishes the update notification before storing stopping. Read it
+        // only after observing that stop so the chosen drain policy cannot be stale.
+        let updating = *service.updates().shutdown_watch().borrow();
+        let started = std::time::Instant::now();
+        let stopped = state.shutdown(shutdown_timeout);
+        // Opening starts native cache writers before returning AppState. They are
+        // not in the Tokio runtime and an unpublished state is invisible to main.
+        // Join them here before an update can exec; propagate every shutdown error.
+        let drained = if updating {
+            state
+                .list_waveforms()
+                .drain_for_update(shutdown_timeout.saturating_sub(started.elapsed()))
+        } else {
+            Ok(())
+        };
+        return stopped.and(drained);
+    }
+    match state.revision() {
+        Ok(revision) => tracing::info!(
+            library = %config.library_db.display(),
+            library_id = %revision.library_id,
+            revision = revision.revision,
+            roots = config.roots.len(),
+            "Library opened"
+        ),
+        Err(error) => tracing::warn!(%error, "Library opened without revision"),
+    }
+    let _runtime = runtime.enter();
+    spawn_revision_poller(
+        state.clone(),
+        Duration::from_secs(config.revision_poll_secs),
+    );
+    service.set_ready(state);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_rejects_unpublished_state_until_its_native_writer_drains() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("library.db");
+        drop(audiolib_db::SqliteProvider::open(&database).unwrap());
+        let config = ServerConfig::from_toml_str(
+            "bind = '127.0.0.1:0'\nlibrary_db = 'library.db'\nlist_waveform_workers = 1\n",
+            directory.path(),
+        )
+        .unwrap();
+        let state = AppState::open(&config, None).unwrap();
+        let service = Service::starting(None);
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let finished = directory.path().join("final-owned-cache-write");
+        let destination = finished.clone();
+        let writer = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            std::fs::write(destination, b"finished").unwrap();
+        });
+        state.list_waveforms().retain_shutdown_test_worker(writer);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // Reproduce stop arriving after AppState::open spawned its native workers,
+        // before the open thread publishes the state to main's readiness lookup.
+        service.updates().signal_shutdown_for_test();
+        service.request_stop();
+        let result = publish_opened(
+            &service,
+            state.clone(),
+            runtime.handle(),
+            &config,
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Err(audiolib_core::Error::Busy(_))));
+        assert!(matches!(service.readiness(), Readiness::Starting));
+        assert!(
+            !finished.exists(),
+            "Update must not claim a clean close before the writer finishes"
+        );
+        release.send(()).unwrap();
+        state
+            .list_waveforms()
+            .drain_for_update(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(std::fs::read(finished).unwrap(), b"finished");
+    }
 }

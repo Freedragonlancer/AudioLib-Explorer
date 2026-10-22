@@ -22,7 +22,11 @@ $platformName = if ($IsWindows) { 'win-x64' } elseif ($IsLinux) { 'linux-x64' } 
 $binaryName = if ($IsWindows) { 'audiolib-server.exe' } else { 'audiolib-server' }
 $extension = if ($IsWindows) { 'zip' } else { 'tar.gz' }
 New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
+$savedTargetDirectory = $env:CARGO_TARGET_DIR
 try {
+    # The validator's intentionally missing benchmark belongs to this synthetic
+    # checkout. A developer's populated target directory must never satisfy it.
+    $env:CARGO_TARGET_DIR = Join-Path $testRoot 'target'
     foreach ($file in @('package-server.ps1', 'validate-server-package.ps1', 'server-files.json')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $testRoot 'tools') }
     $files = @(Get-Content -LiteralPath (Join-Path $testRoot 'tools/server-files.json') -Raw | ConvertFrom-Json)
     foreach ($file in $files) {
@@ -273,6 +277,7 @@ try {
     }
     Write-Host 'Server package boundary regression passed: allowlist, dependency closure, safe report/checksums, rejection preservation, linked-path guard and ASIO target/SDK boundary (positive ASIO fixture on Windows).'
 } finally {
+    $env:CARGO_TARGET_DIR = $savedTargetDirectory
     if (Test-Path -LiteralPath $testRoot) {
         if (!(Split-Path -Leaf $testRoot).StartsWith('AudioLibServerPackage-', [StringComparison]::Ordinal) -or
             !$testRoot.StartsWith($testParent.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, $comparison) -or

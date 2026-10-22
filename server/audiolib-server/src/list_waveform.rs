@@ -1586,6 +1586,11 @@ impl ListWaveforms {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn retain_shutdown_test_worker(&self, worker: std::thread::JoinHandle<()>) {
+        self.worker_handles.lock().unwrap().push(worker);
+    }
+
     /// A stream or preview response started (the on-demand queue yields for 3 s).
     pub fn note_playback_start(&self) {
         *self
