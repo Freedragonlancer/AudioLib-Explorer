@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-audio"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "audioadapter-buffers",
  "audiolib-core",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-cli"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "audiolib-audio",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "semver",
  "serde",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-db"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "audiolib-audio",
  "audiolib-core",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-desktop"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "audiolib-audio",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-ipc"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "audiolib-core",
  "serde_json",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-remote"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "audiolib-core",
  "audiolib-db",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-server"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "audiolib-audio",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-update"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "flate2",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "audiolib-windows"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "audiolib-core",
  "cc",
