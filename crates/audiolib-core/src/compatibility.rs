@@ -559,7 +559,10 @@ mod tests {
         for supported in ["0.6.0", "0.6.1", "0.6.9"] {
             let version = Version::parse(supported).unwrap();
             assert!(accepts_range(&local.peer_application_ranges, &version));
-            assert!(!accepts_range(&local.legacy_peer_application_ranges, &version));
+            assert!(!accepts_range(
+                &local.legacy_peer_application_ranges,
+                &version
+            ));
         }
         for supported in ["0.4.11", "0.5.0", "0.5.1"] {
             assert!(peer_versions_compatible(&local, supported, None));
