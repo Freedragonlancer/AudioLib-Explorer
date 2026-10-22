@@ -6,7 +6,7 @@ param([string]$BinaryDirectory = 'dist/latest/portable', [string]$ReleaseReport)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $payloadRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
-$allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd') +
+$allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd', 'update-channel.txt', 'update-version.txt') +
     # Windows PowerShell 5.1 emits a JSON array as one Object[]; unroll it explicitly.
     @((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json) | ForEach-Object { $_ })
 $privatePrefixes = [Collections.Generic.List[string]]::new()
@@ -40,6 +40,13 @@ function Assert-NoPrivatePlaceholder([string]$Text, [string]$Name, [bool]$IsLice
     }
 }
 if (!(Test-Path -LiteralPath $payloadRoot -PathType Container)) { throw 'Portable payload is missing.' }
+foreach ($name in @('update-channel.txt', 'update-version.txt')) {
+    if (!(Test-Path -LiteralPath (Join-Path $payloadRoot $name) -PathType Leaf)) { throw 'Portable update metadata is missing.' }
+}
+$updateChannel = (Get-Content -LiteralPath (Join-Path $payloadRoot 'update-channel.txt') -Raw).Trim()
+$updateVersion = (Get-Content -LiteralPath (Join-Path $payloadRoot 'update-version.txt') -Raw).Trim()
+if ($updateChannel -cnotin @('stable', 'beta') -or $updateVersion -cnotmatch '^\d+\.\d+\.\d+(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$' -or
+    ($updateChannel -ceq 'stable' -and $updateVersion.Contains('-'))) { throw 'Portable update metadata is invalid.' }
 if ((Get-Item -LiteralPath $payloadRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
     @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Attributes ReparsePoint).Count -gt 0) { throw 'Linked payload is not supported.' }
 foreach ($file in (Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File)) {
@@ -82,7 +89,8 @@ if ($ReleaseReport) {
         }
     } else { throw 'Public portable report has invalid validation mode.' }
     if (!$report.success -or $report.commit -notmatch '^[0-9a-f]{40}$' -or
-        $report.version -notmatch '^\d+\.\d+\.\d+$' -or $report.tag -notmatch ('^v' + [regex]::Escape($report.version) + '(?:-rc\.\d+)?$')) { throw 'Public release report has invalid build/validation identity.' }
+        $report.version -notmatch '^\d+\.\d+\.\d+$' -or $report.tag -notmatch ('^v' + [regex]::Escape($report.version) + '(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$') -or
+        $updateVersion -cne $report.tag.Substring(1)) { throw 'Public release report has invalid build/validation identity.' }
     if (@($report.binaries.PSObject.Properties.Name | Sort-Object) -join ',' -ne 'AudioLibCli.exe,AudioLibExplorer.exe') { throw 'Public binary report schema mismatch.' }
     foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
         if ($report.binaries.$binary -cne (Get-FileHash -LiteralPath (Join-Path $payloadRoot $binary) -Algorithm SHA256).Hash) { throw "Release report binary identity mismatch: $binary" }

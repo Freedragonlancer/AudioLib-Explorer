@@ -1,8 +1,16 @@
 # tools/package-portable.ps1
 [CmdletBinding()]
-param([switch]$SkipBuild, [switch]$WithoutAsio)
+param([switch]$SkipBuild, [switch]$WithoutAsio, [string]$Tag)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+$workspaceText = Get-Content -LiteralPath (Join-Path $taskRoot 'Cargo.toml') -Raw
+$versionMatch = [regex]::Match($workspaceText, '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"(\d+\.\d+\.\d+)"')
+if (!$versionMatch.Success) { throw 'Cannot identify the portable workspace version.' }
+$packageVersion = $versionMatch.Groups[1].Value
+if (!$Tag) { $Tag = 'v' + $packageVersion }
+$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
+if (!$tagMatch.Success -or $tagMatch.Groups[1].Value -cne $packageVersion) { throw 'Portable tag must match the workspace version (vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N).' }
+$updateChannel = if ($Tag.Contains('-')) { 'beta' } else { 'stable' }
 function Assert-WorkspacePath([string]$Path) {
     $cursor = [IO.Path]::GetFullPath($Path)
     if ($cursor -ne $taskRoot -and !$cursor.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Package path escaped workspace.' }
@@ -50,6 +58,8 @@ foreach ($file in (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-f
     Copy-Item -LiteralPath $source -Destination $destination -Force
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Start-AudioLibExplorer.cmd') -Destination $portableRoot -Force
+Set-Content -LiteralPath (Join-Path $portableRoot 'update-channel.txt') -Value $updateChannel -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $portableRoot 'update-version.txt') -Value $Tag.Substring(1) -Encoding ASCII
 $licenseRoot = Join-Path $portableRoot 'licenses'
 New-Item -ItemType Directory -Force -Path $licenseRoot | Out-Null
 Push-Location -LiteralPath $taskRoot

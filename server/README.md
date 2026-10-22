@@ -15,6 +15,8 @@ page. It never modifies audio files.
 
 ## Features
 
+- A background GitHub Release check on every start, with a confirmed download and
+  deployment in the LAN admin page; see [automatic updates](deploy/README.md#automatic-release-updates).
 - Library snapshot (`/library/snapshot`, optional zstd) and revision-based change polling.
 - `/audio/{id}/stream` with single `Range`, `ETag`, `If-Range`; downloads with
   `?download=1`.

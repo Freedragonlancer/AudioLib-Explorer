@@ -1320,6 +1320,7 @@ pub struct ListWaveforms {
     pause_stats_on_playback: bool,
     last_playback_start: Mutex<Option<Instant>>,
     stop: AtomicBool,
+    worker_handles: Mutex<Vec<std::thread::JoinHandle<()>>>,
     db_path: PathBuf,
     db: Mutex<Option<Connection>>,
     /// `waveforms.db` of the 8-bit encoding (§9.4); `None` when it cannot be opened.
@@ -1495,6 +1496,7 @@ impl ListWaveforms {
             pause_stats_on_playback: options.pause_stats_on_playback,
             last_playback_start: Mutex::new(None),
             stop: AtomicBool::new(false),
+            worker_handles: Mutex::new(Vec::new()),
             db_path: db_path.to_path_buf(),
             db: Mutex::new(None),
         };
@@ -1553,6 +1555,35 @@ impl ListWaveforms {
         if let Some(wfdb) = &self.wfdb {
             wfdb.flush();
         }
+    }
+
+    /// After shutdown, join every cache writer before an in-process program update.
+    /// A sleeping source file may hold a worker; that cancels deployment on timeout.
+    pub fn drain_for_update(&self, timeout: Duration) -> Result<()> {
+        let started = Instant::now();
+        let mut handles = self
+            .worker_handles
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while handles.iter().any(|worker| !worker.is_finished()) {
+            if started.elapsed() >= timeout {
+                return Err(Error::Busy(
+                    "A list waveform worker is still finishing".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for worker in handles.drain(..) {
+            worker.join().map_err(|_| {
+                Error::Database("A list waveform worker panicked during shutdown".into())
+            })?;
+        }
+        // A worker may have stored its final row after shutdown's first flush.
+        self.cache.flush_all();
+        if let Some(wfdb) = &self.wfdb {
+            wfdb.flush();
+        }
+        Ok(())
     }
 
     /// A stream or preview response started (the on-demand queue yields for 3 s).
@@ -2911,6 +2942,7 @@ pub fn spawn_workers(state: &AppState) {
     for index in 0..list.workers {
         let weak = state.downgrade();
         let list = list.clone();
+        let owner = list.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("list-waveforms-{index}"))
             .spawn(move || {
@@ -2940,8 +2972,13 @@ pub fn spawn_workers(state: &AppState) {
                 }
                 list.cache.flush_all();
             });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "Cannot start a list waveform worker");
+        match spawned {
+            Ok(handle) => owner
+                .worker_handles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(handle),
+            Err(error) => tracing::warn!(%error, "Cannot start a list waveform worker"),
         }
     }
 }
@@ -3705,6 +3742,25 @@ mod tests {
             "lib-test",
             &dir.join("absent.db"),
         )
+    }
+
+    #[test]
+    fn update_waits_for_cache_writer_and_refuses_deployment_while_it_is_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = job_service(dir.path());
+        let (finished, wait) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        list.worker_handles.lock().unwrap().push(worker);
+        list.shutdown();
+        assert!(matches!(
+            list.drain_for_update(Duration::ZERO),
+            Err(Error::Busy(_))
+        ));
+        finished.send(()).unwrap();
+        list.drain_for_update(Duration::from_secs(2)).unwrap();
+        assert!(list.worker_handles.lock().unwrap().is_empty());
     }
 
     fn running_record() -> JobRecord {

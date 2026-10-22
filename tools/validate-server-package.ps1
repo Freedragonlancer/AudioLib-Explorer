@@ -15,8 +15,8 @@ Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server validation requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-rc\.\d+)?$')
-if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N.' }
+$tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
+if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH, vMAJOR.MINOR.PATCH-rc.N or vMAJOR.MINOR.PATCH-beta.N.' }
 $version = $tagMatch.Groups[1].Value
 if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
 switch ($Target) {
@@ -125,6 +125,8 @@ if ($report.commit -cne $commit) { throw 'Server package report differs from the
 $publicFiles = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'server-files.json') -Raw | ConvertFrom-Json)
 $required = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $null = $required.Add($binaryName)
+$null = $required.Add('update-channel.txt')
+$null = $required.Add('update-version.txt')
 $null = $required.Add('licenses/dependencies.json')
 $sdkLicenseRelative = 'licenses/Steinberg-ASIO-SDK-2.3.4.txt'
 if ($Asio) { $null = $required.Add($sdkLicenseRelative) }
@@ -139,7 +141,10 @@ $testRoot = [IO.Path]::GetFullPath((Join-Path $tempParent ('AudioLibServerValida
 $extractRoot = Join-Path $testRoot 'package'
 $ownedProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 $server = $null; $http = $null; $handler = $null; $testOwned = $false
+$savedUpdateDisable = $env:AUDIOLIB_UPDATE_DISABLE
 try {
+    # Startup acceptance uses only its isolated fixture, never the public network.
+    $env:AUDIOLIB_UPDATE_DISABLE = '1'
     Assert-Within $testRoot $tempParent
     if (Test-Path -LiteralPath $testRoot) { throw 'Server validation temporary directory already exists.' }
     New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -246,6 +251,9 @@ try {
             if ([int][IO.File]::GetUnixFileMode($file.FullName) -ne $expectedMode) { throw 'Extracted server file permissions differ from the package contract.' }
         }
     }
+    $expectedChannel = if ($Tag.Contains('-')) { 'beta' } else { 'stable' }
+    if ((Get-Content -LiteralPath (Join-Path $extractRoot 'update-channel.txt') -Raw).Trim() -cne $expectedChannel -or
+        (Get-Content -LiteralPath (Join-Path $extractRoot 'update-version.txt') -Raw).Trim() -cne $Tag.Substring(1)) { throw 'Server update metadata differs from the release tag.' }
     $binary = Join-Path $extractRoot $binaryName
     if ((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -cne $report.binary_sha256) { throw 'Extracted server binary SHA256 differs from its report.' }
     $versionProcess = Start-OwnedProcess $binary @('--version') 'version' $extractRoot
@@ -306,6 +314,7 @@ try {
         shutdown=$(if ($IsWindows) { 'owned test process termination; graceful drain not tested' } else { 'owned test process SIGTERM with bounded termination fallback' })
     } | ConvertTo-Json -Depth 4
 } finally {
+    $env:AUDIOLIB_UPDATE_DISABLE = $savedUpdateDisable
     if ($null -ne $http) { $http.Dispose() }
     if ($null -ne $handler) { $handler.Dispose() }
     # Only Process objects returned by this invocation's Start-Process are stopped.

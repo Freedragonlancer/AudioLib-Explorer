@@ -560,6 +560,14 @@ export component AppWindow inherits Window {
 
     in-out property <bool> settings-visible: false;
     in-out property <bool> about-visible: false;
+    in-out property <bool> update-visible: false;
+    in property <bool> update-enabled: true;
+    in property <bool> update-busy: false;
+    in property <bool> update-available: false;
+    in property <string> update-version: "";
+    in property <string> update-message: "";
+    callback update-check-requested();
+    callback update-install-requested();
     in-out property <bool> help-visible: false;
     in property <bool> debug-enabled: false;
     in-out property <bool> debug-visible: false;
@@ -948,7 +956,7 @@ export component AppWindow inherits Window {
     // A native menu remains outside the in-window overlays. Guard its items and
     // shortcuts too, so modal dialogs cannot launch overlapping operations.
     property <bool> menu-ready: !root.startup-busy && !root.closing && !root.library-busy && !root.library-visible && !root.confirmation-visible && !root.batch-visible && !root.import-visible && !root.settings-visible && !root.peaks-visible && !root.about-visible && !root.help-visible && !root.debug-visible;
-    property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible;
+    property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible || root.update-visible;
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
@@ -997,7 +1005,8 @@ export component AppWindow inherits Window {
     }
     function dismiss-modal() {
         if root.closing || root.library-busy { return; }
-        if root.sm-fs-visible { root.close-remote-folder(); }
+        if root.update-visible { root.update-visible = false; }
+        else if root.sm-fs-visible { root.close-remote-folder(); }
         else if root.library-visible && root.sm-root-form && !root.sm-manage-busy { root.sm-root-form = false; }
         else if root.library-visible && root.sm-confirm == 5 && !root.sm-manage-busy { root.sm-confirm = 0; }
         else if root.peaks-visible { root.peaks-visible = false; }
@@ -1015,7 +1024,9 @@ export component AppWindow inherits Window {
         else { root.filters-visible = false; }
     }
     function focus-library-modal() {
-        if root.settings-visible && !root.output-applying && !root.closing {
+        if root.update-visible && !root.closing {
+            update-later.focus();
+        } else if root.settings-visible && !root.output-applying && !root.closing {
             settings-first.focus();
         } else if root.batch-visible && !root.closing {
             batch-first.focus();
@@ -1130,6 +1141,7 @@ export component AppWindow inherits Window {
     changed settings-visible => { if root.settings-visible { root.focus-library-modal(); root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed batch-visible => { if root.batch-visible { root.focus-library-modal(); root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed about-visible => { if root.about-visible { root.focus-library-modal(); root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
+    changed update-visible => { if root.update-visible { root.focus-library-modal(); root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed peaks-visible => { if root.peaks-visible { root.focus-library-modal(); root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
     changed help-visible => { if !root.help-visible && !root.background-blocked { results-focus.focus(); } }
     changed debug-visible => { if root.debug-visible { root.focus-library-modal(); root.schedule-modal-focus(); } else if !root.background-blocked { results-focus.focus(); } }
@@ -2026,13 +2038,14 @@ export component AppWindow inherits Window {
         Rectangle {
         background: Theme.overlay;
         TouchArea { }
-        Rectangle { width: 520px; height: 420px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px; border-width: 1px; border-color: Theme.border;
+        Rectangle { width: 520px; height: min(500px, parent.height - 32px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px; border-width: 1px; border-color: Theme.border;
             VerticalLayout { padding: 28px; spacing: 18px;
                 Text { text: "AudioLib Explorer"; color: Theme.ink; font-size: 25px; font-weight: 600; }
                 Label { text: root.app-version + " · Rust desktop"; color: Theme.accent; }
                 Text { text: root.chinese ? "为声音设计师打造的 WAV / BWF 素材库。\nSQLite FTS5 搜索、Metadata 整理与低延迟试听。" : "A WAV / BWF library for sound designers.\nSQLite FTS5 search, Metadata editing and low-latency audition."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: "Made with Slint\nhttps://slint.dev"; color: Theme.ink; font-size: 13px; }
                 Label { text: "Slint © SixtyFPS GmbH · Third-party notices ship with the application."; wrap: word-wrap; }
+                Action { height: 34px; label: root.chinese ? "检查软件更新" : "Check for updates"; clicked => { root.about-visible = false; root.update-visible = true; root.update-check-requested(); } }
                 about-first := Action { height: 34px; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.about-visible = false; } }
             }
         }
@@ -2750,6 +2763,39 @@ export component AppWindow inherits Window {
         TouchArea { }
         Rectangle { width: 410px; height: 135px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 9px; border-width: 1px; border-color: Theme.border;
             Text { x: 20px; width: parent.width - 40px; height: parent.height; text: root.scan-browse-busy || root.file-choice-busy ? (root.chinese ? "请在弹出的文件窗口中完成选择…" : "Complete your selection in the file picker…") : (root.chinese ? "正在处理音效库操作…\n请稍候。" : "Working on the library…\nPlease wait."); color: Theme.ink; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
+        }
+    }
+    update-dialog := FocusScope {
+        visible: root.update-visible; enabled: root.update-visible && !root.closing;
+        focus-on-click: false; focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            if event.text == Key.Escape { root.update-visible = false; return accept; }
+            if event.text == Key.Tab || event.text == Key.Backtab {
+                if update-later.has-focus { update-check.focus(); }
+                else if update-check.has-focus && root.update-available && !root.update-busy { update-install.focus(); }
+                else { update-later.focus(); }
+                return accept;
+            }
+            reject
+        }
+        key-pressed(event) => { accept }
+        key-released(event) => { accept }
+        Rectangle { background: Theme.overlay;
+            TouchArea { }
+            Rectangle { width: min(620px, parent.width - 32px); height: 300px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 10px; border-width: 1px; border-color: Theme.border;
+                VerticalLayout { padding: 24px; spacing: 14px;
+                    Text { text: root.chinese ? "软件更新" : "Software update"; color: Theme.ink; font-size: 22px; }
+                    Label { text: root.update-available ? root.app-version + " → " + root.update-version : root.app-version; color: Theme.accent; }
+                    Label { text: root.update-message; wrap: char-wrap; vertical-stretch: 1; }
+                    Label { text: root.chinese ? "确认后下载并校验，保存更改后自动安装并重启。音效库与设置会保留。" : "Download and verify, then save changes, install and restart. Your libraries and preferences are retained."; wrap: word-wrap; }
+                    HorizontalLayout { height: 34px; spacing: 8px;
+                        update-later := Action { width: 88px; label: root.chinese ? "稍后" : "Later"; clicked => { root.update-visible = false; } }
+                        update-check := Action { width: 128px; enabled: root.update-enabled && !root.update-busy; label: root.chinese ? "重新检查" : "Check again"; clicked => { root.update-check-requested(); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        update-install := Action { width: 190px; primary: true; enabled: root.update-enabled && root.update-available && !root.update-busy && !root.library-busy && !root.closing; label: root.chinese ? "下载、安装并重启" : "Download, install & restart"; clicked => { root.update-install-requested(); } }
+                    }
+                }
+            }
         }
     }
     if root.close-recovery-available && !root.closing: Rectangle {

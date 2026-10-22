@@ -17,6 +17,7 @@ mod startup;
 mod ui_review_tests;
 #[cfg(test)]
 mod ui_tests;
+mod updates;
 mod waveform_view;
 mod window_repaint;
 use anyhow::{Context, Result};
@@ -131,6 +132,9 @@ fn report_fatal_error(error: &anyhow::Error) {
 }
 
 fn run() -> Result<()> {
+    if audiolib_update::handle_update_helper()? {
+        return Ok(());
+    }
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if arguments
         .iter()
@@ -220,6 +224,7 @@ fn run() -> Result<()> {
         playback,
         remote,
     );
+    let updates = updates::DesktopUpdates::install(&ui, controller.clone(), &arguments);
     let close_control = controller.clone();
     let close_ui = ui.as_weak();
     ui.window().on_close_requested(move || {
@@ -266,6 +271,12 @@ fn run() -> Result<()> {
                     ui.invoke_devices_requested(ui.get_backend_index());
                 }
                 "about" => ui.set_about_visible(true),
+                "update" => {
+                    ui.set_update_visible(true);
+                    ui.set_update_version("v0.7.0-beta.2".into());
+                    ui.set_update_message("A new version is available. / 发现新版本。".into());
+                    ui.set_update_available(true);
+                }
                 "help" => ui.set_help_visible(true),
                 "debug" => {
                     ui.set_debug_visible(true);
@@ -603,6 +614,9 @@ fn run() -> Result<()> {
         !smoke_failed.load(Ordering::Acquire),
         "Software-rendered UI smoke screenshot failed"
     );
+    if let Some(updates) = updates {
+        updates.deploy_after_shutdown()?;
+    }
     Ok(())
 }
 

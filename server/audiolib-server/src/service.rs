@@ -37,6 +37,7 @@ struct ServiceInner {
     security: Arc<Security>,
     readiness: RwLock<Readiness>,
     progress: RwLock<Option<audiolib_db::SnapshotUpgradeProgress>>,
+    updates: crate::update::UpdateManager,
     stopping: AtomicBool,
 }
 
@@ -66,6 +67,7 @@ impl Service {
                 security,
                 readiness: RwLock::new(readiness),
                 progress: RwLock::new(None),
+                updates: crate::update::UpdateManager::default(),
                 stopping: AtomicBool::new(false),
             }),
         }
@@ -144,6 +146,11 @@ impl Service {
     /// Authentication and admin settings.
     pub fn security(&self) -> &Arc<Security> {
         &self.inner.security
+    }
+
+    /// Process-local release check and deployment coordinator (inactive until main starts it).
+    pub fn updates(&self) -> &crate::update::UpdateManager {
+        &self.inner.updates
     }
 }
 

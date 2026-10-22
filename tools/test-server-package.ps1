@@ -105,6 +105,12 @@ try {
     Expect-Rejection { & $packager -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
     Expect-Rejection { & $validator -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
     & $packager -Tag v0.4.4 -Target $target
+    if ((Get-Content -LiteralPath (Join-Path $payload 'update-channel.txt') -Raw).Trim() -cne 'stable' -or
+        (Get-Content -LiteralPath (Join-Path $payload 'update-version.txt') -Raw).Trim() -cne '0.4.4') { throw 'Stable server update metadata differs.' }
+    & $packager -Tag v0.4.4-beta.12 -Target $target
+    if ((Get-Content -LiteralPath (Join-Path $payload 'update-channel.txt') -Raw).Trim() -cne 'beta' -or
+        (Get-Content -LiteralPath (Join-Path $payload 'update-version.txt') -Raw).Trim() -cne '0.4.4-beta.12') { throw 'Beta server lost its exact release identity.' }
+    & $packager -Tag v0.4.4 -Target $target
     if (Test-Path -LiteralPath (Join-Path $payload 'settings.json')) { throw 'Stale server runtime file survived packaging.' }
     foreach ($protected in @('dist/latest/portable/preserve.txt', 'local_release/preserve.txt', 'doc/unlisted-private-report.json')) {
         if ((Get-Content -LiteralPath (Join-Path $testRoot $protected) -Raw).Trim() -ne 'Owned sentinel.') { throw 'Packaging changed an unrelated output.' }

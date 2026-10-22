@@ -9,7 +9,8 @@ $testRoot = [IO.Path]::GetFullPath((Join-Path $testParent ('AudioLibPackageBound
 if (!$testRoot.StartsWith($testParent + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Package regression escaped owned test parent.' }
 try {
     New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
-    foreach ($script in @('package-portable.ps1','validate-package-privacy.ps1','portable-files.json','Start-AudioLibExplorer.cmd')) {
+    Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Value "[workspace.package]`nversion = `"0.4.4`"" -Encoding ASCII
+    foreach ($script in @('package-portable.ps1','validate-package-privacy.ps1','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $testRoot 'tools')
     }
     $files = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json
@@ -35,6 +36,31 @@ try {
     $hiddenAncestor.Attributes = $hiddenAncestor.Attributes -bor [IO.FileAttributes]::Hidden
     # Function scope masks Cargo only in this synthetic regression invocation.
     function cargo { '{"packages":[]}' ; $global:LASTEXITCODE = 0 }
+    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
+    & (Join-Path $testRoot 'tools/install-beta.ps1') -Source $staleRoot -Destination (Join-Path $testRoot 'development-beta') -Development
+    if ((Get-Content -LiteralPath (Join-Path $testRoot 'development-beta/update-version.txt') -Raw).Trim() -cne '0.4.4-0' -or
+        (Get-Content -LiteralPath (Join-Path $testRoot 'development-beta/update-channel.txt') -Raw).Trim() -cne 'beta') { throw 'Development beta baseline does not sort before a same-version prerelease.' }
+    if ((Get-Content -LiteralPath (Join-Path $staleRoot 'update-channel.txt') -Raw).Trim() -cne 'stable' -or
+        (Get-Content -LiteralPath (Join-Path $staleRoot 'update-version.txt') -Raw).Trim() -cne '0.4.4') { throw 'Stable package update metadata differs.' }
+    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -Tag v0.4.4-beta.12
+    if ((Get-Content -LiteralPath (Join-Path $staleRoot 'update-channel.txt') -Raw).Trim() -cne 'beta' -or
+        (Get-Content -LiteralPath (Join-Path $staleRoot 'update-version.txt') -Raw).Trim() -cne '0.4.4-beta.12') { throw 'Beta package lost its full release identity.' }
+    $betaInstall = Join-Path $testRoot 'beta-install'
+    New-Item -ItemType Directory -Path $betaInstall | Out-Null
+    Set-Content -LiteralPath (Join-Path $betaInstall 'settings.json') -Value 'owned runtime sentinel' -Encoding ASCII
+    & (Join-Path $testRoot 'tools/install-beta.ps1') -Source $staleRoot -Destination $betaInstall
+    if ((Get-Content -LiteralPath (Join-Path $betaInstall 'update-version.txt') -Raw).Trim() -cne '0.4.4-beta.12' -or
+        (Get-Content -LiteralPath (Join-Path $betaInstall 'update-channel.txt') -Raw).Trim() -cne 'beta' -or
+        (Get-Content -LiteralPath (Join-Path $betaInstall 'settings.json') -Raw).Trim() -cne 'owned runtime sentinel') { throw 'Beta installation lost release identity or changed owned runtime data.' }
+    foreach ($invalidTag in @('v0.4.5-beta.1', 'v0.4.4-beta.01', 'v0.4.4-dev.1')) {
+        $rejected = $false
+        try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -Tag $invalidTag } catch { $rejected = $_.Exception.Message -match 'Portable tag must match' }
+        if (!$rejected) { throw 'Invalid/mismatched portable release identity was accepted.' }
+    }
+    Set-Content -LiteralPath (Join-Path $staleRoot 'update-channel.txt') -Value 'stable' -Encoding ASCII
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot } catch { $rejected = $_.Exception.Message -match 'update metadata is invalid' }
+    if (!$rejected) { throw 'Stable channel accepted a prerelease update identity.' }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
     if (Test-Path -LiteralPath (Join-Path $staleRoot 'settings.json')) { throw 'Stale runtime state survived clean staging.' }
     foreach ($file in @('doc/Rust_Old_Report.json','doc/Rust_CI_Release.json','doc/assets/issues/private.png','resources/private/settings.json')) {
