@@ -4,7 +4,7 @@
 #       [-Sync [-KeepSyncData]] [-MinEntries <n>] [-StreamSamples 20] [-ReleaseDir <beta_release>]
 # -BaseUrl (or AUDIOLIB_BETA_URL) is required; no server address is stored in the repo.
 # Read-only against the server: GET/HEAD only, never starts, stops or scans anything.
-# Stream reads time out after -StreamTimeoutSec (default 120; NAS disks may need to wake).
+# Stream reads time out after -StreamTimeoutSec (default 15).
 # -Sync runs `AudioLibCli remote sync --force` from -ReleaseDir with AUDIOLIB_DATA_DIR set
 # to a fresh directory under $env:TEMP; the stable v1 and the beta data directories are
 # never read or written. A PASS/FAIL table is printed, a log is written to the temp run
@@ -20,7 +20,7 @@ param(
     [string]$ReleaseDir,
     [int]$SyncTimeoutSec = 900,
     [switch]$KeepSyncData,
-    [int]$StreamTimeoutSec = 120
+    [int]$StreamTimeoutSec = 15
 )
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'Pass -BaseUrl <http://host:port> or set AUDIOLIB_BETA_URL.' }
@@ -161,13 +161,12 @@ if ($StreamSamples -gt 0) {
             $picked.Add($file)
         }
         Log ("  picked {0} present records under configured roots" -f $picked.Count)
-        $failures = 0; $timeouts = 0
+        $failures = 0
         foreach ($file in $picked) {
             try { $response = Send GET "$api/audio/$($file.id)/stream" @{ 'Range' = 'bytes=0-4095' } -HeadersOnly -TimeoutSec $StreamTimeoutSec }
             catch {
-                $failures++; $timeouts++
+                $failures++
                 Log ("  stream id={0} FAIL: {1}" -f $file.id, $_.Exception.Message)
-                if ($timeouts -ge 3) { Log '  3 stream requests failed to answer; skipping the remaining samples (root offline or waking?)'; break }
                 continue
             }
             $code = [int]$response.StatusCode
