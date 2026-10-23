@@ -97,6 +97,14 @@ async fn run() -> Result<Option<Deployment>> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    // Warning-only SQLite self-check: log it and keep starting.
+    let linked_sqlite = rusqlite::version();
+    match audiolib_core::compatibility::check_linked_sqlite(linked_sqlite) {
+        Some(warning) => {
+            tracing::warn!(sqlite = linked_sqlite, %warning, "Linked SQLite self-check")
+        }
+        None => tracing::info!(sqlite = linked_sqlite, "Linked SQLite version"),
+    }
     let config_path = match config_arg {
         Some(path) => path,
         None => std::env::var_os(CONFIG_ENV)
