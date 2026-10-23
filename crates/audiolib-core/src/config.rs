@@ -794,7 +794,9 @@ mod tests {
         raw["ui_scale_percent"] = serde_json::json!(130);
         std::fs::write(&config.paths.settings, raw.to_string()).unwrap();
         assert_eq!(
-            AppConfig::load_with_roots(root, &[]).unwrap().ui_scale_percent,
+            AppConfig::load_with_roots(root, &[])
+                .unwrap()
+                .ui_scale_percent,
             0
         );
     }
