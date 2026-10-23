@@ -1,196 +1,64 @@
-# Release packages are built and validated on local machines (Windows client,
-# macOS server) and uploaded with `gh release upload <tag> <files>`.
-# This workflow no longer runs on tag push; it is kept for manual use only.
-# Dispatch it on a tag ref. Beta tags (vX.Y.Z-beta.N) and rc tags are always
-# published as GitHub pre-releases; see doc/Rust_Versioning.md (beta flow).
-name: Release
+# Release packages are built, validated and published on local machines:
+#   - Windows x64 ASIO client (AudioLibExplorer-<tag>-win-x64-portable.zip)
+#   - macOS arm64 server     (AudioLibServer-<tag>-macos-arm64.tar.gz)
+# each with a .sha256, via tools/release-create.sh <tag> <assets...> or
+# `gh release upload <tag> <files>`. Pre-release status is derived from the tag
+# by tools/release-create.sh (vX.Y.Z-beta.N / -rc.N => --prerelease --latest=false).
+#
+# This workflow is VERIFY-ONLY. It has no push/tag trigger (workflow_dispatch
+# only), builds nothing, and never creates, edits or uploads a release or asset
+# (permissions: contents: read). Run it manually after the local upload to check
+# that the release carries exactly the four expected assets with valid checksums.
+# See doc/Rust_Versioning.md.
+name: Release verify
 
 on:
   workflow_dispatch:
     inputs:
-      prerelease:
-        description: 'Mark as pre-release (auto = yes for -beta.N / -rc.N tags)'
-        type: choice
-        options: [auto, 'true']
-        default: auto
+      tag:
+        description: Release tag to verify (vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  windows:
-    name: Build and package Windows client and server
-    runs-on: windows-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      RELEASE_TAG: ${{ github.ref_name }}
-    steps:
-      - name: Check out the tag with all tags and history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Check release version policy
-        run: ./tools/check-release.ps1 -Tag $env:RELEASE_TAG
-
-      - name: Build ASIO release and verify the portable payload
-        run: ./tools/ci-release.ps1 -Tag $env:RELEASE_TAG
-
-      - name: Prepare release assets
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $latest = 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'
-          $digest = (Get-FileHash -LiteralPath $latest -Algorithm SHA256).Hash
-          $expected = ((Get-Content -LiteralPath ($latest + '.sha256') -Raw) -split '\s+')[0]
-          if ($digest -cne $expected) { throw 'Portable ZIP checksum mismatch.' }
-          New-Item -ItemType Directory -Force -Path dist/release | Out-Null
-          $zipName = "AudioLibExplorer-$($env:RELEASE_TAG)-win-x64-portable.zip"
-          Copy-Item -LiteralPath $latest -Destination "dist/release/$zipName" -Force
-          "$digest  $zipName" | Set-Content -LiteralPath "dist/release/$zipName.sha256" -Encoding ASCII
-          Copy-Item -LiteralPath doc/Rust_CI_Release.json -Destination dist/release/Rust_CI_Release.json -Force
-          ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target x86_64-pc-windows-msvc -Asio
-
-      - name: Upload validated Windows assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-windows
-          if-no-files-found: error
-          path: |
-            dist/release/AudioLibExplorer-${{ github.ref_name }}-win-x64-portable.zip
-            dist/release/AudioLibExplorer-${{ github.ref_name }}-win-x64-portable.zip.sha256
-            dist/release/Rust_CI_Release.json
-            dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64.zip
-            dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64.zip.sha256
-            dist/latest/AudioLibServer-${{ github.ref_name }}-win-x64-report.json
-
-  server-unix:
-    name: Build and package server (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            suffix: linux-x64
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      RUSTUP_TOOLCHAIN: 1.97.1
-      RELEASE_TAG: ${{ github.ref_name }}
-      SERVER_TARGET: ${{ matrix.target }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install Linux build prerequisites
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev pkg-config
-      - name: Install pinned Rust
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: server-${{ matrix.target }}
-      # Runtime and platform tests run locally; package scripts still verify
-      # the actual payload, executable version, archive identity and checksum.
-      - name: Build and package server
-        run: |
-          ./tools/build-server-release.ps1 -Target $env:SERVER_TARGET
-          ./tools/package-server.ps1 -Tag $env:RELEASE_TAG -Target $env:SERVER_TARGET
-      - name: Upload validated server assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.suffix }}
-          if-no-files-found: error
-          path: |
-            dist/latest/AudioLibServer-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz
-            dist/latest/AudioLibServer-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz.sha256
-            dist/latest/AudioLibServer-${{ github.ref_name }}-${{ matrix.suffix }}-report.json
-
-  publish:
-    name: Publish verified client and server assets
-    needs: [windows, server-unix]
+  verify:
+    name: Verify published release assets (read-only)
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    timeout-minutes: 15
     defaults:
       run:
         shell: pwsh
     env:
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
-      PRERELEASE_INPUT: ${{ inputs.prerelease }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist/downloads
-          merge-multiple: true
-          pattern: release-*
-      - name: Verify all release assets
+      - name: Verify the release has the client and macOS server packages with SHA-256
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path dist/publish | Out-Null
-          # Flatten only named assets; fail on duplicates or missing files.
-          $names = @("AudioLibExplorer-$env:RELEASE_TAG-win-x64-portable.zip", "AudioLibExplorer-$env:RELEASE_TAG-win-x64-portable.zip.sha256", 'Rust_CI_Release.json')
-          foreach ($platform in @('win-x64', 'linux-x64')) {
-            $extension = if ($platform -eq 'win-x64') { 'zip' } else { 'tar.gz' }
-            $base = "AudioLibServer-$env:RELEASE_TAG-$platform"
-            $names += @("$base.$extension", "$base.$extension.sha256", "$base-report.json")
+          if ($env:RELEASE_TAG -cnotmatch '^v(\d+\.\d+\.\d+)(-(rc|beta)\.\d+)?$') { throw "Tag '$($env:RELEASE_TAG)' must be vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N." }
+          $expectPre = [bool]$Matches[2]
+          $json = gh release view $env:RELEASE_TAG --json name,isPrerelease,assets
+          if ($LASTEXITCODE -ne 0) { throw "Release $($env:RELEASE_TAG) not found or not readable." }
+          $rel = $json | ConvertFrom-Json
+          if ($rel.name -cne "AudioLib Explorer $($env:RELEASE_TAG)") { throw "Release title '$($rel.name)' does not match tag." }
+          if ([bool]$rel.isPrerelease -ne $expectPre) { throw "Release prerelease flag $($rel.isPrerelease) does not match tag (expected $expectPre)." }
+          $packages = @("AudioLibExplorer-$env:RELEASE_TAG-win-x64-portable.zip", "AudioLibServer-$env:RELEASE_TAG-macos-arm64.tar.gz")
+          $assetNames = @($rel.assets | ForEach-Object name)
+          $missing = @()
+          foreach ($p in $packages) { foreach ($n in @($p, "$p.sha256")) { if ($assetNames -cnotcontains $n) { $missing += $n } } }
+          if ($missing) { throw "Missing release assets: $($missing -join ', ')" }
+          # Download (read-only) into a temp dir and check each SHA-256 file.
+          $dir = Join-Path $env:RUNNER_TEMP 'release-verify'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          foreach ($p in $packages) {
+            gh release download $env:RELEASE_TAG --dir $dir --pattern $p --pattern "$p.sha256"
+            if ($LASTEXITCODE -ne 0) { throw "Download of $p failed." }
+            $parts = (Get-Content -LiteralPath (Join-Path $dir "$p.sha256") -Raw).Trim() -split '\s+'
+            if ($parts.Count -ne 2 -or $parts[1].TrimStart('*') -cne $p -or $parts[0] -notmatch '^[0-9A-Fa-f]{64}$') { throw "Malformed checksum file for $p." }
+            if ((Get-FileHash -LiteralPath (Join-Path $dir $p) -Algorithm SHA256).Hash -ine $parts[0]) { throw "Checksum mismatch for $p." }
+            "OK $p"
           }
-          foreach ($name in $names) {
-            $matches = @(Get-ChildItem -LiteralPath dist/downloads -Recurse -File | Where-Object Name -ceq $name)
-            if ($matches.Count -ne 1) { throw "Missing or duplicate validated release asset: $name" }
-            Copy-Item -LiteralPath $matches[0].FullName -Destination (Join-Path dist/publish $name)
-          }
-          foreach ($checksum in Get-ChildItem -LiteralPath dist/publish -Filter '*.sha256') {
-            $archive = $checksum.FullName.Substring(0, $checksum.FullName.Length - '.sha256'.Length)
-            $parts = (Get-Content -LiteralPath $checksum.FullName -Raw).Trim() -split '\s+'
-            if ($parts.Count -ne 2 -or $parts[1] -cne [IO.Path]::GetFileName($archive) -or $parts[0] -notmatch '^[0-9A-Fa-f]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $parts[0]) { throw 'Release archive checksum mismatch.' }
-          }
-          foreach ($reportName in @('Rust_CI_Release.json', "AudioLibServer-$env:RELEASE_TAG-win-x64-report.json", "AudioLibServer-$env:RELEASE_TAG-linux-x64-report.json")) {
-            $report = Get-Content -LiteralPath (Join-Path dist/publish $reportName) -Raw | ConvertFrom-Json
-            if (!$report.success -or $report.tag -cne $env:RELEASE_TAG -or $report.commit -cne $env:GITHUB_SHA) { throw 'Release report/tag commit mismatch.' }
-            if ($reportName -ne 'Rust_CI_Release.json') {
-              $platform = if ($reportName.EndsWith('-win-x64-report.json')) { 'win-x64' } else { 'linux-x64' }
-              $target = if ($platform -eq 'win-x64') { 'x86_64-pc-windows-msvc' } else { 'x86_64-unknown-linux-gnu' }
-              $extension = if ($platform -eq 'win-x64') { 'zip' } else { 'tar.gz' }
-              $archive = Join-Path dist/publish "AudioLibServer-$env:RELEASE_TAG-$platform.$extension"
-              $checkNames = @('version','allowlist','unlinked_paths','privacy','archive_contents','executable_mode')
-              if ($report.target -cne $target -or $report.archive_sha256 -ine (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -or @($report.checks.PSObject.Properties).Count -ne $checkNames.Count) { throw 'Server report/archive identity mismatch.' }
-              foreach ($checkName in $checkNames) {
-                if ($report.checks.$checkName -isnot [bool] -or !$report.checks.$checkName) { throw 'Server package validation did not pass.' }
-              }
-            }
-          }
-          $notes = Get-Content -LiteralPath doc/Rust_Release_Notes.md -Raw -Encoding UTF8
-          $notes = $notes.Replace('(Rust_Validation.md)', "(https://github.com/$($env:GITHUB_REPOSITORY)/blob/$($env:RELEASE_TAG)/doc/Rust_Validation.md)")
-          $notes += "`n`nCommit: $env:GITHUB_SHA`n`nAssets include the Windows x64 ASIO client and Windows/Linux x64 servers; SHA-256 files accompany each archive.`n"
-          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/notes.md'), $notes, [Text.UTF8Encoding]::new($false))
-
-      - name: Create GitHub Release
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ghArgs = @($env:RELEASE_TAG, '--verify-tag', '--title', "AudioLib Explorer $($env:RELEASE_TAG)", '--notes-file', 'dist/notes.md')
-          # Any suffixed tag (-beta.N, -rc.N) is a pre-release; beta tags can never be published as stable.
-          $isPrerelease = $env:RELEASE_TAG.Contains('-') -or $env:PRERELEASE_INPUT -eq 'true'
-          if ($env:RELEASE_TAG -match '-beta\.\d+$' -and !$isPrerelease) { throw 'Beta tags must be published as pre-releases.' }
-          if ($isPrerelease) { $ghArgs += '--prerelease', '--latest=false' }
-          $ghArgs += @(Get-ChildItem -LiteralPath dist/publish -File | ForEach-Object FullName)
-          gh release create @ghArgs
-          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

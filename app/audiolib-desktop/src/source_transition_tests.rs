@@ -32,7 +32,7 @@ pub(super) fn isolated_module(module: &str, child: &str) {
         .unwrap();
     assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
     if root.exists() {
-        std::fs::remove_dir_all(&root).unwrap();
+        remove_dir_all_retry(&root);
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -40,6 +40,28 @@ pub(super) fn isolated_module(module: &str, child: &str) {
         output.status.success() && stdout.contains("1 passed"),
         "{child}: {stdout}\n{stderr}"
     );
+}
+
+/// Test-only cleanup that tolerates transient Windows sharing violations
+/// (OS error 32) left behind by handles that are still being released.
+/// Retries with growing backoff (~10 attempts, capped at ~2s per wait) and
+/// never panics: a leftover temp directory must not fail a passing test.
+pub(super) fn remove_dir_all_retry(path: &Path) {
+    const ATTEMPTS: u32 = 10;
+    for attempt in 0..ATTEMPTS {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if error.raw_os_error() == Some(32) && attempt + 1 < ATTEMPTS => {
+                let wait = (50u64 << attempt).min(2000);
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+            Err(error) => {
+                eprintln!("warning: could not remove {}: {error}", path.display());
+                return;
+            }
+        }
+    }
 }
 
 pub(super) fn root() -> PathBuf {
@@ -70,6 +92,10 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
+        ui_scale_percent: 0,
+        theme: audiolib_core::config::DEFAULT_THEME.into(),
+        ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
+        list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
         audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
@@ -889,10 +915,15 @@ fn child_delayed_ipc_reload_play_is_cancelled_by_stop() {
             next.set(next.get() + 1);
             return false;
         }
-        if c.latest_selection.lock().unwrap().is_some() || !ui.get_audio_ready() {
+        let audio_generation = loaded.generation + if next.get() == 1 { 1 } else { 3 };
+        // audio_ready is still true from the previous Load right after Play is
+        // sent, so wait for the reload's own Load generation before asserting.
+        if c.latest_selection.lock().unwrap().is_some()
+            || !ui.get_audio_ready()
+            || status.generation < audio_generation
+        {
             return false;
         }
-        let audio_generation = loaded.generation + if next.get() == 1 { 1 } else { 3 };
         assert_eq!(status.generation, audio_generation);
         assert_eq!(status.file_path.as_ref(), Some(&metal_path));
         assert!(
@@ -1976,8 +2007,9 @@ fn startup_refuses_another_servers_active_snapshot_and_accepts_effective_same_ur
         matching.library_id
     );
     drop(startup);
+    drop(cache);
     assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
-    std::fs::remove_dir_all(root).unwrap();
+    remove_dir_all_retry(&root);
 }
 
 #[test]

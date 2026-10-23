@@ -117,10 +117,11 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 
 - 只接受局域网直连：TCP 对端在上面的私有网段内，且**没有**任何转发头（`X-Forwarded-For` 等，即不是经反向代理来的），原生 TLS 监听上的公网对端也拒绝；否则 403 `ADMIN_LAN_ONLY`。
 - `Host` 必须是 IP 地址、`localhost`、不带点的主机名或 `.local` / `.lan` / `.home.arpa` / `.internal` 结尾的名字，否则 403 `ADMIN_LAN_ONLY`（防 DNS 重绑定：恶意网页无法借自己的域名访问管理接口）。
+- 只读请求（`GET`/`HEAD`/`OPTIONS`，如 `GET /admin/api/status`、`GET /admin/api/runtime`、`GET /admin/api/tokens`）只做上面两项检查（局域网直连 + LAN `Host`），**不需要** `X-AudioLib-Admin` 头，也不检查 `Origin`。
 - 修改请求（`PUT`/`POST`/`DELETE`）必须带 `X-AudioLib-Admin: 1`，浏览器带 `Origin` 时必须与 `Host` 同源，否则 403 `ADMIN_HEADER_REQUIRED`（自定义头使跨站网页无法静默发起修改）。
 - 管理响应都带 `Cache-Control: no-store`、`X-Frame-Options: DENY`，页面另有严格的 `Content-Security-Policy`。
 
-**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。设置在处理该管理页请求的实例中即时生效，没有需要重启的项。
+**设置的保存位置**：库文件所在目录（例如：`/var/lib/audiolib/`）下的 `admin-settings.json`（公网地址、鉴权模式、库管理权限、局域网地址、TLS）和 `tokens.json`（token 名称、SHA-256、生成/最近使用时间），原子写入，权限 0600。**不修改 `config.toml`**：`config.toml` 中的 `auth_mode`、`manage_mode`、`public_url`、`tls_*` 是默认值，管理页的设置覆盖它们（在页面上清除即回到 `config.toml` 的值）。文件损坏时启动不失败：该文件被改名为 `*.json.corrupt`，页面顶部显示警告。设置在处理该管理页请求的实例中即时生效，没有需要重启的项（页面上只读显示的 `config.toml` 资源限制除外，见 §2.3.2）。
 
 共享同一设置目录时，受 `manage_mode` 保护的 API 在准入时取得跨实例设置锁、重读最新设置，并在同一锁内依次检查 bearer 和管理权限，随后检查库身份。设置锁被另一操作占用时先返回 409 `BUSY`，不使用旧策略放行。另一实例已收紧或放宽策略后，首次获准进入权限核验的管理请求就使用新策略；已准入请求不因之后的策略更改撤回。普通读取、音频流及非管理写入使用该实例当前的鉴权状态，不等待耗时根目录编辑的设置锁；这不承诺所有设置与 token 在所有实例间实时广播。局域网 `/admin` 入口继续使用独立的 LAN、Host 与同源检查。
 
@@ -129,13 +130,19 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 | 请求 | 说明 |
 |---|---|
 | `GET /admin/api/status` | 版本、库状态、`auth_mode`(+`_source`: `default`/`config`/`admin`)、`manage_mode`(+`_source`，同上)、`public_url`(+`_source`)、`lan_url`、`lan_url_source`、`lan_url_candidates`、`http_port`、`env_token`（是否配置了环境变量 token）、`token_count`、`tls { configured, source, state: off/starting/listening/error, port, message }`、设置文件路径、`warnings` |
-| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）；回复同 status |
+| `GET /admin/api/runtime` | 只读运行状态，见下文 §2.3.2；每次请求只读内存状态 |
+| `GET /admin/api/update` | 更新状态 `{state, current_version, channel, tag, release_url, message, checked_at}`；`state` 为 `disabled`/`checking`/`current`/`available`/`downloading`/`ready`/`error`；`checked_at`（新增，Unix 秒）为本进程最近一次检查完成（成功或失败）的时间，未检查过为 `null`；`skipped_newer`（新增，向后兼容）为最近一次检查中被跳过的更新版本列表 `[{tag, reason}]`（新到旧，例如更新的 release 缺少本平台有效安装包而改为提供较旧版本），无则为空数组 `[]`，开始新检查时清空；管理页在更新区显示「跳过的新版本：tag — 原因」，为空时隐藏 |
+| `POST /admin/api/update/check` | 开始一次后台检查，立即回复同 `GET /admin/api/update`；已有更新操作进行中 409 `BUSY`，未启用 503 `UNAVAILABLE` |
+| `POST /admin/api/update/install` | `{"tag"}`（必须等于检查得到的 `tag`）下载、校验并部署；扫描进行中 409 `UPDATE_BUSY` |
+| `PUT /admin/api/settings` | `{"public_url"?, "auth_mode"?, "manage_mode"?, "lan_url"?, "pregenerate_list_waveforms"?, "list_waveform_rate"?}`，只改出现的字段；`null` 或 `""` = 删除覆盖、回到 `config.toml`（`manage_mode` 只接受 `"all"`/`"lan"`/`"off"`/`null`，其他值 400 `VALIDATION`）。注意 `false` 与 `null` 不同：`"pregenerate_list_waveforms": false` 保存一个管理页覆盖（显式关闭，`config.toml` 改为 `true` 也不生效），`null`（或 `""`）才删除覆盖、回到 `config.toml` 的值；回复同 status |
 | `PUT /admin/api/tls` | `{"cert_path","key_path","port"}`，校验后保存并（重新）监听；回复同 status（最多等 4 秒拿到监听结果） |
 | `DELETE /admin/api/tls` | 停用（回到 `config.toml` 的 TLS 设置，默认没有） |
 | `GET /admin/api/tokens` | `{"tokens":[{"id","name","created_at","last_used_at"}]}`（不含哈希） |
 | `POST /admin/api/tokens` | `{"name"}` → 201 `{"token":{…},"secret":"al_…"}`，`secret` 只出现这一次 |
 | `DELETE /admin/api/tokens/{id}` | 撤销 → 204；不存在 → 404 `NOT_FOUND` |
 | `GET /admin/api/fs`、`GET`/`POST /admin/api/roots`、`DELETE /admin/api/roots/{name}`、`/admin/api/scans...` | 库根目录管理，见 §2.3.1 |
+
+原生 TLS 每分钟检查证书和私钥内容；有效续期替换只影响新握手，已有连接继续使用原会话。续期文件暂不匹配或不可读时保留旧证书，管理页 TLS 状态 `message` 与服务端日志报告原因，之后继续重试。每个 HTTP/TLS 监听器最多接纳 1024 个连接（含未完成 TLS 握手），超额连接立即关闭。
 
 #### 2.3.1 库根目录管理（管理页专用 Web API）
 
@@ -168,7 +175,40 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 
 **扫描**：`POST /admin/api/scans`（请求体和回复同 `POST /api/v1/scans`）、`GET /admin/api/scans/current`、`GET /admin/api/scans/{id}`、`POST /admin/api/scans/{id}/pause|resume|cancel` 与 §6.6 的同名接口完全相同，只是走管理页的访问限制、不受 `manage_mode` 限制。`GET /admin/api/roots` 返回与 `GET /api/v1/roots` 相同的列表（不需要令牌）。
 
-原生 TLS 每分钟检查证书和私钥内容；有效续期替换只影响新握手，已有连接继续使用原会话。续期文件暂不匹配或不可读时保留旧证书，管理页 TLS 状态 `message` 与服务端日志报告原因，之后继续重试。每个 HTTP/TLS 监听器最多接纳 1024 个连接（含未完成 TLS 握手），超额连接立即关闭。
+#### 2.3.2 运行状态 `GET /admin/api/runtime`
+
+只读，访问限制同其他管理接口（局域网直连 + LAN `Host`，否则 403 `ADMIN_LAN_ONLY`；`Cache-Control: no-store`）。**只读取内存中的状态和已缓存的计数**（信号量、列表波形调度器、缓存计数器、根目录监控的缓存结果、revision 跟踪器、更新管理器），不扫描、不遍历文件系统、不查询库数据库，可以频繁轮询；管理页每 5 秒刷新一次，标签页隐藏时暂停。库启动中或打开失败时 `library` 为 `starting` / `error`，库相关字段为 `null`、`roots` 为空，`update` 照常。
+
+| 字段 | 说明 |
+|---|---|
+| `library` | `ok` / `starting` / `error` |
+| `list_waveforms` | `enabled`（生效的 `pregenerate_list_waveforms`）、`paused`、`rate`（生效的 `list_waveform_rate`，文件/秒）、`current_rate`（最近 60 秒实测，文件/秒，一位小数）、`job`（当前或最近一次缓存任务，同 `GET /api/v1/waveforms/status` 的 `job`：`done`/`total`/`generated`/`skipped`/`failed`…，没有为 `null`）、`pending`（进行中任务的 `total - done`，否则 `null`）、`failed`（当前文件版本解码失败的记录数）、`queued_on_demand`、`cache_entries`、`cache_bytes`、`cache_limit_bytes`（`list_waveform_cache_mb`）、`over_budget`、`last_error`。与 `GET /api/v1/waveforms/status` 不同，这里不计算 `total` / `remaining`（那两个需要查询数据库） |
+| `slots` | `streams` / `previews` / `transcodes` / `waveforms`：各为 `{active, max}`，`max` 即 `max_streams` / `max_previews` / `max_transcodes` / `max_waveforms`（`config.toml`，需重启生效） |
+| `waveform_cache` | `{estimated_bytes, limit_bytes}`：完整波形缓存。`estimated_bytes` 是最近一次定期清理（每若干次写入）测得的大小加上之后写入的字节数，为估算值；启动后首次清理前为 `null`。`limit_bytes` 即 `waveform_cache_mb`（需重启） |
+| `snapshot` | `library_id`、`revision`（内存中最近已知的值，不读数据库）、`preparing` / `preparing_zstd`（是否正在生成快照）、`cached`（复用的快照副本 `{revision, schema_version, bytes, zstd_bytes}`，没有为 `null`） |
+| `roots` | `[{name, online, state: checking/online/waking/offline, message, checked_at}]`，根目录监控的缓存结果；`checked_at` 为最近一次检查或流读取结果的 Unix 秒 |
+| `update` | 最近一次更新检查：`state`、`channel`、`current_version`、`selected`（检查选中的发布 tag，没有为 `null`）、`skip_reason`（未提供更新的原因：`disabled` 未启用 / `up_to_date` 已是最新 / `error` 检查失败，否则 `null`）、`message`、`checked_at` |
+
+示例（测试夹具）：
+
+```json
+{
+  "library": "ok",
+  "list_waveforms": { "enabled": false, "paused": false, "rate": 10, "current_rate": 0.0, "job": null, "pending": null,
+    "failed": 0, "queued_on_demand": 0, "cache_entries": 0, "cache_bytes": 0, "cache_limit_bytes": 671088640,
+    "over_budget": false, "last_error": null },
+  "slots": { "streams": { "active": 0, "max": 3 }, "previews": { "active": 0, "max": 5 },
+    "transcodes": { "active": 0, "max": 2 }, "waveforms": { "active": 0, "max": 4 } },
+  "waveform_cache": { "estimated_bytes": null, "limit_bytes": 1073741824 },
+  "snapshot": { "library_id": "86574ab3-929c-4510-92b9-69fb2295ad07", "revision": 1, "preparing": false,
+    "preparing_zstd": false, "cached": null },
+  "roots": [ { "name": "SFX_Main", "online": true, "state": "online", "message": null, "checked_at": 1792695833 } ],
+  "update": { "state": "disabled", "channel": null, "current_version": "0.6.4", "selected": null,
+    "skip_reason": "disabled", "message": "此进程未启用自动更新", "checked_at": null }
+}
+```
+
+管理页「列表波形与资源限制」可修改 `pregenerate_list_waveforms` 和 `list_waveform_rate`（经 `PUT /admin/api/settings`，立即生效）；建议速率 40 文件/秒或更低以保持较低资源占用。其他限制（`max_*`、`*_cache_mb`）只读显示并标注「需重启」，只能在 `config.toml` 修改。
 
 ### 2.4 外网反代要求
 
@@ -1157,7 +1197,8 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - **并发**：同一时间最多生成一个整包，准备完成即释放生成名额；缓存命中直接共享文件。同时最多 8 个下载，超限返回 503 `BUSY` + `Retry-After: 5`。客户端在准备期间断开时，准备名额仍保持到阻塞工作结束。客户端按 `Retry-After` 等待后重试，期间照常用 §9.1 按页请求。
 - **超时**：本端点不受 §2.1 的 30 秒请求上限；每个整包发送最多 15 分钟，超过后中断响应并释放文件引用及下载名额，即使 HTTP 背压已停止轮询响应体。客户端按下载不完整重试。
 - **响应头**：`ETag: "wfb1-<32 位十六进制>"`（整个包文件 SHA-256 的前 16 字节；同样内容同样 ETag，客户端可用于判断是否与上次导入的包相同，也可用于下面的条件请求）、`X-Library-Id`（同 `meta.library_id`）、`X-Library-Revision`（同 `meta.revision`）、`Content-Length`、`Cache-Control: private, no-cache`（允许客户端保存，但每次使用前须重新验证；旧版本为 `no-store`）。
-- **条件请求（`If-None-Match`）**：客户端可发送上次导入的包的 `ETag`。服务端按 RFC 9110 弱比较判断：支持带引号的 ETag、`W/` 弱形式、逗号分隔的列表和 `*`。任一项与当前整包 ETag 相同 → `304 Not Modified`，带 `ETag`、`Cache-Control`、`X-Library-Id`、`X-Library-Revision`，**无响应体**（不打开、不发送约 308 MB 的文件）；不匹配或未发送 → 照常 `200` 全量。ETag 是包文件内容的哈希，所以缓存未命中时服务端仍须先生成整包才能比较（生成名额与 503 `BUSY` 规则同上）；缓存命中时只做比较。304 后客户端继续用本地包并按 §9.1 增量补齐。旧服务端忽略该头并返回 200（客户端可比较响应 `ETag` 自行判断）。
+- **ETag 接口规则**：服务端对整包**只**发送强 ETag `"wfb1-<32 位小写十六进制>"`（带双引号，**从不**发送 `W/` 弱形式）。客户端保存原值并作为字符串**精确比较**（含引号），不做大小写转换或弱比较。304 响应携带与当前整包完全相同的强 ETag（与对应 200 的 `ETag` 字节相同）。
+- **条件请求（`If-None-Match`）**：客户端可发送上次导入的包的 `ETag`。服务端按 RFC 9110 弱比较判断：支持带引号的 ETag、`W/` 弱形式、逗号分隔的列表和 `*`。任一项与当前整包 ETag 相同 → `304 Not Modified`，带 `ETag`、`Cache-Control`、`X-Library-Id`、`X-Library-Revision`，**无响应体**（不打开、不发送约 308 MB 的文件）；不匹配或未发送 → 照常 `200` 全量。ETag 是包文件内容的哈希，所以缓存未命中时服务端仍须先生成整包才能比较（生成名额与 503 `BUSY` 规则同上）；缓存命中时只做比较。304 后客户端继续用本地包并按 §9.1 增量补齐。任一条目的波形变化（写入、删除、`rebuild`）都会产生新的包文件，因而得到新的 `ETag`，旧 `If-None-Match` 随之得到 `200`。客户端发送 `If-None-Match` 是可选的。旧服务端忽略该头并返回 200（客户端可比较响应 `ETag` 自行判断）。
 - `meta` 表包含 `generated_at`（Unix 秒）、`library_id`、`revision`、`schema_version`、`encoding`。**`revision` 是主库的 `revision`（§4），仅供参考/诊断**：`waveforms.db` 的内容不随主库 revision 变化，也可能在同一 revision 下变化，客户端**不得**用它判断条目新旧；续传只按逐项 `etag`（下一条）。
 - 客户端流程：下载到临时文件 → **校验后才使用**：`PRAGMA integrity_check` 为 `ok`；表/列名在白名单内（`list_waveforms` 与 `meta`，列同上，不多不少）；每行 `blob` 恰好 256 B、`encoding` 等于请求值、`0 ≤ n ≤ 128`；`meta.library_id` 等于当前库 → **原子替换**本地 `waveforms.db`（同目录临时文件 + rename）。任一校验失败则丢弃，不覆盖现有缓存。
 - 增量（续传）：导入后用 §9.1（`known` = 包内该项的 etag）按 etag 增量拉取；打包期间或之后变化的条目 etag 已不同，会返回 `ok`，所以不会丢失。不按 `meta.revision` 或 `generated_at` 做任何过滤。

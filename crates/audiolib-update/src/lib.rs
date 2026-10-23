@@ -80,8 +80,24 @@ pub struct ReleaseUpdate {
     pub release_url: String,
     /// Release notes (bounded with the release listing).
     pub notes: String,
+    /// Why a newer release was not offered, e.g. `v0.7.0` had no valid package for
+    /// this platform and this older release was selected instead; `None` otherwise.
+    #[serde(default)]
+    pub skipped_newer: Option<String>,
+    /// Every newer release (newest first) that was skipped in favour of this one.
+    #[serde(default)]
+    pub skipped_releases: Vec<SkippedRelease>,
     pub(crate) asset: Asset,
     pub(crate) checksum: Asset,
+}
+
+/// A newer release the channel would accept but that was not offered, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedRelease {
+    /// Full GitHub tag including `v`.
+    pub tag: String,
+    /// Human-readable reason the release was skipped.
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +125,8 @@ pub struct UpdateClient {
     channel: Channel,
     current: Version,
     agent: ureq::Agent,
+    /// GitHub releases API endpoint (without query); defaults to this repository's.
+    releases_api: String,
 }
 
 impl UpdateClient {
@@ -122,12 +140,25 @@ impl UpdateClient {
         self.channel
     }
 
+    /// Replace the releases API endpoint (`?per_page=100&page=N` is appended). The
+    /// production agent still only accepts HTTPS; intended for mirrors and tests.
+    pub fn with_releases_api(mut self, url: impl Into<String>) -> Self {
+        self.releases_api = url.into();
+        self
+    }
+
+    /// The releases API endpoint in use.
+    pub fn releases_api(&self) -> &str {
+        &self.releases_api
+    }
+
     /// Creates a release client without performing network I/O.
     pub fn new(product: Product, channel: Channel, current_version: &str) -> Result<Self> {
         Ok(Self {
             product,
             channel,
             current: Version::parse(current_version)?,
+            releases_api: RELEASES_API.to_owned(),
             agent: ureq::Agent::config_builder()
                 .https_only(true)
                 .tls_config(
@@ -181,7 +212,7 @@ impl UpdateClient {
         // Paginate instead of relying on /latest, which excludes beta releases.
         // The finite bound prevents an untrusted/huge repository from stalling startup.
         for page in 1..=5 {
-            let url = format!("{RELEASES_API}?per_page=100&page={page}");
+            let url = format!("{}?per_page=100&page={page}", self.releases_api);
             let mut batch = self.fetch_releases(&url)?;
             // GitHub (or an intermediate proxy) intermittently answers the first page
             // with 200 and `[]`; this repository always has releases, so an empty first
@@ -228,6 +259,7 @@ impl UpdateClient {
         let mut selected: Option<(Version, ReleaseUpdate)> = None;
         // Newer releases this channel would accept but whose assets are missing or invalid.
         let mut unusable: Option<Version> = None;
+        let mut skipped: Vec<(Version, String)> = Vec::new();
         for release in releases {
             if release.draft {
                 continue;
@@ -264,6 +296,7 @@ impl UpdateClient {
                     tag = %release.tag_name,
                     "update check: newer release has no valid package for this platform; skipped"
                 );
+                skipped.push((version.clone(), release.tag_name.clone()));
                 if unusable.as_ref().is_none_or(|worst| &version > worst) {
                     unusable = Some(version);
                 }
@@ -279,6 +312,8 @@ impl UpdateClient {
                         release.tag_name
                     ),
                     notes: release.body.unwrap_or_default(),
+                    skipped_newer: None,
+                    skipped_releases: Vec::new(),
                     asset: asset.clone(),
                     checksum: checksum.clone(),
                 },
@@ -294,6 +329,24 @@ impl UpdateClient {
                 "update check: offering an older release because the newest has no valid package"
             ),
             _ => {}
+        }
+        if let (Some((chosen, update)), Some(version)) = (selected.as_mut(), unusable.as_ref())
+            && *version > *chosen
+        {
+            update.skipped_newer = Some(format!(
+                "Release v{version} is newer but has no valid package for this platform; offering v{chosen}"
+            ));
+        }
+        if let Some((chosen, update)) = selected.as_mut() {
+            skipped.retain(|(version, _)| version > chosen);
+            skipped.sort_by(|a, b| b.0.cmp(&a.0));
+            update.skipped_releases = skipped
+                .into_iter()
+                .map(|(_, tag)| SkippedRelease {
+                    tag,
+                    reason: "no valid package for this platform".into(),
+                })
+                .collect();
         }
         tracing::info!(
             releases = total,

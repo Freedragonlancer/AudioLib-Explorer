@@ -13,8 +13,11 @@ mod progressive_waveform;
 #[cfg(test)]
 mod responsive_layout_tests;
 mod startup;
+mod theme;
 #[cfg(test)]
 mod ui_review_tests;
+#[cfg(test)]
+mod ui_scale_tests;
 #[cfg(test)]
 mod ui_tests;
 mod updates;

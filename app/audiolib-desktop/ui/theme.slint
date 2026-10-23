@@ -3,27 +3,53 @@ import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
 
 // Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
 export global Theme {
-    out property <color> bg: #181b20;
-    out property <color> panel: #20242a;
-    out property <color> raised: #2a3037;
-    out property <color> hover: #353d45;
-    out property <color> border: #353d45;
-    out property <color> strong-border: #697581;
-    out property <color> ink: #d9dee3;
-    out property <color> dim: #aab2bd;
-    out property <color> muted: #95a0ac;
-    out property <color> accent: #8faea6;
-    out property <color> accent-hover: #a8c3bb;
-    out property <color> on-accent: #202b28;
-    out property <color> selected: #2b3a38;
-    out property <color> checked: #354744;
-    out property <color> alternate: #22282e;
-    out property <color> warning: #c3b48e;
-    out property <color> player: #232a30;
-    out property <color> player-border: #465059;
-    out property <color> tooltip: #14171c;
-    out property <color> overlay: #000000a8;
-    // Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
+    // GUI scale factor (PR1: stays 1.0; nothing reads or writes it from Rust yet).
+    // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
+    // (borders, separators, `/ 1px` unit conversions) stay unscaled.
+    in-out property <float> ui-scale: 1.0;
+    // Font size settings in whole pixels (10-24, set from Rust). 13 is the reference size
+    // at which every design size below is used unchanged, so the defaults keep the look.
+    in-out property <int> ui-font-px: 13;
+    // Result list rows only (Appearance > List font size).
+    in-out property <int> list-font-px: 13;
+    // Interface text: design size `n` px adjusted by the interface font setting and the
+    // UI scale, rounded to whole pixels.
+    public pure function font(n: float) -> length {
+        return round(n * Theme.ui-scale * Theme.ui-font-px / 13) * 1px;
+    }
+    // Result list row text: design size `n` px adjusted by the list font setting.
+    public pure function list-font(n: float) -> length {
+        return round(n * Theme.ui-scale * Theme.list-font-px / 13) * 1px;
+    }
+    // List rows grow with a larger list font and never shrink below the design height.
+    out property <float> list-row-factor: max(1.0, Theme.list-font-px / 13);
+    // Window default text size (was `default-font-size: 12px`).
+    out property <length> ui-font-size: Theme.font(12);
+    // Result list file-name cell (was `font-size: 12px`).
+    out property <length> list-font-size: Theme.list-font(12);
+    // Palette tokens. The values here are the default theme; Rust (src/theme.rs) sets
+    // them from the selected theme at startup and when the Theme setting changes.
+    in-out property <color> bg: #181b20;
+    in-out property <color> panel: #20242a;
+    in-out property <color> raised: #2a3037;
+    in-out property <color> hover: #353d45;
+    in-out property <color> border: #353d45;
+    in-out property <color> strong-border: #697581;
+    in-out property <color> ink: #d9dee3;
+    in-out property <color> dim: #aab2bd;
+    in-out property <color> muted: #95a0ac;
+    in-out property <color> accent: #8faea6;
+    in-out property <color> accent-hover: #a8c3bb;
+    in-out property <color> on-accent: #202b28;
+    in-out property <color> selected: #2b3a38;
+    in-out property <color> checked: #354744;
+    in-out property <color> alternate: #22282e;
+    in-out property <color> warning: #c3b48e;
+    in-out property <color> player: #232a30;
+    in-out property <color> player-border: #465059;
+    in-out property <color> tooltip: #14171c;
+    in-out property <color> overlay: #000000a8;
+    // Not themeable. Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
     out property <color> spectral-canvas: #849094;
     out property <color> normal-canvas: #1d2328;
 }
@@ -40,26 +66,26 @@ export component ThemedSlider inherits Rectangle {
     callback changed <=> native.changed;
     callback released <=> native.released;
     forward-focus: native;
-    min-height: 20px; min-width: 20px;
+    min-height: 20px * Theme.ui-scale; min-width: 20px * Theme.ui-scale;
     horizontal-stretch: 1; vertical-stretch: 0;
     in property <color> surface: Theme.player;
     native := Slider { width: parent.width; height: parent.height; }
     Rectangle { background: root.surface; }
     property <float> fraction: clamp((root.value - root.minimum) / max(0.001, root.maximum - root.minimum), 0, 1);
     Rectangle {
-        x: 10px; y: (parent.height - self.height) / 2;
-        width: parent.width - 20px; height: 4px; border-radius: 2px;
+        x: 10px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+        width: parent.width - 20px * Theme.ui-scale; height: 4px * Theme.ui-scale; border-radius: 2px * Theme.ui-scale;
         background: Theme.strong-border;
         opacity: root.enabled ? 0.65 : 0.3;
-        Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * root.fraction; background: Theme.accent; border-radius: 2px; }
+        Rectangle { x: 0px; y: 0px; height: parent.height; width: parent.width * root.fraction; background: Theme.accent; border-radius: 2px * Theme.ui-scale; }
     }
     Rectangle {
-        x: (parent.width - 20px) * root.fraction; y: (parent.height - self.height) / 2;
-        width: 20px; height: 20px; border-radius: 10px;
+        x: (parent.width - 20px * Theme.ui-scale) * root.fraction; y: (parent.height - self.height) / 2;
+        width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; border-radius: 10px * Theme.ui-scale;
         background: Theme.raised; border-width: 1px;
         border-color: root.has-focus ? Theme.accent : Theme.strong-border;
         opacity: root.enabled ? 1 : 0.45;
-        Rectangle { x: 4px; y: 4px; width: 12px; height: 12px; border-radius: 6px; background: Theme.accent; }
+        Rectangle { x: 4px * Theme.ui-scale; y: 4px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale; border-radius: 6px * Theme.ui-scale; background: Theme.accent; }
     }
     // Paint-only rectangles do not intercept the standard pointer/key/accessibility owner.
 }
@@ -75,13 +101,13 @@ export component ThemedCheckBox inherits Rectangle {
     HorizontalLayout { padding: 0px; native := CheckBox { } }
     Rectangle { background: root.surface; }
     if root.text != "": Text {
-        x: 30px; width: parent.width - self.x; height: parent.height;
+        x: 30px * Theme.ui-scale; width: parent.width - self.x; height: parent.height;
         text: root.text; color: Theme.ink; vertical-alignment: center;
         opacity: root.enabled ? 1 : 0.45;
     }
     Rectangle {
-        x: 0px; width: 18px; height: 18px; y: (parent.height - self.height) / 2;
-        border-radius: 3px; border-width: 1px;
+        x: 0px; width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+        border-radius: 3px * Theme.ui-scale; border-width: 1px;
         background: root.checked ? Theme.accent : Theme.panel;
         border-color: root.has-focus ? Theme.ink : (root.checked ? Theme.accent : Theme.strong-border);
         opacity: root.enabled ? 1 : 0.45;
@@ -89,7 +115,7 @@ export component ThemedCheckBox inherits Rectangle {
         // from the selected UI font and leave checked items as blank squares.
         if root.checked: Image {
             source: @image-url("icons/check.svg"); colorize: Theme.on-accent;
-            x: 3px; y: 3px; width: 12px; height: 12px;
+            x: 3px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale;
             image-fit: contain; accessible-role: none;
         }
     }
@@ -105,10 +131,10 @@ export component ThemedLineEdit inherits Rectangle {
     callback accepted <=> native.accepted;
     callback edited <=> native.edited;
     forward-focus: native;
-    horizontal-stretch: 1; vertical-stretch: 0; min-width: 160px;
+    horizontal-stretch: 1; vertical-stretch: 0; min-width: 160px * Theme.ui-scale;
     HorizontalLayout { padding: 0px; native := LineEdit { min-width: 0px; accessible-label: root.input-label; } }
     if root.has-focus && root.enabled: Rectangle {
-        x: 4px; y: parent.height - 2px; height: 2px; width: parent.width - 8px;
+        x: 4px * Theme.ui-scale; y: parent.height - 2px * Theme.ui-scale; height: 2px * Theme.ui-scale; width: parent.width - 8px * Theme.ui-scale;
         background: Theme.accent;
     }
 }

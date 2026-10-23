@@ -21,6 +21,7 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
    `程序 0.4.0 | API /api/v1/ | schema 5 | 快照兼容 3..=5`
 
 6. 发布产物附 SHA256：`package-portable.ps1` 生成 `<zip>.sha256`，GitHub Actions 发布步骤把它连同 ZIP 上传为 Release 资产，并写入发布说明正文。
+   每个 Release 只发布两个包：Windows 客户端和 macOS arm64 服务端，各附一个 `.sha256`。只有 macOS 服务端支持自动更新；不发布 Windows 和 Linux 服务端包。
 
 规则 1 到 5 由 `tools/check-release.ps1` 检查，失败时列出全部错误并以非零退出。
 
@@ -35,18 +36,25 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
    省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
 4. 正式发布前在本地执行 `tools/check-local.ps1 -Asio`、受影响的专项回归及打包启动验收；日常开发按 [Testing Strategy](Testing_Strategy.md) 选择最小范围。缺少平台或硬件覆盖时明确记录，不能以云端构建代替功能验证。
 5. 合并后在发布提交上打标签 `v0.4.6`（或 `v0.4.6-rc.1`）并推送。
-6. 发布包在对应本机平台构建、验证，使用 `gh release upload <tag> <files>` 上传已创建的 Release。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动；若手动执行云端构建，Windows 调用 `check-release.ps1` / `ci-release.ps1`，Unix 构建并打包服务端，保留实际产物 allowlist、隐私、版本/提交身份和 SHA256 核验。Clippy、功能测试及 UI/服务端启动/health 均在本地执行，云端报告将 portable 运行时结果写为 `not-run`，不声称通过未执行的检查。
-7. 从已发布 Release 下载客户端包、SHA256 和 `Rust_CI_Release.json`，核验归档及报告的标签/提交，再按 AGENTS.md 更新固定 `local_release/` 并核对两个 EXE。CI 产物作为安装身份基准，不以不同本机构建的哈希替代。使用 `pwsh`（PowerShell 7.3 以上）执行 portable validator，传入 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 核对已发布报告中的 EXE 哈希，并运行隔离首次启动、CLI/UI 和诊断检查；省略报告时仍要求本机 release 输出一致。
+6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上构建 macOS arm64 服务端包，各自生成对应的 `.sha256`。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。
+7. 上传本机构建的 4 个资产（两个包及各自的 `.sha256`）：用 `tools/release-create.sh <tag> <资产…>` 创建 Release 并上传，或对已创建的 Release 用 `gh release upload <tag> <资产…>`。之后可选地在 GitHub Actions 中手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验：确认 Release 恰有上述 4 个资产且 SHA256 正确。该 workflow 不构建、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，因此打标签前无需先禁用 release.yml。按 AGENTS.md 用本机构建的发布包更新固定 `local_release/` 并核对两个 EXE，再用 `pwsh`（PowerShell 7.3 以上）执行 portable validator（`-ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout`），运行隔离首次启动、CLI/UI 和诊断检查。
 
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：
 
 - 通过：Cargo 0.4.6 + 版本行 + `-Tag v0.4.6 -BaseTag v0.4.5`
 - 失败：`-Tag v0.4.12`（与 Cargo 不一致）；schema 变了只升 PATCH；缺版本行。
 
+## Release 命名规则
+
+- 正式版：标签 `vX.Y.Z`，Release 标题 `AudioLib Explorer vX.Y.Z`，不是 prerelease。
+- Beta：标签 `vX.Y.Z-beta.N`（rc 同理 `-rc.N`），标题 `AudioLib Explorer vX.Y.Z-beta.N`，必须标为 prerelease（`--latest=false`）。
+- 标题、标签与 `Cargo.toml` 工作区版本（忽略 `-beta.N` / `-rc.N` 后缀）必须一致。标题由标签自动生成：`tools/release-create.sh <tag> [--notes-file f] [资产…]` 传 `--title "AudioLib Explorer <tag>"`，不要手写标题。
+- 发布后用 `pwsh tools/check-release.ps1 -Tag <tag> -CheckGitHubRelease` 核对（或 `-ReleaseTitle <title> -Prerelease <bool>` 离线检查）；标题不符或 prerelease 标记与标签后缀不符均为硬错误。
+
 ## Beta 流程
 
 1. 功能 PR 合入 `beta` 分支；`main` 只接受经过 beta 测试的 `beta`（或 hotfix 分支）合并。
-2. 在 `beta` 的待测提交上打 `vX.Y.Z-beta.N`（`X.Y.Z` 与 `Cargo.toml` 一致），发布为 GitHub pre-release（`gh release create <tag> --prerelease --latest=false`；手动 `release.yml` 对带后缀的标签自动加 `--prerelease`）。
+2. 在 `beta` 的待测提交上打 `vX.Y.Z-beta.N`（`X.Y.Z` 与 `Cargo.toml` 一致），发布为 GitHub pre-release（`tools/release-create.sh <tag>`，等价于 `gh release create <tag> --title "AudioLib Explorer <tag>" --prerelease --latest=false`；完全由标签推导：带后缀的标签（`-beta.N` / `-rc.N`）自动加 `--prerelease --latest=false`，纯 `vX.Y.Z` 为正式版）。
 3. 本机用 `tools/install-beta.ps1` 安装到独立目录（默认仓库下 `beta_release/`，可用 `-Destination` 指定），并通过 `AudioLibExplorer-beta.cmd` 启动；该脚本把 `AUDIOLIB_DATA_DIR` 设为 `%LOCALAPPDATA%/AudioLibExplorer/beta`，与正式版 `v1` 数据完全隔离。
 4. 每个 beta 待测提交按 [AGENTS.md](../AGENTS.md) 的 Beta testing flow 依次执行：Mac 上 `tools/beta-refresh.sh` 刷新 beta 服务端（含 commit 与库根读取自检），Windows 上 `tools/beta-smoke.ps1` 冒烟，再过 GUI 手动清单；任何一步失败都不得提升。
 5. beta 验收通过后，从 `beta` 开 PR 合入 `main`，再按上文流程打正式标签。

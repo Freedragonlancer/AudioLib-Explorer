@@ -587,6 +587,9 @@ struct Inner {
     /// `max_streams` / `max_previews`: a slot in use means audio is being served.
     max_streams: usize,
     max_previews: usize,
+    /// `max_transcodes` / `max_waveforms` (admin runtime view only).
+    max_transcodes: usize,
+    max_waveforms: usize,
     /// List thumbnail waveforms (`POST /waveforms`, pre-generation; §9.1–§9.2).
     list: Arc<ListWaveforms>,
     ffmpeg_path: PathBuf,
@@ -595,6 +598,52 @@ struct Inner {
     scans: ScanManager,
     /// Read-only connection for the `/roots` aggregates (missing counts, last scans).
     roots_db: Mutex<Connection>,
+}
+
+/// Active slots of one limit.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SlotCount {
+    /// Slots in use now.
+    pub active: usize,
+    /// Configured limit (`config.toml`, needs a restart).
+    pub max: usize,
+}
+
+/// [`AppState::slot_usage`].
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SlotUsage {
+    /// `/audio/{id}/stream` (`max_streams`).
+    pub streams: SlotCount,
+    /// `/audio/{id}/preview` (`max_previews`).
+    pub previews: SlotCount,
+    /// ffmpeg transcodes (`max_transcodes`).
+    pub transcodes: SlotCount,
+    /// Waveform decodes (`max_waveforms`).
+    pub waveforms: SlotCount,
+}
+
+/// Cached snapshot copy of [`SnapshotRuntime`].
+#[derive(Clone, Debug, Serialize)]
+pub struct CachedSnapshot {
+    /// Revision the copy was built for.
+    pub revision: u64,
+    /// SQLite user_version of the copy.
+    pub schema_version: i64,
+    /// Size of the plain copy.
+    pub bytes: u64,
+    /// Size of the zstd copy, once built.
+    pub zstd_bytes: Option<u64>,
+}
+
+/// [`AppState::snapshot_runtime`].
+#[derive(Clone, Debug, Serialize)]
+pub struct SnapshotRuntime {
+    /// A plain snapshot is being prepared.
+    pub preparing: bool,
+    /// A zstd snapshot is being prepared.
+    pub preparing_zstd: bool,
+    /// The newest prepared copy kept for reuse.
+    pub cached: Option<CachedSnapshot>,
 }
 
 /// Cheaply cloneable handle shared by all request handlers.
@@ -802,6 +851,8 @@ impl AppState {
                 waveform_slots: Arc::new(Semaphore::new(config.max_waveforms)),
                 max_streams: config.max_streams,
                 max_previews: config.max_previews,
+                max_transcodes: config.max_transcodes,
+                max_waveforms: config.max_waveforms,
                 list,
                 ffmpeg_path: config.ffmpeg_path.clone(),
                 transcode_slots: Arc::new(Semaphore::new(config.max_transcodes)),
@@ -1769,6 +1820,69 @@ impl AppState {
         self.inner
             .stream_open_delay_ms
             .store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Slot usage of streams, previews, transcodes and waveforms against their limits
+    /// (semaphore permits only; for `GET /admin/api/runtime`).
+    pub fn slot_usage(&self) -> SlotUsage {
+        let used = |slots: &Semaphore, max: usize| SlotCount {
+            active: max.saturating_sub(slots.available_permits()),
+            max,
+        };
+        let inner = &self.inner;
+        SlotUsage {
+            streams: used(&inner.stream_slots, inner.max_streams),
+            previews: used(&inner.preview_slots, inner.max_previews),
+            transcodes: used(&inner.transcode_slots, inner.max_transcodes),
+            waveforms: used(&inner.waveform_slots, inner.max_waveforms),
+        }
+    }
+
+    /// `(estimated bytes, limit bytes)` of the full waveform cache; the estimate is
+    /// `None` until the first periodic trim measured the directory (no filesystem access).
+    pub fn waveform_cache_usage(&self) -> (Option<u64>, u64) {
+        (
+            self.inner.waveforms.estimated_bytes(),
+            self.inner.waveforms.limit_bytes(),
+        )
+    }
+
+    /// In-memory snapshot state: preparations in flight and the cached copy, if any.
+    pub fn snapshot_runtime(&self) -> SnapshotRuntime {
+        let preparing = {
+            let jobs = self
+                .inner
+                .snapshot_jobs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let busy = |slot: &Option<SnapshotJob>| {
+                slot.as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                    .is_some_and(|job| job.finished().is_none())
+            };
+            [busy(&jobs[0]), busy(&jobs[1])]
+        };
+        let cached = self
+            .inner
+            .snapshot_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        SnapshotRuntime {
+            preparing: preparing[0],
+            preparing_zstd: preparing[1],
+            cached: cached.map(|snapshot| CachedSnapshot {
+                revision: snapshot.revision,
+                schema_version: snapshot.schema_version,
+                bytes: snapshot.plain.bytes,
+                zstd_bytes: snapshot
+                    .zstd
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                    .map(|file| file.bytes),
+            }),
+        }
     }
 
     /// Cached status of every configured root (never touches the filesystem).

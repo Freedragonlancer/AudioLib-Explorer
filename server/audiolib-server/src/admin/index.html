@@ -50,8 +50,35 @@
 <section aria-live="polite">
   <h2>程序更新</h2>
   <div id="update-status">正在读取更新状态…</div>
+  <div id="update-skipped" class="muted hidden"></div>
   <div class="muted">每次启动检查 GitHub Release。确认后下载、校验并自动部署；现有资料库、音频、配置和令牌保留。部署期间连接会短暂中断。</div>
   <div class="row"><button id="update-check">检查更新</button><button id="update-install" class="primary" disabled>下载并更新服务端</button><a id="update-release" class="hidden" target="_blank" rel="noreferrer noopener">发布说明</a></div>
+</section>
+
+<section aria-live="polite">
+  <h2>运行状态</h2>
+  <div class="muted">只读取服务端内存中的状态（不扫描、不遍历磁盘），每 5 秒自动刷新；页面切到后台时暂停。<span id="rt-updated"></span></div>
+  <div class="inline-error" id="rt-error"></div>
+  <table>
+    <tbody>
+      <tr><th>列表波形预生成</th><td id="rt-list"></td></tr>
+      <tr><th>并发占用</th><td id="rt-slots"></td></tr>
+      <tr><th>缓存</th><td id="rt-cache"></td></tr>
+      <tr><th>快照 / 库版本</th><td id="rt-snapshot"></td></tr>
+      <tr><th>根目录在线</th><td id="rt-roots"></td></tr>
+      <tr><th>最近更新检查</th><td id="rt-update"></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>列表波形与资源限制</h2>
+  <div class="row"><label class="k">预生成列表波形</label><label><input type="checkbox" id="pregen"> 后台为全部音频预先生成列表缩略波形</label></div>
+  <div class="row"><label class="k">生成速率</label><input id="lw-rate" type="number" min="1" max="1000" placeholder="文件/秒"><span class="muted">文件/秒（1–1000）</span></div>
+  <div class="muted">建议使用 40 文件/秒（或更低）以保持较低的 CPU / 磁盘占用；留空 = 回到 config.toml 的值。保存后立即生效（从下一个文件起），无需重启。</div>
+  <div class="row"><button class="primary" id="save-lw">保存</button><button id="reset-lw">恢复配置文件默认</button><span class="muted" id="lw-source"></span></div>
+  <div class="muted" style="margin-top:8px">以下限制只能在 config.toml 中修改（只读显示）：</div>
+  <table><tbody id="rt-limits"></tbody></table>
 </section>
 
 <section>

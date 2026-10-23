@@ -78,10 +78,10 @@ pub use download::{
 };
 pub use error::{NetworkFailure, RemoteError, Result, TlsFailure};
 pub use list_waveforms::{
-    BatchItem, BatchReply, BatchStatus, BundleMeta, DEFAULT_LIST_WAVEFORM_CACHE_BYTES,
-    LIST_WAVEFORM_ENCODING, LIST_WAVEFORM_SHARD_IDS, ListWaveformStatus, ListWaveformStore,
-    ListWaveformsCapability, RemoteListWaveforms, ServerSettings, StoredListWaveform,
-    UNSUPPORTED_ENCODING, bundle_backoff, bundle_etag,
+    BatchItem, BatchReply, BatchStatus, BundleDownload, BundleImport, BundleMeta,
+    DEFAULT_LIST_WAVEFORM_CACHE_BYTES, LIST_WAVEFORM_ENCODING, LIST_WAVEFORM_SHARD_IDS,
+    ListWaveformStatus, ListWaveformStore, ListWaveformsCapability, RemoteListWaveforms,
+    ServerSettings, StoredListWaveform, UNSUPPORTED_ENCODING, bundle_backoff, bundle_etag,
 };
 pub use manage::{
     Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS, ManageMode, RemoveReport,

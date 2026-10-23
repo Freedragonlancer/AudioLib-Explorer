@@ -19,6 +19,23 @@ $artifactRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot '.rust-validation/po
 $savedDataRoot = $env:AUDIOLIB_DATA_DIR
 $legacyPath = Join-Path $taskRoot 'data/audiolib.db'
 $originalHash = if (!$CleanCheckout) { (Get-FileHash -LiteralPath $legacyPath -Algorithm SHA256).Hash } else { $null }
+# Windows PowerShell 5 turns native stderr into terminating NativeCommandError records
+# under ErrorActionPreference=Stop (notably when the caller redirects with *>&1), although
+# the CLI writes informational notes there. Run the CLI with a local 'Continue' and judge
+# success only by its exit code.
+function Invoke-Cli([string[]]$Arguments) {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $all = @(& $cli @Arguments 2>&1)
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $saved }
+    [PSCustomObject]@{
+        ExitCode=$code
+        Output=($all | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | Out-String)
+        Error=($all | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() } | Out-String)
+    }
+}
 function Invoke-DesktopSmoke([string[]]$Arguments, [string]$Name) {
     $stdout = Join-Path $testRoot ($Name + '.stdout')
     $stderr = Join-Path $testRoot ($Name + '.stderr')
@@ -57,8 +74,9 @@ try {
         & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $binaryRoot -ReleaseReport $PublishedReleaseReport
         $published = Get-Content -LiteralPath $PublishedReleaseReport -Raw | ConvertFrom-Json
         if ($published.tag -cne $ExpectedTag -or $published.commit -cne $ExpectedCommit) { throw 'Published release report does not match the expected tag/commit.' }
-        $versionText = & $cli --version | Out-String
-        if ($LASTEXITCODE -ne 0 -or $versionText.Trim() -cne ('AudioLibCli ' + $published.version)) { throw 'Published CLI version does not match its release report.' }
+        $version = Invoke-Cli @('--version')
+        $versionText = $version.Output
+        if ($version.ExitCode -ne 0 -or $versionText.Trim() -cne ('AudioLibCli ' + $published.version)) { throw 'Published CLI version does not match its release report.' }
         $identityCheck = 'packaged EXE hashes match published release report'
     } else {
         if ($ExpectedTag -or $ExpectedCommit) { throw 'Expected tag/commit requires a published release report.' }
@@ -68,13 +86,20 @@ try {
             $sourceHash = (Get-FileHash -LiteralPath (Join-Path $targetRoot ('x86_64-pc-windows-msvc/release/' + $binary)) -Algorithm SHA256).Hash
             $packageHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binary) -Algorithm SHA256).Hash
             if ($sourceHash -ne $packageHash) { throw "Packaged binary differs from release: $binary" }
+            # package-portable.ps1 writes `<exe>.sha256` as `<lowercase hex>  <file name>`.
+            $sidecar = Join-Path $binaryRoot ($binary + '.sha256')
+            if (!(Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw "Missing checksum sidecar: $binary.sha256" }
+            $sidecarText = [IO.File]::ReadAllText($sidecar).TrimEnd("`r", "`n")
+            if ($sidecarText -cnotmatch '^[0-9a-f]{64}  (\S.*)$' -or $Matches[1] -cne $binary) { throw "Checksum sidecar must read '<lowercase hex>  $binary': $binary.sha256" }
+            if ($sidecarText.Substring(0, 64) -cne $packageHash.ToLowerInvariant()) { throw "Checksum sidecar does not match the packaged binary: $binary.sha256" }
         }
+        $identityCheck = 'packaged EXE hashes match release and their .sha256 sidecars'
     }
     # The archive next to the default package output must use updater-safe entry names.
     $portableArchive = Join-Path (Split-Path -Parent $binaryRoot) 'AudioLibExplorer-latest-win-x64-portable.zip'
     $zipCheck = $null
     if (Test-Path -LiteralPath $portableArchive) {
-        $expectedEntries = @(Get-ChildItem -LiteralPath $binaryRoot -Recurse -Force -File | ForEach-Object { $_.FullName.Substring($binaryRoot.Length).TrimStart('\', '/').Replace('\', '/') })
+        $expectedEntries = @(Get-ChildItem -LiteralPath $binaryRoot -Recurse -Force -File | Where-Object { $_.DirectoryName -ne $binaryRoot -or $_.Name -notmatch '^AudioLib(Explorer|Cli)\.exe\.sha256$' } | ForEach-Object { $_.FullName.Substring($binaryRoot.Length).TrimStart('\', '/').Replace('\', '/') })
         & (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $portableArchive -ExpectedEntries $expectedEntries
         $zipCheck = 'portable ZIP entry names use forward slashes'
     }
@@ -101,12 +126,16 @@ try {
             }
         } finally { $writer.Dispose() }
         $fixtureHash = (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash
-        $scan = (& $cli scan $fixtureRoot | Out-String) | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0 -or !$scan.success) { throw 'Packaged CLI synthetic fixture scan failed.' }
+        $scanRun = Invoke-Cli @('scan', $fixtureRoot)
+        if ($scanRun.ExitCode -ne 0) { throw "Packaged CLI synthetic fixture scan failed: $($scanRun.Error)" }
+        $scan = $scanRun.Output | ConvertFrom-Json
+        if (!$scan.success) { throw 'Packaged CLI synthetic fixture scan failed.' }
         $expectedCount = 1
     }
-    $stats = (& $cli stats | Out-String) | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0 -or !$stats.success -or $stats.data.audio_files -ne $expectedCount) { throw 'Packaged CLI statistics failed.' }
+    $statsRun = Invoke-Cli @('stats')
+    if ($statsRun.ExitCode -ne 0) { throw "Packaged CLI statistics failed: $($statsRun.Error)" }
+    $stats = $statsRun.Output | ConvertFrom-Json
+    if (!$stats.success -or $stats.data.audio_files -ne $expectedCount) { throw 'Packaged CLI statistics failed.' }
     $snapshot = Join-Path $artifactRoot 'chinese.png'
     $ui = Invoke-DesktopSmoke @('--smoke-ui','--smoke-language','cn','--screenshot',('"' + $snapshot + '"')) 'chinese'
     if ($ui.ExitCode -ne 0 -or !(Test-Path -LiteralPath $snapshot)) { throw "Portable Chinese UI smoke failed: $($ui.Error)" }
