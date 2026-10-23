@@ -4,6 +4,8 @@
 
 **AudioLib Explorer 帮助声音设计师建立属于自己的音效库。**
 
+开源免费的音效库管理软件（SFX 音效浏览、检索、试听、元数据管理），面向声音设计、游戏音频和影视拟音（Foley），可作为 Soundminer 的开源替代方案。
+
 - 三种部署方式：纯客户端单机、客户端加局域网服务端、客户端加公网域名服务端。
 - 针对公网音频流预览做了专门优化，试听做到 0 延迟。
 - 服务端数据库同步到本地，搜索 0 延迟。
@@ -11,6 +13,8 @@
 - 可承载 10 TB 以上的大规模音效素材库。
 
 **AudioLib Explorer helps sound designers build a sound-effects library of their own.**
+
+A free, open-source sound effects (SFX) library manager for sound design, game audio and Foley: browse, search, preview and tag audio files. An open-source alternative to Soundminer.
 
 - Three deployment modes: standalone client, client with a LAN server, or client with a server on a public domain.
 - Audio streaming over the internet is specifically optimized for zero-latency preview.
