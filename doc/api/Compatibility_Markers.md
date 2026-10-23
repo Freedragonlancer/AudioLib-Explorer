@@ -42,14 +42,15 @@
   "features": { "waveform_bundle_strong_etag": 1, "list_waveforms": 1, "list_waveform_jobs": 1 },
   "blocked_versions": [],
   "marker_revision": 1,
-
   "catalog_revision": 1,
+
   "api_protocols": ["api/v1"],
   "peer_application_ranges": [">=0.6.0, <0.7.0", ">=0.7.0, <0.8.0"],
   "legacy_peer_application_ranges": ["=0.4.11", "=0.5.0", "=0.5.1"]
 }
 ```
 
+- 新增字段均为可选（serde default、旧端忽略未知字段），不改变既有字段结构，故 `catalog_revision` 保持 1。
 - `marker_revision` 存在即表示对端采用本设计（“标记对端”）；缺失即“版本对端”（0.7.0/0.7.1 及更早）。
 - 未知字段一律忽略（serde 默认），以便将来追加 features 不需升 protocol。
 - `api_protocols: ["api/v1"]` 与 `protocol` 互相映射：`"api/vN"` ⇔ `N`。
@@ -68,6 +69,7 @@ fn peer_ok(local, peer_version, peer_catalog):
     match peer_catalog:
         None    => return legacy_ok(local, peer_version)        // 0.4.11/0.5.x 无目录旧端，保持现状
         Some(p) => if p.application_version != peer_version: return Err(Inconsistent)
+                   if p.catalog_revision ∉ local.supported_catalog_revisions: return Err(CatalogMismatch)
                    if !protocol_ok(local, p): return Err(ProtocolMismatch)
                    return Ok
 
@@ -94,21 +96,56 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 
 `direct_use_/auto_migrate_application_ranges` 改由格式判定（`assess_library` 已基于 `LibraryFormat`），版本范围不再参与。
 
-## 5. 变更规则（PR 检查清单）
+## 5. 变更规则与发版检查清单
 
-1. **升 protocol**：删除/重命名端点或必需字段、改变已有字段语义或单位、使旧客户端的合法请求被拒或被误解。同时更新 `protocol.max`；若仍支持旧协议则保留 `min`。
-2. **新格式 ID**：`TARGET_SCHEMA`、`LibraryFormat::target()` 中任一 feature/revision、`SearchStorage`、`TOKENIZATION_REVISION`、source revision 变化；或表/列/索引结构变化（即使 `user_version` 未变）。旧 ID 只要仍可读就保留在 `snapshot_read_formats`。
-3. **加 feature**：新增可选端点/字段/行为（如强 ETag waveform bundle）。不升 protocol。若功能变为必需，则属于 protocol 变更。
-4. **只改应用版本**：不改任何兼容标记；发版不应引起兼容失败。
-5. **CATALOG_REVISION**：退役。它把“目录结构版本”变成了硬等值门槛，与 protocol 重叠。过渡期仍输出 `catalog_revision: 1` 供 0.7.0/0.7.1 校验（它们要求等值），标记对端不再检查；目录结构变化由 `marker_revision` + serde 忽略未知字段承担。
+标记集合（客户端确认）：**API protocol 区间**、**格式 ID + schema**、**`catalog_revision`**。
 
-## 6. 从 0.7.0 / 0.7.1 过渡
+| 标记 | 必须变更的情形 | 不得变更的情形 |
+|---|---|---|
+| `protocol.max`（+1） | 删除/重命名端点或必需字段；改变已有字段语义或单位；新增**必需**请求头；旧客户端的合法请求会被拒绝或误解 | 只新增可选字段/端点（改为加 feature） |
+| `protocol.min` | 确定不再服务旧协议时才提高 | — |
+| 格式 ID（新 ID） | `TARGET_SCHEMA`/`user_version`；`LibraryFormat::target()` 中任一 feature/revision；`SearchStorage`；`TOKENIZATION_REVISION`；source search/tags revision；表/列/索引结构（即使 `user_version` 未变） | 仅应用代码变化 |
+| `snapshot_read_formats` | 新 ID 加入；旧 ID 只要仍可读就保留 | — |
+| `catalog_revision`（+1） | `CompatibilityManifest` **结构**变化：字段删除/改名/类型变化，或某字段的判定语义变化 | 只改字段取值（新增格式 ID、新增 feature、版本号变化） |
+| `features` | 新增可选能力；某能力语义不兼容变化 → 该 feature revision +1 | 能力变为必需 → 应升 protocol |
+| `application_version` | 每次发版 | 永不影响兼容判定（除 `blocked_versions`） |
 
-- 0.7.0/0.7.1 已发布，按版本范围判定（`>=0.7.0, <0.8.0` 及 0.6.x）且要求 `catalog_revision == 1`。它们无法被改变。
-- 新代码（0.7.2+）输出标记字段，**同时**继续输出旧字段：`catalog_revision: 1`、`api_protocols: ["api/v1"]`，以及覆盖所有声明同一 protocol 的已知版本的 `peer_application_ranges`。因此 0.7.2 与 0.7.0/0.7.1 互认（旧端看到 0.7.2 在 `<0.8.0` 内）。
-- 新代码接受“版本对端”：其 `api_protocols` 映射出的协议号与本端相交，且所声明快照格式可读，即放行（不再检查对方版本是否在本端范围内）。
-- 限制：若未来某一侧升至 0.8.0，旧 0.7.0/0.7.1 端仍会拒绝它。所以**两端都需先升级一次到 0.7.2（或更高的标记版本）**，此后版本号可自由前进。0.7.2 的 `peer_application_ranges` 为兼容旧端可写宽（如 `>=0.6.0`），因为标记端自己不再读取它。
-- 无目录旧端（0.4.11/0.5.x）维持 `legacy_peer_application_ranges` 现状。
+发版 PR 检查清单：
+
+- [ ] 对照上表逐项确认：本次是否需要升 protocol / 新格式 ID / 升 catalog_revision / 加 feature；PR 描述写明结论。
+- [ ] 第 7 节格式指纹与协议指纹测试通过（若失败，按提示更新标记而非更新 fixture 了事）。
+- [ ] 旧端兼容层（第 6 节）：新版本的 `application_version` 仍在旧端接受范围内，或已在发版说明中声明“需双方升级”。
+- [ ] `peer_application_ranges` 仍包含旧端需要看到的范围；矩阵第 8 节已回填。
+- [ ] 新增 feature 在客户端缺失时有降级路径并有测试。
+
+`catalog_revision` 保留（不退役）：标记端之间要求 `catalog_revision` 等值（或在本端支持列表内），它只在目录结构变化时变化，不随发版变化，因此不会造成“仅因版本号不同而拒绝”。
+
+## 6. 从已发布 0.6.x–0.7.1 过渡
+
+### 6.1 旧端实际检查什么（v0.7.0 / v0.7.1 源码）
+
+旧端 `peer_application_ranges` = `["=0.4.11","=0.5.0","=0.5.1",">=0.6.0, <0.7.0","=<自身版本>"]`（`CURRENT_MINOR_RANGE` 写死为 `>=0.6.0, <0.7.0`）。旧端对新对端 manifest 依次检查 `peer_versions_compatible`：
+
+1. 新对端版本（`/health.version` 或 header 内 `application_version`）可解析，且落在**旧端自己的** `peer_application_ranges` 内；
+2. manifest 的 `application_version` 等于该版本；
+3. `catalog_revision == 1`；
+4. 新对端 `peer_application_ranges` 接受旧端版本；
+5. `api_protocols` 与 `["api/v1"]` 相交；
+6. 快照/写入：格式 ID 在旧端 `snapshot_read_formats` 内且与头部、文件一致。
+
+### 6.2 结论
+
+- **0.7.1 只接受 0.4.11/0.5.0/0.5.1、0.6.x 和 `=0.7.1`；0.7.0 同理只接受 `=0.7.0`。** 因此 0.7.0 与 0.7.1 互相拒绝，且 **0.7.2（或任何新版本）服务端在第 1 步就会被 0.7.1 客户端拒绝，无法通过任何新端改动修复**（唯一办法是新端谎报版本为 0.7.1，不采用）。反向：0.7.2 客户端连 0.7.1 服务端时，服务端的写入/快照准入同样会在第 1 步拒绝。
+- 0.6.x 端的范围同样不含 0.7.x，故 0.6.x ↔ 0.7.2 也不互通。
+- 所以：**两端必须各升级一次到 0.7.2（首个标记版本）**。此后版本号前进不再影响兼容。
+- 新端对旧端（版本对端，无 `marker_revision`）放宽：只要 `catalog_revision == 1`、`api_protocols` 相交、格式可读即接受，不检查对方版本是否在本端范围内。实际能否连通仍受旧端自身检查限制（上条）。
+
+### 6.3 新版本须保留的旧兼容层（保留到下一个主版本，即 1.0.0 前移除）
+
+- 继续输出 `catalog_revision: 1`（结构不变时）、`api_protocols: ["api/v1"]`、`legacy_peer_application_ranges`。
+- 继续输出旧端期望的 `peer_application_ranges`（至少含 `>=0.6.0, <0.7.0`、`>=0.7.0, <0.8.0` 及 legacy 项），使旧端第 4 步通过；标记端自身不读取它。
+- 尽量让自身 `application_version` 落在旧端接受范围内——对已发布的 0.6.x–0.7.1 做不到（见 6.2），对未来旧端以 `marker_revision` 为准。
+- 无目录旧端（0.4.11/0.5.x）维持现状。
 
 ## 7. 防护测试
 
@@ -122,9 +159,9 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 | # | 客户端 | 服务端 | 期望 | 探测 | 快照 | 修改 | 备注 |
 |---|---|---|---|---|---|---|---|
 | 1 | 0.7.2 | 0.7.2 | 通过 | | | | |
-| 2 | 0.7.2 | 0.7.1 / 0.7.0 | 通过 | | | | |
-| 3 | 0.7.1 / 0.7.0 | 0.7.2 | 通过 | | | | |
-| 4 | 0.7.2 | 0.6.x | 通过（同协议+可读格式） | | | | |
+| 2 | 0.7.2 | 0.7.1 / 0.7.0 | 拒绝（旧服务端只接受自身版本+0.6.x） | | | | |
+| 3 | 0.7.1 / 0.7.0 | 0.7.2 | 拒绝（同上，提示双方升级） | | | | |
+| 4 | 0.7.2 | 0.6.x | 拒绝（0.6.x 不接受 0.7.x） | | | | |
 | 5 | 0.7.2 | 标记端，版本 0.8.0，同协议同格式 | 通过 | | | | |
 | 6 | 0.7.1 | 0.8.0 | 拒绝（旧端限制，提示升级） | | | | |
 | 7 | 标记端 | 协议区间不相交 | 拒绝 `PROTOCOL_UNSUPPORTED` | | | | |
@@ -137,7 +174,8 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 ## 9. 待确认问题
 
 1. `skipped_newer` 目前是 `audiolib-update` 的更新检查结果字段，不是同步能力；是否确实要作为 feature？
-2. `protocol` 是否直接用整数替代 `"api/v1"` 字符串，还是长期并存？
+2. 是否接受“0.7.0/0.7.1 与新版本无法互通、必须双方升级”这一结论（无可行的新端修复）。
+6. `protocol` 是否直接用整数替代 `"api/v1"` 字符串，还是长期并存？
 3. `blocked_versions` 由谁维护：内置于二进制，还是随更新检查清单下发？
 4. 0.7.2 的旧兼容字段 `peer_application_ranges` 写宽到什么程度（`>=0.6.0` 无上限？）。
 5. features 是否也需要客户端声明（服务端据此调整响应），还是只由服务端声明？
