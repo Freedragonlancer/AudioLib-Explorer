@@ -1,9 +1,9 @@
 // crates/audiolib-remote/src/marker_matrix_tests.rs
 //! Client side of the Compatibility_Markers.md §8 test matrix. Rows 7 and 11 (unknown
-//! format ID, header/file mismatch) are covered by
-//! `compatibility::tests::incompatible_negotiation_and_lying_downloads_preserve_the_active_cache`
-//! (`format`, `header` and `bytes` modes); row 3's old-client half is the shipped
-//! client's own check and cannot run here.
+//! format ID, header/file mismatch) are
+//! `compatibility::tests::matrix_row_7_unknown_format_id_refuses_the_snapshot_and_keeps_the_cache`
+//! and `compatibility::tests::matrix_row_11_snapshot_header_file_mismatch_keeps_the_cache`;
+//! row 3's old-client half is the shipped client's own check and cannot run here.
 use crate::{
     CacheState, RemoteCache, RemoteClient, RemoteError,
     error::PeerIncompatibility,
