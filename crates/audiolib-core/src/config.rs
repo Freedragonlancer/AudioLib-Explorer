@@ -383,6 +383,17 @@ pub struct AppConfig {
     /// already applies to the window. Other values are normalized to 0.
     #[serde(default)]
     pub ui_scale_percent: u32,
+    /// Appearance theme identifier from [`THEME_IDS`]; unknown values use [`DEFAULT_THEME`].
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Interface text size in pixels before the interface scale, clamped to
+    /// [`FONT_SIZE_MIN`]..=[`FONT_SIZE_MAX`]; [`DEFAULT_FONT_SIZE`] keeps the design sizes.
+    #[serde(default = "default_font_size")]
+    pub ui_font_size: u32,
+    /// Result list text size in pixels before the interface scale, same range as
+    /// [`AppConfig::ui_font_size`].
+    #[serde(default = "default_font_size")]
+    pub list_font_size: u32,
     /// Persistent table layout and sorting, applied to every search page.
     #[serde(default)]
     pub audio_table: AudioTablePreferences,
@@ -421,6 +432,12 @@ struct SavedPreferences {
     hold_list_waveform_batches_after_audition: bool,
     #[serde(default)]
     ui_scale_percent: u32,
+    #[serde(default = "default_theme")]
+    theme: String,
+    #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
+    ui_font_size: u32,
+    #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
+    list_font_size: u32,
     #[serde(default)]
     audio_table: AudioTablePreferences,
     #[serde(default)]
@@ -438,6 +455,58 @@ pub fn normalize_ui_scale_percent(percent: u32) -> u32 {
     } else {
         0
     }
+}
+
+/// Identifier of the built-in default theme (the original palette).
+pub const DEFAULT_THEME: &str = "default";
+/// Theme identifiers offered in the Appearance settings, in display order.
+pub const THEME_IDS: [&str; 1] = [DEFAULT_THEME];
+
+/// Keep a known theme identifier; anything else uses the default theme.
+pub fn normalize_theme(theme: &str) -> String {
+    if THEME_IDS.contains(&theme) {
+        theme.to_owned()
+    } else {
+        DEFAULT_THEME.to_owned()
+    }
+}
+
+/// Smallest interface and list font size in pixels.
+pub const FONT_SIZE_MIN: u32 = 10;
+/// Largest interface and list font size in pixels.
+pub const FONT_SIZE_MAX: u32 = 24;
+/// Default interface and list font size in pixels.
+pub const DEFAULT_FONT_SIZE: u32 = 13;
+
+/// Clamp a font size setting into [`FONT_SIZE_MIN`]..=[`FONT_SIZE_MAX`].
+pub fn clamp_font_size(size: i64) -> u32 {
+    size.clamp(i64::from(FONT_SIZE_MIN), i64::from(FONT_SIZE_MAX)) as u32
+}
+
+fn default_theme() -> String {
+    DEFAULT_THEME.to_owned()
+}
+fn default_font_size() -> u32 {
+    DEFAULT_FONT_SIZE
+}
+/// Out-of-range numbers clamp (fractions round); a non-numeric value uses the default
+/// so one bad field never discards the other preferences.
+fn lenient_font_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(|value| value.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64)
+            })
+            .map_or(DEFAULT_FONT_SIZE, clamp_font_size),
+        _ => DEFAULT_FONT_SIZE,
+    })
 }
 
 fn default_true() -> bool {
@@ -513,6 +582,9 @@ impl AppConfig {
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             ui_scale_percent: 0,
+            theme: default_theme(),
+            ui_font_size: DEFAULT_FONT_SIZE,
+            list_font_size: DEFAULT_FONT_SIZE,
             audio_table: AudioTablePreferences::default(),
             allowed_scan_roots: Vec::new(),
             data_source: DataSourceSettings::default(),
@@ -566,6 +638,9 @@ impl AppConfig {
             config.hold_list_waveform_batches_after_audition =
                 saved.hold_list_waveform_batches_after_audition;
             config.ui_scale_percent = normalize_ui_scale_percent(saved.ui_scale_percent);
+            config.theme = normalize_theme(&saved.theme);
+            config.ui_font_size = clamp_font_size(i64::from(saved.ui_font_size));
+            config.list_font_size = clamp_font_size(i64::from(saved.list_font_size));
             config.audio_table = saved.audio_table.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
             config.data_source = saved.data_source;
@@ -612,6 +687,9 @@ impl AppConfig {
             hold_list_waveform_batches_after_audition: self
                 .hold_list_waveform_batches_after_audition,
             ui_scale_percent: normalize_ui_scale_percent(self.ui_scale_percent),
+            theme: normalize_theme(&self.theme),
+            ui_font_size: clamp_font_size(i64::from(self.ui_font_size)),
+            list_font_size: clamp_font_size(i64::from(self.list_font_size)),
             audio_table: self.audio_table.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),
             data_source: {
@@ -799,6 +877,79 @@ mod tests {
                 .ui_scale_percent,
             0
         );
+    }
+
+    #[test]
+    fn theme_and_font_sizes_default_round_trip_and_clamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("userdata");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(config.theme, DEFAULT_THEME);
+        assert_eq!(config.ui_font_size, 13);
+        assert_eq!(config.list_font_size, 13);
+        // Settings written before these fields existed load with the defaults.
+        config.save().unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+        for key in ["theme", "ui_font_size", "list_font_size"] {
+            raw.as_object_mut().unwrap().remove(key);
+        }
+        raw["language"] = serde_json::json!("cn");
+        std::fs::write(&config.paths.settings, raw.to_string()).unwrap();
+        let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(
+            (
+                loaded.theme.as_str(),
+                loaded.ui_font_size,
+                loaded.list_font_size
+            ),
+            (DEFAULT_THEME, 13, 13)
+        );
+        assert_eq!(loaded.language, "cn");
+        // Every supported size round-trips, independently for the two settings.
+        for size in FONT_SIZE_MIN..=FONT_SIZE_MAX {
+            config.ui_font_size = size;
+            config.list_font_size = FONT_SIZE_MAX + FONT_SIZE_MIN - size;
+            config.save().unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.ui_font_size, size);
+            assert_eq!(loaded.list_font_size, FONT_SIZE_MAX + FONT_SIZE_MIN - size);
+        }
+        // Out-of-range in-memory values clamp when saved.
+        config.ui_font_size = 0;
+        config.list_font_size = 99;
+        config.theme = "neon".into();
+        config.save().unwrap();
+        let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(
+            (
+                loaded.theme.as_str(),
+                loaded.ui_font_size,
+                loaded.list_font_size
+            ),
+            (DEFAULT_THEME, 10, 24)
+        );
+        // Out-of-range or malformed stored values clamp or fall back on load.
+        for (stored, expected) in [
+            (serde_json::json!(-5), 10),
+            (serde_json::json!(9), 10),
+            (serde_json::json!(25), 24),
+            (serde_json::json!(u64::MAX), 24),
+            (serde_json::json!(14.6), 15),
+            (serde_json::json!("large"), 13),
+            (serde_json::json!(null), 13),
+        ] {
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+            raw["ui_font_size"] = stored.clone();
+            raw["list_font_size"] = stored.clone();
+            raw["theme"] = serde_json::json!("neon");
+            std::fs::write(&config.paths.settings, raw.to_string()).unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.ui_font_size, expected, "{stored}");
+            assert_eq!(loaded.list_font_size, expected, "{stored}");
+            assert_eq!(loaded.theme, DEFAULT_THEME);
+        }
     }
 
     #[test]
