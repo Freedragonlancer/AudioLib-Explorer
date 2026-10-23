@@ -39,7 +39,7 @@ documentation placeholders: `192.0.2.10` (RFC 5737), `audiolib.example.com`,
 
 ## Install
 
-Prebuilt Windows x64 and Linux x64 server archives are available in [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). Verify the accompanying SHA256 file before extracting. The executable is at the archive root; public configuration examples and this deployment guide are under `server/`. The Linux GNU archive is built on Ubuntu 22.04; build from source for an older distribution or a different architecture. For the systemd instructions below, a prebuilt archive's `audiolib-server` replaces `target/<target>/release/audiolib-server` as the install source. Keep your existing configuration, token files and library when upgrading; the archive does not contain runtime data.
+Official [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) ship only the Windows client and the macOS arm64 server, each with a `.sha256` file. Verify the checksum before extracting. The server executable is at the archive root; public configuration examples and this deployment guide are under `server/`. Other platforms (including Linux) must build from source (`cargo build --release -p audiolib-server --target <triple>`); such builds do not auto-update because no packages are published for them. Keep your existing configuration, token files and library when upgrading; the archive does not contain runtime data.
 
 Build the binary first: see [Quick start](../README.md#quick-start-build-from-source)
 (Linux: `RUSTUP_TOOLCHAIN=1.97.1` and an explicit `--target`). After installing, continue

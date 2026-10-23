@@ -21,7 +21,7 @@
 
 ## 下载预编译服务端
 
-[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) 提供 Windows x64 ZIP 和 Linux x64 GNU tar.gz，均附 SHA256 文件。核验校验和后解压，使用根目录的程序及自己的配置启动（`--config <path>`）；公共配置示例位于 `server/audiolib-server/`。Linux 包在 Ubuntu 22.04 构建，其他平台可按下文从源码构建。升级保留原有资料库、资源路径、配置和凭据，安装与回滚见[部署指南](deploy/README.md)。
+[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) 的正式发布只包含 Windows 客户端和 macOS arm64 服务端，均附 `.sha256` 文件。核验校验和后解压，使用根目录的程序及自己的配置启动（`--config <path>`）；公共配置示例位于 `server/audiolib-server/`。其他平台请从源码构建（`cargo build --release -p audiolib-server --target <triple>`，见下文）；这类构建没有对应的发布包，因此不会自动更新。升级保留原有资料库、资源路径、配置和凭据，安装与回滚见[部署指南](deploy/README.md)。
 
 ## 快速开始：从源码构建
 
