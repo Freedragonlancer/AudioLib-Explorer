@@ -437,7 +437,9 @@ pub enum PeerRejection {
     BlockedVersion,
     /// No catalog or no `marker_revision`: the peer predates markers.
     PeerUpgradeRequired,
-    /// The catalog's `application_version` differs from the reported version.
+    /// The catalog contradicts itself or the reported version: `application_version`
+    /// differs, `marker_revision` without `protocol`, `protocol.min > protocol.max`, or
+    /// `api_protocols` disjoint from ours although the intervals intersect.
     Inconsistent,
     /// Peer protocol entirely below ours: the peer must upgrade.
     ProtocolPeerTooOld,
@@ -457,9 +459,14 @@ impl PeerRejection {
     }
 }
 
-/// Fail fast when the linked SQLite is older than [`MINIMUM_SQLITE_VERSION`]. Called by
-/// each process at startup for its own engine; never used to judge a peer.
-pub fn check_linked_sqlite(linked: &str) -> Result<(), String> {
+/// Warning-only self-check of the linked SQLite against [`MINIMUM_SQLITE_VERSION`].
+///
+/// Returns `Some(warning)` when `linked` is older than the minimum or unparsable, `None`
+/// otherwise. It never fails: each process calls it at startup for its own engine, logs
+/// the warning (and may show it in diagnostics) and keeps starting; the operations that
+/// truly need the newer engine refuse on their own (`sqlite_engine::require_plan_b`).
+/// Never used to judge a peer.
+pub fn check_linked_sqlite(linked: &str) -> Option<String> {
     let parse = |text: &str| -> Option<Version> {
         let mut parts = text.trim().split('.').map(|part| part.parse::<u64>().ok());
         Some(Version::new(
@@ -469,8 +476,8 @@ pub fn check_linked_sqlite(linked: &str) -> Result<(), String> {
         ))
     };
     match (parse(linked), parse(MINIMUM_SQLITE_VERSION)) {
-        (Some(found), Some(minimum)) if found >= minimum => Ok(()),
-        _ => Err(format!(
+        (Some(found), Some(minimum)) if found >= minimum => None,
+        _ => Some(format!(
             "Linked SQLite {linked} is older than the required {MINIMUM_SQLITE_VERSION}; rebuild with the bundled SQLite"
         )),
     }
@@ -492,8 +499,10 @@ pub fn check_peer(
         return Err(PeerRejection::Inconsistent);
     }
     let local_range = local.protocol.unwrap_or(PROTOCOL);
-    let Some(peer_range) = peer.protocol else {
-        return Err(PeerRejection::PeerUpgradeRequired);
+    // A marker peer must declare a well-formed interval; anything else is a broken
+    // catalog, not an old peer.
+    let Some(peer_range) = peer.protocol.filter(|range| range.min <= range.max) else {
+        return Err(PeerRejection::Inconsistent);
     };
     if peer_range.max < local_range.min {
         return Err(PeerRejection::ProtocolPeerTooOld);
@@ -501,17 +510,14 @@ pub fn check_peer(
     if peer_range.min > local_range.max {
         return Err(PeerRejection::ProtocolPeerTooNew);
     }
-    // Transitional: `api_protocols` must agree with the interval.
+    // Transitional: `api_protocols` must agree with the interval. The intervals
+    // intersect here, so disjoint identifiers mean the catalog contradicts itself.
     if !peer
         .api_protocols
         .iter()
         .any(|protocol| local.api_protocols.contains(protocol))
     {
-        return Err(if peer_range.max > local_range.max {
-            PeerRejection::ProtocolPeerTooNew
-        } else {
-            PeerRejection::ProtocolPeerTooOld
-        });
+        return Err(PeerRejection::Inconsistent);
     }
     Ok(())
 }
@@ -756,7 +762,10 @@ mod tests {
         // Interval and identifiers must agree during the transition.
         let mut stale = marked("0.9.0");
         stale.api_protocols = vec!["api/v99".into()];
-        assert!(check_peer(&local, "0.9.0", Some(&stale)).is_err());
+        assert_eq!(
+            check_peer(&local, "0.9.0", Some(&stale)),
+            Err(PeerRejection::Inconsistent)
+        );
     }
 
     #[test]
@@ -790,6 +799,58 @@ mod tests {
             check_peer(&local, "0.9.9", Some(&marked("0.8.0"))),
             Err(PeerRejection::Inconsistent)
         );
+        assert_eq!(
+            PeerRejection::Inconsistent.error_code(),
+            PEER_CATALOG_INVALID
+        );
+    }
+
+    #[test]
+    fn inverted_protocol_range_is_an_invalid_catalog() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.protocol = Some(ProtocolRange { min: 2, max: 1 });
+        assert_eq!(
+            check_peer(&local, "0.8.0", Some(&peer)),
+            Err(PeerRejection::Inconsistent)
+        );
+        // Even an inverted range that would otherwise look "too new" or "too old".
+        for (min, max) in [(5, 3), (1, 0)] {
+            peer.protocol = Some(ProtocolRange { min, max });
+            assert_eq!(
+                check_peer(&local, "0.8.0", Some(&peer)),
+                Err(PeerRejection::Inconsistent),
+                "{min}..={max}"
+            );
+        }
+    }
+
+    #[test]
+    fn marker_without_protocol_is_an_invalid_catalog_not_an_old_peer() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.protocol = None;
+        assert!(peer.marker_revision.is_some());
+        assert_eq!(
+            check_peer(&local, "0.8.0", Some(&peer)),
+            Err(PeerRejection::Inconsistent)
+        );
+    }
+
+    #[test]
+    fn intersecting_ranges_with_disjoint_api_protocols_are_an_invalid_catalog() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.protocol = Some(ProtocolRange { min: 1, max: 2 });
+        for identifiers in [vec!["api/v2".to_owned()], Vec::new()] {
+            peer.api_protocols = identifiers;
+            assert_eq!(
+                check_peer(&local, "0.8.0", Some(&peer)),
+                Err(PeerRejection::Inconsistent),
+                "{:?}",
+                peer.api_protocols
+            );
+        }
     }
 
     #[test]
@@ -826,10 +887,11 @@ mod tests {
 
     #[test]
     fn linked_sqlite_self_check() {
-        assert!(check_linked_sqlite(MINIMUM_SQLITE_VERSION).is_ok());
-        assert!(check_linked_sqlite("3.60.0").is_ok());
-        assert!(check_linked_sqlite("3.54.0").is_err());
-        assert!(check_linked_sqlite("garbage").is_err());
+        assert_eq!(check_linked_sqlite(MINIMUM_SQLITE_VERSION), None);
+        assert_eq!(check_linked_sqlite("3.60.0"), None);
+        let warning = check_linked_sqlite("3.54.0").unwrap();
+        assert!(warning.contains("3.54.0") && warning.contains(MINIMUM_SQLITE_VERSION));
+        assert!(check_linked_sqlite("garbage").is_some());
     }
 
     /// Format fingerprint fixture: changing any format input must also change its ID

@@ -43,6 +43,7 @@ impl std::fmt::Display for TlsFailure {
 /// Which side must act on a [`RemoteError::PeerIncompatible`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PeerIncompatibility {
     /// The server predates compatibility markers or speaks an older protocol.
     ServerUpgradeRequired,
@@ -55,6 +56,9 @@ pub enum PeerIncompatibility {
     /// The server refused this client's compatibility catalog as invalid
     /// (`409 PEER_CATALOG_INVALID`).
     ClientCatalogInvalid,
+    /// `409 PROTOCOL_UNSUPPORTED` with a `sub_code` this client does not know: the
+    /// protocols are incompatible but the side to act is unknown.
+    ProtocolUnsupported,
 }
 
 impl PeerIncompatibility {
@@ -65,6 +69,7 @@ impl PeerIncompatibility {
             Self::Blocked => "blocked version",
             Self::Inconsistent => "inconsistent catalog",
             Self::ClientCatalogInvalid => "invalid client catalog",
+            Self::ProtocolUnsupported => "protocol unsupported",
         }
     }
 }
@@ -86,6 +91,7 @@ pub(crate) const CONNECTION_REFUSED: &str = "connection refused";
 /// A classified server-mode failure. Display text is English; use
 /// [`RemoteError::localized`] for the desktop's Chinese/English presentation.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RemoteError {
     #[error("Server unreachable: {0}")]
     Unreachable(String),
@@ -301,10 +307,14 @@ impl RemoteError {
                 reason: PeerIncompatibility::ClientUpgradeRequired,
                 detail: message,
             },
-            // The server's protocol is entirely below this client's (`sub_code`
-            // `SERVER_UPGRADE_REQUIRED`): the server, never the client, must upgrade.
+            // `sub_code` `SERVER_UPGRADE_REQUIRED` (or none, as sent before sub codes): the
+            // server's protocol is entirely below this client's, so the server, never the
+            // client, must upgrade. An unknown `sub_code` gets a generic message.
             (_, "PROTOCOL_UNSUPPORTED") => Self::PeerIncompatible {
-                reason: PeerIncompatibility::ServerUpgradeRequired,
+                reason: match parsed.sub_code.as_str() {
+                    "SERVER_UPGRADE_REQUIRED" | "" => PeerIncompatibility::ServerUpgradeRequired,
+                    _ => PeerIncompatibility::ProtocolUnsupported,
+                },
                 detail: message,
             },
             (_, "PEER_CATALOG_INVALID") => Self::PeerIncompatible {
@@ -946,6 +956,12 @@ fn peer_message(reason: PeerIncompatibility, detail: &str, chinese: bool) -> Str
         (PeerIncompatibility::ClientCatalogInvalid, false) => {
             "This client sent invalid compatibility information. Restart or reinstall AudioLib Explorer; the local cache was kept."
         }
+        (PeerIncompatibility::ProtocolUnsupported, false) => {
+            "The server and this client speak incompatible API protocols. Upgrade both to the latest release; the local cache was kept."
+        }
+        (PeerIncompatibility::ProtocolUnsupported, true) => {
+            "服务器与本客户端的 API 协议不兼容。请将两端都升级到最新版本；本地缓存已保留。"
+        }
         (PeerIncompatibility::ClientCatalogInvalid, true) => {
             "本客户端发送的兼容性信息无效。请重启或重新安装 AudioLib Explorer；本地缓存已保留。"
         }
@@ -996,6 +1012,11 @@ mod tests {
             ("PEER_VERSION_BLOCKED", "", P::Blocked),
             ("PEER_CATALOG_INVALID", "", P::ClientCatalogInvalid),
             ("PEER_VERSION_UNSUPPORTED", "", P::ServerUpgradeRequired),
+            (
+                "PROTOCOL_UNSUPPORTED",
+                "FUTURE_HINT",
+                P::ProtocolUnsupported,
+            ),
         ] {
             let body =
                 format!(r#"{{"error_code":"{code}","sub_code":"{sub_code}","message":"refused"}}"#);
@@ -1022,6 +1043,34 @@ mod tests {
                     _ => {}
                 }
             }
+        }
+    }
+
+    #[test]
+    fn protocol_unsupported_sub_codes_choose_the_message() {
+        use super::PeerIncompatibility as P;
+        let reason = |sub_code: &str| {
+            let body = format!(
+                r#"{{"error_code":"PROTOCOL_UNSUPPORTED","sub_code":"{sub_code}","message":"refused"}}"#
+            );
+            match RemoteError::from_status(409, &body, "GET /snapshot") {
+                RemoteError::PeerIncompatible { reason, detail } => (
+                    reason,
+                    RemoteError::PeerIncompatible { reason, detail }.localized(false),
+                ),
+                other => panic!("{sub_code}: {other:?}"),
+            }
+        };
+        let (upgrade, text) = reason("SERVER_UPGRADE_REQUIRED");
+        assert_eq!(upgrade, P::ServerUpgradeRequired);
+        assert!(text.contains("Upgrade AudioLib Server"), "{text}");
+        assert!(!text.contains("Update AudioLib Explorer"), "{text}");
+        for unknown in ["CLIENT_SOMETHING", "FUTURE_HINT"] {
+            let (generic, text) = reason(unknown);
+            assert_eq!(generic, P::ProtocolUnsupported, "{unknown}");
+            assert!(text.contains("incompatible API protocols"), "{text}");
+            assert!(!text.contains("Upgrade AudioLib Server to"), "{text}");
+            assert!(!text.contains("Update AudioLib Explorer"), "{text}");
         }
     }
 

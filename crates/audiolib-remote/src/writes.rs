@@ -845,9 +845,17 @@ mod tests {
         let posts = Arc::new(StdMutex::new(0));
         let server = {
             let posts = posts.clone();
-            TestServer::start(move |request| {
-                match request.path.as_str() {
-                "/api/v1/capabilities" => crate::test_server::marker_capabilities(serde_json::from_str(r#"{"list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64"}}"#).unwrap()),
+            TestServer::start(move |request| match request.path.as_str() {
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({
+                        "list_waveforms": {
+                            "version": 1,
+                            "buckets": [128],
+                            "max_ids": 200,
+                            "encoding": "i16le-minmax-base64",
+                        }
+                    }))
+                }
                 "/api/v1/waveforms" => {
                     *posts.lock().unwrap() += 1;
                     TestResponse::json(
@@ -856,7 +864,6 @@ mod tests {
                     )
                 }
                 other => panic!("unexpected {other}"),
-            }
             })
         };
         let writer = || {
