@@ -432,7 +432,7 @@ struct SavedPreferences {
     hold_list_waveform_batches_after_audition: bool,
     #[serde(default)]
     ui_scale_percent: u32,
-    #[serde(default = "default_theme")]
+    #[serde(default = "default_theme", deserialize_with = "lenient_theme")]
     theme: String,
     #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
     ui_font_size: u32,
@@ -486,6 +486,17 @@ pub fn clamp_font_size(size: i64) -> u32 {
 fn default_theme() -> String {
     DEFAULT_THEME.to_owned()
 }
+/// Accept any JSON value for the theme; non-strings fall back to [`DEFAULT_THEME`]
+/// so one bad field never discards the other preferences.
+fn lenient_theme<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(theme) => theme,
+        _ => default_theme(),
+    })
+}
+
 fn default_font_size() -> u32 {
     DEFAULT_FONT_SIZE
 }
@@ -949,6 +960,24 @@ mod tests {
             assert_eq!(loaded.ui_font_size, expected, "{stored}");
             assert_eq!(loaded.list_font_size, expected, "{stored}");
             assert_eq!(loaded.theme, DEFAULT_THEME);
+        }
+
+        for stored in [
+            serde_json::json!(7),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"id": "dark"}),
+        ] {
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+            raw["ui_font_size"] = serde_json::json!(16);
+            raw["list_font_size"] = serde_json::json!(12);
+            raw["theme"] = stored.clone();
+            std::fs::write(&config.paths.settings, raw.to_string()).unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.theme, DEFAULT_THEME, "{stored}");
+            assert_eq!(loaded.ui_font_size, 16, "{stored}");
+            assert_eq!(loaded.list_font_size, 12, "{stored}");
         }
     }
 
