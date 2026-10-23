@@ -91,7 +91,7 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
             let expected = match mode {
                 "unmarked" | "protocol" => "PEER_UPGRADE_REQUIRED",
                 "protocol_newer" => "PROTOCOL_UNSUPPORTED",
-                _ => "PEER_VERSION_UNSUPPORTED",
+                _ => "PEER_CATALOG_INVALID",
             };
             assert_eq!(body["error_code"], expected, "{mode} {path}");
             if mode == "protocol_newer" {

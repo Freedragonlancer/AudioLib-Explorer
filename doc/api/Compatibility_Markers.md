@@ -99,7 +99,7 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok；无头豁�
 
 ### 4.1 服务端错误码（`server/audiolib-server/src/compatibility.rs`）
 
-均为 HTTP 409，常量定义于 core `compatibility.rs`，由 `PeerRejection::error_code()` 映射：
+均为 HTTP 409，常量定义于 core `compatibility.rs`，由 `PeerRejection::error_code()` 映射；`PEER_CATALOG_INVALID` 暂定义于服务端（`Inconsistent` 在服务端改映射为它）。新服务端不再返回 `PEER_VERSION_UNSUPPORTED`——旧服务端用该码表示“服务端过旧”：
 
 | 情形 | `error_code` | `sub_code`（提示） | 适用 |
 | --- | --- | --- | --- |
@@ -107,7 +107,7 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok；无头豁�
 | 无目录头，或目录无 `marker_revision`/`protocol`（0.4.11/0.5.x、0.6.0–0.7.1） | `PEER_UPGRADE_REQUIRED` | — | 同上；设置/缓存任务无头时豁免 |
 | 对端协议区间整体低于本端（对端太旧） | `PEER_UPGRADE_REQUIRED` | — | 同上 |
 | 对端协议区间整体高于本端（对端太新，需升级服务端） | `PROTOCOL_UNSUPPORTED` | `SERVER_UPGRADE_REQUIRED` | 同上 |
-| 目录头畸形、重复、超过 4096 字节，或 `application_version` 自相矛盾 | `PEER_VERSION_UNSUPPORTED` | — | 同上 |
+| 目录头畸形、重复、超过 4096 字节，或 `application_version` 自相矛盾 | `PEER_CATALOG_INVALID` | — | 同上 |
 | 对端无法读取当前库格式 ID | `SNAPSHOT_FORMAT_UNSUPPORTED` | — | 快照、库写入 |
 
 - 快照上限头名与值来自 core 常量：`SNAPSHOT_SCHEMA_MAX_HEADER`/`SEARCH_STORAGE_MAX_HEADER`/`TOKENIZATION_MAX_HEADER` 与 `SEARCH_STORAGE_MAX`、`TOKENIZATION_MAX`（schema 上限需 ≥ 实际库 schema）。
