@@ -378,6 +378,11 @@ pub struct AppConfig {
     /// audition start (deferred, not dropped). Off by default.
     #[serde(default)]
     pub hold_list_waveform_batches_after_audition: bool,
+    /// Interface scale in percent: 100-200 in steps of 25, or 0 to follow the system.
+    /// Following the system keeps the content scale at 1.0 because the OS display scale
+    /// already applies to the window. Other values are normalized to 0.
+    #[serde(default)]
+    pub ui_scale_percent: u32,
     /// Persistent table layout and sorting, applied to every search page.
     #[serde(default)]
     pub audio_table: AudioTablePreferences,
@@ -415,12 +420,26 @@ struct SavedPreferences {
     #[serde(default)]
     hold_list_waveform_batches_after_audition: bool,
     #[serde(default)]
+    ui_scale_percent: u32,
+    #[serde(default)]
     audio_table: AudioTablePreferences,
     #[serde(default)]
     allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
     data_source: DataSourceSettings,
 }
+/// Interface scale choices offered in the Appearance settings, in percent.
+pub const UI_SCALE_PERCENTS: [u32; 5] = [100, 125, 150, 175, 200];
+
+/// Keep a supported interface scale; anything else (including 0) follows the system.
+pub fn normalize_ui_scale_percent(percent: u32) -> u32 {
+    if UI_SCALE_PERCENTS.contains(&percent) {
+        percent
+    } else {
+        0
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -493,6 +512,7 @@ impl AppConfig {
             play_history_limit: PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
+            ui_scale_percent: 0,
             audio_table: AudioTablePreferences::default(),
             allowed_scan_roots: Vec::new(),
             data_source: DataSourceSettings::default(),
@@ -545,6 +565,7 @@ impl AppConfig {
             config.pregenerate_list_waveforms = saved.pregenerate_list_waveforms;
             config.hold_list_waveform_batches_after_audition =
                 saved.hold_list_waveform_batches_after_audition;
+            config.ui_scale_percent = normalize_ui_scale_percent(saved.ui_scale_percent);
             config.audio_table = saved.audio_table.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
             config.data_source = saved.data_source;
@@ -590,6 +611,7 @@ impl AppConfig {
             pregenerate_list_waveforms: self.pregenerate_list_waveforms,
             hold_list_waveform_batches_after_audition: self
                 .hold_list_waveform_batches_after_audition,
+            ui_scale_percent: normalize_ui_scale_percent(self.ui_scale_percent),
             audio_table: self.audio_table.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),
             data_source: {
@@ -747,6 +769,34 @@ mod tests {
         assert!(loaded.hold_list_waveform_batches_after_audition);
         assert_eq!(loaded.allowed_scan_roots, config.allowed_scan_roots);
         assert_eq!(loaded.data_source, config.data_source);
+    }
+
+    #[test]
+    fn ui_scale_round_trips_and_unsupported_values_follow_the_system() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("userdata");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(config.ui_scale_percent, 0);
+        for percent in UI_SCALE_PERCENTS {
+            config.ui_scale_percent = percent;
+            config.save().unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.ui_scale_percent, percent);
+        }
+        for unsupported in [1, 99, 110, 201, u32::MAX] {
+            config.ui_scale_percent = unsupported;
+            config.save().unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.ui_scale_percent, 0, "{unsupported}");
+        }
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config.paths.settings).unwrap()).unwrap();
+        raw["ui_scale_percent"] = serde_json::json!(130);
+        std::fs::write(&config.paths.settings, raw.to_string()).unwrap();
+        assert_eq!(
+            AppConfig::load_with_roots(root, &[]).unwrap().ui_scale_percent,
+            0
+        );
     }
 
     #[test]

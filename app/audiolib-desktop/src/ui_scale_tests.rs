@@ -56,6 +56,10 @@ type Setup = fn(&AppWindow);
 const VIEWS: &[(&str, Setup)] = &[
     ("main", |_| {}),
     ("settings", |ui| ui.set_settings_visible(true)),
+    ("appearance", |ui| {
+        ui.set_settings_page(1);
+        ui.set_settings_visible(true);
+    }),
     ("about", |ui| ui.set_about_visible(true)),
     ("help", |ui| ui.set_help_visible(true)),
     ("wide", |ui| ui.set_inspector_visible(false)),
@@ -116,6 +120,7 @@ fn table_column_widths_scale_proportionally_with_ui_scale() {
         let total = ui.get_table_columns_total();
         // Stored widths stay logical: scaling must never rewrite them.
         assert_eq!(ui.get_table_name_width(), 300.0);
+        assert_eq!(ui.get_table_tags_width(), 140.0);
         total
     };
     let base = total_at(1.0);
@@ -173,4 +178,30 @@ fn wide_table_at_1_5_scrolls_horizontally_to_the_last_column() {
     );
     save_snapshot(&ui, "main-en-x1.5-scrollmax.png");
     ui.hide().unwrap();
+}
+
+#[test]
+fn appearance_scale_choices_map_to_theme_ui_scale() {
+    use crate::controller::{apply_ui_scale, ui_scale_index, ui_scale_percent};
+    init_software_backend();
+    let ui = AppWindow::new().unwrap();
+    for (index, percent, scale) in [
+        (0, 0, 1.0_f32),
+        (1, 100, 1.0),
+        (2, 125, 1.25),
+        (3, 150, 1.5),
+        (4, 175, 1.75),
+        (5, 200, 2.0),
+    ] {
+        assert_eq!(ui_scale_percent(index), percent);
+        assert_eq!(ui_scale_index(percent), index);
+        apply_ui_scale(&ui, percent);
+        assert_eq!(ui.get_ui_scale_index(), index);
+        assert_eq!(ui.global::<crate::Theme>().get_ui_scale(), scale);
+    }
+    assert_eq!(ui_scale_percent(-1), 0);
+    assert_eq!(ui_scale_percent(6), 0);
+    apply_ui_scale(&ui, 130);
+    assert_eq!(ui.get_ui_scale_index(), 0);
+    assert_eq!(ui.global::<crate::Theme>().get_ui_scale(), 1.0);
 }

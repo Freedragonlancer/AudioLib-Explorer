@@ -444,6 +444,11 @@ export component AppWindow inherits Window {
     callback pregenerate-list-waveforms-requested(bool);
     in-out property <bool> hold-list-waveform-batches: false;
     callback hold-list-waveform-batches-requested(bool);
+    // Settings dialog category: 0 = audio output, 1 = appearance.
+    in-out property <int> settings-page: 0;
+    // Appearance interface scale: 0 = automatic (follow system), 1..5 = 100%..200% in 25% steps.
+    in-out property <int> ui-scale-index: 0;
+    callback ui-scale-requested(int);
     callback result-window-changed(int, int);
     private property <length> table-wave-size: root.list-waveforms-visible ? 144px * Theme.ui-scale : 0px;
     in-out property <float> table-name-width: 360;
@@ -456,10 +461,11 @@ export component AppWindow inherits Window {
     private property <length> table-channels-size: clamp(root.table-channels-width, 48, 2000) * 1px * Theme.ui-scale;
     private property <length> table-tags-size: clamp(root.table-tags-width, 80, 2000) * 1px * Theme.ui-scale;
     private property <length> table-name-size: clamp(root.table-name-width, 120, 2000) * 1px * Theme.ui-scale;
-    out property <length> table-columns-total: root.table-columns-size; // read by ui_scale_tests
-    // Horizontal table scroll state, read by ui_scale_tests.
+    out property <length> table-columns-total: root.table-columns-size; // test-only: read by ui_scale_tests
+    // Test-only interface: horizontal table scroll state for ui_scale_tests; the app does not use it.
     out property <length> table-visible-width: result-list.visible-width;
     out property <length> table-scroll-x: root.table-viewport-x;
+    // Test-only: lets ui_scale_tests scroll the table to its last column.
     public function scroll-table-to-end() {
         root.table-viewport-x = min(0px, result-list.visible-width - root.table-content-size);
     }
@@ -1038,7 +1044,7 @@ export component AppWindow inherits Window {
         if root.update-visible && !root.closing {
             update-later.focus();
         } else if root.settings-visible && !root.output-applying && !root.closing {
-            settings-first.focus();
+            if root.settings-page == 1 { appearance-first.focus(); } else { settings-first.focus(); }
         } else if root.batch-visible && !root.closing {
             batch-first.focus();
         } else if root.about-visible && !root.closing {
@@ -1267,7 +1273,8 @@ export component AppWindow inherits Window {
             MenuItem { title: root.chinese ? "暂停" : "Pause"; enabled: root.menu-ready && root.playing; activated => { root.pause-requested(); } }
             MenuItem { title: root.chinese ? "停止" : "Stop"; enabled: root.menu-ready && (root.audio-ready || root.play-duration > 0); activated => { root.stop-requested(); } }
             MenuSeparator { }
-            MenuItem { title: root.chinese ? "音频输出设置…" : "Audio output settings…"; enabled: root.menu-ready; activated => { root.output-settings-requested(); root.settings-visible = true; } }
+            MenuItem { title: root.chinese ? "音频输出设置…" : "Audio output settings…"; enabled: root.menu-ready; activated => { root.settings-page = 0; root.output-settings-requested(); root.settings-visible = true; } }
+            MenuItem { title: root.chinese ? "外观设置…" : "Appearance settings…"; enabled: root.menu-ready; activated => { root.settings-page = 1; root.settings-visible = true; } }
             MenuItem { title: root.chinese ? "Spectral Peaks 设置…" : "Spectral Peaks settings…"; enabled: root.menu-ready; activated => { root.peaks-visible = true; } }
         }
         Menu { title: root.chinese ? "帮助" : "Help"; enabled: root.menu-ready;
@@ -1801,7 +1808,7 @@ export component AppWindow inherits Window {
             zoom-at(factor,fraction) => { root.waveform-wheel-zoom-requested(factor,fraction); }
             pan(value) => { root.waveform-pan-requested(value); }
             peaks => { root.peaks-visible = true; }
-            output-settings => { root.output-settings-requested(); root.settings-visible = true; }
+            output-settings => { root.settings-page = 0; root.output-settings-requested(); root.settings-visible = true; }
         }
         HorizontalLayout { height: 16px * Theme.ui-scale;
             Label { horizontal-stretch: 1; min-width: 0px; text: root.drag-preparing && root.drag-progress != "" ? root.drag-progress : root.status; overflow: elide; font-size: 10px * Theme.ui-scale; }
@@ -1931,7 +1938,7 @@ export component AppWindow inherits Window {
         property <bool> reverse-wrap: false;
         capture-key-pressed(event) => {
             if event.text == Key.Escape { root.dismiss-modal(); return accept; }
-            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && settings-first.has-focus {
+            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (settings-first.has-focus || appearance-first.has-focus) {
                 self.reverse-wrap = true; settings-dialog-end.focus(); self.reverse-wrap = false; return reject;
             }
             reject
@@ -1941,8 +1948,30 @@ export component AppWindow inherits Window {
         Rectangle {
         background: Theme.overlay;
         TouchArea { }
-        Rectangle { width: 590px * Theme.ui-scale; height: 505px * Theme.ui-scale; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
-            VerticalLayout { padding: 26px * Theme.ui-scale; spacing: 13px * Theme.ui-scale;
+        Rectangle { width: 590px * Theme.ui-scale; height: 560px * Theme.ui-scale; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
+          VerticalLayout { padding: 26px * Theme.ui-scale; spacing: 13px * Theme.ui-scale;
+            // Settings categories. PR3 adds theme and font size to the Appearance page.
+            HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                Action { width: 120px * Theme.ui-scale; primary: root.settings-page == 0; enabled: !root.output-applying; label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.settings-page = 0; } }
+                Action { width: 120px * Theme.ui-scale; primary: root.settings-page == 1; enabled: !root.output-applying; label: root.chinese ? "外观" : "Appearance"; clicked => { root.settings-page = 1; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Rectangle { vertical-stretch: 1;
+            appearance-page := VerticalLayout { width: parent.width; visible: root.settings-page == 1; spacing: 13px * Theme.ui-scale; alignment: start;
+                Text { text: root.chinese ? "外观" : "Appearance"; color: Theme.ink; font-size: 23px * Theme.ui-scale; font-weight: 600; }
+                Label { text: root.chinese ? "调整界面大小，更改立即生效并自动保存。" : "Adjust the interface size. Changes apply immediately and are saved."; }
+                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                    Label { width: 108px * Theme.ui-scale; text: root.chinese ? "界面缩放" : "Interface scale"; }
+                    appearance-first := ComboBox { horizontal-stretch: 1; model: root.chinese ? ["自动（跟随系统）", "100%", "125%", "150%", "175%", "200%"] : ["Automatic (follow system)", "100%", "125%", "150%", "175%", "200%"]; current-index <=> root.ui-scale-index; selected => { root.ui-scale-requested(self.current-index); } }
+                }
+                Label { wrap: word-wrap; font-size: 11px * Theme.ui-scale; text: root.chinese ? "“自动”沿用系统显示缩放；百分比在此基础上再放大界面。窗口最小尺寸不变，放不下的列表可滚动。" : "Automatic uses the system display scale; a percentage enlarges the interface on top of it. The minimum window size stays the same and lists that do not fit scroll."; }
+                // PR3: theme and font size rows go here.
+            }
+            HorizontalLayout { width: parent.width; visible: root.settings-page == 1; y: parent.height - self.height; height: 33px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                Rectangle { horizontal-stretch: 1; }
+                Action { width: 84px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.settings-visible = false; } }
+            }
+            VerticalLayout { width: parent.width; height: parent.height; visible: root.settings-page == 0; spacing: 13px * Theme.ui-scale;
                 Text { text: root.chinese ? "音频输出" : "Audio output"; color: Theme.ink; font-size: 23px * Theme.ui-scale; font-weight: 600; }
                 Label { text: root.chinese ? "选择驱动、设备与监听声道对。更改后重新启动输出。" : "Choose the driver, device and listening pair. Changes restart output."; }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
@@ -1980,9 +2009,11 @@ export component AppWindow inherits Window {
                     Action { width: 108px * Theme.ui-scale; primary: true; enabled: !root.devices-loading && !root.output-applying; label: root.output-applying ? (root.chinese ? "应用中…" : "Applying…") : (root.chinese ? "应用设置" : "Apply output"); clicked => { root.output-apply-requested(); } }
                 }
             }
+            }
+            }
         }
     }
-        settings-dialog-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !settings-dialog.reverse-wrap { settings-first.focus(); } } }
+        settings-dialog-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !settings-dialog.reverse-wrap { if root.settings-page == 1 { appearance-first.focus(); } else { settings-first.focus(); } } } }
     }
     debug-dialog := FocusScope {
         visible: root.debug-visible;

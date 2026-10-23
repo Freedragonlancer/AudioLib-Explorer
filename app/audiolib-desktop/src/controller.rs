@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Condvar, Mutex, RwLock, Weak,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,9 @@ use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
 };
-use audiolib_core::config::{AppConfig, AudioTablePreferences};
+use audiolib_core::config::{
+    AppConfig, AudioTablePreferences, UI_SCALE_PERCENTS, normalize_ui_scale_percent,
+};
 use audiolib_core::{
     AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder, LibraryExportFormat,
     ListWaveformSource, MaintenanceAction, MetadataPatch, ScanSession, SearchFilters,
@@ -63,6 +65,37 @@ fn sort_index(order: SortOrder) -> i32 {
         SortOrder::Tags => 5,
         SortOrder::Modified => 6,
     }
+}
+
+/// Appearance combo index for a persisted interface scale: 0 is Automatic.
+pub(crate) fn ui_scale_index(percent: u32) -> i32 {
+    let percent = normalize_ui_scale_percent(percent);
+    UI_SCALE_PERCENTS
+        .iter()
+        .position(|candidate| *candidate == percent)
+        .map_or(0, |position| position as i32 + 1)
+}
+
+/// Persisted interface scale for an Appearance combo index; unknown indices follow
+/// the system.
+pub(crate) fn ui_scale_percent(index: i32) -> u32 {
+    usize::try_from(index - 1)
+        .ok()
+        .and_then(|position| UI_SCALE_PERCENTS.get(position).copied())
+        .unwrap_or(0)
+}
+
+/// Show the interface scale in the Appearance page and apply it to Theme.ui-scale.
+/// Automatic keeps 1.0: the OS display scale already applies to the window.
+pub(crate) fn apply_ui_scale(ui: &AppWindow, percent: u32) {
+    let percent = normalize_ui_scale_percent(percent);
+    ui.set_ui_scale_index(ui_scale_index(percent));
+    let scale = if percent == 0 {
+        1.0
+    } else {
+        percent as f32 / 100.0
+    };
+    ui.global::<crate::Theme>().set_ui_scale(scale);
 }
 
 fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
@@ -685,6 +718,7 @@ pub struct Controller {
     /// The "hold list-waveform batch requests during the first 3 s after audition start"
     /// preference (server mode).
     hold_list_waveform_batches: AtomicBool,
+    ui_scale_percent: AtomicU32,
 }
 
 fn post(ui: slint::Weak<AppWindow>, action: impl FnOnce(AppWindow) + Send + 'static) {
@@ -753,6 +787,7 @@ impl Controller {
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
+        apply_ui_scale(ui, config.ui_scale_percent);
         let table = config.audio_table.normalized();
         ui.set_table_name_width(table.name_width);
         ui.set_table_duration_width(table.duration_width);
@@ -800,6 +835,7 @@ impl Controller {
             list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms)
                 .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
             pregenerate_list_waveforms: AtomicBool::new(config.pregenerate_list_waveforms),
+            ui_scale_percent: AtomicU32::new(normalize_ui_scale_percent(config.ui_scale_percent)),
             hold_list_waveform_batches: AtomicBool::new(
                 config.hold_list_waveform_batches_after_audition,
             ),
@@ -955,6 +991,16 @@ impl Controller {
             c.hold_list_waveform_batches
                 .store(enabled, Ordering::Release);
             c.list_waveforms.set_hold_after_audition(enabled);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_ui_scale_requested(move |index| {
+            let percent = ui_scale_percent(index);
+            if let Some(ui) = c.ui.upgrade() {
+                apply_ui_scale(&ui, percent);
+            }
+            c.ui_scale_percent.store(percent, Ordering::Release);
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
         });
@@ -2587,6 +2633,7 @@ impl Controller {
                             c.pregenerate_list_waveforms.load(Ordering::Acquire);
                         config.hold_list_waveform_batches_after_audition =
                             c.hold_list_waveform_batches.load(Ordering::Acquire);
+                        config.ui_scale_percent = c.ui_scale_percent.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
                         config.save()
                     };
@@ -5739,6 +5786,7 @@ impl Controller {
         config.pregenerate_list_waveforms = self.pregenerate_list_waveforms.load(Ordering::Acquire);
         config.hold_list_waveform_batches_after_audition =
             self.hold_list_waveform_batches.load(Ordering::Acquire);
+        config.ui_scale_percent = self.ui_scale_percent.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
@@ -7552,6 +7600,7 @@ mod tests {
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
+            ui_scale_percent: 0,
             audio_table: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
