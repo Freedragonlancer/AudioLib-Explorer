@@ -10,7 +10,7 @@
 # Listen address (default "0.0.0.0:8790": all interfaces, LAN access).
 bind = "0.0.0.0:8790"
 
-# Existing AudioLib library (older schemas are migrated on open; current schema 5). The server never creates a library: create or
+# Existing AudioLib library (older schemas are migrated on open; current schema 6). The server never creates a library: create or
 # import one first, e.g. `AudioLibCli db create <path>`. A sidecar
 # `<library_db>.server-state.json` (library_id + revision) is written next to it.
 library_db = "/var/lib/audiolib/library.db"
