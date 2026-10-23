@@ -304,6 +304,17 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         self.code
     }
+    /// Optional machine-readable refinement (`sub_code`) of this reply.
+    pub fn sub_code(&self) -> Option<&'static str> {
+        self.sub_code
+    }
+    /// Attach a machine-readable hint as `sub_code`.
+    pub fn with_sub_code(self, sub_code: &'static str) -> Self {
+        Self {
+            sub_code: Some(sub_code),
+            ..self
+        }
+    }
 }
 
 impl From<audiolib_core::Error> for ApiError {

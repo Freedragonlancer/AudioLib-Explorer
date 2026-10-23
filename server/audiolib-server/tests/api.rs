@@ -769,7 +769,7 @@ async fn pinned_snapshot_refuses_incompatible_clients_before_ranges_or_not_modif
             assert_eq!(
                 error.error_code,
                 if mode == "incompatible_version" {
-                    "PEER_VERSION_UNSUPPORTED"
+                    "PEER_UPGRADE_REQUIRED"
                 } else {
                     "SNAPSHOT_FORMAT_UNSUPPORTED"
                 }

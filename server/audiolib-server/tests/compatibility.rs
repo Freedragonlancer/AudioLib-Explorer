@@ -88,10 +88,15 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
             let body: serde_json::Value =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
-            assert_eq!(
-                body["error_code"], "PEER_VERSION_UNSUPPORTED",
-                "{mode} {path}"
-            );
+            let expected = match mode {
+                "unmarked" | "protocol" => "PEER_UPGRADE_REQUIRED",
+                "protocol_newer" => "PROTOCOL_UNSUPPORTED",
+                _ => "PEER_VERSION_UNSUPPORTED",
+            };
+            assert_eq!(body["error_code"], expected, "{mode} {path}");
+            if mode == "protocol_newer" {
+                assert_eq!(body["sub_code"], "SERVER_UPGRADE_REQUIRED", "{path}");
+            }
             assert_eq!(std::fs::read(&settings_path).ok(), original_settings);
             assert_eq!(state.revision().unwrap().revision, revision);
             assert_eq!(
@@ -135,10 +140,10 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
         (Method::POST, "/api/v1/scans/1/cancel", ""),
     ];
     for (mode, code) in [
-        ("missing", "PEER_VERSION_UNSUPPORTED"),
+        ("missing", "PEER_UPGRADE_REQUIRED"),
         ("p0_only", "SNAPSHOT_FORMAT_UNSUPPORTED"),
         ("future_format", "SNAPSHOT_FORMAT_UNSUPPORTED"),
-        ("unmarked_program", "PEER_VERSION_UNSUPPORTED"),
+        ("unmarked_program", "PEER_UPGRADE_REQUIRED"),
     ] {
         let mut catalog = compatibility_manifest();
         match mode {

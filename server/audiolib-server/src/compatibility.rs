@@ -3,8 +3,11 @@
 use crate::ApiError;
 use audiolib_core::compatibility::{
     ACCEPT_FORMATS_HEADER, CLIENT_COMPATIBILITY_HEADER, CompatibilityManifest,
-    LIBRARY_FORMAT_HEADER, MAX_COMPATIBILITY_HEADER_BYTES, SERVER_COMPATIBILITY_HEADER,
-    SNAPSHOT_FORMAT_HEADER, SnapshotFormat, compatibility_manifest, peer_versions_compatible,
+    LIBRARY_FORMAT_HEADER, MAX_COMPATIBILITY_HEADER_BYTES, PEER_UPGRADE_REQUIRED,
+    PEER_VERSION_UNSUPPORTED, PeerRejection, SEARCH_STORAGE_MAX, SEARCH_STORAGE_MAX_HEADER,
+    SERVER_COMPATIBILITY_HEADER, SNAPSHOT_FORMAT_HEADER, SNAPSHOT_SCHEMA_MAX,
+    SNAPSHOT_SCHEMA_MAX_HEADER, SnapshotFormat, TOKENIZATION_MAX, TOKENIZATION_MAX_HEADER,
+    check_peer, compatibility_manifest,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
@@ -35,12 +38,9 @@ pub(crate) fn admit(headers: &HeaderMap, format: &SnapshotFormat) -> Result<(), 
         return Err(unsupported(format));
     }
     for (header, required) in [
-        (
-            "x-audiolib-snapshot-schema-max",
-            format.format.schema_version,
-        ),
-        ("x-audiolib-search-storage-max", 1),
-        ("x-audiolib-tokenization-max", 3),
+        (SNAPSHOT_SCHEMA_MAX_HEADER, format.format.schema_version),
+        (SEARCH_STORAGE_MAX_HEADER, SEARCH_STORAGE_MAX),
+        (TOKENIZATION_MAX_HEADER, TOKENIZATION_MAX),
     ] {
         if single(headers, header)
             .and_then(|value| value.parse::<u32>().ok())
@@ -56,33 +56,67 @@ pub(crate) fn admit(headers: &HeaderMap, format: &SnapshotFormat) -> Result<(), 
     Ok(())
 }
 
-/// Validate a modern peer at request admission, including after a client preflight.
+/// Translate a marker refusal into the stable 409 reply (Compatibility_Markers.md §4).
+fn rejection(reason: PeerRejection, peer_version: &str) -> ApiError {
+    let message = match reason {
+        PeerRejection::BlockedVersion => format!(
+            "Client version {peer_version} is blocked by this server; install a different client release"
+        ),
+        PeerRejection::PeerUpgradeRequired => {
+            "The client predates compatibility markers (0.7.2); upgrade the client".to_owned()
+        }
+        PeerRejection::ProtocolPeerTooOld => format!(
+            "Client {peer_version} only speaks an older API protocol than this server; upgrade the client"
+        ),
+        PeerRejection::ProtocolPeerTooNew => format!(
+            "Client {peer_version} requires a newer API protocol than this server supports; upgrade the server"
+        ),
+        PeerRejection::Inconsistent => {
+            "The client compatibility catalog is inconsistent; upgrade the client".to_owned()
+        }
+    };
+    let error = ApiError::new(StatusCode::CONFLICT, reason.error_code(), message);
+    if reason == PeerRejection::ProtocolPeerTooNew {
+        // Hint: this side, not the client, must be upgraded.
+        error.with_sub_code("SERVER_UPGRADE_REQUIRED")
+    } else {
+        error
+    }
+}
+
+/// Marker check of the client catalog. Client `features` are logged for diagnostics
+/// only and never change admission or the response.
 fn admit_peer(headers: &HeaderMap) -> Result<CompatibilityManifest, ApiError> {
+    if !headers.contains_key(CLIENT_COMPATIBILITY_HEADER) {
+        // No catalog at all: a pre-marker (0.4.x/0.5.x or JSON-only) caller.
+        return Err(rejection(PeerRejection::PeerUpgradeRequired, ""));
+    }
     let peer: CompatibilityManifest = single(headers, CLIENT_COMPATIBILITY_HEADER)
         .and_then(|value| serde_json::from_str(value).ok())
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::CONFLICT,
-                "PEER_VERSION_UNSUPPORTED",
-                "A valid client compatibility catalog is required; upgrade the client before writing",
+                PEER_VERSION_UNSUPPORTED,
+                "The client compatibility catalog is malformed, duplicated or too large; upgrade the client",
             )
         })?;
-    if !peer_versions_compatible(
+    tracing::debug!(
+        client_version = %peer.application_version,
+        client_marker_revision = ?peer.marker_revision,
+        client_features = ?peer.features,
+        "client compatibility catalog"
+    );
+    check_peer(
         &compatibility_manifest(),
         &peer.application_version,
         Some(&peer),
-    ) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "PEER_VERSION_UNSUPPORTED",
-            "Client and server application compatibility ranges do not agree; upgrade the client",
-        ));
-    }
+    )
+    .map_err(|reason| rejection(reason, &peer.application_version))?;
     Ok(peer)
 }
 
 /// Settings, cache jobs and the playback no-op permit legacy JSON callers to omit
-/// the catalog. A supplied malformed or incompatible catalog is always refused.
+/// the catalog (the only no-header exemption). A supplied malformed or incompatible catalog is always refused.
 pub(crate) fn admit_mutation(headers: &HeaderMap) -> Result<(), ApiError> {
     if headers.contains_key(CLIENT_COMPATIBILITY_HEADER) {
         admit_peer(headers)?;
@@ -179,11 +213,11 @@ mod tests {
                 .unwrap(),
         );
         for (name, value) in [
-            ("x-audiolib-snapshot-schema-max", "6"),
-            ("x-audiolib-search-storage-max", "1"),
-            ("x-audiolib-tokenization-max", "3"),
+            (SNAPSHOT_SCHEMA_MAX_HEADER, SNAPSHOT_SCHEMA_MAX),
+            (SEARCH_STORAGE_MAX_HEADER, SEARCH_STORAGE_MAX),
+            (TOKENIZATION_MAX_HEADER, TOKENIZATION_MAX),
         ] {
-            headers.insert(name, HeaderValue::from_static(value));
+            headers.insert(name, HeaderValue::from(value));
         }
         (
             headers,
@@ -202,7 +236,7 @@ mod tests {
         for name in [
             ACCEPT_FORMATS_HEADER,
             CLIENT_COMPATIBILITY_HEADER,
-            "x-audiolib-tokenization-max",
+            TOKENIZATION_MAX_HEADER,
         ] {
             let mut missing = headers.clone();
             missing.remove(name);
@@ -236,7 +270,7 @@ mod tests {
         // Snapshot-transfer headers do not substitute for or constrain the catalog
         // used by a JSON mutation. The full actual library descriptor still does.
         headers.remove(ACCEPT_FORMATS_HEADER);
-        headers.remove("x-audiolib-snapshot-schema-max");
+        headers.remove(SNAPSHOT_SCHEMA_MAX_HEADER);
         admit_library_mutation(&headers, &format).unwrap();
         assert!(admit_library_mutation(&HeaderMap::new(), &format).is_err());
         let mut old = compatibility_manifest();
@@ -250,5 +284,125 @@ mod tests {
         let (headers, mut unknown) = fixture();
         unknown.format.features.insert("future_feature".into(), 1);
         assert!(admit_library_mutation(&headers, &unknown).is_err());
+    }
+
+    fn with_catalog(headers: &HeaderMap, catalog: &CompatibilityManifest) -> HeaderMap {
+        let mut headers = headers.clone();
+        headers.insert(
+            CLIENT_COMPATIBILITY_HEADER,
+            HeaderValue::from_str(&serde_json::to_string(catalog).unwrap()).unwrap(),
+        );
+        headers
+    }
+
+    fn code(result: Result<(), ApiError>) -> (&'static str, Option<&'static str>) {
+        let error = result.unwrap_err();
+        (error.code(), error.sub_code())
+    }
+
+    #[test]
+    fn marker_peers_of_any_version_are_admitted() {
+        let (headers, format) = fixture();
+        for version in ["0.7.2", "0.8.0", "9.0.0"] {
+            let mut peer = compatibility_manifest();
+            peer.application_version = version.into();
+            peer.catalog_revision += 5;
+            peer.peer_application_ranges = vec!["<0.1.0".into()];
+            let headers = with_catalog(&headers, &peer);
+            admit(&headers, &format).unwrap();
+            admit_mutation(&headers).unwrap();
+            admit_library_mutation(&headers, &format).unwrap();
+        }
+    }
+
+    #[test]
+    fn unmarked_and_missing_catalogs_require_peer_upgrade() {
+        let (headers, format) = fixture();
+        let mut old = compatibility_manifest();
+        old.application_version = "0.7.1".into();
+        old.marker_revision = None;
+        old.protocol = None;
+        let old_headers = with_catalog(&headers, &old);
+        for result in [
+            admit(&old_headers, &format),
+            admit_mutation(&old_headers),
+            admit_library_mutation(&old_headers, &format),
+        ] {
+            assert_eq!(code(result), (PEER_UPGRADE_REQUIRED, None));
+        }
+        let mut missing = headers.clone();
+        missing.remove(CLIENT_COMPATIBILITY_HEADER);
+        assert_eq!(
+            code(admit_library_mutation(&missing, &format)),
+            (PEER_UPGRADE_REQUIRED, None)
+        );
+        assert_eq!(
+            code(admit(&missing, &format)),
+            (PEER_UPGRADE_REQUIRED, None)
+        );
+    }
+
+    #[test]
+    fn protocol_direction_selects_the_side_to_upgrade() {
+        let (headers, format) = fixture();
+        let mut newer = compatibility_manifest();
+        newer.protocol = Some(audiolib_core::compatibility::ProtocolRange { min: 2, max: 3 });
+        newer.api_protocols = vec!["api/v2".into(), "api/v3".into()];
+        let newer = with_catalog(&headers, &newer);
+        assert_eq!(
+            code(admit_library_mutation(&newer, &format)),
+            (
+                audiolib_core::compatibility::PROTOCOL_UNSUPPORTED,
+                Some("SERVER_UPGRADE_REQUIRED")
+            )
+        );
+        assert_eq!(
+            code(admit_mutation(&newer)).0,
+            audiolib_core::compatibility::PROTOCOL_UNSUPPORTED
+        );
+        let mut older = compatibility_manifest();
+        older.protocol = Some(audiolib_core::compatibility::ProtocolRange { min: 0, max: 0 });
+        older.api_protocols = vec!["api/v0".into()];
+        let older = with_catalog(&headers, &older);
+        assert_eq!(code(admit(&older, &format)), (PEER_UPGRADE_REQUIRED, None));
+    }
+
+    #[test]
+    fn blocked_version_maps_to_peer_version_blocked() {
+        assert_eq!(
+            rejection(PeerRejection::BlockedVersion, "0.7.3").code(),
+            audiolib_core::compatibility::PEER_VERSION_BLOCKED
+        );
+        assert_eq!(
+            rejection(PeerRejection::BlockedVersion, "0.7.3").status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn header_exemption_is_limited_to_settings_and_cache_tasks() {
+        let (_, format) = fixture();
+        admit_mutation(&HeaderMap::new()).unwrap();
+        assert_eq!(
+            code(admit_library_mutation(&HeaderMap::new(), &format)).0,
+            PEER_UPGRADE_REQUIRED
+        );
+        let mut malformed = HeaderMap::new();
+        malformed.insert(CLIENT_COMPATIBILITY_HEADER, HeaderValue::from_static("{"));
+        assert_eq!(code(admit_mutation(&malformed)).0, PEER_VERSION_UNSUPPORTED);
+    }
+
+    #[test]
+    fn schema_max_headers_follow_core_constants() {
+        let (headers, format) = fixture();
+        for name in [
+            SNAPSHOT_SCHEMA_MAX_HEADER,
+            SEARCH_STORAGE_MAX_HEADER,
+            TOKENIZATION_MAX_HEADER,
+        ] {
+            let mut low = headers.clone();
+            low.insert(name, HeaderValue::from_static("0"));
+            assert!(admit(&low, &format).is_err(), "{name}");
+        }
     }
 }
