@@ -21,6 +21,7 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
    `程序 0.4.0 | API /api/v1/ | schema 5 | 快照兼容 3..=5`
 
 6. 发布产物附 SHA256：`package-portable.ps1` 生成 `<zip>.sha256`，GitHub Actions 发布步骤把它连同 ZIP 上传为 Release 资产，并写入发布说明正文。
+   每个 Release 只发布两个包：Windows 客户端和 macOS arm64 服务端，各附一个 `.sha256`。只有 macOS 服务端支持自动更新；不发布 Windows 和 Linux 服务端包。
 
 规则 1 到 5 由 `tools/check-release.ps1` 检查，失败时列出全部错误并以非零退出。
 
