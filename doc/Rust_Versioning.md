@@ -36,8 +36,8 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
    省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
 4. 正式发布前在本地执行 `tools/check-local.ps1 -Asio`、受影响的专项回归及打包启动验收；日常开发按 [Testing Strategy](Testing_Strategy.md) 选择最小范围。缺少平台或硬件覆盖时明确记录，不能以云端构建代替功能验证。
 5. 合并后在发布提交上打标签 `v0.4.6`（或 `v0.4.6-rc.1`）并推送。
-6. 发布包在对应本机平台构建、验证，使用 `gh release upload <tag> <files>` 上传已创建的 Release。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。发布流程：在本机分别构建并验证 Windows x64 客户端包与 macOS arm64 服务端包（各带 `.sha256`），用 `tools/release-create.sh <tag> <资产…>` 创建 Release（或对已创建的 Release 用 `gh release upload`），然后可选地手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验：确认 Release 恰有上述 4 个资产且 SHA256 正确。该 workflow 不构建、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，也不会覆盖本地上传的资产，因此打标签前无需先禁用 release.yml。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。
-7. 从已发布 Release 下载客户端包、SHA256 和 `Rust_CI_Release.json`，核验归档及报告的标签/提交，再按 AGENTS.md 更新固定 `local_release/` 并核对两个 EXE。CI 产物作为安装身份基准，不以不同本机构建的哈希替代。使用 `pwsh`（PowerShell 7.3 以上）执行 portable validator，传入 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 核对已发布报告中的 EXE 哈希，并运行隔离首次启动、CLI/UI 和诊断检查；省略报告时仍要求本机 release 输出一致。
+6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上构建 macOS arm64 服务端包，各自生成对应的 `.sha256`。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。
+7. 上传本机构建的 4 个资产（两个包及各自的 `.sha256`）：用 `tools/release-create.sh <tag> <资产…>` 创建 Release 并上传，或对已创建的 Release 用 `gh release upload <tag> <资产…>`。之后可选地在 GitHub Actions 中手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验：确认 Release 恰有上述 4 个资产且 SHA256 正确。该 workflow 不构建、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，因此打标签前无需先禁用 release.yml。按 AGENTS.md 用本机构建的发布包更新固定 `local_release/` 并核对两个 EXE，再用 `pwsh`（PowerShell 7.3 以上）执行 portable validator（`-ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout`），运行隔离首次启动、CLI/UI 和诊断检查。
 
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：
 
