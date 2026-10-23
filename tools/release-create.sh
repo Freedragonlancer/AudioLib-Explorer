@@ -16,8 +16,13 @@ cargo_ver=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f&&/^version *=/
 notes=(--notes-file "$root/doc/Rust_Release_Notes.md"); dry=0; assets=()
 while [ $# -gt 0 ]; do
   case $1 in
-    --notes-file) notes=(--notes-file "$2"); shift 2 ;;
+    --notes-file)
+      [ $# -ge 2 ] && [ -n "$2" ] && [[ $2 != --* ]] || die "option $1 requires a value"
+      notes=(--notes-file "$2"); shift 2 ;;
+    --notes-file=*) [ -n "${1#*=}" ] || die "option --notes-file requires a value"; notes=(--notes-file "${1#*=}"); shift ;;
     --dry-run) dry=1; shift ;;
+    --) shift; assets+=("$@"); break ;;
+    -*) die "unknown option: $1" ;;
     *) assets+=("$1"); shift ;;
   esac
 done
