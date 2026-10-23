@@ -111,6 +111,7 @@ fn child_real_pointer_preview_modes() {
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
+        ui_scale_percent: 0,
         audio_table: Default::default(),
         allowed_scan_roots: vec![sounds.canonicalize().unwrap()],
         data_source: Default::default(),

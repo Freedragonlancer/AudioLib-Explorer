@@ -1402,6 +1402,7 @@ mod tests {
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
+            ui_scale_percent: 0,
             audio_table: Default::default(),
             playback: json!({"backend":"wasapi","volume":0.25}),
             allowed_scan_roots: Vec::new(),

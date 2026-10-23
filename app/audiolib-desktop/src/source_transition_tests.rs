@@ -92,6 +92,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
+        ui_scale_percent: 0,
         audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
@@ -911,10 +912,15 @@ fn child_delayed_ipc_reload_play_is_cancelled_by_stop() {
             next.set(next.get() + 1);
             return false;
         }
-        if c.latest_selection.lock().unwrap().is_some() || !ui.get_audio_ready() {
+        let audio_generation = loaded.generation + if next.get() == 1 { 1 } else { 3 };
+        // audio_ready is still true from the previous Load right after Play is
+        // sent, so wait for the reload's own Load generation before asserting.
+        if c.latest_selection.lock().unwrap().is_some()
+            || !ui.get_audio_ready()
+            || status.generation < audio_generation
+        {
             return false;
         }
-        let audio_generation = loaded.generation + if next.get() == 1 { 1 } else { 3 };
         assert_eq!(status.generation, audio_generation);
         assert_eq!(status.file_path.as_ref(), Some(&metal_path));
         assert!(

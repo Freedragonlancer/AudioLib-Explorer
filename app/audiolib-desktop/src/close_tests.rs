@@ -41,6 +41,7 @@ fn real_windows_empty_library_closes_after_startup_event_loop() {
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
+        ui_scale_percent: 0,
         audio_table: Default::default(),
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
