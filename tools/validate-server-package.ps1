@@ -11,6 +11,8 @@ param(
     [switch]$Asio
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Server validation requires PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -329,4 +331,7 @@ try {
         Assert-UnlinkedTree $testRoot
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release')
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }
 $cli = Join-Path $binaryRoot 'AudioLibCli.exe'
@@ -56,4 +58,7 @@ try {
     if ($resolvedRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedRoot)) {
         Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }
