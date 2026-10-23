@@ -437,7 +437,9 @@ pub enum PeerRejection {
     BlockedVersion,
     /// No catalog or no `marker_revision`: the peer predates markers.
     PeerUpgradeRequired,
-    /// The catalog's `application_version` differs from the reported version.
+    /// The catalog contradicts itself or the reported version: `application_version`
+    /// differs, `marker_revision` without `protocol`, `protocol.min > protocol.max`, or
+    /// `api_protocols` disjoint from ours although the intervals intersect.
     Inconsistent,
     /// Peer protocol entirely below ours: the peer must upgrade.
     ProtocolPeerTooOld,
@@ -492,8 +494,10 @@ pub fn check_peer(
         return Err(PeerRejection::Inconsistent);
     }
     let local_range = local.protocol.unwrap_or(PROTOCOL);
-    let Some(peer_range) = peer.protocol else {
-        return Err(PeerRejection::PeerUpgradeRequired);
+    // A marker peer must declare a well-formed interval; anything else is a broken
+    // catalog, not an old peer.
+    let Some(peer_range) = peer.protocol.filter(|range| range.min <= range.max) else {
+        return Err(PeerRejection::Inconsistent);
     };
     if peer_range.max < local_range.min {
         return Err(PeerRejection::ProtocolPeerTooOld);
@@ -501,17 +505,14 @@ pub fn check_peer(
     if peer_range.min > local_range.max {
         return Err(PeerRejection::ProtocolPeerTooNew);
     }
-    // Transitional: `api_protocols` must agree with the interval.
+    // Transitional: `api_protocols` must agree with the interval. The intervals
+    // intersect here, so disjoint identifiers mean the catalog contradicts itself.
     if !peer
         .api_protocols
         .iter()
         .any(|protocol| local.api_protocols.contains(protocol))
     {
-        return Err(if peer_range.max > local_range.max {
-            PeerRejection::ProtocolPeerTooNew
-        } else {
-            PeerRejection::ProtocolPeerTooOld
-        });
+        return Err(PeerRejection::Inconsistent);
     }
     Ok(())
 }
@@ -756,7 +757,10 @@ mod tests {
         // Interval and identifiers must agree during the transition.
         let mut stale = marked("0.9.0");
         stale.api_protocols = vec!["api/v99".into()];
-        assert!(check_peer(&local, "0.9.0", Some(&stale)).is_err());
+        assert_eq!(
+            check_peer(&local, "0.9.0", Some(&stale)),
+            Err(PeerRejection::Inconsistent)
+        );
     }
 
     #[test]
@@ -790,6 +794,58 @@ mod tests {
             check_peer(&local, "0.9.9", Some(&marked("0.8.0"))),
             Err(PeerRejection::Inconsistent)
         );
+        assert_eq!(
+            PeerRejection::Inconsistent.error_code(),
+            PEER_CATALOG_INVALID
+        );
+    }
+
+    #[test]
+    fn inverted_protocol_range_is_an_invalid_catalog() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.protocol = Some(ProtocolRange { min: 2, max: 1 });
+        assert_eq!(
+            check_peer(&local, "0.8.0", Some(&peer)),
+            Err(PeerRejection::Inconsistent)
+        );
+        // Even an inverted range that would otherwise look "too new" or "too old".
+        for (min, max) in [(5, 3), (1, 0)] {
+            peer.protocol = Some(ProtocolRange { min, max });
+            assert_eq!(
+                check_peer(&local, "0.8.0", Some(&peer)),
+                Err(PeerRejection::Inconsistent),
+                "{min}..={max}"
+            );
+        }
+    }
+
+    #[test]
+    fn marker_without_protocol_is_an_invalid_catalog_not_an_old_peer() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.protocol = None;
+        assert!(peer.marker_revision.is_some());
+        assert_eq!(
+            check_peer(&local, "0.8.0", Some(&peer)),
+            Err(PeerRejection::Inconsistent)
+        );
+    }
+
+    #[test]
+    fn intersecting_ranges_with_disjoint_api_protocols_are_an_invalid_catalog() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.protocol = Some(ProtocolRange { min: 1, max: 2 });
+        for identifiers in [vec!["api/v2".to_owned()], Vec::new()] {
+            peer.api_protocols = identifiers;
+            assert_eq!(
+                check_peer(&local, "0.8.0", Some(&peer)),
+                Err(PeerRejection::Inconsistent),
+                "{:?}",
+                peer.api_protocols
+            );
+        }
     }
 
     #[test]
