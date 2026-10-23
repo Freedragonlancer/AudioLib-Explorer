@@ -23,14 +23,14 @@ component Tool inherits Rectangle {
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
     if root.icon.width > 0: Image { source: root.icon; colorize: root.primary ? Theme.on-accent : Theme.ink; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-    if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: 16px * Theme.ui-scale; horizontal-alignment: center; vertical-alignment: center; }
+    if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
     focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; } reject } }
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     if hit.has-hover: Rectangle { z: 10; y: -28px * Theme.ui-scale; height: 24px * Theme.ui-scale; width: max(86px * Theme.ui-scale, tip.preferred-width + 16px * Theme.ui-scale); background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px * Theme.ui-scale;
-        tip := Text { text: root.label; color: Theme.ink; font-size: 10px * Theme.ui-scale; horizontal-alignment: center; vertical-alignment: center; }
+        tip := Text { text: root.label; color: Theme.ink; font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
     }
 }
-component Caption inherits Text { color: Theme.dim; font-size: 11px * Theme.ui-scale; vertical-alignment: center; }
+component Caption inherits Text { color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; }
 
 export component AuditionPanel inherits Rectangle {
     in property <bool> compact: false;
@@ -117,7 +117,7 @@ export component AuditionPanel inherits Rectangle {
             volume-control := Slider { min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
             Tool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-            Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: 9px * Theme.ui-scale; }
+            Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: Theme.font(9); }
             Tool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; clicked => { root.peaks(); } }
             Tool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.output-settings(); } }
         }
@@ -127,7 +127,7 @@ export component AuditionPanel inherits Rectangle {
             changed width => { root.resize(self.width / 1px, self.height / 1px); }
             changed height => { root.resize(self.width / 1px, self.height / 1px); }
             Image { source: root.waveform; width: parent.width; height: parent.height; image-fit: fill; }
-            if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: 11px * Theme.ui-scale; }
+            if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
             // These overlays are paint-only, leaving click/scroll ownership to scrub.
             if root.ready && root.duration > 0: Rectangle {
                 x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
@@ -148,25 +148,25 @@ export component AuditionPanel inherits Rectangle {
         }
         Rectangle { height: 24px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
             for tick in 51: Rectangle { x: tick * (parent.width - 1px) / 50; width: 1px; height: Math.mod(tick,5) == 0 ? 9px * Theme.ui-scale : 4px * Theme.ui-scale; background: Theme.muted; }
-            for label[index] in root.ruler-labels: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px * Theme.ui-scale; width: 55px * Theme.ui-scale; height: 13px * Theme.ui-scale; text: label; color: Theme.dim; font-size: 9px * Theme.ui-scale; horizontal-alignment: index == 10 ? right : left; }
+            for label[index] in root.ruler-labels: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px * Theme.ui-scale; width: 55px * Theme.ui-scale; height: 13px * Theme.ui-scale; text: label; color: Theme.dim; font-size: Theme.font(9); horizontal-alignment: index == 10 ? right : left; }
             TouchArea { enabled: root.ready; mouse-cursor: pointer;
                 clicked => { root.seek-play(root.view-start + clamp(self.mouse-x/self.width,0,1)*(root.view-end - root.view-start)); }
                 scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
             }
         }
         HorizontalLayout { height: 16px * Theme.ui-scale; spacing: 7px * Theme.ui-scale;
-            Caption { width: 42px * Theme.ui-scale; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: 10px * Theme.ui-scale; }
-            if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: 9px * Theme.ui-scale; }
+            Caption { width: 42px * Theme.ui-scale; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: Theme.font(10); }
+            if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: Theme.font(9); }
             Slider { horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
             Tool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
             Tool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
             Tool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
         }
         HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: 14px * Theme.ui-scale; vertical-alignment: center; }
+            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center; }
             Rectangle { width: 1px; background: Theme.player-border; }
-            Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: 11px * Theme.ui-scale; vertical-alignment: center; }
-            Caption { text: root.info; font-size: 10px * Theme.ui-scale; }
+            Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; }
+            Caption { text: root.info; font-size: Theme.font(10); }
         }
     }
 }
@@ -196,7 +196,7 @@ export component PeakSettings inherits FocusScope {
     Rectangle { width: 480px * Theme.ui-scale; height: 384px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; background: Theme.panel; border-radius: 8px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
         VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
             HorizontalLayout { height: 30px * Theme.ui-scale;
-                Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: 17px * Theme.ui-scale; font-weight: 600; vertical-alignment: center; }
+                Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: Theme.font(17); font-weight: 600; vertical-alignment: center; }
                 peaks-close := Tool { symbol: "×"; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
             }
             HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
@@ -216,7 +216,7 @@ export component PeakSettings inherits FocusScope {
             // Muted frequency anchors from audiolib-audio/src/spectral.rs.
             Rectangle { height: 92px * Theme.ui-scale; background: @linear-gradient(90deg, #5bafb5, #707cbe, #b073ab, #c57564, #c0a954, #6fae79, #5bafb5, #707cbe); border-radius: 3px * Theme.ui-scale;
                 Rectangle { x: 0px; y: 0px; background: @linear-gradient(180deg, #0e0e0eff, #0e0e0e00); height: 65px * Theme.ui-scale; }
-                for frequency[index] in ["14 Hz", "36 Hz", "92 Hz", "239 Hz", "619 Hz", "1604 Hz", "4155 Hz"]: Text { x: 4px * Theme.ui-scale + index * (parent.width - 8px * Theme.ui-scale) / 7; y: 69px * Theme.ui-scale; height: 20px * Theme.ui-scale; text: frequency; color: #101820; font-size: 10px * Theme.ui-scale; font-weight: 600; vertical-alignment: center; }
+                for frequency[index] in ["14 Hz", "36 Hz", "92 Hz", "239 Hz", "619 Hz", "1604 Hz", "4155 Hz"]: Text { x: 4px * Theme.ui-scale + index * (parent.width - 8px * Theme.ui-scale) / 7; y: 69px * Theme.ui-scale; height: 20px * Theme.ui-scale; text: frequency; color: #101820; font-size: Theme.font(10); font-weight: 600; vertical-alignment: center; }
             }
             HorizontalLayout { height: 26px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                 Caption { text: root.chinese ? "噪声阈值" : "Noise threshold"; width: 80px * Theme.ui-scale; }
@@ -226,7 +226,7 @@ export component PeakSettings inherits FocusScope {
                 Slider { surface: Theme.panel; horizontal-stretch: 1; minimum: 0.05; maximum: 1; step: 0.01; value <=> root.variance; changed => { root.changed(); } }
                 Caption { width: 36px * Theme.ui-scale; text: Math.round(root.variance*100)/100; }
             }
-            Caption { text: root.chinese ? "黑色表示非音调内容；颜色随主频变化。显示增益不改变音量。" : "Noise fades to black; tones show frequency. Display gain is visual only."; font-size: 10px * Theme.ui-scale; }
+            Caption { text: root.chinese ? "黑色表示非音调内容；颜色随主频变化。显示增益不改变音量。" : "Noise fades to black; tones show frequency. Display gain is visual only."; font-size: Theme.font(10); }
         }
     }
     }
