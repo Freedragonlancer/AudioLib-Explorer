@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release', [switch]$CleanCheckout)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $PSNativeCommandUseErrorActionPreference = $false
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
@@ -229,4 +231,7 @@ try {
     if ((Test-Path -LiteralPath $testRoot) -and $testRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

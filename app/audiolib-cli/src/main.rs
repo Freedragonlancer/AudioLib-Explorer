@@ -1407,6 +1407,7 @@ mod tests {
             ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             audio_table: Default::default(),
+            window_layout: Default::default(),
             playback: json!({"backend":"wasapi","volume":0.25}),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),

@@ -5,6 +5,8 @@ param(
     [ValidateRange(1,20)][int]$Cycles = 3
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $taskRepo = Split-Path -Parent $PSScriptRoot
 $taskBinary = (Resolve-Path -LiteralPath $BinaryDirectory).Path
 $taskDesktop = Join-Path $taskBinary 'AudioLibExplorer.exe'
@@ -155,3 +157,6 @@ try {
     $taskReport | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $taskArtifacts 'report.json') -Encoding UTF8
     $taskReport | ConvertTo-Json -Depth 5
 } finally { $env:AUDIOLIB_DATA_DIR=$taskSavedData; $env:SLINT_BACKEND=$taskSavedBackend; $env:RUST_LOG=$taskSavedLog; $env:USERNAME=$taskSavedUserName }
+} finally {
+    Restore-AudioLibConsoleEncoding
+}

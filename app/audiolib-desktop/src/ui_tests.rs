@@ -3814,3 +3814,37 @@ fn unified_source_window_gates_server_scans_and_removals_on_the_active_managed_s
     }
     ui.hide().unwrap();
 }
+
+#[test]
+fn appearance_settings_live_in_the_view_menu_in_both_languages() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    ui.show().unwrap();
+    for chinese in [false, true] {
+        ui.set_chinese(chinese);
+        let (view, playback, label) = if chinese {
+            ("视图", "播放", "外观设置…")
+        } else {
+            ("View", "Playback", "Appearance settings…")
+        };
+        open_menu(&ui, playback);
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .is_none(),
+            "Appearance settings must no longer be in the Playback menu"
+        );
+        close_menu(&ui);
+        ui.set_settings_visible(false);
+        ui.set_settings_page(0);
+        click_menu_item(&ui, view, label);
+        assert!(ui.get_settings_visible(), "View menu must open settings");
+        assert_eq!(
+            ui.get_settings_page(),
+            1,
+            "View menu must open the Appearance page"
+        );
+        ui.set_settings_visible(false);
+    }
+}

@@ -2,6 +2,8 @@
 # Native Windows exposure regression; only the launched isolated test window is captured.
 param([Parameter(Mandatory=$true)][string]$BinaryDirectory)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $binaryRoot = (Resolve-Path -LiteralPath $BinaryDirectory).Path
 $desktop = Join-Path $binaryRoot 'AudioLibExplorer.exe'
@@ -277,4 +279,7 @@ try {
         }
         Remove-Item -LiteralPath $resolvedTest -Recurse -Force
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

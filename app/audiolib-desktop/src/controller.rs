@@ -633,6 +633,9 @@ pub struct Controller {
     single_click_play: AtomicBool,
     /// Latest table layout, captured on the event loop and saved by the preferences worker.
     audio_table: Mutex<AudioTablePreferences>,
+    /// Window geometry and pane layout, captured on the UI thread when a pane
+    /// divider is released and when closing; saved by the preferences worker.
+    window_layout: Mutex<audiolib_core::window_layout::WindowLayoutPreferences>,
     single_click_play_pending: Mutex<bool>,
     single_click_play_wake: Condvar,
     playback: Mutex<PlaybackConfig>,
@@ -792,6 +795,7 @@ impl Controller {
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
         apply_ui_scale(ui, config.ui_scale_percent);
+        crate::window_layout::restore_panes(ui, &config.window_layout);
         crate::theme::apply_theme(ui, &config.theme);
         crate::theme::apply_font_sizes(ui, config.ui_font_size, config.list_font_size);
         let table = config.audio_table.normalized();
@@ -853,6 +857,7 @@ impl Controller {
                 config.hold_list_waveform_batches_after_audition,
             ),
             audio_table: Mutex::new(table),
+            window_layout: Mutex::new(config.window_layout.normalized()),
             single_click_play_pending: Mutex::new(false),
             single_click_play_wake: Condvar::new(),
             config: Arc::new(Mutex::new(config)),
@@ -1055,6 +1060,18 @@ impl Controller {
                 && let Some(ui) = c.ui.upgrade()
             {
                 *c.audio_table.lock().unwrap() = table_preferences(&ui);
+                *c.single_click_play_pending.lock().unwrap() = true;
+                c.single_click_play_wake.notify_one();
+            }
+        });
+        let c = self.clone();
+        ui.on_pane_layout_changed(move || {
+            if c.available()
+                && let Some(ui) = c.ui.upgrade()
+            {
+                let mut layout = c.window_layout.lock().unwrap();
+                *layout = crate::window_layout::capture(&ui, &layout);
+                drop(layout);
                 *c.single_click_play_pending.lock().unwrap() = true;
                 c.single_click_play_wake.notify_one();
             }
@@ -2681,6 +2698,7 @@ impl Controller {
                         config.ui_font_size = c.ui_font_size.load(Ordering::Acquire);
                         config.list_font_size = c.list_font_size.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
+                        config.window_layout = c.window_layout.lock().unwrap().clone();
                         config.save()
                     };
                     if let Err(error) = result {
@@ -4387,6 +4405,10 @@ impl Controller {
             return;
         }
         *self.audio_table.lock().unwrap() = table_preferences(ui);
+        {
+            let mut layout = self.window_layout.lock().unwrap();
+            *layout = crate::window_layout::capture(ui, &layout);
+        }
         let barrier = if pending_source_sync {
             self.metadata.lock().unwrap().sequence
         } else {
@@ -5837,6 +5859,7 @@ impl Controller {
         config.ui_font_size = self.ui_font_size.load(Ordering::Acquire);
         config.list_font_size = self.list_font_size.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
+        config.window_layout = self.window_layout.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
         }
@@ -7654,6 +7677,7 @@ mod tests {
             ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             audio_table: Default::default(),
+            window_layout: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
             data_source_fallback: None,

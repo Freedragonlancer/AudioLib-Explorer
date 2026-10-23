@@ -397,6 +397,9 @@ pub struct AppConfig {
     /// Persistent table layout and sorting, applied to every search page.
     #[serde(default)]
     pub audio_table: AudioTablePreferences,
+    /// Desktop window geometry and pane layout restored on the next launch.
+    #[serde(default)]
+    pub window_layout: crate::window_layout::WindowLayoutPreferences,
     #[serde(default)]
     pub allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
@@ -440,6 +443,8 @@ struct SavedPreferences {
     list_font_size: u32,
     #[serde(default)]
     audio_table: AudioTablePreferences,
+    #[serde(default)]
+    window_layout: crate::window_layout::WindowLayoutPreferences,
     #[serde(default)]
     allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
@@ -597,6 +602,7 @@ impl AppConfig {
             ui_font_size: DEFAULT_FONT_SIZE,
             list_font_size: DEFAULT_FONT_SIZE,
             audio_table: AudioTablePreferences::default(),
+            window_layout: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: DataSourceSettings::default(),
             data_source_fallback: None,
@@ -653,6 +659,7 @@ impl AppConfig {
             config.ui_font_size = clamp_font_size(i64::from(saved.ui_font_size));
             config.list_font_size = clamp_font_size(i64::from(saved.list_font_size));
             config.audio_table = saved.audio_table.normalized();
+            config.window_layout = saved.window_layout.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
             config.data_source = saved.data_source;
             // Single-server settings become one profile; older-client edits of the old
@@ -702,6 +709,7 @@ impl AppConfig {
             ui_font_size: clamp_font_size(i64::from(self.ui_font_size)),
             list_font_size: clamp_font_size(i64::from(self.list_font_size)),
             audio_table: self.audio_table.normalized(),
+            window_layout: self.window_layout.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),
             data_source: {
                 // Code that edits `mode` / `server_url` directly keeps working: the
@@ -888,6 +896,58 @@ mod tests {
                 .ui_scale_percent,
             0
         );
+    }
+
+    #[test]
+    fn window_layout_round_trips_and_bad_values_keep_other_preferences() {
+        use crate::window_layout::WindowLayoutPreferences;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(config.window_layout, WindowLayoutPreferences::default());
+        config.window_layout = WindowLayoutPreferences {
+            width: Some(1366.0),
+            height: Some(768.0),
+            x: Some(-1900),
+            y: Some(24),
+            maximized: true,
+            sidebar_width: Some(250.0),
+            inspector_width: Some(380.0),
+            inspector_visible: Some(false),
+            filters_visible: Some(true),
+        };
+        config.save().unwrap();
+        let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(loaded.window_layout, config.window_layout);
+        // A malformed layout resets only itself, like a malformed theme.
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"language":"cn","list_font_size":15,"window_layout":"broken"}"#,
+        )
+        .unwrap();
+        let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(loaded.window_layout, WindowLayoutPreferences::default());
+        assert_eq!(
+            (loaded.language.as_str(), loaded.list_font_size),
+            ("cn", 15)
+        );
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"language":"cn","window_layout":{"width":-5,"height":"x","x":3,"y":4,"maximized":null}}"#,
+        )
+        .unwrap();
+        let loaded = AppConfig::load_with_roots(root, &[]).unwrap();
+        assert_eq!(loaded.language, "cn");
+        assert_eq!(
+            loaded.window_layout.width,
+            Some(crate::window_layout::WINDOW_MIN_WIDTH)
+        );
+        assert_eq!(loaded.window_layout.height, None);
+        assert_eq!(
+            (loaded.window_layout.x, loaded.window_layout.y),
+            (Some(3), Some(4))
+        );
+        assert!(!loaded.window_layout.maximized);
     }
 
     #[test]

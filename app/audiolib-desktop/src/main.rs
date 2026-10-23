@@ -22,6 +22,7 @@ mod ui_scale_tests;
 mod ui_tests;
 mod updates;
 mod waveform_view;
+mod window_layout;
 mod window_repaint;
 use anyhow::{Context, Result};
 use audiolib_audio::{AudioEngine, PlaybackConfig};
@@ -212,9 +213,17 @@ fn run() -> Result<()> {
     window_repaint::install(ui.window());
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_chinese(config.language == "cn");
+    // Smoke runs keep the design layout so screenshots stay deterministic.
+    let restore_layout = !arguments.iter().any(|argument| argument == "--smoke-ui");
+    if restore_layout {
+        window_layout::restore_before_show(&ui, &config.window_layout);
+    }
     let Some((sqlite, remote)) = startup::show_while_opening(&ui, config.clone())? else {
         return Ok(());
     };
+    if restore_layout {
+        window_layout::keep_on_screen(&ui);
+    }
     let playback =
         serde_json::from_value::<PlaybackConfig>(config.playback.clone()).unwrap_or_default();
     let engine = AudioEngine::new(playback.clone()).context("Initialize audio engine")?;

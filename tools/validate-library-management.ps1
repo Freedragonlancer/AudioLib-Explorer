@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release')
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $PSNativeCommandUseErrorActionPreference = $false
 function Normalize-Path([string]$Path) {
     $candidate = $Path
@@ -268,4 +270,7 @@ try {
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

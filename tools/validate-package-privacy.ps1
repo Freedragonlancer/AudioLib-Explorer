@@ -4,6 +4,8 @@
 [CmdletBinding()]
 param([string]$BinaryDirectory = 'dist/latest/portable', [string]$ReleaseReport)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $payloadRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
 $allowedFiles = @('AudioLibExplorer.exe', 'AudioLibCli.exe', 'Start-AudioLibExplorer.cmd', 'update-channel.txt', 'update-version.txt') +
@@ -100,3 +102,6 @@ if ($ReleaseReport) {
     }
 }
 Write-Host 'Portable publication boundary passed: allowlisted files, no local build/user paths, no private example values, public report schema (when provided).'
+} finally {
+    Restore-AudioLibConsoleEncoding
+}
