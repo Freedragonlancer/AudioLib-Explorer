@@ -18,6 +18,7 @@ pub mod profiles;
 pub mod server_url;
 pub mod waveform_cache;
 pub mod waveform_rate;
+pub mod window_layout;
 pub use library::*;
 pub use list_waveform::{
     LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,

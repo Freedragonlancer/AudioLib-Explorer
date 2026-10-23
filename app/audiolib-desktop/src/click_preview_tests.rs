@@ -116,6 +116,7 @@ fn child_real_pointer_preview_modes() {
         ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
         list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
         audio_table: Default::default(),
+        window_layout: Default::default(),
         allowed_scan_roots: vec![sounds.canonicalize().unwrap()],
         data_source: Default::default(),
         data_source_fallback: None,
