@@ -22,13 +22,68 @@
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.5.0 (workspace `Cargo.toml`)
+- **Program version:** 0.6.5 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 6 (snapshot read range 3..=6, subject to actual format validation)
 - **Writable library format:** `ale-s6-cld1-t3-m2-p1`; earlier p0 libraries are read-only sources for an owned migration
 - **License:** [GPL-3.0-only](LICENSE)
 
-The program version above identifies the released mainline baseline. This branch's workspace version is `0.6.0-dev.1`; its schema-v6 changes are unpublished. See the [v6 development contract](doc/api/Schema_V6_Iteration.md).
+The program version is read from the workspace `Cargo.toml` and is shared by the client, CLI and server. See the [schema v6 contract](doc/api/Schema_V6_Iteration.md) for the current database format.
+
+## Download / Install
+
+Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). Each Release ships exactly two packages, each with a matching `.sha256` file:
+
+| Package | Asset | Auto-update |
+|---|---|---|
+| Windows x64 desktop client (portable) | `AudioLibExplorer-<tag>-win-x64-portable.zip` | Yes, in-app prompt |
+| macOS arm64 server | `AudioLibServer-<tag>-macos-arm64.tar.gz` | Yes, via the admin page (also for self-built macOS arm64) |
+
+Server packages for Windows, Linux or other architectures are not published; build them from source (see [Build](#build)). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
+
+### Windows client
+
+1. Download `AudioLibExplorer-<tag>-win-x64-portable.zip` and its `.sha256` from the Releases page.
+2. Verify the checksum and compare it with the value in the `.sha256` file:
+
+   ```powershell
+   Get-FileHash .\AudioLibExplorer-<tag>-win-x64-portable.zip -Algorithm SHA256
+   ```
+
+3. Extract the ZIP to a folder of your choice and start `Start-AudioLibExplorer.cmd` (or `AudioLibExplorer.exe`). No installer is needed; settings and libraries live in `%LOCALAPPDATA%/AudioLibExplorer/v1`, outside the program folder.
+
+## Server deployment
+
+The macOS arm64 server package is the only published server build. On the Mac:
+
+```sh
+shasum -a 256 -c AudioLibServer-<tag>-macos-arm64.tar.gz.sha256
+tar -xzf AudioLibServer-<tag>-macos-arm64.tar.gz
+```
+
+Then copy `server/audiolib-server/config.example.toml` (also included in the package) to a config file and set the library roots, `library_db` (the database must already exist; the server never creates a library, so create it first with `AudioLibCli db create`) and `bind` (listen address and port, default `0.0.0.0:8790`). The server has no port flag; it only takes `--config <path>` (or the `AUDIOLIB_SERVER_CONFIG` environment variable).
+
+Register it as a LaunchAgent based on [`server/deploy/launchd/io.github.audiolib.server.plist.example`](server/deploy/launchd/io.github.audiolib.server.plist.example):
+
+- `EnvironmentVariables` must set `AUDIOLIB_LAUNCHD_LABEL` to exactly the same value as `Label`, and `KeepAlive` must be enabled; otherwise the service is not relaunched after an automatic update.
+- The example runs `audiolib-launcher /bin/sh run.sh`. Create `run.sh` yourself: it reads the token from a file with `chmod 600` permissions, exports `AUDIOLIB_SERVER_TOKEN` and `exec`s `audiolib-server --config <config.toml>` (see the comment in the plist). Without the launcher, drop the first `ProgramArguments` entry.
+
+Check it with `GET /api/v1/health` (for example `curl http://<server-host>:8790/api/v1/health`); all API routes are under `/api/v1/` (bare `/health` returns 404).
+
+If the library is on an external or network volume, click Allow when macOS asks, or grant `audiolib-server` in System Settings → Privacy & Security → Full Disk Access. The release package does not include a launcher. To avoid granting access again after each binary swap, you can optionally build [`server/launcher`](server/launcher/README.md) from source (`server/launcher/build.sh`), make it the first `ProgramArguments` entry and grant the permission to the launcher instead. Full details: [server/README.md](server/README.md) and [server/deploy/README.md](server/deploy/README.md).
+
+**Let an AI coding agent deploy it.** The simplest route is to give this repository (or this README) to an AI coding agent such as Cursor, Claude Code or Codex running on the server machine, for example:
+
+```text
+Deploy the AudioLib Explorer server on this Mac using https://github.com/Freedragonlancer/AudioLib-Explorer.
+Download the latest AudioLibServer-<tag>-macos-arm64.tar.gz and its .sha256 from GitHub Releases and verify the checksum.
+Follow server/README.md and server/deploy/README.md. In config.toml set my library root to <library folder>,
+set `bind` to an unused port (the server has no port flag, only --config), and make sure `library_db` points to an existing database.
+Register it as a launchd service that starts at boot, based on server/deploy/launchd/io.github.audiolib.server.plist.example:
+AUDIOLIB_LAUNCHD_LABEL must equal Label exactly and KeepAlive must be enabled; create run.sh that reads the token
+from a chmod 600 file and execs audiolib-server --config <config.toml>; drop the audiolib-launcher entry if no launcher is built.
+Confirm GET http://<server-host>:<port>/api/v1/health returns ok. Do not commit or print tokens.
+```
 
 ## Features
 
@@ -44,7 +99,7 @@ Before deploying schema v6, upgrade clients first, then migrate the server durin
 
 ## Build
 
-Requirements: Windows with MSVC build tools and the pinned Rust toolchain (see `rust-toolchain.toml`). ASIO builds additionally need LLVM (libclang) and use the pinned, hash-verified Steinberg ASIO SDK (downloaded by `tools/prepare-asio.ps1`).
+Requirements: Windows with MSVC build tools and the Rust toolchain `1.97.1-x86_64-pc-windows-msvc`. `rust-toolchain.toml` pins only the version `1.97.1`; the Windows MSVC target comes from `.cargo/config.toml`. If your machine's default toolchain is GNU, select the MSVC toolchain explicitly (for example `cargo +1.97.1-x86_64-pc-windows-msvc build ...`); otherwise the build fails with `can't find crate for std`. ASIO builds additionally need LLVM (libclang) and use the pinned, hash-verified Steinberg ASIO SDK (downloaded by `tools/prepare-asio.ps1`).
 
 ```powershell
 cargo build --release -p audiolib-desktop -p audiolib-cli
@@ -58,7 +113,7 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
-The server builds on Windows, Linux and macOS (it does not need audio playback support). Because the repository's `.cargo/config.toml` defaults to a Windows target, pass an explicit target:
+Platforms without a prebuilt server package (Windows, Linux, other architectures) can build the server from source with Rust; it does not need audio playback support. The updater code supports Windows and Linux x64, but no official server packages are published for them, so those builds do not receive updates; a self-built macOS arm64 server does receive updates from the official package. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
 ```sh
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
@@ -85,7 +140,7 @@ cargo run -p audiolib-cli -- search "explosion" --format table
 cargo run -p audiolib-cli -- stats
 ```
 
-User settings, logs, caches and the library database live in `%LOCALAPPDATA%/AudioLibExplorer/v1`; set `AUDIOLIB_DATA_DIR` to use an isolated directory. In the Data source window, choose server mode and enter the server address (for example `https://audiolib.example.com:8443` or `http://server.example.lan:8790`) and an access token if the server requires one. See [Remote mode](doc/Rust_Remote_Mode.md) and [library management](doc/Rust_Library_Management.md).
+User settings, logs, caches and the library database live in `%LOCALAPPDATA%/AudioLibExplorer/v1`; set `AUDIOLIB_DATA_DIR` to use an isolated directory. In the Data source window, choose server mode and enter the server address (for example `https://audiolib.example.com:8443` or `http://<server-host>:8790`) and an access token if the server requires one. See [Remote mode](doc/Rust_Remote_Mode.md) and [library management](doc/Rust_Library_Management.md).
 
 ### Server
 
@@ -98,15 +153,15 @@ audiolib-server --config /etc/audiolib/config.toml
 
 ## Versioning
 
-Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP API version (`/api/v1/`) and database schema (`SCHEMA_VERSION`, currently 6) are independent. The compatibility catalog and complete feature/format descriptor determine supported operations; the same schema number can describe read-only p0 or writable p1. See the [migration compatibility contract](doc/api/Library_Migration_Compatibility.md). A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z` or `vX.Y.Z-rc.N` and must match `Cargo.toml`; `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
+Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP API version (`/api/v1/`) and database schema (`SCHEMA_VERSION`, currently 6) are independent. The compatibility catalog and complete feature/format descriptor determine supported operations; the same schema number can describe read-only p0 or writable p1. See the [migration compatibility contract](doc/api/Library_Migration_Compatibility.md). A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` and must match `Cargo.toml` (ignoring the suffix). Tags with a suffix are automatically published as pre-releases; the Release title is always `AudioLib Explorer <tag>` (for example `AudioLib Explorer v0.6.5`); `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
 
 ## Releases and CI
 
 The desktop client and server check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 
-This development branch builds `0.6.0-dev.1` and includes the released 0.5.0 mainline baseline. Its schema-v6 changes are unpublished and have not been deployed; the existing installation and working library remain unchanged.
+Each Release ships exactly two packages: the Windows x64 client and the macOS arm64 server, each with a `.sha256`. Windows and Linux server packages are not published, so although the updater supports Windows and Linux x64, only macOS arm64 servers (packaged or self-built) receive server updates.
 
-GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built, validated and uploaded locally. `.github/workflows/release.yml` remains available for manual dispatch; tag pushes do not start it. Its cloud checks verify actual package allowlists, privacy, executable/archive identity and checksums, and report runtime validation as `not-run`. Each published archive has a SHA-256 file and a public build report.
+GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built and validated locally, then published with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is a manually triggered (`workflow_dispatch`), read-only verify job: it checks that the Release has exactly the two packages and their `.sha256` files with matching checksums, and never builds, creates or uploads anything. Tag pushes do not start any workflow.
 
 Portable payloads use `tools/portable-files.json` and fresh staging. Generated local reports, user screenshots and runtime state are excluded. Release builds remap compiler paths, and `tools/validate-package-privacy.ps1` checks the payload and public report schema before publication. These checks do not remove information from already published Git history or releases.
 
