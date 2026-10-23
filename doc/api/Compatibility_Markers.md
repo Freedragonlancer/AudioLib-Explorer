@@ -99,7 +99,7 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok；无头豁�
 
 ### 4.1 服务端错误码（`server/audiolib-server/src/compatibility.rs`）
 
-均为 HTTP 409，常量定义于 core `compatibility.rs`，由 `PeerRejection::error_code()` 映射；`PEER_CATALOG_INVALID` 暂定义于服务端（`Inconsistent` 在服务端改映射为它）。新服务端不再返回 `PEER_VERSION_UNSUPPORTED`——旧服务端用该码表示“服务端过旧”：
+均为 HTTP 409，常量定义于 core `compatibility.rs`，由 `PeerRejection::error_code()` 映射（含 `PEER_CATALOG_INVALID`）。新服务端不再返回 `PEER_VERSION_UNSUPPORTED`——旧服务端用该码表示“服务端过旧”：
 
 | 情形 | `error_code` | `sub_code`（提示） | 适用 |
 | --- | --- | --- | --- |

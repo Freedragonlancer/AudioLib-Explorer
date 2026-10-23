@@ -3,17 +3,13 @@
 use crate::ApiError;
 use audiolib_core::compatibility::{
     ACCEPT_FORMATS_HEADER, CLIENT_COMPATIBILITY_HEADER, CompatibilityManifest,
-    LIBRARY_FORMAT_HEADER, MAX_COMPATIBILITY_HEADER_BYTES, PEER_UPGRADE_REQUIRED, PeerRejection,
-    SEARCH_STORAGE_MAX, SEARCH_STORAGE_MAX_HEADER, SERVER_COMPATIBILITY_HEADER,
-    SNAPSHOT_FORMAT_HEADER, SNAPSHOT_SCHEMA_MAX, SNAPSHOT_SCHEMA_MAX_HEADER, SnapshotFormat,
-    TOKENIZATION_MAX, TOKENIZATION_MAX_HEADER, check_peer, compatibility_manifest,
+    LIBRARY_FORMAT_HEADER, MAX_COMPATIBILITY_HEADER_BYTES, PEER_CATALOG_INVALID,
+    PEER_UPGRADE_REQUIRED, PeerRejection, SEARCH_STORAGE_MAX, SEARCH_STORAGE_MAX_HEADER,
+    SERVER_COMPATIBILITY_HEADER, SNAPSHOT_FORMAT_HEADER, SNAPSHOT_SCHEMA_MAX,
+    SNAPSHOT_SCHEMA_MAX_HEADER, SnapshotFormat, TOKENIZATION_MAX, TOKENIZATION_MAX_HEADER,
+    check_peer, compatibility_manifest,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-
-/// 409 for a malformed, duplicated, oversized or self-contradicting client catalog.
-/// Distinct from `PEER_VERSION_UNSUPPORTED`, which pre-marker servers send to mean
-/// "the server is too old". Candidate for core alongside the other codes.
-pub(crate) const PEER_CATALOG_INVALID: &str = "PEER_CATALOG_INVALID";
 
 fn unsupported(format: &SnapshotFormat) -> ApiError {
     ApiError::new(
@@ -79,11 +75,7 @@ fn rejection(reason: PeerRejection, peer_version: &str) -> ApiError {
             "The client compatibility catalog is inconsistent; upgrade the client".to_owned()
         }
     };
-    let code = match reason {
-        PeerRejection::Inconsistent => PEER_CATALOG_INVALID,
-        other => other.error_code(),
-    };
-    let error = ApiError::new(StatusCode::CONFLICT, code, message);
+    let error = ApiError::new(StatusCode::CONFLICT, reason.error_code(), message);
     if reason == PeerRejection::ProtocolPeerTooNew {
         // Hint: this side, not the client, must be upgraded.
         error.with_sub_code("SERVER_UPGRADE_REQUIRED")
