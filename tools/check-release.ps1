@@ -1,11 +1,15 @@
 ﻿# tools/check-release.ps1
 # Release version-policy check (see doc/Rust_Versioning.md). Read-only: never creates tags or modifies files.
-#   ./tools/check-release.ps1 -Tag v0.4.0 [-BaseTag v0.3.7] [-Root <repo>]
+#   ./tools/check-release.ps1 -Tag v0.4.0 [-BaseTag v0.3.7] [-Root <repo>] [-ReleaseTitle <title> -Prerelease <true|false>] [-CheckGitHubRelease]
+# Naming rule: title must be exactly 'AudioLib Explorer <tag>'; prerelease iff the tag has a -rc.N/-beta.N suffix.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Tag,
     [string]$BaseTag,
-    [string]$Root = (Split-Path -Parent $PSScriptRoot)
+    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$ReleaseTitle,
+    [Nullable[bool]]$Prerelease,
+    [switch]$CheckGitHubRelease
 )
 $ErrorActionPreference = 'Stop'
 $Root = [IO.Path]::GetFullPath($Root)
@@ -39,6 +43,21 @@ $tagCore = if ($tagMatch.Success) { "$($tagMatch.Groups[1].Value).$($tagMatch.Gr
 $program = Get-CargoVersion (Read-Utf8 'Cargo.toml')
 if (!$program) { Fail 'Cannot read MAJOR.MINOR.PATCH from [workspace.package] version in Cargo.toml.' }
 elseif ($tagCore -and $program.Text -ne $tagCore) { Fail "Tag $Tag does not match Cargo.toml workspace version $($program.Text) (expected tag v$($program.Text), v$($program.Text)-rc.N or v$($program.Text)-beta.N)." }
+
+# 2b. Release naming: title == 'AudioLib Explorer <tag>', tag core == Cargo version, prerelease iff suffixed tag
+$expectedTitle = "AudioLib Explorer $Tag"
+$expectPrerelease = $Tag.Contains('-')
+if ($CheckGitHubRelease) {
+    $json = gh release view $Tag --json name,isPrerelease 2>$null
+    if ($LASTEXITCODE -ne 0 -or !$json) { Fail "GitHub release $Tag not found (gh release view failed)." }
+    else { $rel = $json | ConvertFrom-Json; $ReleaseTitle = $rel.name; $Prerelease = [bool]$rel.isPrerelease }
+}
+if ($PSBoundParameters.ContainsKey('ReleaseTitle') -or $CheckGitHubRelease) {
+    if ($ReleaseTitle -cne $expectedTitle) { Fail "Release title '$ReleaseTitle' must be exactly '$expectedTitle'." }
+    $titleCore = [regex]::Match([string]$ReleaseTitle, '^AudioLib Explorer v(\d+\.\d+\.\d+)')
+    if ($program -and $titleCore.Success -and $titleCore.Groups[1].Value -ne $program.Text) { Fail "Release title version $($titleCore.Groups[1].Value) does not match Cargo.toml workspace version $($program.Text)." }
+}
+if ($null -ne $Prerelease -and [bool]$Prerelease -ne $expectPrerelease) { Fail "Release prerelease flag is $Prerelease but tag $Tag requires prerelease=$expectPrerelease (suffixed tags are prereleases, plain vX.Y.Z is not)." }
 
 # 3. Schema version
 $schema = Get-Schema (Read-Utf8 'crates/audiolib-db/src/schema.rs')
