@@ -35,43 +35,44 @@
 ```json
 {
   "application_version": "0.7.2",
+  "marker_revision": 1,
   "protocol": { "min": 1, "max": 1 },
+  "api_protocols": ["api/v1"],
   "snapshot_read_formats": ["ale-s3-ext-t3-m2", "ale-s4-ext-t3-m2", "ale-s5-ext-t3-m2",
                             "ale-s6-cld1-t3-m2-p0", "ale-s6-cld1-t3-m2-p1"],
   "database_write_formats": ["ale-s6-cld1-t3-m2-p1"],
+  "migration_source_schemas": [3, 4, 5, 6],
+  "migration_target_format": "ale-s6-cld1-t3-m2-p1",
   "features": { "waveform_bundle_strong_etag": 1, "list_waveforms": 1, "list_waveform_jobs": 1 },
   "blocked_versions": [],
-  "marker_revision": 1,
   "catalog_revision": 1,
-
-  "api_protocols": ["api/v1"],
-  "peer_application_ranges": [">=0.6.0, <0.7.0", ">=0.7.0, <0.8.0"],
-  "legacy_peer_application_ranges": ["=0.4.11", "=0.5.0", "=0.5.1"]
+  "peer_application_ranges": [">=0.6.0"],
+  "minimum_sqlite_version": "3.54.1"
 }
 ```
 
-- 新增字段均为可选（serde default、旧端忽略未知字段），不改变既有字段结构，故 `catalog_revision` 保持 1。
-- `marker_revision` 存在即表示对端采用本设计（“标记对端”）；缺失即“版本对端”（0.7.0/0.7.1 及更早）。
-- 未知字段一律忽略（serde 默认），以便将来追加 features 不需升 protocol。
-- `api_protocols: ["api/v1"]` 与 `protocol` 互相映射：`"api/vN"` ⇔ `N`。
+- 新 manifest **保留** `peer_application_ranges: [">=0.6.0"]`（宽范围，成本低，覆盖残留的版本比较路径），但新代码**从不据此判定**；`direct_use_/auto_migrate_application_ranges` 删除（格式判定已由 `assess_library` 负责）。
+- `minimum_sqlite_version`：建议**仅作显示/诊断**（各端各自打开自己的 SQLite，构建已静态链接满足版本，跨端比较无意义）；本地启动时若链接库低于常量应在本地报错，而非作为对端判定。
+- `catalog_revision` 仅作信息字段输出，不参与等值判定（见 5.1）。
+- 未知字段一律忽略，以便追加 features 不需升 protocol。
+- `marker_revision` 存在即“标记对端”；`api_protocols: ["api/vN"]` ⇔ `protocol` 区间，过渡期两者并存。
 
 ## 4. 判定算法
 
 ```text
-fn protocol_ok(local, peer):
-    if peer.marker_revision is some:
-        return max(local.protocol.min, peer.protocol.min) <= min(local.protocol.max, peer.protocol.max)
-    // 版本对端：用 api_protocols 映射出协议号
-    return peer.api_protocols ∩ local.api_protocols ≠ ∅
+fn protocol_ok(local, p):
+    return max(local.protocol.min, p.protocol.min) <= min(local.protocol.max, p.protocol.max)
 
 fn peer_ok(local, peer_version, peer_catalog):
     if peer_version in local.blocked_versions: return Err(BlockedVersion)
     match peer_catalog:
-        None    => return legacy_ok(local, peer_version)        // 0.4.11/0.5.x 无目录旧端，保持现状
-        Some(p) => if p.application_version != peer_version: return Err(Inconsistent)
-                   if p.catalog_revision ∉ local.supported_catalog_revisions: return Err(CatalogMismatch)
-                   if !protocol_ok(local, p): return Err(ProtocolMismatch)
-                   return Ok
+        None => return legacy_ok(local, peer_version)    // 仅 0.4.11/0.5.0/0.5.1 无目录旧端，保持现状
+        Some(p) if p.marker_revision is none =>
+                return Err(PeerUpgradeRequired)           // 0.6.0–0.7.1：对方本就拒绝我们，直接明确提示升级
+        Some(p) =>
+                if p.application_version != peer_version: return Err(Inconsistent)
+                if !protocol_ok(local, p): return Err(ProtocolMismatch)
+                return Ok                                  // 不看版本范围、不看 catalog_revision
 
 // 1) 探测 / 轮询（客户端，live_library）
 probe():
@@ -98,84 +99,92 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 
 ## 5. 变更规则与发版检查清单
 
-标记集合（客户端确认）：**API protocol 区间**、**格式 ID + schema**、**`catalog_revision`**。
+标记：**API protocol 区间**、**格式 ID（含 schema）**、可选 **features**。
 
-| 标记 | 必须变更的情形 | 不得变更的情形 |
+### 5.1 `catalog_revision` 与格式 ID 的区别
+
+- **格式 ID**（`ale-s6-cld1-t3-m2-p1`）：描述**一个库文件的实际持久化格式**，由 `LibraryFormat::snapshot_format_id()` 从文件推导；读方据此决定能否直接使用快照。
+- **`catalog_revision`**（`CATALOG_REVISION = 1`，现行文档称“目录语义版本”）：描述**兼容目录（manifest）本身的规则语义**，与某个库无关，也不是库的数据版本（库的数据版本是 `x-library-revision`）。
+- 目录语义的变化要么改变 API 交互（→ protocol），要么改变可读格式集合（→ 格式 ID 列表），二者已覆盖；manifest 的 JSON 形状由第 7 节 DTO 快照测试守护。现行 `peer_versions_compatible` 中 `peer.catalog_revision == CATALOG_REVISION` 的**等值**检查（core `compatibility.rs` ~:452）一旦 +1 就会锁死所有旧端。处理：**移出判定**（其语义并入 protocol 与格式 ID），仅输出供诊断（`/health.compatibility_catalog_revision` 保留），下一个主版本删除；若评审坚持保留，则改为声明 `catalog_revisions: {min,max}` 区间相交，而不是等值。
+
+### 5.2 主要代码变更点（实现阶段）
+
+1. `API_PROTOCOL: &str = "api/v1"` → `API_PROTOCOL_MIN/MAX: u32`，manifest 输出 `protocol: {min,max}`，过渡期同时输出 `api_protocols: ["api/v1"]`。
+2. `peer_versions_compatible()`：删除应用版本范围检查和 `catalog_revision` 等值检查，只保留 `blocked_versions` + protocol 相交 + manifest 自洽；格式层 `is_readable_by` 不变。
+3. 服务端快照准入的上限头（`server/audiolib-server/src/compatibility.rs:37-51` 的 `x-audiolib-snapshot-schema-max`、`x-audiolib-search-storage-max`、`x-audiolib-tokenization-max`，目前手写 `1`、`3`）改为从 core 常量派生（`TARGET_SCHEMA`、`LibraryFormat::target().features["search_storage"]`、`TOKENIZATION_REVISION`）；客户端发送端同样由这些常量生成，并对响应头做对称校验。
+4. 删除 core 测试 `fixed_0_7_0_and_0_7_1_catalogs_accept_each_other`（~:621）：minor 升级后它比较的是两份相同派生范围，恒真、已无意义（且与 6.1 实测的旧端行为相反）。同理清理其余依赖版本范围的测试。
+
+### 5.3 何时变更
+
+| 标记 | 必须变更 | 不得变更 |
 |---|---|---|
-| `protocol.max`（+1） | 删除/重命名端点或必需字段；改变已有字段语义或单位；新增**必需**请求头；旧客户端的合法请求会被拒绝或误解 | 只新增可选字段/端点（改为加 feature） |
-| `protocol.min` | 确定不再服务旧协议时才提高 | — |
-| 格式 ID（新 ID） | `TARGET_SCHEMA`/`user_version`；`LibraryFormat::target()` 中任一 feature/revision；`SearchStorage`；`TOKENIZATION_REVISION`；source search/tags revision；表/列/索引结构（即使 `user_version` 未变） | 仅应用代码变化 |
-| `snapshot_read_formats` | 新 ID 加入；旧 ID 只要仍可读就保留 | — |
-| `catalog_revision`（+1） | `CompatibilityManifest` **结构**变化：字段删除/改名/类型变化，或某字段的判定语义变化 | 只改字段取值（新增格式 ID、新增 feature、版本号变化） |
-| `features` | 新增可选能力；某能力语义不兼容变化 → 该 feature revision +1 | 能力变为必需 → 应升 protocol |
-| `application_version` | 每次发版 | 永不影响兼容判定（除 `blocked_versions`） |
+| `protocol.max`（+1） | 任一 API DTO（请求/响应 JSON、manifest、错误体）删除/改名/改类型/改语义；端点删除；新增**必需**请求头；旧端合法请求会被拒或误解 | 仅新增可选字段/端点（改为加 feature） |
+| `protocol.min` | 不再服务旧协议时 | — |
+| 新格式 ID | `TARGET_SCHEMA`/`user_version`；`LibraryFormat::target()` 任一 feature/revision；`SearchStorage`；`TOKENIZATION_REVISION`；source search/tags revision；表/列/索引结构（即使 `user_version` 未变） | 仅应用代码变化 |
+| `snapshot_read_formats` | 新 ID 加入；旧 ID 仍可读则保留 | — |
+| `features` | 新增可选能力；能力语义不兼容变化 → 该 feature revision +1 | 能力变必需 → 改升 protocol |
+| `application_version` | 每次发版 | 永不影响判定（`blocked_versions` 除外） |
 
-发版 PR 检查清单：
+### 5.4 发版 PR 检查清单
 
-- [ ] 对照上表逐项确认：本次是否需要升 protocol / 新格式 ID / 升 catalog_revision / 加 feature；PR 描述写明结论。
-- [ ] 第 7 节格式指纹与协议指纹测试通过（若失败，按提示更新标记而非更新 fixture 了事）。
-- [ ] 旧端兼容层（第 6 节）：新版本的 `application_version` 仍在旧端接受范围内，或已在发版说明中声明“需双方升级”。
-- [ ] `peer_application_ranges` 仍包含旧端需要看到的范围；矩阵第 8 节已回填。
-- [ ] 新增 feature 在客户端缺失时有降级路径并有测试。
+- [ ] **发布顺序：生产服务端先升级，客户端随后发布。** 服务端须同时服务旧协议区间内的客户端；不得先发需要新 protocol/feature 的客户端。
 
-`catalog_revision` 保留（不退役）：标记端之间要求 `catalog_revision` 等值（或在本端支持列表内），它只在目录结构变化时变化，不随发版变化，因此不会造成“仅因版本号不同而拒绝”。
+- [ ] 按 5.2 逐项确认是否需升 protocol / 新格式 ID / 加 feature，并写入 PR 描述。
+- [ ] 第 7 节 schema 指纹与 API DTO 快照测试通过；若失败，先改标记，再更新 fixture。
+- [ ] 新 feature 在对端缺失时有降级路径和测试。
+- [ ] 第 8 节矩阵已回填。
 
-## 6. 从已发布 0.6.x–0.7.1 过渡
+## 6. 从已发布版本过渡
 
-### 6.1 旧端实际检查什么（v0.7.0 / v0.7.1 源码）
+### 6.1 旧端实际检查（源码核对 v0.6.0–v0.6.5、v0.7.0、v0.7.1）
 
-旧端 `peer_application_ranges` = `["=0.4.11","=0.5.0","=0.5.1",">=0.6.0, <0.7.0","=<自身版本>"]`（`CURRENT_MINOR_RANGE` 写死为 `>=0.6.0, <0.7.0`）。旧端对新对端 manifest 依次检查 `peer_versions_compatible`：
+旧端 `peer_versions_compatible` 对对端 manifest 依次要求：① 对端版本落在**旧端自身** `peer_application_ranges`；② manifest `application_version` 与该版本一致；③ `catalog_revision == 1`；④ 对端 ranges 接受旧端版本；⑤ `api_protocols` 含 `api/v1`；快照/写入另需格式 ID 可读。
 
-1. 新对端版本（`/health.version` 或 header 内 `application_version`）可解析，且落在**旧端自己的** `peer_application_ranges` 内；
-2. manifest 的 `application_version` 等于该版本；
-3. `catalog_revision == 1`；
-4. 新对端 `peer_application_ranges` 接受旧端版本；
-5. `api_protocols` 与 `["api/v1"]` 相交；
-6. 快照/写入：格式 ID 在旧端 `snapshot_read_formats` 内且与头部、文件一致。
+旧端自身 ranges：
+
+| 已发布版本 | 接受的对端版本 |
+|---|---|
+| 0.6.0 | `=0.4.11`、`=0.5.0`、`=0.5.1`、`=0.6.0` |
+| 0.6.1–0.6.5 | 上述 legacy + `>=0.6.0, <0.7.0` + `=自身` |
+| 0.7.0 | legacy + `>=0.6.0, <0.7.0` + `=0.7.0` |
+| 0.7.1 | legacy + `>=0.6.0, <0.7.0` + `=0.7.1` |
 
 ### 6.2 结论
 
-- **0.7.1 只接受 0.4.11/0.5.0/0.5.1、0.6.x 和 `=0.7.1`；0.7.0 同理只接受 `=0.7.0`。** 因此 0.7.0 与 0.7.1 互相拒绝，且 **0.7.2（或任何新版本）服务端在第 1 步就会被 0.7.1 客户端拒绝，无法通过任何新端改动修复**（唯一办法是新端谎报版本为 0.7.1，不采用）。反向：0.7.2 客户端连 0.7.1 服务端时，服务端的写入/快照准入同样会在第 1 步拒绝。
-- 0.6.x 端的范围同样不含 0.7.x，故 0.6.x ↔ 0.7.2 也不互通。
-- 所以：**两端必须各升级一次到 0.7.2（首个标记版本）**。此后版本号前进不再影响兼容。
-- 新端对旧端（版本对端，无 `marker_revision`）放宽：只要 `catalog_revision == 1`、`api_protocols` 相交、格式可读即接受，不检查对方版本是否在本端范围内。实际能否连通仍受旧端自身检查限制（上条）。
-
-### 6.3 新版本须保留的旧兼容层（保留到下一个主版本，即 1.0.0 前移除）
-
-- 继续输出 `catalog_revision: 1`（结构不变时）、`api_protocols: ["api/v1"]`、`legacy_peer_application_ranges`。
-- 继续输出旧端期望的 `peer_application_ranges`（至少含 `>=0.6.0, <0.7.0`、`>=0.7.0, <0.8.0` 及 legacy 项），使旧端第 4 步通过；标记端自身不读取它。
-- 尽量让自身 `application_version` 落在旧端接受范围内——对已发布的 0.6.x–0.7.1 做不到（见 6.2），对未来旧端以 `marker_revision` 为准。
-- 无目录旧端（0.4.11/0.5.x）维持现状。
+- ① 只看版本号，新端声明什么都无法通过：**0.7.2（及以后）不能被任何 0.6.x、0.7.0、0.7.1 接受**（除非谎报版本，不采用）。0.7.0 与 0.7.1 彼此也不互认。
+- 因此**旧端必须升级**；**从 0.7.2 起，双方只按标记判定**。
+- 新 manifest 仍输出 `peer_application_ranges: [">=0.6.0"]`，但无法改变 ①（判定看的是旧端自己的范围）；新端遇到无 `marker_revision` 的 0.6.0–0.7.1 对端直接返回“对端需升级”（`409 PEER_UPGRADE_REQUIRED` / 客户端提示），不再做版本范围比较。
+- 无目录旧端（0.4.11/0.5.x）维持现有 legacy 路径不变（是否同样改为“需升级”见待确认问题）。
 
 ## 7. 防护测试
 
 - **格式指纹 fixture**：`crates/audiolib-core/tests/fixtures/format_fingerprint.json` 记录 `{format_id: PLAN_B_FORMAT, schema: TARGET_SCHEMA, target: LibraryFormat::target(), ddl_sha256: <新建空库 sqlite_master 中 type/name/sql 排序后的哈希>}`。测试：新建空库算指纹；若 `ddl_sha256` 或 `target()` 变了而 `PLAN_B_FORMAT` 未变 → 失败，提示“改 schema 必须给新格式 ID 并加入 snapshot_read_formats”。
-- **协议指纹**：对 `CapabilitiesResponse`、快照头名、修改请求必需头做快照测试；有删除/改名而 `protocol.max` 未变 → 失败。
-- **版本无关性**：用同一目录、仅改 `application_version`（如 `0.7.2`↔`9.0.0`）互验，必须通过。
-- **旧目录 fixture**：保存真实 0.7.0、0.7.1 输出的 `compatibility` JSON，新代码须接受；并断言新输出能通过 0.7.1 的 `peer_versions_compatible`（把旧函数复制到测试中）。
+- **API DTO 快照**：对所有公开 DTO（`CapabilitiesResponse`、`CompatibilityManifest`、`/health`、`/library`、快照/修改请求与响应、错误体等）用 `schemars` 生成 JSON Schema，连同快照头名和修改请求必需头，存为 `tests/fixtures/api_v{protocol}.schema.json` 并以 `protocol.max` 为键。测试：当前生成结果与 fixture 比较；若有**删除/改名/改类型/变必需**而 `protocol.max` 未变 → 失败；仅新增可选字段 → 提示更新 fixture（可接受）。
+- **版本无关性**：两份标记 manifest 只改 `application_version`（`0.7.2`↔`9.0.0`）及 `catalog_revision`，互验必须通过。
+- **旧目录 fixture**：保存真实 0.6.5、0.7.0、0.7.1 的 manifest，新端须返回明确的“对端需升级”，而非笼统失败。
 
 ## 8. 测试矩阵（客户端填写）
 
 | # | 客户端 | 服务端 | 期望 | 探测 | 快照 | 修改 | 备注 |
 |---|---|---|---|---|---|---|---|
 | 1 | 0.7.2 | 0.7.2 | 通过 | | | | |
-| 2 | 0.7.2 | 0.7.1 / 0.7.0 | 拒绝（旧服务端只接受自身版本+0.6.x） | | | | |
-| 3 | 0.7.1 / 0.7.0 | 0.7.2 | 拒绝（同上，提示双方升级） | | | | |
-| 4 | 0.7.2 | 0.6.x | 拒绝（0.6.x 不接受 0.7.x） | | | | |
-| 5 | 0.7.2 | 标记端，版本 0.8.0，同协议同格式 | 通过 | | | | |
-| 6 | 0.7.1 | 0.8.0 | 拒绝（旧端限制，提示升级） | | | | |
-| 7 | 标记端 | 协议区间不相交 | 拒绝 `PROTOCOL_UNSUPPORTED` | | | | |
-| 8 | 标记端 | 未知格式 ID | 快照拒绝，保留旧缓存 | | | | |
-| 9 | 标记端 | 缺 `waveform_bundle_strong_etag` | 同步通过，仅该功能降级 | | | | |
-| 10 | 标记端 | 版本在 `blocked_versions` | 拒绝，明确提示 | | | | |
-| 11 | 0.7.2 | 0.5.1（无目录） | 维持现状 | | | | |
-| 12 | 快照头与文件实际格式不一致 | — | 拒绝，保留旧缓存 | | | | |
+| 2 | 0.7.2 | 0.7.1 / 0.7.0 / 0.6.x | 拒绝，提示服务端升级 | | | | |
+| 3 | 0.7.1 / 0.7.0 / 0.6.x | 0.7.2 | 拒绝（旧端版本检查），新服务端写入/快照返回 PEER_UPGRADE_REQUIRED | | | | |
+| 4 | 0.7.2 | 标记端 0.8.0，同协议同格式 | 通过 | | | | |
+| 5 | 标记端 | 协议区间不相交 | 拒绝 `PROTOCOL_UNSUPPORTED` | | | | |
+| 6 | 标记端 | 同协议，不同 `catalog_revision` | 通过 | | | | |
+| 7 | 标记端 | 未知格式 ID | 快照拒绝，保留旧缓存 | | | | |
+| 8 | 标记端 | 缺 `waveform_bundle_strong_etag` | 同步通过，仅该功能降级 | | | | |
+| 9 | 标记端 | 版本在 `blocked_versions` | 拒绝，明确提示 | | | | |
+| 10 | 0.7.2 | 0.5.1（无目录） | 见待确认 #4 | | | | |
+| 11 | 快照头与文件实际格式不一致 | — | 拒绝，保留旧缓存 | | | | |
 
 ## 9. 待确认问题
 
 1. `skipped_newer` 目前是 `audiolib-update` 的更新检查结果字段，不是同步能力；是否确实要作为 feature？
-2. 是否接受“0.7.0/0.7.1 与新版本无法互通、必须双方升级”这一结论（无可行的新端修复）。
-6. `protocol` 是否直接用整数替代 `"api/v1"` 字符串，还是长期并存？
-3. `blocked_versions` 由谁维护：内置于二进制，还是随更新检查清单下发？
-4. 0.7.2 的旧兼容字段 `peer_application_ranges` 写宽到什么程度（`>=0.6.0` 无上限？）。
-5. features 是否也需要客户端声明（服务端据此调整响应），还是只由服务端声明？
+2. `api_protocols` 字符串何时删除（建议下一个主版本，仅保留整数 `protocol` 区间）？
+3. `blocked_versions` 内置于二进制，还是随更新检查清单下发？
+4. 无目录旧端（0.4.11/0.5.x）是否继续走 legacy 只读路径，还是一并改为“需升级”？
+5. 客户端是否也声明 features（服务端据此调整响应），还是只由服务端声明？
+6. DTO 快照用 `schemars` 生成 JSON Schema 是否可接受（新增依赖），或改为手写示例 JSON 快照？
+7. `minimum_sqlite_version` 采用“仅显示 + 本地启动自检”是否同意？
