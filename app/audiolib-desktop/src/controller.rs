@@ -719,6 +719,10 @@ pub struct Controller {
     /// preference (server mode).
     hold_list_waveform_batches: AtomicBool,
     ui_scale_percent: AtomicU32,
+    /// Appearance theme identifier and font sizes, persisted with the other preferences.
+    theme: Mutex<String>,
+    ui_font_size: AtomicU32,
+    list_font_size: AtomicU32,
 }
 
 fn post(ui: slint::Weak<AppWindow>, action: impl FnOnce(AppWindow) + Send + 'static) {
@@ -788,6 +792,8 @@ impl Controller {
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
         apply_ui_scale(ui, config.ui_scale_percent);
+        crate::theme::apply_theme(ui, &config.theme);
+        crate::theme::apply_font_sizes(ui, config.ui_font_size, config.list_font_size);
         let table = config.audio_table.normalized();
         ui.set_table_name_width(table.name_width);
         ui.set_table_duration_width(table.duration_width);
@@ -836,6 +842,13 @@ impl Controller {
                 .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
             pregenerate_list_waveforms: AtomicBool::new(config.pregenerate_list_waveforms),
             ui_scale_percent: AtomicU32::new(normalize_ui_scale_percent(config.ui_scale_percent)),
+            theme: Mutex::new(audiolib_core::config::normalize_theme(&config.theme)),
+            ui_font_size: AtomicU32::new(audiolib_core::config::clamp_font_size(i64::from(
+                config.ui_font_size,
+            ))),
+            list_font_size: AtomicU32::new(audiolib_core::config::clamp_font_size(i64::from(
+                config.list_font_size,
+            ))),
             hold_list_waveform_batches: AtomicBool::new(
                 config.hold_list_waveform_batches_after_audition,
             ),
@@ -1001,6 +1014,36 @@ impl Controller {
                 apply_ui_scale(&ui, percent);
             }
             c.ui_scale_percent.store(percent, Ordering::Release);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_theme_requested(move |index| {
+            let id = crate::theme::theme_id(index);
+            if let Some(ui) = c.ui.upgrade() {
+                crate::theme::apply_theme(&ui, &id);
+            }
+            *c.theme.lock().unwrap() = id;
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_ui_font_requested(move |size| {
+            let size = audiolib_core::config::clamp_font_size(i64::from(size));
+            c.ui_font_size.store(size, Ordering::Release);
+            if let Some(ui) = c.ui.upgrade() {
+                crate::theme::apply_font_sizes(&ui, size, c.list_font_size.load(Ordering::Acquire));
+            }
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_list_font_requested(move |size| {
+            let size = audiolib_core::config::clamp_font_size(i64::from(size));
+            c.list_font_size.store(size, Ordering::Release);
+            if let Some(ui) = c.ui.upgrade() {
+                crate::theme::apply_font_sizes(&ui, c.ui_font_size.load(Ordering::Acquire), size);
+            }
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
         });
@@ -2634,6 +2677,9 @@ impl Controller {
                         config.hold_list_waveform_batches_after_audition =
                             c.hold_list_waveform_batches.load(Ordering::Acquire);
                         config.ui_scale_percent = c.ui_scale_percent.load(Ordering::Acquire);
+                        config.theme = c.theme.lock().unwrap().clone();
+                        config.ui_font_size = c.ui_font_size.load(Ordering::Acquire);
+                        config.list_font_size = c.list_font_size.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
                         config.save()
                     };
@@ -5787,6 +5833,9 @@ impl Controller {
         config.hold_list_waveform_batches_after_audition =
             self.hold_list_waveform_batches.load(Ordering::Acquire);
         config.ui_scale_percent = self.ui_scale_percent.load(Ordering::Acquire);
+        config.theme = self.theme.lock().unwrap().clone();
+        config.ui_font_size = self.ui_font_size.load(Ordering::Acquire);
+        config.list_font_size = self.list_font_size.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
@@ -7601,6 +7650,9 @@ mod tests {
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             ui_scale_percent: 0,
+            theme: audiolib_core::config::DEFAULT_THEME.into(),
+            ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
+            list_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
             audio_table: Default::default(),
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),

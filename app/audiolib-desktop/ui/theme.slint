@@ -7,31 +7,49 @@ export global Theme {
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
     // (borders, separators, `/ 1px` unit conversions) stay unscaled.
     in-out property <float> ui-scale: 1.0;
+    // Font size settings in whole pixels (10-24, set from Rust). 13 is the reference size
+    // at which every design size below is used unchanged, so the defaults keep the look.
+    in-out property <int> ui-font-px: 13;
+    // Result list rows only (Appearance > List font size).
+    in-out property <int> list-font-px: 13;
+    // Interface text: design size `n` px adjusted by the interface font setting and the
+    // UI scale, rounded to whole pixels.
+    public pure function font(n: float) -> length {
+        return round(n * Theme.ui-scale * Theme.ui-font-px / 13) * 1px;
+    }
+    // Result list row text: design size `n` px adjusted by the list font setting.
+    public pure function list-font(n: float) -> length {
+        return round(n * Theme.ui-scale * Theme.list-font-px / 13) * 1px;
+    }
+    // List rows grow with a larger list font and never shrink below the design height.
+    out property <float> list-row-factor: max(1.0, Theme.list-font-px / 13);
     // Window default text size (was `default-font-size: 12px`).
-    out property <length> ui-font-size: 12px * Theme.ui-scale;
+    out property <length> ui-font-size: Theme.font(12);
     // Result list file-name cell (was `font-size: 12px`).
-    out property <length> list-font-size: 12px * Theme.ui-scale;
-    out property <color> bg: #181b20;
-    out property <color> panel: #20242a;
-    out property <color> raised: #2a3037;
-    out property <color> hover: #353d45;
-    out property <color> border: #353d45;
-    out property <color> strong-border: #697581;
-    out property <color> ink: #d9dee3;
-    out property <color> dim: #aab2bd;
-    out property <color> muted: #95a0ac;
-    out property <color> accent: #8faea6;
-    out property <color> accent-hover: #a8c3bb;
-    out property <color> on-accent: #202b28;
-    out property <color> selected: #2b3a38;
-    out property <color> checked: #354744;
-    out property <color> alternate: #22282e;
-    out property <color> warning: #c3b48e;
-    out property <color> player: #232a30;
-    out property <color> player-border: #465059;
-    out property <color> tooltip: #14171c;
-    out property <color> overlay: #000000a8;
-    // Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
+    out property <length> list-font-size: Theme.list-font(12);
+    // Palette tokens. The values here are the default theme; Rust (src/theme.rs) sets
+    // them from the selected theme at startup and when the Theme setting changes.
+    in-out property <color> bg: #181b20;
+    in-out property <color> panel: #20242a;
+    in-out property <color> raised: #2a3037;
+    in-out property <color> hover: #353d45;
+    in-out property <color> border: #353d45;
+    in-out property <color> strong-border: #697581;
+    in-out property <color> ink: #d9dee3;
+    in-out property <color> dim: #aab2bd;
+    in-out property <color> muted: #95a0ac;
+    in-out property <color> accent: #8faea6;
+    in-out property <color> accent-hover: #a8c3bb;
+    in-out property <color> on-accent: #202b28;
+    in-out property <color> selected: #2b3a38;
+    in-out property <color> checked: #354744;
+    in-out property <color> alternate: #22282e;
+    in-out property <color> warning: #c3b48e;
+    in-out property <color> player: #232a30;
+    in-out property <color> player-border: #465059;
+    in-out property <color> tooltip: #14171c;
+    in-out property <color> overlay: #000000a8;
+    // Not themeable. Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
     out property <color> spectral-canvas: #849094;
     out property <color> normal-canvas: #1d2328;
 }
