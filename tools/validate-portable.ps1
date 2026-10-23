@@ -8,6 +8,8 @@ param(
     [string]$ExpectedCommit
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 if ($PublishedReleaseReport -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Published release validation requires pwsh (PowerShell 7.3 or newer).' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }))
@@ -175,4 +177,7 @@ try {
         if (!$testRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside owned portable test root.' }
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

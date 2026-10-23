@@ -11,6 +11,8 @@ param(
     [uint32]$PointerOverlayProcessId = 0
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $PSNativeCommandUseErrorActionPreference = $false
 
 function Write-NewJson([string]$Path, [object]$Value) {
@@ -325,3 +327,6 @@ try {
 if ($blockedReason) { throw "GUI search validation blocked: $blockedReason" }
 if (!$completed -or $invalidCount -or $slowCount) { throw "GUI search validation failed: $invalidCount invalid, $slowCount valid totals at or above 500ms; all samples retained" }
 Write-Host "GUI search validation passed: $validCount fresh-process samples, every valid total below 500ms"
+} finally {
+    Restore-AudioLibConsoleEncoding
+}

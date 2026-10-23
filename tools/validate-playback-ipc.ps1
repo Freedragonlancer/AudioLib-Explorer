@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release', [switch]$CleanCheckout)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = if ([IO.Path]::IsPathRooted($BinaryDirectory)) { $BinaryDirectory } else { Join-Path $taskRoot $BinaryDirectory }
 $cli = Join-Path $binaryRoot 'AudioLibCli.exe'
@@ -355,4 +357,7 @@ try {
         $message = $cleanupErrors -join ' '
         if ($primaryError) { Write-Warning $message } else { throw $message }
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

@@ -10,6 +10,8 @@ param(
     [switch]$DesktopOnly
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3' -or !$IsWindows) { throw 'Remote resume validation requires Windows and PowerShell 7.3 or newer.' }
 if ($SkipDesktop -and $DesktopOnly) { throw '-DesktopOnly cannot be combined with -SkipDesktop.' }
@@ -309,4 +311,7 @@ try {
         if (!$taskKeepRoot -and (Test-Path -LiteralPath $taskRoot)) { Assert-OwnedTree $taskRoot; Remove-Item -LiteralPath $taskRoot -Recurse -Force }
         elseif ($taskKeepRoot) { Write-Warning "Failed validation retained only its isolated fixture: $taskRoot" }
     }
+}
+} finally {
+    Restore-AudioLibConsoleEncoding
 }

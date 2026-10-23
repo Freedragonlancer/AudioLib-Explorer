@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([string]$BinaryDirectory = 'dist/latest/portable', [string]$ReferenceWav, [string]$ArtifactDirectory = '.rust-validation/spectral-v4', [switch]$ThemeViews)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $binaryRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot $BinaryDirectory))
 $artifactRoot = Join-Path $taskRoot $ArtifactDirectory
@@ -97,3 +99,6 @@ try {
     $views | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifactRoot 'views.json') -Encoding UTF8
     $views | ConvertTo-Json -Depth 5
 } finally { $env:AUDIOLIB_DATA_DIR = $previousDataRoot }
+} finally {
+    Restore-AudioLibConsoleEncoding
+}

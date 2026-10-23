@@ -8,6 +8,8 @@ param(
     [string[]]$ExpectedEntries
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'console-utf8.ps1')
+try {
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($Archive))
 try { $names = @($zip.Entries | ForEach-Object { $_.FullName }) } finally { $zip.Dispose() }
@@ -23,3 +25,6 @@ if ($PSBoundParameters.ContainsKey('ExpectedEntries')) {
     if ($names.Count -ne $expected.Count -or @($names | Where-Object { !$expected.Contains($_) }).Count) { throw 'Portable ZIP contents differ from the staged package files.' }
 }
 Write-Host "Portable ZIP entry names verified: $($names.Count) files, forward slashes only."
+} finally {
+    Restore-AudioLibConsoleEncoding
+}
