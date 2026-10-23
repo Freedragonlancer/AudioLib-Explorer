@@ -369,9 +369,22 @@ pub struct CompatibilityManifest {
 /// direct-use/migration ranges derived from this one reviewed release set.
 const LEGACY_APPLICATION_RANGES: &[&str] = &["=0.4.11", "=0.5.0", "=0.5.1"];
 
-/// Published releases of the current minor line share one protocol baseline;
-/// patch releases of the same minor accept each other (0.6.0 onward).
-const CURRENT_MINOR_RANGE: &str = ">=0.6.0, <0.7.0";
+/// Released minor lines that share the current protocol baseline. 0.6.x peers
+/// keep working exactly as before.
+const RELEASED_MINOR_RANGES: &[&str] = &[">=0.6.0, <0.7.0"];
+
+/// Patch releases of the running minor line accept each other. Derived from
+/// `CARGO_PKG_VERSION` so a version bump can never leave it stale.
+fn current_minor_range() -> String {
+    let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
+    format!(
+        ">={}.{}.0, <{}.{}.0",
+        version.major,
+        version.minor,
+        version.major,
+        version.minor + 1
+    )
+}
 
 /// This development catalog admits the tested published releases and the exact
 /// development version. Actual format inspection still decides direct use versus
@@ -382,7 +395,8 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
         .map(|requirement| (*requirement).to_owned())
         .collect();
     let mut supported_ranges = legacy_ranges.clone();
-    supported_ranges.push(CURRENT_MINOR_RANGE.to_owned());
+    supported_ranges.extend(RELEASED_MINOR_RANGES.iter().map(|r| (*r).to_owned()));
+    supported_ranges.push(current_minor_range());
     supported_ranges.push(format!("={}", env!("CARGO_PKG_VERSION")));
     CompatibilityManifest {
         application_version: env!("CARGO_PKG_VERSION").into(),
@@ -571,11 +585,86 @@ mod tests {
         assert_ne!(current, "0.6.0");
         assert!(!peer_versions_compatible(&local, "0.6.0", Some(&released)));
         assert!(!peer_versions_compatible(&released, &current, Some(&local)));
-        // Later 0.6.x patches carrying the minor-line range accept each other.
+        // Later 0.6.x patches carrying the minor-line range accept each other;
+        // the 0.6 line stays a retained released baseline after the 0.7 bump.
         let mut later = local.clone();
         later.application_version = "0.6.9".into();
         assert!(peer_versions_compatible(&local, "0.6.9", Some(&later)));
         assert!(peer_versions_compatible(&later, &current, Some(&local)));
+    }
+
+    fn catalog_for(version: &str) -> CompatibilityManifest {
+        let mut catalog = compatibility_manifest();
+        catalog.application_version = version.into();
+        catalog
+    }
+
+    #[test]
+    fn every_patch_of_current_minor_is_mutually_accepted() {
+        let local = compatibility_manifest();
+        let current = Version::parse(&local.application_version).unwrap();
+        for patch in 0..=9 {
+            let version = format!("{}.{}.{patch}", current.major, current.minor);
+            let peer = catalog_for(&version);
+            assert!(
+                peer_versions_compatible(&local, &version, Some(&peer)),
+                "{version}"
+            );
+            assert!(
+                peer_versions_compatible(&peer, &local.application_version, Some(&local)),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_0_7_0_and_0_7_1_catalogs_accept_each_other() {
+        let local = compatibility_manifest();
+        let current = Version::parse(&local.application_version).unwrap();
+        if (current.major, current.minor) != (0, 7) {
+            return;
+        }
+        let old = catalog_for("0.7.0");
+        let new = catalog_for("0.7.1");
+        assert!(peer_versions_compatible(&old, "0.7.1", Some(&new)));
+        assert!(peer_versions_compatible(&new, "0.7.0", Some(&old)));
+    }
+
+    #[test]
+    fn derived_minor_range_rejects_prereleases() {
+        let local = compatibility_manifest();
+        let current = Version::parse(&local.application_version).unwrap();
+        let pre = format!(
+            "{}.{}.{}-beta.1",
+            current.major,
+            current.minor,
+            current.patch + 1
+        );
+        let peer = catalog_for(&pre);
+        assert!(!peer_versions_compatible(&local, &pre, Some(&peer)));
+        assert!(!accepts_range(
+            &[current_minor_range()],
+            &Version::parse(&pre).unwrap()
+        ));
+        assert!(
+            local
+                .peer_application_ranges
+                .contains(&">=0.6.0, <0.7.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn next_minor_is_not_auto_accepted() {
+        let local = compatibility_manifest();
+        let current = Version::parse(&local.application_version).unwrap();
+        let next = format!("{}.{}.0", current.major, current.minor + 1);
+        let peer = catalog_for(&next);
+        assert!(!peer_versions_compatible(&local, &next, Some(&peer)));
+        assert!(!peer_versions_compatible(&local, &next, None));
+        assert!(!accepts_range(
+            &local.peer_application_ranges,
+            &Version::parse(&next).unwrap()
+        ));
     }
 
     #[test]
