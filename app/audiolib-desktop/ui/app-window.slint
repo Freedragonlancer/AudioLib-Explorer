@@ -1298,6 +1298,7 @@ export component AppWindow inherits Window {
                 MenuItem { title: root.chinese ? "全部记录" : "All records"; enabled: root.menu-ready; activated => { root.visibility-index = 2; root.filter-requested(); } }
             }
             MenuSeparator { }
+            MenuItem { title: root.chinese ? "外观设置…" : "Appearance settings…"; enabled: root.menu-ready; activated => { root.settings-page = 1; root.settings-visible = true; } }
             MenuItem { title: root.chinese ? "Switch to English" : "切换到中文"; enabled: root.menu-ready; activated => { root.chinese = !root.chinese; root.language-requested(root.chinese); } }
         }
         Menu { title: root.chinese ? "播放" : "Playback"; enabled: root.menu-ready;
@@ -1307,7 +1308,6 @@ export component AppWindow inherits Window {
             MenuItem { title: root.chinese ? "停止" : "Stop"; enabled: root.menu-ready && (root.audio-ready || root.play-duration > 0); activated => { root.stop-requested(); } }
             MenuSeparator { }
             MenuItem { title: root.chinese ? "音频输出设置…" : "Audio output settings…"; enabled: root.menu-ready; activated => { root.settings-page = 0; root.output-settings-requested(); root.settings-visible = true; } }
-            MenuItem { title: root.chinese ? "外观设置…" : "Appearance settings…"; enabled: root.menu-ready; activated => { root.settings-page = 1; root.settings-visible = true; } }
             MenuItem { title: root.chinese ? "Spectral Peaks 设置…" : "Spectral Peaks settings…"; enabled: root.menu-ready; activated => { root.peaks-visible = true; } }
         }
         Menu { title: root.chinese ? "帮助" : "Help"; enabled: root.menu-ready;
