@@ -459,9 +459,14 @@ impl PeerRejection {
     }
 }
 
-/// Fail fast when the linked SQLite is older than [`MINIMUM_SQLITE_VERSION`]. Called by
-/// each process at startup for its own engine; never used to judge a peer.
-pub fn check_linked_sqlite(linked: &str) -> Result<(), String> {
+/// Warning-only self-check of the linked SQLite against [`MINIMUM_SQLITE_VERSION`].
+///
+/// Returns `Some(warning)` when `linked` is older than the minimum or unparsable, `None`
+/// otherwise. It never fails: each process calls it at startup for its own engine, logs
+/// the warning (and may show it in diagnostics) and keeps starting; the operations that
+/// truly need the newer engine refuse on their own (`sqlite_engine::require_plan_b`).
+/// Never used to judge a peer.
+pub fn check_linked_sqlite(linked: &str) -> Option<String> {
     let parse = |text: &str| -> Option<Version> {
         let mut parts = text.trim().split('.').map(|part| part.parse::<u64>().ok());
         Some(Version::new(
@@ -471,8 +476,8 @@ pub fn check_linked_sqlite(linked: &str) -> Result<(), String> {
         ))
     };
     match (parse(linked), parse(MINIMUM_SQLITE_VERSION)) {
-        (Some(found), Some(minimum)) if found >= minimum => Ok(()),
-        _ => Err(format!(
+        (Some(found), Some(minimum)) if found >= minimum => None,
+        _ => Some(format!(
             "Linked SQLite {linked} is older than the required {MINIMUM_SQLITE_VERSION}; rebuild with the bundled SQLite"
         )),
     }
@@ -882,10 +887,11 @@ mod tests {
 
     #[test]
     fn linked_sqlite_self_check() {
-        assert!(check_linked_sqlite(MINIMUM_SQLITE_VERSION).is_ok());
-        assert!(check_linked_sqlite("3.60.0").is_ok());
-        assert!(check_linked_sqlite("3.54.0").is_err());
-        assert!(check_linked_sqlite("garbage").is_err());
+        assert_eq!(check_linked_sqlite(MINIMUM_SQLITE_VERSION), None);
+        assert_eq!(check_linked_sqlite("3.60.0"), None);
+        let warning = check_linked_sqlite("3.54.0").unwrap();
+        assert!(warning.contains("3.54.0") && warning.contains(MINIMUM_SQLITE_VERSION));
+        assert!(check_linked_sqlite("garbage").is_some());
     }
 
     /// Format fingerprint fixture: changing any format input must also change its ID
