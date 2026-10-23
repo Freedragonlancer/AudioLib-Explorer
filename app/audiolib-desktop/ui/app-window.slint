@@ -156,6 +156,8 @@ component PaneDivider inherits Rectangle {
     in property <bool> enabled: true;
     in property <string> label;
     callback resized(length);
+    // Emitted once a drag or keyboard adjustment ends, to persist the layout.
+    callback finished();
     private property <length> pressed-pointer-x;
     private property <length> pressed-pane-width;
     width: 12px * Theme.ui-scale;
@@ -174,6 +176,7 @@ component PaneDivider inherits Rectangle {
             if event.text == Key.LeftArrow || event.text == Key.RightArrow {
                 let step = event.text == Key.LeftArrow ? -16px * Theme.ui-scale : 16px * Theme.ui-scale;
                 root.resized(root.pane-width + (root.reverse ? -step : step));
+                root.finished();
                 return accept;
             }
             reject
@@ -187,6 +190,9 @@ component PaneDivider inherits Rectangle {
                 divider-focus.focus();
                 root.pressed-pointer-x = self.absolute-position.x + self.mouse-x;
                 root.pressed-pane-width = root.pane-width;
+            }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                root.finished();
             }
         }
         moved => {
@@ -508,6 +514,8 @@ export component AppWindow inherits Window {
     private property <length> table-viewport-x;
     private property <string> table-resize-help: root.chinese ? "拖动调整列宽；双击或 Home 恢复默认；方向键微调" : "Drag to resize; double-click or Home to reset; arrow keys adjust width";
     callback table-layout-changed();
+    // A pane divider drag or keyboard adjustment ended; persist the window layout.
+    callback pane-layout-changed();
     in-out property <string> duration-min: "";
     in-out property <string> duration-max: "";
 
@@ -1469,6 +1477,7 @@ export component AppWindow inherits Window {
                 pane-width: root.sidebar-width; enabled: !root.background-blocked;
                 label: root.chinese ? "调整素材库侧栏宽度" : "Resize library sidebar";
                 resized(width) => { root.sidebar-preferred-width = clamp(width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? root.inspector-width : 0px))); }
+                finished => { root.pane-layout-changed(); }
             }
             results-column := VerticalLayout { horizontal-stretch: 1; min-width: 520px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                 HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
@@ -1763,6 +1772,7 @@ export component AppWindow inherits Window {
                 pane-width: root.inspector-width; reverse: true; enabled: !root.background-blocked;
                 label: root.chinese ? "调整声音详情宽度" : "Resize sound details";
                 resized(width) => { root.inspector-preferred-width = clamp(width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width)); }
+                finished => { root.pane-layout-changed(); }
             }
             if root.inspector-visible: details-sidebar := Rectangle { width: root.inspector-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
                 VerticalLayout { padding: 10px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
