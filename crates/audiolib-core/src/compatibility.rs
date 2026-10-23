@@ -425,8 +425,10 @@ pub const TOKENIZATION_MAX: u32 = TOKENIZATION_REVISION;
 pub const PEER_UPGRADE_REQUIRED: &str = "PEER_UPGRADE_REQUIRED";
 pub const PROTOCOL_UNSUPPORTED: &str = "PROTOCOL_UNSUPPORTED";
 pub const PEER_VERSION_BLOCKED: &str = "PEER_VERSION_BLOCKED";
-/// Pre-marker code still sent by 0.6.x–0.7.1 servers; also used for an inconsistent catalog.
+/// Pre-marker code still sent by 0.6.x–0.7.1 servers: that server is too old.
 pub const PEER_VERSION_UNSUPPORTED: &str = "PEER_VERSION_UNSUPPORTED";
+/// The peer's compatibility catalog is malformed, duplicated, oversized or inconsistent.
+pub const PEER_CATALOG_INVALID: &str = "PEER_CATALOG_INVALID";
 
 /// Why a marker check refused a peer (Compatibility_Markers.md §4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,7 +452,7 @@ impl PeerRejection {
             Self::BlockedVersion => PEER_VERSION_BLOCKED,
             Self::PeerUpgradeRequired | Self::ProtocolPeerTooOld => PEER_UPGRADE_REQUIRED,
             Self::ProtocolPeerTooNew => PROTOCOL_UNSUPPORTED,
-            Self::Inconsistent => PEER_VERSION_UNSUPPORTED,
+            Self::Inconsistent => PEER_CATALOG_INVALID,
         }
     }
 }

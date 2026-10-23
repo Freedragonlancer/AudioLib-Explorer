@@ -52,6 +52,9 @@ pub enum PeerIncompatibility {
     Blocked,
     /// The peer's declared catalog contradicts its reported version.
     Inconsistent,
+    /// The server refused this client's compatibility catalog as invalid
+    /// (`409 PEER_CATALOG_INVALID`).
+    ClientCatalogInvalid,
 }
 
 impl PeerIncompatibility {
@@ -61,6 +64,7 @@ impl PeerIncompatibility {
             Self::ClientUpgradeRequired => "client upgrade required",
             Self::Blocked => "blocked version",
             Self::Inconsistent => "inconsistent catalog",
+            Self::ClientCatalogInvalid => "invalid client catalog",
         }
     }
 }
@@ -186,7 +190,8 @@ pub enum RemoteError {
     Snapshot(String),
     /// Compatibility markers refuse this client/server pair (Compatibility_Markers.md §4):
     /// either side detected it (local check or `409 PEER_UPGRADE_REQUIRED`,
-    /// `PROTOCOL_UNSUPPORTED`, `PEER_VERSION_BLOCKED`, legacy `PEER_VERSION_UNSUPPORTED`).
+    /// `PROTOCOL_UNSUPPORTED`, `PEER_VERSION_BLOCKED`, `PEER_CATALOG_INVALID`, legacy
+    /// `PEER_VERSION_UNSUPPORTED`).
     /// The existing cache is always retained.
     #[error("Incompatible client/server ({}): {detail}", reason.as_str())]
     PeerIncompatible {
@@ -296,9 +301,14 @@ impl RemoteError {
                 reason: PeerIncompatibility::ClientUpgradeRequired,
                 detail: message,
             },
-            // The server's protocol is entirely below this client's.
+            // The server's protocol is entirely below this client's (`sub_code`
+            // `SERVER_UPGRADE_REQUIRED`): the server, never the client, must upgrade.
             (_, "PROTOCOL_UNSUPPORTED") => Self::PeerIncompatible {
                 reason: PeerIncompatibility::ServerUpgradeRequired,
+                detail: message,
+            },
+            (_, "PEER_CATALOG_INVALID") => Self::PeerIncompatible {
+                reason: PeerIncompatibility::ClientCatalogInvalid,
                 detail: message,
             },
             (_, "PEER_VERSION_BLOCKED") => Self::PeerIncompatible {
@@ -933,6 +943,12 @@ fn peer_message(reason: PeerIncompatibility, detail: &str, chinese: bool) -> Str
         (PeerIncompatibility::Inconsistent, true) => {
             "服务器报告的版本信息不一致。请重启或重新安装服务器；本地缓存已保留。"
         }
+        (PeerIncompatibility::ClientCatalogInvalid, false) => {
+            "This client sent invalid compatibility information. Restart or reinstall AudioLib Explorer; the local cache was kept."
+        }
+        (PeerIncompatibility::ClientCatalogInvalid, true) => {
+            "本客户端发送的兼容性信息无效。请重启或重新安装 AudioLib Explorer；本地缓存已保留。"
+        }
     };
     if detail.is_empty() {
         text.to_owned()
@@ -965,6 +981,49 @@ impl From<audiolib_core::Error> for RemoteError {
 #[cfg(test)]
 mod tests {
     use super::{RemoteError, retry_wait};
+
+    #[test]
+    fn marker_refusal_codes_name_the_side_to_act() {
+        use super::PeerIncompatibility as P;
+        for (code, sub_code, expected) in [
+            ("PEER_UPGRADE_REQUIRED", "", P::ClientUpgradeRequired),
+            (
+                "PROTOCOL_UNSUPPORTED",
+                "SERVER_UPGRADE_REQUIRED",
+                P::ServerUpgradeRequired,
+            ),
+            ("PROTOCOL_UNSUPPORTED", "", P::ServerUpgradeRequired),
+            ("PEER_VERSION_BLOCKED", "", P::Blocked),
+            ("PEER_CATALOG_INVALID", "", P::ClientCatalogInvalid),
+            ("PEER_VERSION_UNSUPPORTED", "", P::ServerUpgradeRequired),
+        ] {
+            let body =
+                format!(r#"{{"error_code":"{code}","sub_code":"{sub_code}","message":"refused"}}"#);
+            for context in ["GET /snapshot", "PUT /settings", "PATCH /files/1"] {
+                let error = RemoteError::from_status(409, &body, context);
+                assert!(
+                    matches!(&error, RemoteError::PeerIncompatible { reason, .. } if *reason == expected),
+                    "{code} {context}: {error:?}"
+                );
+                let english = error.localized(false);
+                let chinese = error.localized(true);
+                assert!(english.contains("cache was kept"), "{english}");
+                assert!(chinese.contains("缓存已保留"), "{chinese}");
+                match expected {
+                    P::ServerUpgradeRequired => {
+                        assert!(english.contains("Upgrade AudioLib Server"))
+                    }
+                    P::ClientUpgradeRequired => {
+                        assert!(english.contains("Update AudioLib Explorer"))
+                    }
+                    P::ClientCatalogInvalid => {
+                        assert!(english.contains("reinstall AudioLib Explorer"))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     #[test]
     fn mdns_host_failures_suggest_the_lan_ip() {

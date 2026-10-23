@@ -296,6 +296,19 @@ mod tests {
     }
 
     #[test]
+    fn write_header_carries_marker_revision_and_protocol() {
+        let header: serde_json::Value = serde_json::from_str(&client_header().unwrap()).unwrap();
+        let ours = compatibility_manifest();
+        assert_eq!(
+            header["marker_revision"],
+            serde_json::json!(ours.marker_revision)
+        );
+        assert!(header["marker_revision"].as_u64().is_some());
+        assert!(header["protocol"]["min"].as_u64().is_some());
+        assert!(header["protocol"]["max"].as_u64().is_some());
+    }
+
+    #[test]
     fn headers_require_exact_format_revisions_and_bidirectional_versions() {
         let valid = headers();
         assert_eq!(response_format(&valid).unwrap(), Some(descriptor()));
