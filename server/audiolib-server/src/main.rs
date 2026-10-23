@@ -97,12 +97,13 @@ async fn run() -> Result<Option<Deployment>> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    // Diagnostics only: an old linked SQLite is reported, never fatal.
-    // TODO(#98): adapt to `Option<warning>` once the new core signature lands.
+    // Warning-only SQLite self-check: log it and keep starting.
     let linked_sqlite = rusqlite::version();
     match audiolib_core::compatibility::check_linked_sqlite(linked_sqlite) {
-        Ok(()) => tracing::info!(sqlite = linked_sqlite, "Linked SQLite version"),
-        Err(warning) => tracing::warn!(sqlite = linked_sqlite, "{warning}"),
+        Some(warning) => {
+            tracing::warn!(sqlite = linked_sqlite, %warning, "Linked SQLite self-check")
+        }
+        None => tracing::info!(sqlite = linked_sqlite, "Linked SQLite version"),
     }
     let config_path = match config_arg {
         Some(path) => path,

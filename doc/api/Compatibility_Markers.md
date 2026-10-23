@@ -104,13 +104,14 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok；无头豁�
 | 情形 | `error_code` | `sub_code`（提示） | 适用 |
 | --- | --- | --- | --- |
 | 客户端版本在 `blocked_versions` | `PEER_VERSION_BLOCKED` | — | 快照、设置/缓存任务（带头时）、库写入 |
-| 无目录头，或目录无 `marker_revision`/`protocol`（0.4.11/0.5.x、0.6.0–0.7.1） | `PEER_UPGRADE_REQUIRED` | — | 同上；设置/缓存任务无头时豁免 |
+| 无目录头，或目录无 `marker_revision`（0.4.11/0.5.x、0.6.0–0.7.1） | `PEER_UPGRADE_REQUIRED` | — | 同上；设置/缓存任务无头时豁免；无头时使用固定提示文案 |
 | 对端协议区间整体低于本端（对端太旧） | `PEER_UPGRADE_REQUIRED` | — | 同上 |
 | 对端协议区间整体高于本端（对端太新，需升级服务端） | `PROTOCOL_UNSUPPORTED` | `SERVER_UPGRADE_REQUIRED` | 同上 |
-| 目录头畸形、重复、超过 4096 字节，或 `application_version` 自相矛盾 | `PEER_CATALOG_INVALID` | — | 同上 |
+| 目录头畸形、重复、超过 4096 字节；或自相矛盾：`application_version` 不一致、有 `marker_revision` 却无 `protocol`、`protocol.min > max`、区间相交但 `api_protocols` 不相交 | `PEER_CATALOG_INVALID` | — | 同上 |
 | 对端无法读取当前库格式 ID | `SNAPSHOT_FORMAT_UNSUPPORTED` | — | 快照、库写入 |
 
 - 快照上限头名与值来自 core 常量：`SNAPSHOT_SCHEMA_MAX_HEADER`/`SEARCH_STORAGE_MAX_HEADER`/`TOKENIZATION_MAX_HEADER` 与 `SEARCH_STORAGE_MAX`、`TOKENIZATION_MAX`（schema 上限需 ≥ 实际库 schema）。
+- 对端标记检查先于 schema < 6 快照的格式豁免执行（矩阵第 3、9 行）。
 - 无头豁免仅限设置与缓存任务（及已废弃的 playback 空操作）；库写入缺少目录头一律 `PEER_UPGRADE_REQUIRED`。
 - 客户端 `features` 只记入 `tracing::debug!` 诊断日志，不影响准入或响应。
 

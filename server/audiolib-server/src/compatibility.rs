@@ -473,4 +473,33 @@ mod tests {
             assert!(!error.message().contains("  ") && !error.message().contains("Client  "));
         }
     }
+
+    #[test]
+    fn self_contradicting_marker_catalogs_are_peer_catalog_invalid() {
+        let (headers, format) = fixture();
+        let mut no_protocol = compatibility_manifest();
+        no_protocol.protocol = None;
+        assert!(no_protocol.marker_revision.is_some());
+        let mut disjoint = compatibility_manifest();
+        disjoint.protocol = Some(audiolib_core::compatibility::ProtocolRange { min: 1, max: 2 });
+        disjoint.api_protocols = vec!["api/v2".into()];
+        let mut inverted = compatibility_manifest();
+        inverted.protocol = Some(audiolib_core::compatibility::ProtocolRange { min: 2, max: 1 });
+        for (name, catalog) in [
+            ("no_protocol", no_protocol),
+            ("disjoint_api_protocols", disjoint),
+            ("inverted", inverted),
+        ] {
+            let headers = with_catalog(&headers, &catalog);
+            for error in [
+                admit(&headers, &format).unwrap_err(),
+                admit(&headers, &legacy_format()).unwrap_err(),
+                admit_mutation(&headers).unwrap_err(),
+                admit_library_mutation(&headers, &format).unwrap_err(),
+            ] {
+                assert_eq!(error.status(), StatusCode::CONFLICT, "{name}");
+                assert_eq!(error.code(), PEER_CATALOG_INVALID, "{name}");
+            }
+        }
+    }
 }

@@ -89,7 +89,7 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
             let expected = match mode {
-                "unmarked" | "protocol" => "PEER_UPGRADE_REQUIRED",
+                "unmarked" => "PEER_UPGRADE_REQUIRED",
                 "protocol_newer" => "PROTOCOL_UNSUPPORTED",
                 _ => "PEER_CATALOG_INVALID",
             };
