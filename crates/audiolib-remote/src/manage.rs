@@ -145,10 +145,25 @@ impl Capabilities {
         self.root_management && self.may_manage()
     }
 
+    /// Whether an optional marker feature may be used with this server: on marker
+    /// servers both sides must declare it at the same revision; a missing or mismatched
+    /// one only disables that function (Compatibility_Markers.md §4, §9.5). Servers
+    /// without markers are refused before this matters; their legacy capability
+    /// fields alone decide.
+    pub fn feature_enabled(&self, name: &str) -> bool {
+        match &self.compatibility {
+            Some(server) if server.marker_revision.is_some() => {
+                crate::compatibility::enabled_features(Some(server)).contains(name)
+            }
+            _ => true,
+        }
+    }
+
     /// Whether the list may show server thumbnail Waveforms (§9.1–§9.2): a known
     /// `list_waveforms` capability (version 1, 128 buckets, `i16le-minmax-base64`).
     pub fn list_waveforms_usable(&self) -> bool {
         self.supported
+            && self.feature_enabled("list_waveforms")
             && self
                 .list_waveforms
                 .as_ref()
@@ -700,7 +715,7 @@ mod tests {
         let log = seen.clone();
         let server = TestServer::start(move |request| {
             if (request.path != "/api/v1/capabilities" || !probe_catalog)
-                && let Some(response) = crate::test_server::legacy_handshake(&request.path)
+                && let Some(response) = crate::test_server::marker_handshake(&request.path)
             {
                 return response;
             }

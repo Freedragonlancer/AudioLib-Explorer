@@ -98,6 +98,12 @@ fn legacy_server(
             })),
             // The tested published baselines expose management hints, without a modern
             // compatibility catalog or an actual-format descriptor.
+            // A marker server of this release, or a published unmarked one.
+            ("GET", "/api/v1/capabilities") if state.version == env!("CARGO_PKG_VERSION") => {
+                crate::test_server::marker_capabilities(serde_json::json!({
+                    "manage_mode":"all", "can_manage":true,
+                }))
+            }
             ("GET", "/api/v1/capabilities") => json(&serde_json::json!({
                 "manage_mode":"all", "can_manage":true,
             })),
@@ -165,8 +171,9 @@ fn cached_identity(cache: &RemoteCache) -> CachedIdentity {
 }
 
 #[test]
-fn published_legacy_peers_sync_poll_probe_patch_and_ignore_retired_json_fields() {
-    for version in ["0.4.11", "0.5.0", "0.5.1"] {
+fn marker_server_with_published_schema5_snapshot_syncs_polls_probes_patches_and_ignores_retired_json_fields()
+ {
+    for version in [env!("CARGO_PKG_VERSION")] {
         let owned = tempfile::tempdir().unwrap();
         let original = owned.path().join("original-schema5.db");
         let (bytes, file) = legacy_snapshot(&original);
@@ -319,11 +326,14 @@ fn published_legacy_peers_sync_poll_probe_patch_and_ignore_retired_json_fields()
 }
 
 #[test]
-fn unknown_legacy_versions_fail_before_download_or_write_and_retain_cache() {
-    for unsupported in ["0.4.12", "0.5.2", "0.5.0-rc.1", "0.5.1-rc.1", "99.0.0"] {
+fn unmarked_servers_require_upgrade_before_download_or_write_and_retain_cache() {
+    // Published catalog-less (0.4.11/0.5.x) and range-based (0.6.x–0.7.x) servers. (This
+    // build still reports the workspace version, so the real 0.7.1 catalog is covered by
+    // the core fixture tests.)
+    for unsupported in ["0.4.11", "0.5.0", "0.5.1", "0.6.5", "0.7.0", "99.0.0"] {
         let owned = tempfile::tempdir().unwrap();
         let (bytes, file) = legacy_snapshot(&owned.path().join("source.db"));
-        let (server, observed) = legacy_server("0.5.0", bytes, file);
+        let (server, observed) = legacy_server(env!("CARGO_PKG_VERSION"), bytes, file);
         let client = RemoteClient::new(&server.url, "").unwrap();
         let cache = RemoteCache::new(&owned.path().join("client"));
         let initial =
@@ -338,10 +348,19 @@ fn unknown_legacy_versions_fail_before_download_or_write_and_retain_cache() {
             .map(|path| std::fs::read(path).unwrap())
             .collect();
         observed.lock().unwrap().version = unsupported.into();
-        assert!(matches!(
-            sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), true,),
-            Err(RemoteError::Snapshot(_))
-        ));
+        let upgrade = |error: &RemoteError| {
+            matches!(
+                error,
+                RemoteError::PeerIncompatible {
+                    reason: crate::error::PeerIncompatibility::ServerUpgradeRequired,
+                    ..
+                }
+            )
+        };
+        let error =
+            sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), true).unwrap_err();
+        assert!(upgrade(&error), "{unsupported}: {error:?}");
+        assert!(error.localized(false).contains("Upgrade AudioLib Server"));
         let writer = RemoteWriter::new(client.clone(), cache.clone(), LIBRARY);
         assert!(matches!(
             writer.update_metadata(
@@ -351,7 +370,7 @@ fn unknown_legacy_versions_fail_before_download_or_write_and_retain_cache() {
                     ..Default::default()
                 },
             ),
-            Err(RemoteError::Snapshot(_))
+            Err(ref error) if upgrade(error)
         ));
         assert!(matches!(
             check_revision(&client, Some(&cached_identity(&cache)), false),

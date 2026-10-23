@@ -210,7 +210,7 @@ mod tests {
         }
         let mut one_way = headers.clone();
         let mut peer = compatibility_manifest();
-        peer.peer_application_ranges = vec!["<0.4.0".into()];
+        peer.marker_revision = None;
         one_way.insert(
             CLIENT_COMPATIBILITY_HEADER,
             HeaderValue::from_str(&serde_json::to_string(&peer).unwrap()).unwrap(),

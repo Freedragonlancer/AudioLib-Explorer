@@ -5,14 +5,34 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Explicit supported legacy handshake for tests focused on unrelated API operations.
-pub(crate) fn legacy_handshake(path: &str) -> Option<TestResponse> {
+/// This build's compatibility catalog as JSON (a marker peer of the same release).
+pub(crate) fn marker_catalog() -> serde_json::Value {
+    serde_json::to_value(audiolib_core::compatibility::compatibility_manifest()).unwrap()
+}
+
+/// `/health` of a marker peer of this release.
+pub(crate) fn marker_health() -> TestResponse {
+    TestResponse::json(
+        200,
+        &serde_json::json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}).to_string(),
+    )
+}
+
+/// `/capabilities` of a marker peer with `extra` fields (an object) merged in.
+pub(crate) fn marker_capabilities(extra: serde_json::Value) -> TestResponse {
+    let mut body = extra;
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    body["compatibility"] = marker_catalog();
+    TestResponse::json(200, &body.to_string())
+}
+
+/// Marker-peer handshake for tests focused on unrelated API operations.
+pub(crate) fn marker_handshake(path: &str) -> Option<TestResponse> {
     match path {
-        "/api/v1/health" => Some(TestResponse::json(
-            200,
-            r#"{"status":"ok","version":"0.4.11"}"#,
-        )),
-        "/api/v1/capabilities" => Some(TestResponse::json(404, "{}")),
+        "/api/v1/health" => Some(marker_health()),
+        "/api/v1/capabilities" => Some(marker_capabilities(serde_json::json!({}))),
         _ => None,
     }
 }

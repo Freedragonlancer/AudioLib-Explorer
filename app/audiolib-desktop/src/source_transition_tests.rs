@@ -179,13 +179,17 @@ fn legacy_peer_preflight(listener: &std::net::TcpListener) {
         (
             "/api/v1/health",
             "200 OK",
-            r#"{"status":"ok","version":"0.4.11"}"#,
+            serde_json::json!({"status":"ok","version":audiolib_core::compatibility::compatibility_manifest().application_version}).to_string(),
         ),
-        ("/api/v1/capabilities", "404 Not Found", "{}"),
+        (
+            "/api/v1/capabilities",
+            "200 OK",
+            serde_json::json!({"compatibility":audiolib_core::compatibility::compatibility_manifest()}).to_string(),
+        ),
     ] {
         let mut socket = accept(listener);
         assert!(request(&mut socket).starts_with(&format!("GET {path} ")));
-        respond(&mut socket, status, body);
+        respond(&mut socket, status, &body);
     }
 }
 
@@ -1378,7 +1382,7 @@ fn rejected_snapshot_cache(unsupported: bool) {
                 "/api/v1/health" => respond(
                     &mut socket,
                     "200 OK",
-                    r#"{"status":"ok","version":"0.4.11"}"#,
+                    &serde_json::json!({"status":"ok","version":audiolib_core::compatibility::compatibility_manifest().application_version}).to_string(),
                 ),
                 "/api/v1/library" => respond(
                     &mut socket,
@@ -1390,8 +1394,8 @@ fn rejected_snapshot_cache(unsupported: bool) {
                 ),
                 "/api/v1/capabilities" => respond(
                     &mut socket,
-                    "404 Not Found",
-                    r#"{"error_code":"NOT_FOUND","message":"legacy server"}"#,
+                    "200 OK",
+                    &serde_json::json!({"compatibility":audiolib_core::compatibility::compatibility_manifest()}).to_string(),
                 ),
                 "/api/v1/roots" => respond(&mut socket, "200 OK", "[]"),
                 "/api/v1/library/snapshot" => {

@@ -43,8 +43,8 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
         .pragma_query_value(None, "data_version", |row| row.get(0))
         .unwrap();
     for mode in [
-        "version",
-        "mutual_range",
+        "unmarked",
+        "protocol_newer",
         "protocol",
         "malformed",
         "duplicate",
@@ -52,8 +52,14 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
     ] {
         let mut catalog = compatibility_manifest();
         match mode {
-            "version" => catalog.application_version = "99.0.0".into(),
-            "mutual_range" => catalog.peer_application_ranges = vec!["<0.4.0".into()],
+            // Marker peers of any version are admitted; unmarked or protocol-disjoint
+            // peers are not.
+            "unmarked" => catalog.marker_revision = None,
+            "protocol_newer" => {
+                catalog.protocol =
+                    Some(audiolib_core::compatibility::ProtocolRange { min: 2, max: 2 });
+                catalog.api_protocols = vec!["api/v2".into()];
+            }
             "protocol" => catalog.api_protocols.clear(),
             _ => {}
         }
@@ -132,13 +138,13 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
         ("missing", "PEER_VERSION_UNSUPPORTED"),
         ("p0_only", "SNAPSHOT_FORMAT_UNSUPPORTED"),
         ("future_format", "SNAPSHOT_FORMAT_UNSUPPORTED"),
-        ("future_program", "PEER_VERSION_UNSUPPORTED"),
+        ("unmarked_program", "PEER_VERSION_UNSUPPORTED"),
     ] {
         let mut catalog = compatibility_manifest();
         match mode {
             "p0_only" => catalog.snapshot_read_formats = vec![PLAN_B_INITIAL_FORMAT.into()],
             "future_format" => catalog.snapshot_read_formats = vec!["ale-s99-future".into()],
-            "future_program" => catalog.application_version = "99.0.0".into(),
+            "unmarked_program" => catalog.marker_revision = None,
             _ => {}
         }
         if matches!(mode, "p0_only" | "future_format") {

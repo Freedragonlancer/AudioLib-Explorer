@@ -349,11 +349,14 @@ impl MockServer {
         assert!(health.raw.starts_with("GET /api/v1/health "));
         health.reply(
             "200 OK",
-            serde_json::json!({"status":"ok", "version":"0.4.11"}),
+            serde_json::json!({"status":"ok", "version":audiolib_core::compatibility::compatibility_manifest().application_version}),
         );
         let capabilities = self.next_at("mutation GET /capabilities compatibility preflight");
         assert!(capabilities.raw.starts_with("GET /api/v1/capabilities "));
-        capabilities.reply("404 Not Found", serde_json::json!({}));
+        capabilities.reply(
+            "200 OK",
+            serde_json::json!({"compatibility":audiolib_core::compatibility::compatibility_manifest()}),
+        );
         self.next_at("bound mutation after compatibility preflight")
     }
 }
