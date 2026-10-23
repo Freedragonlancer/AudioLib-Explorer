@@ -66,7 +66,7 @@ fn protocol_ok(local, p):
 fn peer_ok(local, peer_version, peer_catalog):
     if peer_version in local.blocked_versions: return Err(BlockedVersion)
     match peer_catalog:
-        None => return legacy_ok(local, peer_version)    // 仅 0.4.11/0.5.0/0.5.1 无目录旧端，保持现状
+        None => return Err(PeerUpgradeRequired)           // 0.4.11/0.5.x 无目录旧端：同样要求升级，不再维护 legacy 路径
         Some(p) if p.marker_revision is none =>
                 return Err(PeerUpgradeRequired)           // 0.6.0–0.7.1：对方本就拒绝我们，直接明确提示升级
         Some(p) =>
@@ -154,7 +154,7 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 - ① 只看版本号，新端声明什么都无法通过：**0.7.2（及以后）不能被任何 0.6.x、0.7.0、0.7.1 接受**（除非谎报版本，不采用）。0.7.0 与 0.7.1 彼此也不互认。
 - 因此**旧端必须升级**；**从 0.7.2 起，双方只按标记判定**。
 - 新 manifest 仍输出 `peer_application_ranges: [">=0.6.0"]`，但无法改变 ①（判定看的是旧端自己的范围）；新端遇到无 `marker_revision` 的 0.6.0–0.7.1 对端直接返回“对端需升级”（`409 PEER_UPGRADE_REQUIRED` / 客户端提示），不再做版本范围比较。
-- 无目录旧端（0.4.11/0.5.x）维持现有 legacy 路径不变（是否同样改为“需升级”见待确认问题）。
+- 无目录旧端（0.4.11/0.5.x）同样要求升级，不再维护单独的 legacy 路径（`legacy_peer_application_ranges` 删除）。
 
 ## 7. 防护测试
 
@@ -176,15 +176,16 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 | 7 | 标记端 | 未知格式 ID | 快照拒绝，保留旧缓存 | | | | |
 | 8 | 标记端 | 缺 `waveform_bundle_strong_etag` | 同步通过，仅该功能降级 | | | | |
 | 9 | 标记端 | 版本在 `blocked_versions` | 拒绝，明确提示 | | | | |
-| 10 | 0.7.2 | 0.5.1（无目录） | 见待确认 #4 | | | | |
+| 10 | 0.7.2 | 0.5.1（无目录） | 拒绝，提示升级 | | | | |
 | 11 | 快照头与文件实际格式不一致 | — | 拒绝，保留旧缓存 | | | | |
 
-## 9. 待确认问题
+## 9. 已定默认（评审可修改）
 
-1. `skipped_newer` 目前是 `audiolib-update` 的更新检查结果字段，不是同步能力；是否确实要作为 feature？
-2. `api_protocols` 字符串何时删除（建议下一个主版本，仅保留整数 `protocol` 区间）？
-3. `blocked_versions` 内置于二进制，还是随更新检查清单下发？
-4. 无目录旧端（0.4.11/0.5.x）是否继续走 legacy 只读路径，还是一并改为“需升级”？
-5. 客户端是否也声明 features（服务端据此调整响应），还是只由服务端声明？
-6. DTO 快照用 `schemars` 生成 JSON Schema 是否可接受（新增依赖），或改为手写示例 JSON 快照？
-7. `minimum_sqlite_version` 采用“仅显示 + 本地启动自检”是否同意？
+1. **已定默认**：`skipped_newer` **不是** feature，仍留在 `audiolib-update` 更新检查结果中。
+2. **已定默认**：旧字符串字段 `api_protocols: ["api/v1"]` 在下一个主版本删除，此后只用整数 `protocol` 区间。
+3. **已定默认**：`blocked_versions` 随更新检查下发（拉黑无需重新构建）；manifest 中的同名字段仅为本端当前生效列表。
+4. **已定默认**：0.4.11/0.5.x 无目录旧端同样要求升级，不再维护单独 legacy 路径。
+5. **已定默认**：客户端也声明自己的 `features`（在 `x-audiolib-client-compatibility` 中），双方对称；某功能仅在双方都声明时启用。
+6. **已定默认**：允许 `schemars`，仅作 dev/test 依赖，用于 API DTO JSON Schema 快照。
+7. **已定默认**：`minimum_sqlite_version` 仅作显示；另在本地启动时自检链接的 SQLite 版本，不参与对端判定。
+8. **已确认**：新 manifest 声明宽范围 `peer_application_ranges: [">=0.6.0"]`，新代码从不据此判定。
