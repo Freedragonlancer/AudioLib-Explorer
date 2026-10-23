@@ -229,6 +229,12 @@ fn main_view_at_2_0_in_1080x700_scrolls_to_its_last_control() {
         assert!(ui.get_main_viewport_height() > 700.0);
         assert!(ui.get_main_viewport_width() > 1080.0);
         assert!(ui.get_main_last_bottom() > 700.0);
+        assert_eq!(ui.get_results_panel_min_height(), 480.0);
+        assert!(
+            ui.get_results_panel_height() >= 480.0,
+            "sound list squeezed to {}",
+            ui.get_results_panel_height()
+        );
         ui.invoke_scroll_main_to_end();
         save_snapshot(&ui, &format!("main-{language}-x2-1080x700-scrollmax.png"));
         let bottom = ui.get_main_last_bottom();

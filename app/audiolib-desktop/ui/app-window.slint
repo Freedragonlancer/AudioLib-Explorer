@@ -468,6 +468,8 @@ export component AppWindow inherits Window {
     // Test-only: main view and settings scroll state for ui_scale_tests.
     out property <length> main-viewport-height: main-scroll.viewport-height;
     out property <length> main-viewport-width: main-scroll.viewport-width;
+    out property <length> results-panel-height: results-panel.height;
+    out property <length> results-panel-min-height: round(240 * Theme.ui-scale) * 1px;
     out property <length> main-last-bottom: status-row.absolute-position.y + status-row.height;
     out property <length> main-last-right: status-row.absolute-position.x + status-row.width;
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
@@ -1398,7 +1400,7 @@ export component AppWindow inherits Window {
                 Action { width: 76px * Theme.ui-scale; primary: true; label: root.searching ? (root.chinese ? "搜索中" : "Searching") : (root.chinese ? "搜索" : "Search"); clicked => { root.search-requested(true); } }
             }
         }
-        workspace := HorizontalLayout { vertical-stretch: 1; min-height: 0px; spacing: 0px;
+        workspace := HorizontalLayout { vertical-stretch: 1; min-height: results-column.min-height; spacing: 0px;
             library-sidebar := Rectangle { width: root.sidebar-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
                 VerticalLayout { padding: 12px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                     Label { height: 24px * Theme.ui-scale; text: root.chinese ? "素材库" : "LIBRARY"; font-size: 10px * Theme.ui-scale; font-weight: 600; }
@@ -1518,7 +1520,8 @@ export component AppWindow inherits Window {
                     }
                 }
                 }
-                Rectangle { vertical-stretch: 1; min-height: 0px; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px * Theme.ui-scale; background: Theme.panel;
+                // Keeps the sound list usable at large scales; the main view scrolls for the rest.
+                results-panel := Rectangle { vertical-stretch: 1; min-height: round(240 * Theme.ui-scale) * 1px; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px * Theme.ui-scale; background: Theme.panel;
                     VerticalLayout { spacing: 0px;
                         Rectangle { height: 33px * Theme.ui-scale; background: Theme.raised; clip: true;
                             // Both empty and populated results share the header's horizontal position.
