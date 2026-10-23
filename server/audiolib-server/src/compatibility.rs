@@ -3,11 +3,10 @@
 use crate::ApiError;
 use audiolib_core::compatibility::{
     ACCEPT_FORMATS_HEADER, CLIENT_COMPATIBILITY_HEADER, CompatibilityManifest,
-    LIBRARY_FORMAT_HEADER, MAX_COMPATIBILITY_HEADER_BYTES, PEER_CATALOG_INVALID,
-    PEER_UPGRADE_REQUIRED, PeerRejection, SEARCH_STORAGE_MAX, SEARCH_STORAGE_MAX_HEADER,
-    SERVER_COMPATIBILITY_HEADER, SNAPSHOT_FORMAT_HEADER, SNAPSHOT_SCHEMA_MAX,
-    SNAPSHOT_SCHEMA_MAX_HEADER, SnapshotFormat, TOKENIZATION_MAX, TOKENIZATION_MAX_HEADER,
-    check_peer, compatibility_manifest,
+    LIBRARY_FORMAT_HEADER, MAX_COMPATIBILITY_HEADER_BYTES, PEER_CATALOG_INVALID, PeerRejection,
+    SEARCH_STORAGE_MAX, SEARCH_STORAGE_MAX_HEADER, SERVER_COMPATIBILITY_HEADER,
+    SNAPSHOT_FORMAT_HEADER, SNAPSHOT_SCHEMA_MAX_HEADER, SnapshotFormat, TOKENIZATION_MAX,
+    TOKENIZATION_MAX_HEADER, check_peer, compatibility_manifest,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
@@ -30,6 +29,9 @@ fn single<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 /// Enforce exact format support and both application ranges for schema 6.
 pub(crate) fn admit(headers: &HeaderMap, format: &SnapshotFormat) -> Result<(), ApiError> {
+    // Peer markers are checked first so a blocked or pre-marker client is refused
+    // even for a legacy (schema < 6) snapshot (matrix rows 3 and 9).
+    let peer = admit_peer(headers)?;
     if format.format.schema_version < 6 {
         return Ok(());
     }
@@ -49,12 +51,14 @@ pub(crate) fn admit(headers: &HeaderMap, format: &SnapshotFormat) -> Result<(), 
             return Err(unsupported(format));
         }
     }
-    let peer = admit_peer(headers)?;
     if !format.is_readable_by(&peer) {
         return Err(unsupported(format));
     }
     Ok(())
 }
+
+/// Fixed upgrade hint for a request without any catalog: there is no version to show.
+const MISSING_CATALOG_HINT: &str = "No client compatibility catalog was sent; the client predates compatibility markers (0.7.2), upgrade the client";
 
 /// Translate a marker refusal into the stable 409 reply (Compatibility_Markers.md §4).
 fn rejection(reason: PeerRejection, peer_version: &str) -> ApiError {
@@ -89,7 +93,11 @@ fn rejection(reason: PeerRejection, peer_version: &str) -> ApiError {
 fn admit_peer(headers: &HeaderMap) -> Result<CompatibilityManifest, ApiError> {
     if !headers.contains_key(CLIENT_COMPATIBILITY_HEADER) {
         // No catalog at all: a pre-marker (0.4.x/0.5.x or JSON-only) caller.
-        return Err(rejection(PeerRejection::PeerUpgradeRequired, ""));
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            PeerRejection::PeerUpgradeRequired.error_code(),
+            MISSING_CATALOG_HINT,
+        ));
     }
     let peer: CompatibilityManifest = single(headers, CLIENT_COMPATIBILITY_HEADER)
         .and_then(|value| serde_json::from_str(value).ok())
@@ -199,7 +207,9 @@ pub(crate) fn response_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use audiolib_core::compatibility::{LibraryFormat, PLAN_B_FORMAT};
+    use audiolib_core::compatibility::{
+        LibraryFormat, PEER_UPGRADE_REQUIRED, PLAN_B_FORMAT, SNAPSHOT_SCHEMA_MAX,
+    };
 
     fn fixture() -> (HeaderMap, SnapshotFormat) {
         let mut headers = HeaderMap::new();
@@ -409,6 +419,58 @@ mod tests {
             let mut low = headers.clone();
             low.insert(name, HeaderValue::from_static("0"));
             assert!(admit(&low, &format).is_err(), "{name}");
+        }
+    }
+
+    fn legacy_format() -> SnapshotFormat {
+        let mut format = LibraryFormat::target();
+        format.schema_version = 5;
+        format.storage = audiolib_core::compatibility::SearchStorage::ExternalContent;
+        format.features.remove("search_storage");
+        format.features.remove("play_history_retired");
+        SnapshotFormat {
+            id: format.snapshot_format_id().unwrap(),
+            format,
+        }
+    }
+
+    #[test]
+    fn legacy_schema_snapshot_still_runs_the_peer_check() {
+        let (headers, _) = fixture();
+        let legacy = legacy_format();
+        admit(&headers, &legacy).unwrap();
+        // Row 3: marker-less 0.7.1 catalog and no catalog at all.
+        let mut old = compatibility_manifest();
+        old.application_version = "0.7.1".into();
+        old.marker_revision = None;
+        assert_eq!(
+            code(admit(&with_catalog(&headers, &old), &legacy)),
+            (PEER_UPGRADE_REQUIRED, None)
+        );
+        assert_eq!(
+            code(admit(&HeaderMap::new(), &legacy)),
+            (PEER_UPGRADE_REQUIRED, None)
+        );
+        // Row 5 direction also applies.
+        let mut newer = compatibility_manifest();
+        newer.protocol = Some(audiolib_core::compatibility::ProtocolRange { min: 2, max: 2 });
+        newer.api_protocols = vec!["api/v2".into()];
+        assert_eq!(
+            code(admit(&with_catalog(&headers, &newer), &legacy)).0,
+            audiolib_core::compatibility::PROTOCOL_UNSUPPORTED
+        );
+    }
+
+    #[test]
+    fn missing_catalog_uses_fixed_upgrade_hint() {
+        let (_, format) = fixture();
+        for error in [
+            admit(&HeaderMap::new(), &format).unwrap_err(),
+            admit_library_mutation(&HeaderMap::new(), &format).unwrap_err(),
+        ] {
+            assert_eq!(error.code(), PEER_UPGRADE_REQUIRED);
+            assert_eq!(error.message(), MISSING_CATALOG_HINT);
+            assert!(!error.message().contains("  ") && !error.message().contains("Client  "));
         }
     }
 }

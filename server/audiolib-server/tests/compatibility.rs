@@ -446,8 +446,8 @@ async fn old_client_is_refused_before_preparation_and_modern_client_syncs_actual
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["error_code"], "SNAPSHOT_FORMAT_UNSUPPORTED");
-    assert!(body["message"].as_str().unwrap().contains(PLAN_B_FORMAT));
+    // No catalog: the peer check runs first and names the client as too old.
+    assert_eq!(body["error_code"], "PEER_UPGRADE_REQUIRED");
     assert_eq!(
         std::fs::read_dir(root.path().join("snapshots")).map_or(0, |entries| entries.count()),
         0

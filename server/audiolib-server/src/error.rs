@@ -304,6 +304,10 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         self.code
     }
+    /// Human-readable message of this reply.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
     /// Optional machine-readable refinement (`sub_code`) of this reply.
     pub fn sub_code(&self) -> Option<&'static str> {
         self.sub_code
