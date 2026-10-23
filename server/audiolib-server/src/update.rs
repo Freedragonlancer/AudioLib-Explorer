@@ -29,6 +29,15 @@ pub struct UpdateStatus {
     pub message: String,
     /// Unix seconds when the last check finished (success or failure), if any.
     pub checked_at: Option<u64>,
+    /// Newer releases skipped by the last check (newest first); empty when none.
+    pub skipped_newer: Vec<SkippedNewer>,
+}
+
+/// One newer release that the last check did not offer, with the reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SkippedNewer {
+    pub tag: String,
+    pub reason: String,
 }
 
 struct Context {
@@ -76,6 +85,7 @@ impl Default for UpdateManager {
                         release_url: None,
                         message: "此进程未启用自动更新".into(),
                         checked_at: None,
+                        skipped_newer: Vec::new(),
                     },
                     context: None,
                     release: None,
@@ -160,6 +170,7 @@ impl UpdateManager {
             state.status.state = "checking".into();
             state.status.tag = None;
             state.status.release_url = None;
+            state.status.skipped_newer.clear();
             state.status.message = "正在检查 GitHub Release…".into();
             context
         };
@@ -178,6 +189,14 @@ impl UpdateManager {
                             state.status.state = "available".into();
                             state.status.tag = Some(release.tag.clone());
                             state.status.release_url = Some(release.release_url.clone());
+                            state.status.skipped_newer = release
+                                .skipped_releases
+                                .iter()
+                                .map(|skipped| SkippedNewer {
+                                    tag: skipped.tag.clone(),
+                                    reason: skipped.reason.clone(),
+                                })
+                                .collect();
                             state.status.message = format!("发现新版本 {}，确认后下载并自动部署", release.tag);
                         }
                         None => {
@@ -292,6 +311,24 @@ fn busy(message: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skipped_newer_serializes_as_tag_reason_array() {
+        let manager = UpdateManager::default();
+        let json = serde_json::to_value(manager.status()).unwrap();
+        assert_eq!(json["skipped_newer"], serde_json::json!([]));
+
+        let mut status = manager.status();
+        status.skipped_newer = vec![SkippedNewer {
+            tag: "v0.7.0".into(),
+            reason: "no valid package for this platform".into(),
+        }];
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(
+            json["skipped_newer"],
+            serde_json::json!([{"tag": "v0.7.0", "reason": "no valid package for this platform"}])
+        );
+    }
 
     #[test]
     fn embedded_router_state_never_contacts_network_or_requests_shutdown() {
