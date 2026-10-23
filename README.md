@@ -54,8 +54,6 @@ Server packages for Windows, Linux or other architectures are not published; bui
 
 ## Server deployment
 
-> To be reviewed by the server maintainer.
-
 The macOS arm64 server package is the only published server build. On the Mac:
 
 ```sh
@@ -63,7 +61,7 @@ shasum -a 256 -c AudioLibServer-<tag>-macos-arm64.tar.gz.sha256
 tar -xzf AudioLibServer-<tag>-macos-arm64.tar.gz
 ```
 
-Then copy `server/audiolib-server/config.example.toml` (also included in the package) to a config file and set the library roots, `library_db` (the database must already exist; the server does not create it) and `bind` (listen address and port, default `0.0.0.0:8790`). The server has no port flag; it only takes `--config <path>` (or the `AUDIOLIB_SERVER_CONFIG` environment variable).
+Then copy `server/audiolib-server/config.example.toml` (also included in the package) to a config file and set the library roots, `library_db` (the database must already exist; the server never creates a library, so create it first with `AudioLibCli db create`) and `bind` (listen address and port, default `0.0.0.0:8790`). The server has no port flag; it only takes `--config <path>` (or the `AUDIOLIB_SERVER_CONFIG` environment variable).
 
 Register it as a LaunchAgent based on [`server/deploy/launchd/io.github.audiolib.server.plist.example`](server/deploy/launchd/io.github.audiolib.server.plist.example):
 
