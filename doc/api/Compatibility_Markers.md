@@ -91,7 +91,7 @@ client response_format(): 头部互相一致 且 id ∈ local.snapshot_read_form
 // 3) 修改请求
 client: 每次带 x-audiolib-client-compatibility，事先 live_library() 复查（不缓存准入）
 server admit_library_mutation(): peer_ok && 当前库 format.is_readable_by(client)
-server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿用现行旧调用方豁免
+server admit_mutation()（设置/缓存任务）: 有头则 peer_ok；无头豁免仅限设置/缓存任务，库写入（admit_library_mutation）一律必须带标记头，否则拒绝
 依赖某 feature 的请求：服务端未声明该 feature → 客户端不发；服务端收到不支持的 → 404/400，仅该功能失败
 ```
 
@@ -154,7 +154,8 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 - ① 只看版本号，新端声明什么都无法通过：**0.7.2（及以后）不能被任何 0.6.x、0.7.0、0.7.1 接受**（除非谎报版本，不采用）。0.7.0 与 0.7.1 彼此也不互认。
 - 因此**旧端必须升级**；**从 0.7.2 起，双方只按标记判定**。
 - 新 manifest 仍输出 `peer_application_ranges: [">=0.6.0"]`，但无法改变 ①（判定看的是旧端自己的范围）；新端遇到无 `marker_revision` 的 0.6.0–0.7.1 对端直接返回“对端需升级”（`409 PEER_UPGRADE_REQUIRED` / 客户端提示），不再做版本范围比较。
-- 无目录旧端（0.4.11/0.5.x）同样要求升级，不再维护单独的 legacy 路径（`legacy_peer_application_ranges` 删除）。
+- 无目录旧端（0.4.11/0.5.x）同样要求升级，不再维护单独的 legacy 路径（`legacy_peer_application_ranges` 及相关代码整体删除）。
+- **发版顺序**：0.7.2 服务端会拒绝全部 0.6.0–0.7.1 客户端，因此服务端升级与客户端发布必须放在**同一个发版窗口**内完成（先升服务端，随即发布客户端并提示用户更新），不能单独先升服务端。
 
 ## 7. 防护测试
 
@@ -178,14 +179,15 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok，无头沿�
 | 9 | 标记端 | 版本在 `blocked_versions` | 拒绝，明确提示 | | | | |
 | 10 | 0.7.2 | 0.5.1（无目录） | 拒绝，提示升级 | | | | |
 | 11 | 快照头与文件实际格式不一致 | — | 拒绝，保留旧缓存 | | | | |
+| 12 | 标记端（某 feature revision 较低） | 标记端（同一 feature revision 较高） | 仅关闭该功能，同步照常 | | | | |
 
 ## 9. 已定默认（评审可修改）
 
 1. **已定默认**：`skipped_newer` **不是** feature，仍留在 `audiolib-update` 更新检查结果中。
 2. **已定默认**：旧字符串字段 `api_protocols: ["api/v1"]` 在下一个主版本删除，此后只用整数 `protocol` 区间。
-3. **已定默认**：`blocked_versions` 随更新检查下发（拉黑无需重新构建）；manifest 中的同名字段仅为本端当前生效列表。
-4. **已定默认**：0.4.11/0.5.x 无目录旧端同样要求升级，不再维护单独 legacy 路径。
-5. **已定默认**：客户端也声明自己的 `features`（在 `x-audiolib-client-compatibility` 中），双方对称；某功能仅在双方都声明时启用。
+3. **已定默认**：`blocked_versions` 先写死在程序常量中；随更新检查下发留作以后再议。
+4. **已定默认**：0.4.11/0.5.x 无目录旧端同样要求升级，不再维护单独 legacy 路径，legacy 代码整体删除（矩阵第 10 行期望已确定）。
+5. **已定默认**：客户端也声明自己的 `features`（在 `x-audiolib-client-compatibility` 中），客户端某功能仅在双方都声明时启用；服务端只用客户端 features 做诊断日志，不据此改变响应。
 6. **已定默认**：允许 `schemars`，仅作 dev/test 依赖，用于 API DTO JSON Schema 快照。
 7. **已定默认**：`minimum_sqlite_version` 仅作显示；另在本地启动时自检链接的 SQLite 版本，不参与对端判定。
 8. **已确认**：新 manifest 声明宽范围 `peer_application_ranges: [">=0.6.0"]`，新代码从不据此判定。
