@@ -115,6 +115,21 @@ server admit_mutation()（设置/缓存任务）: 有头则 peer_ok；无头豁�
 - 无头豁免仅限设置与缓存任务（及已废弃的 playback 空操作）；库写入缺少目录头一律 `PEER_UPGRADE_REQUIRED`。
 - 客户端 `features` 只记入 `tracing::debug!` 诊断日志，不影响准入或响应。
 
+### 4.2 遗留兼容字段（仅为旧客户端显示升级提示而保留，可在日后移除）
+
+旧客户端先解析 `GET /api/v1/health` 与 `GET /api/v1/capabilities`，再发出会得到 409 的请求。若探测响应缺少它们 struct 中的必填字段（无 `serde(default)` 且非 `Option`），整个响应解析失败，用户只看到解析错误而非升级提示。逐 tag 核对 v0.4.11–v0.7.1 的客户端 struct（`HealthInfo`、`Capabilities` 及嵌套的 `ListWaveformsCapability`/`WaveformJobsCapability`、`CompatibilityManifest`、`RemoteLibrary`/`SnapshotFormat`/`LibraryFormat`、`ErrorBody`）：
+
+| 版本 | 必填但新服务端曾缺失的字段 | 备注 |
+| --- | --- | --- |
+| v0.4.11、v0.5.0、v0.5.1 | 无 | `Capabilities`/`HealthInfo`/`ErrorBody` 全部有默认值；无 `compatibility` 字段 |
+| v0.6.0–v0.7.1 | `compatibility.direct_use_application_ranges`、`compatibility.auto_migrate_application_ranges`（`Vec<String>`） | 同一 struct 也用于解析 `x-audiolib-server-compatibility` 响应头 |
+
+其余必填字段（`application_version`、`catalog_revision`、`peer_application_ranges`、`api_protocols`、`snapshot_read_formats`、`database_write_formats`、`migration_source_schemas`、`migration_target_format`、`migration_protocols`、`minimum_sqlite_version`）新服务端仍输出，类型一致，无跨版本类型冲突。
+
+- `direct_use_application_ranges`、`auto_migrate_application_ranges` 为**遗留兼容字段**：值同 `peer_application_ranges`，只为让旧客户端能解析；任何准入判定都不读取它们（测试 `legacy_compat_ranges_never_affect_admission`）。旧客户端也只用自己本地的这两个字段。
+- 回归 fixture：`server/audiolib-server/tests/legacy_client_shapes.rs` 逐字复制 v0.4.11（最旧）、v0.5.x、v0.6.0–v0.7.1（最新）形状。
+- 当不再需要向 0.6.0–0.7.1 客户端显示升级提示时，可删除这两个字段及对应 fixture。
+
 ## 5. 变更规则与发版检查清单
 
 标记：**API protocol 区间**、**格式 ID（含 schema）**、可选 **features**。
