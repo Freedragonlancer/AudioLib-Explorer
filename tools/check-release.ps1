@@ -1,11 +1,16 @@
 ﻿# tools/check-release.ps1
 # Release version-policy check (see doc/Rust_Versioning.md). Read-only: never creates tags or modifies files.
-#   ./tools/check-release.ps1 -Tag v0.4.0 [-BaseTag v0.3.7] [-Root <repo>]
+#   ./tools/check-release.ps1 -Tag v0.4.0 [-BaseTag v0.3.7] [-Root <repo>] [-ReleaseTitle <title> -Prerelease <true|false>] [-CheckGitHubRelease] [-Repo owner/name]
+# Naming rule: title must be exactly 'AudioLib Explorer <tag>'; prerelease iff the tag has a -rc.N/-beta.N suffix.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Tag,
     [string]$BaseTag,
-    [string]$Root = (Split-Path -Parent $PSScriptRoot)
+    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$ReleaseTitle,
+    [Nullable[bool]]$Prerelease,
+    [switch]$CheckGitHubRelease,
+    [string]$Repo = 'Freedragonlancer/AudioLib-Explorer'
 )
 $ErrorActionPreference = 'Stop'
 $Root = [IO.Path]::GetFullPath($Root)
@@ -31,7 +36,7 @@ function Get-CargoVersion([string]$Text) {
 }
 
 # 1. Tag format: vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N
-$tagMatch = [regex]::Match($Tag, '^v(\d+)\.(\d+)\.(\d+)(?:-(?:rc|beta)\.(\d+))?$')
+$tagMatch = [regex]::Match($Tag, '^v(\d+)\.(\d+)\.(\d+)(?<suffix>-(?:rc|beta)\.\d+)?$')
 if (!$tagMatch.Success) { Fail "Tag '$Tag' must look like vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N." }
 $tagCore = if ($tagMatch.Success) { "$($tagMatch.Groups[1].Value).$($tagMatch.Groups[2].Value).$($tagMatch.Groups[3].Value)" }
 
@@ -39,6 +44,36 @@ $tagCore = if ($tagMatch.Success) { "$($tagMatch.Groups[1].Value).$($tagMatch.Gr
 $program = Get-CargoVersion (Read-Utf8 'Cargo.toml')
 if (!$program) { Fail 'Cannot read MAJOR.MINOR.PATCH from [workspace.package] version in Cargo.toml.' }
 elseif ($tagCore -and $program.Text -ne $tagCore) { Fail "Tag $Tag does not match Cargo.toml workspace version $($program.Text) (expected tag v$($program.Text), v$($program.Text)-rc.N or v$($program.Text)-beta.N)." }
+
+# 2b. Release naming: title == 'AudioLib Explorer <tag>', tag core == Cargo version, prerelease iff suffixed tag
+$expectedTitle = "AudioLib Explorer $Tag"
+$expectPrerelease = $tagMatch.Success -and $tagMatch.Groups['suffix'].Success
+$checkTitle = $PSBoundParameters.ContainsKey('ReleaseTitle')
+if ($CheckGitHubRelease) {
+    $rel = $null
+    try {
+        $json = gh release view $Tag -R $Repo --json name,isPrerelease 2>$null
+        if ($LASTEXITCODE -eq 0 -and $json) { $r = $json | ConvertFrom-Json; $rel = @{ Name = [string]$r.name; Pre = [bool]$r.isPrerelease } }
+    } catch { $rel = $null }
+    if (!$rel) {
+        try {
+            $uri = "https://api.github.com/repos/$Repo/releases/tags/$([uri]::EscapeDataString($Tag))"
+            $r = Invoke-RestMethod -Uri $uri -Headers @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'check-release.ps1' } -ErrorAction Stop
+            $rel = @{ Name = [string]$r.name; Pre = [bool]$r.prerelease }
+        } catch { $rel = $null }
+    }
+    if ($rel) { $ReleaseTitle = $rel.Name; $Prerelease = $rel.Pre; $checkTitle = $true }
+    else {
+        Fail "GitHub release $Tag not found in $Repo (gh release view and anonymous GitHub API both failed); title/prerelease checks skipped."
+        $checkTitle = $false; $Prerelease = $null
+    }
+}
+if ($checkTitle) {
+    if ($ReleaseTitle -cne $expectedTitle) { Fail "Release title '$ReleaseTitle' must be exactly '$expectedTitle'." }
+    $titleCore = [regex]::Match([string]$ReleaseTitle, '^AudioLib Explorer v(\d+\.\d+\.\d+)')
+    if ($program -and $titleCore.Success -and $titleCore.Groups[1].Value -ne $program.Text) { Fail "Release title version $($titleCore.Groups[1].Value) does not match Cargo.toml workspace version $($program.Text)." }
+}
+if ($null -ne $Prerelease -and [bool]$Prerelease -ne $expectPrerelease) { Fail "Release prerelease flag is $Prerelease but tag $Tag requires prerelease=$expectPrerelease (suffixed tags are prereleases, plain vX.Y.Z is not)." }
 
 # 3. Schema version
 $schema = Get-Schema (Read-Utf8 'crates/audiolib-db/src/schema.rs')
