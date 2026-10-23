@@ -379,6 +379,15 @@ pub struct CompatibilityManifest {
     /// for decisions here.
     #[serde(default)]
     pub peer_application_ranges: Vec<String>,
+    /// LEGACY compat field (Compatibility_Markers.md §4.2): required (no serde default)
+    /// by the 0.6.0–0.7.1 client structs, which fail to parse `/capabilities` without
+    /// it and never reach the 409 upgrade prompt. Emitted only so those clients parse;
+    /// never read by any admission decision. Removable once 0.7.1 clients are gone.
+    #[serde(default)]
+    pub direct_use_application_ranges: Vec<String>,
+    /// LEGACY compat field, same rules as `direct_use_application_ranges`.
+    #[serde(default)]
+    pub auto_migrate_application_ranges: Vec<String>,
     /// Display/diagnostics only; each side checks its own linked SQLite at startup
     /// ([`check_linked_sqlite`]).
     #[serde(default)]
@@ -552,8 +561,19 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
             .iter()
             .map(|range| (*range).to_owned())
             .collect(),
+        direct_use_application_ranges: legacy_ranges(),
+        auto_migrate_application_ranges: legacy_ranges(),
         minimum_sqlite_version: MINIMUM_SQLITE_VERSION.into(),
     }
+}
+
+/// Values for the legacy compat fields: old clients only need them to parse (they
+/// read their own local copies for decisions).
+fn legacy_ranges() -> Vec<String> {
+    PEER_APPLICATION_RANGES
+        .iter()
+        .map(|range| (*range).to_owned())
+        .collect()
 }
 
 /// Whether `peer` may sync with `local` ([`check_peer`] without the reason).
@@ -686,6 +706,37 @@ mod tests {
         ))
         .unwrap();
         serde_json::from_str(&json).unwrap()
+    }
+
+    /// Legacy compat fields exist only so 0.6.0–0.7.1 clients parse; no value of them
+    /// (on either side, for any peer) may change an admission decision.
+    #[test]
+    fn legacy_compat_ranges_never_affect_admission() {
+        let local = compatibility_manifest();
+        let peers = [
+            marked(&local.application_version),
+            shipped("0.6.5"),
+            shipped("0.7.1"),
+        ];
+        for peer in &peers {
+            let version = peer.application_version.clone();
+            let expected = check_peer(&local, &version, Some(peer));
+            for ranges in [
+                vec![],
+                vec!["<0.0.1".to_owned()],
+                vec!["garbage".to_owned()],
+            ] {
+                let mut local2 = local.clone();
+                local2.direct_use_application_ranges = ranges.clone();
+                local2.auto_migrate_application_ranges = ranges.clone();
+                let mut peer2 = peer.clone();
+                peer2.direct_use_application_ranges = ranges.clone();
+                peer2.auto_migrate_application_ranges = ranges;
+                assert_eq!(check_peer(&local2, &version, Some(&peer2)), expected);
+            }
+        }
+        assert!(!local.direct_use_application_ranges.is_empty());
+        assert!(!local.auto_migrate_application_ranges.is_empty());
     }
 
     #[test]
