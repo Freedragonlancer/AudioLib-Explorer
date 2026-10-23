@@ -151,6 +151,10 @@ function renderUpdate(status) {
   const release = $("update-release");
   release.classList.toggle("hidden", !status.release_url);
   if (status.release_url) release.href = status.release_url;
+  const skipped = status.skipped_newer || [];
+  const skippedList = $("update-skipped");
+  skippedList.classList.toggle("hidden", skipped.length === 0);
+  skippedList.textContent = skipped.length ? "跳过的新版本：" + skipped.map((item) => item.tag + " — " + item.reason).join("；") : "";
   if (status.state === "ready") updateRestarting = true;
 }
 

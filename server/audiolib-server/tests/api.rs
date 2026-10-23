@@ -4897,6 +4897,10 @@ async fn admin_runtime_reports_in_memory_state_and_is_lan_only() {
     assert_eq!(runtime["update"]["state"], "disabled");
     assert_eq!(runtime["update"]["skip_reason"], "disabled");
     assert!(runtime["update"]["selected"].is_null());
+    let update: serde_json::Value =
+        json(call(&f.state, Method::GET, "/admin/api/update", &[], None, None).await).await;
+    assert_eq!(update["state"], "disabled");
+    assert_eq!(update["skipped_newer"], serde_json::json!([]));
 
     // A prepared snapshot and a changed rate show up without any extra work.
     f.state.prepare_snapshot().unwrap();
