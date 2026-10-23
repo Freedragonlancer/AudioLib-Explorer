@@ -42,8 +42,8 @@ fn snapshot_response(body: Vec<u8>, revision: u64) -> TestResponse {
 
 fn ordinary_response(request: &TestRequest, revision: u64) -> TestResponse {
     match request.path.as_str() {
-        "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.5.1"}"#),
-        "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+        "/api/v1/health" => crate::test_server::marker_health(),
+        "/api/v1/capabilities" => crate::test_server::marker_capabilities(serde_json::json!({})),
         "/api/v1/library" => library_response(revision),
         "/api/v1/roots" => TestResponse::json(200, "[]"),
         _ => panic!("unexpected request {}", request.path),
@@ -182,7 +182,10 @@ fn modern_pinned_resume_keeps_its_format_when_the_live_revision_advances() {
     incompatible.store(true, Ordering::SeqCst);
     let error =
         sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap_err();
-    assert!(matches!(error, RemoteError::Snapshot(_)), "{error:?}");
+    assert!(
+        matches!(error, RemoteError::PeerIncompatible { .. }),
+        "{error:?}"
+    );
     assert_eq!(
         cache
             .pending_sync(client.api_url())

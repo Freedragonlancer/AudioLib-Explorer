@@ -147,7 +147,7 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
         let requests = requests.clone();
         let revision = revision.clone();
         TestServer::start(move |request| {
-            if let Some(response) = test_server::legacy_handshake(&request.path) {
+            if let Some(response) = test_server::marker_handshake(&request.path) {
                 return response;
             }
             requests

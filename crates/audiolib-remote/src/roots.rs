@@ -248,7 +248,7 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
         let server = TestServer::start(move |request| {
-            if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+            if let Some(response) = crate::test_server::marker_handshake(&request.path) {
                 return response;
             }
             if request.path == "/api/v1/library" {
@@ -333,7 +333,7 @@ mod tests {
     fn root_errors_and_old_server_capabilities_remain_distinct() {
         let server = TestServer::start(|request| {
             if request.path == "/api/v1/health" {
-                return crate::test_server::legacy_handshake(&request.path).unwrap();
+                return crate::test_server::marker_handshake(&request.path).unwrap();
             }
             if request.path == "/api/v1/library" {
                 return TestResponse::json(
@@ -343,7 +343,9 @@ mod tests {
             }
             let (status, code, message) = match request.path.as_str() {
                 "/api/v1/capabilities" => {
-                    return TestResponse::json(200, r#"{"manage_mode":"all","can_manage":true}"#);
+                    return crate::test_server::marker_capabilities(
+                        serde_json::from_str(r#"{"manage_mode":"all","can_manage":true}"#).unwrap(),
+                    );
                 }
                 "/api/v1/fs" => (404, "NOT_FOUND", "No such endpoint"),
                 "/api/v1/fs?path=%2Fdenied&hidden=0" => {

@@ -6,8 +6,8 @@ use crate::{
 };
 use audiolib_core::compatibility::{
     CompatibilityManifest, LIBRARY_FORMAT_HEADER, LibraryAccess, LibraryFormat,
-    MAX_COMPATIBILITY_HEADER_BYTES, SERVER_COMPATIBILITY_HEADER, SNAPSHOT_FORMAT_HEADER,
-    SnapshotFormat, compatibility_manifest, peer_versions_compatible,
+    MAX_COMPATIBILITY_HEADER_BYTES, PeerRejection, SERVER_COMPATIBILITY_HEADER,
+    SNAPSHOT_FORMAT_HEADER, SnapshotFormat, check_peer, compatibility_manifest,
 };
 use std::{path::Path, sync::atomic::AtomicBool};
 use ureq::http::HeaderMap;
@@ -16,16 +16,55 @@ fn invalid(message: impl Into<String>) -> RemoteError {
     RemoteError::Snapshot(message.into())
 }
 
+/// Marker-based server check (Compatibility_Markers.md §4): blocked list, marker presence,
+/// version/catalog consistency and protocol intersection. Never compares version ranges.
 pub(crate) fn peer(version: &str, catalog: Option<&CompatibilityManifest>) -> Result<()> {
-    if !peer_versions_compatible(&compatibility_manifest(), version, catalog) {
-        return Err(invalid(
-            "Client and server application versions or protocol ranges are incompatible; update to a supported pair",
-        ));
-    }
-    Ok(())
+    use crate::error::PeerIncompatibility as Kind;
+    let (reason, detail) = match check_peer(&compatibility_manifest(), version, catalog) {
+        Ok(()) => return Ok(()),
+        Err(PeerRejection::BlockedVersion) => {
+            (Kind::Blocked, format!("server {version} is blocked"))
+        }
+        Err(PeerRejection::PeerUpgradeRequired) => (
+            Kind::ServerUpgradeRequired,
+            format!("server {version} has no compatibility markers"),
+        ),
+        Err(PeerRejection::ProtocolPeerTooOld) => (
+            Kind::ServerUpgradeRequired,
+            format!("server {version} protocol is older than this client's"),
+        ),
+        Err(PeerRejection::ProtocolPeerTooNew) => (
+            Kind::ClientUpgradeRequired,
+            format!("server {version} protocol is newer than this client's"),
+        ),
+        Err(PeerRejection::Inconsistent) => (
+            Kind::Inconsistent,
+            format!("server reports {version} but its catalog disagrees"),
+        ),
+    };
+    Err(RemoteError::PeerIncompatible { reason, detail })
 }
 
-pub(crate) fn library(library: &RemoteLibrary, modern: bool) -> Result<()> {
+/// Optional features usable with this server: declared by both sides at the same revision
+/// (§4, §9.5). Anything else is only hidden/degraded; it never blocks sync.
+pub fn enabled_features(
+    server: Option<&CompatibilityManifest>,
+) -> std::collections::BTreeSet<String> {
+    let local = compatibility_manifest();
+    let Some(server) = server else {
+        return Default::default();
+    };
+    local
+        .features
+        .iter()
+        .filter(|(name, revision)| server.features.get(*name) == Some(*revision))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Format check of `/library`. Peers are admitted by markers alone; a published schema
+/// 3–5 library may still omit its descriptor because [`downloaded`] verifies the bytes.
+pub(crate) fn library(library: &RemoteLibrary) -> Result<()> {
     match &library.snapshot_format {
         Some(format)
             if i64::from(format.format.schema_version) == library.schema_version
@@ -33,7 +72,7 @@ pub(crate) fn library(library: &RemoteLibrary, modern: bool) -> Result<()> {
         {
             Ok(())
         }
-        None if !modern && (3..=5).contains(&library.schema_version) => Ok(()),
+        None if (3..=5).contains(&library.schema_version) => Ok(()),
         _ => Err(invalid(
             "Server library format is missing, inconsistent or unsupported; the existing cache was retained",
         )),
@@ -47,14 +86,14 @@ pub(crate) fn live_library(
     observed: &RemoteLibrary,
     version: Option<&str>,
 ) -> Result<()> {
-    library(observed, false)?;
+    library(observed)?;
     let version = match version {
         Some(version) => version.to_owned(),
         None => client.health()?.version,
     };
     let capabilities = client.capabilities()?;
     peer(&version, capabilities.compatibility.as_ref())?;
-    library(observed, capabilities.compatibility.is_some())
+    library(observed)
 }
 
 /// Send on each mutation so the serving process also checks the peer after preflight.
@@ -278,14 +317,18 @@ mod tests {
         let mut mismatch = valid.clone();
         mismatch.insert("x-schema-version", HeaderValue::from_static("5"));
         assert!(response_format(&mismatch).is_err());
-        let mut one_way = compatibility_manifest();
-        one_way.peer_application_ranges = vec!["<0.4.0".into()];
-        assert!(peer(&one_way.application_version, Some(&one_way)).is_err());
-        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
-            peer(supported, None).unwrap();
-        }
-        for unsupported in ["0.4.12", "0.5.2", "0.5.1-rc.1", "99.0.0"] {
-            assert!(peer(unsupported, None).is_err());
+        // Version ranges no longer decide; markers do.
+        let mut ranges = compatibility_manifest();
+        ranges.peer_application_ranges = vec!["<0.4.0".into()];
+        peer(&ranges.application_version, Some(&ranges)).unwrap();
+        for catalogless in ["0.4.11", "0.5.0", "0.5.1", "0.5.2", "99.0.0"] {
+            assert!(matches!(
+                peer(catalogless, None),
+                Err(RemoteError::PeerIncompatible {
+                    reason: crate::error::PeerIncompatibility::ServerUpgradeRequired,
+                    ..
+                })
+            ));
         }
     }
 
@@ -293,7 +336,7 @@ mod tests {
     fn live_upgrade_is_rechecked_by_poll_probe_and_every_write() {
         use crate::{CachedIdentity, RevisionCheck, check_revision, test_connection};
         use audiolib_core::{MetadataPatch, config::DataSourceSettings};
-        for rejection in ["version", "mutual_range", "format"] {
+        for rejection in ["version", "unmarked", "protocol", "format"] {
             let upgraded = Arc::new(AtomicBool::new(false));
             let changed = upgraded.clone();
             let writes = Arc::new(AtomicUsize::new(0));
@@ -306,8 +349,11 @@ mod tests {
                     }).to_string()),
                     ("GET", "/api/v1/capabilities") => {
                         let mut catalog = compatibility_manifest();
-                        if upgraded && rejection == "mutual_range" {
-                            catalog.peer_application_ranges = vec!["<0.4.0".into()];
+                        if upgraded && rejection == "unmarked" {
+                            catalog.marker_revision = None;
+                        }
+                        if upgraded && rejection == "protocol" {
+                            catalog.protocol = Some(audiolib_core::compatibility::ProtocolRange { min: 2, max: 2 });
                         }
                         TestResponse::json(200, &serde_json::json!({"compatibility":catalog}).to_string())
                     }
@@ -383,7 +429,10 @@ mod tests {
                 client.remove_audio(&[1]).unwrap_err(),
             ] {
                 assert!(
-                    matches!(error, RemoteError::Snapshot(_)),
+                    matches!(
+                        error,
+                        RemoteError::Snapshot(_) | RemoteError::PeerIncompatible { .. }
+                    ),
                     "{rejection}: {error}"
                 );
                 assert!(!error.write_may_have_committed());
@@ -405,7 +454,7 @@ mod tests {
             let writer = crate::RemoteWriter::new(client.clone(), cache.clone(), "stable");
             assert!(matches!(
                 writer.update_metadata(1, &patch),
-                Err(RemoteError::Snapshot(_))
+                Err(RemoteError::Snapshot(_) | RemoteError::PeerIncompatible { .. })
             ));
             assert_eq!(cache.active().unwrap(), retained);
             assert!(std::fs::read(&path).unwrap() == bytes);
@@ -481,7 +530,7 @@ mod tests {
             assert!(
                 matches!(
                     sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), true),
-                    Err(RemoteError::Snapshot(_))
+                    Err(RemoteError::Snapshot(_) | RemoteError::PeerIncompatible { .. })
                 ),
                 "{mode}"
             );
@@ -496,7 +545,8 @@ mod tests {
 
     #[test]
     fn legacy_stale_or_unbound_download_preserves_the_active_cache() {
-        for version in ["0.4.11", "0.5.0", "0.5.1"] {
+        // A marker server still serving a published schema-5 snapshot without headers.
+        for version in [env!("CARGO_PKG_VERSION")] {
             for mode in [
                 "stale",
                 "missing_revision",
@@ -537,7 +587,9 @@ mod tests {
                         200,
                         &serde_json::json!({"status":"ok","version":version}).to_string(),
                     ),
-                    "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+                    "/api/v1/capabilities" => {
+                        crate::test_server::marker_capabilities(serde_json::json!({}))
+                    }
                     "/api/v1/library" => TestResponse::json(
                         200,
                         r#"{"library_id":"legacy","revision":12,"schema_version":5}"#,
@@ -634,10 +686,10 @@ mod tests {
             let downloads = Arc::new(AtomicUsize::new(0));
             let observed = downloads.clone();
             let server = TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                "/api/v1/health" => crate::test_server::marker_health(),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
                 }
-                "/api/v1/capabilities" => TestResponse::json(404, r#"{"error_code":"NOT_FOUND"}"#),
                 "/api/v1/library" => TestResponse::json(
                     200,
                     r#"{"library_id":"legacy","revision":12,"schema_version":5}"#,

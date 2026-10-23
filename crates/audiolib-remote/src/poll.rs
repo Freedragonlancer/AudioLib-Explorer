@@ -97,7 +97,7 @@ impl RevisionCheck {
         if let Some(message) = snapshot_schema_error(library.schema_version, chinese) {
             return Self::Failed(message);
         }
-        if let Err(error) = crate::compatibility::library(&library, false) {
+        if let Err(error) = crate::compatibility::library(&library) {
             return Self::Failed(error.localized(chinese));
         }
         match cached {

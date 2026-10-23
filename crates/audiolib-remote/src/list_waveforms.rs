@@ -1450,10 +1450,14 @@ fn resolve_i8(
 }
 
 fn usable(capabilities: &Capabilities) -> Option<ListWaveformsCapability> {
-    capabilities
-        .list_waveforms
-        .clone()
-        .filter(|capability| capabilities.supported && capability.usable())
+    let mut capability = capabilities.list_waveforms.clone().filter(|capability| {
+        capabilities.supported
+            && capabilities.feature_enabled("list_waveforms")
+            && capability.usable()
+    })?;
+    // Bundle import relies on the strong bundle ETag; degrade to incremental lookups.
+    capability.bundle &= capabilities.feature_enabled("waveform_bundle_strong_etag");
+    Some(capability)
 }
 
 #[cfg(test)]
@@ -1799,7 +1803,7 @@ mod tests {
         let server = {
             let patches = patches.clone();
             TestServer::start(move |request| {
-                if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                if let Some(response) = crate::test_server::marker_handshake(&request.path) {
                     return response;
                 }
                 match (request.method.as_str(), request.path.as_str()) {

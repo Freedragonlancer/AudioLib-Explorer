@@ -613,8 +613,10 @@ mod tests {
         let downloads = Arc::new(AtomicUsize::new(0));
         let observed = downloads.clone();
         let server = TestServer::start(move |request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.5.1"}"#),
-            "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+            "/api/v1/health" => crate::test_server::marker_health(),
+            "/api/v1/capabilities" => {
+                crate::test_server::marker_capabilities(serde_json::json!({}))
+            }
             "/api/v1/library" => TestResponse::json(
                 200,
                 r#"{"library_id":"lib","revision":8,"schema_version":5}"#,

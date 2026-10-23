@@ -942,7 +942,10 @@ impl RemoteClient {
         let path = format!("/roots/{}/check", crate::util::encode_path_segment(name));
         let url = format!("{}{path}", self.api);
         let context = format!("POST {path}");
-        let mut request = self.agent.post(&url);
+        let mut request = self.agent.post(&url).header(
+            audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+            &crate::compatibility::client_header()?,
+        );
         if !self.token.is_empty() {
             request = request.header("Authorization", &format!("Bearer {}", self.token));
         }
@@ -1016,9 +1019,18 @@ impl RemoteClient {
                     audiolib_core::compatibility::ACCEPT_FORMATS_HEADER,
                     &accepted,
                 )
-                .header("X-AudioLib-Snapshot-Schema-Max", "6")
-                .header("X-AudioLib-Search-Storage-Max", "1")
-                .header("X-AudioLib-Tokenization-Max", "3");
+                .header(
+                    audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX_HEADER,
+                    &audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX.to_string(),
+                )
+                .header(
+                    audiolib_core::compatibility::SEARCH_STORAGE_MAX_HEADER,
+                    &audiolib_core::compatibility::SEARCH_STORAGE_MAX.to_string(),
+                )
+                .header(
+                    audiolib_core::compatibility::TOKENIZATION_MAX_HEADER,
+                    &audiolib_core::compatibility::TOKENIZATION_MAX.to_string(),
+                );
             if !self.token.is_empty() {
                 request = request.header("Authorization", &format!("Bearer {}", self.token));
             }

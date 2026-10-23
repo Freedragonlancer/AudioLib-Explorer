@@ -559,7 +559,8 @@ impl DataProvider for RemoteProvider {
             jobs: capabilities
                 .list_waveform_jobs
                 .clone()
-                .filter(|jobs| jobs.version >= 1),
+                .filter(|jobs| jobs.version >= 1)
+                .filter(|_| capabilities.feature_enabled("list_waveform_jobs")),
             can_manage: capabilities.may_manage(),
         })
     }
@@ -623,7 +624,7 @@ mod tests {
             let cached = cache.state(LIBRARY).unwrap();
             let before = std::fs::read(cache.database_path(&cached)).unwrap();
             let server = TestServer::start(move |request| {
-                if let Some(response) = crate::test_server::legacy_handshake(&request.path) {
+                if let Some(response) = crate::test_server::marker_handshake(&request.path) {
                     return response;
                 }
                 if request.path == "/api/v1/library" {
@@ -728,10 +729,10 @@ mod tests {
     ) -> TestServer {
         TestServer::start(move |request| {
             if probe_capabilities && request.path == "/api/v1/health" {
-                return TestResponse::json(200, r#"{"status":"ok","version":"0.5.0"}"#);
+                return crate::test_server::marker_health();
             }
             if (request.path != "/api/v1/capabilities" || !probe_capabilities)
-                && let Some(response) = crate::test_server::legacy_handshake(&request.path)
+                && let Some(response) = crate::test_server::marker_handshake(&request.path)
             {
                 return response;
             }
@@ -764,10 +765,7 @@ mod tests {
         let status = r#"{"state":"paused","total":4,"cached":1,"pending":3,"run_state":"paused","current_rate":0,"eta_secs":null,"job":{"id":"wfj-2","mode":"missing","started_at":1,"done":1,"failed":0,"total":4,"state":"paused"}}"#;
         let server = server_with_capability_probe(seen.clone(), true, move |method, path| {
             match (method, path) {
-                ("GET", "/api/v1/capabilities") => TestResponse::json(
-                    200,
-                    r#"{"manage_mode":"lan","can_manage":false,"list_waveform_jobs":{"version":1,"modes":["missing","rebuild","failed"],"rate_setting":true}}"#,
-                ),
+                ("GET", "/api/v1/capabilities") => crate::test_server::marker_capabilities(serde_json::from_str(r#"{"manage_mode":"lan","can_manage":false,"list_waveform_jobs":{"version":1,"modes":["missing","rebuild","failed"],"rate_setting":true}}"#).unwrap()),
                 ("GET", "/api/v1/waveforms/status") => TestResponse::json(200, status),
                 ("GET", "/api/v1/settings") => TestResponse::json(
                     200,
@@ -847,11 +845,9 @@ mod tests {
         let posts = Arc::new(StdMutex::new(0));
         let server = {
             let posts = posts.clone();
-            TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/capabilities" => TestResponse::json(
-                    200,
-                    r#"{"list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64"}}"#,
-                ),
+            TestServer::start(move |request| {
+                match request.path.as_str() {
+                "/api/v1/capabilities" => crate::test_server::marker_capabilities(serde_json::from_str(r#"{"list_waveforms":{"version":1,"buckets":[128],"max_ids":200,"encoding":"i16le-minmax-base64"}}"#).unwrap()),
                 "/api/v1/waveforms" => {
                     *posts.lock().unwrap() += 1;
                     TestResponse::json(
@@ -860,6 +856,7 @@ mod tests {
                     )
                 }
                 other => panic!("unexpected {other}"),
+            }
             })
         };
         let writer = || {

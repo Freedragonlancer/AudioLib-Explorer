@@ -40,6 +40,31 @@ impl std::fmt::Display for TlsFailure {
     }
 }
 
+/// Which side must act on a [`RemoteError::PeerIncompatible`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerIncompatibility {
+    /// The server predates compatibility markers or speaks an older protocol.
+    ServerUpgradeRequired,
+    /// The server reports this client is too old (or speaks an older protocol).
+    ClientUpgradeRequired,
+    /// One side's application version is on the other's known-bad list.
+    Blocked,
+    /// The peer's declared catalog contradicts its reported version.
+    Inconsistent,
+}
+
+impl PeerIncompatibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServerUpgradeRequired => "server upgrade required",
+            Self::ClientUpgradeRequired => "client upgrade required",
+            Self::Blocked => "blocked version",
+            Self::Inconsistent => "inconsistent catalog",
+        }
+    }
+}
+
 /// Network failure kinds recognised inside [`RemoteError::Unreachable`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkFailure {
@@ -159,6 +184,15 @@ pub enum RemoteError {
     Changed(String),
     #[error("Snapshot rejected: {0}")]
     Snapshot(String),
+    /// Compatibility markers refuse this client/server pair (Compatibility_Markers.md §4):
+    /// either side detected it (local check or `409 PEER_UPGRADE_REQUIRED`,
+    /// `PROTOCOL_UNSUPPORTED`, `PEER_VERSION_BLOCKED`, legacy `PEER_VERSION_UNSUPPORTED`).
+    /// The existing cache is always retained.
+    #[error("Incompatible client/server ({}): {detail}", reason.as_str())]
+    PeerIncompatible {
+        reason: PeerIncompatibility,
+        detail: String,
+    },
     /// The snapshot or cache uses a newer database format than this client supports.
     #[error("{}", audiolib_core::newer_database_message(what, *found, *supported, false))]
     NewerDatabase {
@@ -257,9 +291,26 @@ impl RemoteError {
             (_, "SCAN_STATE") => Self::ScanState(message),
             (_, "JOB_STATE") => Self::JobState(message),
             (_, "LIBRARY_CHANGED" | "LIBRARY_ID_REQUIRED") => Self::LibraryChanged(message),
-            (_, "SNAPSHOT_FORMAT_UNSUPPORTED" | "PEER_VERSION_UNSUPPORTED") => {
-                Self::Snapshot(message)
-            }
+            // The server rejected this client (no markers or an older protocol).
+            (_, "PEER_UPGRADE_REQUIRED") => Self::PeerIncompatible {
+                reason: PeerIncompatibility::ClientUpgradeRequired,
+                detail: message,
+            },
+            // The server's protocol is entirely below this client's.
+            (_, "PROTOCOL_UNSUPPORTED") => Self::PeerIncompatible {
+                reason: PeerIncompatibility::ServerUpgradeRequired,
+                detail: message,
+            },
+            (_, "PEER_VERSION_BLOCKED") => Self::PeerIncompatible {
+                reason: PeerIncompatibility::Blocked,
+                detail: message,
+            },
+            // Only 0.6.x–0.7.1 servers send this: their version ranges predate markers.
+            (_, "PEER_VERSION_UNSUPPORTED") => Self::PeerIncompatible {
+                reason: PeerIncompatibility::ServerUpgradeRequired,
+                detail: message,
+            },
+            (_, "SNAPSHOT_FORMAT_UNSUPPORTED") => Self::Snapshot(message),
             // Before the 503 arm: a `503 BUSY` is a full stream cap, not a starting server.
             (409, _) | (_, "BUSY") | (_, "CANCELLED") => Self::Busy {
                 message,
@@ -470,6 +521,7 @@ impl RemoteError {
                 Self::LibraryChanged(detail) => format!(
                     "The server library changed or its identity is unconfirmed (409); nothing was written. Sync before editing again. ({detail})"
                 ),
+                Self::PeerIncompatible { reason, detail } => peer_message(*reason, detail, false),
                 other => other.to_string(),
             };
         }
@@ -556,6 +608,7 @@ impl RemoteError {
             } => format!("服务器错误 {status} {code}：{message}"),
             Self::Protocol(detail) => format!("服务器响应格式异常：{detail}"),
             Self::Snapshot(detail) => format!("快照校验失败，未替换本地缓存：{detail}"),
+            Self::PeerIncompatible { reason, detail } => peer_message(*reason, detail, true),
             Self::NewerDatabase {
                 what,
                 found,
@@ -820,6 +873,10 @@ impl RemoteError {
             Self::Protocol(detail) => Self::Protocol(detail.clone()),
             Self::Changed(detail) => Self::Changed(detail.clone()),
             Self::Snapshot(detail) => Self::Snapshot(detail.clone()),
+            Self::PeerIncompatible { reason, detail } => Self::PeerIncompatible {
+                reason: *reason,
+                detail: detail.clone(),
+            },
             Self::NewerDatabase {
                 what,
                 found,
@@ -847,6 +904,42 @@ impl RemoteError {
             | Self::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
         }
+    }
+}
+
+fn peer_message(reason: PeerIncompatibility, detail: &str, chinese: bool) -> String {
+    let text = match (reason, chinese) {
+        (PeerIncompatibility::ServerUpgradeRequired, false) => {
+            "The server is too old for this client. Upgrade AudioLib Server to the same or a newer release; the local cache was kept."
+        }
+        (PeerIncompatibility::ServerUpgradeRequired, true) => {
+            "服务器版本过旧，与本客户端不兼容。请将 AudioLib Server 升级到相同或更新的版本；本地缓存已保留。"
+        }
+        (PeerIncompatibility::ClientUpgradeRequired, false) => {
+            "The server requires a newer client. Update AudioLib Explorer; the local cache was kept."
+        }
+        (PeerIncompatibility::ClientUpgradeRequired, true) => {
+            "服务器要求更新的客户端。请更新 AudioLib Explorer；本地缓存已保留。"
+        }
+        (PeerIncompatibility::Blocked, false) => {
+            "This client or server version is known to be faulty and was refused. Upgrade both to the latest release; the local cache was kept."
+        }
+        (PeerIncompatibility::Blocked, true) => {
+            "该客户端或服务器版本存在已知问题，已被拒绝。请将两端都升级到最新版本；本地缓存已保留。"
+        }
+        (PeerIncompatibility::Inconsistent, false) => {
+            "The server reported inconsistent version information. Restart or reinstall the server; the local cache was kept."
+        }
+        (PeerIncompatibility::Inconsistent, true) => {
+            "服务器报告的版本信息不一致。请重启或重新安装服务器；本地缓存已保留。"
+        }
+    };
+    if detail.is_empty() {
+        text.to_owned()
+    } else if chinese {
+        format!("{text}（{detail}）")
+    } else {
+        format!("{text} ({detail})")
     }
 }
 
