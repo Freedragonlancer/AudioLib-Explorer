@@ -469,7 +469,7 @@ export component AppWindow inherits Window {
     out property <length> main-viewport-height: main-scroll.viewport-height;
     out property <length> main-viewport-width: main-scroll.viewport-width;
     out property <length> results-panel-height: results-panel.height;
-    out property <length> results-panel-min-height: round(240 * Theme.ui-scale) * 1px;
+    out property <length> results-panel-min-height: Theme.ui-scale > 1 ? round(240 * Theme.ui-scale) * 1px : 0px;
     out property <length> main-last-bottom: status-row.absolute-position.y + status-row.height;
     out property <length> main-last-right: status-row.absolute-position.x + status-row.width;
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
@@ -1520,8 +1520,9 @@ export component AppWindow inherits Window {
                     }
                 }
                 }
-                // Keeps the sound list usable at large scales; the main view scrolls for the rest.
-                results-panel := Rectangle { vertical-stretch: 1; min-height: round(240 * Theme.ui-scale) * 1px; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px * Theme.ui-scale; background: Theme.panel;
+                // Above 1.0, keeps the sound list usable; the main view scrolls for the rest. At 1.0 the
+                // compact 1080x700 layout (filters open) keeps fitting without scrolling.
+                results-panel := Rectangle { vertical-stretch: 1; min-height: root.results-panel-min-height; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px * Theme.ui-scale; background: Theme.panel;
                     VerticalLayout { spacing: 0px;
                         Rectangle { height: 33px * Theme.ui-scale; background: Theme.raised; clip: true;
                             // Both empty and populated results share the header's horizontal position.
