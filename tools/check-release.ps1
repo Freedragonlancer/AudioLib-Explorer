@@ -52,10 +52,19 @@ $checkTitle = $PSBoundParameters.ContainsKey('ReleaseTitle')
 if ($CheckGitHubRelease) {
     $rel = $null
     $apiError = $null
+    $ghError = $null
+    $ghErrFile = [IO.Path]::GetTempFileName()
     try {
-        $json = gh release view $Tag -R $Repo --json name,isPrerelease 2>$null
+        $json = gh release view $Tag -R $Repo --json name,isPrerelease 2>$ghErrFile
         if ($LASTEXITCODE -eq 0 -and $json) { $r = $json | ConvertFrom-Json; $rel = @{ Name = [string]$r.name; Pre = [bool]$r.isPrerelease } }
-    } catch { $rel = $null }
+        else { $ghError = "exit $LASTEXITCODE" }
+    } catch { $rel = $null; $ghError = $_.Exception.Message }
+    finally {
+        # gh never prints the token to stderr; still redact anything token-shaped before reporting.
+        $errText = if (Test-Path -LiteralPath $ghErrFile) { (Get-Content -LiteralPath $ghErrFile -Raw) } else { $null }
+        Remove-Item -LiteralPath $ghErrFile -Force -ErrorAction SilentlyContinue
+        if ($errText) { $ghError = (($errText.Trim() -replace '(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)', '<redacted>') -replace '\s+', ' ') }
+    }
     if (!$rel) {
         try {
             $uri = "https://api.github.com/repos/$Repo/releases/tags/$([uri]::EscapeDataString($Tag))"
@@ -70,7 +79,7 @@ if ($CheckGitHubRelease) {
     if ($rel) { $ReleaseTitle = $rel.Name; $Prerelease = $rel.Pre; $checkTitle = $true }
     else {
         $detail = if ($apiError) { "anonymous GitHub API: $apiError" } else { 'not found' }
-        Fail "GitHub release $Tag could not be read from $Repo (gh release view failed; $detail); title/prerelease checks skipped."
+        Fail "GitHub release $Tag could not be read from $Repo (gh release view failed: $ghError; $detail); title/prerelease checks skipped."
         $checkTitle = $false; $Prerelease = $null
     }
 }
