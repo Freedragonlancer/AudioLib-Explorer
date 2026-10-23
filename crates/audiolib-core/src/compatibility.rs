@@ -1,7 +1,7 @@
 // crates/audiolib-core/src/compatibility.rs
 //! Owned, conservative compatibility decisions shared by every application adapter.
 //! Database observations must come from a pinned inspection, never from SemVer alone.
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -334,63 +334,192 @@ pub fn assess_library(
 
 /// Embedded application/format catalog, exposed by both client and server.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct CompatibilityManifest {
-    /// Shared workspace release identity.
+    /// Shared workspace release identity; display, update checks and `blocked_versions`
+    /// only. Never compared as a range.
     pub application_version: String,
-    /// Capability semantics, separate from database schema.
-    pub catalog_revision: u32,
-    /// Each entry is an explicit semver requirement; pre-releases require opt-in.
-    pub peer_application_ranges: Vec<String>,
-    /// Tested published peers that predate the catalog. This exception is bounded
-    /// independently of modern peers; an absent field grants no legacy admission.
+    /// Present on marker-based peers (0.7.2+). Absent: the peer predates markers and
+    /// must upgrade (Compatibility_Markers.md §4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_revision: Option<u32>,
+    /// Supported API protocol interval; peers are compatible when intervals intersect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ProtocolRange>,
+    /// Understood HTTP protocol identifiers (`api/v{n}`), kept beside `protocol` during
+    /// the transition.
     #[serde(default)]
-    pub legacy_peer_application_ranges: Vec<String>,
-    /// Tested application origins that may directly use supported read formats.
-    pub direct_use_application_ranges: Vec<String>,
-    /// Tested application origins with supported owned migration routes.
-    pub auto_migrate_application_ranges: Vec<String>,
-    /// Understood HTTP protocol identifiers.
     pub api_protocols: Vec<String>,
     /// Complete snapshot format identifiers the application can read.
+    #[serde(default)]
     pub snapshot_read_formats: Vec<String>,
     /// Complete database formats this application can write.
+    #[serde(default)]
     pub database_write_formats: Vec<String>,
     /// Supported owned-conversion schema sources, not permission to mutate them.
+    #[serde(default)]
     pub migration_source_schemas: Vec<u32>,
     /// Format produced by a successful Plan B conversion.
+    #[serde(default)]
     pub migration_target_format: String,
     /// Known persistent migration protocols.
+    #[serde(default)]
     pub migration_protocols: BTreeMap<String, u32>,
-    /// Required statistics-fix baseline.
+    /// Optional capabilities `{name: revision}`. A function is used only when both
+    /// sides declare it at the same revision; a missing one never refuses sync.
+    #[serde(default)]
+    pub features: BTreeMap<String, u32>,
+    /// Known-bad application versions refused regardless of markers.
+    #[serde(default)]
+    pub blocked_versions: Vec<String>,
+    /// Informational; never compared for equality.
+    #[serde(default)]
+    pub catalog_revision: u32,
+    /// Declared for peers still doing range checks (they ignore markers); never used
+    /// for decisions here.
+    #[serde(default)]
+    pub peer_application_ranges: Vec<String>,
+    /// Display/diagnostics only; each side checks its own linked SQLite at startup
+    /// ([`check_linked_sqlite`]).
+    #[serde(default)]
     pub minimum_sqlite_version: String,
 }
 
-/// Exact published protocol baselines. Keep legacy admission and the exposed
-/// direct-use/migration ranges derived from this one reviewed release set.
-const LEGACY_APPLICATION_RANGES: &[&str] = &["=0.4.11", "=0.5.0", "=0.5.1"];
+/// Inclusive API protocol interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct ProtocolRange {
+    pub min: u32,
+    pub max: u32,
+}
 
-/// Published releases of the current minor line share one protocol baseline;
-/// patch releases of the same minor accept each other (0.6.0 onward).
-const CURRENT_MINOR_RANGE: &str = ">=0.6.0, <0.7.0";
+/// Current marker scheme revision.
+pub const MARKER_REVISION: u32 = 1;
+/// API protocol interval of this build (`api/v1`).
+pub const PROTOCOL: ProtocolRange = ProtocolRange { min: 1, max: 1 };
+/// Known-bad application versions. Intentionally empty; add an exact version only for a
+/// published release that corrupts peers.
+pub const BLOCKED_VERSIONS: &[&str] = &[];
+/// Optional features and revisions this build implements on both client and server.
+pub const FEATURES: &[(&str, u32)] = &[
+    ("list_waveform_jobs", 1),
+    ("list_waveforms", 1),
+    ("waveform_bundle_strong_etag", 1),
+];
+/// Accepted-range shape kept for peers that still do range checks.
+pub const PEER_APPLICATION_RANGES: &[&str] = &[">=0.6.0"];
 
-/// This development catalog admits the tested published releases and the exact
-/// development version. Actual format inspection still decides direct use versus
-/// owned migration; neither the version nor these overlapping ranges grants writes.
-pub fn compatibility_manifest() -> CompatibilityManifest {
-    let legacy_ranges: Vec<String> = LEGACY_APPLICATION_RANGES
+/// Snapshot capability-max request headers and their values (derived, never hand-written),
+/// shared by the client sender and the server's admission check.
+pub const SNAPSHOT_SCHEMA_MAX_HEADER: &str = "x-audiolib-snapshot-schema-max";
+pub const SEARCH_STORAGE_MAX_HEADER: &str = "x-audiolib-search-storage-max";
+pub const TOKENIZATION_MAX_HEADER: &str = "x-audiolib-tokenization-max";
+/// Highest schema the client reads.
+pub const SNAPSHOT_SCHEMA_MAX: u32 = TARGET_SCHEMA;
+/// Highest search storage revision the client reads (matches `LibraryFormat::target()`).
+pub const SEARCH_STORAGE_MAX: u32 = 1;
+/// Highest tokenization revision the client reads.
+pub const TOKENIZATION_MAX: u32 = TOKENIZATION_REVISION;
+
+/// Error codes (409) for refused peers.
+pub const PEER_UPGRADE_REQUIRED: &str = "PEER_UPGRADE_REQUIRED";
+pub const PROTOCOL_UNSUPPORTED: &str = "PROTOCOL_UNSUPPORTED";
+pub const PEER_VERSION_BLOCKED: &str = "PEER_VERSION_BLOCKED";
+/// Pre-marker code still sent by 0.6.x–0.7.1 servers; also used for an inconsistent catalog.
+pub const PEER_VERSION_UNSUPPORTED: &str = "PEER_VERSION_UNSUPPORTED";
+
+/// Why a marker check refused a peer (Compatibility_Markers.md §4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerRejection {
+    /// The peer's version is on our `blocked_versions` list.
+    BlockedVersion,
+    /// No catalog or no `marker_revision`: the peer predates markers.
+    PeerUpgradeRequired,
+    /// The catalog's `application_version` differs from the reported version.
+    Inconsistent,
+    /// Peer protocol entirely below ours: the peer must upgrade.
+    ProtocolPeerTooOld,
+    /// Peer protocol entirely above ours (peer min > our max): this side must upgrade.
+    ProtocolPeerTooNew,
+}
+
+impl PeerRejection {
+    /// HTTP error code a server sends for this refusal of a client.
+    pub fn error_code(self) -> &'static str {
+        match self {
+            Self::BlockedVersion => PEER_VERSION_BLOCKED,
+            Self::PeerUpgradeRequired | Self::ProtocolPeerTooOld => PEER_UPGRADE_REQUIRED,
+            Self::ProtocolPeerTooNew => PROTOCOL_UNSUPPORTED,
+            Self::Inconsistent => PEER_VERSION_UNSUPPORTED,
+        }
+    }
+}
+
+/// Fail fast when the linked SQLite is older than [`MINIMUM_SQLITE_VERSION`]. Called by
+/// each process at startup for its own engine; never used to judge a peer.
+pub fn check_linked_sqlite(linked: &str) -> Result<(), String> {
+    let parse = |text: &str| -> Option<Version> {
+        let mut parts = text.trim().split('.').map(|part| part.parse::<u64>().ok());
+        Some(Version::new(
+            parts.next()??,
+            parts.next().flatten().unwrap_or(0),
+            parts.next().flatten().unwrap_or(0),
+        ))
+    };
+    match (parse(linked), parse(MINIMUM_SQLITE_VERSION)) {
+        (Some(found), Some(minimum)) if found >= minimum => Ok(()),
+        _ => Err(format!(
+            "Linked SQLite {linked} is older than the required {MINIMUM_SQLITE_VERSION}; rebuild with the bundled SQLite"
+        )),
+    }
+}
+
+/// Marker-based peer check: no version ranges, no catalog_revision equality.
+pub fn check_peer(
+    local: &CompatibilityManifest,
+    peer_version: &str,
+    peer: Option<&CompatibilityManifest>,
+) -> Result<(), PeerRejection> {
+    if local.blocked_versions.iter().any(|v| v == peer_version) {
+        return Err(PeerRejection::BlockedVersion);
+    }
+    let Some(peer) = peer.filter(|peer| peer.marker_revision.is_some()) else {
+        return Err(PeerRejection::PeerUpgradeRequired);
+    };
+    if peer.application_version != peer_version {
+        return Err(PeerRejection::Inconsistent);
+    }
+    let local_range = local.protocol.unwrap_or(PROTOCOL);
+    let Some(peer_range) = peer.protocol else {
+        return Err(PeerRejection::PeerUpgradeRequired);
+    };
+    if peer_range.max < local_range.min {
+        return Err(PeerRejection::ProtocolPeerTooOld);
+    }
+    if peer_range.min > local_range.max {
+        return Err(PeerRejection::ProtocolPeerTooNew);
+    }
+    // Transitional: `api_protocols` must agree with the interval.
+    if !peer
+        .api_protocols
         .iter()
-        .map(|requirement| (*requirement).to_owned())
-        .collect();
-    let mut supported_ranges = legacy_ranges.clone();
-    supported_ranges.push(CURRENT_MINOR_RANGE.to_owned());
-    supported_ranges.push(format!("={}", env!("CARGO_PKG_VERSION")));
+        .any(|protocol| local.api_protocols.contains(protocol))
+    {
+        return Err(if peer_range.max > local_range.max {
+            PeerRejection::ProtocolPeerTooNew
+        } else {
+            PeerRejection::ProtocolPeerTooOld
+        });
+    }
+    Ok(())
+}
+
+/// This build's catalog (Compatibility_Markers.md §3).
+pub fn compatibility_manifest() -> CompatibilityManifest {
     CompatibilityManifest {
         application_version: env!("CARGO_PKG_VERSION").into(),
-        catalog_revision: CATALOG_REVISION,
-        peer_application_ranges: supported_ranges.clone(),
-        legacy_peer_application_ranges: legacy_ranges,
-        direct_use_application_ranges: supported_ranges.clone(),
-        auto_migrate_application_ranges: supported_ranges,
+        marker_revision: Some(MARKER_REVISION),
+        protocol: Some(PROTOCOL),
         api_protocols: vec![API_PROTOCOL.into()],
         snapshot_read_formats: vec![
             "ale-s3-ext-t3-m2".into(),
@@ -405,45 +534,27 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
         migration_protocols: [("search_text".into(), 1), ("search_storage".into(), 1)]
             .into_iter()
             .collect(),
+        features: FEATURES
+            .iter()
+            .map(|(name, revision)| ((*name).to_owned(), *revision))
+            .collect(),
+        blocked_versions: BLOCKED_VERSIONS.iter().map(|v| (*v).to_owned()).collect(),
+        catalog_revision: CATALOG_REVISION,
+        peer_application_ranges: PEER_APPLICATION_RANGES
+            .iter()
+            .map(|range| (*range).to_owned())
+            .collect(),
         minimum_sqlite_version: MINIMUM_SQLITE_VERSION.into(),
     }
 }
 
-fn accepts_range(ranges: &[String], version: &Version) -> bool {
-    ranges.iter().any(|requirement| {
-        VersionReq::parse(requirement).is_ok_and(|requirement| requirement.matches(version))
-    })
-}
-
-/// Validate both directions of a modern handshake. Only releases explicitly
-/// recorded in the local legacy catalog may omit theirs; all downloaded formats
-/// still require independent header/file checks.
+/// Whether `peer` may sync with `local` ([`check_peer`] without the reason).
 pub fn peer_versions_compatible(
     local: &CompatibilityManifest,
     peer_version: &str,
     peer: Option<&CompatibilityManifest>,
 ) -> bool {
-    let (Ok(peer_version), Ok(local_version)) = (
-        Version::parse(peer_version),
-        Version::parse(&local.application_version),
-    ) else {
-        return false;
-    };
-    if !accepts_range(&local.peer_application_ranges, &peer_version) {
-        return false;
-    }
-    match peer {
-        Some(peer) => {
-            Version::parse(&peer.application_version).ok().as_ref() == Some(&peer_version)
-                && peer.catalog_revision == CATALOG_REVISION
-                && accepts_range(&peer.peer_application_ranges, &local_version)
-                && peer
-                    .api_protocols
-                    .iter()
-                    .any(|p| local.api_protocols.contains(p))
-        }
-        None => accepts_range(&local.legacy_peer_application_ranges, &peer_version),
-    }
+    check_peer(local, peer_version, peer).is_ok()
 }
 
 #[cfg(test)]
@@ -553,142 +664,227 @@ mod tests {
         );
     }
 
-    #[test]
-    fn released_0_6_0_catalog_and_later_patch_catalogs() {
-        let local = compatibility_manifest();
-        // The shipped 0.6.0 catalog only admits legacy releases and exactly 0.6.0.
-        let mut released = local.clone();
-        released.application_version = "0.6.0".into();
-        let mut ranges: Vec<String> = LEGACY_APPLICATION_RANGES
-            .iter()
-            .map(|range| (*range).to_owned())
-            .collect();
-        ranges.push("=0.6.0".into());
-        released.peer_application_ranges = ranges.clone();
-        released.direct_use_application_ranges = ranges.clone();
-        released.auto_migrate_application_ranges = ranges;
-        let current = local.application_version.clone();
-        assert_ne!(current, "0.6.0");
-        assert!(!peer_versions_compatible(&local, "0.6.0", Some(&released)));
-        assert!(!peer_versions_compatible(&released, &current, Some(&local)));
-        // Later 0.6.x patches carrying the minor-line range accept each other.
-        let mut later = local.clone();
-        later.application_version = "0.6.9".into();
-        assert!(peer_versions_compatible(&local, "0.6.9", Some(&later)));
-        assert!(peer_versions_compatible(&later, &current, Some(&local)));
+    fn marked(version: &str) -> CompatibilityManifest {
+        let mut catalog = compatibility_manifest();
+        catalog.application_version = version.into();
+        catalog
+    }
+
+    /// Real shipped catalogs that predate markers (fixtures, not derived from this build).
+    fn shipped(version: &str) -> CompatibilityManifest {
+        let json = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/compatibility/{version}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        serde_json::from_str(&json).unwrap()
     }
 
     #[test]
-    fn peer_checks_are_mutual_bounded_and_pre_release_explicit() {
+    fn matrix_1_and_4_same_protocol_marker_peers_pass_regardless_of_version() {
         let local = compatibility_manifest();
-        for supported in ["0.6.0", "0.6.1", "0.6.9"] {
-            let version = Version::parse(supported).unwrap();
-            assert!(accepts_range(&local.peer_application_ranges, &version));
-            assert!(!accepts_range(
-                &local.legacy_peer_application_ranges,
-                &version
+        for version in [
+            local.application_version.as_str(),
+            "0.7.2",
+            "0.8.0",
+            "9.0.0",
+        ] {
+            assert_eq!(check_peer(&local, version, Some(&marked(version))), Ok(()));
+            assert!(peer_versions_compatible(
+                &marked(version),
+                &local.application_version,
+                Some(&local)
             ));
         }
-        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
-            assert!(peer_versions_compatible(&local, supported, None));
-            let version = Version::parse(supported).unwrap();
-            for ranges in [
-                &local.peer_application_ranges,
-                &local.direct_use_application_ranges,
-                &local.auto_migrate_application_ranges,
-            ] {
-                assert!(accepts_range(ranges, &version));
-            }
-        }
-        for unsupported in [
-            "0.4.10",
-            "0.4.12",
-            "0.4.11-rc.1",
-            "0.5.0-rc.1",
-            "0.5.1-rc.1",
-            "0.5.2",
-            "0.7.0",
-            "0.6.0-dev.2",
-            "9.0.0",
-            "invalid",
-        ] {
-            assert!(!peer_versions_compatible(&local, unsupported, None));
-        }
-        // A current prerelease opts into modern mutual negotiation only. Even an
-        // otherwise identical process cannot silently omit its capability catalog.
-        assert!(!peer_versions_compatible(
-            &local,
-            &local.application_version,
-            None
-        ));
-        assert!(peer_versions_compatible(
-            &local,
-            &local.application_version,
-            Some(&local)
-        ));
-        let mut peer = local.clone();
-        peer.peer_application_ranges = vec!["<0.4.0".into()];
-        assert!(!peer_versions_compatible(
-            &local,
-            &peer.application_version,
-            Some(&peer)
-        ));
     }
 
     #[test]
-    fn catalog_controls_legacy_exception_without_bypassing_peer_ranges() {
-        let mut local = compatibility_manifest();
-        local.legacy_peer_application_ranges.clear();
-        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
-            assert!(!peer_versions_compatible(&local, supported, None));
-        }
-        // A catalog does not classify an untested release as legacy merely because
-        // its ordinary peer range admits that version.
-        local.peer_application_ranges.push("=0.5.2".into());
-        assert!(!peer_versions_compatible(&local, "0.5.2", None));
-        local.legacy_peer_application_ranges = vec!["=0.5.0".into()];
-        assert!(peer_versions_compatible(&local, "0.5.0", None));
-        local.peer_application_ranges = vec![format!("={}", local.application_version)];
-        assert!(!peer_versions_compatible(&local, "0.5.0", None));
-    }
-
-    #[test]
-    fn absent_legacy_catalog_is_conservative_without_breaking_modern_peers() {
+    fn matrix_2_3_and_10_unmarked_peers_require_upgrade() {
         let local = compatibility_manifest();
-        let mut json = serde_json::to_value(&local).unwrap();
-        json.as_object_mut()
-            .unwrap()
-            .remove("legacy_peer_application_ranges");
-        let older_catalog: CompatibilityManifest = serde_json::from_value(json).unwrap();
-        assert!(older_catalog.legacy_peer_application_ranges.is_empty());
-        for supported in ["0.4.11", "0.5.0", "0.5.1"] {
-            assert!(!peer_versions_compatible(&older_catalog, supported, None));
-        }
-        assert!(peer_versions_compatible(
-            &local,
-            &older_catalog.application_version,
-            Some(&older_catalog)
-        ));
-    }
-
-    #[test]
-    fn modern_peer_must_match_identity_catalog_and_protocol_in_both_directions() {
-        let local = compatibility_manifest();
-        for mode in ["identity", "catalog", "protocol", "range", "invalid_range"] {
-            let mut peer = local.clone();
-            match mode {
-                "identity" => peer.application_version = "0.5.0".into(),
-                "catalog" => peer.catalog_revision += 1,
-                "protocol" => peer.api_protocols = vec!["api/v99".into()],
-                "range" => peer.peer_application_ranges = vec!["=0.5.0".into()],
-                "invalid_range" => peer.peer_application_ranges = vec!["invalid".into()],
-                _ => unreachable!(),
-            }
-            assert!(
-                !peer_versions_compatible(&local, &local.application_version, Some(&peer)),
-                "{mode}"
+        for version in ["0.6.5", "0.7.0", "0.7.1"] {
+            let old = shipped(version);
+            assert_eq!(old.marker_revision, None, "{version}");
+            assert_eq!(
+                check_peer(&local, version, Some(&old)),
+                Err(PeerRejection::PeerUpgradeRequired),
+                "{version}"
+            );
+            assert_eq!(
+                PeerRejection::PeerUpgradeRequired.error_code(),
+                PEER_UPGRADE_REQUIRED
             );
         }
+        // 0.4.11/0.5.x have no catalog at all; the legacy path is gone.
+        for version in ["0.4.11", "0.5.0", "0.5.1"] {
+            assert_eq!(
+                check_peer(&local, version, None),
+                Err(PeerRejection::PeerUpgradeRequired)
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_5_disjoint_protocols_name_the_side_that_must_upgrade() {
+        let local = compatibility_manifest();
+        let mut newer = marked("0.9.0");
+        newer.protocol = Some(ProtocolRange { min: 2, max: 3 });
+        newer.api_protocols = vec!["api/v2".into(), "api/v3".into()];
+        assert_eq!(
+            check_peer(&local, "0.9.0", Some(&newer)),
+            Err(PeerRejection::ProtocolPeerTooNew)
+        );
+        assert_eq!(
+            PeerRejection::ProtocolPeerTooNew.error_code(),
+            PROTOCOL_UNSUPPORTED
+        );
+        // Seen from the newer side, we are the one too old.
+        assert_eq!(
+            check_peer(&newer, &local.application_version, Some(&local)),
+            Err(PeerRejection::ProtocolPeerTooOld)
+        );
+        assert_eq!(
+            PeerRejection::ProtocolPeerTooOld.error_code(),
+            PEER_UPGRADE_REQUIRED
+        );
+        // Overlapping intervals pass.
+        let mut wide = marked("0.9.0");
+        wide.protocol = Some(ProtocolRange { min: 1, max: 2 });
+        wide.api_protocols = vec!["api/v1".into(), "api/v2".into()];
+        assert_eq!(check_peer(&local, "0.9.0", Some(&wide)), Ok(()));
+        // Interval and identifiers must agree during the transition.
+        let mut stale = marked("0.9.0");
+        stale.api_protocols = vec!["api/v99".into()];
+        assert!(check_peer(&local, "0.9.0", Some(&stale)).is_err());
+    }
+
+    #[test]
+    fn matrix_6_catalog_revision_and_ranges_are_informational() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.7.9");
+        peer.catalog_revision += 7;
+        peer.peer_application_ranges = vec!["<0.1.0".into()];
+        assert_eq!(check_peer(&local, "0.7.9", Some(&peer)), Ok(()));
+    }
+
+    #[test]
+    fn matrix_9_blocked_versions_refuse_first() {
+        let mut local = compatibility_manifest();
+        assert!(local.blocked_versions.is_empty() && BLOCKED_VERSIONS.is_empty());
+        local.blocked_versions = vec!["0.7.3".into()];
+        assert_eq!(
+            check_peer(&local, "0.7.3", Some(&marked("0.7.3"))),
+            Err(PeerRejection::BlockedVersion)
+        );
+        assert_eq!(
+            PeerRejection::BlockedVersion.error_code(),
+            PEER_VERSION_BLOCKED
+        );
+    }
+
+    #[test]
+    fn inconsistent_catalog_is_refused() {
+        let local = compatibility_manifest();
+        assert_eq!(
+            check_peer(&local, "0.9.9", Some(&marked("0.8.0"))),
+            Err(PeerRejection::Inconsistent)
+        );
+    }
+
+    #[test]
+    fn matrix_12_feature_revisions_are_per_feature() {
+        let local = compatibility_manifest();
+        let mut peer = marked("0.8.0");
+        peer.features.insert("list_waveforms".into(), 2);
+        peer.features.remove("waveform_bundle_strong_etag");
+        peer.features.insert("future_optional".into(), 1);
+        // Features never refuse the peer.
+        assert_eq!(check_peer(&local, "0.8.0", Some(&peer)), Ok(()));
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored_and_old_catalogs_still_parse() {
+        let mut json = serde_json::to_value(compatibility_manifest()).unwrap();
+        json["future_marker"] = serde_json::json!({"x": 1});
+        let parsed: CompatibilityManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, compatibility_manifest());
+        for version in ["0.6.5", "0.7.0", "0.7.1"] {
+            assert!(shipped(version).features.is_empty());
+        }
+    }
+
+    #[test]
+    fn manifest_fits_the_header_bound() {
+        let json = serde_json::to_string(&compatibility_manifest()).unwrap();
+        assert!(
+            json.len() <= MAX_COMPATIBILITY_HEADER_BYTES,
+            "{}",
+            json.len()
+        );
+    }
+
+    #[test]
+    fn linked_sqlite_self_check() {
+        assert!(check_linked_sqlite(MINIMUM_SQLITE_VERSION).is_ok());
+        assert!(check_linked_sqlite("3.60.0").is_ok());
+        assert!(check_linked_sqlite("3.54.0").is_err());
+        assert!(check_linked_sqlite("garbage").is_err());
+    }
+
+    /// Format fingerprint fixture: changing any format input must also change its ID
+    /// (Compatibility_Markers.md §5.2). Update the fixture together with a new format ID.
+    #[test]
+    fn format_fingerprints_match_fixture() {
+        let target = LibraryFormat::target();
+        let actual = serde_json::json!({
+            "target_id": target.snapshot_format_id(),
+            "target": target,
+            "plan_b_format": PLAN_B_FORMAT,
+            "plan_b_initial_format": PLAN_B_INITIAL_FORMAT,
+            "target_schema": TARGET_SCHEMA,
+            "tokenization_revision": TOKENIZATION_REVISION,
+            "snapshot_read_formats": compatibility_manifest().snapshot_read_formats,
+            "capability_max": {
+                SNAPSHOT_SCHEMA_MAX_HEADER: SNAPSHOT_SCHEMA_MAX,
+                SEARCH_STORAGE_MAX_HEADER: SEARCH_STORAGE_MAX,
+                TOKENIZATION_MAX_HEADER: TOKENIZATION_MAX,
+            },
+        });
+        assert_eq!(actual["target_id"], PLAN_B_FORMAT);
+        assert_eq!(
+            target.features.get("search_storage").copied(),
+            Some(SEARCH_STORAGE_MAX)
+        );
+        snapshot("format_fingerprint.json", &actual);
+    }
+
+    /// DTO JSON-schema snapshot: any manifest shape change shows up in review and must be
+    /// classified per §5.2 (new optional field vs protocol bump).
+    #[test]
+    fn manifest_json_schema_snapshot() {
+        let schema = schemars::schema_for!(CompatibilityManifest);
+        snapshot(
+            "compatibility_manifest.schema.json",
+            &serde_json::to_value(schema).unwrap(),
+        );
+    }
+
+    /// Compare with `tests/fixtures/compatibility/<name>`; `AUDIOLIB_UPDATE_SNAPSHOTS=1`
+    /// rewrites it.
+    fn snapshot(name: &str, actual: &serde_json::Value) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/compatibility")
+            .join(name);
+        let text = serde_json::to_string_pretty(actual).unwrap() + "\n";
+        if std::env::var_os("AUDIOLIB_UPDATE_SNAPSHOTS").is_some() {
+            std::fs::write(&path, &text).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert_eq!(
+            expected, text,
+            "{name} changed; review and set AUDIOLIB_UPDATE_SNAPSHOTS=1"
+        );
     }
 
     #[test]

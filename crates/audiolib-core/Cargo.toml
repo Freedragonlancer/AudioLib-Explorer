@@ -14,5 +14,6 @@ unicode-segmentation = "=1.13.3"
 semver.workspace = true
 
 [dev-dependencies]
+schemars = "1"
 tempfile.workspace = true
 
