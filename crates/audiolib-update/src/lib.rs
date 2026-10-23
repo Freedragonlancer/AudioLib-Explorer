@@ -84,8 +84,20 @@ pub struct ReleaseUpdate {
     /// this platform and this older release was selected instead; `None` otherwise.
     #[serde(default)]
     pub skipped_newer: Option<String>,
+    /// Every newer release (newest first) that was skipped in favour of this one.
+    #[serde(default)]
+    pub skipped_releases: Vec<SkippedRelease>,
     pub(crate) asset: Asset,
     pub(crate) checksum: Asset,
+}
+
+/// A newer release the channel would accept but that was not offered, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedRelease {
+    /// Full GitHub tag including `v`.
+    pub tag: String,
+    /// Human-readable reason the release was skipped.
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -247,6 +259,7 @@ impl UpdateClient {
         let mut selected: Option<(Version, ReleaseUpdate)> = None;
         // Newer releases this channel would accept but whose assets are missing or invalid.
         let mut unusable: Option<Version> = None;
+        let mut skipped: Vec<(Version, String)> = Vec::new();
         for release in releases {
             if release.draft {
                 continue;
@@ -283,6 +296,7 @@ impl UpdateClient {
                     tag = %release.tag_name,
                     "update check: newer release has no valid package for this platform; skipped"
                 );
+                skipped.push((version.clone(), release.tag_name.clone()));
                 if unusable.as_ref().is_none_or(|worst| &version > worst) {
                     unusable = Some(version);
                 }
@@ -299,6 +313,7 @@ impl UpdateClient {
                     ),
                     notes: release.body.unwrap_or_default(),
                     skipped_newer: None,
+                    skipped_releases: Vec::new(),
                     asset: asset.clone(),
                     checksum: checksum.clone(),
                 },
@@ -321,6 +336,17 @@ impl UpdateClient {
             update.skipped_newer = Some(format!(
                 "Release v{version} is newer but has no valid package for this platform; offering v{chosen}"
             ));
+        }
+        if let Some((chosen, update)) = selected.as_mut() {
+            skipped.retain(|(version, _)| version > chosen);
+            skipped.sort_by(|a, b| b.0.cmp(&a.0));
+            update.skipped_releases = skipped
+                .into_iter()
+                .map(|(_, tag)| SkippedRelease {
+                    tag,
+                    reason: "no valid package for this platform".into(),
+                })
+                .collect();
         }
         tracing::info!(
             releases = total,

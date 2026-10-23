@@ -572,6 +572,7 @@ fn empty_first_page_is_retried_then_succeeds() {
     let update = mock_client(&url, "0.6.1").check().unwrap().unwrap();
     assert_eq!(update.tag, "v0.6.2");
     assert!(update.skipped_newer.is_none());
+    assert!(update.skipped_releases.is_empty());
     let targets = server.join().unwrap();
     assert_eq!(
         targets,
@@ -612,6 +613,13 @@ fn newer_release_without_package_falls_back_and_reports_the_skip() {
     let (url, server) = mock_releases(vec![list_json(&[newest, release("v0.6.2", false, false)])]);
     let update = mock_client(&url, "0.6.1").check().unwrap().unwrap();
     assert_eq!(update.tag, "v0.6.2");
+    assert_eq!(
+        update.skipped_releases,
+        [SkippedRelease {
+            tag: "v0.7.0".into(),
+            reason: "no valid package for this platform".into(),
+        }]
+    );
     let skipped = update.skipped_newer.unwrap();
     assert!(
         skipped.contains("v0.7.0") && skipped.contains("v0.6.2"),
