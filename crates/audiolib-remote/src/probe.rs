@@ -915,16 +915,16 @@ mod tests {
                             .unwrap()
                             .push((request.method.clone(), request.path.clone()));
                         match request.path.as_str() {
-                            "/api/v1/health" => {
-                                TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
-                            }
+                            "/api/v1/health" => crate::test_server::marker_health(),
                             "/api/v1/library" => TestResponse::json(
                                 200,
                                 &format!(
                                     r#"{{"library_id":"schema-test","schema_version":{version},"revision":42,"stats":{{"audio_files":123456}}}}"#
                                 ),
                             ),
-                            "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+                            "/api/v1/capabilities" => {
+                                crate::test_server::marker_capabilities(serde_json::json!({}))
+                            }
                             "/api/v1/roots" => TestResponse::json(200, "[]"),
                             _ => TestResponse::json(500, "{}"),
                         }
@@ -940,7 +940,10 @@ mod tests {
                 let supported = (3..=5).contains(&version);
                 assert_eq!(report.ok(), supported, "{}", report.summary(chinese));
                 assert!(!report.unauthorized && !report.server_starting());
-                assert_eq!(report.server_version.as_deref(), Some("0.4.11"));
+                assert_eq!(
+                    report.server_version.as_deref(),
+                    Some(env!("CARGO_PKG_VERSION"))
+                );
                 let library = report.library.as_ref().unwrap();
                 assert_eq!((library.schema_version, library.revision), (version, 42));
                 assert_eq!(library.audio_files(), Some(123456));
@@ -1029,6 +1032,9 @@ mod tests {
             "/api/v1/health" => {
                 TestResponse::json(200, r#"{"status":"starting","version":"0.3.5"}"#)
             }
+            "/api/v1/capabilities" if request.header("authorization") == Some("Bearer tok") => {
+                crate::test_server::marker_capabilities(serde_json::json!({}))
+            }
             _ if request.header("authorization") != Some("Bearer tok") => TestResponse::json(
                 401,
                 r#"{"error_code":"UNAUTHORIZED","message":"bad token"}"#,
@@ -1105,11 +1111,15 @@ mod tests {
             }
         });
         let dav_url = dav.url.clone();
-        let api = TestServer::start(move |request| match request.path.as_str() {
+        let api = TestServer::start(move |request| {
+            match request.path.as_str() {
             "/api/v1/health" => TestResponse::json(
                 200,
-                r#"{"status":"ok","version":"0.4.11","public_url":"https://AudioLib.Example.com:8443/"}"#,
+                &serde_json::json!({"status":"ok","version":env!("CARGO_PKG_VERSION"),"public_url":"https://AudioLib.Example.com:8443/"}).to_string(),
             ),
+            "/api/v1/capabilities" if request.header("authorization") == Some("Bearer tok") => {
+                crate::test_server::marker_capabilities(serde_json::json!({}))
+            }
             _ if request.header("authorization") != Some("Bearer tok") => TestResponse::json(
                 401,
                 r#"{"error_code":"UNAUTHORIZED","message":"bad token"}"#,
@@ -1125,6 +1135,7 @@ mod tests {
                 ),
             ),
             _ => TestResponse::json(404, "{}"),
+        }
         });
         let mut settings = DataSourceSettings {
             mode: DataSourceMode::Server,
@@ -1226,8 +1237,9 @@ mod tests {
                 return TestResponse::json(400, r#"{"message":"unexpected Authorization"}"#);
             }
             match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                "/api/v1/health" => crate::test_server::marker_health(),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
                 }
                 "/api/v1/library" => TestResponse::json(
                     200,
@@ -1251,7 +1263,10 @@ mod tests {
         assert!(report.steps[3].ok && report.steps[4].ok);
 
         let secured = TestServer::start(|request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
+            "/api/v1/health" => crate::test_server::marker_health(),
+            "/api/v1/capabilities" => {
+                crate::test_server::marker_capabilities(serde_json::json!({}))
+            }
             _ => TestResponse::json(
                 401,
                 r#"{"error_code":"UNAUTHORIZED","message":"missing token"}"#,
@@ -1316,11 +1331,11 @@ mod tests {
             let mode = mode.clone();
             TestServer::start(move |request| {
                 match request.path.as_str() {
-                "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
+                "/api/v1/health" => crate::test_server::marker_health(),
                 _ if request.header("authorization") != Some("Bearer tok") => {
                     TestResponse::json(401, r#"{"error_code":"UNAUTHORIZED"}"#)
                 }
-                "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+                "/api/v1/capabilities" => crate::test_server::marker_capabilities(serde_json::json!({})),
                 "/api/v1/library" => {
                     TestResponse::json(200, r#"{"library_id":"L","schema_version":3,"revision":4}"#)
                 }

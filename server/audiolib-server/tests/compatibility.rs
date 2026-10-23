@@ -43,8 +43,8 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
         .pragma_query_value(None, "data_version", |row| row.get(0))
         .unwrap();
     for mode in [
-        "version",
-        "mutual_range",
+        "unmarked",
+        "protocol_newer",
         "protocol",
         "malformed",
         "duplicate",
@@ -52,8 +52,14 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
     ] {
         let mut catalog = compatibility_manifest();
         match mode {
-            "version" => catalog.application_version = "99.0.0".into(),
-            "mutual_range" => catalog.peer_application_ranges = vec!["<0.4.0".into()],
+            // Marker peers of any version are admitted; unmarked or protocol-disjoint
+            // peers are not.
+            "unmarked" => catalog.marker_revision = None,
+            "protocol_newer" => {
+                catalog.protocol =
+                    Some(audiolib_core::compatibility::ProtocolRange { min: 2, max: 2 });
+                catalog.api_protocols = vec!["api/v2".into()];
+            }
             "protocol" => catalog.api_protocols.clear(),
             _ => {}
         }
@@ -82,10 +88,15 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
             let body: serde_json::Value =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
-            assert_eq!(
-                body["error_code"], "PEER_VERSION_UNSUPPORTED",
-                "{mode} {path}"
-            );
+            let expected = match mode {
+                "unmarked" => "PEER_UPGRADE_REQUIRED",
+                "protocol_newer" => "PROTOCOL_UNSUPPORTED",
+                _ => "PEER_CATALOG_INVALID",
+            };
+            assert_eq!(body["error_code"], expected, "{mode} {path}");
+            if mode == "protocol_newer" {
+                assert_eq!(body["sub_code"], "SERVER_UPGRADE_REQUIRED", "{path}");
+            }
             assert_eq!(std::fs::read(&settings_path).ok(), original_settings);
             assert_eq!(state.revision().unwrap().revision, revision);
             assert_eq!(
@@ -129,16 +140,16 @@ async fn mutation_admission_rejects_invalid_peer_catalogs_without_writing() {
         (Method::POST, "/api/v1/scans/1/cancel", ""),
     ];
     for (mode, code) in [
-        ("missing", "PEER_VERSION_UNSUPPORTED"),
+        ("missing", "PEER_UPGRADE_REQUIRED"),
         ("p0_only", "SNAPSHOT_FORMAT_UNSUPPORTED"),
         ("future_format", "SNAPSHOT_FORMAT_UNSUPPORTED"),
-        ("future_program", "PEER_VERSION_UNSUPPORTED"),
+        ("unmarked_program", "PEER_UPGRADE_REQUIRED"),
     ] {
         let mut catalog = compatibility_manifest();
         match mode {
             "p0_only" => catalog.snapshot_read_formats = vec![PLAN_B_INITIAL_FORMAT.into()],
             "future_format" => catalog.snapshot_read_formats = vec!["ale-s99-future".into()],
-            "future_program" => catalog.application_version = "99.0.0".into(),
+            "unmarked_program" => catalog.marker_revision = None,
             _ => {}
         }
         if matches!(mode, "p0_only" | "future_format") {
@@ -435,8 +446,8 @@ async fn old_client_is_refused_before_preparation_and_modern_client_syncs_actual
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["error_code"], "SNAPSHOT_FORMAT_UNSUPPORTED");
-    assert!(body["message"].as_str().unwrap().contains(PLAN_B_FORMAT));
+    // No catalog: the peer check runs first and names the client as too old.
+    assert_eq!(body["error_code"], "PEER_UPGRADE_REQUIRED");
     assert_eq!(
         std::fs::read_dir(root.path().join("snapshots")).map_or(0, |entries| entries.count()),
         0

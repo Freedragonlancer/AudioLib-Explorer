@@ -187,6 +187,17 @@ fn run() -> Result<()> {
         .with_writer(writer)
         .try_init()
         .ok();
+    // Warning-only SQLite self-check: log it and keep starting.
+    match audiolib_db::sqlite_engine::identity() {
+        Ok(engine) => {
+            if let Some(warning) =
+                audiolib_core::compatibility::check_linked_sqlite(&engine.version)
+            {
+                tracing::warn!(%warning, "Linked SQLite self-check");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "Could not read the linked SQLite version"),
+    }
     match server_fallback {
         Some((reason, true)) => {
             tracing::warn!(%reason, "Server data source unusable; starting in local mode")

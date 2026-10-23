@@ -1,0 +1,55 @@
+{
+  "application_version": "0.7.0",
+  "catalog_revision": 1,
+  "peer_application_ranges": [
+    "=0.4.11",
+    "=0.5.0",
+    "=0.5.1",
+    ">=0.6.0, <0.7.0",
+    "=0.7.0"
+  ],
+  "legacy_peer_application_ranges": [
+    "=0.4.11",
+    "=0.5.0",
+    "=0.5.1"
+  ],
+  "direct_use_application_ranges": [
+    "=0.4.11",
+    "=0.5.0",
+    "=0.5.1",
+    ">=0.6.0, <0.7.0",
+    "=0.7.0"
+  ],
+  "auto_migrate_application_ranges": [
+    "=0.4.11",
+    "=0.5.0",
+    "=0.5.1",
+    ">=0.6.0, <0.7.0",
+    "=0.7.0"
+  ],
+  "api_protocols": [
+    "api/v1"
+  ],
+  "snapshot_read_formats": [
+    "ale-s3-ext-t3-m2",
+    "ale-s4-ext-t3-m2",
+    "ale-s5-ext-t3-m2",
+    "ale-s6-cld1-t3-m2-p0",
+    "ale-s6-cld1-t3-m2-p1"
+  ],
+  "database_write_formats": [
+    "ale-s6-cld1-t3-m2-p1"
+  ],
+  "migration_source_schemas": [
+    3,
+    4,
+    5,
+    6
+  ],
+  "migration_target_format": "ale-s6-cld1-t3-m2-p1",
+  "migration_protocols": {
+    "search_storage": 1,
+    "search_text": 1
+  },
+  "minimum_sqlite_version": "3.54.1"
+}

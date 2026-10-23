@@ -748,7 +748,8 @@ async fn pinned_snapshot_refuses_incompatible_clients_before_ranges_or_not_modif
                 if mode == "older_format" {
                     catalog.snapshot_read_formats = vec![PLAN_B_INITIAL_FORMAT.into()];
                 } else {
-                    catalog.application_version = "99.0.0".into();
+                    // Unmarked (pre-0.7.2) client catalog.
+                    catalog.marker_revision = None;
                 }
                 request.headers_mut().unwrap().insert(
                     CLIENT_COMPATIBILITY_HEADER,
@@ -767,8 +768,9 @@ async fn pinned_snapshot_refuses_incompatible_clients_before_ranges_or_not_modif
             let error: ErrorBody = json(response).await;
             assert_eq!(
                 error.error_code,
-                if mode == "incompatible_version" {
-                    "PEER_VERSION_UNSUPPORTED"
+                if mode != "older_format" {
+                    // Peer markers are checked before the format (no catalog = pre-marker).
+                    "PEER_UPGRADE_REQUIRED"
                 } else {
                     "SNAPSHOT_FORMAT_UNSUPPORTED"
                 }

@@ -783,9 +783,18 @@ fn snapshot_response(
                 audiolib_core::compatibility::ACCEPT_FORMATS_HEADER,
                 &accepted,
             )
-            .header("X-AudioLib-Snapshot-Schema-Max", "6")
-            .header("X-AudioLib-Search-Storage-Max", "1")
-            .header("X-AudioLib-Tokenization-Max", "3");
+            .header(
+                audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX_HEADER,
+                &audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX.to_string(),
+            )
+            .header(
+                audiolib_core::compatibility::SEARCH_STORAGE_MAX_HEADER,
+                &audiolib_core::compatibility::SEARCH_STORAGE_MAX.to_string(),
+            )
+            .header(
+                audiolib_core::compatibility::TOKENIZATION_MAX_HEADER,
+                &audiolib_core::compatibility::TOKENIZATION_MAX.to_string(),
+            );
         if !client.token.is_empty() {
             request = request.header("Authorization", &format!("Bearer {}", client.token));
         }

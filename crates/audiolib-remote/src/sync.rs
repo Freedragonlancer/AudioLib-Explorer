@@ -975,7 +975,7 @@ fn sync_library_inner(
     if let Some(message) = snapshot_schema_error(library.schema_version, false) {
         return Err(RemoteError::Snapshot(message));
     }
-    crate::compatibility::library(&library, capabilities.compatibility.is_some())?;
+    crate::compatibility::library(&library)?;
     transfer.bind_library(&library.library_id)?;
     let roots = match client.roots_cancellable(cancel) {
         Ok(roots) => Some(roots),
@@ -1485,16 +1485,16 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let bytes = old_unicode_snapshot(directory.path());
             let server = TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
-                }
+                "/api/v1/health" => crate::test_server::marker_health(),
                 "/api/v1/library" => TestResponse::json(200, &library_json(8)),
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
                 "/api/v1/library/snapshot" => TestResponse::bytes(200, bytes.clone())
                     .with_header("X-Library-Id", "lib-r")
                     .with_header("X-Library-Revision", "8")
                     .with_header("X-Schema-Version", "5"),
-                "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
+                }
                 _ => panic!("unexpected request {}", request.path),
             });
             let cache = RemoteCache::new(&directory.path().join("data"));
@@ -2003,8 +2003,9 @@ mod tests {
         TestServer::start(move |request| {
             let mut fixture = fixture.lock().unwrap();
             match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                "/api/v1/health" => crate::test_server::marker_health(),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
                 }
                 "/api/v1/library" => TestResponse::json(
                     200,
@@ -2171,10 +2172,10 @@ mod tests {
                 TestServer::start(move |request| {
                     requests.lock().unwrap().push(request.path.clone());
                     match request.path.as_str() {
-                        "/api/v1/health" => {
-                            TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                        "/api/v1/health" => crate::test_server::marker_health(),
+                        "/api/v1/capabilities" => {
+                            crate::test_server::marker_capabilities(serde_json::json!({}))
                         }
-                        "/api/v1/capabilities" => TestResponse::json(404, "{}"),
                         "/api/v1/library" => TestResponse::json(
                             200,
                             &format!(
@@ -2236,8 +2237,9 @@ mod tests {
         let server = {
             let snapshots = snapshots.clone();
             TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                "/api/v1/health" => crate::test_server::marker_health(),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
                 }
                 "/api/v1/library" => {
                     TestResponse::json(200, r#"{"library_id":"L","schema_version":5,"revision":1}"#)
@@ -2283,8 +2285,9 @@ mod tests {
         let server = {
             let (busy, waited) = (busy.clone(), waited.clone());
             TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                "/api/v1/health" => crate::test_server::marker_health(),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
                 }
                 "/api/v1/library" => {
                     TestResponse::json(200, r#"{"library_id":"L","schema_version":5,"revision":1}"#)
@@ -2342,7 +2345,10 @@ mod tests {
         let wire_bytes = packed.len() as u64;
         assert!(wire_bytes < database_bytes);
         let server = TestServer::start(move |request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
+            "/api/v1/health" => crate::test_server::marker_health(),
+            "/api/v1/capabilities" => {
+                crate::test_server::marker_capabilities(serde_json::json!({}))
+            }
             "/api/v1/library" => TestResponse::json(
                 200,
                 r#"{"library_id":"compressed","schema_version":5,"revision":1}"#,
@@ -2425,7 +2431,7 @@ mod tests {
         assert!(first.downloaded && !first.library_changed && first.previous.is_none());
         assert_eq!(fixture.lock().unwrap().busy, 0, "BUSY must be retried");
         assert!(phases.contains(&SyncProgress::Validating));
-        assert_eq!(first.state.server_version, "0.4.11");
+        assert_eq!(first.state.server_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(first.state.roots[0].server_path, "/Volumes/SFX");
         let db = cache.database_path(&first.state);
         assert!(db.is_file());
@@ -2763,16 +2769,16 @@ mod tests {
                 let enabled = enabled.clone();
                 TestServer::start(move |request| {
                     let response = match request.path.as_str() {
-                        "/api/v1/health" => {
-                            TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
-                        }
+                        "/api/v1/health" => crate::test_server::marker_health(),
                         "/api/v1/library" => TestResponse::json(200, &library_json(1)),
                         "/api/v1/roots" => TestResponse::json(200, "[]"),
                         "/api/v1/library/snapshot" => TestResponse::bytes(200, bytes.clone())
                             .with_header("X-Library-Id", "lib-r")
                             .with_header("X-Library-Revision", "1")
                             .with_header("X-Schema-Version", "5"),
-                        "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+                        "/api/v1/capabilities" => {
+                            crate::test_server::marker_capabilities(serde_json::json!({}))
+                        }
                         _ => panic!("unexpected request {}", request.path),
                     };
                     if enabled.load(Ordering::Acquire) && request.path == path {
@@ -2843,8 +2849,9 @@ mod tests {
         let server = {
             let state = state.clone();
             TestServer::start(move |request| match request.path.as_str() {
-                "/api/v1/health" => {
-                    TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                "/api/v1/health" => crate::test_server::marker_health(),
+                "/api/v1/capabilities" => {
+                    crate::test_server::marker_capabilities(serde_json::json!({}))
                 }
                 "/api/v1/library" => TestResponse::json(200, &library_json(1)),
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
@@ -2907,8 +2914,9 @@ mod tests {
             TestServer::start(move |request| {
                 let state = state.lock().unwrap();
                 match request.path.as_str() {
-                    "/api/v1/health" => {
-                        TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#)
+                    "/api/v1/health" => crate::test_server::marker_health(),
+                    "/api/v1/capabilities" => {
+                        crate::test_server::marker_capabilities(serde_json::json!({}))
                     }
                     "/api/v1/library" if state.0 => TestResponse::json(
                         408,
@@ -2998,13 +3006,15 @@ mod tests {
             std::fs::read(&database).unwrap(),
         );
         let server = TestServer::start(|request| match request.path.as_str() {
-            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.4.11"}"#),
+            "/api/v1/health" => crate::test_server::marker_health(),
             "/api/v1/library" => TestResponse::json(
                 408,
                 r#"{"error_code":"TIMEOUT","message":"library B timed out"}"#,
             ),
             "/api/v1/roots" => TestResponse::json(200, r#"[{"name":"B_ROOT","server_path":"/B"}]"#),
-            "/api/v1/capabilities" => TestResponse::json(404, "{}"),
+            "/api/v1/capabilities" => {
+                crate::test_server::marker_capabilities(serde_json::json!({}))
+            }
             _ => panic!("unexpected request: {}", request.path),
         });
         let client = RemoteClient::new(&server.url, "fixture").unwrap();

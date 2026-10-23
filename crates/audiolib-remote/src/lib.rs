@@ -46,6 +46,8 @@ mod legacy_compatibility_tests;
 mod list_waveforms;
 mod manage;
 mod mapping;
+#[cfg(test)]
+mod marker_matrix_tests;
 mod poll;
 mod probe;
 mod profiles;

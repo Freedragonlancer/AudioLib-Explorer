@@ -1,0 +1,160 @@
+{
+  "$defs": {
+    "ProtocolRange": {
+      "description": "Inclusive API protocol interval.",
+      "properties": {
+        "max": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Embedded application/format catalog, exposed by both client and server.",
+  "properties": {
+    "api_protocols": {
+      "default": [],
+      "description": "Understood HTTP protocol identifiers (`api/v{n}`), kept beside `protocol` during\nthe transition.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "application_version": {
+      "description": "Shared workspace release identity; display, update checks and `blocked_versions`\nonly. Never compared as a range.",
+      "type": "string"
+    },
+    "auto_migrate_application_ranges": {
+      "default": [],
+      "description": "LEGACY compat field, same rules as `direct_use_application_ranges`.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "blocked_versions": {
+      "default": [],
+      "description": "Known-bad application versions refused regardless of markers.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "catalog_revision": {
+      "default": 0,
+      "description": "Informational; never compared for equality.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "database_write_formats": {
+      "default": [],
+      "description": "Complete database formats this application can write.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "direct_use_application_ranges": {
+      "default": [],
+      "description": "LEGACY compat field (Compatibility_Markers.md §4.2): required (no serde default)\nby the 0.6.0–0.7.1 client structs, which fail to parse `/capabilities` without\nit and never reach the 409 upgrade prompt. Emitted only so those clients parse;\nnever read by any admission decision. Removable once 0.7.1 clients are gone.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "features": {
+      "additionalProperties": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "default": {},
+      "description": "Optional capabilities `{name: revision}`. A function is used only when both\nsides declare it at the same revision; a missing one never refuses sync.",
+      "type": "object"
+    },
+    "marker_revision": {
+      "description": "Present on marker-based peers (0.7.2+). Absent: the peer predates markers and\nmust upgrade (Compatibility_Markers.md §4).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "migration_protocols": {
+      "additionalProperties": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "default": {},
+      "description": "Known persistent migration protocols.",
+      "type": "object"
+    },
+    "migration_source_schemas": {
+      "default": [],
+      "description": "Supported owned-conversion schema sources, not permission to mutate them.",
+      "items": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "migration_target_format": {
+      "default": "",
+      "description": "Format produced by a successful Plan B conversion.",
+      "type": "string"
+    },
+    "minimum_sqlite_version": {
+      "default": "",
+      "description": "Display/diagnostics only; each side checks its own linked SQLite at startup\n([`check_linked_sqlite`]).",
+      "type": "string"
+    },
+    "peer_application_ranges": {
+      "default": [],
+      "description": "Declared for peers still doing range checks (they ignore markers); never used\nfor decisions here.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "protocol": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProtocolRange"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Supported API protocol interval; peers are compatible when intervals intersect."
+    },
+    "snapshot_read_formats": {
+      "default": [],
+      "description": "Complete snapshot format identifiers the application can read.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "application_version"
+  ],
+  "title": "CompatibilityManifest",
+  "type": "object"
+}

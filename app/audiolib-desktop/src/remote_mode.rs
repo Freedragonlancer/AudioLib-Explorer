@@ -3831,9 +3831,9 @@ mod tests {
                     // Writer preflight binds mutations to the displayed snapshot.
                     r#"{"library_id":"lib-1","identity_bound_writes":true,"revision":1,"schema_version":5}"#.to_owned()
                 } else if head.starts_with("GET /api/v1/health ") {
-                    r#"{"status":"ok","version":"0.4.11"}"#.to_owned()
+                    serde_json::json!({"status":"ok","version":audiolib_core::compatibility::compatibility_manifest().application_version}).to_string()
                 } else if head.starts_with("GET /api/v1/capabilities ") {
-                    "{}".to_owned()
+                    serde_json::json!({"compatibility":audiolib_core::compatibility::compatibility_manifest()}).to_string()
                 } else {
                     response.clone()
                 };

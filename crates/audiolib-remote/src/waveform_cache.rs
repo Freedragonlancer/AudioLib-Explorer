@@ -181,10 +181,12 @@ mod tests {
         let log = seen.clone();
         let server = TestServer::start(move |request| {
             if request.method == "GET" && request.path == "/api/v1/health" {
-                return TestResponse::json(200, r#"{"status":"ok","version":"0.5.0"}"#);
+                return crate::test_server::marker_health();
             }
             if request.method == "GET" && request.path == "/api/v1/capabilities" {
-                return TestResponse::json(200, r#"{"manage_mode":"all","can_manage":true}"#);
+                return crate::test_server::marker_capabilities(
+                    serde_json::from_str(r#"{"manage_mode":"all","can_manage":true}"#).unwrap(),
+                );
             }
             if request.method == "GET" && request.path == "/api/v1/library" {
                 return TestResponse::json(200, LIBRARY);
