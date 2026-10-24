@@ -35,10 +35,15 @@ fn table_headers_sort_and_dividers_track_absolute_pointer_with_limits_and_reset(
         settle();
         assert!(ui.get_sort_descending());
         assert_eq!(header.accessible_value().as_deref(), Some("descending"));
+        // A third click returns to the default order (relevance, else filename).
+        click(&ui, midpoint(&header));
+        settle();
+        assert_eq!((ui.get_sort_index(), ui.get_sort_descending()), (0, false));
+        assert_eq!(header.accessible_value().as_deref(), Some(""));
     }
     assert_eq!(
         searches.get(),
-        10,
+        15,
         "Each header click admits a new library sort"
     );
 
@@ -85,7 +90,7 @@ fn table_headers_sort_and_dividers_track_absolute_pointer_with_limits_and_reset(
     near(ui.get_table_duration_width(), 80.0);
     assert_eq!(
         searches.get(),
-        10,
+        15,
         "Resizing must retain the current result order"
     );
     ui.hide().unwrap();
@@ -483,7 +488,9 @@ fn child_table_controller_preferences() {
                     timer_phase.set(1);
                 }
                 1 => {
-                    assert!(!ui.get_sort_descending());
+                    // From descending, the header returns to the default order, which
+                    // without a query is filename ascending.
+                    assert_eq!((ui.get_sort_index(), ui.get_sort_descending()), (0, false));
                     assert_names(&ui, 0..200);
                     ui.invoke_page_requested(1);
                     timer_phase.set(2);
@@ -491,6 +498,8 @@ fn child_table_controller_preferences() {
                 2 => {
                     assert_eq!(timer_controller.request.lock().unwrap().offset, 200);
                     assert_names(&ui, 200..205);
+                    // Ascending, then descending; only the latest request publishes.
+                    click(&ui, midpoint(&element(&ui, "table-name-header")));
                     click(&ui, midpoint(&element(&ui, "table-name-header")));
                     timer_phase.set(3);
                 }
