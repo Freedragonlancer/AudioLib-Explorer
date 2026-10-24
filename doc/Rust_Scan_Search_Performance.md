@@ -43,6 +43,8 @@ AudioLibCli.exe --database TEST_DATABASE scan SOURCE_DIRECTORY
 cargo run --release --locked -p audiolib-db --bin search-benchmark -- --records 1000000 --queries 100 --folder-facets --db NEW_BENCHMARK_DATABASE
 cargo run --release --locked -p audiolib-db --bin search-benchmark -- --existing-db BENCHMARK_DATABASE --queries 100 --folder-facets
 cargo run --release --locked -p audiolib-db --bin search-diagnose -- BENCHMARK_DATABASE
+cargo run --release --locked -p audiolib-db --bin search-benchmark -- --existing-db BENCHMARK_DATABASE --queries 200 --folder-facets --tag-exclusion-cases
+cargo run --release --locked -p audiolib-db --bin tag-exclude-diagnose -- BENCHMARK_DATABASE explosion door
 ```
 
 Regression tests compare serial/4/16-worker extraction, unchanged/error counts, pause/resume/cancel, cross-process exclusion, Metadata preservation, every sort/visibility combination against direct SQL, and ID3 streamed/full decoding including malformed frames. A metered-reader test verifies that a 1 MB artwork frame needs fewer than 100 bytes of actual reads while retaining subsequent text. Required default/ASIO checks, release regressions and both package/installation validations must pass before delivery.
