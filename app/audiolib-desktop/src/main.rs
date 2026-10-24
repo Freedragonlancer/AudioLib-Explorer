@@ -13,6 +13,7 @@ mod progressive_waveform;
 #[cfg(test)]
 mod responsive_layout_tests;
 mod startup;
+mod tag_chips;
 mod theme;
 #[cfg(test)]
 mod ui_review_tests;
@@ -336,7 +337,7 @@ fn run() -> Result<()> {
                     ui.invoke_check_page_requested(true);
                     ui.set_batch_visible(true);
                 }
-                "filters" => ui.set_filters_visible(true),
+                "filters" | "filter-tags" => ui.set_filters_visible(true),
                 "import" => ui.set_import_visible(true),
                 "data-source" => ui.invoke_open_data_source(),
                 "server-settings" => {
@@ -571,6 +572,11 @@ fn run() -> Result<()> {
                                 slint::LogicalPosition::new(480.0, 310.0),
                             );
                         }
+                    }
+                    if smoke_view == "filter-tags" {
+                        // Mixed include/exclude chips through the same path as typing + Enter.
+                        ui.set_tag_draft("engine -interior -rain \"pass by\"".into());
+                        ui.invoke_apply_filters();
                     }
                     if smoke_view == "folder-context" {
                         use slint::Model;

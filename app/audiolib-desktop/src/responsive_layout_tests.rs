@@ -229,7 +229,7 @@ fn pane_preferences_restore_after_window_resize_and_details_toggle() {
 }
 
 #[test]
-fn filters_and_result_tags_adapt_to_the_remaining_center_width() {
+fn filter_page_and_result_tags_adapt_to_the_remaining_widths() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {
         let ui = window(chinese, 2200.0, 900.0);
@@ -240,7 +240,14 @@ fn filters_and_result_tags_adapt_to_the_remaining_center_width() {
             tags: tag.into(),
             ..Default::default()
         }])));
+        let details_list = element(&ui, "AppWindow::results-panel").size().height;
         ui.set_filters_visible(true);
+        settle();
+        // Filters share the sidebar instead of pushing the sound list down.
+        near(
+            element(&ui, "AppWindow::results-panel").size().height,
+            details_list,
+        );
         drag(&ui, divider_label(chinese, false), 2000.0);
         drag(&ui, divider_label(chinese, true), -2000.0);
         assert!(
@@ -257,21 +264,18 @@ fn filters_and_result_tags_adapt_to_the_remaining_center_width() {
                 .next()
                 .is_none()
         );
-        let results = element(&ui, "AppWindow::results-column");
-        let left = results.absolute_position().x;
-        let right = left + results.size().width;
+        let bounds = |id: &str| {
+            let pane = element(&ui, id);
+            let origin = pane.absolute_position();
+            (origin.x, origin.x + pane.size().width)
+        };
+        let (left, right) = bounds("AppWindow::results-column");
         let toolbar_labels = if chinese {
-            ["筛选 −", "详情"]
+            ["筛选", "详情"]
         } else {
-            ["Filters −", "Details"]
+            ["Filters", "Details"]
         };
-        let filter_labels = if chinese {
-            ["有标签", "重置", "应用"]
-        } else {
-            ["Tagged only", "Reset", "Apply"]
-        };
-        scroll_to_bottom(&ui, "AppWindow::filters-scroll");
-        for label in toolbar_labels.into_iter().chain(filter_labels) {
+        for label in toolbar_labels {
             let control = labelled(&ui, label);
             let origin = control.absolute_position();
             assert!(
@@ -279,6 +283,44 @@ fn filters_and_result_tags_adapt_to_the_remaining_center_width() {
                 "{label} extends outside the narrowed results column"
             );
         }
+        let (left, right) = bounds("AppWindow::details-sidebar");
+        let filter_labels = if chinese {
+            [
+                "标签筛选：+ 包含，- 排除，回车添加",
+                "颜色 #RRGGBB",
+                "有标签",
+                "重置",
+                "应用",
+            ]
+        } else {
+            [
+                "Tag filter: + include, - exclude, Enter adds",
+                "Color #RRGGBB",
+                "Tagged only",
+                "Reset",
+                "Apply",
+            ]
+        };
+        scroll_to_bottom(&ui, "AppWindow::filters-scroll");
+        for label in filter_labels {
+            let control = labelled(&ui, label);
+            let origin = control.absolute_position();
+            assert!(
+                origin.x >= left - 1.0 && origin.x + control.size().width <= right + 1.0,
+                "{label} extends outside the narrowed sidebar"
+            );
+        }
+        // Selecting a sound keeps the filter page; the toolbar switch toggles the sidebar.
+        ui.set_has_selection(true);
+        ui.set_selected_id("42".into());
+        settle();
+        assert!(ui.get_inspector_visible() && ui.get_filters_visible());
+        click_label(&ui, toolbar_labels[0]);
+        assert!(!ui.get_inspector_visible());
+        click_label(&ui, toolbar_labels[1]);
+        assert!(ui.get_inspector_visible() && !ui.get_filters_visible());
+        click_label(&ui, toolbar_labels[0]);
+        assert!(ui.get_inspector_visible() && ui.get_filters_visible());
         ui.window().set_size(slint::LogicalSize::new(2200.0, 900.0));
         settle();
         assert!(

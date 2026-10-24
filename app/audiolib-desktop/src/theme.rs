@@ -25,6 +25,8 @@ pub(crate) struct Palette {
     pub checked: u32,
     pub alternate: u32,
     pub warning: u32,
+    pub danger: u32,
+    pub danger_surface: u32,
     pub player: u32,
     pub player_border: u32,
     pub tooltip: u32,
@@ -49,6 +51,8 @@ pub(crate) const DEFAULT_PALETTE: Palette = Palette {
     checked: 0xff35_4744,
     alternate: 0xff22_282e,
     warning: 0xffc3_b48e,
+    danger: 0xffcf_9696,
+    danger_surface: 0xff3a_2a2d,
     player: 0xff23_2a30,
     player_border: 0xff46_5059,
     tooltip: 0xff14_171c,
@@ -115,6 +119,8 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     theme.set_checked(color(palette.checked));
     theme.set_alternate(color(palette.alternate));
     theme.set_warning(color(palette.warning));
+    theme.set_danger(color(palette.danger));
+    theme.set_danger_surface(color(palette.danger_surface));
     theme.set_player(color(palette.player));
     theme.set_player_border(color(palette.player_border));
     theme.set_tooltip(color(palette.tooltip));

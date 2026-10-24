@@ -35,6 +35,10 @@ export struct SourceRow { id: string, name: string, subtitle: string, kind: int,
 export struct ServerRootRow { name: string, path: string, status: string, offline: bool, scanning: bool, file-count: string, missing: string, last-scan: string, message: string }
 export struct RemoteFolderRow { name: string, path: string }
 export struct RemoteBreadcrumbRow { name: string, path: string }
+// One include/exclude filter term; `index` is its position among all terms.
+export struct TagChip { text: string, exclude: bool, index: int }
+// Chips that fit one line of the filter sidebar; rows are wrapped in Rust (tag_chips.rs).
+export struct TagChipRow { chips: [TagChip] }
 
 component Action inherits Rectangle {
     in property <string> label;
@@ -76,6 +80,109 @@ component Action inherits Rectangle {
 }
 
 component Label inherits Text { color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; }
+
+// A panel switch with an optional count badge (the number of active filters). Inactive
+// switches stay borderless like subtle actions; the active one uses the selected look.
+component PanelToggle inherits Rectangle {
+    in property <string> label;
+    in property <string> action-label: root.label;
+    in property <bool> active: false;
+    in property <int> count: 0;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 36px * Theme.ui-scale;
+    min-height: 26px * Theme.ui-scale;
+    accessible-role: button;
+    accessible-label: root.action-label;
+    accessible-description: root.count > 0 ? root.count + "" : "";
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: toggle-focus;
+    border-radius: 5px * Theme.ui-scale;
+    background: root.active ? Theme.selected : (toggle-hit.has-hover ? Theme.hover : transparent);
+    border-width: 1px;
+    border-color: toggle-focus.has-focus || root.active ? Theme.accent : transparent;
+    opacity: root.enabled ? 1 : 0.42;
+    HorizontalLayout { alignment: center; spacing: 5px * Theme.ui-scale; padding-left: 6px * Theme.ui-scale; padding-right: 6px * Theme.ui-scale;
+        Text { text: root.label; color: root.active ? Theme.ink : Theme.dim; font-size: Theme.font(12); font-weight: root.active ? 600 : 400; vertical-alignment: center; }
+        if root.count > 0: Rectangle { y: (parent.height - self.height) / 2; height: 16px * Theme.ui-scale; min-width: 16px * Theme.ui-scale; border-radius: 8px * Theme.ui-scale; background: Theme.accent;
+            HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale;
+                Text { text: root.count; color: Theme.on-accent; font-size: Theme.font(10); font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+    }
+    toggle-focus := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            reject
+        }
+    }
+    toggle-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// One page of the right sidebar (筛选 / 详情).
+component SidebarTab inherits PanelToggle { accessible-role: tab; accessible-item-selectable: true; accessible-item-selected: root.active; }
+
+// The round sign or remove control inside a tag chip.
+component ChipButton inherits Rectangle {
+    in property <string> glyph;
+    in property <color> glyph-color;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 20px * Theme.ui-scale;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: chip-focus;
+    border-radius: 10px * Theme.ui-scale;
+    background: chip-hit.has-hover || chip-focus.has-focus ? Theme.hover : transparent;
+    Text { text: root.glyph; color: root.glyph-color; font-size: Theme.font(13); font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    chip-focus := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            reject
+        }
+    }
+    chip-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// An include (+, accent) or exclude (−, struck through) filter term. The sign switches
+// the side and × removes the term; long terms elide inside the sidebar width.
+component TagChipView inherits Rectangle {
+    in property <string> text;
+    in property <bool> exclude;
+    in property <bool> chinese;
+    in property <bool> enabled: true;
+    callback toggle;
+    callback remove;
+    height: 24px * Theme.ui-scale;
+    border-radius: 12px * Theme.ui-scale;
+    border-width: 1px;
+    background: root.exclude ? Theme.danger-surface : Theme.selected;
+    border-color: root.exclude ? Theme.danger : Theme.accent;
+    accessible-role: list-item;
+    accessible-label: (root.exclude ? (root.chinese ? "排除：" : "Exclude: ") : (root.chinese ? "包含：" : "Include: ")) + root.text;
+    HorizontalLayout { padding-left: 2px * Theme.ui-scale; padding-right: 2px * Theme.ui-scale; spacing: 1px * Theme.ui-scale;
+        ChipButton {
+            enabled: root.enabled; glyph: root.exclude ? "−" : "+"; glyph-color: root.exclude ? Theme.danger : Theme.accent;
+            label: root.exclude ? (root.chinese ? "改为包含 " : "Include ") + root.text : (root.chinese ? "改为排除 " : "Exclude ") + root.text;
+            clicked => { root.toggle(); }
+        }
+        chip-text := Text { text: root.text; color: root.exclude ? Theme.dim : Theme.ink; font-size: Theme.font(11); overflow: elide; vertical-alignment: center; }
+        ChipButton {
+            enabled: root.enabled; glyph: "×"; glyph-color: Theme.dim;
+            label: (root.chinese ? "移除标签 " : "Remove tag ") + root.text;
+            clicked => { root.remove(); }
+        }
+    }
+    if root.exclude: Rectangle { x: chip-text.x; y: chip-text.y + chip-text.height / 2; width: chip-text.width; height: 1px; background: Theme.danger; }
+}
 
 // A remote directory is a keyboard-accessible navigation action, never a local path.
 component RemoteFolderAction inherits Rectangle {
@@ -349,7 +456,7 @@ component HelpPanel inherits FocusScope {
         Rectangle { width: 640px * Theme.ui-scale; height: 470px * Theme.ui-scale; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 12px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
             VerticalLayout { padding: 28px * Theme.ui-scale; spacing: 16px * Theme.ui-scale;
                 Text { text: root.chinese ? "快捷键与基本操作" : "Shortcuts and basics"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }
-                Text { text: root.chinese ? "Ctrl Shift I   添加声音文件夹     ·     Ctrl D   音效库管理\nCtrl F   搜索     ·     Ctrl S   保存 Metadata\nCtrl I   显示 / 隐藏详情     ·     F5   刷新素材库\nCtrl Q   保存草稿并退出     ·     Esc   关闭当前面板" : "Ctrl Shift I   Add sound folder     ·     Ctrl D   Manage sound library\nCtrl F   Search     ·     Ctrl S   Save Metadata\nCtrl I   Show / hide details     ·     F5   Refresh library\nCtrl Q   Save drafts and exit     ·     Esc   Close current panel"; color: Theme.ink; wrap: word-wrap; }
+                Text { text: root.chinese ? "Ctrl Shift I   添加声音文件夹     ·     Ctrl D   音效库管理\nCtrl F   搜索     ·     Ctrl S   保存 Metadata\nCtrl I   显示 / 隐藏侧栏     ·     F5   刷新素材库\nCtrl Q   保存草稿并退出     ·     Esc   关闭当前面板" : "Ctrl Shift I   Add sound folder     ·     Ctrl D   Manage sound library\nCtrl F   Search     ·     Ctrl S   Save Metadata\nCtrl I   Show / hide side panel     ·     F5   Refresh library\nCtrl Q   Save drafts and exit     ·     Esc   Close current panel"; color: Theme.ink; wrap: word-wrap; }
                 Text { text: root.chinese ? "新增声音：通过文件菜单添加文件夹，扫描其中的 WAV / BWF。\n批量编辑：Ctrl 单击切换选择，Shift 单击连续选择，再使用批量标注。\n移除：编辑菜单可移除所选记录、选择记录或当前目录；仅删除数据库记录及标注，磁盘上的 WAV 会保留。" : "Add sounds: use File to add a folder and scan its WAV / BWF files.\nBatch edit: Ctrl-click to toggle or Shift-click to select a range, then choose Edit selected records in Edit.\nRemove: Edit can remove the selected record, selected records or current folder. Library records and annotations are removed; WAV files remain on disk."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: root.chinese ? "日常更新用增量扫描；整理文件后用全量扫描检查缺失。\n修复引用：音效库 → 查看缺失文件，选中声音后在详情面板选择新位置。标签和备注会保留。\n备份与数据库维护收在音效库管理底部的“高级维护”中。" : "Use incremental scans for daily updates; full scans check missing files after reorganizing a folder.\nRepair: Library → Missing files, select a sound, then locate it in Sound details. Annotations are kept.\nBackups and database tools are under Advanced maintenance in library management."; color: Theme.dim; wrap: word-wrap; }
                 close-action := Action { height: 34px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
@@ -432,8 +539,24 @@ export component AppWindow inherits Window {
     in property <string> page-label: "1";
     in-out property <bool> favorites-only: false;
     in-out property <bool> tagged-only: false;
+    // Canonical include/exclude terms (`engine, -interior`); the chips below mirror it.
     in-out property <string> tag-filter: "";
+    changed tag-filter => { root.tag-chips-relayout(); }
+    // Typed terms not yet added; Enter or Apply commits them.
+    in-out property <string> tag-draft: "";
+    in property <[TagChipRow]> tag-chip-rows: [];
+    in property <int> tag-term-count: 0;
+    // Chip wrapping inputs read by Rust: the chip area width and one measured chip.
+    in-out property <length> tag-chip-area-width: 0px;
+    changed tag-chip-area-width => { root.tag-chips-relayout(); }
+    out property <length> tag-chip-spacing: 4px * Theme.ui-scale;
+    in-out property <string> tag-probe-text: "";
+    out property <length> tag-probe-width: tag-probe.preferred-width;
     in-out property <string> color-filter: "";
+    // Rust validates the typed hex for the swatch beside the color field.
+    in property <color> color-filter-swatch: transparent;
+    in property <bool> color-filter-valid: false;
+    changed color-filter => { root.color-filter-edited(); }
     in-out property <int> sample-filter: 0;
     in-out property <int> bit-filter: 0;
     in-out property <int> channel-filter: 0;
@@ -652,6 +775,13 @@ export component AppWindow inherits Window {
     callback search-requested(bool);
     callback filter-requested();
     callback reset-filters();
+    // Commit typed tag terms, then search with every filter (Apply, or Enter in a field).
+    callback apply-filters();
+    callback tag-term-toggled(int);
+    // -1 removes the last term (Backspace in the empty tag field).
+    callback tag-term-removed(int);
+    callback tag-chips-relayout();
+    callback color-filter-edited();
     callback select-requested(int);
     callback audition-requested(int);
     callback folder-requested(int);
@@ -1005,8 +1135,27 @@ export component AppWindow inherits Window {
     private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - (root.inspector-visible ? 24px * Theme.ui-scale : 12px * Theme.ui-scale);
     out property <length> sidebar-width: clamp(root.sidebar-preferred-width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? 240px * Theme.ui-scale : 0px)));
     out property <length> inspector-width: clamp(root.inspector-preferred-width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width));
+    // The right sidebar holds two pages: `inspector-visible` opens the sidebar and
+    // `filters-visible` selects the filter page instead of the sound details page.
+    // Both persist; selecting a sound never switches the page.
     in-out property <bool> filters-visible: false;
     in-out property <bool> inspector-visible: true;
+    // A toolbar switch opens its page, or closes the sidebar when that page is showing.
+    function show-sidebar-page(filters: bool) {
+        if root.inspector-visible && root.filters-visible == filters {
+            root.inspector-visible = false;
+        } else {
+            root.filters-visible = filters;
+            root.inspector-visible = true;
+        }
+    }
+    function show-details-page() {
+        root.filters-visible = false;
+        root.inspector-visible = true;
+    }
+    // Three format filters share one row once the sidebar is wide enough for their labels.
+    private property <bool> filters-wide: root.inspector-width >= 380px * Theme.ui-scale;
+    private property <[string]> channel-filter-labels: root.chinese ? ["全部声道", "单声道", "立体声", "4 声道", "6 声道", "8 声道"] : ["Channels", "Mono", "Stereo", "4 channels", "6 channels", "8 channels"];
     in-out property <bool> import-visible: false;
     in-out property <bool> notes-visible: false;
     in-out property <bool> source-metadata-visible: false;
@@ -1018,7 +1167,7 @@ export component AppWindow inherits Window {
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
-    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? 1 : 0) + (root.color-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
+    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
     callback file-action-requested(string, int);
     callback folder-action-requested(string, int);
     callback selection-step-requested(int);
@@ -1079,6 +1228,7 @@ export component AppWindow inherits Window {
         else if root.help-visible { root.help-visible = false; }
         else if root.debug-visible { root.debug-visible = false; }
         else if root.settings-visible && !root.output-applying { root.settings-visible = false; }
+        // Leaving the filter page returns the sidebar to the sound details it replaced.
         else { root.filters-visible = false; }
     }
     function focus-library-modal() {
@@ -1117,6 +1267,7 @@ export component AppWindow inherits Window {
         root.favorites-only = false;
         root.tagged-only = false;
         root.tag-filter = "";
+        root.tag-draft = "";
         root.color-filter = "";
         root.sample-filter = 0;
         root.bit-filter = 0;
@@ -1124,7 +1275,8 @@ export component AppWindow inherits Window {
         root.duration-min = "";
         root.duration-max = "";
         root.visibility-index = 1;
-        root.inspector-visible = true;
+        // Repairs start from the details page.
+        root.show-details-page();
         root.all-library-requested();
     }
     public function show-file-menu(row: AudioRow, position: Point) {
@@ -1248,6 +1400,8 @@ export component AppWindow inherits Window {
         }
     }
     clipboard-input := TextInput { visible: false; }
+    // Measures one tag chip for the Rust row wrapping (tag-probe-width); never shown.
+    tag-probe := TagChipView { visible: false; enabled: false; text: root.tag-probe-text; chinese: root.chinese; }
     init => { Palette.color-scheme = ColorScheme.dark; root.content-width = self.width - 32px * Theme.ui-scale; }
     MenuBar {
         Menu { title: root.chinese ? "文件" : "File"; enabled: root.menu-ready;
@@ -1258,7 +1412,7 @@ export component AppWindow inherits Window {
             MenuItem { title: root.chinese ? "退出" : "Exit"; enabled: root.menu-ready; shortcut: @keys(Control + Q); activated => { root.exit-requested(); } }
         }
         Menu { title: root.chinese ? "编辑" : "Edit"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "查看 / 编辑 Metadata" : "View / edit Metadata"; enabled: root.menu-ready && root.has-selection; activated => { root.inspector-visible = true; } }
+            MenuItem { title: root.chinese ? "查看 / 编辑 Metadata" : "View / edit Metadata"; enabled: root.menu-ready && root.has-selection; activated => { root.show-details-page(); } }
             MenuItem { title: (root.chinese ? "保存 Metadata" : "Save Metadata"); enabled: root.menu-ready && root.has-selection && root.metadata-dirty; shortcut: @keys(Control + S); activated => { root.save-metadata-requested(); } }
             MenuItem { title: (root.chinese ? "批量标注选择记录…" : "Edit selected records…"); enabled: root.menu-ready && root.checked-count > 0; activated => { root.open-batch(); } }
             MenuSeparator { }
@@ -1294,8 +1448,9 @@ export component AppWindow inherits Window {
         }
         Menu { title: root.chinese ? "视图" : "View"; enabled: root.menu-ready;
             MenuItem { title: root.chinese ? "搜索" : "Search"; enabled: root.menu-ready; shortcut: @keys(Control + F); activated => { search-input.focus(); } }
-            MenuItem { title: root.chinese ? "显示详情面板" : "Show details panel"; enabled: root.menu-ready; shortcut: @keys(Control + I); checkable: true; checked <=> root.inspector-visible; }
-            MenuItem { title: root.chinese ? "显示筛选面板" : "Show filters panel"; enabled: root.menu-ready; checkable: true; checked <=> root.filters-visible; }
+            MenuItem { title: root.chinese ? "显示侧栏（筛选 / 详情）" : "Show side panel (filters / details)"; enabled: root.menu-ready; shortcut: @keys(Control + I); checkable: true; checked <=> root.inspector-visible; }
+            MenuItem { title: root.chinese ? "显示筛选" : "Show filters"; enabled: root.menu-ready; activated => { root.filters-visible = true; root.inspector-visible = true; } }
+            MenuItem { title: root.chinese ? "显示声音详情" : "Show sound details"; enabled: root.menu-ready; activated => { root.show-details-page(); } }
             MenuItem { title: root.chinese ? "重置筛选" : "Reset filters"; enabled: root.menu-ready; activated => { root.reset-filters(); } }
             MenuSeparator { }
             MenuItem { title: root.chinese ? "全部声音" : "All sounds"; enabled: root.menu-ready; activated => { root.favorites-only = false; root.all-library-requested(); } }
@@ -1491,14 +1646,14 @@ export component AppWindow inherits Window {
                     if root.checked-count > 1 && root.wide-layout: Action { width: 64px * Theme.ui-scale; subtle: true; enabled: !root.background-blocked && root.removal-allowed; label: root.chinese ? "移除" : "Remove"; clicked => { root.library-action(11); } }
                     if root.checked-count > 1: Rectangle { horizontal-stretch: 1; }
                     ComboBox { width: 116px * Theme.ui-scale; model: root.chinese ? ["存在的文件", "缺失的文件", "全部记录"] : ["Present files", "Missing files", "All records"]; current-index <=> root.visibility-index; selected => { root.filter-requested(); } }
-                    Action { width: 82px * Theme.ui-scale; subtle: true; active: root.filters-visible || root.filter-count > 0; label: (root.chinese ? "筛选" : "Filters") + (root.filter-count > 0 ? " · " + root.filter-count : "") + (root.filters-visible ? " −" : " +"); clicked => { root.filters-visible = !root.filters-visible; } }
+                    PanelToggle { width: 82px * Theme.ui-scale; height: 30px * Theme.ui-scale; active: root.inspector-visible && root.filters-visible; count: root.filter-count; label: root.chinese ? "筛选" : "Filters"; clicked => { root.show-sidebar-page(true); } }
                     ComboBox {
                         width: 116px * Theme.ui-scale;
                         model: root.chinese ? ["相关度", "文件名", "时长", "采样率", "声道", "标签", "修改时间"] : ["Relevance", "Filename", "Duration", "Sample rate", "Channels", "Tags", "Modified"];
                         current-index <=> root.sort-index;
                         selected => { root.sort-descending = false; root.filter-requested(); root.table-layout-changed(); }
                     }
-                    Action { width: 62px * Theme.ui-scale; subtle: true; active: root.inspector-visible; label: root.chinese ? "详情" : "Details"; clicked => { root.inspector-visible = !root.inspector-visible; } }
+                    PanelToggle { width: 62px * Theme.ui-scale; height: 30px * Theme.ui-scale; active: root.inspector-visible && !root.filters-visible; label: root.chinese ? "详情" : "Details"; clicked => { root.show-sidebar-page(false); } }
                 }
                 if root.crumbs.length > 0: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
                     Action { width: 64px * Theme.ui-scale; subtle: true; label: root.chinese ? "素材库" : "Library"; clicked => { root.all-library-requested(); } }
@@ -1512,35 +1667,8 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if root.filters-visible: Rectangle { height: root.short-layout ? 100px * Theme.ui-scale : 156px * Theme.ui-scale; background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 6px * Theme.ui-scale;
-                    filters-scroll := ScrollView { min-height: 0px; viewport-height: 156px * Theme.ui-scale;
-                    VerticalLayout { padding: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                        HorizontalLayout { spacing: 6px * Theme.ui-scale;
-                            ComboBox { horizontal-stretch: 1; model: root.chinese ? ["全部采样率", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz", "192 kHz"] : ["Sample rate", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz", "192 kHz"]; current-index <=> root.sample-filter; selected => { root.filter-requested(); } }
-                            ComboBox { horizontal-stretch: 1; model: root.chinese ? ["全部位深", "16 bit", "24 bit", "32 bit"] : ["Bit depth", "16 bit", "24 bit", "32 bit"]; current-index <=> root.bit-filter; selected => { root.filter-requested(); } }
-                            ComboBox { horizontal-stretch: 1; model: root.chinese ? ["全部声道", "单声道", "立体声", "4 声道", "6 声道", "8 声道"] : ["Channels", "Mono", "Stereo", "4 channels", "6 channels", "8 channels"]; current-index <=> root.channel-filter; selected => { root.filter-requested(); } }
-                        }
-                        HorizontalLayout { spacing: 6px * Theme.ui-scale;
-                            Label { text: root.chinese ? "时长 / 秒" : "Seconds"; }
-                            LineEdit { horizontal-stretch: 1; min-width: 0px; text <=> root.duration-min; placeholder-text: root.chinese ? "最短" : "Min"; accepted => { root.filter-requested(); } }
-                            Label { text: "–"; }
-                            LineEdit { horizontal-stretch: 1; min-width: 0px; text <=> root.duration-max; placeholder-text: root.chinese ? "最长" : "Max"; accepted => { root.filter-requested(); } }
-                        }
-                        HorizontalLayout { spacing: 6px * Theme.ui-scale;
-                            LineEdit { horizontal-stretch: 1; min-width: 0px; text <=> root.tag-filter; placeholder-text: root.chinese ? "标签包含…" : "Tags contain…"; accepted => { root.filter-requested(); } }
-                            LineEdit { min-width: 118px * Theme.ui-scale; max-width: 118px * Theme.ui-scale; text <=> root.color-filter; placeholder-text: root.chinese ? "颜色 #RRGGBB" : "Color #RRGGBB"; accepted => { root.filter-requested(); } }
-                        }
-                        HorizontalLayout { spacing: 6px * Theme.ui-scale;
-                            CheckBox { text: root.chinese ? "有标签" : "Tagged only"; checked <=> root.tagged-only; toggled => { root.filter-requested(); } }
-                            Rectangle { horizontal-stretch: 1; }
-                            Action { width: 58px * Theme.ui-scale; label: root.chinese ? "重置" : "Reset"; clicked => { root.reset-filters(); } }
-                            Action { width: 64px * Theme.ui-scale; primary: true; label: root.chinese ? "应用" : "Apply"; clicked => { root.filter-requested(); } }
-                        }
-                    }
-                }
-                }
                 // Above 1.0, keeps the sound list usable; the main view scrolls for the rest. At 1.0 the
-                // compact 1080x700 layout (filters open) keeps fitting without scrolling.
+                // compact 1080x700 layout keeps fitting without scrolling; filters live in the sidebar.
                 results-panel := Rectangle { vertical-stretch: 1; min-height: root.results-panel-min-height; clip: true; border-width: 1px; border-color: Theme.border; border-radius: 7px * Theme.ui-scale; background: Theme.panel;
                     VerticalLayout { spacing: 0px;
                         Rectangle { height: 33px * Theme.ui-scale; background: Theme.raised; clip: true;
@@ -1742,8 +1870,7 @@ export component AppWindow inherits Window {
                                 changed viewport-x => { if root.table-empty { root.table-viewport-x = self.viewport-x; } }
                                 Rectangle { width: root.table-content-size; height: empty-result-list.visible-height; }
                             }
-                            if root.rows.length == 0 && root.short-layout && root.filters-visible: Text { text: root.chinese ? "没有匹配声音 · 调整或重置筛选" : "No matching sounds · Adjust or reset filters"; color: Theme.dim; font-size: Theme.font(11); horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
-                            if root.rows.length == 0 && (!root.short-layout || !root.filters-visible): VerticalLayout { padding: 24px * Theme.ui-scale; alignment: center; spacing: 12px * Theme.ui-scale;
+                            if root.rows.length == 0: VerticalLayout { padding: 24px * Theme.ui-scale; alignment: center; spacing: 12px * Theme.ui-scale;
                                 Text { text: root.searching ? (root.chinese ? "正在搜索…" : "Searching…") : (root.chinese ? "这里还没有声音" : "No sounds in this view"); color: Theme.ink; horizontal-alignment: center; font-size: Theme.font(18); }
                                 Label { text: root.visibility-index == 1 ? (root.chinese ? "当前仅显示缺失文件，没有匹配的记录。" : "No matching missing files. Only missing records are shown.") : root.query != "" || root.filter-count > 0 || root.favorites-only || root.selected-folder-path != "" ? (root.chinese ? "当前搜索、目录或筛选没有匹配的声音。" : "No sounds match the current search, folder or filters.") : (root.chinese ? "音效库中还没有声音。添加 WAV 文件夹开始使用。" : "Your library has no sounds yet. Add a WAV folder to get started."); horizontal-alignment: center; wrap: word-wrap; }
                                 Action { width: 140px * Theme.ui-scale; label: root.chinese ? "清除搜索和筛选" : "Clear search & filters"; clicked => { root.query = ""; root.favorites-only = false; root.reset-filters(); root.all-library-requested(); } }
@@ -1776,17 +1903,104 @@ export component AppWindow inherits Window {
             }
             if root.inspector-visible: details-sidebar := Rectangle { width: root.inspector-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
                 VerticalLayout { padding: 10px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                    HorizontalLayout { height: 30px * Theme.ui-scale;
-                        Text { horizontal-stretch: 1; text: root.chinese ? "声音详情" : "Sound details"; color: Theme.ink; font-size: Theme.font(13); font-weight: 600; vertical-alignment: center; }
-                        if root.has-selection: Action { width: 36px * Theme.ui-scale; subtle: true; active: root.edit-favorite; enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked; label: root.edit-favorite ? "★" : "☆"; action-label: root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "收藏" : "Add to favorites"); clicked => { root.edit-favorite = !root.edit-favorite; root.metadata-dirty = true; root.metadata-edited(); } }
-                        Action { width: 36px * Theme.ui-scale; subtle: true; label: "×"; clicked => { root.inspector-visible = false; } }
+                    HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
+                        Rectangle { horizontal-stretch: 1; min-width: 0px; background: Theme.raised; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
+                            accessible-role: tab-list;
+                            HorizontalLayout { padding: 1px; spacing: 2px * Theme.ui-scale;
+                                SidebarTab { horizontal-stretch: 1; active: root.filters-visible; count: root.filter-count; label: root.chinese ? "筛选" : "Filters"; action-label: root.chinese ? "筛选页" : "Filters page"; clicked => { root.filters-visible = true; } }
+                                SidebarTab { horizontal-stretch: 1; active: !root.filters-visible; label: root.chinese ? "详情" : "Details"; action-label: root.chinese ? "声音详情页" : "Sound details page"; clicked => { root.filters-visible = false; } }
+                            }
+                        }
+                        if !root.filters-visible && root.has-selection: Action { width: 36px * Theme.ui-scale; subtle: true; active: root.edit-favorite; enabled: !root.background-blocked && !root.remote-writes-blocked && !root.metadata-writes-blocked; label: root.edit-favorite ? "★" : "☆"; action-label: root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "收藏" : "Add to favorites"); clicked => { root.edit-favorite = !root.edit-favorite; root.metadata-dirty = true; root.metadata-edited(); } }
+                        Action { width: 36px * Theme.ui-scale; subtle: true; label: "×"; action-label: root.chinese ? "收起侧栏" : "Close side panel"; clicked => { root.inspector-visible = false; } }
                     }
-                    if !root.has-selection: VerticalLayout { spacing: 6px * Theme.ui-scale; padding-top: 12px * Theme.ui-scale;
+                    if root.filters-visible: filters-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
+                        VerticalLayout { spacing: 12px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
+                            VerticalLayout { spacing: 4px * Theme.ui-scale;
+                                Label { height: 16px * Theme.ui-scale; text: root.chinese ? "格式" : "FORMAT"; font-size: Theme.font(10); }
+                                HorizontalLayout { spacing: 6px * Theme.ui-scale;
+                                    ComboBox { horizontal-stretch: 1; min-width: 0px; preferred-width: 0px; model: root.chinese ? ["全部采样率", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz", "192 kHz"] : ["Sample rate", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz", "192 kHz"]; current-index <=> root.sample-filter; selected => { root.filter-requested(); } }
+                                    ComboBox { horizontal-stretch: 1; min-width: 0px; preferred-width: 0px; model: root.chinese ? ["全部位深", "16 bit", "24 bit", "32 bit"] : ["Bit depth", "16 bit", "24 bit", "32 bit"]; current-index <=> root.bit-filter; selected => { root.filter-requested(); } }
+                                    if root.filters-wide: ComboBox { horizontal-stretch: 1; min-width: 0px; preferred-width: 0px; model: root.channel-filter-labels; current-index <=> root.channel-filter; selected => { root.filter-requested(); } }
+                                }
+                                // Narrow sidebars keep the same column grid on a second row. The row
+                                // itself stays unconditional: a conditional layout row here receives
+                                // the page's free height. The page width is stored by the tag label
+                                // below (binding to this row's own width loops through the viewport).
+                                HorizontalLayout { alignment: start;
+                                    if !root.filters-wide: ComboBox { width: max(0px, root.tag-chip-area-width - 6px * Theme.ui-scale) / 2; model: root.channel-filter-labels; current-index <=> root.channel-filter; selected => { root.filter-requested(); } }
+                                }
+                            }
+                            VerticalLayout { spacing: 4px * Theme.ui-scale;
+                                Label { height: 16px * Theme.ui-scale; text: root.chinese ? "时长（秒）" : "DURATION (SECONDS)"; font-size: Theme.font(10); }
+                                HorizontalLayout { spacing: 6px * Theme.ui-scale;
+                                    LineEdit { horizontal-stretch: 1; min-width: 0px; input-label: root.chinese ? "最短时长（秒）" : "Minimum duration (seconds)"; text <=> root.duration-min; placeholder-text: root.chinese ? "最短" : "Min"; accepted => { root.apply-filters(); } }
+                                    Label { text: "–"; }
+                                    LineEdit { horizontal-stretch: 1; min-width: 0px; input-label: root.chinese ? "最长时长（秒）" : "Maximum duration (seconds)"; text <=> root.duration-max; placeholder-text: root.chinese ? "最长" : "Max"; accepted => { root.apply-filters(); } }
+                                }
+                            }
+                            VerticalLayout { spacing: 6px * Theme.ui-scale;
+                                // Spans the chip area; Rust wraps chips to this width.
+                                Label { height: 16px * Theme.ui-scale; text: root.chinese ? "标签" : "TAGS"; font-size: Theme.font(10);
+                                    init => { root.tag-chip-area-width = self.width; }
+                                    changed width => { root.tag-chip-area-width = self.width; }
+                                }
+                                FocusScope {
+                                    focus-on-click: false;
+                                    focus-on-tab-navigation: false;
+                                    capture-key-pressed(event) => {
+                                        if event.text == Key.Backspace && root.tag-draft == "" && root.tag-term-count > 0 {
+                                            root.tag-term-removed(-1);
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                    HorizontalLayout { padding: 0px;
+                                        tag-input := LineEdit {
+                                            min-width: 0px; text <=> root.tag-draft;
+                                            input-label: root.chinese ? "标签筛选：+ 包含，- 排除，回车添加" : "Tag filter: + include, - exclude, Enter adds";
+                                            placeholder-text: root.chinese ? "+包含 -排除，回车添加" : "+include -exclude, Enter adds";
+                                            accepted => { root.apply-filters(); }
+                                        }
+                                    }
+                                }
+                                if root.tag-chip-rows.length > 0: VerticalLayout { spacing: root.tag-chip-spacing;
+                                    accessible-role: list;
+                                    accessible-label: root.chinese ? "标签筛选条件" : "Tag filter terms";
+                                    for row in root.tag-chip-rows: HorizontalLayout { spacing: root.tag-chip-spacing; alignment: start;
+                                        for chip in row.chips: TagChipView {
+                                            text: chip.text; exclude: chip.exclude; chinese: root.chinese; enabled: !root.background-blocked;
+                                            toggle => { root.tag-term-toggled(chip.index); }
+                                            remove => { root.tag-term-removed(chip.index); }
+                                        }
+                                    }
+                                }
+                                CheckBox { height: 24px * Theme.ui-scale; text: root.chinese ? "有标签" : "Tagged only"; checked <=> root.tagged-only; toggled => { root.filter-requested(); } }
+                            }
+                            VerticalLayout { spacing: 4px * Theme.ui-scale;
+                                Label { height: 16px * Theme.ui-scale; text: root.chinese ? "颜色" : "COLOR"; font-size: Theme.font(10); }
+                                HorizontalLayout { spacing: 8px * Theme.ui-scale;
+                                    Rectangle { width: 22px * Theme.ui-scale; height: 22px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                                        border-radius: 4px * Theme.ui-scale; border-width: 1px;
+                                        border-color: root.color-filter != "" && !root.color-filter-valid ? Theme.warning : Theme.strong-border;
+                                        background: root.color-filter-valid ? root.color-filter-swatch : transparent;
+                                    }
+                                    LineEdit { horizontal-stretch: 1; min-width: 0px; input-label: root.chinese ? "颜色 #RRGGBB" : "Color #RRGGBB"; text <=> root.color-filter; placeholder-text: "#RRGGBB"; accepted => { root.apply-filters(); } }
+                                }
+                            }
+                        }
+                    }
+                    if root.filters-visible: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                        Rectangle { horizontal-stretch: 1; }
+                        Action { width: 58px * Theme.ui-scale; label: root.chinese ? "重置" : "Reset"; clicked => { root.reset-filters(); } }
+                        Action { width: 64px * Theme.ui-scale; primary: true; label: root.chinese ? "应用" : "Apply"; clicked => { root.apply-filters(); } }
+                    }
+                    if !root.filters-visible && !root.has-selection: VerticalLayout { spacing: 6px * Theme.ui-scale; padding-top: 12px * Theme.ui-scale;
                         Text { text: root.chinese ? "选择一个声音" : "Select a sound"; color: Theme.ink; font-size: Theme.font(14); }
                         Text { text: root.chinese ? "在列表中选择文件，查看信息或编辑标注。" : "Select a file to inspect its details and edit annotations."; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
                         Rectangle { vertical-stretch: 1; }
                     }
-                    if root.has-selection: inspector-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
+                    if !root.filters-visible && root.has-selection: inspector-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
                         property <string> displayed-id: root.selected-id;
                         changed displayed-id => { self.viewport-y = 0px; }
                         VerticalLayout { spacing: root.short-layout ? 4px * Theme.ui-scale : 7px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; alignment: start;
@@ -1832,8 +2046,8 @@ export component AppWindow inherits Window {
                             if root.source-metadata-visible: TextEdit { height: root.short-layout ? 100px * Theme.ui-scale : 160px * Theme.ui-scale; font-size: Theme.font(10); accessible-label: root.chinese ? "源文件 Metadata" : "Source Metadata"; read-only: true; text: root.selected-attributes == "" || root.selected-attributes == "{}" ? (root.chinese ? "无嵌入 Metadata" : "No embedded Metadata") : root.selected-attributes; }
                         }
                     }
-                    if root.has-selection: Label { text: root.chinese ? "切换音效时自动保存 · Ctrl S 立即保存" : "Auto-saves when switching sounds · Ctrl S saves now"; wrap: word-wrap; font-size: Theme.font(10); }
-                    if root.has-selection: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                    if !root.filters-visible && root.has-selection: Label { text: root.chinese ? "切换音效时自动保存 · Ctrl S 立即保存" : "Auto-saves when switching sounds · Ctrl S saves now"; wrap: word-wrap; font-size: Theme.font(10); }
+                    if !root.filters-visible && root.has-selection: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Label { horizontal-stretch: 1; text: root.metadata-dirty ? (root.chinese ? "待自动保存" : "Pending auto-save") : root.remote-mode ? (root.chinese ? "已保存到服务器" : "Saved to server") : (root.chinese ? "已保存到素材库" : "Saved to library"); color: root.metadata-dirty ? Theme.warning : Theme.dim; font-size: Theme.font(10); }
                         Action { width: 58px * Theme.ui-scale; enabled: root.metadata-dirty && !root.background-blocked; label: root.chinese ? "还原" : "Revert"; clicked => { root.restore-metadata(); } }
                         Action { width: 82px * Theme.ui-scale; primary: root.metadata-dirty; subtle: !root.metadata-dirty; enabled: root.metadata-dirty && !root.closing && !root.library-busy && !root.remote-writes-blocked && !root.metadata-writes-blocked; label: root.chinese ? "立即保存" : "Save now"; clicked => { root.save-metadata-requested(); } }
@@ -1901,7 +2115,7 @@ export component AppWindow inherits Window {
             MenuItem { title: root.context-file.name; enabled: false; }
             MenuSeparator { }
             MenuItem { title: root.chinese ? "试听" : "Audition"; enabled: !root.context-file.missing; activated => { root.file-action(0); } }
-            MenuItem { title: root.chinese ? "查看 / 编辑 Metadata" : "View / edit Metadata"; activated => { root.inspector-visible = true; root.file-action(1); } }
+            MenuItem { title: root.chinese ? "查看 / 编辑 Metadata" : "View / edit Metadata"; activated => { root.show-details-page(); root.file-action(1); } }
             MenuSeparator { }
             MenuItem { title: (root.context-file.favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action(5); } }
             MenuSeparator { }
