@@ -301,6 +301,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut first_provider = false;
     let mut edge_cases = false;
     let mut fragment_cases = false;
+    let mut tag_exclusion_cases = false;
     let mut missing_records = 0usize;
     let mut case_index_filter = None;
     let mut query_filter = None;
@@ -321,6 +322,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--edge-cases" => edge_cases = true,
             "--fragment-cases" => fragment_cases = true,
+            "--tag-exclusion-cases" => tag_exclusion_cases = true,
             "--case-index" => {
                 case_index_filter = Some(
                     arguments
@@ -362,7 +364,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "search-benchmark [--records 1000000] [--queries 100] [--folder-facets] [--first-provider | --first-only] [--concurrent-writer] [--request-file REQUESTS_JSON] [--edge-cases] [--fragment-cases] [--missing-records N] [--case-index N | --query TEXT] [--db NEW_DATABASE | --existing-db MIGRATED_DATABASE]"
+                    "search-benchmark [--records 1000000] [--queries 100] [--folder-facets] [--first-provider | --first-only] [--concurrent-writer] [--request-file REQUESTS_JSON] [--edge-cases] [--fragment-cases] [--tag-exclusion-cases] [--missing-records N] [--case-index N | --query TEXT] [--db NEW_DATABASE | --existing-db MIGRATED_DATABASE]"
                 );
                 println!(
                     "--first-provider measures one fresh read-only provider per case: first search, then first folder facets; provider opening is reported separately and the OS page cache is not cleared."
@@ -371,7 +373,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--case-index selects one zero-based case from the enabled default/fragment/edge cases; --query selects every enabled case with exactly that query text. Neither option changes the default workload when omitted."
                 );
                 println!(
-                    "--request-file replaces built-in cases with a JSON array of validated SearchRequest values; --case-index may select its zero-based entry. It cannot combine with --query, --edge-cases or --fragment-cases."
+                    "--tag-exclusion-cases adds exclude-only tag filters sorted by duration in both directions, by the default order, and with an include term; every synthetic row has library tags, the worst case for exclusion. Avoid door: it is a substring of every row's outdoor tag."
+                );
+                println!(
+                    "--request-file replaces built-in cases with a JSON array of validated SearchRequest values; --case-index may select its zero-based entry. It cannot combine with --query, --edge-cases, --fragment-cases or --tag-exclusion-cases."
                 );
                 println!(
                     "--first-only requires a current --existing-db: one first search then facets per selected case, without pre-query stats, initial/warm passes or --queries repetitions. Select one request and launch a new process for each independent first-query repetition."
@@ -476,6 +481,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }),
         );
     }
+    if tag_exclusion_cases {
+        let excluding = |exclude: &[&str], order_by: SortOrder, descending: bool| SearchRequest {
+            filters: SearchFilters {
+                exclude_tags: exclude.iter().map(|tag| (*tag).into()).collect(),
+                ..Default::default()
+            },
+            order_by,
+            descending,
+            ..Default::default()
+        };
+        cases.extend([
+            excluding(&["explosion"], SortOrder::Duration, false),
+            excluding(&["explosion"], SortOrder::Duration, true),
+            excluding(&["explosion", "footstep"], SortOrder::Duration, false),
+            excluding(&["explosion", "footstep"], SortOrder::Duration, true),
+            excluding(&["explosion"], SortOrder::Relevance, false),
+            SearchRequest {
+                filters: SearchFilters {
+                    tag_contains: Some("outdoor".into()),
+                    exclude_tags: vec!["explosion".into(), "footstep".into()],
+                    ..Default::default()
+                },
+                order_by: SortOrder::Duration,
+                ..Default::default()
+            },
+        ]);
+    }
     if edge_cases {
         cases.extend([
             SearchRequest {
@@ -512,9 +544,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ]);
     }
     if let Some(path) = &request_file {
-        if query_filter.is_some() || edge_cases || fragment_cases {
+        if query_filter.is_some() || edge_cases || fragment_cases || tag_exclusion_cases {
             return Err(
-                "--request-file cannot combine with --query, --edge-cases or --fragment-cases"
+                "--request-file cannot combine with --query, --edge-cases, --fragment-cases or --tag-exclusion-cases"
                     .into(),
             );
         }
@@ -840,6 +872,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     report["parallel_ranking_auxiliary_readers_active"] = auxiliary_search_reader_count().into();
     report["sqlite_cache_kb_per_auxiliary_reader"] = SQLITE_AUXILIARY_READER_CACHE_KB.into();
     report["concurrent_writer"] = concurrent_writer.into();
+    report["tag_exclusion_cases"] = tag_exclusion_cases.into();
     report["concurrent_writer_report"] = serde_json::to_value(writer_report)?;
     report["sqlite_default_memstatus_disabled"] = sqlite_build.0.into();
     report["sqlite_threadsafe"] = sqlite_build.1.into();
