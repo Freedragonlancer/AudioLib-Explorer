@@ -1,5 +1,26 @@
 # Rust 验证报告
 
+## 筛选侧栏页签与标签排除（2026-10-24，0.7.2，分支 feat/filter-panel-tabs，未合并）
+
+基于 beta `8ddbe24`。筛选移入右侧栏「筛选 | 详情」页签，标签改为 +/− chip，`SearchFilters` 新增 `include_tags` / `exclude_tags`（见 [API 文档](api/README.md) 的 Include / exclude 条目）。
+
+本机 Rust 1.97.1 MSVC：工作区格式检查和工作区全目标严格 Clippy（公共契约有变化，覆盖全部直接使用方）通过。audiolib-core 102 项、audiolib-db 374 项（库内 183 项另有 4 项既有 ignored，其余为全部集成测试）、audiolib-cli 19 项、audiolib-desktop 289 项通过；桌面端另有 91 项既有隔离 helper 标为 ignored。新增回归：词法解析、合并、格式往返和校验；数据库在派生列与 JSON 回退两条路径上，分别覆盖仅包含、仅排除、两者同时、同一词两侧（结果为空）以及有标签加排除的情况，并核对结果数、总数与目录 facet 一致；桌面端用真实按键和点击验证回车添加、Backspace 删除最后一项、chip 的 +/− 切换和 × 删除，以及 chip 换行。两项既有布局和菜单测试按新设计更新，并断言打开筛选页后声音列表高度不变、选中声音不会切换页签。
+
+性能：`search-benchmark --records 1000000 --queries 100 --folder-facets --request-file`，合成库每行都有用户标签，是排除的最坏情况；表中数值为搜索加目录 facet 总耗时的 P95，结果页 P95 在括号内。第 1 轮使用按词展开的 SQL，第 2 轮改为每行调用一次 `audiolib_tag_terms`。
+
+| 请求 | 第 1 轮 | 第 2 轮 |
+| --- | --- | --- |
+| `tag_contains=outdoor`（两轮 SQL 相同） | 178 ms（83） | 215 ms（95） |
+| 仅排除 `explosion` | 431 ms（172） | 516 ms（213） |
+| 仅排除 `rareword` | 442 ms（181） | 519 ms（257） |
+| 包含 `outdoor` + 排除 `explosion,door` | 550 ms（273） | 292 ms（154） |
+| 包含 `rareword,sfx` + 排除 `explosion` | 203 ms（101） | 211 ms（109） |
+| `metal` + 排除 `door` | 322 ms（164） | 339 ms（163） |
+
+第 2 轮总体 P95 为 463 ms，达到目标；多词请求超标的问题已经修复。第 2、3 轮运行期间同机有其他 cargo 构建，未改动的基准请求依次变慢到 215 ms 和 652 ms，因此第 3 轮全部作废，第 2 轮仅排除行的上升按噪声处理，不作为回退结论。仅排除的请求不受索引限制，需要扫描全部可见行，计数和 facet 的成本主要来自读取宽行。若真实百万级资料库上仍偏慢，可改为“可见总数减去带标签覆盖索引中命中排除的行数”，此项留作后续。
+
+界面通过 `--smoke-ui` 软件渲染截图检查：改动前后同为 1440×900 和 1080×700，另有中英文混合 +/− chip 视图（新增的 `--smoke-view filter-tags`），使用隔离的合成资料库。debug 构建启动时主线程栈溢出（beta 基线同样如此），截图前用 `editbin /STACK` 调大了 exe 副本的栈保留，没有修改构建配置。本分支未合并，按要求没有更新 `local_release/`，也没有发版。
+
 ## WASAPI 空闲连接释放与 DAW 共存（2026-10-22，0.6.2，beta）
 
 修复提交 `fd400fc` 在控制线程上为 WASAPI 增加 500 ms 空闲释放：Ready、Paused、Stopped、Ended 到期后销毁输出连接，保留源、位置、变换和播放会话。快速预览仍可复用输出，Playing（含网络缓冲）与 ASIO 不进入该释放策略。源码检查未发现普通播放路径周期性激活外部窗口或枚举 ASIO；已确认的缺陷是旧实现仅暂停 WASAPI，长时间保留音频客户端。此项修复不等同于已经复现并确认 Reaper 的失焦根因。

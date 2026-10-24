@@ -895,6 +895,12 @@ fn root_relocation_rejects_ambiguous_indexed_source_aliases() {
     let target = f.temp.path().join("destination");
     fs::create_dir(&target).unwrap();
     let canonical = source.canonicalize().unwrap();
+    // Two stored spellings are aliases only when the volume resolves both names
+    // to the same directory. A case-sensitive volume keeps them distinct.
+    if !canonical.with_file_name("AUDIO").exists() {
+        eprintln!("case-insensitive filesystem unavailable; not run");
+        return;
+    }
     let root_id = f.provider.folders(None).unwrap()[0].id;
     let conn = support::connection(f.provider.database_path()).unwrap();
     conn.execute(

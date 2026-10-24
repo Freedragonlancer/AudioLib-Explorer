@@ -605,6 +605,36 @@ pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
         Ok(audiolib_core::source_tags(&value).join(", "))
     })
     .map_err(db_error)?;
+    // Include/exclude tag terms in one call per row: the library tags are folded once and
+    // every term is tested here, rather than one folding call per SQL term. The third
+    // argument is a JSON array of [exclude, folded term] pairs, parsed once per statement.
+    // A term matches like `tag_contains`: a substring of the folded library tags or of the
+    // already folded source tag text.
+    let terms_mapper = icu_casemap::CaseMapper::new();
+    conn.create_scalar_function("audiolib_tag_terms", 3, flags, move |context| {
+        type Terms = Vec<(bool, String)>;
+        let terms = context.get_or_create_aux(
+            2,
+            |value| -> std::result::Result<Terms, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(serde_json::from_str(value.as_str()?)?)
+            },
+        )?;
+        let mut user = context.get::<Option<String>>(0)?.unwrap_or_default();
+        if user.is_ascii() {
+            user.make_ascii_lowercase();
+        } else if let std::borrow::Cow::Owned(folded) = terms_mapper.fold_string(&user) {
+            user = folded;
+        }
+        let source = context
+            .get_raw(1)
+            .as_str_or_null()
+            .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))?
+            .unwrap_or_default();
+        Ok(terms
+            .iter()
+            .all(|(exclude, term)| (user.contains(term) || source.contains(term)) != *exclude))
+    })
+    .map_err(db_error)?;
     let mapper = icu_casemap::CaseMapper::new();
     conn.create_scalar_function(
         "audiolib_casefold",
@@ -659,6 +689,19 @@ pub fn register_tokenizer(conn: &Connection, jieba: Arc<Jieba>) -> Result<()> {
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |context| Ok(path_key(&context.get::<String>(0)?)),
+    )
+    .map_err(db_error)?;
+    // Query-only path identity: never persisted in a schema/index or feature map.
+    // Legacy folded keys remain unchanged and only select candidate buckets.
+    conn.create_scalar_function(
+        "audiolib_path_identity",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            Ok(crate::path_identity::comparison_key(
+                &context.get::<String>(0)?,
+            ))
+        },
     )
     .map_err(db_error)
 }

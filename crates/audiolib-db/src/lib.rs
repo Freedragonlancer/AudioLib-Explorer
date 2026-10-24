@@ -11,6 +11,7 @@ pub mod local_play_history;
 mod management;
 pub mod migration;
 mod owned_cancellation;
+mod path_identity;
 #[cfg(feature = "scanner")]
 pub mod scanner;
 mod schema;
@@ -180,7 +181,12 @@ pub fn display_path(path: &Path) -> String {
 /// The text the library stores in `folders.folder_path` for the directory `path`:
 /// [`display_path`] with every `\\` turned into `/` (so on Windows `C:/Sounds/SFX`).
 pub fn folder_path_text(path: &Path) -> String {
-    display_path(path).replace('\\', "/")
+    let text = display_path(path);
+    if cfg!(windows) || path_identity::windows_path(&text) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
 }
 
 pub(crate) fn tokenize(jieba: &Jieba, value: &str) -> String {
@@ -937,6 +943,8 @@ impl SqliteProvider {
     /// rollback-journal mode (no WAL, no migrations) and refreshes the tokenized FTS
     /// columns exactly like `update_metadata`. One transaction: an id missing from the
     /// snapshot rolls everything back and returns `NotFound` (the snapshot diverged).
+    /// Missing or unsupported authoritative `attributes.modified_at` returns
+    /// `Validation`, requiring a full snapshot instead of advancing stale sort state.
     pub fn apply_snapshot_records(path: &Path, files: &[AudioFile]) -> Result<()> {
         static TOKENIZER: std::sync::OnceLock<Arc<Jieba>> = std::sync::OnceLock::new();
         let tokenizer = TOKENIZER.get_or_init(load_tokenizer);
@@ -972,24 +980,32 @@ impl SqliteProvider {
                 "Snapshot format is not ready for incremental Metadata".into(),
             ));
         }
+        // A reply without its authoritative sort timestamp cannot safely advance
+        // the cache revision. Older/incomplete DTOs take the caller's full-sync path.
+        // Check library compatibility first so future formats retain their diagnosis.
+        let modified = files
+            .iter()
+            .map(snapshot_modified_at)
+            .collect::<Result<Vec<_>>>()?;
         let tx = conn.transaction().map_err(db_error)?;
         {
             let mut update = tx
                 .prepare(
                     if version==schema::SCHEMA_VERSION {
-                        "UPDATE audio_files SET user_tags=?1,user_notes=?2,favorite=?3,user_color=?4 WHERE id=?5"
+                        "UPDATE audio_files SET user_tags=?1,user_notes=?2,favorite=?3,user_color=?4,modified_at=?5 WHERE id=?6"
                     } else {"UPDATE audio_files SET user_tags=?1,user_tags_tokenized=?2,user_notes=?3,
-                    user_notes_tokenized=?4,favorite=?5,user_color=?6
-                    WHERE id=?7"},
+                    user_notes_tokenized=?4,favorite=?5,user_color=?6,modified_at=?7
+                    WHERE id=?8"},
                 )
                 .map_err(db_error)?;
-            for file in files {
+            for (file, modified_at) in files.iter().zip(modified) {
                 let changed = if version == schema::SCHEMA_VERSION {
                     update.execute(params![
                         file.tags,
                         file.notes,
                         i64::from(file.favorite),
                         file.color.as_deref().filter(|color| !color.is_empty()),
+                        modified_at,
                         file.id
                     ])
                 } else {
@@ -1000,6 +1016,7 @@ impl SqliteProvider {
                         tokenize(tokenizer, &file.notes),
                         i64::from(file.favorite),
                         file.color.as_deref().filter(|color| !color.is_empty()),
+                        modified_at,
                         file.id,
                     ])
                 }
@@ -1199,7 +1216,7 @@ impl SqliteProvider {
         let mut updated = 0;
         let mut folders = std::collections::HashMap::new();
         let mut find_existing = tx.prepare_cached(
-            "SELECT id,metadata_json,COALESCE(file_size,0),source_mtime_ns FROM audio_files WHERE path_key=?1 ORDER BY id LIMIT 1",
+            "SELECT file_path,id,metadata_json,COALESCE(file_size,0),source_mtime_ns FROM audio_files WHERE path_key=?1 ORDER BY id",
         ).map_err(db_error)?;
         let mut header_columns = tx.prepare_cached(
             "UPDATE audio_files SET bwf_originator=?2,bwf_originator_reference=?3,
@@ -1209,13 +1226,24 @@ impl SqliteProvider {
         for item in items {
             let file_size = i64::try_from(item.size)
                 .map_err(|_| Error::Validation("Audio file exceeds SQLite size range".into()))?;
-            let key = path_key(&display_path(&item.path));
-            let prior: Option<(i64, String, i64, Option<i64>)> = find_existing
-                .query_row([&key], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            let text = display_path(&item.path);
+            let key = path_key(&text);
+            let candidates = find_existing
+                .query_map([&key], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                        ),
+                    ))
                 })
-                .optional()
+                .map_err(db_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(db_error)?;
+            let prior = path_identity::choose(&text, candidates, true)?;
             let existing = prior.as_ref().map(|prior| prior.0);
             let folder = item
                 .path
@@ -1325,7 +1353,7 @@ impl SqliteProvider {
     }
 
     #[cfg(feature = "scanner")]
-    pub(crate) fn mark_seen(&self, keys: &[String], session_id: i64) -> Result<()> {
+    pub(crate) fn mark_seen(&self, ids: &[i64], session_id: i64) -> Result<()> {
         let mut conn = self.writer()?;
         let tx = conn.transaction().map_err(db_error)?;
         {
@@ -1336,19 +1364,17 @@ impl SqliteProvider {
             ensure_scan_seen_table(&tx)?;
             let mut remember = tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO temp.scan_seen(session_id,path_key) VALUES(?1,?2)",
+                    "INSERT OR IGNORE INTO temp.scan_seen(session_id,audio_id) VALUES(?1,?2)",
                 )
                 .map_err(db_error)?;
             let mut reappear = tx
-                .prepare_cached(
-                    "UPDATE audio_files SET missing=0 WHERE path_key=?1 AND missing IS NOT 0",
-                )
+                .prepare_cached("UPDATE audio_files SET missing=0 WHERE id=?1 AND missing IS NOT 0")
                 .map_err(db_error)?;
-            for key in keys {
+            for id in ids {
                 remember
-                    .execute(params![session_id, key])
+                    .execute(params![session_id, id])
                     .map_err(db_error)?;
-                reappear.execute([key]).map_err(db_error)?;
+                reappear.execute([id]).map_err(db_error)?;
             }
         }
         tx.commit().map_err(db_error)
@@ -1365,25 +1391,33 @@ impl SqliteProvider {
         let mut conn = self.writer()?;
         let tx = conn.transaction().map_err(db_error)?;
         if cleanup {
-            let key = path_key(&display_path(root));
+            let folder = ensure_folder(&tx, root, root)?;
+            let stored_root: String = tx
+                .query_row(
+                    "SELECT folder_path FROM folders WHERE id=?1",
+                    [folder],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
             // Missing files retain annotations, playlists, and IDs and can reconnect later.
             let (scope, scope_value) = if recursive {
                 (
-                    "(path_key=?1 OR substr(path_key,1,length(?1)+1)=?1||'/')",
-                    Value::Text(key),
+                    // Hierarchy membership survives native case-only aliases and
+                    // volume roots. Rows without a folder retain the old path scope.
+                    "(folder_id IN (SELECT descendant_id FROM folder_closure WHERE ancestor_id=?1) OR (folder_id IS NULL AND ((?3='/' AND substr(file_path,1,1)='/') OR audiolib_path_identity(file_path)=?3 COLLATE BINARY OR substr(audiolib_path_identity(file_path),1,length(?3)+1)=?3||'/' COLLATE BINARY)))",
+                    Value::Integer(folder),
                 )
             } else {
-                let folder = ensure_folder(&tx, root, root)?;
-                ("folder_id=?1", Value::Integer(folder))
+                ("folder_id=?1 AND ?3 IS NOT NULL", Value::Integer(folder))
             };
             ensure_scan_seen_table(&tx)?;
             progress.removed = tx.execute(
                 &format!(
                     "UPDATE audio_files SET missing=1 WHERE {scope} AND missing=0 AND lower(filename) LIKE '%.wav'
                 AND (seen_scan_id IS NULL OR seen_scan_id<>?2)
-                AND NOT EXISTS(SELECT 1 FROM temp.scan_seen s WHERE s.session_id=?2 AND s.path_key=audio_files.path_key)"
+                AND NOT EXISTS(SELECT 1 FROM temp.scan_seen s WHERE s.session_id=?2 AND s.audio_id=audio_files.id)"
                 ),
-                params![scope_value, progress.session_id],
+                params![scope_value, progress.session_id, path_identity::comparison_key(&stored_root)],
             )
             .map_err(db_error)? as u64;
         }
@@ -1878,13 +1912,19 @@ impl SqliteProvider {
         )?;
         // FTS emits arbitrary row IDs. Use a narrow covering lookup rather than
         // fetching each matching file's wide Metadata row just for its folder.
+        // Exclude terms read only the covered tag columns, so they keep this scan as long
+        // as another tag filter limits the rows to tagged files.
         let tagged_folder_scan = !has_query
             && self.derived_tags.load(Ordering::Acquire)
             && request.filters.visibility == FileVisibility::Present
-            && (request.filters.tagged_only || request.filters.tag_contains.is_some())
+            && (request.filters.tagged_only
+                || request.filters.tag_contains.is_some()
+                || !request.filters.include_tags.is_empty())
             && (audiolib_core::SearchFilters {
                 tagged_only: false,
                 tag_contains: None,
+                include_tags: Vec::new(),
+                exclude_tags: Vec::new(),
                 ..request.filters.clone()
             }) == audiolib_core::SearchFilters::default();
         let from = folder_search_from(has_query, visibility_only, tagged_folder_scan);
@@ -2455,22 +2495,53 @@ fn search_sql(
                 .into()
         });
     }
-    if let Some(tag) = &filters.tag_contains {
-        let folded = schema::fold_case(tag);
-        if derived_tags {
-            conditions.push(ANY_TAG.into());
-            conditions.push(
+    let has_include = filters.tag_contains.is_some() || !filters.include_tags.is_empty();
+    if derived_tags && has_include {
+        conditions.push(ANY_TAG.into());
+    }
+    if filters.include_tags.is_empty() && filters.exclude_tags.is_empty() {
+        // A single include term keeps the statement earlier versions issue.
+        if let Some(tag) = &filters.tag_contains {
+            conditions.push(if derived_tags {
                 "(instr(audiolib_casefold(COALESCE(af.user_tags,'')),?)>0 OR instr(af.source_tags_text,?)>0)"
-                    .into(),
-            );
-        } else {
-            conditions.push(
+                    .into()
+            } else {
                 "(instr(audiolib_casefold(COALESCE(af.user_tags,'')),?)>0 OR instr(audiolib_casefold(audiolib_source_tags(af.metadata_json)),?)>0)"
-                    .into(),
-            );
+                    .into()
+            });
+            let folded = schema::fold_case(tag);
+            values.push(Value::Text(folded.clone()));
+            values.push(Value::Text(folded));
         }
-        values.push(Value::Text(folded.clone()));
-        values.push(Value::Text(folded));
+    } else {
+        // Several terms fold each row's tags once in audiolib_tag_terms instead of once per
+        // term. Exclude-only filters are not index-limited, so files without any tags,
+        // which no exclude term can match, skip the call.
+        let call = if derived_tags {
+            "audiolib_tag_terms(af.user_tags,af.source_tags_text,?)"
+        } else {
+            "audiolib_tag_terms(af.user_tags,audiolib_casefold(audiolib_source_tags(af.metadata_json)),?)"
+        };
+        conditions.push(if derived_tags && !has_include {
+            format!("((COALESCE(trim(af.user_tags),'')='' AND af.source_tags_text='') OR {call}=1)")
+        } else {
+            format!("{call}=1")
+        });
+        let terms: Vec<(bool, String)> = filters
+            .tag_contains
+            .iter()
+            .chain(&filters.include_tags)
+            .map(|tag| (false, schema::fold_case(tag)))
+            .chain(
+                filters
+                    .exclude_tags
+                    .iter()
+                    .map(|tag| (true, schema::fold_case(tag))),
+            )
+            .collect();
+        values.push(Value::Text(
+            serde_json::to_string(&terms).map_err(|error| Error::Database(error.to_string()))?,
+        ));
     }
     if let Some(color) = &filters.color {
         conditions.push("af.user_color COLLATE NOCASE=?".into());
@@ -2498,6 +2569,24 @@ fn audio_projection(_conn: &Connection) -> Result<std::borrow::Cow<'static, str>
     // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
     // retired library playback fields are never selected or surfaced.
     Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
+}
+
+fn snapshot_modified_at(file: &AudioFile) -> Result<&str> {
+    let value = file
+        .attributes
+        .get("modified_at")
+        .and_then(|value| value.as_str());
+    let valid = value.filter(|value| {
+        (19..=29).contains(&value.len())
+            && value.as_bytes().get(10) == Some(&b' ')
+            && chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").is_ok()
+    });
+    valid.ok_or_else(|| {
+        Error::Validation(format!(
+            "Audio {} has no supported authoritative modified_at; a full snapshot is required",
+            file.id
+        ))
+    })
 }
 
 fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
@@ -2578,14 +2667,16 @@ fn compile_query(jieba: &Jieba, query: &str) -> Result<String> {
 #[cfg(feature = "scanner")]
 fn ensure_folder(conn: &Connection, folder: &Path, root: &Path) -> Result<i64> {
     let display = folder_path_text(folder);
-    let existing: Option<(i64, Option<i64>)> = conn
-        .query_row(
-            "SELECT id,parent_id FROM folders WHERE folder_path=?1 COLLATE NOCASE",
-            [&display],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(db_error)?;
+    let existing = path_identity::folder_id(conn, &display)?
+        .map(|id| {
+            conn.query_row(
+                "SELECT id,parent_id FROM folders WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .map_err(db_error)
+        })
+        .transpose()?;
     let parent_id = if folder == root {
         None
     } else {
@@ -2660,13 +2751,13 @@ fn repair_folder_subtree(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Keys of the unchanged files seen by the running scan (see `mark_seen`). A TEMP table
+/// IDs of the unchanged files seen by the running scan (see `mark_seen`). A TEMP table
 /// lives only on the writer connection: no schema change, nothing in snapshots.
 #[cfg(feature = "scanner")]
 fn ensure_scan_seen_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS scan_seen(session_id INTEGER NOT NULL, path_key TEXT NOT NULL,
-         PRIMARY KEY(session_id,path_key)) WITHOUT ROWID;",
+        "CREATE TEMP TABLE IF NOT EXISTS scan_seen(session_id INTEGER NOT NULL, audio_id INTEGER NOT NULL,
+         PRIMARY KEY(session_id,audio_id)) WITHOUT ROWID;",
     )
     .map_err(db_error)
 }
@@ -3034,6 +3125,114 @@ mod search_count_tests {
             reader
                 .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
                 .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tag_term_tests {
+    use super::*;
+    use audiolib_core::SearchFilters;
+    use std::path::Path;
+
+    fn tag_library(path: &Path) -> SqliteProvider {
+        let provider = SqliteProvider::open(path).unwrap();
+        let conn = Connection::open(path).unwrap();
+        schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
+             INSERT INTO folder_closure VALUES(1,1,0);",
+        )
+        .unwrap();
+        for (id, user_tags, keywords, missing) in [
+            (1, Some("engine, exterior"), "", 0),
+            (2, Some("Engine, interior"), "", 0),
+            (3, Some(""), "Engine; Rain", 0),
+            (4, Some("door"), "Interior", 0),
+            (5, None, "", 0),
+            (6, Some("ENGINE, Exterior, rain"), "", 0),
+            (7, Some("engine"), "", 1),
+        ] {
+            let metadata = if keywords.is_empty() {
+                "{}".to_owned()
+            } else {
+                serde_json::json!({"wav_metadata": {"fields": {"keywords": keywords}}}).to_string()
+            };
+            conn.execute(
+                "INSERT INTO audio_files(id,file_path,filename,folder_id,user_tags,metadata_json,
+                 missing,source_tags_text)
+                 VALUES(?1,?2,'sound.wav',1,?3,?4,?5,COALESCE(audiolib_source_tags_key(?4),''))",
+                params![id, format!("root/{id}.wav"), user_tags, metadata, missing],
+            )
+            .unwrap();
+        }
+        provider
+    }
+
+    /// Matching IDs; the count and the directory facet must agree with the page.
+    fn matching(provider: &SqliteProvider, query: &str, filters: &SearchFilters) -> Vec<i64> {
+        let request = SearchRequest {
+            query: query.into(),
+            filters: filters.clone(),
+            ..Default::default()
+        };
+        let page = provider.search(&request).unwrap();
+        let mut ids: Vec<i64> = page.results.iter().map(|file| file.id).collect();
+        ids.sort_unstable();
+        assert_eq!(page.total_count as usize, ids.len(), "{filters:?}");
+        let folders = provider.search_folders(&request).unwrap();
+        let facet = folders
+            .iter()
+            .find(|folder| folder.id == 1)
+            .map_or(0, |folder| folder.file_count);
+        assert_eq!(facet as usize, ids.len(), "facet for {filters:?}");
+        ids
+    }
+
+    #[test]
+    fn include_terms_all_match_and_any_exclude_term_removes_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = tag_library(&dir.path().join("library.db"));
+        let filters = |contains: Option<&str>, include: &[&str], exclude: &[&str]| SearchFilters {
+            tag_contains: contains.map(Into::into),
+            include_tags: include.iter().map(|tag| (*tag).into()).collect(),
+            exclude_tags: exclude.iter().map(|tag| (*tag).into()).collect(),
+            ..Default::default()
+        };
+        let cases = [
+            // Include only: library and extracted tags, case-insensitive.
+            (filters(Some("engine"), &[], &[]), vec![1, 2, 3, 6]),
+            (filters(None, &["engine", "EXTERIOR"], &[]), vec![1, 6]),
+            (filters(Some("engine"), &["rain"], &[]), vec![3, 6]),
+            // Exclude only: untagged files remain, extracted tags exclude too.
+            (filters(None, &[], &["interior"]), vec![1, 3, 5, 6]),
+            (filters(None, &[], &["Engine", "door"]), vec![5]),
+            (filters(None, &[], &["%"]), vec![1, 2, 3, 4, 5, 6]),
+            // Both sides.
+            (filters(Some("engine"), &[], &["rain"]), vec![1, 2]),
+            (filters(Some("engine"), &[], &["rain", "INTERIOR"]), vec![1]),
+            // A term on both sides matches nothing, whatever its case.
+            (filters(Some("engine"), &[], &["ENGINE"]), vec![]),
+            (filters(None, &["Rain"], &["rain"]), vec![]),
+            (
+                SearchFilters {
+                    tagged_only: true,
+                    ..filters(None, &[], &["engine"])
+                },
+                vec![4],
+            ),
+        ];
+        for ready in [false, true] {
+            provider.derived_tags.store(ready, Ordering::Release);
+            for query in ["", "sound"] {
+                for (filters, expected) in &cases {
+                    assert_eq!(
+                        &matching(&provider, query, filters),
+                        expected,
+                        "{filters:?} query={query:?} derived={ready}"
+                    );
+                }
+            }
         }
     }
 }

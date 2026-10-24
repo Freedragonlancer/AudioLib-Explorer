@@ -705,7 +705,7 @@ mod tests {
             format!("\"{color}\"")
         };
         format!(
-            r#"{{"id":{id},"file_path":"/v/{id}.wav","filename":"{id}.wav","folder_id":null,"file_size":52,"sample_rate":48000,"bit_depth":16,"channels":1,"duration":0.1,"tags":"{tags}","rating":{legacy_rating},"color":{color},"notes":"","favorite":false,"bext_description":"","play_count":{plays},"attributes":{{}},"missing":false}}"#
+            r#"{{"id":{id},"file_path":"/v/{id}.wav","filename":"{id}.wav","folder_id":null,"file_size":52,"sample_rate":48000,"bit_depth":16,"channels":1,"duration":0.1,"tags":"{tags}","rating":{legacy_rating},"color":{color},"notes":"","favorite":false,"bext_description":"","play_count":{plays},"attributes":{{"modified_at":"2026-10-24 00:00:00.123"}},"missing":false}}"#
         )
     }
 

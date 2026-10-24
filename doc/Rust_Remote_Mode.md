@@ -1015,13 +1015,13 @@ on server notices open the active connection page.
 
 - Left: 本地素材库 and each saved server (● = active, address, last test), Up/Down to
   move the selection, 「＋ 添加服务器」, 「删除此服务器配置…」 (inline confirmation; not for
-  the active profile). Leaving the 连接 page with unsaved edits asks 保存 / 放弃修改 /
+  the active profile). Leaving the 连接与库信息 page with unsaved edits asks 保存 / 放弃修改 /
   取消 first. Closing the manager or pressing Esc with unsaved server settings asks the
   same question; Save closes only after persistence succeeds, failure keeps the draft,
   and Esc while the question is shown cancels it. 「切换到此数据源」 still switches immediately.
 - Right, local: the library management content while local mode is active; in server mode
   an explanation that it needs local mode first.
-- Right, server: 「切换到此数据源」 when it is not active, and three pages: **连接**
+- Right, server: 「切换到此数据源」 when it is not active, and three pages: **连接与库信息**
   (name, address, token, transcode, revision checks, disabled blank 「WebDAV 设置（功能未开发）」,
   test, 还原 / 保存; a 401 focuses the token field with a hint), **服务器音效库**
   (roots with status, file count, missing count and last scan; management permission;
@@ -1040,10 +1040,7 @@ on server notices open the active connection page.
   a server upgrade for root management. For the active server with management
   permission: 开始扫描… / 暂停 / 继续 / 取消扫描, and 移除所选记录… / 删除目录记录…,
   each confirmed inline — only library records are removed, WAV files on the server
-  stay, a rescan re-adds them with new ids) and **缓存与导出** (the
-  cached snapshot of the profile's library; for the active server 立即同步 and the
-  library management content working on the snapshot: history, missing files, check,
-  backup copy, export).
+  stay, a rescan re-adds them with new ids) and **缓存与导出** (the cached snapshot of the profile's library; for the active server 立即同步 and the library management content working on the snapshot: history, missing files, check, backup copy, export. Local 「扫描与更新」 buttons stay on 本地设置 only; this page shows a one-line note pointing at 服务器音效库 for scans, and ends the cache options with **试听/性能** for the hold-list-waveform-batches checkbox).
 
 1. *Library → 音效库管理… → 服务器设置*, then 「＋ 添加服务器」 (or select a saved server).
 2. Enter the server address (full URL such as `https://audiolib.example.com:8443` or

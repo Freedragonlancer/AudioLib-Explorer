@@ -45,11 +45,11 @@ fn legacy_snapshot(path: &Path) -> (Vec<u8>, AudioFile) {
         "INSERT INTO audio_files(id,file_path,path_key,filename,filename_tokenized,
          file_size,sample_rate,bit_depth,channels,duration,user_tags,user_tags_tokenized,
          user_notes,user_notes_tokenized,bwf_description,bwf_description_tokenized,
-         ixml_scene,ixml_scene_tokenized,ixml_take,ixml_take_tokenized,play_count,last_played_at)
+         ixml_scene,ixml_scene_tokenized,ixml_take,ixml_take_tokenized,play_count,last_played_at,modified_at)
          VALUES(?1,'/owned/legacy-metal.wav','/owned/legacy-metal.wav','legacy-metal.wav',
           audiolib_tokenize('legacy-metal.wav'),128,48000,16,2,1.0,
           'legacytag',audiolib_tokenize('legacytag'),'originalnote',
-          audiolib_tokenize('originalnote'),'','','','','','',?2,?3)",
+          audiolib_tokenize('originalnote'),'','','','','','',?2,?3,'2026-10-24 12:34:56.789')",
         rusqlite::params![AUDIO_ID, HISTORICAL_PLAY_COUNT, LAST_PLAYED],
     )
     .unwrap();

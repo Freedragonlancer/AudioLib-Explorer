@@ -1112,6 +1112,39 @@ impl Controller {
             }
         });
         let c = self.clone();
+        ui.on_apply_filters(move || {
+            if let Some(ui) = c.ui.upgrade() {
+                crate::tag_chips::commit_draft(&ui);
+                c.request_navigation_search(&ui, true, true);
+            }
+        });
+        let c = self.clone();
+        ui.on_tag_term_toggled(move |index| {
+            if let Some(ui) = c.ui.upgrade() {
+                crate::tag_chips::toggle(&ui, index);
+                c.request_navigation_search(&ui, true, true);
+            }
+        });
+        let c = self.clone();
+        ui.on_tag_term_removed(move |index| {
+            if let Some(ui) = c.ui.upgrade() {
+                crate::tag_chips::remove(&ui, index);
+                c.request_navigation_search(&ui, true, true);
+            }
+        });
+        let c = self.clone();
+        ui.on_tag_chips_relayout(move || {
+            if let Some(ui) = c.ui.upgrade() {
+                crate::tag_chips::relayout(&ui);
+            }
+        });
+        let c = self.clone();
+        ui.on_color_filter_edited(move || {
+            if let Some(ui) = c.ui.upgrade() {
+                crate::tag_chips::update_color_swatch(&ui);
+            }
+        });
+        let c = self.clone();
         ui.on_reset_filters(move || {
             if let Some(ui) = c.ui.upgrade() {
                 ui.set_visibility_index(0);
@@ -1121,6 +1154,7 @@ impl Controller {
                 ui.set_favorites_only(false);
                 ui.set_tagged_only(false);
                 ui.set_tag_filter("".into());
+                ui.set_tag_draft("".into());
                 ui.set_color_filter("".into());
                 ui.set_duration_min("".into());
                 ui.set_duration_max("".into());
@@ -2513,6 +2547,7 @@ impl Controller {
             ui.set_bit_filter(0);
             ui.set_channel_filter(0);
             ui.set_tag_filter("".into());
+            ui.set_tag_draft("".into());
             ui.set_color_filter("".into());
             ui.set_duration_min("".into());
             ui.set_duration_max("".into());
@@ -3469,11 +3504,11 @@ impl Controller {
             duration_max: max,
             favorites_only: ui.get_favorites_only(),
             tagged_only: ui.get_tagged_only(),
-            tag_contains: (!ui.get_tag_filter().trim().is_empty())
-                .then(|| ui.get_tag_filter().trim().to_owned()),
             color: (!ui.get_color_filter().trim().is_empty())
                 .then(|| ui.get_color_filter().trim().to_owned()),
+            ..SearchFilters::default()
         };
+        crate::tag_chips::apply_to(ui, &mut request.filters);
         request.order_by = table_sort_order(ui.get_sort_index());
         request.descending = ui.get_sort_descending();
         if let Err(error) = request.validate() {
@@ -6116,6 +6151,8 @@ fn metadata_affects_search(request: &SearchRequest) -> bool {
         || request.filters.favorites_only
         || request.filters.tagged_only
         || request.filters.tag_contains.is_some()
+        || !request.filters.include_tags.is_empty()
+        || !request.filters.exclude_tags.is_empty()
         || request.filters.color.is_some()
 }
 
