@@ -678,12 +678,19 @@ mod uri_tests {
     #[cfg(unix)]
     #[test]
     fn unix_non_utf8_path_bytes_survive_uri_encoding() {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        use std::{ffi::OsString, fs::File, os::unix::ffi::OsStringExt};
         let directory = tempfile::tempdir().unwrap();
-        assert_readonly_attachment(
-            &directory
-                .path()
-                .join(OsString::from_vec(b"raw-\xff#?.db".to_vec())),
-        );
+        let path = directory
+            .path()
+            .join(OsString::from_vec(b"raw-\xff#?.db".to_vec()));
+        // APFS and other UTF-8-only volumes reject the name. SQLite then
+        // reports SQLITE_CANTOPEN before any URI is parsed. The round-trip
+        // applies only where those bytes can be stored.
+        if File::create(&path).is_err() {
+            eprintln!("filesystem rejects non-UTF-8 filenames; not run");
+            return;
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_readonly_attachment(&path);
     }
 }
