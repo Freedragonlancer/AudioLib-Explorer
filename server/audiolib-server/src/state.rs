@@ -1223,39 +1223,45 @@ impl AppState {
         self.inner.tracker.bump()
     }
 
-    /// Blocking. Run a provider write that bumps the revision exactly once (see
-    /// [`RevisionTracker::record_own_write`]); server writes are serialized by it.
+    /// Blocking. Serialize a provider write and advance its revision once. Concurrent
+    /// local commits invalidate incremental replies through the writer connection's
+    /// change observation (see [`RevisionTracker::record_own_write`]).
     pub fn write<T>(
         &self,
         operation: impl FnOnce(&SqliteProvider) -> Result<T>,
     ) -> Result<WriteOutcome<T>> {
-        self.inner
-            .tracker
-            .record_own_write(|| operation(self.inner.provider.as_ref()))
+        self.inner.tracker.record_own_write(
+            || operation(self.inner.provider.as_ref()),
+            || self.inner.provider.foreign_data_version(),
+        )
     }
 
-    /// Blocking. Like [`AppState::write`], but the revision is bumped only when `changed`
-    /// says the write changed something (see [`RevisionTracker::record_own_write_if`]).
+    /// Blocking. Like [`AppState::write`], but only `changed` operations advance their
+    /// own revision; concurrent foreign commits are still counted (see
+    /// [`RevisionTracker::record_own_write_if`]).
     pub fn write_if<T>(
         &self,
         operation: impl FnOnce(&SqliteProvider) -> Result<T>,
         changed: impl FnOnce(&T) -> bool,
     ) -> Result<WriteOutcome<T>> {
-        self.inner
-            .tracker
-            .record_own_write_if(|| operation(self.inner.provider.as_ref()), changed)
+        self.inner.tracker.record_own_write_if(
+            || operation(self.inner.provider.as_ref()),
+            changed,
+            || self.inner.provider.foreign_data_version(),
+        )
     }
 
     /// Blocking. Run a provider write that changes no snapshot content clients must
-    /// re-download for (play bookkeeping); the revision stays put (see
+    /// re-download for (play bookkeeping); isolated writes retain the revision (see
     /// [`RevisionTracker::record_own_write_quiet`]).
     pub fn write_quiet<T>(
         &self,
         operation: impl FnOnce(&SqliteProvider) -> Result<T>,
     ) -> Result<WriteOutcome<T>> {
-        self.inner
-            .tracker
-            .record_own_write_quiet(|| operation(self.inner.provider.as_ref()))
+        self.inner.tracker.record_own_write_quiet(
+            || operation(self.inner.provider.as_ref()),
+            || self.inner.provider.foreign_data_version(),
+        )
     }
 
     /// Blocking. Run `query` on the read-only connection that also serves the `/roots`

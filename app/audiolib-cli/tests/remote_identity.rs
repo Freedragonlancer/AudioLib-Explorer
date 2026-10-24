@@ -178,6 +178,7 @@ fn matching_library_with_normalized_url_allows_edits_plays_and_downloads() {
                                 file_path: "/A/original.wav".into(),
                                 filename: "original.wav".into(),
                                 notes: "saved notes".into(),
+                                attributes: json!({"modified_at":"2026-10-24 12:34:56.789"}),
                                 ..Default::default()
                             },
                             "revision_before": before,

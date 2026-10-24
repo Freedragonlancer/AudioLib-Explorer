@@ -1,6 +1,6 @@
 # tools/validate-access-denial.ps1
 [CmdletBinding()]
-param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release')
+param([string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release', [switch]$CleanCheckout)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'console-utf8.ps1')
 try {
@@ -26,9 +26,25 @@ try {
     New-Item -ItemType Directory -Path $env:AUDIOLIB_DATA_DIR | Out-Null
     Copy-Item -LiteralPath (Join-Path $taskRoot 'config/rust_settings.example.json') -Destination (Join-Path $env:AUDIOLIB_DATA_DIR 'settings.json')
     $null = Invoke-AclLibrary @('db','create',$testDatabase)
-    $fixture = Get-ChildItem -LiteralPath (Join-Path $taskRoot 'test_audiolib/P-51 Mustang') -Filter '*.wav' -Recurse -File | Sort-Object Length | Select-Object -First 1
-    Copy-Item -LiteralPath $fixture.FullName -Destination (Join-Path $libraryRoot 'visible.wav')
-    Copy-Item -LiteralPath $fixture.FullName -Destination (Join-Path $deniedRoot 'protected.wav')
+    if ($CleanCheckout) {
+        $fixturePath = Join-Path $testRoot 'synthetic.wav'
+        $writer = [IO.BinaryWriter]::new([IO.File]::Create($fixturePath))
+        try {
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $writer.Write([uint32]292)
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt ')); $writer.Write([uint32]16)
+            $writer.Write([uint16]1); $writer.Write([uint16]1); $writer.Write([uint32]48000)
+            $writer.Write([uint32]96000); $writer.Write([uint16]2); $writer.Write([uint16]16)
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('data')); $writer.Write([uint32]256)
+            $writer.Write([byte[]]::new(256))
+        } finally { $writer.Dispose() }
+    } else {
+        $fixture = Get-ChildItem -LiteralPath (Join-Path $taskRoot 'test_audiolib/P-51 Mustang') -Filter '*.wav' -Recurse -File | Sort-Object Length | Select-Object -First 1
+        if (!$fixture) { throw 'Legacy WAV fixture unavailable; use -CleanCheckout for the isolated synthetic fixture.' }
+        $fixturePath = $fixture.FullName
+    }
+    $fixtureHash = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+    Copy-Item -LiteralPath $fixturePath -Destination (Join-Path $libraryRoot 'visible.wav')
+    Copy-Item -LiteralPath $fixturePath -Destination (Join-Path $deniedRoot 'protected.wav')
     $initial = Invoke-AclLibrary @('scan',$libraryRoot,'--full')
     if ($initial.errors -ne 0 -or $initial.added -ne 2) { throw 'ACL fixture did not index both files.' }
     Remove-Item -LiteralPath (Join-Path $libraryRoot 'visible.wav')
@@ -50,7 +66,8 @@ try {
     $successful = Invoke-AclLibrary @('scan',$libraryRoot,'--full')
     $after = Invoke-AclLibrary @('search')
     if ($successful.errors -ne 0 -or $after.total_count -ne 1 -or $after.results[0].filename -ne 'protected.wav') { throw 'Successful enumeration did not reconcile only the absent file.' }
-    [PSCustomObject]@{ success=$true; windows_acl_denial_reproduced=$true; partial_scan_errors=$partial.errors; records_retained_during_denial=$retained.total_count; records_after_successful_scan=$after.total_count; source_fixture_unchanged=$true } | ConvertTo-Json
+    if ((Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash -cne $fixtureHash) { throw 'ACL validation changed its source fixture.' }
+    [PSCustomObject]@{ success=$true; fixture_mode=$(if ($CleanCheckout) { 'synthetic' } else { 'legacy' }); windows_acl_denial_reproduced=$true; partial_scan_errors=$partial.errors; records_retained_during_denial=$retained.total_count; records_after_successful_scan=$after.total_count; source_fixture_unchanged=$true } | ConvertTo-Json
 } finally {
     $env:AUDIOLIB_DATA_DIR = $savedDataRoot
     if ($originalAcl) { Set-Acl -LiteralPath $deniedRoot -AclObject $originalAcl }

@@ -3,7 +3,6 @@
 use crate::management::LibraryLease;
 use crate::{ScannedAudio, SqliteProvider, db_error, display_path, path_key};
 use audiolib_core::{Error, Result, ScanIssue, ScanProgress, ScanState, validate_scan_root};
-use rusqlite::OptionalExtension;
 use std::{
     collections::HashSet,
     fs,
@@ -393,7 +392,7 @@ impl ScanService {
     fn flush(
         &self,
         batch: &mut Vec<ScannedAudio>,
-        seen: &mut Vec<String>,
+        seen: &mut Vec<i64>,
         progress: &mut ScanProgress,
     ) -> Result<()> {
         if !batch.is_empty() {
@@ -422,11 +421,11 @@ enum Probed {
 }
 
 enum ProbeOutcome {
-    Unchanged(String),
+    Unchanged(i64),
     Changed(Box<ScannedAudio>),
 }
 
-const FINGERPRINT_SQL: &str = "SELECT COALESCE(file_size,0),source_mtime_ns,\
+const FINGERPRINT_SQL: &str = "SELECT file_path,id,COALESCE(file_size,0),source_mtime_ns,\
     COALESCE(json_extract(CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END,\
     '$.wav_metadata.version'),0) FROM audio_files WHERE path_key=?1";
 
@@ -446,21 +445,31 @@ fn probe_entry(
     )
     .map_err(|_| Error::Validation("File timestamp is out of range".into()))?;
     if incremental {
-        let key = path_key(&display_path(path));
-        let prior: Option<(u64, Option<i64>, i64)> = fingerprint
-            .query_row([&key], |row| {
+        let text = display_path(path);
+        let key = path_key(&text);
+        let candidates = fingerprint
+            .query_map([&key], |row| {
                 // Imported extension Metadata may use another marker type. Refresh
                 // those records instead of turning a stale marker into a probe error.
                 Ok((
-                    crate::unsigned(row, 0)?,
-                    row.get(1)?,
-                    row.get_ref(2)?.as_i64().unwrap_or_default(),
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, i64>(1)?,
+                        crate::unsigned(row, 2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get_ref(4)?.as_i64().unwrap_or_default(),
+                    ),
                 ))
             })
-            .optional()
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(db_error)?;
-        if prior == Some((size, Some(mtime_ns), audiolib_audio::WAV_METADATA_VERSION)) {
-            return Ok(ProbeOutcome::Unchanged(key));
+        if let Some((id, prior_size, prior_mtime, metadata_version)) =
+            crate::path_identity::choose(&text, candidates, true)?
+            && (prior_size, prior_mtime, metadata_version)
+                == (size, Some(mtime_ns), audiolib_audio::WAV_METADATA_VERSION)
+        {
+            return Ok(ProbeOutcome::Unchanged(id));
         }
     }
     let metadata = audiolib_audio::probe(path)?;
