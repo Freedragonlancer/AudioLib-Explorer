@@ -102,9 +102,13 @@ enum Command {
         favorites: bool,
         #[arg(long)]
         tagged: bool,
-        /// Literal substring in user tags (percent/underscore are not wildcards).
+        /// Literal substring in user tags (percent/underscore are not wildcards); repeat to
+        /// require every value.
         #[arg(long)]
-        tag: Option<String>,
+        tag: Vec<String>,
+        /// Omit files whose tags contain this literal substring; may be repeated.
+        #[arg(long)]
+        exclude_tag: Vec<String>,
         #[arg(long)]
         color: Option<String>,
         #[arg(long, default_value_t = 200)]
@@ -646,6 +650,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             favorites,
             tagged,
             tag,
+            exclude_tag,
             color,
             limit,
             offset,
@@ -675,7 +680,9 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
                     duration_max: *duration_max,
                     favorites_only: *favorites,
                     tagged_only: *tagged,
-                    tag_contains: tag.clone(),
+                    tag_contains: tag.first().cloned(),
+                    include_tags: tag.iter().skip(1).cloned().collect(),
+                    exclude_tags: exclude_tag.clone(),
                     color: color.clone(),
                 },
                 limit: *limit,

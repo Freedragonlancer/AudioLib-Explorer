@@ -690,13 +690,12 @@ fn preset_filters(ui: &AppWindow, request: &SearchRequest) {
     );
     ui.set_favorites_only(request.filters.favorites_only);
     ui.set_tagged_only(request.filters.tagged_only);
+    // The canonical term text quotes separators, so the GUI rebuilds the same tag fields.
     ui.set_tag_filter(
-        request
-            .filters
-            .tag_contains
-            .clone()
-            .unwrap_or_default()
-            .into(),
+        audiolib_core::tag_filter::format_tag_terms(&audiolib_core::tag_filter::tag_terms_of(
+            &request.filters,
+        ))
+        .into(),
     );
     ui.set_color_filter(request.filters.color.clone().unwrap_or_default().into());
     ui.set_sort_index(match request.order_by {

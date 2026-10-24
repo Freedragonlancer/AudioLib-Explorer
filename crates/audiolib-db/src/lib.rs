@@ -1912,13 +1912,19 @@ impl SqliteProvider {
         )?;
         // FTS emits arbitrary row IDs. Use a narrow covering lookup rather than
         // fetching each matching file's wide Metadata row just for its folder.
+        // Exclude terms read only the covered tag columns, so they keep this scan as long
+        // as another tag filter limits the rows to tagged files.
         let tagged_folder_scan = !has_query
             && self.derived_tags.load(Ordering::Acquire)
             && request.filters.visibility == FileVisibility::Present
-            && (request.filters.tagged_only || request.filters.tag_contains.is_some())
+            && (request.filters.tagged_only
+                || request.filters.tag_contains.is_some()
+                || !request.filters.include_tags.is_empty())
             && (audiolib_core::SearchFilters {
                 tagged_only: false,
                 tag_contains: None,
+                include_tags: Vec::new(),
+                exclude_tags: Vec::new(),
                 ..request.filters.clone()
             }) == audiolib_core::SearchFilters::default();
         let from = folder_search_from(has_query, visibility_only, tagged_folder_scan);
@@ -2489,22 +2495,53 @@ fn search_sql(
                 .into()
         });
     }
-    if let Some(tag) = &filters.tag_contains {
-        let folded = schema::fold_case(tag);
-        if derived_tags {
-            conditions.push(ANY_TAG.into());
-            conditions.push(
+    let has_include = filters.tag_contains.is_some() || !filters.include_tags.is_empty();
+    if derived_tags && has_include {
+        conditions.push(ANY_TAG.into());
+    }
+    if filters.include_tags.is_empty() && filters.exclude_tags.is_empty() {
+        // A single include term keeps the statement earlier versions issue.
+        if let Some(tag) = &filters.tag_contains {
+            conditions.push(if derived_tags {
                 "(instr(audiolib_casefold(COALESCE(af.user_tags,'')),?)>0 OR instr(af.source_tags_text,?)>0)"
-                    .into(),
-            );
-        } else {
-            conditions.push(
+                    .into()
+            } else {
                 "(instr(audiolib_casefold(COALESCE(af.user_tags,'')),?)>0 OR instr(audiolib_casefold(audiolib_source_tags(af.metadata_json)),?)>0)"
-                    .into(),
-            );
+                    .into()
+            });
+            let folded = schema::fold_case(tag);
+            values.push(Value::Text(folded.clone()));
+            values.push(Value::Text(folded));
         }
-        values.push(Value::Text(folded.clone()));
-        values.push(Value::Text(folded));
+    } else {
+        // Several terms fold each row's tags once in audiolib_tag_terms instead of once per
+        // term. Exclude-only filters are not index-limited, so files without any tags,
+        // which no exclude term can match, skip the call.
+        let call = if derived_tags {
+            "audiolib_tag_terms(af.user_tags,af.source_tags_text,?)"
+        } else {
+            "audiolib_tag_terms(af.user_tags,audiolib_casefold(audiolib_source_tags(af.metadata_json)),?)"
+        };
+        conditions.push(if derived_tags && !has_include {
+            format!("((COALESCE(trim(af.user_tags),'')='' AND af.source_tags_text='') OR {call}=1)")
+        } else {
+            format!("{call}=1")
+        });
+        let terms: Vec<(bool, String)> = filters
+            .tag_contains
+            .iter()
+            .chain(&filters.include_tags)
+            .map(|tag| (false, schema::fold_case(tag)))
+            .chain(
+                filters
+                    .exclude_tags
+                    .iter()
+                    .map(|tag| (true, schema::fold_case(tag))),
+            )
+            .collect();
+        values.push(Value::Text(
+            serde_json::to_string(&terms).map_err(|error| Error::Database(error.to_string()))?,
+        ));
     }
     if let Some(color) = &filters.color {
         conditions.push("af.user_color COLLATE NOCASE=?".into());
@@ -3088,6 +3125,114 @@ mod search_count_tests {
             reader
                 .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
                 .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tag_term_tests {
+    use super::*;
+    use audiolib_core::SearchFilters;
+    use std::path::Path;
+
+    fn tag_library(path: &Path) -> SqliteProvider {
+        let provider = SqliteProvider::open(path).unwrap();
+        let conn = Connection::open(path).unwrap();
+        schema::register_tokenizer(&conn, load_tokenizer()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'root','root');
+             INSERT INTO folder_closure VALUES(1,1,0);",
+        )
+        .unwrap();
+        for (id, user_tags, keywords, missing) in [
+            (1, Some("engine, exterior"), "", 0),
+            (2, Some("Engine, interior"), "", 0),
+            (3, Some(""), "Engine; Rain", 0),
+            (4, Some("door"), "Interior", 0),
+            (5, None, "", 0),
+            (6, Some("ENGINE, Exterior, rain"), "", 0),
+            (7, Some("engine"), "", 1),
+        ] {
+            let metadata = if keywords.is_empty() {
+                "{}".to_owned()
+            } else {
+                serde_json::json!({"wav_metadata": {"fields": {"keywords": keywords}}}).to_string()
+            };
+            conn.execute(
+                "INSERT INTO audio_files(id,file_path,filename,folder_id,user_tags,metadata_json,
+                 missing,source_tags_text)
+                 VALUES(?1,?2,'sound.wav',1,?3,?4,?5,COALESCE(audiolib_source_tags_key(?4),''))",
+                params![id, format!("root/{id}.wav"), user_tags, metadata, missing],
+            )
+            .unwrap();
+        }
+        provider
+    }
+
+    /// Matching IDs; the count and the directory facet must agree with the page.
+    fn matching(provider: &SqliteProvider, query: &str, filters: &SearchFilters) -> Vec<i64> {
+        let request = SearchRequest {
+            query: query.into(),
+            filters: filters.clone(),
+            ..Default::default()
+        };
+        let page = provider.search(&request).unwrap();
+        let mut ids: Vec<i64> = page.results.iter().map(|file| file.id).collect();
+        ids.sort_unstable();
+        assert_eq!(page.total_count as usize, ids.len(), "{filters:?}");
+        let folders = provider.search_folders(&request).unwrap();
+        let facet = folders
+            .iter()
+            .find(|folder| folder.id == 1)
+            .map_or(0, |folder| folder.file_count);
+        assert_eq!(facet as usize, ids.len(), "facet for {filters:?}");
+        ids
+    }
+
+    #[test]
+    fn include_terms_all_match_and_any_exclude_term_removes_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = tag_library(&dir.path().join("library.db"));
+        let filters = |contains: Option<&str>, include: &[&str], exclude: &[&str]| SearchFilters {
+            tag_contains: contains.map(Into::into),
+            include_tags: include.iter().map(|tag| (*tag).into()).collect(),
+            exclude_tags: exclude.iter().map(|tag| (*tag).into()).collect(),
+            ..Default::default()
+        };
+        let cases = [
+            // Include only: library and extracted tags, case-insensitive.
+            (filters(Some("engine"), &[], &[]), vec![1, 2, 3, 6]),
+            (filters(None, &["engine", "EXTERIOR"], &[]), vec![1, 6]),
+            (filters(Some("engine"), &["rain"], &[]), vec![3, 6]),
+            // Exclude only: untagged files remain, extracted tags exclude too.
+            (filters(None, &[], &["interior"]), vec![1, 3, 5, 6]),
+            (filters(None, &[], &["Engine", "door"]), vec![5]),
+            (filters(None, &[], &["%"]), vec![1, 2, 3, 4, 5, 6]),
+            // Both sides.
+            (filters(Some("engine"), &[], &["rain"]), vec![1, 2]),
+            (filters(Some("engine"), &[], &["rain", "INTERIOR"]), vec![1]),
+            // A term on both sides matches nothing, whatever its case.
+            (filters(Some("engine"), &[], &["ENGINE"]), vec![]),
+            (filters(None, &["Rain"], &["rain"]), vec![]),
+            (
+                SearchFilters {
+                    tagged_only: true,
+                    ..filters(None, &[], &["engine"])
+                },
+                vec![4],
+            ),
+        ];
+        for ready in [false, true] {
+            provider.derived_tags.store(ready, Ordering::Release);
+            for query in ["", "sound"] {
+                for (filters, expected) in &cases {
+                    assert_eq!(
+                        &matching(&provider, query, filters),
+                        expected,
+                        "{filters:?} query={query:?} derived={ready}"
+                    );
+                }
+            }
         }
     }
 }

@@ -1706,10 +1706,20 @@ fn menu_bar_playback_view_and_help_preserve_selection_and_modal_guards() {
     assert_eq!(&*transport.borrow(), &["pause", "stop", "play"]);
 
     let inspector = ui.get_inspector_visible();
-    click_menu_item(&ui, "View", "Show details panel");
+    click_menu_item(&ui, "View", "Show side panel (filters / details)");
     assert_eq!(ui.get_inspector_visible(), !inspector);
-    click_menu_item(&ui, "View", "Show details panel");
+    click_menu_item(&ui, "View", "Show side panel (filters / details)");
     assert_eq!(ui.get_inspector_visible(), inspector);
+    // The page items open the sidebar on their page; the side panel item keeps the page.
+    ui.set_inspector_visible(false);
+    click_menu_item(&ui, "View", "Show filters");
+    assert!(ui.get_inspector_visible() && ui.get_filters_visible());
+    click_menu_item(&ui, "View", "Show side panel (filters / details)");
+    click_menu_item(&ui, "View", "Show side panel (filters / details)");
+    assert!(ui.get_inspector_visible() && ui.get_filters_visible());
+    click_menu_item(&ui, "View", "Show sound details");
+    assert!(ui.get_inspector_visible() && !ui.get_filters_visible());
+    ui.set_inspector_visible(inspector);
     let libraries = Rc::new(RefCell::new(Vec::new()));
     let observed = libraries.clone();
     ui.on_library_action(move |action| observed.borrow_mut().push(action));
