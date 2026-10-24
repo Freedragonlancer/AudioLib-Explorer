@@ -124,6 +124,99 @@ fn snapshot_sync_controls_pause_once_and_offer_continue_and_restart_on_both_page
 }
 
 #[test]
+fn server_cache_page_hides_local_scan_buttons_and_keeps_audition_hold_option() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window()
+            .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+        ui.set_chinese(chinese);
+        ui.set_sm_sources(source_rows(true));
+        ui.set_remote_mode(true);
+        ui.invoke_open_library(0);
+        ui.set_sm_selected(1);
+        ui.set_sm_page(2);
+        ui.show().unwrap();
+
+        let (add, incr, full, hold, scan_note, audition) = if chinese {
+            (
+                "添加文件夹…",
+                "增量扫描…",
+                "全量扫描…",
+                "试听开始后 3 秒内暂缓列表波形批量请求",
+                "扫描请到「服务器音效库」页。",
+                "试听/性能",
+            )
+        } else {
+            (
+                "Add folder…",
+                "Incremental scan…",
+                "Full scan…",
+                "Hold list-waveform batch requests during first 3 s after audition start",
+                "Scans are on the Server library page.",
+                "Audition / performance",
+            )
+        };
+        for label in [add, incr, full] {
+            assert!(
+                !has_label(&ui, label),
+                "remote cache page must hide dead scan control: {label}"
+            );
+        }
+        assert!(
+            !has_label(
+                &ui,
+                if chinese {
+                    "扫描与更新"
+                } else {
+                    "Scan and update"
+                }
+            ),
+            "remote cache page must not keep a fake Scan and update section"
+        );
+        assert!(
+            has_label(&ui, scan_note),
+            "missing short scan redirect note"
+        );
+        assert!(
+            has_label(&ui, audition),
+            "missing Audition / performance section"
+        );
+        assert!(
+            has_label(&ui, hold),
+            "hold list-waveform option must remain"
+        );
+
+        // Local settings still expose the scan controls unchanged.
+        ui.set_remote_mode(false);
+        ui.set_sm_selected(0);
+        ui.set_sm_page(0);
+        for label in [add, incr, full] {
+            assert!(
+                has_label(&ui, label),
+                "local settings must keep scan control: {label}"
+            );
+        }
+        assert!(
+            has_label(
+                &ui,
+                if chinese {
+                    "扫描与更新"
+                } else {
+                    "Scan and update"
+                }
+            ),
+            "local settings must keep Scan and update"
+        );
+        assert!(
+            !has_label(&ui, hold),
+            "hold list-waveform option is server-mode only"
+        );
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn keyboard_selection_keeps_compact_result_rows_visible() {
     i_slint_backend_testing::init_no_event_loop();
     for (width, height) in [(1080.0, 700.0), (1440.0, 900.0)] {
