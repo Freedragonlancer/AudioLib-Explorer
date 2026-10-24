@@ -619,20 +619,25 @@ pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
                 Ok(serde_json::from_str(value.as_str()?)?)
             },
         )?;
-        let mut user = context.get::<Option<String>>(0)?.unwrap_or_default();
-        if user.is_ascii() {
-            user.make_ascii_lowercase();
-        } else if let std::borrow::Cow::Owned(folded) = terms_mapper.fold_string(&user) {
-            user = folded;
-        }
-        let source = context
-            .get_raw(1)
-            .as_str_or_null()
-            .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))?
-            .unwrap_or_default();
-        Ok(terms
-            .iter()
-            .all(|(exclude, term)| (user.contains(term) || source.contains(term)) != *exclude))
+        let text = |index| {
+            context
+                .get_raw(index)
+                .as_str_or_null()
+                .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))
+                .map(Option::unwrap_or_default)
+        };
+        let user = text(0)?;
+        let source = text(1)?;
+        // ASCII tags fold to ASCII lowercase, so compare them in place. This runs for
+        // every tagged file of a filter scan; only non-ASCII tags allocate a folded copy.
+        let folded = (!user.is_ascii()).then(|| terms_mapper.fold_string(user));
+        Ok(terms.iter().all(|(exclude, term)| {
+            let in_user = match &folded {
+                Some(folded) => folded.contains(term.as_str()),
+                None => contains_ascii_folded(user.as_bytes(), term.as_bytes()),
+            };
+            (in_user || source.contains(term.as_str())) != *exclude
+        }))
     })
     .map_err(db_error)?;
     let mapper = icu_casemap::CaseMapper::new();
@@ -655,6 +660,19 @@ pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
         },
     )
     .map_err(db_error)
+}
+
+/// Whether ASCII `haystack`, folded to lowercase, contains the folded `needle`. Exactly
+/// `haystack.to_ascii_lowercase().contains(needle)`: a folded term has no uppercase
+/// ASCII, and its non-ASCII bytes never equal a folded ASCII byte.
+fn contains_ascii_folded(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(byte, expected)| byte.to_ascii_lowercase() == *expected)
+        })
 }
 
 pub fn register_tokenizer(conn: &Connection, jieba: Arc<Jieba>) -> Result<()> {
@@ -1148,6 +1166,44 @@ END;";
 
 #[cfg(test)]
 mod source_tag_tests {
+    #[test]
+    fn ascii_tag_matching_equals_lowercasing_then_searching() {
+        let haystacks = [
+            "",
+            " ",
+            "door",
+            "Door",
+            "DOOR, Exterior",
+            "explosion metal outdoor",
+            "a-B_c%d",
+        ];
+        let needles = [
+            "",
+            "d",
+            "door",
+            "or",
+            "r, e",
+            "exterior",
+            "metal outdoor",
+            "doors",
+            "%d",
+            "b_c",
+            "straße",
+            "ü",
+            "DOOR",
+            "outdoor ",
+        ];
+        for haystack in haystacks {
+            for needle in needles {
+                assert_eq!(
+                    super::contains_ascii_folded(haystack.as_bytes(), needle.as_bytes()),
+                    haystack.to_ascii_lowercase().contains(needle),
+                    "{haystack:?} {needle:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn escaped_property_names_match_decoded_source_tags() {
         for key in audiolib_core::SOURCE_TAG_KEYS {

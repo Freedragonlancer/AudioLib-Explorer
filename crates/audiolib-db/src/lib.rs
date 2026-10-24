@@ -18,6 +18,7 @@ mod schema;
 mod search_bm25;
 mod search_cache;
 mod search_candidates;
+mod search_exclude;
 mod search_facets;
 mod search_rank_parallel;
 mod search_sorted;
@@ -1599,17 +1600,37 @@ impl SqliteProvider {
                 true,
                 self.derived_tags.load(Ordering::Acquire),
             )?;
-            let exclude = visibility_only && request.filters.visibility == FileVisibility::Present;
+            // A library-wide exclude-only filter collects the IDs it drops (files not
+            // present and excluded tagged files), not the ID of every passing file.
+            let exclusion = if request.folder_id.is_none() {
+                search_exclude::Exclusion::plan(
+                    tx,
+                    &filter_request,
+                    self.derived_tags.load(Ordering::Acquire),
+                )?
+            } else {
+                None
+            };
+            let exclude = exclusion.is_some()
+                || visibility_only && request.filters.visibility == FileVisibility::Present;
             let filter_from = search_candidates::covering_numeric_filter_from(tx, request)?
                 .unwrap_or(from.as_str());
-            let sql = if exclude {
-                "SELECT id FROM audio_files INDEXED BY idx_audio_files_not_present WHERE missing IS NOT 0".to_string()
+            let (sql, values) = if let Some(exclusion) = &exclusion {
+                exclusion.dropped_ids()
+            } else if exclude {
+                ("SELECT id FROM audio_files INDEXED BY idx_audio_files_not_present WHERE missing IS NOT 0".to_string(), values)
             } else if visibility_only && request.filters.visibility == FileVisibility::Missing {
-                "SELECT id FROM audio_files WHERE missing=1".to_string()
+                (
+                    "SELECT id FROM audio_files WHERE missing=1".to_string(),
+                    values,
+                )
             } else {
-                format!(
-                    "SELECT af.id FROM {filter_from} WHERE {}",
-                    conditions.join(" AND ")
+                (
+                    format!(
+                        "SELECT af.id FROM {filter_from} WHERE {}",
+                        conditions.join(" AND ")
+                    ),
+                    values,
                 )
             };
             if ids.is_empty() {
@@ -1794,11 +1815,22 @@ impl SqliteProvider {
         } else {
             format!("SELECT COUNT(*) FROM {from} WHERE {where_sql}")
         };
-        let total: u64 = tx
-            .query_row(&count_sql, params_from_iter(&values), |row| {
+        // An exclude-only filter counts present files minus excluded tagged files from
+        // narrow indexes rather than testing every wide row. Its page keeps the shared
+        // statement; dense matches read a proven sort index and stop after the page.
+        let exclusion = search_exclude::Exclusion::plan(
+            &tx,
+            request,
+            self.derived_tags.load(Ordering::Acquire),
+        )?;
+        let total: u64 = if let Some(exclusion) = &exclusion {
+            exclusion.total(&tx, request)?
+        } else {
+            tx.query_row(&count_sql, params_from_iter(&values), |row| {
                 unsigned(row, 0)
             })
-            .map_err(db_error)?;
+            .map_err(db_error)?
+        };
         if request.offset as u64 >= total {
             return Ok(SearchPage {
                 returned_count: 0,
@@ -1856,6 +1888,10 @@ impl SqliteProvider {
             // Sort only IDs and the selected key. Fetch the wide Metadata DTOs after
             // pagination for filtered FTS, folder browsing, and alternative sort orders.
             let direction = if descending { "DESC" } else { "ASC" };
+            let from = match &exclusion {
+                Some(exclusion) => exclusion.page_from(&tx, request, total)?.unwrap_or(&from),
+                None => &from,
+            };
             format!(
                 "WITH ranked AS MATERIALIZED (
                     SELECT af.id,{order} AS sort_value FROM {from} WHERE {where_sql}
@@ -1983,11 +2019,26 @@ impl SqliteProvider {
             .as_deref()
             .map(Vec::as_slice)
             .or_else(|| query_ids.as_deref().map(Vec::as_slice));
-        let use_filter_ids =
-            !visibility_only && ((!has_query && !tagged_folder_scan) || retained_ids.is_some());
+        // Exclude-only facets subtract excluded tagged files (per folder without a
+        // query, from the complete query IDs with one); collecting every matching
+        // ID would read each present file's wide row. Facets ignore folder scope.
+        let exclusion = {
+            let mut filter_request = request.clone();
+            filter_request.query.clear();
+            search_exclude::Exclusion::plan(
+                &tx,
+                &filter_request,
+                self.derived_tags.load(Ordering::Acquire),
+            )?
+        };
+        let use_filter_ids = exclusion.is_none()
+            && !visibility_only
+            && ((!has_query && !tagged_folder_scan) || retained_ids.is_some());
         let candidate_ids = if retained_ids.is_some_and(<[i64]>::is_empty) {
             // Completeness is already known, so no filter scan can add a match.
             Some(Vec::new())
+        } else if let (Some(exclusion), Some(ids)) = (&exclusion, retained_ids) {
+            Some(exclusion.without_excluded(&tx, ids, &check_cancel)?)
         } else if use_filter_ids {
             let mut filter_request = request.clone();
             filter_request.query.clear();
@@ -2048,7 +2099,9 @@ impl SqliteProvider {
         // matching file. Stream those IDs into folder-sized counters instead, with
         // a run accumulator for the usual contiguous files from the same directory.
         // Counts and closure rollup share one snapshot, including during a scan.
-        let (direct, values) = if has_query || complete_ids.is_some() {
+        let (direct, values) = if let Some(exclusion) = exclusion.as_ref().filter(|_| !has_query) {
+            exclusion.folder_counts()
+        } else if has_query || complete_ids.is_some() {
             let mut counter = FolderCounter::default();
             if let Some(ids) = complete_ids {
                 if let Some(counts) = search_facets::ranked_counts(
