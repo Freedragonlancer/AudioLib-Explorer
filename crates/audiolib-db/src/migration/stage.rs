@@ -98,14 +98,34 @@ pub(super) fn normalize(
 }
 
 fn read_only_uri(path: &std::path::Path) -> String {
+    #[cfg(windows)]
     let native = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
     let native = native
         .strip_prefix("//?/UNC/")
         .map(|rest| format!("//{rest}"))
         .or_else(|| native.strip_prefix("//?/").map(str::to_owned))
         .unwrap_or(native);
+    #[cfg(windows)]
+    let bytes = native.as_bytes();
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        // Backslashes and non-UTF-8 bytes are filename data on POSIX filesystems.
+        path.as_os_str().as_bytes()
+    };
+    #[cfg(not(any(windows, unix)))]
+    let native = path.to_string_lossy();
+    #[cfg(not(any(windows, unix)))]
+    let bytes = native.as_bytes();
     let mut encoded = String::from("file:");
-    for byte in native.bytes() {
+    // SQLite's bundled URI parser only accepts an empty or localhost authority.
+    // `file:////host/share` retains an empty authority and the complete UNC path
+    // `//host/share`; `file://host/share` would reject the host before opening it.
+    if bytes.starts_with(b"//") {
+        encoded.push_str("//");
+    }
+    for &byte in bytes {
         if byte.is_ascii_alphanumeric() || b"/:._-".contains(&byte) {
             encoded.push(byte as char);
         } else {
@@ -583,4 +603,87 @@ pub(super) fn validate(job: &MigrationJob, cancel: &AtomicBool) -> Result<()> {
         .map_err(db_error)?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::read_only_uri;
+    use rusqlite::{Connection, ErrorCode, OpenFlags};
+    use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_paths_use_an_empty_authority_and_escape_reserved_uri_bytes() {
+        let expected = "file:////host/share/%E4%B8%AD%E6%96%87%20%23%3F%25%26.db?mode=ro";
+        for path in [
+            r"\\host\share\中文 #?%&.db",
+            r"\\?\UNC\host\share\中文 #?%&.db",
+        ] {
+            assert_eq!(read_only_uri(Path::new(path)), expected);
+        }
+        assert_eq!(
+            read_only_uri(Path::new(r"\\?\C:\中文 #?%&.db")),
+            "file:C:/%E4%B8%AD%E6%96%87%20%23%3F%25%26.db?mode=ro"
+        );
+    }
+
+    fn assert_readonly_attachment(path: &Path) {
+        {
+            let source = Connection::open(path).unwrap();
+            source
+                .execute_batch(
+                    "CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('unchanged');",
+                )
+                .unwrap();
+        }
+        let before = std::fs::read(path).unwrap();
+        let reader = Connection::open_with_flags(
+            ":memory:",
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        reader
+            .execute(
+                "ATTACH DATABASE ?1 AS input",
+                [read_only_uri(&path.canonicalize().unwrap())],
+            )
+            .unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT value FROM input.sentinel", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "unchanged"
+        );
+        let error = reader
+            .execute("UPDATE input.sentinel SET value='changed'", [])
+            .unwrap_err();
+        assert_eq!(error.sqlite_error_code(), Some(ErrorCode::ReadOnly));
+        drop(reader);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn escaped_paths_attach_the_original_file_without_granting_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let name = "中文 # % & +.db";
+        #[cfg(not(windows))]
+        let name = "中文 # ? % & + \\.db";
+        assert_readonly_attachment(&directory.path().join(name));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_non_utf8_path_bytes_survive_uri_encoding() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let directory = tempfile::tempdir().unwrap();
+        assert_readonly_attachment(
+            &directory
+                .path()
+                .join(OsString::from_vec(b"raw-\xff#?.db".to_vec())),
+        );
+    }
 }

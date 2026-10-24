@@ -7,21 +7,15 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
 };
 
-// Stored POSIX paths retain case even though the library's search keys fold it.
-// Compare native components so an empty suffix joined to a root (which adds a
-// trailing separator) still matches its canonical path. This does not resolve
-// links: a linked child and its canonical target retain different components.
-// Windows comparisons also normalize drive/UNC prefixes and directory separators.
+// Stored POSIX paths retain case even when read by a Windows process. This
+// comparison deliberately does not resolve links or native case aliases: a
+// case-only relocation must still update the recorded spelling.
 #[cfg(feature = "scanner")]
 fn relocation_path_matches(left: &str, right: &str) -> bool {
-    #[cfg(windows)]
-    {
-        path_key(left) == path_key(right)
-    }
-    #[cfg(not(windows))]
-    {
-        Path::new(left) == Path::new(right)
-    }
+    path_identity::comparison_key(left) == path_identity::comparison_key(right)
+        || (path_identity::windows_path(left)
+            && path_identity::windows_path(right)
+            && path_identity::matches(left, right, true))
 }
 
 /// Persistent lock identity shared with scanning, including builds without scanner support.
@@ -801,15 +795,21 @@ impl SqliteProvider {
         })
     }
     pub(crate) fn management_lookup(&self, path: &Path) -> Result<Option<AudioFile>> {
-        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let resolved = if self.read_only {
+            path.to_path_buf()
+        } else {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        };
         let reader = self.reader()?;
+        let Some(id) = path_identity::audio_id(&reader, &display_path(&resolved), !self.read_only)?
+        else {
+            return Ok(None);
+        };
         let projection = audio_projection(&reader)?;
         reader
             .query_row(
-                &format!(
-                    "SELECT {projection} FROM audio_files af WHERE path_key=?1 ORDER BY id LIMIT 1"
-                ),
-                [path_key(&display_path(&resolved))],
+                &format!("SELECT {projection} FROM audio_files af WHERE id=?1"),
+                [id],
                 audio_from_row,
             )
             .optional()
@@ -953,8 +953,8 @@ impl SqliteProvider {
         }
         let target_text = folder_path_text(&target);
         let resolved_source_text = folder_path_text(source).trim_end_matches('/').to_string();
-        let source_key = path_key(&resolved_source_text);
-        let target_key = path_key(&target_text);
+        let source_key = path_identity::comparison_key(&resolved_source_text);
+        let target_key = path_identity::comparison_key(&target_text);
         // Windows source aliases retain their established no-op behavior. On
         // case-insensitive POSIX volumes, realpath can change the source spelling
         // after a case-only rename, so compare its stored spelling below instead.
@@ -993,11 +993,33 @@ impl SqliteProvider {
                 OR folder_path=?3 COLLATE BINARY LIMIT 2",
         )?;
         if roots.is_empty() {
-            roots = lookup(
-                "SELECT id,parent_id,folder_path FROM folders
-                 WHERE folder_path=?1 COLLATE NOCASE OR folder_path=?2 COLLATE NOCASE
-                    OR folder_path=?3 COLLATE NOCASE LIMIT 2",
-            )?;
+            let mut seen = HashSet::new();
+            for path in [
+                &requested_source_text,
+                &resolved_source_text,
+                &parent_resolved_source_text,
+            ] {
+                let candidate = path_identity::folder_id(&writer, path).map_err(|error| {
+                    if matches!(&error, Error::Validation(message) if message.starts_with("Path matches multiple library records:")) {
+                        validation("Source path matches more than one indexed folder")
+                    } else {
+                        error
+                    }
+                })?;
+                if let Some(id) = candidate
+                    && seen.insert(id)
+                {
+                    roots.push(
+                        writer
+                            .query_row(
+                                "SELECT id,parent_id,folder_path FROM folders WHERE id=?1",
+                                [id],
+                                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                            )
+                            .map_err(db_error)?,
+                    );
+                }
+            }
         }
         if roots.len() > 1 {
             return Err(validation(
@@ -1013,7 +1035,7 @@ impl SqliteProvider {
         if relocation_path_matches(&source_text, &target_text) {
             return Ok(0);
         }
-        let source_key = path_key(&source_text);
+        let source_key = path_identity::comparison_key(&source_text);
         if source_key.starts_with(&format!("{target_key}/"))
             || target_key.starts_with(&format!("{source_key}/"))
         {
@@ -1032,7 +1054,11 @@ impl SqliteProvider {
             .collect::<rusqlite::Result<_>>()
             .map_err(db_error)?;
         let suffix = |text: &str| -> Result<String> {
-            let text = text.replace('\\', "/");
+            let text = if path_identity::windows_path(text) {
+                text.replace('\\', "/")
+            } else {
+                text.to_owned()
+            };
             let prefix = text
                 .get(..source_text.len())
                 .ok_or_else(|| validation("Stored folder path is outside the relocation root"))?;
@@ -1071,10 +1097,8 @@ impl SqliteProvider {
                 ));
             }
             let new_path = folder_path_text(&real);
-            let occupied: bool = writer.query_row(
-                "SELECT EXISTS(SELECT 1 FROM folders WHERE folder_path=?1 COLLATE NOCASE AND id<>?2)",
-                params![new_path, id], |row| row.get(0),
-            ).map_err(db_error)?;
+            let occupied =
+                path_identity::folder_id(&writer, &new_path)?.is_some_and(|found| found != *id);
             if occupied {
                 return Err(validation("Relocation target contains an indexed folder"));
             }
@@ -1127,14 +1151,9 @@ impl SqliteProvider {
             }
             let text = display_path(&real);
             let key = path_key(&text);
-            let occupied: bool = writer
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM audio_files WHERE path_key=?1 AND id<>?2)",
-                    params![key, audio.id],
-                    |row| row.get(0),
-                )
-                .map_err(db_error)?;
-            if occupied || !keys.insert(key.clone()) {
+            let occupied = path_identity::audio_id(&writer, &text, true)?
+                .is_some_and(|found| found != audio.id);
+            if occupied || !keys.insert(path_identity::comparison_key(&text)) {
                 return Err(validation(
                     "Relocation target is occupied by another audio record",
                 ));
@@ -1246,13 +1265,8 @@ impl SqliteProvider {
         if !exists {
             return Err(Error::NotFound(format!("Audio {id}")));
         }
-        let occupied = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM audio_files WHERE path_key=?1 AND id<>?2)",
-                params![key, id],
-                |r| r.get::<_, bool>(0),
-            )
-            .map_err(db_error)?;
+        let occupied = path_identity::audio_id(&tx, &display_path(&path), true)?
+            .is_some_and(|found| found != id);
         if occupied {
             return Err(validation(
                 "Relink target is already occupied by another library record",
@@ -1261,13 +1275,7 @@ impl SqliteProvider {
         // Reuse a registered ancestor when possible so the target remains browsable in its tree.
         let mut root = parent.to_path_buf();
         for ancestor in parent.ancestors() {
-            let found = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM folders WHERE folder_path=?1 COLLATE NOCASE)",
-                    [display_path(ancestor).replace('\\', "/")],
-                    |r| r.get::<_, bool>(0),
-                )
-                .map_err(db_error)?;
+            let found = path_identity::folder_id(&tx, &folder_path_text(ancestor))?.is_some();
             if found {
                 root = ancestor.to_path_buf();
                 break;
@@ -1406,20 +1414,8 @@ impl SqliteProvider {
         let mut skipped = 0;
         let mut apply = |value: serde_json::Value| -> Result<()> {
             let (path, patch) = annotation_patch(&value)?;
-            let ids: Vec<i64> = tx
-                .prepare("SELECT id FROM audio_files WHERE path_key=?1 ORDER BY id LIMIT 2")
-                .map_err(db_error)?
-                .query_map([path_key(&path)], |r| r.get(0))
-                .map_err(db_error)?
-                .collect::<rusqlite::Result<_>>()
-                .map_err(db_error)?;
-            if ids.len() > 1 {
-                return Err(validation(format!(
-                    "Annotation path matches multiple library records: {path}"
-                )));
-            }
-            if let Some(id) = ids.first() {
-                patch_row(&tx, *id, &patch, TagEditMode::Replace)?;
+            if let Some(id) = path_identity::audio_id(&tx, &path, false)? {
+                patch_row(&tx, id, &patch, TagEditMode::Replace)?;
                 records += 1;
             } else {
                 skipped += 1;

@@ -15,8 +15,10 @@
 //! administration lease and persists that new physical baseline before closing.
 //!
 //! The server's own writes go through [`RevisionTracker::record_own_write`], which holds
-//! the tracker lock across the write so the change bumps the revision exactly once and
-//! the poller does not count it again. A remote scan (`crate::scans`) commits many small
+//! the tracker lock across the write so an isolated change bumps the revision exactly
+//! once and the poller does not count it again. A writer-connection observation detects
+//! concurrent local edits and invalidates incremental replies that omit those edits.
+//! A remote scan (`crate::scans`) commits many small
 //! transactions; it holds the revision ([`RevisionTracker::begin_hold`]) so polling does
 //! not bump on every batch, and [`RevisionTracker::end_hold`] bumps once at the end (or
 //! not at all for a scan that changed nothing while nobody else wrote). The revision is a conservative change hint: it may
@@ -196,6 +198,9 @@ struct TrackerInner {
     state: SidecarState,
     /// Active holds ([`RevisionTracker::begin_hold`]); polling does not bump while > 0.
     holds: usize,
+    /// A write attempted during a hold returned before its complete baseline was
+    /// recorded. Even an otherwise unchanged scan cannot absorb that possible commit.
+    uncertain_write: bool,
 }
 
 /// Owns the dedicated change-detection connection and the persisted identity/revision.
@@ -289,6 +294,7 @@ impl RevisionTracker {
                 data_version,
                 state,
                 holds: 0,
+                uncertain_write: false,
             }),
         })
     }
@@ -328,12 +334,14 @@ impl RevisionTracker {
     /// if a server write already counted part of the work). Without it, commits made
     /// during the hold become the new baseline without a bump: the caller asserts they
     /// carry no client-visible change and that no other connection wrote meanwhile.
+    /// A write that returned before recording its baseline overrides that assertion:
+    /// its possible commit is conservatively counted even when `changed` is false.
     pub fn end_hold(&self, changed: bool) -> Result<RevisionInfo> {
         let mut inner = self.lock()?;
         inner.holds = inner.holds.saturating_sub(1);
         let version = data_version(&inner.conn)?;
         let fingerprint = FileFingerprint::read(&self.database)?;
-        if changed {
+        if changed || inner.uncertain_write {
             self.advance(&mut inner, version, fingerprint)?;
             tracing::info!(revision = inner.state.revision, "Library changed by a scan");
         } else if version != inner.data_version || fingerprint != inner.state.fingerprint {
@@ -352,7 +360,10 @@ impl RevisionTracker {
     fn catch_up(&self, inner: &mut TrackerInner) -> Result<()> {
         let version = data_version(&inner.conn)?;
         let fingerprint = FileFingerprint::read(&self.database)?;
-        if version != inner.data_version || fingerprint != inner.state.fingerprint {
+        if inner.uncertain_write
+            || version != inner.data_version
+            || fingerprint != inner.state.fingerprint
+        {
             self.advance(inner, version, fingerprint)?;
             tracing::info!(revision = inner.state.revision, "Library change detected");
         }
@@ -368,9 +379,12 @@ impl RevisionTracker {
     /// baseline, so the poller does not bump again for this write. A failed write leaves
     /// the revision untouched (the next poll still catches any partial effect).
     ///
-    /// Limitation: an external commit landing while `write` runs is folded into the same
-    /// bump; it is still reflected in the revision, but a client applying only the
-    /// returned records would not see it until the next change.
+    /// `foreign_version` must read `PRAGMA data_version` on the connection performing
+    /// `write`: its own commits leave that value unchanged, whereas commits from a
+    /// local client or another connection change it. Observations bracket both the
+    /// tracker baseline and the operation. A concurrent foreign commit advances
+    /// `revision_before` first, so a client cannot apply only the returned records to
+    /// an older snapshot and incorrectly declare itself current.
     ///
     /// During a hold (a running scan) pending commits are only counted when the write
     /// succeeds (then `revision_before` = held + 1 and `revision` = held + 2), so a
@@ -378,21 +392,29 @@ impl RevisionTracker {
     pub fn record_own_write<T>(
         &self,
         write: impl FnOnce() -> Result<T>,
+        foreign_version: impl FnMut() -> Result<i64>,
     ) -> Result<WriteOutcome<T>> {
-        self.record_own_write_if(write, |_| true)
+        self.record_own_write_if(write, |_| true, foreign_version)
     }
 
     /// Blocking. [`RevisionTracker::record_own_write`] for a write that may turn out to
     /// change nothing (removing records that no longer exist): when `changed` says so for
     /// the returned value, the revision is not bumped and `revision == revision_before`.
-    /// The baseline is then left alone, so a commit the write made anyway (or another
-    /// connection's commit) is still counted by the next poll.
+    /// The baseline is then left alone, so a commit the write made anyway is still
+    /// counted by the next poll. A concurrent foreign commit is counted immediately,
+    /// including for a no-op, so it cannot be hidden by the returned revision.
+    /// `foreign_version` has the same writer-connection contract as
+    /// [`Self::record_own_write`].
     pub fn record_own_write_if<T>(
         &self,
         write: impl FnOnce() -> Result<T>,
         changed: impl FnOnce(&T) -> bool,
+        mut foreign_version: impl FnMut() -> Result<i64>,
     ) -> Result<WriteOutcome<T>> {
         let mut inner = self.lock()?;
+        // Observe before catch_up: a commit between catch_up and this observation
+        // would otherwise be absorbed into the successful write's final baseline.
+        let foreign_before = foreign_version()?;
         let deferred = if inner.holds == 0 {
             self.catch_up(&mut inner)?;
             false
@@ -400,27 +422,42 @@ impl RevisionTracker {
             data_version(&inner.conn)? != inner.data_version
                 || FileFingerprint::read(&self.database)? != inner.state.fingerprint
         };
-        let value = write()?;
-        if !changed(&value) {
-            let revision = inner.state.revision;
-            return Ok(WriteOutcome {
-                value,
-                revision_before: revision,
-                revision,
-            });
-        }
-        let version = data_version(&inner.conn)?;
-        let fingerprint = FileFingerprint::read(&self.database)?;
-        if deferred {
+        // Once the operation is attempted, every error is potentially post-commit.
+        // Keep that uncertainty across an otherwise unchanged scan's end_hold(false).
+        let result = (|| {
+            let value = write()?;
+            let changed = changed(&value);
+            let version = data_version(&inner.conn)?;
+            let fingerprint = FileFingerprint::read(&self.database)?;
+            // Observe after the tracker baseline. A later foreign commit remains visible
+            // to poll via `version`; an earlier one must invalidate incremental replies.
+            let foreign_changed = foreign_version()? != foreign_before;
+            if !changed {
+                if foreign_changed || inner.uncertain_write {
+                    self.advance(&mut inner, version, fingerprint)?;
+                }
+                let revision = inner.state.revision;
+                return Ok(WriteOutcome {
+                    value,
+                    revision_before: revision,
+                    revision,
+                });
+            }
+            if deferred || foreign_changed || inner.uncertain_write {
+                self.advance(&mut inner, version, fingerprint)?;
+            }
+            let revision_before = inner.state.revision;
             self.advance(&mut inner, version, fingerprint)?;
+            Ok(WriteOutcome {
+                value,
+                revision_before,
+                revision: inner.state.revision,
+            })
+        })();
+        if result.is_err() && inner.holds > 0 {
+            inner.uncertain_write = true;
         }
-        let revision_before = inner.state.revision;
-        self.advance(&mut inner, version, fingerprint)?;
-        Ok(WriteOutcome {
-            value,
-            revision_before,
-            revision: inner.state.revision,
-        })
+        result
     }
 
     /// Blocking. Run a server-side write that only touches data clients do not need to
@@ -429,21 +466,28 @@ impl RevisionTracker {
     /// becomes the new polling baseline (persisted, so a restart does not bump either)
     /// without advancing the revision: `revision == revision_before`. During a hold the
     /// baseline is left alone so the scan's commits are still counted by `end_hold`; the
-    /// caller's commit then rides along with that bump.
+    /// caller's commit then rides along with that bump. Concurrent foreign commits
+    /// advance the revision even for a quiet write. `foreign_version` must observe
+    /// the writer connection, as required by [`Self::record_own_write`].
     pub fn record_own_write_quiet<T>(
         &self,
         write: impl FnOnce() -> Result<T>,
+        mut foreign_version: impl FnMut() -> Result<i64>,
     ) -> Result<WriteOutcome<T>> {
         let mut inner = self.lock()?;
+        let foreign_before = foreign_version()?;
         if inner.holds == 0 {
             self.catch_up(&mut inner)?;
         }
-        let value = write()?;
-        let revision = inner.state.revision;
-        if inner.holds == 0 {
+        let result = (|| {
+            let value = write()?;
             let version = data_version(&inner.conn)?;
             let fingerprint = FileFingerprint::read(&self.database)?;
-            if version != inner.data_version || fingerprint != inner.state.fingerprint {
+            if foreign_version()? != foreign_before || inner.uncertain_write {
+                self.advance(&mut inner, version, fingerprint)?;
+            } else if inner.holds == 0
+                && (version != inner.data_version || fingerprint != inner.state.fingerprint)
+            {
                 let mut next = inner.state.clone();
                 next.fingerprint = fingerprint;
                 next.wal = Some(WalSignature::read(&self.database)?);
@@ -451,12 +495,17 @@ impl RevisionTracker {
                 inner.state = next;
                 inner.data_version = version;
             }
+            let revision = inner.state.revision;
+            Ok(WriteOutcome {
+                value,
+                revision_before: revision,
+                revision,
+            })
+        })();
+        if result.is_err() && inner.holds > 0 {
+            inner.uncertain_write = true;
         }
-        Ok(WriteOutcome {
-            value,
-            revision_before: revision,
-            revision,
-        })
+        result
     }
 
     /// Blocking. Unconditionally bump the revision; call after server-side writes.
@@ -486,6 +535,7 @@ impl RevisionTracker {
         write_sidecar(&self.sidecar, &next)?;
         inner.state = next;
         inner.data_version = version;
+        inner.uncertain_write = false;
         Ok(())
     }
 }
@@ -624,10 +674,13 @@ mod tests {
         external.execute("INSERT INTO t VALUES (3)", []).unwrap();
         let own = wal_writer(&path);
         let outcome = tracker
-            .record_own_write(|| {
-                own.execute("INSERT INTO t VALUES (4)", [])
-                    .map_err(db_error)
-            })
+            .record_own_write(
+                || {
+                    own.execute("INSERT INTO t VALUES (4)", [])
+                        .map_err(db_error)
+                },
+                || data_version(&own),
+            )
             .unwrap();
         assert_eq!(outcome.value, 1);
         assert_eq!(
@@ -641,8 +694,10 @@ mod tests {
             outcome.revision,
             "no second bump"
         );
-        let failed =
-            tracker.record_own_write(|| -> Result<()> { Err(Error::NotFound("x".into())) });
+        let failed = tracker.record_own_write(
+            || -> Result<()> { Err(Error::NotFound("x".into())) },
+            || data_version(&own),
+        );
         assert!(failed.is_err());
         assert_eq!(tracker.poll().unwrap().revision, outcome.revision);
         drop(tracker);
@@ -688,8 +743,10 @@ mod tests {
         let writer = wal_writer(&path);
         tracker.begin_hold().unwrap();
         writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
-        let rejected =
-            tracker.record_own_write(|| -> Result<()> { Err(Error::Busy("scan".into())) });
+        let rejected = tracker.record_own_write(
+            || -> Result<()> { Err(Error::Busy("scan".into())) },
+            || data_version(&writer),
+        );
         assert!(rejected.is_err());
         assert_eq!(
             tracker.poll().unwrap().revision,
@@ -697,10 +754,13 @@ mod tests {
             "a rejected write keeps the hold"
         );
         let outcome = tracker
-            .record_own_write(|| {
-                writer.execute("INSERT INTO t VALUES (2)", []).unwrap();
-                Ok(())
-            })
+            .record_own_write(
+                || {
+                    writer.execute("INSERT INTO t VALUES (2)", []).unwrap();
+                    Ok(())
+                },
+                || data_version(&writer),
+            )
             .unwrap();
         assert_eq!(
             (outcome.revision_before, outcome.revision),
@@ -718,14 +778,14 @@ mod tests {
         let writer = wal_writer(&path);
         // Nothing changed: same revision on both sides, nothing persisted.
         let outcome = tracker
-            .record_own_write_if(|| Ok(0_u64), |n| *n > 0)
+            .record_own_write_if(|| Ok(0_u64), |n| *n > 0, || data_version(&writer))
             .unwrap();
         assert_eq!((outcome.revision_before, outcome.revision), (start, start));
         assert_eq!(tracker.poll().unwrap().revision, start);
         // A pending external commit is counted first, even by a no-op write.
         writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
         let outcome = tracker
-            .record_own_write_if(|| Ok(0_u64), |n| *n > 0)
+            .record_own_write_if(|| Ok(0_u64), |n| *n > 0, || data_version(&writer))
             .unwrap();
         assert_eq!(
             (outcome.revision_before, outcome.revision),
@@ -739,6 +799,7 @@ mod tests {
                     Ok(1_u64)
                 },
                 |n| *n > 0,
+                || data_version(&writer),
             )
             .unwrap();
         assert_eq!(
@@ -754,6 +815,7 @@ mod tests {
                     Ok(0_u64)
                 },
                 |n| *n > 0,
+                || data_version(&writer),
             )
             .unwrap();
         assert_eq!(tracker.poll().unwrap().revision, start + 3);
@@ -768,10 +830,13 @@ mod tests {
         let writer = wal_writer(&path);
         // A non-content write commits but neither it nor a later poll bumps.
         let outcome = tracker
-            .record_own_write_quiet(|| {
-                writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
-                Ok(())
-            })
+            .record_own_write_quiet(
+                || {
+                    writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
+                    Ok(())
+                },
+                || data_version(&writer),
+            )
             .unwrap();
         assert_eq!((outcome.revision_before, outcome.revision), (start, start));
         assert_eq!(tracker.poll().unwrap().revision, start);
@@ -782,10 +847,13 @@ mod tests {
         // An external commit pending before a quiet write is still counted.
         writer.execute("INSERT INTO t VALUES (2)", []).unwrap();
         let outcome = tracker
-            .record_own_write_quiet(|| {
-                writer.execute("INSERT INTO t VALUES (3)", []).unwrap();
-                Ok(())
-            })
+            .record_own_write_quiet(
+                || {
+                    writer.execute("INSERT INTO t VALUES (3)", []).unwrap();
+                    Ok(())
+                },
+                || data_version(&writer),
+            )
             .unwrap();
         assert_eq!(
             (outcome.revision_before, outcome.revision),
@@ -794,10 +862,13 @@ mod tests {
         assert_eq!(tracker.poll().unwrap().revision, start + 1);
         // A content write bumps exactly once.
         let outcome = tracker
-            .record_own_write(|| {
-                writer.execute("INSERT INTO t VALUES (4)", []).unwrap();
-                Ok(())
-            })
+            .record_own_write(
+                || {
+                    writer.execute("INSERT INTO t VALUES (4)", []).unwrap();
+                    Ok(())
+                },
+                || data_version(&writer),
+            )
             .unwrap();
         assert_eq!(outcome.revision, start + 2);
         assert_eq!(tracker.poll().unwrap().revision, start + 2);
@@ -805,12 +876,267 @@ mod tests {
         tracker.begin_hold().unwrap();
         writer.execute("INSERT INTO t VALUES (5)", []).unwrap();
         tracker
-            .record_own_write_quiet(|| {
-                writer.execute("INSERT INTO t VALUES (6)", []).unwrap();
-                Ok(())
-            })
+            .record_own_write_quiet(
+                || {
+                    writer.execute("INSERT INTO t VALUES (6)", []).unwrap();
+                    Ok(())
+                },
+                || data_version(&writer),
+            )
             .unwrap();
         assert_eq!(tracker.end_hold(true).unwrap().revision, start + 3);
+    }
+
+    #[test]
+    fn foreign_commits_at_observation_boundaries_cannot_disappear_into_own_revision() {
+        use std::cell::Cell;
+        for boundary in [
+            "before_catch_up",
+            "during_write",
+            "before_final_sample",
+            "after_final_sample",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, _setup) = database(dir.path());
+            let tracker = RevisionTracker::open(&path).unwrap();
+            let writer = wal_writer(&path);
+            let external = wal_writer(&path);
+            let start = tracker.poll().unwrap().revision;
+            let observations = Cell::new(0);
+            let foreign_commit = || {
+                // Multiple commits can coalesce into one observed data_version change;
+                // correctness must not depend on subtracting version counters.
+                external.execute("INSERT INTO t VALUES (10)", []).unwrap();
+                external.execute("INSERT INTO t VALUES (11)", []).unwrap();
+            };
+            let outcome = tracker
+                .record_own_write(
+                    || {
+                        if boundary == "during_write" {
+                            foreign_commit();
+                        }
+                        writer
+                            .execute("INSERT INTO t VALUES (1)", [])
+                            .map_err(db_error)
+                    },
+                    || {
+                        let sample = observations.get();
+                        observations.set(sample + 1);
+                        if sample == 1 && boundary == "before_final_sample" {
+                            foreign_commit();
+                        }
+                        let version = data_version(&writer)?;
+                        if (sample == 0 && boundary == "before_catch_up")
+                            || (sample == 1 && boundary == "after_final_sample")
+                        {
+                            foreign_commit();
+                        }
+                        Ok(version)
+                    },
+                )
+                .unwrap();
+            if boundary == "after_final_sample" {
+                assert_eq!(outcome.revision_before, start);
+                assert!(tracker.poll().unwrap().revision > outcome.revision);
+            } else {
+                assert!(
+                    outcome.revision_before > start,
+                    "{boundary} must refuse an old incremental cache"
+                );
+                assert!(tracker.poll().unwrap().revision >= outcome.revision);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_noop_and_quiet_writes_preserve_concurrent_changes_during_scan_holds() {
+        for holding in [false, true] {
+            for kind in ["failed", "noop", "quiet", "ordinary"] {
+                let dir = tempfile::tempdir().unwrap();
+                let (path, _setup) = database(dir.path());
+                let tracker = RevisionTracker::open(&path).unwrap();
+                let writer = wal_writer(&path);
+                let external = wal_writer(&path);
+                let start = tracker.poll().unwrap().revision;
+                if holding {
+                    tracker.begin_hold().unwrap();
+                }
+                let write = || {
+                    external.execute("INSERT INTO t VALUES (10)", []).unwrap();
+                    if kind == "failed" {
+                        return Err(Error::Busy("scan write was rejected".into()));
+                    }
+                    if kind != "noop" {
+                        writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
+                    }
+                    Ok(())
+                };
+                let result = if kind == "quiet" {
+                    tracker.record_own_write_quiet(write, || data_version(&writer))
+                } else {
+                    tracker.record_own_write_if(
+                        write,
+                        |_| kind == "ordinary",
+                        || data_version(&writer),
+                    )
+                };
+                if kind == "failed" {
+                    assert!(result.is_err());
+                    if holding {
+                        assert_eq!(
+                            tracker.poll().unwrap().revision,
+                            start,
+                            "rejected write keeps the hold"
+                        );
+                        assert!(tracker.end_hold(true).unwrap().revision > start);
+                    } else {
+                        assert!(tracker.poll().unwrap().revision > start);
+                    }
+                } else {
+                    let outcome = result.unwrap();
+                    assert!(outcome.revision_before > start, "{holding}/{kind}");
+                    assert_eq!(
+                        outcome.revision - outcome.revision_before,
+                        u64::from(kind == "ordinary")
+                    );
+                    if holding {
+                        assert!(tracker.end_hold(true).unwrap().revision > outcome.revision);
+                    } else {
+                        assert_eq!(tracker.poll().unwrap().revision, outcome.revision);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn uncertain_own_commits_survive_an_unchanged_scan_hold_end() {
+        use std::cell::Cell;
+        for quiet in [false, true] {
+            for failure in ["operation", "observer", "sidecar"] {
+                let dir = tempfile::tempdir().unwrap();
+                let (path, _setup) = database(dir.path());
+                let mut tracker = RevisionTracker::open(&path).unwrap();
+                let writer = wal_writer(&path);
+                let start = tracker.poll().unwrap().revision;
+                let sidecar = tracker.sidecar.clone();
+                if failure == "sidecar" {
+                    // An owned directory cannot be replaced by the state file. Restore
+                    // the real target before finishing the hold so recovery can persist.
+                    tracker.sidecar = dir.path().join("blocked-sidecar");
+                    fs::create_dir(&tracker.sidecar).unwrap();
+                }
+                tracker.begin_hold().unwrap();
+                let observations = Cell::new(0);
+                let write = || {
+                    writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
+                    if failure == "operation" {
+                        Err(Error::Database("failure after commit".into()))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let observe = || {
+                    let count = observations.get();
+                    observations.set(count + 1);
+                    if failure == "observer" && count == 1 {
+                        Err(Error::Database("final observation failed".into()))
+                    } else {
+                        data_version(&writer)
+                    }
+                };
+                // A quiet write normally leaves its baseline to end_hold. For the
+                // sidecar case, a foreign commit forces immediate state persistence.
+                let external = wal_writer(&path);
+                let operation = || {
+                    if quiet && failure == "sidecar" {
+                        external.execute("INSERT INTO t VALUES (2)", []).unwrap();
+                    }
+                    write()
+                };
+                let result = if quiet {
+                    tracker.record_own_write_quiet(operation, observe)
+                } else {
+                    tracker.record_own_write(operation, observe)
+                };
+                assert!(result.is_err(), "{quiet}/{failure}");
+                assert_eq!(
+                    tracker.poll().unwrap().revision,
+                    start,
+                    "failure must retain the active hold"
+                );
+                tracker.sidecar = sidecar;
+                let finished = tracker.end_hold(false).unwrap();
+                assert!(
+                    finished.revision > start,
+                    "{quiet}/{failure} must not absorb a possible business commit"
+                );
+                assert_eq!(tracker.poll().unwrap(), finished);
+                drop(tracker);
+                assert_eq!(
+                    RevisionTracker::open(&path).unwrap().poll().unwrap(),
+                    finished
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn successful_or_unattempted_writes_do_not_dirty_an_unchanged_hold() {
+        for kind in ["ordinary", "quiet", "noop", "initial_observer_error"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, _setup) = database(dir.path());
+            let tracker = RevisionTracker::open(&path).unwrap();
+            let writer = wal_writer(&path);
+            let start = tracker.poll().unwrap().revision;
+            tracker.begin_hold().unwrap();
+            let result = if kind == "quiet" {
+                tracker.record_own_write_quiet(
+                    || {
+                        writer
+                            .execute("INSERT INTO t VALUES (1)", [])
+                            .map_err(db_error)
+                    },
+                    || data_version(&writer),
+                )
+            } else {
+                tracker.record_own_write_if(
+                    || {
+                        assert_ne!(
+                            kind, "initial_observer_error",
+                            "must fail before the operation"
+                        );
+                        if kind == "ordinary" {
+                            writer
+                                .execute("INSERT INTO t VALUES (1)", [])
+                                .map_err(db_error)
+                        } else {
+                            Ok(0)
+                        }
+                    },
+                    |_| kind == "ordinary",
+                    || {
+                        if kind == "initial_observer_error" {
+                            Err(Error::Database("initial observation failed".into()))
+                        } else {
+                            data_version(&writer)
+                        }
+                    },
+                )
+            };
+            if kind == "initial_observer_error" {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+            }
+            let expected = start + u64::from(kind == "ordinary");
+            assert_eq!(
+                tracker.end_hold(false).unwrap().revision,
+                expected,
+                "{kind}"
+            );
+            assert_eq!(tracker.poll().unwrap().revision, expected);
+        }
     }
 
     #[test]

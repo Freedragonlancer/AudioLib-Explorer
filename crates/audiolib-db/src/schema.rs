@@ -660,6 +660,19 @@ pub fn register_tokenizer(conn: &Connection, jieba: Arc<Jieba>) -> Result<()> {
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |context| Ok(path_key(&context.get::<String>(0)?)),
     )
+    .map_err(db_error)?;
+    // Query-only path identity: never persisted in a schema/index or feature map.
+    // Legacy folded keys remain unchanged and only select candidate buckets.
+    conn.create_scalar_function(
+        "audiolib_path_identity",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            Ok(crate::path_identity::comparison_key(
+                &context.get::<String>(0)?,
+            ))
+        },
+    )
     .map_err(db_error)
 }
 
