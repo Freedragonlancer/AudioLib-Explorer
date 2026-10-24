@@ -495,8 +495,13 @@ fn native_posix_backslashes_remain_literal_folder_and_file_characters() {
         folder_path_text(&sounds.canonicalize().unwrap())
     );
     let id = provider.find_audio_by_path(&file).unwrap().unwrap().id;
+    assert_eq!(provider.get_audio(id).unwrap().filename, r"Foo\Bar.wav");
+    assert!(!sounds.join("Foo").exists());
     assert_eq!(scan(true).unchanged, 1);
-    fs::remove_file(file).unwrap();
+    fs::remove_file(&file).unwrap();
+    // An empty scan root must not mark files missing: an unmounted volume looks
+    // the same. A non-audio sibling keeps this deletion inside reconciliation.
+    fs::write(sounds.join("keep.txt"), b"keep").unwrap();
     assert_eq!(scan(false).removed, 1);
     assert!(provider.get_audio(id).unwrap().missing);
 }
