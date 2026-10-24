@@ -3473,6 +3473,7 @@ impl Controller {
                 .then(|| ui.get_tag_filter().trim().to_owned()),
             color: (!ui.get_color_filter().trim().is_empty())
                 .then(|| ui.get_color_filter().trim().to_owned()),
+            ..SearchFilters::default()
         };
         request.order_by = table_sort_order(ui.get_sort_index());
         request.descending = ui.get_sort_descending();

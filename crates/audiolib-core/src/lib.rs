@@ -16,6 +16,7 @@ pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
 pub mod server_url;
+pub mod tag_filter;
 pub mod waveform_cache;
 pub mod waveform_rate;
 pub mod window_layout;
@@ -201,6 +202,9 @@ pub struct Folder {
     pub file_count: u64,
 }
 
+/// Upper bound on `include_tags` plus `exclude_tags`, keeping each search statement bounded.
+pub const MAX_TAG_TERMS: usize = 64;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchFilters {
     #[serde(default)]
@@ -214,6 +218,14 @@ pub struct SearchFilters {
     pub tagged_only: bool,
     /// Case-insensitive literal substring of library tags; percent/underscore are literal.
     pub tag_contains: Option<String>,
+    /// Further include terms matched like `tag_contains`; a record must contain all of them.
+    /// Omitted when empty and defaulted when absent, so older peers keep their wire shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_tags: Vec<String>,
+    /// Exclude terms matched like `tag_contains`; a record containing any of them is
+    /// omitted. A term on both sides therefore matches nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_tags: Vec<String>,
     /// Exact library color, ignoring hex letter case.
     pub color: Option<String>,
 }
@@ -323,6 +335,24 @@ impl SearchRequest {
             return Err(Error::Validation(
                 "Tag filter exceeds 500 characters or contains NUL".into(),
             ));
+        }
+        // An empty term would match every tag text, so an exclusion would hide everything.
+        let terms = self
+            .filters
+            .include_tags
+            .iter()
+            .chain(&self.filters.exclude_tags);
+        if self.filters.include_tags.len() + self.filters.exclude_tags.len() > MAX_TAG_TERMS {
+            return Err(Error::Validation(format!(
+                "At most {MAX_TAG_TERMS} tag filter terms are allowed"
+            )));
+        }
+        for tag in terms {
+            if tag.trim().is_empty() || tag.chars().count() > 500 || tag.contains('\0') {
+                return Err(Error::Validation(
+                    "Tag filter terms must be 1..=500 characters without NUL".into(),
+                ));
+            }
         }
         if let Some(color) = &self.filters.color {
             MetadataPatch {
