@@ -644,6 +644,64 @@ fn click_menu_item(ui: &AppWindow, title: &str, label: &str) {
     );
 }
 
+// Fallback submenus open beside their entry; their items report popup-relative positions.
+fn click_submenu_item(ui: &AppWindow, title: &str, submenu: &str, label: &str) {
+    let popup = open_menu(ui, title);
+    let entry = ElementHandle::find_by_accessible_label(ui, submenu)
+        .next()
+        .unwrap_or_else(|| panic!("Missing {title} submenu: {submenu}"));
+    let (origin, size) = (entry.absolute_position(), entry.size());
+    click_at(
+        ui,
+        slint::LogicalPosition::new(
+            popup.x + origin.x + size.width / 2.0,
+            popup.y + origin.y + size.height / 2.0,
+        ),
+    );
+    let nested = slint::LogicalPosition::new(popup.x + origin.x + size.width, popup.y + origin.y);
+    let item = ElementHandle::find_by_accessible_label(ui, label)
+        .find(|item| item.absolute_position().x < origin.x + size.width / 2.0)
+        .unwrap_or_else(|| panic!("Missing {submenu} item: {label}"));
+    let (item_origin, item_size) = (item.absolute_position(), item.size());
+    click_at(
+        ui,
+        slint::LogicalPosition::new(
+            nested.x + item_origin.x + item_size.width / 2.0,
+            nested.y + item_origin.y + item_size.height / 2.0,
+        ),
+    );
+}
+
+#[test]
+fn library_menu_file_status_and_view_sort_show_a_footer_reset() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    let searches = Rc::new(RefCell::new(0));
+    let observed = searches.clone();
+    ui.on_filter_requested(move || *observed.borrow_mut() += 1);
+    ui.show().unwrap();
+    click_submenu_item(&ui, "Library", "Show files: Present files", "Missing files");
+    assert_eq!(ui.get_visibility_index(), 1);
+    assert_eq!(*searches.borrow(), 1);
+    // The footer keeps the menu-only scope visible and restores it in one click.
+    click_label(&ui, "Show present files");
+    assert_eq!(ui.get_visibility_index(), 0);
+    assert_eq!(*searches.borrow(), 2);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Show present files")
+            .next()
+            .is_none()
+    );
+    // Modification time has no column, so the View menu sorts by it.
+    click_submenu_item(&ui, "View", "Sort: Default", "Modified (newest first)");
+    assert_eq!((ui.get_sort_index(), ui.get_sort_descending()), (6, true));
+    click_label(&ui, "Restore default order");
+    assert_eq!((ui.get_sort_index(), ui.get_sort_descending()), (0, false));
+    assert_eq!(*searches.borrow(), 4);
+    ui.hide().unwrap();
+}
+
 pub(crate) fn send_keys(ui: &AppWindow, keys: &[slint::SharedString]) {
     for key in keys {
         ui.window()
