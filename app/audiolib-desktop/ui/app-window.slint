@@ -763,7 +763,7 @@ export component AppWindow inherits Window {
     // profile; sm-selected -1 is a new, unsaved server.
     in property <[SourceRow]> sm-sources: [{ kind: 0, active: true }];
     in-out property <int> sm-selected: 0;
-    // Server pages: 0 连接, 1 服务器音效库, 2 缓存与导出.
+    // Server pages: 0 连接与库信息, 1 服务器音效库, 2 缓存与导出 (试听/性能 lives on page 2).
     in-out property <int> sm-page: 0;
     in-out property <bool> sm-confirm-delete: false;
     in property <string> sm-local-path: "";
@@ -2282,7 +2282,7 @@ export component AppWindow inherits Window {
                             if root.library-visible && !root.sm-new && !root.sm-active: Action { width: 150px * Theme.ui-scale; primary: true; enabled: (!root.ds-applying && !root.library-busy) || (!root.sm-server && root.sm-local-escape); label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
                         }
                         if root.library-visible && root.sm-server: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                            Action { width: 96px * Theme.ui-scale; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接" : "Connection"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
+                            Action { width: 96px * Theme.ui-scale; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接与库信息" : "Connection & library"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
                             Action { width: 120px * Theme.ui-scale; active: root.sm-page == 1; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "服务器音效库" : "Server library"; clicked => { root.sm-page = 1; root.sm-page-selected(1); } }
                             Action { width: 110px * Theme.ui-scale; active: root.sm-page == 2; enabled: !root.ds-applying && !root.sm-new; label: root.chinese ? "缓存与导出" : "Cache and export"; clicked => { root.sm-page = 2; root.sm-page-selected(2); } }
                             Rectangle { horizontal-stretch: 1; }
@@ -2290,6 +2290,7 @@ export component AppWindow inherits Window {
                         if root.library-visible && root.sm-server && root.sm-page == 2: VerticalLayout { vertical-stretch: 0; spacing: 4px * Theme.ui-scale;
                             // Compact header: one summary line, the elided cache directory, then sync on one row;
                             // the full library id / path / snapshot details open on demand (详情).
+                            Text { height: 18px * Theme.ui-scale; text: root.chinese ? "库信息" : "Library info"; color: Theme.dim; font-size: Theme.font(12); font-weight: 600; }
                             HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                                 VerticalLayout { horizontal-stretch: 1; spacing: 2px * Theme.ui-scale;
                                     Text { height: 16px * Theme.ui-scale; vertical-alignment: center; overflow: elide; color: Theme.ink; font-size: Theme.font(11); text: root.sm-cache-summary; }
@@ -2328,37 +2329,35 @@ export component AppWindow inherits Window {
                                     if root.library-feedback != "": Text { height: 34px * Theme.ui-scale; text: root.library-feedback; color: Theme.accent; wrap: word-wrap; font-size: Theme.font(11); }
                                     library-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
                                         VerticalLayout { spacing: 12px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; alignment: start;
-                                            Text { height: 24px * Theme.ui-scale; text: root.chinese ? "扫描与更新" : "Scan and update"; color: Theme.ink; font-size: Theme.font(15); font-weight: 600; }
-                                            Label { height: 32px * Theme.ui-scale; text: root.chinese ? "添加新音效用增量扫描；整理或移动文件后，用全量扫描检查所选文件夹。均包含子文件夹。" : "Use incremental scans to add sounds; use full scans to recheck a folder after reorganizing files. Both include subfolders."; wrap: word-wrap; }
-                                            if root.remote-mode: Text { text: root.chinese ? "服务器模式只读：扫描、修复、维护、恢复、新建/打开库和导入标注不可用；校验、备份副本和导出仍可使用。服务器允许本机管理时，可从编辑菜单或右键菜单移除服务器音效库的记录（WAV 文件不受影响），扫描在「服务器音效库」页。" : "Read-only in server mode: scans, repair, maintenance, restore, new/open library and annotation import are unavailable; check, backup copy and export still work. When the server lets this PC manage, Edit and the context menus remove server library records (WAV files are untouched); scans run on the Server library page."; color: Theme.warning; font-size: Theme.font(11); wrap: word-wrap; }
-                                            HorizontalLayout { height: 36px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                                                Action { horizontal-stretch: 1; primary: true; enabled: !root.library-busy && !root.scanning && !root.remote-mode; label: root.chinese ? "添加文件夹…" : "Add folder…"; clicked => { root.prepare-scan(0, ""); } }
-                                                Action { horizontal-stretch: 1; enabled: !root.library-busy && !root.scanning && !root.remote-mode; label: root.chinese ? "增量扫描…" : "Incremental scan…"; clicked => { root.prepare-scan(0, root.selected-folder-path); } }
-                                                Action { horizontal-stretch: 1; enabled: !root.library-busy && !root.scanning && !root.remote-mode; label: root.chinese ? "全量扫描…" : "Full scan…"; clicked => { root.prepare-scan(1, root.selected-folder-path); } }
+                                            // Local mode: full scan/update controls. Server/remote mode
+                                            // hides the forever-disabled buttons; scans live on 服务器音效库.
+                                            if !root.remote-mode: VerticalLayout { spacing: 12px * Theme.ui-scale;
+                                                Text { height: 24px * Theme.ui-scale; text: root.chinese ? "扫描与更新" : "Scan and update"; color: Theme.ink; font-size: Theme.font(15); font-weight: 600; }
+                                                Label { height: 32px * Theme.ui-scale; text: root.chinese ? "添加新音效用增量扫描；整理或移动文件后，用全量扫描检查所选文件夹。均包含子文件夹。" : "Use incremental scans to add sounds; use full scans to recheck a folder after reorganizing files. Both include subfolders."; wrap: word-wrap; }
+                                                HorizontalLayout { height: 36px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                                                    Action { horizontal-stretch: 1; primary: true; enabled: !root.library-busy && !root.scanning; label: root.chinese ? "添加文件夹…" : "Add folder…"; clicked => { root.prepare-scan(0, ""); } }
+                                                    Action { horizontal-stretch: 1; enabled: !root.library-busy && !root.scanning; label: root.chinese ? "增量扫描…" : "Incremental scan…"; clicked => { root.prepare-scan(0, root.selected-folder-path); } }
+                                                    Action { horizontal-stretch: 1; enabled: !root.library-busy && !root.scanning; label: root.chinese ? "全量扫描…" : "Full scan…"; clicked => { root.prepare-scan(1, root.selected-folder-path); } }
+                                                }
+                                                if root.scanning: HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                                                    Label { horizontal-stretch: 1; text: root.scan-paused ? (root.chinese ? "扫描已请求暂停，可继续或取消。" : "Pause requested. Resume or cancel at any time.") : (root.chinese ? "扫描正在后台进行，可以继续浏览和试听。" : "Scanning in the background. You can keep browsing and auditioning."); }
+                                                    Action { width: 110px * Theme.ui-scale; enabled: root.scan-controllable && !root.scan-validating; label: root.scan-paused ? (root.chinese ? "继续扫描" : "Resume scan") : (root.chinese ? "暂停扫描" : "Pause scan"); clicked => { root.scan-pause-requested(); } }
+                                                    Action { width: 130px * Theme.ui-scale; enabled: root.scan-controllable; label: root.chinese ? "取消当前扫描" : "Cancel current scan"; clicked => { root.scan-cancel-requested(); } }
+                                                }
+                                                if root.scan-summary != "": Text { height: 44px * Theme.ui-scale; text: root.scan-summary; color: Theme.accent; wrap: word-wrap; font-size: Theme.font(11); }
+                                                pregenerate-waveforms-check := CheckBox {
+                                                    height: 28px * Theme.ui-scale; enabled: !root.library-busy;
+                                                    text: root.chinese ? "预生成列表波形" : "Pre-generate list Waveforms";
+                                                    checked <=> root.pregenerate-list-waveforms;
+                                                    toggled => { root.pregenerate-list-waveforms-requested(self.checked); }
+                                                }
+                                                Label { height: 32px * Theme.ui-scale; wrap: word-wrap; font-size: Theme.font(10);
+                                                    text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
+                                                }
                                             }
-                                            if root.scanning: HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                                                Label { horizontal-stretch: 1; text: root.scan-paused ? (root.chinese ? "扫描已请求暂停，可继续或取消。" : "Pause requested. Resume or cancel at any time.") : (root.chinese ? "扫描正在后台进行，可以继续浏览和试听。" : "Scanning in the background. You can keep browsing and auditioning."); }
-                                                Action { width: 110px * Theme.ui-scale; enabled: root.scan-controllable && !root.scan-validating; label: root.scan-paused ? (root.chinese ? "继续扫描" : "Resume scan") : (root.chinese ? "暂停扫描" : "Pause scan"); clicked => { root.scan-pause-requested(); } }
-                                                Action { width: 130px * Theme.ui-scale; enabled: root.scan-controllable; label: root.chinese ? "取消当前扫描" : "Cancel current scan"; clicked => { root.scan-cancel-requested(); } }
-                                            }
-                                            if root.scan-summary != "": Text { height: 44px * Theme.ui-scale; text: root.scan-summary; color: Theme.accent; wrap: word-wrap; font-size: Theme.font(11); }
-                                            if !root.remote-mode: pregenerate-waveforms-check := CheckBox {
-                                                height: 28px * Theme.ui-scale; enabled: !root.library-busy;
-                                                text: root.chinese ? "预生成列表波形" : "Pre-generate list Waveforms";
-                                                checked <=> root.pregenerate-list-waveforms;
-                                                toggled => { root.pregenerate-list-waveforms-requested(self.checked); }
-                                            }
-                                            if !root.remote-mode: Label { height: 32px * Theme.ui-scale; wrap: word-wrap; font-size: Theme.font(10);
-                                                text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
-                                            }
-                                            if root.remote-mode: hold-waveform-batches-check := CheckBox {
-                                                height: 28px * Theme.ui-scale;
-                                                text: root.chinese ? "试听开始后 3 秒内暂缓列表波形批量请求" : "Hold list-waveform batch requests during first 3 s after audition start";
-                                                checked <=> root.hold-list-waveform-batches;
-                                                toggled => { root.hold-list-waveform-batches-requested(self.checked); }
-                                            }
-                                            if root.remote-mode: Label { height: 32px * Theme.ui-scale; wrap: word-wrap; font-size: Theme.font(10);
-                                                text: root.chinese ? "开启后，每次试听开始（加载/播放/定位）后的 3 秒内不发送新的列表缩略波形批量请求，之后补发，不会丢弃；默认关闭。" : "When on, no new list thumbnail batch request is sent during the first 3 s after each audition start (Load/Play/Seek); held rows are requested afterwards, not dropped. Off by default.";
+                                            if root.remote-mode: Label {
+                                                wrap: word-wrap; font-size: Theme.font(11); color: Theme.muted;
+                                                text: root.chinese ? "扫描请到「服务器音效库」页。" : "Scans are on the Server library page.";
                                             }
                                             if root.sm-server && root.sm-page == 2 && root.sm-wave-supported: VerticalLayout { spacing: 6px * Theme.ui-scale;
                                                 if root.sm-wave-supported: Text { height: 22px * Theme.ui-scale; text: root.chinese ? "列表简化波形（服务器）" : "List Waveforms (server)"; color: Theme.ink; font-size: Theme.font(14); font-weight: 600; }
@@ -2438,6 +2437,18 @@ export component AppWindow inherits Window {
                                             }
                                             if root.sm-cw-message != "": Label { wrap: word-wrap; font-size: Theme.font(11); color: Theme.accent; text: root.sm-cw-message; }
                                             Rectangle { height: 1px; background: Theme.border; }
+                                            if root.remote-mode: VerticalLayout { spacing: 8px * Theme.ui-scale;
+                                                Text { height: 22px * Theme.ui-scale; text: root.chinese ? "试听/性能" : "Audition / performance"; color: Theme.ink; font-size: Theme.font(14); font-weight: 600; }
+                                                hold-waveform-batches-check := CheckBox {
+                                                    height: 28px * Theme.ui-scale;
+                                                    text: root.chinese ? "试听开始后 3 秒内暂缓列表波形批量请求" : "Hold list-waveform batch requests during first 3 s after audition start";
+                                                    checked <=> root.hold-list-waveform-batches;
+                                                    toggled => { root.hold-list-waveform-batches-requested(self.checked); }
+                                                }
+                                                Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted;
+                                                    text: root.chinese ? "开启后，每次试听开始（加载/播放/定位）后的 3 秒内不发送新的列表缩略波形批量请求，之后补发，不会丢弃；默认关闭。" : "When on, no new list thumbnail batch request is sent during the first 3 s after each audition start (Load/Play/Seek); held rows are requested afterwards, not dropped. Off by default.";
+                                                }
+                                            }
                                             Rectangle { height: 1px; background: Theme.border; }
                                             HorizontalLayout { height: 62px * Theme.ui-scale; spacing: 16px * Theme.ui-scale;
                                                 VerticalLayout { horizontal-stretch: 1; spacing: 4px * Theme.ui-scale;
