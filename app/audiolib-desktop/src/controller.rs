@@ -42,6 +42,8 @@ enum ScanPresentation {
 mod client_review_tests;
 #[path = "controller_history.rs"]
 mod history;
+#[path = "search_tasks.rs"]
+mod search_tasks;
 
 fn table_sort_order(index: i32) -> SortOrder {
     match index {
@@ -376,7 +378,7 @@ struct WaveJob {
     width: u32,
     height: u32,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TreeState {
     matches: Arc<Vec<Folder>>,
     visible: Arc<Vec<(Folder, usize, bool)>>,
@@ -633,6 +635,10 @@ pub struct Controller {
     single_click_play: AtomicBool,
     /// Latest table layout, captured on the event loop and saved by the preferences worker.
     audio_table: Mutex<AudioTablePreferences>,
+    task_workspace: Mutex<search_tasks::TaskWorkspaceState>,
+    workspace_writes: Mutex<search_tasks::WorkspaceWrites>,
+    workspace_wake: Condvar,
+    max_search_tasks: AtomicU32,
     /// Window geometry and pane layout, captured on the UI thread when a pane
     /// divider is released and when closing; saved by the preferences worker.
     window_layout: Mutex<audiolib_core::window_layout::WindowLayoutPreferences>,
@@ -874,6 +880,10 @@ impl Controller {
                 config.hold_list_waveform_batches_after_audition,
             ),
             audio_table: Mutex::new(table),
+            task_workspace: Mutex::new(search_tasks::TaskWorkspaceState::default()),
+            workspace_writes: Mutex::new(search_tasks::WorkspaceWrites::default()),
+            workspace_wake: Condvar::new(),
+            max_search_tasks: AtomicU32::new(config.max_search_tasks),
             window_layout: Mutex::new(config.window_layout.normalized()),
             single_click_play_pending: Mutex::new(false),
             single_click_play_wake: Condvar::new(),
@@ -955,11 +965,13 @@ impl Controller {
         controller.reload_tree();
         controller.request_search(ui, true, true);
         controller.init_remote(remote);
+        controller.init_search_workspace();
         controller.find_metadata_recovery();
         controller
     }
 
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
+        self.bind_search_tasks(ui);
         let c = self.clone();
         ui.on_exit_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -971,6 +983,9 @@ impl Controller {
             if c.available()
                 && let Some(ui) = c.ui.upgrade()
             {
+                if c.retry_failed_search_task(&ui) {
+                    return;
+                }
                 c.reload_tree();
                 c.refresh_library_info();
                 c.request_search(&ui, true, true);
@@ -1541,6 +1556,7 @@ impl Controller {
                 saving.reload_tree();
             });
             if let Some(ui) = c.ui.upgrade() {
+                c.publish_search_tasks(&ui);
                 c.request_search(&ui, true, false);
                 c.refresh_library_info();
                 c.publish_data_source(&ui);
@@ -1963,6 +1979,13 @@ impl Controller {
             if self.is_same_library_snapshot_refresh(target));
         let retain_context = operation.retains_library_identity();
         let read_only = operation.is_read_only();
+        self.persist_search_task(&ui);
+        let switches_workspace = matches!(
+            operation,
+            LibraryOperation::Switch { .. }
+                | LibraryOperation::Restore(_)
+                | LibraryOperation::DataSource(_)
+        );
         let selected_id = ui.get_selected_id().parse::<i64>().ok();
         self.capture_metadata(&ui);
         let recovering_handoff = matches!(operation, LibraryOperation::DataSource(_));
@@ -1990,6 +2013,9 @@ impl Controller {
         };
         if already_busy {
             return;
+        }
+        if switches_workspace {
+            self.freeze_search_workspace();
         }
         ui.set_library_busy(true);
         let opening_cache = matches!(
@@ -2035,6 +2061,7 @@ impl Controller {
             let mut retained_checked = None;
             let mut removed_audio_generation = None;
             let result = (|| -> Result<String, String> {
+                c.wait_workspace_writes()?;
                 // Keep the old snapshot and its drafts when a save fails. A refresh
                 // must never discard an annotation merely because a newer snapshot exists.
                 if recovering_handoff {
@@ -2309,6 +2336,9 @@ impl Controller {
                     ui.set_audio_ready(false);
                 }
                 let succeeded = result.is_ok();
+                if switches_workspace && !succeeded {
+                    c2.thaw_search_workspace();
+                }
                 if matches!(operation, LibraryOperation::DataSource(_))
                     && c2.source_changing.load(Ordering::Acquire)
                 {
@@ -2397,6 +2427,9 @@ impl Controller {
                         c2.reconcile_source_manager_after_swap(&ui);
                     }
                     c2.publish_metadata_recovery_notice(&ui);
+                }
+                if switches_workspace && succeeded {
+                    c2.init_search_workspace();
                 }
                 if !operation.changes_records() || !succeeded {
                     c2.sync_editor(&ui);
@@ -2693,6 +2726,7 @@ impl Controller {
     }
 
     fn start_workers(self: &Arc<Self>) {
+        self.start_workspace_worker();
         let c = self.clone();
         std::thread::Builder::new()
             .name("audiolib-selection".into())
@@ -2761,6 +2795,7 @@ impl Controller {
                         config.ui_font_size = c.ui_font_size.load(Ordering::Acquire);
                         config.list_font_size = c.list_font_size.load(Ordering::Acquire);
                         config.audio_table = c.audio_table.lock().unwrap().clone();
+                        config.max_search_tasks = c.max_search_tasks.load(Ordering::Acquire);
                         config.window_layout = c.window_layout.lock().unwrap().clone();
                         config.save()
                     };
@@ -2894,6 +2929,7 @@ impl Controller {
                     }
                     let provider = &job.provider;
                     crate::gui_search_benchmark::worker_started(job.generation, false);
+                    let revision_before = provider.search_revision().ok().flatten();
                     let chinese = c.chinese.load(Ordering::Acquire);
                     let mut result = survive_panic(
                         || provider.search_cancellable(&job.request, job.cancel.clone()),
@@ -2903,6 +2939,9 @@ impl Controller {
                             ))
                         },
                     );
+                    let revision_after = provider.search_revision().ok().flatten();
+                    let workspace_revision =
+                        revision_before.filter(|revision| Some(*revision) == revision_after);
                     crate::gui_search_benchmark::worker_completed(job.generation, false);
                     // Server removals stay hidden until the resync swaps the snapshot.
                     if let Ok(page) = result.as_mut() {
@@ -3031,6 +3070,7 @@ impl Controller {
                                     );
                                 }
                                 c2.search_page_published(&ui, job.generation, true);
+                                c2.search_task_page_ready(&ui, workspace_revision);
                             }
                             Err(error) => {
                                 ui.set_status(error.to_string().into());
@@ -3130,6 +3170,10 @@ impl Controller {
                     crate::gui_search_benchmark::worker_completed(job.generation, true);
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
+                        if c2.search_generation.load(Ordering::Acquire) != job.generation {
+                            return;
+                        }
+                        c2.search_task_folders_ready(database_revision.filter(|_| stable));
                         c2.search_folders_computed(
                             &ui,
                             job.generation,
@@ -3498,6 +3542,7 @@ impl Controller {
         if !self.available() {
             return;
         }
+        self.persist_search_task(ui);
         // Even invalid input supersedes queued/in-flight work and its UI publications.
         self.search_cancel
             .lock()
@@ -3509,6 +3554,9 @@ impl Controller {
         let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.tree_generation.fetch_add(1, Ordering::AcqRel);
         ui.set_searching(false);
+        if self.task_folder_unavailable(ui) {
+            return;
+        }
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
         if request.needs_more_search_text() {
@@ -3599,7 +3647,9 @@ impl Controller {
             return;
         }
         crate::gui_search_benchmark::request(ui, generation, &request);
+        self.begin_task_search(reset);
         *self.request.lock().unwrap() = request.clone();
+        self.persist_search_task(ui);
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
             .store(true, Ordering::Release);
@@ -3657,6 +3707,7 @@ impl Controller {
     }
 
     fn select_folder_id(self: &Arc<Self>, id: i64) {
+        self.clear_task_folder_error();
         if let Some(ui) = self.ui.upgrade() {
             // Disable current-folder menu actions until this selection's tree
             // publication supplies its path; search may finish before the tree.
@@ -3836,6 +3887,7 @@ impl Controller {
                         }
                     };
                     if let Some(retained_status) = ready_status {
+                        c2.search_task_directory_ready(&ui);
                         ui.set_searching(false);
                         ui.set_status(
                             retained_status
@@ -4522,6 +4574,7 @@ impl Controller {
         if self.closing.load(Ordering::Acquire) {
             return;
         }
+        self.persist_search_task(ui);
         *self.audio_table.lock().unwrap() = table_preferences(ui);
         {
             let mut layout = self.window_layout.lock().unwrap();
@@ -4550,6 +4603,7 @@ impl Controller {
             let _plays = self.remote_plays.lock().unwrap();
             self.closing.store(true, Ordering::Release);
         }
+        self.cancel_pending_task_restore_for_close(ui);
         self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
         self.invalidate_library_reads();
@@ -4560,12 +4614,14 @@ impl Controller {
         self.schedule_close_poll(Some(Instant::now() + Duration::from_secs(5)));
         let c = self.clone();
         std::thread::spawn(move || {
-            let metadata_result = if recover {
-                c.wait_metadata(barrier, false)
-                    .and_then(|_| c.preserve_metadata_recovery(false))
-            } else {
-                c.wait_transition_metadata(barrier)
-            };
+            let metadata_result = c.wait_workspace_writes().and_then(|_| {
+                if recover {
+                    c.wait_metadata(barrier, false)
+                        .and_then(|_| c.preserve_metadata_recovery(false))
+                } else {
+                    c.wait_transition_metadata(barrier)
+                }
+            });
             let mut result = metadata_result.and_then(|_| {
                 tracing::info!("Desktop Metadata drained; cancelling scan");
                 if let Some(cancel) = c.scan_cancel.lock().unwrap().as_ref() {
@@ -4661,10 +4717,15 @@ impl Controller {
         if let Err(error) = result {
             tracing::warn!(%error, "Desktop close failed; retaining drafts");
             self.closing.store(false, Ordering::Release);
+            let resumed_task = self.resume_search_task_after_failed_close(ui);
             let scanning = self.scan_cancel.lock().unwrap().is_some();
-            self.resume_source_selection(false);
+            if !resumed_task {
+                self.resume_source_selection(false);
+            }
             self.refresh_library_info();
-            self.resume_search(ui, Some(error.clone()));
+            if !resumed_task {
+                self.resume_search(ui, Some(error.clone()));
+            }
             if ui.get_library_visible() {
                 let offset = *self.history_offset.lock().unwrap();
                 self.request_history_page(offset);
@@ -5899,7 +5960,17 @@ impl Controller {
 
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            self.persist_search_task(&ui);
+        }
+        if let Err(error) = self.wait_workspace_writes() {
+            tracing::warn!(%error, "Save search workspace during shutdown");
+        }
         self.shutdown.store(true, Ordering::Release);
+        {
+            let _writes = self.workspace_writes.lock().unwrap();
+            self.workspace_wake.notify_all();
+        }
         self.list_waveforms.shutdown();
         *self.close_completion.lock().unwrap() = None;
         *self.latest_selection.lock().unwrap() = None;
@@ -5977,6 +6048,7 @@ impl Controller {
         config.ui_font_size = self.ui_font_size.load(Ordering::Acquire);
         config.list_font_size = self.list_font_size.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
+        config.max_search_tasks = self.max_search_tasks.load(Ordering::Acquire);
         config.window_layout = self.window_layout.lock().unwrap().clone();
         if let Ok(status) = confirmed {
             self.playback.lock().unwrap().audition = status.audition;
@@ -7790,6 +7862,7 @@ mod tests {
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
+            max_search_tasks: 6,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             ui_scale_percent: 0,

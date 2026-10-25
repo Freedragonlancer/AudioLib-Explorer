@@ -12,6 +12,8 @@ mod pane_review_tests;
 mod progressive_waveform;
 #[cfg(test)]
 mod responsive_layout_tests;
+#[cfg(test)]
+mod search_task_ui_tests;
 mod startup;
 mod tag_chips;
 mod theme;

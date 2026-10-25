@@ -455,6 +455,21 @@ pub fn core_error(error: RemoteError, chinese: bool) -> Error {
 }
 
 impl DataProvider for RemoteProvider {
+    fn load_search_workspace(
+        &self,
+        target: &audiolib_core::SearchWorkspaceTarget,
+    ) -> audiolib_core::Result<audiolib_core::SearchWorkspace> {
+        self.snapshot.load_search_workspace(target)
+    }
+
+    fn save_search_workspace(
+        &self,
+        target: &audiolib_core::SearchWorkspaceTarget,
+        workspace: &audiolib_core::SearchWorkspace,
+    ) -> audiolib_core::Result<()> {
+        self.snapshot.save_search_workspace(target, workspace)
+    }
+
     fn search(&self, request: &SearchRequest) -> audiolib_core::Result<SearchPage> {
         self.snapshot.search(request)
     }
@@ -500,6 +515,9 @@ impl DataProvider for RemoteProvider {
     }
     fn find_audio_by_path(&self, path: &Path) -> audiolib_core::Result<Option<AudioFile>> {
         self.snapshot.find_audio_by_path(path)
+    }
+    fn find_folder_by_path(&self, path: &Path) -> audiolib_core::Result<Option<Folder>> {
+        self.snapshot.find_folder_by_path(path)
     }
     fn relink_audio(&self, _id: i64, _path: &Path) -> audiolib_core::Result<AudioFile> {
         Err(self.refused())
@@ -615,6 +633,79 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     const LIBRARY: &str = "lib-w";
+
+    #[test]
+    fn indexed_folder_lookup_is_available_offline_and_preserves_source_case() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 41);
+        let state = cache.state(LIBRARY).unwrap();
+        let database = cache.database_path(&state);
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        audiolib_db::register_library_functions(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO folders(id,folder_path,folder_name) VALUES
+             (1,'/offline/Sounds/Wind','Wind'),(2,'/offline/Sounds/wind','wind');",
+        )
+        .unwrap();
+        drop(conn);
+        let before = std::fs::read(&database).unwrap();
+        let writer = RemoteWriter::new(
+            RemoteClient::new("http://127.0.0.1:1", "").unwrap(),
+            cache.clone(),
+            LIBRARY,
+        );
+        let provider = RemoteProvider::new(Arc::new(snapshot(&cache)), writer, false, None);
+        for (path, id) in [("/offline/Sounds/Wind", 1), ("/offline/Sounds/wind", 2)] {
+            assert_eq!(
+                provider
+                    .find_folder_by_path(Path::new(path))
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                id
+            );
+        }
+        assert!(
+            provider
+                .find_folder_by_path(Path::new("/offline/sounds/Wind"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        assert_eq!(cache.state(LIBRARY).unwrap(), state);
+    }
+
+    #[test]
+    fn personal_search_workspace_is_available_offline_without_snapshot_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cached_library(directory.path(), 41);
+        let state = cache.state(LIBRARY).unwrap();
+        let before = std::fs::read(cache.database_path(&state)).unwrap();
+        let writer = RemoteWriter::new(
+            RemoteClient::new("http://127.0.0.1:1", "").unwrap(),
+            cache.clone(),
+            LIBRARY,
+        );
+        let provider = RemoteProvider::new(Arc::new(snapshot(&cache)), writer, false, None);
+        let target = audiolib_core::SearchWorkspaceTarget::new(
+            directory.path(),
+            format!("server-{LIBRARY}"),
+        );
+        let mut workspace = provider.load_search_workspace(&target).unwrap();
+        workspace.session.tasks.push(audiolib_core::SearchTask {
+            id: "task".into(),
+            title: "Wind".into(),
+            definition: audiolib_core::SearchTaskDefinition {
+                query: "wind".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        provider.save_search_workspace(&target, &workspace).unwrap();
+        assert_eq!(provider.load_search_workspace(&target).unwrap(), workspace);
+        assert_eq!(cache.state(LIBRARY).unwrap(), state);
+        assert_eq!(std::fs::read(cache.database_path(&state)).unwrap(), before);
+    }
 
     #[test]
     fn server_identity_conflicts_emit_invalidation_and_leave_the_cache_unchanged() {

@@ -16,6 +16,7 @@ fn main() {
     )
     .expect("compile AudioLib desktop UI");
     println!("cargo:rerun-if-changed=ui/app-window.slint");
+    println!("cargo:rerun-if-changed=ui/search-task-tabs.slint");
     println!("cargo:rerun-if-changed=ui/audition-panel.slint");
     println!("cargo:rerun-if-changed=ui/icons");
     println!("cargo:rerun-if-changed=ui/theme.slint");

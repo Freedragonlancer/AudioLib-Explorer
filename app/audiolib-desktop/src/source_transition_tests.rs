@@ -92,6 +92,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
+        max_search_tasks: 6,
         ui_scale_percent: 0,
         theme: audiolib_core::config::DEFAULT_THEME.into(),
         ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,

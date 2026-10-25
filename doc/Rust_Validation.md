@@ -1,5 +1,13 @@
 # Rust 验证报告
 
+## multi-search 最终 CR（2026-10-25，Windows x64，0.7.4）
+
+基于 `multi-search` 合入 beta `7b97a78`，修复代码提交为 `f81401a`。收藏复用现在关联正确收藏并保留已有任务名称；目录 ID 漂移按存储路径判断，大小写不同的 POSIX/Windows 目录项及模糊别名不会合并。目录与音频路径查找在同一读事务内完成 ID 解析和 owned 行读取，覆盖并发 ID 复用。显式名称记录来源，避免 `Search 2`、`default` 等用户名称被自动名称覆盖。切页后重排正确 Waveform，包括远程 Loading/Ready/Playing 来源，保持音频 generation/session/位置。
+
+Rust 1.97.1 MSVC：格式检查、core/db/remote/desktop/CLI/server 全目标严格 Clippy 通过；106 项 core、191 项控制器、35 项任务/界面、6 项工作区、3 项新路径身份、3 项原路径身份单元、10 项远程写入/路径查询通过。新并发路径回归执行 512 次事务性 ID/路径交换及 1024 组查询。beta 集成验证另通过 19 项 CLI、318 项 server、5 项搜索片段和 2 项包含标签测试；隔离 child helper 由父测试执行，不重复计数。
+
+在 AMD Ryzen 7 9800X3D（8 核/16 线程）上运行 `cargo run --release --locked -p audiolib-db --bin search-benchmark -- --records 1000000 --queries 100`：独立临时合成库 1,000,000 条，默认混合循环 100 次，结果页 P50 **2.11ms**、P95 **150.67ms**、P99 **194.78ms**，65 次排名缓存命中；初始混合轮 P95 **308.17ms**。通过本次 **P95 latency <500ms for 1M+ records** 的结果页验收。生成与重建发生在计时前，保留 OS 缓存，测量时没有并行构建；未计入目录统计、新 provider 冷启动、GUI 防抖/排队/绘制及物理播放延迟。原始记录在本机 `C:/al-build/multi-search-cr-million.log`，完整 JSON 在同目录的 `multi-search-cr-million-report.json`。
+
 ## 审查修复：包含标签排序、鉴权限速、流名额与桌面端健壮性（2026-10-25，0.7.4，beta）
 
 基于 beta `d5baffc`。修复一次代码审查找出的问题，不改 schema、不加索引，旧库和服务器快照不需要迁移。
