@@ -2,6 +2,11 @@
 //! Isolated controller regressions for task identity, saved definitions and persistence.
 use super::super::*;
 
+#[path = "search_task_lifecycle_review_tests.rs"]
+mod lifecycle_review;
+#[path = "search_task_ui_review_tests.rs"]
+mod ui_review;
+
 const ROOT_ENV: &str = "AUDIOLIB_SEARCH_TASK_TEST_ROOT";
 
 fn isolated(child: &str) {

@@ -103,7 +103,7 @@ impl SearchTaskDefinition {
         }
         request.validate()?;
         if let Some(folder) = &self.folder {
-            validate_reference(folder.id, &folder.path)?;
+            validate_reference(&folder.path)?;
         }
         Ok(())
     }
@@ -151,7 +151,7 @@ impl SearchTaskView {
             }
         }
         for folder in &self.expanded_folders {
-            validate_reference(folder.id, &folder.path)?;
+            validate_reference(&folder.path)?;
         }
         for audio in self
             .selected_audio
@@ -159,7 +159,7 @@ impl SearchTaskView {
             .chain(self.checked_audio.iter())
             .chain(self.selection_anchor.iter())
         {
-            validate_reference(audio.id, &audio.file_path)?;
+            validate_reference(&audio.file_path)?;
         }
         if self.raw_inputs.iter().any(|(key, value)| {
             key.len() > 128 || key.contains('\0') || value.len() > 1_048_576 || value.contains('\0')
@@ -272,10 +272,12 @@ fn validate_scope(scope: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_reference(id: i64, path: &str) -> Result<()> {
-    if id <= 0 || path.is_empty() || path.len() > 1_048_576 || path.contains('\0') {
+fn validate_reference(path: &str) -> Result<()> {
+    // SQLite identities span the full signed i64 domain, including zero. Optional
+    // references already distinguish an absent selection from every valid row ID.
+    if path.is_empty() || path.len() > 1_048_576 || path.contains('\0') {
         return Err(invalid(
-            "Search workspace references need a positive ID and a bounded path",
+            "Search workspace references need a nonempty bounded path without NUL",
         ));
     }
     Ok(())

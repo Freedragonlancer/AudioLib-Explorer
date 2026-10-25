@@ -117,6 +117,81 @@ fn personal_library_scopes_are_isolated_and_snapshot_names_are_irrelevant() {
 }
 
 #[test]
+fn workspace_round_trips_signed_audio_and_folder_identities_from_an_existing_library() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = provider(directory.path());
+    let connection = rusqlite::Connection::open(provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
+    for (id, path) in [(-9, "/sounds/negative"), (0, "/sounds/zero")] {
+        connection
+            .execute(
+                "INSERT INTO folders(id,folder_path,folder_name) VALUES(?1,?2,'sounds')",
+                rusqlite::params![id, path],
+            )
+            .unwrap();
+    }
+    for id in [i64::MIN, -7, 0] {
+        connection
+            .execute(
+                "INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,missing)
+                 VALUES(?1,?2,?2,'wind.wav',-9,0)",
+                rusqlite::params![id, format!("/sounds/negative/{id}.wav")],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch(
+            "INSERT INTO folder_closure(ancestor_id,descendant_id,depth)
+             VALUES(-9,-9,0),(0,0,0);
+             UPDATE folders SET file_count=3,total_file_count=3 WHERE id=-9;",
+        )
+        .unwrap();
+    let library = provider.database_path().to_owned();
+    drop(connection);
+    drop(provider);
+    let provider = SqliteProvider::open_existing(&library).unwrap();
+
+    let selected = provider.get_audio(-7).unwrap();
+    let zero = provider.get_audio(0).unwrap();
+    let minimum = provider.get_audio(i64::MIN).unwrap();
+    let negative_folder = provider.get_folder(-9).unwrap();
+    let zero_folder = provider.get_folder(0).unwrap();
+    let target = SearchWorkspaceTarget::new(
+        directory.path().join("userdata"),
+        local_library_id(provider.database_path()).unwrap(),
+    );
+    let mut workspace = provider.load_search_workspace(&target).unwrap();
+    let mut current = task("signed-identities", "wind");
+    current.definition.folder = Some(SearchFolderRef {
+        id: negative_folder.id,
+        path: negative_folder.path,
+    });
+    current.view.expanded_folders = vec![SearchFolderRef {
+        id: zero_folder.id,
+        path: zero_folder.path,
+    }];
+    current.view.selected_audio = Some(SearchAudioRef {
+        id: selected.id,
+        file_path: selected.file_path,
+    });
+    current.view.checked_audio = [zero, minimum]
+        .into_iter()
+        .map(|file| SearchAudioRef {
+            id: file.id,
+            file_path: file.file_path,
+        })
+        .collect();
+    current.view.selection_anchor = current.view.checked_audio.first().cloned();
+    workspace.session.active_task_id = Some(current.id.clone());
+    workspace.session.tasks.push(current);
+
+    provider.save_search_workspace(&target, &workspace).unwrap();
+    assert_eq!(provider.load_search_workspace(&target).unwrap(), workspace);
+    assert_eq!(provider.get_audio(-7).unwrap().id, -7);
+    assert_eq!(provider.get_folder(0).unwrap().id, 0);
+}
+
+#[test]
 fn damaged_foreign_and_newer_files_are_preserved_on_load_and_save() {
     let directory = tempfile::tempdir().unwrap();
     let provider = provider(directory.path());

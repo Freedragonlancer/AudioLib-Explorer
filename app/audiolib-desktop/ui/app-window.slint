@@ -593,6 +593,8 @@ export component AppWindow inherits Window {
     in property <[SearchTaskRow]> search-tasks: [];
     in property <[SavedSearchTaskRow]> saved-search-tasks: [];
     in property <bool> search-workspace-loading: false;
+    in property <bool> search-workspace-read-only: false;
+    changed search-workspace-read-only => { if root.search-workspace-read-only { root.search-task-rename-visible = false; } }
     in property <string> search-workspace-error: "";
     in-out property <int> max-search-tasks: 6;
     // Per-task navigation presentation; pane widths and appearance remain global.
@@ -641,6 +643,7 @@ export component AppWindow inherits Window {
         }
     }
     public function begin-search-task-rename(id: string, name: string, saved: bool) {
+        if root.search-workspace-read-only { return; }
         root.search-task-rename-id = id;
         root.search-task-rename-name = name;
         root.search-task-rename-saved = saved;
@@ -648,7 +651,7 @@ export component AppWindow inherits Window {
         root.schedule-modal-focus();
     }
     function finish-search-task-rename() {
-        if root.search-task-rename-name != "" {
+        if !root.search-workspace-read-only && root.search-task-rename-name != "" {
             if root.search-task-rename-saved { root.saved-search-renamed(root.search-task-rename-id, root.search-task-rename-name); }
             else { root.search-task-renamed(root.search-task-rename-id, root.search-task-rename-name); }
             root.search-task-rename-visible = false;
@@ -1769,7 +1772,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout { spacing: 3px * Theme.ui-scale; alignment: start;
                         for task in root.search-tasks: SearchTaskTab {
                             width: 200px * Theme.ui-scale; name: task.name; active: task.active;
-                            favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout; enabled: !root.background-blocked;
+                            favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout; enabled: !root.background-blocked; editable: !root.search-workspace-read-only;
                             selected => { root.search-task-selected(task.id); }
                             favorite-toggled => { root.search-task-favorite-toggled(task.id); }
                             closed => { root.search-task-closed(task.id); }
@@ -1783,7 +1786,7 @@ export component AppWindow inherits Window {
                 }
                 Action { width: 34px * Theme.ui-scale; height: 32px * Theme.ui-scale; subtle: true;
                     label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
-                    enabled: !root.background-blocked && root.search-tasks.length < root.max-search-tasks;
+                    enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
                     clicked => { root.search-task-created(); }
                 }
                 Label { width: 38px * Theme.ui-scale; text: root.search-tasks.length + "/" + root.max-search-tasks; horizontal-alignment: center; font-size: Theme.font(10); }
@@ -1829,10 +1832,10 @@ export component AppWindow inherits Window {
                         VerticalLayout { padding: 0px; spacing: 5px * Theme.ui-scale; alignment: start;
                             if root.saved-search-tasks.length == 0: Label { height: 70px * Theme.ui-scale; text: root.chinese ? "点击任务页签上的 ☆ 收藏搜索，之后可在这里重新打开。" : "Star a search task to reopen it here later."; wrap: word-wrap; }
                             for saved in root.saved-search-tasks: Rectangle { height: 58px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale; background: saved-hit.has-hover ? Theme.hover : Theme.raised;
-                                accessible-role: button; accessible-label: (root.chinese ? "打开搜索任务收藏：" : "Open saved search: ") + saved.name; accessible-enabled: !root.background-blocked;
-                                accessible-action-default => { if !root.background-blocked { root.saved-search-opened(saved.id); } }
+                                accessible-role: button; accessible-label: (root.chinese ? "打开搜索任务收藏：" : "Open saved search: ") + saved.name; accessible-enabled: !root.background-blocked && !root.search-workspace-read-only;
+                                accessible-action-default => { if !root.background-blocked && !root.search-workspace-read-only { root.saved-search-opened(saved.id); } }
                                 forward-focus: saved-focus; border-width: saved-focus.has-focus ? 1px : 0px; border-color: Theme.accent;
-                                saved-focus := FocusScope { enabled: !root.background-blocked; focus-on-click: false; key-pressed(event) => {
+                                saved-focus := FocusScope { enabled: !root.background-blocked && !root.search-workspace-read-only; focus-on-click: false; key-pressed(event) => {
                                     if event.text == " " || event.text == Key.Return { root.saved-search-opened(saved.id); return accept; }
                                     if event.text == Key.F2 { root.begin-search-task-rename(saved.id, saved.name, true); return accept; }
                                     reject
@@ -1841,9 +1844,9 @@ export component AppWindow inherits Window {
                                     Text { text: saved.name; color: Theme.ink; font-size: Theme.font(12); overflow: elide; }
                                     Text { text: saved.summary; color: Theme.muted; font-size: Theme.font(10); overflow: elide; }
                                 }
-                                saved-hit := TouchArea { width: parent.width - 32px * Theme.ui-scale; enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.saved-search-opened(saved.id); } }
+                                saved-hit := TouchArea { width: parent.width - 32px * Theme.ui-scale; enabled: !root.background-blocked && !root.search-workspace-read-only; mouse-cursor: pointer; clicked => { root.saved-search-opened(saved.id); } }
                                 Action { width: 28px * Theme.ui-scale; height: 28px * Theme.ui-scale; x: parent.width - self.width - 3px * Theme.ui-scale; y: 5px * Theme.ui-scale; subtle: true;
-                                    label: "..."; action-label: (root.chinese ? "管理搜索任务收藏：" : "Manage saved search: ") + saved.name; enabled: !root.background-blocked;
+                                    label: "..."; action-label: (root.chinese ? "管理搜索任务收藏：" : "Manage saved search: ") + saved.name; enabled: !root.background-blocked && !root.search-workspace-read-only;
                                     clicked => {
                                         root.context-saved-search = saved;
                                         saved-search-menu.show({x: self.absolute-position.x - saved-search-menu.absolute-position.x, y: self.absolute-position.y + self.height - saved-search-menu.absolute-position.y});
@@ -2394,19 +2397,19 @@ export component AppWindow inherits Window {
     search-task-menu := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
         Menu {
             MenuItem { title: root.context-search-task.name; enabled: false; }
-            MenuItem { title: root.chinese ? "重命名…" : "Rename…"; enabled: !root.background-blocked; activated => { root.begin-search-task-rename(root.context-search-task.id, root.context-search-task.name, false); } }
-            MenuItem { title: root.context-search-task.favorite ? (root.chinese ? "取消任务收藏" : "Unfavorite task") : (root.chinese ? "收藏任务" : "Favorite task"); enabled: !root.background-blocked; activated => { root.search-task-favorite-toggled(root.context-search-task.id); } }
-            MenuItem { title: root.chinese ? "关闭任务" : "Close task"; enabled: !root.background-blocked; activated => { root.search-task-closed(root.context-search-task.id); } }
+            MenuItem { title: root.chinese ? "重命名…" : "Rename…"; enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.begin-search-task-rename(root.context-search-task.id, root.context-search-task.name, false); } }
+            MenuItem { title: root.context-search-task.favorite ? (root.chinese ? "取消任务收藏" : "Unfavorite task") : (root.chinese ? "收藏任务" : "Favorite task"); enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.search-task-favorite-toggled(root.context-search-task.id); } }
+            MenuItem { title: root.chinese ? "关闭任务" : "Close task"; enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.search-task-closed(root.context-search-task.id); } }
         }
     }
     saved-search-menu := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
         Menu {
             MenuItem { title: root.context-saved-search.name; enabled: false; }
-            MenuItem { title: root.chinese ? "打开搜索任务" : "Open search task"; enabled: !root.background-blocked; activated => { root.saved-search-opened(root.context-saved-search.id); } }
-            MenuItem { title: root.chinese ? "重命名…" : "Rename…"; enabled: !root.background-blocked; activated => { root.begin-search-task-rename(root.context-saved-search.id, root.context-saved-search.name, true); } }
-            MenuItem { title: root.chinese ? "用当前任务更新收藏" : "Update from current task"; enabled: !root.background-blocked; activated => { root.saved-search-updated(root.context-saved-search.id); } }
+            MenuItem { title: root.chinese ? "打开搜索任务" : "Open search task"; enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.saved-search-opened(root.context-saved-search.id); } }
+            MenuItem { title: root.chinese ? "重命名…" : "Rename…"; enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.begin-search-task-rename(root.context-saved-search.id, root.context-saved-search.name, true); } }
+            MenuItem { title: root.chinese ? "用当前任务更新收藏" : "Update from current task"; enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.saved-search-updated(root.context-saved-search.id); } }
             MenuSeparator { }
-            MenuItem { title: root.chinese ? "删除任务收藏" : "Delete saved search"; enabled: !root.background-blocked; activated => { root.saved-search-deleted(root.context-saved-search.id); } }
+            MenuItem { title: root.chinese ? "删除任务收藏" : "Delete saved search"; enabled: !root.background-blocked && !root.search-workspace-read-only; activated => { root.saved-search-deleted(root.context-saved-search.id); } }
         }
     }
     table-menu := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
@@ -2534,11 +2537,11 @@ export component AppWindow inherits Window {
             Rectangle { width: min(450px * Theme.ui-scale, parent.width - 28px); height: 190px * Theme.ui-scale; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 10px * Theme.ui-scale; border-width: 1px; border-color: Theme.strong-border;
                 VerticalLayout { padding: 22px * Theme.ui-scale; spacing: 14px * Theme.ui-scale;
                     Text { text: root.search-task-rename-saved ? (root.chinese ? "重命名搜索任务收藏" : "Rename saved search") : (root.chinese ? "重命名搜索任务" : "Rename search task"); color: Theme.ink; font-size: Theme.font(18); font-weight: 600; }
-                    task-rename-input := LineEdit { text <=> root.search-task-rename-name; input-label: root.chinese ? "搜索任务名称" : "Search task name"; accepted => { root.finish-search-task-rename(); } }
+                    task-rename-input := LineEdit { enabled: !root.search-workspace-read-only; text <=> root.search-task-rename-name; input-label: root.chinese ? "搜索任务名称" : "Search task name"; accepted => { root.finish-search-task-rename(); } }
                     HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                         Rectangle { horizontal-stretch: 1; }
                         Action { width: 76px * Theme.ui-scale; label: root.chinese ? "取消" : "Cancel"; clicked => { root.search-task-rename-visible = false; } }
-                        task-rename-save := Action { width: 76px * Theme.ui-scale; primary: true; enabled: root.search-task-rename-name != ""; label: root.chinese ? "保存名称" : "Save name"; clicked => { root.finish-search-task-rename(); } }
+                        task-rename-save := Action { width: 76px * Theme.ui-scale; primary: true; enabled: !root.search-workspace-read-only && root.search-task-rename-name != ""; label: root.chinese ? "保存名称" : "Save name"; clicked => { root.finish-search-task-rename(); } }
                     }
                 }
             }

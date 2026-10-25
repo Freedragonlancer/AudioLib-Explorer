@@ -966,6 +966,9 @@ impl Controller {
             if c.available()
                 && let Some(ui) = c.ui.upgrade()
             {
+                if c.retry_failed_search_task(&ui) {
+                    return;
+                }
                 c.reload_tree();
                 c.refresh_library_info();
                 c.request_search(&ui, true, true);
@@ -4516,6 +4519,7 @@ impl Controller {
             let _plays = self.remote_plays.lock().unwrap();
             self.closing.store(true, Ordering::Release);
         }
+        self.cancel_pending_task_restore_for_close(ui);
         self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
         self.invalidate_library_reads();
@@ -4629,10 +4633,15 @@ impl Controller {
         if let Err(error) = result {
             tracing::warn!(%error, "Desktop close failed; retaining drafts");
             self.closing.store(false, Ordering::Release);
+            let resumed_task = self.resume_search_task_after_failed_close(ui);
             let scanning = self.scan_cancel.lock().unwrap().is_some();
-            self.resume_source_selection(false);
+            if !resumed_task {
+                self.resume_source_selection(false);
+            }
             self.refresh_library_info();
-            self.resume_search(ui, Some(error.clone()));
+            if !resumed_task {
+                self.resume_search(ui, Some(error.clone()));
+            }
             if ui.get_library_visible() {
                 let offset = *self.history_offset.lock().unwrap();
                 self.request_history_page(offset);

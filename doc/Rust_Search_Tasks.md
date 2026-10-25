@@ -18,6 +18,8 @@ Column widths, pane widths and visibility, language, theme, interface scale, aud
 
 The audio engine and audition session are shared. Changing or closing a task does not load, start, pause or stop audio. Restoring a task's selected row may restore its details, but it must not pass through an audio-loading selection path. Playback remains subject to the existing explicit transport and selection actions.
 
+Returning to the sound already loaded in the engine also preserves its reload state: an ordinary Pause/Resume continues the same position and play session. A different selected sound or an existing failed explicit load still requires its own successful Load before audition.
+
 Metadata drafts and their ordered write queue are shared by file identity and edit revision. Leaving a task captures requested edits before changing the displayed record. Returning to the same audio in another task shows the current pending draft or confirmed Metadata, rather than a separate editable copy. Closing the application drains requested writes through the existing shutdown barriers.
 
 ## Favorites
@@ -36,6 +38,10 @@ All open tasks, including tasks without a favorite, are restored on the next lau
 
 Workspace writes run off the Slint event loop and retain their original library target. Switching the current source cannot redirect a late save into another library's group. Unknown or damaged workspace formats are preserved and reported; an empty fallback must not overwrite them as an ordinary save.
 
+An unreadable workspace opens a clearly marked, read-only temporary search session. Task and favorite mutations are disabled, and its temporary conditions are not promised to survive restart. Repair the workspace file and reopen the library to resume persistent work. Audio Metadata editing keeps its existing library permissions.
+
+If a task's identity lookup fails, its stored definition and navigation remain intact. The failed view cannot inherit another task's directory, selection or checked records; F5 retries restoration, and other tasks remain selectable. A failed application close resumes any task or workspace load cancelled for that close. Directory expansion references remain preserved while their tree data is still loading.
+
 ## Search execution and invalidation
 
 Tasks share the existing bounded result and directory-facet workers. Switching tasks cancels obsolete requests. Every asynchronous result, directory model, detail response and visible-row Waveform publication must match the current task, request and library/source generations before updating the UI.
@@ -49,5 +55,7 @@ Query validation and FTS5 behavior remain the existing core contracts, including
 Regression coverage exercises independent query/filter/directory/list state, capacity and last-task behavior, late asynchronous publications, same-file Metadata drafts across tasks, manual favorite updates and restart restoration. Identity tests reject recycled folder/file IDs, and cache tests observe external Metadata changes. A failed workspace save blocks a library switch and remains failed even after another library's workspace saves successfully.
 
 Local verification on Windows x64 with Rust 1.97.1 MSVC on 2026-10-25 passed formatting, strict Clippy for core/db/remote/desktop/CLI, 105 core tests, five workspace-storage tests, the remote offline-workspace test, 304 desktop tests across the controller and other desktop groups, and 19 CLI tests. After the final cache-revision guard, the 12 task/UI tests and three directory-search regressions passed again. The synthetic package-boundary regression passed with this document included in the portable allowlist. Ignored desktop entries include subprocess helpers exercised by their parent tests and explicitly interactive hardware/UI checks; they are not claimed as separately run acceptance.
+
+The review follow-up on the same date passed 177 controller tests, 19 task/UI regressions, the two core workspace DTO tests, all six workspace-storage cases, and strict Clippy for core/db/desktop. It adds coverage for failed task reads and F5 retries, interrupted close recovery, protected workspace interaction, complete unsubmitted filter validation, cold directory expansion and playback-session continuity. The storage case reopens a real owned library containing zero and negative SQLite identities before saving their references; the complete signed `i64` identity domain is supported.
 
 Layout acceptance covers six long task titles, both desktop languages, the minimum 1080×700 logical window and supported interface scaling. Keyboard navigation must remain available without interpreting task changes as audio transport. Real-device audio and performance acceptance are recorded separately from synthetic UI checks.

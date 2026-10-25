@@ -31,6 +31,7 @@ export component SearchTaskTab inherits Rectangle {
     in property <bool> chinese: false;
     in property <bool> compact: false;
     in property <bool> enabled: true;
+    in property <bool> editable: true;
     callback selected();
     callback favorite-toggled();
     callback closed();
@@ -67,14 +68,14 @@ export component SearchTaskTab inherits Rectangle {
         enabled: root.enabled; focus-on-click: false;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return { root.selected(); return accept; }
-            if event.text == Key.F2 { root.rename-requested(); return accept; }
+            if root.editable && event.text == Key.F2 { root.rename-requested(); return accept; }
             reject
         }
     }
     task-hit := TouchArea {
         width: max(0px, parent.width - 62px * Theme.ui-scale); enabled: root.enabled; mouse-cursor: pointer;
         clicked => { root.selected(); }
-        double-clicked => { root.rename-requested(); }
+        double-clicked => { if root.editable { root.rename-requested(); } }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                 root.context-requested({x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y});
@@ -83,13 +84,13 @@ export component SearchTaskTab inherits Rectangle {
     }
     TaskTabIcon {
         x: parent.width - 60px * Theme.ui-scale; y: 4px * Theme.ui-scale;
-        text: root.favorite ? "★" : "☆"; lit: root.favorite; enabled: root.enabled;
+        text: root.favorite ? "★" : "☆"; lit: root.favorite; enabled: root.enabled && root.editable;
         label: (root.favorite ? (root.chinese ? "取消搜索任务收藏：" : "Unfavorite search task: ") : (root.chinese ? "收藏搜索任务：" : "Favorite search task: ")) + root.name;
         clicked => { root.favorite-toggled(); }
     }
     TaskTabIcon {
         x: parent.width - 30px * Theme.ui-scale; y: 4px * Theme.ui-scale;
-        text: "×"; enabled: root.enabled;
+        text: "×"; enabled: root.enabled && root.editable;
         label: (root.chinese ? "关闭搜索任务：" : "Close search task: ") + root.name;
         clicked => { root.closed(); }
     }

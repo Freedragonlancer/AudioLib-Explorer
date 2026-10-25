@@ -35,6 +35,8 @@ pub(super) struct TaskWorkspaceState {
     epoch: u64,
     loading: bool,
     restoring: bool,
+    restore_failed: bool,
+    resume_after_close: Option<WorkspaceResume>,
     pending_view: Option<SearchTaskView>,
     unavailable_folder: Option<SearchFolderRef>,
     protected: bool,
@@ -52,6 +54,8 @@ impl Default for TaskWorkspaceState {
             epoch: 0,
             loading: false,
             restoring: false,
+            restore_failed: false,
+            resume_after_close: None,
             pending_view: None,
             unavailable_folder: None,
             protected: false,
@@ -63,6 +67,11 @@ struct SaveJob {
     provider: Arc<SqliteProvider>,
     target: SearchWorkspaceTarget,
     workspace: SearchWorkspace,
+}
+
+enum WorkspaceResume {
+    Load,
+    Task(String),
 }
 
 #[derive(Default)]
@@ -120,6 +129,7 @@ fn fresh_task(number: usize, order_by: SortOrder, descending: bool, chinese: boo
 impl Controller {
     pub(super) fn begin_task_search(&self, reset: bool) {
         let mut state = self.task_workspace.lock().unwrap();
+        state.restore_failed = false;
         state.page_revision = None;
         state.folders_revision = None;
         state.page_complete = false;
@@ -129,12 +139,21 @@ impl Controller {
     }
 
     pub(super) fn clear_task_folder_error(&self) {
-        self.task_workspace.lock().unwrap().unavailable_folder = None;
+        let mut state = self.task_workspace.lock().unwrap();
+        state.unavailable_folder = None;
+        state.restore_failed = false;
     }
 
     pub(super) fn task_folder_unavailable(&self, ui: &AppWindow) -> bool {
         let folder_id = self.request.lock().unwrap().folder_id;
         let mut state = self.task_workspace.lock().unwrap();
+        if state.restore_failed {
+            ui.set_status(self.localized(
+                "任务恢复失败，原条件已保留；按 F5 重试后再修改检索",
+                "Task restore failed; original conditions are retained. Press F5 to retry before changing the search",
+            ));
+            return true;
+        }
         if state
             .unavailable_folder
             .as_ref()
@@ -155,10 +174,14 @@ impl Controller {
         let mut state = self.task_workspace.lock().unwrap();
         state.loading = true;
         state.restoring = false;
+        state.restore_failed = false;
+        state.pending_view = None;
+        state.resume_after_close = None;
         state.epoch += 1;
         drop(state);
         if let Some(ui) = self.ui.upgrade() {
             ui.set_search_workspace_loading(false);
+            ui.set_task_restoring(false);
         }
     }
 
@@ -197,6 +220,85 @@ impl Controller {
         ui.set_max_search_tasks(self.max_search_tasks.load(Ordering::Acquire) as i32);
     }
 
+    fn workspace_mutations_allowed(&self, ui: &AppWindow) -> bool {
+        if self.task_workspace.lock().unwrap().protected {
+            ui.set_status(self.localized(
+                "搜索工作区为只读临时模式；请修复工作区文件后重新打开，当前条件不会在重启后恢复",
+                "Search workspace is temporary and read-only; repair it and reopen. Current conditions will not be restored after restart",
+            ));
+            false
+        } else {
+            true
+        }
+    }
+
+    /// F5 retries a failed identity read without recapturing a partial view.
+    pub(super) fn retry_failed_search_task(self: &Arc<Self>, _ui: &AppWindow) -> bool {
+        let id = {
+            let state = self.task_workspace.lock().unwrap();
+            if !state.restore_failed || state.loading || state.restoring {
+                return false;
+            }
+            state.workspace.session.active_task_id.clone()
+        };
+        if let Some(id) = id {
+            self.restore_search_task(&id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Native close may arrive while task or workspace reads are running. Retain
+    /// the owned target and invalidate its callback before beginning the drain.
+    pub(super) fn cancel_pending_task_restore_for_close(&self, ui: &AppWindow) {
+        let mut state = self.task_workspace.lock().unwrap();
+        let resume = if state.loading {
+            Some(WorkspaceResume::Load)
+        } else if state.restoring {
+            state
+                .workspace
+                .session
+                .active_task_id
+                .clone()
+                .map(WorkspaceResume::Task)
+        } else {
+            None
+        };
+        if let Some(resume) = resume {
+            state.epoch += 1;
+            state.loading = false;
+            state.restoring = false;
+            state.restore_failed = true;
+            state.pending_view = None;
+            state.resume_after_close = Some(resume);
+            ui.set_search_workspace_loading(false);
+            ui.set_task_restoring(false);
+        }
+    }
+
+    /// A failed close restores the interrupted target; an ignored old callback
+    /// must never leave the surviving window permanently blocked.
+    pub(super) fn resume_search_task_after_failed_close(self: &Arc<Self>, _ui: &AppWindow) -> bool {
+        let resume = self
+            .task_workspace
+            .lock()
+            .unwrap()
+            .resume_after_close
+            .take();
+        match resume {
+            Some(WorkspaceResume::Load) => {
+                self.init_search_workspace();
+                true
+            }
+            Some(WorkspaceResume::Task(id)) => {
+                self.restore_search_task(&id);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub(super) fn start_workspace_worker(self: &Arc<Self>) {
         let c = self.clone();
         std::thread::Builder::new()
@@ -216,6 +318,7 @@ impl Controller {
                         .provider
                         .save_search_workspace(&job.target, &job.workspace)
                         .map_err(|error| error.to_string());
+                    let target = job.target.clone();
                     let mut writes = c.workspace_writes.lock().unwrap();
                     writes.in_flight = false;
                     // A failed write is retained as an error until a later explicit save
@@ -227,18 +330,31 @@ impl Controller {
                     }
                     c.workspace_wake.notify_all();
                     drop(writes);
-                    if let Some(error) = error {
-                        c.status(format!("Search workspace could not be saved: {error}"));
-                        post(c.ui.clone(), move |ui| {
-                            ui.set_search_workspace_error(
-                                format!("Search workspace could not be saved: {error}").into(),
-                            )
-                        });
-                    } else {
-                        post(c.ui.clone(), move |ui| {
-                            ui.set_search_workspace_error("".into())
-                        });
-                    }
+                    let c2 = c.clone();
+                    post(c.ui.clone(), move |ui| {
+                        let state = c2.task_workspace.lock().unwrap();
+                        if state.target.as_ref() != Some(&target)
+                            || state.protected
+                            || state.restore_failed
+                        {
+                            return;
+                        }
+                        let error = c2
+                            .workspace_writes
+                            .lock()
+                            .unwrap()
+                            .errors
+                            .iter()
+                            .find(|(failed, _)| failed == &target)
+                            .map(|(_, error)| error.clone());
+                        ui.set_search_workspace_error(
+                            error
+                                .map_or_else(String::new, |error| {
+                                    format!("Search workspace could not be saved: {error}")
+                                })
+                                .into(),
+                        );
+                    });
                 }
             })
             .expect("spawn workspace worker");
@@ -285,9 +401,14 @@ impl Controller {
             state.loading = true;
             state.caches.clear();
             state.page_revision = None;
+            state.folders_revision = None;
+            state.page_complete = false;
+            state.pending_view = None;
+            state.resume_after_close = None;
             state.epoch
         };
         ui.set_search_workspace_loading(true);
+        ui.set_task_restoring(false);
         ui.set_search_workspace_error("".into());
         let provider = self.provider();
         let data_root = self.config.lock().unwrap().data_root();
@@ -329,6 +450,8 @@ impl Controller {
                 }
                 let mut state = c2.task_workspace.lock().unwrap();
                 state.loading = false;
+                state.restoring = false;
+                state.restore_failed = false;
                 state.protected = false;
                 match result {
                     Ok((target, Ok(workspace))) => {
@@ -340,7 +463,7 @@ impl Controller {
                         state.target = Some(target);
                         state.protected = true;
                         ui.set_search_workspace_error(
-                            format!("Search workspace preserved; changes cannot be saved: {error}")
+                            format!("Temporary read-only search workspace; current conditions will not be restored after restart. Original file preserved: {error}")
                                 .into(),
                         );
                         ui.set_status(
@@ -353,10 +476,13 @@ impl Controller {
                     Err(error) => {
                         state.target = None;
                         state.workspace = SearchWorkspace::for_scope("");
+                        state.protected = true;
+                        ui.set_search_workspace_error(format!("Temporary read-only search workspace; current conditions will not be restored after restart: {error}").into());
                         ui.set_status(error.to_string().into());
                     }
                 }
                 let fresh_workspace = state.workspace.session.tasks.is_empty();
+                ui.set_search_workspace_read_only(state.protected);
                 if fresh_workspace {
                     let preferences = c2.audio_table.lock().unwrap();
                     let task = fresh_task(
@@ -409,7 +535,7 @@ impl Controller {
     pub(super) fn capture_search_task(&self, ui: &AppWindow) {
         let previous = {
             let state = self.task_workspace.lock().unwrap();
-            if state.loading || state.restoring {
+            if state.loading || state.restoring || state.restore_failed {
                 return;
             }
             state
@@ -444,11 +570,21 @@ impl Controller {
         let view = SearchTaskView {
             offset: request.offset,
             raw_inputs: raw,
-            expanded_folders: tree
-                .expanded
-                .iter()
-                .filter_map(|id| tree.known.get(id).map(folder_ref))
-                .collect(),
+            expanded_folders: {
+                // A cold restore keeps validated expansion IDs before its facets
+                // hydrate `known`. Retain those owned path references until then.
+                let mut refs = previous
+                    .as_ref()
+                    .map_or_else(Vec::new, |task| task.view.expanded_folders.clone());
+                refs.retain(|reference| tree.expanded.contains(&reference.id));
+                for id in &tree.expanded {
+                    if let Some(folder) = tree.known.get(id) {
+                        refs.retain(|reference| reference.id != *id);
+                        refs.push(folder_ref(folder));
+                    }
+                }
+                refs
+            },
             folder_scroll_y: ui.get_task_folder_scroll_y(),
             list_scroll_y: scroll_y,
             list_scroll_x: ui.get_task_result_scroll_x(),
@@ -617,6 +753,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         if self.task_workspace.lock().unwrap().loading {
             return;
         }
@@ -688,6 +827,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         if self.task_workspace.lock().unwrap().loading {
             return;
         }
@@ -738,6 +880,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
             ui.set_status(self.localized(
@@ -775,6 +920,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         self.capture_search_task(&ui);
         let mut state = self.task_workspace.lock().unwrap();
         let Some(index) = state
@@ -815,6 +963,10 @@ impl Controller {
         if !self.available() {
             return;
         }
+        let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         let mut state = self.task_workspace.lock().unwrap();
         state.workspace.favorites.retain(|saved| saved.id != id);
         for task in &mut state.workspace.session.tasks {
@@ -834,6 +986,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         self.capture_search_task(&ui);
         let mut state = self.task_workspace.lock().unwrap();
         let task = state
@@ -867,6 +1022,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.workspace_mutations_allowed(&ui) {
+            return;
+        }
         if let Err(error) = self.enqueue_current_metadata(&ui) {
             ui.set_status(error.into());
             return;
@@ -920,52 +1078,84 @@ impl Controller {
         self.restore_search_task(&id);
     }
 
-    fn restore_search_task(self: &Arc<Self>, id: &str) {
-        let Some(ui) = self.ui.upgrade() else { return };
+    fn prepare_search_task_restore(
+        &self,
+        ui: &AppWindow,
+        id: &str,
+    ) -> Option<(SearchTask, Option<TaskCache>, u64)> {
+        let (task, cache, epoch) = {
+            let mut state = self.task_workspace.lock().unwrap();
+            let task = state
+                .workspace
+                .session
+                .tasks
+                .iter()
+                .find(|task| task.id == id)
+                .cloned()?;
+            state.workspace.session.active_task_id = Some(task.id.clone());
+            state.epoch += 1;
+            state.page_revision = None;
+            state.folders_revision = None;
+            state.page_complete = false;
+            state.restoring = true;
+            state.restore_failed = false;
+            state.pending_view = None;
+            state.resume_after_close = None;
+            // Until the folder reference has been checked, it is an unavailable
+            // scope rather than a usable numeric ID from another task or library.
+            state.unavailable_folder = task.definition.folder.clone();
+            (task, state.caches.get(id).cloned(), state.epoch)
+        };
         self.search_cancel
             .lock()
             .unwrap()
             .store(true, Ordering::Release);
         self.search_generation.fetch_add(1, Ordering::AcqRel);
         self.tree_generation.fetch_add(1, Ordering::AcqRel);
-        self.selection_generation.fetch_add(1, Ordering::AcqRel);
+        // Load admission uses this same mutex. An older selection cannot pass its
+        // generation check and enqueue Load after the task switch has cancelled it.
+        {
+            let mut remembered = self.latest_selection.lock().unwrap();
+            self.selection_generation.fetch_add(1, Ordering::AcqRel);
+            *remembered = None;
+            *self.selection_job.lock().unwrap() = None;
+            *self.selection_audio_job.lock().unwrap() = None;
+        }
         self.invalidate_waveform();
         self.list_waveforms.invalidate();
         *self.search_job.lock().unwrap() = None;
         *self.facet_job.lock().unwrap() = None;
         *self.search_publication.lock().unwrap() = None;
-        // Do not use select_id(false): its existing selection path also performs Load.
-        *self.latest_selection.lock().unwrap() = None;
-        *self.selection_job.lock().unwrap() = None;
-        *self.selection_audio_job.lock().unwrap() = None;
-        let (task, cache, epoch) = {
-            let mut state = self.task_workspace.lock().unwrap();
-            let Some(task) = state
-                .workspace
-                .session
-                .tasks
-                .iter()
-                .find(|task| task.id == id)
-                .cloned()
-            else {
-                return;
-            };
-            state.epoch += 1;
-            state.page_revision = None;
-            state.restoring = true;
-            (task, state.caches.get(id).cloned(), state.epoch)
+        // Install one safe runtime for B before any fallible I/O. If validation
+        // fails, none of A's request, directory IDs or checked rows can leak into B.
+        *self.request.lock().unwrap() = task.definition.to_request(PAGE_SIZE, task.view.offset);
+        let stats = self.tree.lock().unwrap().stats.clone();
+        *self.tree.lock().unwrap() = TreeState {
+            stats,
+            ..Default::default()
         };
+        self.multi_selection.lock().unwrap().clear();
+        *self.selection_anchor.lock().unwrap() = None;
         ui.set_task_restoring(true);
         ui.set_search_workspace_loading(true);
         ui.set_searching(false);
-        apply_task_controls(&ui, &task);
+        apply_task_controls(ui, &task);
         self.records.lock().unwrap().clear();
         *self.selected.lock().unwrap() = None;
         ui.set_rows(ModelRc::new(VecModel::<AudioRow>::default()));
         ui.set_selected_id("".into());
         ui.set_has_selection(false);
+        ui.set_selected_row(-1);
+        ui.set_selected_folder(-1);
         ui.set_selected_folder_path("".into());
-        self.publish_search_tasks(&ui);
+        ui.set_checked_count(0);
+        ui.set_can_previous(false);
+        ui.set_can_next(false);
+        ui.set_result_summary("".into());
+        ui.set_page_label((task.view.offset / PAGE_SIZE + 1).to_string().into());
+        ui.set_folders(ModelRc::new(VecModel::<FolderRow>::default()));
+        ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
+        self.publish_search_tasks(ui);
         let index = self
             .task_workspace
             .lock()
@@ -978,29 +1168,67 @@ impl Controller {
         if let Some(index) = index {
             ui.invoke_reveal_search_task(index as i32);
         }
+        Some((task, cache, epoch))
+    }
+
+    fn finish_search_task_restore(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        task_id: &str,
+        epoch: u64,
+        result: Result<ResolvedTask, String>,
+    ) {
+        if self.shutdown.load(Ordering::Acquire)
+            || self.task_workspace.lock().unwrap().epoch != epoch
+        {
+            return;
+        }
+        if self.closing.load(Ordering::Acquire) {
+            let mut state = self.task_workspace.lock().unwrap();
+            state.restoring = false;
+            state.restore_failed = true;
+            state.resume_after_close = Some(WorkspaceResume::Task(task_id.to_owned()));
+            return;
+        }
+        ui.set_search_workspace_loading(false);
+        self.task_workspace.lock().unwrap().restoring = false;
+        match result {
+            Ok((task, cache, selected, folder_missing, folders)) => {
+                self.task_workspace.lock().unwrap().restore_failed = false;
+                self.apply_search_task(ui, task, cache, selected, folder_missing, folders);
+                let protected = self.task_workspace.lock().unwrap().protected;
+                if !protected && self.workspace_writes.lock().unwrap().errors.is_empty() {
+                    ui.set_search_workspace_error("".into());
+                }
+            }
+            Err(error) => {
+                self.task_workspace.lock().unwrap().restore_failed = true;
+                ui.set_task_restoring(false);
+                ui.set_search_workspace_error(self.localized(
+                    "任务恢复失败，原任务条件已保留；按 F5 重试，或切换到其他任务",
+                    "Task restore failed. Original conditions are retained; press F5 to retry or switch to another task",
+                ));
+                ui.set_status(error.into());
+                // Only the active ID changed: save the intact owned snapshots,
+                // never capture the deliberately empty failed-restore view.
+                self.queue_workspace_save();
+            }
+        }
+    }
+
+    fn restore_search_task(self: &Arc<Self>, id: &str) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let Some((task, cache, epoch)) = self.prepare_search_task_restore(&ui, id) else {
+            return;
+        };
         let provider = self.provider();
         let c = self.clone();
         std::thread::spawn(move || {
+            let task_id = task.id.clone();
             let result = resolve_task(&provider, task, cache);
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
-                if c2.shutdown.load(Ordering::Acquire)
-                    || c2.closing.load(Ordering::Acquire)
-                    || c2.task_workspace.lock().unwrap().epoch != epoch
-                {
-                    return;
-                }
-                ui.set_search_workspace_loading(false);
-                c2.task_workspace.lock().unwrap().restoring = false;
-                match result {
-                    Ok((task, cache, selected, folder_missing, folders)) => {
-                        c2.apply_search_task(&ui, task, cache, selected, folder_missing, folders);
-                    }
-                    Err(error) => {
-                        ui.set_task_restoring(false);
-                        ui.set_status(error.into());
-                    }
-                }
+                c2.finish_search_task_restore(&ui, &task_id, epoch, result);
             });
         });
     }
@@ -1058,9 +1286,7 @@ impl Controller {
             *self.selected.lock().unwrap() = Some(file.clone());
             present_file(ui, &file);
             ui.set_metadata_dirty(dirty);
-            // The loaded sound and its play session remain global. A later explicit
-            // Play of this selection must load it before auditioning.
-            self.mark_audio_reload(file.id);
+            self.restore_task_audio_selection(&file);
         } else {
             ui.set_selected_id("".into());
             ui.set_has_selection(false);
@@ -1148,6 +1374,48 @@ impl Controller {
         self.queue_workspace_save();
     }
 
+    fn task_selection_is_loaded(
+        &self,
+        file: &AudioFile,
+        status: &audiolib_audio::PlaybackStatus,
+    ) -> bool {
+        if file.missing
+            || status.sample_rate == 0
+            || matches!(
+                status.state,
+                PlaybackState::Empty | PlaybackState::Loading | PlaybackState::Error
+            )
+            || status.generation == self.removed_audio_generation.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(path) = status.file_path.as_deref() else {
+            return false;
+        };
+        if self.remote_read_only() {
+            // waveform_file may prefer the newly displayed row, so it cannot
+            // prove which server record the engine actually loaded.
+            self.remote_wave_file(path).is_some_and(|loaded| {
+                loaded.id == file.id
+                    && same_path(Path::new(&loaded.file_path), Path::new(&file.file_path))
+            })
+        } else {
+            same_path(path, Path::new(&file.file_path))
+        }
+    }
+
+    fn restore_task_audio_selection(&self, file: &AudioFile) {
+        let loaded = self.task_selection_is_loaded(file, &self.audio.status());
+        let mut pending = self.audio_reload.lock().unwrap();
+        if !loaded {
+            *pending = Some(file.id);
+        } else if *pending != Some(file.id) {
+            // Clear a different task's marker, but retain a matching marker from
+            // an explicitly failed/incomplete Load that still needs a retry.
+            *pending = None;
+        }
+    }
+
     fn restore_task_scroll(&self, ui: &AppWindow, view: &SearchTaskView) {
         let y = -(view.list_top_row as f32 + view.list_row_offset)
             * ui.get_task_result_row_height().max(1.0);
@@ -1163,6 +1431,13 @@ impl Controller {
     pub(super) fn search_task_page_ready(&self, ui: &AppWindow, revision: Option<u64>) {
         self.task_workspace.lock().unwrap().page_revision = revision;
         self.persist_search_task(ui);
+        let state = self.task_workspace.lock().unwrap();
+        if !state.protected
+            && !state.restore_failed
+            && self.workspace_writes.lock().unwrap().errors.is_empty()
+        {
+            ui.set_search_workspace_error("".into());
+        }
     }
 
     pub(super) fn search_task_folders_ready(&self, revision: Option<u64>) {
@@ -1182,6 +1457,37 @@ impl Controller {
 fn task_inputs_valid(task: &SearchTask) -> bool {
     let mut request = task.definition.to_request(PAGE_SIZE, task.view.offset);
     let raw = &task.view.raw_inputs;
+    if !raw.is_empty() {
+        let samples = [0, 44_100, 48_000, 88_200, 96_000, 192_000];
+        let bits = [0, 16, 24, 32];
+        let channels = [0, 1, 2, 4, 6, 8];
+        let sample = samples
+            .get(task.view.sample_filter as usize)
+            .copied()
+            .unwrap_or(0);
+        let bit = bits
+            .get(task.view.bit_filter as usize)
+            .copied()
+            .unwrap_or(0);
+        let channel = channels
+            .get(task.view.channel_filter as usize)
+            .copied()
+            .unwrap_or(0);
+        request.filters.sample_rate = (sample > 0).then_some(sample);
+        request.filters.bit_depth = (bit > 0).then_some(bit);
+        request.filters.channels = (channel > 0).then_some(channel);
+        request.filters.visibility = match task.view.visibility_index {
+            1 => FileVisibility::Missing,
+            2 => FileVisibility::All,
+            _ => FileVisibility::Present,
+        };
+    }
+    if let Some(value) = raw.get("favorites_only") {
+        request.filters.favorites_only = value == "true";
+    }
+    if let Some(value) = raw.get("tagged_only") {
+        request.filters.tagged_only = value == "true";
+    }
     if let Some(query) = raw.get("query") {
         request.query = query.clone();
     }
