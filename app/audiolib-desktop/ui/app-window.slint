@@ -29,7 +29,7 @@ export struct AudioRow {
 }
 export struct FolderRow { name: string, count: string, path: string, depth: int, expanded: bool, has-children: bool }
 export struct CrumbRow { name: string }
-export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool }
+export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: [string], folder: string, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
 // One row of the unified window's source list: kind 0 = the local library (always row 0),
 // 1 = a saved server profile. status-kind: 0 unknown, 1 ok, 3 failed.
@@ -591,6 +591,7 @@ export component AppWindow inherits Window {
     in-out property <bool> chinese: false;
     in-out property <string> query: "";
     in property <[SearchTaskRow]> search-tasks: [];
+    in property <int> active-search-task-index: 0;
     in property <[SavedSearchTaskRow]> saved-search-tasks: [];
     in property <bool> search-workspace-loading: false;
     in property <bool> search-workspace-read-only: false;
@@ -636,12 +637,14 @@ export component AppWindow inherits Window {
         task-viewport-timer.restart();
     }
     public function reveal-search-task(index: int) {
-        let left = max(0, index) * 203px * Theme.ui-scale;
+        let left = max(0, index) * (root.task-tab-width + 3px * Theme.ui-scale);
+        let right = left + root.task-tab-width + (index == root.search-tasks.length - 1 ? 38px * Theme.ui-scale : 0px);
         if left < -task-tabs-scroll.viewport-x { task-tabs-scroll.viewport-x = -left; }
-        else if left + 200px * Theme.ui-scale > -task-tabs-scroll.viewport-x + task-tabs-scroll.visible-width {
-            task-tabs-scroll.viewport-x = task-tabs-scroll.visible-width - left - 200px * Theme.ui-scale;
+        else if right > -task-tabs-scroll.viewport-x + task-tabs-scroll.visible-width {
+            task-tabs-scroll.viewport-x = task-tabs-scroll.visible-width - right;
         }
     }
+    private property <length> task-tab-width: 320px * Theme.ui-scale;
     public function begin-search-task-rename(id: string, name: string, saved: bool) {
         if root.search-workspace-read-only { return; }
         root.search-task-rename-id = id;
@@ -1767,14 +1770,16 @@ export component AppWindow inherits Window {
         // Document tabs own the entire search workspace below, including its directory tree.
         Rectangle { height: (root.short-layout ? 34px : 38px) * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale;
             accessible-role: tab-list; accessible-label: root.chinese ? "搜索任务" : "Search tasks";
-            HorizontalLayout { spacing: 4px * Theme.ui-scale; padding-left: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale;
+            HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale;
                 task-tabs-scroll := ScrollView { horizontal-stretch: 1; min-width: 0px; viewport-height: (root.short-layout ? 32px : 36px) * Theme.ui-scale;
+                    viewport-width: root.search-tasks.length * (root.task-tab-width + 3px * Theme.ui-scale) + 38px * Theme.ui-scale;
                     HorizontalLayout { spacing: 3px * Theme.ui-scale; alignment: start;
                         for task in root.search-tasks: SearchTaskTab {
-                            width: 200px * Theme.ui-scale; name: task.name; active: task.active;
+                            width: root.task-tab-width; name: task.name; active: task.active;
+                            tooltip-width: min(560px * Theme.ui-scale, root.width - 40px * Theme.ui-scale);
+                            keywords: task.keywords; folder: task.folder; summary: task.summary; searched: task.searched;
                             favorite: task.favorite; modified: task.modified; chinese: root.chinese; compact: root.short-layout; enabled: !root.background-blocked; editable: !root.search-workspace-read-only;
                             selected => { root.search-task-selected(task.id); }
-                            favorite-toggled => { root.search-task-favorite-toggled(task.id); }
                             closed => { root.search-task-closed(task.id); }
                             rename-requested => { root.begin-search-task-rename(task.id, task.name, false); }
                             context-requested(position) => {
@@ -1782,14 +1787,14 @@ export component AppWindow inherits Window {
                                 search-task-menu.show({x: position.x - search-task-menu.absolute-position.x, y: position.y - search-task-menu.absolute-position.y});
                             }
                         }
+                        Action { width: 34px * Theme.ui-scale; height: (root.short-layout ? 30px : 32px) * Theme.ui-scale; subtle: true;
+                            label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
+                            enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
+                            clicked => { root.search-task-created(); }
+                            Tooltip { text: @markdown("\{root.search-tasks.length}/\{root.max-search-tasks}"); }
+                        }
                     }
                 }
-                Action { width: 34px * Theme.ui-scale; height: 32px * Theme.ui-scale; subtle: true;
-                    label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
-                    enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
-                    clicked => { root.search-task-created(); }
-                }
-                Label { width: 38px * Theme.ui-scale; text: root.search-tasks.length + "/" + root.max-search-tasks; horizontal-alignment: center; font-size: Theme.font(10); }
             }
         }
         if root.search-workspace-error != "": Rectangle {
@@ -1830,7 +1835,7 @@ export component AppWindow inherits Window {
                     if root.library-sidebar-page == 1 && root.favorites-category == 0: Label { height: 54px * Theme.ui-scale; text: root.chinese ? "收藏的音频显示在声音列表中。" : "Favorite audio files appear in the sound list."; wrap: word-wrap; }
                     if root.library-sidebar-page == 1 && root.favorites-category == 1: ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
                         VerticalLayout { padding: 0px; spacing: 5px * Theme.ui-scale; alignment: start;
-                            if root.saved-search-tasks.length == 0: Label { height: 70px * Theme.ui-scale; text: root.chinese ? "点击任务页签上的 ☆ 收藏搜索，之后可在这里重新打开。" : "Star a search task to reopen it here later."; wrap: word-wrap; }
+                            if root.saved-search-tasks.length == 0: Label { height: 70px * Theme.ui-scale; text: root.chinese ? "点击声音列表右上角的 ☆ 收藏当前搜索任务，之后可在这里重新打开。" : "Star the current search above the sound list to reopen it here later."; wrap: word-wrap; }
                             for saved in root.saved-search-tasks: Rectangle { height: 58px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale; background: saved-hit.has-hover ? Theme.hover : Theme.raised;
                                 accessible-role: button; accessible-label: (root.chinese ? "打开搜索任务收藏：" : "Open saved search: ") + saved.name; accessible-enabled: !root.background-blocked && !root.search-workspace-read-only;
                                 accessible-action-default => { if !root.background-blocked && !root.search-workspace-read-only { root.saved-search-opened(saved.id); } }
@@ -1922,10 +1927,18 @@ export component AppWindow inherits Window {
                     if root.checked-count > 1 && root.wide-layout: Action { width: 64px * Theme.ui-scale; subtle: true; enabled: !root.background-blocked && root.removal-allowed; label: root.chinese ? "移除" : "Remove"; clicked => { root.library-action(11); } }
                     if root.checked-count > 1: Rectangle { horizontal-stretch: 1; }
                     // File status lives in the Library menu and sorting in the table headers;
-                    // the header keeps only the sidebar switch (筛选 | 详情).
+                    // The current task favorite shares the filter/details icon treatment.
                     Rectangle { y: (parent.height - self.height) / 2; height: 30px * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
-                        accessible-role: tab-list; accessible-label: root.chinese ? "侧栏" : "Side panel";
+                        accessible-role: none;
                         HorizontalLayout { padding: 2px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
+                            if root.search-tasks.length > root.active-search-task-index: IconSegment {
+                                private property <SearchTaskRow> task: root.search-tasks[root.active-search-task-index];
+                                icon: self.task.favorite ? @image-url("icons/task-star-filled.svg") : @image-url("icons/task-star.svg");
+                                label: (self.task.favorite ? (root.chinese ? "取消搜索任务收藏：" : "Unfavorite search task: ") : (root.chinese ? "收藏搜索任务：" : "Favorite search task: ")) + self.task.name + (self.task.modified ? (root.chinese ? "（条件已修改，右键收藏可更新）" : " (changed; update from saved search menu)") : "");
+                                active: self.task.favorite;
+                                enabled: !root.background-blocked && !root.search-workspace-read-only;
+                                clicked => { root.search-task-favorite-toggled(self.task.id); }
+                            }
                             IconSegment { icon: @image-url("icons/filter.svg"); label: root.chinese ? "筛选" : "Filters"; active: root.inspector-visible && root.filters-visible; count: root.filter-count; clicked => { root.show-sidebar-page(true); } }
                             IconSegment { icon: @image-url("icons/details.svg"); label: root.chinese ? "详情" : "Details"; active: root.inspector-visible && !root.filters-visible; clicked => { root.show-sidebar-page(false); } }
                         }

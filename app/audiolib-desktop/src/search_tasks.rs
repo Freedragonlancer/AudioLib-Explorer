@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 #[path = "search_task_tests.rs"]
 mod tests;
 
+#[path = "search_task_presentation.rs"]
+mod presentation;
+
 #[derive(Clone)]
 struct TaskCache {
     provider: Weak<SqliteProvider>,
@@ -108,14 +111,10 @@ fn folder_ref(folder: &Folder) -> SearchFolderRef {
     }
 }
 
-fn fresh_task(number: usize, order_by: SortOrder, descending: bool, chinese: bool) -> SearchTask {
+fn fresh_task(order_by: SortOrder, descending: bool, chinese: bool) -> SearchTask {
     SearchTask {
         id: unique_id(),
-        title: if chinese {
-            format!("搜索任务 {number}")
-        } else {
-            format!("Search {number}")
-        },
+        title: if chinese { "默认搜索" } else { "default" }.into(),
         definition: SearchTaskDefinition {
             order_by,
             descending,
@@ -486,7 +485,6 @@ impl Controller {
                 if fresh_workspace {
                     let preferences = c2.audio_table.lock().unwrap();
                     let task = fresh_task(
-                        1,
                         preferences.order_by,
                         preferences.descending,
                         c2.chinese.load(Ordering::Acquire),
@@ -684,6 +682,7 @@ impl Controller {
 
     pub(super) fn publish_search_tasks(&self, ui: &AppWindow) {
         let state = self.task_workspace.lock().unwrap();
+        let chinese = self.chinese.load(Ordering::Acquire);
         let rows = state
             .workspace
             .session
@@ -697,9 +696,20 @@ impl Controller {
                         .iter()
                         .find(|saved| &saved.id == id)
                 });
+                let display = presentation::task_presentation(task, chinese);
                 crate::SearchTaskRow {
                     id: task.id.as_str().into(),
-                    name: task.title.as_str().into(),
+                    name: display.name.into(),
+                    keywords: ModelRc::new(VecModel::from(
+                        display
+                            .keywords
+                            .into_iter()
+                            .map(slint::SharedString::from)
+                            .collect::<Vec<_>>(),
+                    )),
+                    folder: display.folder.into(),
+                    summary: display.summary.into(),
+                    searched: display.searched,
                     favorite: saved.is_some(),
                     modified: saved.is_some_and(|saved| {
                         saved.definition != task.definition || !task_inputs_valid(task)
@@ -708,6 +718,7 @@ impl Controller {
                 }
             })
             .collect::<Vec<_>>();
+        ui.set_active_search_task_index(rows.iter().position(|row| row.active).unwrap_or(0) as i32);
         ui.set_search_tasks(ModelRc::new(VecModel::from(rows)));
         ui.set_saved_search_tasks(ModelRc::new(VecModel::from(
             state
@@ -776,7 +787,6 @@ impl Controller {
         }
         let prefs = self.audio_table.lock().unwrap();
         let task = fresh_task(
-            state.workspace.session.tasks.len() + 1,
             prefs.order_by,
             prefs.descending,
             self.chinese.load(Ordering::Acquire),
@@ -853,7 +863,6 @@ impl Controller {
         state.caches.remove(id);
         if state.workspace.session.tasks.is_empty() {
             state.workspace.session.tasks.push(fresh_task(
-                1,
                 SortOrder::Relevance,
                 false,
                 self.chinese.load(Ordering::Acquire),

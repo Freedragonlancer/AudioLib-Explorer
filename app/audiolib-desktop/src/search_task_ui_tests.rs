@@ -17,6 +17,7 @@ fn tasks(count: usize) -> ModelRc<SearchTaskRow> {
                 active: index == 0,
                 favorite: false,
                 modified: index == 1,
+                ..Default::default()
             })
             .collect::<Vec<_>>(),
     ))
@@ -47,6 +48,23 @@ fn settle() {
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
 }
 
+fn snapshot_if_requested(ui: &AppWindow, name: &str) {
+    let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") else {
+        return;
+    };
+    let directory = std::path::Path::new(&directory);
+    std::fs::create_dir_all(directory).unwrap();
+    let pixels = ui.window().take_snapshot().unwrap();
+    image::save_buffer(
+        directory.join(format!("{name}.png")),
+        pixels.as_bytes(),
+        pixels.width(),
+        pixels.height(),
+        image::ColorType::Rgba8,
+    )
+    .unwrap();
+}
+
 fn open_saved_menu(ui: &AppWindow) {
     let control = ElementHandle::find_by_accessible_label(ui, "Manage saved search: Forest")
         .next()
@@ -71,7 +89,7 @@ fn activate_popup(ui: &AppWindow, label: &str, steps_from_end: usize) {
 }
 
 #[test]
-fn background_task_favorite_and_close_do_not_select_the_task() {
+fn active_task_toolbar_favorite_and_background_close_do_not_select_a_task() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = window();
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -83,12 +101,177 @@ fn background_task_favorite_and_close_do_not_select_the_task() {
     });
     let observed = events.clone();
     ui.on_search_task_closed(move |id| observed.borrow_mut().push(format!("close:{id}")));
-    click(&ui, "Favorite search task: Task 1");
+    click(&ui, "Favorite search task: Task 0");
     click(&ui, "Close search task: Task 1");
-    assert_eq!(&*events.borrow(), &["favorite:1", "close:1"]);
+    assert_eq!(&*events.borrow(), &["favorite:0", "close:1"]);
     click(&ui, "Search task: Task 1");
-    assert_eq!(&*events.borrow(), &["favorite:1", "close:1", "select:1"]);
+    assert_eq!(&*events.borrow(), &["favorite:0", "close:1", "select:1"]);
+    ui.set_active_search_task_index(1);
+    settle();
+    let toolbar_favorite = ElementHandle::find_by_accessible_label(
+        &ui,
+        "Favorite search task: Task 1 (changed; update from saved search menu)",
+    )
+    .next()
+    .unwrap();
+    toolbar_favorite.mock_single_click(PointerEventButton::Left);
+    settle();
+    assert_eq!(
+        &*events.borrow(),
+        &["favorite:0", "close:1", "select:1", "favorite:1"]
+    );
     ui.hide().unwrap();
+}
+
+#[test]
+fn new_task_control_follows_the_last_tab_and_remains_reachable_after_horizontal_scrolling() {
+    i_slint_backend_testing::init_no_event_loop();
+    for scale in [1.0, 2.0] {
+        let ui = AppWindow::new().unwrap();
+        ui.global::<crate::Theme>().set_ui_scale(scale);
+        // First inspect adjacency with both tabs visible. At 200% a 1080px
+        // viewport correctly clips the inline plus, so its accessibility entry
+        // is absent until horizontal scrolling reveals it.
+        ui.window()
+            .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
+        ui.set_search_tasks(tasks(2));
+        let created = Rc::new(RefCell::new(0));
+        let observed = created.clone();
+        ui.on_search_task_created(move || *observed.borrow_mut() += 1);
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let observed = selected.clone();
+        ui.on_search_task_selected(move |id| observed.borrow_mut().push(id.to_string()));
+        ui.show().unwrap();
+        settle();
+
+        let plus = ElementHandle::find_by_accessible_label(&ui, "New search task")
+            .next()
+            .unwrap();
+        let last_tab = ElementHandle::find_by_accessible_label(&ui, "Search task: Task 1")
+            .next()
+            .unwrap();
+        let gap =
+            plus.absolute_position().x - last_tab.absolute_position().x - last_tab.size().width;
+        assert!(
+            gap >= -1.0 && gap < plus.size().width,
+            "New-task control must follow the last tab without a flexible empty gap, scale={scale}, gap={gap}"
+        );
+
+        // A five-tab strip overflows this narrow view at both supported scales.
+        // Scroll through the real ScrollView rather than invoking its offscreen button.
+        ui.window()
+            .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
+        ui.set_search_tasks(tasks(5));
+        settle();
+        let strip = ElementHandle::find_by_element_id(&ui, "AppWindow::task-tabs-scroll")
+            .next()
+            .unwrap();
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(
+                strip.absolute_position().x + strip.size().width / 2.0,
+                strip.absolute_position().y + strip.size().height / 2.0,
+            ),
+            delta_x: -10_000.0,
+            delta_y: 0.0,
+        });
+        settle();
+        let plus = ElementHandle::find_by_accessible_label(&ui, "New search task")
+            .next()
+            .unwrap_or_else(|| {
+                panic!(
+                    "Inline plus missing after wheel-to-end at scale={scale}, strip={:?}+{:?}, window={:?}",
+                    strip.absolute_position(),
+                    strip.size(),
+                    ui.window().size()
+                )
+            });
+        assert!(
+            plus.absolute_position().x >= strip.absolute_position().x - 1.0
+                && plus.absolute_position().x + plus.size().width
+                    <= strip.absolute_position().x + strip.size().width + 1.0,
+            "The inline new-task control must be fully reachable at the strip's scroll end, scale={scale}"
+        );
+        plus.mock_single_click(PointerEventButton::Left);
+        settle();
+        assert_eq!(*created.borrow(), 1);
+        assert!(selected.borrow().is_empty());
+
+        // Active-task restoration reveals the last tab even when the strip starts left.
+        ui.set_search_tasks(tasks(6));
+        ui.invoke_reveal_search_task(0);
+        settle();
+        ui.invoke_reveal_search_task(5);
+        settle();
+        click(&ui, "Search task: Task 5");
+        assert_eq!(&*selected.borrow(), &["5"]);
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn search_tab_hover_exposes_the_complete_query_and_directory_without_selecting_the_task() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for chinese in [false, true] {
+        let ui = window();
+        ui.set_chinese(chinese);
+        let summary = "Search: hard \"metal hit\" glass\nDirectory: D:/Sound Library/Aircraft/P-51 Mustang\nInclude subfolders: Yes";
+        ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
+            id: "hover-task".into(),
+            name: "Mustang impacts".into(),
+            keywords: ModelRc::new(VecModel::from(vec![
+                "hard".into(),
+                "metal hit".into(),
+                "glass".into(),
+            ])),
+            folder: "P-51 Mustang".into(),
+            summary: summary.into(),
+            searched: true,
+            active: true,
+            ..Default::default()
+        }])));
+        ui.on_search_task_selected(|_| panic!("Hover must not select a task"));
+        settle();
+        let label = if chinese {
+            "搜索任务：Mustang impacts"
+        } else {
+            "Search task: Mustang impacts"
+        };
+        let tab = ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap();
+        let accessible_summary = tab.accessible_description().unwrap();
+        assert!(accessible_summary.contains("hard \"metal hit\" glass"));
+        assert!(accessible_summary.contains("D:/Sound Library/Aircraft/P-51 Mustang"));
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, summary)
+                .next()
+                .is_none()
+        );
+        let language = if chinese { "cn" } else { "en" };
+        snapshot_if_requested(&ui, &format!("task-before-hover-{language}"));
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(
+                tab.absolute_position().x + tab.size().width / 2.0,
+                tab.absolute_position().y + tab.size().height / 2.0,
+            ),
+        });
+        settle();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+        settle();
+        snapshot_if_requested(&ui, &format!("task-after-hover-{language}"));
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, summary)
+                .next()
+                .is_some(),
+            "Hover should open the full task tooltip, chinese={chinese}"
+        );
+        ui.hide().unwrap();
+    }
 }
 
 #[test]
