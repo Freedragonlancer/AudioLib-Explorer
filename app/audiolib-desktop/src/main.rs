@@ -578,6 +578,17 @@ fn run() -> Result<()> {
                         ui.set_tag_draft("engine -interior -rain \"pass by\"".into());
                         ui.invoke_apply_filters();
                     }
+                    if smoke_view == "sorted" {
+                        // A header sort (duration, descending) shows its arrow.
+                        ui.set_sort_index(2);
+                        ui.set_sort_descending(true);
+                        ui.invoke_filter_requested();
+                    }
+                    if smoke_view == "file-status" {
+                        // Library > Show files > All records, flagged in the list footer.
+                        ui.set_visibility_index(2);
+                        ui.invoke_filter_requested();
+                    }
                     if smoke_view == "folder-context" {
                         use slint::Model;
                         if let Some(folder) = ui.get_folders().row_data(0) {

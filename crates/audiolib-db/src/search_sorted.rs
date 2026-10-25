@@ -240,18 +240,7 @@ pub(super) fn page_sql(
             "af.missing=0 AND ",
         )
     } else {
-        let has_index: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_index_list('audio_files')
-                 WHERE name=?1 AND partial=0)
-             AND (SELECT COUNT(*) FROM pragma_index_info(?1))=1
-             AND EXISTS(SELECT 1 FROM pragma_index_info(?1)
-                 WHERE name=?2 AND cid>=0)",
-                params![index, column],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        (has_index, "")
+        (single_column_index(tx, index, column)?, "")
     };
     if !has_index {
         return Ok(None);
@@ -267,6 +256,21 @@ pub(super) fn page_sql(
         ) SELECT {projection} FROM ranked JOIN audio_files af ON af.id=ranked.id
         ORDER BY ranked.sort_value {direction},af.id ASC"
     )))
+}
+
+/// Whether `index` is a complete (non-partial) audio_files index on `column` alone,
+/// so INDEXED BY can always plan it for an ordinary filtered statement.
+pub(super) fn single_column_index(tx: &Connection, index: &str, column: &str) -> Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_index_list('audio_files')
+         WHERE name=?1 AND partial=0)
+     AND (SELECT COUNT(*) FROM pragma_index_info(?1))=1
+     AND EXISTS(SELECT 1 FROM pragma_index_info(?1)
+         WHERE name=?2 AND cid>=0)",
+        params![index, column],
+        |row| row.get(0),
+    )
+    .map_err(db_error)
 }
 
 /// The sparse tag index omits exactly the present rows whose derived key is

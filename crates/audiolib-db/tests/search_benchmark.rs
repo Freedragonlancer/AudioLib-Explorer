@@ -163,6 +163,34 @@ fn small_synthetic_fixtures_measure_every_case_and_index_extracted_keywords() {
 }
 
 #[test]
+fn tag_exclusion_cases_extend_the_synthetic_workload() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("tag-exclusion.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
+        .args(["--records", "31", "--queries", "20", "--folder-facets"])
+        .arg("--tag-exclusion-cases")
+        .arg("--db")
+        .arg(&database)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["tag_exclusion_cases"], true);
+    let cases = report["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 20);
+    for case in &cases[14..] {
+        let excluded = case["request"]["filters"]["exclude_tags"]
+            .as_array()
+            .unwrap();
+        assert!(!excluded.is_empty(), "{case}");
+    }
+}
+
+#[test]
 fn insufficient_queries_fail_before_creating_a_synthetic_database() {
     let directory = tempfile::tempdir().unwrap();
     for (queries, edge_cases, minimum) in [(13, false, 14), (18, true, 19)] {
