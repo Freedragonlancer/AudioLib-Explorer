@@ -115,6 +115,7 @@ fn fresh_task(order_by: SortOrder, descending: bool, chinese: bool) -> SearchTas
     SearchTask {
         id: unique_id(),
         title: if chinese { "默认搜索" } else { "default" }.into(),
+        title_is_custom: false,
         definition: SearchTaskDefinition {
             order_by,
             descending,
@@ -123,6 +124,25 @@ fn fresh_task(order_by: SortOrder, descending: bool, chinese: bool) -> SearchTas
         view: SearchTaskView::default(),
         saved_search_id: None,
     }
+}
+
+// Exact stored paths survive snapshot-assigned ID changes. Syntax aliases only
+// compare equal while the ID agrees: separate indexed alias rows can have
+// different contents and must not be silently merged by a task switch.
+fn same_search_definition(left: &SearchTaskDefinition, right: &SearchTaskDefinition) -> bool {
+    left.query == right.query
+        && left.include_subfolders == right.include_subfolders
+        && left.filters == right.filters
+        && left.order_by == right.order_by
+        && left.descending == right.descending
+        && match (&left.folder, &right.folder) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                audiolib_db::indexed_paths_equal(&left.path, &right.path)
+                    && (left.id == right.id || left.path == right.path)
+            }
+            _ => false,
+        }
 }
 
 impl Controller {
@@ -712,7 +732,8 @@ impl Controller {
                     searched: display.searched,
                     favorite: saved.is_some(),
                     modified: saved.is_some_and(|saved| {
-                        saved.definition != task.definition || !task_inputs_valid(task)
+                        !same_search_definition(&saved.definition, &task.definition)
+                            || !task_inputs_valid(task)
                     }),
                     active: state.workspace.session.active_task_id.as_ref() == Some(&task.id),
                 }
@@ -909,6 +930,7 @@ impl Controller {
                 .find(|task| task.id == id)
             {
                 task.title = name.to_owned();
+                task.title_is_custom = true;
             }
         } else if let Some(task) = state
             .workspace
@@ -918,6 +940,7 @@ impl Controller {
             .find(|task| task.id == id)
         {
             task.title = name.to_owned();
+            task.title_is_custom = true;
         }
         drop(state);
         self.publish_search_tasks(&ui);
@@ -960,6 +983,7 @@ impl Controller {
         state.workspace.favorites.push(SavedSearchTask {
             id: saved_id.clone(),
             title: task.title,
+            title_is_custom: task.title_is_custom,
             definition: task.definition,
         });
         state.workspace.session.tasks[index].saved_search_id = Some(saved_id);
@@ -1052,15 +1076,16 @@ impl Controller {
         else {
             return;
         };
-        if let Some(existing) = state
-            .workspace
-            .session
-            .tasks
-            .iter()
-            .find(|task| task.definition == saved.definition && task_inputs_valid(task))
-        {
+        if let Some(existing) = state.workspace.session.tasks.iter_mut().find(|task| {
+            same_search_definition(&task.definition, &saved.definition) && task_inputs_valid(task)
+        }) {
+            // Opening a named favorite binds that favorite even when its search
+            // can reuse an existing tab. Preserve the tab's independent title.
+            existing.saved_search_id = Some(saved.id);
             let existing = existing.id.clone();
             drop(state);
+            self.publish_search_tasks(&ui);
+            self.queue_workspace_save();
             self.switch_search_task(&existing);
             return;
         }
@@ -1076,6 +1101,7 @@ impl Controller {
         let task = SearchTask {
             id: unique_id(),
             title: saved.title,
+            title_is_custom: saved.title_is_custom,
             definition: saved.definition,
             saved_search_id: Some(saved.id),
             view: SearchTaskView::default(),
@@ -1213,6 +1239,7 @@ impl Controller {
             Err(error) => {
                 self.task_workspace.lock().unwrap().restore_failed = true;
                 ui.set_task_restoring(false);
+                self.resume_task_waveform(ui);
                 ui.set_search_workspace_error(self.localized(
                     "任务恢复失败，原任务条件已保留；按 F5 重试，或切换到其他任务",
                     "Task restore failed. Original conditions are retained; press F5 to retry or switch to another task",
@@ -1303,6 +1330,7 @@ impl Controller {
             ui.set_selected_path("".into());
             ui.set_metadata_dirty(false);
         }
+        self.resume_task_waveform(ui);
         let records = cache
             .as_ref()
             .map_or_else(Vec::new, |cache| cache.records.clone());
@@ -1406,10 +1434,10 @@ impl Controller {
             // prove which server record the engine actually loaded.
             self.remote_wave_file(path).is_some_and(|loaded| {
                 loaded.id == file.id
-                    && same_path(Path::new(&loaded.file_path), Path::new(&file.file_path))
+                    && audiolib_db::indexed_paths_equal(&loaded.file_path, &file.file_path)
             })
         } else {
-            same_path(path, Path::new(&file.file_path))
+            audiolib_db::indexed_paths_equal(&path.to_string_lossy(), &file.file_path)
         }
     }
 
@@ -1423,6 +1451,57 @@ impl Controller {
             // an explicitly failed/incomplete Load that still needs a retry.
             *pending = None;
         }
+    }
+
+    /// Switching invalidates any outstanding image publication, including one
+    /// for audio which remains loaded. Requeue its Waveform without loading or
+    /// playing audio; an unchanged playback generation will not trigger it again.
+    fn resume_task_waveform(&self, ui: &AppWindow) {
+        let status = self.audio.status();
+        if let Some(file) = self.task_waveform_source(&status) {
+            self.queue_waveform(&file);
+        } else {
+            ui.set_waveform_ready(false);
+            ui.set_waveform_image(Image::default());
+            ui.set_waveform_info("".into());
+        }
+    }
+
+    fn task_waveform_source(&self, status: &audiolib_audio::PlaybackStatus) -> Option<AudioFile> {
+        // In server mode the general preview helper may prefer the inspector's
+        // row. A task switch does not load that row: the loaded or pending global
+        // source keeps its Waveform. Its remote mapping supplies original source
+        // Metadata even before a Loading status exposes its decoded sample rate.
+        let mapped_source = (self.remote_read_only()
+            && (status.state == PlaybackState::Loading
+                || (status.sample_rate > 0
+                    && !matches!(status.state, PlaybackState::Empty | PlaybackState::Error))))
+        .then(|| {
+            status
+                .file_path
+                .as_deref()
+                .and_then(|path| self.remote_wave_file(path))
+        })
+        .flatten();
+        mapped_source
+            .or_else(|| self.waveform_file(status))
+            .or_else(|| {
+                let selected = self.selected.lock().unwrap().clone()?;
+                // A local Load may still be finishing when a tab restores its
+                // matching row. The status observer assumes that row's Waveform
+                // was queued already, so use its Metadata while Loading rather
+                // than waiting for an observer which will skip the same path.
+                (status.file_path.is_none()
+                    || (status.state == PlaybackState::Loading
+                        && status.file_path.as_deref().is_some_and(|path| {
+                            audiolib_db::indexed_paths_equal(
+                                &path.to_string_lossy(),
+                                &selected.file_path,
+                            )
+                        })))
+                .then_some(selected)
+            })
+            .filter(|file| !file.missing)
     }
 
     fn restore_task_scroll(&self, ui: &AppWindow, view: &SearchTaskView) {
@@ -1645,7 +1724,7 @@ fn resolve_task(
 ) -> Result<ResolvedTask, String> {
     let resolve_audio = |reference: &SearchAudioRef| -> Result<Option<AudioFile>, String> {
         match provider.get_audio(reference.id) {
-            Ok(file) if same_path(Path::new(&file.file_path), Path::new(&reference.file_path)) => {
+            Ok(file) if audiolib_db::indexed_paths_equal(&file.file_path, &reference.file_path) => {
                 return Ok(Some(file));
             }
             Ok(_) | Err(audiolib_core::Error::NotFound(_)) => {}
@@ -1655,44 +1734,21 @@ fn resolve_task(
             .find_audio_by_path(Path::new(&reference.file_path))
             .map_err(|error| error.to_string())
     };
-    let mut folders = None;
-    let mut resolve_folder =
-        |reference: &SearchFolderRef| -> Result<Option<SearchFolderRef>, String> {
-            match provider.get_folder(reference.id) {
-                Ok(folder) if same_path(Path::new(&folder.path), Path::new(&reference.path)) => {
-                    return Ok(Some(folder_ref(&folder)));
-                }
-                Ok(_) | Err(audiolib_core::Error::NotFound(_)) => {}
-                Err(error) => return Err(error.to_string()),
+    let resolve_folder = |reference: &SearchFolderRef| -> Result<Option<SearchFolderRef>, String> {
+        match provider.get_folder(reference.id) {
+            Ok(folder) if audiolib_db::indexed_paths_equal(&folder.path, &reference.path) => {
+                return Ok(Some(folder_ref(&folder)));
             }
-            // Resolve against indexed paths, never this machine's filesystem (remote
-            // paths need not be mounted here). Materialize the tree only on ID drift.
-            if folders.is_none() {
-                let mut all = Vec::new();
-                let mut parents = vec![None];
-                let mut seen = HashSet::new();
-                while let Some(parent) = parents.pop() {
-                    for folder in provider
-                        .folders(parent)
-                        .map_err(|error| error.to_string())?
-                    {
-                        if seen.insert(folder.id) {
-                            parents.push(Some(folder.id));
-                            all.push(folder);
-                        }
-                    }
-                }
-                folders = Some(all);
-            }
-            Ok(folders
-                .as_ref()
-                .and_then(|all| {
-                    all.iter().find(|folder| {
-                        same_path(Path::new(&folder.path), Path::new(&reference.path))
-                    })
-                })
-                .map(folder_ref))
-        };
+            Ok(_) | Err(audiolib_core::Error::NotFound(_)) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        // Exact-first indexed lookup applies the stored path's identity
+        // policy. Do not fold POSIX paths or enumerate the complete tree.
+        provider
+            .find_folder_by_path(Path::new(&reference.path))
+            .map(|folder| folder.as_ref().map(folder_ref))
+            .map_err(|error| error.to_string())
+    };
     let folder_missing = if let Some(folder) = task.definition.folder.clone() {
         if let Some(resolved) = resolve_folder(&folder)? {
             task.definition.folder = Some(resolved);
@@ -1707,7 +1763,7 @@ fn resolve_task(
         .view
         .expanded_folders
         .iter()
-        .map(&mut resolve_folder)
+        .map(resolve_folder)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -1744,11 +1800,5 @@ fn resolve_task(
             && cache.provider.ptr_eq(&Arc::downgrade(provider))
             && Some(cache.revision) == revision
     });
-    Ok((
-        task,
-        cache,
-        selected,
-        folder_missing,
-        folders.unwrap_or_default(),
-    ))
+    Ok((task, cache, selected, folder_missing, Vec::new()))
 }

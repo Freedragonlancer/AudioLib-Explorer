@@ -801,19 +801,25 @@ impl SqliteProvider {
             path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
         };
         let reader = self.reader()?;
-        let Some(id) = path_identity::audio_id(&reader, &display_path(&resolved), !self.read_only)?
+        // Keep the resolved identity and projected row in one read snapshot;
+        // another writer may otherwise reuse the numeric ID between statements.
+        let transaction = reader.unchecked_transaction().map_err(db_error)?;
+        let Some(id) =
+            path_identity::audio_id(&transaction, &display_path(&resolved), !self.read_only)?
         else {
             return Ok(None);
         };
-        let projection = audio_projection(&reader)?;
-        reader
+        let projection = audio_projection(&transaction)?;
+        let audio = transaction
             .query_row(
                 &format!("SELECT {projection} FROM audio_files af WHERE id=?1"),
                 [id],
                 audio_from_row,
             )
             .optional()
-            .map_err(db_error)
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(audio)
     }
     pub(crate) fn management_remove(&self, ids: &[i64]) -> Result<u64> {
         let _lease = LibraryLease::acquire(&self.path)?;

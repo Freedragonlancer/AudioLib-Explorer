@@ -52,10 +52,31 @@ fn query_keywords(query: &str) -> Vec<String> {
     words
 }
 
+// A backslash is part of a POSIX directory name, even on a Windows client.
+fn folder_label(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let windows = path.starts_with("\\\\")
+        || path.starts_with("//")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
+    let label = if windows {
+        path.trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .find(|part| !part.is_empty())
+    } else {
+        path.trim_end_matches('/')
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+    };
+    label.unwrap_or(path).to_owned()
+}
+
 pub(super) fn task_presentation(task: &SearchTask, chinese: bool) -> TaskPresentation {
     let text = |cn, en| if chinese { cn } else { en };
     let definition = &task.definition;
-    let name = if default_title(&task.title) {
+    let name = if !task.title_is_custom && default_title(&task.title) {
         text("默认搜索", "default").to_owned()
     } else {
         task.title.clone()
@@ -63,13 +84,7 @@ pub(super) fn task_presentation(task: &SearchTask, chinese: bool) -> TaskPresent
     let folder = definition
         .folder
         .as_ref()
-        .map_or_else(String::new, |folder| {
-            let path = folder.path.trim_end_matches(['/', '\\']);
-            path.rsplit(['/', '\\'])
-                .find(|part| !part.is_empty())
-                .unwrap_or(&folder.path)
-                .to_owned()
-        });
+        .map_or_else(String::new, |folder| folder_label(&folder.path));
     let mut lines = vec![name.clone()];
     lines.push(format!(
         "{}: {}",
@@ -220,10 +235,37 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_named_tasks_keep_literal_names_even_when_they_look_automatic() {
+        for title in [
+            "Search 2",
+            "Search task 3",
+            "搜索任务 1",
+            "default",
+            "默认搜索",
+            "My rain",
+        ] {
+            let task = SearchTask {
+                title: title.into(),
+                title_is_custom: true,
+                ..Default::default()
+            };
+            for chinese in [false, true] {
+                let display = task_presentation(&task, chinese);
+                assert_eq!(display.name, title);
+                assert_eq!(display.summary.lines().next(), Some(title));
+            }
+        }
+    }
+
+    #[test]
     fn keywords_preserve_phrases_and_folder_uses_either_path_separator() {
         let mut task = SearchTask::default();
         task.definition.query = "hard \"metal hit\" “汽车 经过” pass-by".into();
-        for path in ["X:\\Sound Library\\Vehicles\\", "/mnt/sounds/Vehicles/"] {
+        for (path, label) in [
+            ("X:\\Sound Library\\Vehicles\\", "Vehicles"),
+            ("/mnt/sounds/Vehicles/", "Vehicles"),
+            ("/mnt/sounds/Vehicles\\Take/", "Vehicles\\Take"),
+        ] {
             task.definition.folder = Some(SearchFolderRef {
                 id: 1,
                 path: path.into(),
@@ -233,7 +275,7 @@ mod tests {
                 display.keywords,
                 ["hard", "metal hit", "汽车 经过", "pass-by"]
             );
-            assert_eq!(display.folder, "Vehicles");
+            assert_eq!(display.folder, label);
             assert!(display.summary.contains(&task.definition.query));
             assert!(display.summary.contains(path));
             assert!(display.searched);

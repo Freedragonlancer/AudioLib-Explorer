@@ -170,6 +170,14 @@ pub(crate) fn path_key(value: &str) -> String {
         .to_lowercase()
 }
 
+/// Compare stored path identities without accessing the source filesystem.
+/// Windows drive, UNC and separator syntax is normalized; directory-entry case
+/// and literal POSIX backslashes remain significant on every reader platform.
+/// Resolving an old alias against library rows uses DataProvider path lookup instead.
+pub fn indexed_paths_equal(left: &str, right: &str) -> bool {
+    path_identity::comparison_key(left) == path_identity::comparison_key(right)
+}
+
 /// The text the library stores in `audio_files.file_path` for `path` (as given, normally
 /// canonical): the Windows verbatim prefix is dropped (`\\?\C:\x` -> `C:\x`,
 /// `\\?\UNC\host\share` -> `\\host\share`); separators are kept as they are.
@@ -2369,6 +2377,31 @@ impl DataProvider for SqliteProvider {
     }
     fn find_audio_by_path(&self, path: &Path) -> Result<Option<AudioFile>> {
         self.management_lookup(path)
+    }
+    fn find_folder_by_path(&self, path: &Path) -> Result<Option<Folder>> {
+        let resolved = if self.read_only {
+            path.to_path_buf()
+        } else {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        };
+        let reader = self.reader()?;
+        // Pin candidate selection and row projection to one SQLite snapshot so
+        // a concurrent scan cannot reuse the chosen numeric ID between reads.
+        let transaction = reader.unchecked_transaction().map_err(db_error)?;
+        let Some(id) = path_identity::folder_id_with_alias(
+            &transaction,
+            &display_path(&resolved),
+            !self.read_only,
+        )?
+        else {
+            return Ok(None);
+        };
+        let folder = transaction.query_row(
+            "SELECT id,folder_path,folder_name,parent_id,total_file_count FROM folders WHERE id=?1",
+            [id], |row| Ok(Folder { id:row.get(0)?, path:row.get(1)?, name:row.get(2)?, parent_id:row.get(3)?, file_count:unsigned(row,4)? }),
+        ).optional().map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(folder)
     }
     fn relink_audio(&self, id: i64, path: &Path) -> Result<AudioFile> {
         self.management_relink(id, path)

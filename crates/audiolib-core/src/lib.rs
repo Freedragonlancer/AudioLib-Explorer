@@ -548,6 +548,15 @@ pub trait DataProvider: Send + Sync {
     fn maintain_library(&self, action: MaintenanceAction) -> Result<MaintenanceReport>;
     fn update_metadata_batch(&self, request: &BatchMetadataRequest) -> Result<BatchMetadataReport>;
     fn find_audio_by_path(&self, path: &Path) -> Result<Option<AudioFile>>;
+    /// Resolve one indexed directory by its stored path, preferring an exact
+    /// source spelling and refusing ambiguous aliases. Read-only snapshots must
+    /// resolve their own path syntax without probing the reader's filesystem.
+    /// Providers without indexed directory lookup explicitly refuse the operation.
+    fn find_folder_by_path(&self, _path: &Path) -> Result<Option<Folder>> {
+        Err(Error::Validation(
+            "This data provider cannot resolve indexed folder paths".into(),
+        ))
+    }
     fn relink_audio(&self, id: i64, path: &Path) -> Result<AudioFile>;
     /// Relocate an indexed top-level folder as one operation while retaining record
     /// identities and annotations. Every indexed WAV must have a valid corresponding

@@ -71,6 +71,7 @@ fn read_only_provider_round_trips_unfavorited_tasks_without_changing_snapshot() 
     workspace.favorites.push(SavedSearchTask {
         id: "saved".into(),
         title: "Original wood".into(),
+        title_is_custom: true,
         definition: workspace.session.tasks[0].definition.clone(),
     });
     provider.save_search_workspace(&target, &workspace).unwrap();

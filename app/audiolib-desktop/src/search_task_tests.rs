@@ -2,10 +2,14 @@
 //! Isolated controller regressions for task identity, saved definitions and persistence.
 use super::super::*;
 
+#[path = "search_task_favorite_review_tests.rs"]
+mod favorite_review;
 #[path = "search_task_lifecycle_review_tests.rs"]
 mod lifecycle_review;
 #[path = "search_task_ui_review_tests.rs"]
 mod ui_review;
+#[path = "search_task_waveform_review_tests.rs"]
+mod waveform_review;
 
 const ROOT_ENV: &str = "AUDIOLIB_SEARCH_TASK_TEST_ROOT";
 

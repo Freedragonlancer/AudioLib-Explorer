@@ -554,6 +554,7 @@ dependencies = [
  "chrono",
  "i-slint-backend-testing",
  "image",
+ "rusqlite",
  "serde_json",
  "slint",
  "slint-build",

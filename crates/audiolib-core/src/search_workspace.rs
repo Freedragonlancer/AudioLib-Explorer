@@ -178,6 +178,10 @@ impl SearchTaskView {
 pub struct SearchTask {
     pub id: String,
     pub title: String,
+    /// Explicit user names bypass automatic/default title localization. Legacy
+    /// workspaces omit this field and retain automatic-name handling (`false`).
+    #[serde(default)]
+    pub title_is_custom: bool,
     pub definition: SearchTaskDefinition,
     pub view: SearchTaskView,
     pub saved_search_id: Option<String>,
@@ -197,6 +201,10 @@ pub struct SearchSession {
 pub struct SavedSearchTask {
     pub id: String,
     pub title: String,
+    /// Retain explicit-name provenance when reopening a favorite. Legacy
+    /// favorites omit this field and retain automatic-name handling (`false`).
+    #[serde(default)]
+    pub title_is_custom: bool,
     pub definition: SearchTaskDefinition,
 }
 
@@ -297,6 +305,26 @@ fn invalid(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_provenance_defaults_for_legacy_json_and_round_trips_explicit_names() {
+        let mut task: SearchTask =
+            serde_json::from_str(r#"{"id":"task","title":"Search 2"}"#).unwrap();
+        let mut saved: SavedSearchTask =
+            serde_json::from_str(r#"{"id":"saved","title":"default"}"#).unwrap();
+        assert!(!task.title_is_custom);
+        assert!(!saved.title_is_custom);
+        task.title_is_custom = true;
+        saved.title_is_custom = true;
+        let restored_task: SearchTask =
+            serde_json::from_slice(&serde_json::to_vec(&task).unwrap()).unwrap();
+        let restored_saved: SavedSearchTask =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(restored_task, task);
+        assert_eq!(restored_saved, saved);
+        assert!(restored_task.title_is_custom);
+        assert!(restored_saved.title_is_custom);
+    }
 
     #[test]
     fn definition_round_trip_retains_complete_filters_and_partial_query() {

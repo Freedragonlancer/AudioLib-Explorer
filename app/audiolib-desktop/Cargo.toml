@@ -38,6 +38,7 @@ winresource = "=0.1.31"
 
 [dev-dependencies]
 i-slint-backend-testing = { version = "=1.17.1", features = ["renderer-software"] }
+rusqlite.workspace = true
 
 # Icon wiring for a future native macOS bundle; Windows uses build.rs.
 # This metadata does not imply that the desktop has been validated on macOS.

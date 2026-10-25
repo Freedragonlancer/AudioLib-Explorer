@@ -219,18 +219,34 @@ pub(crate) fn folder_id(conn: &Connection, path: &str) -> Result<Option<i64>> {
     }
     // The exact UNIQUE index handles the common case. Only an absent spelling
     // needs the legacy Unicode bucket; SQLite NOCASE handles ASCII alone.
-    let mut statement = conn.prepare_cached("SELECT folder_path,id FROM folders WHERE audiolib_path_key(folder_path)=?1 ORDER BY id").map_err(db_error)?;
-    let rows = statement
-        .query_map([path_key(path)], |row| {
-            Ok((row.get::<_, String>(0)?, row.get(1)?))
-        })
+    folder_id_with_alias(conn, path, true)
+}
+
+/// Snapshot lookups preserve exact source spellings and reject ambiguous aliases;
+/// scanner callers retain their existing native-filesystem alias policy above.
+pub(crate) fn folder_id_with_alias(
+    conn: &Connection,
+    path: &str,
+    native_alias: bool,
+) -> Result<Option<i64>> {
+    // Read-only snapshot readers do not register write-side scalar functions.
+    // The historical SQL function also scanned this table; retain its shared
+    // folded-key bucket in Rust, then apply exact-first identity selection.
+    let mut statement = conn
+        .prepare_cached("SELECT folder_path,id FROM folders ORDER BY id")
         .map_err(db_error)?;
-    choose(
-        path,
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(db_error)?,
-        true,
-    )
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))
+        .map_err(db_error)?;
+    let bucket = path_key(path);
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (stored_path, id) = row.map_err(db_error)?;
+        if path_key(&stored_path) == bucket {
+            candidates.push((stored_path, id));
+        }
+    }
+    choose(path, candidates, native_alias)
 }
 
 #[cfg(all(test, feature = "scanner"))]
