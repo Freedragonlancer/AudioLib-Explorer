@@ -4,7 +4,7 @@
 //! rows, because the Slint layouts available here cannot wrap a repeated row by width.
 use crate::{AppWindow, TagChip, TagChipRow};
 use audiolib_core::{
-    SearchFilters,
+    MAX_TAG_TERMS, SearchFilters,
     tag_filter::{self, TagTerm},
 };
 use slint::{Color, ModelRc, VecModel};
@@ -25,16 +25,22 @@ fn store(ui: &AppWindow, terms: &[TagTerm]) {
 }
 
 /// Add the typed draft to the terms. A draft holding no term (for example a lone sign)
-/// stays in the field so nothing typed is silently discarded.
-pub(crate) fn commit_draft(ui: &AppWindow) {
+/// stays in the field so nothing typed is silently discarded. A draft that would exceed
+/// [`MAX_TAG_TERMS`] also stays, and the terms are unchanged: false, so the caller can
+/// say why instead of showing chips no search accepts.
+pub(crate) fn commit_draft(ui: &AppWindow) -> bool {
     let added = tag_filter::parse_tag_terms(&ui.get_tag_draft());
     if added.is_empty() {
-        return;
+        return true;
     }
     let mut terms = terms(ui);
     tag_filter::merge_tag_terms(&mut terms, added);
+    if terms.len() > MAX_TAG_TERMS {
+        return false;
+    }
     ui.set_tag_draft("".into());
     store(ui, &terms);
+    true
 }
 
 /// Switch a term between include and exclude.
@@ -165,8 +171,21 @@ mod tests {
         assert_eq!(filters.exclude_tags, ["engine"]);
         // A lone sign is not a term and stays in the field.
         ui.set_tag_draft("-".into());
-        commit_draft(&ui);
+        assert!(commit_draft(&ui));
         assert_eq!(ui.get_tag_draft(), "-");
+        // Terms past the search limit stay in the field instead of becoming chips.
+        let many = (0..MAX_TAG_TERMS)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>();
+        ui.set_tag_draft(many.join(" ").into());
+        assert!(!commit_draft(&ui));
+        assert_eq!(ui.get_tag_filter(), "-engine, interior");
+        // Re-entering an existing term with the other sign does not add one.
+        ui.set_tag_draft("engine".into());
+        assert!(commit_draft(&ui));
+        ui.set_tag_draft("-engine".into());
+        assert!(commit_draft(&ui));
+        assert_eq!(ui.get_tag_filter(), "-engine, interior");
         // A narrow area puts each chip on its own row; indexes keep the term order.
         let one_chip = {
             ui.set_tag_probe_text("interior".into());

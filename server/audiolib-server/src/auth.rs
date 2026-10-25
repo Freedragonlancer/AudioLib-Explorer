@@ -675,7 +675,7 @@ impl Security {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Err(audiolib_core::Error::Busy(
-                    "Another server instance is editing library roots or settings".into(),
+                    "Library roots or settings are being changed, or a scan is starting (in this or another server instance); retry in a moment".into(),
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
@@ -1065,6 +1065,12 @@ impl Security {
                 .unwrap_or_else(PoisonError::into_inner)
                 .limited(connection.peer.ip().to_canonical(), Instant::now())
         {
+            // Generated tokens carry 256 random bits, so a limited peer cannot guess one;
+            // other clients behind the same proxy or NAT keep working. The configured
+            // environment token may be weaker and stays limited.
+            if presented.is_some_and(|token| self.verify_generated(token)) {
+                return Ok(());
+            }
             return Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "AUTH_RATE_LIMITED",
@@ -1136,6 +1142,12 @@ impl Security {
             .env_token
             .as_ref()
             .is_some_and(|token| token.matches(presented));
+        let generated = self.verify_generated(presented);
+        env_ok || generated
+    }
+
+    /// Whether `presented` is a generated (not revoked) token, recording its use.
+    fn verify_generated(self: &Arc<Self>, presented: &str) -> bool {
         let hash = sha256(presented.as_bytes());
         let matched = {
             let state = self.read();
@@ -1153,7 +1165,7 @@ impl Security {
                 self.touch(id, now);
             }
         }
-        env_ok || matched.is_some()
+        matched.is_some()
     }
 
     /// Update `last_used_at` in memory and write the token file off the request path.
@@ -1880,6 +1892,45 @@ mod tests {
             .update_settings(|s| s.auth_mode = Some(AuthMode::Off))
             .unwrap();
         assert_eq!(code(security.authorize(&with(None), Some(&public))), None);
+    }
+
+    #[test]
+    fn a_limited_peer_keeps_generated_tokens_but_not_the_environment_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ServerConfig::from_toml_str("library_db = \"lib.db\"\n", dir.path()).unwrap();
+        let env = "env-token-0123456789abcdef0123456789abcdef";
+        let security = Security::from_config(&config, Some(BearerToken::new(env).unwrap()));
+        let (_, secret) = security.create_token("t").unwrap();
+        // Clients behind one reverse proxy share its socket peer.
+        let proxy = conn("8.8.8.8:1", Listener::Http);
+        let with = |token: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+            headers
+        };
+        let code = |result: Result<(), ApiError>| result.err().map(|error| error.code());
+        for _ in 0..AUTH_FAILURE_LIMIT {
+            assert_eq!(
+                code(security.authorize(&with("garbage"), Some(&proxy))),
+                Some("UNAUTHORIZED")
+            );
+        }
+        assert_eq!(
+            code(security.authorize(&with("garbage"), Some(&proxy))),
+            Some("AUTH_RATE_LIMITED")
+        );
+        assert_eq!(code(security.authorize(&with(&secret), Some(&proxy))), None);
+        assert_eq!(
+            code(security.authorize(&with(env), Some(&proxy))),
+            Some("AUTH_RATE_LIMITED")
+        );
+        // Another peer is unaffected.
+        let other = conn("8.8.4.4:1", Listener::Http);
+        assert_eq!(code(security.authorize(&with(env), Some(&other))), None);
     }
 
     #[test]

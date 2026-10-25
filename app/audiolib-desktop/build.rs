@@ -22,6 +22,12 @@ fn main() {
     println!("cargo:rerun-if-changed=app.manifest");
     println!("cargo:rerun-if-changed=../../resources/icons/AudioLibExplorer.ico");
     println!("cargo:rerun-if-changed=../../resources/icons/AudioLibExplorer.png");
+    // Unoptimized builds overflow the default 1 MiB main-thread stack at startup.
+    // Reserve 16 MiB (address space only, committed on use) for every profile, so
+    // debug runs need no editbin and both profiles start the window the same way.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:16777216");
+    }
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         winresource::WindowsResource::new()
             .set_icon("../../resources/icons/AudioLibExplorer.ico")
