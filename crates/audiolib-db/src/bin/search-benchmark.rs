@@ -373,7 +373,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--case-index selects one zero-based case from the enabled default/fragment/edge cases; --query selects every enabled case with exactly that query text. Neither option changes the default workload when omitted."
                 );
                 println!(
-                    "--tag-exclusion-cases adds exclude-only tag filters sorted by duration in both directions, by the default order, and with an include term; every synthetic row has library tags, the worst case for exclusion. Avoid door: it is a substring of every row's outdoor tag."
+                    "--tag-exclusion-cases adds exclude-only tag filters sorted by duration in both directions, by the default order, and with an include term, plus a sparse include term (rareword) sorted by descending duration; every synthetic row has library tags, the worst case for exclusion. Avoid door: it is a substring of every row's outdoor tag."
                 );
                 println!(
                     "--request-file replaces built-in cases with a JSON array of validated SearchRequest values; --case-index may select its zero-based entry. It cannot combine with --query, --edge-cases, --fragment-cases or --tag-exclusion-cases."
@@ -504,6 +504,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 order_by: SortOrder::Duration,
+                ..Default::default()
+            },
+            // A sparse include term: 1 in 1000 files, all of the shortest duration, so a
+            // descending duration walk passes every other file first.
+            SearchRequest {
+                filters: SearchFilters {
+                    tag_contains: Some("rareword".into()),
+                    ..Default::default()
+                },
+                order_by: SortOrder::Duration,
+                descending: true,
+                ..Default::default()
+            },
+            SearchRequest {
+                filters: SearchFilters {
+                    include_tags: vec!["rareword".into()],
+                    exclude_tags: vec!["footstep".into()],
+                    ..Default::default()
+                },
+                order_by: SortOrder::Duration,
+                descending: true,
                 ..Default::default()
             },
         ]);

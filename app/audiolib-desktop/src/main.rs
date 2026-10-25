@@ -190,6 +190,18 @@ fn run() -> Result<()> {
         .with_writer(writer)
         .try_init()
         .ok();
+    // Release builds have no console: record every panic, worker threads' included,
+    // in the log before the default hook runs.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        tracing::error!(
+            thread = thread.name().unwrap_or("unnamed"),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "Panic: {info}"
+        );
+        default_hook(info);
+    }));
     // Warning-only SQLite self-check: log it and keep starting.
     match audiolib_db::sqlite_engine::identity() {
         Ok(engine) => {
