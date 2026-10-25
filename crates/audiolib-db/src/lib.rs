@@ -24,6 +24,7 @@ mod search_rank_parallel;
 mod search_sorted;
 mod search_storage;
 mod search_text;
+mod search_workspace;
 mod space;
 pub mod sqlite_engine;
 mod sqlite_mmap;
@@ -2171,6 +2172,21 @@ impl SqliteProvider {
 }
 
 impl DataProvider for SqliteProvider {
+    fn load_search_workspace(
+        &self,
+        target: &audiolib_core::SearchWorkspaceTarget,
+    ) -> Result<audiolib_core::SearchWorkspace> {
+        search_workspace::load(target)
+    }
+
+    fn save_search_workspace(
+        &self,
+        target: &audiolib_core::SearchWorkspaceTarget,
+        workspace: &audiolib_core::SearchWorkspace,
+    ) -> Result<()> {
+        search_workspace::save(target, workspace)
+    }
+
     fn search_revision(&self) -> Result<Option<u64>> {
         let _gate = self.read_gate.read().unwrap();
         // data_version is comparable only on the SAME connection. A dedicated observer

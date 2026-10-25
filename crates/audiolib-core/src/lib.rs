@@ -15,6 +15,7 @@ pub mod list_waveform;
 pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
+pub mod search_workspace;
 pub mod server_url;
 pub mod tag_filter;
 pub mod waveform_cache;
@@ -32,6 +33,10 @@ pub use list_waveform_i8::{
 };
 pub use metadata::{
     SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
+};
+pub use search_workspace::{
+    SavedSearchTask, SearchAudioRef, SearchFolderRef, SearchSession, SearchTask,
+    SearchTaskDefinition, SearchTaskView, SearchWorkspace, SearchWorkspaceTarget,
 };
 
 /// Compatible operation envelope for CLI and local control replies.
@@ -457,6 +462,24 @@ pub struct LibraryStats {
 
 /// All business data operations pass through this interface and return owned DTOs.
 pub trait DataProvider: Send + Sync {
+    /// Read personal search tasks from client-local storage, including in server mode.
+    /// This operation must never write a main library or downloaded snapshot.
+    fn load_search_workspace(&self, _target: &SearchWorkspaceTarget) -> Result<SearchWorkspace> {
+        Err(Error::Validation(
+            "This provider has no personal search workspace storage".into(),
+        ))
+    }
+    /// Atomically save personal tasks; the caller owns the desktop instance lease and
+    /// orders saves on one worker, draining them before switching sources or closing.
+    fn save_search_workspace(
+        &self,
+        _target: &SearchWorkspaceTarget,
+        _workspace: &SearchWorkspace,
+    ) -> Result<()> {
+        Err(Error::Validation(
+            "This provider has no personal search workspace storage".into(),
+        ))
+    }
     /// Provider-local change token for search caches. Compare only within this provider's
     /// lifetime, before and after reading; `None` disables cache reuse.
     fn search_revision(&self) -> Result<Option<u64>> {

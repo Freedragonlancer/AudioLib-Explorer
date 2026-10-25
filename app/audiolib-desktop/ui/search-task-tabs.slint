@@ -1,0 +1,96 @@
+// app/audiolib-desktop/ui/search-task-tabs.slint
+import { Theme } from "theme.slint";
+
+component TaskTabIcon inherits Rectangle {
+    in property <string> text;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> lit: false;
+    callback clicked();
+    width: 26px * Theme.ui-scale; height: 28px * Theme.ui-scale;
+    border-radius: 4px * Theme.ui-scale; background: hit.has-hover ? Theme.hover : transparent;
+    border-width: icon-focus.has-focus ? 1px : 0px; border-color: Theme.accent;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: icon-focus;
+    Text { text: root.text; color: root.lit ? Theme.accent : Theme.dim; font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
+    icon-focus := FocusScope {
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.clicked(); return accept; } reject }
+    }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// Document-shaped tabs are deliberately distinct from the recessed side-panel switch.
+// Each hit target is disjoint, so starring or closing a background task never selects it.
+export component SearchTaskTab inherits Rectangle {
+    in property <string> name;
+    in property <bool> active: false;
+    in property <bool> favorite: false;
+    in property <bool> modified: false;
+    in property <bool> chinese: false;
+    in property <bool> compact: false;
+    in property <bool> enabled: true;
+    callback selected();
+    callback favorite-toggled();
+    callback closed();
+    callback rename-requested();
+    callback context-requested(Point);
+    height: (root.compact ? 32px : 36px) * Theme.ui-scale;
+    min-width: 144px * Theme.ui-scale;
+    preferred-width: 200px * Theme.ui-scale;
+    accessible-role: tab;
+    accessible-label: (root.chinese ? "搜索任务：" : "Search task: ") + root.name;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.active;
+    accessible-description: root.modified ? (root.chinese ? "当前搜索已修改，尚未更新任务收藏" : "The search differs from its saved favorite") : (root.favorite ? (root.chinese ? "已收藏搜索任务" : "Saved search task") : "");
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.selected(); } }
+    forward-focus: task-focus;
+    background: root.active ? Theme.panel : (task-hit.has-hover ? Theme.raised : Theme.trough);
+    border-top-left-radius: 7px * Theme.ui-scale;
+    border-top-right-radius: 7px * Theme.ui-scale;
+    border-width: task-focus.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    opacity: root.enabled ? 1 : 0.45;
+    Rectangle { height: 2px * Theme.ui-scale; y: parent.height - self.height; background: root.active ? Theme.accent : Theme.border; }
+    Text {
+        x: 12px * Theme.ui-scale; width: max(0px, parent.width - 82px * Theme.ui-scale); height: parent.height;
+        text: root.name; color: root.active ? Theme.ink : Theme.dim; font-size: Theme.font(12);
+        font-weight: root.active ? 600 : 400; vertical-alignment: center; overflow: elide;
+    }
+    if root.modified: Rectangle {
+        x: parent.width - 67px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+        width: 4px * Theme.ui-scale; height: 4px * Theme.ui-scale; border-radius: 2px * Theme.ui-scale; background: Theme.accent;
+    }
+    task-focus := FocusScope {
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.selected(); return accept; }
+            if event.text == Key.F2 { root.rename-requested(); return accept; }
+            reject
+        }
+    }
+    task-hit := TouchArea {
+        width: max(0px, parent.width - 62px * Theme.ui-scale); enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { root.selected(); }
+        double-clicked => { root.rename-requested(); }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.context-requested({x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y});
+            }
+        }
+    }
+    TaskTabIcon {
+        x: parent.width - 60px * Theme.ui-scale; y: 4px * Theme.ui-scale;
+        text: root.favorite ? "★" : "☆"; lit: root.favorite; enabled: root.enabled;
+        label: (root.favorite ? (root.chinese ? "取消搜索任务收藏：" : "Unfavorite search task: ") : (root.chinese ? "收藏搜索任务：" : "Favorite search task: ")) + root.name;
+        clicked => { root.favorite-toggled(); }
+    }
+    TaskTabIcon {
+        x: parent.width - 30px * Theme.ui-scale; y: 4px * Theme.ui-scale;
+        text: "×"; enabled: root.enabled;
+        label: (root.chinese ? "关闭搜索任务：" : "Close search task: ") + root.name;
+        clicked => { root.closed(); }
+    }
+}
