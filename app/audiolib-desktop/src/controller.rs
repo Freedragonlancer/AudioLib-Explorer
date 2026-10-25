@@ -655,6 +655,9 @@ pub struct Controller {
     /// Background drain completion is retained until the closing UI timer consumes
     /// it; a rejected cross-thread event-loop notification must not lose it.
     close_completion: Mutex<Option<Result<(), String>>>,
+    /// After a rejected close, keep the recovery/status line until the user saves again.
+    /// A late Metadata / LibraryChanged publication must not hide the close-owned message.
+    close_retains_status: AtomicBool,
     tree: Mutex<TreeState>,
     tree_generation: AtomicU64,
     selection_generation: AtomicU64,
@@ -896,6 +899,7 @@ impl Controller {
             metadata_recovery_notice: Mutex::new(None),
             closing: AtomicBool::new(false),
             close_completion: Mutex::new(None),
+            close_retains_status: AtomicBool::new(false),
             tree: Mutex::new(TreeState::default()),
             tree_generation: AtomicU64::new(0),
             selection_generation: AtomicU64::new(0),
@@ -2872,7 +2876,11 @@ impl Controller {
                                     }
                                     ui.set_metadata_dirty(dirty);
                                 }
-                                if !c2.closing.load(Ordering::Acquire) {
+                                // Close recovery owns the status until the user saves again.
+                                if !c2.closing.load(Ordering::Acquire)
+                                    && !c2.close_retains_status.load(Ordering::Acquire)
+                                    && !ui.get_closing()
+                                {
                                     let chinese = c2.chinese.load(Ordering::Acquire);
                                     ui.set_status(
                                         match (remote, chinese) {
@@ -2889,6 +2897,14 @@ impl Controller {
                                 }
                             }
                             Err(error) => {
+                                // Mirror the Ok path: close owns the status while draining,
+                                // and after a rejected close until the user saves again.
+                                if c2.closing.load(Ordering::Acquire)
+                                    || c2.close_retains_status.load(Ordering::Acquire)
+                                    || ui.get_closing()
+                                {
+                                    return;
+                                }
                                 let message = c2.metadata_failure_message(job.id, &error);
                                 ui.set_status(message.into());
                             }
@@ -4392,6 +4408,7 @@ impl Controller {
     }
 
     fn save_metadata(self: &Arc<Self>, ui: &AppWindow) {
+        self.close_retains_status.store(false, Ordering::Release);
         if !self.available() {
             return;
         }
@@ -4716,6 +4733,9 @@ impl Controller {
         });
         if let Err(error) = result {
             tracing::warn!(%error, "Desktop close failed; retaining drafts");
+            // Claim status before restore; clear closing so resumed reads can publish.
+            // close_retains_status keeps late Metadata/LibraryChanged off the status line.
+            self.close_retains_status.store(true, Ordering::Release);
             self.closing.store(false, Ordering::Release);
             let resumed_task = self.resume_search_task_after_failed_close(ui);
             let scanning = self.scan_cancel.lock().unwrap().is_some();
@@ -5621,7 +5641,14 @@ impl Controller {
         completion
     }
     fn status(&self, message: String) {
-        post(self.ui.clone(), move |ui| ui.set_status(message.into()));
+        let retain = self.closing.load(Ordering::Acquire)
+            || self.close_retains_status.load(Ordering::Acquire);
+        post(self.ui.clone(), move |ui| {
+            if retain || ui.get_closing() {
+                return;
+            }
+            ui.set_status(message.into());
+        });
     }
 
     fn reveal(self: &Arc<Self>) {
