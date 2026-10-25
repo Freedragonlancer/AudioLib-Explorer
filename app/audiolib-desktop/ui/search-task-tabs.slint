@@ -21,20 +21,20 @@ component TaskTabIcon inherits Rectangle {
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
-// Read-only tags summarize the executable search; the full definition stays in the tooltip.
+// Read-only keywords use a subtle tint; only the directory keeps a rounded marker.
 component SearchTaskTag inherits Rectangle {
     in property <string> text;
     in property <bool> directory: false;
     height: max(20px * Theme.ui-scale, Theme.font(11) + 4px * Theme.ui-scale);
     min-width: 24px * Theme.ui-scale;
-    preferred-width: min(96px * Theme.ui-scale, tag-label.preferred-width + 14px * Theme.ui-scale);
+    preferred-width: min(96px * Theme.ui-scale, tag-label.preferred-width + (root.directory ? 14px : 4px) * Theme.ui-scale);
     max-width: 96px * Theme.ui-scale;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
-    background: root.directory ? Theme.raised : Theme.selected;
-    border-width: 1px; border-color: root.directory ? Theme.warning : Theme.accent;
+    background: root.directory ? Theme.raised : transparent;
+    border-width: root.directory ? 1px : 0px; border-color: Theme.warning;
     tag-label := Text {
-        x: 7px * Theme.ui-scale; width: max(0px, parent.width - 14px * Theme.ui-scale); height: parent.height;
+        x: (root.directory ? 7px : 0px) * Theme.ui-scale; width: max(0px, parent.width - (root.directory ? 14px : 4px) * Theme.ui-scale); height: parent.height;
         text: root.text; color: root.directory ? Theme.warning : Theme.accent;
         font-size: Theme.font(11); vertical-alignment: center; overflow: elide;
     }
