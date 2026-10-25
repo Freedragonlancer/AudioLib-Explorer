@@ -78,7 +78,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 
 500 与 507 的 `message` 使用概括文字，原始路径和内部诊断只写服务端日志；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
 
-连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；`POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
+连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；`POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；响应还有数据要发但客户端连续 60 秒一个字节都不收（休眠、断网，或拿着响应不读）时，服务端断开该连接并释放它占用的名额；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
 
 ### 2.2 鉴权模式与 token
 
@@ -99,7 +99,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - token 的“最近使用时间”最多每分钟记一次（避免频繁写盘），在管理页显示。
 - **Host 防护**：`trust_lan_peers = true`（默认）时，来自局域网直连对端（socket 对端 IP 为私有或链路本地地址且不是本机，含 IPv4 映射的 IPv6，且请求不带任何转发头）的免 token 请求一律放行（回环和同机对端除外，见“同机规则”），不检查 `Host`——局域网客户端可以用 IP、`<服务器主机名>.local` 等 LAN 名称，或经 NAT 回环 / split DNS 用公网域名访问。其他免 token 请求（`auth_mode = "off"` 下的非局域网对端）必须携带单一合法 `Host`，主机为 IP、LAN 名称，或已配置 `public_url` / `lan_url` 的主机名；否则 403 `HOST_FORBIDDEN`。`external` 模式下非局域网或带转发头的请求仍需 token（401）。有效 bearer 可访问其他合法主机名。注意：局域网内浏览器因此不再受 API 层 DNS rebinding 防护（`/admin` 仍单独校验 Host）；若局域网不可信，请使用 `auth_mode = "all"` 或 `trust_lan_peers = false`。
 - **隐藏来源的部署**：`trust_lan_peers = false` 将全部对端按外部请求处理，并关闭免密码 `/admin`；同时使用 `auth_mode = "all"`。Docker Desktop、rootless 容器、SNAT 和未可靠保留来源的反代必须使用此配置，通过 TOML 管理。示例容器采用此策略，仅映射宿主机 `127.0.0.1:8790`。
-- **失败限速**：按 socket peer IP 记录失败（不信任转发头里的地址），60 秒内 60 次失败后返回 429 `AUTH_RATE_LIMITED` 和 `Retry-After: 60`。最多保留 1024 个来源；日志记录来源，不记录 bearer。代理后的客户端共用代理 IP 的限额。
+- **失败限速**：按 socket peer IP 记录失败（不信任转发头里的地址），60 秒内 60 次失败后返回 429 `AUTH_RATE_LIMITED` 和 `Retry-After: 60`。最多保留 1024 个来源；日志记录来源，不记录 bearer。代理后的客户端共用代理 IP 的限额；限速期间管理页生成的 token（256 位随机，无法猜中）仍然有效，环境变量 token 和错误 token 继续返回 429。
 
 ### 2.3 管理页 `/admin`
 
@@ -161,7 +161,7 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
   "truncated": false, "wav_files": 12, "other_files": 3, "counts_truncated": false }
 ```
 
-  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（管理页独立保留 1 个，不受客户端 API 的 4 个名额占用影响，管理页浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
+  `entries` 不区分大小写排序，最多 2000 项（超出 `truncated: true`）；指向目录的符号链接会列出并标 `is_symlink`，指向文件的不列出；`wav_files` / `other_files` 只统计该目录**直接**包含的文件（不递归，最多检查 50000 个条目，超出 `counts_truncated: true`；这时排在后面的子目录也不会列出，即使 `truncated` 为 `false`）。错误（`message` 为中文）：相对路径或空路径 / 不是目录 → 400 `VALIDATION`；不存在（如磁盘未挂载）→ 404 `NOT_FOUND`；系统拒绝读取（权限，或 macOS 隐私保护 TCC 弹窗尚未允许）→ 403 `FS_FORBIDDEN`。目录 15 秒内没有响应（磁盘休眠、网络共享无响应，或 macOS 正在等待“访问网络卷”的权限弹窗，需在服务器屏幕上点允许）→ 504 `FS_TIMEOUT`（`POST /admin/api/roots` 的路径检查同理）。卡住的系统调用在返回前一直占用一个名额（管理页独立保留 1 个，不受客户端 API 的 4 个名额占用影响，管理页浏览与添加根目录共用），名额用完时直接 503 `BUSY`（`Retry-After: 1`），不再为同一个无响应的共享叠加阻塞线程。
 
 **`POST /admin/api/roots`** `{"name","path"}` → 201，回复同 `GET /api/v1/roots` 的一项（新根目录尚未扫描，`file_count` 为 `null`）。校验（400 `VALIDATION`，不存在 404，权限 403 `FS_FORBIDDEN`）：`name` 非空、1..=128 字符、无首尾空白、不含 `/` `\` 和控制字符、与现有根目录不重名（不区分大小写）；`path` 是已存在的绝对目录；不能与现有根目录相同、位于其内部或包含它。保存的 `server_path` 是规范化后的真实路径。
 
@@ -812,7 +812,7 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - **只提供配置的根下的文件**：服务端把库里的 `file_path` 规范化（解析符号链接和 `..`），只有落在某个 `[[roots]] server_path`（同样规范化，按路径分量比较，每次请求时重新解析，因此启动后才挂载的卷也有效）之下的普通文件才会返回；Unix 上打开后还核对打开的文件与检查过的路径是同一个文件（设备号 + inode），不一致也拒绝。根之外的路径返回与文件缺失**完全相同**的 404，不泄露根之外的文件是否存在。
 - **404 `NOT_FOUND`**：无此记录；或文件缺失、不是普通文件、不在配置的根下（后三种 `message` 相同，均含 `missing`）。
 - **根离线 / 慢速磁盘**：文件所在的根离线时先即时重查（约 2 秒），仍离线则返回 503 `ROOT_OFFLINE` + `Retry-After: 5`（§6.4）；`HEAD` 同样触发重查。本端点没有时间上限，NAS 硬盘唤醒期间请求会一直等待，不会 408。
-- **并发上限**：同时进行中的流响应最多 `max_streams` 个（服务端配置，默认 16；名额一直占用到响应体发完或客户端断开）。超出时返回 **503 `BUSY`** + `Retry-After: 1`，客户端按 `Retry-After` 稍后重试。304/416 不占名额。§8.1 的预览**不占**这些名额（有自己的 `max_previews`），所以拖出下载等把 `/stream` 名额占满时预览照常可用。
+- **并发上限**：同时进行中的流响应最多 `max_streams` 个（服务端配置，默认 16；名额一直占用到响应体发完、客户端断开，或客户端连续 60 秒不接收数据，见 §2.1 末尾的“连接与超时”）。超出时返回 **503 `BUSY`** + `Retry-After: 1`，客户端按 `Retry-After` 稍后重试。304/416 不占名额。§8.1 的预览**不占**这些名额（有自己的 `max_previews`），所以拖出下载等把 `/stream` 名额占满时预览照常可用。
 - **响应体不完整**：发送途中文件被截断或连接中断时，客户端收到的字节数会少于 `Content-Length`（或 `Content-Range` 所示长度），应视为失败并重试（可用 `If-Range` + 已收到部分续传）。文件缺失时，下次重扫后 `GET /audio/{id}` 的 `missing` 为 true（流端点本身不改库）。
 - 服务端用 tokio 文件 + 分块流（256 KiB）发送，不会把整个文件读入内存。
 - **下载 `?download=1`**（也接受 `download=true`，大小写不敏感；不带该参数为默认的播放用途，响应不带 `Content-Disposition`，即按 inline 处理；`download` 的其他取值、重复或格式错误的查询串 → 400 `VALIDATION`，其他未知参数忽略）。文件选择、根目录限制、404、并发上限、`Range`/`If-Range`/`If-None-Match`/304/416 与上面完全相同（`Range` 照常生效，用于续传中断的下载），唯一区别是 200/206/304 响应多一个头：

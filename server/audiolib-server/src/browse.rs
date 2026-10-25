@@ -42,7 +42,8 @@ pub struct FsListing {
     pub wav_files: u64,
     /// All other files directly in this directory.
     pub other_files: u64,
-    /// The file counts stopped at [`MAX_SCANNED_ENTRIES`] entries.
+    /// The listing stopped after [`MAX_SCANNED_ENTRIES`] entries: the file counts and
+    /// possibly `entries` are incomplete, even when `truncated` is false.
     pub counts_truncated: bool,
 }
 

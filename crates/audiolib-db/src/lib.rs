@@ -20,6 +20,7 @@ mod search_cache;
 mod search_candidates;
 mod search_exclude;
 mod search_facets;
+mod search_include;
 mod search_rank_parallel;
 mod search_sorted;
 mod search_storage;
@@ -1795,6 +1796,13 @@ impl SqliteProvider {
         } else {
             0
         };
+        // An include filter tests its terms on the sparse tag index; only matches read
+        // their wide row. Sort index walks would test every row they pass.
+        let inclusion = search_include::Inclusion::plan(
+            &tx,
+            request,
+            self.derived_tags.load(Ordering::Acquire),
+        )?;
         let no_missing = unfiltered_fts
             && (request.filters.visibility == FileVisibility::All
                 || request.filters.visibility == FileVisibility::Present && not_present_probe == 0);
@@ -1813,6 +1821,9 @@ impl SqliteProvider {
                 SELECT 1 FROM audio_search WHERE rowid=af.id AND audio_search MATCH ?1))"
                 .to_string()
         } else {
+            let from = inclusion
+                .as_ref()
+                .map_or(from.as_str(), |plan| plan.count_from());
             format!("SELECT COUNT(*) FROM {from} WHERE {where_sql}")
         };
         // An exclude-only filter counts present files minus excluded tagged files from
@@ -1888,9 +1899,12 @@ impl SqliteProvider {
             // Sort only IDs and the selected key. Fetch the wide Metadata DTOs after
             // pagination for filtered FTS, folder browsing, and alternative sort orders.
             let direction = if descending { "DESC" } else { "ASC" };
-            let from = match &exclusion {
-                Some(exclusion) => exclusion.page_from(&tx, request, total)?.unwrap_or(&from),
-                None => &from,
+            let from = match (&exclusion, &inclusion) {
+                (Some(exclusion), _) => exclusion.page_from(&tx, request, total)?.unwrap_or(&from),
+                (None, Some(inclusion)) => {
+                    inclusion.page_from(&tx, request, total)?.unwrap_or(&from)
+                }
+                (None, None) => &from,
             };
             format!(
                 "WITH ranked AS MATERIALIZED (

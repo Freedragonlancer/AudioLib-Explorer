@@ -461,7 +461,8 @@ async function browse(path) {
     $("fs-up").disabled = !data.parent;
     $("fs-info").replaceChildren(document.createTextNode(
       "本目录直接包含 " + numberText(data.wav_files) + " 个 WAV 文件、" + numberText(data.other_files) + " 个其他文件" +
-      (data.counts_truncated ? "（目录过大，计数不完整）" : "") + "；子目录 " + data.entries.length + (data.truncated ? "+（只显示前 " + data.entries.length + " 个）" : "") + " 个"));
+      (data.counts_truncated ? "（目录过大，计数不完整）" : "") + "；子目录 " + data.entries.length +
+      (data.truncated ? "+（只显示前 " + data.entries.length + " 个）" : data.counts_truncated ? "+（目录过大，可能未列全，可直接输入完整路径进入）" : "") + " 个"));
     if (data.network) $("fs-info").append(" ", badge("网络共享（SMB 等）"));
     if (!data.entries.length) {
       const empty = document.createElement("div");

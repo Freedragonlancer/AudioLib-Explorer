@@ -1,5 +1,6 @@
 // server/audiolib-server/src/server_tests.rs
-//! Connection admission limits include idle HTTP sockets and pending TLS handshakes.
+//! Connection admission limits include idle HTTP sockets and pending TLS handshakes, and a
+//! peer that stops reading a response loses it after the write stall timeout.
 use super::*;
 use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,6 +12,7 @@ async fn connection_limit(tls: bool) {
         max_connections: 1,
         header_read_timeout: Duration::from_secs(5),
         shutdown_grace: Duration::from_millis(100),
+        write_stall_timeout: Duration::from_secs(60),
     };
     let directory = tempfile::tempdir().unwrap();
     let acceptor = tls.then(|| {
@@ -93,4 +95,69 @@ async fn idle_http_connections_cannot_exceed_the_listener_limit() {
 #[tokio::test]
 async fn incomplete_tls_handshakes_cannot_exceed_the_listener_limit() {
     connection_limit(true).await;
+}
+
+/// An endless response body; the guard is dropped with the body.
+struct Endless(#[allow(dead_code)] Arc<()>);
+
+impl futures_core::Stream for Endless {
+    type Item = Result<axum::body::Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(Some(Ok(axum::body::Bytes::from_static(&[0; 64 * 1024]))))
+    }
+}
+
+#[tokio::test]
+async fn a_peer_that_stops_reading_releases_the_response_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let options = ServeOptions {
+        max_connections: 4,
+        header_read_timeout: Duration::from_secs(5),
+        shutdown_grace: Duration::from_millis(100),
+        write_stall_timeout: Duration::from_millis(300),
+    };
+    let guard = Arc::new(());
+    let body_guard = guard.clone();
+    let app = Router::new().route(
+        "/",
+        get(move || {
+            let guard = body_guard.clone();
+            async move { axum::body::Body::from_stream(Endless(guard)) }
+        }),
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(serve_inner(
+        listener,
+        app,
+        None,
+        async {
+            let _ = stopped.await;
+        },
+        options,
+    ));
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    // The route keeps one clone; a third exists while the body is being sent. The
+    // client never reads, so the socket buffers fill up and writes stall.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&guard) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        while Arc::strong_count(&guard) > 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stalled response body was kept");
+    drop(client);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
 }

@@ -736,6 +736,23 @@ fn post(ui: slint::Weak<AppWindow>, action: impl FnOnce(AppWindow) + Send + 'sta
     });
 }
 
+/// Run one worker job. A panic becomes this job's error, so the worker thread keeps
+/// serving later jobs and waiters see the job finish; the panic hook has logged it.
+fn survive_panic<T, E>(
+    run: impl FnOnce() -> Result<T, E>,
+    panicked: impl FnOnce() -> E,
+) -> Result<T, E> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Err(panicked()))
+}
+
+fn internal_error(chinese: bool, task_cn: &str, task_en: &str) -> String {
+    if chinese {
+        format!("{task_cn}时发生内部错误，详情见日志")
+    } else {
+        format!("{task_en} failed with an internal error; see the log for details")
+    }
+}
+
 impl Controller {
     fn provider(&self) -> Arc<SqliteProvider> {
         self.sqlite.read().unwrap().clone()
@@ -1114,8 +1131,19 @@ impl Controller {
         let c = self.clone();
         ui.on_apply_filters(move || {
             if let Some(ui) = c.ui.upgrade() {
-                crate::tag_chips::commit_draft(&ui);
-                c.request_navigation_search(&ui, true, true);
+                if crate::tag_chips::commit_draft(&ui) {
+                    c.request_navigation_search(&ui, true, true);
+                } else {
+                    let max = audiolib_core::MAX_TAG_TERMS;
+                    ui.set_status(
+                        if c.chinese.load(Ordering::Acquire) {
+                            format!("最多只能有 {max} 个标签词，请先移除一些")
+                        } else {
+                            format!("At most {max} tag terms are allowed; remove some first")
+                        }
+                        .into(),
+                    );
+                }
             }
         });
         let c = self.clone();
@@ -2760,7 +2788,8 @@ impl Controller {
                     let provider = c.metadata_provider();
                     let library_generation = c.library_generation.load(Ordering::Acquire);
                     let remote = c.remote_read_only();
-                    let result = (|| -> audiolib_core::Result<AudioFile> {
+                    let chinese = c.chinese.load(Ordering::Acquire);
+                    let save = || -> audiolib_core::Result<AudioFile> {
                         let provider = provider.map_err(audiolib_core::Error::Validation)?;
                         match &job.write {
                             MetadataWrite::Draft(draft) => {
@@ -2777,8 +2806,11 @@ impl Controller {
                                 provider.update_metadata(job.id, &patch)
                             }
                         }
-                    })()
-                    .map_err(|error| error.to_string());
+                    };
+                    let result = survive_panic(
+                        || save().map_err(|error| error.to_string()),
+                        || internal_error(chinese, "保存 Metadata", "Saving Metadata"),
+                    );
                     // Queue the UI publication before completion becomes observable:
                     // a waiter (close, source switch) must not see the job completed
                     // and then have this older result overwrite its newer status.
@@ -2862,7 +2894,15 @@ impl Controller {
                     }
                     let provider = &job.provider;
                     crate::gui_search_benchmark::worker_started(job.generation, false);
-                    let mut result = provider.search_cancellable(&job.request, job.cancel.clone());
+                    let chinese = c.chinese.load(Ordering::Acquire);
+                    let mut result = survive_panic(
+                        || provider.search_cancellable(&job.request, job.cancel.clone()),
+                        || {
+                            audiolib_core::Error::Database(internal_error(
+                                chinese, "搜索", "Search",
+                            ))
+                        },
+                    );
                     crate::gui_search_benchmark::worker_completed(job.generation, false);
                     // Server removals stay hidden until the resync swaps the snapshot.
                     if let Ok(page) = result.as_mut() {
@@ -3044,12 +3084,27 @@ impl Controller {
                         )
                     });
                     let cache_hit = cached.is_some();
+                    let chinese = c.chinese.load(Ordering::Acquire);
+                    let count_folders = || {
+                        survive_panic(
+                            || {
+                                provider
+                                    .search_folders_cancellable(&job.request, job.cancel.clone())
+                                    .map(Arc::new)
+                            },
+                            || {
+                                audiolib_core::Error::Database(internal_error(
+                                    chinese,
+                                    "统计目录",
+                                    "Counting folders",
+                                ))
+                            },
+                        )
+                    };
                     let mut folders = if let Some(cached) = cached {
                         Ok(cached.folders.clone())
                     } else {
-                        provider
-                            .search_folders_cancellable(&job.request, job.cancel.clone())
-                            .map(Arc::new)
+                        count_folders()
                     };
                     if c.search_generation.load(Ordering::Acquire) != job.generation
                         || job.cancel.load(Ordering::Acquire)
@@ -3059,9 +3114,7 @@ impl Controller {
                     let after_revision = provider.search_revision().ok().flatten();
                     let stable = database_revision.is_some() && database_revision == after_revision;
                     if cache_hit && !stable {
-                        folders = provider
-                            .search_folders_cancellable(&job.request, job.cancel.clone())
-                            .map(Arc::new);
+                        folders = count_folders();
                     }
                     facets = None;
                     if stable && let Ok(folders) = &folders {
@@ -3114,29 +3167,33 @@ impl Controller {
                         end_frame: Some(job.end_frame),
                         include_colors: true,
                     };
-                    let result = match job.remote_id {
-                        // Server mode: the server's waveform of the original, drawn as soon
-                        // as it arrives, whatever the audition stream is doing.
-                        Some(id) => c.remote_waveform(
-                            id,
-                            job.sample_rate,
-                            request,
-                            &job.cancel,
-                            |data, progress| {
-                                c.publish_waveform(&job, data, progress);
-                            },
-                        ),
-                        None => {
-                            let cache = c.config.lock().unwrap().paths.cache.join("waveforms");
-                            audiolib_audio::cached_waveform_with_cancel(
-                                &job.path,
-                                &cache,
+                    let chinese = c.chinese.load(Ordering::Acquire);
+                    let result = survive_panic(
+                        || match job.remote_id {
+                            // Server mode: the server's waveform of the original, drawn as soon
+                            // as it arrives, whatever the audition stream is doing.
+                            Some(id) => c.remote_waveform(
+                                id,
+                                job.sample_rate,
                                 request,
                                 &job.cancel,
-                            )
-                            .map_err(|error| error.to_string())
-                        }
-                    };
+                                |data, progress| {
+                                    c.publish_waveform(&job, data, progress);
+                                },
+                            ),
+                            None => {
+                                let cache = c.config.lock().unwrap().paths.cache.join("waveforms");
+                                audiolib_audio::cached_waveform_with_cancel(
+                                    &job.path,
+                                    &cache,
+                                    request,
+                                    &job.cancel,
+                                )
+                                .map_err(|error| error.to_string())
+                            }
+                        },
+                        || internal_error(chinese, "绘制 Waveform", "Drawing the Waveform"),
+                    );
                     if job.cancel.load(Ordering::Acquire)
                         || c.waveform_generation.load(Ordering::Acquire) != job.generation
                     {
@@ -3423,6 +3480,20 @@ impl Controller {
         }
     }
 
+    /// Invalid input runs no search. Say so where the result count is shown, which
+    /// stays until the next search, so the previous page is not taken for its results.
+    fn reject_search(&self, ui: &AppWindow, message: String) {
+        ui.set_result_summary(
+            if self.chinese.load(Ordering::Acquire) {
+                format!("未搜索：{message}（列表仍是上一次的结果）")
+            } else {
+                format!("Not searched: {message} (the list shows the previous results)")
+            }
+            .into(),
+        );
+        ui.set_status(message.into());
+    }
+
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
         if !self.available() {
             return;
@@ -3478,10 +3549,22 @@ impl Controller {
                     .map_err(|_| "Duration must be a number in seconds".into())
             }
         };
+        // The sidebar's filter count compares these fields with "": blank input is
+        // no filter, so store it as empty.
+        if ui.get_duration_min().trim().is_empty() && !ui.get_duration_min().is_empty() {
+            ui.set_duration_min("".into());
+        }
+        if ui.get_duration_max().trim().is_empty() && !ui.get_duration_max().is_empty() {
+            ui.set_duration_max("".into());
+        }
+        if ui.get_color_filter().trim().is_empty() && !ui.get_color_filter().is_empty() {
+            ui.set_color_filter("".into());
+        }
         let min = duration(ui.get_duration_min());
         let max = duration(ui.get_duration_max());
         let (Ok(min), Ok(max)) = (min, max) else {
-            ui.set_status(
+            self.reject_search(
+                ui,
                 if self.chinese.load(Ordering::Acquire) {
                     "时长必须是以秒为单位的数字"
                 } else {
@@ -3512,7 +3595,7 @@ impl Controller {
         request.order_by = table_sort_order(ui.get_sort_index());
         request.descending = ui.get_sort_descending();
         if let Err(error) = request.validate() {
-            ui.set_status(error.to_string().into());
+            self.reject_search(ui, error.to_string());
             return;
         }
         crate::gui_search_benchmark::request(ui, generation, &request);
