@@ -167,7 +167,7 @@ fn tag_exclusion_cases_extend_the_synthetic_workload() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("tag-exclusion.db");
     let output = Command::new(env!("CARGO_BIN_EXE_search-benchmark"))
-        .args(["--records", "31", "--queries", "20", "--folder-facets"])
+        .args(["--records", "31", "--queries", "22", "--folder-facets"])
         .arg("--tag-exclusion-cases")
         .arg("--db")
         .arg(&database)
@@ -181,12 +181,23 @@ fn tag_exclusion_cases_extend_the_synthetic_workload() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["tag_exclusion_cases"], true);
     let cases = report["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 20);
-    for case in &cases[14..] {
+    assert_eq!(cases.len(), 22);
+    for case in &cases[14..20] {
         let excluded = case["request"]["filters"]["exclude_tags"]
             .as_array()
             .unwrap();
         assert!(!excluded.is_empty(), "{case}");
+    }
+    // The sparse include cases sort by descending duration.
+    for case in &cases[20..] {
+        let filters = &case["request"]["filters"];
+        let included = filters["tag_contains"] == "rareword"
+            || filters["include_tags"]
+                .as_array()
+                .is_some_and(|terms| terms.iter().any(|term| term == "rareword"));
+        assert!(included, "{case}");
+        assert_eq!(case["request"]["order_by"], "duration", "{case}");
+        assert_eq!(case["request"]["descending"], true, "{case}");
     }
 }
 

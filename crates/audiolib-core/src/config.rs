@@ -378,6 +378,9 @@ pub struct AppConfig {
     /// audition start (deferred, not dropped). Off by default.
     #[serde(default)]
     pub hold_list_waveform_batches_after_audition: bool,
+    /// Maximum open search tasks, set in Appearance and bounded to 1..=6.
+    #[serde(default = "default_max_search_tasks")]
+    pub max_search_tasks: u32,
     /// Interface scale in percent: 100-200 in steps of 25, or 0 to follow the system.
     /// Following the system keeps the content scale at 1.0 because the OS display scale
     /// already applies to the window. Other values are normalized to 0.
@@ -433,6 +436,11 @@ struct SavedPreferences {
     pregenerate_list_waveforms: bool,
     #[serde(default)]
     hold_list_waveform_batches_after_audition: bool,
+    #[serde(
+        default = "default_max_search_tasks",
+        deserialize_with = "lenient_max_search_tasks"
+    )]
+    max_search_tasks: u32,
     #[serde(default)]
     ui_scale_percent: u32,
     #[serde(default = "default_theme", deserialize_with = "lenient_theme")]
@@ -449,6 +457,35 @@ struct SavedPreferences {
     allowed_scan_roots: Vec<PathBuf>,
     #[serde(default)]
     data_source: DataSourceSettings,
+}
+/// Default open-task capacity; the hard limit remains six.
+pub const DEFAULT_MAX_SEARCH_TASKS: u32 = crate::search_workspace::MAX_SEARCH_TASKS as u32;
+
+/// Clamp a task capacity without deleting any already persisted tasks.
+pub fn normalize_max_search_tasks(value: u32) -> u32 {
+    value.clamp(1, DEFAULT_MAX_SEARCH_TASKS)
+}
+
+fn default_max_search_tasks() -> u32 {
+    DEFAULT_MAX_SEARCH_TASKS
+}
+
+fn lenient_max_search_tasks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(number) => number
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(|value| {
+                value
+                    .round()
+                    .clamp(1.0, f64::from(DEFAULT_MAX_SEARCH_TASKS)) as u32
+            })
+            .unwrap_or(DEFAULT_MAX_SEARCH_TASKS),
+        _ => DEFAULT_MAX_SEARCH_TASKS,
+    })
 }
 /// Interface scale choices offered in the Appearance settings, in percent.
 pub const UI_SCALE_PERCENTS: [u32; 5] = [100, 125, 150, 175, 200];
@@ -597,6 +634,7 @@ impl AppConfig {
             play_history_limit: PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
+            max_search_tasks: DEFAULT_MAX_SEARCH_TASKS,
             ui_scale_percent: 0,
             theme: default_theme(),
             ui_font_size: DEFAULT_FONT_SIZE,
@@ -654,6 +692,7 @@ impl AppConfig {
             config.pregenerate_list_waveforms = saved.pregenerate_list_waveforms;
             config.hold_list_waveform_batches_after_audition =
                 saved.hold_list_waveform_batches_after_audition;
+            config.max_search_tasks = normalize_max_search_tasks(saved.max_search_tasks);
             config.ui_scale_percent = normalize_ui_scale_percent(saved.ui_scale_percent);
             config.theme = normalize_theme(&saved.theme);
             config.ui_font_size = clamp_font_size(i64::from(saved.ui_font_size));
@@ -704,6 +743,7 @@ impl AppConfig {
             pregenerate_list_waveforms: self.pregenerate_list_waveforms,
             hold_list_waveform_batches_after_audition: self
                 .hold_list_waveform_batches_after_audition,
+            max_search_tasks: normalize_max_search_tasks(self.max_search_tasks),
             ui_scale_percent: normalize_ui_scale_percent(self.ui_scale_percent),
             theme: normalize_theme(&self.theme),
             ui_font_size: clamp_font_size(i64::from(self.ui_font_size)),
@@ -866,6 +906,47 @@ mod tests {
         assert!(loaded.hold_list_waveform_batches_after_audition);
         assert_eq!(loaded.allowed_scan_roots, config.allowed_scan_roots);
         assert_eq!(loaded.data_source, config.data_source);
+    }
+
+    #[test]
+    fn search_task_capacity_defaults_round_trips_and_recovers_bad_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("userdata");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert_eq!(config.max_search_tasks, 6);
+        for value in 1..=6 {
+            config.max_search_tasks = value;
+            config.save().unwrap();
+            assert_eq!(
+                AppConfig::load_with_roots(root.clone(), &[])
+                    .unwrap()
+                    .max_search_tasks,
+                value
+            );
+        }
+        for (stored, expected) in [
+            (serde_json::json!(0), 1),
+            (serde_json::json!(-9), 1),
+            (serde_json::json!(99), 6),
+            (serde_json::json!("bad"), 6),
+            (serde_json::Value::Null, 6),
+        ] {
+            std::fs::write(
+                &config.paths.settings,
+                serde_json::json!({"language":"cn","max_search_tasks":stored}).to_string(),
+            )
+            .unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.max_search_tasks, expected);
+            assert_eq!(loaded.language, "cn");
+        }
+        std::fs::write(&config.paths.settings, r#"{"language":"cn"}"#).unwrap();
+        assert_eq!(
+            AppConfig::load_with_roots(root, &[])
+                .unwrap()
+                .max_search_tasks,
+            6
+        );
     }
 
     #[test]

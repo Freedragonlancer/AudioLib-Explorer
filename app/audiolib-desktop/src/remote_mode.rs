@@ -1052,6 +1052,12 @@ impl Controller {
         self.remote.lock().unwrap().live_roots = Some(roots);
     }
 
+    /// Associate an owned playback fixture with its original server record.
+    #[cfg(test)]
+    pub(super) fn set_remote_wave_file_for_test(&self, path: PathBuf, file: AudioFile) {
+        self.remote.lock().unwrap().audio_files.insert(path, file);
+    }
+
     /// Registration identities retained for isolated playback cleanup assertions.
     #[cfg(test)]
     pub(super) fn remote_playback_paths_for_test(&self) -> Vec<PathBuf> {

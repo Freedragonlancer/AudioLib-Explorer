@@ -15,7 +15,7 @@ use crate::{Result, db_error, id_membership::IdMembership, schema, search_sorted
 use audiolib_core::{Error, SearchFilters, SearchRequest, SortOrder};
 use rusqlite::{Connection, params_from_iter, types::Value};
 
-const TAGGED_INDEX: &str = "CREATE INDEX idx_audio_visible_tagged_folders
+pub(super) const TAGGED_INDEX: &str = "CREATE INDEX idx_audio_visible_tagged_folders
      ON audio_files(folder_id,id,user_tags,source_tags_text)
      WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'')";
 

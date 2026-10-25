@@ -20,10 +20,12 @@ mod search_cache;
 mod search_candidates;
 mod search_exclude;
 mod search_facets;
+mod search_include;
 mod search_rank_parallel;
 mod search_sorted;
 mod search_storage;
 mod search_text;
+mod search_workspace;
 mod space;
 pub mod sqlite_engine;
 mod sqlite_mmap;
@@ -166,6 +168,14 @@ pub(crate) fn path_key(value: &str) -> String {
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_lowercase()
+}
+
+/// Compare stored path identities without accessing the source filesystem.
+/// Windows drive, UNC and separator syntax is normalized; directory-entry case
+/// and literal POSIX backslashes remain significant on every reader platform.
+/// Resolving an old alias against library rows uses DataProvider path lookup instead.
+pub fn indexed_paths_equal(left: &str, right: &str) -> bool {
+    path_identity::comparison_key(left) == path_identity::comparison_key(right)
 }
 
 /// The text the library stores in `audio_files.file_path` for `path` (as given, normally
@@ -1795,6 +1805,13 @@ impl SqliteProvider {
         } else {
             0
         };
+        // An include filter tests its terms on the sparse tag index; only matches read
+        // their wide row. Sort index walks would test every row they pass.
+        let inclusion = search_include::Inclusion::plan(
+            &tx,
+            request,
+            self.derived_tags.load(Ordering::Acquire),
+        )?;
         let no_missing = unfiltered_fts
             && (request.filters.visibility == FileVisibility::All
                 || request.filters.visibility == FileVisibility::Present && not_present_probe == 0);
@@ -1813,6 +1830,9 @@ impl SqliteProvider {
                 SELECT 1 FROM audio_search WHERE rowid=af.id AND audio_search MATCH ?1))"
                 .to_string()
         } else {
+            let from = inclusion
+                .as_ref()
+                .map_or(from.as_str(), |plan| plan.count_from());
             format!("SELECT COUNT(*) FROM {from} WHERE {where_sql}")
         };
         // An exclude-only filter counts present files minus excluded tagged files from
@@ -1888,9 +1908,12 @@ impl SqliteProvider {
             // Sort only IDs and the selected key. Fetch the wide Metadata DTOs after
             // pagination for filtered FTS, folder browsing, and alternative sort orders.
             let direction = if descending { "DESC" } else { "ASC" };
-            let from = match &exclusion {
-                Some(exclusion) => exclusion.page_from(&tx, request, total)?.unwrap_or(&from),
-                None => &from,
+            let from = match (&exclusion, &inclusion) {
+                (Some(exclusion), _) => exclusion.page_from(&tx, request, total)?.unwrap_or(&from),
+                (None, Some(inclusion)) => {
+                    inclusion.page_from(&tx, request, total)?.unwrap_or(&from)
+                }
+                (None, None) => &from,
             };
             format!(
                 "WITH ranked AS MATERIALIZED (
@@ -2171,6 +2194,21 @@ impl SqliteProvider {
 }
 
 impl DataProvider for SqliteProvider {
+    fn load_search_workspace(
+        &self,
+        target: &audiolib_core::SearchWorkspaceTarget,
+    ) -> Result<audiolib_core::SearchWorkspace> {
+        search_workspace::load(target)
+    }
+
+    fn save_search_workspace(
+        &self,
+        target: &audiolib_core::SearchWorkspaceTarget,
+        workspace: &audiolib_core::SearchWorkspace,
+    ) -> Result<()> {
+        search_workspace::save(target, workspace)
+    }
+
     fn search_revision(&self) -> Result<Option<u64>> {
         let _gate = self.read_gate.read().unwrap();
         // data_version is comparable only on the SAME connection. A dedicated observer
@@ -2339,6 +2377,31 @@ impl DataProvider for SqliteProvider {
     }
     fn find_audio_by_path(&self, path: &Path) -> Result<Option<AudioFile>> {
         self.management_lookup(path)
+    }
+    fn find_folder_by_path(&self, path: &Path) -> Result<Option<Folder>> {
+        let resolved = if self.read_only {
+            path.to_path_buf()
+        } else {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        };
+        let reader = self.reader()?;
+        // Pin candidate selection and row projection to one SQLite snapshot so
+        // a concurrent scan cannot reuse the chosen numeric ID between reads.
+        let transaction = reader.unchecked_transaction().map_err(db_error)?;
+        let Some(id) = path_identity::folder_id_with_alias(
+            &transaction,
+            &display_path(&resolved),
+            !self.read_only,
+        )?
+        else {
+            return Ok(None);
+        };
+        let folder = transaction.query_row(
+            "SELECT id,folder_path,folder_name,parent_id,total_file_count FROM folders WHERE id=?1",
+            [id], |row| Ok(Folder { id:row.get(0)?, path:row.get(1)?, name:row.get(2)?, parent_id:row.get(3)?, file_count:unsigned(row,4)? }),
+        ).optional().map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(folder)
     }
     fn relink_audio(&self, id: i64, path: &Path) -> Result<AudioFile> {
         self.management_relink(id, path)

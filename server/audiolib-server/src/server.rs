@@ -6,7 +6,9 @@
 //! directly: each connection must deliver its request headers within
 //! [`ServeOptions::header_read_timeout`] (a TLS handshake gets the same limit), and on
 //! shutdown in-flight requests get at most [`ServeOptions::shutdown_grace`] before the
-//! remaining connections are dropped. Every request carries a
+//! remaining connections are dropped. A peer that accepts no response bytes for
+//! [`ServeOptions::write_stall_timeout`] loses its connection, so a client that stops
+//! reading without closing cannot keep a stream slot. Every request carries a
 //! [`ConnectionInfo`](crate::auth::ConnectionInfo) extension (peer address and listener)
 //! used by authentication and the admin guard.
 use crate::auth::{ConnectionInfo, Listener};
@@ -16,11 +18,20 @@ use hyper_util::{
     rt::{TokioIo, TokioTimer},
     service::TowerToHyperService,
 };
-use std::{future::Future, pin::pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    io,
+    pin::{Pin, pin},
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
     sync::{Semaphore, watch},
     task::JoinSet,
+    time::Sleep,
 };
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
@@ -36,6 +47,10 @@ pub struct ServeOptions {
     pub header_read_timeout: Duration,
     /// Maximum wait for in-flight requests after shutdown is requested.
     pub shutdown_grace: Duration,
+    /// Maximum time the peer may accept no response bytes while some are pending (a
+    /// sleeping or disconnected client, or one holding a response it stopped reading).
+    /// The connection then fails and its body, with any stream slot, is dropped.
+    pub write_stall_timeout: Duration,
 }
 
 impl Default for ServeOptions {
@@ -44,6 +59,8 @@ impl Default for ServeOptions {
             max_connections: 1024,
             header_read_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(10),
+            // Clients hold a response ahead of their read window for at most 15 s.
+            write_stall_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -111,6 +128,7 @@ async fn serve_inner(
                     listener: if tls.is_some() { Listener::Tls } else { Listener::Http },
                     local: stream.local_addr().ok(),
                 };
+                let stream = WriteStallTimeout::new(stream, options.write_stall_timeout);
                 let service = TowerToHyperService::new(app.clone().map_request(
                     move |mut request: Request<Incoming>| {
                         request.extensions_mut().insert(info);
@@ -205,5 +223,94 @@ async fn serve_connection<I, S>(
                 tracing::debug!(%error, "Connection ended with an error");
             }
         }
+    }
+}
+
+/// Fails writes after the peer has accepted no bytes for `timeout`. Only pending writes
+/// count: waiting for the next request or for the response body is not a stall.
+struct WriteStallTimeout<T> {
+    inner: T,
+    timeout: Duration,
+    stalled: Option<Pin<Box<Sleep>>>,
+}
+
+impl<T> WriteStallTimeout<T> {
+    fn new(inner: T, timeout: Duration) -> Self {
+        Self {
+            inner,
+            timeout,
+            stalled: None,
+        }
+    }
+
+    fn progress<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        poll: Poll<io::Result<R>>,
+    ) -> Poll<io::Result<R>> {
+        if poll.is_ready() {
+            self.stalled = None;
+            return poll;
+        }
+        let timeout = self.timeout;
+        let stalled = self
+            .stalled
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+        if stalled.as_mut().poll(cx).is_ready() {
+            self.stalled = None;
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "The peer stopped accepting response bytes",
+            )));
+        }
+        Poll::Pending
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for WriteStallTimeout<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for WriteStallTimeout<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_write(cx, buf);
+        this.progress(cx, poll)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
+        this.progress(cx, poll)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_flush(cx);
+        this.progress(cx, poll)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_shutdown(cx);
+        this.progress(cx, poll)
     }
 }

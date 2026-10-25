@@ -1409,6 +1409,7 @@ mod tests {
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
+            max_search_tasks: audiolib_core::config::DEFAULT_MAX_SEARCH_TASKS,
             ui_scale_percent: 0,
             theme: audiolib_core::config::DEFAULT_THEME.into(),
             ui_font_size: audiolib_core::config::DEFAULT_FONT_SIZE,
