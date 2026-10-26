@@ -3580,6 +3580,17 @@ impl Controller {
         ui.set_status(message.into());
     }
 
+    /// Cache file for one album's thumbnail. FNV-1a keeps the name filesystem-safe and
+    /// stable for the same album, so a refresh reuses it instead of reading audio again.
+    fn album_thumbnail_path(cache_root: &std::path::Path, album: &str) -> std::path::PathBuf {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in album.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        cache_root.join("artwork").join(format!("{hash:016x}.png"))
+    }
+
     /// Publish album facets for the current query and filters. The album filter itself is
     /// dropped so every other album stays reachable; local libraries only for now.
     fn publish_albums(self: &Arc<Self>) {
@@ -3587,6 +3598,7 @@ impl Controller {
             return;
         }
         let provider = self.provider();
+        let cache_root = self.config.lock().unwrap().paths.cache.clone();
         let mut request = self.request.lock().unwrap().clone();
         request.filters.album = None;
         request.limit = 1;
@@ -3596,18 +3608,32 @@ impl Controller {
                 return;
             };
             // Covers are read for the first albums only: each one costs a single small file
-            // read, and slint::Image is not Send, so carry pixels and build them on the loop.
+            // read the first time and a cached PNG afterwards, and slint::Image is not Send,
+            // so pixels cross to the event loop and the image is built there.
             let mut rows = Vec::with_capacity(albums.len());
             for (index, (name, count)) in albums.into_iter().enumerate() {
                 let mut thumbnail = None;
-                if index < ALBUM_THUMBNAILS
-                    && let Ok(Some(path)) = provider.album_cover_path(&name)
-                    && let Ok((_, Some(artwork))) = audiolib_audio::probe_with_artwork(&path)
-                    && let Ok(decoded) = image::load_from_memory(&artwork.bytes)
-                {
-                    let small = decoded.thumbnail(40, 40).into_rgba8();
-                    let (width, height) = small.dimensions();
-                    thumbnail = Some((small.into_raw(), width, height));
+                if index < ALBUM_THUMBNAILS {
+                    let cache_path = Self::album_thumbnail_path(&cache_root, &name);
+                    let cached = std::fs::read(&cache_path)
+                        .ok()
+                        .and_then(|bytes| image::load_from_memory(&bytes).ok());
+                    if let Some(decoded) = cached {
+                        let small = decoded.thumbnail(40, 40).into_rgba8();
+                        let (width, height) = small.dimensions();
+                        thumbnail = Some((small.into_raw(), width, height));
+                    } else if let Ok(Some(path)) = provider.album_cover_path(&name)
+                        && let Ok((_, Some(artwork))) = audiolib_audio::probe_with_artwork(&path)
+                        && let Ok(decoded) = image::load_from_memory(&artwork.bytes)
+                    {
+                        let small = decoded.thumbnail(40, 40).into_rgba8();
+                        let (width, height) = small.dimensions();
+                        if let Some(parent) = cache_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = small.save(&cache_path);
+                        thumbnail = Some((small.into_raw(), width, height));
+                    }
                 }
                 rows.push((name, count, thumbnail));
             }
