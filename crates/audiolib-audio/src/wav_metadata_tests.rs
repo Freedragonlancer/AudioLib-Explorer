@@ -530,8 +530,7 @@ fn real_boom_smed_metadata_fixtures() {
 }
 
 #[test]
-fn playback_layout_stops_at_the_data_chunk() {
-    // A network source must not fetch the file's tail to start playing: the playback
+fn playback_layout_stops_at_the_data_chunk() {    // A network source must not fetch the file's tail to start playing: the playback
     // layout ignores everything after the audio (here a trailing chunk claiming more bytes
     // than the file has, which the full Metadata probe rejects).
     let temp = tempfile::tempdir().unwrap();
@@ -552,4 +551,40 @@ fn playback_layout_stops_at_the_data_chunk() {
             .frames,
         64
     );
+}
+
+#[test]
+fn probe_with_artwork_returns_the_id3_cover_and_ordinary_probe_skips_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("album.wav");
+    wav(&path);
+    // Boom-style ID3v2.3: the album name is TALB, the cover is a raw APIC payload.
+    let image = b"\x89PNG\r\n\x1a\nfixture cover bytes".to_vec();
+    let mut apic = vec![0_u8]; // ISO-8859-1
+    apic.extend_from_slice(b"image/png\0");
+    apic.push(3); // front cover
+    apic.push(0); // empty description
+    apic.extend_from_slice(&image);
+    let mut frames = id3_frame(3, "APIC", &apic, 0);
+    frames.extend(id3_frame(3, "TALB", b"\x00Album Name", 0));
+    let mut tag = b"ID3\x03\x00\x00".to_vec();
+    tag.extend(synchsafe(frames.len()));
+    tag.extend(frames);
+    add(&path, b"ID3 ", &tag);
+
+    let metadata = probe(&path).unwrap();
+    assert_eq!(
+        metadata.attributes["wav_metadata"]["fields"]["library"],
+        "Album Name"
+    );
+    let (_, artwork) = crate::probe_with_artwork(&path).unwrap();
+    let artwork = artwork.expect("ID3 APIC cover");
+    assert_eq!(artwork.mime, "image/png");
+    assert_eq!(artwork.bytes, image);
+
+    // A file without a cover stays empty instead of failing or inventing one.
+    let plain = temp.path().join("plain.wav");
+    wav(&plain);
+    let (_, none) = crate::probe_with_artwork(&plain).unwrap();
+    assert!(none.is_none());
 }
