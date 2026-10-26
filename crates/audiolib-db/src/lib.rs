@@ -1474,6 +1474,34 @@ struct RankingSnapshot<'a> {
 }
 
 impl SqliteProvider {
+    /// Present-record counts per declared album for the same query and filters as the
+    /// result page. The caller passes a request without an album filter, so every album
+    /// stays visible for cross-filter navigation. Ordered by count, then name.
+    pub fn album_facets(&self, request: &SearchRequest) -> Result<Vec<(String, u64)>> {
+        let reader = self.reader()?;
+        let derived = self.derived_tags.load(Ordering::Acquire);
+        let sql = search_sql(&self.tokenizer, request, false, derived)?;
+        let statement = format!(
+            "SELECT af.album,COUNT(*) FROM {} WHERE {} AND af.album<>''
+             GROUP BY af.album ORDER BY COUNT(*) DESC,af.album COLLATE NOCASE",
+            sql.from,
+            sql.conditions.join(" AND ")
+        );
+        let mut prepared = reader.prepare(&statement).map_err(db_error)?;
+        let rows = prepared
+            .query_map(params_from_iter(&sql.values), |row| {
+                let album: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((album, u64::try_from(count).unwrap_or(0)))
+            })
+            .map_err(db_error)?;
+        let mut albums = Vec::new();
+        for row in rows {
+            albums.push(row.map_err(db_error)?);
+        }
+        Ok(albums)
+    }
+
     fn observe_search_revision(&self) -> Result<u64> {
         let mut observer = self.revision_reader.lock().unwrap();
         if observer.is_none() {
@@ -2600,6 +2628,11 @@ fn search_sql(
     if filters.favorites_only {
         conditions.push("af.favorite=1".into());
     }
+    if let Some(album) = filters.album.as_deref() {
+        // Exact stored name; the value is bound, never interpolated.
+        conditions.push("af.album=?".into());
+        values.push(Value::Text(album.to_owned()));
+    }
     // Both filters are written so the planner can use idx_audio_visible_tagged_any: its
     // partial WHERE is exactly the "has any tag" term below, so the visible filename order
     // is kept (no sorter) and only rows that have tags are visited. `derived_tags == false`
@@ -2681,7 +2714,8 @@ const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE
  af.bwf_originator,af.bwf_originator_reference,af.bwf_origination_date,af.bwf_origination_time,
  af.bwf_time_reference,af.bwf_version,af.bwf_umid,af.ixml_scene,af.ixml_take,af.ixml_tape,
  af.ixml_circled,af.ixml_wild_track,af.ixml_no_good,af.codec,af.created_at,af.modified_at,
- af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0)";
+ af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0),
+ COALESCE(af.album,'')";
 
 fn audio_projection(_conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
     // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
@@ -2773,6 +2807,7 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         favorite: row.get(12)?,
         bext_description: row.get(13)?,
         attributes,
+        album: row.get(36)?,
         missing: row.get(35)?,
     })
 }

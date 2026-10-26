@@ -1032,8 +1032,11 @@ const PERFORMANCE_INDEXES:&str="
  CREATE INDEX IF NOT EXISTS idx_audio_visible_format ON audio_files(bit_depth,channels) WHERE missing=0;
  CREATE INDEX IF NOT EXISTS idx_audio_visible_format_name ON audio_files(bit_depth,filename COLLATE NOCASE,id) WHERE missing=0;
  CREATE INDEX IF NOT EXISTS idx_audio_visible_tagged_any ON audio_files(filename COLLATE NOCASE,id,user_tags,source_tags_text) WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'');
- CREATE INDEX IF NOT EXISTS idx_audio_visible_color ON audio_files(user_color COLLATE NOCASE,id) WHERE missing=0 AND user_color IS NOT NULL;
- CREATE INDEX IF NOT EXISTS idx_audio_visible_album ON audio_files(album,id) WHERE missing=0;";
+ CREATE INDEX IF NOT EXISTS idx_audio_visible_color ON audio_files(user_color COLLATE NOCASE,id) WHERE missing=0 AND user_color IS NOT NULL;";
+
+/// v7 album accelerator; created only once the album column exists.
+pub(crate) const ALBUM_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_audio_visible_album ON audio_files(album,id) WHERE missing=0";
 
 const AUDIO_COLUMNS: &[(&str, &str)] = &[
     ("file_path", "TEXT"),

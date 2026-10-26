@@ -104,6 +104,7 @@ pub(crate) fn upgrade_from_previous(
         progress(SnapshotUpgradeProgress::Tokenizing { completed, total })?;
     }
     apply_indexes(&tx)?;
+    tx.execute_batch(ALBUM_INDEX).map_err(db_error)?;
     mark_current(&tx)?;
     tx.commit().map_err(db_error)
 }
@@ -186,6 +187,7 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
     seed.execute_batch(BASE_INDEXES).map_err(db_error)?;
     add_management_schema(&seed)?;
     apply_indexes(&seed)?;
+    seed.execute_batch(ALBUM_INDEX).map_err(db_error)?;
     add_current_features(&seed)?;
     seed.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
     seed.commit().map_err(db_error)?;

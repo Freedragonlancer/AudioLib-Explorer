@@ -195,6 +195,9 @@ pub struct AudioFile {
     pub favorite: bool,
     pub bext_description: String,
     pub attributes: serde_json::Value,
+    /// Library/album declared by the file itself; empty when it declares none.
+    #[serde(default)]
+    pub album: String,
     #[serde(default)]
     pub missing: bool,
 }
@@ -234,6 +237,9 @@ pub struct SearchFilters {
     pub exclude_tags: Vec<String>,
     /// Exact library color, ignoring hex letter case.
     pub color: Option<String>,
+    /// Exact library/album name declared by the files; absent keeps every album visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
