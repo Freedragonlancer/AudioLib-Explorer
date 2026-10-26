@@ -343,6 +343,14 @@ fn run() -> Result<()> {
                     ui.invoke_peak_style_requested();
                 }
                 "database" | "library" => ui.invoke_open_library(0),
+                "local-source" | "add-source" => {
+                    ui.invoke_open_library(0);
+                    if smoke_view == "local-source" {
+                        ui.invoke_sm_local_add_requested();
+                    } else {
+                        ui.set_sm_add_choice(true);
+                    }
+                }
                 "maintenance" => {
                     ui.invoke_open_library(0);
                     ui.set_advanced_maintenance_visible(true);

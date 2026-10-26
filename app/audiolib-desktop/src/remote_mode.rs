@@ -83,7 +83,7 @@ mod server_removal;
 mod source_consistency_tests;
 #[path = "source_manager.rs"]
 mod source_manager;
-pub(super) use source_manager::RootOperation;
+pub(super) use source_manager::{LocalSourceRequest, RootOperation};
 #[cfg(test)]
 #[path = "snapshot_refresh_tests.rs"]
 mod snapshot_refresh_tests;

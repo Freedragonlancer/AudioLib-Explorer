@@ -70,6 +70,77 @@ pub(crate) enum ListWaveformCell {
     Offline(Option<ListWaveform>),
 }
 
+/// State of the local pre-generation pass, independent of visible-row requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListWaveformProgressState {
+    Disabled,
+    Paused,
+    Scanning,
+    Auditioning,
+    Running,
+    Complete,
+    Error,
+}
+
+/// Cheap, owned progress of this library's current local pre-generation pass.
+/// Counts describe work completed since the pass started, not the entire cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListWaveformProgress {
+    pub generation: u64,
+    pub enabled: bool,
+    pub state: ListWaveformProgressState,
+    pub processed: u64,
+    pub generated: u64,
+    pub failed: u64,
+    /// Waiting IDs in the current discovered batch; not the library-wide backlog.
+    pub queued: usize,
+    pub current: Option<i64>,
+    pub error: Option<String>,
+}
+
+impl ListWaveformProgress {
+    /// Localized progress text; do not present a batch's queue length as a total.
+    pub(crate) fn text(&self, chinese: bool) -> String {
+        use ListWaveformProgressState as Phase;
+        let label = match (self.state, chinese) {
+            (Phase::Disabled, true) => "预生成已关闭，仅计算可见行。",
+            (Phase::Disabled, false) => {
+                "Pre-generation is off; visible rows are computed on demand."
+            }
+            (Phase::Paused, true) => "后台预生成已暂停",
+            (Phase::Paused, false) => "Background pre-generation paused",
+            (Phase::Scanning, true) => "等待音效库扫描结束",
+            (Phase::Scanning, false) => "Waiting for the library scan to finish",
+            (Phase::Auditioning, true) => "试听期间暂停后台预生成",
+            (Phase::Auditioning, false) => "Background pre-generation yielding to audition",
+            (Phase::Running, true) => "正在后台扫描并生成列表波形",
+            (Phase::Running, false) => "Scanning and generating list Waveforms in the background",
+            (Phase::Complete, true) => "本轮列表波形预生成完成",
+            (Phase::Complete, false) => "List Waveform pre-generation pass complete",
+            (Phase::Error, true) => "后台预生成未完成",
+            (Phase::Error, false) => "Background pre-generation could not finish",
+        };
+        if !self.enabled {
+            return label.into();
+        }
+        let counts = if chinese {
+            format!(
+                "本轮已处理 {} · 已生成 {} · 失败 {}",
+                self.processed, self.generated, self.failed
+            )
+        } else {
+            format!(
+                "This pass: processed {} · generated {} · failed {}",
+                self.processed, self.generated, self.failed
+            )
+        };
+        match &self.error {
+            Some(error) => format!("{label} · {counts}\n{error}"),
+            None => format!("{label} · {counts}"),
+        }
+    }
+}
+
 /// The desktop side the worker needs; implemented by the controller.
 pub(crate) trait ListWaveformHost: Send + Sync + 'static {
     /// The provider to use now, or `None` while library work must not run (library
@@ -123,6 +194,11 @@ struct Backfill {
     cursor: i64,
     queue: VecDeque<i64>,
     last_start: Option<Instant>,
+    processed: u64,
+    generated: u64,
+    failed: u64,
+    current: Option<i64>,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -148,6 +224,7 @@ pub(crate) struct State {
     suspended: bool,
     shutdown: bool,
     playing: bool,
+    scanning: bool,
     playback_start: Option<Instant>,
     playback_end: Option<Instant>,
     pregenerate: bool,
@@ -168,6 +245,42 @@ pub(crate) struct State {
 }
 
 impl State {
+    fn progress_at(&self, now: Instant) -> ListWaveformProgress {
+        let state = if !self.pregenerate {
+            ListWaveformProgressState::Disabled
+        } else if self.suspended || self.shutdown {
+            ListWaveformProgressState::Paused
+        } else if self.backfill.error.is_some() {
+            ListWaveformProgressState::Error
+        } else if self.scanning {
+            ListWaveformProgressState::Scanning
+        } else if !self.backfill.active {
+            ListWaveformProgressState::Complete
+        } else if self.playing
+            || self
+                .playback_start
+                .is_some_and(|start| now.saturating_duration_since(start) < PREBUFFER_YIELD)
+            || self
+                .playback_end
+                .is_some_and(|end| now.saturating_duration_since(end) < BACKFILL_RESUME_DELAY)
+        {
+            ListWaveformProgressState::Auditioning
+        } else {
+            ListWaveformProgressState::Running
+        };
+        ListWaveformProgress {
+            generation: self.generation,
+            enabled: self.pregenerate,
+            state,
+            processed: self.backfill.processed,
+            generated: self.backfill.generated,
+            failed: self.backfill.failed,
+            queued: self.backfill.queue.len(),
+            current: self.backfill.current,
+            error: self.backfill.error.clone(),
+        }
+    }
+
     fn remember(&mut self, id: i64, cell: ListWaveformCell) {
         if self.cache.insert(id, cell).is_none() {
             self.cache_order.push_back(id);
@@ -206,6 +319,7 @@ impl State {
         scanning: bool,
         source: ListWaveformSource,
     ) -> Step {
+        self.scanning = scanning;
         if self.shutdown {
             return Step::Exit;
         }
@@ -357,6 +471,9 @@ impl State {
     }
 
     fn compute_task(&mut self, id: i64, on_demand: bool) -> Task {
+        if !on_demand {
+            self.backfill.current = Some(id);
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         self.current = Some(Current {
             id,
@@ -382,6 +499,7 @@ impl State {
         now: Instant,
     ) -> Vec<(i64, ListWaveformCell)> {
         self.current = None;
+        self.backfill.current = None;
         let mut cells = Vec::new();
         match outcome {
             Outcome::Lookup {
@@ -474,6 +592,18 @@ impl State {
                 if generation != self.generation {
                     return cells;
                 }
+                if self.pregenerate
+                    && self.backfill.active
+                    && !matches!(&result, Err(Error::Cancelled))
+                {
+                    self.backfill.processed += 1;
+                    match &result {
+                        Ok(ListWaveformState::Ready { .. }) => self.backfill.generated += 1,
+                        Ok(ListWaveformState::Missing | ListWaveformState::Failed { .. })
+                        | Err(_) => self.backfill.failed += 1,
+                        Ok(_) => {}
+                    }
+                }
                 let cell = match result {
                     Ok(ListWaveformState::Ready { waveform }) => ListWaveformCell::Ready(waveform),
                     Ok(ListWaveformState::Missing | ListWaveformState::Failed { .. }) => {
@@ -482,6 +612,11 @@ impl State {
                     Err(Error::Cancelled) => {
                         // Scrolled out (or suspended): look it up again when it returns.
                         self.looked_up.remove(&id);
+                        // Suspension must not lose a background ID already popped from
+                        // the batch. A newer generation has already been rejected above.
+                        if !on_demand && self.pregenerate && self.backfill.active {
+                            self.backfill.queue.push_front(id);
+                        }
                         return cells;
                     }
                     Ok(_) | Err(_) => {
@@ -506,8 +641,11 @@ impl State {
                         self.backfill.cursor = *ids.last().unwrap();
                         self.backfill.queue.extend(ids);
                     }
-                    // Done (or the library refused): the next scan starts a new pass.
-                    _ => self.backfill.active = false,
+                    Ok(_) => self.backfill.active = false,
+                    Err(error) => {
+                        self.backfill.active = false;
+                        self.backfill.error = Some(error.to_string());
+                    }
                 }
             }
         }
@@ -695,6 +833,12 @@ impl ListWaveforms {
     /// Current generation; results of older generations are stale.
     pub(crate) fn generation(&self) -> u64 {
         self.lock().generation
+    }
+
+    /// Read progress without accessing the database or decoding audio; safe to poll
+    /// from the status worker. The UI must associate it with the selected library.
+    pub(crate) fn progress(&self) -> ListWaveformProgress {
+        self.lock().progress_at(Instant::now())
     }
 
     /// Replace the wanted ids (the `visible` rows on screen first, then the rows one
@@ -948,6 +1092,195 @@ mod tests {
 
     fn take_task(state: &mut State) -> Task {
         state.task.take().expect("task")
+    }
+
+    #[test]
+    fn local_progress_counts_results_and_finishes_only_at_the_end_of_the_backlog() {
+        let service = ListWaveforms::new(true);
+        let now = Instant::now();
+        let mut state = service.lock();
+        assert_eq!(
+            state.progress_at(now).state,
+            ListWaveformProgressState::Running
+        );
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        let Task::Backlog { generation, .. } = take_task(&mut state) else {
+            panic!("backlog first")
+        };
+        state.finish(Outcome::Backlog {
+            generation,
+            result: Ok(vec![10, 11]),
+        });
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        let Task::Compute { id, .. } = take_task(&mut state) else {
+            panic!("background compute")
+        };
+        assert_eq!(state.progress_at(now).current, Some(id));
+        assert_eq!(state.progress_at(now).queued, 1);
+        state.finish(Outcome::Compute {
+            generation,
+            id,
+            on_demand: false,
+            result: Ok(ListWaveformState::Ready {
+                waveform: waveform(4),
+            }),
+        });
+        let next = now + BACKFILL_INTERVAL;
+        assert_eq!(
+            state.next_step(next, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        let Task::Compute { id, .. } = take_task(&mut state) else {
+            panic!("second background compute")
+        };
+        state.finish(Outcome::Compute {
+            generation,
+            id,
+            on_demand: false,
+            result: Ok(ListWaveformState::Failed {
+                message: "Invalid WAV".into(),
+            }),
+        });
+        let progress = state.progress_at(next);
+        assert_eq!(
+            (progress.processed, progress.generated, progress.failed),
+            (2, 1, 1)
+        );
+        assert_eq!(progress.state, ListWaveformProgressState::Running);
+        assert!(progress.current.is_none());
+        assert_eq!(
+            state.next_step(next, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        take_task(&mut state);
+        state.finish(Outcome::Backlog {
+            generation,
+            result: Ok(Vec::new()),
+        });
+        assert_eq!(
+            state.progress_at(next).state,
+            ListWaveformProgressState::Complete
+        );
+        assert_eq!(state.progress_at(next).processed, 2);
+    }
+
+    #[test]
+    fn local_progress_reports_scan_audition_pause_and_backlog_errors() {
+        let service = ListWaveforms::new(true);
+        let now = Instant::now();
+        let mut state = service.lock();
+        state.next_step(now, true, ListWaveformSource::Local);
+        assert_eq!(
+            state.progress_at(now).state,
+            ListWaveformProgressState::Scanning
+        );
+        state.scanning = false;
+        state.playback_start = Some(now);
+        assert_eq!(
+            state.progress_at(now).state,
+            ListWaveformProgressState::Auditioning
+        );
+        assert_eq!(
+            state.progress_at(now + PREBUFFER_YIELD).state,
+            ListWaveformProgressState::Running
+        );
+        state.suspended = true;
+        assert_eq!(
+            state.progress_at(now).state,
+            ListWaveformProgressState::Paused
+        );
+        state.suspended = false;
+        let generation = state.generation;
+        state.finish(Outcome::Backlog {
+            generation,
+            result: Err(Error::Database("Library is unavailable".into())),
+        });
+        let progress = state.progress_at(now);
+        assert_eq!(progress.state, ListWaveformProgressState::Error);
+        assert!(progress.error.as_ref().unwrap().contains("unavailable"));
+        assert!(!state.backfill.active);
+    }
+
+    #[test]
+    fn local_progress_resets_for_scans_libraries_and_setting_changes() {
+        let service = ListWaveforms::new(true);
+        let generation = service.generation();
+        service.lock().finish(Outcome::Compute {
+            generation,
+            id: 10,
+            on_demand: false,
+            result: Ok(ListWaveformState::Ready {
+                waveform: waveform(4),
+            }),
+        });
+        assert_eq!(service.progress().generated, 1);
+        service.scan_finished();
+        assert_eq!(service.progress().generated, 0);
+        assert!(service.progress().generation > generation);
+        service.lock().finish(Outcome::Compute {
+            generation,
+            id: 11,
+            on_demand: false,
+            result: Err(Error::Database("stale failure".into())),
+        });
+        assert_eq!(
+            service.progress().failed,
+            0,
+            "old library/scan work must not count"
+        );
+        service.lock().backfill.processed = 8;
+        service.invalidate();
+        assert_eq!(service.progress().processed, 0);
+        service.lock().backfill.processed = 8;
+        service.set_pregenerate(false);
+        assert_eq!(
+            service.progress().state,
+            ListWaveformProgressState::Disabled
+        );
+        service.set_pregenerate(true);
+        assert_eq!(service.progress().processed, 0);
+        assert_eq!(service.progress().state, ListWaveformProgressState::Running);
+    }
+
+    #[test]
+    fn cancelled_background_decode_remains_queued_without_counting_a_failure() {
+        let service = ListWaveforms::new(true);
+        let now = Instant::now();
+        let mut state = service.lock();
+        state.backfill.queue.push_back(10);
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        let Task::Compute { generation, id, .. } = take_task(&mut state) else {
+            panic!("background compute")
+        };
+        state.finish(Outcome::Compute {
+            generation,
+            id,
+            on_demand: false,
+            result: Err(Error::Cancelled),
+        });
+        assert_eq!(state.progress_at(now).processed, 0);
+        assert_eq!(state.progress_at(now).failed, 0);
+        assert_eq!(
+            state.backfill.queue.iter().copied().collect::<Vec<_>>(),
+            vec![10]
+        );
+        assert_eq!(
+            state.next_step(now + BACKFILL_INTERVAL, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        assert!(matches!(
+            take_task(&mut state),
+            Task::Compute { id: 10, .. }
+        ));
     }
 
     #[test]
