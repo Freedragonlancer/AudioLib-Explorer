@@ -12,7 +12,7 @@ use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
 use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform};
-use crate::{AppWindow, AudioRow, CrumbRow, FolderRow};
+use crate::{AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow};
 use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
@@ -1263,6 +1263,42 @@ impl Controller {
         let c = self.clone();
         ui.on_drag_cancel_requested(move || {
             c.drag_cancel.lock().unwrap().store(true, Ordering::Release);
+        });
+        let c = self.clone();
+        ui.on_local_scan_root_remove_requested(move || {
+            if c.remote_read_only() || !c.available() {
+                return;
+            }
+            let Some(ui) = c.ui.upgrade() else {
+                return;
+            };
+            let selected = ui.get_local_scan_root_selected();
+            if selected < 0 {
+                return;
+            }
+            let Some(row) = ui.get_local_scan_roots().row_data(selected as usize) else {
+                return;
+            };
+            let path = row.path.to_string();
+            let id = match c.provider().find_folder_by_path(Path::new(&path)) {
+                Ok(Some(folder)) => folder.id,
+                Ok(None) => {
+                    c.status(
+                        if c.chinese.load(Ordering::Acquire) {
+                            "未找到该扫描根目录的库记录。"
+                        } else {
+                            "No library record for that scan root."
+                        }
+                        .to_string(),
+                    );
+                    return;
+                }
+                Err(error) => {
+                    c.status(error.to_string());
+                    return;
+                }
+            };
+            c.propose_operation(LibraryOperation::RemoveFolder(id));
         });
         let c = self.clone();
         ui.on_folder_action_requested(move |path, action| {
@@ -2589,6 +2625,8 @@ impl Controller {
         }
         ui.set_rows(ModelRc::new(VecModel::<AudioRow>::default()));
         ui.set_folders(ModelRc::new(VecModel::<FolderRow>::default()));
+        ui.set_local_scan_roots(ModelRc::new(VecModel::<LocalScanRootRow>::default()));
+        ui.set_local_scan_root_selected(-1);
         ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
         ui.set_history_rows(ModelRc::new(VecModel::<slint::SharedString>::default()));
         ui.set_history_missing(ModelRc::new(VecModel::<bool>::default()));
@@ -3737,6 +3775,47 @@ impl Controller {
         }
     }
 
+    fn local_scan_root_rows(folders: &[Folder]) -> Vec<LocalScanRootRow> {
+        folders
+            .iter()
+            .map(|folder| LocalScanRootRow {
+                name: folder.name.clone().into(),
+                path: folder.path.clone().into(),
+                file_count: folder.file_count.to_string().into(),
+                // Missing or non-directory paths stay listed so the user can remove the DB records.
+                invalid: !Path::new(&folder.path).is_dir(),
+            })
+            .collect()
+    }
+
+    fn publish_local_scan_roots(self: &Arc<Self>, ui: &AppWindow, folders: &[Folder]) {
+        let previous_path = {
+            let selected = ui.get_local_scan_root_selected();
+            let model = ui.get_local_scan_roots();
+            if selected >= 0 {
+                model
+                    .row_data(selected as usize)
+                    .map(|row| row.path.to_string())
+            } else {
+                None
+            }
+        };
+        let rows = if self.remote_read_only() {
+            Vec::new()
+        } else {
+            Self::local_scan_root_rows(folders)
+        };
+        let next_selected = previous_path
+            .as_deref()
+            .and_then(|path| {
+                rows.iter()
+                    .position(|row| same_path(Path::new(row.path.as_str()), Path::new(path)))
+            })
+            .map_or(-1, |index| index as i32);
+        ui.set_local_scan_roots(ModelRc::new(VecModel::from(rows)));
+        ui.set_local_scan_root_selected(next_selected);
+    }
+
     fn reload_tree(self: &Arc<Self>) {
         if !self.available() {
             return;
@@ -3774,6 +3853,13 @@ impl Controller {
             let mut known = known.as_ref().clone();
             let mut matches = matches.as_ref().clone();
             c.hide_removed_folders(&mut matches);
+            // Top-level folders are the local scan-roots list (independent of the
+            // search-filtered tree matches).
+            let scan_roots = if c.remote_read_only() {
+                Vec::new()
+            } else {
+                c.provider().folders(None).unwrap_or_default()
+            };
             let mut children = HashMap::<Option<i64>, Vec<Folder>>::new();
             for folder in matches {
                 known.insert(folder.id, folder.clone());
@@ -3857,6 +3943,7 @@ impl Controller {
                     visible: visible.clone(),
                     expanded,
                 }));
+                c2.publish_local_scan_roots(&ui, &scan_roots);
                 ui.set_crumbs(ModelRc::new(VecModel::from(
                     crumbs
                         .iter()
@@ -8547,6 +8634,43 @@ mod tests {
             assert!(!detail.trim_start().starts_with('{'));
             assert!(!detail.contains("\"scan_type\""));
         }
+    }
+
+    #[test]
+    fn local_scan_root_rows_flag_missing_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "audiolib-desktop-scan-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("does-not-exist");
+        let rows = Controller::local_scan_root_rows(&[
+            Folder {
+                id: 1,
+                path: root.to_string_lossy().into_owned(),
+                name: "present".into(),
+                parent_id: None,
+                file_count: 4,
+            },
+            Folder {
+                id: 2,
+                path: missing.to_string_lossy().into_owned(),
+                name: "gone".into(),
+                parent_id: None,
+                file_count: 0,
+            },
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name.as_str(), "present");
+        assert_eq!(rows[0].file_count.as_str(), "4");
+        assert!(!rows[0].invalid, "existing directory must be valid");
+        assert_eq!(rows[1].name.as_str(), "gone");
+        assert!(rows[1].invalid, "missing directory must be invalid");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
