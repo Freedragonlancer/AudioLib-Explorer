@@ -109,6 +109,31 @@ pub(crate) fn upgrade_from_previous(
     tx.commit().map_err(db_error)
 }
 
+/// v6 -> v7 without a storage migration: add the album column, fill it from the Metadata
+/// already stored in the library, create its index and publish the format. The whole step
+/// is one transaction over additive DDL plus one derived UPDATE, so it takes seconds and
+/// never touches audio files. Returns false when the library is not a v6 source.
+pub(crate) fn fast_upgrade_album(conn: &mut Connection) -> Result<bool> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    if version != SCHEMA_VERSION - 1 || pending(conn)? {
+        return Ok(false);
+    }
+    validate_supported_feature_revisions(conn)?;
+    let tx = conn.transaction().map_err(db_error)?;
+    ensure_column(&tx, "audio_files", "album", "TEXT NOT NULL DEFAULT ''")?;
+    tx.execute(
+        "UPDATE audio_files SET album=audiolib_album_key(metadata_json)",
+        [],
+    )
+    .map_err(db_error)?;
+    tx.execute_batch(ALBUM_INDEX).map_err(db_error)?;
+    mark_current(&tx)?;
+    tx.commit().map_err(db_error)?;
+    Ok(true)
+}
+
 pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))

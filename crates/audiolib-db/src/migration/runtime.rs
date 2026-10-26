@@ -216,6 +216,16 @@ fn prepare_writable_with_history(
             }
         }
     }
+    // v7 additive upgrade: a v6 library gets the derived album column and its fill in one
+    // short transaction (additive DDL plus one UPDATE) instead of a storage migration.
+    {
+        super::inspect::check_cancel(cancel)?;
+        let mut conn = job::open_rw(path)?;
+        schema::register_tokenizer(&conn, crate::load_tokenizer())?;
+        if schema::fast_upgrade_album(&mut conn)? {
+            return Ok(());
+        }
+    }
     let conn = job::open_read(path)?;
     if !schema::needs_upgrade(&conn)? {
         return Ok(());

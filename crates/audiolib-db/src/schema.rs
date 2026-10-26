@@ -9,7 +9,8 @@ pub(crate) mod definition;
 mod legacy;
 mod search_upgrade;
 pub(crate) use current::{
-    create_current, current_format_ready, mark_current, needs_upgrade, readable_format_ready,
+    create_current, current_format_ready, fast_upgrade_album, mark_current, needs_upgrade,
+    readable_format_ready,
 };
 pub(crate) use search_upgrade::{migrate_resumable, pending};
 
