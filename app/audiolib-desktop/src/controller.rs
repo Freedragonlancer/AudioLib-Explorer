@@ -4765,6 +4765,18 @@ impl Controller {
                     c.wait_transition_metadata(barrier)
                 }
             });
+            // The finish interrupt was only there so Metadata could take the writer.
+            // If the window stays open, clear it before a later rollup observes it.
+            // Shutdown still aborts that statement instead of starting it over.
+            if metadata_result.is_err()
+                && let Some(cancel) = c.scan_cancel.lock().unwrap().as_ref()
+            {
+                if c.shutdown.load(Ordering::Acquire) {
+                    cancel.interrupt();
+                } else {
+                    cancel.clear_finish_interrupt();
+                }
+            }
             let mut result = metadata_result.and_then(|_| {
                 tracing::info!("Desktop Metadata drained; interrupting scan");
                 if let Some(cancel) = c.scan_cancel.lock().unwrap().as_ref() {
@@ -8126,6 +8138,11 @@ mod tests {
         present_file(&ui, &file);
         ui.set_edit_notes("draft retained after failed close".into());
         ui.set_metadata_dirty(true);
+        // Close interrupts folder rollup before this drain. A failed save must
+        // clear that flag; the retry below must not inherit a sticky interrupt.
+        let finish_interrupt = ScanCancellation::default();
+        *controller.scan_cancel.lock().unwrap() = Some(finish_interrupt.clone());
+        let failed_close_scan = finish_interrupt;
         // Real cross-instance administration exclusion rejects the first save.
         // Release only after the UI has consumed the failed close completion.
         let lease = std::fs::OpenOptions::new()
@@ -8179,6 +8196,17 @@ mod tests {
                     slint::quit_event_loop().unwrap();
                     return;
                 }
+                if failed_close_scan.is_interrupted() || failed_close_scan.is_cancelled() {
+                    *errors.borrow_mut() = Some(
+                        "Failed close left the scan finish interrupt set, so a later rollup would abort"
+                            .into(),
+                    );
+                    slint::quit_event_loop().unwrap();
+                    return;
+                }
+                // The simulated scan never reaches finish. Drop it before the
+                // successful retry, which would otherwise wait on this token.
+                *c.scan_cancel.lock().unwrap() = None;
                 retry_lease.borrow_mut().take().unwrap().unlock().unwrap();
                 observed_retry.set(true);
                 c.request_close(&ui);
