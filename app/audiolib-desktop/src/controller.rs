@@ -5973,11 +5973,11 @@ impl Controller {
     }
 
     /// Drag the row (or every checked row when the dragged one is checked) to another
-    /// program as real files (CF_HDROP, copy only). Local mode offers the library files
-    /// directly. Server mode first makes complete copies in the download cache
-    /// (`<data dir>/cache`), with progress and Cancel in the status bar. The native drag
-    /// only starts while the mouse button is still held; otherwise the prepared files are
-    /// cached and the next drag starts at once.
+    /// program as real files (Windows `CF_HDROP` / macOS `public.file-url`, copy only).
+    /// Local mode offers the library files directly. Server mode first makes complete
+    /// copies in the download cache (`<data dir>/cache`), with progress and Cancel in the
+    /// status bar. The native drag only starts while the mouse button is still held;
+    /// otherwise the prepared files are cached and the next drag starts at once.
     fn drag_out(self: &Arc<Self>, id: i64) {
         const MAX_DRAG_FILES: usize = 500;
         if !self.available() || self.drag_busy.swap(true, Ordering::AcqRel) {
