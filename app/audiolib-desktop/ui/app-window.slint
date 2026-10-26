@@ -721,7 +721,7 @@ export component AppWindow inherits Window {
     // Server mode: the server offers usable list Waveforms (`/capabilities`).
     in property <bool> list-waveforms-server: false;
     private property <bool> list-waveforms-visible: root.list-waveforms-enabled && (!root.remote-mode || root.list-waveforms-server);
-    in-out property <bool> pregenerate-list-waveforms: false;
+    in-out property <bool> pregenerate-list-waveforms: true;
     callback pregenerate-list-waveforms-requested(bool);
     in-out property <bool> hold-list-waveform-batches: false;
     callback hold-list-waveform-batches-requested(bool);
