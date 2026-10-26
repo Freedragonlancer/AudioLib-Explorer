@@ -32,7 +32,8 @@ pub use list_waveform_i8::{
     i8_base64_len, quantize_i16_to_i8,
 };
 pub use metadata::{
-    SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
+    SOURCE_TAG_KEYS, album, display_tags, source_description, source_metadata_search_text,
+    source_tags,
 };
 pub use search_workspace::{
     SavedSearchTask, SearchAudioRef, SearchFolderRef, SearchSession, SearchTask,

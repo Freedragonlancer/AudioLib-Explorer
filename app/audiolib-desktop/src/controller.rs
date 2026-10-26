@@ -2532,6 +2532,9 @@ impl Controller {
             ui.set_selected_name("".into());
             ui.set_selected_path("".into());
             ui.set_selected_format("".into());
+            ui.set_selected_album("".into());
+            ui.set_album_cover(Image::default());
+            ui.set_album_cover_ready(false);
             ui.set_selected_attributes("".into());
             ui.set_selected_description("".into());
             ui.set_selected_source_tags("".into());
@@ -2579,6 +2582,9 @@ impl Controller {
         ui.set_selected_name("".into());
         ui.set_selected_path("".into());
         ui.set_selected_format("".into());
+        ui.set_selected_album("".into());
+        ui.set_album_cover(Image::default());
+        ui.set_album_cover_ready(false);
         ui.set_checked_count(0);
         ui.set_audio_ready(false);
         ui.set_waveform_ready(false);
@@ -4200,6 +4206,27 @@ impl Controller {
                 return;
             }
         };
+        // Preview: publish the selected file's own cover. This is one bounded read of the
+        // file already opened for playback; files that declare no album or carry no artwork
+        // simply leave the panel empty.
+        if !audiolib_core::album(&displayed.attributes).is_empty()
+            && let Ok((_, Some(artwork))) = audiolib_audio::probe_with_artwork(&path)
+            && let Ok(decoded) = image::load_from_memory(&artwork.bytes)
+        {
+            // slint::Image is not Send, so carry the pixels across and build it on the loop.
+            let (width, height) = (decoded.width(), decoded.height());
+            let rgba = decoded.into_rgba8().into_raw();
+            let confirmed = loading.clone();
+            post(loading.ui.clone(), move |ui| {
+                if confirmed.selection_generation.load(Ordering::Acquire) == generation {
+                    let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &rgba, width, height,
+                    );
+                    ui.set_album_cover(Image::from_rgba8(pixels));
+                    ui.set_album_cover_ready(true);
+                }
+            });
+        }
         let completion = {
             // Stop and selection changes use the same lock. An old Load either
             // enters the FIFO before Stop or is cancelled before it can enter.
@@ -6637,6 +6664,14 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
     ui.set_selected_missing(file.missing);
     ui.set_selected_name(file.filename.clone().into());
     ui.set_selected_path(file.file_path.clone().into());
+    // The library/album comes from the file's own Metadata; files without one show nothing
+    // and keep no stale cover from the previous selection.
+    let album = audiolib_core::album(&file.attributes);
+    ui.set_album_cover_ready(false);
+    if album.is_empty() {
+        ui.set_album_cover(Image::default());
+    }
+    ui.set_selected_album(album.into());
     ui.set_selected_format(
         format!(
             "{:.1} kHz / {} bit / {} ch / {}",

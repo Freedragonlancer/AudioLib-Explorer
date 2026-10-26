@@ -797,6 +797,11 @@ export component AppWindow inherits Window {
     in property <string> selected-name: "";
     in property <string> selected-path: "";
     in property <string> selected-format: "";
+    // Library/album declared by the file itself; empty means the file has none.
+    in property <string> selected-album: "";
+    in property <image> album-cover;
+    // Slint has no "image is empty" test here, so the controller publishes readiness.
+    in property <bool> album-cover-ready: false;
     in property <string> selected-description: "";
     in property <string> selected-source-tags: "";
     in property <string> selected-attributes: "";
@@ -2320,6 +2325,20 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Label { height: root.short-layout ? 16px * Theme.ui-scale : 28px * Theme.ui-scale; text: root.selected-format; color: Theme.accent; wrap: word-wrap; overflow: elide; font-size: Theme.font(10); }
+                            // The file's own Library/album, as declared by the pack (Boom-style).
+                            if root.selected-album != "": VerticalLayout { spacing: 4px * Theme.ui-scale;
+                                Label { height: 16px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARY"; font-size: Theme.font(10); }
+                                Text { text: root.selected-album; color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; overflow: elide; }
+                            }
+                            // Embedded cover; hidden while the file declares none.
+                            Image {
+                                visible: root.album-cover-ready;
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                height: 160px * Theme.ui-scale;
+                                image-fit: contain;
+                                source: root.album-cover;
+                            }
                             if root.selected-missing: VerticalLayout { spacing: 6px * Theme.ui-scale;
                                 Text { text: root.chinese ? "原位置找不到此文件。选择移动或改名后的 WAV，保留已有标注。" : "File missing at its original location. Locate the moved or renamed WAV to keep its annotations."; color: Theme.warning; font-size: Theme.font(11); wrap: word-wrap; }
                                 Action { height: 32px * Theme.ui-scale; primary: true; enabled: !root.closing && !root.library-busy; label: root.chinese ? "选择新位置，修复引用…" : "Locate file and repair…"; clicked => { root.file-action-requested(root.selected-id, 20); } }
