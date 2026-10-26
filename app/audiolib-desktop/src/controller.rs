@@ -29,6 +29,8 @@ use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 const PAGE_SIZE: usize = 200;
+/// Sidebar album covers are read only for the first rows; later rows show text only.
+const ALBUM_THUMBNAILS: usize = 12;
 const HISTORY_SIZE: usize = 50;
 /// Owned scan presentation can be regenerated after a runtime language change.
 #[derive(Clone)]
@@ -3593,14 +3595,40 @@ impl Controller {
             let Ok(albums) = provider.album_facets(&request) else {
                 return;
             };
-            let rows: Vec<AlbumRow> = albums
-                .into_iter()
-                .map(|(name, count)| AlbumRow {
-                    name: name.into(),
-                    count: count.to_string().into(),
-                })
-                .collect();
+            // Covers are read for the first albums only: each one costs a single small file
+            // read, and slint::Image is not Send, so carry pixels and build them on the loop.
+            let mut rows = Vec::with_capacity(albums.len());
+            for (index, (name, count)) in albums.into_iter().enumerate() {
+                let mut thumbnail = None;
+                if index < ALBUM_THUMBNAILS
+                    && let Ok(Some(path)) = provider.album_cover_path(&name)
+                    && let Ok((_, Some(artwork))) = audiolib_audio::probe_with_artwork(&path)
+                    && let Ok(decoded) = image::load_from_memory(&artwork.bytes)
+                {
+                    let small = decoded.thumbnail(40, 40).into_rgba8();
+                    let (width, height) = small.dimensions();
+                    thumbnail = Some((small.into_raw(), width, height));
+                }
+                rows.push((name, count, thumbnail));
+            }
             post(ui, move |ui| {
+                let rows: Vec<AlbumRow> = rows
+                    .into_iter()
+                    .map(|(name, count, thumbnail)| AlbumRow {
+                        name: name.into(),
+                        count: count.to_string().into(),
+                        cover: match thumbnail {
+                            Some((pixels, width, height)) => {
+                                slint::Image::from_rgba8(slint::SharedPixelBuffer::<
+                                    slint::Rgba8Pixel,
+                                >::clone_from_slice(
+                                    &pixels, width, height
+                                ))
+                            }
+                            None => slint::Image::default(),
+                        },
+                    })
+                    .collect();
                 ui.set_albums(ModelRc::new(VecModel::from(rows)));
             });
         });

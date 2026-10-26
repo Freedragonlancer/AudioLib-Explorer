@@ -29,7 +29,7 @@ export struct AudioRow {
 }
 export struct FolderRow { name: string, count: string, path: string, depth: int, expanded: bool, has-children: bool }
 /// One declared library/album and how many present records carry it.
-export struct AlbumRow { name: string, count: string }
+export struct AlbumRow { name: string, count: string, cover: image }
 export struct CrumbRow { name: string }
 export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: [string], folder: string, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
@@ -1925,6 +1925,7 @@ export component AppWindow inherits Window {
                             for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
                                 background: root.album-filter == album.name ? Theme.selected : (album-hit.has-hover ? Theme.raised : transparent);
                                 HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
+                                    Image { width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
                                     Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.ink; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
                                     Label { min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
                                 }

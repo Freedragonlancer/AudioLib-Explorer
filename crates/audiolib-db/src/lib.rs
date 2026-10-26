@@ -1502,6 +1502,20 @@ impl SqliteProvider {
         Ok(albums)
     }
 
+    /// One present file path for an album, used to read that album's embedded cover.
+    pub fn album_cover_path(&self, album: &str) -> Result<Option<std::path::PathBuf>> {
+        let reader = self.reader()?;
+        let path: Option<String> = reader
+            .query_row(
+                "SELECT file_path FROM audio_files WHERE album=?1 AND missing=0 ORDER BY id LIMIT 1",
+                [album],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        Ok(path.map(std::path::PathBuf::from))
+    }
+
     fn observe_search_revision(&self) -> Result<u64> {
         let mut observer = self.revision_reader.lock().unwrap();
         if observer.is_none() {
