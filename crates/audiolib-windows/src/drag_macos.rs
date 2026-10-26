@@ -156,7 +156,8 @@ pub(super) fn drag(paths: &[PathBuf]) -> std::io::Result<DragOutcome> {
         NSPoint::new(cursor.x - 16.0, cursor.y - 16.0),
         NSSize::new(32.0, 32.0),
     );
-    let preview = NSImage::imageNamed(NSImageNameMultipleDocuments);
+    // SAFETY: AppKit image-name constants are immutable process-lifetime extern statics.
+    let preview = NSImage::imageNamed(unsafe { NSImageNameMultipleDocuments });
 
     let mut items = Vec::with_capacity(urls.len());
     for url in &urls {
@@ -188,12 +189,13 @@ pub(super) fn drag(paths: &[PathBuf]) -> std::io::Result<DragOutcome> {
             return Ok(outcome);
         }
         let slice = NSDate::dateWithTimeIntervalSinceNow(0.05);
-        run_loop.runMode_beforeDate(NSEventTrackingRunLoopMode, &slice);
-        run_loop.runMode_beforeDate(NSDefaultRunLoopMode, &slice);
+        // SAFETY: Foundation run-loop mode constants are immutable process-lifetime extern statics.
+        run_loop.runMode_beforeDate(unsafe { NSEventTrackingRunLoopMode }, &slice);
+        run_loop.runMode_beforeDate(unsafe { NSDefaultRunLoopMode }, &slice);
         // If the user released before AppKit delivered endedAt, avoid hanging forever.
         if !primary_button_down() {
             let grace = NSDate::dateWithTimeIntervalSinceNow(0.25);
-            run_loop.runMode_beforeDate(NSEventTrackingRunLoopMode, &grace);
+            run_loop.runMode_beforeDate(unsafe { NSEventTrackingRunLoopMode }, &grace);
             if let Some(outcome) = source.ivars().outcome.get() {
                 return Ok(outcome);
             }
