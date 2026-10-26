@@ -184,6 +184,8 @@ enum LibraryOperation {
     DataSource(remote_mode::DataSourceSwitch),
     /// Server root mutations share the Metadata drain and library operation gate.
     ServerRoot(Box<remote_mode::RootOperation>),
+    /// Register or select a local library through the same write/scan drain barrier.
+    LocalSource(Box<remote_mode::LocalSourceRequest>),
 }
 
 impl LibraryOperation {
@@ -210,6 +212,7 @@ impl LibraryOperation {
                 | Self::Batch(_)
                 | Self::DataSource(_)
                 | Self::ServerRoot(_)
+                | Self::LocalSource(_)
         )
     }
 
@@ -230,9 +233,11 @@ impl LibraryOperation {
 
     fn affects_playback(&self, file: Option<&AudioFile>, removed_folders: &HashSet<i64>) -> bool {
         match self {
-            Self::Restore(_) | Self::Switch { .. } | Self::DataSource(_) | Self::ServerRoot(_) => {
-                true
-            }
+            Self::Restore(_)
+            | Self::Switch { .. }
+            | Self::DataSource(_)
+            | Self::ServerRoot(_)
+            | Self::LocalSource(_) => true,
             Self::RemoveAudio(ids) => file.is_some_and(|file| ids.contains(&file.id)),
             Self::RemoveFolder(_) => file.is_some_and(|file| {
                 file.folder_id
@@ -2041,7 +2046,10 @@ impl Controller {
     /// UI edits and scanning are frozen until completion; failure preserves drafts/library.
     fn run_library_operation(self: &Arc<Self>, operation: LibraryOperation) {
         let source_handoff = self.source_changing.load(Ordering::Acquire)
-            && matches!(operation, LibraryOperation::DataSource(_))
+            && matches!(
+                operation,
+                LibraryOperation::DataSource(_) | LibraryOperation::LocalSource(_)
+            )
             && !self.library_busy.load(Ordering::Acquire)
             && !self.closing.load(Ordering::Acquire)
             && !self.shutdown.load(Ordering::Acquire);
@@ -2059,10 +2067,14 @@ impl Controller {
             LibraryOperation::Switch { .. }
                 | LibraryOperation::Restore(_)
                 | LibraryOperation::DataSource(_)
+                | LibraryOperation::LocalSource(_)
         );
         let selected_id = ui.get_selected_id().parse::<i64>().ok();
         self.capture_metadata(&ui);
-        let recovering_handoff = matches!(operation, LibraryOperation::DataSource(_));
+        let recovering_handoff = matches!(
+            operation,
+            LibraryOperation::DataSource(_) | LibraryOperation::LocalSource(_)
+        );
         let mut metadata_warning = None;
         let enqueue_result = if recovering_handoff {
             self.enqueue_transition_metadata()
@@ -2076,6 +2088,9 @@ impl Controller {
                 self.metadata.lock().unwrap().sequence
             }
             Err(error) => {
+                if matches!(operation, LibraryOperation::LocalSource(_)) {
+                    ui.set_sm_local_message(error.clone().into());
+                }
                 ui.set_status(error.clone().into());
                 ui.set_management_report(error.into());
                 return;
@@ -2281,6 +2296,7 @@ impl Controller {
                     )),
                     LibraryOperation::DataSource(target) => c.switch_data_source(target)?,
                     LibraryOperation::ServerRoot(root) => c.execute_server_root(root)?,
+                    LibraryOperation::LocalSource(request) => c.execute_local_source(request)?,
                     LibraryOperation::Switch { path, create } => {
                         if *create && path.exists() {
                             return Err(c.localized("新建音效库的文件已存在，请选择新的文件名", "New database destination already exists; choose a new filename").to_string());
@@ -2339,6 +2355,10 @@ impl Controller {
                             .select_database(&selected_path)
                             .map_err(|e| e.to_string())?;
                         preferences.save().map_err(|e| e.to_string())?;
+                        c.pregenerate_list_waveforms
+                            .store(preferences.pregenerate_list_waveforms, Ordering::Release);
+                        c.list_waveforms
+                            .set_pregenerate(preferences.pregenerate_list_waveforms);
                         *config = preferences;
                         *c.sqlite.write().unwrap() = next;
                         format!(
@@ -2413,8 +2433,10 @@ impl Controller {
                 if switches_workspace && !succeeded {
                     c2.thaw_search_workspace();
                 }
-                if matches!(operation, LibraryOperation::DataSource(_))
-                    && c2.source_changing.load(Ordering::Acquire)
+                if matches!(
+                    operation,
+                    LibraryOperation::DataSource(_) | LibraryOperation::LocalSource(_)
+                ) && c2.source_changing.load(Ordering::Acquire)
                 {
                     c2.finish_source_change(&ui, succeeded);
                 }
@@ -2446,6 +2468,7 @@ impl Controller {
                                         LibraryOperation::Switch { .. }
                                             | LibraryOperation::Restore(_)
                                             | LibraryOperation::DataSource(_)
+                                            | LibraryOperation::LocalSource(_)
                                     ) && !retain_search,
                                     retain_search,
                                 );
@@ -2486,6 +2509,10 @@ impl Controller {
                         );
                     }
                     Err(error) => {
+                        if matches!(operation, LibraryOperation::LocalSource(_)) {
+                            ui.set_sm_local_message(error.clone().into());
+                            ui.set_ds_message(error.clone().into());
+                        }
                         if matches!(operation, LibraryOperation::DataSource(_)) {
                             ui.set_ds_message(error.clone().into());
                         }
@@ -2526,6 +2553,26 @@ impl Controller {
                 }
                 if let LibraryOperation::ServerRoot(root) = &operation {
                     c2.server_root_finished(&ui, root, succeeded);
+                }
+                if let LibraryOperation::LocalSource(request) = &operation {
+                    c2.publish_data_source(&ui);
+                    if succeeded {
+                        c2.finish_local_source(request, &ui);
+                    }
+                }
+                if succeeded && matches!(operation, LibraryOperation::Switch { .. }) {
+                    let id = c2
+                        .config
+                        .lock()
+                        .unwrap()
+                        .selected_local_library()
+                        .map(|entry| entry.id.clone());
+                    if let Some(id) = id {
+                        c2.finish_local_source(
+                            &remote_mode::LocalSourceRequest::Switch { id },
+                            &ui,
+                        );
+                    }
                 }
                 if c2.close_after_operation.swap(false, Ordering::AcqRel) && succeeded {
                     c2.request_close(&ui);
@@ -2873,7 +2920,9 @@ impl Controller {
                         config.audio_table = c.audio_table.lock().unwrap().clone();
                         config.max_search_tasks = c.max_search_tasks.load(Ordering::Acquire);
                         config.window_layout = c.window_layout.lock().unwrap().clone();
-                        config.save()
+                        config
+                            .reconcile_local_libraries()
+                            .and_then(|_| config.save())
                     };
                     if let Err(error) = result {
                         c.status(error.to_string());
@@ -3352,6 +3401,7 @@ impl Controller {
                 // Network audition waiting for data: since when, and whether the hint shows.
                 let mut buffering_since: Option<Instant> = None;
                 let mut buffering_shown = false;
+                let mut last_wave_progress = Instant::now() - Duration::from_secs(1);
                 while !c.shutdown.load(Ordering::Acquire) {
                     if c.library_busy.load(Ordering::Acquire) {
                         std::thread::sleep(Duration::from_millis(65));
@@ -3364,6 +3414,13 @@ impl Controller {
                         status.state,
                         PlaybackState::Loading | PlaybackState::Playing
                     ));
+                    let wave_progress =
+                        if last_wave_progress.elapsed() >= Duration::from_millis(500) {
+                            last_wave_progress = Instant::now();
+                            Some(c.list_waveforms.progress())
+                        } else {
+                            None
+                        };
                     let history_events: Vec<_> = events.try_iter().collect();
                     if playback_history
                         .library_generation
@@ -3447,6 +3504,16 @@ impl Controller {
                             || c2.library_busy.load(Ordering::Acquire)
                         {
                             return;
+                        }
+                        if let Some(progress) = wave_progress
+                            && c2.list_waveforms.generation() == progress.generation
+                            && ui.get_library_visible()
+                            && !ui.get_remote_mode()
+                        {
+                            let text = progress.text(c2.chinese.load(Ordering::Acquire));
+                            if ui.get_local_waveform_progress().as_str() != text {
+                                ui.set_local_waveform_progress(text.into());
+                            }
                         }
                         publish_playback_progress(&ui, &status, progress_continues);
                         let ready = !matches!(
@@ -6310,7 +6377,10 @@ impl Controller {
         }
         config.playback =
             serde_json::to_value(self.playback.lock().unwrap().clone()).unwrap_or_default();
-        if let Err(error) = config.save() {
+        if let Err(error) = config
+            .reconcile_local_libraries()
+            .and_then(|_| config.save())
+        {
             tracing::warn!(%error,"Save desktop preferences");
         }
         let _ = self.audio.send(AudioCommand::Shutdown);

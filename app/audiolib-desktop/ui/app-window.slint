@@ -1060,23 +1060,40 @@ export component AppWindow inherits Window {
     callback data-source-sync-restart-requested();
     callback remote-write-refused();
     // Unified library manager with local and server settings; shown by
-    // library-visible. Row 0 of sm-sources is the local library, then one row per server
-    // profile; sm-selected -1 is a new, unsaved server.
+    // library-visible. Local libraries precede server profiles; row 0 is default.
+    // sm-selected -1 is a new, unsaved server.
     in property <[SourceRow]> sm-sources: [{ kind: 0, active: true }];
     in-out property <int> sm-selected: 0;
     // Server pages: 0 连接与库信息, 1 服务器音效库, 2 缓存与导出 (试听/性能 lives on page 2).
     in-out property <int> sm-page: 0;
     in-out property <bool> sm-confirm-delete: false;
     in property <string> sm-local-path: "";
+    in property <int> sm-local-count: 1;
+    in property <bool> sm-local-default: true;
+    in property <string> sm-local-description: "";
+    in-out property <bool> sm-add-choice: false;
+    in-out property <bool> sm-local-form: false;
+    in-out property <bool> sm-local-editing: false;
+    in-out property <string> sm-local-name: "";
+    in-out property <string> sm-local-description-draft: "";
+    in-out property <string> sm-local-path-draft: "";
+    in-out property <bool> sm-local-existing: false;
+    in-out property <bool> sm-local-pregenerate: true;
+    in property <string> sm-local-message: "";
+    in property <string> local-waveform-progress: "";
+    callback sm-local-add-requested();
+    callback sm-local-edit-requested();
+    callback sm-local-browse-requested();
+    callback sm-local-save-requested();
     property <bool> sm-new: root.sm-selected < 0;
-    property <bool> sm-server: root.sm-selected != 0;
+    property <bool> sm-server: !root.sm-local-form && (root.sm-new || (root.sm-selected < root.sm-sources.length && root.sm-sources[root.sm-selected].kind == 1));
     property <bool> sm-active: root.sm-selected >= 0 && root.sm-selected < root.sm-sources.length && root.sm-sources[root.sm-selected].active;
     // The local library's management content shows only while local mode is active.
     // The library management content works on the open library: the local one, or in
     // server mode the snapshot (history, missing files, check, backup copy, export) on
     // the active server's 缓存与导出 page.
-    property <bool> sm-local-content: (root.sm-selected == 0 && !root.remote-mode) || (root.sm-server && root.sm-active && root.remote-mode && root.sm-page == 2);
-    property <string> sm-title: root.sm-new ? (root.chinese ? "新服务器（未保存）" : "New server (unsaved)") : ((root.sm-selected == 0 ? (root.chinese ? "本地素材库" : "Local library") : (root.sm-selected < root.sm-sources.length ? root.sm-sources[root.sm-selected].name : "")) + (root.sm-active ? (root.chinese ? " · 当前数据源" : " · active") : (root.chinese ? " · 未生效" : " · not active")));
+    property <bool> sm-local-content: !root.sm-local-form && ((!root.sm-server && root.sm-active && !root.remote-mode) || (root.sm-server && root.sm-active && root.remote-mode && root.sm-page == 2));
+    property <string> sm-title: root.sm-local-form ? (root.sm-local-editing ? (root.chinese ? "编辑本地音效库" : "Edit local library") : (root.chinese ? "添加本地音效库" : "Add local library")) : root.sm-new ? (root.chinese ? "新服务器（未保存）" : "New server (unsaved)") : ((root.sm-selected < root.sm-sources.length ? root.sm-sources[root.sm-selected].name : "") + (root.sm-active ? (root.chinese ? " · 当前数据源" : " · active") : (root.chinese ? " · 未生效" : " · not active")));
     // Connection page (the old data source dialog's fields, per profile).
     in-out property <string> ds-name: "";
     in property <bool> ds-token-saved: false;
@@ -1231,7 +1248,7 @@ export component AppWindow inherits Window {
     }
     // Select a source row (click, Up/Down, 添加服务器): unsaved 连接 edits prompt first.
     public function sm-select-row(index: int) {
-        if index == root.sm-selected || ((root.ds-applying || root.library-busy) && !(index == 0 && root.sm-local-escape)) || root.sm-manage-busy {
+        if (index == root.sm-selected && !root.sm-local-form) || ((root.ds-applying || root.library-busy) && !(index == 0 && root.sm-local-escape)) || root.sm-manage-busy {
             return;
         }
         if root.ds-dirty && root.sm-server {
@@ -1248,6 +1265,12 @@ export component AppWindow inherits Window {
         root.sm-root-form = false;
         root.sm-root-selected = -1;
         root.close-remote-folder();
+        root.sm-add-choice = false;
+        if index == -4 {
+            root.sm-local-add-requested();
+            return;
+        }
+        root.sm-local-form = false;
         root.sm-selected = index;
         root.sm-page = 0;
         if index < 0 {
@@ -2789,7 +2812,7 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                     Action { width: 160px * Theme.ui-scale; active: !root.sm-server; enabled: (!root.ds-applying && !root.library-busy) || root.sm-local-escape; label: root.chinese ? "本地设置" : "Local settings"; clicked => { root.sm-select-row(0); } }
-                    Action { width: 160px * Theme.ui-scale; active: root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "服务器设置" : "Server settings"; clicked => { if !root.sm-server { root.sm-select-row(root.sm-sources.length > 1 ? 1 : -1); } } }
+                    Action { width: 160px * Theme.ui-scale; active: root.sm-server; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "服务器设置" : "Server settings"; clicked => { if !root.sm-server { root.sm-select-row(root.sm-sources.length > root.sm-local-count ? root.sm-local-count : -1); } } }
                     Rectangle { horizontal-stretch: 1; }
                 }
                 if root.sm-server || root.shared-sync-dirty: Rectangle { height: root.shared-sync-close-pending ? 100px * Theme.ui-scale : 64px * Theme.ui-scale; background: Theme.bg; border-radius: 5px * Theme.ui-scale;
@@ -2832,7 +2855,7 @@ export component AppWindow inherits Window {
                                 VerticalLayout { padding: 4px * Theme.ui-scale; spacing: 3px * Theme.ui-scale; alignment: start;
                                     for source[index] in root.sm-sources: Rectangle { height: 58px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale; background: root.sm-selected == index ? Theme.selected : (source-hit.has-hover ? Theme.hover : transparent);
                                         VerticalLayout { padding-left: 8px * Theme.ui-scale; padding-right: 6px * Theme.ui-scale; padding-top: 5px * Theme.ui-scale; padding-bottom: 5px * Theme.ui-scale; spacing: 1px;
-                                            Text { text: (source.active ? "● " : "○ ") + (source.kind == 0 ? (root.chinese ? "本地素材库" : "Local library") : source.name); color: source.active ? Theme.accent : Theme.ink; font-size: Theme.font(12); font-weight: 600; overflow: elide; }
+                                            Text { text: (source.active ? "● " : "○ ") + source.name; color: source.active ? Theme.accent : Theme.ink; font-size: Theme.font(12); font-weight: 600; overflow: elide; }
                                             Text { text: source.subtitle; color: Theme.muted; font-size: Theme.font(10); overflow: elide; }
                                             Text { text: source.active ? ((root.chinese ? "当前数据源" : "Active") + (source.status != "" ? " · " + source.status : "")) : source.status; color: source.status-kind == 3 ? Theme.warning : (source.status-kind == 1 ? Theme.accent : Theme.dim); font-size: Theme.font(10); overflow: elide; }
                                         }
@@ -2853,13 +2876,18 @@ export component AppWindow inherits Window {
                                 Action { horizontal-stretch: 1; enabled: !root.ds-applying; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-pending-select = -2; } }
                             }
                         }
-                        Action { height: 30px * Theme.ui-scale; enabled: !root.ds-applying && !root.library-busy && !root.sm-new && root.sm-pending-select == -2; label: root.chinese ? "＋ 添加服务器" : "+ Add server"; clicked => { root.sm-select-row(-1); } }
-                        if root.sm-selected > 0 && !root.sm-confirm-delete: Action { height: 30px * Theme.ui-scale; enabled: !root.ds-applying && !root.library-busy && !root.sm-active; label: root.chinese ? "删除此服务器配置…" : "Delete this server profile…"; clicked => { root.sm-confirm-delete = true; } }
-                        if root.sm-selected > 0 && root.sm-active && !root.sm-confirm-delete: Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted; text: root.chinese ? "当前数据源不能删除，请先切换到其他数据源。" : "The active source cannot be deleted; switch to another source first."; }
+                        Action { height: 30px * Theme.ui-scale; enabled: !root.ds-applying && !root.library-busy && root.sm-pending-select == -2; label: root.chinese ? "＋ 添加源" : "+ Add source"; clicked => { root.sm-add-choice = !root.sm-add-choice; } }
+                        if root.sm-add-choice: VerticalLayout { spacing: 4px * Theme.ui-scale;
+                            Action { height: 30px * Theme.ui-scale; label: root.chinese ? "本地音效库路径…" : "Local library path…"; clicked => { root.sm-select-row(-4); } }
+                            Action { height: 30px * Theme.ui-scale; label: root.chinese ? "服务器音效库…" : "Server library…"; clicked => { root.sm-select-row(-1); } }
+                        }
+                        if !root.sm-new && !root.sm-local-form && (root.sm-server || !root.sm-local-default) && !root.sm-confirm-delete: Action { height: 30px * Theme.ui-scale; enabled: !root.ds-applying && !root.library-busy && !root.sm-active; label: root.sm-server ? (root.chinese ? "删除此服务器配置…" : "Delete this server profile…") : (root.chinese ? "移除此本地音效库…" : "Remove this local library…"); clicked => { root.sm-confirm-delete = true; } }
+                        if !root.sm-new && !root.sm-local-form && (root.sm-server || !root.sm-local-default) && root.sm-active && !root.sm-confirm-delete: Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted; text: root.chinese ? "当前数据源不能移除，请先切换到其他数据源。" : "Switch to another source before removing the active source."; }
+                        if !root.sm-server && !root.sm-local-form && root.sm-local-default: Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted; text: root.chinese ? "default 为默认音效库，无法移除。" : "The default library cannot be removed."; }
                         if root.sm-confirm-delete: VerticalLayout { spacing: 4px * Theme.ui-scale;
-                            Label { wrap: word-wrap; font-size: Theme.font(11); color: Theme.warning; text: root.chinese ? "删除此连接配置及其令牌？不会删除任何缓存、快照或数据目录，服务器上的音效库也不受影响。" : "Delete this connection profile and its token? No cache, snapshot or data directory is deleted, and the server library is not affected."; }
+                            Label { wrap: word-wrap; font-size: Theme.font(11); color: Theme.warning; text: root.sm-server ? (root.chinese ? "删除此连接配置及其令牌？不会删除任何缓存、快照或数据目录，服务器上的音效库也不受影响。" : "Delete this connection profile and its token? No cache, snapshot or data directory is deleted, and the server library is not affected.") : (root.chinese ? "从数据源列表移除此音效库？数据库、标注和磁盘中的 WAV 文件均保留，可随时重新添加数据库。" : "Remove this library from the source list? Its database, annotations and WAV files are kept; the database can be added again." ); }
                             HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-                                Action { horizontal-stretch: 1; enabled: !root.ds-applying; label: root.chinese ? "确认删除" : "Delete profile"; clicked => { root.sm-confirm-delete = false; root.sm-delete-requested(); } }
+                                Action { horizontal-stretch: 1; enabled: !root.ds-applying; label: root.chinese ? "确认移除" : "Confirm removal"; clicked => { root.sm-confirm-delete = false; root.sm-delete-requested(); } }
                                 Action { horizontal-stretch: 1; label: root.chinese ? "取消" : "Keep"; clicked => { root.sm-confirm-delete = false; } }
                             }
                         }
@@ -2867,7 +2895,11 @@ export component AppWindow inherits Window {
                     VerticalLayout { horizontal-stretch: 1; spacing: 8px * Theme.ui-scale;
                         HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                             Text { horizontal-stretch: 1; vertical-alignment: center; overflow: elide; color: Theme.ink; font-size: Theme.font(15); font-weight: 600; text: root.sm-title; }
-                            if root.library-visible && !root.sm-new && !root.sm-active: Action { width: 150px * Theme.ui-scale; primary: true; enabled: (!root.ds-applying && !root.library-busy) || (!root.sm-server && root.sm-local-escape); label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
+                            if root.library-visible && !root.sm-new && !root.sm-local-form && !root.sm-active: Action { width: 150px * Theme.ui-scale; primary: true; enabled: (!root.ds-applying && !root.library-busy) || (!root.sm-server && root.sm-local-escape); label: root.sm-server && root.ds-dirty ? (root.chinese ? "保存并切换" : "Save and switch") : (root.chinese ? "切换到此数据源" : "Switch to this source"); clicked => { root.sm-switch-requested(); } }
+                        }
+                        if root.library-visible && !root.sm-server && !root.sm-local-form: HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                            Text { horizontal-stretch: 1; text: root.sm-local-description; color: Theme.dim; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
+                            Action { width: 110px * Theme.ui-scale; enabled: !root.ds-applying && !root.library-busy; label: root.chinese ? "编辑音效库…" : "Edit library…"; clicked => { root.sm-local-edit-requested(); } }
                         }
                         if root.library-visible && root.sm-server: HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                             Action { width: 96px * Theme.ui-scale; active: root.sm-page == 0; enabled: !root.ds-applying; label: root.chinese ? "连接与库信息" : "Connection & library"; clicked => { root.sm-page = 0; root.sm-page-selected(0); } }
@@ -2977,6 +3009,7 @@ export component AppWindow inherits Window {
                                                 Label { height: 32px * Theme.ui-scale; wrap: word-wrap; font-size: Theme.font(10);
                                                     text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
                                                 }
+                                                Text { text: root.local-waveform-progress; color: Theme.accent; font-size: Theme.font(11); wrap: word-wrap; }
                                             }
                                             if root.remote-mode: Label {
                                                 wrap: word-wrap; font-size: Theme.font(11); color: Theme.muted;
@@ -3128,10 +3161,36 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            if root.library-visible && root.sm-selected == 0 && root.remote-mode: VerticalLayout { width: parent.width; height: parent.height; spacing: 10px * Theme.ui-scale; alignment: start;
-                                Label { wrap: word-wrap; text: root.chinese ? "本地素材库当前未生效（正在使用服务器）。扫描、修复引用和高级维护需要先切换到本地模式；切换不会改动本地素材库，也不影响服务器。" : "The local library is not active (a server is in use). Scans, reference repair and maintenance need local mode; switching changes neither the local library nor the server."; }
+                            if root.library-visible && !root.sm-server && !root.sm-local-form && !root.sm-active: VerticalLayout { width: parent.width; height: parent.height; spacing: 10px * Theme.ui-scale; alignment: start;
+                                Label { wrap: word-wrap; text: root.chinese ? "此本地音效库当前未生效。切换到此数据源后，可扫描文件夹、管理音效及生成列表波形。" : "This local library is inactive. Switch to this source to scan folders, manage sounds and generate list Waveforms."; }
                                 Text { text: root.sm-local-path; color: Theme.dim; font-size: Theme.font(11); wrap: word-wrap; }
                                 if root.ds-message != "": Label { wrap: word-wrap; font-size: Theme.font(11); color: Theme.warning; text: root.ds-message; }
+                            }
+                            if root.library-visible && root.sm-local-form: VerticalLayout { width: parent.width; height: parent.height; spacing: 10px * Theme.ui-scale;
+                                ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
+                                    VerticalLayout { padding-right: 10px * Theme.ui-scale; spacing: 12px * Theme.ui-scale; alignment: start;
+                                        Label { wrap: word-wrap; text: root.chinese ? "每个本地音效库独立保存音效索引和标注，可在左侧切换。" : "Each local library keeps its own audio index and annotations. Switch libraries in the source list."; color: Theme.dim; font-size: Theme.font(11); }
+                                        Label { text: root.chinese ? "名称" : "Name"; }
+                                        LineEdit { height: 32px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; text <=> root.sm-local-name; input-label: root.chinese ? "本地音效库名称" : "Local library name"; placeholder-text: root.chinese ? "例如 Foley、环境声" : "For example Foley or Ambience"; }
+                                        Label { text: root.chinese ? "简介" : "Description"; }
+                                        LineEdit { height: 32px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; text <=> root.sm-local-description-draft; input-label: root.chinese ? "本地音效库简介" : "Local library description"; placeholder-text: root.chinese ? "可选，简要描述音效库内容" : "Optional description of this library"; }
+                                        if !root.sm-local-editing: CheckBox { height: 30px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; text: root.chinese ? "添加已有本地音效数据库" : "Add an existing local library database"; checked <=> root.sm-local-existing; toggled => { root.sm-local-path-draft = ""; } }
+                                        Label { text: root.sm-local-existing || root.sm-local-editing ? (root.chinese ? "数据库路径" : "Database path") : (root.chinese ? "本地音效文件夹路径" : "Local audio folder path"); }
+                                        HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                                            LineEdit { horizontal-stretch: 1; enabled: !root.sm-local-editing && !root.library-busy && !root.ds-applying; text <=> root.sm-local-path-draft; input-label: root.chinese ? "本地音效库路径" : "Local library path"; placeholder-text: root.sm-local-existing ? (root.chinese ? "选择 AudioLib 数据库（.db）" : "Choose an AudioLib database (.db)") : (root.chinese ? "选择包含 WAV 音效的文件夹" : "Choose a folder containing WAV files"); }
+                                            if !root.sm-local-editing: Action { width: 90px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; label: root.chinese ? "浏览…" : "Browse…"; clicked => { root.sm-local-browse-requested(); } }
+                                        }
+                                        if !root.sm-local-editing: Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted; text: root.sm-local-existing ? (root.chinese ? "已有数据库通过校验后加入列表，保留其中的 Metadata 和标注。" : "The existing database is validated before it is added; its Metadata and annotations are preserved.") : (root.chinese ? "添加后创建独立数据库，并在后台扫描此文件夹；原始 WAV 文件保留在原位置。" : "Creates a separate database and scans this folder in the background. Source WAV files stay in place."); }
+                                        CheckBox { height: 30px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; text: root.chinese ? "预生成列表波形" : "Pre-generate list Waveforms"; checked <=> root.sm-local-pregenerate; }
+                                        Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted; text: root.chinese ? "扫描完成后后台生成全库列表缩略波形，并显示文字进度；试听和扫描时暂停。关闭后仅计算可见行。" : "After scanning, generates list thumbnails in the background with text progress, yielding to auditions and scans. When off, only visible rows are computed."; }
+                                        if root.sm-local-message != "": Text { text: root.sm-local-message; color: Theme.warning; wrap: word-wrap; font-size: Theme.font(11); }
+                                    }
+                                }
+                                HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                                    Action { width: 164px * Theme.ui-scale; primary: true; enabled: !root.library-busy && !root.ds-applying; label: root.library-busy || root.ds-applying ? (root.chinese ? "正在处理…" : "Working…") : root.sm-local-editing ? (root.chinese ? "保存音效库设置" : "Save library settings") : (root.chinese ? "添加并切换" : "Add and switch"); clicked => { root.sm-local-save-requested(); } }
+                                    Action { width: 90px * Theme.ui-scale; enabled: !root.library-busy && !root.ds-applying; label: root.chinese ? "取消" : "Cancel"; clicked => { root.sm-local-form = false; } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
                             }
                             if root.library-visible && root.sm-server && root.sm-page == 0: VerticalLayout { width: parent.width; height: parent.height; spacing: 8px * Theme.ui-scale;
                                 connection-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
