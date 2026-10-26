@@ -117,7 +117,22 @@ pub(crate) fn fast_upgrade_album(conn: &mut Connection) -> Result<bool> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    if version != SCHEMA_VERSION - 1 || pending(conn)? {
+    if pending(conn)? {
+        return Ok(false);
+    }
+    let has_column: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
+             WHERE name='album' COLLATE NOCASE)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let upgrade_source = version == SCHEMA_VERSION - 1;
+    // Also repair a v7 library whose album column is missing (for example one produced by
+    // a storage migration that predates the column); the derived state is rebuilt the same
+    // way, so no further migration and no audio file is needed.
+    if !upgrade_source && (version != SCHEMA_VERSION || has_column) {
         return Ok(false);
     }
     validate_supported_feature_revisions(conn)?;
@@ -129,7 +144,9 @@ pub(crate) fn fast_upgrade_album(conn: &mut Connection) -> Result<bool> {
     )
     .map_err(db_error)?;
     tx.execute_batch(ALBUM_INDEX).map_err(db_error)?;
-    mark_current(&tx)?;
+    if upgrade_source {
+        mark_current(&tx)?;
+    }
     tx.commit().map_err(db_error)?;
     Ok(true)
 }
