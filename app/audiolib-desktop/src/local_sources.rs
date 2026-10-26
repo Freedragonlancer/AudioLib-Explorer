@@ -206,14 +206,25 @@ impl Controller {
         + 'static,
         complete: impl FnOnce(&Arc<Self>, &AppWindow) + Send + 'static,
     ) {
+        if !self.available()
+            || ui.get_ds_applying()
+            || self.library_busy.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
         let generation = self.remote.lock().unwrap().manager.form_generation;
+        ui.set_library_busy(true);
         ui.set_ds_applying(true);
         ui.set_sm_local_message("".into());
         let c = self.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 let mut config = c.config.lock().unwrap();
+                if c.shutdown.load(Ordering::Acquire) {
+                    return Err(audiolib_core::Error::Cancelled);
+                }
                 let mut next = config.clone();
+                c.mirror_local_waveform_preference(&mut next);
                 next.reconcile_local_libraries()?;
                 update(&mut next)?;
                 next.save()?;
@@ -226,7 +237,10 @@ impl Controller {
             })();
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
+                c2.library_busy.store(false, Ordering::Release);
+                ui.set_library_busy(false);
                 ui.set_ds_applying(false);
+                let succeeded = result.is_ok();
                 match result {
                     Ok(()) => {
                         c2.publish_sources(&ui);
@@ -242,7 +256,7 @@ impl Controller {
                         ui.set_ds_message(error.to_string().into());
                     }
                 }
-                if c2.close_after_operation.swap(false, Ordering::AcqRel) {
+                if c2.close_after_operation.swap(false, Ordering::AcqRel) && succeeded {
                     c2.request_close(&ui);
                 }
             });
@@ -274,11 +288,15 @@ impl Controller {
         request: &LocalSourceRequest,
     ) -> Result<String, String> {
         let chinese = self.chinese.load(Ordering::Acquire);
-        let configuration = self.config.lock().unwrap().clone();
-        let mut next_config = configuration.clone();
-        next_config
-            .reconcile_local_libraries()
-            .map_err(|error| error.to_string())?;
+        let configuration = {
+            let mut config = self.config.lock().unwrap();
+            self.mirror_local_waveform_preference(&mut config);
+            let mut snapshot = config.clone();
+            snapshot
+                .reconcile_local_libraries()
+                .map_err(|error| error.to_string())?;
+            snapshot
+        };
         let (path, create, registration) = match request {
             LocalSourceRequest::Register {
                 name,
@@ -314,7 +332,7 @@ impl Controller {
                 )
             }
             LocalSourceRequest::Switch { id } => {
-                let library = next_config.local_library(id).ok_or_else(|| {
+                let library = configuration.local_library(id).ok_or_else(|| {
                     cn_or(
                         chinese,
                         "本地音效库不存在。",
@@ -369,34 +387,36 @@ impl Controller {
                 "Selected library failed validation.",
             ));
         }
-        let id = match registration {
-            Some((name, description, pregenerate)) => next_config
-                .register_local_library(name, description, &path, pregenerate)
-                .map_err(|error| error.to_string())?,
-            None => match request {
-                LocalSourceRequest::Switch { id } => id.clone(),
-                _ => unreachable!(),
-            },
-        };
-        next_config
-            .select_local_library(&id)
-            .map_err(|error| error.to_string())?;
-        next_config
-            .data_source
-            .set_active(&ActiveSource::Local)
-            .map_err(|error| error.to_string())?;
-        next_config.data_source_fallback = None;
         crate::startup::prepare_local_search(&provider);
-        // Keep unrelated preferences saved during the provider open. The library gate
-        // prevents another source transition; copy only this operation's source fields.
+        // Open can be slow. Apply only this source operation to the latest settings,
+        // including any preference or server profile updates saved in the meantime.
         {
             let mut config = self.config.lock().unwrap();
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err("Desktop is shutting down".into());
+            }
             let mut committed = config.clone();
-            committed.paths.database = next_config.paths.database.clone();
-            committed.paths.legacy_database = None;
-            committed.data_source = next_config.data_source;
+            self.mirror_local_waveform_preference(&mut committed);
+            committed
+                .reconcile_local_libraries()
+                .map_err(|error| error.to_string())?;
+            let id = match registration {
+                Some((name, description, pregenerate)) => committed
+                    .register_local_library(name, description, &path, pregenerate)
+                    .map_err(|error| error.to_string())?,
+                None => match request {
+                    LocalSourceRequest::Switch { id } => id.clone(),
+                    _ => unreachable!(),
+                },
+            };
+            committed
+                .select_local_library(&id)
+                .map_err(|error| error.to_string())?;
+            committed
+                .data_source
+                .set_active(&ActiveSource::Local)
+                .map_err(|error| error.to_string())?;
             committed.data_source_fallback = None;
-            committed.pregenerate_list_waveforms = next_config.pregenerate_list_waveforms;
             committed.save().map_err(|error| error.to_string())?;
             self.pregenerate_list_waveforms
                 .store(committed.pregenerate_list_waveforms, Ordering::Release);
@@ -488,6 +508,233 @@ mod tests {
         config::{AppConfig, ServerProfile},
     };
     use slint::{ComponentHandle, Model};
+
+    fn local_controller(root: &Path) -> (AppWindow, Arc<Controller>, AudioEngine) {
+        let mut config = source_transition_tests::configuration(&root.join("preferences"));
+        config.reconcile_local_libraries().unwrap();
+        let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            ..Default::default()
+        };
+        let engine = AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
+        ui.set_library_visible(true);
+        (ui, controller, engine)
+    }
+
+    #[test]
+    fn pending_checkbox_changes_survive_local_switch_and_inactive_library_edit() {
+        source_transition_tests::isolated_module(
+            "source_manager::local_sources::tests",
+            "child_pending_checkbox_changes",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated pending preferences, source selection and local editor regression"]
+    fn child_pending_checkbox_changes() {
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = source_transition_tests::root();
+        let (ui, controller, _engine) = local_controller(&root);
+        let other = SqliteProvider::open(&root.join("other.db")).unwrap();
+        let id = {
+            let mut config = controller.config.lock().unwrap();
+            config
+                .update_local_library(DEFAULT_LOCAL_LIBRARY_ID, "default", "", true)
+                .unwrap();
+            config
+                .register_local_library("Other", "", other.database_path(), true)
+                .unwrap()
+        };
+        // Model a clicked checkbox before its asynchronous preference worker runs:
+        // the atomic value is current, while both saved fields still say true.
+        controller
+            .pregenerate_list_waveforms
+            .store(false, Ordering::Release);
+        controller
+            .execute_local_source(&LocalSourceRequest::Switch { id: id.clone() })
+            .unwrap();
+        {
+            let config = controller.config.lock().unwrap();
+            assert!(
+                !config
+                    .local_library(DEFAULT_LOCAL_LIBRARY_ID)
+                    .unwrap()
+                    .pregenerate_list_waveforms
+            );
+            assert!(config.pregenerate_list_waveforms);
+        }
+        let loaded = AppConfig::load_in(controller.data_root()).unwrap();
+        assert!(
+            !loaded
+                .local_library(DEFAULT_LOCAL_LIBRARY_ID)
+                .unwrap()
+                .pregenerate_list_waveforms
+        );
+        controller
+            .execute_local_source(&LocalSourceRequest::Switch {
+                id: DEFAULT_LOCAL_LIBRARY_ID.into(),
+            })
+            .unwrap();
+        // Editing inactive Other must not overwrite the current default library's
+        // newer checkbox value or its running background service.
+        controller
+            .pregenerate_list_waveforms
+            .store(true, Ordering::Release);
+        controller.set_selection(Selection::LocalLibrary(id.clone()));
+        ui.invoke_sm_local_edit_requested();
+        ui.set_sm_local_name("Other edited".into());
+        ui.set_sm_local_pregenerate(false);
+        ui.invoke_sm_local_save_requested();
+        let saved = controller.clone();
+        source_transition_tests::run_until(&ui, move || {
+            !saved.library_busy.load(Ordering::Acquire)
+        });
+        let config = controller.config.lock().unwrap();
+        assert!(config.pregenerate_list_waveforms);
+        assert!(
+            config
+                .local_library(DEFAULT_LOCAL_LIBRARY_ID)
+                .unwrap()
+                .pregenerate_list_waveforms
+        );
+        assert!(
+            !config
+                .local_library(&id)
+                .unwrap()
+                .pregenerate_list_waveforms
+        );
+        assert_eq!(config.local_library(&id).unwrap().name, "Other edited");
+        drop(config);
+        assert!(
+            controller
+                .pregenerate_list_waveforms
+                .load(Ordering::Acquire)
+        );
+        assert!(controller.list_waveforms.progress().enabled);
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
+
+    #[test]
+    fn closing_waits_for_requested_local_preference_save() {
+        source_transition_tests::isolated_module(
+            "source_manager::local_sources::tests",
+            "child_close_during_local_save",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated native-close admission while local settings save is pending"]
+    fn child_close_during_local_save() {
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = source_transition_tests::root();
+        let (ui, controller, _engine) = local_controller(&root);
+        let (entered, writing) = std::sync::mpsc::sync_channel(1);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        controller.update_local_preferences(
+            &ui,
+            move |config| {
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                config.update_local_library(
+                    DEFAULT_LOCAL_LIBRARY_ID,
+                    "Saved before close",
+                    "Kept",
+                    true,
+                )
+            },
+            |_, _| {},
+        );
+        writing
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        controller.request_close(&ui);
+        assert!(controller.close_after_operation.load(Ordering::Acquire));
+        assert!(!controller.closing.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        // The save completion, rather than this predicate, must initiate the
+        // normal close drain and end this single event-loop invocation.
+        source_transition_tests::run_until(&ui, || false);
+        assert!(!ui.window().is_visible());
+        assert!(controller.closing.load(Ordering::Acquire));
+        let loaded = AppConfig::load_in(controller.data_root()).unwrap();
+        assert_eq!(
+            loaded.local_library(DEFAULT_LOCAL_LIBRARY_ID).unwrap().name,
+            "Saved before close"
+        );
+        assert_eq!(
+            loaded
+                .local_library(DEFAULT_LOCAL_LIBRARY_ID)
+                .unwrap()
+                .description,
+            "Kept"
+        );
+        controller.shutdown();
+    }
+
+    #[test]
+    fn failed_local_preference_save_keeps_requested_close_open() {
+        source_transition_tests::isolated_module(
+            "source_manager::local_sources::tests",
+            "child_failed_local_save_keeps_window",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated local settings failure with a queued native close"]
+    fn child_failed_local_save_keeps_window() {
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = source_transition_tests::root();
+        let (ui, controller, _engine) = local_controller(&root);
+        let original_settings = controller.config.lock().unwrap().paths.settings.clone();
+        let blocked = root.join("settings-is-directory");
+        std::fs::create_dir(&blocked).unwrap();
+        controller.config.lock().unwrap().paths.settings = blocked;
+        let (entered, writing) = std::sync::mpsc::sync_channel(1);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        controller.update_local_preferences(
+            &ui,
+            move |config| {
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                config.update_local_library(DEFAULT_LOCAL_LIBRARY_ID, "Must not commit", "", true)
+            },
+            |_, _| panic!("A failed save must not complete the editor"),
+        );
+        writing
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        controller.request_close(&ui);
+        assert!(controller.close_after_operation.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        let completed = controller.clone();
+        let form = ui.as_weak();
+        source_transition_tests::run_until(&ui, move || {
+            !completed.library_busy.load(Ordering::Acquire)
+                && !form.upgrade().unwrap().get_ds_applying()
+        });
+        assert!(ui.window().is_visible());
+        assert!(!controller.closing.load(Ordering::Acquire));
+        assert!(!controller.close_after_operation.load(Ordering::Acquire));
+        assert!(!ui.get_sm_local_message().is_empty());
+        assert!(!ui.get_ds_message().is_empty());
+        let mut config = controller.config.lock().unwrap();
+        assert_eq!(
+            config.local_library(DEFAULT_LOCAL_LIBRARY_ID).unwrap().name,
+            "default"
+        );
+        config.paths.settings = original_settings;
+        drop(config);
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
 
     #[test]
     fn local_registration_switch_and_rejection_preserve_library_data() {

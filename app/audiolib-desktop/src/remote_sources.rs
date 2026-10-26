@@ -13,7 +13,10 @@ use std::sync::atomic::Ordering;
 impl Controller {
     /// Cancel a pending server sync before opening the requested local library.
     /// The library operation then owns the existing Metadata drain and rollback.
-    pub(super) fn begin_local_library_change(&self, ui: &AppWindow) -> Result<(), String> {
+    pub(in crate::controller) fn begin_local_library_change(
+        &self,
+        ui: &AppWindow,
+    ) -> Result<(), String> {
         self.begin_source_change_guarded(ui, true, true).map(|_| ())
     }
 

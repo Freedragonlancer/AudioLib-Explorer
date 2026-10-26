@@ -804,6 +804,21 @@ impl Controller {
         self.sqlite.read().unwrap().clone()
     }
 
+    /// Mirror a checkbox change before a source operation can replace its atomic
+    /// runtime value. The caller holds the configuration lock; no file I/O occurs.
+    fn mirror_local_waveform_preference(&self, config: &mut AppConfig) {
+        let enabled = self.pregenerate_list_waveforms.load(Ordering::Acquire);
+        config.pregenerate_list_waveforms = enabled;
+        let sources = &mut config.data_source;
+        if let Some(library) = sources
+            .local_libraries
+            .iter_mut()
+            .find(|library| sources.active_local_library.as_deref() == Some(library.id.as_str()))
+        {
+            library.pregenerate_list_waveforms = enabled;
+        }
+    }
+
     /// Provider for annotation writes: the local library, or in server mode the
     /// server API (`RemoteProvider`; the snapshot follows by the revision rule).
     fn metadata_provider(self: &Arc<Self>) -> Result<Arc<dyn DataProvider>, String> {
@@ -2057,6 +2072,14 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
+        if matches!(operation, LibraryOperation::LocalSource(_))
+            && !self.source_changing.load(Ordering::Acquire)
+            && let Err(error) = self.begin_local_library_change(&ui)
+        {
+            ui.set_sm_local_message(error.clone().into());
+            ui.set_ds_message(error.into());
+            return;
+        }
         let retain_search = matches!(&operation, LibraryOperation::DataSource(target)
             if self.is_same_library_snapshot_refresh(target));
         let retain_context = operation.retains_library_identity();
@@ -2090,6 +2113,7 @@ impl Controller {
             Err(error) => {
                 if matches!(operation, LibraryOperation::LocalSource(_)) {
                     ui.set_sm_local_message(error.clone().into());
+                    self.finish_source_change(&ui, false);
                 }
                 ui.set_status(error.clone().into());
                 ui.set_management_report(error.into());
@@ -2351,6 +2375,7 @@ impl Controller {
                         crate::startup::prepare_local_search(&next);
                         let mut config = c.config.lock().unwrap();
                         let mut preferences = config.clone();
+                        c.mirror_local_waveform_preference(&mut preferences);
                         preferences
                             .select_database(&selected_path)
                             .map_err(|e| e.to_string())?;
@@ -2559,6 +2584,7 @@ impl Controller {
                     if succeeded {
                         c2.finish_local_source(request, &ui);
                     }
+                    c2.publish_metadata_recovery_notice(&ui);
                 }
                 if succeeded && matches!(operation, LibraryOperation::Switch { .. }) {
                     let id = c2

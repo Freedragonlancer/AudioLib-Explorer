@@ -46,7 +46,7 @@ impl LocalLibrary {
         if !self.database.is_absolute()
             || self.database.as_os_str().len() > 32767
             || self.database.to_string_lossy().contains('\0')
-            || self.database.is_dir()
+            || self.database.file_name().is_none()
         {
             return Err(Error::Validation(
                 "Local library requires an absolute database file path".into(),
@@ -84,12 +84,20 @@ fn absolute(path: &Path) -> Result<PathBuf> {
 }
 
 fn same_database(left: &Path, right: &Path) -> bool {
-    let left = left.canonicalize().unwrap_or_else(|_| left.to_owned());
-    let right = right.canonicalize().unwrap_or_else(|_| right.to_owned());
+    if same_lexical_database(left, right) {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => same_lexical_database(&left, &right),
+        _ => false,
+    }
+}
+
+/// Compare persisted spellings without touching files or unavailable network shares.
+fn same_lexical_database(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
+        windows_database_spelling(left).eq_ignore_ascii_case(&windows_database_spelling(right))
     }
     #[cfg(not(windows))]
     {
@@ -97,8 +105,31 @@ fn same_database(left: &Path, right: &Path) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn windows_database_spelling(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    // canonicalize() returns the extended namespace, while legacy active_database
+    // values often retain ordinary drive/UNC syntax. Keep these identities stable
+    // when the file is absent. Other device namespaces are not interchangeable.
+    if path
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+    {
+        format!("//{}", &path[8..])
+    } else if path.starts_with("//?/")
+        && path.as_bytes().get(4).is_some_and(u8::is_ascii_alphabetic)
+        && path.as_bytes().get(5) == Some(&b':')
+        && path.as_bytes().get(6) == Some(&b'/')
+    {
+        path[4..].to_owned()
+    } else {
+        path
+    }
+}
+
 impl DataSourceSettings {
-    /// Validate a migrated registry, accepting an empty registry from an older client.
+    /// Structurally validate a registry without filesystem I/O. Existing databases
+    /// are checked when registered/opened; unavailable paths remain editable.
     pub fn validate_local_libraries(&self) -> Result<()> {
         if self.local_libraries.is_empty() {
             return Ok(());
@@ -116,7 +147,7 @@ impl DataSourceSettings {
         for (index, entry) in self.local_libraries.iter().enumerate() {
             entry.validate()?;
             if self.local_libraries[..index].iter().any(|other| {
-                other.id == entry.id || same_database(&other.database, &entry.database)
+                other.id == entry.id || same_lexical_database(&other.database, &entry.database)
             }) {
                 return Err(Error::Validation(
                     "Duplicate local library registration".into(),
@@ -139,6 +170,18 @@ impl DataSourceSettings {
         database: &Path,
         pregenerate: bool,
     ) -> Result<()> {
+        // Saved selections already carry their stable path identity. In server
+        // mode the remembered local database may be on a disconnected share;
+        // ordinary preference edits must not probe it just to mirror a checkbox.
+        if let Some(index) = self
+            .local_libraries
+            .iter()
+            .position(|entry| same_lexical_database(&entry.database, database))
+        {
+            self.local_libraries[index].pregenerate_list_waveforms = pregenerate;
+            self.active_local_library = Some(self.local_libraries[index].id.clone());
+            return self.validate_local_libraries();
+        }
         let database = absolute(database)?;
         if self.local_libraries.is_empty() {
             self.local_libraries.push(LocalLibrary {
@@ -544,5 +587,94 @@ mod tests {
             different.canonicalize().unwrap()
         );
         assert!(!loaded.pregenerate_list_waveforms);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unavailable_migrated_default_keeps_its_identity_when_the_file_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("preferences");
+        let database = temp.path().join("existing-working.db");
+        std::fs::write(&database, b"existing library annotations").unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({ "active_database": database })).unwrap(),
+        )
+        .unwrap();
+        let migrated = config(&root);
+        assert_eq!(
+            migrated.selected_local_library().unwrap().database,
+            database.canonicalize().unwrap()
+        );
+        migrated.save().unwrap();
+        std::fs::remove_file(&database).unwrap();
+
+        let unavailable = config(&root);
+        assert_eq!(unavailable.data_source.local_libraries.len(), 1);
+        assert_eq!(
+            unavailable.selected_local_library().unwrap().id,
+            DEFAULT_LOCAL_LIBRARY_ID
+        );
+        unavailable.save().unwrap();
+        assert!(
+            !database.exists(),
+            "settings must not recreate the database"
+        );
+
+        std::fs::write(&database, b"existing library annotations").unwrap();
+        let available = config(&root);
+        assert_eq!(available.data_source.local_libraries.len(), 1);
+        assert_eq!(
+            available.selected_local_library().unwrap().id,
+            DEFAULT_LOCAL_LIBRARY_ID
+        );
+        assert_eq!(
+            std::fs::read(&database).unwrap(),
+            b"existing library annotations"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn offline_drive_and_unc_spellings_match_only_their_standard_namespace_alias() {
+        assert!(same_lexical_database(
+            Path::new(r"\\?\C:\Sounds\Library.db"),
+            Path::new(r"c:/sounds/library.db")
+        ));
+        assert!(same_lexical_database(
+            Path::new(r"\\?\UNC\nas\Audio\Library.db"),
+            Path::new(r"\\NAS\audio\library.db")
+        ));
+        assert!(!same_lexical_database(
+            Path::new(r"\\?\UNC\nas\Audio\Library.db"),
+            Path::new(r"\\nas\Other\Library.db")
+        ));
+        assert!(!same_lexical_database(
+            Path::new(r"\\?\C:\Sounds\one.db"),
+            Path::new(r"C:\Sounds\two.db")
+        ));
+        assert!(!same_lexical_database(
+            Path::new(r"\\?\GLOBALROOT\Device\Library.db"),
+            Path::new(r"GLOBALROOT\Device\Library.db")
+        ));
+    }
+
+    #[test]
+    fn structural_validation_leaves_filesystem_type_checks_to_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config(&temp.path().join("preferences"));
+        // A path's current type/availability cannot gate editing unrelated server
+        // preferences. Registration and provider opening still require a real file.
+        let directory = temp.path().join("not-a-database");
+        std::fs::create_dir_all(&directory).unwrap();
+        config.data_source.local_libraries[0].database = directory.clone();
+        config.data_source.validate_local_libraries().unwrap();
+        config.data_source.local_libraries[0].database = config.paths.database.clone();
+        assert!(
+            config
+                .register_local_library("Invalid", "", &directory, true)
+                .is_err()
+        );
     }
 }

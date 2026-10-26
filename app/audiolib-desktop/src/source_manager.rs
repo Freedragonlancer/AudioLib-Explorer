@@ -1102,9 +1102,21 @@ impl Controller {
                     )
                     .into(),
                 );
-                if self.source_changing.load(Ordering::Acquire)
-                    && let Err(error) = self.begin_local_library_change(&ui)
-                {
+                // An explicit server activation can still be using the original
+                // local provider while its sync waits. Cancelling that choice must
+                // retain the provider and search context, rather than reopen it.
+                let current = self.provider();
+                #[cfg(windows)]
+                let current_path = crate::controller::same_path(&path, current.database_path());
+                #[cfg(not(windows))]
+                let current_path = path == current.database_path();
+                if !self.remote_read_only() && current_path {
+                    self.activate_data_source(ActiveSource::Local);
+                    return;
+                }
+                // Startup and ordinary server syncs need immediate cancellation
+                // too, even when they did not establish a source-changing gate.
+                if let Err(error) = self.begin_local_library_change(&ui) {
                     ui.set_ds_message(error.into());
                     return;
                 }
