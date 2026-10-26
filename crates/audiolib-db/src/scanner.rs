@@ -56,6 +56,9 @@ struct ScanControl {
     cancelled: AtomicBool,
     paused: AtomicBool,
     finishing: AtomicBool,
+    /// Aborts the final folder-statistics statement. Independent of `cancelled` so a
+    /// close can release that statement without changing enumeration-cancel timing.
+    interrupt: Arc<AtomicBool>,
     gate: Mutex<()>,
     wake: Condvar,
 }
@@ -68,6 +71,27 @@ impl ScanCancellation {
             self.0.paused.store(false, Ordering::Release);
             self.0.wake.notify_all();
         }
+    }
+    /// Stop enumeration and abort the final folder-statistics statement.
+    /// Unlike [`Self::cancel`], this still applies while that statement is draining.
+    pub fn interrupt(&self) {
+        let _guard = self.0.gate.lock().unwrap();
+        self.0.interrupt.store(true, Ordering::Release);
+        self.0.cancelled.store(true, Ordering::Release);
+        self.0.paused.store(false, Ordering::Release);
+        self.0.wake.notify_all();
+    }
+    /// Abort only the final folder-statistics statement. Enumeration keeps running
+    /// until [`Self::cancel`] or [`Self::interrupt`].
+    pub fn interrupt_finish(&self) {
+        self.0.interrupt.store(true, Ordering::Release);
+    }
+    /// Whether [`Self::interrupt`] or [`Self::interrupt_finish`] requested the final statement to stop.
+    pub fn is_interrupted(&self) -> bool {
+        self.0.interrupt.load(Ordering::Acquire)
+    }
+    pub(crate) fn interrupt_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0.interrupt)
     }
     /// Whether cancellation was accepted before final reconciliation.
     pub fn is_cancelled(&self) -> bool {
@@ -188,8 +212,13 @@ impl ScanService {
         if cancellation.is_cancelled() {
             cancellation.begin_finish(&mut progress, &mut progress_callback);
             progress.state = ScanState::Cancelled;
-            self.provider
-                .finish_scan(&root, &mut progress, false, options.recursive)?;
+            self.provider.finish_scan(
+                &root,
+                &mut progress,
+                false,
+                options.recursive,
+                &cancellation.interrupt_flag(),
+            )?;
             progress_callback(progress.clone());
             return Ok(progress);
         }
@@ -207,8 +236,13 @@ impl ScanService {
             progress.state = ScanState::Failed;
             let failed_path = progress.current_path.clone();
             record_issue(&mut progress, failed_path, error.to_string());
-            self.provider
-                .finish_scan(&root, &mut progress, false, options.recursive)?;
+            self.provider.finish_scan(
+                &root,
+                &mut progress,
+                false,
+                options.recursive,
+                &cancellation.interrupt_flag(),
+            )?;
             progress_callback(progress);
             return Err(error);
         }
@@ -226,8 +260,13 @@ impl ScanService {
             && progress.errors == 0
             && progress.state == ScanState::Completed
             && (progress.discovered > 0 || root_has_entries(&root));
-        self.provider
-            .finish_scan(&root, &mut progress, cleanup, options.recursive)?;
+        self.provider.finish_scan(
+            &root,
+            &mut progress,
+            cleanup,
+            options.recursive,
+            &cancellation.interrupt_flag(),
+        )?;
         progress_callback(progress.clone());
         Ok(progress)
     }
@@ -611,4 +650,26 @@ fn producer_ready(cancellation: &ScanCancellation, stop: &AtomicBool) -> bool {
         cancellation.wait();
     }
     !cancellation.is_cancelled() && !stop.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_during_finish_does_not_interrupt_and_interrupt_does() {
+        let cancellation = ScanCancellation::default();
+        let mut progress = ScanProgress::default();
+        cancellation.begin_finish(&mut progress, &mut |_| {});
+        assert!(cancellation.is_finishing());
+        cancellation.cancel();
+        assert!(!cancellation.is_cancelled());
+        assert!(!cancellation.is_interrupted());
+        cancellation.interrupt_finish();
+        assert!(cancellation.is_interrupted());
+        assert!(!cancellation.is_cancelled());
+        cancellation.interrupt();
+        assert!(cancellation.is_cancelled());
+        assert!(cancellation.is_interrupted());
+    }
 }
