@@ -17,6 +17,7 @@ export struct AudioRow {
     format: string,
     channels: string,
     tags: string,
+    album: string,
     favorite: bool,
     missing: bool,
     checked: bool,
@@ -785,7 +786,9 @@ export component AppWindow inherits Window {
     public function scroll-table-to-end() {
         root.table-viewport-x = min(0px, result-list.visible-width - root.table-content-size);
     }
-    private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
+    // Fixed width: the album column is informational, sorted/filtered from the sidebar.
+    private property <length> table-album-size: round(160 * Theme.ui-scale) * 1px;
+    private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + root.table-album-size;
     private property <length> table-content-size: max(root.table-columns-size, result-list.visible-width);
     private property <bool> table-empty: root.rows.length == 0;
     private property <length> table-viewport-x;
@@ -2036,6 +2039,13 @@ export component AppWindow inherits Window {
                                     active: root.sort-index == 5; descending: root.sort-descending; enabled: !root.background-blocked;
                                     clicked => { root.sort-table(5); } context-requested(position) => { root.show-table-menu(position); }
                                 }
+                                // Informational column: albums are filtered from the sidebar.
+                                Text {
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + 12px * Theme.ui-scale;
+                                    width: root.table-album-size - 24px * Theme.ui-scale; height: parent.height;
+                                    text: root.chinese ? "专辑" : "ALBUM"; color: Theme.dim; vertical-alignment: center;
+                                    font-size: Theme.font(10); overflow: elide;
+                                }
                                 table-name-divider := TableDivider {
                                     x: root.table-wave-size + root.table-name-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-name-size;
                                     label: root.chinese ? "调整文件名列宽" : "Resize Filename column"; help: root.table-resize-help; enabled: !root.background-blocked;
@@ -2145,6 +2155,7 @@ export component AppWindow inherits Window {
                                         table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(10); overflow: elide; }
                                         table-channels-cell := Text { width: root.table-channels-size - 24px * Theme.ui-scale; text: row.channels; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
                                         table-tags-cell := Text { width: root.table-tags-size - 24px * Theme.ui-scale; text: row.tags; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(10); }
+                                        table-album-cell := Text { width: root.table-album-size - 24px * Theme.ui-scale; text: row.album; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(10); }
                                     }
                                     result-hit := TouchArea { mouse-cursor: pointer;
                                         property <bool> toggle-selection;

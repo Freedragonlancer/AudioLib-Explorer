@@ -6909,6 +6909,7 @@ fn audio_row(file: &AudioFile) -> AudioRow {
         .into(),
         channels: file.channels.to_string().into(),
         tags: audiolib_core::display_tags(&file.tags, &file.attributes).into(),
+        album: file.album.clone().into(),
         favorite: file.favorite,
         missing: file.missing,
         checked: false,
