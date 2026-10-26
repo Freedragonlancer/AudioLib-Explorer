@@ -28,13 +28,8 @@ pub(crate) fn changes() -> Vec<SchemaChange> {
             column: (*column).into(),
         })
         .collect();
-    // v7: library/album declared by each file; the candidate fills it from the Metadata
-    // copied into the same row, so no audio file is read during the upgrade.
-    result.push(SchemaChange::AddColumn {
-        table: "audio_files".into(),
-        column: "album".into(),
-        definition: "TEXT NOT NULL DEFAULT ''".into(),
-    });
+    // v7 album column is part of AUDIO_COLUMNS, so the candidate template already has it;
+    // declaring it here again would add a duplicate column.
     // Final v6 contract retires only the two playback fields and history table.
     // Client-local history import runs after backup and before this recipe.
     result.push(SchemaChange::RetireColumn {
