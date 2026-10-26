@@ -5,6 +5,7 @@ use crate::{migration, search_storage};
 use audiolib_core::compatibility::LibraryFormat;
 use rusqlite::{params, params_from_iter, types::Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) fn current_format_ready(conn: &Connection) -> Result<bool> {
     format_ready(conn, false)
@@ -60,6 +61,51 @@ fn format_ready(conn: &Connection, allow_p0: bool) -> Result<bool> {
         return Ok(false);
     }
     definition::required_match(conn)
+}
+
+/// v6 -> v7: add the album column, fill it from the Metadata already stored in the
+/// library (no audio file is read), then publish the format with its album index.
+pub(crate) fn upgrade_from_previous(
+    conn: &mut Connection,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(SnapshotUpgradeProgress) -> Result<()>,
+) -> Result<()> {
+    progress(SnapshotUpgradeProgress::Preparing)?;
+    let tx = conn.transaction().map_err(db_error)?;
+    ensure_column(&tx, "audio_files", "album", "TEXT NOT NULL DEFAULT ''")?;
+    let total_rows: i64 = tx
+        .query_row("SELECT COUNT(*) FROM audio_files", [], |row| row.get(0))
+        .map_err(db_error)?;
+    let total = u64::try_from(total_rows).unwrap_or(0);
+    let mut cursor = i64::MIN;
+    let mut completed = 0_u64;
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        // Keyset batches keep one short write per 5 000 rows and stay resumable by id.
+        let last: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(id) FROM
+                 (SELECT id FROM audio_files WHERE id > ?1 ORDER BY id LIMIT 5000)",
+                [cursor],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(db_error)?;
+        let Some(last) = last else { break };
+        tx.execute(
+            "UPDATE audio_files SET album=audiolib_album_key(metadata_json)
+             WHERE id > ?1 AND id <= ?2",
+            params![cursor, last],
+        )
+        .map_err(db_error)?;
+        cursor = last;
+        completed = completed.saturating_add(5000).min(total);
+        progress(SnapshotUpgradeProgress::Tokenizing { completed, total })?;
+    }
+    apply_indexes(&tx)?;
+    mark_current(&tx)?;
+    tx.commit().map_err(db_error)
 }
 
 pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {

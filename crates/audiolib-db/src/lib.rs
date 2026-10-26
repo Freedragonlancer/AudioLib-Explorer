@@ -1300,6 +1300,8 @@ impl SqliteProvider {
             }
             let source_tags_text =
                 schema::fold_case(&audiolib_core::source_tags(&attributes).join(", "));
+            // Library/album comes from the file itself; empty when it declares none.
+            let album = audiolib_core::album(&attributes);
             let ix_scene = attributes
                 .get("ixml_scene")
                 .and_then(|value| value.as_str());
@@ -1308,22 +1310,22 @@ impl SqliteProvider {
             if let Some(id) = existing {
                 tx.prepare_cached("UPDATE audio_files SET filename=?2,file_size=?3,sample_rate=?4,bit_depth=?5,channels=?6,
                     duration=?7,codec=?8,bwf_description=?9,folder_id=?10,source_mtime_ns=?11,metadata_json=?12,
-                    ixml_scene=?13,ixml_take=?14,seen_scan_id=?15,source_tags_text=?16,missing=0,
+                    ixml_scene=?13,ixml_take=?14,seen_scan_id=?15,source_tags_text=?16,album=?17,missing=0,
                     modified_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1").map_err(db_error)?.execute(params![id,
                     filename,file_size,item.metadata.sample_rate,item.metadata.bit_depth,item.metadata.channels,
                     item.metadata.duration,item.metadata.encoding,description,folder_id,item.mtime_ns,
-                    attributes.to_string(),ix_scene,ix_take,session_id,source_tags_text]).map_err(db_error)?;
+                    attributes.to_string(),ix_scene,ix_take,session_id,source_tags_text,album]).map_err(db_error)?;
                 updated += 1;
             } else {
                 let id = schema::allocate_audio_id(tx)?;
                 tx.prepare_cached("INSERT INTO audio_files(file_path,path_key,filename,file_size,sample_rate,bit_depth,channels,
                     duration,codec,bwf_description,folder_id,source_mtime_ns,metadata_json,
                     ixml_scene,ixml_take,seen_scan_id,
-                    id,missing,created_at,modified_at,source_tags_text) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,
-                    strftime('%Y-%m-%d %H:%M:%f','now'),strftime('%Y-%m-%d %H:%M:%f','now'),?18)").map_err(db_error)?.execute(params![
+                    id,missing,created_at,modified_at,source_tags_text,album) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,
+                    strftime('%Y-%m-%d %H:%M:%f','now'),strftime('%Y-%m-%d %H:%M:%f','now'),?18,?19)").map_err(db_error)?.execute(params![
                     display_path(&item.path),key,filename,file_size,item.metadata.sample_rate,item.metadata.bit_depth,item.metadata.channels,
                     item.metadata.duration,item.metadata.encoding,description,folder_id,item.mtime_ns,
-                    attributes.to_string(),ix_scene,ix_take,session_id,id,source_tags_text]).map_err(db_error)?;
+                    attributes.to_string(),ix_scene,ix_take,session_id,id,source_tags_text,album]).map_err(db_error)?;
                 added += 1;
             }
             // Missing supported header fields clear legacy columns after successful probing.

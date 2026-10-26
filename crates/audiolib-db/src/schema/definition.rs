@@ -45,6 +45,8 @@ const DERIVED: &[Definition] = &[
     Definition { name: "idx_audio_visible_tagged_folders", kind: "index", table: "audio_files",
         sql: "CREATE INDEX idx_audio_visible_tagged_folders ON audio_files(folder_id,id,user_tags,source_tags_text)
           WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'')" },
+    Definition { name: "idx_audio_visible_album", kind: "index", table: "audio_files",
+        sql: "CREATE INDEX idx_audio_visible_album ON audio_files(album,id) WHERE missing=0" },
 ];
 
 /// Compare SQLite token boundaries, preserving literal bytes and identifier case
