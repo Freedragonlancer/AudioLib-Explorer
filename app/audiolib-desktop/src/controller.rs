@@ -12,7 +12,7 @@ use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
 use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform};
-use crate::{AppWindow, AudioRow, CrumbRow, FolderRow};
+use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow};
 use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
@@ -1140,6 +1140,24 @@ impl Controller {
             if let Some(ui) = c.ui.upgrade() {
                 c.request_search(&ui, immediate, true);
             }
+        });
+        let c = self.clone();
+        ui.on_album_selected(move |name| {
+            let Some(ui) = c.ui.upgrade() else { return };
+            // Clicking the active album clears the filter, like a toggle chip.
+            {
+                let mut request = c.request.lock().unwrap();
+                let current = request.filters.album.clone().unwrap_or_default();
+                let next = if current == name.as_str() {
+                    String::new()
+                } else {
+                    name.to_string()
+                };
+                request.filters.album = (!next.is_empty()).then(|| next.clone());
+                request.offset = 0;
+                ui.set_album_filter(next.into());
+            }
+            c.request_navigation_search(&ui, true, false);
         });
         let c = self.clone();
         ui.on_filter_requested(move || {
@@ -3560,6 +3578,34 @@ impl Controller {
         ui.set_status(message.into());
     }
 
+    /// Publish album facets for the current query and filters. The album filter itself is
+    /// dropped so every other album stays reachable; local libraries only for now.
+    fn publish_albums(self: &Arc<Self>) {
+        if self.remote_read_only() {
+            return;
+        }
+        let provider = self.provider();
+        let mut request = self.request.lock().unwrap().clone();
+        request.filters.album = None;
+        request.limit = 1;
+        let ui = self.ui.clone();
+        std::thread::spawn(move || {
+            let Ok(albums) = provider.album_facets(&request) else {
+                return;
+            };
+            let rows: Vec<AlbumRow> = albums
+                .into_iter()
+                .map(|(name, count)| AlbumRow {
+                    name: name.into(),
+                    count: count.to_string().into(),
+                })
+                .collect();
+            post(ui, move |ui| {
+                ui.set_albums(ModelRc::new(VecModel::from(rows)));
+            });
+        });
+    }
+
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
         if !self.available() {
             return;
@@ -3581,6 +3627,8 @@ impl Controller {
         }
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
+        // Refresh the sidebar album facets for the same query and filters.
+        self.publish_albums();
         if request.needs_more_search_text() {
             ui.set_status(
                 if self.chinese.load(Ordering::Acquire) {
