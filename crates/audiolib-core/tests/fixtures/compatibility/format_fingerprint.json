@@ -1,17 +1,19 @@
 {
   "capability_max": {
     "x-audiolib-search-storage-max": 1,
-    "x-audiolib-snapshot-schema-max": 6,
+    "x-audiolib-snapshot-schema-max": 7,
     "x-audiolib-tokenization-max": 3
   },
-  "plan_b_format": "ale-s6-cld1-t3-m2-p1",
-  "plan_b_initial_format": "ale-s6-cld1-t3-m2-p0",
+  "plan_b_format": "ale-s7-cld1-t3-m2-p1",
+  "plan_b_initial_format": "ale-s7-cld1-t3-m2-p0",
   "snapshot_read_formats": [
     "ale-s3-ext-t3-m2",
     "ale-s4-ext-t3-m2",
     "ale-s5-ext-t3-m2",
     "ale-s6-cld1-t3-m2-p0",
-    "ale-s6-cld1-t3-m2-p1"
+    "ale-s6-cld1-t3-m2-p1",
+    "ale-s7-cld1-t3-m2-p0",
+    "ale-s7-cld1-t3-m2-p1"
   ],
   "target": {
     "features": {
@@ -22,12 +24,12 @@
       "stable_audio_ids": 1,
       "tokenization": 3
     },
-    "schema_version": 6,
+    "schema_version": 7,
     "source_search_revision": 2,
     "source_tags_revision": 2,
     "storage": "contentless_delete"
   },
-  "target_id": "ale-s6-cld1-t3-m2-p1",
-  "target_schema": 6,
+  "target_id": "ale-s7-cld1-t3-m2-p1",
+  "target_schema": 7,
   "tokenization_revision": 3
 }

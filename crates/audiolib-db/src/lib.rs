@@ -2731,10 +2731,26 @@ const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE
  af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0),
  COALESCE(af.album,'')";
 
-fn audio_projection(_conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
+fn audio_projection(conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
     // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
     // retired library playback fields are never selected or surfaced.
-    Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
+    // The album column arrives with the v7 additive upgrade, so an older snapshot
+    // projects an empty value instead of failing every read.
+    let has_album: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
+             WHERE name='album' COLLATE NOCASE)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if has_album {
+        Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
+    } else {
+        Ok(std::borrow::Cow::Owned(
+            AUDIO_SELECT.replace("COALESCE(af.album,'')", "''"),
+        ))
+    }
 }
 
 fn snapshot_modified_at(file: &AudioFile) -> Result<&str> {
