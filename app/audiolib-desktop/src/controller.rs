@@ -679,6 +679,8 @@ pub struct Controller {
     search_publication: Mutex<Option<SearchPublication>>,
     search_cancel: Mutex<Arc<AtomicBool>>,
     facet_revision: AtomicU64,
+    /// Rejects stale sidebar album publications; each request advances it.
+    album_generation: AtomicU64,
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
     waveform_generation: AtomicU64,
@@ -919,6 +921,7 @@ impl Controller {
             search_publication: Mutex::new(None),
             search_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             facet_revision: AtomicU64::new(0),
+            album_generation: AtomicU64::new(0),
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
             waveform_generation: AtomicU64::new(0),
@@ -3597,6 +3600,9 @@ impl Controller {
         if self.remote_read_only() {
             return;
         }
+        // Advance first: an older in-flight publication must not overwrite this one.
+        let generation = self.album_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let confirmed = self.clone();
         let provider = self.provider();
         let cache_root = self.config.lock().unwrap().paths.cache.clone();
         let mut request = self.request.lock().unwrap().clone();
@@ -3638,6 +3644,9 @@ impl Controller {
                 rows.push((name, count, thumbnail));
             }
             post(ui, move |ui| {
+                if confirmed.album_generation.load(Ordering::Acquire) != generation {
+                    return;
+                }
                 let rows: Vec<AlbumRow> = rows
                     .into_iter()
                     .map(|(name, count, thumbnail)| AlbumRow {
