@@ -161,7 +161,7 @@ pub(super) fn drag(paths: &[PathBuf]) -> std::io::Result<DragOutcome> {
     let mut items = Vec::with_capacity(urls.len());
     for url in &urls {
         let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&**url);
-        let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer);
+        let item = NSDraggingItem::initWithPasteboardWriter(mtm.alloc::<NSDraggingItem>(), writer);
         // SAFETY: contents is an optional NSImage (or nil) for the drag badge.
         unsafe {
             item.setDraggingFrame_contents(
