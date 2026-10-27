@@ -304,6 +304,7 @@ mod tests {
             include_tags: vec!["outside".into()],
             exclude_tags: vec!["thunder".into()],
             color: Some("#123456".into()),
+            album: None,
         };
         task.definition.include_subfolders = false;
         task.definition.order_by = SortOrder::Filename;

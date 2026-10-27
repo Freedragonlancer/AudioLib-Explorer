@@ -77,7 +77,7 @@ pub(super) fn filtered_filename_page(
     let filtered_ids = if let Some(filter_from) = filter_from.filter(|_| !query_ids.is_empty()) {
         let mut filter_request = request.clone();
         filter_request.query.clear();
-        let filter_sql = search_sql(tokenizer, &filter_request, false, false)?;
+        let filter_sql = search_sql(tx, tokenizer, &filter_request, false, false)?;
         let Some(ids) = search_candidates::filtered_ids_full_scan(
             tx,
             &format!(

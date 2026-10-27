@@ -8,7 +8,7 @@ use std::{fs, path::Path};
 fn fixture(path: &Path) {
     let conn = Connection::open(path).unwrap();
     // This suite exercises the supported external-content snapshot family.
-    // A freshly created schema-6 database cannot represent those historical inputs.
+    // A freshly created contentless database cannot represent those historical inputs.
     conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
         .unwrap();
     conn.execute_batch(

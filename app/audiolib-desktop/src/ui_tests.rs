@@ -239,7 +239,9 @@ fn keyboard_selection_keeps_compact_result_rows_visible() {
             ui.set_selected_row((ui.get_selected_row() + step).clamp(0, 119));
         });
         ui.show().unwrap();
-        click_label(&ui, "Scroll 0.wav");
+        // A row spans horizontally scrollable columns, so its midpoint can be clipped
+        // behind the inspector. Focus the visible left edge before sending real keys.
+        click_at(&ui, result_row_position(&ui, "Scroll 0.wav"));
         for (key, targets) in [
             (
                 slint::platform::Key::DownArrow,

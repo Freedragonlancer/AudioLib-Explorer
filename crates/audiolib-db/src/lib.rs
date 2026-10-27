@@ -1,6 +1,8 @@
 // crates/audiolib-db/src/lib.rs
 //! SQLite library data, lossless legacy import, and bounded background scanning.
 #[cfg(test)]
+mod album_tests;
+#[cfg(test)]
 mod folder_rollup_tests;
 #[cfg(test)]
 mod full_library_validation;
@@ -998,11 +1000,14 @@ impl SqliteProvider {
             .iter()
             .map(snapshot_modified_at)
             .collect::<Result<Vec<_>>>()?;
+        let contentless = search_storage::columns(&conn)?
+            .iter()
+            .all(|column| !search_storage::is_derived_column(column));
         let tx = conn.transaction().map_err(db_error)?;
         {
             let mut update = tx
                 .prepare(
-                    if version==schema::SCHEMA_VERSION {
+                    if contentless {
                         "UPDATE audio_files SET user_tags=?1,user_notes=?2,favorite=?3,user_color=?4,modified_at=?5 WHERE id=?6"
                     } else {"UPDATE audio_files SET user_tags=?1,user_tags_tokenized=?2,user_notes=?3,
                     user_notes_tokenized=?4,favorite=?5,user_color=?6,modified_at=?7
@@ -1010,7 +1015,7 @@ impl SqliteProvider {
                 )
                 .map_err(db_error)?;
             for (file, modified_at) in files.iter().zip(modified) {
-                let changed = if version == schema::SCHEMA_VERSION {
+                let changed = if contentless {
                     update.execute(params![
                         file.tags,
                         file.notes,
@@ -1300,6 +1305,8 @@ impl SqliteProvider {
             }
             let source_tags_text =
                 schema::fold_case(&audiolib_core::source_tags(&attributes).join(", "));
+            // Library/album comes from the file itself; empty when it declares none.
+            let album = audiolib_core::album(&attributes);
             let ix_scene = attributes
                 .get("ixml_scene")
                 .and_then(|value| value.as_str());
@@ -1308,22 +1315,22 @@ impl SqliteProvider {
             if let Some(id) = existing {
                 tx.prepare_cached("UPDATE audio_files SET filename=?2,file_size=?3,sample_rate=?4,bit_depth=?5,channels=?6,
                     duration=?7,codec=?8,bwf_description=?9,folder_id=?10,source_mtime_ns=?11,metadata_json=?12,
-                    ixml_scene=?13,ixml_take=?14,seen_scan_id=?15,source_tags_text=?16,missing=0,
+                    ixml_scene=?13,ixml_take=?14,seen_scan_id=?15,source_tags_text=?16,album=?17,missing=0,
                     modified_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1").map_err(db_error)?.execute(params![id,
                     filename,file_size,item.metadata.sample_rate,item.metadata.bit_depth,item.metadata.channels,
                     item.metadata.duration,item.metadata.encoding,description,folder_id,item.mtime_ns,
-                    attributes.to_string(),ix_scene,ix_take,session_id,source_tags_text]).map_err(db_error)?;
+                    attributes.to_string(),ix_scene,ix_take,session_id,source_tags_text,album]).map_err(db_error)?;
                 updated += 1;
             } else {
                 let id = schema::allocate_audio_id(tx)?;
                 tx.prepare_cached("INSERT INTO audio_files(file_path,path_key,filename,file_size,sample_rate,bit_depth,channels,
                     duration,codec,bwf_description,folder_id,source_mtime_ns,metadata_json,
                     ixml_scene,ixml_take,seen_scan_id,
-                    id,missing,created_at,modified_at,source_tags_text) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,
-                    strftime('%Y-%m-%d %H:%M:%f','now'),strftime('%Y-%m-%d %H:%M:%f','now'),?18)").map_err(db_error)?.execute(params![
+                    id,missing,created_at,modified_at,source_tags_text,album) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,
+                    strftime('%Y-%m-%d %H:%M:%f','now'),strftime('%Y-%m-%d %H:%M:%f','now'),?18,?19)").map_err(db_error)?.execute(params![
                     display_path(&item.path),key,filename,file_size,item.metadata.sample_rate,item.metadata.bit_depth,item.metadata.channels,
                     item.metadata.duration,item.metadata.encoding,description,folder_id,item.mtime_ns,
-                    attributes.to_string(),ix_scene,ix_take,session_id,id,source_tags_text]).map_err(db_error)?;
+                    attributes.to_string(),ix_scene,ix_take,session_id,id,source_tags_text,album]).map_err(db_error)?;
                 added += 1;
             }
             // Missing supported header fields clear legacy columns after successful probing.
@@ -1565,6 +1572,66 @@ struct RankingSnapshot<'a> {
 }
 
 impl SqliteProvider {
+    /// Present-record counts per declared album for the same query and filters as the
+    /// result page. The caller passes a request without an album filter, so every album
+    /// stays visible for cross-filter navigation. Ordered by count, then name.
+    pub fn album_facets(&self, request: &SearchRequest) -> Result<Vec<(String, u64)>> {
+        self.album_facets_cancellable(request, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Cancellable album counts using the same bounded reader as other search work.
+    pub fn album_facets_cancellable(
+        &self,
+        request: &SearchRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<(String, u64)>> {
+        request.validate()?;
+        let reader = self.search_reader(Some(cancel.clone()))?;
+        let derived = self.derived_tags.load(Ordering::Acquire);
+        let sql = search_sql(&reader, &self.tokenizer, request, true, derived)?;
+        let album = album_expression(&reader)?;
+        let statement = format!(
+            "SELECT {album},COUNT(*) FROM {} WHERE {} AND {album}<>''
+             GROUP BY {album} ORDER BY COUNT(*) DESC,{album} COLLATE NOCASE",
+            sql.from,
+            sql.conditions.join(" AND ")
+        );
+        let mut prepared = reader.prepare(&statement).map_err(db_error)?;
+        let rows = prepared
+            .query_map(params_from_iter(&sql.values), |row| {
+                let album: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((album, u64::try_from(count).unwrap_or(0)))
+            })
+            .map_err(db_error)?;
+        let mut albums = Vec::new();
+        for row in rows {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
+            albums.push(row.map_err(db_error)?);
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        Ok(albums)
+    }
+
+    /// One present file path for an album, used to read that album's embedded cover.
+    pub fn album_cover_path(&self, album: &str) -> Result<Option<std::path::PathBuf>> {
+        let reader = self.reader()?;
+        let album_key = album_expression(&reader)?;
+        let path: Option<String> = reader
+            .query_row(
+                &format!("SELECT file_path FROM audio_files af WHERE {album_key}=?1 AND missing=0 ORDER BY id LIMIT 1"),
+                [album],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        Ok(path.map(std::path::PathBuf::from))
+    }
+
     fn observe_search_revision(&self) -> Result<u64> {
         let mut observer = self.revision_reader.lock().unwrap();
         if observer.is_none() {
@@ -1698,6 +1765,7 @@ impl SqliteProvider {
                 conditions,
                 values,
             } = search_sql(
+                tx,
                 &self.tokenizer,
                 &filter_request,
                 true,
@@ -1853,6 +1921,7 @@ impl SqliteProvider {
             conditions,
             mut values,
         } = search_sql(
+            &tx,
             &self.tokenizer,
             request,
             true,
@@ -2054,14 +2123,6 @@ impl SqliteProvider {
                 Ok(())
             }
         };
-        let SearchSql {
-            conditions, values, ..
-        } = search_sql(
-            &self.tokenizer,
-            request,
-            false,
-            self.derived_tags.load(Ordering::Acquire),
-        )?;
         // FTS emits arbitrary row IDs. Use a narrow covering lookup rather than
         // fetching each matching file's wide Metadata row just for its folder.
         // Exclude terms read only the covered tag columns, so they keep this scan as long
@@ -2085,6 +2146,15 @@ impl SqliteProvider {
             .then(|| self.observe_search_revision())
             .transpose()?;
         let tx = conn.transaction().map_err(db_error)?;
+        let SearchSql {
+            conditions, values, ..
+        } = search_sql(
+            &tx,
+            &self.tokenizer,
+            request,
+            false,
+            self.derived_tags.load(Ordering::Acquire),
+        )?;
         let (ranked_ids, pinned_revision) = if let Some(revision_before) = revision_before {
             // The complete ranking is query-only, even when its page was scoped
             // or filtered. Reuse it only when it belongs to this pinned snapshot.
@@ -2162,6 +2232,7 @@ impl SqliteProvider {
             // folder. Keep the covering-index proof aligned with that SQL scope.
             filter_request.folder_id = None;
             let filter_sql = search_sql(
+                &tx,
                 &self.tokenizer,
                 &filter_request,
                 false,
@@ -2638,6 +2709,7 @@ struct SearchSql {
 
 // Results and directory facets must compile exactly the same query and filters.
 fn search_sql(
+    conn: &Connection,
     tokenizer: &Jieba,
     request: &SearchRequest,
     include_folder: bool,
@@ -2690,6 +2762,11 @@ fn search_sql(
     }
     if filters.favorites_only {
         conditions.push("af.favorite=1".into());
+    }
+    if let Some(album) = filters.album.as_deref() {
+        // Exact stored name; the value is bound, never interpolated.
+        conditions.push(format!("{}=?", album_expression(conn)?));
+        values.push(Value::Text(album.to_owned()));
     }
     // Both filters are written so the planner can use idx_audio_visible_tagged_any: its
     // partial WHERE is exactly the "has any tag" term below, so the visible filename order
@@ -2772,12 +2849,42 @@ const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE
  af.bwf_originator,af.bwf_originator_reference,af.bwf_origination_date,af.bwf_origination_time,
  af.bwf_time_reference,af.bwf_version,af.bwf_umid,af.ixml_scene,af.ixml_take,af.ixml_tape,
  af.ixml_circled,af.ixml_wild_track,af.ixml_no_good,af.codec,af.created_at,af.modified_at,
- af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0)";
+ af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0),
+ COALESCE(af.album,'')";
 
-fn audio_projection(_conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
+fn album_expression(conn: &Connection) -> Result<&'static str> {
+    let has_album: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files') WHERE name='album' COLLATE NOCASE)",
+        [], |row| row.get(0),
+    ).map_err(db_error)?;
+    Ok(if has_album {
+        "af.album"
+    } else {
+        "audiolib_album_key(af.metadata_json)"
+    })
+}
+
+fn audio_projection(conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
     // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
     // retired library playback fields are never selected or surfaced.
-    Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
+    // The album column arrives with the v7 additive upgrade, so an older snapshot
+    // projects an empty value instead of failing every read.
+    let has_album: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
+             WHERE name='album' COLLATE NOCASE)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if has_album {
+        Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
+    } else {
+        Ok(std::borrow::Cow::Owned(AUDIO_SELECT.replace(
+            "COALESCE(af.album,'')",
+            "audiolib_album_key(af.metadata_json)",
+        )))
+    }
 }
 
 fn snapshot_modified_at(file: &AudioFile) -> Result<&str> {
@@ -2864,6 +2971,7 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         favorite: row.get(12)?,
         bext_description: row.get(13)?,
         attributes,
+        album: row.get(36)?,
         missing: row.get(35)?,
     })
 }
@@ -3067,7 +3175,7 @@ mod search_folder_plan_tests {
                 // both when no ranking exists and when candidate IDs overflow.
                 let SearchSql {
                     conditions, values, ..
-                } = search_sql(&provider.tokenizer, &request, false, true).unwrap();
+                } = search_sql(&conn, &provider.tokenizer, &request, false, true).unwrap();
                 let from = folder_search_from(true, visibility_only, false);
                 let plan = conn
                     .prepare(&format!(
@@ -3099,7 +3207,7 @@ mod search_folder_plan_tests {
                 from,
                 conditions,
                 values,
-            } = search_sql(&provider.tokenizer, &filtered_request(), true, true).unwrap();
+            } = search_sql(&conn, &provider.tokenizer, &filtered_request(), true, true).unwrap();
             for (columns, suffix) in [
                 ("COUNT(*)", ""),
                 (

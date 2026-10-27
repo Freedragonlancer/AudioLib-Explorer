@@ -2,6 +2,8 @@
 //! Isolated controller regressions for task identity, saved definitions and persistence.
 use super::super::*;
 
+#[path = "album_review_tests.rs"]
+mod album_review;
 #[path = "search_task_favorite_review_tests.rs"]
 mod favorite_review;
 #[path = "search_task_lifecycle_review_tests.rs"]

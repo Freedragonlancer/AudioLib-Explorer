@@ -6,13 +6,17 @@ use audiolib_db::SqliteProvider;
 use std::path::Path;
 
 fn fixture(path: &Path, version: i64) {
-    if version < audiolib_db::SCHEMA_VERSION {
+    if version < 6 {
         let conn = support::connection(path).unwrap();
         conn.execute_batch(include_str!("fixtures/schema-v5.sql"))
             .unwrap();
         conn.pragma_update(None, "user_version", version).unwrap();
     } else {
         drop(SqliteProvider::open(path).unwrap());
+        if version == 6 {
+            let conn = support::connection(path).unwrap();
+            conn.execute_batch("DROP INDEX idx_audio_visible_album; ALTER TABLE audio_files DROP COLUMN album; PRAGMA user_version=6;").unwrap();
+        }
     }
     support::connection(path).unwrap().execute_batch(
         "INSERT INTO audio_files(id,file_path,path_key,filename,modified_at,metadata_json)

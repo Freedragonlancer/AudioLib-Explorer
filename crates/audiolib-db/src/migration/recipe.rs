@@ -28,6 +28,8 @@ pub(crate) fn changes() -> Vec<SchemaChange> {
             column: (*column).into(),
         })
         .collect();
+    // v7 album column is part of AUDIO_COLUMNS, so the candidate template already has it;
+    // declaring it here again would add a duplicate column.
     // Final v6 contract retires only the two playback fields and history table.
     // Client-local history import runs after backup and before this recipe.
     result.push(SchemaChange::RetireColumn {
@@ -46,7 +48,7 @@ pub(crate) fn changes() -> Vec<SchemaChange> {
 
 pub(super) fn identity() -> String {
     let mut hash = Sha256::new();
-    hash.update(b"ale-schema6-storage1-retire-plays2;");
+    hash.update(b"ale-schema7-storage1-retire-plays2;");
     // Index batches and query compilation must keep one implementation identity,
     // including source Metadata projection and the exact locked dependency graph.
     hash.update(super::plan::tokenizer_identity().as_bytes());

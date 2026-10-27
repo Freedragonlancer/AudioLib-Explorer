@@ -446,6 +446,29 @@ pub(super) fn build(
             )
             .map_err(db_error)?;
             if count == 0 {
+                // v7: fill the album column from the Metadata copied into the candidate,
+                // never from an audio file. The blueprint comes from the source schema,
+                // so older sources require this owned additive column before publication.
+                let has_album: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
+                         WHERE name='album' COLLATE NOCASE)",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(db_error)?;
+                if !has_album {
+                    tx.execute_batch(
+                        "ALTER TABLE audio_files ADD COLUMN album TEXT NOT NULL DEFAULT ''",
+                    )
+                    .map_err(db_error)?;
+                }
+                tx.execute(
+                    "UPDATE audio_files SET album=audiolib_album_key(metadata_json)",
+                    [],
+                )
+                .map_err(db_error)?;
+                tx.execute_batch(schema::ALBUM_INDEX).map_err(db_error)?;
                 search_storage::install_triggers(&tx)?;
                 schema::mark_current(&tx)?;
                 tx.execute_batch("DROP TABLE audiolib_migration_copy;")

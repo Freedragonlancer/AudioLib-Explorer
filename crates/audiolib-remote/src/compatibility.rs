@@ -72,6 +72,8 @@ pub(crate) fn library(library: &RemoteLibrary) -> Result<()> {
         {
             Ok(())
         }
+        // The published format before the current target may still omit its descriptor;
+        // bytes are verified after download. The current target must declare one.
         None if (3..=5).contains(&library.schema_version) => Ok(()),
         _ => Err(invalid(
             "Server library format is missing, inconsistent or unsupported; the existing cache was retained",
@@ -284,7 +286,7 @@ mod tests {
                 SERVER_COMPATIBILITY_HEADER,
                 serde_json::to_string(&compatibility_manifest()).unwrap(),
             ),
-            ("x-schema-version", "6".into()),
+            ("x-schema-version", "7".into()),
             ("x-search-storage-revision", "1".into()),
             ("x-tokenization-revision", "3".into()),
             ("x-source-search-revision", "2".into()),
@@ -376,7 +378,7 @@ mod tests {
                             format.format.features.insert("future_feature".into(), 1);
                         }
                         TestResponse::json(200, &serde_json::json!({
-                            "library_id":"stable", "revision":8, "schema_version":6,
+                            "library_id":"stable", "revision":8, "schema_version":7,
                             "identity_bound_writes":true, "snapshot_format":format,
                         }).to_string())
                     }
@@ -521,7 +523,7 @@ mod tests {
                         format.format.features.insert("future_required_feature".into(),1);
                     }
                     TestResponse::json(200, &serde_json::json!({
-                        "library_id":"incoming", "revision":8, "schema_version":6, "snapshot_format":format,
+                        "library_id":"incoming", "revision":8, "schema_version":7, "snapshot_format":format,
                     }).to_string())
                 }
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
@@ -776,7 +778,7 @@ mod tests {
             }
             let outcome =
                 sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap();
-            assert_eq!(outcome.state.schema_version, if stale { 6 } else { 5 });
+            assert_eq!(outcome.state.schema_version, if stale { 7 } else { 5 });
             assert_eq!(outcome.state.revision, 12);
             let format = outcome.state.format.as_ref().unwrap();
             assert_eq!(format.source.as_ref(), Some(&source_format));

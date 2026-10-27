@@ -12,7 +12,7 @@ use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
 use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform};
-use crate::{AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow};
+use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow};
 use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
@@ -29,6 +29,8 @@ use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 const PAGE_SIZE: usize = 200;
+/// Sidebar album covers are read only for the first rows; later rows show text only.
+const ALBUM_THUMBNAILS: usize = 12;
 const HISTORY_SIZE: usize = 50;
 /// Owned scan presentation can be regenerated after a runtime language change.
 #[derive(Clone)]
@@ -321,6 +323,11 @@ struct SearchJob {
     cancel: Arc<AtomicBool>,
     facet_revision: u64,
     provider: Arc<SqliteProvider>,
+}
+
+struct ArtworkJob {
+    path: PathBuf,
+    generation: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -703,6 +710,8 @@ pub struct Controller {
     search_publication: Mutex<Option<SearchPublication>>,
     search_cancel: Mutex<Arc<AtomicBool>>,
     facet_revision: AtomicU64,
+    artwork_job: Mutex<Option<ArtworkJob>>,
+    artwork_wake: Condvar,
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
     waveform_generation: AtomicU64,
@@ -969,6 +978,8 @@ impl Controller {
             search_publication: Mutex::new(None),
             search_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             facet_revision: AtomicU64::new(0),
+            artwork_job: Mutex::new(None),
+            artwork_wake: Condvar::new(),
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
             waveform_generation: AtomicU64::new(0),
@@ -1196,6 +1207,27 @@ impl Controller {
             }
         });
         let c = self.clone();
+        ui.on_album_selected(move |name| {
+            if !c.available() || c.remote_read_only() {
+                return;
+            }
+            let Some(ui) = c.ui.upgrade() else { return };
+            // Clicking the active album clears the filter, like a toggle chip.
+            {
+                let mut request = c.request.lock().unwrap();
+                let current = request.filters.album.clone().unwrap_or_default();
+                let next = if current == name.as_str() {
+                    String::new()
+                } else {
+                    name.to_string()
+                };
+                request.filters.album = (!next.is_empty()).then(|| next.clone());
+                request.offset = 0;
+                ui.set_album_filter(next.into());
+            }
+            c.request_navigation_search(&ui, true, false);
+        });
+        let c = self.clone();
         ui.on_filter_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
                 c.request_navigation_search(&ui, true, true);
@@ -1259,6 +1291,7 @@ impl Controller {
                 ui.set_color_filter("".into());
                 ui.set_duration_min("".into());
                 ui.set_duration_max("".into());
+                ui.set_album_filter("".into());
                 c.request_navigation_search(&ui, true, true);
             }
         });
@@ -2675,6 +2708,9 @@ impl Controller {
             ui.set_selected_name("".into());
             ui.set_selected_path("".into());
             ui.set_selected_format("".into());
+            ui.set_selected_album("".into());
+            ui.set_album_cover(Image::default());
+            ui.set_album_cover_ready(false);
             ui.set_selected_attributes("".into());
             ui.set_selected_description("".into());
             ui.set_selected_source_tags("".into());
@@ -2688,6 +2724,7 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        ui.set_albums(ModelRc::new(VecModel::<AlbumRow>::default()));
         *self.latest_selection.lock().unwrap() = None;
         self.metadata.lock().unwrap().reset_library();
         *self.selected.lock().unwrap() = None;
@@ -2722,6 +2759,9 @@ impl Controller {
         ui.set_selected_name("".into());
         ui.set_selected_path("".into());
         ui.set_selected_format("".into());
+        ui.set_selected_album("".into());
+        ui.set_album_cover(Image::default());
+        ui.set_album_cover_ready(false);
         ui.set_checked_count(0);
         ui.set_audio_ready(false);
         ui.set_waveform_ready(false);
@@ -2749,6 +2789,7 @@ impl Controller {
         ui.set_edit_notes("".into());
         ui.set_edit_favorite(false);
         if reset_request {
+            ui.set_album_filter("".into());
             *self.request.lock().unwrap() = SearchRequest::default();
             ui.set_query("".into());
             ui.set_favorites_only(false);
@@ -2876,6 +2917,55 @@ impl Controller {
 
     fn start_workers(self: &Arc<Self>) {
         self.start_workspace_worker();
+        let c = self.clone();
+        std::thread::Builder::new()
+            .name("audiolib-artwork".into())
+            .spawn(move || {
+                loop {
+                    let mut pending = c.artwork_job.lock().unwrap();
+                    while pending.is_none() && !c.shutdown.load(Ordering::Acquire) {
+                        pending = c.artwork_wake.wait(pending).unwrap();
+                    }
+                    if c.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let job = pending.take().unwrap();
+                    drop(pending);
+                    if c.selection_generation.load(Ordering::Acquire) != job.generation
+                        || !c.available()
+                    {
+                        continue;
+                    }
+                    let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
+                    let Ok(path) = audiolib_core::validate_wav_path(&job.path, &allowed_roots)
+                    else {
+                        continue;
+                    };
+                    let Some(pixels) = audiolib_audio::probe_with_artwork(&path)
+                        .ok()
+                        .and_then(|(_, artwork)| artwork)
+                        .and_then(|artwork| crate::artwork::decode_thumbnail(&artwork.bytes, 512))
+                    else {
+                        continue;
+                    };
+                    let confirmed = c.clone();
+                    post(c.ui.clone(), move |ui| {
+                        if confirmed.selection_generation.load(Ordering::Acquire) == job.generation
+                            && confirmed.available()
+                        {
+                            let (width, height) = pixels.dimensions();
+                            let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                pixels.as_raw(),
+                                width,
+                                height,
+                            );
+                            ui.set_album_cover(Image::from_rgba8(pixels));
+                            ui.set_album_cover_ready(true);
+                        }
+                    });
+                }
+            })
+            .expect("spawn artwork worker");
         let c = self.clone();
         std::thread::Builder::new()
             .name("audiolib-selection".into())
@@ -3331,6 +3421,7 @@ impl Controller {
                         });
                     }
                     crate::gui_search_benchmark::worker_completed(job.generation, true);
+                    let album_job = job.clone();
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.search_generation.load(Ordering::Acquire) != job.generation {
@@ -3343,6 +3434,8 @@ impl Controller {
                             folders.map_err(|error| error.to_string()),
                         );
                     });
+                    // Reuse this coalesced worker: typing never spawns unbounded facet queries.
+                    c.publish_albums(&album_job);
                 }
             })
             .expect("spawn directory search worker");
@@ -3719,6 +3812,98 @@ impl Controller {
         ui.set_status(message.into());
     }
 
+    /// Publish album facets for the current query and filters. The album filter itself is
+    /// dropped so every other album stays reachable; local libraries only for now.
+    fn publish_albums(self: &Arc<Self>, job: &SearchJob) {
+        let current = || {
+            self.search_generation.load(Ordering::Acquire) == job.generation
+                && !job.cancel.load(Ordering::Acquire)
+                && self.available()
+                && !self.remote_read_only()
+        };
+        if !current() {
+            return;
+        }
+        let confirmed = self.clone();
+        let provider = job.provider.clone();
+        let cache_root = self.config.lock().unwrap().paths.cache.clone();
+        let allowed_roots = self.config.lock().unwrap().allowed_scan_roots.clone();
+        let mut request = job.request.clone();
+        request.filters.album = None;
+        request.limit = 1;
+        let ui = self.ui.clone();
+        let Ok(albums) = provider.album_facets_cancellable(&request, job.cancel.clone()) else {
+            return;
+        };
+        // Covers are read for the first albums only: each one costs a single small file
+        // read the first time and a cached PNG afterwards, and slint::Image is not Send,
+        // so pixels cross to the event loop and the image is built there.
+        let mut rows = Vec::with_capacity(albums.len());
+        for (index, (name, count)) in albums.into_iter().enumerate() {
+            if !current() {
+                return;
+            }
+            let mut thumbnail = None;
+            if index < ALBUM_THUMBNAILS
+                && let Ok(Some(path)) = provider.album_cover_path(&name)
+                && let Ok(path) = audiolib_core::validate_wav_path(&path, &allowed_roots)
+                && let Some(cache_path) = crate::artwork::thumbnail_path(
+                    &cache_root,
+                    provider.database_path(),
+                    &path,
+                    &name,
+                )
+            {
+                let cached = std::fs::metadata(&cache_path)
+                    .ok()
+                    .filter(|metadata| metadata.len() <= 256 * 1024)
+                    .and_then(|_| std::fs::read(&cache_path).ok())
+                    .and_then(|bytes| crate::artwork::decode_thumbnail(&bytes, 40));
+                if let Some(small) = cached {
+                    let (width, height) = small.dimensions();
+                    thumbnail = Some((small.into_raw(), width, height));
+                } else if let Ok((_, Some(artwork))) = audiolib_audio::probe_with_artwork(&path)
+                    && let Some(small) = crate::artwork::decode_thumbnail(&artwork.bytes, 40)
+                {
+                    let (width, height) = small.dimensions();
+                    if let Some(parent) = cache_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = small.save(&cache_path);
+                    thumbnail = Some((small.into_raw(), width, height));
+                }
+            }
+            rows.push((name, count, thumbnail));
+        }
+        let generation = job.generation;
+        let cancel = job.cancel.clone();
+        post(ui, move |ui| {
+            if confirmed.search_generation.load(Ordering::Acquire) != generation
+                || cancel.load(Ordering::Acquire)
+                || !confirmed.available()
+                || confirmed.remote_read_only()
+            {
+                return;
+            }
+            let rows: Vec<AlbumRow> = rows
+                .into_iter()
+                .map(|(name, count, thumbnail)| AlbumRow {
+                    name: name.into(),
+                    count: count.to_string().into(),
+                    cover: match thumbnail {
+                        Some((pixels, width, height)) => slint::Image::from_rgba8(
+                            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                &pixels, width, height,
+                            ),
+                        ),
+                        None => slint::Image::default(),
+                    },
+                })
+                .collect();
+            ui.set_albums(ModelRc::new(VecModel::from(rows)));
+        });
+    }
+
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
         if !self.available() {
             return;
@@ -3818,6 +4003,7 @@ impl Controller {
             tagged_only: ui.get_tagged_only(),
             color: (!ui.get_color_filter().trim().is_empty())
                 .then(|| ui.get_color_filter().trim().to_owned()),
+            album: (!ui.get_album_filter().is_empty()).then(|| ui.get_album_filter().to_string()),
             ..SearchFilters::default()
         };
         crate::tag_chips::apply_to(ui, &mut request.filters);
@@ -4353,6 +4539,7 @@ impl Controller {
                 return;
             }
             let remote = c2.remote_read_only();
+            c2.queue_artwork(&displayed);
             // Until this selection's Load is confirmed, Play must reload its ID
             // rather than audition the previous source retained by the engine.
             c2.mark_audio_reload(displayed.id);
@@ -4374,6 +4561,21 @@ impl Controller {
             });
             c2.selection_audio_wake.notify_one();
         });
+    }
+
+    /// Cover work never delays Load/Play and never seeks a remote stream to its tail.
+    fn queue_artwork(&self, file: &AudioFile) {
+        if self.remote_read_only()
+            || file.missing
+            || audiolib_core::album(&file.attributes).is_empty()
+        {
+            return;
+        }
+        *self.artwork_job.lock().unwrap() = Some(ArtworkJob {
+            path: PathBuf::from(&file.file_path),
+            generation: self.selection_generation.load(Ordering::Acquire),
+        });
+        self.artwork_wake.notify_one();
     }
 
     fn load_selection_audio(self: &Arc<Self>, job: SelectionAudioJob) {
@@ -6380,6 +6582,11 @@ impl Controller {
             self.selection_audio_wake.notify_all();
         }
         {
+            let mut pending = self.artwork_job.lock().unwrap();
+            *pending = None;
+            self.artwork_wake.notify_all();
+        }
+        {
             let _signal = self.poll_signal.lock().unwrap();
             self.poll_wake.notify_all();
         }
@@ -6956,11 +7163,22 @@ fn same_patch(left: &MetadataPatch, right: &MetadataPatch) -> bool {
 }
 
 fn present_file(ui: &AppWindow, file: &AudioFile) {
+    let album = audiolib_core::album(&file.attributes);
+    let same_cover = ui.get_selected_id().as_str() == file.id.to_string()
+        && ui.get_selected_path().as_str() == file.file_path
+        && ui.get_selected_album().as_str() == album;
     ui.set_selected_id(file.id.to_string().into());
     ui.set_has_selection(true);
     ui.set_selected_missing(file.missing);
     ui.set_selected_name(file.filename.clone().into());
     ui.set_selected_path(file.file_path.clone().into());
+    // The library/album comes from the file's own Metadata; files without one show nothing
+    // and keep no stale cover from the previous selection.
+    if !same_cover || album.is_empty() {
+        ui.set_album_cover_ready(false);
+        ui.set_album_cover(Image::default());
+    }
+    ui.set_selected_album(album.into());
     ui.set_selected_format(
         format!(
             "{:.1} kHz / {} bit / {} ch / {}",
@@ -7096,6 +7314,7 @@ fn audio_row(file: &AudioFile) -> AudioRow {
         .into(),
         channels: file.channels.to_string().into(),
         tags: audiolib_core::display_tags(&file.tags, &file.attributes).into(),
+        album: file.album.clone().into(),
         favorite: file.favorite,
         missing: file.missing,
         checked: false,

@@ -1146,6 +1146,7 @@ impl Controller {
             .unwrap()
             .store(true, Ordering::Release);
         self.search_generation.fetch_add(1, Ordering::AcqRel);
+        ui.set_albums(ModelRc::new(VecModel::<crate::AlbumRow>::default()));
         self.tree_generation.fetch_add(1, Ordering::AcqRel);
         // Load admission uses this same mutex. An older selection cannot pass its
         // generation check and enqueue Load after the task switch has cancelled it.
@@ -1321,6 +1322,7 @@ impl Controller {
             let (file, dirty) = self.metadata.lock().unwrap().for_display(&file, 0);
             *self.selected.lock().unwrap() = Some(file.clone());
             present_file(ui, &file);
+            self.queue_artwork(&file);
             ui.set_metadata_dirty(dirty);
             self.restore_task_audio_selection(&file);
         } else {
@@ -1405,6 +1407,21 @@ impl Controller {
             self.request_navigation_search(ui, true, false);
         } else {
             self.reload_tree();
+            // A restored result cache still needs facets for this task's conditions.
+            // Reuse the bounded directory worker instead of retaining another tab's albums.
+            if !self.remote_read_only() {
+                let cancel = Arc::new(AtomicBool::new(false));
+                *self.search_cancel.lock().unwrap() = cancel.clone();
+                *self.facet_job.lock().unwrap() = Some(SearchJob {
+                    request: self.request.lock().unwrap().clone(),
+                    generation: self.search_generation.load(Ordering::Acquire),
+                    not_before: Instant::now(),
+                    cancel,
+                    facet_revision: self.facet_revision.load(Ordering::Acquire),
+                    provider: self.provider(),
+                });
+                self.facet_wake.notify_one();
+            }
         }
         self.restore_task_scroll(ui, &task.view);
         self.publish_search_tasks(ui);
@@ -1611,6 +1628,7 @@ fn task_inputs_valid(task: &SearchTask) -> bool {
 
 fn apply_task_controls(ui: &AppWindow, task: &SearchTask) {
     let definition = &task.definition;
+    ui.set_album_filter(definition.filters.album.clone().unwrap_or_default().into());
     let view = &task.view;
     let raw = &view.raw_inputs;
     ui.set_query(

@@ -1,5 +1,6 @@
 // app/audiolib-desktop/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod artwork;
 #[cfg(test)]
 mod close_tests;
 mod controller;

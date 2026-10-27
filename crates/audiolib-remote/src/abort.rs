@@ -228,7 +228,7 @@ fn warm(url: &str) {
         return;
     };
     if WARMING
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < MAX_WARMING).then_some(n + 1)
         })
         .is_err()
