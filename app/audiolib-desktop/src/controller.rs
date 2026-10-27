@@ -325,9 +325,17 @@ struct SearchJob {
     provider: Arc<SqliteProvider>,
 }
 
+enum ArtworkSource {
+    /// Local library: ID3 art from the validated WAV. Unchanged from the local path.
+    Local { path: PathBuf },
+    /// Server mode: `GET /audio/{id}/artwork` for this snapshot's library.
+    Remote { id: i64, library_id: String },
+}
+
 struct ArtworkJob {
-    path: PathBuf,
+    source: ArtworkSource,
     generation: u64,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -712,6 +720,8 @@ pub struct Controller {
     facet_revision: AtomicU64,
     artwork_job: Mutex<Option<ArtworkJob>>,
     artwork_wake: Condvar,
+    /// In-flight cover fetch. Replacing it cancels the previous server request.
+    artwork_cancel: Mutex<Arc<AtomicBool>>,
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
     waveform_generation: AtomicU64,
@@ -980,6 +990,7 @@ impl Controller {
             facet_revision: AtomicU64::new(0),
             artwork_job: Mutex::new(None),
             artwork_wake: Condvar::new(),
+            artwork_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
             waveform_generation: AtomicU64::new(0),
@@ -2936,21 +2947,49 @@ impl Controller {
                     {
                         continue;
                     }
-                    let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
-                    let Ok(path) = audiolib_core::validate_wav_path(&job.path, &allowed_roots)
-                    else {
+                    let pixels = match &job.source {
+                        ArtworkSource::Local { path } => {
+                            let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
+                            let Ok(path) = audiolib_core::validate_wav_path(path, &allowed_roots)
+                            else {
+                                continue;
+                            };
+                            audiolib_audio::probe_with_artwork(&path)
+                                .ok()
+                                .and_then(|(_, artwork)| artwork)
+                                .and_then(|artwork| {
+                                    crate::artwork::decode_thumbnail(&artwork.bytes, 512)
+                                })
+                        }
+                        ArtworkSource::Remote { id, library_id } => {
+                            let Some((client, cache, open_library, revision)) =
+                                c.remote_artwork_client()
+                            else {
+                                continue;
+                            };
+                            if &open_library != library_id
+                                || job.cancel.load(Ordering::Acquire)
+                                || c.selection_generation.load(Ordering::Acquire) != job.generation
+                            {
+                                continue;
+                            }
+                            crate::artwork::remote_selection_cover(
+                                &client,
+                                &cache,
+                                &open_library,
+                                *id,
+                                revision,
+                                &job.cancel,
+                            )
+                        }
+                    };
+                    let Some(pixels) = pixels else {
                         continue;
                     };
-                    let Some(pixels) = audiolib_audio::probe_with_artwork(&path)
-                        .ok()
-                        .and_then(|(_, artwork)| artwork)
-                        .and_then(|artwork| crate::artwork::decode_thumbnail(&artwork.bytes, 512))
-                    else {
-                        continue;
-                    };
+                    let generation = job.generation;
                     let confirmed = c.clone();
                     post(c.ui.clone(), move |ui| {
-                        if confirmed.selection_generation.load(Ordering::Acquire) == job.generation
+                        if confirmed.selection_generation.load(Ordering::Acquire) == generation
                             && confirmed.available()
                         {
                             let (width, height) = pixels.dimensions();
@@ -4563,17 +4602,49 @@ impl Controller {
         });
     }
 
-    /// Cover work never delays Load/Play and never seeks a remote stream to its tail.
+    /// Cover work never delays Load/Play and never reads a remote audio stream.
+    /// Server mode asks `GET /audio/{id}/artwork` only when `album_artwork` is
+    /// offered; otherwise the selection cover stays blank.
     fn queue_artwork(&self, file: &AudioFile) {
-        if self.remote_read_only()
-            || file.missing
-            || audiolib_core::album(&file.attributes).is_empty()
-        {
+        if file.missing {
             return;
         }
+        let generation = self.selection_generation.load(Ordering::Acquire);
+        if self.remote_read_only() {
+            let Some(library_id) = self.remote_artwork_library() else {
+                return;
+            };
+            self.enqueue_artwork(
+                ArtworkSource::Remote {
+                    id: file.id,
+                    library_id,
+                },
+                generation,
+            );
+            return;
+        }
+        if audiolib_core::album(&file.attributes).is_empty() {
+            return;
+        }
+        self.enqueue_artwork(
+            ArtworkSource::Local {
+                path: PathBuf::from(&file.file_path),
+            },
+            generation,
+        );
+    }
+
+    fn enqueue_artwork(&self, source: ArtworkSource, generation: u64) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut current = self.artwork_cancel.lock().unwrap();
+            current.store(true, Ordering::Release);
+            *current = cancel.clone();
+        }
         *self.artwork_job.lock().unwrap() = Some(ArtworkJob {
-            path: PathBuf::from(&file.file_path),
-            generation: self.selection_generation.load(Ordering::Acquire),
+            source,
+            generation,
+            cancel,
         });
         self.artwork_wake.notify_one();
     }
@@ -6581,6 +6652,10 @@ impl Controller {
             let _pending = self.selection_audio_job.lock().unwrap();
             self.selection_audio_wake.notify_all();
         }
+        self.artwork_cancel
+            .lock()
+            .unwrap()
+            .store(true, Ordering::Release);
         {
             let mut pending = self.artwork_job.lock().unwrap();
             *pending = None;

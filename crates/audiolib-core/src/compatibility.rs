@@ -427,8 +427,12 @@ pub const PROTOCOL: ProtocolRange = ProtocolRange { min: 1, max: 1 };
 /// Known-bad application versions. Intentionally empty; add an exact version only for a
 /// published release that corrupts peers.
 pub const BLOCKED_VERSIONS: &[&str] = &[];
-/// Optional features and revisions this build implements on both client and server.
+/// Optional features and revisions this build understands. A marker server enables one
+/// only when both sides declare the same revision. `album_artwork` is phase-1 selection
+/// covers (`GET /audio/{id}/artwork`); the live route is the `/capabilities` object,
+/// so listing the feature here does not by itself fetch covers.
 pub const FEATURES: &[(&str, u32)] = &[
+    ("album_artwork", 1),
     ("list_waveform_jobs", 1),
     ("list_waveforms", 1),
     ("waveform_bundle_strong_etag", 1),
