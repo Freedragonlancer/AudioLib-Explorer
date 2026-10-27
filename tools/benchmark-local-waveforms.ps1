@@ -114,7 +114,7 @@ $taskLocationPushed = $true
         $taskResult | Add-Member -NotePropertyName minimum_speedup -NotePropertyValue $MinimumSpeedup
         Write-Host ('Speedup: {0:N2}x ({1:N3}s -> {2:N3}s)' -f $taskSpeedup, $taskBaseline.cold_seconds, $taskResult.cold_seconds)
         if ($taskSpeedup -lt $MinimumSpeedup) {
-            throw "Measured speedup $taskSpeedup is below required $MinimumSpeedup. Report: $taskReport"
+            throw "Measured speedup $taskSpeedup is below required $MinimumSpeedup. The previous accepted report was preserved."
         }
     }
     # Publish only after every check passes. A failed run keeps the prior accepted
