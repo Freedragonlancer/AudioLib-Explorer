@@ -385,7 +385,7 @@ impl OpenProgress {
         }
     }
     /// The open finished; later work (e.g. decoding) is not an open.
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         if let Ok(mut target) = self.target.lock() {
             *target = None;
         }

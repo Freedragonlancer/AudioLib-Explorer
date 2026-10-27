@@ -62,8 +62,9 @@ const STREAM_CHUNK_BYTES: usize = 256 * 1024;
 static BUNDLE_DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 const BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
-/// `/audio/{id}/preview` and `/audio/{id}/waveform`, which legitimately take long (large
-/// bodies, waking disks, decoding); exceeding it yields 408 `TIMEOUT`.
+/// `/audio/{id}/preview`, `/audio/{id}/waveform` and `/audio/{id}/artwork`, which
+/// legitimately take long (large bodies, waking disks, decoding); exceeding it yields
+/// 408 `TIMEOUT`.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest accepted JSON request body (a 1 MiB note may double when JSON-escaped).
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -112,8 +113,8 @@ pub struct HealthResponse {
 /// `MANAGE_FORBIDDEN`, checked after authentication). The LAN-only admin page lives at
 /// `/admin` (`crate::admin`). Accepts an open [`AppState`] or a [`Service`] that may still
 /// be starting. Request tracing records method, URI and status only, never request
-/// headers. All routes except the snapshot, audio stream, preview, waveform and
-/// `POST /scans` are limited to [`REQUEST_TIMEOUT`].
+/// headers. All routes except the snapshot, audio stream, preview, waveform, embedded
+/// cover and `POST /scans` are limited to [`REQUEST_TIMEOUT`].
 pub fn router(service: impl Into<Service>) -> Router {
     router_with_request_timeout(service, REQUEST_TIMEOUT)
 }
@@ -222,6 +223,7 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             "/audio/{id}/waveform",
             get(audio_waveform).route_layer(middleware::map_response(vary_accept_encoding)),
         )
+        .route("/audio/{id}/artwork", get(audio_artwork))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -1949,6 +1951,57 @@ async fn audio_waveform(
     })
 }
 
+/// Query string of `/audio/{id}/artwork`; other parameters are ignored.
+#[derive(Deserialize)]
+struct ArtworkQuery {
+    side: Option<String>,
+}
+
+/// `GET`/`HEAD /audio/{id}/artwork`: embedded JPEG/PNG cover (doc/api/README.md §8.2).
+/// Not time-limited. No cover, a missing file and a failed extract are 404.
+async fn audio_artwork(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+    query: Result<Query<ArtworkQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(&raw_id)?;
+    let Query(query) = query.map_err(|rejection| {
+        ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
+    })?;
+    let side = crate::artwork::parse_side(query.side.as_deref())?;
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let progress = OpenProgress::default();
+    let reporter = progress.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        state.artwork(id, side, if_none_match.as_deref(), &reporter)
+    });
+    let reply = watch_open(id, "Artwork", task, &progress).await?;
+    let cache_control = HeaderValue::from_static("private, no-cache");
+    Ok(match reply {
+        crate::artwork::ArtworkReply::NotModified { etag } => {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            let headers = response.headers_mut();
+            headers.insert(header::ETAG, header_value(etag)?);
+            headers.insert(header::CACHE_CONTROL, cache_control);
+            response
+        }
+        crate::artwork::ArtworkReply::Body { etag, mime, bytes } => {
+            let len = bytes.len();
+            let mut response = Response::new(Body::from(bytes));
+            let headers = response.headers_mut();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+            headers.insert(header::ETAG, header_value(etag)?);
+            headers.insert(header::CACHE_CONTROL, cache_control);
+            response
+        }
+    })
+}
+
 /// `Vary: Accept-Encoding` on every `/library/snapshot` and `/audio/{id}/waveform`
 /// reply (errors and 304 too).
 async fn vary_accept_encoding(mut response: Response) -> Response {
@@ -2646,6 +2699,8 @@ mod tests {
             (Method::HEAD, "/audio/{id}/stream"),
             (Method::GET, "/audio/{id}/preview"),
             (Method::GET, "/audio/{id}/waveform"),
+            (Method::GET, "/audio/{id}/artwork"),
+            (Method::HEAD, "/audio/{id}/artwork"),
             (Method::PATCH, "/audio/{id}/metadata"),
             (Method::POST, "/audio/metadata/batch"),
             (Method::POST, "/audio/{id}/plays"),

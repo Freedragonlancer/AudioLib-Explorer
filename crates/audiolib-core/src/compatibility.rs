@@ -427,8 +427,14 @@ pub const PROTOCOL: ProtocolRange = ProtocolRange { min: 1, max: 1 };
 /// Known-bad application versions. Intentionally empty; add an exact version only for a
 /// published release that corrupts peers.
 pub const BLOCKED_VERSIONS: &[&str] = &[];
+/// Optional `GET /audio/{id}/artwork` cover endpoint. A peer that omits it only
+/// disables that request; a missing optional feature never refuses sync.
+pub const ALBUM_ARTWORK_FEATURE: &str = "album_artwork";
+/// Revision of [`ALBUM_ARTWORK_FEATURE`] implemented by this build.
+pub const ALBUM_ARTWORK_REVISION: u32 = 1;
 /// Optional features and revisions this build implements on both client and server.
 pub const FEATURES: &[(&str, u32)] = &[
+    (ALBUM_ARTWORK_FEATURE, ALBUM_ARTWORK_REVISION),
     ("list_waveform_jobs", 1),
     ("list_waveforms", 1),
     ("waveform_bundle_strong_etag", 1),
@@ -922,6 +928,20 @@ mod tests {
                 peer.api_protocols
             );
         }
+    }
+
+    #[test]
+    fn album_artwork_is_an_optional_feature_at_revision_1() {
+        let manifest = compatibility_manifest();
+        assert!(
+            manifest
+                .features
+                .get(ALBUM_ARTWORK_FEATURE)
+                .copied()
+                .unwrap_or(0)
+                >= 1
+        );
+        assert!(!manifest.features.contains_key("artwork"));
     }
 
     #[test]
