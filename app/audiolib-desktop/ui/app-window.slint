@@ -1379,7 +1379,7 @@ export component AppWindow inherits Window {
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
-    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
+    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.album-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
     callback file-action-requested(string, int);
     callback folder-action-requested(string, int);
     callback selection-step-requested(int);
@@ -1954,7 +1954,7 @@ export component AppWindow inherits Window {
                     }
                     // Library/album groups declared by the files themselves. Clicking one
                     // filters the results; clicking the active one clears the filter.
-                    if root.library-sidebar-page == 0 && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; height: 190px * Theme.ui-scale;
+                    if root.library-sidebar-page == 0 && !root.remote-mode && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; height: 190px * Theme.ui-scale;
                         Label { height: 24px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARIES"; font-size: Theme.font(10); }
                         album-list := ListView { vertical-stretch: 1; viewport-width: self.visible-width; accessible-role: list;
                             for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
@@ -1964,7 +1964,7 @@ export component AppWindow inherits Window {
                                     Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.ink; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
                                     Label { min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
                                 }
-                                album-hit := TouchArea { mouse-cursor: pointer; clicked => { root.album-selected(album.name); } }
+                                album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.name); } }
                             }
                         }
                     }
@@ -2400,7 +2400,7 @@ export component AppWindow inherits Window {
                                 visible: root.album-cover-ready;
                                 horizontal-stretch: 1;
                                 min-width: 0px;
-                                height: 160px * Theme.ui-scale;
+                                height: root.album-cover-ready ? 160px * Theme.ui-scale : 0px;
                                 image-fit: contain;
                                 source: root.album-cover;
                             }
