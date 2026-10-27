@@ -72,7 +72,7 @@ See [API §8.2](api/README.md).
 ## Acceptance boundaries
 
 The authorized production deployment on 2026-10-27 updated the Mac server to the
-current 0.8.0 development build. The existing launcher, its signature, launchd
+then-current 0.8.0 development build. The existing launcher, its signature, launchd
 configuration and file-access chain were retained. Schema 6 was upgraded in place
 to schema 7 after validating an independent rollback backup and an upgrade copy.
 The library identity and complete business-data digest remained unchanged.
