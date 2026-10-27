@@ -5,8 +5,8 @@
 //! and below) through the [`DataProvider`]: it first looks stored list Waveforms up
 //! (cheap, never decodes), then computes missing ones one file at a time (local mode),
 //! and finally, when the user enabled "pre-generate list Waveforms", backfills the
-//! library at a bounded rate. Rows that scroll out of the window are dropped from the
-//! queues and an on-demand decode of such a row is cancelled.
+//! library without a fixed per-file delay. Rows that scroll out of the window are
+//! dropped from the queues and an on-demand decode of such a row is cancelled.
 //!
 //! In server mode ([`ListWaveformSource::Server`]) the lookup is one `POST /waveforms`
 //! for up to 200 ids and the client never decodes: `pending` ids are asked again after
@@ -28,6 +28,9 @@ use audiolib_core::{
     ListWaveformState, MAX_LIST_WAVEFORM_IDS,
 };
 use slint::{Rgba8Pixel, SharedPixelBuffer};
+#[cfg(test)]
+#[path = "list_waveforms_benchmark.rs"]
+mod benchmark;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
@@ -41,8 +44,6 @@ use std::{
 pub(crate) const PREBUFFER_YIELD: Duration = Duration::from_secs(3);
 /// The backfill resumes this long after the last audition ended.
 pub(crate) const BACKFILL_RESUME_DELAY: Duration = Duration::from_secs(5);
-/// Backfill starts at most one file per interval (5 files per second).
-pub(crate) const BACKFILL_INTERVAL: Duration = Duration::from_millis(200);
 /// Ids per lookup request.
 const LOOKUP_BATCH: usize = 64;
 /// Ids per backlog query.
@@ -193,7 +194,6 @@ struct Backfill {
     active: bool,
     cursor: i64,
     queue: VecDeque<i64>,
-    last_start: Option<Instant>,
     processed: u64,
     generated: u64,
     failed: u64,
@@ -364,7 +364,9 @@ impl State {
             self.task = Some(self.compute_task(id, true));
             return Step::Run;
         }
-        // 3. Rate-limited backfill, only while nothing is auditioned or scanned.
+        // 3. Continuous backfill on the single background-priority worker. Recheck
+        // visible work, audition and scan gates before every file, without an
+        // artificial per-file sleep limiting small effects to five per second.
         if !(self.pregenerate && self.backfill.active) {
             return Step::Wait(None);
         }
@@ -385,14 +387,7 @@ impl State {
                 self.backfill.queue.pop_front();
                 continue;
             }
-            if let Some(last) = self.backfill.last_start {
-                let elapsed = now.saturating_duration_since(last);
-                if elapsed < BACKFILL_INTERVAL {
-                    return Step::Wait(Some(BACKFILL_INTERVAL - elapsed));
-                }
-            }
             self.backfill.queue.pop_front();
-            self.backfill.last_start = Some(now);
             self.task = Some(self.compute_task(id, false));
             return Step::Run;
         }
@@ -629,8 +624,11 @@ impl State {
                 self.verify.remove(&id);
                 if on_demand || self.in_window.contains(&id) {
                     self.remember(id, cell.clone());
+                    cells.push((id, cell));
                 }
-                cells.push((id, cell));
+                // Background-only results are already persisted by the provider.
+                // Posting each one would flood Slint with a full-page row walk for
+                // files outside the window. Progress is polled separately.
             }
             Outcome::Backlog { generation, result } => {
                 if generation != self.generation {
@@ -1131,7 +1129,7 @@ mod tests {
                 waveform: waveform(4),
             }),
         });
-        let next = now + BACKFILL_INTERVAL;
+        let next = now;
         assert_eq!(
             state.next_step(next, false, ListWaveformSource::Local),
             Step::Run
@@ -1274,7 +1272,7 @@ mod tests {
             vec![10]
         );
         assert_eq!(
-            state.next_step(now + BACKFILL_INTERVAL, false, ListWaveformSource::Local),
+            state.next_step(now, false, ListWaveformSource::Local),
             Step::Run
         );
         assert!(matches!(
@@ -1441,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_is_rate_limited_and_yields_to_scans_and_auditions() {
+    fn backfill_continues_immediately_but_yields_to_scans_and_auditions() {
         let service = ListWaveforms::new(true);
         let mut state = std::mem::take(&mut *service.lock());
         let now = Instant::now();
@@ -1476,18 +1474,82 @@ mod tests {
             panic!()
         };
         assert_eq!((id, on_demand), (10, false));
-        state.current = None;
+        state.finish(Outcome::Compute {
+            generation,
+            id,
+            on_demand,
+            result: Ok(ListWaveformState::Ready {
+                waveform: waveform(8),
+            }),
+        });
+        // Fast backfill must recheck every gate between files, even at the same
+        // timestamp; no batch is allowed to run through a scan or audition.
         assert_eq!(
-            state.next_step(now + Duration::from_millis(50), false, local),
-            Step::Wait(Some(Duration::from_millis(150)))
+            state.next_step(now, true, local),
+            Step::Wait(Some(IDLE_POLL))
         );
-        let next = now + BACKFILL_INTERVAL;
-        assert_eq!(state.next_step(next, false, local), Step::Run);
-        take_task(&mut state);
+        state.playing = true;
         assert_eq!(
-            state.next_step(next + BACKFILL_INTERVAL, false, local),
-            Step::Run
+            state.next_step(now, false, local),
+            Step::Wait(Some(IDLE_POLL))
         );
+        state.playing = false;
+        state.playback_start = Some(now);
+        assert_eq!(
+            state.next_step(now, false, local),
+            Step::Wait(Some(PREBUFFER_YIELD))
+        );
+        assert_eq!(
+            state.backfill.queue.iter().copied().collect::<Vec<_>>(),
+            vec![11]
+        );
+        state.playback_start = None;
+        state.window = vec![20];
+        state.in_window.insert(20);
+        assert_eq!(state.next_step(now, false, local), Step::Run);
+        let Task::Lookup { ids, .. } = take_task(&mut state) else {
+            panic!("visible lookup precedes the remaining backfill")
+        };
+        state.finish(Outcome::Lookup {
+            generation,
+            ids,
+            server: false,
+            result: Ok(ListWaveformBatch {
+                items: vec![ListWaveformItem {
+                    id: 20,
+                    state: ListWaveformState::Pending { previous: None },
+                }],
+                retry_after: None,
+                deferred: None,
+            }),
+        });
+        assert_eq!(state.next_step(now, false, local), Step::Run);
+        let Task::Compute { id, on_demand, .. } = take_task(&mut state) else {
+            panic!("visible decode precedes the remaining backfill")
+        };
+        assert_eq!((id, on_demand), (20, true));
+        state.finish(Outcome::Compute {
+            generation,
+            id,
+            on_demand,
+            result: Ok(ListWaveformState::Ready {
+                waveform: waveform(8),
+            }),
+        });
+        assert_eq!(state.next_step(now, false, local), Step::Run);
+        let Task::Compute { id, on_demand, .. } = take_task(&mut state) else {
+            panic!("next background file without waiting")
+        };
+        assert_eq!((id, on_demand), (11, false));
+        state.finish(Outcome::Compute {
+            generation,
+            id,
+            on_demand,
+            result: Ok(ListWaveformState::Ready {
+                waveform: waveform(8),
+            }),
+        });
+        assert_eq!(state.next_step(now, false, local), Step::Run);
         let Task::Backlog { generation, after } = take_task(&mut state) else {
             panic!()
         };
@@ -1500,7 +1562,63 @@ mod tests {
             !state.backfill.active,
             "the pass ends at the end of the backlog"
         );
-        assert_eq!(state.next_step(next, false, local), Step::Wait(None));
+        assert_eq!(state.next_step(now, false, local), Step::Wait(None));
+    }
+
+    #[test]
+    fn fast_backfill_keeps_progress_without_publishing_off_window_rows() {
+        let service = ListWaveforms::new(true);
+        let mut state = service.lock();
+        let generation = state.generation;
+        let ready = waveform(8);
+        let cells = state.finish(Outcome::Compute {
+            generation,
+            id: 10,
+            on_demand: false,
+            result: Ok(ListWaveformState::Ready {
+                waveform: ready.clone(),
+            }),
+        });
+        assert!(
+            cells.is_empty(),
+            "screen-off backfill must not post UI work"
+        );
+        assert!(!state.cache.contains_key(&10));
+        assert_eq!(state.backfill.generated, 1);
+        assert_eq!(state.backfill.processed, 1);
+        drop(state);
+
+        // Moving into view reads the persisted result normally; off-window results
+        // do not have to fill the bounded in-memory display cache.
+        service.set_window(vec![10], 1);
+        let mut state = service.lock();
+        let now = Instant::now();
+        assert_eq!(
+            state.next_step(now, false, ListWaveformSource::Local),
+            Step::Run
+        );
+        let Task::Lookup { ids, .. } = take_task(&mut state) else {
+            panic!("new window takes priority over backfill")
+        };
+        assert_eq!(ids, vec![10]);
+        assert_eq!(
+            state.finish(Outcome::Lookup {
+                generation,
+                ids,
+                server: false,
+                result: Ok(ListWaveformBatch {
+                    items: vec![ListWaveformItem {
+                        id: 10,
+                        state: ListWaveformState::Ready {
+                            waveform: ready.clone()
+                        },
+                    }],
+                    retry_after: None,
+                    deferred: None,
+                }),
+            }),
+            vec![(10, ListWaveformCell::Ready(ready))]
+        );
     }
 
     #[test]
