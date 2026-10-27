@@ -1409,17 +1409,19 @@ impl Controller {
             self.reload_tree();
             // A restored result cache still needs facets for this task's conditions.
             // Reuse the bounded directory worker instead of retaining another tab's albums.
-            let cancel = Arc::new(AtomicBool::new(false));
-            *self.search_cancel.lock().unwrap() = cancel.clone();
-            *self.facet_job.lock().unwrap() = Some(SearchJob {
-                request: self.request.lock().unwrap().clone(),
-                generation: self.search_generation.load(Ordering::Acquire),
-                not_before: Instant::now(),
-                cancel,
-                facet_revision: self.facet_revision.load(Ordering::Acquire),
-                provider: self.provider(),
-            });
-            self.facet_wake.notify_one();
+            if !self.remote_read_only() {
+                let cancel = Arc::new(AtomicBool::new(false));
+                *self.search_cancel.lock().unwrap() = cancel.clone();
+                *self.facet_job.lock().unwrap() = Some(SearchJob {
+                    request: self.request.lock().unwrap().clone(),
+                    generation: self.search_generation.load(Ordering::Acquire),
+                    not_before: Instant::now(),
+                    cancel,
+                    facet_revision: self.facet_revision.load(Ordering::Acquire),
+                    provider: self.provider(),
+                });
+                self.facet_wake.notify_one();
+            }
         }
         self.restore_task_scroll(ui, &task.view);
         self.publish_search_tasks(ui);

@@ -22,6 +22,7 @@ fn child_album_navigation() {
     // These statements modify only the isolated fixture. Album values are derived
     // from the same owned Metadata representation used by scanning and v7 backfill.
     let connection = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
+    audiolib_db::register_library_functions(&connection).unwrap();
     connection.execute(
         "UPDATE audio_files SET album=CASE WHEN filename LIKE 'gore%' THEN 'Gore album' ELSE 'Wind album' END",
         [],

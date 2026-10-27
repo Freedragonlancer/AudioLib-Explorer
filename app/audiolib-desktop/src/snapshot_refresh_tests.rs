@@ -464,7 +464,8 @@ impl SnapshotServer {
                         let format = serde_json::to_string(&audiolib_core::compatibility::LibraryFormat::target()).unwrap();
                         let manifest = serde_json::to_string(&audiolib_core::compatibility::compatibility_manifest()).unwrap();
                         let format_id = audiolib_core::compatibility::PLAN_B_FORMAT;
-                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nX-Library-Id: {library_id}\r\nX-Library-Revision: {revision}\r\nX-Schema-Version: 6\r\nX-Audiolib-Snapshot-Format: {format_id}\r\nX-Audiolib-Library-Format: {format}\r\nX-Audiolib-Server-Compatibility: {manifest}\r\nX-Search-Storage-Revision: 1\r\nX-Tokenization-Revision: 3\r\nX-Source-Search-Revision: 2\r\nX-Source-Tags-Revision: 2\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                        let schema_version = audiolib_db::SCHEMA_VERSION;
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nX-Library-Id: {library_id}\r\nX-Library-Revision: {revision}\r\nX-Schema-Version: {schema_version}\r\nX-Audiolib-Snapshot-Format: {format_id}\r\nX-Audiolib-Library-Format: {format}\r\nX-Audiolib-Server-Compatibility: {manifest}\r\nX-Search-Storage-Revision: 1\r\nX-Tokenization-Revision: 3\r\nX-Source-Search-Revision: 2\r\nX-Source-Tags-Revision: 2\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
                         socket.write_all(&bytes).unwrap();
                     }
                     _ => respond(
