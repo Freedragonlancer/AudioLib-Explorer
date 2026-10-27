@@ -152,7 +152,7 @@ fn modern_pinned_resume_keeps_its_format_when_the_live_revision_advances() {
                     "/api/v1/health" => TestResponse::json(200, &serde_json::json!({"status":"ok","version":if incompatible.load(Ordering::SeqCst) { "99.0.0" } else { env!("CARGO_PKG_VERSION") }}).to_string()),
                     "/api/v1/capabilities" => TestResponse::json(200, &serde_json::json!({"compatibility":compatibility_manifest()}).to_string()),
                     "/api/v1/library" => TestResponse::json(200, &serde_json::json!({
-                        "library_id":LIBRARY,"schema_version":6,"revision":revision.load(Ordering::SeqCst),
+                        "library_id":LIBRARY,"schema_version":7,"revision":revision.load(Ordering::SeqCst),
                         "snapshot_format":SnapshotFormat { id:PLAN_B_FORMAT.into(),format:LibraryFormat::target() }
                     }).to_string()),
                     "/api/v1/roots" => TestResponse::json(200, "[]"),

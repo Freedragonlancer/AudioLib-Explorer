@@ -7,7 +7,7 @@ use crate::{
 use audiolib_core::compatibility::{
     CompatibilityManifest, LIBRARY_FORMAT_HEADER, LibraryAccess, LibraryFormat,
     MAX_COMPATIBILITY_HEADER_BYTES, PeerRejection, SERVER_COMPATIBILITY_HEADER,
-    SNAPSHOT_FORMAT_HEADER, SnapshotFormat, check_peer, compatibility_manifest,
+    SNAPSHOT_FORMAT_HEADER, SnapshotFormat, TARGET_SCHEMA, check_peer, compatibility_manifest,
 };
 use std::{path::Path, sync::atomic::AtomicBool};
 use ureq::http::HeaderMap;
@@ -72,7 +72,13 @@ pub(crate) fn library(library: &RemoteLibrary) -> Result<()> {
         {
             Ok(())
         }
-        None if (3..=5).contains(&library.schema_version) => Ok(()),
+        // The published format before the current target may still omit its descriptor;
+        // bytes are verified after download. The current target must declare one.
+        None if (3..=i64::from(TARGET_SCHEMA.saturating_sub(1)))
+            .contains(&library.schema_version) =>
+        {
+            Ok(())
+        }
         _ => Err(invalid(
             "Server library format is missing, inconsistent or unsupported; the existing cache was retained",
         )),
@@ -521,7 +527,7 @@ mod tests {
                         format.format.features.insert("future_required_feature".into(),1);
                     }
                     TestResponse::json(200, &serde_json::json!({
-                        "library_id":"incoming", "revision":8, "schema_version":6, "snapshot_format":format,
+                        "library_id":"incoming", "revision":8, "schema_version":7, "snapshot_format":format,
                     }).to_string())
                 }
                 "/api/v1/roots" => TestResponse::json(200, "[]"),

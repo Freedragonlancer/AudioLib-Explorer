@@ -92,7 +92,7 @@ fn fixture(peer: Peer) -> Fixture {
                 ("GET", "/api/v1/library") => TestResponse::json(
                     200,
                     &serde_json::json!({
-                        "library_id":LIBRARY, "revision":3, "schema_version":6,
+                        "library_id":LIBRARY, "revision":3, "schema_version":7,
                         "identity_bound_writes":true,
                         "snapshot_format":SnapshotFormat{id:PLAN_B_FORMAT.into(),format:LibraryFormat::target()},
                     })
