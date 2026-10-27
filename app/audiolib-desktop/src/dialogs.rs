@@ -180,6 +180,7 @@ pub enum FileKind {
     Database,
     NewLibrary,
     Wav,
+    Image,
     JsonLines,
     Csv,
     Annotations,
@@ -234,6 +235,7 @@ pub fn choose(
             "db",
         ),
         (FileKind::Wav, _) => ("WAV / BWF\0*.wav\0\0", "wav"),
+        (FileKind::Image, _) => ("PNG / JPEG\0*.png;*.jpg;*.jpeg\0\0", "png"),
         (FileKind::JsonLines, _) => ("JSON Lines (*.jsonl)\0*.jsonl\0\0", "jsonl"),
         (FileKind::Csv, _) => ("CSV (*.csv)\0*.csv\0\0", "csv"),
         (FileKind::Annotations, true) => ("音效库标注\0*.jsonl;*.csv\0所有文件\0*.*\0\0", "jsonl"),
@@ -253,6 +255,8 @@ pub fn choose(
         (FileKind::Database, false, false) => "Choose sound library database",
         (FileKind::Wav, _, true) => "选择 WAV，修复文件引用",
         (FileKind::Wav, _, false) => "Choose WAV to repair file reference",
+        (FileKind::Image, _, true) => "选择专辑封面",
+        (FileKind::Image, _, false) => "Choose album artwork",
         (_, true, true) => "导出音效库标注",
         (_, true, false) => "Export library annotations",
         (_, false, true) => "导入音效库标注",
@@ -271,7 +275,7 @@ pub fn choose(
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")
             }
-            FileKind::Wav => String::new(),
+            FileKind::Wav | FileKind::Image => String::new(),
         };
         for (target, value) in file.iter_mut().zip(name.encode_utf16()) {
             *target = value;

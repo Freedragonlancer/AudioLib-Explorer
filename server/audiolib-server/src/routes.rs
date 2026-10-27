@@ -60,6 +60,8 @@ pub const API_BASE: &str = "/api/v1";
 const STREAM_CHUNK_BYTES: usize = 256 * 1024;
 /// Bundle download limits are independent of its short preparation lease.
 static BUNDLE_DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+// Keep bounded image decode allocations independent of the audio playback slots.
+static ARTWORK_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 const BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
 /// `/audio/{id}/preview`, `/audio/{id}/waveform` and `/audio/{id}/artwork`, which
@@ -1965,11 +1967,36 @@ async fn audio_artwork(
     query: Result<Query<ArtworkQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let identities = headers.get_all(LIBRARY_ID_HEADER);
+    let mut identities = identities.iter();
+    let identity = identities
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty() && identities.next().is_none())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "LIBRARY_ID_REQUIRED",
+                "Artwork reads require X-AudioLib-Library-Id from the opened snapshot",
+            )
+        })?;
+    if identity != state.library_id() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "LIBRARY_CHANGED",
+            "The server library changed; synchronize before reading artwork",
+        ));
+    }
+    // The middleware's AppState clone pins this identity throughout the read.
+    let library_id = header_value(state.library_id().to_owned())?;
     let id = parse_id(&raw_id)?;
     let Query(query) = query.map_err(|rejection| {
         ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
     })?;
     let side = crate::artwork::parse_side(query.side.as_deref())?;
+    let permit = ARTWORK_SLOTS
+        .try_acquire()
+        .map_err(|_| ApiError::fs_busy("Artwork requests are busy; retry shortly"))?;
     let if_none_match = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -1977,6 +2004,7 @@ async fn audio_artwork(
     let progress = OpenProgress::default();
     let reporter = progress.clone();
     let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         state.artwork(id, side, if_none_match.as_deref(), &reporter)
     });
     let reply = watch_open(id, "Artwork", task, &progress).await?;
@@ -1987,6 +2015,7 @@ async fn audio_artwork(
             let headers = response.headers_mut();
             headers.insert(header::ETAG, header_value(etag)?);
             headers.insert(header::CACHE_CONTROL, cache_control);
+            headers.insert("x-library-id", library_id);
             response
         }
         crate::artwork::ArtworkReply::Body { etag, mime, bytes } => {
@@ -1997,6 +2026,7 @@ async fn audio_artwork(
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
             headers.insert(header::ETAG, header_value(etag)?);
             headers.insert(header::CACHE_CONTROL, cache_control);
+            headers.insert("x-library-id", library_id);
             response
         }
     })

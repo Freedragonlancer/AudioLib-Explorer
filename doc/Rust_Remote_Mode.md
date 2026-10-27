@@ -15,6 +15,13 @@ modified or replaced while in server mode; switching back to local mode reopens 
 
 ## Settings and secrets
 
+Album artwork uses the optional `album_artwork` capability and its dedicated
+HTTP endpoint; older servers skip embedded covers while retaining normal sync
+and playback behavior. The active server's **Cache and export** page also offers
+client-local custom images, hiding/restoring, display preferences and thumbnail
+cleanup. These choices never write to the server snapshot or WAV files and do
+not sync to other PCs. See [Album artwork](Rust_Artwork.md).
+
 `settings.json` gains a `data_source` section (all fields have serde defaults, so older
 settings files load as local mode):
 

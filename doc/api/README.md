@@ -900,9 +900,11 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 
 - 鉴权同 §2.2。支持 `GET` 和 `HEAD`。不受 30 秒上限；打开文件、根目录限制、根离线 503 `ROOT_OFFLINE`（先即时重查约 2 秒）与 `/stream` 相同（§6.4）。
 - **支持检测**：`GET /capabilities` 的 `compatibility.features.album_artwork` ≥ 1。旧服务端没有这个 feature 时客户端跳过请求，不要改去逐条探测一个不存在的端点。
+- 请求必须带单个非空 `X-AudioLib-Library-Id`，绑定当前快照的库身份；缺失、空值或重复为 409 `LIBRARY_ID_REQUIRED`，与当前服务器库不符为 409 `LIBRARY_CHANGED`，读取文件前即拒绝。200 和 304 返回 `X-Library-Id`，客户端核对一致后才缓存或显示。
+- 封面解码使用独立的两个并发名额，不占试听名额；已满时返回 503 `BUSY`、`Retry-After: 1`。
 - 查询参数 `side` 可省略。省略时返回嵌入的原始 JPEG 或 PNG。`side` 为 1..=512 的十进制整数时，把长边缩到不超过该值（保持比例，不放大）。其他值（含 `0`）为 400 `VALIDATION`。未知参数忽略。
 - 界限与桌面端封面解码相同：编码不超过 8 MiB，解码宽或高不超过 4096，解码分配不超过 64 MiB。只接受 `image/jpeg` 和 `image/png`。
-- 成功：200，`Content-Type: image/jpeg` 或 `image/png`，`Content-Length`，强 `ETag`（形如 `"aa1-<源文件 ETag 内容>-<side 的十六进制>"`，`side` 省略时为 `0`），`Cache-Control: private, no-cache`。`If-None-Match` 匹配（弱比较，或 `*`）为 304，不再解码。
+- 成功：200，`Content-Type: image/jpeg` 或 `image/png`，`Content-Length`，强 `ETag`（形如 `"aa2-<源文件 ETag 内容>-<side 的十六进制>"`，`side` 省略时为 `0`），`Cache-Control: private, no-cache`。确认封面存在后，`If-None-Match` 匹配（弱比较，或 `*`）为 304；无封面时即使发送 `*` 仍为 404。
 - 无封面、文件缺失、文件损坏或提取/解码失败：**404 `NOT_FOUND`**，不是 5xx。
 - 可选磁盘缓存：库文件所在目录下的 `artwork/`，键含库 id、记录 id、规范路径、源文件 ETag、`side` 和算法版本。缓存写失败仍返回图片。超过约 256 MiB 时删掉最旧的缓存文件。
 

@@ -1427,6 +1427,7 @@ mod tests {
             language: "cn".into(),
             audition_play_on_single_click: false,
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
+            show_album_artwork: true,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,
             max_search_tasks: audiolib_core::config::DEFAULT_MAX_SEARCH_TASKS,

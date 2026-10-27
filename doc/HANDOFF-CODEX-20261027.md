@@ -1,9 +1,11 @@
 # Codex 交接总索引 — 2026-10-27
 
-English: master handoff for Codex after the Grok fleet quota wrap-up on 2026-10-27 (Asia/Shanghai). **Do not merge this branch into `beta`.**
+English: historical master handoff for Codex after the Grok fleet quota wrap-up on 2026-10-27 (Asia/Shanghai). See the current status below.
 
 本文件是唯一总索引：`doc/HANDOFF-CODEX-20261027.md`。  
 Debug 播放调查笔记在 `docs/HANDOFF-CODEX-20261027.md`，只作链接，不要把两份文件当成同一份，也不要互相覆盖。
+
+后续接手结果及授权的生产部署见[封面功能说明](Rust_Artwork.md)、[最新验证报告](Rust_Validation.md)、[数据库影响审查](Artwork_Data_Safety_20261027.md)与[播放调查证据](../docs/Playback_Fix_20261027.md)。以下保留交接时状态，不代表这些待办或当时限制仍然适用。发布 Release 或合并 PR 仍需另外授权。
 
 ## 1. 分支状态
 
@@ -17,7 +19,7 @@ Debug 播放调查笔记在 `docs/HANDOFF-CODEX-20261027.md`，只作链接，�
 
 v0.8.0 曾经 #134 合入 main（merge `6bf602e3`），随后 **GitHub Release 已删除**（服务器模式预览/播放与曲库封面问题严重）。当前最新 Release 是 **v0.7.8**。附注 tag `v0.8.0` 仍指向 `6bf602e3`，**留给 Paul 决定，不要删 tag**。main 上仍保留这次 promote 历史，管家不做 main 回滚。
 
-## 2. 硬约束
+## 2. 交接时的约束（历史记录）
 
 - **#97**（design(compat) marker sync）保持原样，不合并、不改、不评论：https://github.com/Freedragonlancer/AudioLib-Explorer/pull/97
 - **8790** 生产仍是 v0.7.8 / schema 6。没有 Paul 点头，不升级、不重启、不改部署配置。

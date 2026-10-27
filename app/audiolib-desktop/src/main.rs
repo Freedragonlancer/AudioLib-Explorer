@@ -343,7 +343,10 @@ fn run() -> Result<()> {
                     ui.set_peak_mode(0);
                     ui.invoke_peak_style_requested();
                 }
-                "database" | "library" => ui.invoke_open_library(0),
+                "database" | "library" | "artwork" => {
+                    ui.invoke_open_library(0);
+                    ui.set_artwork_management_expanded(smoke_view == "artwork");
+                }
                 "local-source" | "add-source" => {
                     ui.invoke_open_library(0);
                     if smoke_view == "local-source" {
@@ -367,7 +370,7 @@ fn run() -> Result<()> {
                     ui.invoke_open_data_source();
                     ui.invoke_sm_select_row(-1);
                 }
-                "cache-export" | "server-cache" => {
+                "cache-export" | "server-cache" | "server-artwork" => {
                     // Synthetic presentation-only fixture of 缓存与导出; never connects to a
                     // server or changes a working library. Smoke runs use an isolated data dir.
                     ui.set_library_visible(true);
@@ -387,6 +390,7 @@ fn run() -> Result<()> {
                     ])));
                     ui.set_sm_selected(1);
                     ui.set_sm_page(2);
+                    ui.set_artwork_management_expanded(smoke_view == "server-artwork");
                     ui.set_sm_cache_available(true);
                     ui.set_sm_cache_summary(
                         if ui.get_chinese() {

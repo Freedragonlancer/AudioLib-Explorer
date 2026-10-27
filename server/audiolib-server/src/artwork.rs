@@ -1,7 +1,7 @@
 // server/audiolib-server/src/artwork.rs
 //! On-demand embedded cover for `GET /audio/{id}/artwork`.
 //!
-//! The picture is read from the audio file on disk (`audiolib_audio::probe_with_artwork`).
+//! The picture is read from the authorized audio file handle on disk.
 //! Image bytes are never written into the library SQLite database or into snapshots.
 //! Resolution is the audio id's file path, so a schema 6 library works without the
 //! schema 7 album column. An optional disk cache under the server data directory
@@ -13,13 +13,14 @@ use crate::{
 };
 use audiolib_core::Error;
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 /// Bumped when thumbnail bytes for the same source and `side` change.
-const ARTWORK_ALGORITHM: u32 = 1;
+const ARTWORK_ALGORITHM: u32 = 2;
 /// Same encoded-byte cap as ID3 extraction and the desktop cover decoder.
 const MAX_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 /// Same dimension and allocation caps as `app/audiolib-desktop/src/artwork.rs`.
@@ -89,31 +90,39 @@ impl AppState {
         if_none_match: Option<&str>,
         progress: &OpenProgress,
     ) -> Result<ArtworkReply, OpenError> {
-        let served = self.open_audio_reporting(id, progress)?;
-        drop(served.file);
+        let mut served = self.open_audio_reporting(id, progress)?;
         progress.clear();
         let side_key = side.unwrap_or(0);
         let etag = artwork_etag(&served.etag, side_key);
-        if if_none_match.is_some_and(|value| stream::none_match(value, &etag)) {
-            return Ok(ArtworkReply::NotModified { etag });
-        }
         let cache_dir = artwork_cache_dir(self);
         let key = cache_key(self.library_id(), id, &served.path, &served.etag, side_key);
         if let Some(cover) = load_cache(&cache_dir, &key) {
+            if if_none_match.is_some_and(|value| stream::none_match(value, &etag)) {
+                return Ok(ArtworkReply::NotModified { etag });
+            }
             return Ok(ArtworkReply::Body {
                 etag,
                 mime: cover.mime,
                 bytes: cover.bytes,
             });
         }
-        let cover = match render_file(&served.path, side) {
+        let cover = match render_file(&mut served.file, side) {
             Some(cover) => cover,
             None => {
                 tracing::debug!(id, "Embedded cover is absent or could not be decoded");
                 return Err(Error::NotFound(format!("Audio {id} has no embedded cover")).into());
             }
         };
+        if stream::file_etag(&served.file.metadata().map_err(Error::from)?) != served.etag {
+            return Err(Error::NotFound("Audio changed during cover extraction".into()).into());
+        }
         store_cache(&cache_dir, &key, &cover);
+        // A source WAV existing does not imply that its optional cover exists.
+        // Evaluate conditional headers only after resolving that representation,
+        // so `If-None-Match: *` on an uncovered WAV still answers 404.
+        if if_none_match.is_some_and(|value| stream::none_match(value, &etag)) {
+            return Ok(ArtworkReply::NotModified { etag });
+        }
         Ok(ArtworkReply::Body {
             etag,
             mime: cover.mime,
@@ -150,8 +159,8 @@ fn fnv64(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn render_file(path: &Path, side: Option<u32>) -> Option<Cover> {
-    let (_, artwork) = audiolib_audio::probe_with_artwork(path).ok()?;
+fn render_file(file: &mut fs::File, side: Option<u32>) -> Option<Cover> {
+    let (_, artwork) = audiolib_audio::probe_file_with_artwork(file).ok()?;
     let artwork = artwork?;
     render(artwork.bytes, side)
 }
@@ -162,6 +171,9 @@ fn render(bytes: Vec<u8>, side: Option<u32>) -> Option<Cover> {
     let decoded = decode_limited(&bytes)?;
     match side {
         None => Some(Cover { mime, bytes }),
+        Some(side) if decoded.width() <= side && decoded.height() <= side => {
+            Some(Cover { mime, bytes })
+        }
         Some(side) => encode(&decoded.thumbnail(side, side), mime),
     }
 }
@@ -209,10 +221,19 @@ fn encode(image: &image::DynamicImage, mime: &'static str) -> Option<Cover> {
 fn load_cache(dir: &Path, key: &str) -> Option<Cover> {
     for (extension, mime) in [("jpg", "image/jpeg"), ("png", "image/png")] {
         let path = dir.join(format!("{key}.{extension}"));
-        let Ok(bytes) = fs::read(&path) else {
+        let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        if classify(&bytes) == Some(mime) {
+        let mut bytes = Vec::new();
+        // A damaged cache is disposable. Bound the read itself rather than allocating
+        // the entire file before checking its size or trusting a raced metadata length.
+        if file
+            .take(MAX_ENCODED_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .is_ok()
+            && classify(&bytes) == Some(mime)
+            && decode_limited(&bytes).is_some()
+        {
             return Some(Cover { mime, bytes });
         }
     }
@@ -229,18 +250,17 @@ fn store_cache(dir: &Path, key: &str, cover: &Cover) {
         "png"
     };
     let path = dir.join(format!("{key}.{extension}"));
-    let pid = std::process::id();
-    let temporary = dir.join(format!(".{key}.{pid}.{extension}.tmp"));
-    if fs::write(&temporary, &cover.bytes).is_err() {
-        let _ = fs::remove_file(&temporary);
+    // Different requests for the same cover must never share a partially written
+    // temporary file or delete another request's published cache entry on a race.
+    let Ok(mut temporary) = tempfile::Builder::new()
+        .prefix(".artwork-")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+    else {
         return;
-    }
-    if fs::rename(&temporary, &path).is_err() {
-        let _ = fs::remove_file(&path);
-        if fs::rename(&temporary, &path).is_err() {
-            let _ = fs::remove_file(&temporary);
-            return;
-        }
+    };
+    if temporary.write_all(&cover.bytes).is_err() || temporary.persist(&path).is_err() {
+        return;
     }
     prune(dir, MAX_CACHE_BYTES);
 }
@@ -334,12 +354,24 @@ mod tests {
         let original = render(png_bytes.clone(), None).unwrap();
         assert_eq!(original.mime, "image/png");
         assert_eq!(original.bytes, png_bytes);
+        let small_png = render(png_bytes.clone(), Some(512)).unwrap();
+        assert_eq!(small_png.bytes, png_bytes);
+        assert_eq!(
+            decode_limited(&small_png.bytes).unwrap().dimensions(),
+            (80, 40)
+        );
         let thumb = render(png_bytes, Some(20)).unwrap();
         assert_eq!(thumb.mime, "image/png");
         let decoded = decode_limited(&thumb.bytes).unwrap();
         assert_eq!(decoded.dimensions(), (20, 10));
 
         let jpeg_bytes = jpeg(30, 10);
+        let small_jpeg = render(jpeg_bytes.clone(), Some(512)).unwrap();
+        assert_eq!(small_jpeg.bytes, jpeg_bytes);
+        assert_eq!(
+            decode_limited(&small_jpeg.bytes).unwrap().dimensions(),
+            (30, 10)
+        );
         let jpeg_cover = render(jpeg_bytes, Some(8)).unwrap();
         assert_eq!(jpeg_cover.mime, "image/jpeg");
         assert!(jpeg_cover.bytes.starts_with(&[0xff, 0xd8, 0xff]));
@@ -359,7 +391,7 @@ mod tests {
     #[test]
     fn etag_and_cache_key_follow_the_source_identity() {
         let etag = artwork_etag("\"abc\"", 0);
-        assert_eq!(etag, "\"aa1-abc-0\"");
+        assert_eq!(etag, "\"aa2-abc-0\"");
         assert_ne!(artwork_etag("\"abc\"", 40), etag);
         assert!(stream::none_match(&etag, &etag));
         let first = cache_key("lib", 7, Path::new("/a.wav"), "\"abc\"", 0);
@@ -393,5 +425,37 @@ mod tests {
         prune(dir.path(), limit);
         assert!(dir.path().join(format!("{}.png", "a".repeat(16))).is_file());
         assert!(!older.exists());
+    }
+
+    #[test]
+    fn cache_rejects_corrupt_or_oversized_entries_before_using_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "c".repeat(16);
+        let path = dir.path().join(format!("{key}.png"));
+        fs::write(&path, b"\x89PNG\r\n\x1a\ntruncated").unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_ENCODED_BYTES as u64 + 1024).unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+        fs::write(&path, png(MAX_DIMENSION + 1, 1)).unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+    }
+
+    #[test]
+    fn concurrent_cache_writes_publish_a_complete_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "d".repeat(16);
+        let cover = Cover {
+            mime: "image/png",
+            bytes: png(24, 12),
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let (dir, key, cover) = (dir.path(), &key, &cover);
+                scope.spawn(move || store_cache(dir, key, cover));
+            }
+        });
+        assert_eq!(load_cache(dir.path(), &key).unwrap(), cover);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

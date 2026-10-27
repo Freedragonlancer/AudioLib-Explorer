@@ -1,5 +1,9 @@
 # Handoff: server-mode album artwork (phase 1)
 
+> Historical phase-1 handoff. The completed server/client implementation and
+> subsequent validation are documented in [Album artwork](Rust_Artwork.md) and
+> [Rust validation](Rust_Validation.md). Pending checks below describe the handoff state.
+
 Capability key is exactly **`album_artwork`** (revision ≥ 1). Do not rename it to `artwork`. The client will use the same name.
 
 ## Goal / agreed API

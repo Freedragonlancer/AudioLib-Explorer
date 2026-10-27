@@ -1,5 +1,10 @@
 # Codex handoff — 2026-10-27
 
+> Historical handoff written before the completed investigation and authorized
+> deployment. See [playback evidence](Playback_Fix_20261027.md) and the
+> [latest validation report](../doc/Rust_Validation.md). The hypotheses, pending
+> work and restrictions below describe the handoff state.
+
 Shared handoff for `handoff/codex-20261027`. This file currently contains only the Debug section. Other tracks should append their own sections. Do not merge this branch to `beta`.
 
 The branch already contains `d807cad` ("Add phase-1 server album artwork endpoint") from another track. That commit is not part of this playback investigation. Do not extend it, and do not treat it as the remote-playback fix.
@@ -72,7 +77,7 @@ No playback code was edited. `git diff --stat` before this document was empty. T
 
 ### Not verified
 
-- No Windows repro. Dragonpark-Home `local_release` 0.8 vs 0.7.8 was not run.
+- No Windows repro. `<Windows acceptance host>` `local_release` 0.8 vs 0.7.8 was not run.
 - No log of whether `/stream` or `/preview` is hit, and no Upgrading-UI observation.
 - `has_current_search_state` / `open_read_only` / `prepare_cached_state` were not run on a real Plan B schema-6 file or on the 8790 snapshot.
 - `cargo test`, Clippy, and `cargo fmt` were not run.
@@ -80,7 +85,7 @@ No playback code was edited. `git diff --stat` before this document was empty. T
 
 ### Next steps (ordered)
 
-1. On Dragonpark-Home, repro with the installed `local_release` 0.8 client against the same 8790 server, then repeat with the 0.7.8 client. Do not upgrade 8790. Watch the UI for Upgrading / Tokenizing / Copying before any sound.
+1. On `<Windows acceptance host>`, repro with the installed `local_release` 0.8 client against the same 8790 server, then repeat with the 0.7.8 client. Do not upgrade 8790. Watch the UI for Upgrading / Tokenizing / Copying before any sound.
 2. Log HTTP. If `/audio/{id}/stream` and `/preview` are **absent**, stop tracing the decoder.
 3. Break or log `RemoteCache::prepare_cached_state_with_progress_cancellable`, `validate_snapshot_with_progress_cancellable`, `SqliteProvider::has_current_search_state`, `search_state_is_current`, `open_read_only`, and `upgrade_owned_snapshot_with_progress_cancellable`. Record schema `user_version`, whether the search-state probe is true, and whether a temp copy (`audiolib-readonly-*` or `.snapshot-job-`) appears.
 4. If the probe is false, that is the stall: fix the smallest gate so a readable schema-6 Plan B snapshot is not copied or upgraded, and add a regression that a real Plan B schema-6 file stays `user_version` 6, keeps no `album` column, and `open_read_only().database_path()` is the cache file.

@@ -2,6 +2,9 @@
 //! Exercise album filters, current-query facets and stale publications through real workers.
 use super::*;
 
+#[path = "artwork_management_tests.rs"]
+mod management;
+
 #[test]
 fn albums_filter_results_follow_current_query_and_restore_with_tasks() {
     isolated("album_review::child_album_navigation");

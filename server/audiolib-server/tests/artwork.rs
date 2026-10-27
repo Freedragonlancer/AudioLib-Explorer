@@ -3,7 +3,10 @@
 mod support;
 
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
-use audiolib_server::{AppState, BearerToken, ErrorBody, ServerConfig, router};
+use audiolib_remote::{ArtworkReply, RemoteClient};
+use audiolib_server::{
+    AppState, BearerToken, ErrorBody, ServeOptions, ServerConfig, router, serve,
+};
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
@@ -12,10 +15,16 @@ use axum::{
 use http_body_util::BodyExt;
 use image::GenericImageView;
 use rusqlite::{Connection, OpenFlags};
-use std::{fs, io, path::Path, sync::Arc};
+use std::{
+    fs, io,
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 use tower::ServiceExt;
 
 const TOKEN: &str = "artwork-test-token-0123456789abcdef";
+static HTTP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn real_path(path: &Path) -> std::path::PathBuf {
     let canonical = path.canonicalize().unwrap();
@@ -165,6 +174,7 @@ async fn send(state: &AppState, path: &str) -> Response {
         .oneshot(
             support::modern(Request::get(path))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", state.library_id())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -188,8 +198,29 @@ fn contains(path: &Path, needle: &[u8]) -> bool {
         .is_some_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
 }
 
+#[test]
+fn cover_probe_keeps_the_authorized_handle_when_the_path_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("covered.wav");
+    let image = png(8, 4);
+    wav(&path);
+    embed_png(&path, &image);
+    let mut authorized = fs::File::open(&path).unwrap();
+    fs::rename(&path, dir.path().join("original.wav")).unwrap();
+    wav(&path);
+    let (_, cover) = audiolib_audio::probe_file_with_artwork(&mut authorized).unwrap();
+    assert_eq!(cover.unwrap().bytes, image);
+    assert!(
+        audiolib_audio::probe_with_artwork(&path)
+            .unwrap()
+            .1
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn capabilities_advertise_album_artwork_and_cover_round_trips() {
+    let _serial = HTTP_SERIAL.lock().await;
     let f = fixture();
     let response = send(&f.state, "/api/v1/capabilities").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -225,7 +256,7 @@ async fn capabilities_advertise_album_artwork_and_cover_round_trips() {
         .to_str()
         .unwrap()
         .to_owned();
-    assert!(etag.starts_with("\"aa1-") && etag.ends_with('"'), "{etag}");
+    assert!(etag.starts_with("\"aa2-") && etag.ends_with('"'), "{etag}");
     let bytes = body(response).await;
     assert_eq!(bytes, f.image);
     assert!(
@@ -251,6 +282,7 @@ async fn capabilities_advertise_album_artwork_and_cover_round_trips() {
         .oneshot(
             support::modern(Request::get(&path))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", f.state.library_id())
                 .header(header::IF_NONE_MATCH, &etag)
                 .body(Body::empty())
                 .unwrap(),
@@ -273,6 +305,7 @@ async fn capabilities_advertise_album_artwork_and_cover_round_trips() {
         .oneshot(
             support::modern(Request::builder().method("HEAD").uri(&path))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", f.state.library_id())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -311,6 +344,21 @@ async fn capabilities_advertise_album_artwork_and_cover_round_trips() {
     assert_eq!(missing_cover.status(), StatusCode::NOT_FOUND);
     let error: ErrorBody = serde_json::from_slice(&body(missing_cover).await).unwrap();
     assert_eq!(error.error_code, "NOT_FOUND");
+    let conditional_missing = router(f.state.clone())
+        .oneshot(
+            support::modern(Request::get(format!(
+                "/api/v1/audio/{}/artwork",
+                f.plain_id
+            )))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header("X-AudioLib-Library-Id", f.state.library_id())
+            .header(header::IF_NONE_MATCH, "*")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conditional_missing.status(), StatusCode::NOT_FOUND);
 
     let unknown = send(&f.state, "/api/v1/audio/999999/artwork").await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
@@ -339,4 +387,126 @@ async fn capabilities_advertise_album_artwork_and_cover_round_trips() {
     fs::remove_file(&cover_path).unwrap();
     let gone = send(&f.state, &path).await;
     assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn remote_cover_client_round_trip_preserves_library_and_audio_stream() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let observer = Connection::open_with_flags(&f.db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let before: i64 = observer
+        .pragma_query_value(None, "data_version", |row| row.get(0))
+        .unwrap();
+    let schema: i64 = observer
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(serve(
+        listener,
+        router(f.state.clone()),
+        async {
+            let _ = stopped.await;
+        },
+        ServeOptions {
+            shutdown_grace: Duration::from_secs(2),
+            ..Default::default()
+        },
+    ));
+    let (id, plain_id) = (f.cover_id, f.plain_id);
+    let image = f.image.clone();
+    let library_id = f.state.library_id().to_owned();
+    tokio::task::spawn_blocking(move || {
+        let client = RemoteClient::new(&url, TOKEN).unwrap();
+        assert!(client.capabilities().unwrap().album_artwork_usable());
+        let cancel = AtomicBool::new(false);
+        let ArtworkReply::Data { bytes, etag, .. } = client
+            .artwork_for_library(&library_id, id, None, None, &cancel)
+            .unwrap()
+        else {
+            panic!("cover must be served");
+        };
+        assert_eq!(bytes, image);
+        assert_eq!(
+            client
+                .artwork_for_library(&library_id, id, None, etag.as_deref(), &cancel)
+                .unwrap(),
+            ArtworkReply::NotModified
+        );
+        assert_eq!(
+            client
+                .artwork_for_library(&library_id, plain_id, None, None, &cancel)
+                .unwrap(),
+            ArtworkReply::Missing
+        );
+        assert!(matches!(
+            client.artwork_for_library("replaced-library", id, None, None, &cancel),
+            Err(audiolib_remote::RemoteError::LibraryChanged(_))
+        ));
+    })
+    .await
+    .unwrap();
+    let _ = stop.send(());
+    task.await.unwrap();
+
+    let stream = router(f.state.clone())
+        .oneshot(
+            support::modern(Request::get(format!("/api/v1/audio/{}/stream", f.cover_id)))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::RANGE, "bytes=0-43")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::PARTIAL_CONTENT);
+    let header = body(stream).await;
+    assert_eq!(header.len(), 44);
+    assert_eq!(&header[..4], b"RIFF");
+    assert_eq!(
+        observer
+            .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        observer
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        schema
+    );
+}
+
+#[tokio::test]
+async fn artwork_rejects_missing_duplicate_and_stale_snapshot_identity() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let path = format!("/api/v1/audio/{}/artwork", f.cover_id);
+    for (identities, code) in [
+        (Vec::new(), "LIBRARY_ID_REQUIRED"),
+        (vec![""], "LIBRARY_ID_REQUIRED"),
+        (vec!["different-library"], "LIBRARY_CHANGED"),
+        (
+            vec![f.state.library_id(), f.state.library_id()],
+            "LIBRARY_ID_REQUIRED",
+        ),
+    ] {
+        let mut request = support::modern(Request::get(&path))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+        for identity in identities {
+            request = request.header("X-AudioLib-Library-Id", identity);
+        }
+        let response = router(f.state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error: ErrorBody = serde_json::from_slice(&body(response).await).unwrap();
+        assert_eq!(error.error_code, code);
+    }
+    assert!(
+        !f.db.parent().unwrap().join("artwork").exists(),
+        "rejected reads must not create a cache"
+    );
 }

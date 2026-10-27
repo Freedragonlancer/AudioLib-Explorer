@@ -136,6 +136,10 @@ fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
     .normalized()
 }
 
+#[path = "artwork_album_hints.rs"]
+mod artwork_album_hints;
+#[path = "controller_artwork.rs"]
+mod artwork_controller;
 #[cfg(test)]
 #[path = "click_preview_tests.rs"]
 mod click_preview_tests;
@@ -326,8 +330,11 @@ struct SearchJob {
 }
 
 struct ArtworkJob {
-    path: PathBuf,
+    file: AudioFile,
     generation: u64,
+    source_generation: u64,
+    epoch: u64,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -666,6 +673,7 @@ pub struct Controller {
     config: Arc<Mutex<AppConfig>>,
     /// Latest GUI preference; its worker serializes disk writes with other settings.
     single_click_play: AtomicBool,
+    show_album_artwork: AtomicBool,
     /// Latest table layout, captured on the event loop and saved by the preferences worker.
     audio_table: Mutex<AudioTablePreferences>,
     task_workspace: Mutex<search_tasks::TaskWorkspaceState>,
@@ -712,6 +720,12 @@ pub struct Controller {
     facet_revision: AtomicU64,
     artwork_job: Mutex<Option<ArtworkJob>>,
     artwork_wake: Condvar,
+    artwork_epoch: AtomicU64,
+    artwork_cancel: Mutex<Arc<AtomicBool>>,
+    artwork_cache_lock: Mutex<()>,
+    artwork_album_hints: Mutex<artwork_album_hints::ArtworkAlbumHints>,
+    artwork_actions: Mutex<artwork_controller::ArtworkActions>,
+    artwork_actions_wake: Condvar,
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
     waveform_generation: AtomicU64,
@@ -880,6 +894,7 @@ impl Controller {
         ui.set_chinese(chinese);
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
+        ui.set_artwork_enabled(config.show_album_artwork);
         ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
         apply_ui_scale(ui, config.ui_scale_percent);
         crate::window_layout::restore_panes(ui, &config.window_layout);
@@ -929,6 +944,7 @@ impl Controller {
             audio,
             removed_audio_generation: AtomicU64::new(u64::MAX),
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
+            show_album_artwork: AtomicBool::new(config.show_album_artwork),
             list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms)
                 .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
             pregenerate_list_waveforms: AtomicBool::new(config.pregenerate_list_waveforms),
@@ -980,6 +996,12 @@ impl Controller {
             facet_revision: AtomicU64::new(0),
             artwork_job: Mutex::new(None),
             artwork_wake: Condvar::new(),
+            artwork_epoch: AtomicU64::new(0),
+            artwork_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            artwork_cache_lock: Mutex::new(()),
+            artwork_album_hints: Mutex::new(artwork_album_hints::ArtworkAlbumHints::default()),
+            artwork_actions: Mutex::new(artwork_controller::ArtworkActions::default()),
+            artwork_actions_wake: Condvar::new(),
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
             waveform_generation: AtomicU64::new(0),
@@ -1041,6 +1063,7 @@ impl Controller {
 
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_search_tasks(ui);
+        self.bind_artwork(ui);
         let c = self.clone();
         ui.on_exit_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -1208,7 +1231,7 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_album_selected(move |name| {
-            if !c.available() || c.remote_read_only() {
+            if !c.available() || !c.album_facets_available() {
                 return;
             }
             let Some(ui) = c.ui.upgrade() else { return };
@@ -2074,6 +2097,8 @@ impl Controller {
     }
 
     fn invalidate_library_reads(&self) {
+        self.cancel_artwork();
+        self.artwork_album_hints.lock().unwrap().clear();
         self.library_info_generation.fetch_add(1, Ordering::AcqRel);
         self.search_cancel
             .lock()
@@ -2696,6 +2721,7 @@ impl Controller {
             if changed_path {
                 self.mark_audio_reload(file.id);
             }
+            self.queue_artwork(&file);
             if !file.missing {
                 self.queue_waveform(&file);
             }
@@ -2917,55 +2943,7 @@ impl Controller {
 
     fn start_workers(self: &Arc<Self>) {
         self.start_workspace_worker();
-        let c = self.clone();
-        std::thread::Builder::new()
-            .name("audiolib-artwork".into())
-            .spawn(move || {
-                loop {
-                    let mut pending = c.artwork_job.lock().unwrap();
-                    while pending.is_none() && !c.shutdown.load(Ordering::Acquire) {
-                        pending = c.artwork_wake.wait(pending).unwrap();
-                    }
-                    if c.shutdown.load(Ordering::Acquire) {
-                        return;
-                    }
-                    let job = pending.take().unwrap();
-                    drop(pending);
-                    if c.selection_generation.load(Ordering::Acquire) != job.generation
-                        || !c.available()
-                    {
-                        continue;
-                    }
-                    let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
-                    let Ok(path) = audiolib_core::validate_wav_path(&job.path, &allowed_roots)
-                    else {
-                        continue;
-                    };
-                    let Some(pixels) = audiolib_audio::probe_with_artwork(&path)
-                        .ok()
-                        .and_then(|(_, artwork)| artwork)
-                        .and_then(|artwork| crate::artwork::decode_thumbnail(&artwork.bytes, 512))
-                    else {
-                        continue;
-                    };
-                    let confirmed = c.clone();
-                    post(c.ui.clone(), move |ui| {
-                        if confirmed.selection_generation.load(Ordering::Acquire) == job.generation
-                            && confirmed.available()
-                        {
-                            let (width, height) = pixels.dimensions();
-                            let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                pixels.as_raw(),
-                                width,
-                                height,
-                            );
-                            ui.set_album_cover(Image::from_rgba8(pixels));
-                            ui.set_album_cover_ready(true);
-                        }
-                    });
-                }
-            })
-            .expect("spawn artwork worker");
+        self.start_artwork_worker();
         let c = self.clone();
         std::thread::Builder::new()
             .name("audiolib-selection".into())
@@ -3025,6 +3003,7 @@ impl Controller {
                         }
                         config.audition_play_on_single_click =
                             c.single_click_play.load(Ordering::Acquire);
+                        config.show_album_artwork = c.show_album_artwork.load(Ordering::Acquire);
                         config.pregenerate_list_waveforms =
                             c.pregenerate_list_waveforms.load(Ordering::Acquire);
                         config.hold_list_waveform_batches_after_audition =
@@ -3813,21 +3792,20 @@ impl Controller {
     }
 
     /// Publish album facets for the current query and filters. The album filter itself is
-    /// dropped so every other album stays reachable; local libraries only for now.
+    /// dropped so every other album stays reachable. Older remote snapshots skip
+    /// unindexed album aggregation and remain unchanged on disk.
     fn publish_albums(self: &Arc<Self>, job: &SearchJob) {
         let current = || {
             self.search_generation.load(Ordering::Acquire) == job.generation
                 && !job.cancel.load(Ordering::Acquire)
                 && self.available()
-                && !self.remote_read_only()
+                && self.album_facets_available()
         };
         if !current() {
             return;
         }
         let confirmed = self.clone();
         let provider = job.provider.clone();
-        let cache_root = self.config.lock().unwrap().paths.cache.clone();
-        let allowed_roots = self.config.lock().unwrap().allowed_scan_roots.clone();
         let mut request = job.request.clone();
         request.filters.album = None;
         request.limit = 1;
@@ -3835,44 +3813,15 @@ impl Controller {
         let Ok(albums) = provider.album_facets_cancellable(&request, job.cancel.clone()) else {
             return;
         };
-        // Covers are read for the first albums only: each one costs a single small file
-        // read the first time and a cached PNG afterwards, and slint::Image is not Send,
-        // so pixels cross to the event loop and the image is built there.
+        // Sidebar thumbnails read only cached pixels; source extraction stays on the
+        // independent artwork worker. slint::Image is not Send, so pixels cross to
+        // the event loop and images are built there.
         let mut rows = Vec::with_capacity(albums.len());
         for (index, (name, count)) in albums.into_iter().enumerate() {
             if !current() {
                 return;
             }
-            let mut thumbnail = None;
-            if index < ALBUM_THUMBNAILS
-                && let Ok(Some(path)) = provider.album_cover_path(&name)
-                && let Ok(path) = audiolib_core::validate_wav_path(&path, &allowed_roots)
-                && let Some(cache_path) = crate::artwork::thumbnail_path(
-                    &cache_root,
-                    provider.database_path(),
-                    &path,
-                    &name,
-                )
-            {
-                let cached = std::fs::metadata(&cache_path)
-                    .ok()
-                    .filter(|metadata| metadata.len() <= 256 * 1024)
-                    .and_then(|_| std::fs::read(&cache_path).ok())
-                    .and_then(|bytes| crate::artwork::decode_thumbnail(&bytes, 40));
-                if let Some(small) = cached {
-                    let (width, height) = small.dimensions();
-                    thumbnail = Some((small.into_raw(), width, height));
-                } else if let Ok((_, Some(artwork))) = audiolib_audio::probe_with_artwork(&path)
-                    && let Some(small) = crate::artwork::decode_thumbnail(&artwork.bytes, 40)
-                {
-                    let (width, height) = small.dimensions();
-                    if let Some(parent) = cache_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = small.save(&cache_path);
-                    thumbnail = Some((small.into_raw(), width, height));
-                }
-            }
+            let thumbnail = self.album_thumbnail(&provider, &name, index, job.cancel.clone());
             rows.push((name, count, thumbnail));
         }
         let generation = job.generation;
@@ -3881,7 +3830,7 @@ impl Controller {
             if confirmed.search_generation.load(Ordering::Acquire) != generation
                 || cancel.load(Ordering::Acquire)
                 || !confirmed.available()
-                || confirmed.remote_read_only()
+                || !confirmed.album_facets_available()
             {
                 return;
             }
@@ -4514,6 +4463,8 @@ impl Controller {
             ui.set_selected_row(selected_row.map_or(-1, |index| index as i32));
             ui.set_metadata_dirty(dirty);
             ui.set_audio_ready(false);
+            // Client-local covers are available even when the source WAV is missing.
+            c2.queue_artwork(&displayed);
             if displayed.missing {
                 c2.selection_request_completed(generation);
                 ui.set_waveform_ready(false);
@@ -4539,7 +4490,6 @@ impl Controller {
                 return;
             }
             let remote = c2.remote_read_only();
-            c2.queue_artwork(&displayed);
             // Until this selection's Load is confirmed, Play must reload its ID
             // rather than audition the previous source retained by the engine.
             c2.mark_audio_reload(displayed.id);
@@ -4565,17 +4515,7 @@ impl Controller {
 
     /// Cover work never delays Load/Play and never seeks a remote stream to its tail.
     fn queue_artwork(&self, file: &AudioFile) {
-        if self.remote_read_only()
-            || file.missing
-            || audiolib_core::album(&file.attributes).is_empty()
-        {
-            return;
-        }
-        *self.artwork_job.lock().unwrap() = Some(ArtworkJob {
-            path: PathBuf::from(&file.file_path),
-            generation: self.selection_generation.load(Ordering::Acquire),
-        });
-        self.artwork_wake.notify_one();
+        self.enqueue_artwork(file);
     }
 
     fn load_selection_audio(self: &Arc<Self>, job: SelectionAudioJob) {
@@ -5060,6 +5000,10 @@ impl Controller {
                     c.wait_transition_metadata(barrier)
                 }
             });
+            // Cover edits accepted before closing own their original destination.
+            // Drain them off the event loop and retain any persistence failure.
+            let artwork_result = c.wait_artwork_actions();
+            let metadata_result = metadata_result.and(artwork_result);
             // The finish interrupt was only there so Metadata could take the writer.
             // If the window stays open, clear it before a later rollup observes it.
             // Shutdown still aborts that statement instead of starting it over.
@@ -6516,7 +6460,11 @@ impl Controller {
         if let Err(error) = self.wait_workspace_writes() {
             tracing::warn!(%error, "Save search workspace during shutdown");
         }
+        if let Err(error) = self.wait_artwork_actions() {
+            tracing::warn!(%error, "Save artwork settings during shutdown");
+        }
         self.shutdown.store(true, Ordering::Release);
+        self.cancel_artwork();
         {
             let _writes = self.workspace_writes.lock().unwrap();
             self.workspace_wake.notify_all();
@@ -6595,6 +6543,7 @@ impl Controller {
             .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4));
         let mut config = self.config.lock().unwrap();
         config.audition_play_on_single_click = self.single_click_play.load(Ordering::Acquire);
+        config.show_album_artwork = self.show_album_artwork.load(Ordering::Acquire);
         config.pregenerate_list_waveforms = self.pregenerate_list_waveforms.load(Ordering::Acquire);
         config.hold_list_waveform_batches_after_audition =
             self.hold_list_waveform_batches.load(Ordering::Acquire);
@@ -7172,9 +7121,9 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
     ui.set_selected_missing(file.missing);
     ui.set_selected_name(file.filename.clone().into());
     ui.set_selected_path(file.file_path.clone().into());
-    // The library/album comes from the file's own Metadata; files without one show nothing
-    // and keep no stale cover from the previous selection.
-    if !same_cover || album.is_empty() {
+    // A changed selection clears stale pixels. Saving the same record retains its
+    // cover, including a file-scoped custom image when no album is declared.
+    if !same_cover {
         ui.set_album_cover_ready(false);
         ui.set_album_cover(Image::default());
     }
@@ -8432,6 +8381,7 @@ mod tests {
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
+            show_album_artwork: true,
             max_search_tasks: 6,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,

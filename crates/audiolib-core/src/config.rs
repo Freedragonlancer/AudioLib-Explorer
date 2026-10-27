@@ -383,6 +383,9 @@ pub struct AppConfig {
     /// History lives under the user data root, independently of libraries and caches.
     #[serde(default = "default_play_history_limit")]
     pub play_history_limit: u32,
+    /// Show embedded album artwork in local and server mode. Images stay outside libraries.
+    #[serde(default = "default_true")]
+    pub show_album_artwork: bool,
     /// Local mode: pre-generate list thumbnail Waveforms in the background after scans
     /// (doc/api/README.md §9.3). New installs default on; an existing settings.json that
     /// omits the key stays off (`#[serde(default)]` on the saved field is false).
@@ -446,6 +449,8 @@ struct SavedPreferences {
     audition_play_on_single_click: bool,
     #[serde(default = "default_play_history_limit")]
     play_history_limit: u32,
+    #[serde(default = "default_true")]
+    show_album_artwork: bool,
     #[serde(default)]
     pregenerate_list_waveforms: bool,
     #[serde(default)]
@@ -646,6 +651,7 @@ impl AppConfig {
             playback: default_playback(),
             audition_play_on_single_click: true,
             play_history_limit: PLAY_HISTORY_LIMIT_PER_LIBRARY,
+            show_album_artwork: true,
             pregenerate_list_waveforms: true,
             hold_list_waveform_batches_after_audition: false,
             max_search_tasks: DEFAULT_MAX_SEARCH_TASKS,
@@ -703,6 +709,7 @@ impl AppConfig {
             config.playback = saved.playback;
             config.audition_play_on_single_click = saved.audition_play_on_single_click;
             config.play_history_limit = saved.play_history_limit;
+            config.show_album_artwork = saved.show_album_artwork;
             config.pregenerate_list_waveforms = saved.pregenerate_list_waveforms;
             config.hold_list_waveform_batches_after_audition =
                 saved.hold_list_waveform_batches_after_audition;
@@ -758,6 +765,7 @@ impl AppConfig {
             playback: self.playback.clone(),
             audition_play_on_single_click: self.audition_play_on_single_click,
             play_history_limit: self.play_history_limit,
+            show_album_artwork: self.show_album_artwork,
             pregenerate_list_waveforms: self.pregenerate_list_waveforms,
             hold_list_waveform_batches_after_audition: self
                 .hold_list_waveform_batches_after_audition,
@@ -862,6 +870,29 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artwork_preference_defaults_for_old_settings_and_round_trips_explicit_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("preferences");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"language":"cn","playback":{"volume":0.35},"allowed_scan_roots":[]}"#,
+        )
+        .unwrap();
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        assert!(config.show_album_artwork);
+        for enabled in [false, true] {
+            config.show_album_artwork = enabled;
+            config.save().unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.show_album_artwork, enabled);
+            assert_eq!(loaded.language, "cn");
+            assert_eq!(loaded.playback["volume"], serde_json::json!(0.35));
+            assert_eq!(loaded.data_root(), root);
+        }
+    }
 
     #[test]
     fn client_local_history_limit_defaults_and_round_trips_without_moving_data_root() {
