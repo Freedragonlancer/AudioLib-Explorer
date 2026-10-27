@@ -397,7 +397,8 @@ impl SqliteProvider {
             }
             AlbumKind::Folder => match folder_path {
                 Some(path) => {
-                    let Some(id) = path_identity::folder_id(&reader, path)? else {
+                    let Some(id) = path_identity::folder_id_with_alias(&reader, path, false)?
+                    else {
                         return Ok(None);
                     };
                     format!("folder:{id}")
