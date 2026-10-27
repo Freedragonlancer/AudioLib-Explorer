@@ -423,11 +423,31 @@ mod tests {
     }
 
     fn legacy_format() -> SnapshotFormat {
-        let mut format = LibraryFormat::target();
-        format.schema_version = 5;
-        format.storage = audiolib_core::compatibility::SearchStorage::ExternalContent;
-        format.features.remove("search_storage");
-        format.features.remove("play_history_retired");
+        // Inspect the retained historical layout instead of subtracting selected
+        // features from a target which can acquire new schema requirements.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("schema-v5.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(include_str!(
+            "../../../crates/audiolib-db/tests/fixtures/schema-v5.sql"
+        ))
+        .unwrap();
+        drop(conn);
+        let inspection = audiolib_db::migration::inspect(
+            &path,
+            audiolib_core::compatibility::LibraryAccess::Read,
+            false,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(inspection.evidence.identified_library);
+        assert!(inspection.evidence.search_ready);
+        let format = inspection.format;
+        assert_eq!(format.schema_version, 5);
+        assert_eq!(
+            format.snapshot_format_id().as_deref(),
+            Some("ale-s5-ext-t3-m2")
+        );
         SnapshotFormat {
             id: format.snapshot_format_id().unwrap(),
             format,
