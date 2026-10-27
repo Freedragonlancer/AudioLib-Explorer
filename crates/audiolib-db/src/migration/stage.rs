@@ -446,14 +446,25 @@ pub(super) fn build(
             )
             .map_err(db_error)?;
             if count == 0 {
-                // v7: derive the album column from the Metadata already copied into the
-                // candidate; this never reads an audio file.
-                tx.execute(
-                    "UPDATE audio_files SET album=audiolib_album_key(metadata_json)",
-                    [],
-                )
-                .map_err(db_error)?;
-                tx.execute_batch(schema::ALBUM_INDEX).map_err(db_error)?;
+                // v7: fill the album column from the Metadata copied into the candidate,
+                // never from an audio file. A legacy source may not carry the column yet —
+                // the additive repair on the next open adds and fills it in that case.
+                let has_album: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
+                         WHERE name='album' COLLATE NOCASE)",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(db_error)?;
+                if has_album {
+                    tx.execute(
+                        "UPDATE audio_files SET album=audiolib_album_key(metadata_json)",
+                        [],
+                    )
+                    .map_err(db_error)?;
+                    tx.execute_batch(schema::ALBUM_INDEX).map_err(db_error)?;
+                }
                 search_storage::install_triggers(&tx)?;
                 schema::mark_current(&tx)?;
                 tx.execute_batch("DROP TABLE audiolib_migration_copy;")
