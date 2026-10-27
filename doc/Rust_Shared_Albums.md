@@ -71,6 +71,29 @@ work to result materialization, not to every indexed row during a search. The
 performance target remains **P95 latency <500ms for 1M+ records**; measured
 conditions and results must be reported separately from this target.
 
+### Pre-publication measurements
+
+A read-only rehearsal of a 909,342-record library reduced the SQLite file from
+10,611,302,400 to 5,400,199,168 bytes (49.11%). All original Metadata UTF-8 bytes
+matched after decoding, including whitespace and unknown fields. The 6,910
+shared entities covered every record without orphan memberships. Rollback and
+staging files are additional storage, outside this final-file comparison.
+
+On a Ryzen 7 9800X3D with a Windows local SSD, warm ABBA runs of the same 100-query
+mix measured result-page P95 at 99–101 ms before and 109–113 ms after migration.
+A separate 1M-record synthetic fixture measured 117.7 ms for result pages and
+212.2 ms including directory facets. That fixture has one fallback album; the
+real-library rehearsal supplies the broader album cardinality. Provider opening,
+cold-cache startup and complete UI latency are separate measurements.
+
+Physical row compression does not guarantee a smaller transport archive. With
+the server's zstd level 3 and eight workers, the rehearsal snapshot grew from
+950,903,523 to 2,033,256,351 bytes. Per-row zlib hides redundancy that outer zstd
+previously shared across records. The current implementation trades a smaller
+installed database for a larger initial/forced snapshot transfer; it does not
+claim faster synchronization. A text-oriented wire projection would need separate
+owned-copy conversion, cancellation and publication proofs on both peers.
+
 ## Migration and recovery
 
 Recognized schemas 3–7 are read-only sources until migration. Migration reviews
