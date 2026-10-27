@@ -155,6 +155,10 @@ pub struct RemoteRoot {
 const MAX_WAVEFORM_BYTES: u64 = 64 * 1024 * 1024;
 /// The server decodes the whole file for an uncached waveform: allow a slow NAS.
 const WAVEFORM_TIMEOUT: Duration = Duration::from_secs(120);
+/// `GET /audio/{id}/artwork` body cap. Matches the desktop thumbnail decoder.
+const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
+/// Cover bytes are a bounded image, not an audio decode.
+const ARTWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Parameters of `GET /audio/{id}/waveform` (§9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +177,21 @@ pub enum WaveformReply {
     NotModified,
     /// The JSON body (decompressed) and its ETag.
     Data { json: Vec<u8>, etag: Option<String> },
+}
+
+/// Reply of [`RemoteClient::album_artwork`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArtworkReply {
+    /// No embedded cover, or the server has no artwork route (`404` / `405`).
+    Missing,
+    /// `304`: the copy named by `If-None-Match` is current.
+    NotModified { etag: Option<String> },
+    /// Image bytes (`image/*` or `application/octet-stream`) and their ETag.
+    Data {
+        bytes: Vec<u8>,
+        content_type: String,
+        etag: Option<String>,
+    },
 }
 
 /// Identity headers returned with `GET /library/snapshot`.
@@ -399,6 +418,17 @@ pub(crate) fn cancellable_io_with_stall<T>(
             other => other,
         }
     })
+}
+
+/// Image bodies the cover decoder can inspect. Anything else (JSON errors, HTML) is refused.
+fn artwork_content_type(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let mime = value.split(';').next().unwrap_or("").trim();
+    mime.is_empty()
+        || mime.eq_ignore_ascii_case("application/octet-stream")
+        || mime.to_ascii_lowercase().starts_with("image/")
 }
 
 impl RemoteClient {
@@ -824,6 +854,105 @@ impl RemoteClient {
                 };
                 Ok(WaveformReply::Data { json, etag })
             }
+            401 if self.token.is_empty() => Err(RemoteError::TokenRequired(context)),
+            _ => Err(RemoteError::from_audio_response(
+                status,
+                &String::from_utf8_lossy(&body),
+                &context,
+                retry,
+            )),
+        }
+    }
+
+    /// `GET /audio/{id}/artwork` (optional `side` display pixels).
+    ///
+    /// This is the phase-1 cover route. It never opens `/audio/{id}/stream` or
+    /// `/audio/{id}/preview`. `404` and `405` are [`ArtworkReply::Missing`] so a
+    /// server without covers, or a record without one, is not an error.
+    pub fn album_artwork(
+        &self,
+        id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if id <= 0 {
+            return Err(RemoteError::Validation(format!("invalid audio id {id}")));
+        }
+        if let Some(side) = side
+            && !(1..=4096).contains(&side)
+        {
+            return Err(RemoteError::Validation(format!(
+                "invalid artwork side {side}"
+            )));
+        }
+        if let Some(etag) = if_none_match
+            && (etag.is_empty() || etag.contains(['\r', '\n']))
+        {
+            return Err(RemoteError::Validation(
+                "invalid artwork entity tag".into(),
+            ));
+        }
+        let mut path = format!("/audio/{id}/artwork");
+        if let Some(side) = side {
+            path.push_str(&format!("?side={side}"));
+        }
+        let url = format!("{}{path}", self.api);
+        let token = (!self.token.is_empty()).then(|| format!("Bearer {}", self.token));
+        let if_none_match = if_none_match.map(str::to_owned);
+        let context = format!("GET {path}");
+        let (status, etag, content_type, body, retry) = call_cancellable(
+            move |abort| {
+                let agent =
+                    crate::abort::abortable_agent(ARTWORK_TIMEOUT, ARTWORK_TIMEOUT, abort);
+                let mut response = crate::abort::call_fresh(|| {
+                    let mut request = agent.get(&url);
+                    if let Some(token) = &token {
+                        request = request.header("Authorization", token);
+                    }
+                    if let Some(etag) = &if_none_match {
+                        request = request.header("If-None-Match", etag);
+                    }
+                    request
+                })
+                .map_err(|error| RemoteError::from_transport(error, &url))?;
+                let header = |name: &str| {
+                    response
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
+                };
+                let (etag, content_type) = (header("etag"), header("content-type"));
+                let retry = retry_after(response.headers());
+                let status = response.status().as_u16();
+                if status == 200 && !artwork_content_type(content_type.as_deref()) {
+                    return Err(RemoteError::Protocol(format!(
+                        "{context}: unexpected Content-Type {}",
+                        content_type.as_deref().unwrap_or("(missing)")
+                    )));
+                }
+                let body = response
+                    .body_mut()
+                    .with_config()
+                    .limit(MAX_ARTWORK_BYTES)
+                    .read_to_vec()
+                    .map_err(|error| RemoteError::from_transport(error, &url))?;
+                Ok((status, etag, content_type.unwrap_or_default(), body, retry))
+            },
+            cancel,
+            &mut |_| {},
+        )?;
+        match status {
+            304 => Ok(ArtworkReply::NotModified { etag }),
+            404 | 405 => Ok(ArtworkReply::Missing),
+            200 if body.is_empty() => Ok(ArtworkReply::Missing),
+            200 => Ok(ArtworkReply::Data {
+                bytes: body,
+                content_type,
+                etag,
+            }),
             401 if self.token.is_empty() => Err(RemoteError::TokenRequired(context)),
             _ => Err(RemoteError::from_audio_response(
                 status,
@@ -1964,5 +2093,65 @@ mod tests {
             ..query
         };
         assert_eq!(client.waveform(7, &plain, None, &cancel).unwrap(), expected);
+    }
+
+    #[test]
+    fn album_artwork_reads_the_cover_route_and_treats_404_as_missing() {
+        let png = b"\x89PNG\r\n\x1a\ncover".to_vec();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let server = TestServer::start(move |request| {
+            assert!(
+                !request.path.contains("/stream") && !request.path.contains("/preview"),
+                "cover fetch must not read audio: {}",
+                request.path
+            );
+            seen.lock().unwrap().push(request.path.clone());
+            assert_eq!(request.header("authorization"), Some("Bearer secret"));
+            if request.path == "/api/v1/audio/9/artwork?side=512" {
+                if request.header("if-none-match") == Some("\"art-1\"") {
+                    return TestResponse::bytes(304, Vec::new()).with_header("ETag", "\"art-1\"");
+                }
+                let mut response = TestResponse::bytes(200, png.clone()).with_header("ETag", "\"art-1\"");
+                response.content_type = "image/png";
+                return response;
+            }
+            if request.path == "/api/v1/audio/4/artwork" {
+                return TestResponse::json(404, r#"{"error_code":"NOT_FOUND","message":"No artwork"}"#);
+            }
+            if request.path == "/api/v1/audio/5/artwork?side=32" {
+                return TestResponse::json(200, r#"{"error_code":"NOPE"}"#);
+            }
+            TestResponse::json(404, r#"{"error_code":"NOT_FOUND","message":"No such endpoint"}"#)
+        });
+        let client = RemoteClient::new(&server.url, "secret").unwrap();
+        let cancel = AtomicBool::new(false);
+        match client.album_artwork(9, Some(512), None, &cancel).unwrap() {
+            ArtworkReply::Data { bytes, content_type, etag } => {
+                assert_eq!(bytes, png);
+                assert_eq!(content_type, "image/png");
+                assert_eq!(etag.as_deref(), Some("\"art-1\""));
+            }
+            other => panic!("expected cover bytes, got {other:?}"),
+        }
+        assert!(matches!(
+            client.album_artwork(9, Some(512), Some("\"art-1\""), &cancel).unwrap(),
+            ArtworkReply::NotModified { etag } if etag.as_deref() == Some("\"art-1\"")
+        ));
+        assert!(matches!(
+            client.album_artwork(4, None, None, &cancel).unwrap(),
+            ArtworkReply::Missing
+        ));
+        assert!(matches!(
+            client.album_artwork(8, None, None, &cancel).unwrap(),
+            ArtworkReply::Missing
+        ));
+        assert!(matches!(
+            client.album_artwork(5, Some(32), None, &cancel),
+            Err(RemoteError::Protocol(message)) if message.contains("Content-Type")
+        ));
+        assert!(client.album_artwork(0, Some(512), None, &cancel).is_err());
+        assert!(client.album_artwork(9, Some(0), None, &cancel).is_err());
+        let paths = seen.lock().unwrap().clone();
+        assert!(paths.iter().all(|path| path.contains("/artwork")));
     }
 }
