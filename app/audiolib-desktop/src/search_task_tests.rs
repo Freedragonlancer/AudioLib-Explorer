@@ -183,8 +183,9 @@ fn wait_for(ui: &AppWindow, ready: impl Fn(&AppWindow) -> bool + 'static) {
                 "Task transition timed out: {}",
                 ui.get_status()
             );
-            if ready(&ui) {
-                observed.set(true);
+            // The testing backend updates timers before consuming a queued Quit.
+            // A repeated tick must not leave another Quit for the next wait.
+            if ready(&ui) && !observed.replace(true) {
                 slint::quit_event_loop().unwrap();
             }
         },

@@ -1,6 +1,6 @@
 # AudioLib 远程 API（v1，讨论稿）
 
-> 状态：讨论稿。里程碑 1（`/health`、`/library`、`/library/snapshot`、`/roots`）和里程碑 2（`/audio/{id}`、`/audio/{id}/stream`，以及启动期 `/health` 状态 + 503 `UNAVAILABLE`）、里程碑 3（metadata 写入：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`，§6.3）以及波形（§9）、试听预览 `/audio/{id}/preview`（§8.1）、远程扫描 `/scans`（§6.6）、历史列表 `/history/...`（§6.7）、从库中移除记录/文件夹 `POST /audio/remove`、`DELETE /folders/{id}`（§6.8）以及库管理权限 `manage_mode` + `GET /capabilities`（§6.9）及客户端远程目录浏览与根目录新增/改路径/删除（§6.10）已在 `server/audiolib-server` 实现；其余端点仍为计划，等服务端确认、用户拍板后再定稿。改任何路由或字段先在「AudioLib 开发组」群里通知对方。
+> 状态：讨论稿。里程碑 1（`/health`、`/library`、`/library/snapshot`、`/roots`）和里程碑 2（`/audio/{id}`、`/audio/{id}/stream`，以及启动期 `/health` 状态 + 503 `UNAVAILABLE`）、里程碑 3（metadata 写入：`PATCH /audio/{id}/metadata`、`POST /audio/metadata/batch`、`POST /audio/{id}/plays`，§6.3）以及波形（§9）、试听预览 `/audio/{id}/preview`（§8.1）、内嵌封面 `/audio/{id}/artwork`（§8.2）、远程扫描 `/scans`（§6.6）、历史列表 `/history/...`（§6.7）、从库中移除记录/文件夹 `POST /audio/remove`、`DELETE /folders/{id}`（§6.8）以及库管理权限 `manage_mode` + `GET /capabilities`（§6.9）及客户端远程目录浏览与根目录新增/改路径/删除（§6.10）已在 `server/audiolib-server` 实现；其余端点仍为计划，等服务端确认、用户拍板后再定稿。改任何路由或字段先在「AudioLib 开发组」群里通知对方。
 
 ## 1. 目标与边界
 
@@ -61,7 +61,7 @@ CR、修复及历次隔离证据见 [方案 B CR](Search_Storage_B_CR.md)；p1�
 | `codec=pcm` 预览遇到不支持的文件（非 WAV、ADPCM 等，文件头损坏或截断，或采样率无法按 `sr` 整数倍抽取，§8.1） | 415 | `PREVIEW_UNSUPPORTED_FORMAT` |
 | 远程不支持的操作 | 501 | `UNSUPPORTED` |
 | 库尚未打开（启动中）或打开失败、正在重试（§6.2） | 503 | `UNAVAILABLE`（附 `Retry-After: 5`）；**只用于这一种情况** |
-| 音频流/预览/波形所在的库根目录、或 `POST /scans` 要扫描的根离线或暂时无响应（§6.4、§6.6） | 503 | `ROOT_OFFLINE`（附 `Retry-After: 5`，`message` 为 `Library root "<根名>" is offline: <原因>`） |
+| 音频流/预览/波形/封面对应文件所在的库根目录、或 `POST /scans` 要扫描的根离线或暂时无响应（§6.4、§6.6、§8.2） | 503 | `ROOT_OFFLINE`（附 `Retry-After: 5`，`message` 为 `Library root "<根名>" is offline: <原因>`） |
 | 音频流并发达到上限 `max_streams`（§8），预览（`pcm`/`flac`）并发达到独立的上限 `max_previews`，或 `flac` 预览等待 0.5 秒仍无转码名额 `max_transcodes`（§8.1）；`POST /waveforms` 同时处理的请求超过 4 个（§9.1） | 503 | `BUSY`（附 `Retry-After: 1`，几种情况形状完全相同；快照并发仍为 409 `BUSY`） |
 | 快照还在准备、等待超过 `snapshot_wait_secs`（§6.1） | 503 | `BUSY`（附 `Retry-After: 5`；准备在后台继续，重试即可拿到；与音频流 `BUSY` 同码，靠 `Retry-After` 和端点区分） |
 | `flac` 预览所需的 ffmpeg 不存在或无法启动（§8.1） | 503 | `TRANSCODER_UNAVAILABLE`（不带 `Retry-After`） |
@@ -74,11 +74,11 @@ remote 端把 `error_code` 还原成对应的 `Error` 变体，保证 GUI 现有
 - `BUSY`（503）：音频流/预览名额已满，按 `Retry-After` 稍后重试（§8、§8.1）。
 - `TRANSCODER_UNAVAILABLE`：只出现在 `/audio/{id}/preview?codec=flac` 上，服务端没有可用的 ffmpeg；重试无用，改用 `codec=pcm` 或 `/stream`。
 - `UNAVAILABLE`：**整个库**暂不可用（服务端启动中或开库失败正在重试，§6.2），任何需鉴权的端点都可能返回；按“服务器暂不可用、稍后重试”处理（类似连接失败，可沿用离线缓存）。
-- `ROOT_OFFLINE`：只出现在 `/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 和 `POST /scans`（§6.6）上（`POST /waveforms` 不整体返回它，而是逐项 `status: "root_offline"`，§9.1），表示**该文件所在（或要扫描）的库根**离线或暂时无响应；库本身可用（元数据、快照、写入照常），客户端可显示 `message` 中的原因、查看 `/roots` 的 `status`，或用 `POST /roots/{name}/check` 立即重查（§6.4）。
+- `ROOT_OFFLINE`：只出现在 `/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform`、`/audio/{id}/artwork`（§8.2）和 `POST /scans`（§6.6）上（`POST /waveforms` 不整体返回它，而是逐项 `status: "root_offline"`，§9.1），表示**该文件所在（或要扫描）的库根**离线或暂时无响应；库本身可用（元数据、快照、写入照常），客户端可显示 `message` 中的原因、查看 `/roots` 的 `status`，或用 `POST /roots/{name}/check` 立即重查（§6.4）。
 
 500 与 507 的 `message` 使用概括文字，原始路径和内部诊断只写服务端日志；503 的 `message` 和 `/health` 不含路径（`UNAVAILABLE` 为固定文字，`ROOT_OFFLINE` 为根名 + 原因）。
 
-连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform` 、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；`POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；响应还有数据要发但客户端连续 60 秒一个字节都不收（休眠、断网，或拿着响应不读）时，服务端断开该连接并释放它占用的名额；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
+连接与超时：服务端只说 HTTP/1.1；连接须在 10 秒内发完请求头（空闲的 keep-alive 连接同样在 10 秒后关闭），除 `/library`、`/library/snapshot`、`/audio/{id}/stream`、`/audio/{id}/preview`、`/audio/{id}/waveform`、`/audio/{id}/artwork`、`POST /scans`、`PATCH /roots/{name}`、`DELETE /roots/{name}` 外的端点 30 秒内未完成返回 408 `TIMEOUT`（这些端点不受通用 30 秒上限，见 §6.4、§6.6、§6.10；`/library` 通常毫秒级返回，仅在百万级库且无统计缓存时的第一次请求可能等待统计计算；`POST /waveforms` 受 30 秒上限，自身有 2 秒 Metadata 预算，§9.1）；响应还有数据要发但客户端连续 60 秒一个字节都不收（休眠、断网，或拿着响应不读）时，服务端断开该连接并释放它占用的名额；服务端停止时最多等 10 秒让进行中的请求结束，之后断开剩余连接（客户端看到连接中断或响应体不完整，按可重试错误处理）。
 
 ### 2.2 鉴权模式与 token
 
@@ -279,7 +279,7 @@ audiolib.example.com:8443 {
 
 ### 3.1 历史：快照 schema 3 → 5
 
-以下记录已发布 v5 的演进与兼容行为。当前开发分支为 schema 6 / `ale-s6-cld1-t3-m2-p1`，读取边界为 3..=6，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6 的实际格式准入。
+以下记录已发布 v5 的演进与兼容行为。当前源码为 schema 7 / `ale-s7-cld1-t3-m2-p1`，读取边界为 3..=7，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准，v7 的派生专辑和封面边界见[封面契约](../Rust_Artwork.md)。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6/v7 的实际格式准入。
 
 - `SCHEMA_VERSION` = **5**（`crates/audiolib-db/src/schema.rs`，由 `audiolib_db::SCHEMA_VERSION` 导出）。`MIN_SNAPSHOT_SCHEMA_VERSION` = **3**（同文件，客户端的 `MIN_SNAPSHOT_SCHEMA` 直接引用它，不重复定义）。`GET /library` 的 `schema_version` 与快照响应头 `X-Schema-Version` 现在都是 `5`。
 - v4 **只新增索引**：不改任何表、列、触发器、FTS，不改行数据，所以 v3 与 v4 用同一套查询；`/library` 的 `stats` 条件由 `COALESCE(missing,0)=0` 改为 `missing=0`（`missing` 列是 `NOT NULL DEFAULT 0`），可命中部分索引。
@@ -370,6 +370,7 @@ audiolib.example.com:8443 {
 | ✅ | POST | `/waveforms/pregeneration/pause` · `/resume` | 手动暂停 / 继续预生成（受 `manage_mode` 限制） | 无请求体 | 同 `/waveforms/status`，见 §9.2 |
 | ✅ | GET / PATCH | `/settings` | 客户端可读写的服务端设置（PATCH 受 `manage_mode` 限制） | PATCH `{ "pregenerate_list_waveforms": bool \| null }` | `{ "pregenerate_list_waveforms", "pregenerate_list_waveforms_source", "can_change" }`，见 §9.2 |
 | ✅ | GET / HEAD | `/audio/{id}/preview?codec=pcm\|flac&sr=&bits=&ch=[&t=]` | 低带宽试听预览 | 见 §8.1 | `pcm`：进程内生成的 WAV（有长度，可 Range）；`flac`：ffmpeg 实时转码的分块 FLAC 流 |
+| ✅ | GET / HEAD | `/audio/{id}/artwork[?side=]` | 内嵌封面（按需读文件，不入库） | `side` 可省略，1..=512 | `image/jpeg` 或 `image/png`；无封面 / 文件缺失 / 提取失败 404，见 §8.2 |
 
 管理页 `/admin` 和 `/admin/api/...` 不在 `/api/v1` 下，只供局域网浏览器使用，见 §2.3。
 
@@ -505,7 +506,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 
 库根目录通常在 NAS 上，NAS 硬盘休眠后唤醒要 20–30 秒甚至更久。服务端因此遵守：
 
-1. **只有 `/audio/{id}/stream`（GET/HEAD，含 `download=1`）、`/audio/{id}/preview`（GET/HEAD）和 `/audio/{id}/waveform` 会访问根目录下的文件**，而且没有任何时间上限：不受 30 秒 408 限制，打开/stat/首次读取等多久都行（≥ 90 秒没问题）；唯一的超时是 10 秒的请求头读取，只针对客户端发送请求头。打开文件在 tokio 的阻塞线程池里进行，不占用异步运行时；客户端在等待期间断开时，处理函数连同它占用的并发名额（`max_streams` / `max_previews` / 波形名额）立即释放，即使阻塞的 `open()` 本身还卡着（例如 macOS 的“网络宗卷”授权弹窗未处理时）。这些卡住的打开会在服务端登记：每个根最多同时存在 4 × (`max_streams` + `max_previews`) 个未结束的打开（流和预览的打开共用这个上限），超出时新请求直接返回 503 `ROOT_OFFLINE`（`…earlier file opens have not finished yet`），所以卡住的线程有上限。打开超过 10 秒时服务端日志记一条 WARN（含根名和文件路径），结束时若总共超过 10 秒再记一条。§9.1–§9.2：`POST /waveforms` 只对文件做 `stat`（有 2 秒预算，不读音频数据，根缓存为 `offline` 时完全不访问）；列表缩略波形的后台工作线程会读取音频数据，同样没有时间上限。
+1. **只有 `/audio/{id}/stream`（GET/HEAD，含 `download=1`）、`/audio/{id}/preview`（GET/HEAD）、`/audio/{id}/waveform` 和 `/audio/{id}/artwork`（GET/HEAD，§8.2）会访问根目录下的文件**，而且没有任何时间上限：不受 30 秒 408 限制，打开/stat/首次读取等多久都行（≥ 90 秒没问题）；唯一的超时是 10 秒的请求头读取，只针对客户端发送请求头。打开文件在 tokio 的阻塞线程池里进行，不占用异步运行时；客户端在等待期间断开时，处理函数连同它占用的并发名额（`max_streams` / `max_previews` / 波形名额）立即释放，即使阻塞的 `open()` 本身还卡着（例如 macOS 的“网络宗卷”授权弹窗未处理时）。这些卡住的打开会在服务端登记：每个根最多同时存在 4 × (`max_streams` + `max_previews`) 个未结束的打开（流和预览的打开共用这个上限），超出时新请求直接返回 503 `ROOT_OFFLINE`（`…earlier file opens have not finished yet`），所以卡住的线程有上限。打开超过 10 秒时服务端日志记一条 WARN（含根名和文件路径），结束时若总共超过 10 秒再记一条。§9.1–§9.2：`POST /waveforms` 只对文件做 `stat`（有 2 秒预算，不读音频数据，根缓存为 `offline` 时完全不访问）；列表缩略波形的后台工作线程会读取音频数据，同样没有时间上限。
 2. **`/health`、`/library`、`/library/snapshot`、`/roots`、`/audio/{id}`、`/history/...`、`/scans/...` 的查询和控制端点以及 metadata 写入端点从不访问根目录**（只读写本机磁盘上的库文件和内存缓存），NAS 休眠或离线时照常快速响应。`POST /scans`（§6.6）是例外：扫描本身就要读根目录，它在独立后台线程里进行，没有时间上限。服务端启动时也不访问根目录；根检查线程在库打开成功之后才启动。
 3. **根状态由后台线程检查并缓存**，`/roots` 只读缓存。每个根一个检查线程：启动时、每 `root_check_secs` 秒（默认 300）、以及有请求要求重查时（见下）各检查一次。检查只做根目录的 `realpath` + `stat`（不列目录、不读文件），**不会为保持唤醒而轮询**；若连这个也不想要，把 `root_check_secs` 调大（最大 86400）。进行中的文件打开与进行中的检查同等对待：自上次成功以来超过 5 秒未完成 → `waking`，超过 `root_offline_secs` → `offline`；在此之后的一次成功（检查或打开）立即恢复 `online`。
 
@@ -520,7 +521,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 
 - `checked_at`：最近一次完成的检查（或音频流打开）的 Unix 秒，启动后尚未完成时为 `null`。
 - 离线后无需人工干预：任何一次检查或音频流打开成功都会立刻恢复 `online`。
-- 根缓存为离线时：`/audio/{id}/stream`（**GET 和 HEAD 都一样**，所以客户端可以用一个 `HEAD` 触发重查）和 `/audio/{id}/waveform` 先做一次**有界的即时重查**（最多等约 2 秒，由检查线程执行）：卷已恢复就直接正常响应（不会先收到一次 503）；仍离线或 2 秒内没有结论则返回 503 `ROOT_OFFLINE` + `Retry-After: 5`，`message` 如 `Library root "SFX_Main" is offline: Root directory not found (volume not mounted?)`，未完成的检查在后台继续。重查请求会合并：每个根同一时间只有一个检查在跑，并发请求等同一个结果，不会形成检查风暴。
+- 根缓存为离线时：`/audio/{id}/stream`（**GET 和 HEAD 都一样**，所以客户端可以用一个 `HEAD` 触发重查）、`/audio/{id}/waveform` 和 `/audio/{id}/artwork` 先做一次**有界的即时重查**（最多等约 2 秒，由检查线程执行）：卷已恢复就直接正常响应（不会先收到一次 503）；仍离线或 2 秒内没有结论则返回 503 `ROOT_OFFLINE` + `Retry-After: 5`，`message` 如 `Library root "SFX_Main" is offline: Root directory not found (volume not mounted?)`，未完成的检查在后台继续。重查请求会合并：每个根同一时间只有一个检查在跑，并发请求等同一个结果，不会形成检查风暴。
 - **`POST /roots/{name}/check`**：同样的有界即时重查（约 2 秒），返回该根更新后的 `/roots` 条目。2 秒内没有结论时返回当时的状态，检查在后台继续：之前在线的根显示 `waking`，之前离线的根保持 `offline`（直到某次检查成功），首次检查未完成为 `checking`。未知根名返回 404 `NOT_FOUND`。适合客户端“重试”按钮。
 - 文件打开失败时，服务端会顺带检查该根：根本身不可达则标记离线并返回 503 `ROOT_OFFLINE`；根可达但文件访问遇到超时/连接断开/网络文件句柄失效（`ETIMEDOUT`、`ENOTCONN`、`ECONNRESET`、`ESTALE` 等）时同样返回 503 `ROOT_OFFLINE`（`Root is not answering reliably: …`，可重试，不改根状态）；根可达且文件不存在才按文件缺失返回 404，其余 I/O 错误（如 `EIO`）为 500 `IO`。**根离线或变慢都不会把库里的文件标为 missing**。
 - 扫描器遵守同样的规则：根目录不存在/不可读时扫描直接失败，不改任何记录；扫描途中目录读取出错（例如卷断开）时不做 missing 对账；全量扫描遇到**完全为空**的根目录（只有 `.DS_Store` 等隐藏文件也算空；典型的未挂载挂载点）也不做 missing 对账（代价：用户真的删光了根目录下所有文件和文件夹时，记录不会被标 missing，直到根目录里重新有内容后再全量扫描；这种情况下流端点对这些文件返回 404）；慢只会让扫描变慢，扫描本身没有超时。
@@ -768,6 +769,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 | `list_waveforms` | 支持 §9.1 的 `POST /waveforms`：`{ "version": 1, "buckets": [128], "max_ids": 200, "encoding": "i16le-minmax-base64" }`；缺字段 = 不支持 |
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
 | `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（库已打开但 `waveforms.db` 无法打开时也不声明，§9.5.7） |
+| `compatibility.features.album_artwork` | 可选 feature，修订 ≥ 1 表示支持 §8.2 的 `GET /audio/{id}/artwork`。键名就是 `album_artwork`。旧服务端没有该键（或修订不同）时客户端不要请求封面；缺失只关闭这一功能，不拒绝同步 |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
@@ -891,6 +893,20 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 
 - 选择文件、根目录限制、404、根离线 503 `ROOT_OFFLINE` + `Retry-After: 5`（先即时重查约 2 秒）、慢速 NAS 唤醒（**无 30 秒时间上限**，不会 408）、文件在阻塞线程池中打开、打开超过 10 秒记 WARN：与 `/stream` 完全相同（§6.4）。文件缺失是 404，不会变成一个坏掉的流。
 - 以后可能的扩展：进程内（纯 Rust）FLAC 编码，替代 ffmpeg 并得到确定、可 Range 的 FLAC；Opus（`kbps=`，客户端需另配解码器）；转码结果缓存。
+
+### 8.2 内嵌封面 `GET /audio/{id}/artwork`（已实现，第一阶段）
+
+按音频记录 id 从磁盘上的文件读取内嵌封面（ID3 `APIC`，复用 `audiolib_audio::probe_with_artwork`）。**不把图片字节写入主库 SQLite，也不写入快照。** 按文件 id 读磁盘，不依赖 schema 7 的 `album` 列，schema 6 库同样可用。按专辑名取封面、扫描时批量预生成属于后续阶段，这里没有。
+
+- 鉴权同 §2.2。支持 `GET` 和 `HEAD`。不受 30 秒上限；打开文件、根目录限制、根离线 503 `ROOT_OFFLINE`（先即时重查约 2 秒）与 `/stream` 相同（§6.4）。
+- **支持检测**：`GET /capabilities` 的 `compatibility.features.album_artwork` ≥ 1。旧服务端没有这个 feature 时客户端跳过请求，不要改去逐条探测一个不存在的端点。
+- 请求必须带单个非空 `X-AudioLib-Library-Id`，绑定当前快照的库身份；缺失、空值或重复为 409 `LIBRARY_ID_REQUIRED`，与当前服务器库不符为 409 `LIBRARY_CHANGED`，读取文件前即拒绝。200 和 304 返回 `X-Library-Id`，客户端核对一致后才缓存或显示。
+- 封面解码使用独立的两个并发名额，不占试听名额；已满时返回 503 `BUSY`、`Retry-After: 1`。
+- 查询参数 `side` 可省略。省略时返回嵌入的原始 JPEG 或 PNG。`side` 为 1..=512 的十进制整数时，把长边缩到不超过该值（保持比例，不放大）。其他值（含 `0`）为 400 `VALIDATION`。未知参数忽略。
+- 界限与桌面端封面解码相同：编码不超过 8 MiB，解码宽或高不超过 4096，解码分配不超过 64 MiB。只接受 `image/jpeg` 和 `image/png`。
+- 成功：200，`Content-Type: image/jpeg` 或 `image/png`，`Content-Length`，强 `ETag`（形如 `"aa2-<源文件 ETag 内容>-<side 的十六进制>"`，`side` 省略时为 `0`），`Cache-Control: private, no-cache`。确认封面存在后，`If-None-Match` 匹配（弱比较，或 `*`）为 304；无封面时即使发送 `*` 仍为 404。
+- 无封面、文件缺失、文件损坏或提取/解码失败：**404 `NOT_FOUND`**，不是 5xx。
+- 可选磁盘缓存：库文件所在目录下的 `artwork/`，键含库 id、记录 id、规范路径、源文件 ETag、`side` 和算法版本。缓存写失败仍返回图片。超过约 256 MiB 时删掉最旧的缓存文件。
 
 ## 9. 波形（已实现）
 

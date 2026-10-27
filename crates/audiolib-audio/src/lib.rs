@@ -35,7 +35,7 @@ pub use engine::{
 /// Compatibility name for the persisted output-device configuration contract.
 #[cfg(feature = "playback")]
 pub type AudioOutputConfig = PlaybackConfig;
-pub use wav::{probe, probe_with_artwork};
+pub use wav::{probe, probe_file_with_artwork, probe_with_artwork};
 pub use wav_metadata::{Artwork, WAV_METADATA_VERSION};
 pub use waveform::{
     CACHE_VERSION as WAVEFORM_CACHE_VERSION, WaveformData, WaveformPeak, WaveformRequest,

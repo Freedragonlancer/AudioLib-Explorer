@@ -1,14 +1,14 @@
 # AudioLib Explorer 版本规范
 
-本文对应合入 0.5.0 主线后的隔离 CR 分支 `0.6.0-dev.1`，不表示已发布或修改了当前安装。程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。此前 `0.5.0-dev.1` 验证保留为历史证据。
+程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.1 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.6.0-dev.1（未发布） | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.1 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
-| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 6 | SQLite 资料库结构（`user_version`） |
+| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 7 | SQLite 资料库结构（`user_version`） |
 
-schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；派生搜索状态已准备的快照直接只读打开，需要修复的旧状态仅在客户端拥有的 staging/copy 中升级，原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
+schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=7`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；派生搜索状态已准备的快照直接只读打开，需要修复的旧状态仅在客户端拥有的 staging/copy 中升级，原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
 
 ## 规则
 
@@ -27,16 +27,16 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=6`
 
 ## 发布流程
 
-**v0.4.11 和 v0.5.0 已发布，不得覆盖其标签或把新的开发包当作这些 Release 的原产物。** 本隔离工作区使用 `0.6.0-dev.1` 继续验证 schema 6、共享迁移及客户端/服务端集成；该开发标识不用于现有正式 Release 标签流程。下一次正式发布前，须确定发布号，同步更新工作区及锁文件、经过测试的双方程序范围与发布说明版本行，再以新标签执行完整发布流程。本轮只整理 PR，不创建发布标签或部署服务端。
+不得覆盖既有标签或把新构建当作旧 Release 的原产物。`v0.8.0` 的 Release 已撤回，但标签保留；0.8.1 使用新标签 `v0.8.1`。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。以最后实际公开的 `v0.7.8` 显式检查升级路径；从该版本升级会把可写 schema 6 库升级为 7，回退旧程序须配套恢复 schema 6 备份。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
 3. 本地预检（不创建标签，标签用参数传入）：
-   `pwsh tools/check-release.ps1 -Tag v0.4.6 -BaseTag v0.4.5`
+   `pwsh tools/check-release.ps1 -Tag v0.8.1 -BaseTag v0.7.8`
    省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
 4. 正式发布前在本地执行 `tools/check-local.ps1 -Asio`、受影响的专项回归及打包启动验收；日常开发按 [Testing Strategy](Testing_Strategy.md) 选择最小范围。缺少平台或硬件覆盖时明确记录，不能以云端构建代替功能验证。
-5. 合并后在发布提交上打标签 `v0.4.6`（或 `v0.4.6-rc.1`）并推送。
-6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上构建 macOS arm64 服务端包，各自生成对应的 `.sha256`。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。
+5. 合并后在发布提交上打标签 `v0.8.1`（或对应的预发布标签）并推送。
+6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上构建 macOS arm64 服务端包，各自生成对应的 `.sha256`。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。正式包必须从最终 main/tag 提交构建；beta 的预编译服务器不能替代嵌入最终提交身份的正式产物。
 7. 上传本机构建的 4 个资产（两个包及各自的 `.sha256`）：用 `tools/release-create.sh <tag> <资产…>` 创建 Release 并上传，或对已创建的 Release 用 `gh release upload <tag> <资产…>`。之后可选地在 GitHub Actions 中手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验：确认 Release 恰有上述 4 个资产且 SHA256 正确。该 workflow 不构建、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，因此打标签前无需先禁用 release.yml。按 AGENTS.md 用本机构建的发布包更新固定 `local_release/` 并核对两个 EXE，再用 `pwsh`（PowerShell 7.3 以上）执行 portable validator（`-ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout`），运行隔离首次启动、CLI/UI 和诊断检查。
 
 常用模拟（`-Root` 可指向临时克隆，便于不改工作区验证）：

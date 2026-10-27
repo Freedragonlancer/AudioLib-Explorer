@@ -6,6 +6,145 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel, platform::WindowEvent};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[test]
+fn artwork_management_actions_are_reachable_in_both_modes_and_languages() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        for remote in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            ui.window()
+                .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+            ui.set_chinese(chinese);
+            ui.set_sm_sources(source_rows(remote));
+            ui.set_remote_mode(remote);
+            ui.invoke_open_library(0);
+            ui.set_sm_selected(if remote { 1 } else { 0 });
+            ui.set_sm_page(if remote { 2 } else { 0 });
+            ui.set_has_selection(true);
+            ui.set_selected_album("Sound pack".into());
+            let actions = Rc::new(RefCell::new(Vec::new()));
+            let observed = actions.clone();
+            ui.on_artwork_action_requested(move |action| observed.borrow_mut().push(action));
+            ui.show().unwrap();
+            click_label(
+                &ui,
+                if chinese {
+                    "专辑封面管理 ▸"
+                } else {
+                    "Album artwork ▸"
+                },
+            );
+            assert!(ui.get_artwork_management_expanded());
+            let labels = if chinese {
+                [
+                    "指定 / 替换图片…",
+                    "移除封面",
+                    "恢复内嵌封面",
+                    "重新加载封面",
+                    "清理本机封面缓存",
+                ]
+            } else {
+                [
+                    "Choose / replace image…",
+                    "Remove cover",
+                    "Restore embedded",
+                    "Reload cover",
+                    "Clear cover thumbnails",
+                ]
+            };
+            for (label, action) in labels.into_iter().zip([2, 3, 4, 0, 1]) {
+                click_label(&ui, label);
+                assert_eq!(actions.borrow().last(), Some(&action));
+            }
+            ui.set_artwork_busy(true);
+            click_label(
+                &ui,
+                if chinese {
+                    "移除封面"
+                } else {
+                    "Remove cover"
+                },
+            );
+            assert_eq!(
+                actions.borrow().len(),
+                5,
+                "busy artwork actions are disabled"
+            );
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn artwork_preferences_and_actions_are_disabled_during_library_transitions_and_close() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        for remote in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            ui.window()
+                .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+            ui.set_chinese(chinese);
+            ui.set_sm_sources(source_rows(remote));
+            ui.set_remote_mode(remote);
+            ui.invoke_open_library(0);
+            ui.set_sm_selected(if remote { 1 } else { 0 });
+            ui.set_sm_page(if remote { 2 } else { 0 });
+            ui.set_has_selection(true);
+            ui.set_selected_album("Sound pack".into());
+            ui.set_artwork_management_expanded(true);
+            let actions = Rc::new(RefCell::new(Vec::new()));
+            let observed = actions.clone();
+            ui.on_artwork_action_requested(move |action| observed.borrow_mut().push(action));
+            let preferences = Rc::new(RefCell::new(Vec::new()));
+            let observed = preferences.clone();
+            ui.on_artwork_enabled_requested(move |enabled| observed.borrow_mut().push(enabled));
+            ui.show().unwrap();
+            let toggle = if chinese {
+                "显示封面（本地与服务器）"
+            } else {
+                "Show covers (local and server)"
+            };
+            let labels = if chinese {
+                [
+                    "指定 / 替换图片…",
+                    "移除封面",
+                    "恢复内嵌封面",
+                    "重新加载封面",
+                    "清理本机封面缓存",
+                ]
+            } else {
+                [
+                    "Choose / replace image…",
+                    "Remove cover",
+                    "Restore embedded",
+                    "Reload cover",
+                    "Clear cover thumbnails",
+                ]
+            };
+            for gate in 0..4 {
+                ui.set_artwork_busy(gate == 0);
+                ui.set_library_busy(gate == 1);
+                ui.set_ds_applying(gate == 2);
+                ui.set_closing(gate == 3);
+                click_label(&ui, toggle);
+                for label in labels {
+                    click_label(&ui, label);
+                }
+                assert!(ui.get_artwork_enabled());
+                assert!(preferences.borrow().is_empty());
+                assert!(actions.borrow().is_empty());
+            }
+            ui.set_closing(false);
+            click_label(&ui, toggle);
+            assert!(!ui.get_artwork_enabled());
+            assert_eq!(&*preferences.borrow(), &[false]);
+            click_label(&ui, labels[1]);
+            assert_eq!(&*actions.borrow(), &[3]);
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
 fn mirror_folder_action_requires_an_existing_cache_and_remains_available_during_sync() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {

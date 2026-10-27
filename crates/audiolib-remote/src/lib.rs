@@ -31,10 +31,13 @@
 //! * Remote folder browsing ([`RemoteDirectory`]) and sound-library root registration,
 //!   path changes and database-only root removal ([`RootRemoveReport`]), guarded by
 //!   [`Capabilities::may_manage_roots`].
+//! * Optional embedded covers ([`RemoteClient::artwork`]): bounded image responses with
+//!   conditional ETags; gate requests with [`Capabilities::album_artwork_usable`].
 //! * Server profiles (`profiles` module): the data source dialog saved against the
 //!   active profile, "use the external address" as a sibling profile, switching and
 //!   removal, with per-profile tokens in [`RemoteSecrets`].
 mod abort;
+mod artwork;
 mod bandwidth;
 mod cache_cleanup;
 mod client;
@@ -68,6 +71,7 @@ mod writes;
 pub use waveform_cache::waveform_cache_error;
 
 pub use abort::set_connection_warming;
+pub use artwork::{ArtworkReply, MAX_ARTWORK_BYTES};
 pub use bandwidth::{Bandwidth, bandwidth};
 pub use client::{
     BatchWrite, CONNECT_TIMEOUT, DownloadStage, FileWrite, HealthInfo, LIBRARY_ID_HEADER,

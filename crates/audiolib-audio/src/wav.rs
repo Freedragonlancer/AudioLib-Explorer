@@ -34,6 +34,19 @@ pub fn probe_with_artwork(path: &Path) -> Result<(AudioMetadata, Option<Artwork>
     Ok((info.metadata, info.artwork))
 }
 
+/// Read a cover from an already opened and authorized local file handle.
+///
+/// Seeks to the start and leaves the position after the probe. Servers use this
+/// after validating root containment so replacing the path cannot redirect reads.
+pub fn probe_file_with_artwork(
+    file: &mut std::fs::File,
+) -> Result<(AudioMetadata, Option<Artwork>)> {
+    let file_len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(0))?;
+    let info = read_info_reader(file, file_len, true, true)?;
+    Ok((info.metadata, info.artwork))
+}
+
 fn u16le(bytes: &[u8]) -> u16 {
     u16::from_le_bytes(bytes[..2].try_into().unwrap())
 }
@@ -51,7 +64,16 @@ pub(crate) fn read_info(path: &Path) -> Result<WavInfo> {
 }
 
 fn read_info_impl(path: &Path, include_metadata: bool, include_artwork: bool) -> Result<WavInfo> {
-    let (mut file, file_len) = crate::source::open_source(path)?;
+    let (file, file_len) = crate::source::open_source(path)?;
+    read_info_reader(file, file_len, include_metadata, include_artwork)
+}
+
+fn read_info_reader(
+    mut file: impl Read + Seek,
+    file_len: u64,
+    include_metadata: bool,
+    include_artwork: bool,
+) -> Result<WavInfo> {
     let mut header = [0_u8; 12];
     file.read_exact(&mut header)?;
     if !matches!(&header[..4], b"RIFF" | b"RF64" | b"BW64") || &header[8..] != b"WAVE" {
