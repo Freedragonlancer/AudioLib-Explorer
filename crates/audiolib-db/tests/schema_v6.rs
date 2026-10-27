@@ -156,11 +156,21 @@ fn p0_is_readable_but_owned_upgrade_removes_last_timestamp_and_rollback_restores
     let path = root.path().join("p0.db");
     drop(SqliteProvider::open(&path).unwrap());
     let conn = support::connection(&path).unwrap();
-    // Keep the actual historical v6 layout as the source, even as the writable
-    // target evolves. The album field was introduced only in v7.
+    // Remove every schema-8-only object from this empty owned fixture before
+    // inserting historical TEXT rows. v6 had neither album identity nor a name column.
     conn.execute_batch(
-        "DROP INDEX idx_audio_visible_album;
-         ALTER TABLE audio_files DROP COLUMN album;
+        "PRAGMA journal_mode=DELETE;
+         DROP TRIGGER audiolib_album_audio_insert;
+         DROP TRIGGER audiolib_album_audio_update;
+         DROP TRIGGER audiolib_album_folder_delete;
+         DROP TRIGGER audiolib_album_id_high_water;
+         DROP INDEX idx_audio_visible_album;
+         DROP INDEX idx_audio_album_members;
+         ALTER TABLE audio_files DROP COLUMN album_id;
+         DROP TABLE albums;
+         DROP TABLE audiolib_album_id_sequence;
+         DELETE FROM audiolib_schema_features WHERE feature IN ('album_entities','metadata_storage');
+         DELETE FROM library_meta WHERE key='metadata_storage_policy';
          PRAGMA user_version=6;
          ALTER TABLE audio_files ADD COLUMN Last_Played_At TEXT;
          ALTER TABLE audio_files ADD COLUMN last_played_at_note TEXT;
@@ -176,12 +186,37 @@ fn p0_is_readable_but_owned_upgrade_removes_last_timestamp_and_rollback_restores
         before.decision.disposition,
         Some(MigrationDisposition::Compatible)
     );
+    let original = std::fs::read(&path).unwrap();
     let readonly = SqliteProvider::open_read_only(&path).unwrap();
-    assert_eq!(readonly.database_path(), path.as_path());
+    assert_ne!(readonly.database_path(), path.as_path());
+    assert_eq!(
+        readonly.library_info().unwrap().schema_version,
+        audiolib_db::SCHEMA_VERSION
+    );
+    assert!(SqliteProvider::has_current_album_state(readonly.database_path()).unwrap());
     let dto = serde_json::to_value(readonly.get_audio(1).unwrap()).unwrap();
     assert!(dto.get("play_count").is_none());
     assert!(dto["attributes"].get("last_played_at").is_none());
+    assert_eq!(dto["notes"], "retained");
+    assert!(matches!(
+        readonly.update_metadata(
+            1,
+            &audiolib_core::MetadataPatch {
+                notes: Some("must not write".into()),
+                ..Default::default()
+            }
+        ),
+        Err(audiolib_core::Error::Validation(_))
+    ));
     drop(readonly);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        support::connection(&path)
+            .unwrap()
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        6
+    );
     let plan = migration::plan(&path, &cancel).unwrap();
     assert_eq!(
         plan.source.decision.disposition,
