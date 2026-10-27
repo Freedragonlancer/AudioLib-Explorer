@@ -17,12 +17,26 @@ pub(crate) fn readable_format_ready(conn: &Connection) -> Result<bool> {
 }
 
 fn format_ready(conn: &Connection, allow_p0: bool) -> Result<bool> {
+    if !format_ready_at_version(conn, allow_p0, SCHEMA_VERSION)? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files') WHERE name='album' COLLATE NOCASE)",
+        [], |row| row.get(0),
+    ).map_err(db_error)
+}
+
+fn format_ready_at_version(
+    conn: &Connection,
+    allow_p0: bool,
+    expected_version: i64,
+) -> Result<bool> {
     ensure_ready(conn)?;
     validate_supported_feature_revisions(conn)?;
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    if version != SCHEMA_VERSION || !feature_table_exists(conn)? {
+    if version != expected_version || !feature_table_exists(conn)? {
         return Ok(false);
     }
     let features = conn
@@ -83,29 +97,36 @@ pub(crate) fn upgrade_from_previous(
         if cancel.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
         }
-        // Keyset batches keep one short write per 5 000 rows and stay resumable by id.
+        // All batches share this atomic transaction; cancellation rolls back the DDL too.
         let last: Option<i64> = tx
             .query_row(
                 "SELECT MAX(id) FROM
-                 (SELECT id FROM audio_files WHERE id > ?1 ORDER BY id LIMIT 5000)",
+                 (SELECT id FROM audio_files WHERE id >= ?1 ORDER BY id LIMIT 5000)",
                 [cursor],
                 |row| row.get::<_, Option<i64>>(0),
             )
             .map_err(db_error)?;
         let Some(last) = last else { break };
-        tx.execute(
-            "UPDATE audio_files SET album=audiolib_album_key(metadata_json)
-             WHERE id > ?1 AND id <= ?2",
-            params![cursor, last],
-        )
-        .map_err(db_error)?;
-        cursor = last;
-        completed = completed.saturating_add(5000).min(total);
+        let changed = tx
+            .execute(
+                "UPDATE audio_files SET album=audiolib_album_key(metadata_json)
+             WHERE id >= ?1 AND id <= ?2",
+                params![cursor, last],
+            )
+            .map_err(db_error)?;
+        completed = completed.saturating_add(changed as u64).min(total);
         progress(SnapshotUpgradeProgress::Tokenizing { completed, total })?;
+        let Some(next) = last.checked_add(1) else {
+            break;
+        };
+        cursor = next;
     }
     apply_indexes(&tx)?;
     tx.execute_batch(ALBUM_INDEX).map_err(db_error)?;
     mark_current(&tx)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
     tx.commit().map_err(db_error)
 }
 
@@ -113,7 +134,11 @@ pub(crate) fn upgrade_from_previous(
 /// already stored in the library, create its index and publish the format. The whole step
 /// is one transaction over additive DDL plus one derived UPDATE, so it takes seconds and
 /// never touches audio files. Returns false when the library is not a v6 source.
-pub(crate) fn fast_upgrade_album(conn: &mut Connection) -> Result<bool> {
+pub(crate) fn fast_upgrade_album(
+    conn: &mut Connection,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(SnapshotUpgradeProgress),
+) -> Result<bool> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
@@ -135,19 +160,44 @@ pub(crate) fn fast_upgrade_album(conn: &mut Connection) -> Result<bool> {
     if !upgrade_source && (version != SCHEMA_VERSION || has_column) {
         return Ok(false);
     }
-    validate_supported_feature_revisions(conn)?;
-    let tx = conn.transaction().map_err(db_error)?;
-    ensure_column(&tx, "audio_files", "album", "TEXT NOT NULL DEFAULT ''")?;
-    tx.execute(
-        "UPDATE audio_files SET album=audiolib_album_key(metadata_json)",
-        [],
-    )
-    .map_err(db_error)?;
-    tx.execute_batch(ALBUM_INDEX).map_err(db_error)?;
-    if upgrade_source {
-        mark_current(&tx)?;
+    // Only a complete p1 source can use this additive path. Missing watermarks,
+    // damaged FTS structure and p0 retirement require the checked migration route.
+    if !format_ready_at_version(conn, false, version)? {
+        return Ok(false);
     }
-    tx.commit().map_err(db_error)?;
+    let extension_triggers: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name='audio_files'
+         AND name NOT IN ('audio_files_ai','audio_files_au','audio_files_ad','audiolib_audio_id_high_water'))",
+        [], |row| row.get(0),
+    ).map_err(db_error)?;
+    if extension_triggers {
+        // The ordinary candidate route verifies their side effects before publication.
+        return Ok(false);
+    }
+    let foreign_keys: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(db_error)?;
+    if foreign_keys != 0 {
+        return Err(Error::Validation(
+            "Library relationships require repair before the album upgrade".into(),
+        ));
+    }
+    let check: String = conn
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(db_error)?;
+    if check != "ok" {
+        return Err(Error::Database(check));
+    }
+    upgrade_from_previous(conn, cancel, &mut |event| {
+        progress(event);
+        if cancel.load(Ordering::Acquire) {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    })?;
     Ok(true)
 }
 

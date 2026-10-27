@@ -373,6 +373,18 @@ impl SearchRequest {
             }
             .validate()?;
         }
+        // Album names originate in bounded WAV Metadata. Keep exact names usable even
+        // when they exceed the free-text query's 500-character limit.
+        if self
+            .filters
+            .album
+            .as_ref()
+            .is_some_and(|album| album.len() > 32 * 1024 * 1024 || album.contains('\0'))
+        {
+            return Err(Error::Validation(
+                "Album filter exceeds the Metadata size limit or contains NUL".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -806,6 +818,17 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn album_filters_reject_nul_and_unbounded_input_without_truncating_declared_names() {
+        let mut request = SearchRequest::default();
+        request.filters.album = Some("名".repeat(1000));
+        assert!(request.validate().is_ok());
+        request.filters.album = Some("name\0suffix".into());
+        assert!(request.validate().is_err());
+        request.filters.album = Some("x".repeat(32 * 1024 * 1024 + 1));
+        assert!(request.validate().is_err());
     }
 
     #[test]

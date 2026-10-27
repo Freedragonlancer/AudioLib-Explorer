@@ -1,6 +1,8 @@
 // crates/audiolib-db/src/lib.rs
 //! SQLite library data, lossless legacy import, and bounded background scanning.
 #[cfg(test)]
+mod album_tests;
+#[cfg(test)]
 mod folder_rollup_tests;
 #[cfg(test)]
 mod full_library_validation;
@@ -998,11 +1000,14 @@ impl SqliteProvider {
             .iter()
             .map(snapshot_modified_at)
             .collect::<Result<Vec<_>>>()?;
+        let contentless = search_storage::columns(&conn)?
+            .iter()
+            .all(|column| !search_storage::is_derived_column(column));
         let tx = conn.transaction().map_err(db_error)?;
         {
             let mut update = tx
                 .prepare(
-                    if version==schema::SCHEMA_VERSION {
+                    if contentless {
                         "UPDATE audio_files SET user_tags=?1,user_notes=?2,favorite=?3,user_color=?4,modified_at=?5 WHERE id=?6"
                     } else {"UPDATE audio_files SET user_tags=?1,user_tags_tokenized=?2,user_notes=?3,
                     user_notes_tokenized=?4,favorite=?5,user_color=?6,modified_at=?7
@@ -1010,7 +1015,7 @@ impl SqliteProvider {
                 )
                 .map_err(db_error)?;
             for (file, modified_at) in files.iter().zip(modified) {
-                let changed = if version == schema::SCHEMA_VERSION {
+                let changed = if contentless {
                     update.execute(params![
                         file.tags,
                         file.notes,
@@ -1571,12 +1576,23 @@ impl SqliteProvider {
     /// result page. The caller passes a request without an album filter, so every album
     /// stays visible for cross-filter navigation. Ordered by count, then name.
     pub fn album_facets(&self, request: &SearchRequest) -> Result<Vec<(String, u64)>> {
-        let reader = self.reader()?;
+        self.album_facets_cancellable(request, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Cancellable album counts using the same bounded reader as other search work.
+    pub fn album_facets_cancellable(
+        &self,
+        request: &SearchRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<(String, u64)>> {
+        request.validate()?;
+        let reader = self.search_reader(Some(cancel.clone()))?;
         let derived = self.derived_tags.load(Ordering::Acquire);
-        let sql = search_sql(&self.tokenizer, request, false, derived)?;
+        let sql = search_sql(&reader, &self.tokenizer, request, true, derived)?;
+        let album = album_expression(&reader)?;
         let statement = format!(
-            "SELECT af.album,COUNT(*) FROM {} WHERE {} AND af.album<>''
-             GROUP BY af.album ORDER BY COUNT(*) DESC,af.album COLLATE NOCASE",
+            "SELECT {album},COUNT(*) FROM {} WHERE {} AND {album}<>''
+             GROUP BY {album} ORDER BY COUNT(*) DESC,{album} COLLATE NOCASE",
             sql.from,
             sql.conditions.join(" AND ")
         );
@@ -1590,7 +1606,13 @@ impl SqliteProvider {
             .map_err(db_error)?;
         let mut albums = Vec::new();
         for row in rows {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
             albums.push(row.map_err(db_error)?);
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
         }
         Ok(albums)
     }
@@ -1598,9 +1620,10 @@ impl SqliteProvider {
     /// One present file path for an album, used to read that album's embedded cover.
     pub fn album_cover_path(&self, album: &str) -> Result<Option<std::path::PathBuf>> {
         let reader = self.reader()?;
+        let album_key = album_expression(&reader)?;
         let path: Option<String> = reader
             .query_row(
-                "SELECT file_path FROM audio_files WHERE album=?1 AND missing=0 ORDER BY id LIMIT 1",
+                &format!("SELECT file_path FROM audio_files af WHERE {album_key}=?1 AND missing=0 ORDER BY id LIMIT 1"),
                 [album],
                 |row| row.get(0),
             )
@@ -1742,6 +1765,7 @@ impl SqliteProvider {
                 conditions,
                 values,
             } = search_sql(
+                tx,
                 &self.tokenizer,
                 &filter_request,
                 true,
@@ -1897,6 +1921,7 @@ impl SqliteProvider {
             conditions,
             mut values,
         } = search_sql(
+            &tx,
             &self.tokenizer,
             request,
             true,
@@ -2098,14 +2123,6 @@ impl SqliteProvider {
                 Ok(())
             }
         };
-        let SearchSql {
-            conditions, values, ..
-        } = search_sql(
-            &self.tokenizer,
-            request,
-            false,
-            self.derived_tags.load(Ordering::Acquire),
-        )?;
         // FTS emits arbitrary row IDs. Use a narrow covering lookup rather than
         // fetching each matching file's wide Metadata row just for its folder.
         // Exclude terms read only the covered tag columns, so they keep this scan as long
@@ -2129,6 +2146,15 @@ impl SqliteProvider {
             .then(|| self.observe_search_revision())
             .transpose()?;
         let tx = conn.transaction().map_err(db_error)?;
+        let SearchSql {
+            conditions, values, ..
+        } = search_sql(
+            &tx,
+            &self.tokenizer,
+            request,
+            false,
+            self.derived_tags.load(Ordering::Acquire),
+        )?;
         let (ranked_ids, pinned_revision) = if let Some(revision_before) = revision_before {
             // The complete ranking is query-only, even when its page was scoped
             // or filtered. Reuse it only when it belongs to this pinned snapshot.
@@ -2206,6 +2232,7 @@ impl SqliteProvider {
             // folder. Keep the covering-index proof aligned with that SQL scope.
             filter_request.folder_id = None;
             let filter_sql = search_sql(
+                &tx,
                 &self.tokenizer,
                 &filter_request,
                 false,
@@ -2682,6 +2709,7 @@ struct SearchSql {
 
 // Results and directory facets must compile exactly the same query and filters.
 fn search_sql(
+    conn: &Connection,
     tokenizer: &Jieba,
     request: &SearchRequest,
     include_folder: bool,
@@ -2737,7 +2765,7 @@ fn search_sql(
     }
     if let Some(album) = filters.album.as_deref() {
         // Exact stored name; the value is bound, never interpolated.
-        conditions.push("af.album=?".into());
+        conditions.push(format!("{}=?", album_expression(conn)?));
         values.push(Value::Text(album.to_owned()));
     }
     // Both filters are written so the planner can use idx_audio_visible_tagged_any: its
@@ -2824,6 +2852,18 @@ const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE
  af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0),
  COALESCE(af.album,'')";
 
+fn album_expression(conn: &Connection) -> Result<&'static str> {
+    let has_album: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files') WHERE name='album' COLLATE NOCASE)",
+        [], |row| row.get(0),
+    ).map_err(db_error)?;
+    Ok(if has_album {
+        "af.album"
+    } else {
+        "audiolib_album_key(af.metadata_json)"
+    })
+}
+
 fn audio_projection(conn: &Connection) -> Result<std::borrow::Cow<'static, str>> {
     // The same owned DTO projection reads legacy v3..v5, p0 and current p1;
     // retired library playback fields are never selected or surfaced.
@@ -2840,9 +2880,10 @@ fn audio_projection(conn: &Connection) -> Result<std::borrow::Cow<'static, str>>
     if has_album {
         Ok(std::borrow::Cow::Borrowed(AUDIO_SELECT))
     } else {
-        Ok(std::borrow::Cow::Owned(
-            AUDIO_SELECT.replace("COALESCE(af.album,'')", "''"),
-        ))
+        Ok(std::borrow::Cow::Owned(AUDIO_SELECT.replace(
+            "COALESCE(af.album,'')",
+            "audiolib_album_key(af.metadata_json)",
+        )))
     }
 }
 
@@ -3134,7 +3175,7 @@ mod search_folder_plan_tests {
                 // both when no ranking exists and when candidate IDs overflow.
                 let SearchSql {
                     conditions, values, ..
-                } = search_sql(&provider.tokenizer, &request, false, true).unwrap();
+                } = search_sql(&conn, &provider.tokenizer, &request, false, true).unwrap();
                 let from = folder_search_from(true, visibility_only, false);
                 let plan = conn
                     .prepare(&format!(
@@ -3166,7 +3207,7 @@ mod search_folder_plan_tests {
                 from,
                 conditions,
                 values,
-            } = search_sql(&provider.tokenizer, &filtered_request(), true, true).unwrap();
+            } = search_sql(&conn, &provider.tokenizer, &filtered_request(), true, true).unwrap();
             for (columns, suffix) in [
                 ("COUNT(*)", ""),
                 (
