@@ -70,9 +70,9 @@ pub use waveform_cache::waveform_cache_error;
 pub use abort::set_connection_warming;
 pub use bandwidth::{Bandwidth, bandwidth};
 pub use client::{
-    BatchWrite, CONNECT_TIMEOUT, DownloadStage, FileWrite, HealthInfo, LIBRARY_ID_HEADER,
-    MAX_WRITE_BODY_BYTES, RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta, SnapshotProgress,
-    WaveformQuery, WaveformReply, api_base_url,
+    ArtworkReply, BatchWrite, CONNECT_TIMEOUT, DownloadStage, FileWrite, HealthInfo,
+    LIBRARY_ID_HEADER, MAX_WRITE_BODY_BYTES, RemoteClient, RemoteLibrary, RemoteRoot, SnapshotMeta,
+    SnapshotProgress, WaveformQuery, WaveformReply, api_base_url,
 };
 pub use download::{
     DEFAULT_DOWNLOAD_CACHE_BYTES, DownloadCache, DownloadItem, DownloadProbe, DownloadProgress,
@@ -86,8 +86,9 @@ pub use list_waveforms::{
     ServerSettings, StoredListWaveform, UNSUPPORTED_ENCODING, bundle_backoff, bundle_etag,
 };
 pub use manage::{
-    Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS, ManageMode, RemoveReport,
-    RootScan, ScanControl, ScanMode, ScanRequest, ServerScan, manage_error_text,
+    AlbumArtworkCapability, Capabilities, MAX_HISTORY_LIMIT, MAX_REMOVE_IDS, MAX_SCAN_WORKERS,
+    ManageMode, RemoveReport, RootScan, ScanControl, ScanMode, ScanRequest, ServerScan,
+    manage_error_text,
 };
 pub use mapping::{
     EffectiveRoot, RootState, UrlSource, effective_roots, map_server_path, root_for_path,

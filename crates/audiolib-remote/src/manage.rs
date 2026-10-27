@@ -31,7 +31,7 @@
 use crate::client::RemoteClient;
 use crate::error::{RemoteError, Result};
 use audiolib_core::{ScanProgress, ScanSession};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::time::Duration;
 
 const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
@@ -96,6 +96,49 @@ pub struct Capabilities {
     /// servers (only the §9.2 switch, status and pause/resume).
     #[serde(default)]
     pub list_waveform_jobs: Option<audiolib_core::waveform_cache::WaveformJobsCapability>,
+    /// Album covers (`GET /audio/{id}/artwork`). Absent, null, or an unrecognized
+    /// shape means the server has no cover route: show a blank cover.
+    #[serde(default, deserialize_with = "album_artwork_capability")]
+    pub album_artwork: Option<AlbumArtworkCapability>,
+}
+
+/// `album_artwork` of `GET /capabilities`. Revision 1 is
+/// `GET /audio/{id}/artwork` with an optional `side` query (display pixels).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AlbumArtworkCapability {
+    /// Server capability revision. Phase 1 accepts `revision >= 1`.
+    pub revision: u32,
+}
+
+impl AlbumArtworkCapability {
+    /// Whether this client can request covers from a server at this revision.
+    pub fn usable(&self) -> bool {
+        self.revision >= 1
+    }
+}
+
+/// Accept an object (`{"revision": 1}`), a bare revision (`1`), or null.
+/// Any other shape is "not offered" so one optional field cannot reject `/capabilities`.
+fn album_artwork_capability<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<AlbumArtworkCapability>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .and_then(|revision| u32::try_from(revision).ok())
+            .map(|revision| AlbumArtworkCapability { revision }),
+        serde_json::Value::Object(map) => Some(AlbumArtworkCapability {
+            revision: map
+                .get("revision")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|revision| u32::try_from(revision).ok())
+                .unwrap_or(0),
+        }),
+        _ => None,
+    })
 }
 
 fn known() -> bool {
@@ -114,6 +157,7 @@ impl Default for Capabilities {
             list_waveforms: None,
             pregenerate_list_waveforms: None,
             list_waveform_jobs: None,
+            album_artwork: None,
         }
     }
 }
@@ -168,6 +212,30 @@ impl Capabilities {
                 .list_waveforms
                 .as_ref()
                 .is_some_and(|capability| capability.usable())
+    }
+
+    /// Whether selection covers may be read with `GET /audio/{id}/artwork`.
+    ///
+    /// The route is offered only when `album_artwork` is present at revision 1 or
+    /// newer. A marker catalog that also names the feature must agree with this
+    /// build's revision; a catalog that omits the name still honors the object
+    /// (older servers omit the object entirely and stay blank).
+    pub fn album_artwork_usable(&self) -> bool {
+        let Some(capability) = &self.album_artwork else {
+            return false;
+        };
+        if !self.supported || !capability.usable() {
+            return false;
+        }
+        match &self.compatibility {
+            Some(catalog) if catalog.marker_revision.is_some() => {
+                match catalog.features.get("album_artwork") {
+                    Some(_) => self.feature_enabled("album_artwork"),
+                    None => true,
+                }
+            }
+            _ => true,
+        }
     }
 }
 
@@ -798,6 +866,52 @@ mod tests {
             RemoteClient::new(&secured.url, "").unwrap().capabilities(),
             Err(RemoteError::TokenRequired(_))
         ));
+    }
+
+    #[test]
+    fn album_artwork_is_optional_and_requires_revision_1() {
+        let missing: Capabilities = serde_json::from_str(r#"{"manage_mode":"all"}"#).unwrap();
+        assert!(!missing.album_artwork_usable());
+        assert!(!Capabilities::unknown().album_artwork_usable());
+
+        let revision_zero: Capabilities =
+            serde_json::from_str(r#"{"album_artwork":{"revision":0}}"#).unwrap();
+        assert!(!revision_zero.album_artwork_usable());
+
+        let object: Capabilities =
+            serde_json::from_str(r#"{"album_artwork":{"revision":1,"side":512}}"#).unwrap();
+        assert!(object.album_artwork_usable());
+        assert_eq!(object.album_artwork.unwrap().revision, 1);
+
+        let number: Capabilities = serde_json::from_str(r#"{"album_artwork":1}"#).unwrap();
+        assert!(number.album_artwork_usable());
+
+        let odd: Capabilities = serde_json::from_str(
+            r#"{"manage_mode":"lan","can_manage":true,"album_artwork":"soon"}"#,
+        )
+        .unwrap();
+        assert!(!odd.album_artwork_usable());
+        assert!(odd.may_manage());
+
+        let mut catalog = audiolib_core::compatibility::compatibility_manifest();
+        catalog.features.remove("album_artwork");
+        let mut body = serde_json::json!({
+            "album_artwork": {"revision": 1},
+            "compatibility": catalog,
+        });
+        let omitted: Capabilities = serde_json::from_value(body.clone()).unwrap();
+        assert!(omitted.album_artwork_usable());
+
+        let mut matched_catalog = audiolib_core::compatibility::compatibility_manifest();
+        matched_catalog.features.insert("album_artwork".into(), 1);
+        body["compatibility"] = serde_json::to_value(&matched_catalog).unwrap();
+        let matched: Capabilities = serde_json::from_value(body.clone()).unwrap();
+        assert!(matched.album_artwork_usable());
+
+        matched_catalog.features.insert("album_artwork".into(), 2);
+        body["compatibility"] = serde_json::to_value(matched_catalog).unwrap();
+        let newer: Capabilities = serde_json::from_value(body).unwrap();
+        assert!(!newer.album_artwork_usable());
     }
 
     #[test]
