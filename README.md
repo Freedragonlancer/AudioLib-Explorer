@@ -28,8 +28,8 @@ AudioLib Explorer is a fast, local-first sound-effects library manager for Windo
 
 - **Source development version:** 0.8.1 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
-- **Database schema:** 7 (snapshot schema range 3..=7; only explicitly recognized complete formats are readable)
-- **Writable library format:** `ale-s7-cld1-t3-m2-p1`; recognized schema 6 and p0 formats are read-only sources that require migration before writing
+- **Database schema:** 8 (snapshot schema range 3..=8; only explicitly recognized complete formats are readable)
+- **Writable library format:** `ale-s8-cld1-t3-m2-p1-a1-z1`; recognized schema 3–7 formats are read-only migration sources. Schema 8 shares albums and losslessly compresses eligible Metadata.
 - **License:** [GPL-3.0-only](LICENSE)
 
 The program version is read from the workspace `Cargo.toml` and is shared by the client, CLI and server. Current formats are defined by the [compatibility catalog](crates/audiolib-core/src/compatibility.rs); the [historical schema v6 contract](doc/api/Schema_V6_Iteration.md) describes the earlier format.
@@ -158,7 +158,7 @@ audiolib-server --config /etc/audiolib/config.toml
 
 ## Versioning
 
-Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP API version (`/api/v1/`) and database schema (`SCHEMA_VERSION`, currently 7) are independent. The compatibility catalog and complete feature/format descriptor determine supported operations; a schema number alone never grants compatibility. Only the exact current target is writable; recognized schema 6 and p0 formats require validation and migration to that target before writing. See the [historical migration compatibility design](doc/api/Library_Migration_Compatibility.md) for the migration safeguards and the [compatibility catalog](crates/audiolib-core/src/compatibility.rs) for current formats. A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` and must match `Cargo.toml` (ignoring the suffix). Tags with a suffix are automatically published as pre-releases; the Release title is always `AudioLib Explorer <tag>` (for example `AudioLib Explorer v0.6.5`); `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
+Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP API version (`/api/v1/`) and database schema (`SCHEMA_VERSION`, currently 8) are independent. The compatibility catalog and complete feature/format descriptor determine supported operations; a schema number alone never grants compatibility. Only the exact current target is writable; recognized schema 3–7 formats require validation and migration to that target before writing. See the [historical migration compatibility design](doc/api/Library_Migration_Compatibility.md) for the migration safeguards and the [compatibility catalog](crates/audiolib-core/src/compatibility.rs) for current formats. A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` and must match `Cargo.toml` (ignoring the suffix). Tags with a suffix are automatically published as pre-releases; the Release title is always `AudioLib Explorer <tag>` (for example `AudioLib Explorer v0.6.5`); `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
 
 ## Releases and CI
 

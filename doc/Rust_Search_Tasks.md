@@ -42,7 +42,23 @@ Personal search favorites remain on this computer, independently of server write
 
 The client stores task order, active task, search definitions, navigation and view state in a versioned `workspace.json` under the configured user data root. The default root is `%LOCALAPPDATA%/AudioLibExplorer/v1`; `AUDIOLIB_DATA_DIR` selects an isolated alternative. Per-library scopes use the existing canonical local-library identity or the server library ID. Tokens, passwords, decoded audio, result rows, Slint models and Waveform images are not persisted in a task workspace.
 
+Schema-8 clients write workspace format 2 and explicitly admit existing format-1
+files in memory before the next ordered save. All tasks, favorites and drafts
+remain. The user-data directory stays at `v1`. Older clients reject format 2
+instead of silently ignoring an album-ID filter; a downgrade must restore a
+matching older workspace backup to reuse those conditions. Unknown fields,
+unknown filter conditions, foreign scopes and future versions preserve the
+original file and open a protected temporary workspace.
+
 All open tasks, including tasks without a favorite, are restored on the next launch. Only the active task queries at startup; other tasks query when activated. Restoration never resumes audio automatically. Persisted file and directory identities include their indexed paths and are resolved against the opened library before reuse. A missing saved directory is reported as an unavailable scope, rather than silently broadening the search to the whole library.
+
+Album filters store the album namespace and Metadata key or folder identity along
+with the numeric ID. When an old server adopts native shared albums, all open
+and saved filters resolve their semantic owner before querying. A matching
+numeric ID alone cannot select a different album. Missing albums remain visibly
+unavailable and block execution until reselected or reset; original conditions
+are retained. Within one namespace, a supported root relocation keeps the live
+folder album ID and updates its stored path.
 
 Workspace writes run off the Slint event loop and retain their original library target. Switching the current source cannot redirect a late save into another library's group. Unknown or damaged workspace formats are preserved and reported; an empty fallback must not overwrite them as an ordinary save.
 

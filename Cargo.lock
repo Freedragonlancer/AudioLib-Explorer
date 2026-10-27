@@ -526,6 +526,7 @@ dependencies = [
  "audiolib-audio",
  "audiolib-core",
  "chrono",
+ "flate2",
  "icu_casemap",
  "icu_normalizer",
  "jieba-rs",
@@ -537,6 +538,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

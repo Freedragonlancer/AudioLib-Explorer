@@ -1,5 +1,11 @@
 # 客户端、服务端与数据库迁移兼容契约
 
+当前 0.8.1 候选写入 schema 8 / `ale-s8-cld1-t3-m2-p1-a1-z1`，增加
+`album_entities: 1`、`metadata_storage: 1`；认可的 3–7 来源须经备份及 owned
+候选迁移，不能按 schema 数字忽略格式特征。业务摘要解码 Metadata 后比较原始
+JSON 字节，共享专辑绑定纳入目标摘要。详见[共享专辑与 Metadata 存储](../Rust_Shared_Albums.md)。
+下段保留契约建立时的历史状态；当前验收结果以本轮记录为准。
+
 状态：**2026-10-21 下一版契约，隔离实现，正在进行 CR 后复验，尚未发布**。与 [搜索存储 B](Search_Storage_B.md) 一并验证；实现与验收边界以 [Implementation_B_Status.md](Implementation_B_Status.md) 为准。原工作目录的当前应用、安装和工作库不变。首轮为 `0.5.0-dev.1`；合入已发布 0.5.0 主线后的 CR 分支使用 `0.6.0-dev.1`，两端共享该开发标识。
 
 ## 1. 三种判定与版本范围

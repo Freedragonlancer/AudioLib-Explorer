@@ -2,6 +2,7 @@
 //! `GET /audio/{id}/artwork`: capability `album_artwork`, a JPEG/PNG body, and 404.
 mod support;
 
+use audiolib_core::DataProvider;
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use audiolib_remote::{ArtworkReply, RemoteClient};
 use audiolib_server::{
@@ -111,6 +112,10 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_second_cover(false)
+}
+
+fn fixture_with_second_cover(second_cover: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = real_path(dir.path());
     let sounds = base.join("sounds");
@@ -121,6 +126,9 @@ fn fixture() -> Fixture {
     wav(&cover);
     embed_png(&cover, &image);
     wav(&plain);
+    if second_cover {
+        embed_png(&plain, &png(14, 10));
+    }
     let db = dir.path().join("library").join("library.db");
     let writer = Arc::new(SqliteProvider::open(&db).unwrap());
     let progress = ScanService::new(writer.clone())
@@ -175,6 +183,10 @@ async fn send(state: &AppState, path: &str) -> Response {
             support::modern(Request::get(path))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
                 .header("X-AudioLib-Library-Id", state.library_id())
+                .header(
+                    "X-AudioLib-Album-Namespace",
+                    state.provider().album_namespace(),
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -417,9 +429,13 @@ async fn remote_cover_client_round_trip_preserves_library_and_audio_stream() {
     let (id, plain_id) = (f.cover_id, f.plain_id);
     let image = f.image.clone();
     let library_id = f.state.library_id().to_owned();
+    let namespace = f.state.provider().album_namespace();
+    let album_id = f.state.provider().get_audio(id).unwrap().album_id.unwrap();
     tokio::task::spawn_blocking(move || {
         let client = RemoteClient::new(&url, TOKEN).unwrap();
-        assert!(client.capabilities().unwrap().album_artwork_usable());
+        let capabilities = client.capabilities().unwrap();
+        assert!(capabilities.album_artwork_usable());
+        assert!(capabilities.album_entity_artwork_usable());
         let cancel = AtomicBool::new(false);
         let ArtworkReply::Data { bytes, etag, .. } = client
             .artwork_for_library(&library_id, id, None, None, &cancel)
@@ -442,6 +458,37 @@ async fn remote_cover_client_round_trip_preserves_library_and_audio_stream() {
         );
         assert!(matches!(
             client.artwork_for_library("replaced-library", id, None, None, &cancel),
+            Err(audiolib_remote::RemoteError::LibraryChanged(_))
+        ));
+        let ArtworkReply::Data { bytes, etag, .. } = client
+            .album_artwork_for_library(&library_id, &namespace, album_id, None, None, &cancel)
+            .unwrap()
+        else {
+            panic!("shared album cover must be served");
+        };
+        assert_eq!(bytes, image);
+        assert_eq!(
+            client
+                .album_artwork_for_library(
+                    &library_id,
+                    &namespace,
+                    album_id,
+                    None,
+                    etag.as_deref(),
+                    &cancel
+                )
+                .unwrap(),
+            ArtworkReply::NotModified
+        );
+        assert!(matches!(
+            client.album_artwork_for_library(
+                &library_id,
+                "replaced-namespace",
+                album_id,
+                None,
+                etag.as_deref(),
+                &cancel
+            ),
             Err(audiolib_remote::RemoteError::LibraryChanged(_))
         ));
     })
@@ -509,4 +556,147 @@ async fn artwork_rejects_missing_duplicate_and_stale_snapshot_identity() {
         !f.db.parent().unwrap().join("artwork").exists(),
         "rejected reads must not create a cache"
     );
+}
+
+#[tokio::test]
+async fn shared_album_cover_uses_whole_album_and_preserves_legacy_wav_semantics() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let covered = f.state.provider().get_audio(f.cover_id).unwrap();
+    let plain = f.state.provider().get_audio(f.plain_id).unwrap();
+    let album_id = covered.album_id.expect("folder fallback album");
+    assert_eq!(plain.album_id, Some(album_id));
+    let path = format!("/api/v1/albums/{album_id}/artwork?side=512");
+    let response = send(&f.state, &path).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-album-id"], album_id.to_string());
+    assert_eq!(response.headers()["x-library-id"], f.state.library_id());
+    assert_eq!(
+        response.headers()["x-album-namespace"],
+        f.state.provider().album_namespace()
+    );
+    let etag = response.headers()[header::ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(body(response).await, f.image);
+    let again = send(&f.state, &path).await;
+    assert_eq!(again.headers()[header::ETAG], etag);
+    assert_eq!(body(again).await, f.image);
+    let conditional = router(f.state.clone())
+        .oneshot(
+            support::modern(Request::get(&path))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", f.state.library_id())
+                .header(
+                    "X-AudioLib-Album-Namespace",
+                    f.state.provider().album_namespace(),
+                )
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(conditional.headers()["x-album-id"], album_id.to_string());
+    assert_eq!(
+        conditional.headers()["x-album-namespace"],
+        f.state.provider().album_namespace()
+    );
+    assert!(body(conditional).await.is_empty());
+    assert_eq!(
+        send(&f.state, &format!("/api/v1/audio/{}/artwork", f.plain_id))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let stale = router(f.state.clone())
+        .oneshot(
+            support::modern(Request::get(&path))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", "different-library")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        send(&f.state, "/api/v1/albums/999999/artwork")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn different_member_pictures_have_one_deterministic_album_representation() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture_with_second_cover(true);
+    let file = f.state.provider().get_audio(f.cover_id).unwrap();
+    let album_id = file.album_id.unwrap();
+    let members = f
+        .state
+        .provider()
+        .album_members(album_id, 64, Arc::new(AtomicBool::new(false)))
+        .unwrap();
+    assert_eq!(members.len(), 2);
+    let first = body(
+        send(
+            &f.state,
+            &format!("/api/v1/audio/{}/artwork", members[0].id),
+        )
+        .await,
+    )
+    .await;
+    let second = body(
+        send(
+            &f.state,
+            &format!("/api/v1/audio/{}/artwork", members[1].id),
+        )
+        .await,
+    )
+    .await;
+    assert_ne!(first, second);
+    let path = format!("/api/v1/albums/{album_id}/artwork");
+    for _ in 0..3 {
+        assert_eq!(body(send(&f.state, &path).await).await, first);
+    }
+}
+
+#[tokio::test]
+async fn album_artwork_rejects_missing_duplicate_and_stale_namespace_before_cache() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let album_id = f
+        .state
+        .provider()
+        .get_audio(f.cover_id)
+        .unwrap()
+        .album_id
+        .unwrap();
+    let namespace = f.state.provider().album_namespace();
+    for values in [
+        Vec::new(),
+        vec![""],
+        vec!["another-library-namespace"],
+        vec![namespace.as_str(), namespace.as_str()],
+    ] {
+        let mut request =
+            support::modern(Request::get(format!("/api/v1/albums/{album_id}/artwork")))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", f.state.library_id());
+        for value in values {
+            request = request.header("X-AudioLib-Album-Namespace", value);
+        }
+        let response = router(f.state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error: ErrorBody = serde_json::from_slice(&body(response).await).unwrap();
+        assert_eq!(error.error_code, "LIBRARY_CHANGED");
+    }
+    assert!(!f.db.parent().unwrap().join("artwork").exists());
 }

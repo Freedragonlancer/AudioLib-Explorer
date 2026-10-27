@@ -686,26 +686,30 @@ impl Controller {
 
     /// Capture the active snapshot and an artwork-capable client without holding locks
     /// during credential loading or HTTP work. Older servers simply have no context.
-    pub(super) fn remote_artwork_context(&self) -> Option<(RemoteClient, CacheState)> {
+    pub(super) fn remote_artwork_context(
+        &self,
+    ) -> Option<(RemoteClient, CacheState, audiolib_remote::Capabilities)> {
         if !self.remote_read_only() {
             return None;
         }
         let settings = self.config.lock().unwrap().data_source.clone();
-        let state = {
+        let (state, capabilities) = {
             let remote = self.remote.lock().unwrap();
+            let capabilities = remote
+                .manage
+                .capabilities_for(&settings.server_url)?
+                .clone();
             if remote.library_changed
-                || !remote
-                    .manage
-                    .capabilities_for(&settings.server_url)?
-                    .album_artwork_usable()
+                || !(capabilities.album_artwork_usable()
+                    || capabilities.album_entity_artwork_usable())
             {
                 return None;
             }
-            remote.state.clone()?
+            (remote.state.clone()?, capabilities)
         };
         let secrets = self.secrets();
         let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
-        Some((client, state))
+        Some((client, state, capabilities))
     }
 
     /// Refuse a structural library write in server mode with a clear message; returns true

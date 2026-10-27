@@ -545,9 +545,12 @@ mod tests {
                 1,
                 "{plan:?}"
             );
+            // Album DTO lookups hydrate only the already bounded page. The
+            // ranking/membership prefix must still avoid correlated probes.
             assert!(
                 !plan
                     .iter()
+                    .take_while(|step| !step.contains("SEARCH af USING INTEGER PRIMARY KEY"))
                     .any(|step| step.contains("CORRELATED") || step.contains("=M")),
                 "{plan:?}"
             );
@@ -728,7 +731,10 @@ mod tests {
                     "{plan:?}"
                 );
                 assert!(
-                    !plan.iter().any(|line| line.contains("CORRELATED")),
+                    !plan
+                        .iter()
+                        .take_while(|line| !line.contains("SEARCH af USING INTEGER PRIMARY KEY"))
+                        .any(|line| line.contains("CORRELATED")),
                     "{plan:?}"
                 );
                 let all = SearchRequest {
@@ -786,7 +792,10 @@ mod tests {
             "{plan:?}"
         );
         assert!(
-            !plan.iter().any(|line| line.contains("CORRELATED")),
+            !plan
+                .iter()
+                .take_while(|line| !line.contains("SEARCH af USING INTEGER PRIMARY KEY"))
+                .any(|line| line.contains("CORRELATED")),
             "{plan:?}"
         );
         let hydrate = plan

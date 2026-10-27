@@ -46,6 +46,7 @@ toml = "1"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"
 sha2 = "0.10"
+flate2 = "=1.1.10"
 
 # Pin the engine containing the contentless-delete statistics fix. The released
 # libsqlite3-sys 0.38.2 still bundles 3.53.2; this reviewed vendor uses 3.54.1.

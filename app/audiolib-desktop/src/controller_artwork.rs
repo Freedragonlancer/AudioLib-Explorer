@@ -1,7 +1,6 @@
 // app/audiolib-desktop/src/controller_artwork.rs
 //! Independent artwork worker and client-local cover management, outside the audio path.
 use super::*;
-use audiolib_remote::ArtworkReply;
 
 #[derive(Default)]
 pub(super) struct ArtworkActions {
@@ -101,244 +100,6 @@ impl Controller {
         }
     }
 
-    pub(super) fn album_facets_available(&self) -> bool {
-        // Schema 6 has no indexed album projection. Keep its remote search path free
-        // of a full-library JSON aggregation and never upgrade a snapshot for covers.
-        !self.remote_read_only()
-            || self
-                .remote
-                .lock()
-                .unwrap()
-                .state
-                .as_ref()
-                .is_some_and(|state| state.schema_version >= 7)
-    }
-
-    pub(super) fn album_thumbnail(
-        &self,
-        provider: &SqliteProvider,
-        album: &str,
-        index: usize,
-        cancel: Arc<AtomicBool>,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        if index >= ALBUM_THUMBNAILS || !self.show_album_artwork.load(Ordering::Acquire) {
-            return None;
-        }
-        // A slow cover request must not stall the search/facet worker.
-        let _cache = self.artwork_cache_lock.try_lock().ok()?;
-        let request = SearchRequest {
-            filters: SearchFilters {
-                album: Some(album.into()),
-                ..Default::default()
-            },
-            limit: 1,
-            ..Default::default()
-        };
-        let file = provider
-            .search_cancellable(&request, cancel)
-            .ok()?
-            .results
-            .into_iter()
-            .next()?;
-        let (overrides, key) = self.artwork_identity(&file)?;
-        if overrides.join(format!("{key}.hidden")).is_file() {
-            return None;
-        }
-        let custom = crate::artwork::read_thumbnail(&overrides.join(format!("{key}.png")), 40);
-        // Facets read generated pixels only. No stat/canonicalize/decode of a source
-        // WAV here: a sleeping NAS must not block the next search's directory counts.
-        let pixels = custom.or_else(|| {
-            self.hinted_album_artwork(provider, album)
-                .and_then(|path| crate::artwork::read_thumbnail(&path, 40))
-                .or_else(|| {
-                    self.cached_artwork_path(&file)
-                        .and_then(|path| crate::artwork::read_thumbnail(&path, 40))
-                })
-        })?;
-        let (width, height) = pixels.dimensions();
-        Some((pixels.into_raw(), width, height))
-    }
-
-    pub(super) fn cached_artwork_path(&self, file: &AudioFile) -> Option<PathBuf> {
-        let root = self.config.lock().unwrap().paths.cache.clone();
-        if !self.remote_read_only() {
-            return Some(crate::artwork::thumbnail_path(
-                &root,
-                self.provider().database_path(),
-                file,
-                &audiolib_core::album(&file.attributes),
-            ));
-        }
-        let state = self.remote.lock().unwrap().state.clone()?;
-        let key = crate::artwork::key(&[
-            "remote-v1",
-            &state.library_id,
-            &state.revision.to_string(),
-            &file.id.to_string(),
-        ]);
-        Some(root.join("artwork").join(format!("{key}.png")))
-    }
-
-    pub(super) fn artwork_identity(&self, file: &AudioFile) -> Option<(PathBuf, String)> {
-        let config = self.config.lock().unwrap();
-        let directory = config.paths.settings.parent()?.join("artwork-overrides");
-        drop(config);
-        let library = if self.remote_read_only() {
-            format!(
-                "server:{}",
-                self.remote.lock().unwrap().state.as_ref()?.library_id
-            )
-        } else {
-            format!("local:{}", self.provider().database_path().display())
-        };
-        let album = audiolib_core::album(&file.attributes);
-        let group = if album.is_empty() {
-            format!("file:{}", file.id)
-        } else {
-            format!("album:{album}")
-        };
-        Some((directory, crate::artwork::key(&[&library, &group])))
-    }
-
-    pub(super) fn cancel_artwork(&self) {
-        self.artwork_epoch.fetch_add(1, Ordering::AcqRel);
-        self.artwork_cancel
-            .lock()
-            .unwrap()
-            .store(true, Ordering::Release);
-        *self.artwork_job.lock().unwrap() = None;
-    }
-
-    pub(super) fn enqueue_artwork(&self, file: &AudioFile) {
-        if !self.show_album_artwork.load(Ordering::Acquire) {
-            return;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        std::mem::replace(&mut *self.artwork_cancel.lock().unwrap(), cancel.clone())
-            .store(true, Ordering::Release);
-        *self.artwork_job.lock().unwrap() = Some(ArtworkJob {
-            file: file.clone(),
-            generation: self.selection_generation.load(Ordering::Acquire),
-            source_generation: self.source_generation.load(Ordering::Acquire),
-            epoch: self.artwork_epoch.load(Ordering::Acquire),
-            cancel,
-        });
-        self.artwork_wake.notify_one();
-    }
-
-    pub(super) fn artwork_current(&self, job: &ArtworkJob) -> bool {
-        self.available()
-            && !self.shutdown.load(Ordering::Acquire)
-            && !job.cancel.load(Ordering::Acquire)
-            && self.selection_generation.load(Ordering::Acquire) == job.generation
-            && self.source_generation.load(Ordering::Acquire) == job.source_generation
-            && self.artwork_epoch.load(Ordering::Acquire) == job.epoch
-            && self.show_album_artwork.load(Ordering::Acquire)
-    }
-
-    pub(super) fn load_artwork(&self, job: &ArtworkJob) -> Option<image::RgbaImage> {
-        if !self.artwork_current(job) {
-            return None;
-        }
-        let (overrides, key) = self.artwork_identity(&job.file)?;
-        {
-            let _cache = self.artwork_cache_lock.lock().unwrap();
-            if !self.artwork_current(job) || overrides.join(format!("{key}.hidden")).is_file() {
-                return None;
-            }
-            if let Some(pixels) =
-                crate::artwork::read_thumbnail(&overrides.join(format!("{key}.png")), 512)
-            {
-                return Some(pixels);
-            }
-        }
-        if job.file.missing {
-            return None;
-        }
-        let (cache_root, allowed) = {
-            let config = self.config.lock().unwrap();
-            (
-                config.paths.cache.clone(),
-                config.allowed_scan_roots.clone(),
-            )
-        };
-        if !self.remote_read_only() {
-            // Keep the immutable destination before touching a potentially sleeping
-            // source. Cache actions never wait for source validation or decoding.
-            let cache = self.cached_artwork_path(&job.file)?;
-            let path =
-                audiolib_core::validate_wav_path(Path::new(&job.file.file_path), &allowed).ok()?;
-            let pixels = audiolib_audio::probe_with_artwork(&path)
-                .ok()?
-                .1
-                .and_then(|art| crate::artwork::decode_thumbnail(&art.bytes, 512))?;
-            let _cache = self.artwork_cache_lock.lock().unwrap();
-            if self.artwork_current(job) {
-                let _ = crate::artwork::save_thumbnail(&cache, &pixels);
-                let _ = crate::artwork::clean_cache(&cache_root, false);
-            }
-            return Some(pixels);
-        }
-        let (client, state) = self.remote_artwork_context()?;
-        let cache_key = crate::artwork::key(&[
-            "remote-v1",
-            &state.library_id,
-            &state.revision.to_string(),
-            &job.file.id.to_string(),
-        ]);
-        let image_path = cache_root.join("artwork").join(format!("{cache_key}.png"));
-        let etag_path = image_path.with_extension("etag");
-        let (cached, etag) = {
-            let _cache = self.artwork_cache_lock.lock().unwrap();
-            if !self.artwork_current(job) {
-                return None;
-            }
-            let cached = crate::artwork::read_thumbnail(&image_path, 512);
-            let etag = cached
-                .as_ref()
-                .and_then(|_| std::fs::metadata(&etag_path).ok())
-                .filter(|metadata| metadata.len() <= 4096)
-                .and_then(|_| std::fs::read_to_string(&etag_path).ok());
-            (cached, etag)
-        };
-        // The socket can remain busy while a server root wakes; no cache lock is
-        // held across HTTP, and cancellation still interrupts this request.
-        match client.artwork_for_library(
-            &state.library_id,
-            job.file.id,
-            Some(512),
-            etag.as_deref(),
-            &job.cancel,
-        ) {
-            Ok(ArtworkReply::NotModified) => cached,
-            Ok(ArtworkReply::Data { bytes, etag, .. }) => {
-                let pixels = crate::artwork::decode_thumbnail(&bytes, 512)?;
-                let _cache = self.artwork_cache_lock.lock().unwrap();
-                if self.artwork_current(job) {
-                    if crate::artwork::save_thumbnail(&image_path, &pixels).is_ok() {
-                        if let Some(etag) = etag {
-                            let _ = std::fs::write(&etag_path, etag);
-                        } else {
-                            let _ = std::fs::remove_file(&etag_path);
-                        }
-                    }
-                    let _ = crate::artwork::clean_cache(&cache_root, false);
-                }
-                Some(pixels)
-            }
-            Ok(ArtworkReply::Missing) => {
-                let _cache = self.artwork_cache_lock.lock().unwrap();
-                if self.artwork_current(job) {
-                    let _ = std::fs::remove_file(image_path);
-                    let _ = std::fs::remove_file(etag_path);
-                }
-                None
-            }
-            Err(audiolib_remote::RemoteError::LibraryChanged(_)) => None,
-            Err(_) => cached,
-        }
-    }
-
     pub(super) fn start_artwork_worker(self: &Arc<Self>) {
         let c = self.clone();
         std::thread::Builder::new()
@@ -355,13 +116,19 @@ impl Controller {
                     let job = pending.take().unwrap();
                     drop(pending);
                     if !c.artwork_current(&job) {
+                        c.artwork_job_finished(&job);
                         continue;
                     }
                     let pixels = c.load_artwork(&job);
+                    let notice = job.notice.lock().unwrap().take();
+                    c.artwork_job_finished(&job);
                     let confirmed = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if !confirmed.artwork_current(&job) {
                             return;
+                        }
+                        if let Some(notice) = notice {
+                            ui.set_artwork_message(notice.into());
                         }
                         let ready = pixels.is_some();
                         let image = pixels
@@ -381,10 +148,10 @@ impl Controller {
                             return;
                         }
                         confirmed.remember_album_artwork(&job);
-                        let album = audiolib_core::album(&job.file.attributes);
+                        let album = job.album.id.to_string();
                         for index in 0..ui.get_albums().row_count() {
                             if let Some(mut row) = ui.get_albums().row_data(index)
-                                && row.name.as_str() == album
+                                && row.id.as_str() == album
                             {
                                 row.cover = image.clone();
                                 ui.get_albums().set_row_data(index, row);
@@ -440,6 +207,8 @@ impl Controller {
             2 => {
                 crate::artwork::save_thumbnail(&image_path, &chosen_pixels.unwrap())
                     .map_err(|error| ArtworkActionError::Persistence(error.to_string()))?;
+                crate::album_override_migration::mark_completed(&directory, &key)
+                    .map_err(|error| ArtworkActionError::Persistence(error.to_string()))?;
                 remove_if_present(&hidden_path).map_err(ArtworkActionError::Persistence)?;
             }
             3 => {
@@ -447,9 +216,13 @@ impl Controller {
                     .map_err(|error| ArtworkActionError::Persistence(error.to_string()))?;
                 std::fs::write(&hidden_path, [])
                     .map_err(|error| ArtworkActionError::Persistence(error.to_string()))?;
+                crate::album_override_migration::mark_completed(&directory, &key)
+                    .map_err(|error| ArtworkActionError::Persistence(error.to_string()))?;
                 remove_if_present(&image_path).map_err(ArtworkActionError::Persistence)?;
             }
             4 => {
+                crate::album_override_migration::mark_completed(&directory, &key)
+                    .map_err(|error| ArtworkActionError::Persistence(error.to_string()))?;
                 remove_if_present(&image_path).map_err(ArtworkActionError::Persistence)?;
                 remove_if_present(&hidden_path).map_err(ArtworkActionError::Persistence)?;
             }
@@ -528,7 +301,7 @@ impl Controller {
                 return;
             }
             let file = c.selected.lock().unwrap().clone();
-            if action != 1 && file.is_none() {
+            if action != 1 && file.as_ref().is_none_or(|file| file.album_entity.is_none()) {
                 return;
             }
             let context = c.artwork_action_context(file.as_ref());

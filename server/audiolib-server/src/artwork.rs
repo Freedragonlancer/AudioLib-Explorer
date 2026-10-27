@@ -1,5 +1,5 @@
 // server/audiolib-server/src/artwork.rs
-//! On-demand embedded cover for `GET /audio/{id}/artwork`.
+//! Embedded covers for legacy WAV reads and shared album representations.
 //!
 //! The picture is read from the authorized audio file handle on disk.
 //! Image bytes are never written into the library SQLite database or into snapshots.
@@ -11,11 +11,16 @@ use crate::{
     state::{OpenError, OpenProgress},
     stream,
 };
-use audiolib_core::Error;
+use audiolib_core::{DataProvider, Error, MAX_ALBUM_MEMBERS};
 use std::{
+    collections::VecDeque,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::SystemTime,
 };
 
@@ -31,6 +36,43 @@ pub(crate) const MAX_SIDE: u32 = 512;
 const JPEG_QUALITY: u8 = 85;
 /// Cover cache stays under this size; oldest files are removed past it.
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ALBUM_CHOICES: usize = 128;
+
+/// A resolved album source is shared across member selections and image sizes.
+struct AlbumChoice {
+    key: String,
+    audio_id: i64,
+}
+
+fn album_choices() -> &'static Mutex<VecDeque<AlbumChoice>> {
+    static CHOICES: OnceLock<Mutex<VecDeque<AlbumChoice>>> = OnceLock::new();
+    CHOICES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn album_reply(
+    reply: ArtworkReply,
+    library_id: &str,
+    namespace: &str,
+    album_id: i64,
+) -> ArtworkReply {
+    let library = fnv64(format!("{library_id}\0{namespace}").as_bytes());
+    match reply {
+        ArtworkReply::NotModified { etag } => ArtworkReply::NotModified {
+            etag: format!(
+                "\"album1-{library:x}-{album_id}-{}\"",
+                etag.trim_matches('"')
+            ),
+        },
+        ArtworkReply::Body { etag, mime, bytes } => ArtworkReply::Body {
+            etag: format!(
+                "\"album1-{library:x}-{album_id}-{}\"",
+                etag.trim_matches('"')
+            ),
+            mime,
+            bytes,
+        },
+    }
+}
 
 /// JPEG or PNG bytes ready to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +121,90 @@ pub(crate) fn artwork_etag(file_etag: &str, side: u32) -> String {
 }
 
 impl AppState {
+    /// Resolve one deterministic cover from the whole album, independent of the
+    /// selected member or search filters. Only owned candidates and authorized
+    /// source handles are used; no picture is stored in SQLite.
+    pub(crate) fn album_artwork(
+        &self,
+        album_id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<ArtworkReply, OpenError> {
+        self.provider().get_album(album_id)?;
+        let members = self
+            .provider()
+            .album_members(album_id, MAX_ALBUM_MEMBERS, cancel.clone())?;
+        let namespace = self.provider().album_namespace();
+        let mut material = format!(
+            "{}\0{namespace}\0{}\0{album_id}\0{}",
+            self.library_id(),
+            self.provider().database_path().display(),
+            self.revision()?.revision
+        );
+        for member in &members {
+            use std::fmt::Write as _;
+            let _ = write!(
+                material,
+                "\0{}:{}:{}",
+                member.id, member.file_size, member.file_path
+            );
+        }
+        let key = format!("{:016x}", fnv64(material.as_bytes()));
+        let cached_id = {
+            let choices = album_choices()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            choices
+                .iter()
+                .find(|choice| choice.key == key)
+                .map(|choice| choice.audio_id)
+        };
+        let mut candidates: Vec<i64> = members.iter().map(|member| member.id).collect();
+        if let Some(cached_id) = cached_id
+            && let Some(index) = candidates.iter().position(|id| *id == cached_id)
+        {
+            candidates.remove(index);
+            candidates.insert(0, cached_id);
+        }
+        for audio_id in candidates {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Error::Cancelled.into());
+            }
+            match self.artwork(audio_id, side, None, progress) {
+                Ok(reply) => {
+                    if self.provider().get_audio(audio_id)?.album_id != Some(album_id) {
+                        continue;
+                    }
+                    let mut choices = album_choices()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    choices.retain(|choice| choice.key != key);
+                    choices.push_back(AlbumChoice { key, audio_id });
+                    while choices.len() > MAX_ALBUM_CHOICES {
+                        choices.pop_front();
+                    }
+                    drop(choices);
+                    let reply = album_reply(reply, self.library_id(), &namespace, album_id);
+                    let etag = match &reply {
+                        ArtworkReply::NotModified { etag } | ArtworkReply::Body { etag, .. } => {
+                            etag
+                        }
+                    };
+                    return if if_none_match.is_some_and(|value| stream::none_match(value, etag)) {
+                        Ok(ArtworkReply::NotModified { etag: etag.clone() })
+                    } else {
+                        Ok(reply)
+                    };
+                }
+                Err(OpenError::Library(Error::NotFound(_))) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Error::NotFound(format!("Album {album_id} has no embedded cover")).into())
+    }
+
     /// Blocking. Open audio `id` like a stream, then return its embedded cover.
     ///
     /// No cover, a missing file and a failed extract are [`Error::NotFound`] (HTTP 404).

@@ -216,28 +216,6 @@ fn prepare_writable_with_history(
             }
         }
     }
-    // v7 additive upgrade: a v6 library gets the derived album column and its fill in one
-    // short transaction (additive DDL plus one UPDATE) instead of a storage migration.
-    {
-        super::inspect::check_cancel(cancel)?;
-        let probe = job::open_read(path)?;
-        let has_album: bool = probe.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files') WHERE name='album' COLLATE NOCASE)",
-            [], |row| row.get(0),
-        ).map_err(db_error)?;
-        if !schema::needs_upgrade(&probe)? && has_album {
-            return Ok(());
-        }
-        drop(probe);
-        let _leases = job::Leases::acquire(path)?;
-        let mut conn = job::open_rw(path)?;
-        schema::register_tokenizer(&conn, crate::load_tokenizer())?;
-        if crate::owned_cancellation::run(&mut conn, cancel, |conn| {
-            schema::fast_upgrade_album(conn, cancel, progress)
-        })? {
-            return Ok(());
-        }
-    }
     let conn = job::open_read(path)?;
     if !schema::needs_upgrade(&conn)? {
         return Ok(());
