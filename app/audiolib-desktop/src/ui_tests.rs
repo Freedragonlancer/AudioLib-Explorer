@@ -189,6 +189,7 @@ fn server_cache_page_hides_local_scan_buttons_and_keeps_audition_hold_option() {
 
         // Local settings still expose the scan controls unchanged.
         ui.set_remote_mode(false);
+        ui.set_sm_sources(source_rows(false));
         ui.set_sm_selected(0);
         ui.set_sm_page(0);
         for label in [add, incr, full] {
@@ -915,14 +916,9 @@ fn library_management_prioritizes_scanning_and_collapses_advanced_maintenance() 
             );
         }
         for label in if chinese {
-            ["添加文件夹…", "增量扫描…", "全量扫描…", "修复文件引用"]
+            ["添加文件夹…", "增量扫描…", "全量扫描…"]
         } else {
-            [
-                "Add folder…",
-                "Incremental scan…",
-                "Full scan…",
-                "Repair file references",
-            ]
+            ["Add folder…", "Incremental scan…", "Full scan…"]
         } {
             let element = ElementHandle::find_by_accessible_label(&ui, label)
                 .next()
@@ -938,6 +934,29 @@ fn library_management_prioritizes_scanning_and_collapses_advanced_maintenance() 
                 "{label} is vertically clipped"
             );
         }
+        let remove_root = if chinese {
+            "从库中移除此根目录…"
+        } else {
+            "Remove root from library…"
+        };
+        let remove = ElementHandle::find_by_accessible_label(&ui, remove_root)
+            .next()
+            .expect(remove_root);
+        assert_eq!(
+            remove.accessible_enabled(),
+            Some(false),
+            "Remove root stays disabled with an empty selection"
+        );
+        // Scan-roots list sits above repair; scroll so the maintenance action stays reachable.
+        scroll_library_management(&ui, -400.0);
+        let repair = if chinese {
+            "修复文件引用"
+        } else {
+            "Repair file references"
+        };
+        ElementHandle::find_by_accessible_label(&ui, repair)
+            .next()
+            .expect(repair);
         scroll_library_management(&ui, -5000.0);
         click_label(&ui, advanced);
         scroll_library_management(&ui, -5000.0);
@@ -1019,14 +1038,35 @@ fn repair_references_shows_missing_files_across_the_library_in_both_languages() 
                         "Manage library"
                     },
                 );
-                click_label(
-                    &ui,
-                    if chinese {
-                        "修复文件引用"
-                    } else {
-                        "Repair file references"
-                    },
-                );
+                let repair = if chinese {
+                    "修复文件引用"
+                } else {
+                    "Repair file references"
+                };
+                // Library settings can exceed a compact window's viewport.
+                // Bring the real action into view before exercising its pointer path.
+                let scroll = ElementHandle::find_by_element_id(&ui, "AppWindow::library-scroll")
+                    .next()
+                    .expect("library settings scroll view");
+                for _ in 0..8 {
+                    if has_label(&ui, repair) {
+                        break;
+                    }
+                    scroll_library_management(&ui, -scroll.size().height * 0.6);
+                }
+                let action = ElementHandle::find_by_accessible_label(&ui, repair)
+                    .next()
+                    .expect("repair references action is reachable by scrolling");
+                let top = scroll.absolute_position().y + 4.0;
+                let bottom = scroll.absolute_position().y + scroll.size().height - 4.0;
+                let action_top = action.absolute_position().y;
+                let action_bottom = action_top + action.size().height;
+                if action_top < top {
+                    scroll.scroll(0.0, top - action_top);
+                } else if action_bottom > bottom {
+                    scroll.scroll(0.0, bottom - action_bottom);
+                }
+                click_label(&ui, repair);
             } else {
                 click_menu_item(
                     &ui,
@@ -3509,18 +3549,26 @@ fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages(
         click_label(
             &ui,
             if chinese {
-                "确认删除"
+                "确认移除"
             } else {
-                "Delete profile"
+                "Confirm removal"
             },
         );
         assert!(!ui.get_sm_confirm_delete());
         click_label(
             &ui,
             if chinese {
-                "＋ 添加服务器"
+                "＋ 添加源"
             } else {
-                "+ Add server"
+                "+ Add source"
+            },
+        );
+        click_label(
+            &ui,
+            if chinese {
+                "服务器音效库…"
+            } else {
+                "Server library…"
             },
         );
         assert_eq!(ui.get_sm_selected(), -1);
@@ -3561,6 +3609,131 @@ fn unified_source_window_lists_sources_and_shows_server_pages_in_both_languages(
         assert!(!ui.get_library_visible());
     }
     ui.hide().unwrap();
+}
+
+#[test]
+fn local_source_chooser_and_multiple_local_rows_keep_their_own_controls() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+        ui.set_chinese(chinese);
+        let mut sources = source_rows(false).iter().collect::<Vec<_>>();
+        sources.insert(
+            1,
+            SourceRow {
+                id: "local-foley".into(),
+                name: "Foley".into(),
+                subtitle: "D:/Sounds/Foley.db".into(),
+                kind: 0,
+                ..Default::default()
+            },
+        );
+        ui.set_sm_sources(ModelRc::new(VecModel::from(sources)));
+        ui.set_sm_local_count(2);
+        let local_adds = Rc::new(RefCell::new(0));
+        let observed = local_adds.clone();
+        let weak = ui.as_weak();
+        ui.on_sm_local_add_requested(move || {
+            *observed.borrow_mut() += 1;
+            let ui = weak.upgrade().unwrap();
+            ui.set_sm_local_form(true);
+            ui.set_sm_local_editing(false);
+            ui.set_sm_local_pregenerate(true);
+        });
+        let weak = ui.as_weak();
+        ui.on_sm_source_selected(move |index| {
+            weak.upgrade().unwrap().set_sm_local_default(index == 0);
+        });
+        let deletions = Rc::new(RefCell::new(0));
+        let observed = deletions.clone();
+        ui.on_sm_delete_requested(move || *observed.borrow_mut() += 1);
+        ui.show().unwrap();
+        ui.invoke_open_library(0);
+        let add = if chinese {
+            "＋ 添加源"
+        } else {
+            "+ Add source"
+        };
+        let local = if chinese {
+            "本地音效库路径…"
+        } else {
+            "Local library path…"
+        };
+        click_label(&ui, add);
+        click_label(&ui, local);
+        assert_eq!(*local_adds.borrow(), 1);
+        assert!(ui.get_sm_local_form() && ui.get_sm_local_pregenerate());
+        assert_eq!(
+            ui.get_sm_selected(),
+            0,
+            "a draft keeps its real source selection"
+        );
+        assert!(!ui.get_sm_add_choice());
+        click_label(&ui, if chinese { "取消" } else { "Cancel" });
+        assert!(!ui.get_sm_local_form());
+
+        ui.invoke_sm_select_row(1);
+        assert!(!has_label(
+            &ui,
+            if chinese {
+                "测试连接"
+            } else {
+                "Test connection"
+            }
+        ));
+        assert!(has_label(
+            &ui,
+            if chinese {
+                "编辑音效库…"
+            } else {
+                "Edit library…"
+            }
+        ));
+        let remove = if chinese {
+            "移除此本地音效库…"
+        } else {
+            "Remove this local library…"
+        };
+        click_label(&ui, remove);
+        assert!(ui.get_sm_confirm_delete());
+        click_label(&ui, if chinese { "取消" } else { "Keep" });
+        ui.invoke_sm_select_row(0);
+        assert!(!has_label(&ui, remove), "default has no removal action");
+        assert_eq!(*deletions.borrow(), 0);
+
+        click_label(
+            &ui,
+            if chinese {
+                "服务器设置"
+            } else {
+                "Server settings"
+            },
+        );
+        assert_eq!(ui.get_sm_selected(), 2, "server tab skips every local row");
+        assert!(has_label(
+            &ui,
+            if chinese {
+                "测试连接"
+            } else {
+                "Test connection"
+            }
+        ));
+        ui.set_ds_dirty(true);
+        click_label(&ui, add);
+        click_label(&ui, local);
+        assert_eq!(ui.get_sm_pending_select(), -4);
+        assert_eq!(
+            *local_adds.borrow(),
+            1,
+            "dirty connection prompts before local creation"
+        );
+        click_label(&ui, if chinese { "放弃修改" } else { "Discard" });
+        assert_eq!(*local_adds.borrow(), 2);
+        assert!(ui.get_sm_local_form() && !ui.get_ds_dirty());
+        assert_eq!(ui.get_sm_selected(), 2);
+        ui.hide().unwrap();
+    }
 }
 
 #[test]
