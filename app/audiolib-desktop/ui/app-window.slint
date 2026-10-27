@@ -3007,7 +3007,7 @@ export component AppWindow inherits Window {
                                                     toggled => { root.pregenerate-list-waveforms-requested(self.checked); }
                                                 }
                                                 Label { height: 32px * Theme.ui-scale; wrap: word-wrap; font-size: Theme.font(10);
-                                                    text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
+                                                    text: root.chinese ? "开启后在扫描结束后于后台以低优先级连续补齐列表缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, missing list thumbnails are generated continuously in the background at low priority after scans, pausing while you audition or scan. When off, only visible rows are computed.";
                                                 }
                                                 Text { text: root.local-waveform-progress; color: Theme.accent; font-size: Theme.font(11); wrap: word-wrap; }
                                             }
