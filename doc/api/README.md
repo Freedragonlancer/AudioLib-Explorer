@@ -279,7 +279,7 @@ audiolib.example.com:8443 {
 
 ### 3.1 历史：快照 schema 3 → 5
 
-以下记录已发布 v5 的演进与兼容行为。当前开发分支为 schema 6 / `ale-s6-cld1-t3-m2-p1`，读取边界为 3..=6，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6 的实际格式准入。
+以下记录已发布 v5 的演进与兼容行为。当前源码为 schema 7 / `ale-s7-cld1-t3-m2-p1`，读取边界为 3..=7，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准，v7 的派生专辑和封面边界见[封面契约](../Rust_Artwork.md)。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6/v7 的实际格式准入。
 
 - `SCHEMA_VERSION` = **5**（`crates/audiolib-db/src/schema.rs`，由 `audiolib_db::SCHEMA_VERSION` 导出）。`MIN_SNAPSHOT_SCHEMA_VERSION` = **3**（同文件，客户端的 `MIN_SNAPSHOT_SCHEMA` 直接引用它，不重复定义）。`GET /library` 的 `schema_version` 与快照响应头 `X-Schema-Version` 现在都是 `5`。
 - v4 **只新增索引**：不改任何表、列、触发器、FTS，不改行数据，所以 v3 与 v4 用同一套查询；`/library` 的 `stats` 条件由 `COALESCE(missing,0)=0` 改为 `missing=0`（`missing` 列是 `NOT NULL DEFAULT 0`），可命中部分索引。

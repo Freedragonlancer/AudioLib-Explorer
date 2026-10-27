@@ -1,6 +1,6 @@
 # Rust Architecture
 
-AudioLib Explorer `0.7.4` uses the Rust workspace and schema 6 / Plan B storage. See the [shared migration contract](api/Library_Migration_Compatibility.md) and [storage CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier development-version measurements remain historical evidence.
+AudioLib Explorer `0.8.1` uses the Rust workspace and schema 7 / Plan B storage, including the derived album projection. See the [shared migration contract](api/Library_Migration_Compatibility.md), [artwork contracts](Rust_Artwork.md) and [storage CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier development-version measurements remain historical evidence.
 
 This document supersedes Python-specific implementation choices in Technical_Architecture.md. Its Appendix A remains the terminology reference. The Python implementation and its test scripts have been removed from the working tree; earlier committed versions preserve their history. The original SQLite database and local config/audiolib_config.yaml remain read-only migration inputs. New features use the Rust workspace.
 
