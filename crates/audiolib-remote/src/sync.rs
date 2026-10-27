@@ -2037,14 +2037,14 @@ mod tests {
     #[test]
     fn ready_snapshot_schemas_3_through_6_read_without_retired_dto_fields() {
         let owned = tempfile::tempdir().unwrap();
-        for version in 3..=6 {
+        for version in 3..=audiolib_db::SCHEMA_VERSION {
             let path = owned.path().join(format!("ready-v{version}.db"));
-            if version == 6 {
+            if version == audiolib_db::SCHEMA_VERSION {
                 drop(SqliteProvider::open(&path).unwrap());
             }
             let connection = rusqlite::Connection::open(&path).unwrap();
             audiolib_db::register_library_functions(&connection).unwrap();
-            if version < 6 {
+            if version < audiolib_db::SCHEMA_VERSION {
                 // Synthetic supported-version combinations use the captured legacy
                 // layout, matching the historic snapshot matrix below. No real
                 // archived v3/v4 user database is available in this checkout.
@@ -2064,7 +2064,7 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            if version < 6 {
+            if version < audiolib_db::SCHEMA_VERSION {
                 connection
                     .execute(
                         "UPDATE audio_files SET filename_tokenized=audiolib_tokenize(filename),
