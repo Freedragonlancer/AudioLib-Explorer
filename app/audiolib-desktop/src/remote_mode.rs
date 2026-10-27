@@ -684,6 +684,30 @@ impl Controller {
         self.remote_mode.load(Ordering::Acquire)
     }
 
+    /// Capture the active snapshot and an artwork-capable client without holding locks
+    /// during credential loading or HTTP work. Older servers simply have no context.
+    pub(super) fn remote_artwork_context(&self) -> Option<(RemoteClient, CacheState)> {
+        if !self.remote_read_only() {
+            return None;
+        }
+        let settings = self.config.lock().unwrap().data_source.clone();
+        let state = {
+            let remote = self.remote.lock().unwrap();
+            if remote.library_changed
+                || !remote
+                    .manage
+                    .capabilities_for(&settings.server_url)?
+                    .album_artwork_usable()
+            {
+                return None;
+            }
+            remote.state.clone()?
+        };
+        let secrets = self.secrets();
+        let client = RemoteClient::new(&settings.server_url, &secrets.token).ok()?;
+        Some((client, state))
+    }
+
     /// Refuse a structural library write in server mode with a clear message; returns true
     /// if refused. Annotation edits are not refused: they go to the server.
     pub(super) fn refuse_remote_write(&self) -> bool {
@@ -4546,6 +4570,34 @@ mod tests {
         assert_eq!(controller.playback_display_name(&path), file.filename);
         assert!(audiolib_audio::is_stream_source(&path));
         assert_eq!(audiolib_audio::probe(&path).unwrap().sample_rate, 48000);
+        // Exercise the actual engine Load boundary, not just the HTTP reader: the
+        // virtual registration does not exist on disk and must still become Ready.
+        // Load/Seek/Stop require no output device and never emit sound in this test.
+        let loaded = controller
+            .audio
+            .send_and_wait(
+                audiolib_audio::AudioCommand::Load(path.clone()),
+                Duration::from_secs(4),
+            )
+            .unwrap();
+        assert_eq!(loaded.state, audiolib_audio::PlaybackState::Ready);
+        assert_eq!(loaded.file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(loaded.sample_rate, file.sample_rate);
+        assert_eq!(loaded.channels, file.channels);
+        assert_eq!(loaded.duration, file.duration);
+        let seeked = controller
+            .audio
+            .send_and_wait(
+                audiolib_audio::AudioCommand::Seek(file.duration),
+                Duration::from_secs(4),
+            )
+            .unwrap();
+        assert_eq!(seeked.position, file.duration);
+        assert_eq!(seeked.state, audiolib_audio::PlaybackState::Ready);
+        controller
+            .audio
+            .send_and_wait(audiolib_audio::AudioCommand::Stop, Duration::from_secs(4))
+            .unwrap();
         let original_stream = controller
             .remote_stream
             .lock()

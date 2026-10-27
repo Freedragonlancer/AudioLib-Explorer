@@ -11,9 +11,9 @@ fn previous_fixture() -> (tempfile::TempDir, PathBuf) {
     register_library_functions(&conn).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=DELETE;
-         INSERT INTO audio_files(id,file_path,filename,metadata_json,user_notes,modified_at)
-         VALUES(-9223372036854775808,'lowest.wav','metal.wav','{\"wav_metadata\":{\"fields\":{\"library\":\"Library A\"}},\"private\":42}','keep note','2020-01-02 03:04:05'),
-               (2,'two.wav','water.wav','{\"wav_metadata\":{\"fields\":{\"library\":\"Library B\"}}}','second note','2020-01-02 03:04:05');
+         INSERT INTO audio_files(id,file_path,path_key,filename,metadata_json,user_notes,modified_at)
+         VALUES(-9223372036854775808,'lowest.wav','lowest.wav','metal.wav','{\"wav_metadata\":{\"fields\":{\"library\":\"Library A\"}},\"private\":42}','keep note','2020-01-02 03:04:05'),
+               (2,'two.wav','two.wav','water.wav','{\"wav_metadata\":{\"fields\":{\"library\":\"Library B\"}}}','second note','2020-01-02 03:04:05');
          DROP INDEX idx_audio_visible_album;
          ALTER TABLE audio_files DROP COLUMN album;
          PRAGMA user_version=6;",
@@ -97,7 +97,23 @@ fn album_upgrade_does_not_publish_damaged_identity_or_relationships() {
 fn previous_read_only_snapshots_support_album_facets_filters_and_metadata_patches() {
     let (_root, path) = previous_fixture();
     let before = fs::read(&path).unwrap();
+    assert!(SqliteProvider::has_current_search_state(&path).unwrap());
     let provider = SqliteProvider::open_read_only(&path).unwrap();
+    // A readable Plan B v6 mirror must never be copied/upgraded just to display
+    // the v7 album field. This also keeps later server annotation patches visible.
+    assert_eq!(provider.database_path(), path);
+    assert!(provider._owned_snapshot_directory.is_none());
+    let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        source
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        album_expression(&source).unwrap(),
+        "audiolib_album_key(af.metadata_json)"
+    );
     assert_eq!(
         provider.album_facets(&SearchRequest::default()).unwrap(),
         vec![("Library A".into(), 1), ("Library B".into(), 1)]
@@ -139,6 +155,123 @@ fn previous_read_only_snapshots_support_album_facets_filters_and_metadata_patche
             .total_count,
         1
     );
+    assert_eq!(provider.get_audio(i64::MIN).unwrap().album, "Library A");
+    assert_eq!(
+        provider.get_audio(i64::MIN).unwrap().attributes["private"],
+        42
+    );
+    assert_eq!(
+        source
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        6
+    );
+}
+
+#[test]
+fn album_backup_restore_and_annotation_exports_preserve_authoritative_metadata() {
+    use audiolib_core::LibraryExportFormat;
+
+    let (root, path) = previous_fixture();
+    let provider = SqliteProvider::open_existing(&path).unwrap();
+    let original = provider.get_audio(i64::MIN).unwrap();
+    let mut source_metadata = original.attributes.clone();
+    // modified_at is a live DTO projection of the annotation revision, not
+    // embedded Metadata. Importing an annotation correctly advances that value.
+    source_metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("modified_at");
+    let backup = root.path().join("backup.db");
+    provider.backup_library(&backup).unwrap();
+    for (name, format) in [
+        ("annotations.jsonl", LibraryExportFormat::JsonLines),
+        ("annotations.csv", LibraryExportFormat::Csv),
+    ] {
+        let exported = root.path().join(name);
+        provider.export_library(&exported, format).unwrap();
+        let bytes = fs::read_to_string(&exported).unwrap();
+        assert!(bytes.contains("Library A"));
+        assert!(bytes.contains("private"));
+        provider
+            .update_metadata(
+                original.id,
+                &MetadataPatch {
+                    notes: Some("temporary edit".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let report = provider.import_annotations(&exported).unwrap();
+        assert_eq!(report.records, 2);
+        assert_eq!(report.skipped, 0);
+        let mut imported = provider.get_audio(original.id).unwrap();
+        assert_eq!(imported.notes, original.notes);
+        imported
+            .attributes
+            .as_object_mut()
+            .unwrap()
+            .remove("modified_at");
+        assert_eq!(imported.attributes, source_metadata);
+        assert_eq!(imported.album, original.album);
+    }
+    provider
+        .update_metadata(
+            original.id,
+            &MetadataPatch {
+                notes: Some("edit after backup".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    provider.restore_library(&backup).unwrap();
+    let restored = provider.get_audio(original.id).unwrap();
+    assert_eq!(restored.notes, original.notes);
+    assert_eq!(restored.attributes, original.attributes);
+    assert_eq!(restored.album, original.album);
+    assert_eq!(
+        provider
+            .album_facets(&SearchRequest::default())
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+/// Explicit, read-only acceptance against an already downloaded v6 mirror.
+/// Refuses the open before any copy is possible unless its search state is ready.
+#[test]
+#[ignore = "requires AUDIOLIB_TEST_V6_SNAPSHOT and AUDIOLIB_TEST_AUDIO_ID"]
+fn existing_v6_mirror_opens_in_place_and_reads_audio() {
+    let path = PathBuf::from(std::env::var_os("AUDIOLIB_TEST_V6_SNAPSHOT").unwrap());
+    let id: i64 = std::env::var("AUDIOLIB_TEST_AUDIO_ID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let before = fs::metadata(&path).unwrap();
+    let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        source
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        album_expression(&source).unwrap(),
+        "audiolib_album_key(af.metadata_json)"
+    );
+    assert!(SqliteProvider::has_current_search_state(&path).unwrap());
+    let provider = SqliteProvider::open_read_only(&path).unwrap();
+    assert_eq!(provider.database_path(), path);
+    assert!(provider._owned_snapshot_directory.is_none());
+    let audio = provider.get_audio(id).unwrap();
+    assert_eq!(audio.id, id);
+    assert!(!audio.file_path.is_empty());
+    assert_eq!(audio.album, audiolib_core::album(&audio.attributes));
+    drop(provider);
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
 }
 
 #[test]

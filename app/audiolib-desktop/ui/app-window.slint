@@ -820,6 +820,13 @@ export component AppWindow inherits Window {
     in property <image> album-cover;
     // Slint has no "image is empty" test here, so the controller publishes readiness.
     in property <bool> album-cover-ready: false;
+    in-out property <bool> artwork-enabled: true;
+    in property <bool> artwork-busy: false;
+    in property <string> artwork-message: "";
+    in-out property <bool> artwork-management-expanded: false;
+    callback artwork-enabled-requested(bool);
+    // 0 refresh, 1 clear thumbnails, 2 choose custom, 3 hide, 4 restore embedded.
+    callback artwork-action-requested(int);
     in property <string> selected-description: "";
     in property <string> selected-source-tags: "";
     in property <string> selected-attributes: "";
@@ -1954,13 +1961,13 @@ export component AppWindow inherits Window {
                     }
                     // Library/album groups declared by the files themselves. Clicking one
                     // filters the results; clicking the active one clears the filter.
-                    if root.library-sidebar-page == 0 && !root.remote-mode && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; height: 190px * Theme.ui-scale;
+                    if root.library-sidebar-page == 0 && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; height: 190px * Theme.ui-scale;
                         Label { height: 24px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARIES"; font-size: Theme.font(10); }
                         album-list := ListView { vertical-stretch: 1; viewport-width: self.visible-width; accessible-role: list;
                             for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
                                 background: root.album-filter == album.name ? Theme.selected : (album-hit.has-hover ? Theme.raised : transparent);
                                 HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
-                                    Image { width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
+                                    Image { visible: root.artwork-enabled; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
                                     Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.ink; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
                                     Label { min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
                                 }
@@ -2397,10 +2404,10 @@ export component AppWindow inherits Window {
                             }
                             // Embedded cover; hidden while the file declares none.
                             Image {
-                                visible: root.album-cover-ready;
+                                visible: root.artwork-enabled && root.album-cover-ready;
                                 horizontal-stretch: 1;
                                 min-width: 0px;
-                                height: root.album-cover-ready ? 160px * Theme.ui-scale : 0px;
+                                height: root.artwork-enabled && root.album-cover-ready ? 160px * Theme.ui-scale : 0px;
                                 image-fit: contain;
                                 source: root.album-cover;
                             }
@@ -3001,6 +3008,24 @@ export component AppWindow inherits Window {
                                     if root.library-feedback != "": Text { height: 34px * Theme.ui-scale; text: root.library-feedback; color: Theme.accent; wrap: word-wrap; font-size: Theme.font(11); }
                                     library-scroll := ScrollView { vertical-stretch: 1; min-height: 0px; viewport-width: self.visible-width;
                                         VerticalLayout { spacing: 12px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; alignment: start;
+                                            if !root.sm-server || root.sm-page == 2: VerticalLayout { spacing: 6px * Theme.ui-scale;
+                                                Action { height: 28px * Theme.ui-scale; subtle: true; label: (root.chinese ? "专辑封面管理 " : "Album artwork ") + (root.artwork-management-expanded ? "▾" : "▸"); clicked => { root.artwork-management-expanded = !root.artwork-management-expanded; } }
+                                                if root.artwork-management-expanded: VerticalLayout { spacing: 6px * Theme.ui-scale;
+                                                CheckBox { text: root.chinese ? "显示封面（本地与服务器）" : "Show covers (local and server)"; checked <=> root.artwork-enabled; enabled: !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; toggled => { root.artwork-enabled-requested(self.checked); } }
+                                                Label { wrap: word-wrap; font-size: Theme.font(10); color: Theme.muted; text: root.chinese ? "手动封面仅保存在本机，按素材库与专辑区分；没有专辑名时只作用于所选音频。清理缓存会保留手动封面。旧服务器不支持内嵌封面时仍可手动指定。" : "Custom covers stay on this PC, per library and album, or per selected sound when no album is declared. Clearing thumbnails keeps custom covers. Custom covers also work with older servers."; }
+                                                Text { text: root.has-selection ? (root.chinese ? "当前对象：" : "Current target: ") + (root.selected-album != "" ? root.selected-album : root.selected-name) : (root.chinese ? "先在主列表中选择一个音频，再管理它的专辑封面。" : "Select a sound in the main list to manage its album cover."); color: Theme.dim; wrap: word-wrap; font-size: Theme.font(11); }
+                                                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                    Action { horizontal-stretch: 1; enabled: root.has-selection && root.sm-active && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "指定 / 替换图片…" : "Choose / replace image…"; clicked => { root.artwork-action-requested(2); } }
+                                                    Action { horizontal-stretch: 1; enabled: root.has-selection && root.sm-active && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "移除封面" : "Remove cover"; clicked => { root.artwork-action-requested(3); } }
+                                                    Action { horizontal-stretch: 1; enabled: root.has-selection && root.sm-active && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "恢复内嵌封面" : "Restore embedded"; clicked => { root.artwork-action-requested(4); } }
+                                                }
+                                                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                    Action { horizontal-stretch: 1; enabled: root.has-selection && root.sm-active && !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "重新加载封面" : "Reload cover"; clicked => { root.artwork-action-requested(0); } }
+                                                    Action { horizontal-stretch: 1; enabled: !root.artwork-busy && !root.library-busy && !root.ds-applying && !root.closing; label: root.chinese ? "清理本机封面缓存" : "Clear cover thumbnails"; clicked => { root.artwork-action-requested(1); } }
+                                                }
+                                                if root.artwork-message != "": Label { text: root.artwork-message; wrap: word-wrap; color: Theme.accent; font-size: Theme.font(11); }
+                                                }
+                                            }
                                             // Local mode: full scan/update controls. Server/remote mode
                                             // hides the forever-disabled buttons; scans live on 服务器音效库.
                                             if !root.remote-mode: VerticalLayout { spacing: 12px * Theme.ui-scale;
