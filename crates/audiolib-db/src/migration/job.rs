@@ -281,8 +281,8 @@ fn marker_matches(source: &Connection, job: &MigrationJob) -> Result<bool> {
         .map_err(db_error)?;
     // A job started by the previous target must stay resumable, and a job started by this
     // build records the current target.
-    let target = i64::try_from(marker.3).unwrap_or(0);
-    let current = i64::try_from(crate::schema::SCHEMA_VERSION).unwrap_or(0);
+    let target = i64::from(marker.3);
+    let current = crate::schema::SCHEMA_VERSION;
     let accepted_target = (current - 1..=current).contains(&target);
     if marker.0 != job.id || marker.1 != encode(&job.plan)? || marker.2 != 1 || !accepted_target {
         return Err(invalid(

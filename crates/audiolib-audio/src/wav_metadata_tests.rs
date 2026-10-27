@@ -530,7 +530,8 @@ fn real_boom_smed_metadata_fixtures() {
 }
 
 #[test]
-fn playback_layout_stops_at_the_data_chunk() {    // A network source must not fetch the file's tail to start playing: the playback
+fn playback_layout_stops_at_the_data_chunk() {
+    // A network source must not fetch the file's tail to start playing: the playback
     // layout ignores everything after the audio (here a trailing chunk claiming more bytes
     // than the file has, which the full Metadata probe rejects).
     let temp = tempfile::tempdir().unwrap();

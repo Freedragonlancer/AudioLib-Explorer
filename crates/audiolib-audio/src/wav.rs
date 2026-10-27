@@ -49,11 +49,7 @@ pub(crate) fn read_info(path: &Path) -> Result<WavInfo> {
     read_info_impl(path, false, false)
 }
 
-fn read_info_impl(
-    path: &Path,
-    include_metadata: bool,
-    include_artwork: bool,
-) -> Result<WavInfo> {
+fn read_info_impl(path: &Path, include_metadata: bool, include_artwork: bool) -> Result<WavInfo> {
     let (mut file, file_len) = crate::source::open_source(path)?;
     let mut header = [0_u8; 12];
     file.read_exact(&mut header)?;

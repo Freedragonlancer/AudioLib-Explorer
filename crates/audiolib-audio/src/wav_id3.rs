@@ -210,7 +210,8 @@ impl EmbeddedMetadata {
 }
 
 // Only called after WAV chunk/budget validation. All offsets stay within this tag.
-fn compact_tag(reader: &mut (impl Read + Seek), size: usize) -> std::io::Result<Option<Vec<u8>>> {    if size < 10 {
+fn compact_tag(reader: &mut (impl Read + Seek), size: usize) -> std::io::Result<Option<Vec<u8>>> {
+    if size < 10 {
         return Ok(None);
     }
     let mut header = [0; 10];
