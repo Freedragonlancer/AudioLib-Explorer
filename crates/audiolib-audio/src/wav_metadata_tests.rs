@@ -589,3 +589,118 @@ fn probe_with_artwork_returns_the_id3_cover_and_ordinary_probe_skips_it() {
     let (_, none) = crate::probe_with_artwork(&plain).unwrap();
     assert!(none.is_none());
 }
+
+fn apic(image: &[u8]) -> Vec<u8> {
+    let mut content = b"\0image/png\0\x03\0".to_vec();
+    content.extend_from_slice(image);
+    content
+}
+
+fn synchronise(bytes: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        encoded.push(byte);
+        if byte == 255
+            && bytes
+                .get(index + 1)
+                .is_none_or(|next| *next == 0 || *next >= 224)
+        {
+            encoded.push(0);
+        }
+    }
+    encoded
+}
+
+#[test]
+fn id3_large_cover_preserves_album_text_without_copying_artwork_into_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("large-cover.wav");
+    wav(&path);
+    let mut image = b"\x89PNG\r\n\x1a\n".to_vec();
+    image.resize(3 * 1024 * 1024, 42);
+    let mut frames = id3_frame(3, "APIC", &apic(&image), 0);
+    frames.extend(id3_frame(3, "TALB", b"\0Large Cover Album", 0));
+    let mut tag = b"ID3\x03\0\0".to_vec();
+    tag.extend(synchsafe(frames.len()));
+    tag.extend(frames);
+    add(&path, b"ID3 ", &tag);
+
+    let metadata = probe(&path).unwrap();
+    assert_eq!(
+        audiolib_core::album(&metadata.attributes),
+        "Large Cover Album"
+    );
+    assert!(metadata.attributes["wav_metadata"]["warnings"].is_null());
+    assert!(metadata.attributes.to_string().len() < 1024);
+    let (_, cover) = crate::probe_with_artwork(&path).unwrap();
+    assert_eq!(cover.unwrap().bytes, image);
+}
+
+#[test]
+fn id3_artwork_restores_unsynchronisation_and_skips_frame_prefixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let image = b"\x89PNG\r\n\x1a\n\xff\xe0\xff\0image\xff";
+    for (version, tag_flags, frame_flags) in [(3, 0xc0, 0x20), (4, 0xc0, 0x43), (4, 0, 2)] {
+        let path = temp
+            .path()
+            .join(format!("artwork-flags-{version}-{tag_flags}.wav"));
+        wav(&path);
+        let content = apic(image);
+        let mut framed = Vec::new();
+        if frame_flags & if version == 3 { 0x20 } else { 0x40 } != 0 {
+            framed.push(7); // grouping identity
+        }
+        if version == 4 && frame_flags & 1 != 0 {
+            framed.extend(synchsafe(content.len()));
+        }
+        framed.extend(content);
+        if version == 4 {
+            framed = synchronise(&framed);
+        }
+        let mut payload = if tag_flags & 0x40 != 0 {
+            if version == 3 {
+                vec![0, 0, 0, 6, 0, 0, 0, 0, 0, 0]
+            } else {
+                vec![0, 0, 0, 6, 1, 0]
+            }
+        } else {
+            Vec::new()
+        };
+        payload.extend(id3_frame(version, "APIC", &framed, frame_flags));
+        payload.extend(id3_frame(version, "TALB", b"\0Flagged Album", 0));
+        if version == 3 {
+            payload = synchronise(&payload);
+        }
+        let mut tag = vec![b'I', b'D', b'3', version, 0, tag_flags];
+        tag.extend(synchsafe(payload.len()));
+        tag.extend(payload);
+        add(&path, b"id3 ", &tag);
+
+        let (metadata, cover) = crate::probe_with_artwork(&path).unwrap();
+        assert_eq!(audiolib_core::album(&metadata.attributes), "Flagged Album");
+        assert_eq!(cover.unwrap().bytes, image);
+    }
+}
+
+#[test]
+fn id3_artwork_skips_unsupported_invalid_and_oversized_pictures() {
+    let image = b"\x89PNG\r\n\x1a\nvalid cover";
+    for (version, flags) in [(3, 0xc0), (4, 0x0c)] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("picture-fallback.wav");
+        wav(&path);
+        let mut oversized = b"\x89PNG\r\n\x1a\n".to_vec();
+        oversized.resize(MAX_ARTWORK_BYTES + 1, 42);
+        let mut frames = id3_frame(version, "APIC", &apic(image), flags);
+        frames.extend(id3_frame(version, "APIC", b"invalid picture", 0));
+        frames.extend(id3_frame(version, "APIC", &apic(&oversized), 0));
+        frames.extend(id3_frame(version, "APIC", &apic(image), 0));
+        let mut tag = vec![b'I', b'D', b'3', version, 0, 0];
+        tag.extend(synchsafe(frames.len()));
+        tag.extend(frames);
+        add(&path, b"ID3 ", &tag);
+
+        let (_, cover) = crate::probe_with_artwork(&path).unwrap();
+        assert_eq!(cover.unwrap().bytes, image);
+    }
+}

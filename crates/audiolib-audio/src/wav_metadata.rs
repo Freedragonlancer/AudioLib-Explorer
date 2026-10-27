@@ -5,7 +5,7 @@ use roxmltree::{Document, Node, ParsingOptions};
 use serde_json::{Map, Value, json};
 
 /// Increment when extraction changes so an ordinary scan refreshes old records.
-pub const WAV_METADATA_VERSION: i64 = 3;
+pub const WAV_METADATA_VERSION: i64 = 4;
 pub(crate) const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 // Modern SMED includes UTF-16 base64 artwork (the supplied BOOM files use ~4 MiB).
 pub(crate) const MAX_SMED_BYTES: u64 = 16 * 1024 * 1024;
@@ -15,6 +15,9 @@ const MAX_XML_DEPTH: usize = 32;
 const MAX_FIELD_PATH_BYTES: usize = 4096;
 /// Bounded cover payload accepted from ID3; larger frames are ignored rather than copied.
 pub(crate) const MAX_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
+// An ID3 tag can contain one bounded image plus text/frame overhead. Ordinary
+// Metadata extraction still skips binary frames and caps copied text separately.
+pub(crate) const MAX_ID3_BYTES: u64 = MAX_ARTWORK_BYTES as u64 + MAX_CHUNK_BYTES;
 
 /// Cover artwork embedded in the WAV itself (ID3 APIC), kept separate from Metadata JSON
 /// so a multi-megabyte image never reaches SQLite or FTS5.

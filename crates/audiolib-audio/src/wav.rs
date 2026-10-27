@@ -1,6 +1,7 @@
 // crates/audiolib-audio/src/wav.rs
 use crate::wav_metadata::{
-    Artwork, EmbeddedMetadata, MAX_CHUNK_BYTES, MAX_METADATA_BYTES, MAX_SMED_BYTES, text,
+    Artwork, EmbeddedMetadata, MAX_CHUNK_BYTES, MAX_ID3_BYTES, MAX_METADATA_BYTES, MAX_SMED_BYTES,
+    text,
 };
 use audiolib_core::{AudioMetadata, Error, Result};
 use serde_json::{Map, Value, json};
@@ -111,6 +112,8 @@ fn read_info_impl(path: &Path, include_metadata: bool, include_artwork: bool) ->
         );
         let chunk_limit = if &chunk[..4] == b"SMED" {
             MAX_SMED_BYTES
+        } else if matches!(&chunk[..4], b"id3 " | b"ID3 ") {
+            MAX_ID3_BYTES
         } else {
             MAX_CHUNK_BYTES
         };
