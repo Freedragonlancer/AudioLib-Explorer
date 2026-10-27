@@ -279,7 +279,16 @@ fn marker_matches(source: &Connection, job: &MigrationJob) -> Result<bool> {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(db_error)?;
-    if marker != (job.id.clone(), encode(&job.plan)?, 1, 6) {
+    // A job started by the previous target must stay resumable, and a job started by this
+    // build records the current target.
+    let target = i64::try_from(marker.3).unwrap_or(0);
+    let current = i64::try_from(crate::schema::SCHEMA_VERSION).unwrap_or(0);
+    let accepted_target = (current - 1..=current).contains(&target);
+    if marker.0 != job.id
+        || marker.1 != encode(&job.plan)?
+        || marker.2 != 1
+        || !accepted_target
+    {
         return Err(invalid(
             "Source belongs to a different or unsupported migration",
         ));
@@ -301,7 +310,12 @@ fn install_guards(source: &mut Connection, job: &MigrationJob, cancel: &AtomicBo
           target INTEGER NOT NULL,job_id TEXT NOT NULL,directory TEXT NOT NULL,plan TEXT NOT NULL);",
     ).map_err(db_error)?;
     tx.execute(
-        "INSERT INTO audiolib_storage_migration VALUES(1,1,6,?1,?2,?3)",
+        // Record the format this build publishes; the compatibility check also accepts the
+        // previous target, so an in-flight job from an older build can still resume.
+        &format!(
+            "INSERT INTO audiolib_storage_migration VALUES(1,1,{},?1,?2,?3)",
+            crate::schema::SCHEMA_VERSION
+        ),
         params![job.id, job.directory.to_string_lossy(), encode(&job.plan)?],
     )
     .map_err(db_error)?;

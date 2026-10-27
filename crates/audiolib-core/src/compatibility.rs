@@ -296,7 +296,9 @@ pub fn assess_library(
                 && (1..=5).contains(&format.schema_version)
                 && format.features.get("tokenization") == Some(&4))
                 || (pending.protocol == "search_storage"
-                    && pending.target == TARGET_SCHEMA
+                    // A job started by the previous target must stay resumable; newer
+                    // builds record their own target here.
+                    && (TARGET_SCHEMA.saturating_sub(1)..=TARGET_SCHEMA).contains(&pending.target)
                     && (3..=TARGET_SCHEMA).contains(&format.schema_version)));
         // Tokenization=4 is permitted only within the existing rev-3 protocol.
         let mut completed_format = format.clone();
