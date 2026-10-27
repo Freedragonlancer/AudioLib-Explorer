@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[path = "local_libraries.rs"]
+mod local_libraries;
+pub use local_libraries::{DEFAULT_LOCAL_LIBRARY_ID, LocalLibrary};
+
 pub use crate::profiles::{
     ACTIVE_LOCAL, ActiveSource, DEFAULT_PROFILE_ID, ProfileKind, ProfileMigration, ServerProfile,
     TestSummary, default_transcode,
@@ -103,6 +107,12 @@ pub struct DataSourceSettings {
     /// Saved server connections (LAN and external addresses are separate profiles).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<ServerProfile>,
+    /// Registered local databases. Removing an entry never removes its database or WAVs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_libraries: Vec<LocalLibrary>,
+    /// Last selected local database, retained while a server source is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_local_library: Option<String>,
 }
 
 impl Default for DataSourceSettings {
@@ -117,6 +127,8 @@ impl Default for DataSourceSettings {
             audition_original: false,
             active: None,
             profiles: Vec::new(),
+            local_libraries: Vec::new(),
+            active_local_library: None,
         }
     }
 }
@@ -156,6 +168,7 @@ impl DataSourceSettings {
             return Err(Error::Validation("WebDAV username is invalid".into()));
         }
         self.validate_profiles()?;
+        self.validate_local_libraries()?;
         Ok(())
     }
 
@@ -718,8 +731,12 @@ impl AppConfig {
                     root.join(path)
                 };
                 config.paths.legacy_database = None;
+            } else if let Some(library) = config.selected_local_library().cloned() {
+                config.paths.database = library.database;
+                config.pregenerate_list_waveforms = library.pregenerate_list_waveforms;
             }
         }
+        config.reconcile_local_libraries()?;
         if config.language != "cn" && config.language != "en" {
             config.language = english();
         }
@@ -757,6 +774,10 @@ impl AppConfig {
                 // profiles follow those fields before they are written.
                 let mut data_source = self.persisted_data_source();
                 data_source.migrate_profiles();
+                data_source.reconcile_local_libraries(
+                    &self.paths.database,
+                    self.pregenerate_list_waveforms,
+                )?;
                 data_source
             },
         };
@@ -811,8 +832,29 @@ impl AppConfig {
                 path.display()
             )));
         }
-        self.paths.database = path.canonicalize()?;
-        self.paths.legacy_database = None;
+        let database = path.canonicalize()?;
+        let mut updated = self.clone();
+        updated.reconcile_local_libraries()?;
+        if let Some(id) = updated
+            .data_source
+            .local_libraries
+            .iter()
+            .find(|entry| {
+                entry
+                    .database
+                    .canonicalize()
+                    .unwrap_or_else(|_| entry.database.clone())
+                    == database
+            })
+            .map(|entry| entry.id.clone())
+        {
+            updated.select_local_library(&id)?;
+        } else {
+            updated.paths.database = database;
+            updated.paths.legacy_database = None;
+            updated.reconcile_local_libraries()?;
+        }
+        *self = updated;
         Ok(())
     }
 }
@@ -937,7 +979,9 @@ mod tests {
         assert!(loaded.pregenerate_list_waveforms);
         assert!(loaded.hold_list_waveform_batches_after_audition);
         assert_eq!(loaded.allowed_scan_roots, config.allowed_scan_roots);
-        assert_eq!(loaded.data_source, config.data_source);
+        let mut expected_sources = config.clone();
+        expected_sources.reconcile_local_libraries().unwrap();
+        assert_eq!(loaded.data_source, expected_sources.data_source);
     }
 
     #[test]
@@ -1287,7 +1331,10 @@ mod tests {
         )
         .unwrap();
         let mut config = AppConfig::load_in(directory.path().to_owned()).unwrap();
-        assert_eq!(config.data_source, DataSourceSettings::default());
+        let mut server_settings = config.data_source.clone();
+        server_settings.local_libraries.clear();
+        server_settings.active_local_library = None;
+        assert_eq!(server_settings, DataSourceSettings::default());
         assert_eq!(config.data_source.mode, DataSourceMode::Local);
         assert_eq!(
             config.data_source.poll_interval_secs,
