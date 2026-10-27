@@ -17,6 +17,7 @@ export struct AudioRow {
     format: string,
     channels: string,
     tags: string,
+    album: string,
     favorite: bool,
     missing: bool,
     checked: bool,
@@ -28,6 +29,8 @@ export struct AudioRow {
     wave: image,
 }
 export struct FolderRow { name: string, count: string, path: string, depth: int, expanded: bool, has-children: bool }
+/// One declared library/album and how many present records carry it.
+export struct AlbumRow { name: string, count: string, cover: image }
 export struct CrumbRow { name: string }
 export struct SearchTaskRow { id: string, name: string, favorite: bool, modified: bool, active: bool, keywords: [string], folder: string, summary: string, searched: bool }
 export struct SavedSearchTaskRow { id: string, name: string, summary: string }
@@ -792,7 +795,9 @@ export component AppWindow inherits Window {
     public function scroll-table-to-end() {
         root.table-viewport-x = min(0px, result-list.visible-width - root.table-content-size);
     }
-    private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size;
+    // Fixed width: the album column is informational, sorted/filtered from the sidebar.
+    private property <length> table-album-size: round(160 * Theme.ui-scale) * 1px;
+    private property <length> table-columns-size: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + root.table-album-size;
     private property <length> table-content-size: max(root.table-columns-size, result-list.visible-width);
     private property <bool> table-empty: root.rows.length == 0;
     private property <length> table-viewport-x;
@@ -805,7 +810,16 @@ export component AppWindow inherits Window {
 
     in property <string> selected-name: "";
     in property <string> selected-path: "";
+    // Sidebar library/album facets and the active album filter (empty = all albums).
+    in-out property <[AlbumRow]> albums: [];
+    in-out property <string> album-filter: "";
+    callback album-selected(string);
     in property <string> selected-format: "";
+    // Library/album declared by the file itself; empty means the file has none.
+    in property <string> selected-album: "";
+    in property <image> album-cover;
+    // Slint has no "image is empty" test here, so the controller publishes readiness.
+    in property <bool> album-cover-ready: false;
     in property <string> selected-description: "";
     in property <string> selected-source-tags: "";
     in property <string> selected-attributes: "";
@@ -1365,7 +1379,7 @@ export component AppWindow inherits Window {
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
-    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
+    property <int> filter-count: (root.sample-filter > 0 ? 1 : 0) + (root.bit-filter > 0 ? 1 : 0) + (root.channel-filter > 0 ? 1 : 0) + (root.tagged-only ? 1 : 0) + (root.tag-filter != "" ? max(1, root.tag-term-count) : 0) + (root.color-filter != "" ? 1 : 0) + (root.album-filter != "" ? 1 : 0) + (root.duration-min != "" || root.duration-max != "" ? 1 : 0);
     callback file-action-requested(string, int);
     callback folder-action-requested(string, int);
     callback selection-step-requested(int);
@@ -1938,6 +1952,22 @@ export component AppWindow inherits Window {
                         }
                     }
                     }
+                    // Library/album groups declared by the files themselves. Clicking one
+                    // filters the results; clicking the active one clears the filter.
+                    if root.library-sidebar-page == 0 && !root.remote-mode && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; height: 190px * Theme.ui-scale;
+                        Label { height: 24px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARIES"; font-size: Theme.font(10); }
+                        album-list := ListView { vertical-stretch: 1; viewport-width: self.visible-width; accessible-role: list;
+                            for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+                                background: root.album-filter == album.name ? Theme.selected : (album-hit.has-hover ? Theme.raised : transparent);
+                                HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
+                                    Image { width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; image-fit: cover; source: album.cover; }
+                                    Text { horizontal-stretch: 1; min-width: 0px; text: album.name; color: Theme.ink; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
+                                    Label { min-width: 34px * Theme.ui-scale; text: album.count; horizontal-alignment: right; }
+                                }
+                                album-hit := TouchArea { enabled: !root.background-blocked; mouse-cursor: pointer; clicked => { root.album-selected(album.name); } }
+                            }
+                        }
+                    }
                     if root.library-sidebar-page == 0: Label { height: 34px * Theme.ui-scale; text: root.chinese ? "方向键浏览目录 · 右键管理素材库" : "Right-click folders to manage"; wrap: word-wrap; font-size: Theme.font(10); }
                 }
             }
@@ -2040,6 +2070,13 @@ export component AppWindow inherits Window {
                                     help: root.chinese ? "按素材库标签排序，空白时使用源标签；再次点击切换升序 / 降序" : "Sort by library tags, using source tags when empty; click again to reverse ascending / descending";
                                     active: root.sort-index == 5; descending: root.sort-descending; enabled: !root.background-blocked;
                                     clicked => { root.sort-table(5); } context-requested(position) => { root.show-table-menu(position); }
+                                }
+                                // Informational column: albums are filtered from the sidebar.
+                                Text {
+                                    x: root.table-wave-size + root.table-name-size + root.table-duration-size + root.table-format-size + root.table-channels-size + root.table-tags-size + 12px * Theme.ui-scale;
+                                    width: root.table-album-size - 24px * Theme.ui-scale; height: parent.height;
+                                    text: root.chinese ? "专辑" : "ALBUM"; color: Theme.dim; vertical-alignment: center;
+                                    font-size: Theme.font(10); overflow: elide;
                                 }
                                 table-name-divider := TableDivider {
                                     x: root.table-wave-size + root.table-name-size - 8px * Theme.ui-scale; height: parent.height; column-width: root.table-name-size;
@@ -2150,6 +2187,7 @@ export component AppWindow inherits Window {
                                         table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(10); overflow: elide; }
                                         table-channels-cell := Text { width: root.table-channels-size - 24px * Theme.ui-scale; text: row.channels; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
                                         table-tags-cell := Text { width: root.table-tags-size - 24px * Theme.ui-scale; text: row.tags; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(10); }
+                                        table-album-cell := Text { width: root.table-album-size - 24px * Theme.ui-scale; text: row.album; color: Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(10); }
                                     }
                                     result-hit := TouchArea { mouse-cursor: pointer;
                                         property <bool> toggle-selection;
@@ -2352,6 +2390,20 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Label { height: root.short-layout ? 16px * Theme.ui-scale : 28px * Theme.ui-scale; text: root.selected-format; color: Theme.accent; wrap: word-wrap; overflow: elide; font-size: Theme.font(10); }
+                            // The file's own Library/album, as declared by the pack (Boom-style).
+                            if root.selected-album != "": VerticalLayout { spacing: 4px * Theme.ui-scale;
+                                Label { height: 16px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARY"; font-size: Theme.font(10); }
+                                Text { text: root.selected-album; color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; overflow: elide; }
+                            }
+                            // Embedded cover; hidden while the file declares none.
+                            Image {
+                                visible: root.album-cover-ready;
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                height: root.album-cover-ready ? 160px * Theme.ui-scale : 0px;
+                                image-fit: contain;
+                                source: root.album-cover;
+                            }
                             if root.selected-missing: VerticalLayout { spacing: 6px * Theme.ui-scale;
                                 Text { text: root.chinese ? "原位置找不到此文件。选择移动或改名后的 WAV，保留已有标注。" : "File missing at its original location. Locate the moved or renamed WAV to keep its annotations."; color: Theme.warning; font-size: Theme.font(11); wrap: word-wrap; }
                                 Action { height: 32px * Theme.ui-scale; primary: true; enabled: !root.closing && !root.library-busy; label: root.chinese ? "选择新位置，修复引用…" : "Locate file and repair…"; clicked => { root.file-action-requested(root.selected-id, 20); } }
@@ -3007,7 +3059,7 @@ export component AppWindow inherits Window {
                                                     toggled => { root.pregenerate-list-waveforms-requested(self.checked); }
                                                 }
                                                 Label { height: 32px * Theme.ui-scale; wrap: word-wrap; font-size: Theme.font(10);
-                                                    text: root.chinese ? "开启后在扫描结束后于后台限速补齐结果列表的缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, list thumbnails are filled in at a limited rate in the background after scans, pausing while you audition or scan. When off, only visible rows are computed.";
+                                                    text: root.chinese ? "开启后在扫描结束后于后台以低优先级连续补齐列表缩略波形，试听或扫描时暂停；关闭时只为当前可见的行计算。" : "When on, missing list thumbnails are generated continuously in the background at low priority after scans, pausing while you audition or scan. When off, only visible rows are computed.";
                                                 }
                                                 Text { text: root.local-waveform-progress; color: Theme.accent; font-size: Theme.font(11); wrap: word-wrap; }
                                             }

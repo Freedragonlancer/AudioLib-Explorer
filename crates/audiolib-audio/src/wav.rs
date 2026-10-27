@@ -1,6 +1,7 @@
 // crates/audiolib-audio/src/wav.rs
 use crate::wav_metadata::{
-    EmbeddedMetadata, MAX_CHUNK_BYTES, MAX_METADATA_BYTES, MAX_SMED_BYTES, text,
+    Artwork, EmbeddedMetadata, MAX_CHUNK_BYTES, MAX_ID3_BYTES, MAX_METADATA_BYTES, MAX_SMED_BYTES,
+    text,
 };
 use audiolib_core::{AudioMetadata, Error, Result};
 use serde_json::{Map, Value, json};
@@ -16,11 +17,21 @@ pub(crate) struct WavInfo {
     pub data_bytes: u64,
     pub block_align: u16,
     pub format_tag: u16,
+    pub artwork: Option<Artwork>,
 }
 
 /// Read RIFF/RF64 headers and public embedded Metadata without decoding audio samples.
 pub fn probe(path: &Path) -> Result<AudioMetadata> {
-    Ok(read_info_impl(path, true)?.metadata)
+    Ok(read_info_impl(path, true, false)?.metadata)
+}
+
+/// Probe Metadata and also return the WAV's own cover artwork, when it carries one.
+///
+/// Only this path reads the ID3 `APIC` payload, so ordinary scans never touch cover
+/// bytes; callers ask for artwork once per album rather than once per file.
+pub fn probe_with_artwork(path: &Path) -> Result<(AudioMetadata, Option<Artwork>)> {
+    let info = read_info_impl(path, true, true)?;
+    Ok((info.metadata, info.artwork))
 }
 
 fn u16le(bytes: &[u8]) -> u16 {
@@ -36,10 +47,10 @@ fn u64le(bytes: &[u8]) -> u64 {
 /// Playback layout only: stops at the `data` chunk once `fmt ` is known, so a network
 /// source never fetches the file's tail (trailing metadata chunks) to start playing.
 pub(crate) fn read_info(path: &Path) -> Result<WavInfo> {
-    read_info_impl(path, false)
+    read_info_impl(path, false, false)
 }
 
-fn read_info_impl(path: &Path, include_metadata: bool) -> Result<WavInfo> {
+fn read_info_impl(path: &Path, include_metadata: bool, include_artwork: bool) -> Result<WavInfo> {
     let (mut file, file_len) = crate::source::open_source(path)?;
     let mut header = [0_u8; 12];
     file.read_exact(&mut header)?;
@@ -101,6 +112,8 @@ fn read_info_impl(path: &Path, include_metadata: bool) -> Result<WavInfo> {
         );
         let chunk_limit = if &chunk[..4] == b"SMED" {
             MAX_SMED_BYTES
+        } else if matches!(&chunk[..4], b"id3 " | b"ID3 ") {
+            MAX_ID3_BYTES
         } else {
             MAX_CHUNK_BYTES
         };
@@ -180,7 +193,15 @@ fn read_info_impl(path: &Path, include_metadata: bool) -> Result<WavInfo> {
                     ),
                 );
             }
-            b"id3 " | b"ID3 " if within_budget => embedded.read_id3(&mut file, size as usize)?,
+            b"id3 " | b"ID3 " if within_budget => {
+                embedded.read_id3(&mut file, size as usize)?;
+                if include_artwork {
+                    // compact_tag() seeks past binary frames, so the cover needs its own
+                    // bounded pass over the same chunk.
+                    file.seek(SeekFrom::Start(payload))?;
+                    embedded.read_id3_artwork(&mut file, size as usize)?;
+                }
+            }
             b"iXML" | b"axml" | b"aXML" | b"_PMX" | b"XMP " | b"LIST" | b"SMED"
                 if within_budget =>
             {
@@ -227,33 +248,35 @@ fn read_info_impl(path: &Path, include_metadata: bool) -> Result<WavInfo> {
         "container".into(),
         json!(if rf64 { "RF64" } else { "RIFF" }),
     );
+    // finish() consumes the collector, so take the cover first.
+    let artwork = embedded.take_artwork();
     if include_metadata {
         embedded.finish(&mut attrs);
     }
-    let metadata = AudioMetadata {
-        sample_rate,
-        channels,
-        bit_depth: bits,
-        frames,
-        duration: frames as f64 / f64::from(sample_rate),
-        encoding: match format_tag {
-            1 => "PCM",
-            3 => "IEEE_FLOAT",
-            _ => "WAV_COMPRESSED",
-        }
-        .into(),
-        bext_description: attrs
-            .get("bwf_description")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .into(),
-        attributes: Value::Object(attrs),
-    };
     Ok(WavInfo {
-        metadata,
+        metadata: AudioMetadata {
+            sample_rate,
+            channels,
+            bit_depth: bits,
+            frames,
+            duration: frames as f64 / f64::from(sample_rate),
+            encoding: match format_tag {
+                1 => "PCM",
+                3 => "IEEE_FLOAT",
+                _ => "WAV_COMPRESSED",
+            }
+            .into(),
+            bext_description: attrs
+                .get("bwf_description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            attributes: Value::Object(attrs),
+        },
         data_offset,
         data_bytes,
         block_align,
         format_tag,
+        artwork,
     })
 }

@@ -195,7 +195,8 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     ui.show().unwrap();
     settle();
     let before = element(&ui, "table-name-header").absolute_position().x;
-    scroll_table(&ui, "empty-result-list", -900.0);
+    // Saturate the scroll range: the album column extends beyond the Tags divider.
+    scroll_table(&ui, "empty-result-list", -10_000.0);
     let empty_offset = element(&ui, "table-name-header").absolute_position().x - before;
     assert!(
         empty_offset < -600.0,
@@ -217,7 +218,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     crate::ui_tests::send_keys(&ui, &[slint::platform::Key::RightArrow.into()]);
     near(ui.get_table_tags_width(), 300.0);
     settle();
-    scroll_table(&ui, "empty-result-list", -900.0);
+    scroll_table(&ui, "empty-result-list", -10_000.0);
     let resized_offset = element(&ui, "table-name-header").absolute_position().x - before;
     near(resized_offset, empty_offset + 40.0);
 
@@ -249,7 +250,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
         populated_offset,
     );
     assert_eq!(ui.get_rows().row_count(), 0);
-    scroll_table(&ui, "empty-result-list", -900.0);
+    scroll_table(&ui, "empty-result-list", -10_000.0);
     near(
         element(&ui, "table-name-header").absolute_position().x - before,
         resized_offset,
@@ -269,7 +270,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
         resized_offset + 20.0,
     );
     assert_cell_alignment(&ui);
-    scroll_table(&ui, "result-list", 900.0);
+    scroll_table(&ui, "result-list", 10_000.0);
     near(
         element(&ui, "table-name-header").absolute_position().x,
         before,
@@ -284,7 +285,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     rows.set_vec(Vec::new());
     settle();
-    scroll_table(&ui, "empty-result-list", -900.0);
+    scroll_table(&ui, "empty-result-list", -10_000.0);
     let fractional_offset = element(&ui, "table-name-header").absolute_position().x - before;
     assert!(fractional_offset < -600.0);
     rows.push(row.clone());
@@ -298,10 +299,10 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     // Narrow columns have no horizontal range in either view. The fixed empty
     // overlay still accepts its clear action over the independent viewport.
     rows.set_vec(Vec::new());
-    ui.set_table_name_width(240.5);
+    ui.set_table_name_width(120.5);
     ui.set_table_tags_width(160.25);
     settle();
-    scroll_table(&ui, "empty-result-list", -900.0);
+    scroll_table(&ui, "empty-result-list", -10_000.0);
     near(
         element(&ui, "table-name-header").absolute_position().x,
         before,
@@ -319,7 +320,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     assert_eq!(filters.get(), 1);
     rows.push(row.clone());
     settle();
-    scroll_table(&ui, "result-list", -900.0);
+    scroll_table(&ui, "result-list", -10_000.0);
     near(
         element(&ui, "table-name-header").absolute_position().x,
         before,
@@ -333,7 +334,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
         element(&ui, "table-name-header").absolute_position().x,
         before,
     );
-    scroll_table_for(&ui, "empty-result-list", -900.0, 60);
+    scroll_table_for(&ui, "empty-result-list", -10_000.0, 60);
     // The public PointerScrolled API uses Slint's immediate (Cancelled) phase.
     // Rapid model switches must preserve that input's offset in both views.
     let moving_offset = element(&ui, "table-name-header").absolute_position().x - before;

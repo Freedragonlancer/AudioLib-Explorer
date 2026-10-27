@@ -111,6 +111,9 @@ enum Command {
         exclude_tag: Vec<String>,
         #[arg(long)]
         color: Option<String>,
+        /// Exact library/album name declared by the files.
+        #[arg(long)]
+        album: Option<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
         #[arg(long, default_value_t = 0)]
@@ -132,6 +135,11 @@ enum Command {
         workers: usize,
     },
     Stats,
+    /// List declared library/album names with their present-record counts.
+    Albums {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
     Folders {
         #[arg(long)]
         parent: Option<i64>,
@@ -652,6 +660,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             tag,
             exclude_tag,
             color,
+            album,
             limit,
             offset,
             sort,
@@ -684,6 +693,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
                     include_tags: tag.iter().skip(1).cloned().collect(),
                     exclude_tags: exclude_tag.clone(),
                     color: color.clone(),
+                    album: album.clone(),
                 },
                 limit: *limit,
                 offset: *offset,
@@ -731,6 +741,16 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             })?)
         }
         Command::Stats => json!(provider.stats()?),
+        Command::Albums { limit } => {
+            let mut albums = provider.album_facets(&SearchRequest::default())?;
+            albums.truncate(*limit);
+            json!(
+                albums
+                    .into_iter()
+                    .map(|(album, count)| json!({"album": album, "count": count}))
+                    .collect::<Vec<_>>()
+            )
+        }
         Command::Folders { parent } => json!(provider.folders(*parent)?),
         Command::Info { id } => json!(provider.get_audio(*id)?),
         Command::Edit {

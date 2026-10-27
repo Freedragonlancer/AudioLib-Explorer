@@ -79,6 +79,11 @@ pub(crate) fn migrate_resumable(
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(db_error)?;
+    // v6 -> v7: additive album column filled from stored Metadata; audio files are not read.
+    if version == SCHEMA_VERSION - 1 && !pending(conn)? {
+        validate_supported_feature_revisions(conn)?;
+        return super::current::upgrade_from_previous(conn, cancel, progress);
+    }
     if !pending(conn)? {
         validate_supported_feature_revisions(conn)?;
         if !(1..=LEGACY_SCHEMA_VERSION).contains(&version) || search_text_is_current(conn)? {

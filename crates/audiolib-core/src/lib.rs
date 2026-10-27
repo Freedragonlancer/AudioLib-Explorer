@@ -32,7 +32,8 @@ pub use list_waveform_i8::{
     i8_base64_len, quantize_i16_to_i8,
 };
 pub use metadata::{
-    SOURCE_TAG_KEYS, display_tags, source_description, source_metadata_search_text, source_tags,
+    SOURCE_TAG_KEYS, album, display_tags, source_description, source_metadata_search_text,
+    source_tags,
 };
 pub use search_workspace::{
     SavedSearchTask, SearchAudioRef, SearchFolderRef, SearchSession, SearchTask,
@@ -194,6 +195,9 @@ pub struct AudioFile {
     pub favorite: bool,
     pub bext_description: String,
     pub attributes: serde_json::Value,
+    /// Library/album declared by the file itself; empty when it declares none.
+    #[serde(default)]
+    pub album: String,
     #[serde(default)]
     pub missing: bool,
 }
@@ -233,6 +237,9 @@ pub struct SearchFilters {
     pub exclude_tags: Vec<String>,
     /// Exact library color, ignoring hex letter case.
     pub color: Option<String>,
+    /// Exact library/album name declared by the files; absent keeps every album visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,6 +372,18 @@ impl SearchRequest {
                 ..Default::default()
             }
             .validate()?;
+        }
+        // Album names originate in bounded WAV Metadata. Keep exact names usable even
+        // when they exceed the free-text query's 500-character limit.
+        if self
+            .filters
+            .album
+            .as_ref()
+            .is_some_and(|album| album.len() > 32 * 1024 * 1024 || album.contains('\0'))
+        {
+            return Err(Error::Validation(
+                "Album filter exceeds the Metadata size limit or contains NUL".into(),
+            ));
         }
         Ok(())
     }
@@ -799,6 +818,17 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn album_filters_reject_nul_and_unbounded_input_without_truncating_declared_names() {
+        let mut request = SearchRequest::default();
+        request.filters.album = Some("名".repeat(1000));
+        assert!(request.validate().is_ok());
+        request.filters.album = Some("name\0suffix".into());
+        assert!(request.validate().is_err());
+        request.filters.album = Some("x".repeat(32 * 1024 * 1024 + 1));
+        assert!(request.validate().is_err());
     }
 
     #[test]

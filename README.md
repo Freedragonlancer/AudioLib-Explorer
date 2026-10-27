@@ -26,13 +26,13 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 
 AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
 
-- **Program version:** 0.7.8 (workspace `Cargo.toml`)
+- **Source development version:** 0.8.0 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
-- **Database schema:** 6 (snapshot read range 3..=6, subject to actual format validation)
-- **Writable library format:** `ale-s6-cld1-t3-m2-p1`; earlier p0 libraries are read-only sources for an owned migration
+- **Database schema:** 7 (snapshot schema range 3..=7; only explicitly recognized complete formats are readable)
+- **Writable library format:** `ale-s7-cld1-t3-m2-p1`; recognized schema 6 and p0 formats are read-only sources that require migration before writing
 - **License:** [GPL-3.0-only](LICENSE)
 
-The program version is read from the workspace `Cargo.toml` and is shared by the client, CLI and server. See the [schema v6 contract](doc/api/Schema_V6_Iteration.md) for the current database format.
+The program version is read from the workspace `Cargo.toml` and is shared by the client, CLI and server. Current formats are defined by the [compatibility catalog](crates/audiolib-core/src/compatibility.rs); the [historical schema v6 contract](doc/api/Schema_V6_Iteration.md) describes the earlier format.
 
 ## Download / Install
 
@@ -100,7 +100,7 @@ Confirm GET http://<server-host>:<port>/api/v1/health returns ok. Do not commit 
 - Server mode: `server/audiolib-server` exposes one library over `/api/v1/` (snapshots, range streaming, previews, waveforms, token authentication, LAN-only admin page). The client opens a validated read-only snapshot; annotations and management writes use identity-bound HTTP requests. Tested older servers (0.4.11 and 0.5.0) remain readable.
 - Bilingual (Chinese/English) user interface.
 
-Before deploying schema v6, upgrade clients first, then migrate the server during a maintenance window. Real library writes require a valid modern compatibility catalog that explicitly supports the server's complete current format. Deprecated playback routes remain no-ops; HTTP 200 does not guarantee an old client's DTO can decode the response. Playback history stays on each client. See the [v6 contract](doc/api/Schema_V6_Iteration.md).
+Before migrating the server library to the current format, upgrade clients to versions that support that format, then migrate during a maintenance window. Real library writes require a valid modern compatibility catalog that explicitly supports the server's complete current format. Deprecated playback routes remain no-ops; HTTP 200 does not guarantee an old client's DTO can decode the response. Playback history stays on each client. See the [historical v6 contract](doc/api/Schema_V6_Iteration.md) for the playback-history transition.
 
 ## Build
 
@@ -158,9 +158,11 @@ audiolib-server --config /etc/audiolib/config.toml
 
 ## Versioning
 
-Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP API version (`/api/v1/`) and database schema (`SCHEMA_VERSION`, currently 6) are independent. The compatibility catalog and complete feature/format descriptor determine supported operations; the same schema number can describe read-only p0 or writable p1. See the [migration compatibility contract](doc/api/Library_Migration_Compatibility.md). A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` and must match `Cargo.toml` (ignoring the suffix). Tags with a suffix are automatically published as pre-releases; the Release title is always `AudioLib Explorer <tag>` (for example `AudioLib Explorer v0.6.5`); `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
+Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP API version (`/api/v1/`) and database schema (`SCHEMA_VERSION`, currently 7) are independent. The compatibility catalog and complete feature/format descriptor determine supported operations; a schema number alone never grants compatibility. Only the exact current target is writable; recognized schema 6 and p0 formats require validation and migration to that target before writing. See the [historical migration compatibility design](doc/api/Library_Migration_Compatibility.md) for the migration safeguards and the [compatibility catalog](crates/audiolib-core/src/compatibility.rs) for current formats. A schema change requires at least a MINOR program bump. Release tags are `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` and must match `Cargo.toml` (ignoring the suffix). Tags with a suffix are automatically published as pre-releases; the Release title is always `AudioLib Explorer <tag>` (for example `AudioLib Explorer v0.6.5`); `tools/check-release.ps1` enforces the policy. Details: [doc/Rust_Versioning.md](doc/Rust_Versioning.md).
 
 ## Releases and CI
+
+The current source development version is `0.8.0`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
 
 The desktop client and server check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 

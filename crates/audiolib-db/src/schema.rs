@@ -9,12 +9,13 @@ pub(crate) mod definition;
 mod legacy;
 mod search_upgrade;
 pub(crate) use current::{
-    create_current, current_format_ready, mark_current, needs_upgrade, readable_format_ready,
+    create_current, current_format_ready, fast_upgrade_album, mark_current, needs_upgrade,
+    readable_format_ready,
 };
 pub(crate) use search_upgrade::{migrate_resumable, pending};
 
 /// Writable target format; legacy normalization remains pinned to v5 below.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 pub const LEGACY_SCHEMA_VERSION: i64 = 5;
 /// Read-only source snapshots remain compatible across schemas 3..=5. Obsolete
 /// derived search state is repaired only in an owned staging or temporary copy.
@@ -605,6 +606,16 @@ pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
         Ok(audiolib_core::source_tags(&value).join(", "))
     })
     .map_err(db_error)?;
+    // Library/album name exactly as the file declares it; empty when it declares none.
+    conn.create_scalar_function("audiolib_album_key", 1, flags, |context| {
+        let json = context.get::<Option<String>>(0)?.unwrap_or_default();
+        if !json.contains("library") && !json.contains("\\u") {
+            return Ok(String::new());
+        }
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+        Ok(audiolib_core::album(&value))
+    })
+    .map_err(db_error)?;
     // Include/exclude tag terms in one call per row: the library tags are folded once and
     // every term is tested here, rather than one folding call per SQL term. The third
     // argument is a JSON array of [exclude, folded term] pairs, parsed once per statement.
@@ -1000,6 +1011,8 @@ fn apply_indexes(conn: &Connection) -> Result<()> {
         "source_tags_text",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    // v7 album column; the album index in PERFORMANCE_INDEXES depends on it.
+    ensure_column(conn, "audio_files", "album", "TEXT NOT NULL DEFAULT ''")?;
     conn.execute_batch(DROP_RATING_INDEXES).map_err(db_error)?;
     conn.execute_batch(PERFORMANCE_INDEXES).map_err(db_error)
 }
@@ -1021,6 +1034,10 @@ const PERFORMANCE_INDEXES:&str="
  CREATE INDEX IF NOT EXISTS idx_audio_visible_format_name ON audio_files(bit_depth,filename COLLATE NOCASE,id) WHERE missing=0;
  CREATE INDEX IF NOT EXISTS idx_audio_visible_tagged_any ON audio_files(filename COLLATE NOCASE,id,user_tags,source_tags_text) WHERE missing=0 AND (COALESCE(trim(user_tags),'')<>'' OR source_tags_text<>'');
  CREATE INDEX IF NOT EXISTS idx_audio_visible_color ON audio_files(user_color COLLATE NOCASE,id) WHERE missing=0 AND user_color IS NOT NULL;";
+
+/// v7 album accelerator; created only once the album column exists.
+pub(crate) const ALBUM_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_audio_visible_album ON audio_files(album,id) WHERE missing=0";
 
 const AUDIO_COLUMNS: &[(&str, &str)] = &[
     ("file_path", "TEXT"),
@@ -1051,6 +1068,8 @@ const AUDIO_COLUMNS: &[(&str, &str)] = &[
     ("zero_crossing_rate", "REAL"),
     ("user_tags", "TEXT"),
     ("source_tags_text", "TEXT NOT NULL DEFAULT ''"),
+    // v7: library/album declared by the file itself (Soundminer <Library>, ID3 TALB, RIFF IPRD).
+    ("album", "TEXT NOT NULL DEFAULT ''"),
     ("user_rating", "INTEGER"),
     ("user_color", "TEXT"),
     ("user_notes", "TEXT"),

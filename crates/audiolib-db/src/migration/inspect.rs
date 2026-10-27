@@ -343,7 +343,8 @@ pub(super) fn business_digest_retained(
             .filter(|(name, _)| {
                 !table.eq_ignore_ascii_case("audio_files")
                     || (!search_storage::is_derived_column(name)
-                        && !name.eq_ignore_ascii_case("source_tags_text"))
+                        && !name.eq_ignore_ascii_case("source_tags_text")
+                        && !name.eq_ignore_ascii_case("album"))
             })
             .map(|(name, _)| name.clone())
             .collect();

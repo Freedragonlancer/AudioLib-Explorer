@@ -1437,7 +1437,7 @@ fn current_provider_creation_metadata_snapshot_patch_and_play_noop_share_the_tar
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("current.db");
     let provider = crate::SqliteProvider::open(&path).unwrap();
-    assert_eq!(provider.library_info().unwrap().schema_version, 6);
+    assert_eq!(provider.library_info().unwrap().schema_version, 7);
     provider.writer().unwrap().execute(
         "INSERT INTO audio_files(id,file_path,filename,user_notes) VALUES(1,'one.wav','metal.wav','old annotation')",[],
     ).unwrap();
@@ -1499,7 +1499,7 @@ fn current_provider_auto_migrates_old_library_but_honors_explicit_rollback() {
     drop(legacy);
     let provider = crate::SqliteProvider::open_existing(&path).unwrap();
 
-    assert_eq!(provider.library_info().unwrap().schema_version, 6);
+    assert_eq!(provider.library_info().unwrap().schema_version, 7);
     drop(provider);
     let job = discover(&path).unwrap().unwrap();
     assert_eq!(job.phase, MigrationPhase::Complete);
@@ -1525,7 +1525,7 @@ fn current_import_restore_maintenance_and_removal_preserve_unretired_business() 
     crate::import_legacy(&source, &destination).unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
     let provider = crate::SqliteProvider::open_existing(&destination).unwrap();
-    assert_eq!(provider.library_info().unwrap().schema_version, 6);
+    assert_eq!(provider.library_info().unwrap().schema_version, 7);
 
     assert_eq!(provider.get_audio(1).unwrap().notes, "user annotation");
     assert!(provider.check_library().unwrap().is_ok());

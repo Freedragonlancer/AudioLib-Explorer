@@ -165,7 +165,7 @@ fn server_startup_auto_migrates_supported_formats_preserves_data_and_honors_roll
             .unwrap();
         assert_eq!(
             state.provider().library_info().unwrap().schema_version,
-            6,
+            audiolib_db::SCHEMA_VERSION,
             "{format}"
         );
         let audio = state.audio(42).unwrap();

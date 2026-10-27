@@ -27,7 +27,7 @@ fn assert_retired(conn: &rusqlite::Connection) {
 }
 
 #[test]
-fn new_schema6_has_no_library_playback_storage_and_reopen_is_idempotent() {
+fn current_schema_has_no_library_playback_storage_and_reopen_is_idempotent() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("current.db");
     drop(SqliteProvider::open(&path).unwrap());
@@ -156,8 +156,13 @@ fn p0_is_readable_but_owned_upgrade_removes_last_timestamp_and_rollback_restores
     let path = root.path().join("p0.db");
     drop(SqliteProvider::open(&path).unwrap());
     let conn = support::connection(&path).unwrap();
+    // Keep the actual historical v6 layout as the source, even as the writable
+    // target evolves. The album field was introduced only in v7.
     conn.execute_batch(
-        "ALTER TABLE audio_files ADD COLUMN Last_Played_At TEXT;
+        "DROP INDEX idx_audio_visible_album;
+         ALTER TABLE audio_files DROP COLUMN album;
+         PRAGMA user_version=6;
+         ALTER TABLE audio_files ADD COLUMN Last_Played_At TEXT;
          ALTER TABLE audio_files ADD COLUMN last_played_at_note TEXT;
          UPDATE audiolib_schema_features SET version=1 WHERE feature='play_history_retired';
          INSERT INTO audio_files(id,file_path,filename,last_played_at,last_played_at_note,user_notes)

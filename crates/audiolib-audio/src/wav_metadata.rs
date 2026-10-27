@@ -5,7 +5,7 @@ use roxmltree::{Document, Node, ParsingOptions};
 use serde_json::{Map, Value, json};
 
 /// Increment when extraction changes so an ordinary scan refreshes old records.
-pub const WAV_METADATA_VERSION: i64 = 3;
+pub const WAV_METADATA_VERSION: i64 = 4;
 pub(crate) const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 // Modern SMED includes UTF-16 base64 artwork (the supplied BOOM files use ~4 MiB).
 pub(crate) const MAX_SMED_BYTES: u64 = 16 * 1024 * 1024;
@@ -13,6 +13,21 @@ pub(crate) const MAX_METADATA_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FIELDS: usize = 16_384;
 const MAX_XML_DEPTH: usize = 32;
 const MAX_FIELD_PATH_BYTES: usize = 4096;
+/// Bounded cover payload accepted from ID3; larger frames are ignored rather than copied.
+pub(crate) const MAX_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
+// An ID3 tag can contain one bounded image plus text/frame overhead. Ordinary
+// Metadata extraction still skips binary frames and caps copied text separately.
+pub(crate) const MAX_ID3_BYTES: u64 = MAX_ARTWORK_BYTES as u64 + MAX_CHUNK_BYTES;
+
+/// Cover artwork embedded in the WAV itself (ID3 APIC), kept separate from Metadata JSON
+/// so a multi-megabyte image never reaches SQLite or FTS5.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Artwork {
+    /// Original container bytes (JPEG/PNG/...), never re-encoded by the extractor.
+    pub bytes: Vec<u8>,
+    /// Declared or magic-detected MIME type, for example `image/jpeg`.
+    pub mime: String,
+}
 
 pub(crate) fn text(bytes: &[u8]) -> String {
     let bytes = bytes.split(|b| *b == 0).next().unwrap_or_default();
@@ -81,6 +96,43 @@ pub(crate) struct EmbeddedMetadata {
     groups: Map<String, Value>,
     chunks: Vec<Value>,
     warnings: Vec<String>,
+    artwork: Option<Artwork>,
+}
+
+impl EmbeddedMetadata {
+    /// Keep the first bounded cover found in the file; later duplicates are ignored.
+    pub(crate) fn set_artwork(&mut self, bytes: Vec<u8>, declared_mime: &str) {
+        if self.artwork.is_some() || bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES {
+            return;
+        }
+        let mime = if declared_mime.starts_with("image/") {
+            declared_mime.to_owned()
+        } else {
+            image_mime(&bytes).unwrap_or_default().to_owned()
+        };
+        if !mime.is_empty() {
+            self.artwork = Some(Artwork { bytes, mime });
+        }
+    }
+
+    pub(crate) fn take_artwork(&mut self) -> Option<Artwork> {
+        self.artwork.take()
+    }
+}
+
+/// Detect the cover format from its magic bytes when the container declares no MIME type.
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif")
+    } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 impl EmbeddedMetadata {

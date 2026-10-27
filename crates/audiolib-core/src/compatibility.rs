@@ -8,13 +8,16 @@ use std::collections::BTreeMap;
 /// Catalog version identifies capability semantics independently of application SemVer.
 pub const CATALOG_REVISION: u32 = 1;
 /// Plan B's completed business schema.
-pub const TARGET_SCHEMA: u32 = 6;
+pub const TARGET_SCHEMA: u32 = 7;
 /// Completed tokenizer encoding; 4 in an old live upgrade is a temporary marker.
 pub const TOKENIZATION_REVISION: u32 = 3;
 /// Format identifiers are exact sets, not a promise that all lower integers work.
-pub const PLAN_B_FORMAT: &str = "ale-s6-cld1-t3-m2-p1";
+pub const PLAN_B_FORMAT: &str = "ale-s7-cld1-t3-m2-p1";
 /// Earlier unpublished Plan B retained the last playback timestamp; read-only source.
-pub const PLAN_B_INITIAL_FORMAT: &str = "ale-s6-cld1-t3-m2-p0";
+pub const PLAN_B_INITIAL_FORMAT: &str = "ale-s7-cld1-t3-m2-p0";
+/// Schema-6 libraries stay readable; the album column only affects writable opens.
+pub const PLAN_B_V6_FORMAT: &str = "ale-s6-cld1-t3-m2-p1";
+pub const PLAN_B_V6_INITIAL_FORMAT: &str = "ale-s6-cld1-t3-m2-p0";
 /// Snapshot protocol is separate from both schema and application versions.
 pub const API_PROTOCOL: &str = "api/v1";
 /// Minimum engine with corrected contentless-delete aggregate statistics.
@@ -121,6 +124,19 @@ impl LibraryFormat {
                     let mut initial = Self::target();
                     initial.features.insert("play_history_retired".into(), 1);
                     (self == &initial).then(|| PLAN_B_INITIAL_FORMAT.into())
+                }
+            }
+            // Schema 6 is still readable (remote snapshots and caches); it only lacks
+            // the derived album column, which writable opens migrate.
+            (SearchStorage::ContentlessDelete, 6) => {
+                let mut v6 = Self::target();
+                v6.schema_version = 6;
+                if self == &v6 {
+                    Some(PLAN_B_V6_FORMAT.into())
+                } else {
+                    let mut initial = v6;
+                    initial.features.insert("play_history_retired".into(), 1);
+                    (self == &initial).then(|| PLAN_B_V6_INITIAL_FORMAT.into())
                 }
             }
             _ => None,
@@ -280,7 +296,9 @@ pub fn assess_library(
                 && (1..=5).contains(&format.schema_version)
                 && format.features.get("tokenization") == Some(&4))
                 || (pending.protocol == "search_storage"
-                    && pending.target == TARGET_SCHEMA
+                    // A job started by the previous target must stay resumable; newer
+                    // builds record their own target here.
+                    && (TARGET_SCHEMA.saturating_sub(1)..=TARGET_SCHEMA).contains(&pending.target)
                     && (3..=TARGET_SCHEMA).contains(&format.schema_version)));
         // Tokenization=4 is permitted only within the existing rev-3 protocol.
         let mut completed_format = format.clone();
@@ -542,11 +560,13 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
             "ale-s3-ext-t3-m2".into(),
             "ale-s4-ext-t3-m2".into(),
             "ale-s5-ext-t3-m2".into(),
+            PLAN_B_V6_INITIAL_FORMAT.into(),
+            PLAN_B_V6_FORMAT.into(),
             PLAN_B_INITIAL_FORMAT.into(),
             PLAN_B_FORMAT.into(),
         ],
         database_write_formats: vec![PLAN_B_FORMAT.into()],
-        migration_source_schemas: vec![3, 4, 5, TARGET_SCHEMA],
+        migration_source_schemas: vec![3, 4, 5, 6, TARGET_SCHEMA],
         migration_target_format: PLAN_B_FORMAT.into(),
         migration_protocols: [("search_text".into(), 1), ("search_storage".into(), 1)]
             .into_iter()

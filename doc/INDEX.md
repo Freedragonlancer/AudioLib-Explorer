@@ -92,7 +92,6 @@ These records retain the source identity and scope of each review; historical fi
 | [Client UI review, 2026-10-22](reviews/Client_UI_Review_2026-10-22.md) and [verified fixes](reviews/Client_UI_Fixes_2026-10-22.md) | Original working-copy review plus the subsequent main-branch verification and fixes |
 | [Server review, 2026-10-22](reviews/Server_Review_2026-10-22.md) | Static review of the older working copy; its findings require rechecking against the current server |
 | [Workspace omissions audit, 2026-10-22](reviews/Workspace_Omissions_Audit_2026-10-22.md) | Comparison of uncommitted work with main, distinguishing already integrated changes from missing process and validation work |
-| [Archived snapshot-progress handoff](Snapshot_Progress_Redo_Handoff.md) | Historical notes from an abandoned task; current implementation and contracts take precedence |
 
 ## Retained requirements and historical design
 

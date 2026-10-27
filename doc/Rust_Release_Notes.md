@@ -1,3 +1,9 @@
+# 0.8.0
+
+程序 0.8.0 | API /api/v1/ | schema 7 | 快照兼容 3..=7
+
+新增：按音效库/专辑归类（文件内嵌 Library）、侧栏音效库列表与封面缩略图、`albums` / `search --album` 命令。
+
 # AudioLib Explorer release notes
 
 ## 0.6.5: update check and portable package fixes
