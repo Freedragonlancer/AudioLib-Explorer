@@ -42,6 +42,7 @@ pub(super) struct TaskWorkspaceState {
     epoch: u64,
     loading: bool,
     restoring: bool,
+    deferred_search: Option<(bool, bool)>,
     restore_failed: bool,
     resume_after_close: Option<WorkspaceResume>,
     pending_view: Option<SearchTaskView>,
@@ -63,6 +64,7 @@ impl Default for TaskWorkspaceState {
             epoch: 0,
             loading: false,
             restoring: false,
+            deferred_search: None,
             restore_failed: false,
             resume_after_close: None,
             pending_view: None,
@@ -184,11 +186,23 @@ impl Controller {
         state.restore_failed = false;
     }
 
-    pub(super) fn task_folder_unavailable(&self, ui: &AppWindow) -> bool {
+    pub(super) fn cancel_deferred_task_search(&self) {
+        self.task_workspace.lock().unwrap().deferred_search = None;
+    }
+
+    pub(super) fn task_folder_unavailable(
+        &self,
+        ui: &AppWindow,
+        immediate: bool,
+        reset: bool,
+    ) -> bool {
         let request = self.request.lock().unwrap().clone();
         let folder_id = request.folder_id;
         let mut state = self.task_workspace.lock().unwrap();
         if state.loading || state.restoring {
+            if state.loading && !state.restoring {
+                state.deferred_search = Some((immediate, reset));
+            }
             return true;
         }
         if state.restore_failed {
@@ -226,6 +240,7 @@ impl Controller {
         let mut state = self.task_workspace.lock().unwrap();
         state.loading = true;
         state.restoring = false;
+        state.deferred_search = None;
         state.restore_failed = false;
         state.pending_view = None;
         state.resume_after_close = None;
@@ -451,6 +466,7 @@ impl Controller {
             let mut state = self.task_workspace.lock().unwrap();
             state.epoch += 1;
             state.loading = true;
+            state.deferred_search = None;
             state.caches.clear();
             state.page_revision = None;
             state.folders_revision = None;
@@ -574,6 +590,7 @@ impl Controller {
                     })
                     .unwrap_or_else(|| state.workspace.session.tasks[0].id.clone());
                 state.workspace.session.active_task_id = Some(id.clone());
+                let deferred_search = state.deferred_search.take();
                 drop(state);
                 ui.set_search_workspace_loading(false);
                 if fresh_workspace {
@@ -581,6 +598,14 @@ impl Controller {
                     // Do not cancel a selection or query requested while startup
                     // completed merely to restore an identical blank task.
                     c2.persist_search_task(&ui);
+                    if c2.request.lock().unwrap().filters.album_id.is_some() {
+                        // Resolve retained IDs even when a short query cancelled
+                        // the deferred search. Identity validation must complete
+                        // before a later valid query can dispatch this task.
+                        c2.restore_search_task(&id);
+                    } else if let Some((immediate, reset)) = deferred_search {
+                        c2.request_navigation_search(&ui, immediate, reset);
+                    }
                 } else {
                     c2.restore_search_task(&id);
                 }
@@ -1175,6 +1200,7 @@ impl Controller {
             state.folders_revision = None;
             state.page_complete = false;
             state.restoring = true;
+            state.deferred_search = None;
             state.restore_failed = false;
             state.pending_view = None;
             state.resume_after_close = None;
@@ -1269,7 +1295,12 @@ impl Controller {
             return;
         }
         ui.set_search_workspace_loading(false);
-        self.task_workspace.lock().unwrap().restoring = false;
+        {
+            let mut state = self.task_workspace.lock().unwrap();
+            state.restoring = false;
+            state.loading = false;
+            state.deferred_search = None;
+        }
         match result {
             Ok((task, cache, selected, folder_missing, folders)) => {
                 self.task_workspace.lock().unwrap().restore_failed = false;

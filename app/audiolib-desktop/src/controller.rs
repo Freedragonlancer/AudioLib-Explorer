@@ -3917,10 +3917,7 @@ impl Controller {
         let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.tree_generation.fetch_add(1, Ordering::AcqRel);
         ui.set_searching(false);
-        if self.task_folder_unavailable(ui) {
-            self.queue_unavailable_album_choices(ui, generation);
-            return;
-        }
+        self.cancel_deferred_task_search();
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
         if request.needs_more_search_text() {
@@ -3932,6 +3929,10 @@ impl Controller {
                 }
                 .into(),
             );
+            return;
+        }
+        if self.task_folder_unavailable(ui, immediate, reset) {
+            self.queue_unavailable_album_choices(ui, generation);
             return;
         }
         request.limit = PAGE_SIZE;

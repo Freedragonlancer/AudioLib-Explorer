@@ -270,6 +270,184 @@ fn unresolved_album_and_restore_gates_never_dispatch_an_unfiltered_or_colliding_
     );
 }
 
+fn isolated_fresh_album(child: &str) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("controller::search_tasks::album_bindings::tests::{child}"),
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn fresh_workspace_resolves_known_album_binding_before_resuming_search() {
+    isolated_fresh_album("child_fresh_known_album");
+}
+
+#[test]
+fn fresh_workspace_blocks_unbound_album_id_when_first_query_is_deferred() {
+    isolated_fresh_album("child_fresh_unbound_album");
+}
+
+#[test]
+fn fresh_workspace_checks_album_identity_after_a_short_query_cancels_deferred_search() {
+    isolated_fresh_album("child_fresh_unbound_album_short_query");
+}
+
+#[test]
+#[ignore = "isolated fresh workspace deferred album dispatch regression"]
+fn child_fresh_known_album() {
+    fresh_album_dispatch(true, false);
+}
+
+#[test]
+#[ignore = "isolated fresh workspace deferred album dispatch regression"]
+fn child_fresh_unbound_album() {
+    fresh_album_dispatch(false, false);
+}
+
+#[test]
+#[ignore = "isolated fresh workspace cancelled deferred search identity regression"]
+fn child_fresh_unbound_album_short_query() {
+    fresh_album_dispatch(false, true);
+}
+
+fn fresh_album_dispatch(known: bool, cancel_with_short_query: bool) {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = tempfile::tempdir().unwrap();
+    let next = provider(&root.path().join("next.db"), &["C"]);
+    let preferences = root.path().join("preferences");
+    std::fs::create_dir_all(&preferences).unwrap();
+    let playback = PlaybackConfig {
+        volume: 0.0,
+        ..Default::default()
+    };
+    std::fs::write(preferences.join("settings.json"),serde_json::to_vec(&serde_json::json!({"active_database":next.database_path(),"language":"en","playback":playback})).unwrap()).unwrap();
+    let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let controller = Controller::new(
+        &ui,
+        next.clone(),
+        engine.handle(),
+        AppConfig::load_in(preferences).unwrap(),
+        playback,
+    );
+    let album = next.get_audio(1).unwrap().album_entity.unwrap();
+    controller.remember_task_album_bindings(
+        if known {
+            next.album_namespace()
+        } else {
+            "old-namespace".into()
+        },
+        [album],
+    );
+    controller.request.lock().unwrap().filters.album_id = Some(1);
+    ui.set_album_filter_id("1".into());
+    ui.set_album_filter("Pending album".into());
+    if cancel_with_short_query {
+        ui.set_query("valid".into());
+    }
+    controller.request_search(&ui, true, false);
+    assert!(
+        controller.search_job.lock().unwrap().is_none(),
+        "loading must not dispatch an unchecked album ID"
+    );
+    if cancel_with_short_query {
+        assert!(
+            controller
+                .task_workspace
+                .lock()
+                .unwrap()
+                .deferred_search
+                .is_some()
+        );
+        ui.set_query("x".into());
+        controller.request_search(&ui, true, false);
+        assert!(
+            controller
+                .task_workspace
+                .lock()
+                .unwrap()
+                .deferred_search
+                .is_none()
+        );
+        assert!(ui.get_status().contains("at least 2"));
+        assert!(controller.search_job.lock().unwrap().is_none());
+    }
+    let observed = controller.clone();
+    let weak = ui.as_weak();
+    let began = Instant::now();
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(10),
+        move || {
+            assert!(
+                began.elapsed() < Duration::from_secs(12),
+                "fresh album request was not resumed"
+            );
+            let Some(ui) = weak.upgrade() else { return };
+            let ready = !ui.get_search_workspace_loading()
+                && !ui.get_task_restoring()
+                && !ui.get_searching();
+            if ready && cancel_with_short_query {
+                assert!(ui.get_album_filter_unavailable());
+                assert_eq!(ui.get_query().as_str(), "x");
+                assert!(
+                    observed
+                        .task_workspace
+                        .lock()
+                        .unwrap()
+                        .unavailable_album
+                        .is_some()
+                );
+                ui.set_query("valid".into());
+                observed.request_search(&ui, true, false);
+                assert_eq!(observed.request.lock().unwrap().filters.album_id, Some(1));
+                assert!(ui.get_album_filter_unavailable());
+                assert!(observed.search_job.lock().unwrap().is_none());
+                assert!(observed.search_publication.lock().unwrap().is_none());
+                assert_eq!(ui.get_rows().row_count(), 0);
+                slint::quit_event_loop().unwrap();
+                return;
+            }
+            if ready
+                && if known {
+                    ui.get_rows().row_count() == 1
+                } else {
+                    ui.get_album_filter_unavailable()
+                }
+            {
+                assert_eq!(observed.request.lock().unwrap().filters.album_id, Some(1));
+                slint::quit_event_loop().unwrap();
+            }
+        },
+    );
+    ui.show().unwrap();
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    assert_eq!(ui.get_rows().row_count(), usize::from(known));
+    assert_eq!(ui.get_album_filter_unavailable(), !known);
+    if known {
+        assert_eq!(controller.records.lock().unwrap()[0].album, "C");
+    } else {
+        assert!(controller.search_publication.lock().unwrap().is_none());
+    }
+    controller.shutdown();
+    ui.hide().unwrap();
+    drop(engine);
+}
+
 #[test]
 #[ignore = "isolated unavailable album search gate regression"]
 fn child_unavailable_album_gate() {
