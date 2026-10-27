@@ -286,7 +286,7 @@ mod tests {
                 SERVER_COMPATIBILITY_HEADER,
                 serde_json::to_string(&compatibility_manifest()).unwrap(),
             ),
-            ("x-schema-version", "7".into()),
+            ("x-schema-version", audiolib_db::SCHEMA_VERSION.to_string()),
             ("x-search-storage-revision", "1".into()),
             ("x-tokenization-revision", "3".into()),
             ("x-source-search-revision", "2".into()),
@@ -378,7 +378,7 @@ mod tests {
                             format.format.features.insert("future_feature".into(), 1);
                         }
                         TestResponse::json(200, &serde_json::json!({
-                            "library_id":"stable", "revision":8, "schema_version":7,
+                            "library_id":"stable", "revision":8, "schema_version":audiolib_db::SCHEMA_VERSION,
                             "identity_bound_writes":true, "snapshot_format":format,
                         }).to_string())
                     }
@@ -523,7 +523,7 @@ mod tests {
                         format.format.features.insert("future_required_feature".into(),1);
                     }
                     TestResponse::json(200, &serde_json::json!({
-                        "library_id":"incoming", "revision":8, "schema_version":7, "snapshot_format":format,
+                        "library_id":"incoming", "revision":8, "schema_version":audiolib_db::SCHEMA_VERSION, "snapshot_format":format,
                     }).to_string())
                 }
                 "/api/v1/roots" => TestResponse::json(200, "[]"),
@@ -778,11 +778,11 @@ mod tests {
             }
             let outcome =
                 sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), false).unwrap();
-            assert_eq!(outcome.state.schema_version, if stale { 7 } else { 5 });
+            assert_eq!(outcome.state.schema_version, audiolib_db::SCHEMA_VERSION);
             assert_eq!(outcome.state.revision, 12);
             let format = outcome.state.format.as_ref().unwrap();
             assert_eq!(format.source.as_ref(), Some(&source_format));
-            assert_eq!(format.generation, u64::from(stale));
+            assert_eq!(format.generation, 1);
             assert_eq!(
                 format.local.schema_version as i64,
                 outcome.state.schema_version

@@ -114,6 +114,9 @@ enum Command {
         /// Exact library/album name declared by the files.
         #[arg(long)]
         album: Option<String>,
+        /// Stable shared album identity, including folder-derived albums.
+        #[arg(long, conflicts_with = "album")]
+        album_id: Option<i64>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
         #[arg(long, default_value_t = 0)]
@@ -135,7 +138,7 @@ enum Command {
         workers: usize,
     },
     Stats,
-    /// List declared library/album names with their present-record counts.
+    /// List shared album identities with their present-record counts.
     Albums {
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -661,6 +664,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             exclude_tag,
             color,
             album,
+            album_id,
             limit,
             offset,
             sort,
@@ -694,6 +698,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
                     exclude_tags: exclude_tag.clone(),
                     color: color.clone(),
                     album: album.clone(),
+                    album_id: *album_id,
                 },
                 limit: *limit,
                 offset: *offset,
@@ -747,7 +752,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             json!(
                 albums
                     .into_iter()
-                    .map(|(album, count)| json!({"album": album, "count": count}))
+                    .map(|facet| json!({"album": facet.album.name, "album_id": facet.album.id, "entity": facet.album, "count": facet.matching_count}))
                     .collect::<Vec<_>>()
             )
         }
@@ -1324,6 +1329,9 @@ fn remote_writer_parts(
         library.library_id == state.library_id,
         "The server library changed since the cached snapshot; run `remote sync` first"
     );
+    // Legacy caches acquire persistent shared entities in an owned replacement
+    // before an annotation reply can be applied. The original download stays intact.
+    let state = cache.prepare_cached_state(&state)?;
     Ok((client, state))
 }
 
@@ -1411,6 +1419,30 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn album_identity_filter_is_explicit_and_excludes_legacy_name_filter() {
+        let args = Arguments::try_parse_from(["AudioLibCli", "search", "--album-id", "7"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Command::Search {
+                album_id: Some(7),
+                album: None,
+                ..
+            }
+        ));
+        assert!(
+            Arguments::try_parse_from([
+                "AudioLibCli",
+                "search",
+                "--album-id",
+                "7",
+                "--album",
+                "Library"
+            ])
+            .is_err()
+        );
+    }
     use audiolib_core::config::AppPaths;
     use rusqlite::Connection;
 

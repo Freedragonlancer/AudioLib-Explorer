@@ -73,20 +73,11 @@ fn child_reload_source_destination() {
     let fixture = fixture();
     let file = selected_artwork_file(&fixture);
     let controller = &fixture.controller;
-    let root = controller.config.lock().unwrap().paths.cache.clone();
-    let old_path = crate::artwork::thumbnail_path(
-        &root,
-        fixture.provider.database_path(),
-        &file,
-        &audiolib_core::album(&file.attributes),
-    );
+    let old_path = controller.cached_artwork_path(&file).unwrap();
     let other = Arc::new(SqliteProvider::open(&fixture.root.join("other.db")).unwrap());
-    let new_path = crate::artwork::thumbnail_path(
-        &root,
-        other.database_path(),
-        &file,
-        &audiolib_core::album(&file.attributes),
-    );
+    *controller.sqlite.write().unwrap() = other.clone();
+    let new_path = controller.cached_artwork_path(&file).unwrap();
+    *controller.sqlite.write().unwrap() = fixture.provider.clone();
     manual_cover(&old_path);
     manual_cover(&new_path);
     let context = controller.artwork_action_context(Some(&file));
@@ -254,7 +245,7 @@ fn child_slow_http_cache_lock() {
     let fixture = fixture();
     let file = selected_artwork_file(&fixture);
     let controller = &fixture.controller;
-    *controller.selected.lock().unwrap() = None;
+    *controller.selected.lock().unwrap() = Some(file.clone());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();

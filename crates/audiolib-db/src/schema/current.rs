@@ -1,11 +1,10 @@
 // crates/audiolib-db/src/schema/current.rs
-//! Schema 6 entry points, separate from the retained v1..v5 normalization code.
+//! Current shared-album storage entry points, separate from legacy normalization.
 use super::*;
 use crate::{migration, search_storage};
 use audiolib_core::compatibility::LibraryFormat;
 use rusqlite::{params, params_from_iter, types::Value};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) fn current_format_ready(conn: &Connection) -> Result<bool> {
     format_ready(conn, false)
@@ -20,10 +19,7 @@ fn format_ready(conn: &Connection, allow_p0: bool) -> Result<bool> {
     if !format_ready_at_version(conn, allow_p0, SCHEMA_VERSION)? {
         return Ok(false);
     }
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files') WHERE name='album' COLLATE NOCASE)",
-        [], |row| row.get(0),
-    ).map_err(db_error)
+    crate::albums::ready(conn)
 }
 
 fn format_ready_at_version(
@@ -75,130 +71,6 @@ fn format_ready_at_version(
         return Ok(false);
     }
     definition::required_match(conn)
-}
-
-/// v6 -> v7: add the album column, fill it from the Metadata already stored in the
-/// library (no audio file is read), then publish the format with its album index.
-pub(crate) fn upgrade_from_previous(
-    conn: &mut Connection,
-    cancel: &AtomicBool,
-    progress: &mut dyn FnMut(SnapshotUpgradeProgress) -> Result<()>,
-) -> Result<()> {
-    progress(SnapshotUpgradeProgress::Preparing)?;
-    let tx = conn.transaction().map_err(db_error)?;
-    ensure_column(&tx, "audio_files", "album", "TEXT NOT NULL DEFAULT ''")?;
-    let total_rows: i64 = tx
-        .query_row("SELECT COUNT(*) FROM audio_files", [], |row| row.get(0))
-        .map_err(db_error)?;
-    let total = u64::try_from(total_rows).unwrap_or(0);
-    let mut cursor = i64::MIN;
-    let mut completed = 0_u64;
-    loop {
-        if cancel.load(Ordering::Acquire) {
-            return Err(Error::Cancelled);
-        }
-        // All batches share this atomic transaction; cancellation rolls back the DDL too.
-        let last: Option<i64> = tx
-            .query_row(
-                "SELECT MAX(id) FROM
-                 (SELECT id FROM audio_files WHERE id >= ?1 ORDER BY id LIMIT 5000)",
-                [cursor],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .map_err(db_error)?;
-        let Some(last) = last else { break };
-        let changed = tx
-            .execute(
-                "UPDATE audio_files SET album=audiolib_album_key(metadata_json)
-             WHERE id >= ?1 AND id <= ?2",
-                params![cursor, last],
-            )
-            .map_err(db_error)?;
-        completed = completed.saturating_add(changed as u64).min(total);
-        progress(SnapshotUpgradeProgress::Tokenizing { completed, total })?;
-        let Some(next) = last.checked_add(1) else {
-            break;
-        };
-        cursor = next;
-    }
-    apply_indexes(&tx)?;
-    tx.execute_batch(ALBUM_INDEX).map_err(db_error)?;
-    mark_current(&tx)?;
-    if cancel.load(Ordering::Acquire) {
-        return Err(Error::Cancelled);
-    }
-    tx.commit().map_err(db_error)
-}
-
-/// v6 -> v7 without a storage migration: add the album column, fill it from the Metadata
-/// already stored in the library, create its index and publish the format. The whole step
-/// is one transaction over additive DDL plus one derived UPDATE, so it takes seconds and
-/// never touches audio files. Returns false when the library is not a v6 source.
-pub(crate) fn fast_upgrade_album(
-    conn: &mut Connection,
-    cancel: &AtomicBool,
-    progress: &mut dyn FnMut(SnapshotUpgradeProgress),
-) -> Result<bool> {
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(db_error)?;
-    if pending(conn)? {
-        return Ok(false);
-    }
-    let has_column: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('audio_files')
-             WHERE name='album' COLLATE NOCASE)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-    let upgrade_source = version == SCHEMA_VERSION - 1;
-    // Also repair a v7 library whose album column is missing (for example one produced by
-    // a storage migration that predates the column); the derived state is rebuilt the same
-    // way, so no further migration and no audio file is needed.
-    if !upgrade_source && (version != SCHEMA_VERSION || has_column) {
-        return Ok(false);
-    }
-    // Only a complete p1 source can use this additive path. Missing watermarks,
-    // damaged FTS structure and p0 retirement require the checked migration route.
-    if !format_ready_at_version(conn, false, version)? {
-        return Ok(false);
-    }
-    let extension_triggers: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name='audio_files'
-         AND name NOT IN ('audio_files_ai','audio_files_au','audio_files_ad','audiolib_audio_id_high_water'))",
-        [], |row| row.get(0),
-    ).map_err(db_error)?;
-    if extension_triggers {
-        // The ordinary candidate route verifies their side effects before publication.
-        return Ok(false);
-    }
-    let foreign_keys: i64 = conn
-        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-            row.get(0)
-        })
-        .map_err(db_error)?;
-    if foreign_keys != 0 {
-        return Err(Error::Validation(
-            "Library relationships require repair before the album upgrade".into(),
-        ));
-    }
-    let check: String = conn
-        .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .map_err(db_error)?;
-    if check != "ok" {
-        return Err(Error::Database(check));
-    }
-    upgrade_from_previous(conn, cancel, &mut |event| {
-        progress(event);
-        if cancel.load(Ordering::Acquire) {
-            Err(Error::Cancelled)
-        } else {
-            Ok(())
-        }
-    })?;
-    Ok(true)
 }
 
 pub(crate) fn needs_upgrade(conn: &Connection) -> Result<bool> {
@@ -268,6 +140,7 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
     // created, even transiently; old-source normalization is isolated in legacy.rs.
     let seed = template.transaction().map_err(db_error)?;
     seed.execute_batch(BASE_SCHEMA).map_err(db_error)?;
+    crate::albums::initialize(&seed)?;
     for (name, definition) in AUDIO_COLUMNS {
         if !search_storage::is_derived_column(name) {
             ensure_column(&seed, "audio_files", name, definition)?;
@@ -280,7 +153,10 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
     add_management_schema(&seed)?;
     apply_indexes(&seed)?;
     seed.execute_batch(ALBUM_INDEX).map_err(db_error)?;
+    crate::albums::configure_compression(&seed, true)?;
     add_current_features(&seed)?;
+    set_feature_version(&seed, "album_entities", 1)?;
+    set_feature_version(&seed, "metadata_storage", 1)?;
     seed.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
     seed.commit().map_err(db_error)?;
     let blueprint = search_storage::blueprint_with(&template, &migration::schema_changes())?;
@@ -328,6 +204,7 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
     }
     search_storage::create_index(&tx)?;
     search_storage::install_triggers(&tx)?;
+    crate::albums::install_triggers(&tx)?;
     if !source_tags_ready(&tx)? {
         tx.execute(
             "UPDATE audio_files SET source_tags_text=audiolib_source_tags_key(metadata_json)",

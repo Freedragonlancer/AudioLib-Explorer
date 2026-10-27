@@ -4,6 +4,12 @@
 
 ## 1. 目标与边界
 
+当前 0.8.1 候选使用 schema 8（`album_entities: 1`、`metadata_storage: 1`），
+专辑封面接口见 §8.2。Metadata 的物理列可以为版本化压缩 BLOB，HTTP DTO 继续
+返回解码后的 JSON；客户端与服务器须配套升级。旧快照只在客户端自有副本迁移，
+源格式与投影格式分别保存。详见[共享专辑与存储](../Rust_Shared_Albums.md)。
+下段是此前续传迭代的历史身份和验收范围。
+
 当前续传迭代基于 main `d64c0a7`，程序版本为 `0.6.0`，保留 schema 6 / p1、共享格式协商和受保护迁移。固定快照及 Range 协议见 §6.1；本轮验证见 [Rust 验证报告](../Rust_Validation.md)。生产服务器不在本轮部署范围内，工作库没有被验收脚本打开。以下链接保留此前数据库迭代的设计与历史证据：
 [方案 B 存储设计](Search_Storage_B.md)、
 [版本兼容与迁移契约](Library_Migration_Compatibility.md)、
@@ -894,9 +900,19 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - 选择文件、根目录限制、404、根离线 503 `ROOT_OFFLINE` + `Retry-After: 5`（先即时重查约 2 秒）、慢速 NAS 唤醒（**无 30 秒时间上限**，不会 408）、文件在阻塞线程池中打开、打开超过 10 秒记 WARN：与 `/stream` 完全相同（§6.4）。文件缺失是 404，不会变成一个坏掉的流。
 - 以后可能的扩展：进程内（纯 Rust）FLAC 编码，替代 ffmpeg 并得到确定、可 Range 的 FLAC；Opus（`kbps=`，客户端需另配解码器）；转码结果缓存。
 
-### 8.2 内嵌封面 `GET /audio/{id}/artwork`（已实现，第一阶段）
+### 8.2 专辑封面 `GET /albums/{id}/artwork` 与兼容音频端点
 
-按音频记录 id 从磁盘上的文件读取内嵌封面（ID3 `APIC`，复用 `audiolib_audio::probe_with_artwork`）。**不把图片字节写入主库 SQLite，也不写入快照。** 按文件 id 读磁盘，不依赖 schema 7 的 `album` 列，schema 6 库同样可用。按专辑名取封面、扫描时批量预生成属于后续阶段，这里没有。
+schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组，缺失时按已登记根下的第一层文件夹归组。图片不进入 SQLite 或快照。详见[共享专辑与 Metadata 存储](../Rust_Shared_Albums.md)。
+
+- 新能力 `compatibility.features.album_entity_artwork >= 1` 表示支持 `GET` / `HEAD /albums/{id}/artwork`。`id` 是当前原生快照的专辑 ID，不能发送旧快照本地投影的 ID。
+- 必须带单个非空 `X-AudioLib-Library-Id` 和 `X-AudioLib-Album-Namespace`。库身份或 namespace 不符、namespace 缺失/空/重复，均在读取源文件前拒绝，返回 409 `LIBRARY_CHANGED`（库身份缺失仍为 `LIBRARY_ID_REQUIRED`）。
+- 从完整专辑按音频 ID 升序选最多 64 个未缺失成员，返回第一个有效内嵌封面，与选中 WAV、搜索条件和列表页无关。
+- 200 / 304 同时返回 `X-Library-Id`、`X-Album-Id`、`X-Album-Namespace`；客户端全部核对。ETag 和缓存绑定 namespace、专辑及候选成员版本。库恢复/替换后同数字 ID 不得串图。
+- `side`、图片预算、鉴权、并发名额、条件请求和错误处理沿用下面的音频端点规则。无有效图片为 404。
+
+#### 兼容 `GET /audio/{id}/artwork`
+
+此兼容端点保留按音频记录 id 读取内嵌封面的语义（ID3 `APIC`，复用 `audiolib_audio::probe_with_artwork`），不依赖专辑存储结构。客户端连接 schema 3–7 的服务器时只升级自有快照副本，再用固定的共享成员顺序调用此端点，不发送本地 album ID。**图片字节不写入主库或快照。**
 
 - 鉴权同 §2.2。支持 `GET` 和 `HEAD`。不受 30 秒上限；打开文件、根目录限制、根离线 503 `ROOT_OFFLINE`（先即时重查约 2 秒）与 `/stream` 相同（§6.4）。
 - **支持检测**：`GET /capabilities` 的 `compatibility.features.album_artwork` ≥ 1。旧服务端没有这个 feature 时客户端跳过请求，不要改去逐条探测一个不存在的端点。

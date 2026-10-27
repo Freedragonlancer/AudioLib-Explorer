@@ -23,9 +23,12 @@ page. It never modifies audio files.
 - `/audio/{id}/preview` for low-bandwidth playback: in-process PCM decimation for WAV
   (`codec=pcm`) and an optional ffmpeg FLAC transcode (`codec=flac`).
 - `/audio/{id}/waveform` with an on-disk LRU cache.
-- `/audio/{id}/artwork` returns an embedded JPEG or PNG cover on demand (optional
-  `?side=`). Old servers omit the `album_artwork` capability; image bytes stay out of
-  the library database. A small cache lives in `<library directory>/artwork`.
+- `/albums/{id}/artwork` returns a shared album's embedded JPEG or PNG (optional
+  `?side=`), bound to library identity and album namespace with the
+  `album_entity_artwork` capability. The compatible `/audio/{id}/artwork` retains
+  its per-audio meaning. Image bytes stay outside SQLite; a cache lives in
+  `<library directory>/artwork`. Upgrade schema-8 clients and servers together and
+  retain the rollback database. See [shared albums and storage](../doc/Rust_Shared_Albums.md).
 - Metadata writes, play counts, remote scans (start/pause/resume/cancel), record and folder
   removal (`manage_mode` can restrict them).
 - Token authentication with three modes (`off`, `external`, `all`), tokens generated on the

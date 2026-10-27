@@ -113,7 +113,21 @@ fn startup_fixture(format: &str) -> (tempfile::TempDir, ServerConfig) {
         }
     } else if format == "p0" {
         conn.execute_batch(
-            "ALTER TABLE audio_files ADD COLUMN last_played_at TEXT;
+            "DROP TRIGGER IF EXISTS audiolib_album_audio_insert;
+             DROP TRIGGER IF EXISTS audiolib_album_audio_update;
+             DROP TRIGGER IF EXISTS audiolib_album_folder_delete;
+             DROP TRIGGER IF EXISTS audiolib_album_id_high_water;
+             DROP INDEX idx_audio_visible_album;
+             DROP INDEX IF EXISTS idx_audio_album_members;
+             ALTER TABLE audio_files DROP COLUMN album_id;
+             DROP TABLE albums;
+             DROP TABLE audiolib_album_id_sequence;
+             ALTER TABLE audio_files ADD COLUMN album TEXT NOT NULL DEFAULT '';
+             CREATE INDEX idx_audio_visible_album ON audio_files(album,id) WHERE missing=0;
+             DELETE FROM audiolib_schema_features WHERE feature IN ('album_entities','metadata_storage');
+             DELETE FROM library_meta WHERE key='metadata_storage_policy';
+             PRAGMA user_version=7;
+             ALTER TABLE audio_files ADD COLUMN last_played_at TEXT;
              UPDATE audiolib_schema_features SET version=1 WHERE feature='play_history_retired';",
         )
         .unwrap();

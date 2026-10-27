@@ -94,7 +94,12 @@ fn child_relink_custom_cover() {
     assert_eq!(fixture.ui.get_album_cover().size().width, 3);
 
     let original_bytes = std::fs::read(&file.file_path).unwrap();
-    let target = fixture.root.join("sounds").join("relinked.wav");
+    // Relinking within this folder preserves the shared album. Moving into a
+    // different album must not carry a per-WAV custom cover along with it.
+    let target = Path::new(&file.file_path)
+        .parent()
+        .unwrap()
+        .join("relinked.wav");
     std::fs::write(&target, &original_bytes).unwrap();
     let expected_path = audiolib_db::display_path(&target.canonicalize().unwrap());
     fixture
@@ -131,8 +136,7 @@ fn child_album_representative_refresh() {
     audiolib_db::register_library_functions(&connection).unwrap();
     connection
         .execute_batch(
-            "UPDATE audio_files SET album='Shared artwork',
-             metadata_json=json_set(metadata_json,'$.wav_metadata.fields.library','Shared artwork');",
+            "UPDATE audio_files SET metadata_json=json_set(audiolib_metadata_json(metadata_json),'$.wav_metadata.fields.library','Shared artwork');",
         )
         .unwrap();
     drop(connection);
@@ -169,7 +173,7 @@ fn child_album_representative_refresh() {
     controller.select_id(first.id, false);
     let expected = first.id.to_string();
     wait_for(ui, move |ui| {
-        ui.get_selected_id().as_str() == expected && !ui.get_album_cover_ready()
+        ui.get_selected_id().as_str() == expected && ui.get_album_cover_ready()
     });
     ui.set_albums(ModelRc::new(VecModel::<AlbumRow>::default()));
     search(&fixture, "gore", 3);

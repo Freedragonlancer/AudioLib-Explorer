@@ -1,10 +1,10 @@
 // app/audiolib-desktop/src/artwork.rs
 //! Bounded cover decoding and source-versioned thumbnail cache keys.
 use image::{ImageReader, RgbaImage};
-use std::{
-    io::Cursor,
-    path::{Path, PathBuf},
-};
+use std::{io::Cursor, path::Path};
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 const MAX_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
@@ -123,7 +123,9 @@ pub(crate) fn decode_thumbnail(bytes: &[u8], side: u32) -> Option<RgbaImage> {
     })
 }
 
-/// Key cached pixels from owned record versions without touching the source filesystem.
+/// Historical cache-key fixture. Native covers now use shared album identities;
+/// these old disposable paths remain distinct in compatibility regressions.
+#[cfg(test)]
 pub(crate) fn thumbnail_path(
     cache: &Path,
     library: &Path,

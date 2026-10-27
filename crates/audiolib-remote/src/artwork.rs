@@ -23,6 +23,17 @@ pub enum ArtworkReply {
 }
 
 impl Capabilities {
+    /// A shared album representation is separate from the historical WAV endpoint.
+    pub fn album_entity_artwork_usable(&self) -> bool {
+        self.supported
+            && self.compatibility.as_ref().is_some_and(|manifest| {
+                manifest
+                    .features
+                    .get(audiolib_core::compatibility::ALBUM_ENTITY_ARTWORK_FEATURE)
+                    == Some(&audiolib_core::compatibility::ALBUM_ENTITY_ARTWORK_REVISION)
+            })
+    }
+
     /// Covers are opt-in: an absent `album_artwork` marker disables every image request.
     pub fn album_artwork_usable(&self) -> bool {
         self.supported
@@ -52,7 +63,7 @@ impl RemoteClient {
         if_none_match: Option<&str>,
         cancel: &AtomicBool,
     ) -> Result<ArtworkReply> {
-        self.artwork_request(None, id, side, if_none_match, cancel)
+        self.artwork_request(None, None, id, side, if_none_match, cancel)
     }
 
     /// Read a snapshot record's cover with an atomic server-side library identity check.
@@ -70,12 +81,101 @@ impl RemoteClient {
                 "Invalid cached library identity".into(),
             ));
         }
-        self.artwork_request(Some(library_id), id, side, if_none_match, cancel)
+        self.artwork_request(Some(library_id), None, id, side, if_none_match, cancel)
     }
 
+    /// Read a server-authoritative album and verify its library, namespace and ID.
+    #[allow(clippy::too_many_arguments)]
+    pub fn album_artwork_for_library(
+        &self,
+        library_id: &str,
+        expected_namespace: &str,
+        album_id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if album_id <= 0
+            || library_id.trim().is_empty()
+            || expected_namespace.trim().is_empty()
+            || ureq::http::HeaderValue::from_str(library_id).is_err()
+            || ureq::http::HeaderValue::from_str(expected_namespace).is_err()
+        {
+            return Err(RemoteError::Validation(
+                "Invalid album or library identity".into(),
+            ));
+        }
+        self.artwork_request(
+            Some(library_id),
+            Some(expected_namespace),
+            album_id,
+            side,
+            if_none_match,
+            cancel,
+        )
+    }
+
+    /// Use authoritative album IDs only for an original schema-8 server snapshot.
+    /// Legacy projections use the same sorted whole-album member candidates on every
+    /// selection, never a client-generated album ID or the currently selected WAV.
+    #[allow(clippy::too_many_arguments)]
+    pub fn album_artwork_for_snapshot(
+        &self,
+        state: &crate::CacheState,
+        capabilities: &Capabilities,
+        expected_namespace: &str,
+        album_id: i64,
+        member_ids: &[i64],
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
+        if member_ids.len() > audiolib_core::MAX_ALBUM_MEMBERS {
+            return Err(RemoteError::Validation(
+                "Too many album artwork candidates".into(),
+            ));
+        }
+        let authoritative = state
+            .format
+            .as_ref()
+            .and_then(|format| format.source.as_ref())
+            .is_some_and(|format| {
+                format.schema_version >= 8 && format.features.get("album_entities") == Some(&1)
+            });
+        if authoritative && capabilities.album_entity_artwork_usable() {
+            return self.album_artwork_for_library(
+                &state.library_id,
+                expected_namespace,
+                album_id,
+                side,
+                if_none_match,
+                cancel,
+            );
+        }
+        if !capabilities.album_artwork_usable() {
+            return Ok(ArtworkReply::Missing);
+        }
+        let mut candidates = member_ids.to_vec();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.truncate(audiolib_core::MAX_ALBUM_MEMBERS);
+        for id in candidates {
+            match self.artwork_for_library(&state.library_id, id, side, if_none_match, cancel)? {
+                ArtworkReply::Missing => {}
+                reply => return Ok(reply),
+            }
+        }
+        Ok(ArtworkReply::Missing)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn artwork_request(
         &self,
         library_id: Option<&str>,
+        expected_namespace: Option<&str>,
         id: i64,
         side: Option<u32>,
         if_none_match: Option<&str>,
@@ -86,12 +186,18 @@ impl RemoteClient {
                 "artwork side must be 1..=512".into(),
             ));
         }
+        let collection = if expected_namespace.is_some() {
+            "albums"
+        } else {
+            "audio"
+        };
         let path = match side {
-            Some(side) => format!("/audio/{id}/artwork?side={side}"),
-            None => format!("/audio/{id}/artwork"),
+            Some(side) => format!("/{collection}/{id}/artwork?side={side}"),
+            None => format!("/{collection}/{id}/artwork"),
         };
         let client = self.clone();
         let library_id = library_id.map(str::to_owned);
+        let expected_namespace = expected_namespace.map(str::to_owned);
         let if_none_match = if_none_match.map(str::to_owned);
         crate::client::call_cancellable(
             move |abort| {
@@ -110,6 +216,9 @@ impl RemoteClient {
                     if let Some(library_id) = &library_id {
                         request = request.header(crate::LIBRARY_ID_HEADER, library_id);
                     }
+                    if let Some(namespace) = &expected_namespace {
+                        request = request.header("x-audiolib-album-namespace", namespace);
+                    }
                     request
                 })
                 .map_err(|error| RemoteError::from_transport(error, &url))?;
@@ -126,6 +235,23 @@ impl RemoteClient {
                         return Err(RemoteError::LibraryChanged(
                             "Artwork does not belong to the opened snapshot; synchronize before displaying it".into(),
                         ));
+                    }
+                    if let Some(namespace) = &expected_namespace {
+                        let mut identities = response.headers().get_all("x-album-id").iter();
+                        let identity = identities.next().and_then(|value| value.to_str().ok());
+                        let expected = id.to_string();
+                        if identity != Some(expected.as_str()) || identities.next().is_some() {
+                            return Err(RemoteError::LibraryChanged(
+                                "Artwork does not belong to the requested album".into(),
+                            ));
+                        }
+                        let mut namespaces = response.headers().get_all("x-album-namespace").iter();
+                        let actual = namespaces.next().and_then(|value| value.to_str().ok());
+                        if actual != Some(namespace.as_str()) || namespaces.next().is_some() {
+                            return Err(RemoteError::LibraryChanged(
+                                "Artwork does not belong to the opened album namespace".into(),
+                            ));
+                        }
                     }
                 }
                 let Some(mut response) =
@@ -207,6 +333,173 @@ mod tests {
             .features
             .remove("album_artwork");
         assert!(!capability.album_artwork_usable());
+    }
+
+    #[test]
+    fn native_album_transport_binds_library_namespace_and_album_identity() {
+        let server = TestServer::start(|request| {
+            assert_eq!(request.path, "/api/v1/albums/11/artwork?side=40");
+            assert_eq!(request.header("x-audiolib-library-id"), Some("library"));
+            assert_eq!(
+                request.header("x-audiolib-album-namespace"),
+                Some("namespace")
+            );
+            let mut response = if request.header("if-none-match").is_some() {
+                TestResponse::bytes(304, Vec::new())
+            } else {
+                TestResponse::bytes(200, b"\x89PNG\r\n\x1a\nfixture".to_vec())
+            };
+            response.content_type = "image/png";
+            response
+                .with_header("X-Library-Id", "library")
+                .with_header("X-Album-Id", "11")
+                .with_header("X-Album-Namespace", "namespace")
+        });
+        let client = RemoteClient::new(&server.url, "token").unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(matches!(
+            client
+                .album_artwork_for_library("library", "namespace", 11, Some(40), None, &cancel)
+                .unwrap(),
+            ArtworkReply::Data { .. }
+        ));
+        assert_eq!(
+            client
+                .album_artwork_for_library(
+                    "library",
+                    "namespace",
+                    11,
+                    Some(40),
+                    Some("\"cached\""),
+                    &cancel
+                )
+                .unwrap(),
+            ArtworkReply::NotModified
+        );
+        let format = audiolib_core::compatibility::LibraryFormat::target();
+        let state = crate::CacheState {
+            library_id: "library".into(),
+            schema_version: 8,
+            format: Some(Box::new(crate::CacheFormat {
+                source: Some(format.clone()),
+                local: format,
+                generation: 0,
+            })),
+            ..Default::default()
+        };
+        let capabilities = Capabilities {
+            compatibility: Some(audiolib_core::compatibility::compatibility_manifest()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            client
+                .album_artwork_for_snapshot(
+                    &state,
+                    &capabilities,
+                    "namespace",
+                    11,
+                    &[999],
+                    Some(40),
+                    None,
+                    &cancel
+                )
+                .unwrap(),
+            ArtworkReply::Data { .. }
+        ));
+        for status in [200, 304] {
+            for invalid in 0..5 {
+                let bad = TestServer::start(move |_| {
+                    let response = TestResponse::bytes(status, Vec::new())
+                        .with_header("X-Library-Id", "library");
+                    let response = match invalid {
+                        0 => response.with_header("X-Album-Id", "12"),
+                        1 => response
+                            .with_header("X-Album-Id", "11")
+                            .with_header("X-Album-Id", "11"),
+                        _ => response.with_header("X-Album-Id", "11"),
+                    };
+                    match invalid {
+                        2 => response,
+                        3 => response.with_header("X-Album-Namespace", "different"),
+                        4 => response
+                            .with_header("X-Album-Namespace", "namespace")
+                            .with_header("X-Album-Namespace", "namespace"),
+                        _ => response.with_header("X-Album-Namespace", "namespace"),
+                    }
+                });
+                assert!(matches!(
+                    RemoteClient::new(&bad.url, "token")
+                        .unwrap()
+                        .album_artwork_for_library(
+                            "library",
+                            "namespace",
+                            11,
+                            None,
+                            Some("\"cached\""),
+                            &cancel
+                        ),
+                    Err(RemoteError::LibraryChanged(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_uses_fixed_members_not_locally_projected_album_ids() {
+        let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = paths.clone();
+        let server = TestServer::start(move |request| {
+            assert_eq!(request.header("x-audiolib-album-namespace"), None);
+            observed.lock().unwrap().push(request.path.clone());
+            if request.path == "/api/v1/audio/1/artwork?side=40" {
+                return TestResponse::bytes(404, Vec::new());
+            }
+            assert_eq!(request.path, "/api/v1/audio/2/artwork?side=40");
+            let mut response = TestResponse::bytes(200, b"\x89PNG\r\n\x1a\nfixture".to_vec())
+                .with_header("X-Library-Id", "library");
+            response.content_type = "image/png";
+            response
+        });
+        let local = audiolib_core::compatibility::LibraryFormat::target();
+        let mut source = local.clone();
+        source.schema_version = 7;
+        source.features.remove("album_entities");
+        source.features.remove("metadata_storage");
+        let state = crate::CacheState {
+            library_id: "library".into(),
+            schema_version: 8,
+            format: Some(Box::new(crate::CacheFormat {
+                source: Some(source),
+                local,
+                generation: 1,
+            })),
+            ..Default::default()
+        };
+        let capabilities = Capabilities {
+            compatibility: Some(audiolib_core::compatibility::compatibility_manifest()),
+            ..Default::default()
+        };
+        let reply = RemoteClient::new(&server.url, "token")
+            .unwrap()
+            .album_artwork_for_snapshot(
+                &state,
+                &capabilities,
+                "local-only-namespace",
+                987654,
+                &[9, 2, 1, 2],
+                Some(40),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(matches!(reply, ArtworkReply::Data { .. }));
+        assert_eq!(
+            *paths.lock().unwrap(),
+            [
+                "/api/v1/audio/1/artwork?side=40",
+                "/api/v1/audio/2/artwork?side=40"
+            ]
+        );
     }
 
     #[test]

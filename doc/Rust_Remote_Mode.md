@@ -15,9 +15,13 @@ modified or replaced while in server mode; switching back to local mode reopens 
 
 ## Settings and secrets
 
-Album artwork uses the optional `album_artwork` capability and its dedicated
-HTTP endpoint; older servers skip embedded covers while retaining normal sync
-and playback behavior. The active server's **Cache and export** page also offers
+Album artwork uses the optional `album_entity_artwork` capability and the
+namespace-bound `/albums/{id}/artwork` endpoint. For source schemas 3–7, the client
+creates an owned schema-8 projection and resolves a fixed, sorted set of album
+members through the older `album_artwork` endpoint. Source format and local format
+remain separate, so projection does not cause repeated synchronization. Servers
+without either capability skip embedded covers while retaining normal sync and
+playback behavior. The active server's **Cache and export** page also offers
 client-local custom images, hiding/restoring, display preferences and thumbnail
 cleanup. These choices never write to the server snapshot or WAV files and do
 not sync to other PCs. See [Album artwork](Rust_Artwork.md).

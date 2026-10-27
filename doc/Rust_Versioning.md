@@ -6,13 +6,15 @@
 |---|---|---|---|
 | 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.1 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
-| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 7 | SQLite 资料库结构（`user_version`） |
+| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 8 | SQLite 资料库结构（`user_version`） |
 
-schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=7`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；派生搜索状态已准备的快照直接只读打开，需要修复的旧状态仅在客户端拥有的 staging/copy 中升级，原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
+当前完整格式为 `ale-s8-cld1-t3-m2-p1-a1-z1`，必需 feature 包括 `album_entities=1` 和 `metadata_storage=1`。后者声明可读取混合 TEXT/压缩 BLOB；未知 SQL 明文依赖会保守使用 TEXT，不表示每一行都压缩。
+
+schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；当前 schema 8 的完整快照直接只读打开。schema 3–7 即使原搜索状态就绪，也仅在客户端拥有的 staging/copy 中升级并建立共享专辑投影；原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
 
 ## 规则
 
-1. **schema 变了，程序版本至少升 MINOR**（`SCHEMA_VERSION` 与上一个发布标签相比不同）。
+1. **schema 变了，程序版本至少升 MINOR**（`SCHEMA_VERSION` 与发布基线相比不同；0.8.1 使用下述明确的基线例外）。
 2. 标签必须是 `vX.Y.Z`，预发布为 `vX.Y.Z-rc.N` 或 `vX.Y.Z-beta.N`，且 `X.Y.Z` 必须与 `Cargo.toml` 一致。其他预发布后缀会被拒绝。
 3. 程序版本不得低于基准标签的版本。
 4. 服务端与远程客户端源码中出现的 `/api/vN` 必须只有一个版本。
@@ -27,13 +29,13 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=7`
 
 ## 发布流程
 
-不得覆盖既有标签或把新构建当作旧 Release 的原产物。`v0.8.0` 的 Release 已撤回，但标签保留；0.8.1 使用新标签 `v0.8.1`。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。以最后实际公开的 `v0.7.8` 显式检查升级路径；从该版本升级会把可写 schema 6 库升级为 7，回退旧程序须配套恢复 schema 6 备份。
+不得覆盖既有标签或把新构建当作旧 Release 的原产物。`v0.8.0` 的 Release 已撤回，但标签保留；0.8.1 使用新标签 `v0.8.1`。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。本次 0.8.1 按用户确认使用最后实际公开的 `v0.7.8` 为发布基线：程序 MINOR 从 7 升至 8，可写 schema 6 库升级为 8；撤回的 0.8.0 开发库（schema 7）也通过受保护迁移升级为 8。回退旧程序须配套恢复相应旧 schema 备份。这个例外不重写既有标签，也不改变后续版本的版本升级规则。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
 3. 本地预检（不创建标签，标签用参数传入）：
    `pwsh tools/check-release.ps1 -Tag v0.8.1 -BaseTag v0.7.8`
-   省略 `-BaseTag` 时，默认取除自身外最新的 `vX.Y.Z` 标签。
+   仅标签去除 beta/rc 后缀后为 `v0.8.1`且未给出 `-BaseTag` 时，脚本默认 `v0.7.8`；显式 `-BaseTag` 始终优先。其他版本仍默认取除自身外最新的 `vX.Y.Z` 标签。显式以撤回标签 `v0.8.0` 作基线仍会按 schema 7→8 检查并拒绝仅 PATCH 的比较；这不是移动或替换该标签。
 4. 正式发布前在本地执行 `tools/check-local.ps1 -Asio`、受影响的专项回归及打包启动验收；日常开发按 [Testing Strategy](Testing_Strategy.md) 选择最小范围。缺少平台或硬件覆盖时明确记录，不能以云端构建代替功能验证。
 5. 合并后在发布提交上打标签 `v0.8.1`（或对应的预发布标签）并推送。
 6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上构建 macOS arm64 服务端包，各自生成对应的 `.sha256`。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。正式包必须从最终 main/tag 提交构建；beta 的预编译服务器不能替代嵌入最终提交身份的正式产物。
