@@ -63,7 +63,7 @@ fn modern_snapshot_response(
     let mut reply = TestResponse::bytes(if offset.is_some() { 206 } else { 200 }, body)
         .with_header("X-Library-Id", LIBRARY)
         .with_header("X-Library-Revision", "7")
-        .with_header("X-Schema-Version", "6")
+        .with_header("X-Schema-Version", "7")
         .with_header("X-Snapshot-Id", "modern-pinned-object")
         .with_header("ETag", "\"modern-pinned-object\"")
         .with_header("Accept-Ranges", "bytes")
@@ -204,7 +204,7 @@ fn modern_pinned_resume_keeps_its_format_when_the_live_revision_advances() {
         outcome.state.revision, 7,
         "the cache must name the actual pinned revision"
     );
-    assert_eq!(outcome.state.schema_version, 6);
+    assert_eq!(outcome.state.schema_version, 7);
     let format = outcome.state.format.unwrap();
     assert_eq!(format.source, Some(LibraryFormat::target()));
     assert_eq!(format.local, LibraryFormat::target());

@@ -122,7 +122,7 @@ fn fixture(peer: Peer) -> Fixture {
                             SERVER_COMPATIBILITY_HEADER,
                             peer.catalog.as_ref().map(|c| c.to_string()).unwrap_or_default(),
                         ),
-                        ("x-schema-version", "6".into()),
+                        ("x-schema-version", "7".into()),
                         ("x-search-storage-revision", "1".into()),
                         ("x-tokenization-revision", "3".into()),
                         ("x-source-search-revision", "2".into()),

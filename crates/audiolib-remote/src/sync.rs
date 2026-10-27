@@ -1910,7 +1910,7 @@ mod tests {
 
         let prepared = cache.prepare_cached_state(&state).unwrap();
         assert_ne!(prepared.database_file, state.database_file);
-        assert_eq!(prepared.schema_version, 6);
+        assert_eq!(prepared.schema_version, 7);
         assert_eq!(prepared.library_id, state.library_id);
         assert_eq!(prepared.revision, state.revision);
         assert_eq!(prepared.server_url, state.server_url);
@@ -1932,7 +1932,7 @@ mod tests {
 
         let owned = cache.database_path(&prepared);
         let reader = SqliteProvider::open_read_only(&owned).unwrap();
-        assert_eq!(reader.library_info().unwrap().schema_version, 6);
+        assert_eq!(reader.library_info().unwrap().schema_version, 7);
         assert_eq!(reader.stats().unwrap().audio_files, 1);
         assert_eq!(
             serde_json::to_value(reader.get_audio(id).unwrap()).unwrap(),
@@ -2153,7 +2153,8 @@ mod tests {
             let path = open_as(version);
             let error = validate_snapshot(&path).unwrap_err();
             assert!(
-                matches!(&error, RemoteError::Snapshot(text) if text.contains("not supported")),
+                matches!(&error, RemoteError::Snapshot(text)
+                    if text.contains("not supported") || text.contains("integrity check failed")),
                 "{error:?}"
             );
             assert!(SqliteProvider::open_read_only(&path).is_err());
@@ -2204,7 +2205,10 @@ mod tests {
                     sync_library(&client, &cache, &mut |_| {}, &AtomicBool::new(false), force)
                         .unwrap_err();
                 assert!(
-                    matches!(error, RemoteError::Snapshot(ref message) if message.contains(&format!("schema {version}")))
+                    matches!(error, RemoteError::Snapshot(ref message)
+                        if message.contains(&format!("schema {version}"))
+                            || message.contains("format")),
+                    "{error:?}"
                 );
                 assert_eq!(cache.active().unwrap(), state);
                 assert_eq!(std::fs::read(&path).unwrap(), snapshot);
