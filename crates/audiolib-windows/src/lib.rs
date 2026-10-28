@@ -7,6 +7,10 @@ use std::path::PathBuf;
 mod drag;
 pub use drag::{DragOutcome, drag_files, primary_button_down};
 
+/// Main-thread interception of native macOS Quit through the desktop close drain.
+#[cfg(target_os = "macos")]
+pub mod macos_lifecycle;
+
 /// Explicit diagnostic capture of this process's own GUI completion marker.
 /// Normal application use does not start capture; codec helpers are cross-platform.
 pub mod gui_capture;

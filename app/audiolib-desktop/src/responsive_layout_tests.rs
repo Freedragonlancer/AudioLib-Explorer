@@ -644,7 +644,7 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 &ui,
                 &[
                     slint::platform::Key::Control.into(),
-                    slint::platform::Key::End.into(),
+                    text_document_end_key(),
                 ],
             );
             settle();
@@ -653,7 +653,7 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 &ui,
                 &[
                     slint::platform::Key::Control.into(),
-                    slint::platform::Key::Home.into(),
+                    text_document_start_key(),
                 ],
             );
             settle();
@@ -663,7 +663,7 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 &[
                     slint::platform::Key::Control.into(),
                     slint::platform::Key::Shift.into(),
-                    slint::platform::Key::End.into(),
+                    text_document_end_key(),
                 ],
             );
             settle();
@@ -704,7 +704,7 @@ fn selecting_another_file_resets_description_scroll_and_keyboard_selection() {
                 &[
                     slint::platform::Key::Control.into(),
                     slint::platform::Key::Shift.into(),
-                    slint::platform::Key::End.into(),
+                    text_document_end_key(),
                 ],
             );
             settle();
@@ -716,6 +716,26 @@ fn selecting_another_file_resets_description_scroll_and_keyboard_selection() {
             ui.hide().unwrap();
         }
     }
+}
+
+// Slint's normalized Control modifier uses vertical arrows for text boundaries
+// on macOS; other native platforms use Home/End for the same editing actions.
+fn text_document_start_key() -> slint::SharedString {
+    if cfg!(target_os = "macos") {
+        slint::platform::Key::UpArrow
+    } else {
+        slint::platform::Key::Home
+    }
+    .into()
+}
+
+fn text_document_end_key() -> slint::SharedString {
+    if cfg!(target_os = "macos") {
+        slint::platform::Key::DownArrow
+    } else {
+        slint::platform::Key::End
+    }
+    .into()
 }
 
 fn long_tags(prefix: &str) -> String {

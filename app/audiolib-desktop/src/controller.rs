@@ -8237,6 +8237,9 @@ mod tests {
     #[test]
     #[ignore = "helper invoked by the close-grace regression in an isolated process"]
     fn child_close_finishes_within_remote_grace() {
+        // This child polls close completion without running a native event loop.
+        // Keep UI notifications unavailable, as in the other close-drain fixtures.
+        let _rejected = init_close_without_post_delivery();
         let root = std::env::temp_dir().join(format!(
             "audiolib-desktop-close-grace-{}-{}",
             std::process::id(),

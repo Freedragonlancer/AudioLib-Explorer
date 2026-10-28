@@ -384,7 +384,7 @@ try {
 $taskEvidence = Join-Path $physicalTemp ('AudioLibMacAcceptance-' + [guid]::NewGuid().ToString('N'))
 Assert-Unlinked $taskEvidence
 New-Item -ItemType Directory -Path $taskEvidence | Out-Null
-$taskRuntime = [ordered]@{ success=$false; tag=$Tag; commit=$ExpectedCommit; runtime_validation='failed'; evidence=$taskEvidence; checks=@(); timed_out_pid=$null; acoustic_playback='not-run'; real_server='not-run' }
+$taskRuntime = [ordered]@{ success=$false; tag=$Tag; commit=$ExpectedCommit; runtime_validation='failed'; evidence=$taskEvidence; checks=@(); timed_out_pid=$null; native_quit='not-run'; acoustic_playback='not-run'; real_server='not-run' }
 $taskReadonly = [Collections.Generic.List[object]]::new()
 function Invoke-Owned([string]$Executable, [string[]]$Arguments, [string]$Name, [string]$HomeRoot, [string]$DataRoot, [string]$WorkingDirectory) {
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -456,6 +456,33 @@ try {
     $stats = Invoke-Owned $cli @('stats') 'synthetic-stats' $explicitHome $data $cwd
     $statsJson = $stats.output | ConvertFrom-Json
     if ($stats.code -ne 0 -or !$statsJson.success -or $statsJson.data.audio_files -ne 1) { throw 'Packaged CLI did not find exactly one synthetic record.' }
+
+    # Exercise AppKit's application termination request while a Metadata draft is
+    # dirty. The application hook is constrained to this owned one-record fixture;
+    # persisted state is read back through the packaged CLI after the process exits.
+    $quitBefore = Invoke-Owned $cli @('search','--limit','2') 'native-quit-before' $explicitHome $data $cwd
+    $quitBeforeJson = $quitBefore.output | ConvertFrom-Json
+    $quitRecords = @($quitBeforeJson.data.results)
+    $fixtureCanonical = (Resolve-Path -LiteralPath $fixture).ProviderPath
+    if ($quitBefore.code -ne 0 -or !$quitBeforeJson.success -or $quitBeforeJson.data.total_count -ne 1 -or
+        $quitRecords.Count -ne 1 -or $quitRecords[0].id -le 0 -or $quitRecords[0].file_path -cne $fixtureCanonical -or
+        $quitRecords[0].notes -cne '') { throw 'Native Quit acceptance requires its untouched, single-record synthetic library.' }
+    $quitMarker = Join-Path $data '.native-quit-fixture.json'
+    Assert-Unlinked $quitMarker
+    [IO.File]::WriteAllText($quitMarker, (([ordered]@{schema_version=1;fixture_path=$fixtureCanonical} | ConvertTo-Json) + [char]10), [Text.UTF8Encoding]::new($false))
+    $quitShot = Join-Path $taskEvidence 'native-quit.png'
+    $taskRuntime.native_quit = 'failed'
+    $quit = Invoke-Owned $desktop @('--smoke-ui','--smoke-native-quit','--screenshot',$quitShot) 'native-quit-ui' $explicitHome $data $cwd
+    if ($quit.code -ne 0 -or !(Test-Path -LiteralPath $quitShot -PathType Leaf) -or (Get-Item -LiteralPath $quitShot).Length -eq 0) { throw 'Native application Quit did not exit cleanly after its Metadata draft.' }
+    $quitAfter = Invoke-Owned $cli @('info',([string]$quitRecords[0].id)) 'native-quit-after' $explicitHome $data $cwd
+    $quitAfterJson = $quitAfter.output | ConvertFrom-Json
+    if ($quitAfter.code -ne 0 -or !$quitAfterJson.success -or $null -eq $quitAfterJson.data -or
+        $quitAfterJson.data.id -ne $quitRecords[0].id -or $quitAfterJson.data.file_path -cne $fixtureCanonical -or
+        $quitAfterJson.data.notes -cne 'AudioLib native Quit drain acceptance' -or
+        (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash -cne $fixtureHash) { throw 'Native application Quit lost the pending Metadata draft or changed the source WAV.' }
+    $taskRuntime.native_quit = 'passed'
+    $taskRuntime.checks += 'native application Quit drains a dirty Metadata draft before exit; CLI readback and source WAV identity verified'
+
     $screenshot = Join-Path $taskEvidence 'chinese.png'
     $ui = Invoke-Owned $desktop @('--smoke-ui','--smoke-language','cn','--screenshot',$screenshot) 'chinese-ui' $explicitHome $data $cwd
     if ($ui.code -ne 0 -or !(Test-Path -LiteralPath $screenshot -PathType Leaf) -or (Get-Item -LiteralPath $screenshot).Length -eq 0) { throw 'Chinese UI startup/screenshot/clean exit failed.' }

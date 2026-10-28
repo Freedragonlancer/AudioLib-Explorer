@@ -35,8 +35,11 @@ and macOS privacy settings when granting access to removable or network volumes.
 No working libraries, connection addresses, credentials or audio files are shipped.
 
 The native release validator checks the package boundary, code signatures, binary
-identity, isolated first launch, a synthetic WAV import, Chinese UI startup and
-default data placement with a temporary home and read-only app/current directory.
+identity, isolated first launch, a synthetic WAV import, native application Quit
+with a pending Metadata draft, Chinese UI startup and default data placement with
+a temporary home and read-only app/current directory. The Quit regression sends
+the application's own AppKit termination request, then verifies the saved note
+through the packaged CLI and checks that the synthetic source WAV is unchanged.
 These checks do not establish acoustic performance or real-server beta acceptance.
 
 ## Native release verification
@@ -73,5 +76,8 @@ Full acceptance requires a logged-in Mac desktop session for UI startup. It keep
 the owned temporary home, synthetic audio, screenshots and diagnostics as proof,
 prints their path, and never terminates an unrelated process. If a smoke process
 times out, its owned PID is recorded and the run fails without terminating it.
+The native Quit fixture uses `--smoke-ui --smoke-native-quit`, an explicit owned
+data directory and a validated `.native-quit-fixture.json` marker beside its
+single-record `library.db`. It cannot target a normal working library.
 The default signature is ad-hoc; `-SigningIdentity '<identity>'` selects an
 existing signing identity when packaging. Signing alone does not notarize the app.
