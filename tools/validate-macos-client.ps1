@@ -170,7 +170,8 @@ if ($Tag -cnotmatch '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$' -or $E
 $taskVersion = ([regex]::Match($Tag, '^v(\d+\.\d+\.\d+)')).Groups[1].Value
 function Read-Tool([string]$Tool, [string[]]$Arguments) {
     $result = (& $Tool @Arguments 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Native validation command failed: $Tool" }
+    $nativeExitCode = $LASTEXITCODE
+    if ($nativeExitCode -ne 0) { throw "Native validation command failed ($nativeExitCode): $Tool`n$result" }
     return $result
 }
 $BundlePath = [IO.Path]::GetFullPath($BundlePath, $taskRoot)
@@ -236,7 +237,7 @@ foreach ($file in $taskReport.files) {
 }
 if ($taskExpected.Count -gt 20000 -or $taskUncompressedBytes -gt 2GB) { throw 'Mac package exceeds the explicit extraction budget.' }
 $taskAllowed = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach ($relative in @('Contents/Info.plist','Contents/MacOS/AudioLibExplorer','Contents/MacOS/AudioLibCli','Contents/MacOS/update-channel.txt','Contents/MacOS/update-version.txt','Contents/_CodeSignature/CodeResources','Contents/Resources/licenses/dependencies.json')) { $null = $taskAllowed.Add((Path-Key $relative)) }
+foreach ($relative in @('Contents/Info.plist','Contents/MacOS/AudioLibExplorer','Contents/MacOS/AudioLibCli','Contents/Resources/update-channel.txt','Contents/Resources/update-version.txt','Contents/_CodeSignature/CodeResources','Contents/Resources/licenses/dependencies.json')) { $null = $taskAllowed.Add((Path-Key $relative)) }
 $coreAllowlist = @([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'portable-files.json')) | ConvertFrom-Json)
 foreach ($mapping in $taskManifest.files) {
     Assert-Relative $mapping.source
@@ -315,9 +316,19 @@ foreach ($pair in @(
     if ((Read-Tool /usr/bin/plutil @('-extract', $pair[0], 'raw', '-o', '-', $plist)) -cne $pair[1]) { throw 'Info.plist identity/platform mismatch.' }
 }
 foreach ($pair in @(@('update-channel.txt',$(if ($Tag.Contains('-')) { 'beta' } else { 'stable' })), @('update-version.txt',$Tag.Substring(1)))) {
-    if ([IO.File]::ReadAllText((Join-Path $BundlePath ('Contents/MacOS/' + $pair[0]))).Trim() -cne $pair[1]) { throw 'Bundle update marker mismatch.' }
+    if ([IO.File]::ReadAllText((Join-Path $BundlePath ('Contents/Resources/' + $pair[0]))).Trim() -cne $pair[1]) { throw 'Bundle update marker mismatch.' }
 }
 $null = Read-Tool /usr/bin/codesign @('--verify','--deep','--strict',$BundlePath)
+[xml]$taskResourceSeal = [IO.File]::ReadAllText((Join-Path $BundlePath 'Contents/_CodeSignature/CodeResources'))
+$taskSealedFiles = $taskResourceSeal.SelectSingleNode("/plist/dict/key[text()='files2']/following-sibling::*[1][self::dict]")
+if ($null -eq $taskSealedFiles) { throw 'Code signature resource seal is missing.' }
+foreach ($name in @('update-channel.txt','update-version.txt')) {
+    $sealedMarker = $taskSealedFiles.SelectSingleNode("key[text()='Resources/$name']/following-sibling::*[1][self::dict]")
+    $sealedHash = if ($null -ne $sealedMarker) { $sealedMarker.SelectSingleNode("key[text()='hash2']/following-sibling::*[1][self::data]") } else { $null }
+    if ($null -eq $sealedHash) { throw 'Package channel/version metadata is outside the code signature resource seal.' }
+    $hashBytes = [Convert]::FromBase64String($sealedHash.InnerText)
+    if ($hashBytes.Length -ne 32 -or [Convert]::ToHexString($hashBytes).ToLowerInvariant() -cne $taskExpected['Contents/Resources/' + $name].sha256) { throw 'Signed package channel/version hash differs from its file proof.' }
+}
 $signature = Read-Tool /usr/bin/codesign @('-d','--verbose=4',$BundlePath)
 if (($taskReport.signing -ceq 'ad-hoc') -ne ($signature -match '(?m)^Signature=adhoc$')) { throw 'Signature type differs from package report.' }
 function Assert-MachO([string]$Path) {

@@ -24,10 +24,12 @@ backup/import workflow. There is no automatic migration or removal of that data.
 
 A beta or release-candidate bundle uses the separate sibling directory
 `~/Library/Application Support/AudioLibExplorer/beta`, based on the validated
-version/channel markers beside its executable. `AUDIOLIB_BETA_DATA_DIR` overrides
+version/channel markers in `AudioLib Explorer.app/Contents/Resources`.
+`AUDIOLIB_BETA_DATA_DIR` overrides
 that beta location; `AUDIOLIB_DATA_DIR` takes priority over both. Stable bundles
 ignore the beta override. Invalid or incomplete package markers stop startup
-before selecting a data root. Keep these markers with both bundled executables.
+before selecting a data root. These markers are sealed by the application code
+signature; keep the complete application bundle together.
 
 Server mode uses a validated local snapshot as described in
 [Rust_Remote_Mode.md](doc/Rust_Remote_Mode.md). Use the application's folder picker

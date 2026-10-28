@@ -610,16 +610,10 @@ impl AppConfig {
         #[cfg(target_os = "macos")]
         if override_root.is_none() {
             let executable = std::env::current_exe()?;
-            let directory = executable
-                .parent()
-                .ok_or_else(|| Error::Validation("Cannot locate macOS package metadata".into()))?;
-            let channel = read_macos_package_marker(&directory.join("update-channel.txt"))?;
-            let version = read_macos_package_marker(&directory.join("update-version.txt"))?;
-            return macos_root_with_metadata(
+            return macos_root_for_executable(
                 std::env::var_os("HOME").map(PathBuf::from),
                 std::env::var_os("AUDIOLIB_BETA_DATA_DIR").map(PathBuf::from),
-                channel.as_deref(),
-                version.as_deref(),
+                &executable,
                 env!("CARGO_PKG_VERSION"),
             );
         }
@@ -917,13 +911,59 @@ fn macos_user_root(home: Option<PathBuf>) -> Result<PathBuf> {
         .join("AudioLibExplorer"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn read_macos_package_marker(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_root_for_executable(
+    home: Option<PathBuf>,
+    beta_override: Option<PathBuf>,
+    executable: &Path,
+    binary_version: &str,
+) -> Result<PathBuf> {
+    let directory = executable
+        .parent()
+        .ok_or_else(|| Error::Validation("Cannot locate macOS package metadata".into()))?;
+    let contents = directory.parent().filter(|contents| {
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("MacOS"))
+            && contents
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("Contents"))
+            && contents
+                .parent()
+                .and_then(Path::extension)
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    });
+    // Only executable code belongs in Contents/MacOS. Resources holds the
+    // signed bundle's paired data markers; adjacent stray files cannot select
+    // its channel. Standalone CLI/development binaries retain adjacent markers.
+    let marker_directory =
+        contents.map_or_else(|| directory.to_path_buf(), |p| p.join("Resources"));
+    let channel = read_macos_package_marker(&marker_directory.join("update-channel.txt"))?;
+    let version = read_macos_package_marker(&marker_directory.join("update-version.txt"))?;
+    if contents.is_some() && channel.is_none() && version.is_none() {
+        return Err(Error::Validation(
+            "macOS application bundle is missing channel/version metadata".into(),
+        ));
+    }
+    macos_root_with_metadata(
+        home,
+        beta_override,
+        channel.as_deref(),
+        version.as_deref(),
+        binary_version,
+    )
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1143,6 +1183,80 @@ mod tests {
                 "0.8.3",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn macos_bundle_reads_resource_markers_and_ignores_adjacent_strays() {
+        let temporary = tempfile::tempdir().unwrap();
+        let contents = temporary.path().join("AudioLib Explorer.APP/Contents");
+        let executable = contents.join("MacOS/AudioLibCli");
+        let resources = contents.join("Resources");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("update-channel.txt"), "beta\n").unwrap();
+        std::fs::write(resources.join("update-version.txt"), "0.8.3-beta.1\n").unwrap();
+        std::fs::write(
+            executable.parent().unwrap().join("update-channel.txt"),
+            "stable\n",
+        )
+        .unwrap();
+        std::fs::write(
+            executable.parent().unwrap().join("update-version.txt"),
+            "0.8.3\n",
+        )
+        .unwrap();
+        let home = temporary.path().join("home");
+        assert_eq!(
+            macos_root_for_executable(Some(home.clone()), None, &executable, "0.8.3").unwrap(),
+            home.join("Library/Application Support/AudioLibExplorer/beta")
+        );
+        std::fs::write(resources.join("update-version.txt"), "0.8.2-beta.1\n").unwrap();
+        assert!(macos_root_for_executable(Some(home), None, &executable, "0.8.3").is_err());
+    }
+
+    #[test]
+    fn macos_bundle_cannot_fall_back_to_stable_when_resource_markers_are_missing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let contents = temporary.path().join("AudioLib Explorer.app/Contents");
+        let executable = contents.join("MacOS/AudioLibExplorer");
+        let resources = contents.join("Resources");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(
+            executable.parent().unwrap().join("update-channel.txt"),
+            "stable\n",
+        )
+        .unwrap();
+        std::fs::write(
+            executable.parent().unwrap().join("update-version.txt"),
+            "0.8.3\n",
+        )
+        .unwrap();
+        let home = temporary.path().join("home");
+        assert!(macos_root_for_executable(Some(home.clone()), None, &executable, "0.8.3").is_err());
+        std::fs::write(resources.join("update-channel.txt"), "beta\n").unwrap();
+        assert!(macos_root_for_executable(Some(home), None, &executable, "0.8.3").is_err());
+    }
+
+    #[test]
+    fn macos_unbundled_development_uses_optional_adjacent_markers() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("standalone");
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("AudioLibCli");
+        let home = temporary.path().join("home");
+        assert_eq!(
+            macos_root_for_executable(Some(home.clone()), None, &executable, "0.8.3").unwrap(),
+            home.join("Library/Application Support/AudioLibExplorer/v1")
+        );
+        std::fs::write(directory.join("update-channel.txt"), "beta\n").unwrap();
+        std::fs::write(directory.join("update-version.txt"), "0.8.3-rc.2\n").unwrap();
+        assert_eq!(
+            macos_root_for_executable(Some(home), None, &executable, "0.8.3").unwrap(),
+            temporary
+                .path()
+                .join("home/Library/Application Support/AudioLibExplorer/beta")
         );
     }
 
