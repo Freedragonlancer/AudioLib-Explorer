@@ -16,7 +16,7 @@ SSH 恢复后已在 Apple Silicon、macOS 27.0.1、Rust 1.97.1 原生环境执�
 
 该提交的 Mac arm64 release 构建、ad-hoc 签名、两个标记的资源 seal、Mach-O/系统依赖、包边界与完整原生合成运行验收通过。真实 `NSApplication terminate:` 后，通过 CLI 回读确认 dirty Metadata 备注已经落盘；还覆盖空库首次启动、合成 WAV、中文界面、坏偏好诊断、只读 app/CWD、临时 HOME 默认 beta 目录和导入 ASIO 设置的 CoreAudio 启动。候选证据保留于 `.rust-validation/release-083/native-8b14a8ef98f643a4b59811ee3d336b2b/`，不是最终 main/tag 产物证明。
 
-人工 GUI/声学播放、完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 运行验收通过。
+截至上述候选记录，人工 GUI/声学播放、完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制；最终验收结果以对应 GitHub Release 为准，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 运行验收通过。
 
 ## 0.8.3 发布准备（2026-10-28）
 
