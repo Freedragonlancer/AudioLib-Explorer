@@ -79,6 +79,13 @@ impl DesktopInstanceGuard {
 }
 
 fn main() {
+    if std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("AudioLibExplorer {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if let Err(error) = run() {
         report_fatal_error(&error);
         std::process::exit(1);
@@ -95,17 +102,15 @@ fn report_fatal_error(error: &anyhow::Error) {
     }
     // The asynchronous tracing guard may already have been dropped by run(), and
     // invalid preferences can fail before tracing starts. Persist this synchronously.
-    let root = std::env::var_os("AUDIOLIB_DATA_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("LOCALAPPDATA")
-                .map(|path| PathBuf::from(path).join("AudioLibExplorer/v1"))
-        })
-        .unwrap_or_else(|| {
+    let root = AppConfig::default_root().unwrap_or_else(|_| {
+        if cfg!(target_os = "macos") {
+            std::env::temp_dir().join("AudioLibExplorer-startup")
+        } else {
             std::env::current_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join(".audiolib-user")
-        });
+        }
+    });
     let logs = root.join("logs");
     let log_path = logs.join("AudioLibExplorer-startup-error.log");
     let result = (|| -> std::io::Result<()> {
@@ -255,8 +260,9 @@ fn run() -> Result<()> {
     if restore_layout {
         window_layout::keep_on_screen(&ui);
     }
-    let playback =
-        serde_json::from_value::<PlaybackConfig>(config.playback.clone()).unwrap_or_default();
+    let playback = controller::platform_playback_config(
+        serde_json::from_value::<PlaybackConfig>(config.playback.clone()).unwrap_or_default(),
+    );
     let engine = AudioEngine::new(playback.clone()).context("Initialize audio engine")?;
     let _diagnostics = diagnostics::install(&ui, config.paths.logs.clone(), engine.handle());
     let controller = controller::Controller::new_with_source(

@@ -1,5 +1,15 @@
 # Rust 验证报告
 
+## macOS 客户端发布准备（2026-10-29，0.8.3）
+
+本轮将 macOS arm64 客户端加入发布范围，补齐 per-user 数据目录、beta/rc 数据隔离、原生文件选择与启动错误提示、Finder 定位、CoreAudio 设置及手动更新入口。Windows 的偏好目录和既有更新包边界保持原样；服务端不使用客户端新增的数据目录解析器。
+
+Windows 默认配置的 core/desktop/windows/cli 四包 all-targets 严格 Clippy 与测试通过：587 passed、0 failed、149 ignored；desktop/cli 的 ASIO 配置严格 Clippy 与测试通过：424 passed、0 failed、149 ignored，使用已校验的 SDK 2.3.4。纯行为测试覆盖 Mac 路径选择、合法/损坏包标记、beta 覆盖及跨平台音频设置适配，但不冒充这些分支已经在 Mac 原生执行。前一轮候选的全工作区默认/ASIO 矩阵作为未受修改子系统的基线复用，本轮按影响范围复跑。忽略项仍是子进程入口及需专项环境的用例，未计入通过。
+
+新增发布资产验证器的 34 项合成回归通过；Mac ZIP 边界验证器的 19 个实际归档用例通过，包括精确大小写、Unicode 规范化与冲突、路径逃逸、符号链接、权限和私有文件拒绝。三个 Mac PowerShell 脚本语法检查通过。普通 CI 与 verify-only release workflow 不承担原生运行验收。
+
+Mac 构建、签名、Mach-O/依赖检查、隔离启动与人工 GUI/播放验收尚未执行；完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 验收通过。
+
 ## 0.8.3 发布准备（2026-10-28）
 
 以已发布的 `v0.8.2` 为基线，工作区及 10 个包的版本同步为 0.8.3；API `/api/v1/`、schema 8、快照兼容范围和完整存储格式保持不变。两项独立 CR 未发现阻止提交的问题；侧栏交互已经人工界面验收。

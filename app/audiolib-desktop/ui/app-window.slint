@@ -1010,13 +1010,16 @@ export component AppWindow inherits Window {
     in property <bool> playback-smooth: false;
     in property <string> playback-clock: "";
     in property <float> confirmed-playback-rate: 1;
-    in property <string> output-summary: "WASAPI";
+    in property <bool> native-macos: false;
+    in property <[string]> audio-backend-names: ["WASAPI", "ASIO"];
+    in property <string> output-summary: root.native-macos ? "CoreAudio" : "WASAPI";
     in-out property <float> volume: 0.8;
 
     in-out property <bool> settings-visible: false;
     in-out property <bool> about-visible: false;
     in-out property <bool> update-visible: false;
     in property <bool> update-enabled: true;
+    in property <bool> update-supported: true;
     in property <bool> update-busy: false;
     in property <bool> update-available: false;
     in property <string> update-version: "";
@@ -1763,7 +1766,7 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
             MenuSeparator { }
             MenuItem { title: root.chinese ? "复制所选文件路径" : "Copy selected file path"; enabled: root.menu-ready && root.has-selection; activated => { root.copy-text(root.selected-path); } }
-            MenuItem { title: (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer") + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 2); } }
+            MenuItem { title: (root.native-macos ? (root.chinese ? "在访达中显示" : "Reveal in Finder") : (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer")) + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 2); } }
             MenuItem { title: (root.chinese ? "修复所选文件引用…" : "Repair selected file reference…") + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 20); } }
             MenuSeparator { }
             MenuItem { title: (root.chinese ? "移除所选记录（保留 WAV）…" : "Remove selected record (keep WAV)…") + root.removal-suffix; enabled: root.menu-ready && root.has-selection && root.removal-allowed; activated => { root.file-action-requested(root.selected-id, 21); } }
@@ -2680,7 +2683,7 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: (root.context-file.favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action(5); } }
             MenuSeparator { }
-            MenuItem { title: (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer") + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(2); } }
+            MenuItem { title: (root.native-macos ? (root.chinese ? "在访达中显示" : "Reveal in Finder") : (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer")) + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(2); } }
             MenuItem { title: root.chinese ? "复制完整路径" : "Copy full path"; activated => { root.copy-text(root.context-file.file-path); } }
             MenuItem { title: (root.chinese ? "修复文件引用…" : "Repair file reference…") + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(20); } }
             MenuItem { title: (root.chinese ? "从素材库移除…" : "Remove from library…") + root.removal-suffix; enabled: root.removal-allowed; activated => { root.file-action(21); } }
@@ -2856,7 +2859,7 @@ export component AppWindow inherits Window {
                 Label { text: root.chinese ? "选择驱动、设备与监听声道对。更改后重新启动输出。" : "Choose the driver, device and listening pair. Changes restart output."; }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                     Label { width: 108px * Theme.ui-scale; text: root.chinese ? "驱动" : "Driver"; }
-                    settings-first := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 0 && !root.output-applying; model: ["WASAPI", "ASIO"]; current-index <=> root.backend-index; selected => { if (root.backend-index == 0) { root.rate-index = 0; } root.devices-requested(root.backend-index); } }
+                    settings-first := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 0 && !root.output-applying; model: root.audio-backend-names; current-index <=> root.backend-index; selected => { if (root.backend-index == 0) { root.rate-index = 0; } root.devices-requested(root.backend-index); } }
                 }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                     Label { width: 108px * Theme.ui-scale; text: root.chinese ? "设备" : "Device"; }
@@ -2968,7 +2971,8 @@ export component AppWindow inherits Window {
                 Text { text: root.chinese ? "为声音设计师打造的 WAV / BWF 素材库。\nSQLite FTS5 搜索、Metadata 整理与低延迟试听。" : "A WAV / BWF library for sound designers.\nSQLite FTS5 search, Metadata editing and low-latency audition."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: "Made with Slint\nhttps://slint.dev"; color: Theme.ink; font-size: Theme.font(13); }
                 Label { text: "Slint © SixtyFPS GmbH · Third-party notices ship with the application."; wrap: word-wrap; }
-                Action { height: 34px * Theme.ui-scale; label: root.chinese ? "检查软件更新" : "Check for updates"; clicked => { root.about-visible = false; root.update-visible = true; root.update-check-requested(); } }
+                if root.update-supported: Action { height: 34px * Theme.ui-scale; label: root.chinese ? "检查软件更新" : "Check for updates"; clicked => { root.about-visible = false; root.update-visible = true; root.update-check-requested(); } }
+                if !root.update-supported: Label { text: root.chinese ? "请从 GitHub Releases 下载新版 Mac 客户端，关闭应用后替换。" : "Download new Mac clients from GitHub Releases. Close the app before replacing it."; wrap: word-wrap; }
                 about-first := Action { height: 34px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.about-visible = false; } }
             }
         }
@@ -3795,7 +3799,8 @@ export component AppWindow inherits Window {
         capture-key-pressed(event) => {
             if event.text == Key.Escape { root.update-visible = false; return accept; }
             if event.text == Key.Tab || event.text == Key.Backtab {
-                if update-later.has-focus { update-check.focus(); }
+                if !root.update-supported { update-later.focus(); }
+                else if update-later.has-focus { update-check.focus(); }
                 else if update-check.has-focus && root.update-available && !root.update-busy { update-install.focus(); }
                 else { update-later.focus(); }
                 return accept;
@@ -3811,12 +3816,12 @@ export component AppWindow inherits Window {
                     Text { text: root.chinese ? "软件更新" : "Software update"; color: Theme.ink; font-size: Theme.font(22); }
                     Label { text: root.update-available ? root.app-version + " → " + root.update-version : root.app-version; color: Theme.accent; }
                     Label { text: root.update-message; wrap: char-wrap; vertical-stretch: 1; }
-                    Label { text: root.chinese ? "确认后下载并校验，保存更改后自动安装并重启。音效库与设置会保留。" : "Download and verify, then save changes, install and restart. Your libraries and preferences are retained."; wrap: word-wrap; }
+                    if root.update-supported: Label { text: root.chinese ? "确认后下载并校验，保存更改后自动安装并重启。音效库与设置会保留。" : "Download and verify, then save changes, install and restart. Your libraries and preferences are retained."; wrap: word-wrap; }
                     HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                         update-later := Action { width: 88px * Theme.ui-scale; label: root.chinese ? "稍后" : "Later"; clicked => { root.update-visible = false; } }
-                        update-check := Action { width: 128px * Theme.ui-scale; enabled: root.update-enabled && !root.update-busy; label: root.chinese ? "重新检查" : "Check again"; clicked => { root.update-check-requested(); } }
+                        update-check := Action { visible: root.update-supported; width: root.update-supported ? 128px * Theme.ui-scale : 0px; enabled: root.update-enabled && !root.update-busy; label: root.chinese ? "重新检查" : "Check again"; clicked => { root.update-check-requested(); } }
                         Rectangle { horizontal-stretch: 1; }
-                        update-install := Action { width: 190px * Theme.ui-scale; primary: true; enabled: root.update-enabled && root.update-available && !root.update-busy && !root.library-busy && !root.closing; label: root.chinese ? "下载、安装并重启" : "Download, install & restart"; clicked => { root.update-install-requested(); } }
+                        update-install := Action { visible: root.update-supported; width: root.update-supported ? 190px * Theme.ui-scale : 0px; primary: true; enabled: root.update-enabled && root.update-available && !root.update-busy && !root.library-busy && !root.closing; label: root.chinese ? "下载、安装并重启" : "Download, install & restart"; clicked => { root.update-install-requested(); } }
                     }
                 }
             }

@@ -598,16 +598,37 @@ impl AppConfig {
         Self::load_in(Self::default_root()?)
     }
 
-    /// The user data root: `AUDIOLIB_DATA_DIR`, else `%LOCALAPPDATA%/AudioLibExplorer/v1`.
+    /// Resolve the per-user root, preserving an explicit `AUDIOLIB_DATA_DIR`.
+    /// macOS uses `~/Library/Application Support/AudioLibExplorer/v1`, or the
+    /// sibling `beta` directory for a validated beta/rc package. A beta package
+    /// also respects `AUDIOLIB_BETA_DATA_DIR`. Windows retains
+    /// `%LOCALAPPDATA%/AudioLibExplorer/v1`. Unpublished macOS development
+    /// data under `.audiolib-user` is never moved or deleted; select it explicitly
+    /// with `AUDIOLIB_DATA_DIR` to continue using that directory.
     pub fn default_root() -> Result<PathBuf> {
-        Ok(
-            if let Some(override_path) = std::env::var_os("AUDIOLIB_DATA_DIR") {
-                PathBuf::from(override_path)
-            } else if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                PathBuf::from(local).join("AudioLibExplorer").join("v1")
-            } else {
-                std::env::current_dir()?.join(".audiolib-user")
-            },
+        let override_root = std::env::var_os("AUDIOLIB_DATA_DIR").map(PathBuf::from);
+        #[cfg(target_os = "macos")]
+        if override_root.is_none() {
+            let executable = std::env::current_exe()?;
+            let directory = executable
+                .parent()
+                .ok_or_else(|| Error::Validation("Cannot locate macOS package metadata".into()))?;
+            let channel = read_macos_package_marker(&directory.join("update-channel.txt"))?;
+            let version = read_macos_package_marker(&directory.join("update-version.txt"))?;
+            return macos_root_with_metadata(
+                std::env::var_os("HOME").map(PathBuf::from),
+                std::env::var_os("AUDIOLIB_BETA_DATA_DIR").map(PathBuf::from),
+                channel.as_deref(),
+                version.as_deref(),
+                env!("CARGO_PKG_VERSION"),
+            );
+        }
+        default_root_with_paths(
+            override_root,
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            std::env::var_os("HOME").map(PathBuf::from),
+            cfg!(target_os = "macos"),
+            || Ok(std::env::current_dir()?),
         )
     }
 
@@ -867,9 +888,263 @@ impl AppConfig {
     }
 }
 
+fn default_root_with_paths(
+    override_root: Option<PathBuf>,
+    local_root: Option<PathBuf>,
+    home: Option<PathBuf>,
+    macos: bool,
+    current_dir: impl FnOnce() -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(root) = override_root {
+        return Ok(root);
+    }
+    if macos {
+        return Ok(macos_user_root(home)?.join("v1"));
+    }
+    if let Some(root) = local_root {
+        return Ok(root.join("AudioLibExplorer").join("v1"));
+    }
+    Ok(current_dir()?.join(".audiolib-user"))
+}
+
+fn macos_user_root(home: Option<PathBuf>) -> Result<PathBuf> {
+    let home = home.filter(|path| path.is_absolute()).ok_or_else(|| {
+        Error::Validation("macOS requires an absolute HOME or AUDIOLIB_DATA_DIR".into())
+    })?;
+    Ok(home
+        .join("Library")
+        .join("Application Support")
+        .join("AudioLibExplorer"))
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_package_marker(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_root_with_metadata(
+    home: Option<PathBuf>,
+    beta_override: Option<PathBuf>,
+    channel: Option<&str>,
+    installed_version: Option<&str>,
+    binary_version: &str,
+) -> Result<PathBuf> {
+    let beta = macos_package_uses_beta(channel, installed_version, binary_version)?;
+    if beta && let Some(root) = beta_override {
+        return Ok(root);
+    }
+    Ok(macos_user_root(home)?.join(if beta { "beta" } else { "v1" }))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_package_uses_beta(
+    channel: Option<&str>,
+    installed_version: Option<&str>,
+    binary_version: &str,
+) -> Result<bool> {
+    let invalid =
+        || Error::Validation("Invalid or mismatched macOS package channel/version metadata".into());
+    let (channel, installed_version) = match (channel, installed_version) {
+        (None, None) => return Ok(false),
+        (Some(channel), Some(version)) => (channel.trim(), version.trim()),
+        _ => return Err(invalid()),
+    };
+    let installed = semver::Version::parse(installed_version).map_err(|_| invalid())?;
+    let binary = semver::Version::parse(binary_version).map_err(|_| invalid())?;
+    if (installed.major, installed.minor, installed.patch)
+        != (binary.major, binary.minor, binary.patch)
+        || !installed.build.is_empty()
+    {
+        return Err(invalid());
+    }
+    let prerelease = installed.pre.as_str();
+    let candidate_number = prerelease
+        .strip_prefix("beta.")
+        .or_else(|| prerelease.strip_prefix("rc."));
+    match channel {
+        "stable" if prerelease.is_empty() => Ok(false),
+        "beta"
+            if candidate_number.is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+            }) =>
+        {
+            Ok(true)
+        }
+        _ => Err(invalid()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_data_root_wins_without_resolving_home_or_working_directory() {
+        let explicit = PathBuf::from("existing data ");
+        for macos in [false, true] {
+            assert_eq!(
+                default_root_with_paths(
+                    Some(explicit.clone()),
+                    Some(PathBuf::from("other")),
+                    None,
+                    macos,
+                    || panic!("explicit data root must not resolve cwd"),
+                )
+                .unwrap(),
+                explicit
+            );
+        }
+    }
+
+    #[test]
+    fn macos_data_root_is_per_user_and_independent_of_windows_or_working_directory() {
+        let home = std::env::temp_dir().join("owned-home");
+        let resolved = default_root_with_paths(
+            None,
+            Some(home.join("windows-local")),
+            Some(home.clone()),
+            true,
+            || panic!("macOS data must not depend on cwd"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            home.join("Library/Application Support/AudioLibExplorer/v1")
+        );
+        for invalid_home in [None, Some(PathBuf::from("relative-home"))] {
+            assert!(
+                default_root_with_paths(None, None, invalid_home, true, || {
+                    panic!("missing HOME must not select cwd")
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn other_platform_data_roots_retain_localappdata_and_cwd_fallback() {
+        let root = PathBuf::from("existing-local");
+        assert_eq!(
+            default_root_with_paths(None, Some(root.clone()), None, false, || {
+                panic!("LOCALAPPDATA must not resolve cwd")
+            })
+            .unwrap(),
+            root.join("AudioLibExplorer/v1")
+        );
+        assert_eq!(
+            default_root_with_paths(None, None, None, false, || Ok(root.clone())).unwrap(),
+            root.join(".audiolib-user")
+        );
+    }
+
+    #[test]
+    fn macos_package_metadata_selects_only_matching_stable_beta_or_rc_channels() {
+        for (channel, version, beta) in [
+            (None, None, false),
+            (Some("stable\n"), Some("0.8.3\n"), false),
+            (Some("beta\r\n"), Some("0.8.3-beta.1\r\n"), true),
+            (Some("beta"), Some("0.8.3-beta.0"), true),
+            (Some("beta"), Some("0.8.3-rc.12"), true),
+        ] {
+            assert_eq!(
+                macos_package_uses_beta(channel, version, "0.8.3").unwrap(),
+                beta
+            );
+        }
+    }
+
+    #[test]
+    fn macos_package_metadata_rejects_partial_malformed_and_mismatched_markers() {
+        for (channel, version) in [
+            (Some("beta"), None),
+            (None, Some("0.8.3-beta.1")),
+            (Some(""), Some("0.8.3")),
+            (Some("beta"), Some("")),
+            (Some("Beta"), Some("0.8.3-beta.1")),
+            (Some("stable"), Some("0.8.3-beta.1")),
+            (Some("stable"), Some("0.8.3-rc.1")),
+            (Some("beta"), Some("0.8.3")),
+            (Some("beta"), Some("0.8.3-0")),
+            (Some("beta"), Some("0.8.3-alpha.1")),
+            (Some("beta"), Some("0.8.3-beta.01")),
+            (Some("beta"), Some("0.8.3-rc.1.extra")),
+            (Some("beta"), Some("0.8.3-beta.1+other")),
+            (Some("stable"), Some("0.8.3+other")),
+            (Some("beta"), Some("v0.8.3-beta.1")),
+            (Some("beta"), Some("0.8.2-beta.1")),
+            (Some("stable"), Some("0.8.4")),
+            (Some("beta\nstable"), Some("0.8.3-beta.1")),
+            (Some("stable"), Some("not-a-version")),
+        ] {
+            assert!(
+                macos_package_uses_beta(channel, version, "0.8.3").is_err(),
+                "accepted {channel:?} / {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_beta_and_rc_data_roots_are_isolated_from_stable() {
+        let home = std::env::temp_dir().join("owned-home");
+        let application = home.join("Library/Application Support/AudioLibExplorer");
+        for version in ["0.8.3-beta.1", "0.8.3-rc.2"] {
+            assert_eq!(
+                macos_root_with_metadata(
+                    Some(home.clone()),
+                    None,
+                    Some("beta"),
+                    Some(version),
+                    "0.8.3",
+                )
+                .unwrap(),
+                application.join("beta")
+            );
+        }
+        let beta_override = PathBuf::from("existing-beta-data ");
+        assert_eq!(
+            macos_root_with_metadata(
+                None,
+                Some(beta_override.clone()),
+                Some("beta"),
+                Some("0.8.3-rc.2"),
+                "0.8.3",
+            )
+            .unwrap(),
+            beta_override
+        );
+        for (channel, version) in [(None, None), (Some("stable"), Some("0.8.3"))] {
+            assert_eq!(
+                macos_root_with_metadata(
+                    Some(home.clone()),
+                    Some(beta_override.clone()),
+                    channel,
+                    version,
+                    "0.8.3",
+                )
+                .unwrap(),
+                application.join("v1")
+            );
+        }
+    }
+
+    #[test]
+    fn macos_invalid_package_metadata_cannot_select_even_an_explicit_beta_root() {
+        assert!(
+            macos_root_with_metadata(
+                None,
+                Some(PathBuf::from("existing-beta-data")),
+                Some("beta"),
+                Some("0.8.2-beta.1"),
+                "0.8.3",
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn artwork_preference_defaults_for_old_settings_and_round_trips_explicit_choices() {
