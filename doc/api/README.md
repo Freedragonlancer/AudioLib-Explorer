@@ -777,6 +777,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
 | `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（库已打开但 `waveforms.db` 无法打开时也不声明，§9.5.7） |
 | `compatibility.features.album_artwork` | 可选 feature，修订 ≥ 1 表示支持 §8.2 的 `GET /audio/{id}/artwork`。键名就是 `album_artwork`。旧服务端没有该键（或修订不同）时客户端不要请求封面；缺失只关闭这一功能，不拒绝同步 |
+| `compatibility.features.album_folder_artwork` | 可选 API feature，修订 1 表示 `/albums/{id}/artwork` 支持 `folder_id` 或 `unassigned_directory` 的直属目录过滤及身份回显；不改变数据库格式、schema 或迁移要求 |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
@@ -908,7 +909,11 @@ schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组�
 - 新能力 `compatibility.features.album_entity_artwork >= 1` 表示支持 `GET` / `HEAD /albums/{id}/artwork`。`id` 是当前原生快照的专辑 ID，不能发送旧快照本地投影的 ID。
 - 必须带单个非空 `X-AudioLib-Library-Id` 和 `X-AudioLib-Album-Namespace`。库身份或 namespace 不符、namespace 缺失/空/重复，均在读取源文件前拒绝，返回 409 `LIBRARY_CHANGED`（库身份缺失仍为 `LIBRARY_ID_REQUIRED`）。
 - 从完整专辑按音频 ID 升序选最多 64 个未缺失成员，返回第一个有效内嵌封面，与选中 WAV、搜索条件和列表页无关。
+- 可选 `folder_id` 为已有目录的有符号 64 位 ID，限制为同专辑、该**直属目录**内的未缺失成员；先过滤目录，再按音频 ID 升序取最多 64 个候选，不包含子目录。该目录无图时为 404，不回退专辑其他目录。两种目录参数都省略时仍保持原全专辑语义。整数格式错误/溢出/重复为 400 `VALIDATION`，目录不存在为 404。
+- 对历史 `folder_id=NULL` 成员，可改用 `unassigned_directory=<源父目录 identity>`；只查同专辑、NULL folder、该直属源父目录的未缺失成员，同样在 LIMIT 前过滤。与 `folder_id` 互斥，同时出现或参数重复为 400；原始与规范化字符串均最多 4096 UTF-8 字节。允许空字符串，表示平铺相对文件名的父目录，不能当成全专辑。Windows drive/UNC 路径在所有平台上按其源语法规范化（drive 根 identity 为 `c:`），POSIX 根为 `/`，保留目录 entry 大小写和 POSIX 字面反斜杠；identity 不用于 OS 路径访问，不扫描文件系统寻找目录。
+- 客户端使用目录参数前必须确认 `compatibility.features.album_folder_artwork == 1`（并具备 `album_entity_artwork == 1`）；旧服务端可能忽略未知 query，不能把旧全专辑图片当成目录结果。原生 schema 8 来源缺少此能力时明确提示升级服务端，不能降级到 `/audio` 丢失 namespace 绑定；schema 3–7 来源仍可从自有快照先按直属目录筛候选，再调用兼容 `/audio` 端点，不能发送本地投影的 album ID。
 - 200 / 304 同时返回 `X-Library-Id`、`X-Album-Id`、`X-Album-Namespace`；客户端全部核对。ETag 和缓存绑定 namespace、专辑及候选成员版本。库恢复/替换后同数字 ID 不得串图。
+- 带目录上下文的 200 / 304 必须返回单个 `X-Album-Directory-Identity`：canonical directory 的 UTF-8 字节逐个编码为**小写 hex**（最多 8192 ASCII 字符，空目录对应空值）。`folder_id` 模式取当前 `get_folder.path` 的规范化值，并另回单个 `X-Album-Folder-Id` 的规范十进制 ID；NULL 模式回请求的 canonical parent，不回 folder ID。客户端核对库、namespace、专辑、目录 hex 及存在时的 folder ID；缺失、重复或不匹配时拒绝图片和 304 缓存命中，同 namespace 同 folder ID 路径变更也不得把新图片写入旧目录缓存。ETag 和代表图缓存绑定实际目录 identity；全专辑与目录图片即便字节相同也不共用 ETag。
 - `side`、图片预算、鉴权、并发名额、条件请求和错误处理沿用下面的音频端点规则。无有效图片为 404。
 
 #### 兼容 `GET /audio/{id}/artwork`

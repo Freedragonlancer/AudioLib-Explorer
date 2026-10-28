@@ -38,6 +38,31 @@ const JPEG_QUALITY: u8 = 85;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ALBUM_CHOICES: usize = 128;
 
+#[derive(Clone, Copy)]
+enum AlbumDirectory<'a> {
+    Global,
+    Folder(i64),
+    Unassigned(&'a str),
+}
+
+/// Representation and the actual canonical directory observed by the resolver.
+pub(crate) struct AlbumArtworkReply {
+    /// Encoded pixels or a conditional representation hit.
+    pub reply: ArtworkReply,
+    /// Canonical source parent; absent only for the original global endpoint.
+    pub directory_identity: Option<String>,
+}
+
+/// ASCII-safe wire encoding of an already canonical source directory identity.
+pub(crate) fn directory_identity_hex(directory: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(directory.len() * 2);
+    for byte in directory.bytes() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 /// A resolved album source is shared across member selections and image sizes.
 struct AlbumChoice {
     key: String,
@@ -54,18 +79,30 @@ fn album_reply(
     library_id: &str,
     namespace: &str,
     album_id: i64,
+    directory: AlbumDirectory<'_>,
+    directory_identity: Option<&str>,
 ) -> ArtworkReply {
     let library = fnv64(format!("{library_id}\0{namespace}").as_bytes());
+    let context = match directory {
+        AlbumDirectory::Global => String::new(),
+        AlbumDirectory::Folder(id) => format!(
+            "folder-{id}-directory-{:016x}-",
+            fnv64(directory_identity.unwrap_or_default().as_bytes())
+        ),
+        AlbumDirectory::Unassigned(identity) => {
+            format!("directory-{:016x}-", fnv64(identity.as_bytes()))
+        }
+    };
     match reply {
         ArtworkReply::NotModified { etag } => ArtworkReply::NotModified {
             etag: format!(
-                "\"album1-{library:x}-{album_id}-{}\"",
+                "\"album1-{library:x}-{album_id}-{context}{}\"",
                 etag.trim_matches('"')
             ),
         },
         ArtworkReply::Body { etag, mime, bytes } => ArtworkReply::Body {
             etag: format!(
-                "\"album1-{library:x}-{album_id}-{}\"",
+                "\"album1-{library:x}-{album_id}-{context}{}\"",
                 etag.trim_matches('"')
             ),
             mime,
@@ -132,10 +169,104 @@ impl AppState {
         cancel: &Arc<AtomicBool>,
         progress: &OpenProgress,
     ) -> Result<ArtworkReply, OpenError> {
+        self.album_artwork_context(
+            album_id,
+            AlbumDirectory::Global,
+            side,
+            if_none_match,
+            cancel,
+            progress,
+        )
+        .map(|resolved| resolved.reply)
+    }
+
+    /// Resolve only direct members of an existing folder, before the candidate
+    /// limit. An uncovered folder never borrows another folder's album image.
+    pub(crate) fn album_artwork_in_folder(
+        &self,
+        album_id: i64,
+        folder_id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<AlbumArtworkReply, OpenError> {
+        self.album_artwork_context(
+            album_id,
+            AlbumDirectory::Folder(folder_id),
+            side,
+            if_none_match,
+            cancel,
+            progress,
+        )
+    }
+
+    /// Resolve only NULL-folder members with this canonical source parent identity.
+    /// Directory identities are compared as strings and never accessed as OS paths.
+    pub(crate) fn album_artwork_in_unassigned_directory(
+        &self,
+        album_id: i64,
+        directory: &str,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<AlbumArtworkReply, OpenError> {
+        self.album_artwork_context(
+            album_id,
+            AlbumDirectory::Unassigned(directory),
+            side,
+            if_none_match,
+            cancel,
+            progress,
+        )
+    }
+
+    fn album_artwork_context(
+        &self,
+        album_id: i64,
+        directory: AlbumDirectory<'_>,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<AlbumArtworkReply, OpenError> {
         self.provider().get_album(album_id)?;
-        let members = self
-            .provider()
-            .album_members(album_id, MAX_ALBUM_MEMBERS, cancel.clone())?;
+        let (members, directory_identity) = match directory {
+            AlbumDirectory::Folder(folder_id) => {
+                let folder = self.provider().get_folder(folder_id)?;
+                let identity = audiolib_db::normalize_source_path_identity(&folder.path);
+                if identity.len() > 4096 {
+                    return Err(Error::Validation(
+                        "Canonical directory exceeds 4096 UTF-8 bytes".into(),
+                    )
+                    .into());
+                }
+                (
+                    self.provider().album_members_in_folder(
+                        album_id,
+                        folder_id,
+                        MAX_ALBUM_MEMBERS,
+                        cancel.clone(),
+                    )?,
+                    Some(identity),
+                )
+            }
+            AlbumDirectory::Unassigned(identity) => (
+                self.provider().album_members_in_unassigned_directory(
+                    album_id,
+                    identity,
+                    MAX_ALBUM_MEMBERS,
+                    cancel.clone(),
+                )?,
+                Some(identity.to_owned()),
+            ),
+            AlbumDirectory::Global => (
+                self.provider()
+                    .album_members(album_id, MAX_ALBUM_MEMBERS, cancel.clone())?,
+                None,
+            ),
+        };
         let namespace = self.provider().album_namespace();
         let mut material = format!(
             "{}\0{namespace}\0{}\0{album_id}\0{}",
@@ -143,8 +274,20 @@ impl AppState {
             self.provider().database_path().display(),
             self.revision()?.revision
         );
+        use std::fmt::Write as _;
+        match directory {
+            AlbumDirectory::Global => {}
+            AlbumDirectory::Folder(id) => {
+                let _ = write!(material, "\0folder:{id}");
+            }
+            AlbumDirectory::Unassigned(identity) => {
+                let _ = write!(material, "\0directory:{}:{identity}", identity.len());
+            }
+        }
+        if let Some(identity) = &directory_identity {
+            let _ = write!(material, "\0actual-directory:{}:{identity}", identity.len());
+        }
         for member in &members {
-            use std::fmt::Write as _;
             let _ = write!(
                 material,
                 "\0{}:{}:{}",
@@ -174,8 +317,30 @@ impl AppState {
             }
             match self.artwork(audio_id, side, None, progress) {
                 Ok(reply) => {
-                    if self.provider().get_audio(audio_id)?.album_id != Some(album_id) {
+                    let current = self.provider().get_audio(audio_id)?;
+                    let same_directory = match directory {
+                        AlbumDirectory::Global => true,
+                        AlbumDirectory::Folder(id) => current.folder_id == Some(id),
+                        AlbumDirectory::Unassigned(identity) => {
+                            current.folder_id.is_none()
+                                && audiolib_db::source_parent_path_identity(&current.file_path)
+                                    == identity
+                        }
+                    };
+                    if current.album_id != Some(album_id) || !same_directory {
                         continue;
+                    }
+                    if let AlbumDirectory::Folder(id) = directory {
+                        let current_folder = self.provider().get_folder(id)?;
+                        if Some(audiolib_db::normalize_source_path_identity(
+                            &current_folder.path,
+                        )) != directory_identity
+                        {
+                            return Err(Error::Validation(
+                                "Artwork directory changed during resolution; retry".into(),
+                            )
+                            .into());
+                        }
                     }
                     let mut choices = album_choices()
                         .lock()
@@ -186,17 +351,29 @@ impl AppState {
                         choices.pop_front();
                     }
                     drop(choices);
-                    let reply = album_reply(reply, self.library_id(), &namespace, album_id);
+                    let reply = album_reply(
+                        reply,
+                        self.library_id(),
+                        &namespace,
+                        album_id,
+                        directory,
+                        directory_identity.as_deref(),
+                    );
                     let etag = match &reply {
                         ArtworkReply::NotModified { etag } | ArtworkReply::Body { etag, .. } => {
                             etag
                         }
                     };
-                    return if if_none_match.is_some_and(|value| stream::none_match(value, etag)) {
-                        Ok(ArtworkReply::NotModified { etag: etag.clone() })
-                    } else {
-                        Ok(reply)
-                    };
+                    let reply =
+                        if if_none_match.is_some_and(|value| stream::none_match(value, etag)) {
+                            ArtworkReply::NotModified { etag: etag.clone() }
+                        } else {
+                            reply
+                        };
+                    return Ok(AlbumArtworkReply {
+                        reply,
+                        directory_identity,
+                    });
                 }
                 Err(OpenError::Library(Error::NotFound(_))) => {}
                 Err(error) => return Err(error),

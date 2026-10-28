@@ -604,6 +604,36 @@ pub trait DataProvider: Send + Sync {
             "This provider has no shared album entities".into(),
         ))
     }
+    /// Present members in exactly one indexed parent directory, ordered by audio ID.
+    /// The positive album ID and limit `1..=64` are validated; folder IDs retain
+    /// the full signed range accepted by `get_folder`. This never includes child
+    /// directories or falls back to members elsewhere in the shared album.
+    fn album_members_in_folder(
+        &self,
+        _id: i64,
+        _folder_id: i64,
+        _limit: usize,
+        _cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<AudioFile>> {
+        Err(Error::Validation(
+            "This provider cannot resolve album members within a directory".into(),
+        ))
+    }
+    /// Present unassigned members whose source path has exactly this parent directory.
+    /// Only records without a folder ID are eligible. Directory identities use source
+    /// path syntax, accept an empty parent for a relative filename, and are bounded
+    /// to 4096 UTF-8 bytes. Results are ordered by audio ID and limited to `1..=64`.
+    fn album_members_in_unassigned_directory(
+        &self,
+        _id: i64,
+        _directory: &str,
+        _limit: usize,
+        _cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<AudioFile>> {
+        Err(Error::Validation(
+            "This provider cannot resolve unassigned album members within a directory".into(),
+        ))
+    }
     /// Paginate all member identities, including missing records, for local preferences.
     /// IDs are strictly ascending and the page limit is 1..=4096.
     fn album_member_ids(

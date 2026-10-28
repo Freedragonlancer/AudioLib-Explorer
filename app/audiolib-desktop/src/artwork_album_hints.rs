@@ -1,5 +1,5 @@
 // app/audiolib-desktop/src/artwork_album_hints.rs
-//! Bounded shared-entity cache hints, independent of the selected member WAV.
+//! Bounded album sidebar hints retain their directory and source context.
 use super::*;
 
 const MAX_ALBUM_HINTS: usize = 128;
@@ -13,7 +13,7 @@ struct AlbumScope {
 struct AlbumHint {
     scope: AlbumScope,
     album_id: i64,
-    cache_path: PathBuf,
+    folder: ArtworkFolderContext,
 }
 #[derive(Default)]
 pub(super) struct ArtworkAlbumHints {
@@ -56,9 +56,6 @@ impl Controller {
         let Some(scope) = self.artwork_album_scope(&provider) else {
             return;
         };
-        let Some(cache_path) = self.album_cached_artwork_path(album) else {
-            return;
-        };
         if scope.source_generation == job.source_generation && self.artwork_current(job) {
             self.artwork_album_hints
                 .lock()
@@ -66,28 +63,36 @@ impl Controller {
                 .remember(AlbumHint {
                     scope,
                     album_id: album.id,
-                    cache_path,
+                    folder: job.folder.clone(),
                 });
         }
     }
     /// Only cached shared pixels are resolved; source WAVs are never touched here.
-    pub(super) fn hinted_album_artwork(
+    pub(super) fn hinted_album_context(
         &self,
         provider: &SqliteProvider,
         album: &Album,
-    ) -> Option<PathBuf> {
+    ) -> Option<ArtworkFolderContext> {
         let scope = self.artwork_album_scope(provider)?;
-        let expected = self.album_cached_artwork_path(album)?;
-        self.artwork_album_hints
+        let hint = self
+            .artwork_album_hints
             .lock()
             .unwrap()
             .hints
             .iter()
             .rev()
-            .find(|hint| {
-                hint.scope == scope && hint.album_id == album.id && hint.cache_path == expected
-            })
-            .map(|hint| hint.cache_path.clone())
+            .find(|hint| hint.scope == scope && hint.album_id == album.id)
+            .cloned()?;
+        if hint.folder.namespace != provider.album_namespace() {
+            return None;
+        }
+        if let Some(id) = hint.folder.folder_id {
+            let folder = provider.get_folder(id).ok()?;
+            if audiolib_db::normalize_source_path_identity(&folder.path) != hint.folder.path {
+                return None;
+            }
+        }
+        Some(hint.folder)
     }
 }
 #[cfg(test)]
@@ -105,20 +110,21 @@ mod tests {
             hints.remember(AlbumHint {
                 scope: scope.clone(),
                 album_id: index as i64,
-                cache_path: format!("{index}.png").into(),
+                folder: ArtworkFolderContext {
+                    folder_id: None,
+                    path: index.to_string(),
+                    namespace: scope.namespace.clone(),
+                },
             });
         }
         assert_eq!(hints.hints.len(), MAX_ALBUM_HINTS);
         assert!(!hints.hints.iter().any(|hint| hint.album_id == 0));
         let mut replacement = hints.hints.front().unwrap().clone();
-        replacement.cache_path = "new-pixels.png".into();
+        replacement.folder.path = "new-directory".into();
         let id = replacement.album_id;
         hints.remember(replacement);
         assert_eq!(hints.hints.len(), MAX_ALBUM_HINTS);
-        assert_eq!(
-            hints.hints.back().unwrap().cache_path,
-            PathBuf::from("new-pixels.png")
-        );
+        assert_eq!(hints.hints.back().unwrap().folder.path, "new-directory");
         assert_eq!(
             hints
                 .hints

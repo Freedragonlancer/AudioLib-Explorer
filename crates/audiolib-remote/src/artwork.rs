@@ -7,6 +7,54 @@ use std::{sync::atomic::AtomicBool, time::Duration};
 pub const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
 const ARTWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn canonical_artwork_directory(directory: &str) -> Result<String> {
+    if directory.len() > 4096 {
+        return Err(RemoteError::Validation(
+            "Source directory exceeds 4096 UTF-8 bytes".into(),
+        ));
+    }
+    let canonical = audiolib_db::normalize_source_path_identity(directory);
+    if canonical.len() > 4096 {
+        return Err(RemoteError::Validation(
+            "Canonical source directory exceeds 4096 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn directory_identity_hex(directory: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(directory.len() * 2);
+    for byte in directory.bytes() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn directory_query(directory: &str) -> String {
+    use std::fmt::Write as _;
+    let mut query = String::new();
+    for byte in directory.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            query.push(char::from(byte));
+        } else {
+            let _ = write!(query, "%{byte:02X}");
+        }
+    }
+    query
+}
+
+fn native_album_source(state: &crate::CacheState) -> bool {
+    state
+        .format
+        .as_ref()
+        .and_then(|format| format.source.as_ref())
+        .map_or(state.schema_version, |source| {
+            i64::from(source.schema_version)
+        })
+        >= 8
+}
+
 /// An optional image response; decoding remains on the caller's image worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtworkReply {
@@ -23,6 +71,17 @@ pub enum ArtworkReply {
 }
 
 impl Capabilities {
+    /// Indexed-folder and NULL-source-parent semantics need this explicit API capability.
+    pub fn album_folder_artwork_usable(&self) -> bool {
+        self.album_entity_artwork_usable()
+            && self.compatibility.as_ref().is_some_and(|manifest| {
+                manifest
+                    .features
+                    .get(audiolib_core::compatibility::ALBUM_FOLDER_ARTWORK_FEATURE)
+                    == Some(&audiolib_core::compatibility::ALBUM_FOLDER_ARTWORK_REVISION)
+            })
+    }
+
     /// A shared album representation is separate from the historical WAV endpoint.
     pub fn album_entity_artwork_usable(&self) -> bool {
         self.supported
@@ -63,7 +122,7 @@ impl RemoteClient {
         if_none_match: Option<&str>,
         cancel: &AtomicBool,
     ) -> Result<ArtworkReply> {
-        self.artwork_request(None, None, id, side, if_none_match, cancel)
+        self.artwork_request(None, None, None, None, id, side, if_none_match, cancel)
     }
 
     /// Read a snapshot record's cover with an atomic server-side library identity check.
@@ -81,7 +140,16 @@ impl RemoteClient {
                 "Invalid cached library identity".into(),
             ));
         }
-        self.artwork_request(Some(library_id), None, id, side, if_none_match, cancel)
+        self.artwork_request(
+            Some(library_id),
+            None,
+            None,
+            None,
+            id,
+            side,
+            if_none_match,
+            cancel,
+        )
     }
 
     /// Read a server-authoritative album and verify its library, namespace and ID.
@@ -108,7 +176,209 @@ impl RemoteClient {
         self.artwork_request(
             Some(library_id),
             Some(expected_namespace),
+            None,
+            None,
             album_id,
+            side,
+            if_none_match,
+            cancel,
+        )
+    }
+
+    /// Read only a native album's direct folder members. Callers first negotiate
+    /// [`Capabilities::album_folder_artwork_usable`]; both 200 and 304 must repeat
+    /// the exact folder identity, so an old server ignoring the query is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn album_artwork_in_folder_for_library(
+        &self,
+        library_id: &str,
+        expected_namespace: &str,
+        album_id: i64,
+        folder_id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if album_id <= 0
+            || library_id.trim().is_empty()
+            || expected_namespace.trim().is_empty()
+            || ureq::http::HeaderValue::from_str(library_id).is_err()
+            || ureq::http::HeaderValue::from_str(expected_namespace).is_err()
+        {
+            return Err(RemoteError::Validation(
+                "Invalid album or library identity".into(),
+            ));
+        }
+        self.artwork_request(
+            Some(library_id),
+            Some(expected_namespace),
+            Some(folder_id),
+            None,
+            album_id,
+            side,
+            if_none_match,
+            cancel,
+        )
+    }
+
+    /// Read NULL-folder members of one canonical source parent, including the
+    /// empty parent of a flat relative filename. Both successful status codes
+    /// must repeat its lowercase UTF-8 hex identity; no filesystem lookup occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn album_artwork_in_unassigned_directory_for_library(
+        &self,
+        library_id: &str,
+        expected_namespace: &str,
+        album_id: i64,
+        directory: &str,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        self.album_artwork_bound_directory_for_library(
+            library_id,
+            expected_namespace,
+            album_id,
+            None,
+            directory,
+            side,
+            if_none_match,
+            cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn album_artwork_bound_directory_for_library(
+        &self,
+        library_id: &str,
+        expected_namespace: &str,
+        album_id: i64,
+        folder_id: Option<i64>,
+        directory: &str,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if album_id <= 0
+            || library_id.trim().is_empty()
+            || expected_namespace.trim().is_empty()
+            || ureq::http::HeaderValue::from_str(library_id).is_err()
+            || ureq::http::HeaderValue::from_str(expected_namespace).is_err()
+        {
+            return Err(RemoteError::Validation(
+                "Invalid album or library identity".into(),
+            ));
+        }
+        let directory = canonical_artwork_directory(directory)?;
+        self.artwork_request(
+            Some(library_id),
+            Some(expected_namespace),
+            folder_id,
+            Some(&directory),
+            album_id,
+            side,
+            if_none_match,
+            cancel,
+        )
+    }
+
+    /// Unified selected-directory resolver. Numeric folder IDs remain native
+    /// server identities; NULL-folder members use a normalized source parent.
+    /// Legacy sources receive only the prefiltered bounded audio IDs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn album_artwork_in_directory_for_snapshot(
+        &self,
+        state: &crate::CacheState,
+        capabilities: &Capabilities,
+        expected_namespace: &str,
+        album_id: i64,
+        folder_id: Option<i64>,
+        directory: &str,
+        member_ids: &[i64],
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
+        if member_ids.len() > audiolib_core::MAX_ALBUM_MEMBERS {
+            return Err(RemoteError::Validation(
+                "Too many album artwork candidates".into(),
+            ));
+        }
+        if native_album_source(state) {
+            if !capabilities.album_folder_artwork_usable() {
+                return Err(RemoteError::Protocol("This server does not support directory artwork; upgrade the server to display directory covers".into()));
+            }
+            return self.album_artwork_bound_directory_for_library(
+                &state.library_id,
+                expected_namespace,
+                album_id,
+                folder_id,
+                directory,
+                side,
+                if_none_match,
+                cancel,
+            );
+        }
+        self.album_artwork_for_snapshot(
+            state,
+            capabilities,
+            expected_namespace,
+            album_id,
+            member_ids,
+            side,
+            if_none_match,
+            cancel,
+        )
+    }
+
+    /// Resolve directory artwork using native IDs only for a native schema-8
+    /// source. Missing native folder capability requires a server upgrade, never
+    /// a downgrade to unbound namespace semantics. Legacy member IDs must already
+    /// be filtered by direct folder before the caller's bounded candidate limit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn album_artwork_in_folder_for_snapshot(
+        &self,
+        state: &crate::CacheState,
+        capabilities: &Capabilities,
+        expected_namespace: &str,
+        album_id: i64,
+        folder_id: i64,
+        member_ids: &[i64],
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ArtworkReply> {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
+        if member_ids.len() > audiolib_core::MAX_ALBUM_MEMBERS {
+            return Err(RemoteError::Validation(
+                "Too many album artwork candidates".into(),
+            ));
+        }
+        if native_album_source(state) {
+            if !capabilities.album_folder_artwork_usable() {
+                return Err(RemoteError::Protocol("This server does not support folder artwork; upgrade the server to display directory covers".into()));
+            }
+            return self.album_artwork_in_folder_for_library(
+                &state.library_id,
+                expected_namespace,
+                album_id,
+                folder_id,
+                side,
+                if_none_match,
+                cancel,
+            );
+        }
+        self.album_artwork_for_snapshot(
+            state,
+            capabilities,
+            expected_namespace,
+            album_id,
+            member_ids,
             side,
             if_none_match,
             cancel,
@@ -176,6 +446,8 @@ impl RemoteClient {
         &self,
         library_id: Option<&str>,
         expected_namespace: Option<&str>,
+        expected_folder: Option<i64>,
+        expected_directory: Option<&str>,
         id: i64,
         side: Option<u32>,
         if_none_match: Option<&str>,
@@ -191,13 +463,29 @@ impl RemoteClient {
         } else {
             "audio"
         };
-        let path = match side {
-            Some(side) => format!("/{collection}/{id}/artwork?side={side}"),
-            None => format!("/{collection}/{id}/artwork"),
+        let path = if let Some(directory) = expected_directory.filter(|_| expected_folder.is_none())
+        {
+            let query = directory_query(directory);
+            match side {
+                Some(side) => {
+                    format!("/{collection}/{id}/artwork?unassigned_directory={query}&side={side}")
+                }
+                None => format!("/{collection}/{id}/artwork?unassigned_directory={query}"),
+            }
+        } else {
+            match (side, expected_folder) {
+                (Some(side), Some(folder)) => {
+                    format!("/{collection}/{id}/artwork?folder_id={folder}&side={side}")
+                }
+                (None, Some(folder)) => format!("/{collection}/{id}/artwork?folder_id={folder}"),
+                (Some(side), None) => format!("/{collection}/{id}/artwork?side={side}"),
+                (None, None) => format!("/{collection}/{id}/artwork"),
+            }
         };
         let client = self.clone();
         let library_id = library_id.map(str::to_owned);
         let expected_namespace = expected_namespace.map(str::to_owned);
+        let expected_directory = expected_directory.map(directory_identity_hex);
         let if_none_match = if_none_match.map(str::to_owned);
         crate::client::call_cancellable(
             move |abort| {
@@ -251,6 +539,30 @@ impl RemoteClient {
                             return Err(RemoteError::LibraryChanged(
                                 "Artwork does not belong to the opened album namespace".into(),
                             ));
+                        }
+                        if let Some(folder) = expected_folder {
+                            let mut folders =
+                                response.headers().get_all("x-album-folder-id").iter();
+                            let actual = folders.next().and_then(|value| value.to_str().ok());
+                            let expected = folder.to_string();
+                            if actual != Some(expected.as_str()) || folders.next().is_some() {
+                                return Err(RemoteError::LibraryChanged(
+                                    "Artwork does not belong to the requested direct folder".into(),
+                                ));
+                            }
+                        }
+                        if let Some(expected) = &expected_directory {
+                            let mut identities = response
+                                .headers()
+                                .get_all("x-album-directory-identity")
+                                .iter();
+                            let actual = identities.next().and_then(|value| value.to_str().ok());
+                            if actual != Some(expected.as_str()) || identities.next().is_some() {
+                                return Err(RemoteError::LibraryChanged(
+                                    "Artwork does not belong to the requested source directory"
+                                        .into(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -307,6 +619,10 @@ impl RemoteClient {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "folder_artwork_tests.rs"]
+mod folder_tests;
 
 #[cfg(test)]
 mod tests {

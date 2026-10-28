@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "artwork_contract_review_tests.rs"]
 mod contracts;
+#[path = "artwork_folder_context_tests.rs"]
+mod folder_context;
 #[path = "artwork_worker_review_tests.rs"]
 mod worker_review;
 
@@ -34,6 +36,7 @@ fn selected_artwork_file(fixture: &Fixture) -> AudioFile {
 fn artwork_job(controller: &Controller, file: &AudioFile) -> ArtworkJob {
     ArtworkJob {
         album: file.album_entity.clone().unwrap(),
+        folder: controller.artwork_folder_context(file),
         source_generation: controller.source_generation.load(Ordering::Acquire),
         epoch: controller.artwork_epoch.load(Ordering::Acquire),
         cancel: Arc::new(AtomicBool::new(false)),
@@ -105,12 +108,16 @@ fn child_shared_folder_cover() {
         .search(&SearchRequest::default())
         .unwrap()
         .results;
-    files.retain(|file| file.filename.starts_with("gore"));
+    let directory = audiolib_db::normalize_source_path_identity(&audiolib_db::display_path(
+        &fixture.root.join("sounds/gore").canonicalize().unwrap(),
+    ));
+    files.retain(|file| audiolib_db::source_parent_path_identity(&file.file_path) == directory);
     files.sort_by_key(|file| file.id);
     assert!(files.len() >= 2);
     let first = &files[0];
     let second = &files[1];
     assert_eq!(first.album_id, second.album_id);
+    assert_eq!(first.folder_id, second.folder_id);
     assert_eq!(first.album_entity.as_ref().unwrap().kind, AlbumKind::Folder);
     let blue = [0, 0, 255, 255];
     embedded_cover_color(Path::new(&first.file_path), blue);
@@ -123,7 +130,7 @@ fn child_shared_folder_cover() {
         assert_eq!(
             pixels.get_pixel(0, 0).0,
             blue,
-            "the first whole-album member supplies the shared cover"
+            "the first member in the same directory supplies the shared cover"
         );
     }
     assert_eq!(

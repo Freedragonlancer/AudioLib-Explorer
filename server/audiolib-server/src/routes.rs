@@ -1961,6 +1961,15 @@ struct ArtworkQuery {
     side: Option<String>,
 }
 
+/// Directory context is recognized only on the album endpoint. The historical
+/// per-audio endpoint continues to ignore unknown query parameters.
+#[derive(Deserialize)]
+struct AlbumArtworkQuery {
+    side: Option<String>,
+    folder_id: Option<i64>,
+    unassigned_directory: Option<String>,
+}
+
 /// `GET`/`HEAD /audio/{id}/artwork`: embedded JPEG/PNG cover (doc/api/README.md §8.2).
 /// Not time-limited. No cover, a missing file and a failed extract are 404.
 async fn audio_artwork(
@@ -1969,23 +1978,41 @@ async fn audio_artwork(
     query: Result<Query<ArtworkQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    artwork_response(state, raw_id, query, headers, false).await
+    artwork_response(
+        state,
+        raw_id,
+        query.map(|Query(query)| AlbumArtworkQuery {
+            side: query.side,
+            folder_id: None,
+            unassigned_directory: None,
+        }),
+        headers,
+        false,
+    )
+    .await
 }
 
 /// Album-owned cover; every member resolves the same bounded representative.
 async fn album_artwork(
     Extension(state): Extension<AppState>,
     Path(raw_id): Path<String>,
-    query: Result<Query<ArtworkQuery>, QueryRejection>,
+    query: Result<Query<AlbumArtworkQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    artwork_response(state, raw_id, query, headers, true).await
+    artwork_response(
+        state,
+        raw_id,
+        query.map(|Query(query)| query),
+        headers,
+        true,
+    )
+    .await
 }
 
 async fn artwork_response(
     state: AppState,
     raw_id: String,
-    query: Result<Query<ArtworkQuery>, QueryRejection>,
+    query: Result<AlbumArtworkQuery, QueryRejection>,
     headers: HeaderMap,
     album: bool,
 ) -> Result<Response, ApiError> {
@@ -2027,10 +2054,35 @@ async fn artwork_response(
     // The middleware's AppState clone pins this identity throughout the read.
     let library_id = header_value(state.library_id().to_owned())?;
     let id = parse_id(&raw_id)?;
-    let Query(query) = query.map_err(|rejection| {
+    let AlbumArtworkQuery {
+        side,
+        folder_id,
+        unassigned_directory,
+    } = query.map_err(|rejection| {
         ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
     })?;
-    let side = crate::artwork::parse_side(query.side.as_deref())?;
+    let side = crate::artwork::parse_side(side.as_deref())?;
+    if folder_id.is_some() && unassigned_directory.is_some() {
+        return Err(ApiError::validation(
+            "folder_id and unassigned_directory are mutually exclusive",
+        ));
+    }
+    let unassigned_directory = unassigned_directory
+        .map(|directory| {
+            if directory.len() > 4096 {
+                return Err(ApiError::validation(
+                    "unassigned_directory exceeds 4096 UTF-8 bytes",
+                ));
+            }
+            let canonical = audiolib_db::normalize_source_path_identity(&directory);
+            if canonical.len() > 4096 {
+                return Err(ApiError::validation(
+                    "Canonical directory exceeds 4096 UTF-8 bytes",
+                ));
+            }
+            Ok(canonical)
+        })
+        .transpose()?;
     let permit = ARTWORK_SLOTS
         .try_acquire()
         .map_err(|_| ApiError::fs_busy("Artwork requests are busy; retry shortly"))?;
@@ -2045,14 +2097,48 @@ async fn artwork_response(
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         if album {
-            state.album_artwork(id, side, if_none_match.as_deref(), &cancel, &reporter)
+            if let Some(folder_id) = folder_id {
+                state.album_artwork_in_folder(
+                    id,
+                    folder_id,
+                    side,
+                    if_none_match.as_deref(),
+                    &cancel,
+                    &reporter,
+                )
+            } else if let Some(directory) = unassigned_directory.as_deref() {
+                state.album_artwork_in_unassigned_directory(
+                    id,
+                    directory,
+                    side,
+                    if_none_match.as_deref(),
+                    &cancel,
+                    &reporter,
+                )
+            } else {
+                state
+                    .album_artwork(id, side, if_none_match.as_deref(), &cancel, &reporter)
+                    .map(|reply| crate::artwork::AlbumArtworkReply {
+                        reply,
+                        directory_identity: None,
+                    })
+            }
         } else {
-            state.artwork(id, side, if_none_match.as_deref(), &reporter)
+            state
+                .artwork(id, side, if_none_match.as_deref(), &reporter)
+                .map(|reply| crate::artwork::AlbumArtworkReply {
+                    reply,
+                    directory_identity: None,
+                })
         }
     });
-    let reply = watch_open(id, "Artwork", task, &progress).await?;
+    let resolved = watch_open(id, "Artwork", task, &progress).await?;
+    let directory_identity = resolved
+        .directory_identity
+        .as_deref()
+        .map(crate::artwork::directory_identity_hex);
     let cache_control = HeaderValue::from_static("private, no-cache");
-    Ok(match reply {
+    Ok(match resolved.reply {
         crate::artwork::ArtworkReply::NotModified { etag } => {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
             let headers = response.headers_mut();
@@ -2062,6 +2148,12 @@ async fn artwork_response(
             if let Some(namespace) = album_namespace {
                 headers.insert("x-album-id", HeaderValue::from(id));
                 headers.insert("x-album-namespace", namespace);
+                if let Some(folder_id) = folder_id {
+                    headers.insert("x-album-folder-id", HeaderValue::from(folder_id));
+                }
+                if let Some(identity) = directory_identity {
+                    headers.insert("x-album-directory-identity", header_value(identity)?);
+                }
             }
             response
         }
@@ -2077,6 +2169,12 @@ async fn artwork_response(
             if let Some(namespace) = album_namespace {
                 headers.insert("x-album-id", HeaderValue::from(id));
                 headers.insert("x-album-namespace", namespace);
+                if let Some(folder_id) = folder_id {
+                    headers.insert("x-album-folder-id", HeaderValue::from(folder_id));
+                }
+                if let Some(identity) = directory_identity {
+                    headers.insert("x-album-directory-identity", header_value(identity)?);
+                }
             }
             response
         }

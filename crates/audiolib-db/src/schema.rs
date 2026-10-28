@@ -576,13 +576,21 @@ fn register_metadata_storage(conn: &Connection) -> Result<()> {
     .map_err(db_error)
 }
 
-/// Register deterministic Unicode folding and tag-query functions without rewriting
-/// the stored annotations or original Metadata.
+/// Register deterministic folding, tag-query and source-path identity functions
+/// without rewriting the stored annotations or original Metadata.
 pub(crate) fn register_casefold(conn: &Connection) -> Result<()> {
     // Search-only readers register this subset, so codec functions must be available
     // before either a reader projection or a writer trigger can reference Metadata.
     register_metadata_storage(conn)?;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    // Directory queries run on the lightweight read pool as well as on writers.
+    // This identity is query-only, never persisted in a schema/index or feature map.
+    conn.create_scalar_function("audiolib_path_identity", 1, flags, |context| {
+        Ok(crate::path_identity::comparison_key(
+            &context.get::<String>(0)?,
+        ))
+    })
+    .map_err(db_error)?;
     let tags_mapper = icu_casemap::CaseMapper::new();
     conn.create_scalar_function("audiolib_user_tags_key", 1, flags, move |context| {
         let mut value = context.get::<Option<String>>(0)?.unwrap_or_default();
@@ -803,6 +811,32 @@ mod metadata_sql_tests {
             .unwrap();
         assert_eq!(restored, raw);
     }
+
+    #[test]
+    fn search_only_readers_register_source_path_identity_without_writes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA query_only=ON;").unwrap();
+        register_casefold(&conn).unwrap();
+        for path in [
+            r"C:\FX\Designed\one.wav",
+            r"\\NAS\SHARE\Designed\one.wav",
+            r"/FX/Back\Slash/one.wav",
+            "relative.wav",
+        ] {
+            let actual: String = conn
+                .query_row("SELECT audiolib_path_identity(?1)", [path], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(actual, crate::normalize_source_path_identity(path));
+        }
+        assert_eq!(conn.total_changes(), 0);
+        assert_eq!(
+            conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 }
 
 /// Whether ASCII `haystack`, folded to lowercase, contains the folded `needle`. Exactly
@@ -851,19 +885,6 @@ pub fn register_tokenizer(conn: &Connection, jieba: Arc<Jieba>) -> Result<()> {
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |context| Ok(path_key(&context.get::<String>(0)?)),
-    )
-    .map_err(db_error)?;
-    // Query-only path identity: never persisted in a schema/index or feature map.
-    // Legacy folded keys remain unchanged and only select candidate buckets.
-    conn.create_scalar_function(
-        "audiolib_path_identity",
-        1,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |context| {
-            Ok(crate::path_identity::comparison_key(
-                &context.get::<String>(0)?,
-            ))
-        },
     )
     .map_err(db_error)
 }
