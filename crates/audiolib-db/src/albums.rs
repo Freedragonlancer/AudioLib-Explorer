@@ -3,6 +3,87 @@
 use super::*;
 use audiolib_core::{Album, AlbumFacet, AlbumKind, MAX_ALBUM_MEMBERS};
 
+/// Restrict the candidate scan to one parent directory before applying the limit.
+/// The folder index orders equal folder IDs by rowid, so unrelated members of a
+/// large shared album cannot turn this into an album-wide scan. Materialization
+/// keeps full Metadata hydration limited to the selected present candidates.
+pub(crate) fn members_in_folder_sql(conn: &Connection) -> Result<String> {
+    let projection = audio_projection(conn)?;
+    Ok(format!(
+        "WITH artwork_candidates AS MATERIALIZED (
+           SELECT id FROM audio_files INDEXED BY idx_audio_files_folder
+           WHERE folder_id=?1 AND album_id=?2 AND missing=0 ORDER BY id LIMIT ?3
+         )
+         SELECT {projection} FROM artwork_candidates candidates
+         JOIN audio_files af ON af.id=candidates.id ORDER BY af.id"
+    ))
+}
+
+/// Path keys only narrow the scan; the source identity predicates preserve case
+/// and literal POSIX backslashes before the limit. Legacy NULL keys use the
+/// NULL-folder index range. Each branch needs only its first `limit` identities
+/// before merging, and full Metadata is hydrated only after the final limit.
+pub(crate) fn unassigned_directory_members_sql(
+    conn: &Connection,
+    directory: &str,
+) -> Result<String> {
+    let projection = audio_projection(conn)?;
+    let candidates = if directory.is_empty() {
+        "SELECT id FROM audio_files INDEXED BY idx_audio_files_folder
+         WHERE folder_id IS NULL AND album_id=?1 AND missing=0
+           AND length(audiolib_path_identity(file_path))>0
+           AND instr(audiolib_path_identity(file_path),'/')=0
+         ORDER BY id LIMIT ?2"
+    } else {
+        "SELECT id FROM (
+           SELECT id FROM audio_files INDEXED BY idx_audio_files_path_key
+           WHERE path_key>=?1 COLLATE BINARY AND path_key<?2 COLLATE BINARY
+             AND folder_id IS NULL AND album_id=?3 AND missing=0
+             AND substr(audiolib_path_identity(file_path),1,length(?4))=?4 COLLATE BINARY
+             AND length(audiolib_path_identity(file_path))>length(?4)
+             AND instr(substr(audiolib_path_identity(file_path),length(?4)+1),'/')=0
+           ORDER BY id LIMIT ?5
+         )
+         UNION
+         SELECT id FROM (
+           SELECT id FROM audio_files INDEXED BY idx_audio_files_folder
+           WHERE folder_id IS NULL AND path_key IS NULL AND album_id=?3 AND missing=0
+             AND substr(audiolib_path_identity(file_path),1,length(?4))=?4 COLLATE BINARY
+             AND length(audiolib_path_identity(file_path))>length(?4)
+             AND instr(substr(audiolib_path_identity(file_path),length(?4)+1),'/')=0
+           ORDER BY id LIMIT ?5
+         )
+         ORDER BY id LIMIT ?5"
+    };
+    Ok(format!(
+        "WITH artwork_candidates AS MATERIALIZED ({candidates})
+         SELECT {projection} FROM artwork_candidates candidates
+         JOIN audio_files af ON af.id=candidates.id ORDER BY af.id"
+    ))
+}
+
+fn unassigned_directory_values(id: i64, directory: &str, limit: usize) -> Vec<Value> {
+    if directory.is_empty() {
+        return vec![Value::Integer(id), Value::Integer(limit as i64)];
+    }
+    let prefix = if directory == "/" {
+        "/".to_owned()
+    } else {
+        format!("{directory}/")
+    };
+    // Match path_key's folding without dropping separators that originated from
+    // a literal POSIX backslash at the end of the directory name.
+    let index_prefix = prefix.replace('\\', "/").to_lowercase();
+    let upper = format!("{}0", index_prefix.strip_suffix('/').unwrap());
+    vec![
+        Value::Text(index_prefix),
+        Value::Text(upper),
+        Value::Integer(id),
+        Value::Text(prefix),
+        Value::Integer(limit as i64),
+    ]
+}
+
 /// Unknown SQL may expect JSON text even when it still compiles with a BLOB.
 /// Keep the whole library in text mode rather than changing those semantics.
 pub(crate) fn dependency_safe(conn: &Connection) -> Result<bool> {
@@ -538,6 +619,80 @@ impl SqliteProvider {
         let reader = self.search_reader(Some(cancel.clone()))?;
         let projection = audio_projection(&reader)?;
         let files=reader.prepare(&format!("SELECT {projection} FROM audio_files af WHERE af.album_id=?1 AND af.missing=0 ORDER BY af.id LIMIT ?2")).map_err(db_error)?.query_map(params![id,limit as i64],audio_from_row).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        Ok(files)
+    }
+    /// Present candidates from one exact WAV parent directory, in stable ID order.
+    /// Empty or unknown directories stay empty; other album members are never used.
+    pub fn album_members_in_folder(
+        &self,
+        id: i64,
+        folder_id: i64,
+        limit: usize,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<AudioFile>> {
+        if id <= 0 || limit == 0 || limit > MAX_ALBUM_MEMBERS {
+            return Err(Error::Validation(
+                "Album candidates require a positive ID and limit 1..=64".into(),
+            ));
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        let reader = self.search_reader(Some(cancel.clone()))?;
+        let files = reader
+            .prepare(&members_in_folder_sql(&reader)?)
+            .map_err(db_error)?
+            .query_map(params![folder_id, id, limit as i64], audio_from_row)
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        Ok(files)
+    }
+    /// Present members without a folder ID, restricted to one source parent path.
+    /// Directory syntax is normalized without I/O; no other directory is a fallback.
+    pub fn album_members_in_unassigned_directory(
+        &self,
+        id: i64,
+        directory: &str,
+        limit: usize,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<AudioFile>> {
+        if id <= 0
+            || limit == 0
+            || limit > MAX_ALBUM_MEMBERS
+            || directory.len() > 4096
+            || directory.contains('\0')
+        {
+            return Err(Error::Validation(
+                "Album candidates require a positive ID, limit 1..=64 and a NUL-free directory up to 4096 UTF-8 bytes".into(),
+            ));
+        }
+        let directory = normalize_source_path_identity(directory);
+        if directory.len() > 4096 {
+            return Err(Error::Validation(
+                "Normalized source directory exceeds 4096 UTF-8 bytes".into(),
+            ));
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        let reader = self.search_reader(Some(cancel.clone()))?;
+        let files = reader
+            .prepare(&unassigned_directory_members_sql(&reader, &directory)?)
+            .map_err(db_error)?
+            .query_map(
+                params_from_iter(unassigned_directory_values(id, &directory, limit)),
+                audio_from_row,
+            )
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?;
         if cancel.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
         }

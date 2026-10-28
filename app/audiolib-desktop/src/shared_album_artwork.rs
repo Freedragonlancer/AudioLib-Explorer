@@ -1,6 +1,7 @@
 // app/audiolib-desktop/src/shared_album_artwork.rs
-//! Shared entity cover resolution; source WAVs supply pixels but never own choices.
+//! Directory-scoped cover resolution; shared albums and source Metadata stay unchanged.
 use super::*;
+use crate::directory_artwork_choices::Choice;
 use audiolib_remote::ArtworkReply;
 
 #[cfg(test)]
@@ -88,20 +89,111 @@ impl Controller {
     pub(super) fn artwork_identity(&self, file: &AudioFile) -> Option<(PathBuf, String)> {
         let album = file.album_entity.as_ref()?;
         (file.album_id == Some(album.id)).then_some(())?;
-        self.album_artwork_identity(album)
+        self.directory_artwork_identity(album, &self.artwork_folder_context(file))
     }
 
-    pub(super) fn album_cached_artwork_path(&self, album: &Album) -> Option<PathBuf> {
-        let (_, identity) = self.album_artwork_identity(album)?;
+    fn artwork_folder_context_for(
+        provider: &SqliteProvider,
+        file: &AudioFile,
+    ) -> ArtworkFolderContext {
+        ArtworkFolderContext {
+            folder_id: file.folder_id,
+            path: audiolib_db::source_parent_path_identity(&file.file_path),
+            namespace: provider.album_namespace(),
+        }
+    }
+
+    pub(super) fn artwork_folder_context(&self, file: &AudioFile) -> ArtworkFolderContext {
+        Self::artwork_folder_context_for(&self.provider(), file)
+    }
+
+    fn directory_artwork_identity(
+        &self,
+        album: &Album,
+        folder: &ArtworkFolderContext,
+    ) -> Option<(PathBuf, String)> {
+        let directory = self
+            .config
+            .lock()
+            .unwrap()
+            .paths
+            .settings
+            .parent()?
+            .join("artwork-overrides");
+        // Preferences follow the directory's semantic identity across a legacy
+        // snapshot becoming native. They never follow a selected WAV or reused folder ID.
+        let scope = if self.remote_read_only() {
+            format!(
+                "server:{}",
+                self.remote.lock().unwrap().state.as_ref()?.library_id
+            )
+        } else {
+            format!("local:{}", folder.namespace)
+        };
+        let group = match album.kind {
+            AlbumKind::Metadata => format!("metadata:{}", album.metadata_key.as_deref()?),
+            AlbumKind::Folder => album
+                .folder_path
+                .as_deref()
+                .map(|path| {
+                    format!(
+                        "folder:{}",
+                        audiolib_db::normalize_source_path_identity(path)
+                    )
+                })
+                .unwrap_or_else(|| "unassigned-folder".into()),
+        };
+        Some((
+            directory,
+            crate::artwork::key(&["directory-choice-v1", &scope, &group, &folder.path]),
+        ))
+    }
+
+    pub(super) fn directory_cached_artwork_path(
+        &self,
+        album: &Album,
+        folder: &ArtworkFolderContext,
+    ) -> Option<PathBuf> {
+        let (_, identity) = self.directory_artwork_identity(album, folder)?;
         let cache = self.config.lock().unwrap().paths.cache.clone();
-        // Generated data is disposable, while its owner is the same persistent
-        // entity regardless of which member is selected or which query is shown.
-        let key = crate::artwork::key(&["shared-generated-v1", &identity]);
+        let key = crate::artwork::key(&[
+            "directory-generated-v1",
+            &identity,
+            &folder.namespace,
+            &folder
+                .folder_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unassigned".into()),
+        ]);
         Some(cache.join("artwork").join(format!("{key}.png")))
     }
 
     pub(super) fn cached_artwork_path(&self, file: &AudioFile) -> Option<PathBuf> {
-        self.album_cached_artwork_path(file.album_entity.as_ref()?)
+        self.directory_cached_artwork_path(
+            file.album_entity.as_ref()?,
+            &self.artwork_folder_context(file),
+        )
+    }
+
+    // Caller serializes cache/preference access. An explicit directory receipt
+    // means "use this directory's embedded artwork", so it also stops inheritance.
+    fn directory_artwork_choice(
+        &self,
+        album: &Album,
+        folder: &ArtworkFolderContext,
+        side: u32,
+    ) -> std::io::Result<Option<Choice>> {
+        let Some((directory, key)) = self.directory_artwork_identity(album, folder) else {
+            return Ok(None);
+        };
+        if let Some(choice) = crate::directory_artwork_choices::read_choice(&directory, &key, side)?
+        {
+            return Ok(Some(choice));
+        }
+        let Some((old_directory, old_key)) = self.album_artwork_identity(album) else {
+            return Ok(None);
+        };
+        crate::directory_artwork_choices::read_choice(&old_directory, &old_key, side)
     }
 
     pub(super) fn album_thumbnail(
@@ -113,18 +205,27 @@ impl Controller {
         if index >= ALBUM_THUMBNAILS || !self.show_album_artwork.load(Ordering::Acquire) {
             return None;
         }
+        let context = self.hinted_album_context(provider, album).or_else(|| {
+            let file = provider.get_audio(album.representative_audio_id?).ok()?;
+            Some(Self::artwork_folder_context_for(provider, &file))
+        });
         let _cache = self.artwork_cache_lock.try_lock().ok()?;
-        let (directory, key) = self.album_artwork_identity(album)?;
-        if directory.join(format!("{key}.hidden")).is_file() {
-            return None;
-        }
-        let custom = crate::artwork::read_thumbnail(&directory.join(format!("{key}.png")), 40);
-        let cached = || {
-            self.hinted_album_artwork(provider, album)
-                .or_else(|| self.album_cached_artwork_path(album))
-                .and_then(|path| crate::artwork::read_thumbnail(&path, 40))
+        let pixels = if let Some(folder) = context {
+            match self.directory_artwork_choice(album, &folder, 40).ok()? {
+                Some(Choice::Hidden) => return None,
+                Some(Choice::Pixels(pixels)) => pixels,
+                Some(Choice::Embedded) | None => crate::artwork::read_thumbnail(
+                    &self.directory_cached_artwork_path(album, &folder)?,
+                    40,
+                )?,
+            }
+        } else {
+            let (directory, key) = self.album_artwork_identity(album)?;
+            match crate::directory_artwork_choices::read_choice(&directory, &key, 40).ok()? {
+                Some(Choice::Pixels(pixels)) => pixels,
+                _ => return None,
+            }
         };
-        let pixels = custom.or_else(cached)?;
         let (width, height) = pixels.dimensions();
         Some((pixels.into_raw(), width, height))
     }
@@ -154,23 +255,25 @@ impl Controller {
         let token = (
             self.source_generation.load(Ordering::Acquire),
             album.id,
+            self.artwork_folder_context(file),
             self.artwork_epoch.load(Ordering::Acquire),
         );
         let request_cancelled = self.artwork_cancel.lock().unwrap().load(Ordering::Acquire);
         {
             let mut inflight = self.artwork_inflight.lock().unwrap();
-            if *inflight == Some(token) && !request_cancelled {
+            if inflight.as_ref() == Some(&token) && !request_cancelled {
                 return;
             }
-            *inflight = Some(token);
+            *inflight = Some(token.clone());
         }
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut *self.artwork_cancel.lock().unwrap(), cancel.clone())
             .store(true, Ordering::Release);
         *self.artwork_job.lock().unwrap() = Some(ArtworkJob {
             album: album.clone(),
+            folder: token.2,
             source_generation: token.0,
-            epoch: token.2,
+            epoch: token.3,
             cancel,
             notice: Mutex::new(None),
         });
@@ -179,22 +282,30 @@ impl Controller {
 
     pub(super) fn artwork_current(&self, job: &ArtworkJob) -> bool {
         let selected = self.selected.lock().unwrap();
-        let same_album = selected
-            .as_ref()
-            .is_some_and(|file| file.album_id == Some(job.album.id));
+        let same_album = selected.as_ref().is_some_and(|file| {
+            file.album_id == Some(job.album.id)
+                && file.folder_id == job.folder.folder_id
+                && audiolib_db::source_parent_path_identity(&file.file_path) == job.folder.path
+        });
         self.available()
             && !self.shutdown.load(Ordering::Acquire)
             && !job.cancel.load(Ordering::Acquire)
             && self.source_generation.load(Ordering::Acquire) == job.source_generation
             && self.artwork_epoch.load(Ordering::Acquire) == job.epoch
+            && self.provider().album_namespace() == job.folder.namespace
             && same_album
             && self.show_album_artwork.load(Ordering::Acquire)
     }
 
     pub(super) fn artwork_job_finished(&self, job: &ArtworkJob) {
-        let token = (job.source_generation, job.album.id, job.epoch);
+        let token = (
+            job.source_generation,
+            job.album.id,
+            job.folder.clone(),
+            job.epoch,
+        );
         let mut inflight = self.artwork_inflight.lock().unwrap();
-        if *inflight == Some(token) {
+        if inflight.as_ref() == Some(&token) {
             *inflight = None;
         }
     }
@@ -320,17 +431,28 @@ impl Controller {
         let provider = self.provider();
         let (directory, key) = self.album_artwork_identity(album)?;
         self.migrate_album_choices(job, &provider, album, &directory, &key);
-        let image_path = self.album_cached_artwork_path(album)?;
+        let image_path = self.directory_cached_artwork_path(album, &job.folder)?;
         let etag_path = image_path.with_extension("etag");
         let (cached, etag) = {
             let _cache = self.artwork_cache_lock.lock().unwrap();
-            if !self.artwork_current(job) || directory.join(format!("{key}.hidden")).is_file() {
+            if !self.artwork_current(job) {
                 return None;
             }
-            if let Some(custom) =
-                crate::artwork::read_thumbnail(&directory.join(format!("{key}.png")), 512)
-            {
-                return Some(custom);
+            match self.directory_artwork_choice(album, &job.folder, 512) {
+                Ok(Some(Choice::Hidden)) => return None,
+                Ok(Some(Choice::Pixels(pixels))) => return Some(pixels),
+                Ok(Some(Choice::Embedded) | None) => {}
+                Err(error) => {
+                    *job.notice.lock().unwrap() = Some(format!(
+                        "{}: {error}",
+                        cn_or(
+                            self.chinese.load(Ordering::Acquire),
+                            "无法读取目录封面设置",
+                            "Could not read directory cover preferences"
+                        )
+                    ));
+                    return None;
+                }
             }
             let cached = crate::artwork::read_thumbnail(&image_path, 512);
             let etag = cached
@@ -340,24 +462,43 @@ impl Controller {
                 .and_then(|_| std::fs::read_to_string(&etag_path).ok());
             (cached, etag)
         };
-        let members = provider
-            .album_members(
+        let members = match job.folder.folder_id {
+            Some(folder_id) => provider.album_members_in_folder(
                 album.id,
+                folder_id,
                 audiolib_core::MAX_ALBUM_MEMBERS,
                 job.cancel.clone(),
-            )
-            .ok()?;
+            ),
+            None => provider.album_members_in_unassigned_directory(
+                album.id,
+                &job.folder.path,
+                audiolib_core::MAX_ALBUM_MEMBERS,
+                job.cancel.clone(),
+            ),
+        }
+        .ok()?;
         if !self.artwork_current(job) {
             return None;
         }
         if self.remote_read_only() {
             let (client, state, capabilities) = self.remote_artwork_context()?;
             let ids = members.iter().map(|file| file.id).collect::<Vec<_>>();
-            match client.album_artwork_for_snapshot(
+            // Folder IDs are resolved in this immutable client snapshot, off the
+            // event loop. Echo validation also detects a server-side relink while
+            // that snapshot is still displayed, including historical path aliases.
+            let expected_directory = match job.folder.folder_id {
+                Some(id) => {
+                    audiolib_db::normalize_source_path_identity(&provider.get_folder(id).ok()?.path)
+                }
+                None => job.folder.path.clone(),
+            };
+            match client.album_artwork_in_directory_for_snapshot(
                 &state,
                 &capabilities,
                 &provider.album_namespace(),
                 album.id,
+                job.folder.folder_id,
+                &expected_directory,
                 &ids,
                 Some(512),
                 etag.as_deref(),
@@ -374,7 +515,17 @@ impl Controller {
                     None
                 }
                 Err(audiolib_remote::RemoteError::LibraryChanged(_)) => None,
-                Err(_) => cached,
+                Err(error) => {
+                    *job.notice.lock().unwrap() = Some(format!(
+                        "{}: {error}",
+                        cn_or(
+                            self.chinese.load(Ordering::Acquire),
+                            "目录封面加载失败，请同步资料库或更新服务器",
+                            "Directory cover could not load; sync the library or update the server"
+                        )
+                    ));
+                    cached
+                }
             }
         } else {
             let versions = members

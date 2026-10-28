@@ -331,8 +331,16 @@ struct SearchJob {
     provider: Arc<SqliteProvider>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtworkFolderContext {
+    folder_id: Option<i64>,
+    path: String,
+    namespace: String,
+}
+
 struct ArtworkJob {
     album: Album,
+    folder: ArtworkFolderContext,
     source_generation: u64,
     epoch: u64,
     cancel: Arc<AtomicBool>,
@@ -721,7 +729,7 @@ pub struct Controller {
     search_cancel: Mutex<Arc<AtomicBool>>,
     facet_revision: AtomicU64,
     artwork_job: Mutex<Option<ArtworkJob>>,
-    artwork_inflight: Mutex<Option<(u64, i64, u64)>>,
+    artwork_inflight: Mutex<Option<(u64, i64, ArtworkFolderContext, u64)>>,
     artwork_override_migrations: Mutex<HashSet<(u64, String)>>,
     artwork_wake: Condvar,
     artwork_epoch: AtomicU64,
@@ -2762,6 +2770,7 @@ impl Controller {
             ui.set_selected_format("".into());
             ui.set_selected_album("".into());
             ui.set_selected_album_id("".into());
+            ui.set_selected_artwork_directory("".into());
             ui.set_album_cover(Image::default());
             ui.set_album_cover_ready(false);
             ui.set_selected_attributes("".into());
@@ -2814,6 +2823,7 @@ impl Controller {
         ui.set_selected_format("".into());
         ui.set_selected_album("".into());
         ui.set_selected_album_id("".into());
+        ui.set_selected_artwork_directory("".into());
         ui.set_album_cover(Image::default());
         ui.set_album_cover_ready(false);
         ui.set_checked_count(0);
@@ -7174,20 +7184,23 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
         .map(|album| album.name.clone())
         .unwrap_or_else(|| file.album.clone());
     let identity = file.album_id.map(|id| id.to_string()).unwrap_or_default();
-    let same_cover = !identity.is_empty() && ui.get_selected_album_id().as_str() == identity;
+    let directory = audiolib_db::source_parent_path_identity(&file.file_path);
+    let same_cover = !identity.is_empty()
+        && ui.get_selected_album_id().as_str() == identity
+        && ui.get_selected_artwork_directory().as_str() == directory;
     ui.set_selected_id(file.id.to_string().into());
     ui.set_has_selection(true);
     ui.set_selected_missing(file.missing);
     ui.set_selected_name(file.filename.clone().into());
     ui.set_selected_path(file.file_path.clone().into());
-    // A member selection retains its shared entity's pixels. Only a different
-    // album (or a cleared source context) invalidates the displayed cover.
+    // Members retain pixels only within the same album and direct parent directory.
     if !same_cover {
         ui.set_album_cover_ready(false);
         ui.set_album_cover(Image::default());
     }
     ui.set_selected_album(album.into());
     ui.set_selected_album_id(identity.into());
+    ui.set_selected_artwork_directory(directory.into());
     ui.set_selected_format(
         format!(
             "{:.1} kHz / {} bit / {} ch / {}",

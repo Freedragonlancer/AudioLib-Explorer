@@ -184,6 +184,26 @@ pub fn indexed_paths_equal(left: &str, right: &str) -> bool {
     path_identity::comparison_key(left) == path_identity::comparison_key(right)
 }
 
+/// Normalize a source directory identity without accessing any filesystem.
+/// Windows drive/UNC syntax is recognized on every host; POSIX backslashes and
+/// directory-entry case are retained. A drive root's identity is `c:`, while
+/// the POSIX root remains `/`. The returned identity is not an OS access path.
+pub fn normalize_source_path_identity(directory: &str) -> String {
+    path_identity::comparison_key(directory)
+}
+
+/// Return the direct parent identity using the stored source's path syntax.
+/// Relative filenames have the empty parent; Windows paths never depend on the
+/// reader's platform, and a POSIX literal backslash is not a path separator.
+pub fn source_parent_path_identity(file_path: &str) -> String {
+    let identity = normalize_source_path_identity(file_path);
+    match identity.rsplit_once('/') {
+        Some(("", _)) => "/".into(),
+        Some((parent, _)) => parent.into(),
+        None => String::new(),
+    }
+}
+
 /// The text the library stores in `audio_files.file_path` for `path` (as given, normally
 /// canonical): the Windows verbatim prefix is dropped (`\\?\C:\x` -> `C:\x`,
 /// `\\?\UNC\host\share` -> `\\host\share`); separators are kept as they are.
@@ -2426,6 +2446,24 @@ impl DataProvider for SqliteProvider {
         cancel: Arc<AtomicBool>,
     ) -> Result<Vec<AudioFile>> {
         SqliteProvider::album_members(self, id, limit, cancel)
+    }
+    fn album_members_in_folder(
+        &self,
+        id: i64,
+        folder_id: i64,
+        limit: usize,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<AudioFile>> {
+        SqliteProvider::album_members_in_folder(self, id, folder_id, limit, cancel)
+    }
+    fn album_members_in_unassigned_directory(
+        &self,
+        id: i64,
+        directory: &str,
+        limit: usize,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<AudioFile>> {
+        SqliteProvider::album_members_in_unassigned_directory(self, id, directory, limit, cancel)
     }
 
     fn load_search_workspace(

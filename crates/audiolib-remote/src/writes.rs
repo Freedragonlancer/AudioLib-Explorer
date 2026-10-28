@@ -534,6 +534,26 @@ impl DataProvider for RemoteProvider {
     ) -> audiolib_core::Result<Vec<AudioFile>> {
         self.snapshot.album_members(id, limit, cancel)
     }
+    fn album_members_in_folder(
+        &self,
+        id: i64,
+        folder_id: i64,
+        limit: usize,
+        cancel: Arc<AtomicBool>,
+    ) -> audiolib_core::Result<Vec<AudioFile>> {
+        self.snapshot
+            .album_members_in_folder(id, folder_id, limit, cancel)
+    }
+    fn album_members_in_unassigned_directory(
+        &self,
+        id: i64,
+        directory: &str,
+        limit: usize,
+        cancel: Arc<AtomicBool>,
+    ) -> audiolib_core::Result<Vec<AudioFile>> {
+        self.snapshot
+            .album_members_in_unassigned_directory(id, directory, limit, cancel)
+    }
     fn folders(&self, parent_id: Option<i64>) -> audiolib_core::Result<Vec<Folder>> {
         self.snapshot.folders(parent_id)
     }

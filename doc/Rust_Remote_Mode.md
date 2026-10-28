@@ -15,16 +15,29 @@ modified or replaced while in server mode; switching back to local mode reopens 
 
 ## Settings and secrets
 
-Album artwork uses the optional `album_entity_artwork` capability and the
-namespace-bound `/albums/{id}/artwork` endpoint. For source schemas 3–7, the client
-creates an owned schema-8 projection and resolves a fixed, sorted set of album
-members through the older `album_artwork` endpoint. Source format and local format
-remain separate, so projection does not cause repeated synchronization. Servers
-without either capability skip embedded covers while retaining normal sync and
-playback behavior. The active server's **Cache and export** page also offers
+Artwork within a shared album is scoped to the selected WAV's immediate parent
+folder. The optional `album_folder_artwork` version 1 capability binds native
+schema-8 requests to the library, album namespace, album and folder; responses
+also bind `X-Album-Folder-Id`. Older servers use bounded, sorted members of that
+same folder through their supported per-audio artwork API. The client does not
+reuse a whole-album result from another subfolder, including when the selected
+folder's members fall beyond the whole album's first 64 records. Files without
+their own embedded picture may reuse another member's picture in the same
+album and immediate folder.
+
+Source schemas 3–7 still use an owned schema-8 projection; source and local
+formats remain separate, so projection does not cause repeated synchronization.
+Unsupported embedded-artwork capabilities skip automatic covers while retaining
+normal sync and playback. The active server's **Cache and export** page offers
 client-local custom images, hiding/restoring, display preferences and thumbnail
-cleanup. These choices never write to the server snapshot or WAV files and do
-not sync to other PCs. See [Album artwork](Rust_Artwork.md).
+cleanup. Manual choices are isolated by source, shared album and immediate
+folder. Older whole-album choices remain read-only inherited preferences;
+explicit folder choices take precedence. Restoring embedded artwork records a
+folder-local ignore-inherited marker without deleting the retained whole-album
+preference. These choices never write to the server snapshot or WAV files and
+do not sync to other PCs. Shared Album entities, schema 8 and original Metadata
+TEXT remain unchanged; Metadata compression is deferred. See
+[Album artwork](Rust_Artwork.md).
 
 `settings.json` gains a `data_source` section (all fields have serde defaults, so older
 settings files load as local mode):

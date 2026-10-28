@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "artwork_contract_review_tests.rs"]
 mod contracts;
+#[path = "artwork_folder_context_tests.rs"]
+mod folder_context;
 #[path = "artwork_worker_review_tests.rs"]
 mod worker_review;
 
@@ -34,6 +36,7 @@ fn selected_artwork_file(fixture: &Fixture) -> AudioFile {
 fn artwork_job(controller: &Controller, file: &AudioFile) -> ArtworkJob {
     ArtworkJob {
         album: file.album_entity.clone().unwrap(),
+        folder: controller.artwork_folder_context(file),
         source_generation: controller.source_generation.load(Ordering::Acquire),
         epoch: controller.artwork_epoch.load(Ordering::Acquire),
         cancel: Arc::new(AtomicBool::new(false)),

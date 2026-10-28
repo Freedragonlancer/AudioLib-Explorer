@@ -355,6 +355,662 @@ fn insert_current(conn: &Connection, id: i64, path: &str, library: &str) {
     .unwrap();
 }
 
+fn insert_folder_member(conn: &Connection, id: i64, folder: i64, library: &str) {
+    insert_current(conn, id, &format!("folder-{folder}/{id}.wav"), library);
+    conn.execute(
+        "UPDATE audio_files SET folder_id=?1 WHERE id=?2",
+        params![folder, id],
+    )
+    .unwrap();
+}
+
+fn insert_unassigned_member(conn: &Connection, id: i64, path: &str, library: &str) {
+    insert_current(conn, id, path, library);
+    conn.execute(
+        "UPDATE audio_files SET path_key=?1 WHERE id=?2",
+        params![path_key(path), id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn source_parent_identities_preserve_portable_path_boundaries() {
+    for (path, expected) in [
+        ("relative.wav", ""),
+        (r"literal\backslash.wav", ""),
+        ("relative/one.wav", "relative"),
+        ("/one.wav", "/"),
+        ("/FX/%_[x]/one.wav", "/FX/%_[x]"),
+        (r"/FX/Back\Slash/one.wav", r"/FX/Back\Slash"),
+        (r"/FX/Trailing\/one.wav", "/FX/Trailing\\"),
+        (r"C:\FX\Designed\one.wav", "c:/FX/Designed"),
+        (r"\\?\C:\FX\Designed\one.wav", "c:/FX/Designed"),
+        (r"C:\one.wav", "c:"),
+        (r"\\NAS\SHARE\Designed\one.wav", "//nas/share/Designed"),
+        (
+            r"\\?\UNC\NAS\SHARE\Designed\one.wav",
+            "//nas/share/Designed",
+        ),
+    ] {
+        assert_eq!(source_parent_path_identity(path), expected, "{path}");
+        assert_eq!(normalize_source_path_identity(expected), expected);
+    }
+    assert_eq!(
+        normalize_source_path_identity(r"C:\FX\Designed\"),
+        "c:/FX/Designed"
+    );
+    assert_eq!(
+        normalize_source_path_identity(r"\\NAS\SHARE\Designed\"),
+        "//nas/share/Designed"
+    );
+    assert_eq!(normalize_source_path_identity("/"), "/");
+    assert_eq!(normalize_source_path_identity("C:/"), "c:");
+    assert_ne!(
+        normalize_source_path_identity("/FX/Designed"),
+        normalize_source_path_identity("/FX/designed")
+    );
+    assert_ne!(
+        normalize_source_path_identity(r"/FX/Back\Slash"),
+        normalize_source_path_identity("/FX/Back/Slash")
+    );
+}
+
+#[test]
+fn unassigned_album_directory_candidates_filter_before_limit_without_cross_directory_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("unassigned-members.db")).unwrap();
+    let mut conn = Connection::open(provider.database_path()).unwrap();
+    register_library_functions(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    for id in 1..=80 {
+        insert_unassigned_member(
+            &tx,
+            id,
+            &format!("/owned/CK/{id}.wav"),
+            "Unassigned shared album",
+        );
+    }
+    for id in 200..270 {
+        insert_unassigned_member(
+            &tx,
+            id,
+            &format!("/owned/Designed/{id}.wav"),
+            "Unassigned shared album",
+        );
+    }
+    for (id, path, library) in [
+        (150, "/owned/Designed/other.wav", "Other album"),
+        (
+            151,
+            "/owned/Designed/child/nested.wav",
+            "Unassigned shared album",
+        ),
+        (
+            152,
+            "/owned/Designed2/sibling.wav",
+            "Unassigned shared album",
+        ),
+        (
+            153,
+            "/owned/designed/different-case.wav",
+            "Unassigned shared album",
+        ),
+    ] {
+        insert_unassigned_member(&tx, id, path, library);
+    }
+    tx.execute_batch("INSERT INTO folders(id,folder_path,folder_name) VALUES(-7,'/owned/Designed','Designed'); INSERT INTO folder_closure VALUES(-7,-7,0);").unwrap();
+    insert_unassigned_member(
+        &tx,
+        154,
+        "/owned/Designed/assigned.wav",
+        "Unassigned shared album",
+    );
+    tx.execute("UPDATE audio_files SET folder_id=-7 WHERE id=154", [])
+        .unwrap();
+    tx.execute("UPDATE audio_files SET missing=1 WHERE id=200", [])
+        .unwrap();
+    tx.commit().unwrap();
+    let album = provider.get_audio(201).unwrap().album_id.unwrap();
+    let data: &dyn DataProvider = &provider;
+    let members = data
+        .album_members_in_unassigned_directory(
+            album,
+            "/owned/Designed/",
+            64,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert_eq!(
+        members.iter().map(|file| file.id).collect::<Vec<_>>(),
+        (201..=264).collect::<Vec<_>>()
+    );
+    assert!(
+        members
+            .iter()
+            .all(|file| file.folder_id.is_none() && file.album_id == Some(album) && !file.missing)
+    );
+    assert!(
+        data.album_members_in_unassigned_directory(
+            album,
+            "/owned/Empty",
+            64,
+            Arc::new(AtomicBool::new(false))
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let sql = albums::unassigned_directory_members_sql(&conn, "/owned/Designed").unwrap();
+    let plan = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(
+            params![
+                "/owned/designed/",
+                "/owned/designed0",
+                album,
+                "/owned/Designed/",
+                64
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_audio_files_path_key")
+                && detail.contains("path_key>?")),
+        "{plan:?}"
+    );
+
+    let source = root.path().join("NoFolder").join("retained.wav");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"owned unassigned source remains untouched").unwrap();
+    insert_unassigned_member(
+        &conn,
+        300,
+        &display_path(&source),
+        "Unassigned shared album",
+    );
+    let bytes = fs::read(&source).unwrap();
+    let modified = fs::metadata(&source).unwrap().modified().unwrap();
+    let directory = source_parent_path_identity(&display_path(&source));
+    assert_eq!(
+        data.album_members_in_unassigned_directory(
+            album,
+            &directory,
+            64,
+            Arc::new(AtomicBool::new(false))
+        )
+        .unwrap()
+        .iter()
+        .map(|file| file.id)
+        .collect::<Vec<_>>(),
+        vec![300]
+    );
+    assert_eq!(fs::read(&source).unwrap(), bytes);
+    assert_eq!(fs::metadata(&source).unwrap().modified().unwrap(), modified);
+}
+
+#[test]
+fn unassigned_album_directory_candidates_preserve_literals_and_source_casing() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("unassigned-paths.db")).unwrap();
+    let conn = Connection::open(provider.database_path()).unwrap();
+    register_library_functions(&conn).unwrap();
+    for (id, path) in [
+        (10, "/FX/%_[x]/one.wav"),
+        (11, "/FX/%_[x]/child/nested.wav"),
+        (12, "/FX/anythingx/other.wav"),
+        (20, r"/FX/Back\Slash/one.wav"),
+        (21, "/FX/Back/Slash/other.wav"),
+        (22, r"/FX/Trailing\/one.wav"),
+        (30, r"C:\FX\Designed\one.wav"),
+        (31, "c:/FX/Designed/two.wav"),
+        (32, "c:/FX/designed/other.wav"),
+        (33, r"\\?\C:\FX\Designed\three.wav"),
+        (40, r"\\nas\share\Designed\one.wav"),
+        (41, "//NAS/SHARE/Designed/two.wav"),
+        (42, r"\\?\UNC\NAS\Share\Designed\three.wav"),
+        (43, "//nas/share/designed/other.wav"),
+        (50, "relative.wav"),
+        (51, r"literal\backslash.wav"),
+        (52, "relative/one.wav"),
+        (60, "/root-file.wav"),
+        (61, r"C:\root-file.wav"),
+    ] {
+        insert_unassigned_member(&conn, id, path, "Portable shared album");
+    }
+    let album = provider.get_audio(10).unwrap().album_id.unwrap();
+    for null_keys in [false, true] {
+        if null_keys {
+            conn.execute("UPDATE audio_files SET path_key=NULL", [])
+                .unwrap();
+        }
+        for (directory, expected) in [
+            ("/FX/%_[x]", vec![10]),
+            (r"/FX/Back\Slash", vec![20]),
+            ("/FX/Trailing\\", vec![22]),
+            (r"C:\FX\Designed\", vec![30, 31, 33]),
+            (r"\\NAS\SHARE\Designed\", vec![40, 41, 42]),
+            ("", vec![50, 51]),
+            ("relative", vec![52]),
+            ("/", vec![60]),
+            ("C:/", vec![61]),
+        ] {
+            let members = provider
+                .album_members_in_unassigned_directory(
+                    album,
+                    directory,
+                    64,
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            assert_eq!(
+                members.iter().map(|file| file.id).collect::<Vec<_>>(),
+                expected,
+                "{directory:?}; null_keys={null_keys}"
+            );
+        }
+    }
+    for directory in ["x".repeat(4097), "界".repeat(1366)] {
+        assert!(matches!(
+            provider.album_members_in_unassigned_directory(
+                album,
+                &directory,
+                64,
+                Arc::new(AtomicBool::new(false))
+            ),
+            Err(Error::Validation(_))
+        ));
+    }
+    assert!(
+        provider
+            .album_members_in_unassigned_directory(
+                album,
+                &"x".repeat(4096),
+                64,
+                Arc::new(AtomicBool::new(false))
+            )
+            .unwrap()
+            .is_empty()
+    );
+    for (invalid_album, invalid_limit) in [(0, 64), (-1, 64), (album, 0), (album, 65)] {
+        assert!(matches!(
+            provider.album_members_in_unassigned_directory(
+                invalid_album,
+                "",
+                invalid_limit,
+                Arc::new(AtomicBool::new(false))
+            ),
+            Err(Error::Validation(_))
+        ));
+    }
+    assert!(matches!(
+        provider.album_members_in_unassigned_directory(
+            album,
+            "",
+            64,
+            Arc::new(AtomicBool::new(true))
+        ),
+        Err(Error::Cancelled)
+    ));
+    assert!(matches!(
+        provider.album_members_in_unassigned_directory(
+            album,
+            "bad\0directory",
+            64,
+            Arc::new(AtomicBool::new(false))
+        ),
+        Err(Error::Validation(_))
+    ));
+}
+
+#[test]
+fn unassigned_album_directory_candidates_merge_legal_null_path_keys_before_the_limit() {
+    fn insert_without_key(conn: &Connection, id: i64, path: &str, library: &str) {
+        conn.execute(
+            "INSERT INTO audio_files(id,file_path,filename,metadata_json) VALUES(?1,?2,?2,?3)",
+            params![
+                id,
+                path,
+                serde_json::json!({"wav_metadata":{"fields":{"library":library}}}).to_string()
+            ],
+        )
+        .unwrap();
+        assert!(
+            conn.query_row(
+                "SELECT path_key IS NULL FROM audio_files WHERE id=?1",
+                [id],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("nullable-path-keys.db")).unwrap();
+    let mut conn = Connection::open(provider.database_path()).unwrap();
+    register_library_functions(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    for id in 1..=80 {
+        insert_without_key(
+            &tx,
+            id,
+            &format!("/owned/CK/{id}.wav"),
+            "Nullable shared album",
+        );
+    }
+    for id in 200..340 {
+        let path = format!("/owned/Designed/{id}.wav");
+        if id % 2 == 0 {
+            insert_without_key(&tx, id, &path, "Nullable shared album");
+        } else {
+            insert_unassigned_member(&tx, id, &path, "Nullable shared album");
+        }
+    }
+    for (id, path, library) in [
+        (190, "/owned/Designed/other-album.wav", "Other album"),
+        (
+            191,
+            "/owned/Designed/child/nested.wav",
+            "Nullable shared album",
+        ),
+        (192, "/owned/Designed2/sibling.wav", "Nullable shared album"),
+        (
+            193,
+            "/owned/designed/different-case.wav",
+            "Nullable shared album",
+        ),
+    ] {
+        insert_without_key(&tx, id, path, library);
+    }
+    tx.execute_batch("INSERT INTO folders(id,folder_path,folder_name) VALUES(-7,'/owned/Designed','Designed'); INSERT INTO folder_closure VALUES(-7,-7,0);").unwrap();
+    insert_without_key(
+        &tx,
+        194,
+        "/owned/Designed/assigned.wav",
+        "Nullable shared album",
+    );
+    tx.execute("UPDATE audio_files SET folder_id=-7 WHERE id=194", [])
+        .unwrap();
+    tx.execute("UPDATE audio_files SET missing=1 WHERE id=200", [])
+        .unwrap();
+    tx.commit().unwrap();
+    let album = provider.get_audio(201).unwrap().album_id.unwrap();
+    let snapshot = root.path().join("readonly-nullable-path-keys.db");
+    provider.backup_library(&snapshot).unwrap();
+    let before = fs::read(&snapshot).unwrap();
+    let modified = fs::metadata(&snapshot).unwrap().modified().unwrap();
+    let readonly = SqliteProvider::open_read_only(&snapshot).unwrap();
+    let members = readonly
+        .album_members_in_unassigned_directory(
+            album,
+            "/owned/Designed",
+            64,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert_eq!(
+        members.iter().map(|file| file.id).collect::<Vec<_>>(),
+        (201..=264).collect::<Vec<_>>()
+    );
+    assert!(
+        members
+            .iter()
+            .all(|file| file.folder_id.is_none() && file.album_id == Some(album) && !file.missing)
+    );
+    assert!(
+        readonly
+            .album_members_in_unassigned_directory(
+                album,
+                "/owned/Empty",
+                64,
+                Arc::new(AtomicBool::new(false))
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let source = readonly.reader().unwrap();
+    assert_eq!(source.query_row("SELECT COUNT(*) FROM audio_files WHERE path_key IS NULL AND id BETWEEN 200 AND 339", [], |row| row.get::<_, i64>(0)).unwrap(), 70);
+    let sql = albums::unassigned_directory_members_sql(&source, "/owned/Designed").unwrap();
+    let plan = source
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(
+            params![
+                "/owned/designed/",
+                "/owned/designed0",
+                album,
+                "/owned/Designed/",
+                64
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_audio_files_path_key")
+                && detail.contains("path_key>?")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_audio_files_folder")
+                && detail.contains("folder_id=?")),
+        "{plan:?}"
+    );
+    drop(source);
+    drop(readonly);
+    assert_eq!(fs::read(&snapshot).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&snapshot).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+#[test]
+fn shared_album_folder_candidates_filter_before_limit_and_preserve_readonly_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("folder-members.db")).unwrap();
+    let mut conn = Connection::open(provider.database_path()).unwrap();
+    register_library_functions(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES
+           (11,'owned/CK','CK',NULL),(-7,'owned/Designed','Designed',NULL),
+           (0,'owned/Empty','Empty',NULL),
+           (-9223372036854775808,'owned/Designed/child','child',-7);
+         INSERT INTO folder_closure(ancestor_id,descendant_id,depth) VALUES
+           (11,11,0),(-7,-7,0),(0,0,0),
+           (-9223372036854775808,-9223372036854775808,0),
+           (-7,-9223372036854775808,1);",
+    )
+    .unwrap();
+    let tx = conn.transaction().unwrap();
+    for id in 1..=80 {
+        insert_folder_member(&tx, id, 11, "Shared Alien Library");
+    }
+    for id in 200..270 {
+        insert_folder_member(&tx, id, -7, "Shared Alien Library");
+    }
+    insert_folder_member(&tx, 150, -7, "Other library in the same directory");
+    insert_current(&tx, 151, "unassigned.wav", "Shared Alien Library");
+    insert_folder_member(&tx, 190, i64::MIN, "Shared Alien Library");
+    tx.execute("UPDATE audio_files SET missing=1 WHERE id=200", [])
+        .unwrap();
+    tx.commit().unwrap();
+    let album = provider.get_audio(201).unwrap().album_id.unwrap();
+    assert_eq!(provider.get_audio(1).unwrap().album_id, Some(album));
+    assert_eq!(provider.get_audio(151).unwrap().folder_id, None);
+    assert_eq!(
+        provider
+            .album_members(album, 64, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>(),
+        (1..=64).collect::<Vec<_>>()
+    );
+    let source = root.path().join("must-not-open-or-change.wav");
+    fs::write(&source, b"owned source WAV bytes stay untouched").unwrap();
+    conn.execute(
+        "UPDATE audio_files SET file_path=?1,path_key=?2 WHERE id=201",
+        params![display_path(&source), path_key(&display_path(&source))],
+    )
+    .unwrap();
+    let source_bytes = fs::read(&source).unwrap();
+    let source_modified = fs::metadata(&source).unwrap().modified().unwrap();
+    let snapshot = root.path().join("readonly-folder-members.db");
+    provider.backup_library(&snapshot).unwrap();
+    let snapshot_bytes = fs::read(&snapshot).unwrap();
+    let snapshot_modified = fs::metadata(&snapshot).unwrap().modified().unwrap();
+    let readonly = SqliteProvider::open_read_only(&snapshot).unwrap();
+    let data: &dyn DataProvider = &readonly;
+    assert_eq!(data.get_folder(-7).unwrap().path, "owned/Designed");
+    assert_eq!(data.get_folder(0).unwrap().path, "owned/Empty");
+    assert_eq!(data.get_folder(i64::MIN).unwrap().parent_id, Some(-7));
+    let members = data
+        .album_members_in_folder(album, -7, 64, Arc::new(AtomicBool::new(false)))
+        .unwrap();
+    assert_eq!(
+        members.iter().map(|file| file.id).collect::<Vec<_>>(),
+        (201..=264).collect::<Vec<_>>()
+    );
+    assert!(
+        members.iter().all(|file| file.folder_id == Some(-7)
+            && file.album_id == Some(album)
+            && !file.missing)
+    );
+    assert_eq!(
+        data.album_members_in_folder(album, i64::MIN, 64, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>(),
+        vec![190]
+    );
+    for empty_folder in [0, i64::MAX] {
+        assert!(
+            data.album_members_in_folder(album, empty_folder, 64, Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        data.album_members_in_unassigned_directory(album, "", 64, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>(),
+        vec![151]
+    );
+    drop(readonly);
+    assert_eq!(fs::read(&snapshot).unwrap(), snapshot_bytes);
+    assert_eq!(
+        fs::metadata(&snapshot).unwrap().modified().unwrap(),
+        snapshot_modified
+    );
+    assert_eq!(fs::read(&source).unwrap(), source_bytes);
+    assert_eq!(
+        fs::metadata(&source).unwrap().modified().unwrap(),
+        source_modified
+    );
+}
+
+#[test]
+fn shared_album_folder_candidates_validate_limits_and_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("folder-validation.db")).unwrap();
+    for (album, limit) in [(0, 64), (-1, 64), (1, 0), (1, 65)] {
+        assert!(matches!(
+            provider.album_members_in_folder(album, -7, limit, Arc::new(AtomicBool::new(false))),
+            Err(Error::Validation(_))
+        ));
+    }
+    assert!(matches!(
+        provider.album_members_in_folder(1, i64::MIN, 64, Arc::new(AtomicBool::new(true))),
+        Err(Error::Cancelled)
+    ));
+}
+
+#[test]
+fn shared_album_folder_candidate_work_does_not_grow_with_other_directories() {
+    use rusqlite::StatementStatus;
+
+    fn run(conn: &Connection, sql: &str, album: i64) -> (Vec<i64>, i32, i32) {
+        let mut statement = conn.prepare(sql).unwrap();
+        let ids = statement
+            .query_map(params![-7, album, 64], audio_from_row)
+            .unwrap()
+            .map(|file| file.unwrap().id)
+            .collect::<Vec<_>>();
+        (
+            ids,
+            statement.get_status(StatementStatus::VmStep),
+            statement.get_status(StatementStatus::FullscanStep),
+        )
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("folder-budget.db")).unwrap();
+    let conn = Connection::open(provider.database_path()).unwrap();
+    register_library_functions(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO folders(id,folder_path,folder_name) VALUES
+        (11,'owned/CK','CK'),(-7,'owned/Designed','Designed');
+        INSERT INTO folder_closure VALUES(11,11,0),(-7,-7,0);",
+    )
+    .unwrap();
+    for id in 100_000..100_003 {
+        insert_folder_member(&conn, id, -7, "Same shared album");
+    }
+    let album = provider.get_audio(100_000).unwrap().album_id.unwrap();
+    let sql = albums::members_in_folder_sql(&conn).unwrap();
+    let plan = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(params![-7, album, 64], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_audio_files_folder")
+                && detail.contains("folder_id=?")),
+        "{plan:?}"
+    );
+    let before = run(&conn, &sql, album);
+    conn.execute_batch(
+        "WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<8192)
+         INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,metadata_json)
+         SELECT id,'CK/'||id||'.wav','CK/'||id||'.wav','ck.wav',11,
+                '{\"wav_metadata\":{\"fields\":{\"library\":\"Same shared album\"}}}' FROM ids;",
+    )
+    .unwrap();
+    let after = run(&conn, &sql, album);
+    assert_eq!(before.0, vec![100_000, 100_001, 100_002]);
+    assert_eq!(after.0, before.0);
+    assert!(
+        after.1 <= before.1 + 256,
+        "VM steps grew with unrelated members: {before:?} -> {after:?}"
+    );
+    assert!(
+        after.2 <= before.2 + 8,
+        "Full scans grew with unrelated members: {before:?} -> {after:?}"
+    );
+    assert_eq!(
+        provider
+            .album_members_in_folder(album, -7, 64, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>(),
+        after.0
+    );
+}
+
 #[test]
 fn shared_metadata_album_has_sorted_present_members_and_query_scoped_counts() {
     let root = tempfile::tempdir().unwrap();

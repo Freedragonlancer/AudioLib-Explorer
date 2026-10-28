@@ -99,7 +99,10 @@ fn child_legacy_projection_choices() {
     let mut old_keys = Vec::new();
     for (id, action, name) in [(1, 2, "Custom"), (2, 3, "Hidden"), (3, 4, "Embedded")] {
         let file = legacy.get_audio(id).unwrap();
-        let (actual_directory, key) = controller.artwork_identity(&file).unwrap();
+        // Seed the older whole-album preference format, before directory-scoped edits.
+        let (actual_directory, key) = controller
+            .album_artwork_identity(file.album_entity.as_ref().unwrap())
+            .unwrap();
         assert_eq!(actual_directory, directory);
         assert_eq!(
             key,
@@ -116,16 +119,17 @@ fn child_legacy_projection_choices() {
             &image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 0, 0, 255])),
         )
         .unwrap();
-        let context = controller.artwork_action_context(Some(&file));
-        assert_eq!(
-            controller.perform_artwork_action(
-                context,
-                action,
-                (action == 2).then(|| chosen.clone()),
-                false
-            ),
-            Ok(true)
-        );
+        match action {
+            2 => {
+                std::fs::copy(&chosen, directory.join(format!("{key}.png"))).unwrap();
+            }
+            3 => {
+                std::fs::write(directory.join(format!("{key}.hidden")), []).unwrap();
+            }
+            4 => {}
+            _ => unreachable!(),
+        }
+        crate::album_override_migration::mark_completed(&directory, &key).unwrap();
         assert!(directory.join(format!("{key}.migrated")).is_file());
         old_keys.push((id, action, key, original));
     }
@@ -162,11 +166,13 @@ fn child_legacy_projection_choices() {
         let file = native.get_audio(id).unwrap();
         assert_ne!(file.album_id, legacy.get_audio(id).unwrap().album_id);
         *controller.selected.lock().unwrap() = Some(file.clone());
-        let album = file.album_entity.unwrap();
+        let folder_context = controller.artwork_folder_context(&file);
+        let album = file.album_entity.clone().unwrap();
         let (_, key) = controller.album_artwork_identity(&album).unwrap();
         assert_ne!(key, old_key);
         let job = ArtworkJob {
             album: album.clone(),
+            folder: folder_context,
             source_generation: controller.source_generation.load(Ordering::Acquire),
             epoch: controller.artwork_epoch.load(Ordering::Acquire),
             cancel: Arc::new(AtomicBool::new(false)),

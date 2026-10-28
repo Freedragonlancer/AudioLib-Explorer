@@ -67,7 +67,9 @@ enum Choice {
     Image(Vec<u8>),
 }
 
-fn completed(directory: &Path, key: &str) -> std::io::Result<bool> {
+/// Read the bounded, exact existing receipt format. Callers validate the key
+/// before constructing paths; malformed receipts fail instead of being ignored.
+pub(crate) fn completed(directory: &Path, key: &str) -> std::io::Result<bool> {
     let path = directory.join(format!("{key}.migrated"));
     if !regular(&path)? {
         return Ok(false);

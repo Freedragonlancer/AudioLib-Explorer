@@ -492,10 +492,15 @@ pub const ALBUM_ARTWORK_REVISION: u32 = 1;
 pub const ALBUM_ENTITY_ARTWORK_FEATURE: &str = "album_entity_artwork";
 /// Revision of [`ALBUM_ENTITY_ARTWORK_FEATURE`] implemented by this build.
 pub const ALBUM_ENTITY_ARTWORK_REVISION: u32 = 1;
+/// Optional indexed-folder or NULL-source-parent artwork context; no DB-format change.
+pub const ALBUM_FOLDER_ARTWORK_FEATURE: &str = "album_folder_artwork";
+/// Revision of [`ALBUM_FOLDER_ARTWORK_FEATURE`] implemented by this build.
+pub const ALBUM_FOLDER_ARTWORK_REVISION: u32 = 1;
 /// Optional features and revisions this build implements on both client and server.
 pub const FEATURES: &[(&str, u32)] = &[
     (ALBUM_ARTWORK_FEATURE, ALBUM_ARTWORK_REVISION),
     (ALBUM_ENTITY_ARTWORK_FEATURE, ALBUM_ENTITY_ARTWORK_REVISION),
+    (ALBUM_FOLDER_ARTWORK_FEATURE, ALBUM_FOLDER_ARTWORK_REVISION),
     (ALBUM_ENTITIES_FEATURE, ALBUM_ENTITIES_REVISION),
     ("list_waveform_jobs", 1),
     ("list_waveforms", 1),
@@ -1186,6 +1191,29 @@ mod tests {
                 >= 1
         );
         assert!(!manifest.features.contains_key("artwork"));
+    }
+
+    #[test]
+    fn folder_artwork_is_optional_api_capability_without_a_database_requirement() {
+        let local = compatibility_manifest();
+        assert_eq!(local.features.get(ALBUM_FOLDER_ARTWORK_FEATURE), Some(&1));
+        assert!(
+            !LibraryFormat::target()
+                .features
+                .contains_key(ALBUM_FOLDER_ARTWORK_FEATURE)
+        );
+        assert_eq!(
+            LibraryFormat::target().snapshot_format_id().as_deref(),
+            Some(PLAN_B_FORMAT)
+        );
+        let mut invalid_database_marker = LibraryFormat::target();
+        invalid_database_marker
+            .features
+            .insert(ALBUM_FOLDER_ARTWORK_FEATURE.into(), 1);
+        assert!(invalid_database_marker.snapshot_format_id().is_none());
+        let mut peer = local.clone();
+        peer.features.remove(ALBUM_FOLDER_ARTWORK_FEATURE);
+        assert_eq!(check_peer(&local, "0.8.1", Some(&peer)), Ok(()));
     }
 
     #[test]
