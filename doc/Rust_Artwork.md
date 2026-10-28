@@ -1,77 +1,121 @@
 # Album artwork
 
-Artwork is optional presentation data. Encoded images and decoded pixels never
-enter the library database, FTS5, JSONL/CSV exports or server snapshots. Reading
-or managing a cover does not change source WAV files, Metadata or annotations.
+Artwork is scoped to a shared album within the selected WAV's immediate source
+directory. Selecting another member in that same directory retains its cover;
+another subdirectory has independent automatic and manual choices, even when
+both declare the same Library. A WAV supplies pixels, not a per-file preference.
+Shared Album entities, schema 8 and original Metadata TEXT remain unchanged;
+Metadata compression is deferred. See
+[shared albums and Metadata storage](Rust_Shared_Albums.md) for the schema-8
+ownership, namespace and migration contracts.
+
+Encoded images and decoded pixels never enter SQLite, FTS5, JSONL/CSV exports or
+server snapshots. Reading or managing a cover does not change source WAV files,
+Metadata or annotations.
 
 ## Display and management
 
-Select a sound, then open **Sound library management → Album artwork ▸**. Expand
-the artwork section to show its controls. In server
-mode the controls are on **Cache and export** for the active connection.
+Select a sound, then open **Sound library management → Album cover in this folder ▸**. In
+server mode these controls appear under **Cache and export** for the connection.
+Both modes offer:
 
-- **Show covers** applies to both modes and persists in `settings.json` as
-  `show_album_artwork`. Old settings default to enabled.
-- **Choose / replace image** accepts PNG/JPEG up to 8 MiB, 4096 pixels per
-  dimension and a 64 MiB decode budget. The client copies a thumbnail up to
-  512 pixels; moving the original picture afterwards does not break the cover.
-- **Remove cover** hides the current album's cover, including its embedded cover.
-- **Restore embedded** removes the custom image and hidden marker, returning to
-  extraction from the WAV or the server artwork endpoint.
-- **Reload cover** revalidates the current cover. **Clear cover thumbnails**
-  removes only generated client thumbnails; custom images and hidden markers stay.
+- **Show covers**, persisted as `show_album_artwork` (old settings default on).
+- **Set folder image**: PNG/JPEG up to 8 MiB, 4096 pixels per dimension and
+  64 MiB decode budget. The client stores a thumbnail up to 512 pixels; moving the
+  original image does not break the choice.
+- **Remove folder cover**, hiding custom and embedded artwork for this album in
+  the current immediate directory.
+- **Restore folder default**, ignoring inherited older album choices and using
+  this directory's embedded artwork without changing another directory.
+- **Reload folder cover**, revalidating only the current directory's cover.
+- **Clear cover thumbnails**, clearing generated client images while retaining
+  custom images, hidden markers and migration receipts.
 
-Custom images and hidden markers live under `<user data>/artwork-overrides/`,
-outside the disposable cache. They are scoped to the local database or remote
-library identity and the declared album name. For a sound with no album they
-apply only to that audio ID. LAN/external profiles of the same server library
-share the custom cover. These choices belong to this PC and do not propagate to
-other clients or form part of a `.db` backup/restore.
+The current target shows the Album name and immediate directory. Custom choices
+live under `<user data>/artwork-overrides/`; keys bind the local library namespace
+or remote library identity, semantic album owner and normalized source directory.
+They do not follow an individual WAV or a reused numeric folder ID. LAN/external
+profiles of the same server library share choices. Stable semantic identities
+retain choices across older-source projections and the native schema-8 upgrade.
+Choices belong to this PC and are outside `.db` backup/restore and inter-client
+synchronization.
 
-Generated thumbnails live under `<cache>/artwork/` with a 256 MiB pruning budget.
-Remote keys include the library identity, revision and audio ID; ETags revalidate
-the response. Selection, source changes, disabling covers, cache actions and
-shutdown invalidate old work. A dedicated coalescing worker performs extraction
-and HTTP requests; cover requests do not run on the Slint event loop or audio
-callback. A search worker skips a thumbnail when the cover cache is busy.
+Historical album-name and per-WAV choices migrate by copying into the legacy
+shared identity, with their original files retained.
+Identical choices merge; conflicting images or image/hidden choices retain every
+original and display a conflict notice so the user can choose. No arbitrary WAV
+wins a conflict. Explicit restore-to-embedded stores a migration receipt, so
+retained old files cannot resurrect a removed choice after restart. These older
+whole-album preferences are now read-only inherited defaults. An explicit
+directory image, hidden choice or valid restore receipt takes precedence;
+restoring one directory does not delete the older preference for other folders.
+Damaged explicit preferences are reported instead of silently enabling inheritance.
 
-Source validation, extraction and HTTP run outside the cache mutex. An admitted
-manual edit retains its original library/album destination across source changes,
-and closing waits for those edits off the event loop. Cancelling the image picker
-or rejecting an invalid image resumes automatic loading. Input and disposable
-cache errors are shown without becoming unsaved custom-cover edits.
+## Shared extraction and caching
 
-The sidebar remembers at most 128 successfully displayed album representatives
-in memory. Search refreshes validate those representatives against owned database
-records and read generated thumbnails only; they never inspect source WAVs.
-Custom images and hidden markers take precedence. Source or snapshot replacement
-invalidates the representatives.
+Default extraction filters the shared album to the selected WAV's immediate
+directory before selecting up to 64 present members in ascending audio ID order.
+The first valid embedded picture supplies that directory, independent of the
+selected member, search query and sidebar page. A later directory is not lost
+because its members fall beyond the whole album's first 64 IDs. Valid ID3 APIC
+and BOOM SMED Picture tags can supply pixels, including different Construction
+Kit and Designed posters within one Library. A new scan or explicit reload
+revalidates changed pictures. Explicit directory choices precede inherited ones.
+
+Generated thumbnails live under `<cache>/artwork/` with a 256 MiB budget. Keys
+identify the album/directory context, namespace and indexed folder identity when
+available. Local validation includes member IDs, source paths, sizes and recorded
+modification times; HTTP uses context-bound ETags. The sidebar retains at most
+128 source/directory hints, showing the last successfully browsed directory for
+an album. It reads cached pixels for the first 12 album rows. Hint validation or
+an owned representative `get_audio` lookup runs on the search worker, without
+opening WAVs or issuing per-album search/count queries. Sidebar hints never
+supply detail pixels to another directory.
+
+A dedicated coalescing worker performs extraction and HTTP outside the Slint event
+loop and audio callback. Only the same album and directory reuse in-flight work.
+Folder ID, normalized parent, namespace, source generation, epoch, cancellation
+and shutdown checks reject stale cache writes and event-loop publication. Extraction and
+HTTP run outside the cache mutex. Admitted manual edits retain their original
+library/album/directory destination across source changes; close drains those edits off the
+event loop. Picker cancellation and rejected images resume automatic loading.
 
 ## Server compatibility
 
-The client requests `GET /api/v1/audio/{id}/artwork?side=512` only when
-`compatibility.features.album_artwork >= 1`. Missing capability, 404 or 405 gives
-an empty embedded-cover display; custom client images still work. Artwork is
-never extracted by downloading or seeking to the end of a remote audio stream.
+Native schema-8 directory requests require both optional
+`compatibility.features.album_entity_artwork == 1` and `album_folder_artwork == 1`.
+They use `GET /api/v1/albums/{id}/artwork?folder_id={folder-id}&side=512`. Requests bind both
+`X-AudioLib-Library-Id` and `X-AudioLib-Album-Namespace`; the client validates
+`X-Library-Id`, `X-Album-Id`, `X-Album-Namespace`, `X-Album-Folder-Id` and
+`X-Album-Directory-Identity` on both 200 and 304 replies. The directory identity is
+the normalized source parent's lowercase UTF-8 hex; it detects path changes even
+when numeric IDs remain unchanged. Missing, duplicate or mismatched identity
+headers cannot authorize an image or cached 304 result.
 
-Bound requests include `X-AudioLib-Library-Id` and validate the response's
-`X-Library-Id`. A server-library replacement must not display the same numeric
-audio ID from the new library against an old snapshot.
+Historical members with `folder_id=NULL` use `unassigned_directory` instead of
+`folder_id`, restricted to that same album and normalized immediate parent. An
+empty parent is a valid flat-relative context, not a whole-album request. This
+mode echoes the directory identity without a numeric folder header. Native
+servers without the directory capability must be upgraded; the client does not
+downgrade to a whole-album response or an unbound per-audio request.
 
-The existing schema 6 snapshot remains read-only at its original path. A selected
-record derives its album from existing Metadata without upgrading the snapshot.
-Remote album sidebar aggregation is enabled only for schema 7, whose indexed
-album column avoids scanning every schema 6 row's JSON on each search. Embedded
-remote covers and custom images do not require that sidebar.
+For source schemas 3–7, the client validates and upgrades only an owned copy. It
+filters candidates to the same immediate directory before using the older
+`/audio/{id}/artwork` capability
+instead of sending local projected album IDs. Missing capability, 404 or 405
+produces an empty embedded display while custom images remain usable. Artwork
+never downloads or seeks through a remote audio stream to find a picture.
 
-Server extraction uses the same already-open file handle that passed root/path
-validation. Two independent artwork slots bound decoding without occupying
-playback slots. A full artwork queue returns `503 BUSY` with `Retry-After: 1`.
-See [API §8.2](api/README.md).
+Server extraction uses the already-open file handle that passed root/path checks.
+Two separate artwork slots bound decoding without occupying playback slots.
+A full queue returns `503 BUSY` with `Retry-After: 1`. See
+[API §8.2](api/README.md).
 
 ## Acceptance boundaries
 
-The authorized production deployment on 2026-10-27 updated the Mac server to the
+The following is historical acceptance of the earlier whole-album implementation,
+not acceptance of the current directory candidate. The authorized production
+deployment on 2026-10-27 updated the Mac server to the
 then-current 0.8.0 development build. The existing launcher, its signature, launchd
 configuration and file-access chain were retained. Schema 6 was upgraded in place
 to schema 7 after validating an independent rollback backup and an upgrade copy.

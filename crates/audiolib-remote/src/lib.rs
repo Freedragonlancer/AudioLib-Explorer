@@ -33,6 +33,8 @@
 //!   [`Capabilities::may_manage_roots`].
 //! * Optional embedded covers ([`RemoteClient::artwork`]): bounded image responses with
 //!   conditional ETags; gate requests with [`Capabilities::album_artwork_usable`].
+//!   Shared albums use [`RemoteClient::album_artwork_for_snapshot`], retaining legacy
+//!   source provenance and checking server-authoritative album identities.
 //! * Server profiles (`profiles` module): the data source dialog saved against the
 //!   active profile, "use the external address" as a sibling profile, switching and
 //!   removal, with per-profile tokens in [`RemoteSecrets`].

@@ -475,6 +475,7 @@ dependencies = [
  "audioadapter-buffers",
  "audiolib-core",
  "audiolib-windows",
+ "base64 0.23.1",
  "blowfish",
  "cpal",
  "encoding_rs",
@@ -526,6 +527,7 @@ dependencies = [
  "audiolib-audio",
  "audiolib-core",
  "chrono",
+ "flate2",
  "icu_casemap",
  "icu_normalizer",
  "jieba-rs",
@@ -537,6 +539,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

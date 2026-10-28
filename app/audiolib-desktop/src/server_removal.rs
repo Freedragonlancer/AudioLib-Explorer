@@ -312,7 +312,10 @@ impl Controller {
             let usable = |manage: &ServerManage| {
                 manage
                     .capabilities_for(&current)
-                    .is_some_and(Capabilities::album_artwork_usable)
+                    .is_some_and(|capabilities| {
+                        capabilities.album_artwork_usable()
+                            || capabilities.album_entity_artwork_usable()
+                    })
             };
             let became_available = !usable(&remote.manage) && usable(&manage);
             remote.manage = manage;
@@ -485,8 +488,9 @@ mod tests {
 
     #[test]
     fn artwork_capability_arrival_requeues_the_current_selection_only_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        for marker in ["album_artwork", "album_entity_artwork"] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "controller::remote_mode::server_removal::tests::child_artwork_capability_arrival",
@@ -494,16 +498,19 @@ mod tests {
                 "--test-threads=1",
             ])
             .env("AUDIOLIB_ARTWORK_GATE_TEST_ROOT", directory.path())
+            .env("AUDIOLIB_ARTWORK_GATE_MARKER", marker)
             .env("AUDIOLIB_DATA_DIR", directory.path())
             .output()
             .unwrap();
-        assert!(
-            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-            "Artwork capability regression failed: {}\n{}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "Artwork capability regression ({marker}) failed: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
     }
 
     #[test]
@@ -528,12 +535,31 @@ mod tests {
         controller.config.lock().unwrap().data_source.server_url = url.into();
         controller.remote_mode.store(true, Ordering::Release);
         controller.remote.lock().unwrap().state = Some(state("artwork-library", 1));
-        *controller.selected.lock().unwrap() = Some(file(42, None));
+        let mut selected = file(42, None);
+        selected.album_id = Some(7);
+        selected.album_entity = Some(audiolib_core::albums::Album {
+            id: 7,
+            name: "Shared library".into(),
+            kind: audiolib_core::albums::AlbumKind::Metadata,
+            metadata_key: Some("Shared library".into()),
+            folder_id: None,
+            folder_path: None,
+            representative_audio_id: Some(42),
+        });
+        *controller.selected.lock().unwrap() = Some(selected);
 
+        let marker = std::env::var("AUDIOLIB_ARTWORK_GATE_MARKER").unwrap();
         let reply = |url: &str, artwork: bool| {
             let mut manifest = audiolib_core::compatibility::compatibility_manifest();
+            // A modern server may advertise only shared-entity artwork. Its
+            // capability arrival must admit the same coalesced album request.
+            manifest.features.remove(if marker == "album_artwork" {
+                "album_entity_artwork"
+            } else {
+                "album_artwork"
+            });
             if !artwork {
-                manifest.features.remove("album_artwork");
+                manifest.features.remove(marker.as_str());
             }
             ServerManage {
                 url: url.into(),

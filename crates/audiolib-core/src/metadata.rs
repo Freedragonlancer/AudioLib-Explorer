@@ -15,7 +15,8 @@ pub fn source_description<'a>(bwf: &'a str, attributes: &'a Value) -> &'a str {
 
 /// Library/album name carried by the file's own Metadata (`fields.library`, filled from
 /// Soundminer `<Library>`, ID3 `TALB` or RIFF `IPRD`). Empty means the file declares no
-/// album; callers show nothing rather than inventing a folder-derived name.
+/// Metadata album. A shared folder fallback is represented separately by `Album`;
+/// it must not overwrite this declared Metadata value.
 pub fn album(attributes: &Value) -> String {
     let value = &attributes["wav_metadata"]["fields"]["library"];
     let text = match value {

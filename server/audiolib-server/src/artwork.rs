@@ -1,5 +1,5 @@
 // server/audiolib-server/src/artwork.rs
-//! On-demand embedded cover for `GET /audio/{id}/artwork`.
+//! Embedded covers for legacy WAV reads and shared album representations.
 //!
 //! The picture is read from the authorized audio file handle on disk.
 //! Image bytes are never written into the library SQLite database or into snapshots.
@@ -11,11 +11,16 @@ use crate::{
     state::{OpenError, OpenProgress},
     stream,
 };
-use audiolib_core::Error;
+use audiolib_core::{DataProvider, Error, MAX_ALBUM_MEMBERS};
 use std::{
+    collections::VecDeque,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::SystemTime,
 };
 
@@ -31,6 +36,80 @@ pub(crate) const MAX_SIDE: u32 = 512;
 const JPEG_QUALITY: u8 = 85;
 /// Cover cache stays under this size; oldest files are removed past it.
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ALBUM_CHOICES: usize = 128;
+
+#[derive(Clone, Copy)]
+enum AlbumDirectory<'a> {
+    Global,
+    Folder(i64),
+    Unassigned(&'a str),
+}
+
+/// Representation and the actual canonical directory observed by the resolver.
+pub(crate) struct AlbumArtworkReply {
+    /// Encoded pixels or a conditional representation hit.
+    pub reply: ArtworkReply,
+    /// Canonical source parent; absent only for the original global endpoint.
+    pub directory_identity: Option<String>,
+}
+
+/// ASCII-safe wire encoding of an already canonical source directory identity.
+pub(crate) fn directory_identity_hex(directory: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(directory.len() * 2);
+    for byte in directory.bytes() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// A resolved album source is shared across member selections and image sizes.
+struct AlbumChoice {
+    key: String,
+    audio_id: i64,
+}
+
+fn album_choices() -> &'static Mutex<VecDeque<AlbumChoice>> {
+    static CHOICES: OnceLock<Mutex<VecDeque<AlbumChoice>>> = OnceLock::new();
+    CHOICES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn album_reply(
+    reply: ArtworkReply,
+    library_id: &str,
+    namespace: &str,
+    album_id: i64,
+    directory: AlbumDirectory<'_>,
+    directory_identity: Option<&str>,
+) -> ArtworkReply {
+    let library = fnv64(format!("{library_id}\0{namespace}").as_bytes());
+    let context = match directory {
+        AlbumDirectory::Global => String::new(),
+        AlbumDirectory::Folder(id) => format!(
+            "folder-{id}-directory-{:016x}-",
+            fnv64(directory_identity.unwrap_or_default().as_bytes())
+        ),
+        AlbumDirectory::Unassigned(identity) => {
+            format!("directory-{:016x}-", fnv64(identity.as_bytes()))
+        }
+    };
+    match reply {
+        ArtworkReply::NotModified { etag } => ArtworkReply::NotModified {
+            etag: format!(
+                "\"album1-{library:x}-{album_id}-{context}{}\"",
+                etag.trim_matches('"')
+            ),
+        },
+        ArtworkReply::Body { etag, mime, bytes } => ArtworkReply::Body {
+            etag: format!(
+                "\"album1-{library:x}-{album_id}-{context}{}\"",
+                etag.trim_matches('"')
+            ),
+            mime,
+            bytes,
+        },
+    }
+}
 
 /// JPEG or PNG bytes ready to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +158,230 @@ pub(crate) fn artwork_etag(file_etag: &str, side: u32) -> String {
 }
 
 impl AppState {
+    /// Resolve one deterministic cover from the whole album, independent of the
+    /// selected member or search filters. Only owned candidates and authorized
+    /// source handles are used; no picture is stored in SQLite.
+    pub(crate) fn album_artwork(
+        &self,
+        album_id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<ArtworkReply, OpenError> {
+        self.album_artwork_context(
+            album_id,
+            AlbumDirectory::Global,
+            side,
+            if_none_match,
+            cancel,
+            progress,
+        )
+        .map(|resolved| resolved.reply)
+    }
+
+    /// Resolve only direct members of an existing folder, before the candidate
+    /// limit. An uncovered folder never borrows another folder's album image.
+    pub(crate) fn album_artwork_in_folder(
+        &self,
+        album_id: i64,
+        folder_id: i64,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<AlbumArtworkReply, OpenError> {
+        self.album_artwork_context(
+            album_id,
+            AlbumDirectory::Folder(folder_id),
+            side,
+            if_none_match,
+            cancel,
+            progress,
+        )
+    }
+
+    /// Resolve only NULL-folder members with this canonical source parent identity.
+    /// Directory identities are compared as strings and never accessed as OS paths.
+    pub(crate) fn album_artwork_in_unassigned_directory(
+        &self,
+        album_id: i64,
+        directory: &str,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<AlbumArtworkReply, OpenError> {
+        self.album_artwork_context(
+            album_id,
+            AlbumDirectory::Unassigned(directory),
+            side,
+            if_none_match,
+            cancel,
+            progress,
+        )
+    }
+
+    fn album_artwork_context(
+        &self,
+        album_id: i64,
+        directory: AlbumDirectory<'_>,
+        side: Option<u32>,
+        if_none_match: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        progress: &OpenProgress,
+    ) -> Result<AlbumArtworkReply, OpenError> {
+        self.provider().get_album(album_id)?;
+        let (members, directory_identity) = match directory {
+            AlbumDirectory::Folder(folder_id) => {
+                let folder = self.provider().get_folder(folder_id)?;
+                let identity = audiolib_db::normalize_source_path_identity(&folder.path);
+                if identity.len() > 4096 {
+                    return Err(Error::Validation(
+                        "Canonical directory exceeds 4096 UTF-8 bytes".into(),
+                    )
+                    .into());
+                }
+                (
+                    self.provider().album_members_in_folder(
+                        album_id,
+                        folder_id,
+                        MAX_ALBUM_MEMBERS,
+                        cancel.clone(),
+                    )?,
+                    Some(identity),
+                )
+            }
+            AlbumDirectory::Unassigned(identity) => (
+                self.provider().album_members_in_unassigned_directory(
+                    album_id,
+                    identity,
+                    MAX_ALBUM_MEMBERS,
+                    cancel.clone(),
+                )?,
+                Some(identity.to_owned()),
+            ),
+            AlbumDirectory::Global => (
+                self.provider()
+                    .album_members(album_id, MAX_ALBUM_MEMBERS, cancel.clone())?,
+                None,
+            ),
+        };
+        let namespace = self.provider().album_namespace();
+        let mut material = format!(
+            "{}\0{namespace}\0{}\0{album_id}\0{}",
+            self.library_id(),
+            self.provider().database_path().display(),
+            self.revision()?.revision
+        );
+        use std::fmt::Write as _;
+        match directory {
+            AlbumDirectory::Global => {}
+            AlbumDirectory::Folder(id) => {
+                let _ = write!(material, "\0folder:{id}");
+            }
+            AlbumDirectory::Unassigned(identity) => {
+                let _ = write!(material, "\0directory:{}:{identity}", identity.len());
+            }
+        }
+        if let Some(identity) = &directory_identity {
+            let _ = write!(material, "\0actual-directory:{}:{identity}", identity.len());
+        }
+        for member in &members {
+            let _ = write!(
+                material,
+                "\0{}:{}:{}",
+                member.id, member.file_size, member.file_path
+            );
+        }
+        let key = format!("{:016x}", fnv64(material.as_bytes()));
+        let cached_id = {
+            let choices = album_choices()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            choices
+                .iter()
+                .find(|choice| choice.key == key)
+                .map(|choice| choice.audio_id)
+        };
+        let mut candidates: Vec<i64> = members.iter().map(|member| member.id).collect();
+        if let Some(cached_id) = cached_id
+            && let Some(index) = candidates.iter().position(|id| *id == cached_id)
+        {
+            candidates.remove(index);
+            candidates.insert(0, cached_id);
+        }
+        for audio_id in candidates {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Error::Cancelled.into());
+            }
+            match self.artwork(audio_id, side, None, progress) {
+                Ok(reply) => {
+                    let current = self.provider().get_audio(audio_id)?;
+                    let same_directory = match directory {
+                        AlbumDirectory::Global => true,
+                        AlbumDirectory::Folder(id) => current.folder_id == Some(id),
+                        AlbumDirectory::Unassigned(identity) => {
+                            current.folder_id.is_none()
+                                && audiolib_db::source_parent_path_identity(&current.file_path)
+                                    == identity
+                        }
+                    };
+                    if current.album_id != Some(album_id) || !same_directory {
+                        continue;
+                    }
+                    if let AlbumDirectory::Folder(id) = directory {
+                        let current_folder = self.provider().get_folder(id)?;
+                        if Some(audiolib_db::normalize_source_path_identity(
+                            &current_folder.path,
+                        )) != directory_identity
+                        {
+                            return Err(Error::Validation(
+                                "Artwork directory changed during resolution; retry".into(),
+                            )
+                            .into());
+                        }
+                    }
+                    let mut choices = album_choices()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    choices.retain(|choice| choice.key != key);
+                    choices.push_back(AlbumChoice { key, audio_id });
+                    while choices.len() > MAX_ALBUM_CHOICES {
+                        choices.pop_front();
+                    }
+                    drop(choices);
+                    let reply = album_reply(
+                        reply,
+                        self.library_id(),
+                        &namespace,
+                        album_id,
+                        directory,
+                        directory_identity.as_deref(),
+                    );
+                    let etag = match &reply {
+                        ArtworkReply::NotModified { etag } | ArtworkReply::Body { etag, .. } => {
+                            etag
+                        }
+                    };
+                    let reply =
+                        if if_none_match.is_some_and(|value| stream::none_match(value, etag)) {
+                            ArtworkReply::NotModified { etag: etag.clone() }
+                        } else {
+                            reply
+                        };
+                    return Ok(AlbumArtworkReply {
+                        reply,
+                        directory_identity,
+                    });
+                }
+                Err(OpenError::Library(Error::NotFound(_))) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Error::NotFound(format!("Album {album_id} has no embedded cover")).into())
+    }
+
     /// Blocking. Open audio `id` like a stream, then return its embedded cover.
     ///
     /// No cover, a missing file and a failed extract are [`Error::NotFound`] (HTTP 404).

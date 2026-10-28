@@ -64,7 +64,8 @@ static BUNDLE_DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::c
 static ARTWORK_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 const BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
-/// `/audio/{id}/preview`, `/audio/{id}/waveform` and `/audio/{id}/artwork`, which
+/// `/audio/{id}/preview`, `/audio/{id}/waveform`, `/audio/{id}/artwork` and
+/// `/albums/{id}/artwork`, which
 /// legitimately take long (large bodies, waking disks, decoding); exceeding it yields
 /// 408 `TIMEOUT`.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -226,6 +227,7 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             get(audio_waveform).route_layer(middleware::map_response(vary_accept_encoding)),
         )
         .route("/audio/{id}/artwork", get(audio_artwork))
+        .route("/albums/{id}/artwork", get(album_artwork))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -1959,6 +1961,15 @@ struct ArtworkQuery {
     side: Option<String>,
 }
 
+/// Directory context is recognized only on the album endpoint. The historical
+/// per-audio endpoint continues to ignore unknown query parameters.
+#[derive(Deserialize)]
+struct AlbumArtworkQuery {
+    side: Option<String>,
+    folder_id: Option<i64>,
+    unassigned_directory: Option<String>,
+}
+
 /// `GET`/`HEAD /audio/{id}/artwork`: embedded JPEG/PNG cover (doc/api/README.md §8.2).
 /// Not time-limited. No cover, a missing file and a failed extract are 404.
 async fn audio_artwork(
@@ -1966,6 +1977,44 @@ async fn audio_artwork(
     Path(raw_id): Path<String>,
     query: Result<Query<ArtworkQuery>, QueryRejection>,
     headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    artwork_response(
+        state,
+        raw_id,
+        query.map(|Query(query)| AlbumArtworkQuery {
+            side: query.side,
+            folder_id: None,
+            unassigned_directory: None,
+        }),
+        headers,
+        false,
+    )
+    .await
+}
+
+/// Album-owned cover; every member resolves the same bounded representative.
+async fn album_artwork(
+    Extension(state): Extension<AppState>,
+    Path(raw_id): Path<String>,
+    query: Result<Query<AlbumArtworkQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    artwork_response(
+        state,
+        raw_id,
+        query.map(|Query(query)| query),
+        headers,
+        true,
+    )
+    .await
+}
+
+async fn artwork_response(
+    state: AppState,
+    raw_id: String,
+    query: Result<AlbumArtworkQuery, QueryRejection>,
+    headers: HeaderMap,
+    album: bool,
 ) -> Result<Response, ApiError> {
     let identities = headers.get_all(LIBRARY_ID_HEADER);
     let mut identities = identities.iter();
@@ -1987,13 +2036,53 @@ async fn audio_artwork(
             "The server library changed; synchronize before reading artwork",
         ));
     }
+    let album_namespace = if album {
+        let expected = state.provider().album_namespace();
+        let mut values = headers.get_all("x-audiolib-album-namespace").iter();
+        let actual = values.next().and_then(|value| value.to_str().ok());
+        if actual != Some(expected.as_str()) || values.next().is_some() {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "LIBRARY_CHANGED",
+                "The server album namespace changed; synchronize before reading artwork",
+            ));
+        }
+        Some(header_value(expected)?)
+    } else {
+        None
+    };
     // The middleware's AppState clone pins this identity throughout the read.
     let library_id = header_value(state.library_id().to_owned())?;
     let id = parse_id(&raw_id)?;
-    let Query(query) = query.map_err(|rejection| {
+    let AlbumArtworkQuery {
+        side,
+        folder_id,
+        unassigned_directory,
+    } = query.map_err(|rejection| {
         ApiError::validation(format!("Invalid query string: {}", rejection.body_text()))
     })?;
-    let side = crate::artwork::parse_side(query.side.as_deref())?;
+    let side = crate::artwork::parse_side(side.as_deref())?;
+    if folder_id.is_some() && unassigned_directory.is_some() {
+        return Err(ApiError::validation(
+            "folder_id and unassigned_directory are mutually exclusive",
+        ));
+    }
+    let unassigned_directory = unassigned_directory
+        .map(|directory| {
+            if directory.len() > 4096 {
+                return Err(ApiError::validation(
+                    "unassigned_directory exceeds 4096 UTF-8 bytes",
+                ));
+            }
+            let canonical = audiolib_db::normalize_source_path_identity(&directory);
+            if canonical.len() > 4096 {
+                return Err(ApiError::validation(
+                    "Canonical directory exceeds 4096 UTF-8 bytes",
+                ));
+            }
+            Ok(canonical)
+        })
+        .transpose()?;
     let permit = ARTWORK_SLOTS
         .try_acquire()
         .map_err(|_| ApiError::fs_busy("Artwork requests are busy; retry shortly"))?;
@@ -2003,19 +2092,69 @@ async fn audio_artwork(
         .map(str::to_owned);
     let progress = OpenProgress::default();
     let reporter = progress.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        state.artwork(id, side, if_none_match.as_deref(), &reporter)
+        if album {
+            if let Some(folder_id) = folder_id {
+                state.album_artwork_in_folder(
+                    id,
+                    folder_id,
+                    side,
+                    if_none_match.as_deref(),
+                    &cancel,
+                    &reporter,
+                )
+            } else if let Some(directory) = unassigned_directory.as_deref() {
+                state.album_artwork_in_unassigned_directory(
+                    id,
+                    directory,
+                    side,
+                    if_none_match.as_deref(),
+                    &cancel,
+                    &reporter,
+                )
+            } else {
+                state
+                    .album_artwork(id, side, if_none_match.as_deref(), &cancel, &reporter)
+                    .map(|reply| crate::artwork::AlbumArtworkReply {
+                        reply,
+                        directory_identity: None,
+                    })
+            }
+        } else {
+            state
+                .artwork(id, side, if_none_match.as_deref(), &reporter)
+                .map(|reply| crate::artwork::AlbumArtworkReply {
+                    reply,
+                    directory_identity: None,
+                })
+        }
     });
-    let reply = watch_open(id, "Artwork", task, &progress).await?;
+    let resolved = watch_open(id, "Artwork", task, &progress).await?;
+    let directory_identity = resolved
+        .directory_identity
+        .as_deref()
+        .map(crate::artwork::directory_identity_hex);
     let cache_control = HeaderValue::from_static("private, no-cache");
-    Ok(match reply {
+    Ok(match resolved.reply {
         crate::artwork::ArtworkReply::NotModified { etag } => {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
             let headers = response.headers_mut();
             headers.insert(header::ETAG, header_value(etag)?);
             headers.insert(header::CACHE_CONTROL, cache_control);
             headers.insert("x-library-id", library_id);
+            if let Some(namespace) = album_namespace {
+                headers.insert("x-album-id", HeaderValue::from(id));
+                headers.insert("x-album-namespace", namespace);
+                if let Some(folder_id) = folder_id {
+                    headers.insert("x-album-folder-id", HeaderValue::from(folder_id));
+                }
+                if let Some(identity) = directory_identity {
+                    headers.insert("x-album-directory-identity", header_value(identity)?);
+                }
+            }
             response
         }
         crate::artwork::ArtworkReply::Body { etag, mime, bytes } => {
@@ -2027,6 +2166,16 @@ async fn audio_artwork(
             headers.insert(header::ETAG, header_value(etag)?);
             headers.insert(header::CACHE_CONTROL, cache_control);
             headers.insert("x-library-id", library_id);
+            if let Some(namespace) = album_namespace {
+                headers.insert("x-album-id", HeaderValue::from(id));
+                headers.insert("x-album-namespace", namespace);
+                if let Some(folder_id) = folder_id {
+                    headers.insert("x-album-folder-id", HeaderValue::from(folder_id));
+                }
+                if let Some(identity) = directory_identity {
+                    headers.insert("x-album-directory-identity", header_value(identity)?);
+                }
+            }
             response
         }
     })

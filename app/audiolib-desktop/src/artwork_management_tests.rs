@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "artwork_contract_review_tests.rs"]
 mod contracts;
+#[path = "artwork_folder_context_tests.rs"]
+mod folder_context;
 #[path = "artwork_worker_review_tests.rs"]
 mod worker_review;
 
@@ -18,7 +20,7 @@ fn selected_artwork_file(fixture: &Fixture) -> AudioFile {
     audiolib_db::register_library_functions(&connection).unwrap();
     connection
         .execute(
-            "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.wav_metadata.fields.library',?2),album=?2 WHERE id=?1",
+            "UPDATE audio_files SET metadata_json=json_set(audiolib_metadata_json(metadata_json),'$.wav_metadata.fields.library',?2) WHERE id=?1",
             rusqlite::params![file.id, "Artwork album"],
         )
         .unwrap();
@@ -33,11 +35,12 @@ fn selected_artwork_file(fixture: &Fixture) -> AudioFile {
 
 fn artwork_job(controller: &Controller, file: &AudioFile) -> ArtworkJob {
     ArtworkJob {
-        file: file.clone(),
-        generation: controller.selection_generation.load(Ordering::Acquire),
+        album: file.album_entity.clone().unwrap(),
+        folder: controller.artwork_folder_context(file),
         source_generation: controller.source_generation.load(Ordering::Acquire),
         epoch: controller.artwork_epoch.load(Ordering::Acquire),
         cancel: Arc::new(AtomicBool::new(false)),
+        notice: Mutex::new(None),
     }
 }
 
@@ -55,7 +58,11 @@ fn manual_cover(path: &Path) {
 }
 
 fn embedded_cover(path: &Path) {
-    let pixels = image::RgbaImage::from_pixel(4, 2, image::Rgba([255, 0, 0, 255]));
+    embedded_cover_color(path, [255, 0, 0, 255]);
+}
+
+fn embedded_cover_color(path: &Path, color: [u8; 4]) {
+    let pixels = image::RgbaImage::from_pixel(4, 2, image::Rgba(color));
     let mut png = std::io::Cursor::new(Vec::new());
     pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
     let mut picture = b"\0image/png\0\x03\0".to_vec();
@@ -86,6 +93,78 @@ fn embedded_cover(path: &Path) {
 }
 
 #[test]
+fn folder_album_default_is_independent_of_selected_wav_and_manual_choices_are_shared() {
+    isolated("album_review::management::child_shared_folder_cover");
+}
+
+#[test]
+#[ignore = "isolated shared folder artwork regression"]
+fn child_shared_folder_cover() {
+    let fixture = fixture();
+    let controller = &fixture.controller;
+    controller.config.lock().unwrap().allowed_scan_roots = vec![fixture.root.join("sounds")];
+    let mut files = fixture
+        .provider
+        .search(&SearchRequest::default())
+        .unwrap()
+        .results;
+    let directory = audiolib_db::normalize_source_path_identity(&audiolib_db::display_path(
+        &fixture.root.join("sounds/gore").canonicalize().unwrap(),
+    ));
+    files.retain(|file| audiolib_db::source_parent_path_identity(&file.file_path) == directory);
+    files.sort_by_key(|file| file.id);
+    assert!(files.len() >= 2);
+    let first = &files[0];
+    let second = &files[1];
+    assert_eq!(first.album_id, second.album_id);
+    assert_eq!(first.folder_id, second.folder_id);
+    assert_eq!(first.album_entity.as_ref().unwrap().kind, AlbumKind::Folder);
+    let blue = [0, 0, 255, 255];
+    embedded_cover_color(Path::new(&first.file_path), blue);
+    embedded_cover_color(Path::new(&second.file_path), [255, 0, 0, 255]);
+    for file in [second, first, second] {
+        *controller.selected.lock().unwrap() = Some(file.clone());
+        let pixels = controller
+            .load_artwork(&artwork_job(controller, file))
+            .unwrap();
+        assert_eq!(
+            pixels.get_pixel(0, 0).0,
+            blue,
+            "the first member in the same directory supplies the shared cover"
+        );
+    }
+    assert_eq!(
+        override_paths(controller, first),
+        override_paths(controller, second)
+    );
+    let context = controller.artwork_action_context(Some(second));
+    assert_eq!(
+        controller.perform_artwork_action(context, 3, None, false),
+        Ok(true)
+    );
+    *controller.selected.lock().unwrap() = Some(first.clone());
+    assert!(
+        controller
+            .load_artwork(&artwork_job(controller, first))
+            .is_none()
+    );
+    let context = controller.artwork_action_context(Some(first));
+    assert_eq!(
+        controller.perform_artwork_action(context, 4, None, false),
+        Ok(true)
+    );
+    assert_eq!(
+        controller
+            .load_artwork(&artwork_job(controller, first))
+            .unwrap()
+            .get_pixel(0, 0)
+            .0,
+        blue
+    );
+    finish(&fixture);
+}
+
+#[test]
 fn manual_cover_hide_restore_and_cache_clear_preserve_separate_lifetimes() {
     isolated("album_review::management::child_manual_cover_management");
 }
@@ -103,7 +182,8 @@ fn child_manual_cover_management() {
     controller.queue_artwork(&file);
     wait_for(ui, |ui| ui.get_album_cover_ready());
     assert_eq!(ui.get_album_cover().size().width, 3);
-    // Annotation refreshes must retain file-scoped covers as well as album covers.
+    // Presentation uses the provider's shared entity even when source Metadata
+    // text is refreshed independently of an annotation-only save.
     let custom_cover = ui.get_album_cover();
     let mut ungrouped = file.clone();
     ungrouped.attributes["wav_metadata"]["fields"]["library"] = "".into();
@@ -288,8 +368,11 @@ fn child_artwork_identity_and_cancellation() {
     controller
         .selection_generation
         .fetch_add(1, Ordering::AcqRel);
-    assert!(!controller.artwork_current(&original));
-    assert!(controller.load_artwork(&original).is_none());
+    assert!(
+        controller.artwork_current(&original),
+        "selection changes within the same shared album retain its cover request"
+    );
+    assert!(controller.load_artwork(&original).is_some());
     let old_source = artwork_job(controller, &file);
     controller.source_generation.fetch_add(1, Ordering::AcqRel);
     assert!(!controller.artwork_current(&old_source));

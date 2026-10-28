@@ -27,23 +27,31 @@ fn child_album_navigation() {
     let connection = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
     audiolib_db::register_library_functions(&connection).unwrap();
     connection.execute(
-        "UPDATE audio_files SET album=CASE WHEN filename LIKE 'gore%' THEN 'Gore album' ELSE 'Wind album' END",
-        [],
-    ).unwrap();
-    connection.execute(
-        "UPDATE audio_files SET metadata_json=json_set(metadata_json,'$.wav_metadata.fields.library',album)",
+        "UPDATE audio_files SET metadata_json=json_set(audiolib_metadata_json(metadata_json),'$.wav_metadata.fields.library',CASE WHEN filename LIKE 'gore%' THEN 'Gore album' ELSE 'Wind album' END)",
         [],
     ).unwrap();
     drop(connection);
     search(&fixture, "", 4);
     wait_albums(&fixture, 2);
-    ui.invoke_album_selected("Gore album".into());
+    let gore = ui
+        .get_albums()
+        .iter()
+        .find(|row| row.name == "Gore album")
+        .unwrap()
+        .id;
+    let wind = ui
+        .get_albums()
+        .iter()
+        .find(|row| row.name == "Wind album")
+        .unwrap()
+        .id;
+    ui.invoke_album_selected(gore.clone());
     wait_for(ui, |ui| {
         !ui.get_searching() && ui.get_rows().row_count() == 3
     });
     assert_eq!(
-        controller.request.lock().unwrap().filters.album.as_deref(),
-        Some("Gore album")
+        controller.request.lock().unwrap().filters.album_id,
+        Some(gore.parse::<i64>().unwrap())
     );
     // The current query is wind while the selected album is gore: results are empty,
     // but cross-filter facets expose the matching wind album immediately.
@@ -57,20 +65,36 @@ fn child_album_navigation() {
     wait_for(ui, |ui| {
         !ui.get_searching() && ui.get_rows().row_count() == 1
     });
-    assert!(controller.request.lock().unwrap().filters.album.is_none());
+    assert!(
+        controller
+            .request
+            .lock()
+            .unwrap()
+            .filters
+            .album_id
+            .is_none()
+    );
     assert!(ui.get_album_filter().is_empty());
-    ui.invoke_album_selected("Wind album".into());
+    ui.invoke_album_selected(wind.clone());
     wait_for(ui, |ui| !ui.get_searching());
     assert_eq!(
-        controller.request.lock().unwrap().filters.album.as_deref(),
-        Some("Wind album")
+        controller.request.lock().unwrap().filters.album_id,
+        Some(wind.parse::<i64>().unwrap())
     );
-    ui.invoke_album_selected("Wind album".into());
+    ui.invoke_album_selected(wind);
     wait_for(ui, |ui| !ui.get_searching());
-    assert!(controller.request.lock().unwrap().filters.album.is_none());
+    assert!(
+        controller
+            .request
+            .lock()
+            .unwrap()
+            .filters
+            .album_id
+            .is_none()
+    );
 
     search(&fixture, "", 4);
-    ui.invoke_album_selected("Gore album".into());
+    ui.invoke_album_selected(gore.clone());
     wait_for(ui, |ui| {
         !ui.get_searching() && ui.get_rows().row_count() == 3
     });
@@ -80,7 +104,13 @@ fn child_album_navigation() {
         ui.get_search_tasks().row_count() == 2 && !ui.get_task_restoring() && !ui.get_searching()
     });
     assert!(ui.get_album_filter().is_empty());
-    ui.invoke_album_selected("Wind album".into());
+    ui.invoke_album_selected(
+        ui.get_albums()
+            .iter()
+            .find(|row| row.name == "Wind album")
+            .unwrap()
+            .id,
+    );
     wait_for(ui, |ui| {
         !ui.get_searching() && ui.get_rows().row_count() == 1
     });
@@ -117,11 +147,19 @@ fn child_album_navigation() {
     controller.reset_library_view(ui, true, false);
     controller.remote_mode.store(true, Ordering::Release);
     ui.set_remote_mode(true);
-    ui.invoke_album_selected("Gore album".into());
+    ui.invoke_album_selected(gore);
     wait_for(ui, |_| true);
     assert_eq!(ui.get_albums().row_count(), 0);
     assert!(ui.get_album_filter().is_empty());
-    assert!(controller.request.lock().unwrap().filters.album.is_none());
+    assert!(
+        controller
+            .request
+            .lock()
+            .unwrap()
+            .filters
+            .album_id
+            .is_none()
+    );
     controller.remote_mode.store(false, Ordering::Release);
     ui.set_remote_mode(false);
     finish(&fixture);

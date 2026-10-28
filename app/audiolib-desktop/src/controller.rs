@@ -21,9 +21,9 @@ use audiolib_core::config::{
     AppConfig, AudioTablePreferences, UI_SCALE_PERCENTS, normalize_ui_scale_percent,
 };
 use audiolib_core::{
-    AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder, LibraryExportFormat,
-    ListWaveformSource, MaintenanceAction, MetadataPatch, ScanSession, SearchFilters,
-    SearchRequest, SortOrder, TagEditMode,
+    Album, AlbumKind, AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder,
+    LibraryExportFormat, ListWaveformSource, MaintenanceAction, MetadataPatch, ScanSession,
+    SearchFilters, SearchRequest, SortOrder, TagEditMode,
 };
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -162,6 +162,8 @@ mod request_recovery_tests;
 #[cfg(test)]
 #[path = "result_rows_tests.rs"]
 mod result_rows_tests;
+#[path = "shared_album_artwork.rs"]
+mod shared_album_artwork;
 #[cfg(test)]
 #[path = "single_click_play_tests.rs"]
 mod single_click_play_tests;
@@ -329,12 +331,20 @@ struct SearchJob {
     provider: Arc<SqliteProvider>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtworkFolderContext {
+    folder_id: Option<i64>,
+    path: String,
+    namespace: String,
+}
+
 struct ArtworkJob {
-    file: AudioFile,
-    generation: u64,
+    album: Album,
+    folder: ArtworkFolderContext,
     source_generation: u64,
     epoch: u64,
     cancel: Arc<AtomicBool>,
+    notice: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -719,6 +729,8 @@ pub struct Controller {
     search_cancel: Mutex<Arc<AtomicBool>>,
     facet_revision: AtomicU64,
     artwork_job: Mutex<Option<ArtworkJob>>,
+    artwork_inflight: Mutex<Option<(u64, i64, ArtworkFolderContext, u64)>>,
+    artwork_override_migrations: Mutex<HashSet<(u64, String)>>,
     artwork_wake: Condvar,
     artwork_epoch: AtomicU64,
     artwork_cancel: Mutex<Arc<AtomicBool>>,
@@ -995,6 +1007,8 @@ impl Controller {
             search_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             facet_revision: AtomicU64::new(0),
             artwork_job: Mutex::new(None),
+            artwork_inflight: Mutex::new(None),
+            artwork_override_migrations: Mutex::new(HashSet::new()),
             artwork_wake: Condvar::new(),
             artwork_epoch: AtomicU64::new(0),
             artwork_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
@@ -1230,23 +1244,40 @@ impl Controller {
             }
         });
         let c = self.clone();
-        ui.on_album_selected(move |name| {
+        ui.on_album_selected(move |identity| {
             if !c.available() || !c.album_facets_available() {
                 return;
             }
             let Some(ui) = c.ui.upgrade() else { return };
-            // Clicking the active album clears the filter, like a toggle chip.
+            let Ok(id) = identity.parse::<i64>() else {
+                return;
+            };
+            if id <= 0 {
+                return;
+            }
+            // IDs distinguish same-named folder libraries. Clicking the active
+            // entity clears its filter without turning a label into an identity.
+            let current = c.request.lock().unwrap().filters.album_id;
+            let next = (ui.get_album_filter_unavailable() || current != Some(id)).then_some(id);
+            if !c.admit_task_album_filter(next) {
+                return;
+            }
+            ui.set_album_filter_unavailable(false);
             {
                 let mut request = c.request.lock().unwrap();
-                let current = request.filters.album.clone().unwrap_or_default();
-                let next = if current == name.as_str() {
-                    String::new()
-                } else {
-                    name.to_string()
-                };
-                request.filters.album = (!next.is_empty()).then(|| next.clone());
+                request.filters.album = None;
+                request.filters.album_id = next;
                 request.offset = 0;
-                ui.set_album_filter(next.into());
+                ui.set_album_filter_id(next.map(|id| id.to_string()).unwrap_or_default().into());
+                let label = next
+                    .and_then(|_| {
+                        ui.get_albums()
+                            .iter()
+                            .find(|row| row.id == identity)
+                            .map(|row| row.name)
+                    })
+                    .unwrap_or_default();
+                ui.set_album_filter(label);
             }
             c.request_navigation_search(&ui, true, false);
         });
@@ -1315,6 +1346,8 @@ impl Controller {
                 ui.set_duration_min("".into());
                 ui.set_duration_max("".into());
                 ui.set_album_filter("".into());
+                ui.set_album_filter_id("".into());
+                ui.set_album_filter_unavailable(false);
                 c.request_navigation_search(&ui, true, true);
             }
         });
@@ -2099,6 +2132,7 @@ impl Controller {
     fn invalidate_library_reads(&self) {
         self.cancel_artwork();
         self.artwork_album_hints.lock().unwrap().clear();
+        self.artwork_override_migrations.lock().unwrap().clear();
         self.library_info_generation.fetch_add(1, Ordering::AcqRel);
         self.search_cancel
             .lock()
@@ -2735,6 +2769,8 @@ impl Controller {
             ui.set_selected_path("".into());
             ui.set_selected_format("".into());
             ui.set_selected_album("".into());
+            ui.set_selected_album_id("".into());
+            ui.set_selected_artwork_directory("".into());
             ui.set_album_cover(Image::default());
             ui.set_album_cover_ready(false);
             ui.set_selected_attributes("".into());
@@ -2786,6 +2822,8 @@ impl Controller {
         ui.set_selected_path("".into());
         ui.set_selected_format("".into());
         ui.set_selected_album("".into());
+        ui.set_selected_album_id("".into());
+        ui.set_selected_artwork_directory("".into());
         ui.set_album_cover(Image::default());
         ui.set_album_cover_ready(false);
         ui.set_checked_count(0);
@@ -2816,6 +2854,8 @@ impl Controller {
         ui.set_edit_favorite(false);
         if reset_request {
             ui.set_album_filter("".into());
+            ui.set_album_filter_id("".into());
+            ui.set_album_filter_unavailable(false);
             *self.request.lock().unwrap() = SearchRequest::default();
             ui.set_query("".into());
             ui.set_favorites_only(false);
@@ -3345,6 +3385,10 @@ impl Controller {
                         continue;
                     }
                     let provider = &job.provider;
+                    if c.task_album_choices_only(&job.request) {
+                        c.publish_albums(&job);
+                        continue;
+                    }
                     crate::gui_search_benchmark::worker_started(job.generation, true);
                     let database_revision = provider.search_revision().ok().flatten();
                     let cached = facets.as_ref().filter(|cached| {
@@ -3808,6 +3852,7 @@ impl Controller {
         let provider = job.provider.clone();
         let mut request = job.request.clone();
         request.filters.album = None;
+        request.filters.album_id = None;
         request.limit = 1;
         let ui = self.ui.clone();
         let Ok(albums) = provider.album_facets_cancellable(&request, job.cancel.clone()) else {
@@ -3817,12 +3862,12 @@ impl Controller {
         // independent artwork worker. slint::Image is not Send, so pixels cross to
         // the event loop and images are built there.
         let mut rows = Vec::with_capacity(albums.len());
-        for (index, (name, count)) in albums.into_iter().enumerate() {
+        for (index, facet) in albums.into_iter().enumerate() {
             if !current() {
                 return;
             }
-            let thumbnail = self.album_thumbnail(&provider, &name, index, job.cancel.clone());
-            rows.push((name, count, thumbnail));
+            let thumbnail = self.album_thumbnail(&provider, &facet.album, index);
+            rows.push((facet.album, facet.matching_count, thumbnail));
         }
         let generation = job.generation;
         let cancel = job.cancel.clone();
@@ -3834,10 +3879,15 @@ impl Controller {
             {
                 return;
             }
+            confirmed.remember_task_album_bindings(
+                provider.album_namespace(),
+                rows.iter().map(|(album, _, _)| album.clone()),
+            );
             let rows: Vec<AlbumRow> = rows
                 .into_iter()
-                .map(|(name, count, thumbnail)| AlbumRow {
-                    name: name.into(),
+                .map(|(album, count, thumbnail)| AlbumRow {
+                    id: album.id.to_string().into(),
+                    name: album.name.into(),
                     count: count.to_string().into(),
                     cover: match thumbnail {
                         Some((pixels, width, height)) => slint::Image::from_rgba8(
@@ -3850,6 +3900,14 @@ impl Controller {
                 })
                 .collect();
             ui.set_albums(ModelRc::new(VecModel::from(rows)));
+            if !ui.get_album_filter_unavailable()
+                && let Some(active) = ui
+                    .get_albums()
+                    .iter()
+                    .find(|row| row.id == ui.get_album_filter_id())
+            {
+                ui.set_album_filter(active.name);
+            }
         });
     }
 
@@ -3869,9 +3927,7 @@ impl Controller {
         let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.tree_generation.fetch_add(1, Ordering::AcqRel);
         ui.set_searching(false);
-        if self.task_folder_unavailable(ui) {
-            return;
-        }
+        self.cancel_deferred_task_search();
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
         if request.needs_more_search_text() {
@@ -3883,6 +3939,10 @@ impl Controller {
                 }
                 .into(),
             );
+            return;
+        }
+        if self.task_folder_unavailable(ui, immediate, reset) {
+            self.queue_unavailable_album_choices(ui, generation);
             return;
         }
         request.limit = PAGE_SIZE;
@@ -3952,7 +4012,13 @@ impl Controller {
             tagged_only: ui.get_tagged_only(),
             color: (!ui.get_color_filter().trim().is_empty())
                 .then(|| ui.get_color_filter().trim().to_owned()),
-            album: (!ui.get_album_filter().is_empty()).then(|| ui.get_album_filter().to_string()),
+            album: (ui.get_album_filter_id().is_empty() && !ui.get_album_filter().is_empty())
+                .then(|| ui.get_album_filter().to_string()),
+            album_id: ui
+                .get_album_filter_id()
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0),
             ..SearchFilters::default()
         };
         crate::tag_chips::apply_to(ui, &mut request.filters);
@@ -7112,22 +7178,29 @@ fn same_patch(left: &MetadataPatch, right: &MetadataPatch) -> bool {
 }
 
 fn present_file(ui: &AppWindow, file: &AudioFile) {
-    let album = audiolib_core::album(&file.attributes);
-    let same_cover = ui.get_selected_id().as_str() == file.id.to_string()
-        && ui.get_selected_path().as_str() == file.file_path
-        && ui.get_selected_album().as_str() == album;
+    let album = file
+        .album_entity
+        .as_ref()
+        .map(|album| album.name.clone())
+        .unwrap_or_else(|| file.album.clone());
+    let identity = file.album_id.map(|id| id.to_string()).unwrap_or_default();
+    let directory = audiolib_db::source_parent_path_identity(&file.file_path);
+    let same_cover = !identity.is_empty()
+        && ui.get_selected_album_id().as_str() == identity
+        && ui.get_selected_artwork_directory().as_str() == directory;
     ui.set_selected_id(file.id.to_string().into());
     ui.set_has_selection(true);
     ui.set_selected_missing(file.missing);
     ui.set_selected_name(file.filename.clone().into());
     ui.set_selected_path(file.file_path.clone().into());
-    // A changed selection clears stale pixels. Saving the same record retains its
-    // cover, including a file-scoped custom image when no album is declared.
+    // Members retain pixels only within the same album and direct parent directory.
     if !same_cover {
         ui.set_album_cover_ready(false);
         ui.set_album_cover(Image::default());
     }
     ui.set_selected_album(album.into());
+    ui.set_selected_album_id(identity.into());
+    ui.set_selected_artwork_directory(directory.into());
     ui.set_selected_format(
         format!(
             "{:.1} kHz / {} bit / {} ch / {}",

@@ -1,11 +1,13 @@
 // app/audiolib-desktop/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod album_override_migration;
 mod artwork;
 #[cfg(test)]
 mod close_tests;
 mod controller;
 mod diagnostics;
 mod dialogs;
+mod directory_artwork_choices;
 mod gui_search_benchmark;
 mod list_waveforms;
 #[cfg(test)]

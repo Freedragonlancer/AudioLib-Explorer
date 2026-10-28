@@ -234,8 +234,9 @@ over a running binary.
 Either use the script:
 
 ```sh
+: "${EXPECTED_SERVER_COMMIT:?Set the new release's expected short commit first}"
 INSTALL_DIR=/opt/audiolib DATA_DIR=/var/lib/audiolib SERVICE_NAME=audiolib-server \
-  EXPECT_SCHEMA_VERSION=5 \
+  EXPECT_SCHEMA_VERSION=8 EXPECT_COMMIT="$EXPECTED_SERVER_COMMIT" \
   ./server/deploy/redeploy-server.sh target/<target>/release/audiolib-server
 # macOS: SERVICE_NAME=io.github.audiolib.server INSTALL_DIR=/opt/audiolib DATA_DIR=/usr/local/var/audiolib
 ```
@@ -244,10 +245,21 @@ It checks that no scan is running, backs up the library and the old binary to
 `$DATA_DIR/backups/<timestamp>/` (plus `<binary>.prev` next to the binary), installs the new
 binary under a temporary name and renames it into place, restarts the service
 (systemd or launchd), waits for `/health` to report `ok`, verifies `version`, `api_version`,
-`schema_version` and `commit` (not `unknown`; optionally against `EXPECT_*`), and **rolls back
-automatically** if any of that fails. Parameters: `INSTALL_DIR`, `BINARY`, `SERVICE_NAME`,
+`schema_version` and `commit` (not `unknown`; optionally against `EXPECT_*`), and normally
+rolls back automatically if verification fails. If the latest health response still
+reports `starting` with a recognized database `upgrade.phase`, an explicit matching
+`EXPECT_COMMIT`, the new binary's version and matching API/schema conditions, timeout
+instead exits nonzero and retains the new binary, markers and backups without another
+restart. This is failed acceptance, not successful deployment. Check health/logs and use
+the matching CLI's migration inspect/resume/rollback workflow; never interrupt that job
+by swapping an older binary. The exception requires structured JSON extraction by system
+`plutil` or optional existing `python3`; without either reader, or without explicit commit
+identity, ordinary rollback behavior remains. No parser is bundled or installed. Missing
+responses, ordinary startup without upgrade progress, wrong identity and `error` do not
+qualify. Rust in-app auto-update has no post-restart health watchdog; this timeout belongs
+to the external deployment script. Parameters: `INSTALL_DIR`, `BINARY`, `SERVICE_NAME`,
 `DATA_DIR`, `LIBRARY_DB`, `BACKUP_DIR`, `HOST`, `PORT`, `TOKEN`, `SERVICE_MANAGER`, `WAIT_SECS`,
-`EXPECT_API_VERSION`, `EXPECT_SCHEMA_VERSION`, `EXPECT_COMMIT` (documented at the top of the script).
+`LAUNCHD_PLIST`, `EXPECT_API_VERSION`, `EXPECT_SCHEMA_VERSION`, `EXPECT_COMMIT` (documented at the top of the script).
 
 Or by hand:
 

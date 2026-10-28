@@ -4,6 +4,13 @@
 
 ## 1. 目标与边界
 
+当前 0.8.1 候选使用 schema 8 / `ale-s8-cld1-t3-m2-p1-a1`（`album_entities: 1`），
+专辑封面接口见 §8.2。新库、迁移输出及新服务端快照的 Metadata 物理列保持原始
+JSON TEXT，压缩暂缓；外层快照 zstd 传输保留。客户端与服务器须配套升级。
+旧实验 `a1-z1` 仅保留严格只读兼容，不作为可写目标。旧快照只在客户端自有副本迁移，
+源格式与投影格式分别保存。详见[共享专辑与存储](../Rust_Shared_Albums.md)。
+下段是此前续传迭代的历史身份和验收范围。
+
 当前续传迭代基于 main `d64c0a7`，程序版本为 `0.6.0`，保留 schema 6 / p1、共享格式协商和受保护迁移。固定快照及 Range 协议见 §6.1；本轮验证见 [Rust 验证报告](../Rust_Validation.md)。生产服务器不在本轮部署范围内，工作库没有被验收脚本打开。以下链接保留此前数据库迭代的设计与历史证据：
 [方案 B 存储设计](Search_Storage_B.md)、
 [版本兼容与迁移契约](Library_Migration_Compatibility.md)、
@@ -770,6 +777,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
 | `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（库已打开但 `waveforms.db` 无法打开时也不声明，§9.5.7） |
 | `compatibility.features.album_artwork` | 可选 feature，修订 ≥ 1 表示支持 §8.2 的 `GET /audio/{id}/artwork`。键名就是 `album_artwork`。旧服务端没有该键（或修订不同）时客户端不要请求封面；缺失只关闭这一功能，不拒绝同步 |
+| `compatibility.features.album_folder_artwork` | 可选 API feature，修订 1 表示 `/albums/{id}/artwork` 支持 `folder_id` 或 `unassigned_directory` 的直属目录过滤及身份回显；不改变数据库格式、schema 或迁移要求 |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
 - 设置随时可能在管理页被改；`can_manage` 只是提示，管理端点仍可能返回 403 `MANAGE_FORBIDDEN`，客户端按错误码处理即可。旧服务端没有该端点（404）时按“只读、不提供管理功能”处理。
@@ -894,9 +902,23 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 - 选择文件、根目录限制、404、根离线 503 `ROOT_OFFLINE` + `Retry-After: 5`（先即时重查约 2 秒）、慢速 NAS 唤醒（**无 30 秒时间上限**，不会 408）、文件在阻塞线程池中打开、打开超过 10 秒记 WARN：与 `/stream` 完全相同（§6.4）。文件缺失是 404，不会变成一个坏掉的流。
 - 以后可能的扩展：进程内（纯 Rust）FLAC 编码，替代 ffmpeg 并得到确定、可 Range 的 FLAC；Opus（`kbps=`，客户端需另配解码器）；转码结果缓存。
 
-### 8.2 内嵌封面 `GET /audio/{id}/artwork`（已实现，第一阶段）
+### 8.2 专辑封面 `GET /albums/{id}/artwork` 与兼容音频端点
 
-按音频记录 id 从磁盘上的文件读取内嵌封面（ID3 `APIC`，复用 `audiolib_audio::probe_with_artwork`）。**不把图片字节写入主库 SQLite，也不写入快照。** 按文件 id 读磁盘，不依赖 schema 7 的 `album` 列，schema 6 库同样可用。按专辑名取封面、扫描时批量预生成属于后续阶段，这里没有。
+schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组，缺失时按已登记根下的第一层文件夹归组。图片不进入 SQLite 或快照。详见[共享专辑与 Metadata 存储](../Rust_Shared_Albums.md)。
+
+- 新能力 `compatibility.features.album_entity_artwork >= 1` 表示支持 `GET` / `HEAD /albums/{id}/artwork`。`id` 是当前原生快照的专辑 ID，不能发送旧快照本地投影的 ID。
+- 必须带单个非空 `X-AudioLib-Library-Id` 和 `X-AudioLib-Album-Namespace`。库身份或 namespace 不符、namespace 缺失/空/重复，均在读取源文件前拒绝，返回 409 `LIBRARY_CHANGED`（库身份缺失仍为 `LIBRARY_ID_REQUIRED`）。
+- 从完整专辑按音频 ID 升序选最多 64 个未缺失成员，返回第一个有效内嵌封面，与选中 WAV、搜索条件和列表页无关。
+- 可选 `folder_id` 为已有目录的有符号 64 位 ID，限制为同专辑、该**直属目录**内的未缺失成员；先过滤目录，再按音频 ID 升序取最多 64 个候选，不包含子目录。该目录无图时为 404，不回退专辑其他目录。两种目录参数都省略时仍保持原全专辑语义。整数格式错误/溢出/重复为 400 `VALIDATION`，目录不存在为 404。
+- 对历史 `folder_id=NULL` 成员，可改用 `unassigned_directory=<源父目录 identity>`；只查同专辑、NULL folder、该直属源父目录的未缺失成员，同样在 LIMIT 前过滤。与 `folder_id` 互斥，同时出现或参数重复为 400；原始与规范化字符串均最多 4096 UTF-8 字节。允许空字符串，表示平铺相对文件名的父目录，不能当成全专辑。Windows drive/UNC 路径在所有平台上按其源语法规范化（drive 根 identity 为 `c:`），POSIX 根为 `/`，保留目录 entry 大小写和 POSIX 字面反斜杠；identity 不用于 OS 路径访问，不扫描文件系统寻找目录。
+- 客户端使用目录参数前必须确认 `compatibility.features.album_folder_artwork == 1`（并具备 `album_entity_artwork == 1`）；旧服务端可能忽略未知 query，不能把旧全专辑图片当成目录结果。原生 schema 8 来源缺少此能力时明确提示升级服务端，不能降级到 `/audio` 丢失 namespace 绑定；schema 3–7 来源仍可从自有快照先按直属目录筛候选，再调用兼容 `/audio` 端点，不能发送本地投影的 album ID。
+- 200 / 304 同时返回 `X-Library-Id`、`X-Album-Id`、`X-Album-Namespace`；客户端全部核对。ETag 和缓存绑定 namespace、专辑及候选成员版本。库恢复/替换后同数字 ID 不得串图。
+- 带目录上下文的 200 / 304 必须返回单个 `X-Album-Directory-Identity`：canonical directory 的 UTF-8 字节逐个编码为**小写 hex**（最多 8192 ASCII 字符，空目录对应空值）。`folder_id` 模式取当前 `get_folder.path` 的规范化值，并另回单个 `X-Album-Folder-Id` 的规范十进制 ID；NULL 模式回请求的 canonical parent，不回 folder ID。客户端核对库、namespace、专辑、目录 hex 及存在时的 folder ID；缺失、重复或不匹配时拒绝图片和 304 缓存命中，同 namespace 同 folder ID 路径变更也不得把新图片写入旧目录缓存。ETag 和代表图缓存绑定实际目录 identity；全专辑与目录图片即便字节相同也不共用 ETag。
+- `side`、图片预算、鉴权、并发名额、条件请求和错误处理沿用下面的音频端点规则。无有效图片为 404。
+
+#### 兼容 `GET /audio/{id}/artwork`
+
+此兼容端点保留按音频记录 id 读取内嵌封面的语义（ID3 `APIC`，复用 `audiolib_audio::probe_with_artwork`），不依赖专辑存储结构。客户端连接 schema 3–7 的服务器时只升级自有快照副本，再用固定的共享成员顺序调用此端点，不发送本地 album ID。**图片字节不写入主库或快照。**
 
 - 鉴权同 §2.2。支持 `GET` 和 `HEAD`。不受 30 秒上限；打开文件、根目录限制、根离线 503 `ROOT_OFFLINE`（先即时重查约 2 秒）与 `/stream` 相同（§6.4）。
 - **支持检测**：`GET /capabilities` 的 `compatibility.features.album_artwork` ≥ 1。旧服务端没有这个 feature 时客户端跳过请求，不要改去逐条探测一个不存在的端点。

@@ -128,8 +128,10 @@ fn downgrade(path: &Path, version: i64) {
 
 fn definitions(path: &Path) -> Vec<String> {
     let conn = support::connection(path).unwrap();
+    // Exclude only the explicitly managed objects added by later schemas;
+    // every unrelated table and trigger must still retain its original SQL.
     let mut s = conn
-        .prepare("SELECT sql FROM sqlite_master WHERE type IN ('table','trigger') AND name<>'audio_files' AND name NOT LIKE 'audio_search%' AND name NOT IN ('audio_files_ai','audio_files_au','audio_files_ad','play_history','audiolib_migration_receipts') ORDER BY name")
+        .prepare("SELECT sql FROM sqlite_master WHERE type IN ('table','trigger') AND name<>'audio_files' AND name NOT LIKE 'audio_search%' AND name NOT IN ('audio_files_ai','audio_files_au','audio_files_ad','play_history','audiolib_migration_receipts','albums','audiolib_album_id_sequence','audiolib_album_audio_insert','audiolib_album_audio_update','audiolib_album_folder_delete','audiolib_album_id_high_water') ORDER BY name")
         .unwrap();
     s.query_map([], |r| r.get::<_, Option<String>>(0))
         .unwrap()
