@@ -1005,6 +1005,7 @@ impl SqliteProvider {
                 .map_err(db_error)?;
             (conn, copy_path, Some(directory))
         };
+        schema::register_casefold(&conn)?;
         let derived = schema::source_tags_ready(&conn)?;
         Ok(Self {
             album_namespace: RwLock::new(albums::namespace(&conn)?),

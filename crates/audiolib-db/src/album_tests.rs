@@ -416,6 +416,72 @@ fn source_parent_identities_preserve_portable_path_boundaries() {
 }
 
 #[test]
+fn album_directory_functions_survive_writable_readonly_and_reused_pool_connections() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = SqliteProvider::open(&root.path().join("connection-functions.db")).unwrap();
+    let conn = Connection::open(provider.database_path()).unwrap();
+    register_library_functions(&conn).unwrap();
+    insert_unassigned_member(&conn, 1, "/owned/%_[set]/one.wav", "Connection library");
+    conn.execute("UPDATE audio_files SET path_key=NULL WHERE id=1", [])
+        .unwrap();
+    let album = provider.get_audio(1).unwrap().album_id.unwrap();
+    drop(conn);
+    let snapshot = root.path().join("readonly-connection-functions.db");
+    provider.backup_library(&snapshot).unwrap();
+    let before = fs::read(&snapshot).unwrap();
+    let modified = fs::metadata(&snapshot).unwrap().modified().unwrap();
+    let readonly = SqliteProvider::open_read_only(&snapshot).unwrap();
+    for current in [&provider, &readonly] {
+        let reference = current.writer_unlocked().unwrap();
+        let identity: String = reference
+            .query_row(
+                "SELECT audiolib_path_identity(?1)",
+                [r"C:\FX\Designed\one.wav"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(identity, "c:/FX/Designed/one.wav");
+        drop(reference);
+        // Keeping both leases alive requires two independent read connections.
+        let first = current.reader().unwrap();
+        let second = current.reader().unwrap();
+        for reader in [&first, &second] {
+            let identity: String = reader
+                .query_row(
+                    "SELECT audiolib_path_identity(?1)",
+                    [r"/FX/Back\Slash/one.wav"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(identity, r"/FX/Back\Slash/one.wav");
+        }
+        drop(first);
+        drop(second);
+        assert_eq!(current.read_pool.lock().unwrap().len(), 2);
+        for _ in 0..2 {
+            let members = current
+                .album_members_in_unassigned_directory(
+                    album,
+                    "/owned/%_[set]",
+                    64,
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            assert_eq!(
+                members.iter().map(|file| file.id).collect::<Vec<_>>(),
+                vec![1]
+            );
+        }
+    }
+    drop(readonly);
+    assert_eq!(fs::read(&snapshot).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&snapshot).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+#[test]
 fn unassigned_album_directory_candidates_filter_before_limit_without_cross_directory_fallback() {
     let root = tempfile::tempdir().unwrap();
     let provider = SqliteProvider::open(&root.path().join("unassigned-members.db")).unwrap();
