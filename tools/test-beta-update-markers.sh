@@ -10,6 +10,37 @@ trap cleanup EXIT
 mkdir -p "$TEST_ROOT/repo/tools" "$TEST_ROOT/repo/server/deploy" "$TEST_ROOT/mock-bin"
 cp "$SOURCE/tools/beta-refresh.sh" "$TEST_ROOT/repo/tools/"
 cp "$SOURCE/server/deploy/redeploy-server.sh" "$TEST_ROOT/repo/server/deploy/"
+# Existing Python is used only to emulate macOS plutil and exercise the optional
+# Linux reader here; no parser is installed or added to application packages.
+TEST_PYTHON="${TEST_PYTHON:-$(command -v python || command -v python3)}"
+export TEST_PYTHON TEST_ROOT
+cat > "$TEST_ROOT/mock-bin/plutil" <<'EOF'
+#!/bin/sh
+printf '%s\n' plutil >> "$BETA_APP_DIR/parser-events"
+[ "${MOCK_JSON_READER:-plutil}" != python ] || exit 1
+exec "$TEST_PYTHON" "$TEST_ROOT/plutil.py" "$@"
+EOF
+cat > "$TEST_ROOT/plutil.py" <<'EOF'
+import json
+import sys
+
+args = sys.argv[1:]
+assert len(args) == 9 and args[0] == '-extract' and args[2:4] == ['raw', '-expect']
+assert args[5:] == ['-o', '-', '--', '-']
+value = json.load(sys.stdin)
+for key in args[1].split('.'):
+    assert type(value) is dict
+    value = value[key]
+expected = {'string': str, 'integer': int, 'dictionary': dict}[args[4]]
+assert type(value) is expected
+print('\n'.join(sorted(value)) if expected is dict else value)
+EOF
+cat > "$TEST_ROOT/mock-bin/python3" <<'EOF'
+#!/bin/sh
+printf '%s\n' python3 >> "$BETA_APP_DIR/parser-events"
+[ "${MOCK_JSON_READER:-plutil}" != unavailable ] || exit 1
+exec "$TEST_PYTHON" "$@"
+EOF
 cat > "$TEST_ROOT/mock-bin/git" <<'EOF'
 #!/bin/sh
 case " $* " in
@@ -27,6 +58,17 @@ if [ -f "$BETA_APP_DIR/launchd-loaded" ]; then loaded="$(cat "$BETA_APP_DIR/laun
 [ "$loaded" = 1 ] || exit 22
 number=0
 if [ -f "$BETA_APP_DIR/start-count" ]; then number="$(cat "$BETA_APP_DIR/start-count")"; fi
+if [ "$number" = 1 ] && [ -n "${MOCK_HEALTH_FILE:-}" ]; then
+    if [ "${MOCK_DROP_AFTER_FIRST:-0}" = 1 ]; then
+        count=0
+        [ ! -f "$BETA_APP_DIR/health-count" ] || count="$(cat "$BETA_APP_DIR/health-count")"
+        count=$((count + 1)); printf '%s\n' "$count" > "$BETA_APP_DIR/health-count"
+        [ "$count" = 1 ] || exit 22
+    fi
+    [ -f "$MOCK_HEALTH_FILE" ] || exit 22
+    cat "$MOCK_HEALTH_FILE"
+    exit 0
+fi
 version="$("$BETA_APP_DIR/bin/audiolib-server" --version)"; version="${version#audiolib-server }"
 commit=f54f036
 if [ "${MOCK_REDEPLOY_FAIL:-0}" = 1 ] && [ "$number" = 1 ]; then commit=wrong; fi
@@ -75,7 +117,7 @@ cat > "$TEST_ROOT/server-binary" <<'EOF'
 [ "$#" -eq 1 ] && [ "$1" = '--version' ] || exit 9
 printf '%s\n' 'audiolib-server 0.6.2'
 EOF
-chmod +x "$TEST_ROOT/mock-bin/git" "$TEST_ROOT/mock-bin/curl" "$TEST_ROOT/mock-bin/launchctl" "$TEST_ROOT/mock-bin/pgrep" "$TEST_ROOT/server-binary"
+chmod +x "$TEST_ROOT/mock-bin/git" "$TEST_ROOT/mock-bin/curl" "$TEST_ROOT/mock-bin/launchctl" "$TEST_ROOT/mock-bin/pgrep" "$TEST_ROOT/mock-bin/plutil" "$TEST_ROOT/mock-bin/python3" "$TEST_ROOT/server-binary"
 export PATH="$TEST_ROOT/mock-bin:$PATH"
 run_case() {
     name="$1"; tag="$2"; expected="$3"; fail="$4"; old_markers="$5"
@@ -167,6 +209,8 @@ BETA_APP_DIR="$app" INSTALL_DIR="$app/bin" DATA_DIR="$data" BACKUP_DIR="$work/ba
 # bootstrap it; loaded jobs still use kickstart, even without a plist on disk.
 run_launchd_case() {
     name="$1"; loaded="$2"; bootstrap_fail="$3"; has_plist="$4"; succeeds="$5"; starts="$6"
+    health_file="${7:-}"; retained="${8:-0}"; reader="${9:-plutil}"; expected_commit="${10-f54f036}"
+    wait_secs="${11:-1}"; drop_after_first="${12:-0}"
     app="$TEST_ROOT/$name/app"; data="$TEST_ROOT/$name/data"; work="$TEST_ROOT/$name/work"
     plist="$app/Launch Agents/synthetic.beta.plist"
     mkdir -p "$app/bin" "$app/Launch Agents" "$data" "$work"
@@ -182,8 +226,9 @@ run_launchd_case() {
     if [ "$has_plist" = 1 ]; then cp "$plist" "$plist.expected"; fi
     status=0
     BETA_APP_DIR="$app" INSTALL_DIR="$app/bin" DATA_DIR="$data" BACKUP_DIR="$work/backups" \
-        SERVICE_MANAGER=launchd SERVICE_NAME=synthetic.beta EXPECT_COMMIT=f54f036 WAIT_SECS=1 \
+        SERVICE_MANAGER=launchd SERVICE_NAME=synthetic.beta EXPECT_COMMIT="$expected_commit" EXPECT_SCHEMA_VERSION=6 WAIT_SECS="$wait_secs" \
         LAUNCHD_PLIST="$plist" MOCK_LAUNCHD_LOADED="$loaded" MOCK_BOOTSTRAP_FAIL="$bootstrap_fail" \
+        MOCK_HEALTH_FILE="$health_file" MOCK_JSON_READER="$reader" MOCK_DROP_AFTER_FIRST="$drop_after_first" \
         UPDATE_CHANNEL=beta UPDATE_VERSION=0.6.2-beta.12 \
         sh "$TEST_ROOT/repo/server/deploy/redeploy-server.sh" "$TEST_ROOT/server-binary" >"$work/redeploy.log" 2>&1 || status=$?
     if { [ "$succeeds" = 1 ] && [ "$status" -ne 0 ]; } || { [ "$succeeds" = 0 ] && [ "$status" = 0 ]; }; then
@@ -214,6 +259,29 @@ run_launchd_case() {
     if [ "$succeeds" = 1 ]; then
         grep -Fx '1|0.6.2|beta|0.6.2-beta.12' "$app/start-events" >/dev/null || exit 1
         [ "$(cat "$app/bin/update-channel.txt")" = beta ] && [ "$(cat "$app/bin/update-version.txt")" = 0.6.2-beta.12 ] || exit 1
+    elif [ "$retained" = 1 ]; then
+        [ "$("$app/bin/audiolib-server" --version)" = 'audiolib-server 0.6.2' ] &&
+            [ "$(cat "$app/bin/update-channel.txt")" = beta ] && [ "$(cat "$app/bin/update-version.txt")" = 0.6.2-beta.12 ] &&
+            [ "$("$app/bin/audiolib-server.prev" --version)" = 'audiolib-server 0.6.1' ] || {
+            echo 'Migration timeout changed the candidate or its retained rollback binary' >&2; exit 1;
+        }
+        grep -F 'NOT VERIFIED:' "$work/redeploy.log" >/dev/null &&
+            grep -F 'migration still running; deployment acceptance failed and candidate was retained' "$work/redeploy.log" >/dev/null &&
+            ! grep -E 'ROLLBACK:|OK: new binary' "$work/redeploy.log" >/dev/null || {
+            echo 'Active migration was rolled back or accepted as a successful deployment' >&2; exit 1;
+        }
+        backup_binary="$(find "$work/backups" -name audiolib-server.bin -type f)"
+        [ -n "$backup_binary" ] && [ "$("$backup_binary" --version)" = 'audiolib-server 0.6.1' ] &&
+            [ "$(cat "$(dirname "$backup_binary")/update-version.txt")" = 0.6.1 ] || {
+            echo 'Migration timeout did not retain the original backup and markers' >&2; exit 1;
+        }
+        if [ "$reader" = python ]; then
+            grep -Fx python3 "$app/parser-events" >/dev/null || exit 1
+        else
+            grep -Fx plutil "$app/parser-events" >/dev/null && ! grep -Fx python3 "$app/parser-events" >/dev/null || {
+                echo 'macOS structured-field route unexpectedly relied on Python fallback' >&2; exit 1;
+            }
+        fi
     else
         [ "$("$app/bin/audiolib-server" --version)" = 'audiolib-server 0.6.1' ] &&
             [ "$(cat "$app/bin/update-channel.txt")" = stable ] && [ "$(cat "$app/bin/update-version.txt")" = 0.6.1 ] || {
@@ -228,10 +296,53 @@ run_launchd_case() {
     fi
     for file in "$app/bin/audiolib-launcher" "$app/config.toml" "$data/library.db"; do cmp -s "$file" "$file.expected" || exit 1; done
     if [ "$has_plist" = 1 ]; then cmp -s "$plist" "$plist.expected" || { echo 'Deployment modified the original plist' >&2; exit 1; }; fi
+    ! grep -F 'private-path-do-not-log' "$work/redeploy.log" >/dev/null || { echo 'Health response contents leaked into deployment logs' >&2; exit 1; }
 }
 run_launchd_case loaded-no-plist 1 never 0 1 1
 run_launchd_case quiesced 0 never 1 1 1
 run_launchd_case missing-plist 0 never 0 0 0
 run_launchd_case bootstrap-rollback 0 first 1 0 2
 run_launchd_case bootstrap-unavailable 0 always 1 0 2
-printf '%s\n' 'Beta update metadata regression passed: startup/rollback identities, marker preflight, beta tags, loaded/quiesced launchd routing, missing plist and failed bootstrap rollback; launcher, plist, configuration and database fixtures preserved.'
+
+# The real health contract has root status/identity and an optional upgrade object.
+# plutil keypaths must not be fooled by nested status/identity or escaped strings.
+cat > "$TEST_ROOT/indexing.json" <<'EOF'
+{"compatibility_catalog_revision":1,"upgrade":{"phase":"indexing","completed":5,"total":10},"status":"starting","version":"0.6.2","public_url":null,"api_version":"v1","schema_version":6,"commit":"f54f036"}
+EOF
+cat > "$TEST_ROOT/preparing.json" <<'EOF'
+{"status":"starting","upgrade":{"phase":"preparing"},"version":"0.6.2","public_url":"https://example.invalid/?text=\"status\":\"ok\"","api_version":"v1","schema_version":6,"commit":"f54f036"}
+EOF
+cat > "$TEST_ROOT/starting.json" <<'EOF'
+{"status":"starting","version":"0.6.2","api_version":"v1","schema_version":6,"commit":"f54f036"}
+EOF
+cat > "$TEST_ROOT/shadow-error.json" <<'EOF'
+{"status":"error","upgrade":{"phase":"indexing","status":"ok"},"version":"0.6.2","api_version":"v1","schema_version":6,"commit":"f54f036","message":"private-path-do-not-log"}
+EOF
+cat > "$TEST_ROOT/shadow-starting.json" <<'EOF'
+{"status":"starting","upgrade":{"phase":"indexing","completed":0,"total":10,"status":"ok"},"version":"0.6.2","api_version":"v1","schema_version":6,"commit":"f54f036"}
+EOF
+cat > "$TEST_ROOT/wrong-commit.json" <<'EOF'
+{"status":"starting","version":"0.6.2","api_version":"v1","schema_version":6,"commit":"wrong","upgrade":{"phase":"indexing","commit":"f54f036"}}
+EOF
+cat > "$TEST_ROOT/not-object.json" <<'EOF'
+{"status":"starting","version":"0.6.2","api_version":"v1","schema_version":6,"commit":"f54f036","upgrade":"{\"phase\":\"indexing\"}"}
+EOF
+cat > "$TEST_ROOT/null-upgrade.json" <<'EOF'
+{"status":"starting","version":"0.6.2","api_version":"v1","schema_version":6,"commit":"f54f036","upgrade":null}
+EOF
+sed 's/"f54f036"/"f54f036" BROKEN/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/invalid.json"
+sed 's/"0.6.2"/"0.6.1"/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/wrong-version.json"
+sed 's/"v1"/"v2"/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/wrong-api.json"
+sed 's/"schema_version":6/"schema_version":7/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/wrong-schema.json"
+sed 's/"indexing"/"complete"/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/unknown-phase.json"
+sed 's/,"completed":5,"total":10//' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/missing-counts.json"
+run_launchd_case migration-timeout 1 never 0 0 1 "$TEST_ROOT/indexing.json" 1
+run_launchd_case migration-quiesced 0 never 1 0 1 "$TEST_ROOT/preparing.json" 1
+run_launchd_case migration-python-fallback 1 never 0 0 1 "$TEST_ROOT/indexing.json" 1 python
+run_launchd_case migration-nested-status 1 never 0 0 1 "$TEST_ROOT/shadow-starting.json" 1
+for fixture in starting shadow-error wrong-commit not-object null-upgrade invalid wrong-version wrong-api wrong-schema unknown-phase missing-counts unreachable; do
+    run_launchd_case "timeout-$fixture" 1 never 0 0 2 "$TEST_ROOT/$fixture.json"
+done
+run_launchd_case timeout-unbound-commit 1 never 0 0 2 "$TEST_ROOT/indexing.json" 0 plutil ''
+run_launchd_case timeout-lost-health 1 never 0 0 2 "$TEST_ROOT/indexing.json" 0 plutil f54f036 2 1
+printf '%s\n' 'Beta deployment regressions passed: startup/rollback identities, launchd routing and bootstrap recovery; migration timeout retained only an explicitly identified structured upgrade, exited nonzero and never restarted twice; plutil route and optional Python fallback, invalid/nested JSON and ordinary failure rollback covered; private health messages and owned launcher/plist/configuration/database preserved.'
