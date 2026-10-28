@@ -108,12 +108,16 @@ fn child_shared_folder_cover() {
         .search(&SearchRequest::default())
         .unwrap()
         .results;
-    files.retain(|file| file.filename.starts_with("gore"));
+    let directory = audiolib_db::normalize_source_path_identity(&audiolib_db::display_path(
+        &fixture.root.join("sounds/gore").canonicalize().unwrap(),
+    ));
+    files.retain(|file| audiolib_db::source_parent_path_identity(&file.file_path) == directory);
     files.sort_by_key(|file| file.id);
     assert!(files.len() >= 2);
     let first = &files[0];
     let second = &files[1];
     assert_eq!(first.album_id, second.album_id);
+    assert_eq!(first.folder_id, second.folder_id);
     assert_eq!(first.album_entity.as_ref().unwrap().kind, AlbumKind::Folder);
     let blue = [0, 0, 255, 255];
     embedded_cover_color(Path::new(&first.file_path), blue);

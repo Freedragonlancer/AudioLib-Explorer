@@ -151,6 +151,7 @@ fn child_album_representative_refresh() {
         .unwrap();
     let first = &files[0];
     assert_ne!(first.id, selected.id);
+    assert_ne!(first.folder_id, selected.folder_id);
     embedded_cover(Path::new(&selected.file_path));
     search(&fixture, "", 4);
     wait_for(ui, |ui| ui.get_albums().row_count() == 1);
@@ -167,13 +168,14 @@ fn child_album_representative_refresh() {
     // disappear: sidebar work must reuse generated pixels without opening a WAV.
     let held = fixture.root.join("held-representative.wav");
     std::fs::rename(&selected.file_path, &held).unwrap();
-    // Cancelling a picker or another album's work changes the artwork epoch,
-    // but must retain this still-valid representative and its existing PNG.
+    // Cancelling work retains the valid sidebar hint. Selecting a different
+    // directory in that same album must clear the detail cover instead of
+    // borrowing the wind directory's pixels.
     controller.cancel_artwork();
     controller.select_id(first.id, false);
     let expected = first.id.to_string();
     wait_for(ui, move |ui| {
-        ui.get_selected_id().as_str() == expected && ui.get_album_cover_ready()
+        ui.get_selected_id().as_str() == expected && !ui.get_album_cover_ready()
     });
     ui.set_albums(ModelRc::new(VecModel::<AlbumRow>::default()));
     search(&fixture, "gore", 3);
@@ -186,6 +188,7 @@ fn child_album_representative_refresh() {
         ui.get_albums().row_data(0).unwrap().name.as_str(),
         "Shared artwork"
     );
+    assert!(!ui.get_album_cover_ready());
 
     let generated = controller.cached_artwork_path(selected).unwrap();
     {
@@ -199,9 +202,24 @@ fn child_album_representative_refresh() {
             .row_data(0)
             .is_some_and(|row| row.cover.size().width == 0)
     });
+    assert!(!ui.get_album_cover_ready());
 
     let (custom, _) = override_paths(controller, first);
     manual_cover(&custom);
+    // A manual edit in gore must first become the current successful directory
+    // cover. Searching alone must not overwrite the last valid wind hint.
+    controller.select_id(first.id, false);
+    controller.queue_artwork(first);
+    let expected = first.id.to_string();
+    wait_for(ui, move |ui| {
+        ui.get_selected_id().as_str() == expected
+            && ui.get_album_cover_ready()
+            && ui.get_album_cover().size().width == 3
+            && ui
+                .get_albums()
+                .row_data(0)
+                .is_some_and(|row| row.cover.size().width == 3)
+    });
     ui.set_albums(ModelRc::new(VecModel::<AlbumRow>::default()));
     search(&fixture, "gore", 3);
     wait_for(ui, |ui| {
@@ -212,6 +230,7 @@ fn child_album_representative_refresh() {
     ui.invoke_artwork_action_requested(3);
     wait_for(ui, |ui| {
         !ui.get_artwork_busy()
+            && !ui.get_album_cover_ready()
             && ui
                 .get_albums()
                 .row_data(0)

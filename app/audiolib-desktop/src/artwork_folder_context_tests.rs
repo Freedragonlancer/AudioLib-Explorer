@@ -375,7 +375,10 @@ fn child_folder_reopen_and_sources() {
     controller.remote.lock().unwrap().state = None;
     assert_eq!(override_paths(controller, &files.first), local);
     assert_pixels(controller, &files.first_plain, CHOSEN_COLOR);
-    finish(&fixture);
+    controller.capture_search_task(&fixture.ui);
+    controller.shutdown();
+    // Keep a window registered while replacing the controller. Hiding the last
+    // testing window would queue Quit before the reopened provider can publish.
 
     let preferences = fixture.root.join("preferences");
     let config = AppConfig::load_in(preferences).unwrap();
@@ -393,6 +396,8 @@ fn child_folder_reopen_and_sources() {
         config,
         playback,
     );
+    ui.show().unwrap();
+    fixture.ui.hide().unwrap();
     let ready = reopened.clone();
     wait_for(&ui, move |ui| {
         !ui.get_search_workspace_loading() && !ui.get_searching() && fully_published(&ready)
