@@ -35,7 +35,7 @@ mod window_repaint;
 use anyhow::{Context, Result};
 use audiolib_audio::{AudioEngine, PlaybackConfig};
 use audiolib_core::{DataProvider, config::AppConfig};
-#[cfg(test)]
+#[cfg(all(test, windows))]
 use audiolib_db::SqliteProvider;
 use slint::ComponentHandle;
 use std::{
