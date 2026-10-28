@@ -28,26 +28,26 @@ fn artwork_management_actions_are_reachable_in_both_modes_and_languages() {
             click_label(
                 &ui,
                 if chinese {
-                    "专辑封面管理 ▸"
+                    "当前目录的专辑封面 ▸"
                 } else {
-                    "Album artwork ▸"
+                    "Album cover in this folder ▸"
                 },
             );
             assert!(ui.get_artwork_management_expanded());
             let labels = if chinese {
                 [
-                    "指定 / 替换图片…",
-                    "移除封面",
-                    "恢复内嵌封面",
-                    "重新加载封面",
+                    "指定 / 替换本目录图片…",
+                    "移除本目录封面",
+                    "恢复本目录默认",
+                    "重新加载本目录封面",
                     "清理本机封面缓存",
                 ]
             } else {
                 [
-                    "Choose / replace image…",
-                    "Remove cover",
-                    "Restore embedded",
-                    "Reload cover",
+                    "Set folder image…",
+                    "Remove folder cover",
+                    "Restore folder default",
+                    "Reload folder cover",
                     "Clear cover thumbnails",
                 ]
             };
@@ -59,9 +59,9 @@ fn artwork_management_actions_are_reachable_in_both_modes_and_languages() {
             click_label(
                 &ui,
                 if chinese {
-                    "移除封面"
+                    "移除本目录封面"
                 } else {
-                    "Remove cover"
+                    "Remove folder cover"
                 },
             );
             assert_eq!(
@@ -105,18 +105,18 @@ fn artwork_preferences_and_actions_are_disabled_during_library_transitions_and_c
             };
             let labels = if chinese {
                 [
-                    "指定 / 替换图片…",
-                    "移除封面",
-                    "恢复内嵌封面",
-                    "重新加载封面",
+                    "指定 / 替换本目录图片…",
+                    "移除本目录封面",
+                    "恢复本目录默认",
+                    "重新加载本目录封面",
                     "清理本机封面缓存",
                 ]
             } else {
                 [
-                    "Choose / replace image…",
-                    "Remove cover",
-                    "Restore embedded",
-                    "Reload cover",
+                    "Set folder image…",
+                    "Remove folder cover",
+                    "Restore folder default",
+                    "Reload folder cover",
                     "Clear cover thumbnails",
                 ]
             };

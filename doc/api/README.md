@@ -8,7 +8,7 @@
 专辑封面接口见 §8.2。新库、迁移输出及新服务端快照的 Metadata 物理列保持原始
 JSON TEXT，压缩暂缓；外层快照 zstd 传输保留。客户端与服务器须配套升级。
 旧实验 `a1-z1` 仅保留严格只读兼容，不作为可写目标。旧快照只在客户端自有副本迁移，
-源格式与投影格式分别保存。详见[共享专辑与存储](../Rust_Shared_Albums.md)。
+源格式与投影格式分别保存。详见[共享专辑与存储](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md)。
 下段是此前续传迭代的历史身份和验收范围。
 
 当前续传迭代基于 main `d64c0a7`，程序版本为 `0.6.0`，保留 schema 6 / p1、共享格式协商和受保护迁移。固定快照及 Range 协议见 §6.1；本轮验证见 [Rust 验证报告](../Rust_Validation.md)。生产服务器不在本轮部署范围内，工作库没有被验收脚本打开。以下链接保留此前数据库迭代的设计与历史证据：
@@ -286,7 +286,7 @@ audiolib.example.com:8443 {
 
 ### 3.1 历史：快照 schema 3 → 5
 
-以下记录已发布 v5 的演进与兼容行为。当前源码为 schema 7 / `ale-s7-cld1-t3-m2-p1`，读取边界为 3..=7，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准，v7 的派生专辑和封面边界见[封面契约](../Rust_Artwork.md)。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6/v7 的实际格式准入。
+以下记录已发布 v5 的演进与兼容行为。当前源码为 schema 7 / `ale-s7-cld1-t3-m2-p1`，读取边界为 3..=7，并核对全部 feature；v6 的备份、分批断点恢复、授权退役及部署顺序以[升级契约](Schema_V6_Iteration.md)和[兼容矩阵](Library_Migration_Compatibility.md)为准，v7 的派生专辑和封面边界见[封面契约](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md)。下列旧索引、单事务升级与旧客户端写入描述不覆盖 v6/v7 的实际格式准入。
 
 - `SCHEMA_VERSION` = **5**（`crates/audiolib-db/src/schema.rs`，由 `audiolib_db::SCHEMA_VERSION` 导出）。`MIN_SNAPSHOT_SCHEMA_VERSION` = **3**（同文件，客户端的 `MIN_SNAPSHOT_SCHEMA` 直接引用它，不重复定义）。`GET /library` 的 `schema_version` 与快照响应头 `X-Schema-Version` 现在都是 `5`。
 - v4 **只新增索引**：不改任何表、列、触发器、FTS，不改行数据，所以 v3 与 v4 用同一套查询；`/library` 的 `stats` 条件由 `COALESCE(missing,0)=0` 改为 `missing=0`（`missing` 列是 `NOT NULL DEFAULT 0`），可命中部分索引。
@@ -904,7 +904,7 @@ SQLite 事务与根设置使用持久化恢复日志配对：`admin-settings.jso
 
 ### 8.2 专辑封面 `GET /albums/{id}/artwork` 与兼容音频端点
 
-schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组，缺失时按已登记根下的第一层文件夹归组。图片不进入 SQLite 或快照。详见[共享专辑与 Metadata 存储](../Rust_Shared_Albums.md)。
+schema 8 使用共享专辑实体：优先按 WAV Metadata 的 `library` 归组，缺失时按已登记根下的第一层文件夹归组。图片不进入 SQLite 或快照。详见[共享专辑与 Metadata 存储](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md)。
 
 - 新能力 `compatibility.features.album_entity_artwork >= 1` 表示支持 `GET` / `HEAD /albums/{id}/artwork`。`id` 是当前原生快照的专辑 ID，不能发送旧快照本地投影的 ID。
 - 必须带单个非空 `X-AudioLib-Library-Id` 和 `X-AudioLib-Album-Namespace`。库身份或 namespace 不符、namespace 缺失/空/重复，均在读取源文件前拒绝，返回 409 `LIBRARY_CHANGED`（库身份缺失仍为 `LIBRARY_ID_REQUIRED`）。

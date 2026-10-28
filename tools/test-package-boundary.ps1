@@ -12,7 +12,7 @@ try {
     $env:CARGO_TARGET_DIR = Join-Path $testRoot 'target'
     New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
     Set-Content -LiteralPath (Join-Path $testRoot 'Cargo.toml') -Value "[workspace.package]`nversion = `"0.4.4`"" -Encoding ASCII
-    foreach ($script in @('package-portable.ps1','console-utf8.ps1','validate-portable-zip.ps1','validate-package-privacy.ps1','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
+    foreach ($script in @('package-portable.ps1','console-utf8.ps1','validate-portable-zip.ps1','validate-package-privacy.ps1','validate-update-compatibility.ps1','update-compatible-files.json','portable-files.json','Start-AudioLibExplorer.cmd','install-beta.ps1','AudioLibExplorer-beta.cmd')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $testRoot 'tools')
     }
     $files = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Raw | ConvertFrom-Json
@@ -38,6 +38,16 @@ try {
     $hiddenAncestor.Attributes = $hiddenAncestor.Attributes -bor [IO.FileAttributes]::Hidden
     # Function scope masks Cargo only in this synthetic regression invocation.
     function cargo { '{"packages":[]}' ; $global:LASTEXITCODE = 0 }
+    $compatibilityValidator = Join-Path $testRoot 'tools/validate-update-compatibility.ps1'
+    & $compatibilityValidator -Product Desktop -Entries @('AudioLibExplorer.exe', 'licenses/future-dependency-9.0/LICENSE-MIT', 'licenses/dependencies.json')
+    foreach ($invalid in @('doc/Rust_Future_Update.md', 'doc/../LICENSE', 'licenses/evil.exe', 'licenses/library.sqlite3-shm', 'licenses/private.settings.json', 'licenses/tokens.json', 'licenses/.env', 'licenses/cache.server-state.json', ('licenses/COM' + [char]0x00b9 + '.txt'), 'licenses/notice?.txt')) {
+        $rejected = $false
+        try { & $compatibilityValidator -Product Desktop -Entries @('LICENSE', $invalid) } catch { $rejected = $_.Exception.Message -match 'update compatibility|Update compatibility' }
+        if (!$rejected) { throw "Old-updater file policy accepted an unsupported entry: $invalid" }
+    }
+    $rejected = $false
+    try { & $compatibilityValidator -Product Desktop -Entries @('LICENSE', 'license') } catch { $rejected = $_.Exception.Message -match 'Duplicate update compatibility entry' }
+    if (!$rejected) { throw 'Old-updater file policy accepted case-alias duplicate names.' }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
     # Regression: entries must be forward-slash file names (no `\`, no directory entries).
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
@@ -75,6 +85,22 @@ try {
     try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot } catch { $rejected = $_.Exception.Message -match 'update metadata is invalid' }
     if (!$rejected) { throw 'Stable channel accepted a prerelease update identity.' }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
+    # Current-public does not mean old-updater-compatible. Adding an otherwise
+    # permitted document must fail before replacing the verified payload/archive.
+    $archive = Join-Path $testRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'
+    $archiveHash = (Get-FileHash -LiteralPath $archive).Hash
+    $futureDocument = 'doc/Rust_Future_Update.md'
+    Set-Content -LiteralPath (Join-Path $testRoot $futureDocument) -Value 'Synthetic public future documentation.' -Encoding UTF8
+    $manifest = Join-Path $testRoot 'tools/portable-files.json'
+    try {
+        $files + @($futureDocument) | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding UTF8
+        $rejected = $false
+        try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio } catch { $rejected = $_.Exception.Message -match 'Update compatibility.*Non-public update file' }
+        if (!$rejected) { throw 'Portable packaging accepted a new public document unsupported by the old updater.' }
+    } finally { ConvertTo-Json -InputObject $files | Set-Content -LiteralPath $manifest -Encoding UTF8 }
+    if ((Get-FileHash -LiteralPath $archive).Hash -cne $archiveHash -or (Test-Path -LiteralPath (Join-Path $staleRoot $futureDocument))) {
+        throw 'An incompatible portable package replaced the verified output.'
+    }
     if (Test-Path -LiteralPath (Join-Path $staleRoot 'settings.json')) { throw 'Stale runtime state survived clean staging.' }
     foreach ($file in @('doc/Rust_Old_Report.json','doc/Rust_CI_Release.json','doc/assets/issues/private.png','resources/private/settings.json')) {
         if (Test-Path -LiteralPath (Join-Path $staleRoot $file)) { throw "Private file leaked through package: $file" }
@@ -155,7 +181,7 @@ try {
             Remove-Item -LiteralPath $dist -Force
         }
     }
-    Write-Host 'Package boundary regression passed: stale state/ignored reports/untracked assets excluded; completed and unrun reports accepted; local paths, unsafe reports, false runtime results, wrong binary identities and junction ancestors rejected.'
+    Write-Host 'Package boundary regression passed: stale state/ignored reports/untracked assets excluded; old-updater compatibility and licenses checked; completed and unrun reports accepted; incompatible public docs, local paths, unsafe reports, false runtime results, wrong binary identities and junction ancestors rejected.'
 } finally {
     $env:CARGO_TARGET_DIR = $savedTargetDirectory
     if (Test-Path -LiteralPath $testRoot) {

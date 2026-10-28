@@ -16,7 +16,7 @@ AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件�
 
 ## 功能
 
-- 最多 6 个独立搜索任务页签（外观设置可调整上限），分别保留目录、筛选和列表状态；个人搜索任务收藏按库分类保存，重启恢复打开任务。详见[搜索任务](doc/Rust_Search_Tasks.md)。
+- 最多 6 个独立搜索任务页签（外观设置可调整上限），分别保留目录、筛选和列表状态；个人搜索任务收藏按库分类保存，重启恢复打开任务。详见[搜索任务](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Search_Tasks.md)。
 - 增量/完整文件夹扫描，提取专业 WAV Metadata（BWF `bext`、iXML、INFO、ID3、XMP，只读兼容 Soundminer SMED）。不会修改源 WAV 文件。
 - 基于 SQLite FTS5 的搜索，支持中文分词（jieba-rs）、标签/分类筛选；文档化目标为 100 万以上记录 P95 < 500 ms。
 - 流式解码播放、设备采样率重采样、波形与频谱视图、独立的音高/速率试听（SoundTouch），支持 WASAPI 与可选 ASIO 输出。
