@@ -12,7 +12,11 @@ SSH 恢复后已在 Apple Silicon、macOS 27.0.1、Rust 1.97.1 原生环境执�
 
 新回归还覆盖 CoreAudio 欠载计数、非致命优先级通知、真正设备错误的粘性失败状态，以及原生退出夹具的所有权拒绝。Windows 默认/ASIO 的 audio/desktop/windows 严格 Clippy、音频测试及受影响的关闭/夹具/滚动交互回归通过。原生测试链接器曾提示 debug 测试程序的 `__eh_frame` 超过 compact-unwind 编码范围；测试通过不构成真实声学性能测量。
 
-Mac release 构建正在执行；签名、Mach-O/依赖、隔离启动和原生退出落盘验收须以随后产物报告为准。人工 GUI/播放、完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 运行验收通过。
+`ddda976` 将包标记迁入签名资源目录；新增三项隔离文件系统回归通过，Mac core/CLI 复跑合计 158 passed（其中 core 138），Windows core 140 项通过。当前组合矩阵去重为 1804 passed、158 ignored、87 个顶层目标。初次签名因版本标记误放入代码目录而失败，修复后重新构建和打包；旧失败 stage 保留。
+
+该提交的 Mac arm64 release 构建、ad-hoc 签名、两个标记的资源 seal、Mach-O/系统依赖、包边界与完整原生合成运行验收通过。真实 `NSApplication terminate:` 后，通过 CLI 回读确认 dirty Metadata 备注已经落盘；还覆盖空库首次启动、合成 WAV、中文界面、坏偏好诊断、只读 app/CWD、临时 HOME 默认 beta 目录和导入 ASIO 设置的 CoreAudio 启动。候选证据保留于 `.rust-validation/release-083/native-8b14a8ef98f643a4b59811ee3d336b2b/`，不是最终 main/tag 产物证明。
+
+人工 GUI/声学播放、完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 运行验收通过。
 
 ## 0.8.3 发布准备（2026-10-28）
 
