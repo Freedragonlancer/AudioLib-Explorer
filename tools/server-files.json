@@ -11,8 +11,5 @@
   "server/launcher/README.md",
   "doc/api/README.md",
   "doc/Rust_Remote_Mode.md",
-  "doc/Rust_Artwork.md",
-  "doc/Rust_Shared_Albums.md",
-  "doc/Rust_Search_Tasks.md",
   "doc/Rust_Auto_Update.md"
 ]

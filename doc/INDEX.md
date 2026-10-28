@@ -9,12 +9,12 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [README](../README.md) | Build, launch, user-data layout and release operations |
 | [Repository guidance](../AGENTS.md) | Engineering invariants and required checks |
 | [Rust Architecture](Rust_Architecture.md) | Owned contracts, data services, migration, playback and platform boundaries |
-| [Search Tasks](Rust_Search_Tasks.md) | Independent search tabs, personal task favorites and session recovery |
+| [Search Tasks](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Search_Tasks.md) | Independent search tabs, personal task favorites and session recovery |
 | [Application icon](Rust_App_Icon.md) | Windows high DPI icon, macOS Retina assets and regeneration |
 | [WAV Metadata](Rust_Wav_Metadata.md) | Embedded BWF/INFO/iXML/XMP/ID3 extraction, search, rescan upgrades and private-format limits |
 | [Library Management](Rust_Library_Management.md) | Multi-library selection, backup/restore, integrity, relinking and import/export |
-| [Album Artwork](Rust_Artwork.md) | Local/server covers, custom images, hiding/restoring and thumbnail cache management |
-| [Shared Albums and Metadata Storage](Rust_Shared_Albums.md) | Schema 8 ownership, namespaces, original Metadata TEXT and safe migration |
+| [Album Artwork](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md) | Local/server covers, custom images, hiding/restoring and thumbnail cache management |
+| [Shared Albums and Metadata Storage](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md) | Schema 8 ownership, namespaces, original Metadata TEXT and safe migration |
 | [Search Upgrade Recovery](Rust_Upgrade_Recovery.md) | Committed upgrade batches, crash recovery, startup progress, WAL and snapshot cleanup |
 | [Remote Mode (client)](Rust_Remote_Mode.md) | Server data source: settings/secrets, snapshot sync, WebDAV URL mapping, read-only rules and playback cache |
 | [Server API](api/README.md) | `server/audiolib-server` HTTP contract and client behaviour |

@@ -283,7 +283,7 @@ CLI 为 0.8.0，隔离桌面启动通过；实际库和设置没有被测试夹�
 父回归通过，其他已通过的数据库与服务器结果未重复执行。
 客户端手动封面可用于旧服务器；远程内嵌封面需部署支持 `album_artwork` 的服务端。
 
-操作与缓存契约见[封面说明](Rust_Artwork.md)。
+操作与缓存契约见[封面说明](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md)。
 
 ## multi-search 最终 CR（2026-10-25，Windows x64，0.7.4）
 

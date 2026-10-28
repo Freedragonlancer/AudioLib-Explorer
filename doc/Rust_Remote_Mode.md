@@ -37,7 +37,7 @@ folder-local ignore-inherited marker without deleting the retained whole-album
 preference. These choices never write to the server snapshot or WAV files and
 do not sync to other PCs. Shared Album entities, schema 8 and original Metadata
 TEXT remain unchanged; Metadata compression is deferred. See
-[Album artwork](Rust_Artwork.md).
+[Album artwork](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md).
 
 `settings.json` gains a `data_source` section (all fields have serde defaults, so older
 settings files load as local mode):
