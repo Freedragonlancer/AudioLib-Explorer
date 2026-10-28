@@ -382,7 +382,7 @@ fn unassigned_directory_transport_percent_encodes_literals_and_verifies_utf8_hex
         } else {
             200
         })
-        .with_header("X-Album-Directory-Identity", echoed.clone())
+        .with_header("X-Album-Directory-Identity", &echoed)
     });
     let client = RemoteClient::new(&server.url, "token").unwrap();
     let cancel = AtomicBool::new(false);
@@ -476,7 +476,7 @@ fn unassigned_empty_and_root_contexts_are_distinct_and_directory_budget_is_utf8_
     let path = format!("/api/v1/albums/11/artwork?unassigned_directory={directory}");
     let server = TestServer::start(move |request| {
         assert_eq!(request.path, path);
-        response(200).with_header("X-Album-Directory-Identity", "78".repeat(4096))
+        response(200).with_header("X-Album-Directory-Identity", &"78".repeat(4096))
     });
     assert!(matches!(
         RemoteClient::new(&server.url, "token")
@@ -509,9 +509,11 @@ fn unassigned_transport_rejects_missing_wrong_duplicate_and_noncanonical_hex_on_
                 0 => response(status),
                 1 => response(status).with_header("X-Album-Directory-Identity", "2f6f74686572"),
                 2 => response(status)
-                    .with_header("X-Album-Directory-Identity", hex.clone())
-                    .with_header("X-Album-Directory-Identity", hex.clone()),
-                3 => response(status).with_header("X-Album-Directory-Identity", hex.to_uppercase()),
+                    .with_header("X-Album-Directory-Identity", &hex)
+                    .with_header("X-Album-Directory-Identity", &hex),
+                3 => {
+                    response(status).with_header("X-Album-Directory-Identity", &hex.to_uppercase())
+                }
                 4 => response(status).with_header("X-Album-Directory-Identity", "0"),
                 _ => response(status).with_header("X-Album-Folder-Id", "7"),
             });
@@ -549,7 +551,7 @@ fn generic_registered_folder_checks_actual_directory_even_for_an_empty_304_body(
                 assert_eq!(request.path, "/api/v1/albums/11/artwork?folder_id=7");
                 response(status)
                     .with_header("X-Album-Folder-Id", "7")
-                    .with_header("X-Album-Directory-Identity", hex.clone())
+                    .with_header("X-Album-Directory-Identity", &hex)
             });
             let result = RemoteClient::new(&server.url, "token")
                 .unwrap()

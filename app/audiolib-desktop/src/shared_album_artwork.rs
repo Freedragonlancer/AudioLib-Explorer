@@ -281,12 +281,14 @@ impl Controller {
     }
 
     pub(super) fn artwork_current(&self, job: &ArtworkJob) -> bool {
-        let selected = self.selected.lock().unwrap();
-        let same_album = selected.as_ref().is_some_and(|file| {
-            file.album_id == Some(job.album.id)
-                && file.folder_id == job.folder.folder_id
-                && audiolib_db::source_parent_path_identity(&file.file_path) == job.folder.path
-        });
+        let same_album = {
+            let selected = self.selected.lock().unwrap();
+            selected.as_ref().is_some_and(|file| {
+                file.album_id == Some(job.album.id)
+                    && file.folder_id == job.folder.folder_id
+                    && audiolib_db::source_parent_path_identity(&file.file_path) == job.folder.path
+            })
+        };
         self.available()
             && !self.shutdown.load(Ordering::Acquire)
             && !job.cancel.load(Ordering::Acquire)
@@ -462,7 +464,7 @@ impl Controller {
                 .and_then(|_| std::fs::read_to_string(&etag_path).ok());
             (cached, etag)
         };
-        let members = match job.folder.folder_id {
+        let members = match match job.folder.folder_id {
             Some(folder_id) => provider.album_members_in_folder(
                 album.id,
                 folder_id,
@@ -475,8 +477,21 @@ impl Controller {
                 audiolib_core::MAX_ALBUM_MEMBERS,
                 job.cancel.clone(),
             ),
-        }
-        .ok()?;
+        } {
+            Ok(members) => members,
+            Err(audiolib_core::Error::Cancelled) => return None,
+            Err(error) => {
+                *job.notice.lock().unwrap() = Some(format!(
+                    "{}: {error}",
+                    cn_or(
+                        self.chinese.load(Ordering::Acquire),
+                        "无法读取此目录的封面",
+                        "Could not read this folder's artwork"
+                    )
+                ));
+                return None;
+            }
+        };
         if !self.artwork_current(job) {
             return None;
         }

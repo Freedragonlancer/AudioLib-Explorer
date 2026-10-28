@@ -126,7 +126,7 @@ fn child_shared_folder_cover() {
         assert_eq!(
             pixels.get_pixel(0, 0).0,
             blue,
-            "the first whole-album member supplies the shared cover"
+            "the first member in the same directory supplies the shared cover"
         );
     }
     assert_eq!(
