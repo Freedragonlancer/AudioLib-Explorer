@@ -1103,6 +1103,9 @@ mod tests {
             inspector_width: Some(380.0),
             inspector_visible: Some(false),
             filters_visible: Some(true),
+            folders_section_expanded: Some(false),
+            libraries_section_expanded: Some(true),
+            folders_section_ratio: Some(0.7),
         };
         config.save().unwrap();
         let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();

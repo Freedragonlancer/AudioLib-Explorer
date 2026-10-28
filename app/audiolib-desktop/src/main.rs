@@ -17,6 +17,8 @@ mod progressive_waveform;
 mod responsive_layout_tests;
 #[cfg(test)]
 mod search_task_ui_tests;
+#[cfg(test)]
+mod sidebar_section_tests;
 mod startup;
 mod tag_chips;
 mod theme;
