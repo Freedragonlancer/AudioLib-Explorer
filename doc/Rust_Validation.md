@@ -8,7 +8,11 @@ Windows 默认配置的 core/desktop/windows/cli 四包 all-targets 严格 Clipp
 
 新增发布资产验证器的 34 项合成回归通过；Mac ZIP 边界验证器的 19 个实际归档用例通过，包括精确大小写、Unicode 规范化与冲突、路径逃逸、符号链接、权限和私有文件拒绝。三个 Mac PowerShell 脚本语法检查通过。普通 CI 与 verify-only release workflow 不承担原生运行验收。
 
-Mac 构建、签名、Mach-O/依赖检查、隔离启动与人工 GUI/播放验收尚未执行；完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 验收通过。
+SSH 恢复后已在 Apple Silicon、macOS 27.0.1、Rust 1.97.1 原生环境执行验证。首次检查实际发现 Windows 测试导入范围、关闭测试缺少隔离 backend、Mac 文本导航快捷键及可恢复 CoreAudio 通知分类问题；原失败日志保留，修复后按影响范围重跑。未修改的 core/db/CLI 在 `46731b7` 通过；audio、407 项桌面测试的组合证据以及其余包分别绑定 `32c03ca` 和 `2e4c62f`。同一 87 个顶层测试目标去重合计 1801 passed、158 ignored，原失败项均由修复后的回归通过；10 项 responsive 重跑及嵌套子进程摘要未额外计数。全工作区基线和当前受影响包的严格 Clippy 通过，不将组合证据描述为最终提交单次全量运行。
+
+新回归还覆盖 CoreAudio 欠载计数、非致命优先级通知、真正设备错误的粘性失败状态，以及原生退出夹具的所有权拒绝。Windows 默认/ASIO 的 audio/desktop/windows 严格 Clippy、音频测试及受影响的关闭/夹具/滚动交互回归通过。原生测试链接器曾提示 debug 测试程序的 `__eh_frame` 超过 compact-unwind 编码范围；测试通过不构成真实声学性能测量。
+
+Mac release 构建正在执行；签名、Mach-O/依赖、隔离启动和原生退出落盘验收须以随后产物报告为准。人工 GUI/播放、完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 运行验收通过。
 
 ## 0.8.3 发布准备（2026-10-28）
 
