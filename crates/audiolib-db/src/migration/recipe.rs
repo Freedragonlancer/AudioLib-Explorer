@@ -59,7 +59,7 @@ pub(crate) fn changes() -> Vec<SchemaChange> {
 
 pub(super) fn identity() -> String {
     let mut hash = Sha256::new();
-    hash.update(b"ale-schema8-albums1-zlib1-storage1-retire-plays2;");
+    hash.update(b"ale-schema8-albums1-text-metadata1-retire-plays2;");
     // Index batches and query compilation must keep one implementation identity,
     // including source Metadata projection and the exact locked dependency graph.
     hash.update(super::plan::tokenizer_identity().as_bytes());

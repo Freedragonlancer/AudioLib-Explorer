@@ -1,9 +1,10 @@
-# 0.8.1：共享专辑、封面与无损 Metadata 存储
+# 0.8.1：共享专辑、封面与播放修复
 
 程序 0.8.1 | API /api/v1/ | schema 8 | 快照兼容 3..=8
 
-完整格式：`ale-s8-cld1-t3-m2-p1-a1-z1`；必需 feature 为 `album_entities=1`、
-`metadata_storage=1`。
+完整格式：`ale-s8-cld1-t3-m2-p1-a1`；必需 feature 包括 `album_entities=1`。
+Metadata 压缩暂缓，新库、扫描、迁移输出与新服务端快照保持原始 JSON TEXT；
+快照外层 zstd 传输保留。
 
 变更：
 
@@ -15,13 +16,10 @@
   数据库、FTS5 或快照，操作不修改源 WAV。旧选择迁移遇到冲突时保留原文件。
 - 服务端新增共享专辑封面接口，按 `album_entity_artwork` 能力、库身份、专辑 namespace
   和 ETag 保护请求。旧服务端使用受控降级；客户端生成的旧快照实体 ID 不冒充服务端 ID。
-- Metadata 逐行采用有版本和校验的无损压缩，公开 DTO/API 仍是普通 JSON。
-  原始 JSON 字节和未知字段保留；存在未知 SQL 明文依赖的库使用 TEXT 策略。
-  节省空间取决于 Metadata 内容，不能将样本压缩率视为整库保证。
-  909,342 条真实记录副本的数据库减少 49.11%，全部原始 Metadata 字节一致；
-  同参数 zstd 快照却从约 0.95 GB 增至 2.03 GB，首次/强制同步会传输更多数据。
-  暖缓存百万合成记录的结果页 P95 为 117.7 ms；条件及限制见
-  [共享专辑与存储](Rust_Shared_Albums.md#pre-publication-measurements)。
+- Metadata 保留原始 JSON TEXT、未知字段及字节内容，公开 DTO/API 不变。
+  旧实验 `a1-z1` 保留严格只读解码；其本地/服务端写入口先通过 owned 转换恢复 TEXT，
+  保持库 namespace、专辑身份和引用。旧压缩比例及性能结果仅为已暂缓方案的历史证据，
+  本候选将重新验收；详见[共享专辑与存储](Rust_Shared_Albums.md)。
 - 库 namespace 和专辑高水位防止错误继承封面：备份/恢复保留身份并避免复用已分配 ID；
   显式导入为另一个库时使用新 namespace。旧本地偏好 alias 仅记录明确的本地旧库升级。
 - 搜索任务保存专辑语义和 namespace，服务器升级后先重绑再检索；失效条件保留并提示

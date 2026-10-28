@@ -475,6 +475,7 @@ dependencies = [
  "audioadapter-buffers",
  "audiolib-core",
  "audiolib-windows",
+ "base64 0.23.1",
  "blowfish",
  "cpal",
  "encoding_rs",

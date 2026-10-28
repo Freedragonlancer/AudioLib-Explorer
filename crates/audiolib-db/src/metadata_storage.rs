@@ -1,14 +1,11 @@
 // crates/audiolib-db/src/metadata_storage.rs
-//! Lossless, bounded physical encoding; public Metadata remains the original JSON text.
+//! Plain Metadata writes and strict, bounded decoding of experimental legacy BLOBs.
 use audiolib_core::{Error, Result};
-use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
+use flate2::{Decompress, FlushDecompress, Status};
 use rusqlite::types::{Value, ValueRef};
-use std::io::Write;
 
 const MAGIC: &[u8; 8] = b"ALEMD\x01Z\0";
 const HEADER_BYTES: usize = MAGIC.len() + 8;
-const MIN_COMPRESS_BYTES: usize = 256;
-const MIN_SAVING_BYTES: usize = 32;
 /// Compressed records have a bounded decode budget. Larger legacy text stays text.
 pub(crate) const MAX_DECODE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -16,23 +13,30 @@ fn invalid(message: impl std::fmt::Display) -> Error {
     Error::Database(format!("Invalid Metadata storage: {message}"))
 }
 
-/// Encode exactly the supplied UTF-8 bytes; never parse or reserialize user JSON.
-/// Disabled policies, small values and ineffective compression retain ordinary text.
-pub(crate) fn encode(raw: &str, enabled: bool) -> Result<Value> {
-    if !enabled || raw.len() < MIN_COMPRESS_BYTES || raw.len() > MAX_DECODE_BYTES {
-        return Ok(Value::Text(raw.to_owned()));
-    }
+/// Store the exact UTF-8 bytes as TEXT. The retired experimental policy argument
+/// remains accepted for owned legacy-copy adapters, but never enables compression.
+pub(crate) fn encode(raw: &str, _enabled: bool) -> Result<Value> {
+    Ok(Value::Text(raw.to_owned()))
+}
+
+/// Construct an explicit historical fixture; production code cannot encode BLOBs.
+#[cfg(test)]
+pub(crate) fn encode_legacy_fixture(raw: &str) -> Result<Value> {
+    Ok(Value::Blob(compressed_fixture_bytes(raw.as_bytes())?))
+}
+
+#[cfg(test)]
+fn compressed_fixture_bytes(raw: &[u8]) -> Result<Vec<u8>> {
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::Write;
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-    encoder.write_all(raw.as_bytes()).map_err(invalid)?;
+    encoder.write_all(raw).map_err(invalid)?;
     let compressed = encoder.finish().map_err(invalid)?;
-    if compressed.len() + HEADER_BYTES + MIN_SAVING_BYTES >= raw.len() {
-        return Ok(Value::Text(raw.to_owned()));
-    }
     let mut bytes = Vec::with_capacity(HEADER_BYTES + compressed.len());
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&(raw.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&compressed);
-    Ok(Value::Blob(bytes))
+    Ok(bytes)
 }
 
 /// Read raw text or the explicitly versioned compressed representation. Unknown
@@ -50,17 +54,7 @@ pub(crate) fn decode_value(value: ValueRef<'_>) -> Result<String> {
 /// Decode one complete record with a bounded streaming output and exact length /
 /// checksum validation. The untrusted header never determines an allocation size.
 pub(crate) fn decode_blob(bytes: &[u8]) -> Result<String> {
-    if bytes.len() < HEADER_BYTES || !bytes.starts_with(MAGIC) {
-        return Err(invalid("unknown or truncated codec header"));
-    }
-    let expected = u64::from_le_bytes(
-        bytes[MAGIC.len()..HEADER_BYTES]
-            .try_into()
-            .map_err(invalid)?,
-    );
-    if expected > MAX_DECODE_BYTES as u64 {
-        return Err(invalid("decompressed Metadata exceeds the record budget"));
-    }
+    let expected = decoded_blob_length(bytes)?;
     let payload = &bytes[HEADER_BYTES..];
     let mut decoder = Decompress::new(true);
     let mut decoded = Vec::new();
@@ -95,6 +89,24 @@ pub(crate) fn decode_blob(bytes: &[u8]) -> Result<String> {
     String::from_utf8(decoded).map_err(invalid)
 }
 
+/// Read the bounded original length from an experimental header (at least 16
+/// bytes). Space estimates may use this without reading the payload; only full
+/// decoding validates stream completion, checksum and UTF-8.
+pub(crate) fn decoded_blob_length(header: &[u8]) -> Result<u64> {
+    if header.len() < HEADER_BYTES || !header.starts_with(MAGIC) {
+        return Err(invalid("unknown or truncated codec header"));
+    }
+    let expected = u64::from_le_bytes(
+        header[MAGIC.len()..HEADER_BYTES]
+            .try_into()
+            .map_err(invalid)?,
+    );
+    if expected > MAX_DECODE_BYTES as u64 {
+        return Err(invalid("decompressed Metadata exceeds the record budget"));
+    }
+    Ok(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,19 +119,14 @@ mod tests {
     }
 
     fn compressed_bytes(raw: &[u8]) -> Vec<u8> {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-        encoder.write_all(raw).unwrap();
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&encoder.finish().unwrap());
-        bytes
+        compressed_fixture_bytes(raw).unwrap()
     }
 
     #[test]
-    fn compressed_round_trip_retains_unknown_fields_unicode_and_exact_json_bytes() {
+    fn legacy_decoder_retains_unknown_fields_unicode_and_exact_json_bytes() {
         let text = raw();
-        let Value::Blob(encoded) = encode(&text, true).unwrap() else {
-            panic!("repeated Metadata should compress");
+        let Value::Blob(encoded) = encode_legacy_fixture(&text).unwrap() else {
+            panic!("legacy fixture must contain a BLOB");
         };
         assert!(encoded.len() < text.len() / 2);
         assert_eq!(
@@ -132,6 +139,7 @@ mod tests {
     fn policy_and_small_values_remain_plain_text_without_json_normalization() {
         let text = raw();
         assert_eq!(encode(&text, false).unwrap(), Value::Text(text.clone()));
+        assert_eq!(encode(&text, true).unwrap(), Value::Text(text));
         for text in ["{}", " \n{\"extra\": 1.00}\n", "not-json"] {
             assert_eq!(encode(text, true).unwrap(), Value::Text(text.into()));
             assert_eq!(decode_value(ValueRef::Text(text.as_bytes())).unwrap(), text);
@@ -180,5 +188,25 @@ mod tests {
         assert!(decode_value(ValueRef::Text(&[0xff])).is_err());
         assert!(decode_value(ValueRef::Null).is_err());
         assert!(decode_value(ValueRef::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn header_length_estimates_are_bounded_and_do_not_replace_stream_validation() {
+        let text = raw();
+        let bytes = compressed_bytes(text.as_bytes());
+        assert_eq!(
+            decoded_blob_length(&bytes[..HEADER_BYTES]).unwrap(),
+            text.len() as u64
+        );
+        assert!(decode_blob(&bytes[..HEADER_BYTES]).is_err());
+        for length in [0, MAGIC.len(), HEADER_BYTES - 1] {
+            assert!(decoded_blob_length(&bytes[..length]).is_err());
+        }
+        let mut future = bytes[..HEADER_BYTES].to_vec();
+        future[5] += 1;
+        assert!(decoded_blob_length(&future).is_err());
+        future = bytes[..HEADER_BYTES].to_vec();
+        future[MAGIC.len()..].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(decoded_blob_length(&future).is_err());
     }
 }

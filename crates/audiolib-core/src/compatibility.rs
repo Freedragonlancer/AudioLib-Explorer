@@ -12,7 +12,9 @@ pub const TARGET_SCHEMA: u32 = 8;
 /// Completed tokenizer encoding; 4 in an old live upgrade is a temporary marker.
 pub const TOKENIZATION_REVISION: u32 = 3;
 /// Format identifiers are exact sets, not a promise that all lower integers work.
-pub const PLAN_B_FORMAT: &str = "ale-s8-cld1-t3-m2-p1-a1-z1";
+pub const PLAN_B_FORMAT: &str = "ale-s8-cld1-t3-m2-p1-a1";
+/// Experimental schema-8 snapshots with compressed Metadata remain read-only inputs.
+pub const PLAN_B_V8_COMPRESSED_FORMAT: &str = "ale-s8-cld1-t3-m2-p1-a1-z1";
 /// Schema-7 Plan B used per-record album names and uncompressed Metadata.
 pub const PLAN_B_V7_FORMAT: &str = "ale-s7-cld1-t3-m2-p1";
 /// Earlier schema-7 Plan B retained the last playback timestamp; read-only source.
@@ -26,7 +28,7 @@ pub const PLAN_B_V6_INITIAL_FORMAT: &str = "ale-s6-cld1-t3-m2-p0";
 pub const ALBUM_ENTITIES_FEATURE: &str = "album_entities";
 /// Revision of the persistent shared-album representation.
 pub const ALBUM_ENTITIES_REVISION: u32 = 1;
-/// Persistent lossless Metadata encoding required by the schema-8 format.
+/// Persistent Metadata codec understood only for experimental compressed snapshots.
 pub const METADATA_STORAGE_FEATURE: &str = "metadata_storage";
 /// Revision of the persistent lossless Metadata encoding.
 pub const METADATA_STORAGE_REVISION: u32 = 1;
@@ -105,7 +107,6 @@ impl LibraryFormat {
                 ("search_storage", 1),
                 ("play_history_retired", 2),
                 (ALBUM_ENTITIES_FEATURE, ALBUM_ENTITIES_REVISION),
-                (METADATA_STORAGE_FEATURE, METADATA_STORAGE_REVISION),
             ]
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
@@ -136,6 +137,14 @@ impl LibraryFormat {
         }
     }
 
+    // Preserve the original experimental descriptor independently of later targets.
+    fn prior_compressed_plan_b() -> Self {
+        let mut format = Self::prior_plan_b(8, 2);
+        format.features.insert(ALBUM_ENTITIES_FEATURE.into(), 1);
+        format.features.insert(METADATA_STORAGE_FEATURE.into(), 1);
+        format
+    }
+
     /// Exact completed snapshot format; incomplete/unknown combinations have no ID.
     pub fn snapshot_format_id(&self) -> Option<String> {
         if unknown_requirement(self).is_some()
@@ -155,7 +164,13 @@ impl LibraryFormat {
                 Some(format!("ale-s{schema}-ext-t3-m2"))
             }
             (SearchStorage::ContentlessDelete, TARGET_SCHEMA) => {
-                (self == &Self::target()).then(|| PLAN_B_FORMAT.into())
+                if self == &Self::target() {
+                    Some(PLAN_B_FORMAT.into())
+                } else if self == &Self::prior_compressed_plan_b() {
+                    Some(PLAN_B_V8_COMPRESSED_FORMAT.into())
+                } else {
+                    None
+                }
             }
             // Old snapshots remain readable with their exact, original feature maps.
             (SearchStorage::ContentlessDelete, schema @ 6..=7) => {
@@ -482,7 +497,6 @@ pub const FEATURES: &[(&str, u32)] = &[
     (ALBUM_ARTWORK_FEATURE, ALBUM_ARTWORK_REVISION),
     (ALBUM_ENTITY_ARTWORK_FEATURE, ALBUM_ENTITY_ARTWORK_REVISION),
     (ALBUM_ENTITIES_FEATURE, ALBUM_ENTITIES_REVISION),
-    (METADATA_STORAGE_FEATURE, METADATA_STORAGE_REVISION),
     ("list_waveform_jobs", 1),
     ("list_waveforms", 1),
     ("waveform_bundle_strong_etag", 1),
@@ -618,6 +632,7 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
             PLAN_B_V6_FORMAT.into(),
             PLAN_B_V7_INITIAL_FORMAT.into(),
             PLAN_B_V7_FORMAT.into(),
+            PLAN_B_V8_COMPRESSED_FORMAT.into(),
             PLAN_B_FORMAT.into(),
         ],
         database_write_formats: vec![PLAN_B_FORMAT.into()],
@@ -762,26 +777,67 @@ mod tests {
     }
 
     #[test]
-    fn schema8_requires_both_album_and_metadata_storage_features() {
+    fn schema8_plain_target_requires_albums_and_keeps_metadata_as_text() {
         let target = LibraryFormat::target();
         assert_eq!(target.schema_version, 8);
         assert_eq!(target.snapshot_format_id().as_deref(), Some(PLAN_B_FORMAT));
-        for feature in [ALBUM_ENTITIES_FEATURE, METADATA_STORAGE_FEATURE] {
-            assert_eq!(target.features.get(feature), Some(&1));
-            for revision in [None, Some(0), Some(2)] {
-                let mut incomplete = target.clone();
-                if let Some(revision) = revision {
-                    incomplete.features.insert(feature.into(), revision);
-                } else {
-                    incomplete.features.remove(feature);
-                }
-                assert_eq!(incomplete.snapshot_format_id(), None);
-                assert!(!assess_library(&incomplete, &evidence(), LibraryAccess::Read).direct_use);
+        assert!(!target.features.contains_key(METADATA_STORAGE_FEATURE));
+        assert_eq!(target.features.get(ALBUM_ENTITIES_FEATURE), Some(&1));
+        for revision in [None, Some(0), Some(2)] {
+            let mut incomplete = target.clone();
+            if let Some(revision) = revision {
+                incomplete
+                    .features
+                    .insert(ALBUM_ENTITIES_FEATURE.into(), revision);
+            } else {
+                incomplete.features.remove(ALBUM_ENTITIES_FEATURE);
             }
+            assert_eq!(incomplete.snapshot_format_id(), None);
+            assert!(!assess_library(&incomplete, &evidence(), LibraryAccess::Read).direct_use);
         }
         let mut p0 = target;
         p0.features.insert("play_history_retired".into(), 1);
         assert_eq!(p0.snapshot_format_id(), None);
+    }
+
+    #[test]
+    fn experimental_compressed_schema8_is_an_exact_read_only_source() {
+        // Captured wire requirements must not inherit the current target's map.
+        let legacy: LibraryFormat = serde_json::from_value(serde_json::json!({
+            "schema_version": 8,
+            "storage": "contentless_delete",
+            "features": {
+                "stable_audio_ids": 1, "foreign_key_indexes": 1, "search_indexes": 1,
+                "tokenization": 3, "search_storage": 1, "play_history_retired": 2,
+                "album_entities": 1, "metadata_storage": 1,
+            },
+            "source_search_revision": 2, "source_tags_revision": 2,
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy.snapshot_format_id().as_deref(),
+            Some(PLAN_B_V8_COMPRESSED_FORMAT)
+        );
+        let descriptor = SnapshotFormat {
+            id: PLAN_B_V8_COMPRESSED_FORMAT.into(),
+            format: legacy.clone(),
+        };
+        let manifest = compatibility_manifest();
+        assert!(descriptor.is_readable_by(&manifest));
+        assert!(assess_library(&legacy, &evidence(), LibraryAccess::Read).direct_use);
+        let write = assess_library(&legacy, &evidence(), LibraryAccess::Write);
+        assert!(!write.direct_use);
+        assert_eq!(write.disposition, Some(MigrationDisposition::Migratable));
+        assert_eq!(write.reasons, vec![CompatibilityReason::StorageUpgrade]);
+        assert!(!manifest.database_write_formats.contains(&descriptor.id));
+        for revision in [0, 2] {
+            let mut invalid = legacy.clone();
+            invalid
+                .features
+                .insert(METADATA_STORAGE_FEATURE.into(), revision);
+            assert_eq!(invalid.snapshot_format_id(), None);
+            assert!(!assess_library(&invalid, &evidence(), LibraryAccess::Read).direct_use);
+        }
     }
 
     #[test]
@@ -842,16 +898,14 @@ mod tests {
                 PLAN_B_V6_FORMAT,
                 PLAN_B_V7_INITIAL_FORMAT,
                 PLAN_B_V7_FORMAT,
+                PLAN_B_V8_COMPRESSED_FORMAT,
                 PLAN_B_FORMAT,
             ]
         );
-        for feature in [
-            ALBUM_ENTITIES_FEATURE,
-            METADATA_STORAGE_FEATURE,
-            ALBUM_ENTITY_ARTWORK_FEATURE,
-        ] {
+        for feature in [ALBUM_ENTITIES_FEATURE, ALBUM_ENTITY_ARTWORK_FEATURE] {
             assert_eq!(manifest.features.get(feature), Some(&1));
         }
+        assert!(!manifest.features.contains_key(METADATA_STORAGE_FEATURE));
     }
 
     #[test]
@@ -1187,6 +1241,8 @@ mod tests {
             "plan_b_initial_format": PLAN_B_INITIAL_FORMAT,
             "plan_b_v7_format": PLAN_B_V7_FORMAT,
             "plan_b_v7_initial_format": PLAN_B_V7_INITIAL_FORMAT,
+            "plan_b_v8_compressed_format": PLAN_B_V8_COMPRESSED_FORMAT,
+            "legacy_compressed": LibraryFormat::prior_compressed_plan_b(),
             "target_schema": TARGET_SCHEMA,
             "tokenization_revision": TOKENIZATION_REVISION,
             "snapshot_read_formats": compatibility_manifest().snapshot_read_formats,

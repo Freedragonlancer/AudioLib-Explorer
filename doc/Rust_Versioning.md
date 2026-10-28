@@ -8,7 +8,7 @@
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 8 | SQLite 资料库结构（`user_version`） |
 
-当前完整格式为 `ale-s8-cld1-t3-m2-p1-a1-z1`，必需 feature 包括 `album_entities=1` 和 `metadata_storage=1`。后者声明可读取混合 TEXT/压缩 BLOB；未知 SQL 明文依赖会保守使用 TEXT，不表示每一行都压缩。
+当前可写完整格式为 `ale-s8-cld1-t3-m2-p1-a1`，必需 feature 包括 `album_entities=1`，Metadata 保持原始 JSON TEXT；Metadata 压缩暂缓。实验格式 `ale-s8-cld1-t3-m2-p1-a1-z1` 的 `metadata_storage=1` 仅保留为严格只读兼容来源，不在可写目录或迁移目标中。快照外层 zstd 传输与 Metadata 列存储分别协商。
 
 schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；当前 schema 8 的完整快照直接只读打开。schema 3–7 即使原搜索状态就绪，也仅在客户端拥有的 staging/copy 中升级并建立共享专辑投影；原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
 

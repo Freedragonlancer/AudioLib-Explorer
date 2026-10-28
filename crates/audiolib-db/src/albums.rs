@@ -85,21 +85,6 @@ pub(crate) fn configure_compression(conn: &Connection, enabled: bool) -> Result<
     .map_err(db_error)
 }
 
-#[cfg(feature = "scanner")]
-pub(crate) fn compression_enabled(conn: &Connection) -> Result<bool> {
-    let enabled = conn
-        .query_row(
-            "SELECT compression FROM audiolib_album_id_sequence WHERE singleton=1",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(db_error)?;
-    if enabled && !dependency_safe(conn)? {
-        return Err(Error::Validation("SQL extensions changed; reopen the library to safely prepare Metadata storage before scanning".into()));
-    }
-    Ok(enabled)
-}
-
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS audiolib_album_id_sequence (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), high_water INTEGER NOT NULL CHECK(high_water>=0), namespace TEXT NOT NULL, legacy_scope TEXT, compression INTEGER NOT NULL DEFAULT 0 CHECK(compression IN (0,1)));

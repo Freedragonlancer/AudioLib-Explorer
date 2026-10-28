@@ -27,8 +27,8 @@ pub fn probe(path: &Path) -> Result<AudioMetadata> {
 
 /// Probe Metadata and also return the WAV's own cover artwork, when it carries one.
 ///
-/// Only this path reads the ID3 `APIC` payload, so ordinary scans never touch cover
-/// bytes; callers ask for artwork once per album rather than once per file.
+/// Only this path extracts ID3 `APIC`/`PIC` or Soundminer `SMED` pictures. Ordinary
+/// scans keep binary artwork out of Metadata and never base64-decode SMED pictures.
 pub fn probe_with_artwork(path: &Path) -> Result<(AudioMetadata, Option<Artwork>)> {
     let info = read_info_impl(path, true, true)?;
     Ok((info.metadata, info.artwork))
@@ -234,7 +234,7 @@ fn read_info_reader(
                     b"iXML" => embedded.xml("ixml", &data, &mut attrs),
                     b"axml" | b"aXML" => embedded.xml("axml", &data, &mut attrs),
                     b"_PMX" | b"XMP " => embedded.xml("xmp", &data, &mut attrs),
-                    b"SMED" => embedded.smed(&data, &mut attrs),
+                    b"SMED" => embedded.smed(&data, &mut attrs, include_artwork),
                     _ => embedded.id3(&data),
                 }
             }

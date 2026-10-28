@@ -29,7 +29,7 @@ AudioLib Explorer is a fast, local-first sound-effects library manager for Windo
 - **Source development version:** 0.8.1 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 8 (snapshot schema range 3..=8; only explicitly recognized complete formats are readable)
-- **Writable library format:** `ale-s8-cld1-t3-m2-p1-a1-z1`; recognized schema 3–7 formats are read-only migration sources. Schema 8 shares albums and losslessly compresses eligible Metadata.
+- **Writable library format:** `ale-s8-cld1-t3-m2-p1-a1`; recognized schema 3–7 formats are read-only migration sources. Schema 8 shares albums and retains Metadata as original JSON TEXT. Metadata compression is deferred; snapshot transport still uses zstd.
 - **License:** [GPL-3.0-only](LICENSE)
 
 The program version is read from the workspace `Cargo.toml` and is shared by the client, CLI and server. Current formats are defined by the [compatibility catalog](crates/audiolib-core/src/compatibility.rs); the [historical schema v6 contract](doc/api/Schema_V6_Iteration.md) describes the earlier format.

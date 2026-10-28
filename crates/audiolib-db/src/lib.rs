@@ -12,6 +12,8 @@ mod import_lease;
 mod list_waveforms;
 pub mod local_play_history;
 mod management;
+#[cfg(test)]
+mod metadata_plain_tests;
 pub(crate) mod metadata_storage;
 pub mod migration;
 mod owned_cancellation;
@@ -1284,7 +1286,6 @@ impl SqliteProvider {
         let mut added = 0;
         let mut updated = 0;
         let mut folders = std::collections::HashMap::new();
-        let compress_metadata = albums::compression_enabled(tx)?;
         let mut find_existing = tx.prepare_cached(
             "SELECT file_path,id,metadata_json,COALESCE(file_size,0),source_mtime_ns FROM audio_files WHERE path_key=?1 ORDER BY id",
         ).map_err(db_error)?;
@@ -1366,8 +1367,7 @@ impl SqliteProvider {
             let source_tags_text =
                 schema::fold_case(&audiolib_core::source_tags(&attributes).join(", "));
             // Library/album comes from the file itself; empty when it declares none.
-            let encoded_metadata =
-                metadata_storage::encode(&attributes.to_string(), compress_metadata)?;
+            let encoded_metadata = metadata_storage::encode(&attributes.to_string(), false)?;
             let ix_scene = attributes
                 .get("ixml_scene")
                 .and_then(|value| value.as_str());

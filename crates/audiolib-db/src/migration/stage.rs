@@ -262,7 +262,6 @@ fn copy_table(
     // Recompute this explicitly derived field while copying, before installing
     // extension triggers. A schema-6 repair must not retain stale source-tag keys
     // or fire a user's UPDATE trigger as a side effect of rebuilding search.
-    let compress = crate::albums::dependency_safe(&open_read(&input_path(job)?)?)?;
     let source_projection = columns
         .iter()
         .map(|column| {
@@ -273,10 +272,9 @@ fn copy_table(
             } else if table.eq_ignore_ascii_case("audio_files")
                 && column.eq_ignore_ascii_case("metadata_json")
             {
-                format!(
-                    "audiolib_metadata_store(metadata_json,{})",
-                    i32::from(compress)
-                )
+                // A legacy experimental BLOB is decoded once; every new
+                // candidate stores the original UTF-8 bytes as SQLite TEXT.
+                "audiolib_metadata_json(metadata_json)".into()
             } else {
                 search_storage::quote_identifier(column)
             }
@@ -452,7 +450,7 @@ pub(super) fn build(
                 }
                 other => other,
             })?;
-            crate::albums::configure_compression(&tx, crate::albums::dependency_safe(&input)?)?;
+            crate::albums::configure_compression(&tx, false)?;
             if job.plan.source.format.schema_version < 8 && job.plan.local_history.is_some() {
                 tx.execute("UPDATE audiolib_album_id_sequence SET legacy_scope=?1 WHERE singleton=1 AND legacy_scope IS NULL",[job.plan.source.source.to_string_lossy().as_ref()]).map_err(db_error)?;
             }
@@ -522,11 +520,47 @@ pub(super) fn build(
     })
 }
 
+fn validate_text_metadata(conn: &Connection, cancel: &AtomicBool) -> Result<()> {
+    // Bounded primary-key ranges preserve cancellation even for published
+    // verification, which does not install the owned-writer interrupt hook.
+    let mut last = None;
+    loop {
+        check_cancel(cancel)?;
+        let high: Option<i64> = if let Some(low) = last {
+            conn.query_row(
+                "SELECT MAX(id) FROM (SELECT id FROM audio_files WHERE id>?1 ORDER BY id LIMIT ?2)",
+                params![low, BATCH],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?
+        } else {
+            conn.query_row(
+                "SELECT MAX(id) FROM (SELECT id FROM audio_files ORDER BY id LIMIT ?1)",
+                [BATCH],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?
+        };
+        let Some(high) = high else { return Ok(()) };
+        let non_text: bool = if let Some(low) = last {
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM audio_files WHERE id>?1 AND id<=?2 AND typeof(metadata_json)<>'text')", params![low, high], |row| row.get(0)).map_err(db_error)?
+        } else {
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM audio_files WHERE id<=?1 AND typeof(metadata_json)<>'text')", [high], |row| row.get(0)).map_err(db_error)?
+        };
+        if non_text {
+            return Err(invalid("Candidate Metadata must use SQLite TEXT storage"));
+        }
+        last = Some(high);
+    }
+}
+
 pub(super) fn verify_connection(
     conn: &Connection,
     job: &MigrationJob,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    // Logical decoded-byte parity alone cannot label mixed legacy storage as a1.
+    validate_text_metadata(conn, cancel)?;
     let expected = job
         .target_business
         .as_ref()
@@ -789,6 +823,70 @@ mod album_backfill_tests {
         );
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name LIKE 'audiolib_album_backfill_%'",[],|row|row.get::<_,i64>(0)).unwrap(),1);
         assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='audiolib_album_backfill_keep_unknown')",[],|row|row.get::<_,bool>(0)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod plain_metadata_validation_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::Ordering};
+
+    fn data() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE audio_files(id INTEGER PRIMARY KEY,metadata_json); WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<10001) INSERT INTO audio_files SELECT id,'{}' FROM ids; INSERT INTO audio_files VALUES(-9223372036854775808,'{}'),(9223372036854775807,'{}');").unwrap();
+        conn
+    }
+
+    #[test]
+    fn publication_checks_late_rows_and_extreme_ids_without_rewriting_them() {
+        let conn = data();
+        let cancel = AtomicBool::new(false);
+        validate_text_metadata(&conn, &cancel).unwrap();
+        conn.execute(
+            "UPDATE audio_files SET metadata_json=x'00' WHERE id=9223372036854775807",
+            [],
+        )
+        .unwrap();
+        assert!(validate_text_metadata(&conn, &cancel).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT metadata_json FROM audio_files WHERE id=9223372036854775807",
+                [],
+                |row| row.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            [0]
+        );
+        conn.execute(
+            "UPDATE audio_files SET metadata_json='{}' WHERE id=9223372036854775807",
+            [],
+        )
+        .unwrap();
+        validate_text_metadata(&conn, &cancel).unwrap();
+    }
+
+    #[test]
+    fn publication_type_scan_observes_cancellation_between_ranges() {
+        let conn = data();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let observed = cancel.clone();
+        conn.progress_handler(
+            500,
+            Some(move || {
+                observed.store(true, Ordering::Release);
+                false
+            }),
+        )
+        .unwrap();
+        let result = validate_text_metadata(&conn, &cancel);
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        assert!(matches!(result, Err(audiolib_core::Error::Cancelled)));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM audio_files", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            10003
+        );
     }
 }
 

@@ -89,7 +89,7 @@ DATA_DIR="$BETA_DATA_DIR" BACKUP_DIR="$WORK_DIR/beta-backups" PORT="$PORT" \
 UPDATE_CHANNEL=beta UPDATE_VERSION="$UPDATE_VERSION" \
 TOKEN="$(cat "$TOKEN_FILE")" EXPECT_COMMIT="$SHA" WAIT_SECS="$BETA_WAIT_SECS" \
     sh "$REPO/server/deploy/redeploy-server.sh" "$BETA_APP_DIR/bin/audiolib-server.$SHA" \
-    || die "redeploy failed (rolled back by redeploy-server.sh)"
+    || die "redeploy failed; inspect its rollback or retained-migration result above"
 log "update channel beta, installed version $UPDATE_VERSION"
 
 API="http://127.0.0.1:$PORT/api/v1"; AUTH="Authorization: Bearer $(cat "$TOKEN_FILE")"

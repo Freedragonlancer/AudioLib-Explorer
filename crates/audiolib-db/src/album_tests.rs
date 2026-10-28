@@ -14,7 +14,7 @@ fn strict_schema7_text_metadata_upgrades_without_changing_its_storage_constraint
     );
     assert!(matches!(
         metadata_storage::encode(&raw, true).unwrap(),
-        Value::Blob(_)
+        Value::Text(stored) if stored == raw
     ));
     conn.execute("UPDATE audio_files SET metadata_json=?1 WHERE id=2", [&raw])
         .unwrap();
@@ -59,7 +59,16 @@ fn strict_schema7_text_metadata_upgrades_without_changing_its_storage_constraint
     assert!(strict);
     assert_eq!(kind, "text");
     assert_eq!(stored, raw);
-    assert!(!albums::compression_enabled(&reader).unwrap());
+    assert_eq!(
+        reader
+            .query_row(
+                "SELECT compression FROM audiolib_album_id_sequence",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 
@@ -75,7 +84,7 @@ fn schema7_metadata_autoindex_constraints_keep_text_and_original_collation() {
         );
         assert!(matches!(
             metadata_storage::encode(&raw, true).unwrap(),
-            Value::Blob(_)
+            Value::Text(stored) if stored == raw
         ));
         conn.execute("UPDATE audio_files SET metadata_json=?1 WHERE id=2", [&raw])
             .unwrap();
@@ -1222,9 +1231,10 @@ fn folder_fallback_uses_the_first_root_child_and_metadata_takes_priority() {
 
 #[cfg(feature = "scanner")]
 #[test]
-fn unchanged_rescan_keeps_folder_entities_and_decodes_the_compressed_probe_version() {
+fn unchanged_rescan_keeps_folder_entities_after_legacy_probe_metadata_becomes_text() {
     let temp = tempfile::tempdir().unwrap();
-    let provider = Arc::new(SqliteProvider::open(&temp.path().join("unchanged.db")).unwrap());
+    let database = temp.path().join("unchanged.db");
+    let provider = Arc::new(SqliteProvider::open(&database).unwrap());
     let root = temp.path().join("audio");
     let path = root.join("Pack/nested/one.wav");
     let original = scan_owned_wav(&provider, &root, &path, None);
@@ -1249,14 +1259,28 @@ fn unchanged_rescan_keeps_folder_entities_and_decodes_the_compressed_probe_versi
         .unwrap();
     let mut attributes: serde_json::Value = serde_json::from_str(&raw).unwrap();
     attributes["private_padding"] = "unknown unchanged text ".repeat(400).into();
-    let stored = crate::metadata_storage::encode(&attributes.to_string(), true).unwrap();
+    let stored = crate::metadata_storage::encode_legacy_fixture(&attributes.to_string()).unwrap();
     assert!(matches!(&stored, rusqlite::types::Value::Blob(_)));
     conn.execute(
         "UPDATE audio_files SET metadata_json=?2 WHERE id=?1",
         params![original.id, stored],
     )
     .unwrap();
+    conn.execute_batch("INSERT INTO audiolib_schema_features VALUES('metadata_storage',1); UPDATE audiolib_album_id_sequence SET compression=1;").unwrap();
     drop(conn);
+    drop(provider);
+    let provider = Arc::new(SqliteProvider::open_existing(&database).unwrap());
+    assert_eq!(
+        Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT typeof(metadata_json) FROM audio_files WHERE id=?1",
+                [original.id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "text"
+    );
     let before = fs::read(&path).unwrap();
     let progress = ScanService::new(provider.clone())
         .scan(
@@ -1302,13 +1326,14 @@ fn new_unknown_json_trigger_causes_owned_text_repair_before_the_next_scan() {
         .unwrap();
     let mut attributes: serde_json::Value = serde_json::from_str(&raw).unwrap();
     attributes["private_extension"] = "retain unknown text 🦉 ".repeat(300).into();
-    let stored = crate::metadata_storage::encode(&attributes.to_string(), true).unwrap();
+    let stored = crate::metadata_storage::encode_legacy_fixture(&attributes.to_string()).unwrap();
     assert!(matches!(&stored, rusqlite::types::Value::Blob(_)));
     conn.execute(
         "UPDATE audio_files SET metadata_json=?2 WHERE id=?1",
         params![original.id, stored],
     )
     .unwrap();
+    conn.execute_batch("INSERT INTO audiolib_schema_features VALUES('metadata_storage',1); UPDATE audiolib_album_id_sequence SET compression=1;").unwrap();
     conn.execute_batch(
         "CREATE TABLE vendor_json_events(audio_id INTEGER,library TEXT);
          CREATE TRIGGER vendor_json_consumer AFTER UPDATE OF metadata_json ON audio_files BEGIN

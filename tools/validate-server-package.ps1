@@ -292,25 +292,26 @@ try {
         $health.api_version -cne 'v1' -or $health.schema_version -ne 8 -or $health.commit -cne $shortCommit) { throw 'Extracted server health identity/API/schema check failed.' }
     $capabilities = Read-Endpoint '/capabilities'
     if ($capabilities.compatibility.features.album_entities -ne 1 -or
-        $capabilities.compatibility.features.metadata_storage -ne 1) {
-        throw 'Extracted server does not advertise the shared-album and Metadata storage capabilities.'
+        $capabilities.compatibility.features.album_entity_artwork -ne 1 -or
+        $capabilities.compatibility.features.Contains('metadata_storage')) {
+        throw 'Extracted server shared-album capabilities differ from the plain Metadata contract.'
     }
     $library = Read-Endpoint '/library'
     if ($server.HasExited -or $library.library_id -isnot [string] -or !$library.library_id -or
         $library.schema_version -ne 8 -or $library.identity_bound_writes -isnot [bool] -or !$library.identity_bound_writes -or
         $library.stats.audio_files -ne 1 -or $library.database -cne [IO.Path]::GetFileName($database)) { throw 'Extracted server could not serve its isolated synthetic library.' }
-    if ($library.snapshot_format.id -cne 'ale-s8-cld1-t3-m2-p1-a1-z1' -or
+    if ($library.snapshot_format.id -cne 'ale-s8-cld1-t3-m2-p1-a1' -or
         $library.snapshot_format.format.schema_version -ne 8 -or
         $library.snapshot_format.format.features.play_history_retired -ne 2 -or
         $library.snapshot_format.format.features.album_entities -ne 1 -or
-        $library.snapshot_format.format.features.metadata_storage -ne 1) {
+        $library.snapshot_format.format.features.Contains('metadata_storage')) {
         throw 'Extracted server snapshot format differs from the current schema 8 contract.'
     }
     # Safe public result only: neither endpoint responses nor process logs are exported.
     [ordered]@{
         success=$true; tag=$Tag; version=$version; target=$Target; commit=$commit
         archive_sha256=$archiveHash; binary_sha256=$report.binary_sha256
-        checks=@('archive checksum/report schema', 'public archive contents', 'extracted binary version/hash', 'isolated health API v1/schema 8/commit', 'schema 8 album_entities/metadata_storage features', 'synthetic library available')
+        checks=@('archive checksum/report schema', 'public archive contents', 'extracted binary version/hash', 'isolated health API v1/schema 8/commit', 'schema 8 shared albums/plain Metadata format', 'synthetic library available')
         shutdown=$(if ($IsWindows) { 'owned test process termination; graceful drain not tested' } else { 'owned test process SIGTERM with bounded termination fallback' })
     } | ConvertTo-Json -Depth 4
 } finally {

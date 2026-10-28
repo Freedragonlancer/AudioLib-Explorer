@@ -1,6 +1,6 @@
 # Rust Architecture
 
-AudioLib Explorer `0.8.1` uses the Rust workspace and schema 8 / Plan B storage, including shared album entities and lossless Metadata storage. See [shared albums and Metadata storage](Rust_Shared_Albums.md), the [shared migration contract](api/Library_Migration_Compatibility.md), [artwork contracts](Rust_Artwork.md) and [storage CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier development-version measurements remain historical evidence.
+AudioLib Explorer `0.8.1` uses the Rust workspace and schema 8 / Plan B storage, including shared album entities and original Metadata JSON TEXT. The writable format is `ale-s8-cld1-t3-m2-p1-a1`; Metadata compression is deferred. The snapshot's outer zstd transport remains enabled. See [shared albums and Metadata storage](Rust_Shared_Albums.md), the [shared migration contract](api/Library_Migration_Compatibility.md), [artwork contracts](Rust_Artwork.md) and [storage CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier development-version measurements remain historical evidence.
 
 This document supersedes Python-specific implementation choices in Technical_Architecture.md. Its Appendix A remains the terminology reference. The Python implementation and its test scripts have been removed from the working tree; earlier committed versions preserve their history. The original SQLite database and local config/audiolib_config.yaml remain read-only migration inputs. New features use the Rust workspace.
 
