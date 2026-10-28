@@ -38,10 +38,25 @@ choose a new album even when it reuses an old numeric ID in another namespace.
 Workspace format 2 prevents older clients from ignoring these conditions; see
 [search-task recovery](Rust_Search_Tasks.md).
 
-Pictures remain outside SQLite, FTS5 and snapshots. A bounded, sorted set of up to
-64 present members supplies the first valid embedded picture for the whole
-album. Manual cover selection, hiding and restore-to-embedded belong to that
-shared entity. See [artwork](Rust_Artwork.md) for caching and old-choice migration.
+Pictures remain outside SQLite, FTS5 and snapshots. Automatic covers are scoped
+to a shared album within the selected WAV's immediate source directory. The
+directory filter applies before selecting up to 64 sorted, present members; a
+member without a picture can reuse another picture in that same album and
+directory. Different subdirectories never borrow one another's detail cover,
+even when their Metadata declares the same Library. Album entities and counts
+remain shared; this cover context adds no schema migration or Metadata rewrite.
+
+Manual selection, hiding and restore-to-embedded use the same source, album and
+immediate-directory context in local and server modes. Older whole-album choices
+remain read-only inherited defaults until overridden by a directory choice.
+Restoring the directory default records an ignore-inherited receipt and uses
+its embedded artwork without deleting the older preference for other folders.
+Native server requests use the optional `album_folder_artwork: 1` capability and
+validate library, namespace and directory identity; the database stays at
+schema 8 with original Metadata TEXT. Valid BOOM SMED Picture tags and ID3 APIC
+can supply embedded images, including distinct Construction Kit and Designed
+posters within one Library. See [artwork](Rust_Artwork.md) for cache and preference
+details.
 
 ## Original Metadata TEXT
 
