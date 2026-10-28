@@ -434,3 +434,181 @@ fn cross_index_navigation(server_snapshot: bool) {
     assert_eq!(directory_count(&fixture, "wind"), Some(1));
     finish(&fixture);
 }
+
+#[test]
+fn all_sounds_drops_album_result_cache_when_an_invalid_filter_defers_search() {
+    isolated("album_review::child_all_sounds_invalid_filter_cache_local");
+}
+
+#[test]
+fn all_sounds_drops_album_result_cache_for_invalid_filter_in_read_only_snapshot() {
+    isolated("album_review::child_all_sounds_invalid_filter_cache_server");
+}
+
+#[test]
+#[ignore = "isolated local invalid-filter scope cache regression"]
+fn child_all_sounds_invalid_filter_cache_local() {
+    all_sounds_invalid_filter_cache(false);
+}
+
+#[test]
+#[ignore = "isolated read-only snapshot invalid-filter scope cache regression"]
+fn child_all_sounds_invalid_filter_cache_server() {
+    all_sounds_invalid_filter_cache(true);
+}
+
+fn all_sounds_invalid_filter_cache(server_snapshot: bool) {
+    let fixture = cross_index_fixture(server_snapshot);
+    let ui = &fixture.ui;
+    search(&fixture, "shared", 4);
+    wait_albums(&fixture, 2);
+    let gore = ui
+        .get_albums()
+        .iter()
+        .find(|album| album.name == "Gore album")
+        .unwrap()
+        .id;
+    ui.invoke_album_selected(gore);
+    wait_navigation(&fixture, 3);
+    let first = active_id(ui);
+
+    // The last successful page belongs to Gore. An invalid duration prevents
+    // both Apply and All sounds from dispatching a replacement search.
+    ui.set_duration_min("unfinished".into());
+    ui.invoke_apply_filters();
+    assert!(ui.get_status().contains("Duration"));
+    ui.invoke_all_library_requested();
+    assert_all_scope(&fixture, false);
+    assert_eq!(ui.get_rows().row_count(), 3);
+    assert!(!ui.get_searching());
+
+    // Repair the draft without submitting it, then leave and restore the task.
+    // Its new all-library definition must never reuse Gore's old result cache.
+    ui.set_duration_min("".into());
+    ui.invoke_search_task_created();
+    wait_for(ui, |ui| {
+        !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+            && ui.get_search_tasks().row_count() == 2
+    });
+    search(&fixture, "wind", 1);
+    ui.invoke_search_task_selected(first.clone().into());
+    wait_for(ui, move |ui| {
+        active_id(ui) == first
+            && !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+    });
+    assert_all_scope(&fixture, false);
+    assert_eq!(
+        ui.get_rows().row_count(),
+        4,
+        "the restored all-library task must not reuse the previous Album's three-row cache"
+    );
+    wait_navigation(&fixture, 4);
+    assert_eq!(directory_count(&fixture, "gore"), Some(3));
+    assert_eq!(directory_count(&fixture, "wind"), Some(1));
+    finish(&fixture);
+}
+
+#[test]
+fn album_navigation_drops_result_cache_when_an_invalid_filter_defers_search() {
+    isolated("album_review::child_album_navigation_invalid_filter_cache");
+}
+
+#[test]
+fn folder_navigation_drops_result_cache_when_an_invalid_filter_defers_search() {
+    isolated("album_review::child_folder_navigation_invalid_filter_cache");
+}
+
+#[test]
+#[ignore = "isolated Album navigation invalid-filter cache regression"]
+fn child_album_navigation_invalid_filter_cache() {
+    scoped_navigation_invalid_filter_cache(true);
+}
+
+#[test]
+#[ignore = "isolated folder navigation invalid-filter cache regression"]
+fn child_folder_navigation_invalid_filter_cache() {
+    scoped_navigation_invalid_filter_cache(false);
+}
+
+fn scoped_navigation_invalid_filter_cache(album_scope: bool) {
+    let fixture = cross_index_fixture(false);
+    let ui = &fixture.ui;
+    let controller = &fixture.controller;
+    search(&fixture, "shared", 4);
+    wait_albums(&fixture, 2);
+    let wind = ui
+        .get_albums()
+        .iter()
+        .find(|album| album.name == "Wind album")
+        .unwrap()
+        .id;
+    let root = ui
+        .get_folders()
+        .iter()
+        .position(|folder| folder.name == "sounds")
+        .unwrap();
+    ui.invoke_folder_toggle_requested(root as i32);
+    wait_for(ui, |ui| {
+        ui.get_folders().iter().any(|folder| folder.name == "gore")
+    });
+    let gore_index = ui
+        .get_folders()
+        .iter()
+        .position(|folder| folder.name == "gore")
+        .unwrap();
+    let first = active_id(ui);
+
+    // Both explicit scopes change the executable definition before validation.
+    // Rejected input must not let them retain the previous global page's cache.
+    ui.set_duration_min("unfinished".into());
+    ui.invoke_apply_filters();
+    assert!(ui.get_status().contains("Duration"));
+    if album_scope {
+        ui.invoke_album_selected(wind.clone());
+        assert_eq!(
+            controller.request.lock().unwrap().filters.album_id,
+            Some(wind.parse::<i64>().unwrap())
+        );
+    } else {
+        ui.invoke_folder_requested(gore_index as i32);
+        assert!(controller.request.lock().unwrap().folder_id.is_some());
+    }
+    assert_eq!(ui.get_rows().row_count(), 4);
+    assert!(!ui.get_searching());
+    ui.set_duration_min("".into());
+    ui.invoke_search_task_created();
+    wait_for(ui, |ui| {
+        !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+            && ui.get_search_tasks().row_count() == 2
+    });
+    search(&fixture, "wind", 1);
+    ui.invoke_search_task_selected(first.clone().into());
+    wait_for(ui, move |ui| {
+        active_id(ui) == first
+            && !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+    });
+    assert_eq!(controller.request.lock().unwrap().query, "shared");
+    if album_scope {
+        assert_eq!(ui.get_album_filter_id(), wind);
+        assert!(controller.request.lock().unwrap().folder_id.is_none());
+    } else {
+        assert!(controller.request.lock().unwrap().folder_id.is_some());
+        assert!(ui.get_album_filter_id().is_empty());
+    }
+    let expected = if album_scope { 1 } else { 3 };
+    assert_eq!(
+        ui.get_rows().row_count(),
+        expected,
+        "the restored navigation scope must not reuse the previous global four-row cache"
+    );
+    wait_navigation(&fixture, expected);
+    finish(&fixture);
+}

@@ -1262,6 +1262,9 @@ impl Controller {
             if !c.admit_task_album_filter(next) {
                 return;
             }
+            // The scope changes even when an invalid draft defers the search.
+            // Never capture the previous page under the new task definition.
+            c.begin_task_search(false);
             ui.set_album_filter_unavailable(false);
             {
                 let mut request = c.request.lock().unwrap();
@@ -1511,6 +1514,7 @@ impl Controller {
             if !c.available() {
                 return;
             }
+            c.begin_task_search(true);
             c.clear_task_folder_error();
             c.tree.lock().unwrap().selected = None;
             {
@@ -4104,6 +4108,7 @@ impl Controller {
     }
 
     fn select_folder_id(self: &Arc<Self>, id: i64) {
+        self.begin_task_search(true);
         self.clear_task_folder_error();
         if let Some(ui) = self.ui.upgrade() {
             // Disable current-folder menu actions until this selection's tree
