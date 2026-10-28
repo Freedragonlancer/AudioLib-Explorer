@@ -1,9 +1,131 @@
 // app/audiolib-desktop/src/responsive_layout_tests.rs
 //! Pointer and accessibility regressions for resizable panes and source Metadata disclosure.
-use crate::{AppWindow, AudioRow, FolderRow};
+use crate::{AlbumRow, AppWindow, AudioRow, FolderRow};
 use i_slint_backend_testing::ElementHandle;
 use slint::{ComponentHandle, ModelRc, VecModel, platform::WindowEvent};
 use std::{cell::RefCell, rc::Rc, time::Duration};
+
+#[test]
+fn folder_and_album_indexes_stay_visible_and_clickable_in_small_windows() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        // Cover the reported small client area, the declared minimum, and the
+        // same compact content budget at fractional interface scales.
+        for (width, height, scale) in [
+            (1080.0, 690.0, 1.0),
+            (1080.0, 700.0, 1.0),
+            (1350.0, 875.0, 1.25),
+            (1620.0, 1050.0, 1.5),
+        ] {
+            let ui = AppWindow::new().unwrap();
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.set_chinese(chinese);
+            ui.window().set_size(slint::LogicalSize::new(width, height));
+            let folder_names = ["BOOM root", "Alien Life child"];
+            ui.set_folders(ModelRc::new(VecModel::from(vec![
+                FolderRow {
+                    name: folder_names[0].into(),
+                    count: "761".into(),
+                    path: "C:/Fixture/BOOM".into(),
+                    expanded: true,
+                    has_children: true,
+                    ..Default::default()
+                },
+                FolderRow {
+                    name: folder_names[1].into(),
+                    count: "143".into(),
+                    path: "C:/Fixture/BOOM/Alien Life".into(),
+                    depth: 1,
+                    ..Default::default()
+                },
+            ])));
+            let album_names = ["Alien Life library", "Cinematic Metal library"];
+            ui.set_albums(ModelRc::new(VecModel::from(vec![
+                AlbumRow {
+                    id: "71".into(),
+                    name: album_names[0].into(),
+                    count: "143".into(),
+                    ..Default::default()
+                },
+                AlbumRow {
+                    id: "92".into(),
+                    name: album_names[1].into(),
+                    count: "618".into(),
+                    ..Default::default()
+                },
+            ])));
+            let folders = Rc::new(RefCell::new(Vec::new()));
+            let observed = folders.clone();
+            ui.on_folder_requested(move |index| observed.borrow_mut().push(index));
+            let albums = Rc::new(RefCell::new(Vec::new()));
+            let observed = albums.clone();
+            ui.on_album_selected(move |identity| observed.borrow_mut().push(identity.to_string()));
+            ui.show().unwrap();
+            settle();
+
+            for (index, name) in folder_names.into_iter().enumerate() {
+                let entry = labelled(&ui, name);
+                assert_sidebar_entry_visible(&ui, &entry, "AppWindow::folder-list", name);
+                click_element(&ui, &entry);
+                assert_eq!(
+                    folders.borrow().last().copied(),
+                    Some(index as i32),
+                    "Pointer input must reach folder {name} at {width}x{height}, scale={scale}, chinese={chinese}"
+                );
+            }
+            for (name, identity) in album_names.into_iter().zip(["71", "92"]) {
+                let entry = labelled(&ui, name);
+                assert_sidebar_entry_visible(&ui, &entry, "AppWindow::album-list", name);
+                click_element(&ui, &entry);
+                assert_eq!(
+                    albums.borrow().last().map(String::as_str),
+                    Some(identity),
+                    "Pointer input must reach Album {name} at {width}x{height}, scale={scale}, chinese={chinese}"
+                );
+            }
+            assert_eq!(&*folders.borrow(), &[0, 1]);
+            assert_eq!(&*albums.borrow(), &["71", "92"]);
+            ui.global::<crate::Theme>().set_ui_scale(1.0);
+            ui.hide().unwrap();
+        }
+    }
+}
+
+fn assert_sidebar_entry_visible(ui: &AppWindow, entry: &ElementHandle, list_id: &str, name: &str) {
+    let viewport = ui.window().size().to_logical(ui.window().scale_factor());
+    let mut left: f32 = 0.0;
+    let mut top: f32 = 0.0;
+    let mut right = viewport.width;
+    let mut bottom = viewport.height;
+    for id in [
+        "AppWindow::main-scroll",
+        "AppWindow::library-sidebar",
+        list_id,
+    ] {
+        let clip = element(ui, id);
+        let origin = clip.absolute_position();
+        let size = clip.size();
+        assert!(
+            size.width > 0.0 && size.height > 0.0,
+            "{name} has a collapsed viewport {id}: {origin:?} + {size:?} in {viewport:?}"
+        );
+        left = left.max(origin.x);
+        top = top.max(origin.y);
+        right = right.min(origin.x + size.width);
+        bottom = bottom.min(origin.y + size.height);
+    }
+    let origin = entry.absolute_position();
+    let size = entry.size();
+    assert!(
+        size.width > 0.0
+            && size.height > 0.0
+            && origin.x >= left - 1.0
+            && origin.y >= top - 1.0
+            && origin.x + size.width <= right + 1.0
+            && origin.y + size.height <= bottom + 1.0,
+        "{name} is clipped: {origin:?} + {size:?}, visible sidebar/list intersection ({left}, {top})..({right}, {bottom}), window {viewport:?}"
+    );
+}
 
 #[test]
 fn folder_counts_keep_a_scrollbar_gutter_and_remain_clickable_when_sidebar_resizes() {

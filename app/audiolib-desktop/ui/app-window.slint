@@ -1877,7 +1877,7 @@ export component AppWindow inherits Window {
         }
         workspace := HorizontalLayout { vertical-stretch: 1; min-height: results-column.min-height; spacing: 0px;
             library-sidebar := Rectangle { width: root.sidebar-width; background: Theme.panel; border-radius: 7px * Theme.ui-scale; border-width: 1px; border-color: Theme.border; clip: true;
-                VerticalLayout { padding: 12px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                VerticalLayout { padding: 12px * Theme.ui-scale; padding-top: (root.short-layout ? 8px : 12px) * Theme.ui-scale; padding-bottom: (root.short-layout ? 8px : 12px) * Theme.ui-scale; spacing: (root.short-layout ? 4px : 8px) * Theme.ui-scale;
                     Rectangle { height: 32px * Theme.ui-scale; background: Theme.trough; border-radius: 8px * Theme.ui-scale;
                         accessible-role: tab-list; accessible-label: root.chinese ? "素材库页面" : "Library pages";
                         HorizontalLayout { padding: 3px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
@@ -1919,11 +1919,12 @@ export component AppWindow inherits Window {
                         }
                     }
                     if root.library-sidebar-page == 1 && root.favorites-category == 0: Rectangle { vertical-stretch: 1; }
-                    if root.library-sidebar-page == 0: HorizontalLayout { height: 24px * Theme.ui-scale;
+                    if root.library-sidebar-page == 0: HorizontalLayout { height: (root.short-layout ? 20px : 24px) * Theme.ui-scale;
                         Label { horizontal-stretch: 1; text: root.chinese ? "文件夹" : "FOLDERS"; font-size: Theme.font(10); }
                         Label { text: "WAV / BWF"; font-size: Theme.font(9); color: Theme.accent; }
                     }
-                    folder-focus := FocusScope { visible: root.library-sidebar-page == 0; min-height: 0px; max-height: root.library-sidebar-page == 0 ? 100000px : 0px; vertical-stretch: root.library-sidebar-page == 0 ? 1 : 0; enabled: !root.background-blocked && root.library-sidebar-page == 0;
+                    // Keep two directory rows usable while the album list shares a short sidebar.
+                    folder-focus := FocusScope { visible: root.library-sidebar-page == 0; min-height: root.library-sidebar-page == 0 ? 68px * Theme.ui-scale : 0px; max-height: root.library-sidebar-page == 0 ? 100000px : 0px; vertical-stretch: root.library-sidebar-page == 0 ? 1 : 0; enabled: !root.background-blocked && root.library-sidebar-page == 0;
                         key-pressed(event) => {
                             let index = clamp(root.selected-folder, 0, root.folders.length - 1);
                             if root.folders.length == 0 { return reject; }
@@ -1966,7 +1967,8 @@ export component AppWindow inherits Window {
                     }
                     // Library/album groups declared by the files themselves. Clicking one
                     // filters the results; clicking the active one clears the filter.
-                    if root.library-sidebar-page == 0 && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; height: 190px * Theme.ui-scale;
+                    // Preserve two album rows; shrink the preferred block before starving folders.
+                    if root.library-sidebar-page == 0 && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; min-height: 86px * Theme.ui-scale; preferred-height: 190px * Theme.ui-scale; max-height: 190px * Theme.ui-scale; vertical-stretch: 1;
                         Label { height: 24px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARIES"; font-size: Theme.font(10); }
                         album-list := ListView { vertical-stretch: 1; viewport-width: self.visible-width; accessible-role: list;
                             for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
@@ -1980,7 +1982,7 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    if root.library-sidebar-page == 0: Label { height: 34px * Theme.ui-scale; text: root.chinese ? "方向键浏览目录 · 右键管理素材库" : "Right-click folders to manage"; wrap: word-wrap; font-size: Theme.font(10); }
+                    if root.library-sidebar-page == 0: Label { height: (root.short-layout ? 24px : 34px) * Theme.ui-scale; text: root.chinese ? "方向键浏览目录 · 右键管理素材库" : "Right-click folders to manage"; wrap: word-wrap; font-size: Theme.font(10); }
                 }
             }
             PaneDivider {
