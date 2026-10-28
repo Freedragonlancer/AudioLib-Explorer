@@ -8,8 +8,8 @@ AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件�
 
 - **源码开发版本：** 0.8.1（工作区 `Cargo.toml`）
 - **HTTP API：** `/api/v1/`（客户端与服务端）
-- **数据库 schema：** 7（快照 schema 范围 3..=7；仅支持明确识别的完整格式）
-- **可写库格式：** `ale-s8-cld1-t3-m2-p1-a1-z1`；受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，并对适用的 Metadata 无损压缩。
+- **数据库 schema：** 8（快照 schema 范围 3..=8；仅支持明确识别的完整格式）
+- **可写库格式：** `ale-s8-cld1-t3-m2-p1-a1`；受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。
 - **许可证：** [GPL-3.0-only](LICENSE)
 
 程序版本取自工作区 `Cargo.toml`，由客户端、CLI 和服务端共用。当前格式以[兼容目录](crates/audiolib-core/src/compatibility.rs)为准；[历史 schema v6 契约](doc/api/Schema_V6_Iteration.md)描述此前的格式。

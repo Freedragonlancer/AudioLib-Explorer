@@ -298,6 +298,51 @@ mod tests {
     }
 
     #[test]
+    fn plain_and_experimental_snapshot_descriptors_cannot_be_interchanged() {
+        use audiolib_core::compatibility::{METADATA_STORAGE_FEATURE, PLAN_B_V8_COMPRESSED_FORMAT};
+        let mut declared = headers();
+        let plain = descriptor();
+        assert!(!plain.format.features.contains_key(METADATA_STORAGE_FEATURE));
+        assert_eq!(response_format(&declared).unwrap(), Some(plain.clone()));
+        let history: serde_json::Value = serde_json::from_str(include_str!(
+            "../../audiolib-core/tests/fixtures/compatibility/format_fingerprint.json"
+        ))
+        .unwrap();
+        let legacy = SnapshotFormat {
+            id: PLAN_B_V8_COMPRESSED_FORMAT.into(),
+            format: serde_json::from_value(history["legacy_compressed"].clone()).unwrap(),
+        };
+        declared.insert(
+            SNAPSHOT_FORMAT_HEADER,
+            HeaderValue::from_static(PLAN_B_V8_COMPRESSED_FORMAT),
+        );
+        assert!(
+            response_format(&declared).is_err(),
+            "a z1 ID cannot describe plain bytes"
+        );
+        declared.insert(
+            LIBRARY_FORMAT_HEADER,
+            HeaderValue::from_str(&serde_json::to_string(&legacy.format).unwrap()).unwrap(),
+        );
+        assert_eq!(response_format(&declared).unwrap(), Some(legacy));
+        declared.insert(
+            SNAPSHOT_FORMAT_HEADER,
+            HeaderValue::from_static(PLAN_B_FORMAT),
+        );
+        assert!(
+            response_format(&declared).is_err(),
+            "a plain ID cannot hide the z1 requirement"
+        );
+        let mut experimental_server = compatibility_manifest();
+        experimental_server
+            .features
+            .insert(METADATA_STORAGE_FEATURE.into(), 1);
+        let enabled = enabled_features(Some(&experimental_server));
+        assert!(!enabled.contains(METADATA_STORAGE_FEATURE));
+        assert!(enabled.contains(audiolib_core::compatibility::ALBUM_ENTITIES_FEATURE));
+    }
+
+    #[test]
     fn write_header_carries_marker_revision_and_protocol() {
         let header: serde_json::Value = serde_json::from_str(&client_header().unwrap()).unwrap();
         let ours = compatibility_manifest();

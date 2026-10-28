@@ -20,6 +20,8 @@
 #   EXPECT_SCHEMA_VERSION  expected schema_version            (optional, integer)
 #   EXPECT_COMMIT          expected commit (short hash)       (optional)
 #   SERVICE_MANAGER        systemd | launchd | none           (default: auto-detect)
+#   LAUNCHD_PLIST          existing plist for an unloaded launchd job (default
+#                 $HOME/Library/LaunchAgents/$SERVICE_NAME.plist; never modified)
 #   WAIT_SECS              seconds to wait for health "ok"    (default 60)
 #   UPDATE_CHANNEL / UPDATE_VERSION  optional paired update markers (stable|beta,
 #                 full SemVer without v). Restored before a rollback restart.
@@ -82,7 +84,21 @@ fi
 restart_service() {
     case "$SERVICE_MANAGER" in
     systemd) systemctl restart "$SERVICE_NAME" ;;
-    launchd) launchctl kickstart -k "gui/$(id -u)/$SERVICE_NAME" ;;
+    launchd)
+        launchd_domain="gui/$(id -u)"
+        if launchctl print "$launchd_domain/$SERVICE_NAME" >/dev/null 2>&1; then
+            launchctl kickstart -k "$launchd_domain/$SERVICE_NAME"
+        else
+            # Offline maintenance may leave the job booted out. Reuse the same
+            # plist and launcher so their macOS file-access grants are retained.
+            launchd_plist="${LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/$SERVICE_NAME.plist}"
+            [ -f "$launchd_plist" ] || {
+                log "launchd job is not loaded and its existing plist was not found: $launchd_plist"
+                return 1
+            }
+            launchctl bootstrap "$launchd_domain" "$launchd_plist"
+        fi
+        ;;
     *) log "SERVICE_MANAGER=none: restart the service yourself now, then press Enter"; read -r _ ;;
     esac
 }

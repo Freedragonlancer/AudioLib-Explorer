@@ -716,7 +716,7 @@ mod metadata_sql_tests {
             "unknown": "exact whitespace 🦉 ".repeat(400),
         })
         .to_string();
-        let compressed = crate::metadata_storage::encode(&raw, true).unwrap();
+        let compressed = crate::metadata_storage::encode_legacy_fixture(&raw).unwrap();
         assert!(matches!(&compressed, rusqlite::types::Value::Blob(_)));
         let read = |value: &dyn rusqlite::ToSql| {
             conn.query_row(
@@ -747,7 +747,15 @@ mod metadata_sql_tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(stored, ("blob".into(), "text".into(), raw));
+        assert_eq!(stored, ("text".into(), "text".into(), raw.clone()));
+        let restored: (String, String) = conn
+            .query_row(
+                "SELECT typeof(audiolib_metadata_store(?1,1)),audiolib_metadata_store(?1,1)",
+                [&compressed],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(restored, ("text".into(), raw));
     }
 
     #[test]

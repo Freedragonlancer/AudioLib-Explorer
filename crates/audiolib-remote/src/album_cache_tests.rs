@@ -99,6 +99,102 @@ fn legacy_seven_album_projection_keeps_source_and_is_reused_with_annotation_repl
 }
 
 #[test]
+fn experimental_compressed_cache_keeps_its_source_format_and_original_json() {
+    use audiolib_core::compatibility::{METADATA_STORAGE_FEATURE, PLAN_B_V8_COMPRESSED_FORMAT};
+    let root = tempfile::tempdir().unwrap();
+    let cache = RemoteCache::new(root.path());
+    let mut state = CacheState {
+        library_id: "experimental-compressed".into(),
+        revision: 12,
+        schema_version: 8,
+        database_file: "original.db".into(),
+        server_url: "http://legacy.test/api/v1".into(),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(cache.library_dir(&state.library_id)).unwrap();
+    let source = cache.database_path(&state);
+    drop(SqliteProvider::open(&source).unwrap());
+    let conn = rusqlite::Connection::open(&source).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
+    // Captured ALEMD-v1 zlib bytes, independent of the current write policy.
+    let compressed: &[u8] = &[
+        0x41, 0x4c, 0x45, 0x4d, 0x44, 0x01, 0x5a, 0x00, 0x13, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x78, 0x9c, 0xed, 0xca, 0xdb, 0x09, 0x84, 0x40, 0x10, 0x44, 0xd1, 0x5c, 0xea, 0xdb,
+        0x4d, 0x60, 0xd2, 0x30, 0x00, 0xe9, 0xa5, 0x4b, 0x1d, 0xd6, 0x1d, 0x87, 0xb6, 0x7d, 0x21,
+        0x93, 0xbb, 0x1a, 0x86, 0xe0, 0xd7, 0x29, 0xa8, 0x7b, 0x60, 0x95, 0xa5, 0xf9, 0xd3, 0x45,
+        0xc5, 0x05, 0xe1, 0x40, 0x1b, 0x39, 0xe8, 0x74, 0xaf, 0x21, 0x7e, 0x4d, 0x6c, 0x47, 0x40,
+        0xdd, 0x8b, 0x51, 0x51, 0x4a, 0x05, 0x6e, 0xce, 0x34, 0xc5, 0x31, 0xdd, 0xc5, 0x8f, 0xcc,
+        0x08, 0x6e, 0x33, 0xaf, 0x27, 0x8b, 0x6a, 0x4c, 0xdd, 0x95, 0x1b, 0x33, 0xc5, 0x3f, 0x2f,
+        0x2f, 0x8f, 0x03, 0xe5, 0x04, 0x6b, 0xbb, 0x2a, 0x86,
+    ];
+    conn.execute(
+        "INSERT INTO audio_files(id,file_path,filename,metadata_json) VALUES(1,'shared.wav','shared.wav',?1)",
+        [compressed],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO audiolib_schema_features(feature,version) VALUES('metadata_storage',1);
+         UPDATE audiolib_album_id_sequence SET compression=1 WHERE singleton=1;
+         PRAGMA journal_mode=DELETE;",
+    )
+    .unwrap();
+    let raw = conn
+        .query_row(
+            "SELECT audiolib_metadata_json(metadata_json) FROM audio_files",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(
+        raw,
+        format!(
+            r#"{{"wav_metadata":{{"fields":{{"library":"Shared"}}}},"extension":{{"keep":true}},"padding":"{}"}}"#,
+            "repeat-".repeat(100)
+        )
+    );
+    drop(conn);
+    let original = std::fs::read(&source).unwrap();
+    let source_format = observed_format(&source, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        source_format.snapshot_format_id().as_deref(),
+        Some(PLAN_B_V8_COMPRESSED_FORMAT)
+    );
+    assert_eq!(
+        source_format.features.get(METADATA_STORAGE_FEATURE),
+        Some(&1)
+    );
+    state.format = Some(Box::new(CacheFormat {
+        source: Some(source_format.clone()),
+        local: source_format.clone(),
+        generation: 0,
+    }));
+    cache.save_state(&state).unwrap();
+    let prepared = cache.prepare_cached_state(&state).unwrap();
+    assert_eq!(
+        prepared, state,
+        "a readable legacy cache must not be repeatedly converted"
+    );
+    let provider = SqliteProvider::open_read_only(&source).unwrap();
+    let file = provider.get_audio(1).unwrap();
+    assert_eq!(file.album_entity.as_ref().unwrap().name, "Shared");
+    assert_eq!(file.attributes["extension"]["keep"], true);
+    assert_eq!(file.attributes["padding"], "repeat-".repeat(100));
+    let server = RemoteLibrary {
+        library_id: state.library_id.clone(),
+        revision: state.revision,
+        schema_version: 8,
+        snapshot_format: Some(SnapshotFormat {
+            id: PLAN_B_V8_COMPRESSED_FORMAT.into(),
+            format: source_format,
+        }),
+        ..Default::default()
+    };
+    crate::compatibility::library(&server).unwrap();
+    assert!(reusable_source(&prepared, &server, &state.server_url));
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+}
+
+#[test]
 fn legacy_sync_inherits_album_ids_and_namespace_without_repeated_downloads() {
     use crate::test_server::{TestResponse, TestServer};
     use std::sync::{Arc, atomic::AtomicUsize};
