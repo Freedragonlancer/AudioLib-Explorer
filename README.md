@@ -91,7 +91,7 @@ Confirm GET http://<server-host>:<port>/api/v1/health returns ok. Do not commit 
 
 ## Features
 
-- Up to six independent search-task tabs (limit adjustable in Appearance), with separate folders, filters and list state, personal saved searches and restored sessions. See [Search Tasks](doc/Rust_Search_Tasks.md).
+- Up to six independent search-task tabs (limit adjustable in Appearance), with separate folders, filters and list state, personal saved searches and restored sessions. See [Search Tasks](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Search_Tasks.md).
 - Incremental and full folder scans with professional WAV metadata extraction (BWF `bext`, iXML, INFO, ID3, XMP, Soundminer SMED read-only compatibility). Source WAV files are never modified.
 - SQLite FTS5 search with letter fragments of at least two characters (`expl`, `plos` and `sion` match `explosion`), Chinese segmentation (jieba-rs), tag/category filters and a documented target of P95 < 500 ms for 1M+ records.
 - Playback with streaming decode, device-rate resampling, waveform and spectral views, independent pitch/rate audition (SoundTouch), WASAPI and optional ASIO output.

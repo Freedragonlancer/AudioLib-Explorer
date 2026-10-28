@@ -28,7 +28,7 @@ page. It never modifies audio files.
   `album_entity_artwork` capability. The compatible `/audio/{id}/artwork` retains
   its per-audio meaning. Image bytes stay outside SQLite; a cache lives in
   `<library directory>/artwork`. Upgrade schema-8 clients and servers together and
-  retain the rollback database. See [shared albums and storage](../doc/Rust_Shared_Albums.md).
+  retain the rollback database. See [shared albums and storage](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md).
 - Metadata writes, play counts, remote scans (start/pause/resume/cancel), record and folder
   removal (`manage_mode` can restrict them).
 - Token authentication with three modes (`off`, `external`, `all`), tokens generated on the

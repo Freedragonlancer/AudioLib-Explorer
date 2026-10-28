@@ -234,6 +234,8 @@ try {
     Assert-UnlinkedTree $payloadRoot
     $payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -File -Recurse -Force)
     if ($payloadFiles.Count -ne $plannedFiles.Count) { throw 'Server package file count differs from its allowlist.' }
+    $compatibilityEntries = @($payloadFiles | ForEach-Object { [IO.Path]::GetRelativePath($payloadRoot, $_.FullName).Replace('\', '/') })
+    & (Join-Path $PSScriptRoot 'validate-update-compatibility.ps1') -Product Server -ServerBinaryName $binaryName -Entries $compatibilityEntries
     foreach ($file in $payloadFiles) {
         $relative = [IO.Path]::GetRelativePath($payloadRoot, $file.FullName).Replace('\', '/')
         if (!$plannedFiles.Contains($relative) -or $file.Extension -in @('.db', '.sqlite', '.sqlite3', '.log', '.wav') -or

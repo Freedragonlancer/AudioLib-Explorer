@@ -27,7 +27,7 @@ try {
     # The validator's intentionally missing benchmark belongs to this synthetic
     # checkout. A developer's populated target directory must never satisfy it.
     $env:CARGO_TARGET_DIR = Join-Path $testRoot 'target'
-    foreach ($file in @('package-server.ps1', 'console-utf8.ps1', 'validate-server-package.ps1', 'server-files.json')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $testRoot 'tools') }
+    foreach ($file in @('package-server.ps1', 'console-utf8.ps1', 'validate-server-package.ps1', 'validate-update-compatibility.ps1', 'update-compatible-files.json', 'server-files.json')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $testRoot 'tools') }
     $files = @(Get-Content -LiteralPath (Join-Path $testRoot 'tools/server-files.json') -Raw | ConvertFrom-Json)
     foreach ($file in $files) {
         $destination = Join-Path $testRoot $file
@@ -106,6 +106,13 @@ try {
     }
     $packager = Join-Path $testRoot 'tools/package-server.ps1'
     $validator = Join-Path $testRoot 'tools/validate-server-package.ps1'
+    $compatibilityValidator = Join-Path $testRoot 'tools/validate-update-compatibility.ps1'
+    foreach ($compatibilityBinary in @('audiolib-server', 'audiolib-server.exe')) {
+        & $compatibilityValidator -Product Server -ServerBinaryName $compatibilityBinary -Entries @($compatibilityBinary, 'licenses/future-dependency-9.0/LICENSE-MIT', 'licenses/dependencies.json')
+        $otherBinary = if ($compatibilityBinary -ceq 'audiolib-server') { 'audiolib-server.exe' } else { 'audiolib-server' }
+        Expect-Rejection { & $compatibilityValidator -Product Server -ServerBinaryName $compatibilityBinary -Entries @($otherBinary) } 'Update compatibility.*Non-public update file'
+    }
+    Expect-Rejection { & $compatibilityValidator -Product Server -Entries @('licenses/evil.ps1') } 'Update compatibility.*Non-public update file'
     Expect-Rejection { & $packager -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
     Expect-Rejection { & $validator -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
     & $packager -Tag v0.4.4 -Target $target
@@ -257,6 +264,15 @@ try {
     Expect-Rejection { & $packager -Tag v0.4.4 -Target $target -BinaryPath $binary } 'Local build/user path'
     Set-Content -LiteralPath $document -Value 'Synthetic public documentation.'
     $manifest = Join-Path $testRoot 'tools/server-files.json'
+    $futureDocument = 'doc/Rust_Future_Update.md'
+    Set-Content -LiteralPath (Join-Path $testRoot $futureDocument) -Value 'Synthetic public future documentation.' -Encoding utf8NoBOM
+    try {
+        $files + @($futureDocument) | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
+        Expect-Rejection { & $packager -Tag v0.4.4 -Target $target } 'Update compatibility.*Non-public update file'
+    } finally { ConvertTo-Json -InputObject $files | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM }
+    if ((Get-FileHash -LiteralPath $archive).Hash -cne $archiveHash -or (Test-Path -LiteralPath (Join-Path $payload $futureDocument))) {
+        throw 'An incompatible server package replaced the verified output.'
+    }
     $files + @('../outside.txt') | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
     Expect-Rejection { & $packager -Tag v0.4.4 -Target $target } 'Unsafe relative'
     ConvertTo-Json -InputObject $files | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
@@ -275,7 +291,7 @@ try {
         $link = Get-Item -LiteralPath $dist -Force -ErrorAction SilentlyContinue
         if ($null -ne $link -and ($link.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Assert-TestPath $dist; Remove-Item -LiteralPath $dist -Force }
     }
-    Write-Host 'Server package boundary regression passed: allowlist, dependency closure, safe report/checksums, rejection preservation, linked-path guard and ASIO target/SDK boundary (positive ASIO fixture on Windows).'
+    Write-Host 'Server package boundary regression passed: allowlist, old-updater compatibility and licenses, dependency closure, safe report/checksums, incompatible public doc rejection/preservation, linked-path guard and ASIO target/SDK boundary (positive ASIO fixture on Windows).'
 } finally {
     $env:CARGO_TARGET_DIR = $savedTargetDirectory
     if (Test-Path -LiteralPath $testRoot) {
