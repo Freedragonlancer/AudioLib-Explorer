@@ -1508,11 +1508,26 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_all_library_requested(move || {
+            if !c.available() {
+                return;
+            }
+            c.clear_task_folder_error();
             c.tree.lock().unwrap().selected = None;
-            c.request.lock().unwrap().folder_id = None;
+            {
+                let mut request = c.request.lock().unwrap();
+                request.folder_id = None;
+                request.filters.album = None;
+                request.filters.album_id = None;
+            }
             // Invalidate any pending publication carrying the previous folder.
             c.reload_tree();
             if let Some(ui) = c.ui.upgrade() {
+                // Folder and Album are both navigation scopes. Clear both before
+                // rebuilding the request so the UI cannot reapply the old Album;
+                // the normal task capture also drops its retained Album binding.
+                ui.set_album_filter("".into());
+                ui.set_album_filter_id("".into());
+                ui.set_album_filter_unavailable(false);
                 ui.set_selected_folder(-1);
                 ui.set_selected_folder_path("".into());
                 ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
