@@ -53,7 +53,8 @@ pub fn install_native_quit_handler(
     let delegate = application
         .delegate()
         .ok_or_else(|| "The desktop application delegate is unavailable".to_owned())?;
-    let class = delegate.class();
+    let delegate_object: &AnyObject = delegate.as_ref();
+    let class = delegate_object.class();
     if class.name().to_bytes() != b"WinitApplicationDelegate" {
         return Err("The desktop application delegate is not the pinned Winit delegate".into());
     }
@@ -133,7 +134,8 @@ pub fn request_native_termination() -> Result<(), String> {
     let delegate = application
         .delegate()
         .ok_or_else(|| "The desktop application delegate is unavailable".to_owned())?;
-    let class = delegate.class();
+    let delegate_object: &AnyObject = delegate.as_ref();
+    let class = delegate_object.class();
     let ours = class
         .instance_method(sel!(applicationShouldTerminate:))
         .is_some_and(|method| {

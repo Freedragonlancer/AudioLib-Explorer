@@ -935,7 +935,7 @@ mod native_quit_fixture_tests {
         let audio = evidence.join("fixtures/synthetic tone.wav");
         std::fs::create_dir_all(audio.parent().unwrap()).unwrap();
         std::fs::write(&audio, b"owned path-validation fixture").unwrap();
-        let config = AppConfig::load_in(&data).unwrap();
+        let config = AppConfig::load_in(data.clone()).unwrap();
         std::fs::write(&config.paths.settings, b"{}").unwrap();
         std::fs::write(&config.paths.database, b"owned path-validation library").unwrap();
         let audio = audio.canonicalize().unwrap();
