@@ -1,6 +1,6 @@
 // crates/audiolib-audio/src/wav_id3.rs
 //! Bounded ID3v2 text/COMM/TXXX reader; binary and compressed frames are skipped.
-use super::{EmbeddedMetadata, MAX_FIELDS, append};
+use super::{ArtworkPriority, EmbeddedMetadata, MAX_FIELDS, append};
 use encoding_rs::{UTF_16BE, UTF_16LE};
 use serde_json::Map;
 use std::io::{Read, Seek, SeekFrom};
@@ -288,7 +288,10 @@ impl EmbeddedMetadata {
         reader: &mut (impl Read + Seek),
         size: usize,
     ) -> std::io::Result<()> {
-        if self.artwork.is_some() || size < 10 || size > super::MAX_ID3_BYTES as usize {
+        if !self.accepts_artwork(ArtworkPriority::Id3Front)
+            || size < 10
+            || size > super::MAX_ID3_BYTES as usize
+        {
             return Ok(());
         }
         let mut bytes = vec![0u8; size];
@@ -388,12 +391,19 @@ impl EmbeddedMetadata {
                 let Some(content) = content.get(skip..) else {
                     continue;
                 };
-                if let Some((mime, image)) = apic_parts(version, content)
+                if let Some((picture_type, image)) = apic_parts(version, content)
                     && image.len() <= super::MAX_ARTWORK_BYTES
                 {
-                    self.set_artwork(image.to_vec(), &mime);
+                    let priority = if picture_type == 3 {
+                        ArtworkPriority::Id3Front
+                    } else {
+                        ArtworkPriority::Id3
+                    };
+                    if self.accepts_artwork(priority) {
+                        self.set_artwork(image.to_vec(), priority);
+                    }
                 }
-                if self.artwork.is_some() {
+                if !self.accepts_artwork(ArtworkPriority::Id3Front) {
                     return;
                 }
             }
@@ -401,30 +411,21 @@ impl EmbeddedMetadata {
     }
 }
 
-/// Split an APIC (ID3v2.3/2.4) or PIC (ID3v2.2) frame into its MIME type and image bytes.
-fn apic_parts(version: u8, content: &[u8]) -> Option<(String, &[u8])> {
+/// Split APIC/PIC into its picture type and bytes; image magic supplies the MIME.
+fn apic_parts(version: u8, content: &[u8]) -> Option<(u8, &[u8])> {
     let (&encoding, body) = content.split_first()?;
     if encoding > 3 {
         return None;
     }
     let mut rest = body;
-    let mime = if version == 2 {
-        let extension = rest.get(..3)?;
+    if version == 2 {
         rest = rest.get(3..)?;
-        match extension {
-            b"JPG" => "image/jpeg",
-            b"PNG" => "image/png",
-            b"GIF" => "image/gif",
-            _ => "",
-        }
-        .to_owned()
     } else {
         let end = rest.iter().position(|b| *b == 0)?;
-        let mime = String::from_utf8_lossy(rest.get(..end)?).into_owned();
         rest = rest.get(end + 1..)?;
-        mime
-    };
-    rest = rest.get(1..)?; // picture type
+    }
+    let (&picture_type, body) = rest.split_first()?;
+    rest = body;
     let utf16 = matches!(encoding, 1 | 2);
     let description_end = if utf16 {
         let mut index = 0;
@@ -439,5 +440,5 @@ fn apic_parts(version: u8, content: &[u8]) -> Option<(String, &[u8])> {
         rest.iter().position(|b| *b == 0)?
     };
     let image = rest.get(description_end + if utf16 { 2 } else { 1 }..)?;
-    Some((mime, image))
+    Some((picture_type, image))
 }
