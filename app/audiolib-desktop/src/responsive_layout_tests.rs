@@ -635,7 +635,11 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
             ui.set_selected_source_tags(tags.clone().into());
             settle();
             let field = labelled_value(&ui, source_tags_label(chinese));
+            let viewport = element(&ui, "AppWindow::source-tags");
             let initial = field.absolute_position();
+            // Native text navigation may also scroll the enclosing details pane.
+            // Measure the tag input inside its own viewport, independently of it.
+            let initial_offset = initial.y - viewport.absolute_position().y;
             click_at(
                 &ui,
                 slint::LogicalPosition::new(initial.x + 10.0, initial.y + 8.0),
@@ -648,7 +652,10 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 ],
             );
             settle();
-            assert!(field.absolute_position().y < initial.y - 100.0);
+            assert!(
+                field.absolute_position().y - viewport.absolute_position().y
+                    < initial_offset - 100.0
+            );
             crate::ui_tests::send_keys(
                 &ui,
                 &[
@@ -657,7 +664,10 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 ],
             );
             settle();
-            near(field.absolute_position().y, initial.y);
+            near(
+                field.absolute_position().y - viewport.absolute_position().y,
+                initial_offset,
+            );
             crate::ui_tests::send_keys(
                 &ui,
                 &[
@@ -667,10 +677,16 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 ],
             );
             settle();
-            assert!(field.absolute_position().y < initial.y - 100.0);
+            assert!(
+                field.absolute_position().y - viewport.absolute_position().y
+                    < initial_offset - 100.0
+            );
             ui.set_selected_id("43".into());
             settle();
-            near(field.absolute_position().y, initial.y);
+            near(
+                field.absolute_position().y - viewport.absolute_position().y,
+                initial_offset,
+            );
             assert_eq!(field.accessible_value().as_deref(), Some(tags.as_str()));
             assert!(!ui.get_metadata_dirty());
             ui.hide().unwrap();

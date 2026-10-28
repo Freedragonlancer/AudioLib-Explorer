@@ -2573,7 +2573,7 @@ export component AppWindow inherits Window {
                             }
                             if root.selected-source-tags != "": VerticalLayout { spacing: 4px * Theme.ui-scale;
                                 Label { height: 16px * Theme.ui-scale; text: root.chinese ? "提取的标签" : "EXTRACTED TAGS"; font-size: Theme.font(10); }
-                                SourceTags { height: root.short-layout ? 44px * Theme.ui-scale : 64px * Theme.ui-scale; label: root.chinese ? "提取的标签" : "Extracted tags"; text: root.selected-source-tags; displayed-id: root.selected-id; }
+                                source-tags := SourceTags { height: root.short-layout ? 44px * Theme.ui-scale : 64px * Theme.ui-scale; label: root.chinese ? "提取的标签" : "Extracted tags"; text: root.selected-source-tags; displayed-id: root.selected-id; }
                             }
                             Rectangle { height: 1px; background: Theme.border; }
                             HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
