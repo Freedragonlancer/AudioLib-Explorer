@@ -635,7 +635,11 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
             ui.set_selected_source_tags(tags.clone().into());
             settle();
             let field = labelled_value(&ui, source_tags_label(chinese));
+            let viewport = element(&ui, "AppWindow::source-tags");
             let initial = field.absolute_position();
+            // Native text navigation may also scroll the enclosing details pane.
+            // Measure the tag input inside its own viewport, independently of it.
+            let initial_offset = initial.y - viewport.absolute_position().y;
             click_at(
                 &ui,
                 slint::LogicalPosition::new(initial.x + 10.0, initial.y + 8.0),
@@ -644,33 +648,45 @@ fn keyboard_navigation_keeps_long_extracted_tags_visible() {
                 &ui,
                 &[
                     slint::platform::Key::Control.into(),
-                    slint::platform::Key::End.into(),
+                    text_document_end_key(),
                 ],
             );
             settle();
-            assert!(field.absolute_position().y < initial.y - 100.0);
+            assert!(
+                field.absolute_position().y - viewport.absolute_position().y
+                    < initial_offset - 100.0
+            );
             crate::ui_tests::send_keys(
                 &ui,
                 &[
                     slint::platform::Key::Control.into(),
-                    slint::platform::Key::Home.into(),
+                    text_document_start_key(),
                 ],
             );
             settle();
-            near(field.absolute_position().y, initial.y);
+            near(
+                field.absolute_position().y - viewport.absolute_position().y,
+                initial_offset,
+            );
             crate::ui_tests::send_keys(
                 &ui,
                 &[
                     slint::platform::Key::Control.into(),
                     slint::platform::Key::Shift.into(),
-                    slint::platform::Key::End.into(),
+                    text_document_end_key(),
                 ],
             );
             settle();
-            assert!(field.absolute_position().y < initial.y - 100.0);
+            assert!(
+                field.absolute_position().y - viewport.absolute_position().y
+                    < initial_offset - 100.0
+            );
             ui.set_selected_id("43".into());
             settle();
-            near(field.absolute_position().y, initial.y);
+            near(
+                field.absolute_position().y - viewport.absolute_position().y,
+                initial_offset,
+            );
             assert_eq!(field.accessible_value().as_deref(), Some(tags.as_str()));
             assert!(!ui.get_metadata_dirty());
             ui.hide().unwrap();
@@ -704,7 +720,7 @@ fn selecting_another_file_resets_description_scroll_and_keyboard_selection() {
                 &[
                     slint::platform::Key::Control.into(),
                     slint::platform::Key::Shift.into(),
-                    slint::platform::Key::End.into(),
+                    text_document_end_key(),
                 ],
             );
             settle();
@@ -716,6 +732,26 @@ fn selecting_another_file_resets_description_scroll_and_keyboard_selection() {
             ui.hide().unwrap();
         }
     }
+}
+
+// Slint's normalized Control modifier uses vertical arrows for text boundaries
+// on macOS; other native platforms use Home/End for the same editing actions.
+fn text_document_start_key() -> slint::SharedString {
+    if cfg!(target_os = "macos") {
+        slint::platform::Key::UpArrow
+    } else {
+        slint::platform::Key::Home
+    }
+    .into()
+}
+
+fn text_document_end_key() -> slint::SharedString {
+    if cfg!(target_os = "macos") {
+        slint::platform::Key::DownArrow
+    } else {
+        slint::platform::Key::End
+    }
+    .into()
 }
 
 fn long_tags(prefix: &str) -> String {

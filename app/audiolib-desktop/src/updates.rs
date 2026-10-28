@@ -29,6 +29,20 @@ impl DesktopUpdates {
         controller: Arc<Controller>,
         arguments: &[String],
     ) -> Option<Self> {
+        ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+        ui.set_update_supported(!cfg!(target_os = "macos"));
+        if cfg!(target_os = "macos") {
+            ui.set_update_enabled(false);
+            ui.set_update_message(
+                text(
+                    ui,
+                    "Download a new Mac client from GitHub Releases, then close the app and replace it.",
+                    "请从 GitHub Releases 下载新版 Mac 客户端，关闭应用后替换。",
+                )
+                .into(),
+            );
+            return None;
+        }
         if std::env::var("AUDIOLIB_UPDATE_DISABLE").as_deref() == Ok("1") {
             ui.set_update_enabled(false);
             ui.set_update_message(
