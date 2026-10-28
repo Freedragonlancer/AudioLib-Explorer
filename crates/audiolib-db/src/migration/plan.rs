@@ -44,6 +44,8 @@ fn metadata_expansion_bytes(conn: &Connection, cancel: &AtomicBool) -> Result<u6
             .checked_add(decoded.saturating_sub(stored))
             .ok_or_else(|| invalid("Legacy Metadata expansion estimate overflow"))?;
     }
+    // Filtering can consume an all-TEXT source without yielding a single row.
+    check_cancel(cancel)?;
     Ok(growth)
 }
 
@@ -298,6 +300,33 @@ pub fn plan_local(
 mod tests {
     use super::*;
     use crate::migration::{MigrationPhase, apply, discover, resume, rollback, verify};
+
+    #[test]
+    fn legacy_metadata_budget_observes_cancellation_when_no_blob_row_is_returned() {
+        use std::sync::{Arc, atomic::Ordering};
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE audio_files(metadata_json); WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<10001) INSERT INTO audio_files SELECT '{}' FROM ids;").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let observed = cancel.clone();
+        conn.progress_handler(
+            500,
+            Some(move || {
+                observed.store(true, Ordering::Release);
+                false
+            }),
+        )
+        .unwrap();
+        let result = metadata_expansion_bytes(&conn, &cancel);
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM audio_files", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            10001
+        );
+    }
 
     #[test]
     fn legacy_metadata_budget_accounts_for_text_expansion_without_mutating_input() {
