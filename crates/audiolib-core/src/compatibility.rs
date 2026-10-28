@@ -1213,7 +1213,10 @@ mod tests {
         assert!(invalid_database_marker.snapshot_format_id().is_none());
         let mut peer = local.clone();
         peer.features.remove(ALBUM_FOLDER_ARTWORK_FEATURE);
-        assert_eq!(check_peer(&local, "0.8.1", Some(&peer)), Ok(()));
+        assert_eq!(
+            check_peer(&local, &peer.application_version, Some(&peer)),
+            Ok(())
+        );
     }
 
     #[test]
