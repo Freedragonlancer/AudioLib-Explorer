@@ -26,7 +26,7 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 
 AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 adds Linux x64 server and Docker amd64/arm64 deliverables.
 
-- **Source development version:** 0.8.4 (workspace `Cargo.toml`)
+- **Source development version:** 0.8.5 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 8 (snapshot schema range 3..=8; only explicitly recognized complete formats are readable)
 - **Writable library format:** `ale-s8-cld1-t3-m2-p1-a1`; recognized schema 3–7 formats are read-only migration sources. Schema 8 shares albums and retains Metadata as original JSON TEXT. Metadata compression is deferred; snapshot transport still uses zstd.
@@ -134,7 +134,7 @@ Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the 
 $releaseCommit = (git rev-parse HEAD).Trim()
 $buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.8.4 -ExpectedCommit $releaseCommit -BuildReport $buildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof
 ```
 
 Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
@@ -183,7 +183,7 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 ## Releases and CI
 
-The current source development version is `0.8.4`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
+The current source development version is `0.8.5`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
 
 The Windows desktop client and supported server builds check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. The initial macOS desktop client uses manual updates. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 
