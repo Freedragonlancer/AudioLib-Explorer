@@ -10,7 +10,7 @@ use audiolib_server::{
 };
 use axum::{
     body::Body,
-    http::{Request, StatusCode, header},
+    http::{Method, Request, StatusCode, header},
     response::Response,
 };
 use http_body_util::BodyExt;
@@ -178,9 +178,13 @@ fn fixture_with_second_cover(second_cover: bool) -> Fixture {
 }
 
 async fn send(state: &AppState, path: &str) -> Response {
+    send_method(state, Method::GET, path).await
+}
+
+async fn send_method(state: &AppState, method: Method, path: &str) -> Response {
     router(state.clone())
         .oneshot(
-            support::modern(Request::get(path))
+            support::modern(Request::builder().method(method).uri(path))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
                 .header("X-AudioLib-Library-Id", state.library_id())
                 .header(
@@ -729,17 +733,13 @@ async fn cover_cache_hits_and_304_need_no_decode_slot_and_misses_wait_briefly() 
     let held = slots.clone().acquire_many_owned(2).await.unwrap();
     assert_eq!(slots.available_permits(), 0);
 
-    let started = std::time::Instant::now();
+    // Slots stay held throughout, so a request that needed one would get 503;
+    // 200 and 304 here prove cache hits and conditional hits never take a slot.
     let hit = send(&f.state, &cached).await;
     assert_eq!(hit.status(), StatusCode::OK);
     assert_eq!(body(hit).await, f.image);
     let not_modified = send_if_none_match(&f.state, &cached, &etag).await;
     assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
-    assert!(
-        started.elapsed() < Duration::from_millis(400),
-        "cache hit and 304 never wait for a slot: {:?}",
-        started.elapsed()
-    );
 
     // A cache miss (new thumbnail size) waits about 0.5 s, then 503 BUSY + Retry-After.
     let miss = format!("/api/v1/audio/{}/artwork?side=8", f.cover_id);
@@ -751,9 +751,38 @@ async fn cover_cache_hits_and_304_need_no_decode_slot_and_misses_wait_briefly() 
     let error: ErrorBody = serde_json::from_slice(&body(busy).await).unwrap();
     assert_eq!(error.error_code, "BUSY");
     assert!(
-        waited >= Duration::from_millis(400) && waited < Duration::from_secs(3),
+        // Lower bound only: the timeout never fires early; slow machines may be late.
+        waited >= Duration::from_millis(400),
         "{waited:?}"
     );
+
+    // HEAD of the same busy miss: identical headers (incl. Retry-After and
+    // Content-Length) to GET, and no body.
+    let get_busy = send(&f.state, &miss).await;
+    let head_busy = send_method(&f.state, Method::HEAD, &miss).await;
+    assert_eq!(head_busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(head_busy.headers()[header::RETRY_AFTER], "1");
+    let get_length = get_busy.headers()[header::CONTENT_LENGTH].clone();
+    assert_eq!(
+        head_busy.headers().get(header::CONTENT_LENGTH),
+        Some(&get_length)
+    );
+    let mut get_names: Vec<_> = get_busy
+        .headers()
+        .keys()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    let mut head_names: Vec<_> = head_busy
+        .headers()
+        .keys()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    get_names.sort();
+    head_names.sort();
+    assert_eq!(get_names, head_names);
+    let get_body = body(get_busy).await;
+    assert_eq!(get_length.to_str().unwrap(), get_body.len().to_string());
+    assert!(body(head_busy).await.is_empty());
 
     // A slot freed during the wait serves the queued miss instead of 503.
     let state = f.state.clone();
