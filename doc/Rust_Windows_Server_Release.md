@@ -27,6 +27,8 @@
 $env:RUSTUP_TOOLCHAIN = '1.97.1-x86_64-pc-windows-msvc'
 pwsh tools/build-server-release.ps1 -Target x86_64-pc-windows-msvc
 pwsh tools/package-server.ps1 -Tag vX.Y.Z -Target x86_64-pc-windows-msvc
+# validate 用 search-benchmark.exe 生成隔离的合成库，须先在同一进程（同 RUSTUP_TOOLCHAIN / CARGO_TARGET_DIR）构建
+cargo build --release --locked -p audiolib-db --bin search-benchmark --target x86_64-pc-windows-msvc
 pwsh tools/validate-server-package.ps1 -Tag vX.Y.Z -Target x86_64-pc-windows-msvc
 ```
 
