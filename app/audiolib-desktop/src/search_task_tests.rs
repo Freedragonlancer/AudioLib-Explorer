@@ -810,6 +810,178 @@ fn child_late_facets_and_external_revision() {
     finish(&fixture);
 }
 
+/// Workspace files still name a server library with a `server-` prefix. Any other
+/// non-empty scope is a local library. An empty scope is not loaded yet.
+#[test]
+fn server_prefix_marks_a_server_workspace_scope() {
+    let matches = super::super::Controller::workspace_scope_matches_source;
+    assert!(matches("", false));
+    assert!(matches("", true));
+    assert!(matches("server-audition-library", true));
+    assert!(!matches("server-audition-library", false));
+    assert!(matches("local-library", false));
+    assert!(!matches("local-library", true));
+    assert!(matches("not-server-library", false));
+    assert!(!matches("not-server-library", true));
+    assert!(matches("server", false));
+    assert!(!matches("server", true));
+}
+
+#[test]
+fn result_scroll_follows_rows_after_an_empty_page() {
+    isolated("child_result_scroll_follows_rows");
+}
+
+#[test]
+#[ignore = "isolated Slint result scroll is reapplied after rows are published"]
+fn child_result_scroll_follows_rows() {
+    use audiolib_core::search_workspace::SearchTaskView;
+
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let controller = &fixture.controller;
+    let scope = controller
+        .task_workspace
+        .lock()
+        .unwrap()
+        .workspace
+        .library_scope
+        .clone();
+    assert!(!scope.is_empty(), "fixture workspace has no library scope");
+    assert!(
+        !scope.starts_with("server-"),
+        "local fixture scope must not use the server prefix: {scope}"
+    );
+
+    ui.set_rows(slint::ModelRc::new(
+        slint::VecModel::<crate::AudioRow>::default(),
+    ));
+    wait_for(ui, |ui| ui.get_rows().row_count() == 0);
+    controller.restore_task_scroll(
+        ui,
+        &SearchTaskView {
+            list_top_row: 15,
+            list_row_offset: 0.4,
+            list_scroll_x: -48.0,
+            folder_scroll_y: -120.0,
+            filter_scroll_y: -80.0,
+            inspector_scroll_y: -55.0,
+            ..Default::default()
+        },
+    );
+    wait_for(ui, |ui| !ui.get_task_restoring());
+    let parked_y = ui.get_task_result_scroll_y();
+    let parked_x = ui.get_task_result_scroll_x();
+    assert!(
+        parked_y.abs() < 1.0 && parked_x.abs() < 1.0,
+        "empty page must park the result list at the origin, y={parked_y} x={parked_x}"
+    );
+    assert!(
+        ui.get_task_filter_scroll_y() < -40.0,
+        "empty result page still restores the filter area: {}",
+        ui.get_task_filter_scroll_y()
+    );
+    assert!(
+        ui.get_task_inspector_scroll_y() < -30.0,
+        "empty result page still restores the inspector: {}",
+        ui.get_task_inspector_scroll_y()
+    );
+
+    let rows = synthetic_rows(80);
+    ui.set_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+    wait_for(ui, |ui| ui.get_rows().row_count() == 80);
+    // A task tab or local reload publishes rows before restoring, so the saved
+    // row is applied in that same turn instead of being parked at zero.
+    controller.restore_task_scroll(
+        ui,
+        &SearchTaskView {
+            list_top_row: 15,
+            ..Default::default()
+        },
+    );
+    let row_height = ui.get_task_result_row_height();
+    wait_for(ui, |ui| !ui.get_task_restoring());
+    let expected = -15.0 * row_height;
+    let applied = ui.get_task_result_scroll_y();
+    assert!(
+        (applied - expected).abs() < 2.0,
+        "rows already on the list must restore row 15: height {row_height}, expected {expected}, got {applied}"
+    );
+
+    ui.set_rows(slint::ModelRc::new(
+        slint::VecModel::<crate::AudioRow>::default(),
+    ));
+    wait_for(ui, |ui| ui.get_rows().row_count() == 0);
+    controller.task_workspace.lock().unwrap().pending_view = Some(SearchTaskView {
+        list_top_row: 15,
+        ..Default::default()
+    });
+    ui.set_rows(slint::ModelRc::new(slint::VecModel::from(synthetic_rows(
+        80,
+    ))));
+    wait_for(ui, |ui| ui.get_rows().row_count() == 80);
+    controller.search_task_page_ready(ui, Some(7));
+    assert!(
+        controller
+            .task_workspace
+            .lock()
+            .unwrap()
+            .pending_view
+            .is_none()
+    );
+    assert_eq!(
+        controller.task_workspace.lock().unwrap().page_revision,
+        Some(7)
+    );
+    wait_for(ui, |ui| !ui.get_task_restoring());
+    let filled = ui.get_task_result_scroll_y();
+    assert!(
+        (filled - expected).abs() < 2.0,
+        "page callback must restore the parked row after rows exist: expected {expected}, got {filled}"
+    );
+
+    controller.capture_search_task(ui);
+    let before = active_list_top_row(controller);
+    assert_eq!(before, 15, "captured row {before}");
+    controller.remote_mode.store(true, Ordering::Release);
+    ui.set_remote_mode(true);
+    ui.invoke_restore_search_task_viewport(0.0, 0.0, 0.0, 0.0, 0.0);
+    wait_for(ui, |ui| !ui.get_task_restoring());
+    controller.capture_search_task(ui);
+    assert_eq!(
+        active_list_top_row(controller),
+        before,
+        "server viewport must not overwrite the local task's saved row"
+    );
+    controller.remote_mode.store(false, Ordering::Release);
+    ui.set_remote_mode(false);
+    finish(&fixture);
+}
+
+fn synthetic_rows(count: usize) -> Vec<crate::AudioRow> {
+    (0..count)
+        .map(|index| crate::AudioRow {
+            id: format!("local-{index}").into(),
+            name: format!("local {index:03}.wav").into(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn active_list_top_row(controller: &Controller) -> usize {
+    let state = controller.task_workspace.lock().unwrap();
+    let active = state.workspace.session.active_task_id.clone();
+    state
+        .workspace
+        .session
+        .tasks
+        .iter()
+        .find(|task| Some(&task.id) == active.as_ref())
+        .expect("active task")
+        .view
+        .list_top_row
+}
+
 #[test]
 fn unavailable_directory_scope_survives_repeated_task_switches() {
     isolated("child_unavailable_directory_scope");

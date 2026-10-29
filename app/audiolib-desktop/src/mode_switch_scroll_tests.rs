@@ -2,10 +2,23 @@
 //! The result list shares one Slint ListView between server mode and the local library.
 //! These tests check that a remote viewport, row count and selected row do not keep
 //! pulling the local list back after the mode switch.
-use crate::{AppWindow, AudioRow};
+use crate::{AppWindow, AudioRow, FolderRow};
 use i_slint_backend_testing::ElementHandle;
 use slint::{ComponentHandle, Model, ModelRc, VecModel, platform::WindowEvent};
 use std::{rc::Rc, time::Duration};
+
+fn folders(count: usize) -> Vec<FolderRow> {
+    (0..count)
+        .map(|index| FolderRow {
+            name: format!("Folder {index:03}").into(),
+            count: "1".into(),
+            path: format!("C:/Sounds/{index:03}").into(),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+        })
+        .collect()
+}
 
 fn rows(prefix: &str, count: usize) -> Vec<AudioRow> {
     (0..count)
@@ -304,6 +317,43 @@ fn out_of_range_remote_restore_does_not_pin_local_wheel_steps() {
     assert!(
         moved_steps >= 1,
         "local page had no room to leave the restored offset"
+    );
+    ui.hide().unwrap();
+}
+
+/// Dropping a result-list restore armed for the other source must leave the folder
+/// list, filter area and inspector scroll in place.
+#[test]
+fn mismatched_mode_drops_only_the_result_list_restore() {
+    let ui = show();
+    ui.set_remote_mode(true);
+    ui.set_rows(ModelRc::new(VecModel::from(rows("remote", 200))));
+    ui.set_folders(ModelRc::new(VecModel::from(folders(80))));
+    settle(20);
+    // Arm while still remote, then leave that mode before the timer applies it.
+    ui.invoke_restore_search_task_viewport(-800.0, -20.0, -180.0, -90.0, -70.0);
+    ui.set_remote_mode(false);
+    ui.set_rows(ModelRc::new(VecModel::from(rows("local", 48))));
+    settle(40);
+    let result = scroll_y(&ui);
+    assert!(
+        result > -80.0,
+        "remote result offset landed on the local list: {result}"
+    );
+    let folder = ui.get_task_folder_scroll_y();
+    let filter = ui.get_task_filter_scroll_y();
+    let inspector = ui.get_task_inspector_scroll_y();
+    assert!(
+        folder < -40.0,
+        "folder list scroll was discarded with the result list: {folder}"
+    );
+    assert!(
+        filter < -40.0,
+        "filter scroll was discarded with the result list: {filter}"
+    );
+    assert!(
+        inspector < -30.0,
+        "inspector scroll was discarded with the result list: {inspector}"
     );
     ui.hide().unwrap();
 }
