@@ -67,8 +67,10 @@ The library (`library_db`) must already exist and be writable by the `audiolib` 
 
 Install the binary to `/opt/audiolib/`, data to `/usr/local/var/audiolib/`, then copy
 `launchd/io.github.audiolib.server.plist.example` to `~/Library/LaunchAgents/`, adjust the
-paths and `launchctl bootstrap "gui/$(id -u)" <plist>`. Restart with
-`launchctl kickstart -k "gui/$(id -u)/io.github.audiolib.server"`. If macOS repeatedly asks
+paths and `launchctl bootstrap "gui/$(id -u)" <plist>`. To restart after a binary swap,
+`launchctl bootout "gui/$(id -u)/io.github.audiolib.server"`, wait until the process has
+exited and the port is free, then `launchctl bootstrap "gui/$(id -u)" <plist>` again
+(`redeploy-server.sh` does exactly this, with a timeout). If macOS repeatedly asks
 for removable/network volume access after each binary swap, use the optional
 [launcher](../launcher/README.md).
 
@@ -259,14 +261,24 @@ responses, ordinary startup without upgrade progress, wrong identity and `error`
 qualify. Rust in-app auto-update has no post-restart health watchdog; this timeout belongs
 to the external deployment script. Parameters: `INSTALL_DIR`, `BINARY`, `SERVICE_NAME`,
 `DATA_DIR`, `LIBRARY_DB`, `BACKUP_DIR`, `HOST`, `PORT`, `TOKEN`, `SERVICE_MANAGER`, `WAIT_SECS`,
-`LAUNCHD_PLIST`, `EXPECT_API_VERSION`, `EXPECT_SCHEMA_VERSION`, `EXPECT_COMMIT` (documented at the top of the script).
+`LAUNCHD_PLIST`, `LAUNCHD_DOMAIN`, `STOP_TIMEOUT`, `EXPECT_API_VERSION`, `EXPECT_SCHEMA_VERSION`, `EXPECT_COMMIT` (documented at the top of the script).
+
+Sequence: back up the library and binary; stop the service (launchd `bootout`, systemd
+`stop`); poll until the old process has exited and `PORT` is released (fails after
+`STOP_TIMEOUT` seconds without swapping); `install` + `mv` the new binary; start it again
+(launchd `bootstrap` of the existing `LAUNCHD_PLIST`, which must exist and is checked before
+anything changes; systemd `start`); verify `/api/v1/health`. A failed verification rolls back
+along the same path (stop, wait, swap the previous binary back, start). `EXPECT_COMMIT` may be
+a short or full hash: `/health` reports a 7-character short hash, compared by prefix.
 
 Or by hand:
 
 ```sh
 install -m 755 new/audiolib-server /opt/audiolib/audiolib-server.new
+systemctl stop audiolib-server           # macOS: launchctl bootout "gui/$(id -u)/io.github.audiolib.server"
+# wait until the old process has exited and the port is free
 mv -f /opt/audiolib/audiolib-server.new /opt/audiolib/audiolib-server
-systemctl restart audiolib-server        # macOS: launchctl kickstart -k "gui/$(id -u)/io.github.audiolib.server"
+systemctl start audiolib-server          # macOS: launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/io.github.audiolib.server.plist
 ```
 
 Do not `cp` onto the installed binary: writing into a file a running process maps can corrupt
