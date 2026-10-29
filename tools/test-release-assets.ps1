@@ -12,10 +12,15 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 $script:caseNumber = 0
 $script:assertionCount = 0
 
-function Packages([string]$ReleaseTag, [bool]$MacClient) {
+function Packages([string]$ReleaseTag, [bool]$MacClient, [bool]$LinuxDocker = $false) {
     "AudioLibExplorer-$ReleaseTag-win-x64-portable.zip"
     if ($MacClient) { "AudioLibExplorer-$ReleaseTag-macos-arm64.zip" }
     "AudioLibServer-$ReleaseTag-macos-arm64.tar.gz"
+    if ($LinuxDocker) {
+        "AudioLibServer-$ReleaseTag-linux-x64.tar.gz"
+        "AudioLibServer-$ReleaseTag-docker-linux-amd64.tar.gz"
+        "AudioLibServer-$ReleaseTag-docker-linux-arm64.tar.gz"
+    }
 }
 function AssetNames([string[]]$PackageNames) {
     foreach ($packageName in $PackageNames) { $packageName; "$packageName.sha256" }
@@ -58,20 +63,32 @@ try {
         $metadata = Manifest $releaseTag @(AssetNames $packages)
         Accepted $releaseTag $metadata $packages
     }
-    foreach ($releaseTag in @('v0.8.3', 'v0.8.3-beta.1', 'v0.8.3-rc.0', 'v0.9.0', 'v1.0.0')) {
+    foreach ($releaseTag in @('v0.8.3', 'v0.8.3-beta.1', 'v0.8.3-rc.0')) {
         $packages = @(Packages $releaseTag $true)
         $metadata = Manifest $releaseTag @(AssetNames $packages)
         Accepted $releaseTag $metadata $packages
     }
+    foreach ($releaseTag in @('v0.8.4', 'v0.8.4-beta.1', 'v0.8.4-rc.0', 'v0.9.0', 'v1.0.0')) {
+        $packages = @(Packages $releaseTag $true $true)
+        $metadata = Manifest $releaseTag @(AssetNames $packages)
+        Accepted $releaseTag $metadata $packages
+    }
 
-    $tag = 'v0.8.3'
-    $packages = @(Packages $tag $true)
+    $tag = 'v0.8.4'
+    $packages = @(Packages $tag $true $true)
     $names = @(AssetNames $packages)
     $metadata = Manifest $tag $names
     $missingMac = Manifest $tag @(AssetNames @(Packages $tag $false))
     Rejected 'new release missing Mac client' { & $validator -Tag $tag -ReleaseJsonPath $missingMac } 'Missing release assets'
     $oldExtra = Manifest 'v0.8.2' @(AssetNames @(Packages 'v0.8.2' $true))
     Rejected 'historical release with extra package' { & $validator -Tag 'v0.8.2' -ReleaseJsonPath $oldExtra } 'Unexpected release assets'
+    $oldMacExtra = Manifest 'v0.8.3' @(AssetNames @(Packages 'v0.8.3' $true $true))
+    Rejected '0.8.3 with added Linux/Docker packages' { & $validator -Tag 'v0.8.3' -ReleaseJsonPath $oldMacExtra } 'Unexpected release assets'
+    foreach ($newPackage in $packages[3..5]) {
+        $missingNames = @($names | Where-Object { $_ -cne $newPackage -and $_ -cne ($newPackage + '.sha256') })
+        $missingPackage = Manifest $tag $missingNames
+        Rejected "missing $newPackage" { & $validator -Tag $tag -ReleaseJsonPath $missingPackage } 'Missing release assets'
+    }
     $extra = Manifest $tag @($names + 'private-report.json')
     Rejected 'extra asset' { & $validator -Tag $tag -ReleaseJsonPath $extra } 'Unexpected release assets'
     $duplicate = Manifest $tag @($names + $names[0])
@@ -82,14 +99,14 @@ try {
     $wrongCaseNames[0] = $wrongCaseNames[0].ToLowerInvariant()
     $wrongCase = Manifest $tag $wrongCaseNames
     Rejected 'wrong-case asset' { & $validator -Tag $tag -ReleaseJsonPath $wrongCase } 'Missing release assets.*Unexpected release assets'
-    $wrongTitle = Manifest $tag $names $false 'AudioLib Explorer 0.8.3'
+    $wrongTitle = Manifest $tag $names $false 'AudioLib Explorer 0.8.4'
     Rejected 'wrong title' { & $validator -Tag $tag -ReleaseJsonPath $wrongTitle } 'Release title'
     $wrongTag = Manifest $tag $names $false "AudioLib Explorer $tag" 'v0.8.2'
     Rejected 'wrong actual tag' { & $validator -Tag $tag -ReleaseJsonPath $wrongTag } 'Release tag'
     $wrongStable = Manifest $tag $names $true
     Rejected 'stable marked prerelease' { & $validator -Tag $tag -ReleaseJsonPath $wrongStable } 'prerelease flag'
-    $betaTag = 'v0.8.3-beta.1'
-    $wrongBeta = Manifest $betaTag @(AssetNames @(Packages $betaTag $true)) $false
+    $betaTag = 'v0.8.4-beta.1'
+    $wrongBeta = Manifest $betaTag @(AssetNames @(Packages $betaTag $true $true)) $false
     Rejected 'beta marked stable' { & $validator -Tag $betaTag -ReleaseJsonPath $wrongBeta } 'prerelease flag'
     $wrongType = Manifest $tag $names 'false'
     Rejected 'string prerelease flag' { & $validator -Tag $tag -ReleaseJsonPath $wrongType } 'prerelease flag'
@@ -132,7 +149,7 @@ try {
     Rejected 'missing checksum sidecar' { & $validator -Tag $tag -ReleaseJsonPath $metadata -AssetDirectory $downloads } 'Downloaded asset is missing'
     Move-Item -LiteralPath ($chosenChecksum + '.held') -Destination $chosenChecksum
 
-    Write-Host "Release asset regression passed: $script:assertionCount checks; historical four/new six assets, tag/title/prerelease identity and SHA256 boundaries."
+    Write-Host "Release asset regression passed: $script:assertionCount checks; historical four/six and current twelve assets, tag/title/prerelease identity and SHA256 boundaries."
 } finally {
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)
     if (!$resolvedRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or

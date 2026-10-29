@@ -17,8 +17,22 @@ function Expect-Rejection([scriptblock]$Action, [string]$Message) {
     try { & $Action } catch { $rejected = $_.Exception.Message -match $Message }
     if (!$rejected) { throw 'Server package failed to reject a boundary regression.' }
 }
-$target = if ($IsWindows) { 'x86_64-pc-windows-msvc' } elseif ($IsLinux) { 'x86_64-unknown-linux-gnu' } else { 'aarch64-apple-darwin' }
-$platformName = if ($IsWindows) { 'win-x64' } elseif ($IsLinux) { 'linux-x64' } else { 'macos-arm64' }
+$taskProcessArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+if ($IsWindows) {
+    $target = 'x86_64-pc-windows-msvc'; $platformName = 'win-x64'
+} elseif ($IsLinux) {
+    switch ($taskProcessArchitecture) {
+        ([Runtime.InteropServices.Architecture]::X64) {
+            $target = 'x86_64-unknown-linux-gnu'; $platformName = 'linux-x64'
+        }
+        ([Runtime.InteropServices.Architecture]::Arm64) {
+            $target = 'aarch64-unknown-linux-gnu'; $platformName = 'linux-arm64'
+        }
+        default { throw 'Server package regressions require Linux x64 or arm64.' }
+    }
+} else {
+    $target = 'aarch64-apple-darwin'; $platformName = 'macos-arm64'
+}
 $binaryName = if ($IsWindows) { 'audiolib-server.exe' } else { 'audiolib-server' }
 $extension = if ($IsWindows) { 'zip' } else { 'tar.gz' }
 New-Item -ItemType Directory -Path (Join-Path $testRoot 'tools') | Out-Null
@@ -113,8 +127,14 @@ try {
         Expect-Rejection { & $compatibilityValidator -Product Server -ServerBinaryName $compatibilityBinary -Entries @($otherBinary) } 'Update compatibility.*Non-public update file'
     }
     Expect-Rejection { & $compatibilityValidator -Product Server -Entries @('licenses/evil.ps1') } 'Update compatibility.*Non-public update file'
-    Expect-Rejection { & $packager -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
-    Expect-Rejection { & $validator -Tag v0.4.4 -Target x86_64-unknown-linux-gnu -Asio } '-Asio requires'
+    foreach ($linuxTarget in @('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu')) {
+        Expect-Rejection { & $packager -Tag v0.4.4 -Target $linuxTarget -Asio } '-Asio requires'
+        Expect-Rejection { & $validator -Tag v0.4.4 -Target $linuxTarget -Asio } '-Asio requires'
+    }
+    $otherLinuxTarget = if ($IsLinux -and $taskProcessArchitecture -eq [Runtime.InteropServices.Architecture]::Arm64) { 'x86_64-unknown-linux-gnu' } else { 'aarch64-unknown-linux-gnu' }
+    $otherLinuxPlatform = if ($otherLinuxTarget -ceq 'x86_64-unknown-linux-gnu') { 'Linux x64' } else { 'Linux arm64' }
+    Expect-Rejection { & $packager -Tag v0.4.4 -Target $otherLinuxTarget } $otherLinuxPlatform
+    Expect-Rejection { & $validator -Tag v0.4.4 -Target $otherLinuxTarget } $otherLinuxPlatform
     & $packager -Tag v0.4.4 -Target $target
     if ((Get-Content -LiteralPath (Join-Path $payload 'update-channel.txt') -Raw).Trim() -cne 'stable' -or
         (Get-Content -LiteralPath (Join-Path $payload 'update-version.txt') -Raw).Trim() -cne '0.4.4') { throw 'Stable server update metadata differs.' }

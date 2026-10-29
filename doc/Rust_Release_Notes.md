@@ -1,3 +1,17 @@
+# 0.8.4：目录箭头与 Linux / Docker 服务端
+
+程序 0.8.4 | API /api/v1/ | schema 8 | 快照兼容 3..=8
+
+以已发布的 `v0.8.3` 为基线，完整格式保持 `ale-s8-cld1-t3-m2-p1-a1`，不引入数据库迁移。
+
+- 优化 Folders / Libraries 标题的矢量箭头；展开朝下、收起朝右，保留整行点击、键盘操作及展开状态和高度比例的持久化。
+- 新增 Linux x64 原生服务端归档，以及 Docker linux/amd64、linux/arm64 离线镜像；每个归档附 SHA256。Linux arm64 原生包作为 Docker 内部输入构建、验证，不单独作为 Release 资产发布。
+- Docker 正式镜像只消费已验收的公开 Linux 包，包含程序、版本标记和 Rust 依赖许可证，不复制工作资料库、设置或 Git 元数据。镜像使用 UID/GID 10001、只读根文件系统及只读音频目录，运行数据保存在独立 `/data` 卷。
+- 容器使用镜像替换更新，禁用程序内二进制更新。Mac arm64 与 Linux x64 原生服务端沿用管理页面更新；Windows 客户端与 Mac 客户端的更新方式不变。
+- 发布资产从 0.8.3 的六项扩展为十二项；既有版本的标签、归档和历史校验规则保持原样。
+
+Linux 与 Docker 的构建、离线导入、Compose 和验收流程见 [Linux 与 Docker 交付](Rust_Linux_Docker_Release.md)。正式包的最终提交、实测平台、beta 与人工验收结果以对应 GitHub Release 说明和产物为准。
+
 # 0.8.3：目录分区与 macOS 客户端
 
 程序 0.8.3 | API /api/v1/ | schema 8 | 快照兼容 3..=8

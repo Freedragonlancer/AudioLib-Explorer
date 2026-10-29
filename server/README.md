@@ -37,7 +37,7 @@ page. It never modifies audio files.
 
 ## Download a prebuilt server
 
-[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) provide Windows x64 ZIP and Linux x64 GNU tar.gz archives with SHA256 files. Verify the checksum, extract, then use the executable at the archive root with your own configuration (`--config <path>`). Public configuration examples are under `server/audiolib-server/`; the Linux archive is built on Ubuntu 22.04. Keep your existing library, roots, configuration and credentials when upgrading. See the [deployment guide](deploy/README.md) for installation and rollback. Other platforms can build from source below.
+[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) provide macOS arm64 and, from 0.8.4, Linux x64 GNU server archives with SHA256 files. Version 0.8.4 also includes Docker amd64/arm64 offline images. Verify the checksum before extracting a native package or loading an image. Native archives keep the executable at their root and public configuration examples under `server/audiolib-server/`; Linux packages use Debian 12 as their GNU libc build baseline. Keep existing libraries, roots, configuration and credentials when upgrading. See [Linux/Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md) and the [deployment guide](deploy/README.md). Windows and standalone Linux arm64 servers build from source.
 
 ## Quick start: build from source
 
