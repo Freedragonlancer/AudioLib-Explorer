@@ -777,6 +777,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 | `pregenerate_list_waveforms` | 当前生效的列表缩略波形预生成开关（只读），修改用 `PATCH /settings`，见 §9.2 |
 | `list_waveform_jobs` | 支持 §9.5 的列表波形缓存管理任务与 `list_waveform_rate` 设置：`{ "version": 1, "modes": ["missing", "rebuild", "failed"], "rate_setting": true }`；缺字段 = 不支持（库已打开但 `waveforms.db` 无法打开时也不声明，§9.5.7） |
 | `compatibility.features.album_artwork` | 可选 feature，修订 ≥ 1 表示支持 §8.2 的 `GET /audio/{id}/artwork`。键名就是 `album_artwork`。旧服务端没有该键（或修订不同）时客户端不要请求封面；缺失只关闭这一功能，不拒绝同步 |
+| `compatibility.features.album_entity_artwork` | 可选 API feature，修订 1 表示支持 §8.2 的 `GET` / `HEAD /albums/{id}/artwork`（共享专辑实体封面，须带 `X-AudioLib-Library-Id` 和 `X-AudioLib-Album-Namespace`）。缺失时客户端保留按音频的 `/audio/{id}/artwork`；缺失只关闭这一功能，不拒绝同步 |
 | `compatibility.features.album_folder_artwork` | 可选 API feature，修订 1 表示 `/albums/{id}/artwork` 支持 `folder_id` 或 `unassigned_directory` 的直属目录过滤及身份回显；不改变数据库格式、schema 或迁移要求 |
 
 - §9.2 的 `PATCH /settings` 和 `POST /waveforms/pregeneration/pause|resume` 同样受 `manage_mode` 限制（`GET /settings`、`GET /waveforms/status`、`POST /waveforms` 不受限制）。
