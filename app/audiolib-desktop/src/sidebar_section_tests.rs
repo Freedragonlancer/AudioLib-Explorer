@@ -1,11 +1,54 @@
 // app/audiolib-desktop/src/sidebar_section_tests.rs
 //! Input regressions for independent sidebar disclosure and adjustable list heights.
 use crate::{AlbumRow, AppWindow, FolderRow};
-use i_slint_backend_testing::ElementHandle;
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::{
     ComponentHandle, ModelRc, VecModel, platform::PointerEventButton, platform::WindowEvent,
 };
 use std::{cell::Cell, rc::Rc, time::Duration};
+
+#[test]
+fn software_rendered_chevrons_follow_each_section_disclosure_state() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for scale in [1.0, 1.5] {
+        let ui = window(false, 1440.0 * scale, 900.0 * scale, scale);
+        for libraries in [false, true] {
+            let (width, height) = chevron_ink_extent(&ui, libraries);
+            assert!(width > height, "Expanded chevron must point down");
+        }
+        save_sidebar_snapshot(&ui, &format!("sections-expanded-x{scale}.png"));
+
+        // Accessibility activation keeps pointer/focus styling unchanged so the
+        // rendered direction, rather than a hover or focus color, is verified.
+        header(&ui, false).invoke_accessible_default_action();
+        settle();
+        let (width, height) = chevron_ink_extent(&ui, false);
+        assert!(height > width, "Collapsed folder chevron must point right");
+        let (width, height) = chevron_ink_extent(&ui, true);
+        assert!(width > height, "Library chevron must remain expanded");
+
+        header(&ui, true).invoke_accessible_default_action();
+        settle();
+        for libraries in [false, true] {
+            let (width, height) = chevron_ink_extent(&ui, libraries);
+            assert!(height > width, "Collapsed chevron must point right");
+        }
+        save_sidebar_snapshot(&ui, &format!("sections-collapsed-x{scale}.png"));
+        for libraries in [false, true] {
+            header(&ui, libraries).invoke_accessible_default_action();
+            settle();
+            let (width, height) = chevron_ink_extent(&ui, libraries);
+            assert!(width > height, "Reopened chevron must point down");
+        }
+        ui.global::<crate::Theme>().set_ui_scale(1.0);
+        ui.hide().unwrap();
+    }
+}
 
 #[test]
 fn sections_collapse_independently_and_restore_their_shared_height_without_searching() {
@@ -229,6 +272,64 @@ fn window(chinese: bool, width: f32, height: f32, scale: f32) -> AppWindow {
     ui.show().unwrap();
     settle();
     ui
+}
+
+fn chevron_ink_extent(ui: &AppWindow, libraries: bool) -> (u32, u32) {
+    let icon = header(ui, libraries)
+        .query_descendants()
+        .match_id("SidebarSectionHeader::disclosure-icon")
+        .find_first()
+        .expect("Sidebar disclosure icon");
+    let pixels = ui.window().take_snapshot().unwrap();
+    let scale = ui.window().scale_factor();
+    let origin = icon.absolute_position();
+    let size = icon.size();
+    let left = (origin.x * scale).floor() as u32;
+    let top = (origin.y * scale).floor() as u32;
+    let width = (size.width * scale).ceil() as u32;
+    let height = (size.height * scale).ceil() as u32;
+    assert!(width > 0 && height > 0);
+    assert!(left + width <= pixels.width() && top + height <= pixels.height());
+    let bytes = pixels.as_bytes();
+    let stride = pixels.width() as usize * 4;
+    let background = &bytes[top as usize * stride + left as usize * 4..][..3];
+    let mut bounds = None::<(u32, u32, u32, u32)>;
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = &bytes[(top + y) as usize * stride + (left + x) as usize * 4..][..3];
+            let contrast: u16 = pixel
+                .iter()
+                .zip(background)
+                .map(|(channel, background)| u16::from(channel.abs_diff(*background)))
+                .sum();
+            if contrast > 80 {
+                bounds = Some(match bounds {
+                    Some((min_x, min_y, max_x, max_y)) => {
+                        (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                    }
+                    None => (x, y, x, y),
+                });
+            }
+        }
+    }
+    let (min_x, min_y, max_x, max_y) = bounds.expect("Visible disclosure chevron ink");
+    (max_x - min_x + 1, max_y - min_y + 1)
+}
+
+fn save_sidebar_snapshot(ui: &AppWindow, name: &str) {
+    if let Some(directory) = std::env::var_os("AUDIOLIB_SIDEBAR_SNAPSHOT_DIR") {
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory).unwrap();
+        let pixels = ui.window().take_snapshot().unwrap();
+        image::save_buffer(
+            directory.join(name),
+            pixels.as_bytes(),
+            pixels.width(),
+            pixels.height(),
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
 }
 
 fn count_layout_changes(ui: &AppWindow) -> Rc<Cell<usize>> {

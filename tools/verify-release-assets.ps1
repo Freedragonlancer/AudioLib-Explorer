@@ -17,9 +17,15 @@ $major = [bigint]::Parse($tagMatch.Groups['major'].Value, [Globalization.Culture
 $minor = [bigint]::Parse($tagMatch.Groups['minor'].Value, [Globalization.CultureInfo]::InvariantCulture)
 $patch = [bigint]::Parse($tagMatch.Groups['patch'].Value, [Globalization.CultureInfo]::InvariantCulture)
 $includesMacClient = $major -gt 0 -or $minor -gt 8 -or ($minor -eq 8 -and $patch -ge 3)
+$includesLinuxDocker = $major -gt 0 -or $minor -gt 8 -or ($minor -eq 8 -and $patch -ge 4)
 $packages = @("AudioLibExplorer-$Tag-win-x64-portable.zip")
 if ($includesMacClient) { $packages += "AudioLibExplorer-$Tag-macos-arm64.zip" }
 $packages += "AudioLibServer-$Tag-macos-arm64.tar.gz"
+if ($includesLinuxDocker) {
+    $packages += "AudioLibServer-$Tag-linux-x64.tar.gz"
+    $packages += "AudioLibServer-$Tag-docker-linux-amd64.tar.gz"
+    $packages += "AudioLibServer-$Tag-docker-linux-arm64.tar.gz"
+}
 $expectedAssets = @($packages | ForEach-Object { $_; "$_.sha256" })
 
 $releaseText = [IO.File]::ReadAllText([IO.Path]::GetFullPath($ReleaseJsonPath))

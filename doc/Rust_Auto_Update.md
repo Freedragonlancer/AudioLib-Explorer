@@ -30,6 +30,8 @@ Linux x64 tar.gz 或 macOS arm64 tar.gz。没有对应平台产物或校验和�
 首次分发计划为 ad-hoc 签名、未经 Apple 公证；原生签名与启动验收仍须在 Mac 上实际完成。
 新增此 Release 资产不改变 Windows 客户端或 Mac 服务端的自动更新协议。
 
+0.8.4 起正式发布 Linux x64 原生包，按既有服务端平台规则提供更新。Docker amd64/arm64 离线镜像设置 `AUDIOLIB_UPDATE_DISABLE=1`，通过导入新镜像并重建容器更新；独立 Linux arm64 原生包不作为 Release 资产发布。镜像交付不改变原生更新包的公共文件策略。详见 [Linux 与 Docker 交付](Rust_Linux_Docker_Release.md)。
+
 ## 渠道与版本
 
 安装目录保存两个很小的程序元数据文件，与用户的 `settings.json` 和资料库分开：

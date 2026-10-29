@@ -30,6 +30,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Changes in the current Windows portable release |
 | [Automatic updates](Rust_Auto_Update.md) | Startup GitHub release checks, stable/beta channels, verified downloads and deployment |
+| [Linux and Docker delivery](Rust_Linux_Docker_Release.md) | Native Linux server archives, offline amd64/arm64 Docker images, Compose and platform acceptance |
 | [Review Fixes](Rust_Review_Fixes.md) | Reviewed defects, corrections and regression coverage |
 | [Known issues](Rust_Known_Issues.md) | Reported defects queued for later investigation and acceptance criteria |
 | [Portable application guide](../PORTABLE_README.md) | Packaged startup, settings and local-use delivery |

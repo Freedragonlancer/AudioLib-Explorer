@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')]
+    [ValidateSet('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin')]
     [string]$Target
 )
 $ErrorActionPreference = 'Stop'
