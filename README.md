@@ -62,13 +62,13 @@ Windows server and standalone Linux arm64 server packages are not published; bui
 
 ### macOS client (Apple Silicon)
 
-The 0.8.3 Mac client candidate is an arm64 `AudioLib Explorer.app` bundle. Verify `AudioLibExplorer-<tag>-macos-arm64.zip.sha256`, extract the ZIP and install the app manually. Close the app normally before replacing an earlier bundle; keep its existing data directory and libraries. See the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md).
+The Mac client is an arm64 `AudioLib Explorer.app` bundle. Verify `AudioLibExplorer-<tag>-macos-arm64.zip.sha256`, extract the ZIP and install the app manually. Close the app normally before replacing an earlier bundle; keep its existing data directory and libraries. See the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md).
 
-The initial distribution plan uses ad-hoc signing and has no Apple notarization. Native signing, isolated startup and package checks must pass on a Mac before this candidate is published; these checks are not implied by the Windows validation results. Mac client updates are manual in this release.
+The initial distribution plan uses ad-hoc signing and has no Apple notarization. Native signing, isolated startup and package checks must pass on a Mac before publication; these checks are not implied by the Windows validation results. Mac client updates are manual in this release.
 
 ## Server deployment
 
-The macOS arm64 server package is the only published server build. On the Mac:
+Published server builds are the macOS arm64 server, the Linux x64 server, and Docker linux/amd64 and linux/arm64 offline images. Windows server and standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). On the Mac:
 
 ```sh
 shasum -a 256 -c AudioLibServer-<tag>-macos-arm64.tar.gz.sha256
@@ -134,7 +134,7 @@ Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the 
 $releaseCommit = (git rev-parse HEAD).Trim()
 $buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit $releaseCommit -BuildReport $buildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.4 -ExpectedCommit $releaseCommit -BuildReport $buildProof
 ```
 
 Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
@@ -183,7 +183,7 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 ## Releases and CI
 
-The current source development version is `0.8.3`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
+The current source development version is `0.8.4`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
 
 The Windows desktop client and supported server builds check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. The initial macOS desktop client uses manual updates. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 

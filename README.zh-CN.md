@@ -29,7 +29,7 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 
 Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客户端面向 Apple Silicon，校验 ZIP 的 SHA256 后解压得到 `AudioLib Explorer.app`，手动安装；替换旧 app 前先正常退出，并保留原数据目录和资料库。详见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
-首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布候选，Windows 验证结果不能替代这些检查。Windows 和独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
+首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。Windows 和独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
 
 ## 功能
 
@@ -60,7 +60,7 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
-Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.4 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
 
@@ -108,7 +108,7 @@ audiolib-server --config /etc/audiolib/config.toml
 
 Windows 客户端与受支持的服务端在每次正常启动后于后台检查 GitHub Release。发现新版后，在客户端提示或服务端管理页面确认，即可下载、校验，并在现有工作排空后部署。初期 Mac 客户端采用手动更新。正式版和 beta 保留各自的更新渠道，资料库和偏好设置不属于更新包。渠道、打包元数据及部署方式详见[自动更新](doc/Rust_Auto_Update.md)。
 
-当前源码开发版本为 `0.8.3`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
+当前源码开发版本为 `0.8.4`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
 
 GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.4 起十二项，0.8.3 六项，更早版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256；构建与运行验收报告保持私有，不作为额外 Release 资产上传。
 

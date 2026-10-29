@@ -54,17 +54,17 @@ Xcode command-line tools. No ASIO SDK or Python runtime is used.
 $taskReleaseCommit = (git rev-parse HEAD).Trim()
 $taskBuildProof = Join-Path (Get-Location).Path ('.rust-validation/macos-client-build/' + [guid]::NewGuid().ToString('N') + '/build.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $taskReleaseCommit -ReportPath $taskBuildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit $taskReleaseCommit -BuildReport $taskBuildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.4 -ExpectedCommit $taskReleaseCommit -BuildReport $taskBuildProof
 ```
 
 The packager prints the retained application bundle path and produces
-`dist/latest/AudioLibExplorer-v0.8.3-macos-arm64.zip`, its `.sha256`, and a local
-`AudioLibExplorer-v0.8.3-macos-arm64-report.json`. Substitute the actual tag for a
+`dist/latest/AudioLibExplorer-v0.8.4-macos-arm64.zip`, its `.sha256`, and a local
+`AudioLibExplorer-v0.8.4-macos-arm64-report.json`. Substitute the actual tag for a
 later release or beta candidate. Run the complete native acceptance with those
 paths:
 
 ```powershell
-pwsh ./tools/validate-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit $taskReleaseCommit -BundlePath '<retained app path>' -ArchivePath ./dist/latest/AudioLibExplorer-v0.8.3-macos-arm64.zip -PackageReport ./dist/latest/AudioLibExplorer-v0.8.3-macos-arm64-report.json -BuildReport $taskBuildProof
+pwsh ./tools/validate-macos-client.ps1 -Tag v0.8.4 -ExpectedCommit $taskReleaseCommit -BundlePath '<retained app path>' -ArchivePath ./dist/latest/AudioLibExplorer-v0.8.4-macos-arm64.zip -PackageReport ./dist/latest/AudioLibExplorer-v0.8.4-macos-arm64-report.json -BuildReport $taskBuildProof
 ```
 
 The build proof contains local paths and stays private. Upload only the ZIP and
