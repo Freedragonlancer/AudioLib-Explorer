@@ -6,7 +6,7 @@
 param(
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)]
-    [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')]
+    [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin')]
     [string]$Target,
     [switch]$Asio
 )
@@ -21,14 +21,19 @@ $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d
 if (!$tagMatch.Success) { throw 'Tag must be vMAJOR.MINOR.PATCH, vMAJOR.MINOR.PATCH-rc.N or vMAJOR.MINOR.PATCH-beta.N.' }
 $version = $tagMatch.Groups[1].Value
 if ($Asio -and ($Target -cne 'x86_64-pc-windows-msvc' -or !$IsWindows)) { throw '-Asio requires the native Windows server target.' }
+$taskProcessArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
 switch ($Target) {
     'x86_64-pc-windows-msvc' {
         if (!$IsWindows) { throw 'Validate the Windows package on Windows.' }
         $suffix = 'win-x64'; $binaryName = 'audiolib-server.exe'; $extension = 'zip'
     }
     'x86_64-unknown-linux-gnu' {
-        if (!$IsLinux) { throw 'Validate the Linux package on Linux.' }
+        if (!$IsLinux -or $taskProcessArchitecture -ne [Runtime.InteropServices.Architecture]::X64) { throw 'Validate the Linux x64 package on Linux x64.' }
         $suffix = 'linux-x64'; $binaryName = 'audiolib-server'; $extension = 'tar.gz'
+    }
+    'aarch64-unknown-linux-gnu' {
+        if (!$IsLinux -or $taskProcessArchitecture -ne [Runtime.InteropServices.Architecture]::Arm64) { throw 'Validate the Linux arm64 package on Linux arm64.' }
+        $suffix = 'linux-arm64'; $binaryName = 'audiolib-server'; $extension = 'tar.gz'
     }
     'aarch64-apple-darwin' {
         if (!$IsMacOS) { throw 'Validate the macOS package on macOS.' }

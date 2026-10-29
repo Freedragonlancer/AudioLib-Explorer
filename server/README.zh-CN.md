@@ -22,7 +22,7 @@
 
 ## 下载预编译服务端
 
-[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) 的正式发布只包含 Windows 客户端和 macOS arm64 服务端，均附 `.sha256` 文件。核验校验和后解压，使用根目录的程序及自己的配置启动（`--config <path>`）；公共配置示例位于 `server/audiolib-server/`。其他平台请从源码构建（`cargo build --release -p audiolib-server --target <triple>`，见下文）；这类构建没有对应的发布包，因此不会自动更新。升级保留原有资料库、资源路径、配置和凭据，安装与回滚见[部署指南](deploy/README.md)。
+[GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) 提供 Mac arm64 服务端归档；从 0.8.4 起增加 Linux x64 原生包和 Docker amd64/arm64 离线镜像，均附 `.sha256`。校验后再解压原生包或导入镜像。Linux 包以 Debian 12 为 GNU libc 构建基线；原生程序位于归档根目录，配置示例位于 `server/audiolib-server/`。Windows 和独立 Linux arm64 服务端从源码构建。升级保留原资料库、根目录、配置和凭据；Docker 保留数据卷并替换镜像，不在容器内更新二进制。详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md) 和[部署指南](deploy/README.md)。
 
 ## 快速开始：从源码构建
 

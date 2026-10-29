@@ -418,9 +418,11 @@ component SidebarSectionHeader inherits Rectangle {
     border-color: Theme.accent;
     background: header-hit.has-hover ? Theme.hover : transparent;
     HorizontalLayout { spacing: 5px * Theme.ui-scale;
-        Image { width: 10px * Theme.ui-scale; height: 10px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-            source: @image-url("icons/chevron-down.svg"); colorize: Theme.dim;
-            transform-rotation: root.expanded ? 0deg : -90deg; accessible-role: none;
+        disclosure-icon := Image { width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+            // The software renderer does not rotate items; select the vector direction directly.
+            source: root.expanded ? @image-url("icons/sidebar-chevron-down.svg") : @image-url("icons/sidebar-chevron-right.svg");
+            colorize: header-hit.has-hover || header-focus.has-focus ? Theme.ink : Theme.dim;
+            accessible-role: none;
         }
         Label { horizontal-stretch: 1; text: root.label; font-size: Theme.font(10); }
         Label { text: root.suffix; font-size: Theme.font(9); color: Theme.accent; }

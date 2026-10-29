@@ -39,7 +39,7 @@ documentation placeholders: `192.0.2.10` (RFC 5737), `audiolib.example.com`,
 
 ## Install
 
-Official [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) ship only the Windows client and the macOS arm64 server, each with a `.sha256` file. Verify the checksum before extracting. The server executable is at the archive root; public configuration examples and this deployment guide are under `server/`. Other platforms (including Linux) must build from source (`cargo build --release -p audiolib-server --target <triple>`); such builds do not auto-update because no packages are published for them. Keep your existing configuration, token files and library when upgrading; the archive does not contain runtime data.
+Official [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases) provide Windows and Mac clients, macOS arm64 and Linux x64 native servers, plus Docker amd64/arm64 offline images from 0.8.4. Each archive has a `.sha256`; verify it before extraction or `docker load`. Native archives contain the executable at their root and public examples under `server/`. Windows and standalone Linux arm64 server packages are not published. Keep existing libraries, roots, configuration and credentials. See [Linux/Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md) for versioned images, Compose, architecture and acceptance details.
 
 Build the binary first: see [Quick start](../README.md#quick-start-build-from-source)
 (Linux: `RUSTUP_TOOLCHAIN=1.97.1` and an explicit `--target`). After installing, continue
@@ -79,7 +79,7 @@ launchd's `XPC_SERVICE_NAME`; otherwise it `exec`s in place.
 
 ### Docker
 
-Build from the repository root (the build context needs the whole workspace):
+For published images, use the offline archive and `docker-compose.release.yml` described in [Linux/Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Official runtime images consume only accepted Linux packages, carry their license closure, and disable in-container updates. The following local source-build example uses the public source context selected by `.dockerignore`; Git metadata is excluded, so its health commit is `unknown`:
 
 ```sh
 docker build -f server/deploy/docker/Dockerfile -t audiolib-server .
@@ -103,7 +103,7 @@ Notes / 说明:
 - 只有 `/data` 是卷（library.db、快照、缓存、tokens.json）。`/config` 不是卷：镜像自带 `/config/config.toml`，可选地用只读 bind mount 覆盖（`-v ./my-config.toml:/config/config.toml:ro`）。
 - 镜像内置配置使用 `auth_mode = "all"`。直接 `docker run` 时必须传 `-e AUDIOLIB_SERVER_TOKEN=...`，否则服务能启动，但所有请求都会返回 401；compose 文件用 `${AUDIOLIB_SERVER_TOKEN:?}` 强制要求填写。
 
-(The Dockerfile still installs `libasound2-dev`/`libasound2`; the server no longer needs them since it builds `audiolib-audio` without `playback`.)
+The headless source and runtime images do not install ALSA libraries; the server builds `audiolib-audio` without `playback`. Historical stock-Dockerfile measurements above retain their original commit scope and do not establish current release acceptance.
 
 Build dependencies in the builder stage: `build-essential`, `pkg-config`, `clang` +
 `libclang-dev`. Put an existing `library.db` in the `audiolib-data` volume
