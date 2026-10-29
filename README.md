@@ -47,7 +47,7 @@ Prebuilt packages are published on [GitHub Releases](https://github.com/Freedrag
 | Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Load and recreate the container |
 | Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Load and recreate the container |
 
-Windows server and standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). Docker images are supplied as offline archives; verify SHA256 and use `docker load`. See [Linux and Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
+From 0.8.5 (the first included version) Releases provide a prebuilt Windows x64 server ZIP (`AudioLibServer-<tag>-win-x64.zip`); 0.8.4 and earlier have none, and building from source remains available. See [Windows server release](doc/Rust_Windows_Server_Release.md). Standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). Docker images are supplied as offline archives; verify SHA256 and use `docker load`. See [Linux and Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
 
 ### Windows client
 
@@ -139,7 +139,7 @@ pwsh ./tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit $releaseCommit
 
 Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
-Platforms without a prebuilt standalone server package (Windows, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official macOS arm64 and Linux x64 server packages provide in-app updates. Windows and standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
+Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official macOS arm64 and Linux x64 server packages provide in-app updates. Windows and standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
 ```sh
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"

@@ -23,7 +23,7 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
    `程序 0.4.0 | API /api/v1/ | schema 5 | 快照兼容 3..=5`
 
 6. 发布产物附 SHA256：各平台打包器生成 `<archive>.sha256`，本机发布步骤把它连同包上传为 Release 资产，并写入发布说明正文。
-   从 0.8.4 起，每个 Release 精确发布六个归档及各自的 `.sha256`，共十二个资产：Windows x64 客户端、Mac arm64 客户端、Mac arm64 服务端、Linux x64 服务端，以及 Docker linux/amd64、linux/arm64 离线镜像。文件名分别为 `AudioLibExplorer-<tag>-win-x64-portable.zip`、`AudioLibExplorer-<tag>-macos-arm64.zip`、`AudioLibServer-<tag>-macos-arm64.tar.gz`、`AudioLibServer-<tag>-linux-x64.tar.gz`、`AudioLibServer-<tag>-docker-linux-amd64.tar.gz`、`AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。0.8.3 保留三个包、六个资产；0.8.2 及更早版本保持两个包、四个资产。Mac 客户端手动更新，Docker 导入镜像并重建容器；Windows 客户端及 Mac arm64、Linux x64 原生服务端保留程序内更新。Windows 和独立 Linux arm64 服务端包不发布。
+   从 0.8.4 起，每个 Release 精确发布六个归档及各自的 `.sha256`，共十二个资产：Windows x64 客户端、Mac arm64 客户端、Mac arm64 服务端、Linux x64 服务端，以及 Docker linux/amd64、linux/arm64 离线镜像。文件名分别为 `AudioLibExplorer-<tag>-win-x64-portable.zip`、`AudioLibExplorer-<tag>-macos-arm64.zip`、`AudioLibServer-<tag>-macos-arm64.tar.gz`、`AudioLibServer-<tag>-linux-x64.tar.gz`、`AudioLibServer-<tag>-docker-linux-amd64.tar.gz`、`AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。0.8.3 保留三个包、六个资产；0.8.2 及更早版本保持两个包、四个资产。Mac 客户端手动更新，Docker 导入镜像并重建容器；Windows 客户端及 Mac arm64、Linux x64 原生服务端保留程序内更新。从 0.8.5（首个纳入版本）起增加 Windows x64 服务端 `AudioLibServer-<tag>-win-x64.zip`，共七个归档、十四个资产（门槛常量见 `tools/verify-release-assets.ps1` 的 `$WindowsServerFirstVersion`）；0.8.4 及更早版本保持原资产集合，源码构建仍可用。详见 [Windows 服务端发布](Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。
 
 规则 1 到 5 由 `tools/check-release.ps1` 检查，失败时列出全部错误并以非零退出。
 
