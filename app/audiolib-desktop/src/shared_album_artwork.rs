@@ -4,6 +4,9 @@ use super::*;
 use crate::directory_artwork_choices::Choice;
 use audiolib_remote::ArtworkReply;
 
+/// Busy replies retried after the first. Four cover reads at most.
+const ARTWORK_BUSY_RETRIES: u32 = 3;
+
 #[cfg(test)]
 #[path = "shared_album_artwork_migration_tests.rs"]
 mod migration_tests;
@@ -425,6 +428,22 @@ impl Controller {
         }
     }
 
+    /// Artwork-worker sleep. `job.cancel` and [`Self::artwork_current`] both end it,
+    /// so a replaced selection does not wait out `Retry-After` or block the UI thread.
+    fn wait_artwork_retry(&self, job: &ArtworkJob, delay: Duration) -> bool {
+        let deadline = Instant::now() + delay;
+        loop {
+            if job.cancel.load(Ordering::Acquire) || !self.artwork_current(job) {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return !job.cancel.load(Ordering::Acquire) && self.artwork_current(job);
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(20)));
+        }
+    }
+
     pub(super) fn load_artwork(&self, job: &ArtworkJob) -> Option<image::RgbaImage> {
         if !self.artwork_current(job) {
             return None;
@@ -507,39 +526,66 @@ impl Controller {
                 }
                 None => job.folder.path.clone(),
             };
-            match client.album_artwork_in_directory_for_snapshot(
-                &state,
-                &capabilities,
-                &provider.album_namespace(),
-                album.id,
-                job.folder.folder_id,
-                &expected_directory,
-                &ids,
-                Some(512),
-                etag.as_deref(),
-                &job.cancel,
-            ) {
-                Ok(ArtworkReply::NotModified) => cached,
-                Ok(ArtworkReply::Data { bytes, etag, .. }) => {
+            let mut busy_retries = 0u32;
+            let namespace = provider.album_namespace();
+            let reply = loop {
+                // The artwork worker calls this. Sleeping here does not hold the UI thread.
+                if job.cancel.load(Ordering::Acquire) || !self.artwork_current(job) {
+                    return None;
+                }
+                match client.album_artwork_in_directory_for_snapshot(
+                    &state,
+                    &capabilities,
+                    &namespace,
+                    album.id,
+                    job.folder.folder_id,
+                    &expected_directory,
+                    &ids,
+                    Some(512),
+                    etag.as_deref(),
+                    &job.cancel,
+                ) {
+                    Ok(reply) => break reply,
+                    // Status and error_code classify Busy. The message text is not consulted.
+                    // 401, LibraryChanged and Protocol fall through and are not retried.
+                    Err(audiolib_remote::RemoteError::Busy { retry_after, .. }) => {
+                        if busy_retries >= ARTWORK_BUSY_RETRIES {
+                            return cached;
+                        }
+                        busy_retries += 1;
+                        let delay = audiolib_remote::cover_busy_delay(retry_after);
+                        if !self.wait_artwork_retry(job, delay) {
+                            return None;
+                        }
+                    }
+                    Err(audiolib_remote::RemoteError::LibraryChanged(_)) => return None,
+                    Err(audiolib_remote::RemoteError::Cancelled) => return None,
+                    Err(audiolib_remote::RemoteError::RootOffline { .. }) => return cached,
+                    Err(error) => {
+                        if self.artwork_current(job) {
+                            *job.notice.lock().unwrap() = Some(format!(
+                                "{}: {error}",
+                                cn_or(
+                                    self.chinese.load(Ordering::Acquire),
+                                    "目录封面加载失败，请同步资料库或更新服务器",
+                                    "Directory cover could not load; sync the library or update the server"
+                                )
+                            ));
+                        }
+                        return cached;
+                    }
+                }
+            };
+            match reply {
+                ArtworkReply::NotModified => cached,
+                ArtworkReply::Data { bytes, etag, .. } => {
                     let pixels = crate::artwork::decode_thumbnail(&bytes, 512)?;
                     self.publish_album_cache(job, &image_path, &pixels, etag.as_deref());
                     Some(pixels)
                 }
-                Ok(ArtworkReply::Missing) => {
+                ArtworkReply::Missing => {
                     self.remove_album_cache(job, &image_path);
                     None
-                }
-                Err(audiolib_remote::RemoteError::LibraryChanged(_)) => None,
-                Err(error) => {
-                    *job.notice.lock().unwrap() = Some(format!(
-                        "{}: {error}",
-                        cn_or(
-                            self.chinese.load(Ordering::Acquire),
-                            "目录封面加载失败，请同步资料库或更新服务器",
-                            "Directory cover could not load; sync the library or update the server"
-                        )
-                    ));
-                    cached
                 }
             }
         } else {

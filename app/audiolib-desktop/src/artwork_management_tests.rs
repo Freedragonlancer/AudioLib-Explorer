@@ -2,6 +2,8 @@
 //! Cover preferences and manual management use the actual controller and owned files.
 use super::*;
 
+#[path = "artwork_busy_tests.rs"]
+mod busy;
 #[path = "artwork_contract_review_tests.rs"]
 mod contracts;
 #[path = "artwork_folder_context_tests.rs"]
