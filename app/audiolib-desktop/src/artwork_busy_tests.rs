@@ -365,7 +365,7 @@ fn child_remote_cover_busy() {
             job.notice.lock().unwrap().is_none(),
             "exhausted BUSY must not ask the user to sync"
         );
-        assert_eq!(script.hits.lock().unwrap().len(), 3);
+        assert_eq!(script.hits.lock().unwrap().len(), 4);
         assert!(
             cached_path.is_file(),
             "exhausted BUSY must not delete the cached cover"

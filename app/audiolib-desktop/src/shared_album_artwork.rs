@@ -4,8 +4,8 @@ use super::*;
 use crate::directory_artwork_choices::Choice;
 use audiolib_remote::ArtworkReply;
 
-/// Busy replies retried after the first. Three cover reads at most.
-const ARTWORK_BUSY_RETRIES: u32 = 2;
+/// Busy replies retried after the first. Four cover reads at most.
+const ARTWORK_BUSY_RETRIES: u32 = 3;
 
 #[cfg(test)]
 #[path = "shared_album_artwork_migration_tests.rs"]

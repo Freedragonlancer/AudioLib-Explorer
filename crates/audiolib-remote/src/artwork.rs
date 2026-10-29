@@ -4,12 +4,13 @@
 //! The server keeps two decode slots. When they stay full it queues for about 500ms,
 //! then answers `503 BUSY` with `Retry-After: 1` (seconds). This client never opens a
 //! third cover request. Busy backoff itself lives with the desktop worker, which can
-//! see the current job; [`cover_busy_delay`] is that wait. HTTP 405 is logged and still
-//! means no cover. HTTP 401, library-identity conflicts and protocol errors are not
-//! retried here.
+//! see the current job; [`cover_busy_delay`] is that wait. HTTP 405 is logged once per
+//! server and still means no cover. HTTP 401, library-identity conflicts and protocol
+//! errors are not retried here.
 use crate::{Capabilities, RemoteClient, RemoteError, Result};
+use std::collections::HashSet;
 use std::sync::{
-    Condvar, Mutex,
+    Condvar, LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -175,6 +176,15 @@ static ARTWORK_SLOTS: ArtworkSlots = ArtworkSlots::new(ARTWORK_CLIENT_SLOTS);
 
 fn acquire_artwork_slot(cancel: &AtomicBool) -> Result<ArtworkPermit<'static>> {
     ARTWORK_SLOTS.acquire(cancel)
+}
+
+/// Servers that already logged HTTP 405 for artwork. One warning per API base URL.
+static ARTWORK_405_WARNED: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// `true` the first time `server` is seen, so the 405 warning is logged once.
+fn claim_artwork_method_not_allowed(server: &str) -> bool {
+    ARTWORK_405_WARNED.lock().unwrap().insert(server.to_owned())
 }
 
 /// Wait before another cover read after [`RemoteError::Busy`].
@@ -622,10 +632,13 @@ impl RemoteClient {
                 .map_err(|error| RemoteError::from_transport(error, &url))?;
                 let status = response.status().as_u16();
                 if status == 405 {
-                    tracing::warn!(
-                        %path,
-                        "artwork endpoint returned HTTP 405 Method Not Allowed; showing no cover"
-                    );
+                    if claim_artwork_method_not_allowed(&client.api) {
+                        tracing::warn!(
+                            server = %client.api,
+                            %path,
+                            "artwork endpoint returned HTTP 405 Method Not Allowed; showing no cover"
+                        );
+                    }
                     return Ok(ArtworkReply::Missing);
                 }
                 if status == 404 {
@@ -1286,7 +1299,8 @@ mod tests {
     fn method_not_allowed_is_missing_and_logs_a_warning() {
         use std::sync::Once;
         use tracing::field::Visit;
-        static SAW_405: AtomicBool = AtomicBool::new(false);
+        static WARN_405: AtomicUsize = AtomicUsize::new(0);
+        static EXPECTED_SERVER: Mutex<String> = Mutex::new(String::new());
         static INSTALL: Once = Once::new();
         struct Probe;
         impl tracing::Subscriber for Probe {
@@ -1302,43 +1316,63 @@ mod tests {
                 if *event.metadata().level() != tracing::Level::WARN {
                     return;
                 }
-                let mut hit = false;
-                event.record(&mut ProbeVisit(&mut hit));
-                if hit {
-                    SAW_405.store(true, Ordering::SeqCst);
+                let expected = EXPECTED_SERVER.lock().unwrap().clone();
+                if expected.is_empty() {
+                    return;
+                }
+                let mut server = String::new();
+                event.record(&mut ServerVisit(&mut server));
+                if server == expected {
+                    WARN_405.fetch_add(1, Ordering::SeqCst);
                 }
             }
             fn enter(&self, _: &tracing::span::Id) {}
             fn exit(&self, _: &tracing::span::Id) {}
         }
-        struct ProbeVisit<'a>(&'a mut bool);
-        impl Visit for ProbeVisit<'_> {
+        struct ServerVisit<'a>(&'a mut String);
+        impl Visit for ServerVisit<'_> {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                let text = format!("{value:?}");
-                if field.name() == "path" && text.contains("405405") {
-                    *self.0 = true;
+                if field.name() == "server" {
+                    let text = format!("{value:?}");
+                    *self.0 = text.trim_matches('"').to_owned();
                 }
             }
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                if field.name() == "path" && value.contains("405405") {
-                    *self.0 = true;
+                if field.name() == "server" {
+                    *self.0 = value.to_owned();
                 }
             }
         }
         INSTALL.call_once(|| {
             let _ = tracing::subscriber::set_global_default(Probe);
         });
-        SAW_405.store(false, Ordering::SeqCst);
+        WARN_405.store(0, Ordering::SeqCst);
         let server = TestServer::start(|_| TestResponse::json(405, "{}"));
-        let reply = RemoteClient::new(&server.url, "token")
-            .unwrap()
-            .artwork(405_405, None, None, &AtomicBool::new(false))
-            .unwrap();
-        assert_eq!(reply, ArtworkReply::Missing);
-        assert!(
-            SAW_405.load(Ordering::SeqCst),
-            "HTTP 405 must log a warning and still report no cover"
+        let client = RemoteClient::new(&server.url, "token").unwrap();
+        *EXPECTED_SERVER.lock().unwrap() = client.api_url().to_owned();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            client.artwork(405_405, None, None, &cancel).unwrap(),
+            ArtworkReply::Missing
         );
+        assert_eq!(
+            client.artwork(405_406, None, None, &cancel).unwrap(),
+            ArtworkReply::Missing
+        );
+        assert_eq!(
+            WARN_405.load(Ordering::SeqCst),
+            1,
+            "two HTTP 405 replies from the same server log one warning"
+        );
+        assert!(claim_artwork_method_not_allowed(
+            "http://artwork-405-a.invalid/api/v1"
+        ));
+        assert!(!claim_artwork_method_not_allowed(
+            "http://artwork-405-a.invalid/api/v1"
+        ));
+        assert!(claim_artwork_method_not_allowed(
+            "http://artwork-405-b.invalid/api/v1"
+        ));
     }
 
     #[test]
