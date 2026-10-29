@@ -902,8 +902,13 @@ impl Controller {
         playback: PlaybackConfig,
         remote: Option<RemoteStartup>,
     ) -> Arc<Self> {
+        let playback = platform_playback_config(playback);
         let chinese = config.language == "cn";
         ui.set_chinese(chinese);
+        ui.set_native_macos(cfg!(target_os = "macos"));
+        if cfg!(target_os = "macos") {
+            ui.set_audio_backend_names(ModelRc::new(VecModel::from(vec!["CoreAudio".into()])));
+        }
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         ui.set_artwork_enabled(config.show_album_artwork);
@@ -936,7 +941,7 @@ impl Controller {
         ui.set_buffer_frames(playback.buffer_frames.to_string().into());
         ui.set_pair_index(playback.output_pair.to_string().into());
         ui.set_source_pair(playback.source_pair.to_string().into());
-        ui.set_asio_enabled(cfg!(feature = "asio"));
+        ui.set_asio_enabled(cfg!(all(windows, feature = "asio")));
         let controller = Arc::new(Self {
             ui: ui.as_weak(),
             sqlite: RwLock::new(sqlite),
@@ -5756,11 +5761,7 @@ impl Controller {
         }
         let c = self.clone();
         std::thread::spawn(move || {
-            let backend = if backend == 1 {
-                AudioBackend::Asio
-            } else {
-                AudioBackend::Wasapi
-            };
+            let backend = backend_for_index(backend);
             let result = audiolib_audio::list_devices(backend);
             if c.device_generation.load(Ordering::Acquire) != generation {
                 return;
@@ -5899,11 +5900,7 @@ impl Controller {
                 return;
             }
         };
-        let backend = if ui.get_backend_index() == 1 {
-            AudioBackend::Asio
-        } else {
-            AudioBackend::Wasapi
-        };
+        let backend = backend_for_index(ui.get_backend_index());
         let devices = self.devices.lock().unwrap();
         let device = devices.get(ui.get_device_index() as usize);
         if device.is_none() {
@@ -6233,7 +6230,35 @@ impl Controller {
             {
                 c.status(error.to_string());
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            {
+                let result = if select_file {
+                    audiolib_windows::reveal_path(Path::new(&path))
+                } else {
+                    Path::new(&path)
+                        .canonicalize()
+                        .and_then(|path| {
+                            std::process::Command::new("/usr/bin/open")
+                                .arg(path)
+                                .status()
+                        })
+                        .map_err(audiolib_core::Error::from)
+                        .and_then(|status| {
+                            if status.success() {
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::other(format!(
+                                    "Finder folder open failed ({status})"
+                                ))
+                                .into())
+                            }
+                        })
+                };
+                if let Err(error) = result {
+                    c.status(error.to_string());
+                }
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
             {
                 let _ = (path, select_file);
                 c.status("Reveal in Explorer requires Windows".into());
@@ -7056,10 +7081,42 @@ fn playback_wave_file(status: &audiolib_audio::PlaybackStatus) -> Option<AudioFi
     })
 }
 
+/// Adapt imported Windows ASIO preferences to the default CoreAudio host on macOS.
+/// The persisted backend spelling stays compatible with existing settings files.
+pub(crate) fn platform_playback_config(playback: PlaybackConfig) -> PlaybackConfig {
+    playback_config_for_platform(playback, cfg!(target_os = "macos"))
+}
+
+fn playback_config_for_platform(mut playback: PlaybackConfig, macos: bool) -> PlaybackConfig {
+    if macos && playback.backend == AudioBackend::Asio {
+        playback.backend = AudioBackend::Wasapi;
+        playback.device_id = None;
+        playback.buffer_frames = 0;
+        playback.rate_policy = RatePolicy::DeviceDefault;
+    }
+    playback
+}
+
+fn backend_for_index(index: i32) -> AudioBackend {
+    if index == 1 && !cfg!(target_os = "macos") {
+        AudioBackend::Asio
+    } else {
+        AudioBackend::Wasapi
+    }
+}
+
+fn default_backend_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "CoreAudio"
+    } else {
+        "WASAPI"
+    }
+}
+
 fn output_summary(status: &audiolib_audio::PlaybackStatus) -> String {
     let output = match status.active_backend {
         Some(AudioBackend::Asio) => "ASIO",
-        Some(AudioBackend::Wasapi) => "WASAPI",
+        Some(AudioBackend::Wasapi) => default_backend_name(),
         None => "Output idle",
     };
     let pair = |value: Option<u16>| {
@@ -8180,6 +8237,9 @@ mod tests {
     #[test]
     #[ignore = "helper invoked by the close-grace regression in an isolated process"]
     fn child_close_finishes_within_remote_grace() {
+        // This child polls close completion without running a native event loop.
+        // Keep UI notifications unavailable, as in the other close-drain fixtures.
+        let _rejected = init_close_without_post_delivery();
         let root = std::env::temp_dir().join(format!(
             "audiolib-desktop-close-grace-{}-{}",
             std::process::id(),
@@ -9644,12 +9704,62 @@ mod tests {
         };
         let text = output_summary(&fallback);
         assert!(
-            text.contains("WASAPI")
+            text.contains(default_backend_name())
                 && text.contains("src 3/4 → out 1/2")
                 && text.contains("resampling")
         );
         let idle = output_summary(&audiolib_audio::PlaybackStatus::default());
         assert!(idle.contains("Output idle") && idle.contains("src — → out —"));
+    }
+
+    #[test]
+    fn imported_asio_preferences_keep_user_controls_when_adapted_to_coreaudio() {
+        let playback = PlaybackConfig {
+            backend: AudioBackend::Asio,
+            device_id: Some("windows-driver".into()),
+            buffer_frames: 128,
+            rate_policy: RatePolicy::Native,
+            volume: 0.35,
+            output_pair: 2,
+            source_pair: 1,
+            audition: AuditionSettings {
+                pitch_semitones: 3.0,
+                rate: 0.75,
+                mono: true,
+                loop_enabled: true,
+            },
+        };
+        let expected = serde_json::to_value(&playback).unwrap();
+        assert_eq!(
+            serde_json::to_value(playback_config_for_platform(playback.clone(), false)).unwrap(),
+            expected
+        );
+        let adapted = playback_config_for_platform(playback.clone(), true);
+        assert_eq!(adapted.backend, AudioBackend::Wasapi);
+        assert_eq!(adapted.device_id, None);
+        assert_eq!(adapted.buffer_frames, 0);
+        assert_eq!(adapted.rate_policy, RatePolicy::DeviceDefault);
+        assert_eq!(adapted.volume, playback.volume);
+        assert_eq!(adapted.output_pair, playback.output_pair);
+        assert_eq!(adapted.source_pair, playback.source_pair);
+        assert_eq!(
+            serde_json::to_value(adapted.audition).unwrap(),
+            serde_json::to_value(playback.audition).unwrap()
+        );
+    }
+
+    #[test]
+    fn macos_default_host_preferences_are_not_rewritten() {
+        let playback = PlaybackConfig {
+            device_id: Some("coreaudio-device".into()),
+            buffer_frames: 256,
+            volume: 0.4,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(playback_config_for_platform(playback.clone(), true)).unwrap(),
+            serde_json::to_value(playback).unwrap()
+        );
     }
 
     #[test]

@@ -398,6 +398,93 @@ component PaneDivider inherits Rectangle {
     }
 }
 
+// Section headers stay reachable while their lists are collapsed.
+component SidebarSectionHeader inherits Rectangle {
+    in property <string> label;
+    in property <string> action-label;
+    in property <string> suffix;
+    in property <bool> expanded: true;
+    in property <bool> enabled: true;
+    callback toggled();
+    accessible-role: button;
+    accessible-label: root.action-label;
+    accessible-checkable: true;
+    accessible-checked: root.expanded;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.toggled(); } }
+    forward-focus: header-focus;
+    border-radius: 4px * Theme.ui-scale;
+    border-width: header-focus.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    background: header-hit.has-hover ? Theme.hover : transparent;
+    HorizontalLayout { spacing: 5px * Theme.ui-scale;
+        Image { width: 10px * Theme.ui-scale; height: 10px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+            source: @image-url("icons/chevron-down.svg"); colorize: Theme.dim;
+            transform-rotation: root.expanded ? 0deg : -90deg; accessible-role: none;
+        }
+        Label { horizontal-stretch: 1; text: root.label; font-size: Theme.font(10); }
+        Label { text: root.suffix; font-size: Theme.font(9); color: Theme.accent; }
+    }
+    header-focus := FocusScope {
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.toggled(); return accept; }
+            if event.text == Key.LeftArrow && root.expanded { root.toggled(); return accept; }
+            if event.text == Key.RightArrow && !root.expanded { root.toggled(); return accept; }
+            reject
+        }
+    }
+    header-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { header-focus.focus(); root.toggled(); } }
+}
+
+// Use absolute coordinates so the horizontal divider can move during its drag.
+component SidebarSectionDivider inherits Rectangle {
+    in property <length> pane-height;
+    in property <string> label;
+    in property <string> help;
+    in property <bool> enabled: true;
+    callback resized(length);
+    callback finished();
+    private property <length> pressed-pointer-y;
+    private property <length> pressed-pane-height;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    forward-focus: divider-focus;
+    Rectangle { x: 0px; width: parent.width; y: (parent.height - 1px) / 2; height: 1px;
+        background: drag-area.pressed || divider-focus.has-focus ? Theme.accent : (drag-area.has-hover ? Theme.dim : Theme.border);
+    }
+    Rectangle { x: (parent.width - self.width) / 2; width: 24px * Theme.ui-scale; y: (parent.height - self.height) / 2; height: 3px * Theme.ui-scale; border-radius: 1.5px * Theme.ui-scale;
+        background: drag-area.pressed || divider-focus.has-focus ? Theme.accent : Theme.dim;
+    }
+    Tooltip { text: @markdown("\{root.help}"); }
+    divider-focus := FocusScope {
+        enabled: root.enabled; focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                root.resized(root.pane-height + (event.text == Key.UpArrow ? -16px * Theme.ui-scale : 16px * Theme.ui-scale));
+                root.finished();
+                return accept;
+            }
+            reject
+        }
+    }
+    drag-area := TouchArea {
+        enabled: root.enabled; mouse-cursor: ns-resize;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                divider-focus.focus();
+                root.pressed-pointer-y = self.absolute-position.y + self.mouse-y;
+                root.pressed-pane-height = root.pane-height;
+            }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up { root.finished(); }
+        }
+        moved => {
+            if self.pressed { root.resized(root.pressed-pane-height + self.absolute-position.y + self.mouse-y - root.pressed-pointer-y); }
+        }
+    }
+}
+
 // Sortable column actions keep the same keyboard behavior as ordinary actions.
 component TableHeader inherits Rectangle {
     in property <string> label;
@@ -923,13 +1010,16 @@ export component AppWindow inherits Window {
     in property <bool> playback-smooth: false;
     in property <string> playback-clock: "";
     in property <float> confirmed-playback-rate: 1;
-    in property <string> output-summary: "WASAPI";
+    in property <bool> native-macos: false;
+    in property <[string]> audio-backend-names: ["WASAPI", "ASIO"];
+    in property <string> output-summary: root.native-macos ? "CoreAudio" : "WASAPI";
     in-out property <float> volume: 0.8;
 
     in-out property <bool> settings-visible: false;
     in-out property <bool> about-visible: false;
     in-out property <bool> update-visible: false;
     in property <bool> update-enabled: true;
+    in property <bool> update-supported: true;
     in property <bool> update-busy: false;
     in property <bool> update-available: false;
     in property <string> update-version: "";
@@ -1352,6 +1442,10 @@ export component AppWindow inherits Window {
     // Preferred widths survive temporary window constraints and inspector hiding.
     in-out property <length> sidebar-preferred-width: round(198 * Theme.ui-scale) * 1px;
     in-out property <length> inspector-preferred-width: round(320 * Theme.ui-scale) * 1px;
+    // The saved ratio survives collapsing a section and temporary window constraints.
+    in-out property <bool> folders-section-expanded: true;
+    in-out property <bool> libraries-section-expanded: true;
+    in-out property <float> folders-section-ratio: 0.55;
     private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - (root.inspector-visible ? 24px * Theme.ui-scale : 12px * Theme.ui-scale);
     out property <length> sidebar-width: clamp(root.sidebar-preferred-width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? 240px * Theme.ui-scale : 0px)));
     out property <length> inspector-width: clamp(root.inspector-preferred-width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width));
@@ -1672,7 +1766,7 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
             MenuSeparator { }
             MenuItem { title: root.chinese ? "复制所选文件路径" : "Copy selected file path"; enabled: root.menu-ready && root.has-selection; activated => { root.copy-text(root.selected-path); } }
-            MenuItem { title: (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer") + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 2); } }
+            MenuItem { title: (root.native-macos ? (root.chinese ? "在访达中显示" : "Reveal in Finder") : (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer")) + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 2); } }
             MenuItem { title: (root.chinese ? "修复所选文件引用…" : "Repair selected file reference…") + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 20); } }
             MenuSeparator { }
             MenuItem { title: (root.chinese ? "移除所选记录（保留 WAV）…" : "Remove selected record (keep WAV)…") + root.removal-suffix; enabled: root.menu-ready && root.has-selection && root.removal-allowed; activated => { root.file-action-requested(root.selected-id, 21); } }
@@ -1919,58 +2013,98 @@ export component AppWindow inherits Window {
                         }
                     }
                     if root.library-sidebar-page == 1 && root.favorites-category == 0: Rectangle { vertical-stretch: 1; }
-                    if root.library-sidebar-page == 0: HorizontalLayout { height: (root.short-layout ? 20px : 24px) * Theme.ui-scale;
-                        Label { horizontal-stretch: 1; text: root.chinese ? "文件夹" : "FOLDERS"; font-size: Theme.font(10); }
-                        Label { text: "WAV / BWF"; font-size: Theme.font(9); color: Theme.accent; }
-                    }
-                    // Keep two directory rows usable while the album list shares a short sidebar.
-                    folder-focus := FocusScope { visible: root.library-sidebar-page == 0; min-height: root.library-sidebar-page == 0 ? 68px * Theme.ui-scale : 0px; max-height: root.library-sidebar-page == 0 ? 100000px : 0px; vertical-stretch: root.library-sidebar-page == 0 ? 1 : 0; enabled: !root.background-blocked && root.library-sidebar-page == 0;
-                        key-pressed(event) => {
-                            let index = clamp(root.selected-folder, 0, root.folders.length - 1);
-                            if root.folders.length == 0 { return reject; }
-                            if event.text == Key.DownArrow || event.text == Key.UpArrow {
-                                root.folder-requested(clamp(index + (event.text == Key.DownArrow ? 1 : -1), 0, root.folders.length - 1)); return accept;
-                            }
-                            if event.text == Key.LeftArrow {
-                                if root.folders[index].expanded { root.folder-toggle-requested(index); } return accept;
-                            }
-                            if event.text == Key.RightArrow {
-                                if root.folders[index].has-children && !root.folders[index].expanded { root.folder-toggle-requested(index); }
-                                else if root.folders[index].expanded && index + 1 < root.folders.length { root.folder-requested(index + 1); } return accept;
-                            }
-                            if event.text == Key.Return || event.text == " " { root.folder-requested(index); return accept; }
-                            if event.text == Key.Home { root.folder-requested(0); return accept; }
-                            if event.text == Key.End { root.folder-requested(root.folders.length - 1); return accept; }
-                            reject
+                    directory-sections := Rectangle {
+                        visible: root.library-sidebar-page == 0;
+                        vertical-stretch: root.library-sidebar-page == 0 ? 1 : 0;
+                        min-height: root.library-sidebar-page == 0 ? self.fixed-height + (root.folders-section-expanded ? 68px * Theme.ui-scale : 0px) + (self.libraries-expanded ? 60px * Theme.ui-scale : 0px) : 0px;
+                        max-height: root.library-sidebar-page == 0 ? 100000px : 0px;
+                        private property <bool> has-libraries: root.albums.length > 0;
+                        private property <bool> libraries-expanded: self.has-libraries && root.libraries-section-expanded;
+                        private property <bool> both-expanded: root.folders-section-expanded && self.libraries-expanded;
+                        private property <length> header-height: 24px * Theme.ui-scale;
+                        private property <length> list-gap: 4px * Theme.ui-scale;
+                        private property <length> divider-height: self.both-expanded ? 12px * Theme.ui-scale : (self.has-libraries ? 8px * Theme.ui-scale : 0px);
+                        private property <length> fixed-height: self.header-height * (self.has-libraries ? 2 : 1) + (root.folders-section-expanded ? self.list-gap : 0px) + (self.libraries-expanded ? self.list-gap : 0px) + self.divider-height;
+                        private property <length> list-budget: max(0px, self.height - self.fixed-height);
+                        private property <length> folder-height: !root.folders-section-expanded ? 0px : !self.libraries-expanded ? self.list-budget : clamp(self.list-budget * clamp(root.folders-section-ratio, 0.1, 0.9), 68px * Theme.ui-scale, max(68px * Theme.ui-scale, self.list-budget - 60px * Theme.ui-scale));
+                        SidebarSectionHeader {
+                            x: 0px; y: 0px;
+                            width: parent.width; height: directory-sections.header-height;
+                            label: root.chinese ? "文件夹" : "FOLDERS"; suffix: "WAV / BWF";
+                            action-label: root.chinese ? "文件夹分区" : "Folders section";
+                            expanded: root.folders-section-expanded; enabled: !root.background-blocked;
+                            toggled => { root.folders-section-expanded = !root.folders-section-expanded; root.pane-layout-changed(); }
                         }
-                    folder-list := ListView { viewport-width: self.visible-width; accessible-role: list; accessible-label: root.chinese ? "音效文件夹" : "Sound folders";
-                        for folder[index] in root.folders: Rectangle { height: 34px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale; accessible-role: list-item; accessible-label: (root.chinese ? "文件夹：" : "Folder: ") + folder.name;
-                            border-width: folder-focus.has-focus && root.selected-folder == index ? 1px : 0px; border-color: Theme.accent;
-                            // Fluent overlays a fixed 14px scrollbar (not affected by Theme.ui-scale); the 18px * ui-scale padding reserves its track plus a gap and never shrinks below that at scale >= 1.0.
-                            background: root.selected-folder == index ? Theme.selected : (folder-hit.has-hover ? Theme.raised : transparent);
-                            HorizontalLayout { spacing: 4px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale;
-                                // Keep a readable name and count even in a narrow, deep folder tree.
-                                folder-indent := Rectangle { width: clamp(folder.depth * 10px * Theme.ui-scale, 0px, max(0px, parent.width - max(28px * Theme.ui-scale, folder-count.preferred-width) - 18px * Theme.ui-scale - 17px * Theme.ui-scale - 12px * Theme.ui-scale - 40px * Theme.ui-scale)); }
-                                Rectangle { width: 17px * Theme.ui-scale;
-                                    Text { text: folder.has-children ? (folder.expanded ? "−" : "+") : "·"; color: Theme.dim; vertical-alignment: center; horizontal-alignment: center; }
-                                    TouchArea { mouse-cursor: pointer; clicked => { folder-focus.focus(); root.folder-toggle-requested(index); } }
+                        // Keep two directory rows usable while the album list shares a short sidebar.
+                        folder-focus := FocusScope {
+                            x: 0px; y: directory-sections.header-height + (root.folders-section-expanded ? directory-sections.list-gap : 0px);
+                            width: parent.width; height: directory-sections.folder-height;
+                            visible: root.folders-section-expanded; enabled: !root.background-blocked && root.library-sidebar-page == 0 && root.folders-section-expanded;
+                            key-pressed(event) => {
+                                let index = clamp(root.selected-folder, 0, root.folders.length - 1);
+                                if root.folders.length == 0 { return reject; }
+                                if event.text == Key.DownArrow || event.text == Key.UpArrow {
+                                    root.folder-requested(clamp(index + (event.text == Key.DownArrow ? 1 : -1), 0, root.folders.length - 1)); return accept;
                                 }
-                                Text { horizontal-stretch: 1; min-width: 0px; text: folder.name; color: Theme.ink; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
-                                folder-count := Label { min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: folder.count; horizontal-alignment: right; }
+                                if event.text == Key.LeftArrow {
+                                    if root.folders[index].expanded { root.folder-toggle-requested(index); } return accept;
+                                }
+                                if event.text == Key.RightArrow {
+                                    if root.folders[index].has-children && !root.folders[index].expanded { root.folder-toggle-requested(index); }
+                                    else if root.folders[index].expanded && index + 1 < root.folders.length { root.folder-requested(index + 1); } return accept;
+                                }
+                                if event.text == Key.Return || event.text == " " { root.folder-requested(index); return accept; }
+                                if event.text == Key.Home { root.folder-requested(0); return accept; }
+                                if event.text == Key.End { root.folder-requested(root.folders.length - 1); return accept; }
+                                reject
                             }
-                            folder-hit := TouchArea { x: folder-indent.width + 22px * Theme.ui-scale; width: max(0px, parent.width - 18px * Theme.ui-scale - self.x); mouse-cursor: pointer;
-                                clicked => { folder-focus.focus(); root.folder-requested(index); }
-                                pointer-event(event) => { if event.button == PointerEventButton.right && event.kind == PointerEventKind.down { root.show-folder-menu(folder, {x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y}); } }
+                        folder-list := ListView { viewport-width: self.visible-width; accessible-role: list; accessible-label: root.chinese ? "音效文件夹" : "Sound folders";
+                            for folder[index] in root.folders: Rectangle { height: 34px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale; accessible-role: list-item; accessible-label: (root.chinese ? "文件夹：" : "Folder: ") + folder.name;
+                                border-width: folder-focus.has-focus && root.selected-folder == index ? 1px : 0px; border-color: Theme.accent;
+                                // Fluent overlays a fixed 14px scrollbar (not affected by Theme.ui-scale); the 18px * ui-scale padding reserves its track plus a gap and never shrinks below that at scale >= 1.0.
+                                background: root.selected-folder == index ? Theme.selected : (folder-hit.has-hover ? Theme.raised : transparent);
+                                HorizontalLayout { spacing: 4px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale;
+                                    // Keep a readable name and count even in a narrow, deep folder tree.
+                                    folder-indent := Rectangle { width: clamp(folder.depth * 10px * Theme.ui-scale, 0px, max(0px, parent.width - max(28px * Theme.ui-scale, folder-count.preferred-width) - 18px * Theme.ui-scale - 17px * Theme.ui-scale - 12px * Theme.ui-scale - 40px * Theme.ui-scale)); }
+                                    Rectangle { width: 17px * Theme.ui-scale;
+                                        Text { text: folder.has-children ? (folder.expanded ? "−" : "+") : "·"; color: Theme.dim; vertical-alignment: center; horizontal-alignment: center; }
+                                        TouchArea { mouse-cursor: pointer; clicked => { folder-focus.focus(); root.folder-toggle-requested(index); } }
+                                    }
+                                    Text { horizontal-stretch: 1; min-width: 0px; text: folder.name; color: Theme.ink; overflow: elide; vertical-alignment: center; font-size: Theme.font(11); }
+                                    folder-count := Label { min-width: 28px * Theme.ui-scale; horizontal-stretch: 0; text: folder.count; horizontal-alignment: right; }
+                                }
+                                folder-hit := TouchArea { x: folder-indent.width + 22px * Theme.ui-scale; width: max(0px, parent.width - 18px * Theme.ui-scale - self.x); mouse-cursor: pointer;
+                                    clicked => { folder-focus.focus(); root.folder-requested(index); }
+                                    pointer-event(event) => { if event.button == PointerEventButton.right && event.kind == PointerEventKind.down { root.show-folder-menu(folder, {x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y}); } }
+                                }
                             }
                         }
-                    }
-                    }
-                    // Library/album groups declared by the files themselves. Clicking one
-                    // filters the results; clicking the active one clears the filter.
-                    // Preserve two album rows; shrink the preferred block before starving folders.
-                    if root.library-sidebar-page == 0 && root.albums.length > 0: VerticalLayout { spacing: 2px * Theme.ui-scale; min-height: 86px * Theme.ui-scale; preferred-height: 190px * Theme.ui-scale; max-height: 190px * Theme.ui-scale; vertical-stretch: 1;
-                        Label { height: 24px * Theme.ui-scale; text: root.chinese ? "音效库" : "LIBRARIES"; font-size: Theme.font(10); }
-                        album-list := ListView { vertical-stretch: 1; viewport-width: self.visible-width; accessible-role: list;
+                        }
+                        if directory-sections.both-expanded: SidebarSectionDivider {
+                            width: parent.width; height: directory-sections.divider-height;
+                            y: folder-focus.y + folder-focus.height;
+                            pane-height: directory-sections.folder-height; enabled: !root.background-blocked;
+                            label: root.chinese ? "调整文件夹和音效库高度" : "Resize folder and library heights";
+                            help: root.chinese ? "拖动调整文件夹和音效库高度；上下方向键微调" : "Drag to resize folder and library heights; Up/Down keys adjust height";
+                            resized(height) => { root.folders-section-ratio = clamp(clamp(height, 68px * Theme.ui-scale, max(68px * Theme.ui-scale, directory-sections.list-budget - 60px * Theme.ui-scale)) / max(1px, directory-sections.list-budget), 0.1, 0.9); }
+                            finished => { root.pane-layout-changed(); }
+                        }
+                        // Library/album groups declared by the files themselves. Clicking one
+                        // filters the results; clicking the active one clears the filter.
+                        libraries-header := SidebarSectionHeader {
+                            visible: directory-sections.has-libraries;
+                            width: parent.width; height: directory-sections.has-libraries ? directory-sections.header-height : 0px;
+                            y: folder-focus.y + folder-focus.height + directory-sections.divider-height;
+                            label: root.chinese ? "音效库" : "LIBRARIES";
+                            action-label: root.chinese ? "音效库分区" : "Libraries section";
+                            expanded: root.libraries-section-expanded; enabled: !root.background-blocked && directory-sections.has-libraries;
+                            toggled => { root.libraries-section-expanded = !root.libraries-section-expanded; root.pane-layout-changed(); }
+                        }
+                        album-list := ListView {
+                            x: 0px; y: libraries-header.y + libraries-header.height + (directory-sections.libraries-expanded ? directory-sections.list-gap : 0px);
+                            width: parent.width; height: directory-sections.libraries-expanded ? directory-sections.list-budget - directory-sections.folder-height : 0px;
+                            visible: directory-sections.libraries-expanded;
+                            viewport-width: self.visible-width; accessible-role: list;
                             for album[index] in root.albums: Rectangle { height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
                                 background: !root.album-filter-unavailable && root.album-filter-id == album.id ? Theme.selected : (album-hit.has-hover ? Theme.raised : transparent);
                                 HorizontalLayout { spacing: 6px * Theme.ui-scale; padding-right: 18px * Theme.ui-scale; alignment: start;
@@ -2439,7 +2573,7 @@ export component AppWindow inherits Window {
                             }
                             if root.selected-source-tags != "": VerticalLayout { spacing: 4px * Theme.ui-scale;
                                 Label { height: 16px * Theme.ui-scale; text: root.chinese ? "提取的标签" : "EXTRACTED TAGS"; font-size: Theme.font(10); }
-                                SourceTags { height: root.short-layout ? 44px * Theme.ui-scale : 64px * Theme.ui-scale; label: root.chinese ? "提取的标签" : "Extracted tags"; text: root.selected-source-tags; displayed-id: root.selected-id; }
+                                source-tags := SourceTags { height: root.short-layout ? 44px * Theme.ui-scale : 64px * Theme.ui-scale; label: root.chinese ? "提取的标签" : "Extracted tags"; text: root.selected-source-tags; displayed-id: root.selected-id; }
                             }
                             Rectangle { height: 1px; background: Theme.border; }
                             HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
@@ -2549,7 +2683,7 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: (root.context-file.favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action(5); } }
             MenuSeparator { }
-            MenuItem { title: (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer") + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(2); } }
+            MenuItem { title: (root.native-macos ? (root.chinese ? "在访达中显示" : "Reveal in Finder") : (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer")) + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(2); } }
             MenuItem { title: root.chinese ? "复制完整路径" : "Copy full path"; activated => { root.copy-text(root.context-file.file-path); } }
             MenuItem { title: (root.chinese ? "修复文件引用…" : "Repair file reference…") + root.ro-suffix; enabled: !root.remote-mode; activated => { root.file-action(20); } }
             MenuItem { title: (root.chinese ? "从素材库移除…" : "Remove from library…") + root.removal-suffix; enabled: root.removal-allowed; activated => { root.file-action(21); } }
@@ -2725,7 +2859,7 @@ export component AppWindow inherits Window {
                 Label { text: root.chinese ? "选择驱动、设备与监听声道对。更改后重新启动输出。" : "Choose the driver, device and listening pair. Changes restart output."; }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                     Label { width: 108px * Theme.ui-scale; text: root.chinese ? "驱动" : "Driver"; }
-                    settings-first := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 0 && !root.output-applying; model: ["WASAPI", "ASIO"]; current-index <=> root.backend-index; selected => { if (root.backend-index == 0) { root.rate-index = 0; } root.devices-requested(root.backend-index); } }
+                    settings-first := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 0 && !root.output-applying; model: root.audio-backend-names; current-index <=> root.backend-index; selected => { if (root.backend-index == 0) { root.rate-index = 0; } root.devices-requested(root.backend-index); } }
                 }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                     Label { width: 108px * Theme.ui-scale; text: root.chinese ? "设备" : "Device"; }
@@ -2837,7 +2971,8 @@ export component AppWindow inherits Window {
                 Text { text: root.chinese ? "为声音设计师打造的 WAV / BWF 素材库。\nSQLite FTS5 搜索、Metadata 整理与低延迟试听。" : "A WAV / BWF library for sound designers.\nSQLite FTS5 search, Metadata editing and low-latency audition."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: "Made with Slint\nhttps://slint.dev"; color: Theme.ink; font-size: Theme.font(13); }
                 Label { text: "Slint © SixtyFPS GmbH · Third-party notices ship with the application."; wrap: word-wrap; }
-                Action { height: 34px * Theme.ui-scale; label: root.chinese ? "检查软件更新" : "Check for updates"; clicked => { root.about-visible = false; root.update-visible = true; root.update-check-requested(); } }
+                if root.update-supported: Action { height: 34px * Theme.ui-scale; label: root.chinese ? "检查软件更新" : "Check for updates"; clicked => { root.about-visible = false; root.update-visible = true; root.update-check-requested(); } }
+                if !root.update-supported: Label { text: root.chinese ? "请从 GitHub Releases 下载新版 Mac 客户端，关闭应用后替换。" : "Download new Mac clients from GitHub Releases. Close the app before replacing it."; wrap: word-wrap; }
                 about-first := Action { height: 34px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.about-visible = false; } }
             }
         }
@@ -3664,7 +3799,8 @@ export component AppWindow inherits Window {
         capture-key-pressed(event) => {
             if event.text == Key.Escape { root.update-visible = false; return accept; }
             if event.text == Key.Tab || event.text == Key.Backtab {
-                if update-later.has-focus { update-check.focus(); }
+                if !root.update-supported { update-later.focus(); }
+                else if update-later.has-focus { update-check.focus(); }
                 else if update-check.has-focus && root.update-available && !root.update-busy { update-install.focus(); }
                 else { update-later.focus(); }
                 return accept;
@@ -3680,12 +3816,12 @@ export component AppWindow inherits Window {
                     Text { text: root.chinese ? "软件更新" : "Software update"; color: Theme.ink; font-size: Theme.font(22); }
                     Label { text: root.update-available ? root.app-version + " → " + root.update-version : root.app-version; color: Theme.accent; }
                     Label { text: root.update-message; wrap: char-wrap; vertical-stretch: 1; }
-                    Label { text: root.chinese ? "确认后下载并校验，保存更改后自动安装并重启。音效库与设置会保留。" : "Download and verify, then save changes, install and restart. Your libraries and preferences are retained."; wrap: word-wrap; }
+                    if root.update-supported: Label { text: root.chinese ? "确认后下载并校验，保存更改后自动安装并重启。音效库与设置会保留。" : "Download and verify, then save changes, install and restart. Your libraries and preferences are retained."; wrap: word-wrap; }
                     HorizontalLayout { height: 34px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                         update-later := Action { width: 88px * Theme.ui-scale; label: root.chinese ? "稍后" : "Later"; clicked => { root.update-visible = false; } }
-                        update-check := Action { width: 128px * Theme.ui-scale; enabled: root.update-enabled && !root.update-busy; label: root.chinese ? "重新检查" : "Check again"; clicked => { root.update-check-requested(); } }
+                        update-check := Action { visible: root.update-supported; width: root.update-supported ? 128px * Theme.ui-scale : 0px; enabled: root.update-enabled && !root.update-busy; label: root.chinese ? "重新检查" : "Check again"; clicked => { root.update-check-requested(); } }
                         Rectangle { horizontal-stretch: 1; }
-                        update-install := Action { width: 190px * Theme.ui-scale; primary: true; enabled: root.update-enabled && root.update-available && !root.update-busy && !root.library-busy && !root.closing; label: root.chinese ? "下载、安装并重启" : "Download, install & restart"; clicked => { root.update-install-requested(); } }
+                        update-install := Action { visible: root.update-supported; width: root.update-supported ? 190px * Theme.ui-scale : 0px; primary: true; enabled: root.update-enabled && root.update-available && !root.update-busy && !root.library-busy && !root.closing; label: root.chinese ? "下载、安装并重启" : "Download, install & restart"; clicked => { root.update-install-requested(); } }
                     }
                 }
             }

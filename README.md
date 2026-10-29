@@ -24,9 +24,9 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 
 ![AudioLib Explorer main window / 主界面](resources/screenshot-main.png)
 
-AudioLib Explorer is a fast, local-first sound-effects library manager for Windows, written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), searches them instantly, previews sounds through WASAPI (optionally ASIO), and can also browse a remote library served by the bundled `audiolib-server`.
+AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes large WAV libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. Version 0.8.3 also prepares a macOS arm64 client using CoreAudio; its native package acceptance is required before publication.
 
-- **Source development version:** 0.8.2 (workspace `Cargo.toml`)
+- **Source development version:** 0.8.3 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` (client and server)
 - **Database schema:** 8 (snapshot schema range 3..=8; only explicitly recognized complete formats are readable)
 - **Writable library format:** `ale-s8-cld1-t3-m2-p1-a1`; recognized schema 3–7 formats are read-only migration sources. Schema 8 shares albums and retains Metadata as original JSON TEXT. Metadata compression is deferred; snapshot transport still uses zstd.
@@ -36,11 +36,12 @@ The program version is read from the workspace `Cargo.toml` and is shared by the
 
 ## Download / Install
 
-Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). Each Release ships exactly two packages, each with a matching `.sha256` file:
+Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). From 0.8.3, each Release ships exactly three packages, each with a matching `.sha256` file (six assets). Historical releases through 0.8.2 retain two packages/four assets:
 
 | Package | Asset | Auto-update |
 |---|---|---|
 | Windows x64 desktop client (portable) | `AudioLibExplorer-<tag>-win-x64-portable.zip` | Yes, in-app prompt |
+| macOS arm64 desktop client (`.app` ZIP, from 0.8.3) | `AudioLibExplorer-<tag>-macos-arm64.zip` | Manual installation/update initially |
 | macOS arm64 server | `AudioLibServer-<tag>-macos-arm64.tar.gz` | Yes, via the admin page (also for self-built macOS arm64) |
 
 Server packages for Windows, Linux or other architectures are not published; build them from source (see [Build](#build)). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
@@ -55,6 +56,12 @@ Server packages for Windows, Linux or other architectures are not published; bui
    ```
 
 3. Extract the ZIP to a folder of your choice and start `Start-AudioLibExplorer.cmd` (or `AudioLibExplorer.exe`). No installer is needed; settings and libraries live in `%LOCALAPPDATA%/AudioLibExplorer/v1`, outside the program folder.
+
+### macOS client (Apple Silicon)
+
+The 0.8.3 Mac client candidate is an arm64 `AudioLib Explorer.app` bundle. Verify `AudioLibExplorer-<tag>-macos-arm64.zip.sha256`, extract the ZIP and install the app manually. Close the app normally before replacing an earlier bundle; keep its existing data directory and libraries. See the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md).
+
+The initial distribution plan uses ad-hoc signing and has no Apple notarization. Native signing, isolated startup and package checks must pass on a Mac before this candidate is published; these checks are not implied by the Windows validation results. Mac client updates are manual in this release.
 
 ## Server deployment
 
@@ -104,7 +111,7 @@ Before migrating the server library to the current format, upgrade clients to ve
 
 ## Build
 
-Requirements: Windows with MSVC build tools and the Rust toolchain `1.97.1-x86_64-pc-windows-msvc`. `rust-toolchain.toml` pins only the version `1.97.1`; the Windows MSVC target comes from `.cargo/config.toml`. If your machine's default toolchain is GNU, select the MSVC toolchain explicitly (for example `cargo +1.97.1-x86_64-pc-windows-msvc build ...`); otherwise the build fails with `can't find crate for std`. ASIO builds additionally need LLVM (libclang) and use the pinned, hash-verified Steinberg ASIO SDK (downloaded by `tools/prepare-asio.ps1`).
+Windows client requirements: MSVC build tools and the Rust toolchain `1.97.1-x86_64-pc-windows-msvc`. `rust-toolchain.toml` pins only the version `1.97.1`; the Windows MSVC target comes from `.cargo/config.toml`. If your machine's default toolchain is GNU, select the MSVC toolchain explicitly (for example `cargo +1.97.1-x86_64-pc-windows-msvc build ...`); otherwise the build fails with `can't find crate for std`. ASIO builds additionally need LLVM (libclang) and use the pinned, hash-verified Steinberg ASIO SDK (downloaded by `tools/prepare-asio.ps1`).
 
 ```powershell
 cargo build --release -p audiolib-desktop -p audiolib-cli
@@ -117,6 +124,17 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/build-release.ps1
 ./tools/package-portable.ps1 -SkipBuild
 ```
+
+Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. From the accepted main/tag checkout:
+
+```powershell
+$releaseCommit = (git rev-parse HEAD).Trim()
+$buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
+pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit $releaseCommit -BuildReport $buildProof
+```
+
+Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
 Platforms without a prebuilt server package (Windows, Linux, other architectures) can build the server from source with Rust; it does not need audio playback support. The updater code supports Windows and Linux x64, but no official server packages are published for them, so those builds do not receive updates; a self-built macOS arm64 server does receive updates from the official package. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
@@ -162,13 +180,13 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 ## Releases and CI
 
-The current source development version is `0.8.2`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
+The current source development version is `0.8.3`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
 
-The desktop client and server check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
+The Windows desktop client and supported server builds check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. The initial macOS desktop client uses manual updates. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 
-Each Release ships exactly two packages: the Windows x64 client and the macOS arm64 server, each with a `.sha256`. Windows and Linux server packages are not published, so although the updater supports Windows and Linux x64, only macOS arm64 servers (packaged or self-built) receive server updates.
+From 0.8.3, each Release ships the Windows x64 client, macOS arm64 client and macOS arm64 server, each with a `.sha256` (six assets). Historical releases through 0.8.2 retain their four assets. Windows and Linux server packages are not published, so although the updater supports those server targets, only macOS arm64 servers (packaged or self-built) receive server updates.
 
-GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built and validated locally, then published with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is a manually triggered (`workflow_dispatch`), read-only verify job: it checks that the Release has exactly the two packages and their `.sha256` files with matching checksums, and never builds, creates or uploads anything. Tag pushes do not start any workflow.
+GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built and validated locally, then published with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is a manually triggered (`workflow_dispatch`), read-only verify job: its shared verifier checks the exact version-dependent package/checksum set, rejecting missing, extra, duplicate or wrong-case assets. It never builds, creates or uploads anything. Tag pushes do not start any workflow.
 
 Portable payloads use `tools/portable-files.json` and fresh staging. Generated local reports, user screenshots and runtime state are excluded. Release builds remap compiler paths, and `tools/validate-package-privacy.ps1` checks the payload and public report schema before publication. These checks do not remove information from already published Git history or releases.
 

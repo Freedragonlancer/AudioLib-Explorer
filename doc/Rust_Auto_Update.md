@@ -1,6 +1,6 @@
 # 自动更新
 
-客户端与服务端在每次正常启动后，从 GitHub 公共仓库
+支持自动更新的 Windows 客户端与服务端在每次正常启动后，从 GitHub 公共仓库
 [`Freedragonlancer/AudioLib-Explorer`](https://github.com/Freedragonlancer/AudioLib-Explorer/releases)
 查询已发布的 Release。查询在后台进行；断网、超时或 GitHub 限流会显示检查失败，
 不会阻止打开应用或启动服务。诊断和自动化冒烟模式不做网络更新检查；
@@ -8,7 +8,7 @@
 
 ## 使用
 
-客户端发现新版本后显示更新提示。确认下载与更新后，程序校验下载的包，
+Windows 客户端发现新版本后显示更新提示。确认下载与更新后，程序校验下载的包，
 通过现有关闭流程保存 Metadata、排空请求的写入与扫描，再部署并重启。
 暂不更新可关闭提示；手动检查入口可以重新查询。
 
@@ -18,9 +18,17 @@
 资料库正在打开或打开失败时也可下载修复版本；部署前仍须等待启动线程及其缓存写入
 安全退出，关闭失败或超时会取消部署并保留原程序。已有扫描须先完成或取消。
 
-客户端安装文件为 Windows x64 portable 包；服务端按运行平台选择 Windows x64 ZIP、
+自动更新客户端安装文件为 Windows x64 portable 包；服务端按运行平台选择 Windows x64 ZIP、
 Linux x64 tar.gz 或 macOS arm64 tar.gz。没有对应平台产物或校验和的 Release 不作为
 可安装更新。服务安装的重启与监督方式见 [server deployment](../server/deploy/README.md)。
+
+0.8.3 同时准备 macOS arm64 桌面客户端 `AudioLibExplorer-<tag>-macos-arm64.zip`，
+内含 `AudioLib Explorer.app`。初期采用手动安装与更新，不能把这个 bundle 送入
+现有 Windows 平铺更新器，也不能放宽旧客户端的公共文件清单来适配它。
+替换 Mac app 前先正常退出，保留原有资料库与偏好数据。详见
+[Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+首次分发计划为 ad-hoc 签名、未经 Apple 公证；原生签名与启动验收仍须在 Mac 上实际完成。
+新增此 Release 资产不改变 Windows 客户端或 Mac 服务端的自动更新协议。
 
 ## 渠道与版本
 

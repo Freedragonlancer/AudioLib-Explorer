@@ -1,5 +1,39 @@
 # Rust 验证报告
 
+## macOS 客户端发布准备（2026-10-29，0.8.3）
+
+本轮将 macOS arm64 客户端加入发布范围，补齐 per-user 数据目录、beta/rc 数据隔离、原生文件选择与启动错误提示、Finder 定位、CoreAudio 设置及手动更新入口。Windows 的偏好目录和既有更新包边界保持原样；服务端不使用客户端新增的数据目录解析器。
+
+Windows 默认配置的 core/desktop/windows/cli 四包 all-targets 严格 Clippy 与测试通过：587 passed、0 failed、149 ignored；desktop/cli 的 ASIO 配置严格 Clippy 与测试通过：424 passed、0 failed、149 ignored，使用已校验的 SDK 2.3.4。纯行为测试覆盖 Mac 路径选择、合法/损坏包标记、beta 覆盖及跨平台音频设置适配，但不冒充这些分支已经在 Mac 原生执行。前一轮候选的全工作区默认/ASIO 矩阵作为未受修改子系统的基线复用，本轮按影响范围复跑。忽略项仍是子进程入口及需专项环境的用例，未计入通过。
+
+新增发布资产验证器的 34 项合成回归通过；Mac ZIP 边界验证器的 19 个实际归档用例通过，包括精确大小写、Unicode 规范化与冲突、路径逃逸、符号链接、权限和私有文件拒绝。三个 Mac PowerShell 脚本语法检查通过。普通 CI 与 verify-only release workflow 不承担原生运行验收。
+
+SSH 恢复后已在 Apple Silicon、macOS 27.0.1、Rust 1.97.1 原生环境执行验证。首次检查实际发现 Windows 测试导入范围、关闭测试缺少隔离 backend、Mac 文本导航快捷键及可恢复 CoreAudio 通知分类问题；原失败日志保留，修复后按影响范围重跑。未修改的 core/db/CLI 在 `46731b7` 通过；audio、407 项桌面测试的组合证据以及其余包分别绑定 `32c03ca` 和 `2e4c62f`。同一 87 个顶层测试目标去重合计 1801 passed、158 ignored，原失败项均由修复后的回归通过；10 项 responsive 重跑及嵌套子进程摘要未额外计数。全工作区基线和当前受影响包的严格 Clippy 通过，不将组合证据描述为最终提交单次全量运行。
+
+新回归还覆盖 CoreAudio 欠载计数、非致命优先级通知、真正设备错误的粘性失败状态，以及原生退出夹具的所有权拒绝。Windows 默认/ASIO 的 audio/desktop/windows 严格 Clippy、音频测试及受影响的关闭/夹具/滚动交互回归通过。原生测试链接器曾提示 debug 测试程序的 `__eh_frame` 超过 compact-unwind 编码范围；测试通过不构成真实声学性能测量。
+
+`ddda976` 将包标记迁入签名资源目录；新增三项隔离文件系统回归通过，Mac core/CLI 复跑合计 158 passed（其中 core 138），Windows core 140 项通过。当前组合矩阵去重为 1804 passed、158 ignored、87 个顶层目标。初次签名因版本标记误放入代码目录而失败，修复后重新构建和打包；旧失败 stage 保留。
+
+该提交的 Mac arm64 release 构建、ad-hoc 签名、两个标记的资源 seal、Mach-O/系统依赖、包边界与完整原生合成运行验收通过。真实 `NSApplication terminate:` 后，通过 CLI 回读确认 dirty Metadata 备注已经落盘；还覆盖空库首次启动、合成 WAV、中文界面、坏偏好诊断、只读 app/CWD、临时 HOME 默认 beta 目录和导入 ASIO 设置的 CoreAudio 启动。候选证据保留于 `.rust-validation/release-083/native-8b14a8ef98f643a4b59811ee3d336b2b/`，不是最终 main/tag 产物证明。
+
+截至上述候选记录，人工 GUI/声学播放、完整 beta 流程、最终提交产物及发布后的固定安装同步仍待完成。`MACOS_README.md` 记录原生命令和验收限制；最终验收结果以对应 GitHub Release 为准，不能把 `-StructureOnly` 或 Windows 结果记为 Mac 运行验收通过。
+
+## 0.8.3 发布准备（2026-10-28）
+
+以已发布的 `v0.8.2` 为基线，工作区及 10 个包的版本同步为 0.8.3；API `/api/v1/`、schema 8、快照兼容范围和完整存储格式保持不变。两项独立 CR 未发现阻止提交的问题；侧栏交互已经人工界面验收。
+
+`tools/check-release.ps1 -Tag v0.8.3 -BaseTag v0.8.2` 与锁文件元数据检查通过。准备提交 `37a6c18` 已完成 `tools/check-local.ps1 -Asio`：格式检查、默认及 ASIO 配置的全工作区/all-targets 严格 Clippy 与测试全部通过。两种配置各 87 个顶层测试目标、1791 passed、0 failed、164 ignored；每套日志中两条嵌套子进程摘要均未重复计数。ASIO 使用已校验的 Steinberg SDK 2.3.4。
+
+每套 164 个 ignored 中，143 个是子进程或 fixture 辅助入口；其余 21 项需要交互式 Windows、静音输出、真实服务器/BOOM SMED WAV/v6 快照、完整库或性能专项环境，或用于 fixture 导出。这些入口未计入通过；部分辅助入口对应的人工父用例未运行，真实 ASIO 硬件输出也未据此验收。完整日志保留于 `.rust-validation/local-checks/23d329dc6fad43599f7312b71376b898/`。
+
+本次版本的 Windows 候选构建、打包与固定安装遵循 AGENTS.md 的顺序和隔离数据要求，实际便携启动结果由 `doc/Rust_Portable.json` 记录。下方 0.8.2 开发验证不冒充 0.8.3 发布验收。beta 服务端刷新、客户端同步/流读取冒烟、音量与服务器同步人工清单、Mac arm64 正式产物仍需绑定后续候选或最终发布提交。
+
+## 左侧目录分区折叠与高度调整（2026-10-28，0.8.2）
+
+基于 `5688876` 的工作区变更。Folders 与 Libraries 标题独立展开/收起；双展开时拖动水平分隔条或用上下方向键调整高度，单展开时利用剩余空间。展开状态与高度比例通过既有偏好写入流程保存，保留目录/音效库筛选、选择与目录滚动位置。
+
+Rust 1.97.1 MSVC 下，格式检查、受影响 core/desktop 包的 all-targets 严格 Clippy 与 `git diff --check` 通过。core 全部 130 项测试通过；桌面新增 5 项交互测试及原有 responsive layout 10 项、pane review 4 项、window layout 4 项、search task UI 9 项，共 32 项通过。覆盖中英文、不同界面缩放、小窗口、鼠标/键盘、模态禁用、比例恢复及滚轮位置保留。本轮未运行无关的工作区测试、真实音频硬件或百万记录性能验收。
+
 ## 0.8.1 共享专辑与原始 Metadata TEXT（2026-10-28，新候选待验收）
 
 当前可写目标为 schema 8 / `ale-s8-cld1-t3-m2-p1-a1`，仅增加共享专辑

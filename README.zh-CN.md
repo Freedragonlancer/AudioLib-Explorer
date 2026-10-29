@@ -4,15 +4,29 @@
 
 [English](README.md)
 
-AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它把大型 WAV 音效库索引到 SQLite（FTS5）中，提供即时搜索，通过 WASAPI（可选 ASIO）试听，也可以浏览由自带的 `audiolib-server` 提供的远程音效库。
+AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它把大型 WAV 音效库索引到 SQLite（FTS5）中，提供即时搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。0.8.3 同时准备使用 CoreAudio 的 macOS arm64 客户端，发布前须完成 Mac 原生产物验收。
 
-- **源码开发版本：** 0.8.1（工作区 `Cargo.toml`）
+- **源码开发版本：** 0.8.3（工作区 `Cargo.toml`）
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 8（快照 schema 范围 3..=8；仅支持明确识别的完整格式）
 - **可写库格式：** `ale-s8-cld1-t3-m2-p1-a1`；受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。
 - **许可证：** [GPL-3.0-only](LICENSE)
 
 程序版本取自工作区 `Cargo.toml`，由客户端、CLI 和服务端共用。当前格式以[兼容目录](crates/audiolib-core/src/compatibility.rs)为准；[历史 schema v6 契约](doc/api/Schema_V6_Iteration.md)描述此前的格式。
+
+## 下载与安装
+
+从 0.8.3 起，每次 Release 发布三个包及各自的 `.sha256`，共六个资产；0.8.2 及更早历史版本保留两个包、四个资产的规则。
+
+| 程序包 | Release 文件名 | 更新方式 |
+| --- | --- | --- |
+| Windows x64 客户端 | `AudioLibExplorer-<tag>-win-x64-portable.zip` | 程序内自动更新 |
+| macOS arm64 客户端 | `AudioLibExplorer-<tag>-macos-arm64.zip` | 初期手动安装与更新 |
+| macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 管理页面自动更新 |
+
+Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客户端面向 Apple Silicon，校验 ZIP 的 SHA256 后解压得到 `AudioLib Explorer.app`，手动安装；替换旧 app 前先正常退出，并保留原数据目录和资料库。详见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+
+首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布候选，Windows 验证结果不能替代这些检查。Windows、Linux 服务端包仍不发布。
 
 ## 功能
 
@@ -29,7 +43,7 @@ AudioLib Explorer 是一款面向 Windows 的本地优先音效库管理软件�
 
 ## 构建
 
-要求：Windows、MSVC 构建工具以及固定版本的 Rust 工具链（见 `rust-toolchain.toml`）。ASIO 构建还需要 LLVM（libclang），并使用固定且校验哈希的 Steinberg ASIO SDK（由 `tools/prepare-asio.ps1` 下载）。
+Windows 客户端要求 MSVC 构建工具以及固定版本的 Rust 工具链（见 `rust-toolchain.toml`）。ASIO 构建还需要 LLVM（libclang），并使用固定且校验哈希的 Steinberg ASIO SDK（由 `tools/prepare-asio.ps1` 下载）。
 
 ```powershell
 cargo build --release -p audiolib-desktop -p audiolib-cli
@@ -42,6 +56,8 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/build-release.ps1
 ./tools/package-portable.ps1 -SkipBuild
 ```
+
+Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
 
@@ -87,11 +103,11 @@ audiolib-server --config /etc/audiolib/config.toml
 
 ## 发布与 CI
 
-客户端与服务端在每次正常启动后于后台检查 GitHub Release。发现新版后，在客户端提示或服务端管理页面确认，即可下载、校验，并在现有工作排空后部署。正式版和 beta 保留各自的更新渠道，资料库和偏好设置不属于更新包。渠道、打包元数据及部署方式详见[自动更新](doc/Rust_Auto_Update.md)。
+Windows 客户端与受支持的服务端在每次正常启动后于后台检查 GitHub Release。发现新版后，在客户端提示或服务端管理页面确认，即可下载、校验，并在现有工作排空后部署。初期 Mac 客户端采用手动更新。正式版和 beta 保留各自的更新渠道，资料库和偏好设置不属于更新包。渠道、打包元数据及部署方式详见[自动更新](doc/Rust_Auto_Update.md)。
 
-当前源码开发版本为 `0.8.1`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
+当前源码开发版本为 `0.8.3`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
 
-GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256 和公开构建报告。
+GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.3 起六项，历史版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256 和公开构建报告。
 
 ## 文档
 
