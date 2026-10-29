@@ -6,9 +6,9 @@
 
 箭头旧实现使用 `transform-rotation`，但固定的 Slint 1.17.1 软件渲染器旋转操作尚未实现，展开状态变化后图标仍朝下。当前改为按状态选择两张统一细线、圆角的 12×12 SVG。Windows 工作区格式、桌面 all-targets 严格 Clippy 和六项侧栏回归通过；新增回归在 1×/1.5× 实际渲染中检查展开/收起图标的方向，并保留已有键盘、模态和分区布局覆盖。展开与收起的截图已经查看，原目录行、筛选和高度持久化契约不变。
 
-Linux arm64 正式工具扩展的四个脚本语法检查与 Windows 合成服务端包边界回归通过；发布资产验证器的 41 项离线回归通过，覆盖历史四/六项及 0.8.4 十二项、缺少新增平台包、命名、重复、标签身份和摘要拒绝。Docker release 文件的 YAML 与 RUN shell 语法检查通过。以上结果不代替 Linux/Docker 的实际构建和运行验收。
+Linux arm64 正式工具扩展的四个脚本语法检查与 Windows 合成服务端包边界回归通过；发布资产验证器的 41 项离线回归通过，覆盖历史四/六项及 0.8.4 十二项、缺少新增平台包、命名、重复、标签身份和摘要拒绝。Docker release 文件的 YAML 与 RUN shell 语法检查通过。实际 OrbStack 导出包含 OCI/legacy 混合元数据，最初按预期在加载前拒绝；生产端现仅重建明确的单镜像 manifest/config/引用层，校验 config digest 与解压层 DiffID，并删除 OCI 索引、attestation 和无引用 blob。49 项离线 Docker 回归通过；ARM64 实际镜像的版本/提交、鉴权、RIFF 206、非 root/只读边界、卷持久化、SIGTERM/restart 和缺库 unhealthy 验收通过，日志保持私有。以上结果不代替 Linux/Docker 的实际构建和运行验收。
 
-初始候选为 `cde2ed0`；完整 Windows 默认/ASIO 发布检查及 Linux 双架构构建、平台测试正在执行。Linux amd64 在 ARM64 OrbStack 上执行时必须记录仿真条件，不能声称真实 x86_64 硬件覆盖。正式 Docker 包仅消费已验收的公开 Linux payload，不从开发工作目录构建发布镜像。最终提交产物、beta 人工验收、发布及固定安装结果以对应 Release 的说明和实际产物为准。
+初始候选 `cde2ed0` 已通过 `tools/check-local.ps1 -Asio`：默认及 ASIO 两种配置分别为 87 个顶层目标、1812 passed、0 failed、164 ignored，嵌套子进程摘要未重复计数；日志为 `.rust-validation/local-checks/777c01d819b74c3aaa8d0d361439035b/`。Mac 候选的严格桌面 Clippy、六项侧栏测试、原生签名、完整隔离启动与退出保存验收通过。Windows `f526a80` 候选构建、1247 文件兼容/隐私边界、完整便携验收及固定 `local_release` 的 1249 文件哈希、CLI 版本和隔离启动通过，另行安装了 `0.8.4-0` beta。Linux ARM64 的 server/db 严格 Clippy、all-targets 功能测试、原生包和 ABI、合成 WAV fixture 通过；AMD64 的功能矩阵通过，包验收和 updater 专项仍在执行。Linux amd64 在 ARM64 OrbStack 上执行时必须记录仿真条件，不能声称真实 x86_64 硬件覆盖。正式 Docker 包仅消费已验收的公开 Linux payload，不从开发工作目录构建发布镜像。最终提交产物、beta 人工验收、发布及固定安装结果以对应 Release 的说明和实际产物为准。
 
 ## macOS 客户端发布准备（2026-10-29，0.8.3）
 

@@ -11,6 +11,9 @@ param(
     [Parameter(Mandatory)][string]$ServerValidation,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [string]$DockerCommand = 'docker',
+    # Resume only an explicitly identified immutable image; labels and its actual
+    # server binary hash are rechecked against the accepted native package.
+    [ValidatePattern('^sha256:[0-9a-f]{64}$')][string]$ExistingImageId,
     [switch]$WithoutFfmpeg,
     [switch]$ValidateInputsOnly
 )
@@ -99,6 +102,83 @@ function Get-Image([string]$Reference) {
     $fields = $result.Text.Split('|')
     if ($fields.Count -ne 8) { throw 'Unexpected image identity response.' }
     return @($fields[0..6] | ForEach-Object { ConvertFrom-Json -InputObject $_ -NoEnumerate }) + @($fields[7])
+}
+function Export-LegacyDockerSave([string]$Path, [string]$Destination, [string]$ExpectedImageId, [string]$ExpectedTag) {
+    # This is producer-side normalization of our own docker-save output, never an
+    # import. Modern stores include an OCI index alongside the legacy manifest.
+    # Reconstruct ONLY the single accepted manifest, its config and its layers;
+    # no OCI index, repository map, attestation or unreferenced blob is exported.
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $regular = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $configs = @{}; $manifest = $null
+    $inputFile = [IO.File]::OpenRead($Path); $reader = [Formats.Tar.TarReader]::new($inputFile)
+    try {
+        while ($null -ne ($entry = $reader.GetNextEntry())) {
+            if ([string]$entry.EntryType -ceq 'GlobalExtendedAttributes') { continue }
+            $name = $entry.Name
+            if ($name.StartsWith('./')) { $name = $name.Substring(2) }
+            $name = $name.TrimEnd('/')
+            if (!$name -and [string]$entry.EntryType -ceq 'Directory') { continue }
+            Assert-Relative $name
+            if (!$names.Add($name) -or $names.Count -gt 50000 -or [string]$entry.EntryType -notin @('RegularFile','V7RegularFile','Directory')) { throw 'Unsafe/duplicate producer Docker archive entry.' }
+            if ([string]$entry.EntryType -ceq 'Directory') { continue }
+            $null = $regular.Add($name)
+            if ($name -ceq 'manifest.json' -or $name -cin @(($ExpectedImageId.Substring(7) + '.json'),('blobs/sha256/' + $ExpectedImageId.Substring(7)))) {
+                if ($entry.Length -gt 4194304) { throw 'Producer image metadata is excessive.' }
+                $memory = [IO.MemoryStream]::new()
+                try { $entry.DataStream.CopyTo($memory); $bytes = $memory.ToArray() } finally { $memory.Dispose() }
+                if ($name -ceq 'manifest.json') { $manifest = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json -AsHashtable -NoEnumerate }
+                else { $configs[$name] = $bytes }
+            }
+        }
+    } finally { $reader.Dispose(); $inputFile.Dispose() }
+    if ($null -eq $manifest -or @($manifest).Count -ne 1 -or @($manifest[0].RepoTags).Count -ne 1 -or
+        $manifest[0].RepoTags[0] -cne $ExpectedTag -or !$configs.ContainsKey($manifest[0].Config) -or
+        $manifest[0].Layers -isnot [array] -or !$manifest[0].Layers.Count -or $manifest[0].Layers.Count -gt 128) { throw 'Producer Docker manifest identity/layers mismatch.' }
+    $configBytes = $configs[$manifest[0].Config]
+    if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($configBytes)).ToLowerInvariant() -cne $ExpectedImageId.Substring(7)) { throw 'Producer image config digest mismatch.' }
+    $config = [Text.Encoding]::UTF8.GetString($configBytes) | ConvertFrom-Json -AsHashtable
+    if ($config.rootfs.type -cne 'layers' -or $config.rootfs.diff_ids -isnot [array] -or $config.rootfs.diff_ids.Count -ne $manifest[0].Layers.Count) { throw 'Producer image layer DiffIDs are incomplete.' }
+    $layerIndexes = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    $canonicalLayers = [Collections.Generic.List[string]]::new()
+    for ($index=0; $index -lt $manifest[0].Layers.Count; $index++) {
+        $name = $manifest[0].Layers[$index]; Assert-Relative $name
+        if (!$regular.Contains($name) -or $name -ceq 'manifest.json' -or $name -ceq $manifest[0].Config -or
+            $name -in @('oci-layout','index.json','repositories') -or $layerIndexes.ContainsKey($name) -or
+            $config.rootfs.diff_ids[$index] -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Producer manifest references an unsafe/missing/duplicate layer.' }
+        $layerIndexes.Add($name,$index); $canonicalLayers.Add(('layers/{0:D4}.tar' -f $index))
+    }
+    $canonical = @([ordered]@{Config=($ExpectedImageId.Substring(7)+'.json');RepoTags=@($ExpectedTag);Layers=@($canonicalLayers)})
+    $canonicalBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $canonical -Depth 5 -Compress))
+    $outputFile = [IO.File]::Open($Destination,[IO.FileMode]::CreateNew)
+    $writer = [Formats.Tar.TarWriter]::new($outputFile)
+    try {
+        foreach ($metadata in @(@{Name='manifest.json';Bytes=$canonicalBytes},@{Name=($ExpectedImageId.Substring(7)+'.json');Bytes=$configBytes})) {
+            $entry = [Formats.Tar.PaxTarEntry]::new([Formats.Tar.TarEntryType]::RegularFile,$metadata.Name)
+            $entry.Mode = [IO.UnixFileMode]420
+            $memory = [IO.MemoryStream]::new([byte[]]$metadata.Bytes)
+            try { $entry.DataStream=$memory; $writer.WriteEntry($entry) } finally { $memory.Dispose() }
+        }
+        $inputFile = [IO.File]::OpenRead($Path); $reader = [Formats.Tar.TarReader]::new($inputFile)
+        try {
+            while ($null -ne ($entry = $reader.GetNextEntry())) {
+                $name=$entry.Name; if ($name.StartsWith('./')) { $name=$name.Substring(2) }
+                if (!$layerIndexes.ContainsKey($name)) { continue }
+                $index=$layerIndexes[$name]; $data=$entry.DataStream
+                if (!$data.CanSeek) { throw 'Producer layer stream must be seekable.' }
+                $position=$data.Position; $first=$data.ReadByte(); $second=$data.ReadByte(); $data.Position=$position
+                $sha=[Security.Cryptography.SHA256]::Create(); $decoded=$null
+                try {
+                    if ($first -eq 31 -and $second -eq 139) { $decoded=[IO.Compression.GZipStream]::new($data,[IO.Compression.CompressionMode]::Decompress,$true); $digest=$sha.ComputeHash($decoded) }
+                    else { $digest=$sha.ComputeHash($data) }
+                } finally { if ($null -ne $decoded) { $decoded.Dispose() }; $sha.Dispose() }
+                $data.Position=$position
+                if (('sha256:'+ [Convert]::ToHexString($digest).ToLowerInvariant()) -cne $config.rootfs.diff_ids[$index]) { throw 'Producer layer content does not match its config DiffID.' }
+                $copy=[Formats.Tar.PaxTarEntry]::new([Formats.Tar.TarEntryType]::RegularFile,$canonicalLayers[$index]); $copy.Mode=[IO.UnixFileMode]420
+                $copy.DataStream=$data; $writer.WriteEntry($copy)
+            }
+        } finally { $reader.Dispose(); $inputFile.Dispose() }
+    } finally { $writer.Dispose(); $outputFile.Dispose() }
 }
 
 foreach ($path in @($ServerArchive, ($ServerArchive + '.sha256'), $ServerReport, $ServerValidation, $OutputDirectory, $ownedRoot)) { Assert-Unlinked $path }
@@ -211,15 +291,24 @@ $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $null = New-Item -ItemType Directory -Path $OutputDirectory -Force
 $published = Join-Path $OutputDirectory $archiveName
 if ((Test-Path -LiteralPath $published) -or (Test-Path -LiteralPath ($published + '.sha256'))) { throw 'Refusing to replace an existing Docker delivery artifact.' }
-if ($null -ne (Get-Image $imageTag)) { throw 'Expected image tag already exists; use a clean owned Docker image store or explicitly resolve the collision first.' }
+$prior = Get-Image $imageTag
+if ($ExistingImageId) {
+    if ($null -eq $prior -or $prior[0] -cne $ExistingImageId) { throw 'Resume image ID does not match the existing expected tag.' }
+} elseif ($null -ne $prior) { throw 'Expected image tag already exists; use a clean owned Docker image store or explicitly resolve the collision first.' }
 $ffmpeg = if ($WithoutFfmpeg) { 'false' } else { 'true' }
-$null = Invoke-Docker @('buildx','build','--platform',$Platform,'--load','--build-arg',"VERSION=$fullVersion",'--build-arg',"REVISION=$ExpectedCommit",'--build-arg',"WITH_FFMPEG=$ffmpeg",'--tag',$imageTag,$context)
+if (!$ExistingImageId) { $null = Invoke-Docker @('buildx','build','--platform',$Platform,'--load','--build-arg',"VERSION=$fullVersion",'--build-arg',"REVISION=$ExpectedCommit",'--build-arg',"WITH_FFMPEG=$ffmpeg",'--tag',$imageTag,$context) }
 $image = Get-Image $imageTag
-if ($null -eq $image -or $image[0] -cnotmatch '^sha256:[0-9a-f]{64}$' -or $image[1] -cne 'linux' -or $image[2] -cne $arch -or
+if ($null -eq $image -or ($ExistingImageId -and $image[0] -cne $ExistingImageId) -or $image[0] -cnotmatch '^sha256:[0-9a-f]{64}$' -or $image[1] -cne 'linux' -or $image[2] -cne $arch -or
     $image[3] -cne '10001:10001' -or $image[4] -cne $fullVersion -or $image[5] -cne $ExpectedCommit -or
     @($image[6]).Count -ne 1 -or $image[6][0] -cne '/opt/audiolibserver/audiolib-server' -or $image[7] -cne 'disabled') { throw 'Built image identity/security boundary mismatch.' }
+if ($ExistingImageId) {
+    $hashProbe = Invoke-Docker @('run','--rm','--name',('audiolib-package-hash-'+[guid]::NewGuid().ToString('N')),'--label','io.audiolib.task=package-hash','--platform',$Platform,'--read-only','--network','none','--security-opt','no-new-privileges','--user','10001:10001','--tmpfs','/data:rw,nosuid,nodev','--entrypoint','/usr/bin/sha256sum',$ExistingImageId,'/opt/audiolibserver/audiolib-server')
+    if (($hashProbe.Text -split '\s+')[0] -cne $report.binary_sha256.ToLowerInvariant()) { throw 'Resumed image binary differs from the accepted native package.' }
+}
+$originalTar = Join-Path $ownedRoot 'image-original.tar'
 $rawTar = Join-Path $ownedRoot 'image.tar'
-$null = Invoke-Docker @('save', '--output', $rawTar, $imageTag)
+$null = Invoke-Docker @('save', '--output', $originalTar, $imageTag)
+Export-LegacyDockerSave $originalTar $rawTar $image[0] $imageTag
 Assert-DockerSaveArchive $rawTar $image[0] $imageTag -Uncompressed
 if ((Get-Image $imageTag)[0] -cne $image[0]) { throw 'Image tag changed during packaging.' }
 $staged = Join-Path $ownedRoot $archiveName
@@ -233,6 +322,8 @@ $privateReport = Join-Path $ownedRoot 'package-report.json'
     image_tag=$imageTag; image_id=$image[0]; archive_sha256=$hash; native_archive_sha256=$archiveHash
     binary_sha256=$report.binary_sha256.ToLowerInvariant(); with_ffmpeg=(!$WithoutFfmpeg)
     checks=@('matching native Linux acceptance','public tiny context','image OS/architecture/version/revision/user/entrypoint/update boundary','image save')
+    image_build=$(if ($ExistingImageId) { 'reused explicit immutable image; accepted native binary hash reverified' } else { 'built' })
+    archive_format='closed classic docker-save manifest/config/DiffID-verified layers'
     runtime_validation='not-run'
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $privateReport -Encoding utf8NoBOM
 Copy-Item -LiteralPath $staged -Destination $published
