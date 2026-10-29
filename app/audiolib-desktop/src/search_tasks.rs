@@ -648,6 +648,11 @@ impl Controller {
         }
         raw.insert("favorites_only".into(), ui.get_favorites_only().to_string());
         raw.insert("tagged_only".into(), ui.get_tagged_only().to_string());
+        if !self.result_scroll_belongs_to_workspace() {
+            // A server viewport must not be written into the local library's task,
+            // and a local viewport must not be written into a server workspace.
+            return;
+        }
         let row_height = ui.get_task_result_row_height().max(1.0);
         let scroll_y = ui.get_task_result_scroll_y();
         let view = SearchTaskView {
@@ -1603,9 +1608,41 @@ impl Controller {
             .filter(|file| !file.missing)
     }
 
+    /// Server workspaces are `server-<library id>`. Anything else is a local library.
+    fn result_scroll_belongs_to_workspace(&self) -> bool {
+        let remote = self.remote_read_only();
+        let state = self.task_workspace.lock().unwrap();
+        let scope = state
+            .target
+            .as_ref()
+            .map(|target| target.library_scope.as_str())
+            .filter(|scope| !scope.is_empty())
+            .unwrap_or(state.workspace.library_scope.as_str());
+        // Before a workspace is loaded there is no foreign scope to contaminate.
+        if scope.is_empty() {
+            return true;
+        }
+        remote == scope.starts_with("server-")
+    }
+
     fn restore_task_scroll(&self, ui: &AppWindow, view: &SearchTaskView) {
-        let y = -(view.list_top_row as f32 + view.list_row_offset)
-            * ui.get_task_result_row_height().max(1.0);
+        if !self.result_scroll_belongs_to_workspace() {
+            return;
+        }
+        let row_height = ui.get_task_result_row_height().max(1.0);
+        let rows = ui.get_rows().row_count();
+        // The shared ListView must not inherit a server page's row index.
+        let top = if rows == 0 {
+            0
+        } else {
+            view.list_top_row.min(rows - 1)
+        };
+        let fraction = if rows == 0 {
+            0.0
+        } else {
+            view.list_row_offset.clamp(0.0, 0.999)
+        };
+        let y = -((top as f32) + fraction) * row_height;
         ui.invoke_restore_search_task_viewport(
             y,
             view.list_scroll_x,
