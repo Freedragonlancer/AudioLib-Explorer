@@ -496,11 +496,58 @@ fn render(bytes: Vec<u8>, side: Option<u32>) -> Option<Cover> {
     let mime = classify(&bytes)?;
     let decoded = decode_limited(&bytes)?;
     match side {
-        None => Some(Cover { mime, bytes }),
-        Some(side) if decoded.width() <= side && decoded.height() <= side => {
-            Some(Cover { mime, bytes })
+        Some(side) if decoded.width() > side || decoded.height() > side => {
+            encode(&decoded.thumbnail(side, side), mime)
         }
-        Some(side) => encode(&decoded.thumbnail(side, side), mime),
+        _ => passthrough(bytes, mime, &decoded),
+    }
+}
+
+/// Original bytes for the cache and response, cut at the format end marker.
+/// Embedded pictures often carry padding after JPEG `FFD9` or PNG `IEND`; the
+/// cache read check requires the file to end exactly there (#164), so storing
+/// them untrimmed would make every read a miss. Without an end marker the
+/// decoded pixels are re-encoded instead.
+fn passthrough(
+    mut bytes: Vec<u8>,
+    mime: &'static str,
+    decoded: &image::DynamicImage,
+) -> Option<Cover> {
+    let end = match mime {
+        "image/jpeg" => bytes
+            .windows(2)
+            .rposition(|pair| pair == [0xff, 0xd9])
+            .map(|at| at + 2),
+        "image/png" => png_end(&bytes),
+        _ => None,
+    };
+    match end {
+        Some(end) => {
+            bytes.truncate(end);
+            if cache_entry_complete(&bytes, mime) {
+                Some(Cover { mime, bytes })
+            } else {
+                encode(decoded, mime)
+            }
+        }
+        None => encode(decoded, mime),
+    }
+}
+
+/// Byte offset just past the PNG `IEND` chunk, walking chunk lengths.
+fn png_end(bytes: &[u8]) -> Option<usize> {
+    let mut at = 8_usize;
+    loop {
+        let header = bytes.get(at..at.checked_add(8)?)?;
+        let len = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+        let next = at.checked_add(12)?.checked_add(len)?;
+        if next > bytes.len() {
+            return None;
+        }
+        if &header[4..8] == b"IEND" {
+            return Some(next);
+        }
+        at = next;
     }
 }
 
@@ -583,6 +630,10 @@ fn load_cache(dir: &Path, key: &str) -> Option<Cover> {
         let Ok(file) = fs::File::open(&path) else {
             continue;
         };
+        let observed = file
+            .metadata()
+            .ok()
+            .map(|metadata| (metadata.len(), metadata.modified().ok()));
         let mut bytes = Vec::new();
         // A damaged cache is disposable. Bound the read itself rather than allocating
         // the entire file before checking its size or trusting a raced metadata length.
@@ -595,15 +646,22 @@ fn load_cache(dir: &Path, key: &str) -> Option<Cover> {
         {
             return Some(Cover { mime, bytes });
         }
-        // Invalid entry: drop it so the slot-limited miss path regenerates it.
-        // Removal failing (e.g. a concurrent writer already replaced it) is harmless:
-        // the next writer's atomic rename publishes a complete file.
+        // Invalid entry: treat as a miss so the slot-limited path regenerates it.
+        // Delete it only while the path still has the length and mtime we read;
+        // a concurrent writer may already have renamed a complete entry into
+        // place, and removing that would discard a good file. The remaining
+        // check-then-remove window is tiny and only costs one extra regeneration.
         tracing::warn!(
             path = %path.display(),
             len = bytes.len(),
             "Discarding incomplete or invalid artwork cache entry"
         );
-        let _ = fs::remove_file(&path);
+        let current = fs::metadata(&path)
+            .ok()
+            .map(|metadata| (metadata.len(), metadata.modified().ok()));
+        if observed.is_some() && current == observed {
+            let _ = fs::remove_file(&path);
+        }
     }
     None
 }
@@ -629,7 +687,10 @@ fn store_cache(dir: &Path, key: &str, cover: &Cover) {
     };
     // Write, flush to stable storage, then rename into place: readers only ever
     // see either no entry or a complete one. On failure the temporary is removed
-    // when dropped, so no partial file is left behind.
+    // when the `NamedTempFile` drops, so no partial file is left behind.
+    // The parent directory is not fsynced after the rename (not portable, e.g.
+    // on Windows): after a power loss the entry may be missing, never partial,
+    // and a missing entry is just a cache miss.
     if temporary.write_all(&cover.bytes).is_err()
         || temporary.as_file().sync_all().is_err()
         || temporary.persist(&path).is_err()
@@ -871,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_leaves_only_the_complete_entry() {
+    fn atomic_write_leaves_only_the_complete_entry_and_dir_creation_failure_publishes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let key = "1".repeat(16);
         let cover = Cover {
@@ -885,10 +946,30 @@ mod tests {
             .collect();
         assert_eq!(names, vec![format!("{key}.jpg")], "no temporary left");
         assert_eq!(fs::read(dir.path().join(&names[0])).unwrap(), cover.bytes);
-        // A failed write (directory is a file) publishes nothing.
+        // Failure at directory/temporary creation (the cache dir is a file)
+        // publishes nothing. Later failures (write, sync, rename) are cleaned up
+        // by `NamedTempFile`'s Drop, which removes the temporary.
         let blocked = dir.path().join("blocked");
         fs::write(&blocked, b"x").unwrap();
         store_cache(&blocked, &key, &cover);
         assert!(load_cache(&blocked, &key).is_none());
+    }
+
+    #[test]
+    fn passthrough_trims_padding_after_the_end_marker() {
+        let jpeg_bytes = jpeg(16, 16);
+        let mut padded = jpeg_bytes.clone();
+        padded.extend_from_slice(&[0; 37]);
+        padded.extend_from_slice(b"garbage");
+        let cover = render(padded.clone(), None).unwrap();
+        assert_eq!(cover.bytes, jpeg_bytes);
+        assert!(cache_entry_complete(&cover.bytes, "image/jpeg"));
+        assert_eq!(render(padded, Some(512)).unwrap().bytes, jpeg_bytes);
+        let png_bytes = png(8, 8);
+        let mut padded = png_bytes.clone();
+        padded.extend_from_slice(&[0xff, 0xd9, 0, 0, 1]);
+        let cover = render(padded, None).unwrap();
+        assert_eq!(cover.bytes, png_bytes);
+        assert!(cache_entry_complete(&cover.bytes, "image/png"));
     }
 }
