@@ -557,6 +557,26 @@ fn encode(image: &image::DynamicImage, mime: &'static str) -> Option<Cover> {
     Some(Cover { mime, bytes })
 }
 
+/// Smallest plausible cached image: a PNG signature, IHDR and IEND alone are
+/// 8 + 25 + 12 bytes; any real JPEG is larger than this too.
+const MIN_CACHE_BYTES: usize = 45;
+/// The last 12 bytes of every PNG: IEND length 0, type `IEND`, CRC `AE426082`.
+const PNG_IEND: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82];
+
+/// Cheap structural check of a cached entry without decoding pixels (#164):
+/// a minimal length, the leading signature and the format trailer, so a
+/// truncated file (crash, full disk, older non-atomic writer) is not a hit.
+fn cache_entry_complete(bytes: &[u8], mime: &'static str) -> bool {
+    if bytes.len() < MIN_CACHE_BYTES || classify(bytes) != Some(mime) {
+        return false;
+    }
+    match mime {
+        "image/jpeg" => bytes.ends_with(&[0xff, 0xd9]),
+        "image/png" => bytes.ends_with(&PNG_IEND),
+        _ => false,
+    }
+}
+
 fn load_cache(dir: &Path, key: &str) -> Option<Cover> {
     for (extension, mime) in [("jpg", "image/jpeg"), ("png", "image/png")] {
         let path = dir.join(format!("{key}.{extension}"));
@@ -570,11 +590,20 @@ fn load_cache(dir: &Path, key: &str) -> Option<Cover> {
             .take(MAX_ENCODED_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .is_ok()
-            && classify(&bytes) == Some(mime)
+            && cache_entry_complete(&bytes, mime)
             && header_within_limits(&bytes)
         {
             return Some(Cover { mime, bytes });
         }
+        // Invalid entry: drop it so the slot-limited miss path regenerates it.
+        // Removal failing (e.g. a concurrent writer already replaced it) is harmless:
+        // the next writer's atomic rename publishes a complete file.
+        tracing::warn!(
+            path = %path.display(),
+            len = bytes.len(),
+            "Discarding incomplete or invalid artwork cache entry"
+        );
+        let _ = fs::remove_file(&path);
     }
     None
 }
@@ -598,7 +627,13 @@ fn store_cache(dir: &Path, key: &str, cover: &Cover) {
     else {
         return;
     };
-    if temporary.write_all(&cover.bytes).is_err() || temporary.persist(&path).is_err() {
+    // Write, flush to stable storage, then rename into place: readers only ever
+    // see either no entry or a complete one. On failure the temporary is removed
+    // when dropped, so no partial file is left behind.
+    if temporary.write_all(&cover.bytes).is_err()
+        || temporary.as_file().sync_all().is_err()
+        || temporary.persist(&path).is_err()
+    {
         return;
     }
     prune(dir, MAX_CACHE_BYTES);
@@ -796,5 +831,64 @@ mod tests {
         });
         assert_eq!(load_cache(dir.path(), &key).unwrap(), cover);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    #[test]
+    fn truncated_cached_jpeg_is_a_miss_and_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "e".repeat(16);
+        let full = jpeg(32, 32);
+        let path = dir.path().join(format!("{key}.jpg"));
+        // The header still parses, which used to make this a hit.
+        let truncated = &full[..full.len() - 2];
+        assert!(header_within_limits(truncated));
+        fs::write(&path, truncated).unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+        assert!(!path.exists(), "bad entry is removed");
+        // Tiny or empty entries are misses too.
+        fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+        fs::write(&path, b"").unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+        // Regenerated entry is a hit again.
+        let cover = Cover {
+            mime: "image/jpeg",
+            bytes: full,
+        };
+        store_cache(dir.path(), &key, &cover);
+        assert_eq!(load_cache(dir.path(), &key).unwrap(), cover);
+    }
+
+    #[test]
+    fn truncated_cached_png_missing_iend_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "f".repeat(16);
+        let full = png(16, 16);
+        assert!(full.ends_with(&PNG_IEND));
+        let path = dir.path().join(format!("{key}.png"));
+        fs::write(&path, &full[..full.len() - 4]).unwrap();
+        assert!(load_cache(dir.path(), &key).is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn atomic_write_leaves_only_the_complete_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "1".repeat(16);
+        let cover = Cover {
+            mime: "image/jpeg",
+            bytes: jpeg(20, 20),
+        };
+        store_cache(dir.path(), &key, &cover);
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec![format!("{key}.jpg")], "no temporary left");
+        assert_eq!(fs::read(dir.path().join(&names[0])).unwrap(), cover.bytes);
+        // A failed write (directory is a file) publishes nothing.
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"x").unwrap();
+        store_cache(&blocked, &key, &cover);
+        assert!(load_cache(&blocked, &key).is_none());
     }
 }

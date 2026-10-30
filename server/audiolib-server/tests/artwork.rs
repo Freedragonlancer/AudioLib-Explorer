@@ -795,3 +795,45 @@ async fn cover_cache_hits_and_304_need_no_decode_slot_and_misses_wait_briefly() 
     assert!(thumb.width() <= 8 && thumb.height() <= 8);
     assert_eq!(slots.available_permits(), 2, "decode slots are returned");
 }
+
+#[tokio::test]
+async fn truncated_cover_cache_is_a_miss_regenerated_through_a_slot() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let path = format!("/api/v1/audio/{}/artwork", f.cover_id);
+    let warm = send(&f.state, &path).await;
+    assert_eq!(warm.status(), StatusCode::OK);
+    let cache = f.db.parent().unwrap().join("artwork");
+    let entry = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.is_file())
+        .unwrap();
+    let full = fs::read(&entry).unwrap();
+    fs::write(&entry, &full[..full.len() / 2]).unwrap();
+
+    // With every slot held, the truncated entry must not be served as a hit.
+    let slots = f.state.artwork_slots();
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    let busy = send(&f.state, &path).await;
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(held);
+
+    let served = send(&f.state, &path).await;
+    assert_eq!(served.status(), StatusCode::OK);
+    assert_eq!(body(served).await, f.image);
+    assert_eq!(fs::read(&entry).unwrap(), full, "cache entry regenerated");
+
+    // The repaired entry is a hit again without a slot.
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    let hit = send(&f.state, &path).await;
+    assert_eq!(hit.status(), StatusCode::OK);
+    assert_eq!(body(hit).await, f.image);
+    drop(held);
+    let leftovers: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
