@@ -107,6 +107,8 @@ fn child_remote_cover_busy() {
                 }
                 Err(error) => panic!("Synthetic artwork server: {error}"),
             };
+            // Accepted sockets inherit O_NONBLOCK on macOS/BSD; the handler reads synchronously.
+            socket.set_nonblocking(false).unwrap();
             let capabilities = capabilities.clone();
             let script = server_script.clone();
             handlers.push(std::thread::spawn(move || {
