@@ -12,7 +12,7 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 $script:caseNumber = 0
 $script:assertionCount = 0
 
-function Packages([string]$ReleaseTag, [bool]$MacClient, [bool]$LinuxDocker = $false) {
+function Packages([string]$ReleaseTag, [bool]$MacClient, [bool]$LinuxDocker = $false, [bool]$WinServer = $false) {
     "AudioLibExplorer-$ReleaseTag-win-x64-portable.zip"
     if ($MacClient) { "AudioLibExplorer-$ReleaseTag-macos-arm64.zip" }
     "AudioLibServer-$ReleaseTag-macos-arm64.tar.gz"
@@ -21,6 +21,7 @@ function Packages([string]$ReleaseTag, [bool]$MacClient, [bool]$LinuxDocker = $f
         "AudioLibServer-$ReleaseTag-docker-linux-amd64.tar.gz"
         "AudioLibServer-$ReleaseTag-docker-linux-arm64.tar.gz"
     }
+    if ($WinServer) { "AudioLibServer-$ReleaseTag-win-x64.zip" }
 }
 function AssetNames([string[]]$PackageNames) {
     foreach ($packageName in $PackageNames) { $packageName; "$packageName.sha256" }
@@ -68,11 +69,21 @@ try {
         $metadata = Manifest $releaseTag @(AssetNames $packages)
         Accepted $releaseTag $metadata $packages
     }
-    foreach ($releaseTag in @('v0.8.4', 'v0.8.4-beta.1', 'v0.8.4-rc.0', 'v0.9.0', 'v1.0.0')) {
+    foreach ($releaseTag in @('v0.8.4', 'v0.8.4-beta.1', 'v0.8.4-rc.0')) {
         $packages = @(Packages $releaseTag $true $true)
         $metadata = Manifest $releaseTag @(AssetNames $packages)
         Accepted $releaseTag $metadata $packages
     }
+    foreach ($releaseTag in @('v0.8.5', 'v0.8.5-beta.1', 'v0.8.5-rc.0', 'v0.9.0', 'v1.0.0')) {
+        $packages = @(Packages $releaseTag $true $true $true)
+        if ($packages.Count -ne 7) { throw 'Expected seven packages from 0.8.5.' }
+        $metadata = Manifest $releaseTag @(AssetNames $packages)
+        Accepted $releaseTag $metadata $packages
+    }
+    $winExtra = Manifest 'v0.8.4' @(AssetNames @(Packages 'v0.8.4' $true $true $true))
+    Rejected '0.8.4 with added Windows server package' { & $validator -Tag 'v0.8.4' -ReleaseJsonPath $winExtra } 'Unexpected release assets'
+    $winMissing = Manifest 'v0.8.5' @(AssetNames @(Packages 'v0.8.5' $true $true))
+    Rejected '0.8.5 missing Windows server package' { & $validator -Tag 'v0.8.5' -ReleaseJsonPath $winMissing } 'Missing release assets'
 
     $tag = 'v0.8.4'
     $packages = @(Packages $tag $true $true)
@@ -149,7 +160,7 @@ try {
     Rejected 'missing checksum sidecar' { & $validator -Tag $tag -ReleaseJsonPath $metadata -AssetDirectory $downloads } 'Downloaded asset is missing'
     Move-Item -LiteralPath ($chosenChecksum + '.held') -Destination $chosenChecksum
 
-    Write-Host "Release asset regression passed: $script:assertionCount checks; historical four/six and current twelve assets, tag/title/prerelease identity and SHA256 boundaries."
+    Write-Host "Release asset regression passed: $script:assertionCount checks; historical four/six and 0.8.4 twelve and 0.8.5+ fourteen assets, tag/title/prerelease identity and SHA256 boundaries."
 } finally {
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)
     if (!$resolvedRoot.StartsWith($tempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or

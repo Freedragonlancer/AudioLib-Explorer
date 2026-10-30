@@ -1,10 +1,10 @@
 # AudioLib Explorer 版本规范
 
-程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.4 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
+程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.5 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.4 | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.5 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 8 | SQLite 资料库结构（`user_version`） |
 
@@ -23,25 +23,25 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
    `程序 0.4.0 | API /api/v1/ | schema 5 | 快照兼容 3..=5`
 
 6. 发布产物附 SHA256：各平台打包器生成 `<archive>.sha256`，本机发布步骤把它连同包上传为 Release 资产，并写入发布说明正文。
-   从 0.8.4 起，每个 Release 精确发布六个归档及各自的 `.sha256`，共十二个资产：Windows x64 客户端、Mac arm64 客户端、Mac arm64 服务端、Linux x64 服务端，以及 Docker linux/amd64、linux/arm64 离线镜像。文件名分别为 `AudioLibExplorer-<tag>-win-x64-portable.zip`、`AudioLibExplorer-<tag>-macos-arm64.zip`、`AudioLibServer-<tag>-macos-arm64.tar.gz`、`AudioLibServer-<tag>-linux-x64.tar.gz`、`AudioLibServer-<tag>-docker-linux-amd64.tar.gz`、`AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。0.8.3 保留三个包、六个资产；0.8.2 及更早版本保持两个包、四个资产。Mac 客户端手动更新，Docker 导入镜像并重建容器；Windows 客户端及 Mac arm64、Linux x64 原生服务端保留程序内更新。Windows 和独立 Linux arm64 服务端包不发布。
+   从 0.8.4 起，每个 Release 精确发布六个归档及各自的 `.sha256`，共十二个资产：Windows x64 客户端、Mac arm64 客户端、Mac arm64 服务端、Linux x64 服务端，以及 Docker linux/amd64、linux/arm64 离线镜像。文件名分别为 `AudioLibExplorer-<tag>-win-x64-portable.zip`、`AudioLibExplorer-<tag>-macos-arm64.zip`、`AudioLibServer-<tag>-macos-arm64.tar.gz`、`AudioLibServer-<tag>-linux-x64.tar.gz`、`AudioLibServer-<tag>-docker-linux-amd64.tar.gz`、`AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。0.8.3 保留三个包、六个资产；0.8.2 及更早版本保持两个包、四个资产。Mac 客户端手动更新，Docker 导入镜像并重建容器；Windows 客户端及 Mac arm64、Linux x64 原生服务端保留程序内更新。从 0.8.5（首个纳入版本）起增加 Windows x64 服务端 `AudioLibServer-<tag>-win-x64.zip`，共七个归档、十四个资产（门槛常量见 `tools/verify-release-assets.ps1` 的 `$WindowsServerFirstVersion`）；0.8.4 及更早版本保持原资产集合，源码构建仍可用。详见 [Windows 服务端发布](Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。
 
 规则 1 到 5 由 `tools/check-release.ps1` 检查，失败时列出全部错误并以非零退出。
 
 ## 发布流程
 
-不得覆盖既有标签或把新构建当作旧 Release 的原产物。当前准备 0.8.4 候选，以已发布的 `v0.8.3` 为发布基线；API、schema 和完整存储格式未变，因此本次使用 PATCH 版本。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。既有 `v0.8.3` 及更早标签和资产保持原发布身份。发布状态以本地验收、beta 门禁与 Mac 产物检查的实测结果为准。
+不得覆盖既有标签或把新构建当作旧 Release 的原产物。当前准备 0.8.5 候选，以已发布的 `v0.8.4` 为发布基线；API、schema 和完整存储格式未变，因此本次使用 PATCH 版本。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。既有 `v0.8.4` 及更早标签和资产保持原发布身份。发布状态以本地验收、beta 门禁与 Mac 产物检查的实测结果为准。
 
 历史基线说明：`v0.8.0` 的 Release 已撤回，但标签保留。0.8.1 当时按用户确认使用最后实际公开的 `v0.7.8` 为发布基线：程序 MINOR 从 7 升至 8，可写 schema 6 库升级为 8；撤回的 0.8.0 开发库（schema 7）也通过受保护迁移升级为 8。回退旧程序须配套恢复相应旧 schema 备份。这个例外不重写既有标签，也不改变后续版本的版本升级规则。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
 3. 本地预检（不创建标签，标签用参数传入）：
-   `pwsh tools/check-release.ps1 -Tag v0.8.4 -BaseTag v0.8.3`
+   `pwsh tools/check-release.ps1 -Tag v0.8.5 -BaseTag v0.8.4`
    仅标签去除 beta/rc 后缀后为 `v0.8.1`且未给出 `-BaseTag` 时，脚本默认 `v0.7.8`；显式 `-BaseTag` 始终优先。其他版本仍默认取除自身外最新的 `vX.Y.Z` 标签。显式以撤回标签 `v0.8.0` 作基线仍会按 schema 7→8 检查并拒绝仅 PATCH 的比较；这不是移动或替换该标签。
 4. 正式发布前在本地执行 `tools/check-local.ps1 -Asio`、受影响的专项回归及打包启动验收；日常开发按 [Testing Strategy](Testing_Strategy.md) 选择最小范围。缺少平台或硬件覆盖时明确记录，不能以云端构建代替功能验证。
-5. 合并后在发布提交上打标签 `v0.8.4`（或对应的预发布标签）并推送。
-6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上分别构建 macOS arm64 客户端和服务端包，各自生成对应的 `.sha256`。Mac 客户端使用 `tools/build-macos-client.ps1 -ExpectedCommit <full-commit> -ReportPath <private-build-proof.json>`，再运行 `tools/package-macos-client.ps1 -Tag <tag> -ExpectedCommit <full-commit> -BuildReport <private-build-proof.json>`。按打包器返回的 `.app`、ZIP 和报告路径运行 `tools/validate-macos-client.ps1 -Tag <tag> -ExpectedCommit <full-commit> -BundlePath <app> -ArchivePath <zip> -PackageReport <report> -BuildReport <private-build-proof.json>`；构建证明提供原构建机路径前缀，便于在另一台 Mac 上复核隐私边界。默认完整原生验收必须通过，`-StructureOnly` 的 `not-run` 结果不能替代它。首次 Mac 客户端分发计划使用 ad-hoc 签名、未经 Apple 公证；签名与启动是否通过须以实际 Mac 报告为准。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择，Unix 不传 `-Asio`。Linux x64 原生包在对应架构 Linux 环境中使用 `build-server-release.ps1`、`package-server.ps1` 和 `validate-server-package.ps1` 构建、打包并验收；Linux arm64 包仅作为 Docker 输入使用。Docker 镜像从已验收的 Linux 包生成，分别构建单平台镜像并保存离线归档，禁止把工作目录或运行数据作为正式镜像上下文。详见 [Linux 与 Docker 交付](Rust_Linux_Docker_Release.md)。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。正式包必须从最终 main/tag 提交构建；beta 的预编译服务器不能替代嵌入最终提交身份的正式产物。
-7. 上传本机构建的 12 个资产（六个归档及各自的 `.sha256`）：用 `tools/release-create.sh <tag> <资产…>` 创建 Release 并上传，或对已创建的 Release 用 `gh release upload <tag> <资产…>`。之后可选地在 GitHub Actions 中手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验。共享 `tools/verify-release-assets.ps1` 校验标签、标题、prerelease 标志、精确资产集合和 SHA256；0.8.4 起要求十二项，0.8.3 要求六项，更早标签要求四项，缺失、额外、重复或大小写不符均失败。该 workflow 不构建、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，因此打标签前无需先禁用 release.yml。本机构建包先执行 `pwsh tools/validate-portable.ps1 -BinaryDirectory dist/latest/portable`（旧 fixture 不可用时加 `-CleanCheckout`），再按 AGENTS.md 更新固定 `local_release/`，核对包内文件哈希及隔离启动。下载的已发布产物使用 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 模式；`ExpectedTag` 和 `ExpectedCommit` 不能脱离发布报告单独使用。发布后按 AGENTS.md 的 Published release synchronization 核对本地安装与正式资产身份。
+5. 合并后在发布提交上打标签 `v0.8.5`（或对应的预发布标签）并推送。
+6. 发布包只在对应本机平台构建并验证（不再由 CI 构建）：Windows 上构建 Windows x64 客户端包，Mac 上分别构建 macOS arm64 客户端和服务端包，各自生成对应的 `.sha256`。Mac 客户端使用 `tools/build-macos-client.ps1 -ExpectedCommit <full-commit> -ReportPath <private-build-proof.json>`，再运行 `tools/package-macos-client.ps1 -Tag <tag> -ExpectedCommit <full-commit> -BuildReport <private-build-proof.json>`。按打包器返回的 `.app`、ZIP 和报告路径运行 `tools/validate-macos-client.ps1 -Tag <tag> -ExpectedCommit <full-commit> -BundlePath <app> -ArchivePath <zip> -PackageReport <report> -BuildReport <private-build-proof.json>`；构建证明提供原构建机路径前缀，便于在另一台 Mac 上复核隐私边界。默认完整原生验收必须通过，`-StructureOnly` 的 `not-run` 结果不能替代它。首次 Mac 客户端分发计划使用 ad-hoc 签名、未经 Apple 公证；签名与启动是否通过须以实际 Mac 报告为准。独立 server 包由 `package-server.ps1` 生成，只含允许的公共文件；Windows 客户端的 ASIO 构建、打包与许可证检查使用同一 feature 选择；Windows 服务端用 `build-server-release.ps1 -Target x86_64-pc-windows-msvc` 构建，再由 `package-server.ps1` 和 `validate-server-package.ps1` 打包验收，不传 `-Asio`。Unix 也不传 `-Asio`。Linux x64 原生包在对应架构 Linux 环境中使用 `build-server-release.ps1`、`package-server.ps1` 和 `validate-server-package.ps1` 构建、打包并验收；Linux arm64 包仅作为 Docker 输入使用。Docker 镜像从已验收的 Linux 包生成，分别构建单平台镜像并保存离线归档，禁止把工作目录或运行数据作为正式镜像上下文。详见 [Linux 与 Docker 交付](Rust_Linux_Docker_Release.md)。Clippy、功能测试及 UI/服务端启动/health 均在本地执行。正式包必须从最终 main/tag 提交构建；beta 的预编译服务器不能替代嵌入最终提交身份的正式产物。
+7. 上传本机构建的 14 个资产（七个归档及各自的 `.sha256`）：用 `tools/release-create.sh <tag> <资产…>` 创建 Release 并上传，或对已创建的 Release 用 `gh release upload <tag> <资产…>`。之后可选地在 GitHub Actions 中手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验。共享 `tools/verify-release-assets.ps1` 校验标签、标题、prerelease 标志、精确资产集合和 SHA256；0.8.5 起要求十四项，0.8.4 要求十二项，0.8.3 要求六项，更早标签要求四项，缺失、额外、重复或大小写不符均失败。该 workflow 不构建、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，因此打标签前无需先禁用 release.yml。本机构建包先执行 `pwsh tools/validate-portable.ps1 -BinaryDirectory dist/latest/portable`（旧 fixture 不可用时加 `-CleanCheckout`），再按 AGENTS.md 更新固定 `local_release/`，核对包内文件哈希及隔离启动。下载的已发布产物使用 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 模式；`ExpectedTag` 和 `ExpectedCommit` 不能脱离发布报告单独使用。发布后按 AGENTS.md 的 Published release synchronization 核对本地安装与正式资产身份。
 
    本地可将 `gh release view <tag> --json tagName,name,isPrerelease,assets` 的 JSON 保存为文件，先运行 `pwsh tools/verify-release-assets.ps1 -Tag <tag> -ReleaseJsonPath <metadata.json>` 获得预期包名列表；下载后增加 `-AssetDirectory <downloaded-directory>` 核对全部摘要。`tools/test-release-assets.ps1` 使用隔离合成文件验证这套规则，不连接 GitHub。
 
@@ -62,5 +62,5 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
 1. 功能 PR 合入 `beta` 分支；`main` 只接受经过 beta 测试的 `beta`（或 hotfix 分支）合并。
 2. 在 `beta` 的待测提交上打 `vX.Y.Z-beta.N`（`X.Y.Z` 与 `Cargo.toml` 一致），发布为 GitHub pre-release（`tools/release-create.sh <tag>`，等价于 `gh release create <tag> --title "AudioLib Explorer <tag>" --prerelease --latest=false`；完全由标签推导：带后缀的标签（`-beta.N` / `-rc.N`）自动加 `--prerelease --latest=false`，纯 `vX.Y.Z` 为正式版）。
 3. 本机用 `tools/install-beta.ps1` 安装到独立目录（默认仓库下 `beta_release/`，可用 `-Destination` 指定），并通过 `AudioLibExplorer-beta.cmd` 启动；该脚本把 `AUDIOLIB_DATA_DIR` 设为 `%LOCALAPPDATA%/AudioLibExplorer/beta`，与正式版 `v1` 数据完全隔离。
-4. 每个 beta 待测提交按 [AGENTS.md](../AGENTS.md) 的 Beta testing flow 依次执行：Mac 上 `tools/beta-refresh.sh` 刷新 beta 服务端（含 commit 与库根读取自检），Windows 上 `tools/beta-smoke.ps1` 冒烟，再过 GUI 手动清单；任何一步失败都不得提升。
+4. 有应用改动的 beta 候选按 [AGENTS.md](../AGENTS.md) 的 Beta testing flow 执行自动验收：Mac 上 `tools/beta-refresh.sh` 刷新 beta 服务端（含 commit 与库根读取自检），Windows 上 `tools/beta-smoke.ps1` 冒烟。GUI 验收按本版实际 UI 改动和风险选择相关交互或视觉检查，仅在具体风险需要人工观察时请求确认，不默认重复历史固定清单。纯文档或流程规则更新按 Development checks 的范围复用仍有效的通过证据，不重建未变客户端、不重复无关验收；保留原证据的源码提交和二进制身份。必要检查的真实失败仍阻止提升。
 5. beta 验收通过后，从 `beta` 开 PR 合入 `main`，再按上文流程打正式标签。

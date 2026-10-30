@@ -18,6 +18,10 @@ $minor = [bigint]::Parse($tagMatch.Groups['minor'].Value, [Globalization.Culture
 $patch = [bigint]::Parse($tagMatch.Groups['patch'].Value, [Globalization.CultureInfo]::InvariantCulture)
 $includesMacClient = $major -gt 0 -or $minor -gt 8 -or ($minor -eq 8 -and $patch -ge 3)
 $includesLinuxDocker = $major -gt 0 -or $minor -gt 8 -or ($minor -eq 8 -and $patch -ge 4)
+# First release (including its -beta.N/-rc.N tags) that ships the native Windows x64
+# server ZIP. Releases before it keep their historical asset sets (0.8.4: twelve).
+$WindowsServerFirstVersion = [version]'0.8.5'
+$includesWindowsServer = $major -gt $WindowsServerFirstVersion.Major -or ($major -eq $WindowsServerFirstVersion.Major -and ($minor -gt $WindowsServerFirstVersion.Minor -or ($minor -eq $WindowsServerFirstVersion.Minor -and $patch -ge $WindowsServerFirstVersion.Build)))
 $packages = @("AudioLibExplorer-$Tag-win-x64-portable.zip")
 if ($includesMacClient) { $packages += "AudioLibExplorer-$Tag-macos-arm64.zip" }
 $packages += "AudioLibServer-$Tag-macos-arm64.tar.gz"
@@ -26,6 +30,7 @@ if ($includesLinuxDocker) {
     $packages += "AudioLibServer-$Tag-docker-linux-amd64.tar.gz"
     $packages += "AudioLibServer-$Tag-docker-linux-arm64.tar.gz"
 }
+if ($includesWindowsServer) { $packages += "AudioLibServer-$Tag-win-x64.zip" }
 $expectedAssets = @($packages | ForEach-Object { $_; "$_.sha256" })
 
 $releaseText = [IO.File]::ReadAllText([IO.Path]::GetFullPath($ReleaseJsonPath))

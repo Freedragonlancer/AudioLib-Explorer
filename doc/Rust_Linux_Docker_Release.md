@@ -1,6 +1,6 @@
 # Linux 与 Docker 服务端交付
 
-程序 0.8.4 | API /api/v1/ | schema 8 | 快照兼容 3..=8
+程序 0.8.5 | API /api/v1/ | schema 8 | 快照兼容 3..=8
 
 0.8.4 起，Release 增加以下归档，每个都附同名 `.sha256`；0.8.3 及更早版本的资产保持原样。
 
@@ -10,15 +10,15 @@
 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Docker Linux amd64 镜像离线包 |
 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Docker Linux arm64 镜像离线包 |
 
-Mac arm64 服务端及两个桌面客户端继续发布。独立 Linux arm64 包用于构建、验证 Docker 输入，不作为正式资产上传；Windows 服务端仍从源码构建。程序版本、API、schema 和 Metadata 格式沿用现有契约，不执行部署或自动迁移生产资料库。
+Mac arm64 服务端及两个桌面客户端继续发布。独立 Linux arm64 包用于构建、验证 Docker 输入，不作为正式资产上传；Windows 服务端从 0.8.5（首个纳入版本）起提供预编译 ZIP，之前版本和源码构建仍可用，见 [Windows 服务端发布](Rust_Windows_Server_Release.md)。程序版本、API、schema 和 Metadata 格式沿用现有契约，不执行部署或自动迁移生产资料库。
 
 ## Linux 原生安装
 
 下载 Linux x64 归档及校验文件，先校验再解压：
 
 ```sh
-sha256sum -c AudioLibServer-v0.8.4-linux-x64.tar.gz.sha256
-tar -xzf AudioLibServer-v0.8.4-linux-x64.tar.gz
+sha256sum -c AudioLibServer-v0.8.5-linux-x64.tar.gz.sha256
+tar -xzf AudioLibServer-v0.8.5-linux-x64.tar.gz
 ./audiolib-server --version
 ./audiolib-server --config /etc/audiolib/config.toml
 ```
@@ -30,15 +30,15 @@ tar -xzf AudioLibServer-v0.8.4-linux-x64.tar.gz
 选择与宿主机匹配的归档。以下为 amd64；arm64 将文件名和镜像标签中的 `amd64` 换为 `arm64`：
 
 ```sh
-sha256sum -c AudioLibServer-v0.8.4-docker-linux-amd64.tar.gz.sha256
-docker load --input AudioLibServer-v0.8.4-docker-linux-amd64.tar.gz
-docker image inspect audiolib-server:0.8.4-linux-amd64
+sha256sum -c AudioLibServer-v0.8.5-docker-linux-amd64.tar.gz.sha256
+docker load --input AudioLibServer-v0.8.5-docker-linux-amd64.tar.gz
+docker image inspect audiolib-server:0.8.5-linux-amd64
 ```
 
 这是 `docker save` 格式的压缩镜像归档；无需登录镜像仓库。Compose 文件见本版源码中的 [docker-compose.release.yml](../server/deploy/docker/docker-compose.release.yml)：
 
 ```sh
-export AUDIOLIB_SERVER_IMAGE=audiolib-server:0.8.4-linux-amd64
+export AUDIOLIB_SERVER_IMAGE=audiolib-server:0.8.5-linux-amd64
 export AUDIOLIB_SERVER_TOKEN='<至少 32 个可见 ASCII 字符的随机令牌>'
 export AUDIOLIB_MUSIC_DIR=/srv/audiolib/music
 docker compose -p audiolib-server -f server/deploy/docker/docker-compose.release.yml up -d
@@ -61,6 +61,6 @@ Linux 使用现有 `tools/build-server-release.ps1`、`tools/package-server.ps1`
 
 Docker 正式流程使用 `tools/package-server-docker.ps1` 和 `tools/validate-server-docker.ps1`，从已通过原生包验收的归档生成独立平台镜像。构建上下文只包含公开 payload、Dockerfile 和无凭据的默认配置，不传入工作目录、Git 元数据或运行数据。完整 payload 包括版本标记、项目许可和 Rust 依赖许可证。源码 Dockerfile 保留为开发示例，不替代正式镜像的提交、许可及包边界验收。
 
-每个平台分别验证版本和提交、镜像架构、非 root 身份、禁用二进制更新、令牌鉴权、隔离合成库和 WAV 流、卷持久化、健康状态及正常退出。测试只使用独占的临时容器和卷，不操作已有服务，不使用真实资料库或源音频。最终报告、截图和日志保持私有；Release 只上传六个正式归档及各自 SHA256，共十二个资产。
+每个平台分别验证版本和提交、镜像架构、非 root 身份、禁用二进制更新、令牌鉴权、隔离合成库和 WAV 流、卷持久化、健康状态及正常退出。测试只使用独占的临时容器和卷，不操作已有服务，不使用真实资料库或源音频。最终报告、截图和日志保持私有。0.8.4 发布六个正式归档及各自 SHA256，共十二个资产；0.8.5 起新增 Windows x64 服务端 ZIP（`AudioLibServer-<tag>-win-x64.zip`）及其 `.sha256`，发布七个归档及各自 SHA256，共十四个资产。
 
 正式包必须绑定最终 main/tag 提交，不能把早期候选产物改名充作正式版。发布后继续按 [AGENTS.md](../AGENTS.md) 同步、校验 Windows 的固定 `local_release/`；服务器镜像发布不包含生产部署。

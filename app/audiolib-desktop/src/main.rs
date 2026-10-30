@@ -11,6 +11,8 @@ mod directory_artwork_choices;
 mod gui_search_benchmark;
 mod list_waveforms;
 #[cfg(test)]
+mod mode_switch_scroll_tests;
+#[cfg(test)]
 mod pane_review_tests;
 mod progressive_waveform;
 #[cfg(test)]

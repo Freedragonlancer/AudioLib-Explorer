@@ -705,6 +705,11 @@ export component AppWindow inherits Window {
     private property <bool> task-viewport-pending: false;
     private property <float> task-wanted-result-y: 0;
     private property <float> task-wanted-result-x: 0;
+    // Bumps when a restore is armed or discarded. The timer applies only the epoch it armed.
+    private property <int> result-scroll-epoch: 0;
+    private property <int> result-scroll-apply-epoch: 0;
+    // Mode captured when the restore was armed. A server viewport must not land on the local list.
+    private property <bool> result-scroll-remote: false;
     private property <float> task-wanted-folder-y: 0;
     private property <float> task-wanted-filter-y: 0;
     private property <float> task-wanted-inspector-y: 0;
@@ -720,6 +725,9 @@ export component AppWindow inherits Window {
     // Call after replacing the task's raw fields and models. A one-shot layout turn
     // keeps ListView's temporary empty range from discarding the restored position.
     public function restore-search-task-viewport(result-y: float, result-x: float, folder-y: float, filter-y: float, inspector-y: float) {
+        root.result-scroll-epoch += 1;
+        root.result-scroll-apply-epoch = root.result-scroll-epoch;
+        root.result-scroll-remote = root.remote-mode;
         root.task-restoring = true;
         root.task-viewport-pending = true;
         root.task-wanted-result-y = result-y;
@@ -729,6 +737,17 @@ export component AppWindow inherits Window {
         root.task-wanted-inspector-y = inspector-y;
         task-viewport-timer.running = true;
         task-viewport-timer.restart();
+    }
+    // Drop a viewport armed for the other source and the shared ListView's scroll offset.
+    public function reset-result-list-scroll() {
+        root.result-scroll-epoch += 1;
+        root.task-viewport-pending = false;
+        root.task-restoring = false;
+        root.task-wanted-result-y = 0;
+        root.task-wanted-result-x = 0;
+        result-list.viewport-y = 0px;
+        root.table-viewport-x = 0px;
+        root.sync-table-viewport();
     }
     public function reveal-search-task(index: int) {
         let left = max(0, index) * (root.task-tab-width + 3px * Theme.ui-scale);
@@ -1735,15 +1754,26 @@ export component AppWindow inherits Window {
         running: false; interval: 1ms;
         triggered => {
             self.running = false;
-            result-list.viewport-y = clamp(root.task-wanted-result-y * 1px, min(0px, result-list.visible-height - result-list.viewport-height), 0px);
-            root.table-viewport-x = clamp(root.task-wanted-result-x * 1px, min(0px, result-list.visible-width - root.table-content-size), 0px);
+            // A server result-list offset must not land on another source. Folder,
+            // filter and inspector scrolls are not tied to that row model.
+            if root.task-viewport-pending && root.result-scroll-apply-epoch == root.result-scroll-epoch && root.result-scroll-remote == root.remote-mode {
+                let content-height = max(0, root.rows.length) * root.result-row-height;
+                result-list.viewport-y = clamp(root.task-wanted-result-y * 1px, min(0px, result-list.visible-height - content-height), 0px);
+                root.table-viewport-x = clamp(root.task-wanted-result-x * 1px, min(0px, result-list.visible-width - root.table-content-size), 0px);
+                root.sync-table-viewport();
+                root.report-result-window();
+            }
             folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, folder-list.visible-height - folder-list.viewport-height), 0px);
             root.task-filter-viewport-y = min(0px, root.task-wanted-filter-y * 1px);
             root.task-inspector-viewport-y = min(0px, root.task-wanted-inspector-y * 1px);
             root.task-viewport-pending = false;
             root.task-restoring = false;
-            root.sync-table-viewport();
-            root.report-result-window();
+        }
+    }
+    // A deferred mode change must not discard a restore armed for the mode now showing.
+    changed remote-mode => {
+        if root.task-viewport-pending && root.result-scroll-remote != root.remote-mode {
+            root.reset-result-list-scroll();
         }
     }
     clipboard-input := TextInput { visible: false; }

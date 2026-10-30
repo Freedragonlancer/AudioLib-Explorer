@@ -10,7 +10,7 @@ use audiolib_server::{
 };
 use axum::{
     body::Body,
-    http::{Request, StatusCode, header},
+    http::{Method, Request, StatusCode, header},
     response::Response,
 };
 use http_body_util::BodyExt;
@@ -64,7 +64,11 @@ fn synchsafe(size: usize) -> [u8; 4] {
 }
 
 fn embed_png(path: &Path, image: &[u8]) {
-    let mut apic = b"\0image/png\0\x03\0".to_vec();
+    embed_picture(path, "image/png", image);
+}
+
+fn embed_picture(path: &Path, mime: &str, image: &[u8]) {
+    let mut apic = format!("\0{mime}\0\x03\0").into_bytes();
     apic.extend_from_slice(image);
     let mut frame = b"APIC".to_vec();
     frame.extend_from_slice(&(apic.len() as u32).to_be_bytes());
@@ -116,15 +120,20 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_second_cover(second_cover: bool) -> Fixture {
+    let image = png(32, 16);
+    fixture_with_cover("image/png", &image, image.clone(), second_cover)
+}
+
+/// `embedded` goes into the WAV; `image` is the body the server should return.
+fn fixture_with_cover(mime: &str, embedded: &[u8], image: Vec<u8>, second_cover: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = real_path(dir.path());
     let sounds = base.join("sounds");
     fs::create_dir_all(&sounds).unwrap();
-    let image = png(32, 16);
     let cover = sounds.join("cover.wav");
     let plain = sounds.join("plain.wav");
     wav(&cover);
-    embed_png(&cover, &image);
+    embed_picture(&cover, mime, embedded);
     wav(&plain);
     if second_cover {
         embed_png(&plain, &png(14, 10));
@@ -178,9 +187,13 @@ fn fixture_with_second_cover(second_cover: bool) -> Fixture {
 }
 
 async fn send(state: &AppState, path: &str) -> Response {
+    send_method(state, Method::GET, path).await
+}
+
+async fn send_method(state: &AppState, method: Method, path: &str) -> Response {
     router(state.clone())
         .oneshot(
-            support::modern(Request::get(path))
+            support::modern(Request::builder().method(method).uri(path))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
                 .header("X-AudioLib-Library-Id", state.library_id())
                 .header(
@@ -699,4 +712,185 @@ async fn album_artwork_rejects_missing_duplicate_and_stale_namespace_before_cach
         assert_eq!(error.error_code, "LIBRARY_CHANGED");
     }
     assert!(!f.db.parent().unwrap().join("artwork").exists());
+}
+
+async fn send_if_none_match(state: &AppState, path: &str, etag: &str) -> Response {
+    router(state.clone())
+        .oneshot(
+            support::modern(Request::get(path))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header("X-AudioLib-Library-Id", state.library_id())
+                .header(header::IF_NONE_MATCH, etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cover_cache_hits_and_304_need_no_decode_slot_and_misses_wait_briefly() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let cached = format!("/api/v1/audio/{}/artwork", f.cover_id);
+    let warm = send(&f.state, &cached).await;
+    assert_eq!(warm.status(), StatusCode::OK);
+    let etag = warm.headers()[header::ETAG].to_str().unwrap().to_owned();
+
+    // Every decode slot is held (two slow decodes elsewhere).
+    let slots = f.state.artwork_slots();
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    assert_eq!(slots.available_permits(), 0);
+
+    // Slots stay held throughout, so a request that needed one would get 503;
+    // 200 and 304 here prove cache hits and conditional hits never take a slot.
+    let hit = send(&f.state, &cached).await;
+    assert_eq!(hit.status(), StatusCode::OK);
+    assert_eq!(body(hit).await, f.image);
+    let not_modified = send_if_none_match(&f.state, &cached, &etag).await;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+    // A cache miss (new thumbnail size) waits about 0.5 s, then 503 BUSY + Retry-After.
+    let miss = format!("/api/v1/audio/{}/artwork?side=8", f.cover_id);
+    let started = std::time::Instant::now();
+    let busy = send(&f.state, &miss).await;
+    let waited = started.elapsed();
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
+    let error: ErrorBody = serde_json::from_slice(&body(busy).await).unwrap();
+    assert_eq!(error.error_code, "BUSY");
+    assert!(
+        // Lower bound only: the timeout never fires early; slow machines may be late.
+        waited >= Duration::from_millis(400),
+        "{waited:?}"
+    );
+
+    // HEAD of the same busy miss: identical headers (incl. Retry-After and
+    // Content-Length) to GET, and no body.
+    let get_busy = send(&f.state, &miss).await;
+    let head_busy = send_method(&f.state, Method::HEAD, &miss).await;
+    assert_eq!(head_busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(head_busy.headers()[header::RETRY_AFTER], "1");
+    let get_length = get_busy.headers()[header::CONTENT_LENGTH].clone();
+    assert_eq!(
+        head_busy.headers().get(header::CONTENT_LENGTH),
+        Some(&get_length)
+    );
+    let mut get_names: Vec<_> = get_busy
+        .headers()
+        .keys()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    let mut head_names: Vec<_> = head_busy
+        .headers()
+        .keys()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    get_names.sort();
+    head_names.sort();
+    assert_eq!(get_names, head_names);
+    let get_body = body(get_busy).await;
+    assert_eq!(get_length.to_str().unwrap(), get_body.len().to_string());
+    assert!(body(head_busy).await.is_empty());
+
+    // A slot freed during the wait serves the queued miss instead of 503.
+    let state = f.state.clone();
+    let queued = tokio::spawn(async move { send(&state, &miss).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(held);
+    let served = queued.await.unwrap();
+    assert_eq!(served.status(), StatusCode::OK);
+    let thumb = image::load_from_memory(&body(served).await).unwrap();
+    assert!(thumb.width() <= 8 && thumb.height() <= 8);
+    assert_eq!(slots.available_permits(), 2, "decode slots are returned");
+}
+
+#[tokio::test]
+async fn truncated_cover_cache_is_a_miss_regenerated_through_a_slot() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let path = format!("/api/v1/audio/{}/artwork", f.cover_id);
+    let warm = send(&f.state, &path).await;
+    assert_eq!(warm.status(), StatusCode::OK);
+    let cache = f.db.parent().unwrap().join("artwork");
+    let entry = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.is_file())
+        .unwrap();
+    let full = fs::read(&entry).unwrap();
+    fs::write(&entry, &full[..full.len() / 2]).unwrap();
+
+    // With every slot held, the truncated entry must not be served as a hit.
+    let slots = f.state.artwork_slots();
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    let busy = send(&f.state, &path).await;
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(held);
+
+    let served = send(&f.state, &path).await;
+    assert_eq!(served.status(), StatusCode::OK);
+    assert_eq!(body(served).await, f.image);
+    assert_eq!(fs::read(&entry).unwrap(), full, "cache entry regenerated");
+
+    // The repaired entry is a hit again without a slot.
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    let hit = send(&f.state, &path).await;
+    assert_eq!(hit.status(), StatusCode::OK);
+    assert_eq!(body(hit).await, f.image);
+    drop(held);
+    let leftovers: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+fn jpeg(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([u8::try_from((x + y) % 200).unwrap_or(1), 90, 30])
+    });
+    let mut output = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 85)
+        .encode_image(&image::DynamicImage::ImageRgb8(image))
+        .unwrap();
+    output
+}
+
+/// Real embedded covers often carry bytes after JPEG FFD9 / PNG IEND. The cache
+/// must store the trimmed picture so the next read is a slot-free hit, not an
+/// endless delete-and-regenerate loop.
+#[tokio::test]
+async fn padded_embedded_covers_are_cached_as_hits_without_a_slot() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let mut padded_jpeg = jpeg(24, 12);
+    let clean_jpeg = padded_jpeg.clone();
+    padded_jpeg.extend_from_slice(&[0; 64]);
+    padded_jpeg.extend_from_slice(b"trailing garbage");
+    let clean_png = png(20, 10);
+    let mut padded_png = clean_png.clone();
+    padded_png.extend_from_slice(&[0, 0, 0, 0, 7, 7]);
+    for (mime, padded, clean) in [
+        ("image/jpeg", padded_jpeg, clean_jpeg),
+        ("image/png", padded_png, clean_png),
+    ] {
+        let f = fixture_with_cover(mime, &padded, clean.clone(), false);
+        let path = format!("/api/v1/audio/{}/artwork", f.cover_id);
+        let first = send(&f.state, &path).await;
+        assert_eq!(first.status(), StatusCode::OK, "{mime}");
+        assert_eq!(body(first).await, clean, "{mime}: trimmed original");
+        let slots = f.state.artwork_slots();
+        let held = slots.clone().acquire_many_owned(2).await.unwrap();
+        for _ in 0..2 {
+            let hit = send(&f.state, &path).await;
+            assert_eq!(
+                hit.status(),
+                StatusCode::OK,
+                "{mime}: cache hit needs no slot"
+            );
+            assert_eq!(body(hit).await, clean, "{mime}");
+        }
+        drop(held);
+    }
 }

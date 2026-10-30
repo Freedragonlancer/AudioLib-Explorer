@@ -1,11 +1,31 @@
 // crates/audiolib-remote/src/artwork.rs
 //! Optional embedded-cover HTTP reads. Images never enter the snapshot or audio stream.
+//!
+//! The server keeps two decode slots. When they stay full it queues for about 500ms,
+//! then answers `503 BUSY` with `Retry-After: 1` (seconds). This client never opens a
+//! third cover request. Busy backoff itself lives with the desktop worker, which can
+//! see the current job; [`cover_busy_delay`] is that wait. HTTP 405 is logged once per
+//! server and still means no cover. HTTP 401, library-identity conflicts and protocol
+//! errors are not retried here.
 use crate::{Capabilities, RemoteClient, RemoteError, Result};
-use std::{sync::atomic::AtomicBool, time::Duration};
+use std::collections::HashSet;
+use std::sync::{
+    Condvar, LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 /// Largest encoded cover accepted from a server, matching the bounded image decoder.
 pub const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
 const ARTWORK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cover requests this process will run at once. The server has the same two slots.
+const ARTWORK_CLIENT_SLOTS: usize = 2;
+/// Wait when `Retry-After` is missing or not a positive number of seconds.
+const ARTWORK_BUSY_DEFAULT_WAIT: Duration = Duration::from_secs(1);
+/// Longest wait for one busy retry. `Retry-After: 1` stays one second plus jitter.
+const ARTWORK_BUSY_MAX_WAIT: Duration = Duration::from_secs(10);
+/// Extra delay added after [`crate::error::retry_wait`], so clients do not retry in step.
+const ARTWORK_BUSY_JITTER: Duration = Duration::from_millis(250);
 
 fn canonical_artwork_directory(directory: &str) -> Result<String> {
     if directory.len() > 4096 {
@@ -60,7 +80,8 @@ fn native_album_source(state: &crate::CacheState) -> bool {
 pub enum ArtworkReply {
     /// The caller's ETag still identifies the current image.
     NotModified,
-    /// No image or an older server without the endpoint (`404`/`405`).
+    /// No image, or an older server without the endpoint (`404`/`405`).
+    /// `405` is logged; both still present as no cover.
     Missing,
     /// A bounded JPEG/PNG response with its opaque entity tag.
     Data {
@@ -103,6 +124,98 @@ impl Capabilities {
                     .is_some_and(|revision| *revision >= 1)
             })
     }
+}
+
+struct ArtworkSlots {
+    available: Mutex<usize>,
+    wake: Condvar,
+}
+
+struct ArtworkPermit<'a> {
+    slots: &'a ArtworkSlots,
+}
+
+impl Drop for ArtworkPermit<'_> {
+    fn drop(&mut self) {
+        let mut available = self.slots.available.lock().unwrap();
+        *available += 1;
+        self.slots.wake.notify_one();
+    }
+}
+
+impl ArtworkSlots {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            available: Mutex::new(capacity),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn acquire<'a>(&'a self, cancel: &AtomicBool) -> Result<ArtworkPermit<'a>> {
+        let mut available = self.available.lock().unwrap();
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err(RemoteError::Cancelled);
+            }
+            if *available > 0 {
+                *available -= 1;
+                return Ok(ArtworkPermit { slots: self });
+            }
+            let (guard, _) = self
+                .wake
+                .wait_timeout(available, Duration::from_millis(50))
+                .unwrap();
+            available = guard;
+        }
+    }
+}
+
+/// Process-wide cap. A waiting caller checks cancellation instead of opening a
+/// third socket that the server would queue and then reject.
+static ARTWORK_SLOTS: ArtworkSlots = ArtworkSlots::new(ARTWORK_CLIENT_SLOTS);
+
+fn acquire_artwork_slot(cancel: &AtomicBool) -> Result<ArtworkPermit<'static>> {
+    ARTWORK_SLOTS.acquire(cancel)
+}
+
+/// Servers that already logged HTTP 405 for artwork. One warning per API base URL.
+static ARTWORK_405_WARNED: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// `true` the first time `server` is seen, so the 405 warning is logged once.
+fn claim_artwork_method_not_allowed(server: &str) -> bool {
+    ARTWORK_405_WARNED.lock().unwrap().insert(server.to_owned())
+}
+
+/// Wait before another cover read after [`RemoteError::Busy`].
+///
+/// Uses [`crate::error::retry_wait`]: a positive `Retry-After` is seconds, otherwise
+/// one second, and the result never exceeds [`ARTWORK_BUSY_MAX_WAIT`]. A jitter of at
+/// most 250ms is added so retries do not line up, still inside that cap. Callers must
+/// not use this for 401, library-identity or protocol failures.
+pub fn cover_busy_delay(retry_after: Option<u64>) -> Duration {
+    let base = crate::error::retry_wait(
+        ARTWORK_BUSY_DEFAULT_WAIT,
+        retry_after,
+        ARTWORK_BUSY_MAX_WAIT,
+    );
+    let room = ARTWORK_BUSY_MAX_WAIT.saturating_sub(base);
+    let jitter = jitter_up_to(ARTWORK_BUSY_JITTER.min(room));
+    base.saturating_add(jitter)
+}
+
+fn jitter_up_to(max: Duration) -> Duration {
+    let millis = max.as_millis() as u64;
+    if millis == 0 {
+        return Duration::ZERO;
+    }
+    static MIX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xA5A5_1234);
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.subsec_nanos())
+        .unwrap_or(0);
+    let mixed = MIX.fetch_add(tick ^ 0x9E37_79B9, Ordering::Relaxed) ^ tick;
+    Duration::from_millis(u64::from(mixed) % (millis + 1))
 }
 
 impl RemoteClient {
@@ -482,13 +595,20 @@ impl RemoteClient {
                 (None, None) => format!("/{collection}/{id}/artwork"),
             }
         };
-        let client = self.clone();
         let library_id = library_id.map(str::to_owned);
         let expected_namespace = expected_namespace.map(str::to_owned);
         let expected_directory = expected_directory.map(directory_identity_hex);
         let if_none_match = if_none_match.map(str::to_owned);
+        if cancel.load(Ordering::Acquire) {
+            return Err(RemoteError::Cancelled);
+        }
+        // Held only for this exchange. The desktop worker retries Busy after the
+        // permit is released, and sends the same If-None-Match again.
+        let permit = acquire_artwork_slot(cancel)?;
+        let client = self.clone();
         crate::client::call_cancellable(
             move |abort| {
+                let _permit = permit;
                 let url = format!("{}{path}", client.api);
                 let context = format!("GET {path}");
                 let agent = crate::abort::abortable_agent(ARTWORK_TIMEOUT, ARTWORK_TIMEOUT, abort);
@@ -510,10 +630,23 @@ impl RemoteClient {
                     request
                 })
                 .map_err(|error| RemoteError::from_transport(error, &url))?;
-                if matches!(response.status().as_u16(), 404 | 405) {
+                let status = response.status().as_u16();
+                if status == 405 {
+                    if claim_artwork_method_not_allowed(&client.api) {
+                        tracing::warn!(
+                            server = %client.api,
+                            %path,
+                            "artwork endpoint returned HTTP 405 Method Not Allowed; showing no cover"
+                        );
+                    }
                     return Ok(ArtworkReply::Missing);
                 }
-                if matches!(response.status().as_u16(), 200 | 304)
+                if status == 404 {
+                    return Ok(ArtworkReply::Missing);
+                }
+                // 401, 409 and other statuses are classified by status and
+                // error_code below. This function does not retry them.
+                if matches!(status, 200 | 304)
                     && let Some(expected) = &library_id
                 {
                     let identities = response.headers().get_all("x-library-id");
@@ -628,7 +761,10 @@ mod folder_tests;
 mod tests {
     use super::*;
     use crate::test_server::{TestResponse, TestServer};
-    use std::sync::{Arc, atomic::Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn optional_artwork_requires_its_explicit_feature() {
@@ -983,5 +1119,295 @@ mod tests {
             Err(RemoteError::Cancelled)
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cover_busy_delay_uses_retry_after_seconds_default_cap_and_jitter() {
+        let one =
+            crate::error::retry_wait(ARTWORK_BUSY_DEFAULT_WAIT, Some(1), ARTWORK_BUSY_MAX_WAIT);
+        assert_eq!(one, Duration::from_secs(1));
+        for _ in 0..30 {
+            let delay = cover_busy_delay(Some(1));
+            assert!(delay >= one, "{delay:?}");
+            assert!(delay <= one + ARTWORK_BUSY_JITTER, "{delay:?}");
+            let missing = cover_busy_delay(None);
+            assert!(missing >= ARTWORK_BUSY_DEFAULT_WAIT, "{missing:?}");
+            assert!(
+                missing <= ARTWORK_BUSY_DEFAULT_WAIT + ARTWORK_BUSY_JITTER,
+                "{missing:?}"
+            );
+        }
+        let zero = cover_busy_delay(Some(0));
+        assert!(
+            zero >= ARTWORK_BUSY_DEFAULT_WAIT
+                && zero <= ARTWORK_BUSY_DEFAULT_WAIT + ARTWORK_BUSY_JITTER
+        );
+        let two = cover_busy_delay(Some(2));
+        assert!(
+            two >= Duration::from_secs(2) && two <= Duration::from_secs(2) + ARTWORK_BUSY_JITTER
+        );
+        assert_eq!(cover_busy_delay(Some(3_600)), ARTWORK_BUSY_MAX_WAIT);
+    }
+
+    #[test]
+    fn busy_503_is_classified_from_the_error_code_and_retry_after_not_the_message() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let conditional = Arc::new(std::sync::Mutex::new(None));
+        let saw = conditional.clone();
+        let server = TestServer::start(move |request| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            *saw.lock().unwrap() = request.header("if-none-match").map(str::to_owned);
+            TestResponse::json(
+                503,
+                r#"{"error_code":"BUSY","message":"slot queue elapsed"}"#,
+            )
+            .with_header("Retry-After", "1")
+        });
+        let error = RemoteClient::new(&server.url, "token")
+            .unwrap()
+            .artwork(
+                7,
+                Some(40),
+                Some("\"cached-cover\""),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RemoteError::Busy {
+                    retry_after: Some(1),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the transport does not retry"
+        );
+        assert_eq!(
+            conditional.lock().unwrap().as_deref(),
+            Some("\"cached-cover\"")
+        );
+
+        let misleading = TestServer::start(|_| {
+            TestResponse::json(
+                503,
+                r#"{"error_code":"UNAVAILABLE","message":"server busy please retry"}"#,
+            )
+            .with_header("Retry-After", "1")
+        });
+        let error = RemoteClient::new(&misleading.url, "token")
+            .unwrap()
+            .artwork(7, None, None, &AtomicBool::new(false))
+            .unwrap_err();
+        assert!(
+            matches!(error, RemoteError::Starting { .. }),
+            "a busy-sounding message is not BUSY: {error:?}"
+        );
+    }
+
+    #[test]
+    fn artwork_409_and_root_offline_are_not_retried() {
+        for (status, body, header, expect_busy) in [
+            (
+                409,
+                r#"{"error_code":"BUSY","message":"conflict"}"#,
+                None,
+                true,
+            ),
+            (
+                409,
+                r#"{"error_code":"LIBRARY_CHANGED","message":"changed"}"#,
+                None,
+                false,
+            ),
+            (
+                503,
+                r#"{"error_code":"ROOT_OFFLINE","message":"Library root \"SFX\" is offline: down"}"#,
+                Some("5"),
+                false,
+            ),
+        ] {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let seen = hits.clone();
+            let server = TestServer::start(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                let response = TestResponse::json(status, body);
+                match header {
+                    Some(value) => response.with_header("Retry-After", value),
+                    None => response,
+                }
+            });
+            let error = RemoteClient::new(&server.url, "token")
+                .unwrap()
+                .artwork(1, None, None, &AtomicBool::new(false))
+                .unwrap_err();
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{status} {body}");
+            if expect_busy {
+                assert!(matches!(error, RemoteError::Busy { .. }), "{error:?}");
+            } else if status == 409 {
+                assert!(matches!(error, RemoteError::LibraryChanged(_)), "{error:?}");
+            } else {
+                assert!(
+                    matches!(error, RemoteError::RootOffline { .. }),
+                    "{error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unauthorized_and_protocol_failures_are_single_shot() {
+        for (status, body, protocol) in [
+            (
+                401,
+                r#"{"error_code":"UNAUTHORIZED","message":"token"}"#,
+                false,
+            ),
+            (200, "not-an-image", true),
+        ] {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let seen = hits.clone();
+            let server = TestServer::start(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                if protocol {
+                    let mut response = TestResponse::bytes(200, b"not-an-image".to_vec());
+                    response.content_type = "image/png";
+                    response
+                } else {
+                    TestResponse::json(status, body)
+                }
+            });
+            let error = RemoteClient::new(&server.url, "token")
+                .unwrap()
+                .artwork(4, None, Some("\"etag\""), &AtomicBool::new(false))
+                .unwrap_err();
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{status}");
+            if protocol {
+                assert!(matches!(error, RemoteError::Protocol(_)), "{error:?}");
+            } else {
+                assert!(matches!(error, RemoteError::Unauthorized(_)), "{error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn method_not_allowed_is_missing_and_logs_a_warning() {
+        use std::sync::Once;
+        use tracing::field::Visit;
+        static WARN_405: AtomicUsize = AtomicUsize::new(0);
+        static EXPECTED_SERVER: Mutex<String> = Mutex::new(String::new());
+        static INSTALL: Once = Once::new();
+        struct Probe;
+        impl tracing::Subscriber for Probe {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.level() <= &tracing::Level::WARN
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() != tracing::Level::WARN {
+                    return;
+                }
+                let expected = EXPECTED_SERVER.lock().unwrap().clone();
+                if expected.is_empty() {
+                    return;
+                }
+                let mut server = String::new();
+                event.record(&mut ServerVisit(&mut server));
+                if server == expected {
+                    WARN_405.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        struct ServerVisit<'a>(&'a mut String);
+        impl Visit for ServerVisit<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "server" {
+                    let text = format!("{value:?}");
+                    *self.0 = text.trim_matches('"').to_owned();
+                }
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "server" {
+                    *self.0 = value.to_owned();
+                }
+            }
+        }
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Probe);
+        });
+        WARN_405.store(0, Ordering::SeqCst);
+        let server = TestServer::start(|_| TestResponse::json(405, "{}"));
+        let client = RemoteClient::new(&server.url, "token").unwrap();
+        *EXPECTED_SERVER.lock().unwrap() = client.api_url().to_owned();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            client.artwork(405_405, None, None, &cancel).unwrap(),
+            ArtworkReply::Missing
+        );
+        assert_eq!(
+            client.artwork(405_406, None, None, &cancel).unwrap(),
+            ArtworkReply::Missing
+        );
+        assert_eq!(
+            WARN_405.load(Ordering::SeqCst),
+            1,
+            "two HTTP 405 replies from the same server log one warning"
+        );
+        assert!(claim_artwork_method_not_allowed(
+            "http://artwork-405-a.invalid/api/v1"
+        ));
+        assert!(!claim_artwork_method_not_allowed(
+            "http://artwork-405-a.invalid/api/v1"
+        ));
+        assert!(claim_artwork_method_not_allowed(
+            "http://artwork-405-b.invalid/api/v1"
+        ));
+    }
+
+    #[test]
+    fn artwork_client_keeps_at_most_two_cover_requests_in_flight() {
+        let slots = ArtworkSlots::new(ARTWORK_CLIENT_SLOTS);
+        let cancel = AtomicBool::new(false);
+        let first = slots.acquire(&cancel).unwrap();
+        let second = slots.acquire(&cancel).unwrap();
+        let entered = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let _third = slots.acquire(&cancel).unwrap();
+                entered.store(true, Ordering::Release);
+            });
+            std::thread::sleep(Duration::from_millis(120));
+            assert!(
+                !entered.load(Ordering::Acquire),
+                "a third cover request must wait for a free slot"
+            );
+            drop(first);
+            waiting.join().unwrap();
+        });
+        assert!(entered.load(Ordering::Acquire));
+        drop(second);
+
+        let blocked = ArtworkSlots::new(1);
+        let held = blocked.acquire(&cancel).unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| blocked.acquire(&stop));
+            std::thread::sleep(Duration::from_millis(40));
+            stop.store(true, Ordering::Release);
+            let result = waiting.join().unwrap();
+            assert!(matches!(result, Err(RemoteError::Cancelled)));
+        });
+        drop(held);
     }
 }
