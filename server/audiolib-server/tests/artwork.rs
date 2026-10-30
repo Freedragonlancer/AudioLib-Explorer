@@ -64,7 +64,11 @@ fn synchsafe(size: usize) -> [u8; 4] {
 }
 
 fn embed_png(path: &Path, image: &[u8]) {
-    let mut apic = b"\0image/png\0\x03\0".to_vec();
+    embed_picture(path, "image/png", image);
+}
+
+fn embed_picture(path: &Path, mime: &str, image: &[u8]) {
+    let mut apic = format!("\0{mime}\0\x03\0").into_bytes();
     apic.extend_from_slice(image);
     let mut frame = b"APIC".to_vec();
     frame.extend_from_slice(&(apic.len() as u32).to_be_bytes());
@@ -116,15 +120,20 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_second_cover(second_cover: bool) -> Fixture {
+    let image = png(32, 16);
+    fixture_with_cover("image/png", &image, image.clone(), second_cover)
+}
+
+/// `embedded` goes into the WAV; `image` is the body the server should return.
+fn fixture_with_cover(mime: &str, embedded: &[u8], image: Vec<u8>, second_cover: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = real_path(dir.path());
     let sounds = base.join("sounds");
     fs::create_dir_all(&sounds).unwrap();
-    let image = png(32, 16);
     let cover = sounds.join("cover.wav");
     let plain = sounds.join("plain.wav");
     wav(&cover);
-    embed_png(&cover, &image);
+    embed_picture(&cover, mime, embedded);
     wav(&plain);
     if second_cover {
         embed_png(&plain, &png(14, 10));
@@ -794,4 +803,94 @@ async fn cover_cache_hits_and_304_need_no_decode_slot_and_misses_wait_briefly() 
     let thumb = image::load_from_memory(&body(served).await).unwrap();
     assert!(thumb.width() <= 8 && thumb.height() <= 8);
     assert_eq!(slots.available_permits(), 2, "decode slots are returned");
+}
+
+#[tokio::test]
+async fn truncated_cover_cache_is_a_miss_regenerated_through_a_slot() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let f = fixture();
+    let path = format!("/api/v1/audio/{}/artwork", f.cover_id);
+    let warm = send(&f.state, &path).await;
+    assert_eq!(warm.status(), StatusCode::OK);
+    let cache = f.db.parent().unwrap().join("artwork");
+    let entry = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.is_file())
+        .unwrap();
+    let full = fs::read(&entry).unwrap();
+    fs::write(&entry, &full[..full.len() / 2]).unwrap();
+
+    // With every slot held, the truncated entry must not be served as a hit.
+    let slots = f.state.artwork_slots();
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    let busy = send(&f.state, &path).await;
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(held);
+
+    let served = send(&f.state, &path).await;
+    assert_eq!(served.status(), StatusCode::OK);
+    assert_eq!(body(served).await, f.image);
+    assert_eq!(fs::read(&entry).unwrap(), full, "cache entry regenerated");
+
+    // The repaired entry is a hit again without a slot.
+    let held = slots.clone().acquire_many_owned(2).await.unwrap();
+    let hit = send(&f.state, &path).await;
+    assert_eq!(hit.status(), StatusCode::OK);
+    assert_eq!(body(hit).await, f.image);
+    drop(held);
+    let leftovers: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+fn jpeg(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([u8::try_from((x + y) % 200).unwrap_or(1), 90, 30])
+    });
+    let mut output = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 85)
+        .encode_image(&image::DynamicImage::ImageRgb8(image))
+        .unwrap();
+    output
+}
+
+/// Real embedded covers often carry bytes after JPEG FFD9 / PNG IEND. The cache
+/// must store the trimmed picture so the next read is a slot-free hit, not an
+/// endless delete-and-regenerate loop.
+#[tokio::test]
+async fn padded_embedded_covers_are_cached_as_hits_without_a_slot() {
+    let _serial = HTTP_SERIAL.lock().await;
+    let mut padded_jpeg = jpeg(24, 12);
+    let clean_jpeg = padded_jpeg.clone();
+    padded_jpeg.extend_from_slice(&[0; 64]);
+    padded_jpeg.extend_from_slice(b"trailing garbage");
+    let clean_png = png(20, 10);
+    let mut padded_png = clean_png.clone();
+    padded_png.extend_from_slice(&[0, 0, 0, 0, 7, 7]);
+    for (mime, padded, clean) in [
+        ("image/jpeg", padded_jpeg, clean_jpeg),
+        ("image/png", padded_png, clean_png),
+    ] {
+        let f = fixture_with_cover(mime, &padded, clean.clone(), false);
+        let path = format!("/api/v1/audio/{}/artwork", f.cover_id);
+        let first = send(&f.state, &path).await;
+        assert_eq!(first.status(), StatusCode::OK, "{mime}");
+        assert_eq!(body(first).await, clean, "{mime}: trimmed original");
+        let slots = f.state.artwork_slots();
+        let held = slots.clone().acquire_many_owned(2).await.unwrap();
+        for _ in 0..2 {
+            let hit = send(&f.state, &path).await;
+            assert_eq!(
+                hit.status(),
+                StatusCode::OK,
+                "{mime}: cache hit needs no slot"
+            );
+            assert_eq!(body(hit).await, clean, "{mime}");
+        }
+        drop(held);
+    }
 }
