@@ -124,7 +124,11 @@ foreach ($relative in $publicFiles) {
     Assert-Within (Join-Path $taskRoot $relative) $taskRoot
     Assert-Unlinked (Join-Path $taskRoot $relative)
 }
-if (!$BinaryPath) { $BinaryPath = Join-Path $taskRoot "target/$Target/release" }
+if (!$BinaryPath) {
+    # Match Cargo and package-portable.ps1: honor CARGO_TARGET_DIR when it is set.
+    $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $taskRoot) } else { Join-Path $taskRoot 'target' }
+    $BinaryPath = Join-Path $targetRoot "$Target/release"
+}
 $binarySource = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BinaryPath)) { $BinaryPath } else { Join-Path $taskRoot $BinaryPath }))
 Assert-Unlinked $binarySource
 if (Test-Path -LiteralPath $binarySource -PathType Container) { $binarySource = Join-Path $binarySource $binaryName }

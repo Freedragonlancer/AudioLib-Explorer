@@ -54,7 +54,7 @@ pwsh tools/validate-server-package.ps1 -Tag vX.Y.Z -Target x86_64-pc-windows-msv
 
 ## 待 Paul 拍板
 
-- **Windows 配置/数据目录**：候选 `%ProgramData%\AudioLibServer`（例如 `config.toml` 与 `library.db` 所在目录），程序目录与之分离。此为候选，尚未定论。
+- **Windows 配置/数据目录**：默认 `%ProgramData%\AudioLibServer`（`config.toml` 与 `library.db` 所在目录），程序目录与之分离。已定论（Paul 2026-10-30 批准）。
 - 服务账户与安装目录写权限（自更新需要程序目录可写）。
 
 ## 二期
