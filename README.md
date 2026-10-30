@@ -36,18 +36,19 @@ The program version is read from the workspace `Cargo.toml` and is shared by the
 
 ## Download / Install
 
-Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). From 0.8.4, each Release ships six archives and their matching `.sha256` files (twelve assets). Version 0.8.3 retains three packages/six assets; releases through 0.8.2 retain two packages/four assets:
+Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). From 0.8.5, each Release ships seven archives and their matching `.sha256` files (fourteen assets), adding the Windows x64 server. Version 0.8.4 retains six archives/twelve assets; version 0.8.3 retains three packages/six assets; releases through 0.8.2 retain two packages/four assets:
 
 | Package | Asset | Auto-update |
 |---|---|---|
 | Windows x64 desktop client (portable) | `AudioLibExplorer-<tag>-win-x64-portable.zip` | Yes, in-app prompt |
 | macOS arm64 desktop client (`.app` ZIP, from 0.8.3) | `AudioLibExplorer-<tag>-macos-arm64.zip` | Manual installation/update initially |
 | macOS arm64 server | `AudioLibServer-<tag>-macos-arm64.tar.gz` | Yes, via the admin page (also for self-built macOS arm64) |
+| Windows x64 server (from 0.8.5) | `AudioLibServer-<tag>-win-x64.zip` | Unzip; default data directory `%ProgramData%\AudioLibServer` |
 | Linux x64 server | `AudioLibServer-<tag>-linux-x64.tar.gz` | Yes, via the admin page |
 | Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Load and recreate the container |
 | Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Load and recreate the container |
 
-Windows server and standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). Docker images are supplied as offline archives; verify SHA256 and use `docker load`. See [Linux and Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
+Standalone Linux arm64 server packages are not published; build them from source (see [Build](#build)). Docker images are supplied as offline archives; verify SHA256 and use `docker load`. See [Linux and Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
 
 ### Windows client
 
@@ -68,7 +69,7 @@ The initial distribution plan uses ad-hoc signing and has no Apple notarization.
 
 ## Server deployment
 
-Published server builds are the macOS arm64 server, the Linux x64 server, and Docker linux/amd64 and linux/arm64 offline images. Windows server and standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). On the Mac:
+Published server builds are the macOS arm64 server, the Linux x64 server, the Windows x64 server (from 0.8.5; `AudioLibServer-<tag>-win-x64.zip` plus `.sha256`, verify, unzip, default data directory `%ProgramData%\AudioLibServer`), and Docker linux/amd64 and linux/arm64 offline images. Standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). On the Mac:
 
 ```sh
 shasum -a 256 -c AudioLibServer-<tag>-macos-arm64.tar.gz.sha256
@@ -139,7 +140,7 @@ pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit
 
 Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
-Platforms without a prebuilt standalone server package (Windows, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official macOS arm64 and Linux x64 server packages provide in-app updates. Windows and standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
+Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official macOS arm64 and Linux x64 server packages provide in-app updates. Windows and standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
 ```sh
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
@@ -187,7 +188,7 @@ The current source development version is `0.8.5`, as declared in the workspace 
 
 The Windows desktop client and supported server builds check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. The initial macOS desktop client uses manual updates. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 
-From 0.8.4, each Release ships Windows x64 and macOS arm64 clients, macOS arm64 and Linux x64 servers, and Docker amd64/arm64 offline images, each with a `.sha256` (twelve assets). Version 0.8.3 retains six assets; older releases retain four. Linux arm64 native packages are used internally for Docker validation; Docker updates replace the image.
+From 0.8.4, each Release ships Windows x64 and macOS arm64 clients, macOS arm64 and Linux x64 servers, and Docker amd64/arm64 offline images, each with a `.sha256` (twelve assets); from 0.8.5 the Windows x64 server zip and its `.sha256` are added (fourteen assets). Version 0.8.3 retains six assets; older releases retain four. Linux arm64 native packages are used internally for Docker validation; Docker updates replace the image.
 
 GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built and validated locally, then published with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is a manually triggered (`workflow_dispatch`), read-only verify job: its shared verifier checks the exact version-dependent package/checksum set, rejecting missing, extra, duplicate or wrong-case assets. It never builds, creates or uploads anything. Tag pushes do not start any workflow.
 

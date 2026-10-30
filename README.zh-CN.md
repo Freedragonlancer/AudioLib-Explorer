@@ -16,20 +16,21 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 
 ## 下载与安装
 
-从 0.8.4 起，每次 Release 发布六个归档及各自的 `.sha256`，共十二个资产；0.8.3 保留三个包、六个资产，0.8.2 及更早版本保留两个包、四个资产。
+从 0.8.5 起，每次 Release 发布七个归档及各自的 `.sha256`，共十四个资产（新增 Windows x64 服务端）；0.8.4 保留六个归档、十二个资产；0.8.3 保留三个包、六个资产，0.8.2 及更早版本保留两个包、四个资产。
 
 | 程序包 | Release 文件名 | 更新方式 |
 | --- | --- | --- |
 | Windows x64 客户端 | `AudioLibExplorer-<tag>-win-x64-portable.zip` | 程序内自动更新 |
 | macOS arm64 客户端 | `AudioLibExplorer-<tag>-macos-arm64.zip` | 初期手动安装与更新 |
 | macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 管理页面自动更新 |
+| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 解压使用；默认数据目录 `%ProgramData%\AudioLibServer` |
 | Linux x64 服务端 | `AudioLibServer-<tag>-linux-x64.tar.gz` | 管理页面自动更新 |
 | Docker amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | 导入镜像并重建容器 |
 | Docker arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | 导入镜像并重建容器 |
 
 Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客户端面向 Apple Silicon，校验 ZIP 的 SHA256 后解压得到 `AudioLib Explorer.app`，手动安装；替换旧 app 前先正常退出，并保留原数据目录和资料库。详见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
-首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。Windows 和独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
+首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。独立 Linux arm64 服务端包不发布；Windows x64 服务端自 0.8.5 起发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
 
 ## 功能
 
@@ -110,7 +111,7 @@ Windows 客户端与受支持的服务端在每次正常启动后于后台检查
 
 当前源码开发版本为 `0.8.5`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
 
-GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.4 起十二项，0.8.3 六项，更早版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256；构建与运行验收报告保持私有，不作为额外 Release 资产上传。
+GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.5 起十四项，0.8.4 十二项，0.8.3 六项，更早版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256；构建与运行验收报告保持私有，不作为额外 Release 资产上传。
 
 ## 文档
 
