@@ -43,7 +43,7 @@ Prebuilt packages are published on [GitHub Releases](https://github.com/Freedrag
 | Windows x64 desktop client (portable) | `AudioLibExplorer-<tag>-win-x64-portable.zip` | Yes, in-app prompt |
 | macOS arm64 desktop client (`.app` ZIP, from 0.8.3) | `AudioLibExplorer-<tag>-macos-arm64.zip` | Manual installation/update initially |
 | macOS arm64 server | `AudioLibServer-<tag>-macos-arm64.tar.gz` | Yes, via the admin page (also for self-built macOS arm64) |
-| Windows x64 server (from 0.8.5) | `AudioLibServer-<tag>-win-x64.zip` | Unzip; default data directory `%ProgramData%\AudioLibServer` |
+| Windows x64 server (from 0.8.5) | `AudioLibServer-<tag>-win-x64.zip` | Unzip and run; self-update via the server admin page (program directory must be writable); the desktop client updater does not update the server. Default data directory `%ProgramData%\AudioLibServer` |
 | Linux x64 server | `AudioLibServer-<tag>-linux-x64.tar.gz` | Yes, via the admin page |
 | Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Load and recreate the container |
 | Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Load and recreate the container |
@@ -69,7 +69,7 @@ The initial distribution plan uses ad-hoc signing and has no Apple notarization.
 
 ## Server deployment
 
-Published server builds are the macOS arm64 server, the Linux x64 server, the Windows x64 server (from 0.8.5; `AudioLibServer-<tag>-win-x64.zip` plus `.sha256`, verify, unzip, default data directory `%ProgramData%\AudioLibServer`), and Docker linux/amd64 and linux/arm64 offline images. Standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). On the Mac:
+Published server builds are the macOS arm64 server, the Linux x64 server, the Windows x64 server (from 0.8.5; `AudioLibServer-<tag>-win-x64.zip` plus `.sha256`, verify, unzip and run; self-update via the server admin page (program directory must be writable); the desktop client updater does not update the server; default data directory `%ProgramData%\AudioLibServer`), and Docker linux/amd64 and linux/arm64 offline images. Standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). On the Mac:
 
 ```sh
 shasum -a 256 -c AudioLibServer-<tag>-macos-arm64.tar.gz.sha256
