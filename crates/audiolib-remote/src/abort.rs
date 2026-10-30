@@ -740,6 +740,7 @@ pub(crate) mod tests {
             // The request head, then wait for EOF (or a reset) from the client.
             loop {
                 match socket.read(&mut buffer) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
