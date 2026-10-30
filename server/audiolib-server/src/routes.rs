@@ -60,8 +60,6 @@ pub const API_BASE: &str = "/api/v1";
 const STREAM_CHUNK_BYTES: usize = 256 * 1024;
 /// Bundle download limits are independent of its short preparation lease.
 static BUNDLE_DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
-// Keep bounded image decode allocations independent of the audio playback slots.
-static ARTWORK_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 const BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Time limit for every endpoint except `/library/snapshot`, `/audio/{id}/stream`,
 /// `/audio/{id}/preview`, `/audio/{id}/waveform`, `/audio/{id}/artwork` and
@@ -1342,6 +1340,7 @@ fn open_error(error: OpenError) -> ApiError {
         OpenError::RootOffline { root, reason } => {
             ApiError::root_offline(format!("Library root {root:?} is offline: {reason}"))
         }
+        OpenError::ArtworkBusy => ApiError::artwork_busy(),
     }
 }
 
@@ -2083,9 +2082,6 @@ async fn artwork_response(
             Ok(canonical)
         })
         .transpose()?;
-    let permit = ARTWORK_SLOTS
-        .try_acquire()
-        .map_err(|_| ApiError::fs_busy("Artwork requests are busy; retry shortly"))?;
     let if_none_match = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -2094,8 +2090,9 @@ async fn artwork_response(
     let reporter = progress.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    // Decode slots are taken inside the resolver, only on a cover cache miss, so
+    // cache hits and `If-None-Match` 304s never wait for or hold one.
     let task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
         if album {
             if let Some(folder_id) = folder_id {
                 state.album_artwork_in_folder(

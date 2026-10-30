@@ -33,6 +33,9 @@
 //!   [`Capabilities::may_manage_roots`].
 //! * Optional embedded covers ([`RemoteClient::artwork`]): bounded image responses with
 //!   conditional ETags; gate requests with [`Capabilities::album_artwork_usable`].
+//!   At most two cover requests are in flight. `503 BUSY` retries on `Retry-After`
+//!   seconds (one second when the header is missing) a bounded number of times; HTTP 409
+//!   is not retried. HTTP 405 is logged and still means no cover.
 //!   Shared albums use [`RemoteClient::album_artwork_for_snapshot`], retaining legacy
 //!   source provenance and checking server-authoritative album identities.
 //! * Server profiles (`profiles` module): the data source dialog saved against the
@@ -73,7 +76,7 @@ mod writes;
 pub use waveform_cache::waveform_cache_error;
 
 pub use abort::set_connection_warming;
-pub use artwork::{ArtworkReply, MAX_ARTWORK_BYTES};
+pub use artwork::{ArtworkReply, MAX_ARTWORK_BYTES, cover_busy_delay};
 pub use bandwidth::{Bandwidth, bandwidth};
 pub use client::{
     BatchWrite, CONNECT_TIMEOUT, DownloadStage, FileWrite, HealthInfo, LIBRARY_ID_HEADER,

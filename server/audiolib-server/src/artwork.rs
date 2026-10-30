@@ -21,8 +21,16 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+/// Concurrent cover decodes (cache misses); bounds image decode allocations
+/// independently of the audio playback slots.
+pub(crate) const ARTWORK_SLOTS: usize = 2;
+/// How long a cache miss waits for a decode slot before 503 `BUSY` (same as the
+/// preview transcode slot wait).
+pub(crate) const ARTWORK_SLOT_WAIT: Duration = crate::preview::TRANSCODE_SLOT_WAIT;
 
 /// Bumped when thumbnail bytes for the same source and `side` change.
 const ARTWORK_ALGORITHM: u32 = 2;
@@ -409,6 +417,8 @@ impl AppState {
                 bytes: cover.bytes,
             });
         }
+        let slots = self.artwork_slots();
+        let _permit = wait_for_slot(&slots, ARTWORK_SLOT_WAIT).ok_or(OpenError::ArtworkBusy)?;
         let cover = match render_file(&mut served.file, side) {
             Some(cover) => cover,
             None => {
@@ -462,6 +472,19 @@ fn fnv64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Blocking: wait up to `wait` for a decode slot. Called on a `spawn_blocking`
+/// thread; without a Tokio runtime it only tries once.
+fn wait_for_slot(slots: &Semaphore, wait: Duration) -> Option<SemaphorePermit<'_>> {
+    if let Ok(permit) = slots.try_acquire() {
+        return Some(permit);
+    }
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    handle
+        .block_on(tokio::time::timeout(wait, slots.acquire()))
+        .ok()?
+        .ok()
+}
+
 fn render_file(file: &mut fs::File, side: Option<u32>) -> Option<Cover> {
     let (_, artwork) = audiolib_audio::probe_file_with_artwork(file).ok()?;
     let artwork = artwork?;
@@ -506,6 +529,19 @@ fn decode_limited(bytes: &[u8]) -> Option<image::DynamicImage> {
     reader.decode().ok()
 }
 
+/// Cheap cache-hit check: the image header parses and its dimensions are in bounds.
+/// Cache entries are published atomically by [`store_cache`], so the pixels are not
+/// decoded again here; cache hits therefore need no decode slot.
+fn header_within_limits(bytes: &[u8]) -> bool {
+    image::ImageReader::new(io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(width, height)| {
+            width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION
+        })
+}
+
 fn encode(image: &image::DynamicImage, mime: &'static str) -> Option<Cover> {
     let mut bytes = Vec::new();
     if mime == "image/jpeg" {
@@ -535,7 +571,7 @@ fn load_cache(dir: &Path, key: &str) -> Option<Cover> {
             .read_to_end(&mut bytes)
             .is_ok()
             && classify(&bytes) == Some(mime)
-            && decode_limited(&bytes).is_some()
+            && header_within_limits(&bytes)
         {
             return Some(Cover { mime, bytes });
         }

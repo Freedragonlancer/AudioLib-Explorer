@@ -85,10 +85,13 @@ case "${1:-}" in
     print)
         [ "$#" = 2 ] && [ "$2" = "$domain/synthetic.beta" ] || exit 7
         [ "$loaded" = 1 ]; exit $? ;;
-    kickstart)
-        [ "$#" = 3 ] && [ "$2" = -k ] && [ "$3" = "$domain/synthetic.beta" ] && [ "$loaded" = 1 ] || exit 7 ;;
+    bootout)
+        [ "$#" = 2 ] && [ "$2" = "$domain/synthetic.beta" ] && [ "$loaded" = 1 ] || exit 7
+        printf '%s\n' 0 > "$BETA_APP_DIR/launchd-loaded"; exit 0 ;;
     bootstrap)
         [ "$#" = 3 ] && [ "$2" = "$domain" ] && [ -f "$3" ] || exit 7
+        # Like launchd, refuse to bootstrap a job that is still loaded.
+        [ "$loaded" = 0 ] || exit 5
         [ "$3" = "$LAUNCHD_PLIST" ] || exit 7 ;;
     *) exit 7 ;;
 esac
@@ -112,12 +115,17 @@ cat > "$TEST_ROOT/mock-bin/pgrep" <<'EOF'
 #!/bin/sh
 exit 1
 EOF
+# The fixture never listens on a real port (and must not probe a real 8790).
+cat > "$TEST_ROOT/mock-bin/lsof" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
 cat > "$TEST_ROOT/server-binary" <<'EOF'
 #!/bin/sh
 [ "$#" -eq 1 ] && [ "$1" = '--version' ] || exit 9
 printf '%s\n' 'audiolib-server 0.6.2'
 EOF
-chmod +x "$TEST_ROOT/mock-bin/git" "$TEST_ROOT/mock-bin/curl" "$TEST_ROOT/mock-bin/launchctl" "$TEST_ROOT/mock-bin/pgrep" "$TEST_ROOT/mock-bin/plutil" "$TEST_ROOT/mock-bin/python3" "$TEST_ROOT/server-binary"
+chmod +x "$TEST_ROOT/mock-bin/git" "$TEST_ROOT/mock-bin/curl" "$TEST_ROOT/mock-bin/launchctl" "$TEST_ROOT/mock-bin/pgrep" "$TEST_ROOT/mock-bin/lsof" "$TEST_ROOT/mock-bin/plutil" "$TEST_ROOT/mock-bin/python3" "$TEST_ROOT/server-binary"
 export PATH="$TEST_ROOT/mock-bin:$PATH"
 run_case() {
     name="$1"; tag="$2"; expected="$3"; fail="$4"; old_markers="$5"
@@ -125,11 +133,9 @@ run_case() {
     app="$TEST_ROOT/$name/app"; data="$TEST_ROOT/$name/data"; work="$TEST_ROOT/$name/work"
     mkdir -p "$app/bin" "$data" "$work"
     plist="$app/Launch Agents/synthetic.beta.plist"
-    if [ "$loaded" = 0 ]; then
-        mkdir -p "$app/Launch Agents"
-        printf '%s\n' 'original beta plist fixture' > "$plist"
-        cp "$plist" "$plist.expected"
-    fi
+    mkdir -p "$app/Launch Agents"
+    printf '%s\n' 'original beta plist fixture' > "$plist"
+    cp "$plist" "$plist.expected"
     printf '%s\n' 'bind = "127.0.0.1:8791"' > "$app/config.toml"
     printf '%s\n' 'synthetic-token' > "$app/token"
     printf '%s\n' '#!/bin/sh' 'printf "%s\n" "audiolib-server 0.6.1"' > "$app/bin/audiolib-server"
@@ -188,6 +194,8 @@ app="$TEST_ROOT/direct/app"; data="$TEST_ROOT/direct/data"; work="$TEST_ROOT/dir
 mkdir -p "$app/bin" "$data" "$work"
 printf '%s\n' '#!/bin/sh' 'printf "%s\n" "audiolib-server 0.6.1"' > "$app/bin/audiolib-server"
 chmod +x "$app/bin/audiolib-server"
+printf '%s\n' 'direct plist fixture' > "$app/synthetic.beta.plist"
+export LAUNCHD_PLIST="$app/synthetic.beta.plist"
 BETA_APP_DIR="$app" INSTALL_DIR="$app/bin" DATA_DIR="$data" BACKUP_DIR="$work/backups" \
     SERVICE_MANAGER=launchd SERVICE_NAME=synthetic.beta EXPECT_COMMIT=f54f036 \
     sh "$TEST_ROOT/repo/server/deploy/redeploy-server.sh" "$TEST_ROOT/server-binary" >/dev/null 2>&1
@@ -205,8 +213,11 @@ BETA_APP_DIR="$app" INSTALL_DIR="$app/bin" DATA_DIR="$data" BACKUP_DIR="$work/ba
     echo 'A binary-only base-version change left stale metadata or restarted the service' >&2; exit 1;
 }
 
+unset LAUNCHD_PLIST
+
 # An offline migration can leave launchd quiesced. Only the original plist may
-# bootstrap it; loaded jobs still use kickstart, even without a plist on disk.
+# bootstrap it. A loaded job is booted out, waited for, swapped and bootstrapped
+# from that same plist; without the plist nothing is touched at all.
 run_launchd_case() {
     name="$1"; loaded="$2"; bootstrap_fail="$3"; has_plist="$4"; succeeds="$5"; starts="$6"
     health_file="${7:-}"; retained="${8:-0}"; reader="${9:-plutil}"; expected_commit="${10-f54f036}"
@@ -240,18 +251,20 @@ run_launchd_case() {
     actual_starts=0
     if [ -f "$app/start-count" ]; then actual_starts="$(cat "$app/start-count")"; fi
     [ "$actual_starts" = "$starts" ] || { echo "Unexpected restart count for $name" >&2; exit 1; }
-    if [ "$loaded" = 1 ]; then
-        grep -Fx "kickstart|-k|gui/$(id -u)/synthetic.beta|" "$app/launchctl-events" >/dev/null &&
-            ! grep -F 'bootstrap|' "$app/launchctl-events" >/dev/null || {
-            echo 'Loaded job did not retain its kickstart route' >&2; exit 1;
+    ! grep -F 'kickstart|' "$app/launchctl-events" >/dev/null || { echo 'Deployment still used kickstart' >&2; exit 1; }
+    if [ "$has_plist" = 1 ] && [ "$loaded" = 1 ]; then
+        # bootout must precede the first bootstrap of the exact existing plist.
+        first_out="$(grep -n -Fx "bootout|gui/$(id -u)/synthetic.beta|" "$app/launchctl-events" | head -n 1 | cut -d: -f1)"
+        first_in="$(grep -n -Fx "bootstrap|gui/$(id -u)|$plist|" "$app/launchctl-events" | head -n 1 | cut -d: -f1)"
+        [ -n "$first_out" ] && [ -n "$first_in" ] && [ "$first_out" -lt "$first_in" ] || {
+            echo 'Loaded job was not booted out before bootstrapping its existing plist' >&2; exit 1;
         }
     elif [ "$has_plist" = 1 ]; then
-        grep -Fx "bootstrap|gui/$(id -u)|$plist|" "$app/launchctl-events" >/dev/null &&
-            ! grep -F 'kickstart|' "$app/launchctl-events" >/dev/null || {
+        grep -Fx "bootstrap|gui/$(id -u)|$plist|" "$app/launchctl-events" >/dev/null || {
             echo 'Quiesced job did not bootstrap the exact existing plist' >&2; exit 1;
         }
     else
-        ! grep -E '^(bootstrap|kickstart)\|' "$app/launchctl-events" >/dev/null && [ ! -e "$plist" ] || {
+        ! grep -E '^(bootstrap|bootout)\|' "$app/launchctl-events" >/dev/null && [ ! -e "$plist" ] || {
             echo 'Missing plist triggered an invented service definition or restart' >&2; exit 1;
         }
         grep -F 'existing plist was not found' "$work/redeploy.log" >/dev/null || exit 1
@@ -298,8 +311,11 @@ run_launchd_case() {
     if [ "$has_plist" = 1 ]; then cmp -s "$plist" "$plist.expected" || { echo 'Deployment modified the original plist' >&2; exit 1; }; fi
     ! grep -F 'private-path-do-not-log' "$work/redeploy.log" >/dev/null || { echo 'Health response contents leaked into deployment logs' >&2; exit 1; }
 }
-run_launchd_case loaded-no-plist 1 never 0 1 1
+run_launchd_case loaded 1 never 1 1 1
+run_launchd_case loaded-no-plist 1 never 0 0 0
 run_launchd_case quiesced 0 never 1 1 1
+run_launchd_case full-expect-commit 1 never 1 1 1 '' 0 plutil f54f036aa7c0b9d6e5f4a3b2c1d0e9f8a7b6c5d4
+run_launchd_case wrong-full-commit 1 never 1 0 2 '' 0 plutil f54f037aa7c0b9d6e5f4a3b2c1d0e9f8a7b6c5d4
 run_launchd_case missing-plist 0 never 0 0 0
 run_launchd_case bootstrap-rollback 0 first 1 0 2
 run_launchd_case bootstrap-unavailable 0 always 1 0 2
@@ -336,13 +352,13 @@ sed 's/"v1"/"v2"/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/wrong-api.json"
 sed 's/"schema_version":6/"schema_version":7/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/wrong-schema.json"
 sed 's/"indexing"/"complete"/' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/unknown-phase.json"
 sed 's/,"completed":5,"total":10//' "$TEST_ROOT/indexing.json" > "$TEST_ROOT/missing-counts.json"
-run_launchd_case migration-timeout 1 never 0 0 1 "$TEST_ROOT/indexing.json" 1
+run_launchd_case migration-timeout 1 never 1 0 1 "$TEST_ROOT/indexing.json" 1
 run_launchd_case migration-quiesced 0 never 1 0 1 "$TEST_ROOT/preparing.json" 1
-run_launchd_case migration-python-fallback 1 never 0 0 1 "$TEST_ROOT/indexing.json" 1 python
-run_launchd_case migration-nested-status 1 never 0 0 1 "$TEST_ROOT/shadow-starting.json" 1
+run_launchd_case migration-python-fallback 1 never 1 0 1 "$TEST_ROOT/indexing.json" 1 python
+run_launchd_case migration-nested-status 1 never 1 0 1 "$TEST_ROOT/shadow-starting.json" 1
 for fixture in starting shadow-error wrong-commit not-object null-upgrade invalid wrong-version wrong-api wrong-schema unknown-phase missing-counts unreachable; do
-    run_launchd_case "timeout-$fixture" 1 never 0 0 2 "$TEST_ROOT/$fixture.json"
+    run_launchd_case "timeout-$fixture" 1 never 1 0 2 "$TEST_ROOT/$fixture.json"
 done
-run_launchd_case timeout-unbound-commit 1 never 0 0 2 "$TEST_ROOT/indexing.json" 0 plutil ''
-run_launchd_case timeout-lost-health 1 never 0 0 2 "$TEST_ROOT/indexing.json" 0 plutil f54f036 2 1
-printf '%s\n' 'Beta deployment regressions passed: startup/rollback identities, launchd routing and bootstrap recovery; migration timeout retained only an explicitly identified structured upgrade, exited nonzero and never restarted twice; plutil route and optional Python fallback, invalid/nested JSON and ordinary failure rollback covered; private health messages and owned launcher/plist/configuration/database preserved.'
+run_launchd_case timeout-unbound-commit 1 never 1 0 2 "$TEST_ROOT/indexing.json" 0 plutil ''
+run_launchd_case timeout-lost-health 1 never 1 0 2 "$TEST_ROOT/indexing.json" 0 plutil f54f036 2 1
+printf '%s\n' 'Beta deployment regressions passed: startup/rollback identities, launchd bootout/wait/bootstrap routing and recovery, short-hash prefix commit match; migration timeout retained only an explicitly identified structured upgrade, exited nonzero and never restarted twice; plutil route and optional Python fallback, invalid/nested JSON and ordinary failure rollback covered; private health messages and owned launcher/plist/configuration/database preserved.'
