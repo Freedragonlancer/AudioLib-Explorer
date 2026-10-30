@@ -43,12 +43,12 @@ Prebuilt packages are published on [GitHub Releases](https://github.com/Freedrag
 | Windows x64 desktop client (portable) | `AudioLibExplorer-<tag>-win-x64-portable.zip` | Yes, in-app prompt |
 | macOS arm64 desktop client (`.app` ZIP, from 0.8.3) | `AudioLibExplorer-<tag>-macos-arm64.zip` | Manual installation/update initially |
 | macOS arm64 server | `AudioLibServer-<tag>-macos-arm64.tar.gz` | Yes, via the admin page (also for self-built macOS arm64) |
-| Windows x64 server (from 0.8.5) | `AudioLibServer-<tag>-win-x64.zip` | Unzip and run; self-update via the server admin page (program directory must be writable); the desktop client updater does not update the server. Default data directory `%ProgramData%\AudioLibServer` |
+| Windows x64 server (from 0.8.5) | `AudioLibServer-<tag>-win-x64.zip` | Yes, via the server admin page; program directory must be writable. Explicit configuration is required; see setup below |
 | Linux x64 server | `AudioLibServer-<tag>-linux-x64.tar.gz` | Yes, via the admin page |
 | Docker linux/amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Load and recreate the container |
 | Docker linux/arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Load and recreate the container |
 
-Standalone Linux arm64 server packages are not published; build them from source (see [Build](#build)). Docker images are supplied as offline archives; verify SHA256 and use `docker load`. See [Linux and Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
+Windows server packages start with 0.8.5; see [Windows server release](doc/Rust_Windows_Server_Release.md). Standalone Linux arm64 server packages are not published; build them from source (see [Build](#build)). Docker images are supplied as offline archives; verify SHA256 and use `docker load`. See [Linux and Docker delivery](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md). Tags with a `-beta.N` or `-rc.N` suffix are pre-releases.
 
 ### Windows client
 
@@ -69,7 +69,34 @@ The initial distribution plan uses ad-hoc signing and has no Apple notarization.
 
 ## Server deployment
 
-Published server builds are the macOS arm64 server, the Linux x64 server, the Windows x64 server (from 0.8.5; `AudioLibServer-<tag>-win-x64.zip` plus `.sha256`, verify, unzip and run; self-update via the server admin page (program directory must be writable); the desktop client updater does not update the server; default data directory `%ProgramData%\AudioLibServer`). On Windows, set `ffmpeg_path` in the server `config.toml` to an absolute ffmpeg path: the default is the macOS Homebrew path `/opt/homebrew/bin/ffmpeg`, and without a valid ffmpeg FLAC previews (`codec=flac`) answer 503, and Docker linux/amd64 and linux/arm64 offline images. Standalone Linux arm64 server packages are not published; build those from source (see [Build](#build)). On the Mac:
+Release packages include macOS arm64, Linux x64 and Windows x64 servers, plus Docker linux/amd64 and linux/arm64 offline images. The server requires `--config <path>` or `AUDIOLIB_SERVER_CONFIG`; it does not discover a default configuration or create a library.
+
+### Windows server
+
+Verify `AudioLibServer-<tag>-win-x64.zip` against its `.sha256`, then extract it to a writable program directory. The selected recommended configuration/data directory is `%ProgramData%\AudioLibServer`, separate from the program directory; create it explicitly. From the extracted package, copy the example on first setup:
+
+```powershell
+$serverData = Join-Path $env:ProgramData 'AudioLibServer'
+New-Item -ItemType Directory -Path $serverData -Force | Out-Null
+$serverConfig = Join-Path $serverData 'config.toml'
+if (!(Test-Path -LiteralPath $serverConfig)) {
+    Copy-Item -LiteralPath .\server\audiolib-server\config.example.toml -Destination $serverConfig
+}
+```
+
+Edit that configuration before starting: replace the Unix `library_db` and `[[roots]].server_path` examples with the existing Windows database and real audio directories. Use TOML literal strings for Windows paths, for example `library_db = 'C:\ProgramData\AudioLibServer\library.db'` and `server_path = 'D:\Sounds'`. Keep any existing configured library and data paths when upgrading. For FLAC previews, install ffmpeg separately and set an absolute path such as `ffmpeg_path = 'C:\Tools\ffmpeg\bin\ffmpeg.exe'`; the default is the macOS Homebrew path `/opt/homebrew/bin/ffmpeg`. Without ffmpeg, FLAC previews return 503 `TRANSCODER_UNAVAILABLE`; PCM previews and direct streams remain available.
+
+Start with the explicit configuration:
+
+```powershell
+.\audiolib-server.exe --config $serverConfig
+```
+
+Server updates use its admin page and require a writable program directory. The desktop client updater does not update the server. Windows service registration is not included in this ZIP; see [Windows server release](doc/Rust_Windows_Server_Release.md).
+
+### macOS server
+
+On the Mac:
 
 ```sh
 shasum -a 256 -c AudioLibServer-<tag>-macos-arm64.tar.gz.sha256
@@ -140,7 +167,7 @@ pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit
 
 Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
-Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official macOS arm64 and Linux x64 server packages provide in-app updates. Windows and standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
+Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official Windows x64, macOS arm64 and Linux x64 server packages support updates through the admin page. Standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
 ```sh
 cargo build --release -p audiolib-server --locked --target "$(rustc -vV | sed -n 's/^host: //p')"

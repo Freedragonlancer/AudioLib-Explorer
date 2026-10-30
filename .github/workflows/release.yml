@@ -3,6 +3,7 @@
 #   - macOS arm64 client     (AudioLibExplorer-<tag>-macos-arm64.zip; >= 0.8.3)
 #   - macOS arm64 server     (AudioLibServer-<tag>-macos-arm64.tar.gz)
 #   - Linux x64 server       (AudioLibServer-<tag>-linux-x64.tar.gz; >= 0.8.4)
+#   - Windows x64 server     (AudioLibServer-<tag>-win-x64.zip; >= 0.8.5)
 #   - Docker amd64/arm64     (AudioLibServer-<tag>-docker-linux-<arch>.tar.gz; >= 0.8.4)
 # each with a .sha256, via tools/release-create.sh <tag> <assets...> or
 # `gh release upload <tag> <files>`. Pre-release status is derived from the tag
@@ -12,7 +13,7 @@
 # only), builds nothing, and never creates, edits or uploads a release or asset
 # (permissions: contents: read). Run it manually after the local upload to check
 # that the release carries the exact expected assets with valid checksums:
-# twelve from 0.8.4 onward, six for 0.8.3, four through 0.8.2.
+# fourteen from 0.8.5 onward, twelve for 0.8.4, six for 0.8.3, four through 0.8.2.
 # See doc/Rust_Versioning.md.
 name: Release verify
 

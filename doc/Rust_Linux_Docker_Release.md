@@ -10,7 +10,7 @@
 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | Docker Linux amd64 镜像离线包 |
 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | Docker Linux arm64 镜像离线包 |
 
-Mac arm64 服务端及两个桌面客户端继续发布。独立 Linux arm64 包用于构建、验证 Docker 输入，不作为正式资产上传；Windows 服务端仍从源码构建。程序版本、API、schema 和 Metadata 格式沿用现有契约，不执行部署或自动迁移生产资料库。
+Mac arm64 服务端及两个桌面客户端继续发布。独立 Linux arm64 包用于构建、验证 Docker 输入，不作为正式资产上传；Windows 服务端从 0.8.5（首个纳入版本）起提供预编译 ZIP，之前版本和源码构建仍可用，见 [Windows 服务端发布](Rust_Windows_Server_Release.md)。程序版本、API、schema 和 Metadata 格式沿用现有契约，不执行部署或自动迁移生产资料库。
 
 ## Linux 原生安装
 
