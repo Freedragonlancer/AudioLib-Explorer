@@ -16,20 +16,21 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 
 ## 下载与安装
 
-从 0.8.4 起，每次 Release 发布六个归档及各自的 `.sha256`，共十二个资产；0.8.3 保留三个包、六个资产，0.8.2 及更早版本保留两个包、四个资产。
+从 0.8.5 起，每次 Release 发布七个归档及各自的 `.sha256`，共十四个资产（新增 Windows x64 服务端）；0.8.4 保留六个归档、十二个资产；0.8.3 保留三个包、六个资产，0.8.2 及更早版本保留两个包、四个资产。
 
 | 程序包 | Release 文件名 | 更新方式 |
 | --- | --- | --- |
 | Windows x64 客户端 | `AudioLibExplorer-<tag>-win-x64-portable.zip` | 程序内自动更新 |
 | macOS arm64 客户端 | `AudioLibExplorer-<tag>-macos-arm64.zip` | 初期手动安装与更新 |
 | macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 管理页面自动更新 |
+| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 服务端管理页面更新，程序目录需可写；须显式指定配置，见下方启动说明 |
 | Linux x64 服务端 | `AudioLibServer-<tag>-linux-x64.tar.gz` | 管理页面自动更新 |
 | Docker amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | 导入镜像并重建容器 |
 | Docker arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | 导入镜像并重建容器 |
 
 Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客户端面向 Apple Silicon，校验 ZIP 的 SHA256 后解压得到 `AudioLib Explorer.app`，手动安装；替换旧 app 前先正常退出，并保留原数据目录和资料库。详见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
-首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布候选，Windows 验证结果不能替代这些检查。从 0.8.5（首个纳入版本）起提供 Windows x64 服务端预编译 ZIP（`AudioLibServer-<tag>-win-x64.zip`）；0.8.4 及更早版本没有该包，源码构建仍可用，见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
+首次 Mac 分发计划使用 ad-hoc 签名，未经 Apple 公证。原生签名、隔离启动和包边界检查须在 Mac 上通过后才可发布，Windows 验证结果不能替代这些检查。Windows 服务端包自 0.8.5 起提供，见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。Docker 离线包校验后使用 `docker load` 导入；详见 [Linux 与 Docker 交付](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Linux_Docker_Release.md)。
 
 ## 功能
 
@@ -60,7 +61,7 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
-Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
 
@@ -93,6 +94,31 @@ cargo run -p audiolib-cli -- stats
 
 ### 服务端
 
+服务端必须通过 `--config <路径>` 或 `AUDIOLIB_SERVER_CONFIG` 指定配置；不会自动发现默认配置或创建资料库。
+
+Windows：校验 `AudioLibServer-<tag>-win-x64.zip` 的 SHA256 后解压到可写的程序目录。已选定的推荐配置/数据目录为 `%ProgramData%\AudioLibServer`，与程序目录分离，须显式创建。在解压目录中首次复制配置示例：
+
+```powershell
+$serverData = Join-Path $env:ProgramData 'AudioLibServer'
+New-Item -ItemType Directory -Path $serverData -Force | Out-Null
+$serverConfig = Join-Path $serverData 'config.toml'
+if (!(Test-Path -LiteralPath $serverConfig)) {
+    Copy-Item -LiteralPath .\server\audiolib-server\config.example.toml -Destination $serverConfig
+}
+```
+
+启动前编辑该配置：把 Unix 示例中的 `library_db` 和每个 `[[roots]].server_path` 换为已有的 Windows 资料库和真实音频目录。Windows 路径可使用 TOML 单引号字符串，例如 `library_db = 'C:\ProgramData\AudioLibServer\library.db'` 和 `server_path = 'D:\Sounds'`；升级时保留已有的配置路径与资料库。需要 FLAC 试听时，单独安装 ffmpeg，并设置绝对路径，例如 `ffmpeg_path = 'C:\Tools\ffmpeg\bin\ffmpeg.exe'`。默认值仍为 macOS Homebrew 的 `/opt/homebrew/bin/ffmpeg`；缺少 ffmpeg 时仅 FLAC 试听返回 503 `TRANSCODER_UNAVAILABLE`，PCM 试听和直接流不受影响。
+
+保存配置后显式启动：
+
+```powershell
+.\audiolib-server.exe --config $serverConfig
+```
+
+Windows 服务端通过自身管理页面更新，程序目录须可写；桌面客户端更新器不更新服务端。ZIP 不包含 Windows 服务注册，详见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。
+
+Linux 示例：
+
 ```sh
 cp server/audiolib-server/config.example.toml /etc/audiolib/config.toml   # 编辑根目录和数据库路径
 audiolib-server --config /etc/audiolib/config.toml
@@ -110,7 +136,7 @@ Windows 客户端与受支持的服务端在每次正常启动后于后台检查
 
 当前源码开发版本为 `0.8.5`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
 
-GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.4 起十二项，0.8.3 六项，更早版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256；构建与运行验收报告保持私有，不作为额外 Release 资产上传。
+GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.5 起十四项，0.8.4 十二项，0.8.3 六项，更早版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256；构建与运行验收报告保持私有，不作为额外 Release 资产上传。
 
 ## 文档
 
