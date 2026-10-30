@@ -2810,6 +2810,11 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        // The result ListView is shared. A source change must drop a server viewport;
+        // a same-library refresh keeps the page the user was browsing.
+        if !retain_navigation {
+            ui.invoke_reset_result_list_scroll();
+        }
         ui.set_albums(ModelRc::new(VecModel::<AlbumRow>::default()));
         *self.latest_selection.lock().unwrap() = None;
         self.metadata.lock().unwrap().reset_library();
@@ -6138,6 +6143,11 @@ impl Controller {
             .map(|file| file.id)
             .collect();
         let first = usize::try_from(first).unwrap_or(0);
+        // A server window reported after the model shrank must not retarget local rows.
+        if ids.is_empty() || first >= ids.len() {
+            self.list_waveforms.set_window(Vec::new(), 0);
+            return;
+        }
         let count = usize::try_from(count).unwrap_or(0).max(1);
         self.list_waveforms
             .set_window(window_ids(&ids, first, count), count);
