@@ -23,7 +23,7 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 | Windows x64 客户端 | `AudioLibExplorer-<tag>-win-x64-portable.zip` | 程序内自动更新 |
 | macOS arm64 客户端 | `AudioLibExplorer-<tag>-macos-arm64.zip` | 初期手动安装与更新 |
 | macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 管理页面自动更新 |
-| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 解压即用；可通过服务端管理页自更新（程序目录需可写）；桌面客户端更新器不管服务端。默认数据目录 `%ProgramData%\AudioLibServer` |
+| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 解压即用；可通过服务端管理页自更新（程序目录需可写）；桌面客户端更新器不管服务端。默认数据目录 `%ProgramData%\AudioLibServer`；需在 `config.toml` 中设置 `ffmpeg_path`（绝对路径，默认值为 macOS Homebrew 的 `/opt/homebrew/bin/ffmpeg`），否则 FLAC 试听返回 503 |
 | Linux x64 服务端 | `AudioLibServer-<tag>-linux-x64.tar.gz` | 管理页面自动更新 |
 | Docker amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | 导入镜像并重建容器 |
 | Docker arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | 导入镜像并重建容器 |
