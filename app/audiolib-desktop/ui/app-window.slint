@@ -3,10 +3,11 @@ import { TextEdit, ComboBox, ListView, ScrollView, Palette, SpinBox } from "std-
 
 import { Theme, ThemedLineEdit as LineEdit, ThemedCheckBox as CheckBox } from "theme.slint";
 
-import { AuditionPanel, PeakSettings } from "audition-panel.slint";
+import { AuditionPanel, PeakSettings, RulerTick } from "audition-panel.slint";
 import { SearchTaskTab } from "search-task-tabs.slint";
 // Exported so tests can exercise non-default scales; the desktop does not touch it yet.
 export { Theme }
+export { RulerTick }
 
 export struct AudioRow {
     id: string,
@@ -1020,7 +1021,10 @@ export component AppWindow inherits Window {
     in property <float> view-end: 0;
     in property <float> wave-zoom: 1;
     in-out property <float> wave-scroll: 0;
-    in property <[string]> ruler-labels;
+    in property <[RulerTick]> ruler-ticks;
+    // Requested Waveform range while its render is pending (see AuditionPanel).
+    in property <float> wave-target-start: 0;
+    in property <float> wave-target-end: 0;
     callback transform-requested(string,string,bool,bool);
     callback start-requested(); callback pause-requested();
     callback volume-db-requested(float);
@@ -1037,12 +1041,26 @@ export component AppWindow inherits Window {
     in property <string> play-time: "00:00.000";
     in property <string> play-end: "00:00.000";
     in property <bool> playing: false;
+    // Engine transport phase for the player bar: 0 empty, 1 loading, 2 ready,
+    // 3 playing, 4 paused, 5 stopped, 6 ended, 7 error.
+    in property <int> playback-state: 0;
+    in property <string> playback-error: "";
+    in property <bool> playback-buffering: false;
+    // Share of the current Waveform render that has arrived (1 when complete).
+    in property <float> waveform-progress: 1;
+    // The player bar marks rejected Pitch / Rate input: bit 1 Pitch, bit 2 Rate.
+    callback audition-input-rejected(int);
+    audition-input-rejected(fields) => { audition.reject-input(fields); }
     in property <bool> playback-smooth: false;
     in property <string> playback-clock: "";
     in property <float> confirmed-playback-rate: 1;
     in property <bool> native-macos: false;
     in property <[string]> audio-backend-names: ["WASAPI", "ASIO"];
     in property <string> output-summary: root.native-macos ? "CoreAudio" : "WASAPI";
+    // Active output backend ("" while idle), device rate and underrun count.
+    in property <string> output-backend: "";
+    in property <string> output-rate: "";
+    in property <int> output-xruns: 0;
     in-out property <float> volume: 0.8;
 
     in-out property <bool> settings-visible: false;
@@ -2695,10 +2713,16 @@ export component AppWindow inherits Window {
             compact: root.short-layout; spectral: root.peak-mode == 1;
             play-on-single-click: root.audition-play-on-single-click;
             chinese: root.chinese; ready: root.audio-ready && !root.selected-missing && !root.library-busy;
+            missing: root.selected-missing; busy: root.library-busy;
+            state: root.playback-state; error-text: root.playback-error; buffering: root.playback-buffering;
+            waveform-progress: root.waveform-progress;
+            output-backend: root.output-backend; output-rate: root.output-rate; output-xruns: root.output-xruns;
+            target-start: root.wave-target-start; target-end: root.wave-target-end;
+            relink-enabled: !root.closing && !root.library-busy && root.has-selection;
             playing: root.playing; smooth-progress: root.playback-smooth; progress-clock: root.playback-clock; playback-rate: root.confirmed-playback-rate; waveform: root.waveform-image; waveform-ready: root.waveform-ready;
             name: root.playback-name; info: root.waveform-info; output: root.output-summary;
             position: root.play-position; duration: root.play-duration; time: root.play-time; end-time: root.play-end;
-            view-start: root.view-start; view-end: root.view-end; zoom: root.wave-zoom; ruler-labels: root.ruler-labels;
+            view-start: root.view-start; view-end: root.view-end; zoom: root.wave-zoom; ruler-ticks: root.ruler-ticks;
             scroll <=> root.wave-scroll; volume-db <=> root.volume-db; volume-label: root.volume-label;
             pitch-text <=> root.pitch-text; rate-text <=> root.speed-text; mono <=> root.audition-mono; repeat <=> root.audition-repeat;
             play => { root.start-requested(); } pause => { root.pause-requested(); } stop => { root.stop-requested(); }
@@ -2712,6 +2736,8 @@ export component AppWindow inherits Window {
             pan(value) => { root.waveform-pan-requested(value); }
             peaks => { root.peaks-visible = true; }
             output-settings => { root.settings-page = 0; root.output-settings-requested(); root.settings-visible = true; }
+            retry => { if root.selected-row >= 0 { root.audition-requested(root.selected-row); } else { root.start-requested(); } }
+            relink => { root.file-action-requested(root.selected-id, 20); }
         }
         status-row := HorizontalLayout { height: 16px * Theme.ui-scale;
             Label { horizontal-stretch: 1; min-width: 0px; text: root.drag-preparing && root.drag-progress != "" ? root.drag-progress : root.status; overflow: elide; font-size: Theme.font(10); }

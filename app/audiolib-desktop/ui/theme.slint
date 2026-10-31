@@ -59,6 +59,18 @@ export global Theme {
     // Not themeable. Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
     out property <color> spectral-canvas: #849094;
     out property <color> normal-canvas: #1d2328;
+    // Motion. Transitions stay short and ease out; nothing bounces or travels far.
+    // `motion` scales every duration below: 1 keeps the designed timing, 0 turns
+    // transitions off (state changes then apply immediately).
+    in-out property <float> motion: 1.0;
+    // Hover, press and small color changes.
+    out property <duration> motion-fast: 90ms * Theme.motion;
+    // Icon swaps, fades and most state changes.
+    out property <duration> motion-base: 150ms * Theme.motion;
+    // Larger fades (waveform arrival, end of playback).
+    out property <duration> motion-slow: 240ms * Theme.motion;
+    // Tooltips appear after the pointer rests for this long; not scaled by `motion`.
+    out property <duration> tooltip-delay: 450ms;
 }
 
 // Keep the standard input, keyboard and accessibility behavior; paint its accent
