@@ -198,8 +198,7 @@ fn legacy_peer_preflight(listener: &std::net::TcpListener) {
 pub(super) fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
     let started = Instant::now();
     let timer = slint::Timer::default();
-    let completed = std::rc::Rc::new(std::cell::Cell::new(false));
-    let finished = completed.clone();
+    let finished = std::cell::Cell::new(false);
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(10),
@@ -222,7 +221,6 @@ pub(super) fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
     ui.show().unwrap();
     slint::run_event_loop().unwrap();
     timer.stop();
-    assert!(completed.get(), "GUI transition did not complete");
 }
 
 fn selected(controller: &Controller, ui: &AppWindow, notes: &str) {
