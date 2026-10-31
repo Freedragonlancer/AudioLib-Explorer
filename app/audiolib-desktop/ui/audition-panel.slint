@@ -346,6 +346,7 @@ component OverviewBar inherits Rectangle {
     in property <bool> enabled: true;
     in-out property <float> scroll;
     callback pan(float);
+    forward-focus: focus;
     property <bool> active: root.enabled && root.zoom > 1.0001;
     property <length> thumb-width: max(18px * Theme.ui-scale, root.width / max(1, root.zoom));
     property <length> travel: max(0px, root.width - root.thumb-width);
@@ -378,13 +379,14 @@ component OverviewBar inherits Rectangle {
         x: root.travel * root.shown-scroll; width: root.thumb-width;
         y: (parent.height - self.height) / 2; height: (touch.has-hover || touch.pressed ? 10px : 8px) * Theme.ui-scale; border-radius: self.height / 2;
         background: touch.pressed ? Theme.accent : (touch.has-hover ? Theme.accent.mix(Theme.segment, 0.45) : Theme.segment);
-        border-width: 1px; border-color: touch.has-hover || touch.pressed ? Theme.accent : Theme.strong-border;
+        border-width: 1px; border-color: focus.has-focus || touch.has-hover || touch.pressed ? Theme.accent : Theme.strong-border;
         animate height, background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     }
     touch := TouchArea {
         enabled: root.active; mouse-cursor: pointer;
         pointer-event(event) => {
             if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                focus.focus();
                 let on-thumb = self.mouse-x >= thumb.x && self.mouse-x <= thumb.x + thumb.width;
                 root.grab-offset = on-thumb ? self.mouse-x - thumb.x : root.thumb-width / 2;
                 root.drag-scroll = root.scroll;
@@ -398,6 +400,20 @@ component OverviewBar inherits Rectangle {
             // One detent pans a quarter of the visible window.
             root.move-to(root.scroll - delta / 120px * 0.25 / max(1, root.zoom - 1));
             return accept;
+        }
+    }
+    // Keep the native slider's keyboard reachability when painting a custom overview.
+    focus := FocusScope {
+        enabled: root.active;
+        key-pressed(event) => {
+            if !root.active { return reject; }
+            if event.text == Key.LeftArrow || event.text == Key.DownArrow { root.move-to(root.scroll - 0.05); return accept; }
+            if event.text == Key.RightArrow || event.text == Key.UpArrow { root.move-to(root.scroll + 0.05); return accept; }
+            if event.text == Key.PageDown { root.move-to(root.scroll - 0.25); return accept; }
+            if event.text == Key.PageUp { root.move-to(root.scroll + 0.25); return accept; }
+            if event.text == Key.Home { root.move-to(0); return accept; }
+            if event.text == Key.End { root.move-to(1); return accept; }
+            reject
         }
     }
 }
