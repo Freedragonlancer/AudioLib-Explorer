@@ -62,69 +62,47 @@ function Get-SelectedPackages($Call) {
         if ($Call.Arguments[$taskIndex] -eq '-p') { $Call.Arguments[$taskIndex + 1] }
     }
 }
-function Assert-FullDefaultChecks {
-    if ($taskCalls.Count -lt 3 -or $taskCalls[0].Arguments[0] -ne 'fmt' -or
-        $taskCalls[1].Arguments[0] -ne 'clippy' -or $taskCalls[2].Arguments[0] -ne 'test') { throw 'Default validation stages are missing or reordered.' }
+function Assert-SingleWorkspacePass([bool]$Asio = $false) {
+    if ($taskCalls.Count -ne 3 -or $taskCalls[0].Arguments[0] -ne 'fmt' -or
+        $taskCalls[1].Arguments[0] -ne 'clippy' -or $taskCalls[2].Arguments[0] -ne 'test') { throw 'Validation must run exactly one format/Clippy/test pass.' }
     foreach ($taskCall in @($taskCalls[1], $taskCalls[2])) {
         if ($taskCall.Arguments -notcontains '--workspace' -or $taskCall.Arguments -notcontains '--all-targets' -or
-            $taskCall.Arguments -notcontains '--locked' -or $taskCall.Arguments -contains '--features') { throw 'Default workspace coverage changed.' }
+            $taskCall.Arguments -notcontains '--locked') { throw 'Workspace coverage changed.' }
+        if (($taskCall.Arguments -contains '--features') -ne $Asio -or
+            ($Asio -and $taskCall.Arguments -notcontains 'audiolib-desktop/asio,audiolib-cli/asio') -or
+            $taskCall.Prepared -ne [int]$Asio) { throw 'Checks did not use the selected feature configuration and SDK preparation.' }
     }
-    if (($taskCalls[1].Arguments -join ' ') -notmatch '-- -D warnings$') { throw 'Default Clippy must remain strict.' }
+    if (($taskCalls[1].Arguments -join ' ') -notmatch '-- -D warnings$') { throw 'Clippy must remain strict.' }
 }
 
 try {
     $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
     Invoke-PipelineCase 'check-local.ps1' @{}
-    Assert-FullDefaultChecks
+    Assert-SingleWorkspacePass
     if ($taskCalls.Count -ne 3 -or $taskState.Prepared -ne 0) { throw 'Default checks unexpectedly add ASIO work.' }
     Write-Host 'PASS: default full workspace checks run once without SDK preparation.'
 
     Invoke-PipelineCase 'check-local.ps1' @{Asio=$true; Target='x86_64-pc-windows-msvc'}
-    Assert-FullDefaultChecks
-    if ($taskCalls.Count -ne 5 -or $taskState.Prepared -ne 1) { throw 'ASIO validation stages are missing or repeated.' }
-    $taskAsioPackages = 'audiolib-audio,audiolib-cli,audiolib-desktop,audiolib-windows'
-    foreach ($taskCall in @($taskCalls[3], $taskCalls[4])) {
-        if ($taskCall.Arguments -contains '--workspace' -or
-            (@(Get-SelectedPackages $taskCall | Sort-Object) -join ',') -cne $taskAsioPackages -or
-            $taskCall.Prepared -ne 1 -or $taskCall.Arguments -notcontains 'audiolib-desktop/asio,audiolib-cli/asio' -or
-            $taskCall.Arguments -notcontains '--all-targets' -or $taskCall.Arguments -notcontains '--locked') { throw 'ASIO coverage must include only feature-affected packages after verified preparation.' }
-    }
-    if ($taskCalls[3].Arguments[0] -ne 'clippy' -or ($taskCalls[3].Arguments -join ' ') -notmatch '-- -D warnings$' -or
-        $taskCalls[4].Arguments[0] -ne 'test') { throw 'ASIO strict Clippy/tests were not preserved.' }
+    Assert-SingleWorkspacePass $true
+    if ($taskState.Prepared -ne 1) { throw 'ASIO SDK preparation was repeated.' }
     foreach ($taskCall in @($taskCalls | Select-Object -Skip 1)) {
         $taskTargetIndex = [array]::IndexOf($taskCall.Arguments, '--target')
         if ($taskTargetIndex -lt 0 -or $taskCall.Arguments[$taskTargetIndex + 1] -cne 'x86_64-pc-windows-msvc') { throw 'Explicit target was not forwarded.' }
     }
-    Write-Host 'PASS: ASIO adds checks for four packages and forwards the selected target.'
-
-    Invoke-PipelineCase 'check-local.ps1' @{AsioOnly=$true}
-    if ($taskCalls.Count -ne 3 -or $taskState.Prepared -ne 1 -or $taskCalls[0].Arguments[0] -ne 'fmt') { throw 'ASIO-only checks must run format and one prepared ASIO pass.' }
-    foreach ($taskCall in @($taskCalls[1], $taskCalls[2])) {
-        if ($taskCall.Arguments -contains '--workspace' -or
-            (@(Get-SelectedPackages $taskCall | Sort-Object) -join ',') -cne $taskAsioPackages -or
-            $taskCall.Arguments -notcontains 'audiolib-desktop/asio,audiolib-cli/asio' -or
-            $taskCall.Prepared -ne 1) { throw 'ASIO-only mode must preserve all four packages without repeating the default pass.' }
-    }
-    if ($taskCalls[1].Arguments[0] -ne 'clippy' -or ($taskCalls[1].Arguments -join ' ') -notmatch '-- -D warnings$' -or
-        $taskCalls[2].Arguments[0] -ne 'test') { throw 'ASIO-only strict Clippy/tests were not preserved.' }
-    Invoke-PipelineCase 'check-local.ps1' @{Asio=$true; AsioOnly=$true} 'AmbiguousParameterSet'
-    if ($taskCalls.Count -or $taskState.Prepared) { throw 'Conflicting modes started checks.' }
-    Write-Host 'PASS: ASIO-only mode avoids the default pass and rejects conflicting modes.'
+    Write-Host 'PASS: ASIO selects one workspace pass and forwards the selected target.'
 
     Invoke-PipelineCase 'check-local.ps1' @{Target='aarch64-apple-darwin'}
-    Assert-FullDefaultChecks
+    Assert-SingleWorkspacePass
     if ($taskCalls.Count -ne 3 -or $taskCalls[2].Arguments -notcontains 'aarch64-apple-darwin') { throw 'Native non-Windows routing changed.' }
     Invoke-PipelineCase 'check-local.ps1' @{Asio=$true; Target='aarch64-apple-darwin'} 'Windows MSVC'
     if ($taskCalls.Count -or $taskState.Prepared) { throw 'Invalid ASIO target started work.' }
-    Invoke-PipelineCase 'check-local.ps1' @{AsioOnly=$true; Target='aarch64-apple-darwin'} 'Windows MSVC'
-    if ($taskCalls.Count -or $taskState.Prepared) { throw 'Invalid ASIO-only target started work.' }
     $env:CARGO_BUILD_TARGET = 'aarch64-apple-darwin'
-    Invoke-PipelineCase 'check-local.ps1' @{AsioOnly=$true} 'Windows MSVC'
+    Invoke-PipelineCase 'check-local.ps1' @{Asio=$true} 'Windows MSVC'
     if ($taskCalls.Count -or $taskState.Prepared) { throw 'An incompatible environment target started ASIO work.' }
     $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
     Write-Host 'PASS: native target checks work and incompatible ASIO targets fail before starting.'
 
-    foreach ($taskFailAt in 1..5) {
+    foreach ($taskFailAt in 1..3) {
         $taskState.FailAt = $taskFailAt
         Invoke-PipelineCase 'check-local.ps1' @{Asio=$true} 'cargo exited with code 17'
         if ($taskCalls.Count -ne $taskFailAt) { throw 'Validation continued after a failed stage.' }
@@ -132,9 +110,7 @@ try {
     $taskState.FailAt = 0
     $taskState.FailPreparation = $true
     Invoke-PipelineCase 'check-local.ps1' @{Asio=$true} 'Synthetic SDK preparation failed'
-    if ($taskCalls.Count -ne 3) { throw 'ASIO checks continued after SDK preparation failed.' }
-    Invoke-PipelineCase 'check-local.ps1' @{AsioOnly=$true} 'Synthetic SDK preparation failed'
-    if ($taskCalls.Count -ne 1) { throw 'ASIO-only checks continued after SDK preparation failed.' }
+    if ($taskCalls.Count -ne 1) { throw 'ASIO checks continued after SDK preparation failed.' }
     Invoke-PipelineCase 'build-release.ps1' @{} 'Synthetic SDK preparation failed'
     if ($taskCalls.Count) { throw 'Build continued after SDK preparation failed.' }
     $taskState.FailPreparation = $false
