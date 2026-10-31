@@ -145,18 +145,12 @@ Before migrating the server library to the current format, upgrade clients to ve
 Windows client requirements: MSVC build tools and the Rust toolchain `1.97.1-x86_64-pc-windows-msvc`. `rust-toolchain.toml` pins only the version `1.97.1`; the Windows MSVC target comes from `.cargo/config.toml`. If your machine's default toolchain is GNU, select the MSVC toolchain explicitly (for example `cargo +1.97.1-x86_64-pc-windows-msvc build ...`); otherwise the build fails with `can't find crate for std`. ASIO builds additionally need LLVM (libclang) and use the pinned, hash-verified Steinberg ASIO SDK (downloaded by `tools/prepare-asio.ps1`).
 
 ```powershell
-cargo build --release -p audiolib-desktop -p audiolib-cli
-
-# optional ASIO support
-. ./tools/prepare-asio.ps1
-cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-desktop/asio,audiolib-cli/asio
-
-# portable package (dist/latest/portable)
+# Build once with verified ASIO support, then package (dist/latest/portable).
 ./tools/build-release.ps1
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
-The release script builds only the desktop/CLI binaries. For a tagged Windows package, the compatibility entry point `tools/ci-release.ps1 -Tag <tag>` can replace those two commands; it records runtime validation as `not-run`. Run the full portable acceptance once afterward, then follow the [fixed local installation workflow](AGENTS.md#mandatory-local-application-delivery-and-release-installation). Server packaging uses `tools/build-server-release.ps1` and its platform packager.
+The release script builds only the desktop/CLI binaries. To deliver without ASIO, pass `-WithoutAsio` to both commands and the portable validator. For a tagged Windows package, the compatibility entry point `tools/ci-release.ps1 -Tag <tag>` can replace those two commands; it records runtime validation as `not-run`. Run the full portable acceptance once afterward, then follow the [fixed local installation workflow](AGENTS.md#mandatory-local-application-delivery-and-release-installation). Server packaging uses `tools/build-server-release.ps1` and its platform packager.
 
 Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. From the accepted main/tag checkout:
 
@@ -164,10 +158,10 @@ Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the 
 $releaseCommit = (git rev-parse HEAD).Trim()
 $buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof -ValidateRuntime
 ```
 
-Add `-ValidateRuntime` to the Mac packaging command in a logged-in desktop session to run structural and native acceptance together once. Run `validate-macos-client.ps1` separately only if runtime acceptance was deferred, artifacts changed or a different host must verify them; see the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
+Run the Mac packaging command in a logged-in desktop session to complete structural and native acceptance together once. If that session is unavailable, omit `-ValidateRuntime` and complete runtime acceptance later. Run `validate-macos-client.ps1` separately only if runtime acceptance was deferred, artifacts changed or a different host must verify them; see the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
 Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official Windows x64, macOS arm64 and Linux x64 server packages support updates through the admin page. Standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
