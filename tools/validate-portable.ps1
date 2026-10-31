@@ -3,6 +3,8 @@
 param(
     [string]$BinaryDirectory = 'dist/latest/portable',
     [switch]$CleanCheckout,
+    # Routine acceptance uses synthetic data. Opt in only for legacy-import changes.
+    [switch]$LegacyImport,
     # Match build-release/package-portable; ASIO remains required by default.
     [switch]$WithoutAsio,
     [string]$PublishedReleaseReport,
@@ -10,6 +12,9 @@ param(
     [string]$ExpectedCommit
 )
 $ErrorActionPreference = 'Stop'
+if ($CleanCheckout -and $LegacyImport) { throw 'Choose synthetic acceptance or -LegacyImport, not both.' }
+# Keep -CleanCheckout as a compatible explicit spelling of the default.
+$CleanCheckout = !$LegacyImport
 . (Join-Path $PSScriptRoot 'console-utf8.ps1')
 try {
 if ($PublishedReleaseReport -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Published release validation requires pwsh (PowerShell 7.3 or newer).' }

@@ -91,6 +91,29 @@ try {
     }
     Write-Host 'PASS: ASIO selects one workspace pass and forwards the selected target.'
 
+    foreach ($taskSelection in @(
+        @{Package=@('audiolib-db','audiolib-core','audiolib-db')},
+        @{Package=@('audiolib-desktop');Asio=$true},
+        @{Package=@('audiolib-server');NoDefaultFeatures=$true;Target='x86_64-unknown-linux-gnu'}
+    )) {
+        Invoke-PipelineCase 'check-local.ps1' $taskSelection
+        if ($taskCalls.Count -ne 3 -or $taskCalls[0].Arguments[0] -ne 'fmt') { throw 'Scoped checks repeated or omitted a stage.' }
+        foreach ($taskCall in @($taskCalls[1], $taskCalls[2])) {
+            if ($taskCall.Arguments -contains '--workspace' -or
+                (@(Get-SelectedPackages $taskCall | Sort-Object) -join ',') -cne (@($taskSelection.Package | Sort-Object -Unique) -join ',') -or
+                $taskCall.Arguments -notcontains '--all-targets' -or $taskCall.Arguments -notcontains '--locked') { throw 'Scoped checks expanded beyond the selected packages.' }
+            if (($taskCall.Arguments -contains '--no-default-features') -ne [bool]$taskSelection.NoDefaultFeatures -or
+                ($taskCall.Arguments -contains '--features') -ne [bool]$taskSelection.Asio -or
+                $taskCall.Prepared -ne [int][bool]$taskSelection.Asio) { throw 'Scoped checks did not match the selected release features.' }
+            if ($taskSelection.Asio -and $taskCall.Arguments -notcontains 'audiolib-desktop/asio') { throw 'Scoped ASIO features include an unselected package.' }
+        }
+        if ($taskCalls[1].Arguments[0] -ne 'clippy' -or ($taskCalls[1].Arguments -join ' ') -notmatch '-- -D warnings$' -or
+            $taskCalls[2].Arguments[0] -ne 'test') { throw 'Scoped strict Clippy/tests changed.' }
+    }
+    Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-server');Asio=$true} 'ASIO-capable package'
+    if ($taskCalls.Count -or $taskState.Prepared) { throw 'Headless server checks prepared an irrelevant ASIO SDK.' }
+    Write-Host 'PASS: scoped client/database/server checks run once with their selected features.'
+
     Invoke-PipelineCase 'check-local.ps1' @{Target='aarch64-apple-darwin'}
     Assert-SingleWorkspacePass
     if ($taskCalls.Count -ne 3 -or $taskCalls[2].Arguments -notcontains 'aarch64-apple-darwin') { throw 'Native non-Windows routing changed.' }

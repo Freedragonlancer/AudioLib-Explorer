@@ -3,7 +3,7 @@
 .SYNOPSIS
 Run local Rust validation once with the selected build features.
 .DESCRIPTION
-Runs format, strict Clippy and workspace tests once, failing at the first error.
+Runs format, strict Clippy and selected package tests once, failing at the first error.
 Asio selects the release feature configuration after verified SDK preparation;
 it does not add a second pass. Omit Asio to validate a non-ASIO build.
 Logs stay in .rust-validation/local-checks/<run>/.
@@ -14,6 +14,11 @@ current RUSTUP_TOOLCHAIN value, set $env:RUSTUP_TOOLCHAIN to
 restore the saved value afterward. Do not change the global Rustup toolchain.
 .PARAMETER Asio
 Enable desktop/CLI ASIO features for the single Clippy/test pass.
+.PARAMETER Package
+Packages affected by the change, including relevant direct consumers. Omit for
+an explicitly requested workspace-wide check; release tags do not require it.
+.PARAMETER NoDefaultFeatures
+Match a release built with --no-default-features (for example the headless server).
 .PARAMETER Target
 Override the repository Cargo target for Clippy/tests (for example,
 aarch64-apple-darwin or x86_64-unknown-linux-gnu). Format is target-independent.
@@ -23,11 +28,17 @@ ASIO requires a Windows MSVC target; omitting Target retains repository defaults
 .EXAMPLE
 ./tools/check-local.ps1 -Asio
 .EXAMPLE
+./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio
+.EXAMPLE
+./tools/check-local.ps1 -Package audiolib-server -NoDefaultFeatures -Target x86_64-unknown-linux-gnu
+.EXAMPLE
 ./tools/check-local.ps1 -Target aarch64-apple-darwin
 #>
 [CmdletBinding()]
 param(
     [switch]$Asio,
+    [ValidateNotNullOrEmpty()][string[]]$Package,
+    [switch]$NoDefaultFeatures,
     [ValidateNotNullOrEmpty()][string]$Target
 )
 $ErrorActionPreference = 'Stop'
@@ -36,6 +47,18 @@ $effectiveTarget = if ($Target) { $Target } elseif ($env:CARGO_BUILD_TARGET) { $
 if ($Asio -and $effectiveTarget -notmatch '-windows-msvc$') {
     throw 'ASIO checks require a Windows MSVC target; choose a matching -Target.'
 }
+$selectionArguments = @('--workspace')
+$featureArguments = @()
+if ($Package) {
+    $Package = @($Package | Select-Object -Unique)
+    $selectionArguments = @($Package | ForEach-Object { '-p'; $_ })
+}
+if ($Asio) {
+    $asioPackages = if ($Package) { @($Package | Where-Object { $_ -in @('audiolib-desktop','audiolib-cli','audiolib-audio','audiolib-windows') }) } else { @('audiolib-desktop','audiolib-cli') }
+    if (!$asioPackages.Count) { throw '-Asio requires selecting an ASIO-capable package; unrelated packages do not need a second feature configuration.' }
+    $featureArguments = @('--features', (($asioPackages | ForEach-Object { "$_/asio" }) -join ','))
+}
+if ($NoDefaultFeatures) { $featureArguments += '--no-default-features' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $runId = [guid]::NewGuid().ToString('N')
 $logs = Join-Path (Join-Path $taskRoot '.rust-validation/local-checks') $runId
@@ -77,16 +100,15 @@ Push-Location -LiteralPath $taskRoot
 try {
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     Invoke-CargoCheck 'format' @('fmt', '--all', '--', '--check')
-    $featureArguments = @()
     if ($Asio) {
         Invoke-LoggedCheck 'prepare-asio' { . (Join-Path $PSScriptRoot 'prepare-asio.ps1') }
-        $featureArguments = @('--features', 'audiolib-desktop/asio,audiolib-cli/asio')
     }
     $configuration = if ($Asio) { 'asio' } else { 'default' }
-    $checkArguments = @('--workspace', '--all-targets', '--locked') + $targetArguments + $featureArguments
+    $checkArguments = $selectionArguments + @('--all-targets', '--locked') + $targetArguments + $featureArguments
     Invoke-CargoCheck "$configuration-clippy" (@('clippy') + $checkArguments + @('--', '-D', 'warnings'))
     Invoke-CargoCheck "$configuration-tests" (@('test') + $checkArguments)
-    $scope = "workspace, $configuration configuration only"
+    $selection = if ($Package) { $Package -join ', ' } else { 'workspace' }
+    $scope = "$selection, $configuration configuration only; no-default-features=$([bool]$NoDefaultFeatures)"
     Write-Host "Local checks passed ($scope). Logs: $logs"
 } finally {
     [Environment]::SetEnvironmentVariable('CPAL_ASIO_DIR', $savedAsioDirectory, 'Process')

@@ -76,9 +76,14 @@ try {
     if (!$rejected) { throw 'Portable license preflight did not run before runtime work.' }
     function Start-Process { throw 'Synthetic runtime boundary reached.' }
     try {
-        $reachedRuntime = $false
-        try { & (Join-Path $testRoot 'tools/validate-portable.ps1') -BinaryDirectory $staleRoot -WithoutAsio -CleanCheckout } catch { $reachedRuntime = $_.Exception.Message -eq 'Synthetic runtime boundary reached.' }
-        if (!$reachedRuntime) { throw 'Non-ASIO portable acceptance did not pass preflight.' }
+        foreach ($explicitSynthetic in @($false, $true)) {
+            $reachedRuntime = $false
+            try { & (Join-Path $testRoot 'tools/validate-portable.ps1') -BinaryDirectory $staleRoot -WithoutAsio -CleanCheckout:$explicitSynthetic } catch { $reachedRuntime = $_.Exception.Message -eq 'Synthetic runtime boundary reached.' }
+            if (!$reachedRuntime) { throw 'Synthetic portable acceptance unexpectedly required the legacy fixture.' }
+        }
+        $rejected = $false
+        try { & (Join-Path $testRoot 'tools/validate-portable.ps1') -BinaryDirectory $staleRoot -CleanCheckout -LegacyImport } catch { $rejected = $_.Exception.Message -match 'not both' }
+        if (!$rejected) { throw 'Conflicting fixture modes were accepted.' }
     } finally { Remove-Item Function:\Start-Process }
     # A fresh ASIO package includes the SDK license; stale non-ASIO output is replaced.
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild
