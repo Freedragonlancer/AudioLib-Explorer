@@ -265,6 +265,8 @@ fn child_slow_http_cache_lock() {
                 }
                 Err(error) => panic!("Synthetic artwork server: {error}"),
             };
+            // Accepted sockets inherit O_NONBLOCK on macOS/BSD; the handler reads synchronously.
+            socket.set_nonblocking(false).unwrap();
             let started = started_tx.clone();
             let release = server_release.clone();
             handlers.push(std::thread::spawn(move || {
