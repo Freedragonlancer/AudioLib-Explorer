@@ -79,7 +79,7 @@ GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --
 
 Windows 客户端使用 `tools/build-release.ps1` 构建 desktop/CLI 两个包的 binaries，再运行 `tools/package-portable.ps1 -SkipBuild`。兼容手动入口 `tools/ci-release.ps1 -Tag <tag>` 将这两步和标签身份校验合在一起，并生成运行时为 `not-run` 的报告；二者选一，不串行再跑。它不代替完整 portable 验收。服务端使用专用 `tools/build-server-release.ps1`、打包器及 `tools/validate-server-package.ps1`；Windows 的服务包验收需要构造自有 fixture 时，显式执行 `cargo build -p audiolib-db --bin search-benchmark --release --locked`，不让普通发布构建顺带生成 benchmark。Mac 客户端构建证明保留原构建机路径前缀，便于在另一台 Mac 上核验隐私边界。
 
-原云端 macOS 数据库/服务端生命周期测试、Linux 服务端 Clippy/测试改由匹配平台的本地环境按影响运行。例如在 macOS ARM64 使用 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`；在 Linux 使用 `cargo test -p audiolib-server -p audiolib-db --all-targets --locked --target x86_64-unknown-linux-gnu`。使用原生 Rust 工具链覆盖仓库默认 Windows target；缺少相应主机或音频硬件时，明确记录未验证，不能以云端冒烟通过代替。
+原云端 macOS 数据库/服务端生命周期测试、Linux 服务端 Clippy/测试改由匹配平台的本地环境按影响运行。例如在 macOS ARM64 使用 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`；在 Linux 服务端和数据库均受影响时使用 `cargo test -p audiolib-server -p audiolib-db --all-targets --locked --no-default-features --target x86_64-unknown-linux-gnu`。使用原生 Rust 工具链覆盖仓库默认 Windows target；缺少相应主机或音频硬件时，明确记录未验证，不能以云端冒烟通过代替。
 
 应用变更交付仍需从最新源代码构建、打包并更新固定的 `local_release/`；构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
 
