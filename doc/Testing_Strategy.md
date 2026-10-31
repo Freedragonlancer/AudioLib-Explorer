@@ -59,6 +59,8 @@ GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --
 
 本地全量入口为 `./tools/check-local.ps1`（格式、默认配置严格 Clippy、workspace 测试）；`-Asio` 仅为 `audiolib-windows`、`audiolib-audio`、`audiolib-desktop`、`audiolib-cli` 追加已验证 SDK 的 ASIO 严格 Clippy 和测试，不重复其他 package。打发布标签前完成这套检查，并按实际影响追加专项回归及实际发布包的 portable/服务启动验收；仍有效的结果可复用。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
 
+默认 workspace 检查已通过且仍有效时，使用 `./tools/check-local.ps1 -AsioOnly` 单独补跑格式及四包 ASIO 检查（自动准备已验证 SDK）。例如仅 SDK 准备失败后重试，无需再跑默认整套。此模式明确报告默认检查未运行；发布验收仍需两种配置的有效结果。若修复影响默认配置，也必须重跑其受影响检查。
+
 | 阶段 | 负责的检查与执行次数 |
 | --- | --- |
 | Rust 开发检查 | 对所选范围执行一次格式、严格 Clippy 和相关测试；广泛改动/发布使用上述全量入口。 |
@@ -73,6 +75,8 @@ Windows 客户端使用 `tools/build-release.ps1` 构建 desktop/CLI 两个包�
 原云端 macOS 数据库/服务端生命周期测试、Linux 服务端 Clippy/测试改由匹配平台的本地环境按影响运行。例如在 macOS ARM64 使用 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`；在 Linux 使用 `cargo test -p audiolib-server -p audiolib-db --all-targets --locked --target x86_64-unknown-linux-gnu`。使用原生 Rust 工具链覆盖仓库默认 Windows target；缺少相应主机或音频硬件时，明确记录未验证，不能以云端冒烟通过代替。
 
 应用变更交付仍需从最新源代码构建、打包并更新固定的 `local_release/`；构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
+
+无 ASIO 的本地交付须在 build、package 和 `validate-portable.ps1` 三步都传 `-WithoutAsio`。默认验收仍要求 ASIO 许可证，不根据文件缺失推断构建特性。打包与 portable 验收共用 `validate-portable-licenses.ps1`，在替换有效包或启动应用前拒绝缺失许可证；其回归包含在 `test-package-boundary.ps1` 中。
 
 相关应用/测试源码、feature、工具链和环境未变时可复用已通过的检查；标签或文档变化本身不触发 Cargo 重跑。修复后只重跑失败和受影响的检查，不重新启动其他已通过套件。正式产物仍须从最终 main/tag 提交构建并针对实际包验收，不能用旧 beta 二进制代替最终身份；这不要求重跑仍有效的源码功能矩阵。仅在修改相关路径或结果失效时扩大范围。交付记录说明已运行项目、未覆盖范围及原因，不能把未运行的检查写成通过。
 
