@@ -246,7 +246,10 @@ try {
         if ((Test-Path -LiteralPath $dist) -and ((Get-Item -LiteralPath $dist -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             # Unlink only the exact test-created junction, without recursive deletion.
             if ($dist -ne [IO.Path]::GetFullPath((Join-Path $testRoot 'dist'))) { throw 'Unexpected junction cleanup target.' }
-            Remove-Item -LiteralPath $dist -Force
+            # Windows PowerShell 5.1 Remove-Item fails on a junction to a populated
+            # directory. Nonrecursive Directory.Delete removes only the link.
+            [IO.Directory]::Delete($dist)
+            if ((Get-Content -LiteralPath (Join-Path $redirected 'preserve.txt') -Raw).Trim() -ne 'owned sentinel') { throw 'Junction cleanup changed its target.' }
         }
     }
     Write-Host 'Package boundary regression passed: stale state/ignored reports/untracked assets excluded; old-updater compatibility and licenses checked; completed and unrun reports accepted; incompatible public docs, local paths, unsafe reports, false runtime results, wrong binary identities and junction ancestors rejected.'
