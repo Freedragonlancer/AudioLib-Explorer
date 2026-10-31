@@ -696,6 +696,9 @@ export component AppWindow inherits Window {
     in-out property <int> library-sidebar-page: 0;
     in-out property <int> favorites-category: 0;
     in-out property <bool> task-restoring: false;
+    // Row change notifications can arrive after the one-shot restore timer.
+    // Keep its viewport protected until an ordinary search replaces the range.
+    in-out property <bool> preserve-result-scroll: false;
     in-out property <bool> search-task-rename-visible: false;
     in-out property <string> search-task-rename-name: "";
     private property <string> search-task-rename-id: "";
@@ -718,6 +721,7 @@ export component AppWindow inherits Window {
     private property <length> task-inspector-viewport-y: 0px;
     out property <float> task-result-row-height: root.result-row-height / 1px;
     out property <float> task-result-scroll-y: root.task-viewport-pending ? root.task-wanted-result-y : result-list.viewport-y / 1px;
+    out property <float> task-result-visible-height: result-list.visible-height / 1px;
     out property <float> task-result-scroll-x: root.task-viewport-pending ? root.task-wanted-result-x : root.table-viewport-x / 1px;
     out property <float> task-folder-scroll-y: root.task-viewport-pending ? root.task-wanted-folder-y : folder-list.viewport-y / 1px;
     out property <float> task-filter-scroll-y: root.task-viewport-pending ? root.task-wanted-filter-y : root.task-filter-viewport-y / 1px;
@@ -725,6 +729,8 @@ export component AppWindow inherits Window {
     // Call after replacing the task's raw fields and models. A one-shot layout turn
     // keeps ListView's temporary empty range from discarding the restored position.
     public function restore-search-task-viewport(result-y: float, result-x: float, folder-y: float, filter-y: float, inspector-y: float) {
+        root.preserve-result-scroll = true;
+        root.result-user-scrolling = false;
         root.result-scroll-epoch += 1;
         root.result-scroll-apply-epoch = root.result-scroll-epoch;
         root.result-scroll-remote = root.remote-mode;
@@ -740,6 +746,8 @@ export component AppWindow inherits Window {
     }
     // Drop a viewport armed for the other source and the shared ListView's scroll offset.
     public function reset-result-list-scroll() {
+        root.result-user-scrolling = false;
+        root.preserve-result-scroll = false;
         root.result-scroll-epoch += 1;
         root.task-viewport-pending = false;
         root.task-restoring = false;
@@ -1097,6 +1105,7 @@ export component AppWindow inherits Window {
     callback crumb-requested(int);
     callback all-library-requested();
     callback page-requested(int);
+    callback result-range-requested(int);
     callback scan-requested(string);
     callback scan-browse-requested();
     callback scan-cancel-requested();
@@ -1502,7 +1511,7 @@ export component AppWindow inherits Window {
     // A native menu remains outside the in-window overlays. Guard its items and
     // shortcuts too, so modal dialogs cannot launch overlapping operations.
     property <bool> menu-ready: !root.startup-busy && !root.closing && !root.library-busy && !root.library-visible && !root.confirmation-visible && !root.batch-visible && !root.import-visible && !root.settings-visible && !root.peaks-visible && !root.about-visible && !root.help-visible && !root.debug-visible && !root.search-task-rename-visible && !root.search-workspace-loading;
-    property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible || root.update-visible || root.search-task-rename-visible || root.search-workspace-loading;
+    out property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible || root.update-visible || root.search-task-rename-visible || root.search-workspace-loading;
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
@@ -1675,8 +1684,38 @@ export component AppWindow inherits Window {
             else if (root.selected-row + 1) * root.result-row-height > -result-list.viewport-y + result-list.visible-height { result-list.viewport-y = result-list.visible-height - (root.selected-row + 1) * root.result-row-height; }
         }
     }
-    changed selected-row => { if !root.task-restoring { root.reveal-selected-row(); } }
-    changed rows => { if !root.task-restoring { result-list.viewport-y = 0px; root.reveal-selected-row(); root.report-result-window(); } }
+    private property <bool> result-user-scrolling: false;
+    private property <length> result-last-y: 0px;
+    // Native scrolling stays in charge. Fetch two screens ahead of the moving
+    // viewport, so the next results are ready before the loaded range ends.
+    function track-result-scroll() {
+        let previous = root.result-last-y;
+        root.result-last-y = result-list.viewport-y;
+        if root.result-user-scrolling && !root.searching && !root.background-blocked && !root.task-restoring && root.rows.length > 0 {
+            let buffer = result-list.visible-height * 2;
+            let remaining = root.rows.length * root.result-row-height + result-list.viewport-y - result-list.visible-height;
+            if result-list.viewport-y < previous && root.can-next && remaining <= buffer {
+                root.result-range-requested(1);
+            } else if result-list.viewport-y > previous && root.can-previous && -result-list.viewport-y <= buffer {
+                root.result-range-requested(-1);
+            }
+        }
+        root.report-result-window();
+    }
+    result-scroll-timer := Timer { running: false; interval: 500ms;
+        triggered => { self.running = false; root.result-user-scrolling = false; }
+    }
+    // Keep the same visible sounds when a bounded result window grows or slides.
+    // Apply synchronously before painting, then retain the existing epoch guard.
+    public function restore-result-window-viewport(result-y: float) {
+        root.restore-search-task-viewport(
+            result-y,
+            root.task-result-scroll-x, root.task-folder-scroll-y, root.task-filter-scroll-y, root.task-inspector-scroll-y);
+        result-list.viewport-y = clamp(result-y * 1px, min(0px, result-list.visible-height - root.rows.length * root.result-row-height), 0px);
+        root.result-last-y = result-list.viewport-y;
+    }
+    changed selected-row => { if !root.task-restoring && !root.preserve-result-scroll { root.result-user-scrolling = false; root.reveal-selected-row(); } }
+    changed rows => { if !root.task-restoring && !root.preserve-result-scroll { root.result-user-scrolling = false; result-list.viewport-y = 0px; root.reveal-selected-row(); root.report-result-window(); } }
     // Rows currently on screen (first index, count); Rust adds one screen above/below.
     function report-result-window() {
         if root.list-waveforms-visible && root.rows.length > 0 {
@@ -1751,13 +1790,20 @@ export component AppWindow inherits Window {
         }
     }
     task-viewport-timer := Timer {
-        running: false; interval: 1ms;
+        running: false; interval: 16ms;
         triggered => {
             self.running = false;
+            let content-height = max(0, root.rows.length) * root.result-row-height;
+            if root.task-viewport-pending && root.result-scroll-apply-epoch == root.result-scroll-epoch && root.result-scroll-remote == root.remote-mode && content-height > result-list.visible-height && result-list.viewport-height < content-height - 1px {
+                // Wait for the arriving virtual repeater to measure its range;
+                // otherwise Flickable clamps a restored offset against old bounds.
+                self.running = true;
+                self.restart();
+                return;
+            }
             // A server result-list offset must not land on another source. Folder,
             // filter and inspector scrolls are not tied to that row model.
             if root.task-viewport-pending && root.result-scroll-apply-epoch == root.result-scroll-epoch && root.result-scroll-remote == root.remote-mode {
-                let content-height = max(0, root.rows.length) * root.result-row-height;
                 result-list.viewport-y = clamp(root.task-wanted-result-y * 1px, min(0px, result-list.visible-height - content-height), 0px);
                 root.table-viewport-x = clamp(root.task-wanted-result-x * 1px, min(0px, result-list.visible-width - root.table-content-size), 0px);
                 root.sync-table-viewport();
@@ -1793,7 +1839,7 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.chinese ? "保存 Metadata" : "Save Metadata"); enabled: root.menu-ready && root.has-selection && root.metadata-dirty; shortcut: @keys(Control + S); activated => { root.save-metadata-requested(); } }
             MenuItem { title: (root.chinese ? "批量标注选择记录…" : "Edit selected records…"); enabled: root.menu-ready && root.checked-count > 0; activated => { root.open-batch(); } }
             MenuSeparator { }
-            MenuItem { title: root.chinese ? "选择当前页" : "Check current page"; enabled: root.menu-ready; activated => { root.check-current-page(); } }
+            MenuItem { title: root.chinese ? "选择已加载的结果" : "Check loaded results"; enabled: root.menu-ready; activated => { root.check-current-page(); } }
             MenuItem { title: root.chinese ? "清除全部选择" : "Clear selection"; enabled: root.menu-ready && root.checked-count > 0; activated => { root.check-page-requested(false); } }
             MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
             MenuSeparator { }
@@ -2327,7 +2373,18 @@ export component AppWindow inherits Window {
                                 // A newly populated repeater measures its width after becoming
                                 // visible. Ignore its temporary empty-range clamp until then.
                                 changed viewport-x => { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.table-viewport-x = self.viewport-x; } }
-                                changed viewport-y => { root.report-result-window(); }
+                                changed viewport-y => { root.track-result-scroll(); }
+                                scrolled => {
+                                    // Real input takes over from a pending programmatic restore.
+                                    if root.task-viewport-pending {
+                                        root.result-scroll-epoch += 1;
+                                        root.task-viewport-pending = false;
+                                        root.task-restoring = false;
+                                    }
+                                    root.result-user-scrolling = true;
+                                    result-scroll-timer.running = true;
+                                    result-scroll-timer.restart();
+                                }
                                 changed visible-height => { root.report-result-window(); }
                                 changed viewport-width => { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } }
                                 // Fixed child layout widths let ListView measure its horizontal scroll extent.
@@ -2417,7 +2474,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle { height: 34px * Theme.ui-scale; background: Theme.raised;
                             HorizontalLayout { padding-left: 10px * Theme.ui-scale; padding-right: 5px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
-                                Action { width: 84px * Theme.ui-scale; subtle: true; enabled: root.rows.length > 0; label: root.chinese ? "选择本页" : "Select page"; clicked => { root.check-page-requested(true); } }
+                                Action { width: 96px * Theme.ui-scale; subtle: true; enabled: root.rows.length > 0; label: root.chinese ? "选择已加载" : "Select loaded"; clicked => { root.check-page-requested(true); } }
                                 CheckBox { width: root.chinese ? 104px * Theme.ui-scale : 142px * Theme.ui-scale; enabled: !root.background-blocked; surface: Theme.raised; text: root.chinese ? "单击播放" : "Single-click play"; checked <=> root.audition-play-on-single-click; toggled => { root.single-click-play-requested(self.checked); } }
                                 table-columns-action := Action {
                                     width: root.chinese ? 54px * Theme.ui-scale : 78px * Theme.ui-scale; subtle: true; dropdown: true; enabled: !root.background-blocked;
@@ -2438,9 +2495,9 @@ export component AppWindow inherits Window {
                                     clicked => { root.sort-table(0); }
                                 }
                                 Label { horizontal-stretch: 1; min-width: 0px; text: root.result-summary; overflow: elide; font-size: Theme.font(10); }
-                                Action { width: 30px * Theme.ui-scale; enabled: root.can-previous; label: "‹"; clicked => { root.page-requested(-1); } }
-                                Label { width: 44px * Theme.ui-scale; text: root.page-label; horizontal-alignment: center; }
-                                Action { width: 30px * Theme.ui-scale; enabled: root.can-next; label: "›"; clicked => { root.page-requested(1); } }
+                                Action { width: 30px * Theme.ui-scale; enabled: root.can-previous && !root.searching; label: "‹"; clicked => { root.page-requested(-1); } }
+                                Label { width: 72px * Theme.ui-scale; text: root.page-label; horizontal-alignment: center; }
+                                Action { width: 30px * Theme.ui-scale; enabled: root.can-next && !root.searching; label: "›"; clicked => { root.page-requested(1); } }
                             }
                         }
                     }
