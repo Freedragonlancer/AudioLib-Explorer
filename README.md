@@ -145,16 +145,12 @@ Before migrating the server library to the current format, upgrade clients to ve
 Windows client requirements: MSVC build tools and the Rust toolchain `1.97.1-x86_64-pc-windows-msvc`. `rust-toolchain.toml` pins only the version `1.97.1`; the Windows MSVC target comes from `.cargo/config.toml`. If your machine's default toolchain is GNU, select the MSVC toolchain explicitly (for example `cargo +1.97.1-x86_64-pc-windows-msvc build ...`); otherwise the build fails with `can't find crate for std`. ASIO builds additionally need LLVM (libclang) and use the pinned, hash-verified Steinberg ASIO SDK (downloaded by `tools/prepare-asio.ps1`).
 
 ```powershell
-cargo build --release -p audiolib-desktop -p audiolib-cli
-
-# optional ASIO support
-. ./tools/prepare-asio.ps1
-cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-desktop/asio,audiolib-cli/asio
-
-# portable package (dist/latest/portable)
+# Build once with verified ASIO support, then package (dist/latest/portable).
 ./tools/build-release.ps1
 ./tools/package-portable.ps1 -SkipBuild
 ```
+
+The release script builds only the desktop/CLI binaries. To deliver without ASIO, pass `-WithoutAsio` to both commands and the portable validator. For a tagged Windows package, the compatibility entry point `tools/ci-release.ps1 -Tag <tag>` can replace those two commands; it records runtime validation as `not-run`. Run the full portable acceptance once afterward, then follow the [fixed local installation workflow](AGENTS.md#mandatory-local-application-delivery-and-release-installation). Server packaging uses `tools/build-server-release.ps1` and its platform packager.
 
 Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. From the accepted main/tag checkout:
 
@@ -162,10 +158,10 @@ Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the 
 $releaseCommit = (git rev-parse HEAD).Trim()
 $buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof -ValidateRuntime
 ```
 
-Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
+Run the Mac packaging command in a logged-in desktop session to complete structural and native acceptance together once. If that session is unavailable, omit `-ValidateRuntime` and complete runtime acceptance later. Run `validate-macos-client.ps1` separately only if runtime acceptance was deferred, artifacts changed or a different host must verify them; see the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
 Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official Windows x64, macOS arm64 and Linux x64 server packages support updates through the admin page. Standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
@@ -181,7 +177,7 @@ cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
 cargo test -p audiolib-db --test search_fragments --locked
 ```
 
-Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Run full workspace checks locally with `./tools/check-local.ps1` for broad changes; add `-Asio` for the local release matrix before tagging. Run subsystem regressions and performance measurements when their behavior is affected. Ordinary GitHub CI checks formatting only. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [testing examples](doc/Testing_Strategy.md).
+Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Use `./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio` for affected Windows client packages, or narrower existing test commands. Omit `-Package` only for broad/uncertain impact; `-Asio` selects the Windows release features for that single pass. Check non-ASIO conditional code separately only when the change affects it. Reuse passing results while relevant source, features, toolchain and environment remain unchanged. Run subsystem regressions and performance measurements when their behavior is affected. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [stage responsibilities](doc/Testing_Strategy.md#本地验证与云端最小检查).
 
 ## Usage
 
@@ -211,13 +207,13 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 ## Releases and CI
 
-The current source development version is `0.8.5`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
+The source development version is declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
 
 The Windows desktop client and supported server builds check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. The initial macOS desktop client uses manual updates. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 
-From 0.8.4, each Release ships Windows x64 and macOS arm64 clients, macOS arm64 and Linux x64 servers, and Docker amd64/arm64 offline images, each with a `.sha256` (twelve assets); from 0.8.5 the Windows x64 server zip and its `.sha256` are added (fourteen assets). Version 0.8.3 retains six assets; older releases retain four. Linux arm64 native packages are used internally for Docker validation; Docker updates replace the image.
+Publish the exact version-dependent package/checksum set in the [release policy](doc/Rust_Versioning.md#规则). Linux arm64 native packages are used internally for Docker validation; Docker updates replace the image.
 
-GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built and validated locally, then published with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is a manually triggered (`workflow_dispatch`), read-only verify job: its shared verifier checks the exact version-dependent package/checksum set, rejecting missing, extra, duplicate or wrong-case assets. It never builds, creates or uploads anything. Tag pushes do not start any workflow.
+GitHub Actions run one format-only Linux job on relevant `main`, `beta` and `codex/**` pushes and all pull requests. Pure documentation/screenshot pushes are skipped; every PR reports the required `Linux (fmt)` check. Rust tests, Clippy, UI/server startup checks, regressions and performance measurements run locally. Build/package each release payload once from its final main/tag identity, validate it locally, then publish with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is an optional manually triggered (`workflow_dispatch`), read-only verifier of release identity, exact asset names and SHA256. It never builds, creates or uploads anything and does not repeat runtime acceptance. Tag pushes do not start any workflow.
 
 Portable payloads use `tools/portable-files.json` and fresh staging. Generated local reports, user screenshots and runtime state are excluded. Release builds remap compiler paths, and `tools/validate-package-privacy.ps1` checks the payload and public report schema before publication. These checks do not remove information from already published Git history or releases.
 

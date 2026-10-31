@@ -54,14 +54,18 @@ Xcode command-line tools. No ASIO SDK or Python runtime is used.
 $taskReleaseCommit = (git rev-parse HEAD).Trim()
 $taskBuildProof = Join-Path (Get-Location).Path ('.rust-validation/macos-client-build/' + [guid]::NewGuid().ToString('N') + '/build.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $taskReleaseCommit -ReportPath $taskBuildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $taskReleaseCommit -BuildReport $taskBuildProof
+pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $taskReleaseCommit -BuildReport $taskBuildProof -ValidateRuntime
 ```
 
 The packager prints the retained application bundle path and produces
 `dist/latest/AudioLibExplorer-v0.8.5-macos-arm64.zip`, its `.sha256`, and a local
 `AudioLibExplorer-v0.8.5-macos-arm64-report.json`. Substitute the actual tag for a
-later release or beta candidate. Run the complete native acceptance with those
-paths:
+later release or beta candidate. With `-ValidateRuntime`, packaging runs structural
+and native acceptance together once, before publishing the output files. Keep its
+private `validation.json` evidence; the package inventory report itself still
+records `runtime_validation: not-run`. Do not repeat acceptance for unchanged
+artifacts. If no logged-in desktop session is available, omit `-ValidateRuntime`
+and complete the deferred native acceptance later with those paths:
 
 ```powershell
 pwsh ./tools/validate-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $taskReleaseCommit -BundlePath '<retained app path>' -ArchivePath ./dist/latest/AudioLibExplorer-v0.8.5-macos-arm64.zip -PackageReport ./dist/latest/AudioLibExplorer-v0.8.5-macos-arm64-report.json -BuildReport $taskBuildProof

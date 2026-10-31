@@ -983,6 +983,242 @@ fn active_list_top_row(controller: &Controller) -> usize {
 }
 
 #[test]
+fn result_window_restore_limit_is_bounded_for_saved_rows() {
+    use audiolib_core::search_workspace::SearchTaskView;
+
+    for (top, expected) in [
+        (0, 200),
+        (190, 400),
+        (199, 400),
+        (200, 400),
+        (399, 600),
+        (400, 600),
+        (599, 600),
+        (usize::MAX, 600),
+    ] {
+        let view = SearchTaskView {
+            list_top_row: top,
+            ..Default::default()
+        };
+        assert_eq!(super::task_result_window_limit(&view, 32), expected);
+    }
+}
+
+#[test]
+fn result_window_restores_saved_rows_and_cached_range() {
+    isolated("child_result_window_restore");
+}
+
+#[test]
+#[ignore = "isolated Slint task restore covers cold and cached continuous result windows"]
+fn child_result_window_restore() {
+    use super::TaskCache;
+    use audiolib_core::search_workspace::SearchTaskView;
+
+    fn wait_for_result_layout(ui: &AppWindow, ready: impl Fn(&AppWindow) -> bool + 'static) {
+        let measured = std::cell::RefCell::new(None::<(slint::ModelRc<crate::AudioRow>, usize)>);
+        wait_for(ui, move |ui| {
+            // The system-time testing loop runs timers without rendering. The
+            // element traversal performs the repeater instantiation that a real
+            // renderer frame would run after a model change. Do this once per
+            // model/count, so large-tree traversals cannot starve queued events.
+            let rows = ui.get_rows();
+            let count = rows.row_count();
+            let needs_layout =
+                measured
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|(previous, previous_count)| {
+                        previous != &rows || *previous_count != count
+                    });
+            if needs_layout {
+                let _ = i_slint_backend_testing::ElementHandle::find_by_element_id(
+                    ui,
+                    "AppWindow::result-list",
+                )
+                .next()
+                .map(|list| list.size());
+                measured.replace(Some((rows, count)));
+            }
+            ready(ui)
+        });
+    }
+
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let controller = &fixture.controller;
+    // This regression isolates task restoration and its SQL range. Deriving
+    // Waveforms for 596 newly scanned files would concurrently change the
+    // provider revision and correctly invalidate the manually restored cache.
+    ui.set_list_waveforms_enabled(false);
+    // All additional source audio belongs to this test's existing temporary tree.
+    let sounds = fixture.root.join("sounds");
+    let wav = std::fs::read(sounds.join("wind/wind.wav")).unwrap();
+    for index in 0..596 {
+        std::fs::write(sounds.join(format!("scroll {index:03}.wav")), &wav).unwrap();
+    }
+    ScanService::new(fixture.provider.clone())
+        .scan(
+            &sounds,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let records = fixture
+        .provider
+        .search(&SearchRequest {
+            limit: 600,
+            ..Default::default()
+        })
+        .unwrap()
+        .results;
+    assert_eq!(records.len(), 600);
+
+    let id = active_id(ui);
+    {
+        let mut state = controller.task_workspace.lock().unwrap();
+        state.caches.remove(&id);
+        let task = state
+            .workspace
+            .session
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .unwrap();
+        task.view = SearchTaskView {
+            list_top_row: 250,
+            ..Default::default()
+        };
+    }
+    let (task, cache, epoch) = controller.prepare_search_task_restore(ui, &id).unwrap();
+    assert!(cache.is_none());
+    assert_eq!(controller.request.lock().unwrap().limit, 400);
+    controller.finish_search_task_restore(
+        ui,
+        &id,
+        epoch,
+        Ok((task.clone(), None, None, false, Vec::new())),
+    );
+    let ready = controller.clone();
+    wait_for_result_layout(ui, move |ui| {
+        !ui.get_searching()
+            && !ui.get_task_restoring()
+            && ui.get_rows().row_count() == 400
+            && fully_published(&ready)
+    });
+    let expected = -250.0 * ui.get_task_result_row_height();
+    eprintln!(
+        "Cold window model ready: y={}, expected={expected}, height={}",
+        ui.get_task_result_scroll_y(),
+        ui.get_task_result_row_height()
+    );
+    wait_for_result_layout(ui, move |ui| {
+        !ui.get_task_restoring() && (ui.get_task_result_scroll_y() - expected).abs() < 2.0
+    });
+    assert!(
+        (ui.get_task_result_scroll_y() - expected).abs() < 2.0,
+        "A cold task must restore its saved row inside the second buffered page: y={}, expected={expected}",
+        ui.get_task_result_scroll_y(),
+    );
+
+    let mut edge_task = task.clone();
+    edge_task.view.list_top_row = 190;
+    controller.apply_search_task(ui, edge_task, None, None, false, Vec::new());
+    let ready = controller.clone();
+    wait_for_result_layout(ui, move |ui| {
+        !ui.get_searching()
+            && !ui.get_task_restoring()
+            && ui.get_rows().row_count() == 400
+            && fully_published(&ready)
+    });
+    assert_eq!(
+        controller.request.lock().unwrap().limit,
+        400,
+        "Saved row 190 needs the next page to fit the rest of its screen"
+    );
+    let expected = -190.0 * ui.get_task_result_row_height();
+    wait_for_result_layout(ui, move |ui| {
+        !ui.get_task_restoring() && (ui.get_task_result_scroll_y() - expected).abs() < 2.0
+    });
+    assert!(
+        (ui.get_task_result_scroll_y() - expected).abs() < 2.0,
+        "A saved row near a page boundary must not be clamped upward: y={}, expected={expected}",
+        ui.get_task_result_scroll_y(),
+    );
+
+    let mut cached_task = task;
+    cached_task.view.list_top_row = 20;
+    let cache = TaskCache {
+        provider: Arc::downgrade(&fixture.provider),
+        revision: fixture.provider.search_revision().unwrap().unwrap(),
+        tree: controller.tree.lock().unwrap().clone(),
+        records,
+        limit: 600,
+        summary: "1–600 of 600 sounds".into(),
+        page: "1–3/3".into(),
+        previous: false,
+        next: false,
+    };
+    controller.apply_search_task(
+        ui,
+        cached_task.clone(),
+        Some(cache.clone()),
+        None,
+        false,
+        Vec::new(),
+    );
+    wait_for_result_layout(ui, |ui| {
+        !ui.get_task_restoring() && ui.get_rows().row_count() == 600
+    });
+    assert_eq!(
+        controller.request.lock().unwrap().limit,
+        600,
+        "Restoring a full cache must retain its range even near the first page"
+    );
+    // A server snapshot can retain its original SQL span after deleted records
+    // are filtered out. Restoring or recapturing it must not shorten that span.
+    let mut filtered_cache = cache;
+    filtered_cache.records.truncate(180);
+    filtered_cache.next = true;
+    controller.apply_search_task(
+        ui,
+        cached_task,
+        Some(filtered_cache),
+        None,
+        false,
+        Vec::new(),
+    );
+    let ready = controller.clone();
+    wait_for_result_layout(ui, move |ui| {
+        let state = ready.task_workspace.lock().unwrap();
+        !ui.get_task_restoring()
+            && !ui.get_searching()
+            && ui.get_rows().row_count() == 180
+            && !state.loading
+            && !state.restoring
+            && !state.restore_failed
+            && state.page_complete
+            && state.page_revision.is_some()
+            && state.folders_revision == state.page_revision
+    });
+    assert_eq!(controller.request.lock().unwrap().limit, 600);
+    controller.capture_search_task(ui);
+    let state = controller.task_workspace.lock().unwrap();
+    let captured = state
+        .caches
+        .get(&id)
+        .expect("completed cache was recaptured");
+    assert_eq!(captured.records.len(), 180);
+    assert_eq!(
+        captured.limit, 600,
+        "Filtered rows must retain the SQL span for the next window request"
+    );
+    drop(state);
+    finish(&fixture);
+}
+
+#[test]
 fn unavailable_directory_scope_survives_repeated_task_switches() {
     isolated("child_unavailable_directory_scope");
 }

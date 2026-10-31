@@ -21,6 +21,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Spectral Peaks and Audition](Rust_Spectral_Audition.md) | Waveform colors, bounded analysis and playback transforms |
 | [Debug Mode and Bug Reports](Rust_Debug_Reports.md) | Session-only diagnostic recording, private-data boundaries, report preview and GitHub handoff |
 | [Rust Validation](Rust_Validation.md) | Actual checks, performance measurements and hardware limits |
+| [Testing Strategy](Testing_Strategy.md) | Scope selection, stage responsibilities and reuse of passing results |
 | 0.4.0 pre-push CR validation | Five reviewed fixes, frozen source hashes, default/ASIO checks and verified fixed local installation |
 | 0.4.0 merge validation | Merged source identity, default/ASIO checks, schema 4 server compatibility and fixed local installation |
 | CR final measurements | Final-source default/ASIO checks and 90 fresh GUI searches, including mixed legacy/epoch IDs and retained pre-fix failures |
@@ -69,7 +70,7 @@ The local original database and `config/audiolib_config.yaml` remain read-only i
 
 ## Supported verification
 
-Rust unit and integration tests live with the Cargo workspace packages. Select the smallest affected scope in [AGENTS.md](../AGENTS.md#development-checks-by-change-scope) and [Testing Strategy](Testing_Strategy.md): formatting, strict package Clippy and relevant tests for Rust behavior changes, plus direct-consumer compilation for public contracts. Ordinary GitHub-hosted CI checks formatting only; functional validation runs locally. ASIO checks apply to affected audio/device or feature wiring, and full workspace checks are an explicit release or broad-impact entry point.
+Rust unit and integration tests live with the Cargo workspace packages. Select the smallest affected scope in [AGENTS.md](../AGENTS.md#development-checks-by-change-scope) and [Testing Strategy](Testing_Strategy.md): formatting, strict package Clippy and relevant tests for Rust behavior changes, plus direct-consumer compilation for public contracts. Ordinary GitHub-hosted CI checks formatting only; functional validation runs locally. ASIO checks apply to affected audio/device or feature wiring, and full workspace checks apply only to broad or uncertain impact. Release checks also follow changed packages and shipped features.
 
 | Tool | Purpose |
 |------|---------|
@@ -81,10 +82,11 @@ Rust unit and integration tests live with the Cargo workspace packages. Select t
 | [Spectral UI validation](../tools/validate-spectral-ui.ps1) | Waveform and UI snapshots with isolated data |
 | [Portable validation](../tools/validate-portable.ps1) | Packaged executable identity, startup and license materials |
 | [Rust search benchmark](../crates/audiolib-db/src/bin/search-benchmark.rs) | Actual-service P50/P95/P99 measurements on 1M+ records |
-| [Local full checks](../tools/check-local.ps1) | Explicit local format, strict Clippy and workspace tests; optional ASIO matrix before release |
-| [Release CI](../tools/ci-release.ps1) | Tag/version identity, release build, packaging, privacy and checksum checks; runtime validation stays local |
+| [Local checks](../tools/check-local.ps1) | Format and selected package Clippy/tests once; -Package scopes checks, -Asio / -NoDefaultFeatures match the shipped configuration |
+| [Windows release compatibility entry](../tools/ci-release.ps1) | Manual tagged Windows build/package entry, replacing separate build/package calls; runtime report remains `not-run` |
+| [Published release verifier](../.github/workflows/release.yml) | Optional manual, read-only release identity, exact asset-set and SHA256 checks |
 
-These scripts are maintained regression tooling. Legacy import acceptance requires its explicit fixture; local portable validation's `-CleanCheckout` mode generates a synthetic WAV and starts from an isolated empty library. Cloud release reports record runtime validation as `not-run`.
+These scripts are maintained regression tooling. Legacy import acceptance requires its explicit fixture; local portable validation defaults to an isolated empty library and synthetic WAV. Legacy fixture import is explicit (`-LegacyImport`). Validate each actual payload once, then verify installed file hashes and one isolated startup. The hosted release verifier does not build packages or run application acceptance.
 
 ## Review and audit records
 
