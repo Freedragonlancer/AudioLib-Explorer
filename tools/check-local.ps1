@@ -4,15 +4,16 @@
 Run the full local Rust validation matrix when the change warrants it.
 .DESCRIPTION
 Runs format, default-feature strict Clippy and workspace tests, failing at the
-first error. Optional ASIO checks follow the default checks and verified SDK
-preparation. Logs stay in .rust-validation/local-checks/<run>/.
+first error. Optional ASIO checks cover the four feature-affected packages after
+verified SDK preparation; unrelated workspace tests are not repeated.
+Logs stay in .rust-validation/local-checks/<run>/.
 This does not build a release, install binaries or run subsystem validators.
 Windows checks require the MSVC toolchain. If the default host is GNU, save the
 current RUSTUP_TOOLCHAIN value, set $env:RUSTUP_TOOLCHAIN to
 '1.97.1-x86_64-pc-windows-msvc' in this shell before invoking the script, and
 restore the saved value afterward. Do not change the global Rustup toolchain.
 .PARAMETER Asio
-Also run strict Clippy and tests with desktop/CLI ASIO enabled.
+Also run strict Clippy and tests for audio, Windows, desktop and CLI with ASIO.
 .PARAMETER Target
 Override the repository Cargo target for Clippy/tests (for example,
 aarch64-apple-darwin or x86_64-unknown-linux-gnu). Format is target-independent.
@@ -79,9 +80,12 @@ try {
     Invoke-CargoCheck 'default-tests' (@('test', '--workspace', '--all-targets', '--locked') + $targetArguments)
     if ($Asio) {
         Invoke-LoggedCheck 'prepare-asio' { . (Join-Path $PSScriptRoot 'prepare-asio.ps1') }
+        # ASIO propagates desktop/CLI -> audio -> Windows. Keep both backend
+        # configurations covered without repeating core/db/remote/IPC/update/server.
+        $asioPackages = @('-p', 'audiolib-audio', '-p', 'audiolib-windows', '-p', 'audiolib-desktop', '-p', 'audiolib-cli')
         $asioArguments = @('--features', 'audiolib-desktop/asio,audiolib-cli/asio')
-        Invoke-CargoCheck 'asio-clippy' (@('clippy', '--workspace', '--all-targets', '--locked') + $targetArguments + $asioArguments + @('--', '-D', 'warnings'))
-        Invoke-CargoCheck 'asio-tests' (@('test', '--workspace', '--all-targets', '--locked') + $targetArguments + $asioArguments)
+        Invoke-CargoCheck 'asio-clippy' (@('clippy', '--all-targets', '--locked') + $asioPackages + $targetArguments + $asioArguments + @('--', '-D', 'warnings'))
+        Invoke-CargoCheck 'asio-tests' (@('test', '--all-targets', '--locked') + $asioPackages + $targetArguments + $asioArguments)
     }
     Write-Host "Local checks passed. Logs: $logs"
 } finally {

@@ -1,4 +1,6 @@
 # tools/build-release.ps1
+# Build only the portable client's two executables and their dependencies.
+# Servers use build-server-release.ps1; benchmarks are built on demand.
 [CmdletBinding()]
 param([switch]$WithoutAsio)
 $ErrorActionPreference = 'Stop'
@@ -47,9 +49,9 @@ Push-Location -LiteralPath $taskRoot
 try {
     if (!$WithoutAsio) {
         . (Join-Path $PSScriptRoot 'prepare-asio.ps1')
-        cargo build --workspace --release --locked --features 'audiolib-desktop/asio,audiolib-cli/asio'
+        cargo build -p audiolib-desktop -p audiolib-cli --bins --release --locked --features 'audiolib-desktop/asio,audiolib-cli/asio'
     } else {
-        cargo build --workspace --release --locked
+        cargo build -p audiolib-desktop -p audiolib-cli --bins --release --locked
     }
     if ($LASTEXITCODE -ne 0) { throw 'Rust release build failed.' }
 } finally {

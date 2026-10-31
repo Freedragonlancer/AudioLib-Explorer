@@ -3,14 +3,13 @@
 //! removes its saved registration; database files and source WAVs remain untouched.
 use super::{Controller, LibraryOperation, Selection, cn_or, local_selection, post};
 use crate::AppWindow;
-use audiolib_core::DataProvider;
+use crate::controller::library_progress::LibraryProgress;
 use audiolib_core::config::{ActiveSource, DEFAULT_LOCAL_LIBRARY_ID, LocalLibrary};
-use audiolib_db::SqliteProvider;
 use slint::ComponentHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 static NEXT_LOCAL_DATABASE: AtomicU64 = AtomicU64::new(1);
@@ -281,11 +280,17 @@ impl Controller {
         });
     }
 
-    /// Worker-side open, called only after the library operation drained old writes/scans.
-    /// Preferences are committed before the provider; failures retain the current source.
-    pub(in crate::controller) fn execute_local_source(
+    #[cfg(test)]
+    fn execute_local_source(&self, request: &LocalSourceRequest) -> Result<String, String> {
+        self.execute_local_source_with_progress(request, &mut LibraryProgress::new(self))
+    }
+
+    /// Worker-side open after pending writes/scans drain. Preferences are committed
+    /// before the provider; failures retain the current source.
+    pub(in crate::controller) fn execute_local_source_with_progress(
         &self,
         request: &LocalSourceRequest,
+        progress: &mut LibraryProgress,
     ) -> Result<String, String> {
         let chinese = self.chinese.load(Ordering::Acquire);
         let configuration = {
@@ -358,36 +363,13 @@ impl Controller {
                 "New library destination already exists.",
             ));
         }
-        let cancel = AtomicBool::new(false);
-        let provider = if create {
-            SqliteProvider::open_local_with_progress_cancellable(
-                &path,
-                &configuration.data_root(),
-                configuration.play_history_limit,
-                &cancel,
-                |_| {},
-            )
-        } else {
-            SqliteProvider::open_existing_local_with_progress_cancellable(
-                &path,
-                &configuration.data_root(),
-                configuration.play_history_limit,
-                &cancel,
-                |_| {},
-            )
-        }
-        .map_err(|error| error.local_display_text(chinese))?;
-        let integrity = provider
-            .check_library()
-            .map_err(|error| error.to_string())?;
-        if !integrity.is_ok() {
-            return Err(cn_or(
-                chinese,
-                "所选音效库未通过校验。",
-                "Selected library failed validation.",
-            ));
-        }
-        crate::startup::prepare_local_search(&provider);
+        let provider =
+            self.open_local_for_switch(&path, create, registration.is_some(), progress)?;
+        progress.stage(
+            "applying_local",
+            "正在应用音效库并保存设置…",
+            "Applying the library and saving settings…",
+        );
         // Open can be slow. Apply only this source operation to the latest settings,
         // including any preference or server profile updates saved in the meantime.
         {
@@ -503,11 +485,14 @@ mod tests {
     use super::super::super::source_transition_tests;
     use super::*;
     use audiolib_audio::{AudioEngine, PlaybackConfig};
+    use audiolib_core::DataProvider;
     use audiolib_core::{
         MetadataPatch,
         config::{AppConfig, ServerProfile},
     };
+    use audiolib_db::SqliteProvider;
     use slint::{ComponentHandle, Model};
+    use std::sync::atomic::AtomicBool;
 
     fn local_controller(root: &Path) -> (AppWindow, Arc<Controller>, AudioEngine) {
         let mut config = source_transition_tests::configuration(&root.join("preferences"));
@@ -522,6 +507,136 @@ mod tests {
         let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
         ui.set_library_visible(true);
         (ui, controller, engine)
+    }
+
+    #[test]
+    fn ordinary_switch_keeps_integrity_audits_explicit_and_rejects_invalid_identity() {
+        source_transition_tests::isolated_module(
+            "source_manager::local_sources::tests",
+            "child_switch_without_integrity_audit",
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated ordinary switch versus full admission validation"]
+    fn child_switch_without_integrity_audit() {
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = source_transition_tests::root();
+        let (ui, controller, _engine) = local_controller(&root);
+        // Worker progress reaches the busy overlay through the event loop. A late
+        // post after completion must not leave stale progress for the next picker.
+        ui.set_library_busy(true);
+        let mut progress = LibraryProgress::new(&controller);
+        progress.stage(
+            "draining_scans",
+            "正在等待扫描安全结束…",
+            "Waiting for scans to finish safely…",
+        );
+        let weak = ui.as_weak();
+        source_transition_tests::run_until(&ui, move || {
+            !weak
+                .upgrade()
+                .unwrap()
+                .get_library_operation_stage()
+                .is_empty()
+        });
+        ui.set_library_busy(false);
+        ui.set_library_operation_stage("".into());
+        progress.stage("late_progress", "已完成", "Completed");
+        drop(progress);
+        let delivered = Arc::new(AtomicBool::new(false));
+        let completed = delivered.clone();
+        post(ui.as_weak(), move |ui| {
+            assert!(ui.get_library_operation_stage().is_empty());
+            completed.store(true, Ordering::Release);
+        });
+        source_transition_tests::run_until(&ui, move || delivered.load(Ordering::Acquire));
+        let (other, audio) = source_transition_tests::indexed_sounds(&root.join("other"));
+        let path = other.database_path().to_owned();
+        // An extension's orphan is detectable only by an integrity audit. Ordinary
+        // activation must not copy/audit every data page, or alter extension data.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TABLE extension_links(audio_id INTEGER REFERENCES audio_files(id));
+             INSERT INTO extension_links VALUES(-1);",
+        )
+        .unwrap();
+        drop(conn);
+        assert!(!other.check_library().unwrap().is_ok());
+        let id = controller
+            .config
+            .lock()
+            .unwrap()
+            .register_local_library("Other", "", &path, false)
+            .unwrap();
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.set_selection(Selection::LocalLibrary(id));
+        controller.switch_to_selected();
+        let switched = controller.clone();
+        let expected = path.clone();
+        source_transition_tests::run_until(&ui, move || {
+            !switched.library_busy.load(Ordering::Acquire)
+                && !switched.source_changing.load(Ordering::Acquire)
+                && switched.provider().database_path() == expected
+        });
+        assert!(!controller.remote_read_only());
+        assert_eq!(
+            controller.provider().get_audio(audio.id).unwrap().file_path,
+            audio.file_path
+        );
+        assert_eq!(ui.get_library_operation_stage(), "");
+        assert!(!controller.provider().check_library().unwrap().is_ok());
+        // Adding this same file as a new source still performs the full audit.
+        assert!(
+            controller
+                .execute_local_source(&LocalSourceRequest::Register {
+                    name: "Audit required".into(),
+                    description: String::new(),
+                    path: path.clone(),
+                    existing: true,
+                    pregenerate: false,
+                })
+                .is_err()
+        );
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT audio_id FROM extension_links", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            -1
+        );
+        drop(conn);
+        // Even a previously registered path cannot substitute an unrelated SQLite
+        // file or a library from a future version. Failure preserves the provider.
+        for future in [false, true] {
+            let invalid = root.join(if future { "future.db" } else { "unrelated.db" });
+            if future {
+                drop(SqliteProvider::open(&invalid).unwrap());
+            }
+            let conn = rusqlite::Connection::open(&invalid).unwrap();
+            conn.execute_batch(if future {
+                "PRAGMA user_version=9999;"
+            } else {
+                "CREATE TABLE unrelated(value TEXT);"
+            })
+            .unwrap();
+            drop(conn);
+            let id = controller
+                .config
+                .lock()
+                .unwrap()
+                .register_local_library("Invalid", "", &invalid, false)
+                .unwrap();
+            assert!(
+                controller
+                    .execute_local_source(&LocalSourceRequest::Switch { id })
+                    .is_err()
+            );
+            assert_eq!(controller.provider().database_path(), path);
+        }
+        controller.shutdown();
+        ui.hide().unwrap();
     }
 
     #[test]
