@@ -36,7 +36,7 @@ The program version is read from the workspace `Cargo.toml` and is shared by the
 
 ## Download / Install
 
-Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). From 0.8.4, each Release ships six archives and their matching `.sha256` files (twelve assets). Version 0.8.3 retains three packages/six assets; releases through 0.8.2 retain two packages/four assets:
+Prebuilt packages are published on [GitHub Releases](https://github.com/Freedragonlancer/AudioLib-Explorer/releases). Version 0.8.4 ships six archives and their matching `.sha256` files (twelve assets); from 0.8.5 the Windows x64 server adds a seventh archive (fourteen assets). Version 0.8.3 retains three packages/six assets; releases through 0.8.2 retain two packages/four assets:
 
 | Package | Asset | Auto-update |
 |---|---|---|
@@ -128,6 +128,8 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
+The release script builds only the desktop/CLI binaries. For a tagged Windows package, the compatibility entry point `tools/ci-release.ps1 -Tag <tag>` can replace those two commands; it records runtime validation as `not-run`. Run the full portable acceptance once afterward, then follow the [fixed local installation workflow](AGENTS.md#mandatory-local-application-delivery-and-release-installation). Server packaging uses `tools/build-server-release.ps1` and its platform packager.
+
 Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. From the accepted main/tag checkout:
 
 ```powershell
@@ -153,7 +155,7 @@ cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
 cargo test -p audiolib-db --test search_fragments --locked
 ```
 
-Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Run full workspace checks locally with `./tools/check-local.ps1` for broad changes; add `-Asio` for the local release matrix before tagging. Run subsystem regressions and performance measurements when their behavior is affected. Ordinary GitHub CI checks formatting only. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [testing examples](doc/Testing_Strategy.md).
+Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Run full workspace checks locally with `./tools/check-local.ps1` for broad changes; `-Asio` adds only the windows/audio/desktop/CLI package checks for the local release matrix. Reuse passing results while relevant source, features, toolchain and environment remain unchanged. Run subsystem regressions and performance measurements when their behavior is affected. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [stage responsibilities](doc/Testing_Strategy.md#本地验证与云端最小检查).
 
 ## Usage
 
@@ -183,13 +185,13 @@ Program SemVer (workspace `Cargo.toml`, shared by client, CLI and server), HTTP 
 
 ## Releases and CI
 
-The current source development version is `0.8.3`, as declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
+The source development version is declared in the workspace `Cargo.toml`. Release availability and installed versions must be checked separately.
 
 The Windows desktop client and supported server builds check GitHub Releases in the background on each normal startup. Confirm an available update in the desktop prompt or server admin page to download, verify and deploy it after work drains. The initial macOS desktop client uses manual updates. Stable and beta installations keep separate update channels; libraries and preferences remain outside the update payload. See [automatic updates](doc/Rust_Auto_Update.md) for channels, package metadata and deployment details.
 
-From 0.8.4, each Release ships Windows x64 and macOS arm64 clients, macOS arm64 and Linux x64 servers, and Docker amd64/arm64 offline images, each with a `.sha256` (twelve assets). Version 0.8.3 retains six assets; older releases retain four. Linux arm64 native packages are used internally for Docker validation; Docker updates replace the image.
+Publish the exact version-dependent package/checksum set in the [release policy](doc/Rust_Versioning.md#规则). Linux arm64 native packages are used internally for Docker validation; Docker updates replace the image.
 
-GitHub Actions run one format-only Linux job on relevant `main`/`codex/**` pushes and pull requests; pure documentation and screenshot changes are skipped. Rust tests, Clippy, ASIO matrices, UI/server startup checks, regressions and performance measurements run locally. Release packages are built and validated locally, then published with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is a manually triggered (`workflow_dispatch`), read-only verify job: its shared verifier checks the exact version-dependent package/checksum set, rejecting missing, extra, duplicate or wrong-case assets. It never builds, creates or uploads anything. Tag pushes do not start any workflow.
+GitHub Actions run one format-only Linux job on relevant `main`, `beta` and `codex/**` pushes and all pull requests. Pure documentation/screenshot pushes are skipped; every PR reports the required `Linux (fmt)` check. Rust tests, Clippy, UI/server startup checks, regressions and performance measurements run locally. Build/package each release payload once from its final main/tag identity, validate it locally, then publish with `tools/release-create.sh <tag> <assets...>` (or `gh release upload`). `.github/workflows/release.yml` is an optional manually triggered (`workflow_dispatch`), read-only verifier of release identity, exact asset names and SHA256. It never builds, creates or uploads anything and does not repeat runtime acceptance. Tag pushes do not start any workflow.
 
 Portable payloads use `tools/portable-files.json` and fresh staging. Generated local reports, user screenshots and runtime state are excluded. Release builds remap compiler paths, and `tools/validate-package-privacy.ps1` checks the payload and public report schema before publication. These checks do not remove information from already published Git history or releases.
 

@@ -45,7 +45,8 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 | `tools/validate-access-denial.ps1` | 修改权限错误、路径/文件访问或拒绝写入处理时。真实 ACL 操作限于已验证的自有临时子树，并在 `finally` 恢复。 |
 | `tools/validate-desktop-close.ps1` | 修改关闭流程、写入排空或扫描取消时。 |
 | `tools/validate-spectral-ui.ps1`、`tools/validate-window-repaint.ps1` | 修改对应的 Spectral/Waveform UI 或重绘行为时。 |
-| `tools/test-package-boundary.ps1`、`tools/test-server-package.ps1` | 打包规则变化时在本地运行合成回归；云端仅保留实际产物白名单、隐私与身份检查。 |
+| `tools/test-development-pipeline.ps1` | 修改 `check-local.ps1` 或 `build-release.ps1` 时，用 fake Cargo 验证范围路由、feature 和失败传播，不编译应用。 |
+| `tools/test-package-boundary.ps1`、`tools/test-server-package.ps1` | 打包规则变化时在本地运行合成回归；实际包的白名单、隐私与身份检查由本地打包/验收负责。 |
 | 百万记录基准、真实库搜索、`tools/validate-gui-search-performance.ps1`、播放起音测量 | 修改性能相关路径、处理性能回归，或用户明确要求测量时。日常功能和文档改动不跑。 |
 
 备份恢复、schema 迁移、扫描锁/管理租约、丢失写入、路径验证和源 WAV 保留属于数据安全边界，必须保留与改动直接相关的回归。`scan_management` 覆盖扫描清理、错误明细和 WAV Metadata 变化；`library_management` 覆盖 WAL 备份恢复、回滚、FTS5 修复、原子编辑、重链接和仅数据库移除。桌面草稿排空与旧请求失效也应在相关状态变化时验证。所有测试数据库与音频样本使用自有临时目录，不能修改工作库、旧库或源 WAV。
@@ -54,15 +55,26 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 
 ### 本地验证与云端最小检查
 
-GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。在相关 `main` / `codex/**` 推送和 Pull Request 触发，纯文档和截图变化跳过。云端发布只构建、打包及核对版本/标签、实际包白名单、隐私、身份和校验和，不跑 Rust 测试、Clippy、ASIO 测试矩阵、GUI/CLI 功能冒烟或服务 health 测试。云端报告将运行时验证标为 `not-run`；它不是本地验收通过的证明。
+GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。相关 `main`、`beta`、`codex/**` 推送会触发，纯文档和截图推送跳过；所有 Pull Request 均须返回 required `Linux (fmt)` 结果。`.github/workflows/release.yml` 仅在手动触发时只读核对已发布 Release 的身份、精确资产集合与 SHA256，不构建、不打包、不上传，也不承担运行验收。
 
-本地全量入口为 `./tools/check-local.ps1`（格式、默认配置严格 Clippy、workspace 测试），加 `-Asio` 追加已验证 SDK 的 ASIO 配置。打发布标签前在本地运行 `./tools/check-local.ps1 -Asio`，并完成相关专项回归及实际发布包的 portable/服务启动验收；服务包使用 `tools/validate-server-package.ps1`。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
+本地全量入口为 `./tools/check-local.ps1`（格式、默认配置严格 Clippy、workspace 测试）；`-Asio` 仅为 `audiolib-windows`、`audiolib-audio`、`audiolib-desktop`、`audiolib-cli` 追加已验证 SDK 的 ASIO 严格 Clippy 和测试，不重复其他 package。打发布标签前完成这套检查，并按实际影响追加专项回归及实际发布包的 portable/服务启动验收；仍有效的结果可复用。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
+
+| 阶段 | 负责的检查与执行次数 |
+| --- | --- |
+| Rust 开发检查 | 对所选范围执行一次格式、严格 Clippy 和相关测试；广泛改动/发布使用上述全量入口。 |
+| 专项回归 | 按上表风险追加，保留相关数据安全覆盖；不同专项验证不同边界。 |
+| 构建与打包 | 每份 payload 构建、打包一次；打包器检查实际文件边界、隐私、许可证及归档结构。 |
+| 包运行验收 | 每份实际 payload 完整验收一次：Windows 客户端用 `validate-portable.ps1`，其他平台使用对应验收器。 |
+| 本地安装 | 对已验收 payload 核对安装文件哈希、CLI 版本并隔离启动一次；身份与启动通过后不重跑完整 portable。 |
+| 发布后远端核验 | 可选手动 workflow，仅核验 Release 身份、资产集合和摘要；不重复本地功能测试。 |
+
+Windows 客户端使用 `tools/build-release.ps1` 构建 desktop/CLI 两个包的 binaries，再运行 `tools/package-portable.ps1 -SkipBuild`。兼容手动入口 `tools/ci-release.ps1 -Tag <tag>` 将这两步和标签身份校验合在一起，并生成运行时为 `not-run` 的报告；二者选一，不串行再跑。它不代替完整 portable 验收。服务端使用专用 `tools/build-server-release.ps1`、打包器及 `tools/validate-server-package.ps1`；Windows 的服务包验收需要构造自有 fixture 时，显式执行 `cargo build -p audiolib-db --bin search-benchmark --release --locked`，不让普通发布构建顺带生成 benchmark。Mac 客户端构建证明保留原构建机路径前缀，便于在另一台 Mac 上核验隐私边界。
 
 原云端 macOS 数据库/服务端生命周期测试、Linux 服务端 Clippy/测试改由匹配平台的本地环境按影响运行。例如在 macOS ARM64 使用 `cargo test -p audiolib-db --lib --tests --locked --target aarch64-apple-darwin`；在 Linux 使用 `cargo test -p audiolib-server -p audiolib-db --all-targets --locked --target x86_64-unknown-linux-gnu`。使用原生 Rust 工具链覆盖仓库默认 Windows target；缺少相应主机或音频硬件时，明确记录未验证，不能以云端冒烟通过代替。
 
 应用变更交付仍需从最新源代码构建、打包并更新固定的 `local_release/`；构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
 
-同一代码、feature、工具链和环境下已通过的检查可复用结果；后续改动只重跑受影响检查。仅在出现失败、修改相关路径或结果失效时扩大范围。交付记录说明已运行项目、未覆盖范围及原因，不能把未运行的检查写成通过。
+相关应用/测试源码、feature、工具链和环境未变时可复用已通过的检查；标签或文档变化本身不触发 Cargo 重跑。修复后只重跑失败和受影响的检查，不重新启动其他已通过套件。正式产物仍须从最终 main/tag 提交构建并针对实际包验收，不能用旧 beta 二进制代替最终身份；这不要求重跑仍有效的源码功能矩阵。仅在修改相关路径或结果失效时扩大范围。交付记录说明已运行项目、未覆盖范围及原因，不能把未运行的检查写成通过。
 
 ## 历史设计参考
 

@@ -128,25 +128,33 @@ try {
     $reportPath = Join-Path $testRoot 'public-report.json'
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding UTF8
     & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath
-    foreach ($leak in @('unknown-field','escaped-path','wrong-binary')) {
+    & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath -ReportOnly
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReportOnly } catch { $rejected = $_.Exception.Message -match 'ReportOnly requires -ReleaseReport' }
+    if (!$rejected) { throw 'Report-only validation accepted a missing report.' }
+    foreach ($leak in @('unknown-field','escaped-path','wrong-binary','wrong-desktop-binary')) {
         $bad = $report | ConvertTo-Json -Depth 5 | ConvertFrom-Json
         switch ($leak) {
             'unknown-field' { $bad.portable | Add-Member -NotePropertyName screenshot -NotePropertyValue 'private.png' }
             'escaped-path' { $bad.checks = @($env:USERPROFILE) }
             'wrong-binary' { $bad.binaries.'AudioLibCli.exe' = ('0' * 64) }
+            'wrong-desktop-binary' { $bad.binaries.'AudioLibExplorer.exe' = ('0' * 64) }
         }
         $bad | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding UTF8
-        $rejected = $false
-        try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath } catch { $rejected = $true }
-        if (!$rejected) { throw "Public report leak was not rejected: $leak" }
+        foreach ($reportOnly in @($false, $true)) {
+            $rejected = $false
+            try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath -ReportOnly:$reportOnly } catch { $rejected = $true }
+            if (!$rejected) { throw "Public report leak was not rejected (ReportOnly=$reportOnly): $leak" }
+        }
     }
-    # Cloud releases keep the report schema but leave runtime validation unrun.
+    # Build-only reports keep the schema but leave runtime validation unrun.
     # These nulls must never be accepted as measured success, counts or flags.
     $notRun = $report | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     $notRun.portable.mode = 'not-run'
     foreach ($field in @('success','records','source_unchanged','python_runtime_required')) { $notRun.portable.$field = $null }
     $notRun | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding UTF8
     & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath
+    & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath -ReportOnly
     foreach ($invalid in @('success','records','source_unchanged','python_runtime_required','mode')) {
         $bad = $notRun | ConvertTo-Json -Depth 5 | ConvertFrom-Json
         switch ($invalid) {
@@ -157,9 +165,11 @@ try {
             'mode' { $bad.portable.mode = 'unknown' }
         }
         $bad | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding UTF8
-        $rejected = $false
-        try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath } catch { $rejected = $true }
-        if (!$rejected) { throw "Unrun portable report accepted invalid state: $invalid" }
+        foreach ($reportOnly in @($false, $true)) {
+            $rejected = $false
+            try { & (Join-Path $testRoot 'tools/validate-package-privacy.ps1') -BinaryDirectory $staleRoot -ReleaseReport $reportPath -ReportOnly:$reportOnly } catch { $rejected = $true }
+            if (!$rejected) { throw "Unrun portable report accepted invalid state (ReportOnly=$reportOnly): $invalid" }
+        }
     }
     $dist = [IO.Path]::GetFullPath((Join-Path $testRoot 'dist'))
     $redirected = [IO.Path]::GetFullPath((Join-Path $testRoot 'redirected-output'))

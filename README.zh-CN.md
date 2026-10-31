@@ -16,7 +16,7 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 
 ## 下载与安装
 
-从 0.8.4 起，每次 Release 发布六个归档及各自的 `.sha256`，共十二个资产；0.8.3 保留三个包、六个资产，0.8.2 及更早版本保留两个包、四个资产。
+0.8.4 每次 Release 发布六个归档及各自的 `.sha256`，共十二个资产；0.8.5 起增加 Windows x64 服务端，共七个归档、十四个资产。0.8.3 保留三个包、六个资产，0.8.2 及更早版本保留两个包、四个资产。
 
 | 程序包 | Release 文件名 | 更新方式 |
 | --- | --- | --- |
@@ -60,6 +60,8 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 ./tools/package-portable.ps1 -SkipBuild
 ```
 
+发布脚本只构建 desktop/CLI binaries。带标签的 Windows 包也可改用兼容手动入口 `tools/ci-release.ps1 -Tag <tag>`，替代上述两条命令；其报告中运行时为 `not-run`。随后完整 portable 验收一次，再按[固定本地安装流程](AGENTS.md#mandatory-local-application-delivery-and-release-installation)交付。服务端使用 `tools/build-server-release.ps1` 及对应平台打包器。
+
 Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.3 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
@@ -76,7 +78,7 @@ cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
 cargo test -p audiolib-db --test search_fragments --locked
 ```
 
-纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。影响广泛时在本地运行 `./tools/check-local.ps1`，打发布标签前加 `-Asio` 完成本地发布矩阵；专项回归和性能测量按实际行为变化触发。GitHub 常规 CI 只检查格式。详见[验证范围](AGENTS.md#development-checks-by-change-scope)和[测试示例](doc/Testing_Strategy.md)。
+纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。影响广泛时在本地运行 `./tools/check-local.ps1`，`-Asio` 仅追加 windows/audio/desktop/CLI 四包检查。相关源码、feature、工具链和环境未变时复用通过结果；专项回归和性能测量按实际行为变化触发。详见[验证范围](AGENTS.md#development-checks-by-change-scope)和[阶段职责](doc/Testing_Strategy.md#本地验证与云端最小检查)。
 
 ## 使用
 
@@ -108,9 +110,9 @@ audiolib-server --config /etc/audiolib/config.toml
 
 Windows 客户端与受支持的服务端在每次正常启动后于后台检查 GitHub Release。发现新版后，在客户端提示或服务端管理页面确认，即可下载、校验，并在现有工作排空后部署。初期 Mac 客户端采用手动更新。正式版和 beta 保留各自的更新渠道，资料库和偏好设置不属于更新包。渠道、打包元数据及部署方式详见[自动更新](doc/Rust_Auto_Update.md)。
 
-当前源码开发版本为 `0.8.3`，以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
+源码开发版本以工作区 `Cargo.toml` 为准。发布状态和实际安装版本需分别核对。
 
-GitHub Actions 在相关 `main` / `codex/**` 推送及 Pull Request 时只运行一个 Linux 格式检查作业，纯文档和截图变更跳过。Rust 测试、Clippy、ASIO 矩阵、UI/服务端启动、回归和性能测量按范围在本地执行。发布包在本机构建、验证并上传；`.github/workflows/release.yml` 只保留手动触发，推送标签不会启动它。共享资产验证脚本按版本核对精确包名与校验文件集合，拒绝缺失、额外、重复和大小写不符的资产；0.8.4 起十二项，0.8.3 六项，更早版本四项。云端只核验实际包的允许文件、隐私、二进制/归档身份和校验和，运行时验证明确报告为 `not-run`。发布归档附 SHA-256；构建与运行验收报告保持私有，不作为额外 Release 资产上传。
+GitHub Actions 在相关 `main`、`beta`、`codex/**` 推送及所有 Pull Request 时只运行一个 Linux 格式检查作业。纯文档和截图推送跳过；每个 PR 均返回 required `Linux (fmt)` 检查。Rust 测试、Clippy、UI/服务端启动、回归和性能测量按范围在本地执行。每份正式 payload 从最终 main/tag 身份构建、打包一次并本地验收，再上传发布。`.github/workflows/release.yml` 仅可选手动触发，只读核验 Release 身份、[版本对应的精确资产集合](doc/Rust_Versioning.md#规则)和 SHA256，不重复运行验收；推送标签不会启动它。实际包的白名单、隐私及二进制身份由本地打包/验收负责。构建与运行验收报告保持私有，不作为额外 Release 资产上传。
 
 ## 文档
 
