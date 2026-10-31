@@ -63,7 +63,7 @@ cargo build --release -p audiolib-desktop -p audiolib-cli --features audiolib-de
 
 发布脚本只构建 desktop/CLI binaries。带标签的 Windows 包也可改用兼容手动入口 `tools/ci-release.ps1 -Tag <tag>`，替代上述两条命令；其报告中运行时为 `not-run`。随后完整 portable 验收一次，再按[固定本地安装流程](AGENTS.md#mandatory-local-application-delivery-and-release-installation)交付。服务端使用 `tools/build-server-release.ps1` 及对应平台打包器。
 
-Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。按打包器返回的路径执行完整 `tools/validate-macos-client.ps1` 验收；仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。在已登录桌面的 Mac 上给打包命令加 `-ValidateRuntime`，一次完成结构与原生运行验收；仅延后运行验收、产物变化或换机复核时单独运行 `validate-macos-client.ps1`。仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
 
@@ -79,7 +79,7 @@ cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
 cargo test -p audiolib-db --test search_fragments --locked
 ```
 
-纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。影响广泛时在本地运行 `./tools/check-local.ps1`，`-Asio` 选择 Windows 发布特性，同一套检查只跑一遍；无 ASIO 条件分支仅在受改动影响时定向补测。相关源码、feature、工具链和环境未变时复用通过结果；专项回归和性能测量按实际行为变化触发。详见[验证范围](AGENTS.md#development-checks-by-change-scope)和[阶段职责](doc/Testing_Strategy.md#本地验证与云端最小检查)。
+纯文档只需检查差异、链接和 `git diff --check`；UI 文案和布局改动检查编译及受影响界面。用 `./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio` 检查受影响客户端包，或使用更窄的既有测试命令；仅影响广泛或不明确时省略 `-Package`。`-Asio` 选择 Windows 发布特性，同一套检查只跑一遍；无 ASIO 条件分支仅在受改动影响时定向补测。相关源码、feature、工具链和环境未变时复用通过结果；专项回归和性能测量按实际行为变化触发。详见[验证范围](AGENTS.md#development-checks-by-change-scope)和[阶段职责](doc/Testing_Strategy.md#本地验证与云端最小检查)。
 
 ## 使用
 

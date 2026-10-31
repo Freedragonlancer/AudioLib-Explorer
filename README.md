@@ -167,7 +167,7 @@ pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $
 pwsh ./tools/package-macos-client.ps1 -Tag v0.8.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof
 ```
 
-Run the full `tools/validate-macos-client.ps1` check using the bundle, archive and report paths returned by the packager, as described in the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
+Add `-ValidateRuntime` to the Mac packaging command in a logged-in desktop session to run structural and native acceptance together once. Run `validate-macos-client.ps1` separately only if runtime acceptance was deferred, artifacts changed or a different host must verify them; see the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.
 
 Platforms without a prebuilt standalone server package (Windows before 0.8.5, Linux arm64, other architectures) can build the server from source with Rust; it does not need audio playback support. Official Windows x64, macOS arm64 and Linux x64 server packages support updates through the admin page. Standalone Linux arm64 builds require manual updates; Docker deployments replace the image. Because the repository's `.cargo/config.toml` defaults to a Windows target, `--target` is required (`--target <your-target>`, or the host target as below). On Linux, install the build dependencies first with `sudo apt-get install -y build-essential pkg-config clang libclang-dev`; the binary is written to `target/<target>/release/audiolib-server`:
 
@@ -183,7 +183,7 @@ cargo clippy -p audiolib-db --all-targets --locked -- -D warnings
 cargo test -p audiolib-db --test search_fragments --locked
 ```
 
-Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Run full workspace checks locally with `./tools/check-local.ps1` for broad changes; `-Asio` selects the Windows release features for that single pass. Check non-ASIO conditional code separately only when the change affects it. Reuse passing results while relevant source, features, toolchain and environment remain unchanged. Run subsystem regressions and performance measurements when their behavior is affected. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [stage responsibilities](doc/Testing_Strategy.md#本地验证与云端最小检查).
+Documentation-only changes need a diff/link review and `git diff --check`. UI text/layout changes need compilation and a focused visual check. Use `./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio` for affected Windows client packages, or narrower existing test commands. Omit `-Package` only for broad/uncertain impact; `-Asio` selects the Windows release features for that single pass. Check non-ASIO conditional code separately only when the change affects it. Reuse passing results while relevant source, features, toolchain and environment remain unchanged. Run subsystem regressions and performance measurements when their behavior is affected. See [validation scope](AGENTS.md#development-checks-by-change-scope) and [stage responsibilities](doc/Testing_Strategy.md#本地验证与云端最小检查).
 
 ## Usage
 

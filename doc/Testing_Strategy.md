@@ -57,16 +57,23 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 
 GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。相关 `main`、`beta`、`codex/**` 推送会触发，纯文档和截图推送跳过；所有 Pull Request 均须返回 required `Linux (fmt)` 结果。`.github/workflows/release.yml` 仅在手动触发时只读核对已发布 Release 的身份、精确资产集合与 SHA256，不构建、不打包、不上传，也不承担运行验收。
 
-本地全量入口为 `./tools/check-local.ps1`：按所选构建配置执行一次格式、严格 Clippy 和 workspace 测试。Windows 发布使用 `-Asio`，在同一遍检查中启用 ASIO，并准备已验证 SDK；不先跑默认配置，也不追加第二遍 ASIO 检查。打发布标签前完成这套检查，并按实际影响追加专项回归及实际发布包的 portable/服务启动验收；仍有效的结果可复用。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
+开发与发布都按实际改动、直接消费者和发布配置选择验证范围，不因打标签自动扩大到全 workspace。`check-local.ps1 -Package <packages>` 将格式、所选包的严格 Clippy 和测试执行一次；仅影响广泛或无法可靠判断时省略 `-Package`。已有更窄的行为测试时继续直接运行 Cargo 定向测试，不必为使用统一入口扩大范围。
+
+```powershell
+# 受影响的 Windows 客户端包；不要再附加无 ASIO 整套检查。
+./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio
+# 受影响的 Linux 服务端；按无播放设备的发布配置测试，不启动客户端矩阵。
+./tools/check-local.ps1 -Package audiolib-server -NoDefaultFeatures -Target x86_64-unknown-linux-gnu
+```
 
 无 ASIO 条件分支仅在本次改动影响它时，按受影响 package/测试补测；明确交付无 ASIO 版本时才选择不带 `-Asio` 的完整入口。ASIO 实际设备验收只在驱动/后端行为变化时按相关硬件执行。普通业务改动不重复两种构建配置的同一套测试。
 
 | 阶段 | 负责的检查与执行次数 |
 | --- | --- |
-| Rust 开发检查 | 对所选范围执行一次格式、严格 Clippy 和相关测试；广泛改动/发布使用上述全量入口。 |
+| Rust 开发/发布检查 | 对所选范围和实际交付配置执行一次；全 workspace 仅用于广泛或不确定的影响。 |
 | 专项回归 | 按上表风险追加，保留相关数据安全覆盖；不同专项验证不同边界。 |
 | 构建与打包 | 每份 payload 构建、打包一次；打包器检查实际文件边界、隐私、许可证及归档结构。 |
-| 包运行验收 | 每份实际 payload 完整验收一次：Windows 客户端用 `validate-portable.ps1`，其他平台使用对应验收器。 |
+| 包运行验收 | 每份实际 payload 验收一次：Windows 用 `validate-portable.ps1`；Mac 打包加 `-ValidateRuntime` 合并结构和原生验收，成功后不再单独运行验收器。 |
 | 本地安装 | 对已验收 payload 核对安装文件哈希、CLI 版本并隔离启动一次；身份与启动通过后不重跑完整 portable。 |
 | 发布后远端核验 | 可选手动 workflow，仅核验 Release 身份、资产集合和摘要；不重复本地功能测试。 |
 
@@ -77,6 +84,10 @@ Windows 客户端使用 `tools/build-release.ps1` 构建 desktop/CLI 两个包�
 应用变更交付仍需从最新源代码构建、打包并更新固定的 `local_release/`；构建和打包保持同一 ASIO 选择。完整 portable 验证在包目录执行一次，安装后核对所有包内文件（含两份 EXE）的 SHA256、CLI 版本及一次隔离启动，避免对同一有效载荷重复整套检查。隔离启动须使用临时数据目录及显式设置，防止发现工作库或旧库；结束后恢复正常环境。保留正常数据目录、设置和工作库，不能以安装为由覆盖运行时数据。具体安装流程以仓库 [AGENTS.md](../AGENTS.md) 为准。
 
 无 ASIO 的本地交付须在 build、package 和 `validate-portable.ps1` 三步都传 `-WithoutAsio`。默认验收仍要求 ASIO 许可证，不根据文件缺失推断构建特性。打包与 portable 验收共用 `validate-portable-licenses.ps1`，在替换有效包或启动应用前拒绝缺失许可证；其回归包含在 `test-package-boundary.ps1` 中。
+
+`validate-portable.ps1` 默认使用隔离合成数据，`-CleanCheckout` 保留为兼容写法；仅旧库导入路径受影响时使用 `-LegacyImport`。不再因为本机恰有旧库，就在每次 UI 或发布流程验证中重复导入及哈希它。
+
+包级测试已包含的定向用例不在其前后再跑一遍；同一产物在打包目录、安装目录和下载目录之间只需验证新边界的身份，复用仍有效的运行结果。纯重打包若所有可执行文件、动态库、运行资源和启动配置的哈希都未变，可以复用运行验收并重新核对包边界/隐私/归档身份；只比 EXE 哈希不足以证明界面资源或启动配置未变。合成打包规则回归仅在对应脚本或规则变化时运行。跨平台测试保留平台特有路径，Linux 原生包与 Docker 容器分别检查本机依赖和容器运行边界；不把一端通过当作另一端通过，也不为它们重复整套 Cargo 业务测试。
 
 相关应用/测试源码、feature、工具链和环境未变时可复用已通过的检查；标签或文档变化本身不触发 Cargo 重跑。修复后只重跑失败和受影响的检查，不重新启动其他已通过套件。正式产物仍须从最终 main/tag 提交构建并针对实际包验收，不能用旧 beta 二进制代替最终身份；这不要求重跑仍有效的源码功能矩阵。仅在修改相关路径或结果失效时扩大范围。交付记录说明已运行项目、未覆盖范围及原因，不能把未运行的检查写成通过。
 

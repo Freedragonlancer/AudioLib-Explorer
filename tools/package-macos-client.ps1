@@ -5,6 +5,9 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')][string]$Tag,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedCommit,
     [Parameter(Mandatory)][string]$BuildReport,
+    # Release path: validate structure and native startup together, once.
+    # Omit only when runtime acceptance must happen later in a logged-in session.
+    [switch]$ValidateRuntime,
     [string]$SigningIdentity = '-',
     [string]$OutputDirectory = 'dist/latest'
 )
@@ -229,8 +232,8 @@ try {
     }
     $stagedReport = Join-Path $taskStage $taskReportName
     [IO.File]::WriteAllText($stagedReport, (($taskReport | ConvertTo-Json -Depth 8) + [char]10), [Text.UTF8Encoding]::new($false))
-    & (Join-Path $PSScriptRoot 'validate-macos-client.ps1') -Tag $Tag -ExpectedCommit $ExpectedCommit -BundlePath $taskBundle -ArchivePath $stagedArchive -PackageReport $stagedReport -BuildReport $BuildReport -StructureOnly
-    if (!$?) { throw 'Mac package structural validation failed.' }
+    & (Join-Path $PSScriptRoot 'validate-macos-client.ps1') -Tag $Tag -ExpectedCommit $ExpectedCommit -BundlePath $taskBundle -ArchivePath $stagedArchive -PackageReport $stagedReport -BuildReport $BuildReport -StructureOnly:(!$ValidateRuntime)
+    if (!$?) { throw 'Mac package validation failed.' }
     Assert-Source
     # Artifact names are immutable in this output directory. Retain the staged
     # bundle and proof even after success, so a native acceptance run can use it.
@@ -241,7 +244,9 @@ try {
         [IO.File]::Copy((Join-Path $taskStage $name), $destination, $false)
     }
     Write-Host "Mac client package ready: $(Join-Path $OutputDirectory $taskArchiveName)"
-    Write-Host "Bundle retained for native acceptance: $taskBundle"
+    Write-Host "Bundle retained: $taskBundle"
+    if ($ValidateRuntime) { Write-Host 'Full native acceptance passed; do not repeat it for these unchanged artifacts.' }
+    else { Write-Host 'Runtime acceptance not run; validate-macos-client.ps1 is still required before release.' }
 } finally {
     $env:COPYFILE_DISABLE = $taskCopyDisable
     if ($taskLock) { $taskLock.Dispose() }
