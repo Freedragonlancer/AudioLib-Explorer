@@ -82,7 +82,7 @@ Rust unit and integration tests live with the Cargo workspace packages. Select t
 | [Spectral UI validation](../tools/validate-spectral-ui.ps1) | Waveform and UI snapshots with isolated data |
 | [Portable validation](../tools/validate-portable.ps1) | Packaged executable identity, startup and license materials |
 | [Rust search benchmark](../crates/audiolib-db/src/bin/search-benchmark.rs) | Actual-service P50/P95/P99 measurements on 1M+ records |
-| [Local full checks](../tools/check-local.ps1) | Format and default workspace Clippy/tests; optional ASIO additions for windows/audio/desktop/CLI only |
+| [Local full checks](../tools/check-local.ps1) | Format, workspace Clippy/tests once with the selected features; -Asio selects the Windows release configuration |
 | [Windows release compatibility entry](../tools/ci-release.ps1) | Manual tagged Windows build/package entry, replacing separate build/package calls; runtime report remains `not-run` |
 | [Published release verifier](../.github/workflows/release.yml) | Optional manual, read-only release identity, exact asset-set and SHA256 checks |
 

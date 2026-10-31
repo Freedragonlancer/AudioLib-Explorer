@@ -57,9 +57,9 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 
 GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。相关 `main`、`beta`、`codex/**` 推送会触发，纯文档和截图推送跳过；所有 Pull Request 均须返回 required `Linux (fmt)` 结果。`.github/workflows/release.yml` 仅在手动触发时只读核对已发布 Release 的身份、精确资产集合与 SHA256，不构建、不打包、不上传，也不承担运行验收。
 
-本地全量入口为 `./tools/check-local.ps1`（格式、默认配置严格 Clippy、workspace 测试）；`-Asio` 仅为 `audiolib-windows`、`audiolib-audio`、`audiolib-desktop`、`audiolib-cli` 追加已验证 SDK 的 ASIO 严格 Clippy 和测试，不重复其他 package。打发布标签前完成这套检查，并按实际影响追加专项回归及实际发布包的 portable/服务启动验收；仍有效的结果可复用。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
+本地全量入口为 `./tools/check-local.ps1`：按所选构建配置执行一次格式、严格 Clippy 和 workspace 测试。Windows 发布使用 `-Asio`，在同一遍检查中启用 ASIO，并准备已验证 SDK；不先跑默认配置，也不追加第二遍 ASIO 检查。打发布标签前完成这套检查，并按实际影响追加专项回归及实际发布包的 portable/服务启动验收；仍有效的结果可复用。日常按上表选择范围，不能把该入口变成每次小改动的固定前置。音频/设备后端、ASIO feature 或 SDK/依赖改动时，先 dot-source `tools/prepare-asio.ps1` 验证固定 SDK，再启用所选 package 的 ASIO feature。
 
-默认 workspace 检查已通过且仍有效时，使用 `./tools/check-local.ps1 -AsioOnly` 单独补跑格式及四包 ASIO 检查（自动准备已验证 SDK）。例如仅 SDK 准备失败后重试，无需再跑默认整套。此模式明确报告默认检查未运行；发布验收仍需两种配置的有效结果。若修复影响默认配置，也必须重跑其受影响检查。
+无 ASIO 条件分支仅在本次改动影响它时，按受影响 package/测试补测；明确交付无 ASIO 版本时才选择不带 `-Asio` 的完整入口。ASIO 实际设备验收只在驱动/后端行为变化时按相关硬件执行。普通业务改动不重复两种构建配置的同一套测试。
 
 | 阶段 | 负责的检查与执行次数 |
 | --- | --- |
