@@ -1,10 +1,10 @@
 # AudioLib Explorer 版本规范
 
-程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.5 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
+程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.6 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |
 |---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.5 | 客户端、CLI、服务端共用，发布时一起升 |
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.6 | 客户端、CLI、服务端共用，发布时一起升 |
 | API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
 | schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 8 | SQLite 资料库结构（`user_version`） |
 
@@ -29,17 +29,17 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
 
 ## 发布流程
 
-不得覆盖既有标签或把新构建当作旧 Release 的原产物。当前准备 0.8.5 候选，以已发布的 `v0.8.4` 为发布基线；API、schema 和完整存储格式未变，因此本次使用 PATCH 版本。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。既有 `v0.8.4` 及更早标签和资产保持原发布身份。发布状态以本地验收、beta 门禁与 Mac 产物检查的实测结果为准。
+不得覆盖既有标签或把新构建当作旧 Release 的原产物。当前准备 0.8.6 候选，以已发布的 `v0.8.5` 为发布基线；API、schema 和完整存储格式未变，因此本次使用 PATCH 版本。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。既有 `v0.8.5` 及更早标签和资产保持原发布身份。发布状态以本地验收、beta 门禁与 Mac 产物检查的实测结果为准。
 
 历史基线说明：`v0.8.0` 的 Release 已撤回，但标签保留。0.8.1 当时按用户确认使用最后实际公开的 `v0.7.8` 为发布基线：程序 MINOR 从 7 升至 8，可写 schema 6 库升级为 8；撤回的 0.8.0 开发库（schema 7）也通过受保护迁移升级为 8。回退旧程序须配套恢复相应旧 schema 备份。这个例外不重写既有标签，也不改变后续版本的版本升级规则。
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
 3. 本地预检（不创建标签，标签用参数传入）：
-   `pwsh tools/check-release.ps1 -Tag v0.8.5 -BaseTag v0.8.4`
+   `pwsh tools/check-release.ps1 -Tag v0.8.6 -BaseTag v0.8.5`
    仅标签去除 beta/rc 后缀后为 `v0.8.1`且未给出 `-BaseTag` 时，脚本默认 `v0.7.8`；显式 `-BaseTag` 始终优先。其他版本仍默认取除自身外最新的 `vX.Y.Z` 标签。显式以撤回标签 `v0.8.0` 作基线仍会按 schema 7→8 检查并拒绝仅 PATCH 的比较；这不是移动或替换该标签。
 4. 正式发布前按实际改动选择 package、直接消费者及专项回归，使用实际发布的 target/features 检查一次。`check-local.ps1 -Package <packages>` 支持按包执行；只有影响广泛或无法判断时才使用全 workspace。客户端、无播放服务端及各平台不因同属一次 Release 而互相重复功能测试；无 ASIO 条件分支仅在受影响时定向补测；相关应用/测试源码、feature、工具链与环境未变时复用已通过结果，标签或文档变化本身不触发 Cargo 重跑。日常按 [Testing Strategy](Testing_Strategy.md) 选择最小范围；修复后只重跑失败和受影响检查，不删减数据安全回归。缺少平台或硬件覆盖时明确记录。
-5. 合并后在发布提交上打标签 `v0.8.5`（或对应的预发布标签）并推送。
+5. 合并后在发布提交上打标签 `v0.8.6`（或对应的预发布标签）并推送。
 6. 每份正式 payload 只在对应本机平台从最终 main/tag 提交构建、打包并完整验收一次；beta 预编译产物不能替代最终提交身份。Windows 客户端用 `tools/build-release.ps1` 仅构建 desktop/CLI binaries，再用 `tools/package-portable.ps1 -SkipBuild -Tag <tag>` 打包。也可用兼容手动入口 `tools/ci-release.ps1 -Tag <tag>` 替代这两步，不串行重复；该入口的运行时报告为 `not-run`，随后仍须运行一次 `pwsh tools/validate-portable.ps1 -BinaryDirectory dist/latest/portable`（默认隔离合成数据；仅旧库导入路径变化时显式用 `-LegacyImport`）。Windows 的 ASIO 构建、打包与许可证检查使用同一 feature 选择。Mac 客户端使用 `tools/build-macos-client.ps1 -ExpectedCommit <full-commit> -ReportPath <private-build-proof.json>`，再在已登录桌面的 Mac 上运行 `tools/package-macos-client.ps1 -Tag <tag> -ExpectedCommit <full-commit> -BuildReport <private-build-proof.json> -ValidateRuntime`，结构与原生验收一次完成。仅延后运行验收、产物变化或换机复核时单独运行 `validate-macos-client.ps1`；完整原生验收仍须通过，`-StructureOnly` 的 `not-run` 结果不能替代它。首次 Mac 客户端分发计划使用 ad-hoc 签名、未经 Apple 公证；签名与启动以实际 Mac 报告为准。独立 server 使用 `build-server-release.ps1`、`package-server.ps1` 和 `validate-server-package.ps1`；Windows 服务包验收需用 benchmark 创建自有 fixture 时，显式构建 `cargo build -p audiolib-db --bin search-benchmark --release --locked`，普通客户端/服务端构建不顺带生成它。各 Unix 包在匹配架构环境中构建，Unix 不传 `-Asio`；Linux arm64 包仅作为 Docker 输入。Docker 镜像从已验收的公开 Linux 包生成，分别构建单平台镜像并保存离线归档，禁止把工作目录或运行数据作为正式镜像上下文。详见 [Linux 与 Docker 交付](Rust_Linux_Docker_Release.md)。实际包的文件白名单、隐私、身份、许可证和启动/health 均在本地验证。
 7. 按上述版本规则上传精确资产集合：用 `tools/release-create.sh <tag> <资产…>` 创建 Release 并上传，或对已创建的 Release 用 `gh release upload <tag> <资产…>`。之后可选地在 GitHub Actions 中手动触发 `.github/workflows/release.yml`（仅 `workflow_dispatch`，输入 `tag`）做只读核验。共享 `tools/verify-release-assets.ps1` 校验标签、标题、prerelease 标志、精确资产集合和 SHA256；0.8.5 起十四项、0.8.4 十二项、0.8.3 六项、更早标签四项，缺失、额外、重复或大小写不符均失败。该 workflow 不构建、不解包验收、不创建/编辑 Release、不上传资产（`contents: read`）；推送标签不会触发它，因此打标签前无需先禁用 release.yml。按 AGENTS.md 更新固定 `local_release/`，核对包内文件哈希、CLI 版本和一次隔离启动；同一已验收 payload 不再重复整套 portable。下载的已发布产物须先验证归档摘要，再使用 `-PublishedReleaseReport <report> -ExpectedTag <tag> -ExpectedCommit <full-commit> -CleanCheckout` 模式验收；`ExpectedTag` 和 `ExpectedCommit` 不能脱离发布报告单独使用。发布后按 AGENTS.md 的 Published release synchronization 核对本地安装与正式资产身份，并保留原数据目录、资料库和偏好设置。
 

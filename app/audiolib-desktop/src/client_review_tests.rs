@@ -89,7 +89,19 @@ fn child_playback_feedback() {
             );
             let ui = weak.upgrade().unwrap();
             match observed.get() {
-                0 if !ui.get_searching() => {
+                // Row paging becomes idle before the initial directory model.
+                // Settle both publications before testing persistent audio errors.
+                0 if !ui.get_searching()
+                    && !ui.get_search_workspace_loading()
+                    && !ui.get_task_restoring()
+                    && c.search_publication
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|state| {
+                            state.page == SearchPagePhase::Published && state.model_published
+                        }) =>
+                {
                     c.command(AudioCommand::Seek(f64::NAN));
                     observed.set(1);
                 }

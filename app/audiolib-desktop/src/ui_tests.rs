@@ -2333,6 +2333,87 @@ fn database_batch_and_confirmation_actions_are_reachable_in_both_languages() {
 }
 
 #[test]
+fn waveform_overview_is_tab_reachable_and_keyboard_pan_preserves_playback() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+        ui.set_chinese(chinese);
+        ui.set_audio_ready(true);
+        ui.set_play_duration(100.0);
+        ui.set_view_end(100.0);
+        ui.set_wave_zoom(4.0);
+        ui.set_wave_scroll(0.5);
+        let pans = Rc::new(RefCell::new(Vec::new()));
+        let observed = pans.clone();
+        ui.on_waveform_pan_requested(move |scroll| observed.borrow_mut().push(scroll));
+        let seeks = Rc::new(RefCell::new(Vec::new()));
+        let observed = seeks.clone();
+        ui.on_seek_requested(move |seconds| observed.borrow_mut().push(seconds));
+        ui.show().unwrap();
+        // Start from the preceding slider's real pointer focus, then Tab through
+        // the transport. Arrow presses on the Waveform itself seek, not pan.
+        click_label(&ui, if chinese { "音量" } else { "Volume" });
+        for _ in 0..10 {
+            send_keys(&ui, &[Key::Tab.into()]);
+            send_keys(&ui, &[Key::RightArrow.into()]);
+            if !pans.borrow().is_empty() {
+                break;
+            }
+        }
+        assert!(
+            !pans.borrow().is_empty(),
+            "Tab must reach the zoomed Waveform overview"
+        );
+        assert!((ui.get_wave_scroll() - 0.55).abs() < 0.001);
+        let seek_count = seeks.borrow().len();
+        for (key, expected) in [
+            (Key::LeftArrow, 0.5),
+            (Key::DownArrow, 0.45),
+            (Key::UpArrow, 0.5),
+            (Key::PageUp, 0.75),
+            (Key::PageDown, 0.5),
+            (Key::End, 1.0),
+            (Key::Home, 0.0),
+            (Key::RightArrow, 0.05),
+        ] {
+            send_keys(&ui, &[key.into()]);
+            assert!((ui.get_wave_scroll() - expected).abs() < 0.001);
+            assert!((pans.borrow().last().copied().unwrap() - expected).abs() < 0.001);
+        }
+        assert_eq!(seeks.borrow().len(), seek_count, "overview keys only pan");
+        // Tab leaves the slider; reverse Tab returns to its keyboard owner.
+        let pan_count = pans.borrow().len();
+        send_keys(&ui, &[Key::Tab.into()]);
+        send_keys(&ui, &[Key::RightArrow.into()]);
+        assert_eq!(pans.borrow().len(), pan_count);
+        send_keys(&ui, &[Key::Shift.into(), Key::Tab.into()]);
+        send_keys(&ui, &[Key::RightArrow.into()]);
+        assert!((ui.get_wave_scroll() - 0.1).abs() < 0.001);
+        let overview = ElementHandle::find_by_accessible_label(
+            &ui,
+            if chinese {
+                "波形可视范围"
+            } else {
+                "Visible waveform range"
+            },
+        )
+        .next()
+        .unwrap();
+        assert_eq!(overview.accessible_role(), Some(AccessibleRole::Slider));
+        // A full-range view cannot pan, including through accessibility actions.
+        ui.set_wave_zoom(1.0);
+        let pan_count = pans.borrow().len();
+        send_keys(&ui, &[Key::RightArrow.into()]);
+        overview.invoke_accessible_increment_action();
+        assert_eq!(pans.borrow().len(), pan_count);
+        assert_eq!(overview.accessible_enabled(), Some(false));
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn player_bar_states_offer_recovery_and_mute_restores_the_level() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();

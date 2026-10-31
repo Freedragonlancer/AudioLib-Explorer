@@ -198,15 +198,23 @@ fn legacy_peer_preflight(listener: &std::net::TcpListener) {
 pub(super) fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
     let started = Instant::now();
     let timer = slint::Timer::default();
+    let completed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let finished = completed.clone();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(10),
         move || {
+            // The testing backend can tick again before consuming Quit. A second
+            // Quit would prematurely end the next transition's event loop.
+            if finished.get() {
+                return;
+            }
             assert!(
                 started.elapsed() < Duration::from_secs(12),
                 "GUI transition timed out"
             );
             if ready() {
+                finished.set(true);
                 slint::quit_event_loop().unwrap();
             }
         },
@@ -214,6 +222,7 @@ pub(super) fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
     ui.show().unwrap();
     slint::run_event_loop().unwrap();
     timer.stop();
+    assert!(completed.get(), "GUI transition did not complete");
 }
 
 fn selected(controller: &Controller, ui: &AppWindow, notes: &str) {
