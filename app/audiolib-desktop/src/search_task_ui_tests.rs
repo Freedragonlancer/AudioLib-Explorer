@@ -416,7 +416,14 @@ fn task_viewport_restore_survives_model_and_selection_replacement() {
     ui.invoke_restore_search_task_viewport(-220.0, -80.0, -180.0, 0.0, 0.0);
     assert_eq!(ui.get_task_result_scroll_y(), -220.0);
     assert!(ui.get_task_restoring());
-    settle();
+    // Restoration waits for the arriving virtual rows to be laid out on a frame.
+    // Keep a bounded deadline while allowing that asynchronous measurement turn.
+    for _ in 0..10 {
+        settle();
+        if !ui.get_task_restoring() {
+            break;
+        }
+    }
     assert!(!ui.get_task_restoring());
     assert!((ui.get_task_result_scroll_y() + 220.0).abs() < 1.0);
     assert!((ui.get_task_folder_scroll_y() + 180.0).abs() < 1.0);

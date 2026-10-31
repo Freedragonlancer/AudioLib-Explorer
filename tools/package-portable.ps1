@@ -96,6 +96,7 @@ try {
 if (!$WithoutAsio) {
     Copy-Item -LiteralPath (Join-Path $taskRoot 'tools/.build-tools/asio-2.3.4/ASIOSDK/LICENSE.txt') -Destination (Join-Path $licenseRoot 'Steinberg-ASIO-SDK-2.3.4.txt') -Force
 }
+& (Join-Path $PSScriptRoot 'validate-portable-licenses.ps1') -BinaryDirectory $portableRoot -WithoutAsio:$WithoutAsio
 # Inspect actual staged names against the policy embedded in old clients before
 # replacing the last verified package, even if today's manifest accepts them.
 $compatibilityEntries = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File | ForEach-Object {

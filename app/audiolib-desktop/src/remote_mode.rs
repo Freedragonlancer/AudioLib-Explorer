@@ -2381,9 +2381,20 @@ impl Controller {
         self.run_library_operation(LibraryOperation::DataSource(target));
     }
 
-    /// Worker-side provider swap; runs inside `run_library_operation` after the
-    /// Metadata FIFO and scans have drained and readers were invalidated.
-    pub(super) fn switch_data_source(&self, target: &DataSourceSwitch) -> Result<String, String> {
+    #[cfg(test)]
+    fn switch_data_source(&self, target: &DataSourceSwitch) -> Result<String, String> {
+        self.switch_data_source_with_progress(
+            target,
+            &mut super::library_progress::LibraryProgress::new(self),
+        )
+    }
+
+    /// Worker-side provider swap after Metadata and scans drain and readers expire.
+    pub(super) fn switch_data_source_with_progress(
+        &self,
+        target: &DataSourceSwitch,
+        progress: &mut super::library_progress::LibraryProgress,
+    ) -> Result<String, String> {
         let chinese = self.chinese.load(Ordering::Acquire);
         // Playback streams belong to the snapshot being replaced.
         self.stop_remote_stream();
@@ -2398,25 +2409,12 @@ impl Controller {
                         path.display()
                     ));
                 }
-                let next = if path.exists() {
-                    SqliteProvider::open_existing_local_with_progress_cancellable(
-                        &path,
-                        &config.data_root(),
-                        config.play_history_limit,
-                        &AtomicBool::new(false),
-                        |_| {},
-                    )
-                } else {
-                    SqliteProvider::open_local_with_progress_cancellable(
-                        &path,
-                        &config.data_root(),
-                        config.play_history_limit,
-                        &AtomicBool::new(false),
-                        |_| {},
-                    )
-                }
-                .map_err(|error| error.local_display_text(chinese))?;
-                crate::startup::prepare_local_search(&next);
+                let next = self.open_local_for_switch(&path, !path.exists(), false, progress)?;
+                progress.stage(
+                    "applying_local",
+                    "正在应用本地音效库…",
+                    "Applying the local library…",
+                );
                 *self.sqlite.write().unwrap() = Arc::new(next);
                 self.remote_mode.store(false, Ordering::Release);
                 let mut remote = self.remote.lock().unwrap();

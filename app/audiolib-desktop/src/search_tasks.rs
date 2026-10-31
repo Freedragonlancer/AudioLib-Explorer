@@ -25,6 +25,8 @@ struct TaskCache {
     revision: u64,
     tree: TreeState,
     records: Vec<AudioFile>,
+    /// Original SQL span; server-side removals can hide rows from this cache.
+    limit: usize,
     summary: String,
     page: String,
     previous: bool,
@@ -755,6 +757,7 @@ impl Controller {
                     revision,
                     tree,
                     records,
+                    limit: request.limit,
                     summary: ui.get_result_summary().to_string(),
                     page: ui.get_page_label().to_string(),
                     previous: ui.get_can_previous(),
@@ -1237,7 +1240,13 @@ impl Controller {
         *self.search_publication.lock().unwrap() = None;
         // Install one safe runtime for B before any fallible I/O. If validation
         // fails, none of A's request, directory IDs or checked rows can leak into B.
-        *self.request.lock().unwrap() = task.definition.to_request(PAGE_SIZE, task.view.offset);
+        *self.request.lock().unwrap() = task.definition.to_request(
+            cache.as_ref().map_or_else(
+                || task_result_window_limit(&task.view, task_viewport_rows(ui)),
+                |cache| cache.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3),
+            ),
+            task.view.offset,
+        );
         let stats = self.tree.lock().unwrap().stats.clone();
         *self.tree.lock().unwrap() = TreeState {
             stats,
@@ -1359,7 +1368,13 @@ impl Controller {
     ) {
         let album_missing = album_filter_unavailable(&task.definition);
         apply_task_controls(ui, &task);
-        *self.request.lock().unwrap() = task.definition.to_request(PAGE_SIZE, task.view.offset);
+        *self.request.lock().unwrap() = task.definition.to_request(
+            cache.as_ref().map_or_else(
+                || task_result_window_limit(&task.view, task_viewport_rows(ui)),
+                |cache| cache.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3),
+            ),
+            task.view.offset,
+        );
         let stats = self.tree.lock().unwrap().stats.clone();
         *self.tree.lock().unwrap() = cache.as_ref().map_or_else(
             || TreeState {
@@ -1683,6 +1698,27 @@ impl Controller {
         }
         self.persist_search_task(ui);
     }
+}
+
+/// The whole window height is a conservative upper bound for the result viewport,
+/// including while a task's cleared model has not completed its new layout.
+fn task_viewport_rows(ui: &AppWindow) -> usize {
+    let height = ui
+        .window()
+        .size()
+        .to_logical(ui.window().scale_factor())
+        .height;
+    (height / ui.get_task_result_row_height().max(1.0)).ceil() as usize
+}
+
+/// Include the saved top row's full screen when no result cache survives.
+/// Persisted positions cannot expand the result window beyond 600 rows.
+fn task_result_window_limit(view: &SearchTaskView, visible_rows: usize) -> usize {
+    view.list_top_row
+        .saturating_add(visible_rows.max(1))
+        .div_ceil(PAGE_SIZE)
+        .clamp(1, 3)
+        * PAGE_SIZE
 }
 
 fn task_inputs_valid(task: &SearchTask) -> bool {

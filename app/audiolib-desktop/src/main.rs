@@ -364,6 +364,18 @@ fn run() -> Result<()> {
             .unwrap_or_default();
         {
             match smoke_view.as_str() {
+                "library-progress" => {
+                    ui.invoke_open_library(0);
+                    ui.set_library_busy(true);
+                    ui.set_library_operation_stage(
+                        if ui.get_chinese() {
+                            "正在等待扫描安全结束…"
+                        } else {
+                            "Waiting for scans to finish safely…"
+                        }
+                        .into(),
+                    );
+                }
                 "output" => {
                     ui.set_settings_visible(true);
                     ui.invoke_devices_requested(ui.get_backend_index());
