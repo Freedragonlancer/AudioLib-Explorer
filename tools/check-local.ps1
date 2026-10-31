@@ -14,6 +14,9 @@ current RUSTUP_TOOLCHAIN value, set $env:RUSTUP_TOOLCHAIN to
 restore the saved value afterward. Do not change the global Rustup toolchain.
 .PARAMETER Asio
 Also run strict Clippy and tests for audio, Windows, desktop and CLI with ASIO.
+.PARAMETER AsioOnly
+Run format and only the ASIO package checks. Reuse still-valid default results;
+this mode alone does not complete the full release validation matrix.
 .PARAMETER Target
 Override the repository Cargo target for Clippy/tests (for example,
 aarch64-apple-darwin or x86_64-unknown-linux-gnu). Format is target-independent.
@@ -23,17 +26,24 @@ ASIO requires a Windows MSVC target; omitting Target retains repository defaults
 .EXAMPLE
 ./tools/check-local.ps1 -Asio
 .EXAMPLE
+./tools/check-local.ps1 -AsioOnly
+.EXAMPLE
 ./tools/check-local.ps1 -Target aarch64-apple-darwin
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Default')]
 param(
+    [Parameter(ParameterSetName = 'Default')]
     [switch]$Asio,
+    [Parameter(Mandatory, ParameterSetName = 'AsioOnly')]
+    [switch]$AsioOnly,
     [ValidateNotNullOrEmpty()][string]$Target
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-if ($Asio -and $Target -and $Target -notmatch '-windows-msvc$') {
-    throw '-Asio requires a Windows MSVC target; choose a matching -Target or omit -Asio.'
+$withAsio = $Asio -or $AsioOnly
+$effectiveTarget = if ($Target) { $Target } elseif ($env:CARGO_BUILD_TARGET) { $env:CARGO_BUILD_TARGET } else { 'x86_64-pc-windows-msvc' }
+if ($withAsio -and $effectiveTarget -notmatch '-windows-msvc$') {
+    throw 'ASIO checks require a Windows MSVC target; choose a matching -Target.'
 }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $runId = [guid]::NewGuid().ToString('N')
@@ -76,9 +86,11 @@ Push-Location -LiteralPath $taskRoot
 try {
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     Invoke-CargoCheck 'format' @('fmt', '--all', '--', '--check')
-    Invoke-CargoCheck 'default-clippy' (@('clippy', '--workspace', '--all-targets', '--locked') + $targetArguments + @('--', '-D', 'warnings'))
-    Invoke-CargoCheck 'default-tests' (@('test', '--workspace', '--all-targets', '--locked') + $targetArguments)
-    if ($Asio) {
+    if (!$AsioOnly) {
+        Invoke-CargoCheck 'default-clippy' (@('clippy', '--workspace', '--all-targets', '--locked') + $targetArguments + @('--', '-D', 'warnings'))
+        Invoke-CargoCheck 'default-tests' (@('test', '--workspace', '--all-targets', '--locked') + $targetArguments)
+    }
+    if ($withAsio) {
         Invoke-LoggedCheck 'prepare-asio' { . (Join-Path $PSScriptRoot 'prepare-asio.ps1') }
         # ASIO propagates desktop/CLI -> audio -> Windows. Keep both backend
         # configurations covered without repeating core/db/remote/IPC/update/server.
@@ -87,7 +99,8 @@ try {
         Invoke-CargoCheck 'asio-clippy' (@('clippy', '--all-targets', '--locked') + $asioPackages + $targetArguments + $asioArguments + @('--', '-D', 'warnings'))
         Invoke-CargoCheck 'asio-tests' (@('test', '--all-targets', '--locked') + $asioPackages + $targetArguments + $asioArguments)
     }
-    Write-Host "Local checks passed. Logs: $logs"
+    $scope = if ($AsioOnly) { 'ASIO packages only; default workspace checks not run' } elseif ($Asio) { 'default workspace and ASIO packages' } else { 'default workspace' }
+    Write-Host "Local checks passed ($scope). Logs: $logs"
 } finally {
     [Environment]::SetEnvironmentVariable('CPAL_ASIO_DIR', $savedAsioDirectory, 'Process')
     [Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $savedClangDirectory, 'Process')
