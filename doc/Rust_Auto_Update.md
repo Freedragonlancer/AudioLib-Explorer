@@ -48,10 +48,21 @@ stable 只接收正式 Release；beta 接收 beta、RC 和正式 Release。
 有后缀的程序默认 beta。元数据基础版本与运行 EXE 不符时停止更新，并提示修复安装。
 
 本地未指定标签的包使用 workspace 版本，不伪造 beta 发布号。
-`install-beta.ps1 -Development` 可将未标记的本地构建识别为 `X.Y.Z-0` 开发基线，
-使同一基础版本的首个 beta/RC 发布也能被发现；该标识不用于发布。
-不传此选项时保留包的完整版本，已发布的正式版不会降级到同版本 beta。
-Mac 上的 `beta-refresh.sh` 保留 beta HEAD 的精确发布标签，无标签时同样写入开发基线。
+Windows 的 `install-beta.ps1 -Development` 将本地测试安装标记为
+`X.Y.Z-0+local.<GUI EXE SHA256 前 12 位>`，并写入仅供安装使用的
+`update-development.txt`。完整标识显示在“关于”和更新窗口中。
+该标记不进入公开 portable 包，也不属于更新文件白名单。
+
+本地 Windows 开发安装关闭启动检查及手动检查、安装入口，通过再次执行安装脚本
+更新测试构建。桌面程序识别精确的 `-0` 开发标记，兼容旧 `X.Y.Z-0`；
+Beta 启动器还会根据开发安装文件设置 `AUDIOLIB_UPDATE_DISABLE=1`，保护此前的程序。
+构建元数据仅区分二进制身份，不改变 SemVer 排序：不能依赖版本号本身阻止
+`X.Y.Z-0` 被较早发布但排序更高的 `X.Y.Z` 覆盖。
+
+安装已发布 Beta 时不传 `-Development`：保留包的完整版本，移除本工具拥有的开发
+标记，恢复原有更新通道；已发布的正式版不会降级到同版本 beta。
+Mac 上的 `beta-refresh.sh` 仍保留 beta HEAD 的精确发布标签，无标签时写入
+`X.Y.Z-0` 开发基线；服务端现有的管理员确认更新流程不受 Windows 客户端策略影响。
 
 ## 下载与部署边界
 

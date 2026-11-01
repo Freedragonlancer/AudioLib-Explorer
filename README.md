@@ -152,6 +152,10 @@ Windows client requirements: MSVC build tools and the Rust toolchain `1.97.1-x86
 
 The release script builds only the desktop/CLI binaries. To deliver without ASIO, pass `-WithoutAsio` to both commands and the portable validator. For a tagged Windows package, the compatibility entry point `tools/ci-release.ps1 -Tag <tag>` can replace those two commands; it records runtime validation as `not-run`. Run the full portable acceptance once afterward, then follow the [fixed local installation workflow](AGENTS.md#mandatory-local-application-delivery-and-release-installation). Server packaging uses `tools/build-server-release.ps1` and its platform packager.
 
+For tagged local delivery, `pwsh tools/release-pipeline.ps1 -Action Run -Tag <tag>` combines preflight, build, package, portable acceptance and fixed local installation. It emits short JSON status, keeps full logs on disk and resumes valid stages. Preview with the default `Plan` action; select source checks by actual change scope. Native server/Mac and read-only asset-verification plans are described in the [release pipeline guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md).
+
+After actual build/test work, add `-CleanBuildArtifacts` to local checks or the release pipeline to prune debug caches above the default 40 GiB budget (`-BuildCacheLimitGiB` adjusts it). Preview separately with `pwsh tools/clean-build-artifacts.ps1`; release outputs, packages, installations, SDKs and user data are retained. See [build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md).
+
 Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. From the accepted main/tag checkout:
 
 ```powershell

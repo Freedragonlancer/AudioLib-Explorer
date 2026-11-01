@@ -1,6 +1,6 @@
 # Appearance themes
 
-Choose a theme in **Settings > Appearance > Theme**. The change applies immediately
+Choose a theme in **View > Appearance > Theme**. The change applies immediately
 and is saved with the other preferences in `settings.json`. Switching the interface
 language updates the displayed theme names; the saved identifier stays the same.
 
@@ -14,6 +14,7 @@ presentation as well as its color tokens. Frequency colors and non-tonal peaks a
 audio data, so neither theme changes Spectral Peaks analysis or rendering colors.
 Playback, transforms, volume, zoom, selection, interface scale and font preferences
 remain in the shared application state when the presentation changes.
+Transient input rejection events are cleared before creating a new presentation.
 
 Settings created before theme selection existed, missing theme values and unknown
 identifiers use `default`. Existing `default` selections return to the original

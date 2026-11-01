@@ -29,6 +29,8 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
 
 ## 发布流程
 
+本机阶段优先使用[Release 管线](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md)：`release-pipeline.ps1` 默认预览，`-Action Run` 串联已有构建/打包/验收，Windows 客户端还包含固定安装。一次调用只输出短状态，完整日志和续跑收据留在 `.rust-validation/`；不要逐阶段重新拼命令或反复读取长报告。源码测试仍按实际影响选择，管线不自动扩大全量矩阵，也不创建标签或自动发布。
+
 不得覆盖既有标签或把新构建当作旧 Release 的原产物。当前准备 0.8.6 候选，以已发布的 `v0.8.5` 为发布基线；API、schema 和完整存储格式未变，因此本次使用 PATCH 版本。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。既有 `v0.8.5` 及更早标签和资产保持原发布身份。发布状态以本地验收、beta 门禁与 Mac 产物检查的实测结果为准。
 
 历史基线说明：`v0.8.0` 的 Release 已撤回，但标签保留。0.8.1 当时按用户确认使用最后实际公开的 `v0.7.8` 为发布基线：程序 MINOR 从 7 升至 8，可写 schema 6 库升级为 8；撤回的 0.8.0 开发库（schema 7）也通过受保护迁移升级为 8。回退旧程序须配套恢复相应旧 schema 备份。这个例外不重写既有标签，也不改变后续版本的版本升级规则。
