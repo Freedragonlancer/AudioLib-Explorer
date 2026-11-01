@@ -3,6 +3,8 @@
 //! with partial repaint, so a playback frame costs about the area it repaints.
 //! While the playhead moves, a frame may repaint the playhead, the edge of the
 //! played region and the changing labels, never the played waveform or the window.
+//! The Studio gradient is the one exception: it re-spreads over the played waveform
+//! each time the played width grows by 1/16, so such frames are rare.
 use crate::AppWindow;
 use audiolib_core::config::THEME_IDS;
 use slint::platform::software_renderer::{
@@ -120,23 +122,28 @@ fn playback_repaints_only_around_the_playhead_in_every_theme() {
                 for start in [0.5_f32, 0.9] {
                     let mut position = duration * start;
                     ui.set_play_position(position);
-                    for _ in 0..45 {
+                    for _ in 0..30 {
                         frame();
                     }
-                    let mut worst = 0;
+                    let mut areas = Vec::new();
                     for step in 0..30 {
                         position += 1.0 / 60.0;
                         ui.set_play_position(position);
                         if step % 6 == 0 {
                             ui.set_play_time(format!("00:{position:06.3}").into());
                         }
-                        worst = worst.max(frame());
+                        areas.push(frame());
                     }
                     let case = format!("{theme}, expanded {expanded}, peak mode {peak_mode}");
-                    assert!(worst > 0, "{case}: the playhead never repainted");
                     assert!(
-                        worst <= budget,
-                        "{case}: a playback frame from {start} repainted {worst} px (budget {budget})"
+                        areas.iter().any(|area| *area > 0),
+                        "{case}: the playhead never repainted"
+                    );
+                    // 30 frames move the playhead less than one gradient step apart.
+                    let over = areas.iter().filter(|area| **area > budget).count();
+                    assert!(
+                        over <= 1,
+                        "{case}: {over} playback frames from {start} repainted more than {budget} px: {areas:?}"
                     );
                 }
             }

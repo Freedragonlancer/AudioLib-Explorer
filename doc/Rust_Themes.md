@@ -58,8 +58,8 @@ the playhead cheap by following these rules:
   height instead.
 
 `playback_repaint_tests` plays every registered theme, compact and expanded, in
-waveform and Spectral Peaks mode, and fails when a playback frame repaints more
-than a small part of the window. A new theme is covered once it is registered.
+waveform and Spectral Peaks mode, and fails when playback frames keep repainting
+more than a small part of the window. A new theme is covered once it is registered.
 
 For a theme change, verify registry/index mapping, settings round trips, bilingual
 Appearance selection, live switching and representative player states. The
