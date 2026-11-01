@@ -19,6 +19,10 @@ pub mod gui_capture;
 #[cfg(windows)]
 pub mod gui_geometry;
 
+/// Native exposure record for the desktop window's partial software repaint.
+#[cfg(windows)]
+pub mod paint_exposure;
+
 /// Display a fatal startup diagnostic for a desktop application without a console.
 /// Headless callers should write their diagnostics directly and skip this dialog.
 pub fn show_error_dialog(message: &str) {

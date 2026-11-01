@@ -510,6 +510,35 @@ component OverviewBar inherits Rectangle {
     }
 }
 
+// Played tint and progress bar under the waveform, shared by both player themes.
+// Drawn as fixed-width tiles: the partial software renderer repaints the old and
+// new bounds of any element whose size changes, so one rectangle growing by a
+// pixel per frame would repaint the whole played area on every frame. Here only
+// the tile under the playhead changes, and a frame repaints at most two tiles.
+component PlayedRegion {
+    in property <float> fraction;
+    in property <float> position;
+    in property <float> duration;
+    in property <bool> spectral;
+    in property <bool> chinese;
+    property <length> head: root.fraction * root.width;
+    property <length> tile: 32px;
+    property <brush> tint: root.spectral ? #183c3428 : #8faea622;
+    // The played range for assistive technology. It has no fill, so it never
+    // repaints anything when it grows.
+    Rectangle {
+        x: 0px; y: 0px; width: root.head; height: root.height;
+        accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
+        accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
+    }
+    for i in Math.ceil(root.width / root.tile): Rectangle {
+        x: i * root.tile; y: 0px; height: root.height;
+        width: clamp(root.head - i * root.tile, 0px, root.tile);
+        background: root.tint;
+        Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
+    }
+}
+
 component ClassicTool inherits Rectangle {
     in property <string> symbol;
     in property <image> icon;
@@ -661,12 +690,10 @@ component ClassicAuditionPanel inherits Rectangle {
             }
             if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
             // These overlays are paint-only, leaving click/scroll ownership to scrub.
-            if root.ready && root.duration > 0: Rectangle {
-                x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
-                background: root.spectral ? #183c3428 : #8faea622;
-                accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
-                accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
-                Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
+            if root.ready && root.duration > 0: PlayedRegion {
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                fraction: wave.played-fraction; position: root.position; duration: root.duration;
+                spectral: root.spectral; chinese: root.chinese;
             }
             if root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end: Rectangle {
                 x: wave.played-fraction * (parent.width - 1px); width: 1px;
@@ -961,12 +988,10 @@ component MotionAuditionPanel inherits Rectangle {
                 Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
             }
             // These overlays are paint-only, leaving click/scroll ownership to scrub.
-            if root.ready && root.duration > 0: Rectangle {
-                x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
-                background: root.spectral ? #183c3428 : #8faea622;
-                accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
-                accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
-                Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
+            if root.ready && root.duration > 0: PlayedRegion {
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                fraction: wave.played-fraction; position: root.position; duration: root.duration;
+                spectral: root.spectral; chinese: root.chinese;
             }
             if root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end: Rectangle {
                 x: wave.played-fraction * (parent.width - 1px); width: 1px;
