@@ -883,6 +883,14 @@ component WorkbenchAuditionPanel inherits Rectangle {
         return reject;
     }
     function toggle() { if root.playing { root.pause(); } else { root.play(); } }
+    // Layout width of the gradient bands: kept while it covers the playhead with a
+    // little room and is not much wider (after a seek back or zoom); otherwise the
+    // next 1/16 step above the playhead, capped at the timeline width.
+    pure function band-span(head: length, width: length, current: length) -> length {
+        let limit = max(32px, width);
+        if head + 2px <= current && head * 1.13 >= current && current <= limit { return current; }
+        return min(limit, 32px * Math.pow(1.0625, Math.ceil(Math.log(max(32px, head + 6px) / 32px, 1.0625))));
+    }
 
     // The range the timeline draws: a pending request wins over the last image.
     property <bool> has-target: root.target-end > root.target-start;
@@ -1085,25 +1093,40 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     animate opacity { duration: Theme.motion-slow; easing: ease-out; }
                 }
                 // Played waveform in a gradient from the start (accent) to the playhead
-                // (apricot), drawn as 64 bands. The bands are laid out over `span`, the
-                // played width rounded up in 1/16 steps, and each band is cut at the
-                // playhead itself. Between steps only the band under the playhead
+                // (apricot), drawn as 64 bands. The bands are laid out over `span`, a
+                // little more than the played width, in 1/16 steps, and each band is cut
+                // at the playhead itself. Between steps only the band under the playhead
                 // changes, so a frame repaints one band instead of the whole played
-                // waveform; the gradient re-spreads at each step.
+                // waveform; the gradient re-spreads at each step. `span` is assigned,
+                // not bound: a binding on the playhead would mark every band changed on
+                // every frame. Each band draws only its own slice of the mask
+                // (source-clip), so a cut band never repaints the whole timeline.
                 if !root.show-spectral && root.waveform-ready: Rectangle {
                     x: 0px; y: 0px; width: wave.width; height: wave.height;
                     property <length> head: wave.played-fraction * wave.width;
-                    property <float> step: 1.0625;
-                    property <length> span: self.head <= 32px ? 32px : min(wave.width, 32px * Math.pow(self.step, Math.ceil(Math.log(self.head / 32px, self.step) - 0.0001)));
+                    property <length> span: 32px;
+                    init => { self.span = root.band-span(self.head, wave.width, self.span); }
+                    changed head => { self.span = root.band-span(self.head, wave.width, self.span); }
+                    property <length> image-x: (root.view-start - root.shown-start) / root.shown-span * wave.width;
+                    property <length> image-w: max(1px, (root.view-end - root.view-start) / root.shown-span * wave.width);
                     for stripe in 64: Rectangle {
                         private property <float> fraction: stripe / 63.0;
                         private property <color> tone: self.fraction <= 0.78 ? Theme.accent.mix(Theme.mint, 1 - self.fraction / 0.78) : Theme.mint.mix(Theme.apricot, 1 - (self.fraction - 0.78) / 0.22);
-                        x: parent.span * stripe / 64; y: 0px; height: parent.height; clip: true;
-                        width: clamp(parent.head - self.x, 0px, parent.span / 64 + 1px);
+                        private property <length> band-x: parent.span * stripe / 64;
+                        private property <length> band-w: parent.span / 64 + 1px;
+                        private property <length> image-x: parent.image-x;
+                        private property <length> image-w: parent.image-w;
+                        private property <length> from: max(self.band-x, self.image-x);
+                        private property <length> to: min(self.band-x + self.band-w, self.image-x + self.image-w);
+                        x: self.band-x; y: 0px; height: parent.height; clip: true;
+                        width: clamp(parent.head - self.band-x, 0px, self.band-w);
                         Image {
-                            source: root.waveform-mask; colorize: parent.tone; height: wave.height; image-fit: fill;
-                            x: (root.view-start - root.shown-start) / root.shown-span * wave.width - parent.x;
-                            width: max(0px, (root.view-end - root.view-start) / root.shown-span * wave.width);
+                            source: root.waveform-mask; colorize: parent.tone; image-fit: fill;
+                            x: parent.from - parent.band-x; y: 0px; height: wave.height;
+                            width: max(0px, parent.to - parent.from);
+                            source-clip-x: Math.floor((parent.from - parent.image-x) / parent.image-w * root.waveform-mask.width);
+                            source-clip-width: max(1, Math.round(max(0px, parent.to - parent.from) / parent.image-w * root.waveform-mask.width));
+                            source-clip-y: 0; source-clip-height: root.waveform-mask.height;
                             opacity: root.waveform-ready ? 1 : 0;
                             animate opacity { duration: Theme.motion-slow; easing: ease-out; }
                         }
