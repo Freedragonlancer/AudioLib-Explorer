@@ -5,6 +5,8 @@
 param([switch]$WithoutAsio)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+$buildLease = $null
 $savedEncodedFlags = $env:CARGO_ENCODED_RUSTFLAGS
 $nativeFlagKey = 'CXXFLAGS_x86_64_pc_windows_msvc'
 $savedNativeFlags = [Environment]::GetEnvironmentVariable($nativeFlagKey)
@@ -49,6 +51,7 @@ $nativeFlags = if ($savedHyphenNativeFlags) { $savedHyphenNativeFlags } elseif (
 [Environment]::SetEnvironmentVariable('CXXFLAGS_x86_64-pc-windows-msvc', ($nativeFlags + ' /DNDEBUG').Trim())
 Push-Location -LiteralPath $taskRoot
 try {
+    $buildLease = Enter-AudioLibBuildLease $taskRoot
     # The packager consumes this exact target even if the caller overrides
     # CARGO_BUILD_TARGET. Keep one build invocation for both feature choices.
     $buildArguments = @('build', '-p', 'audiolib-desktop', '-p', 'audiolib-cli', '--bins', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc')
@@ -59,6 +62,7 @@ try {
     cargo @buildArguments
     if ($LASTEXITCODE -ne 0) { throw 'Rust release build failed.' }
 } finally {
+    if ($buildLease) { $buildLease.Dispose() }
     $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedFlags
     [Environment]::SetEnvironmentVariable($nativeFlagKey, $savedNativeFlags)
     [Environment]::SetEnvironmentVariable('CXXFLAGS_x86_64-pc-windows-msvc', $savedHyphenNativeFlags)

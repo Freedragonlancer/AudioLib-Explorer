@@ -23,6 +23,9 @@ Match a release built with --no-default-features (for example the headless serve
 Override the repository Cargo target for Clippy/tests (for example,
 aarch64-apple-darwin or x86_64-unknown-linux-gnu). Format is target-independent.
 ASIO requires a Windows MSVC target; omitting Target retains repository defaults.
+.PARAMETER CleanBuildArtifacts
+After checks pass, prune debug caches above BuildCacheLimitGiB (default 40).
+Requires pwsh 7.3+; do not nest this cleanup inside an active release pipeline.
 .EXAMPLE
 ./tools/check-local.ps1
 .EXAMPLE
@@ -39,7 +42,9 @@ param(
     [switch]$Asio,
     [ValidateNotNullOrEmpty()][string[]]$Package,
     [switch]$NoDefaultFeatures,
-    [ValidateNotNullOrEmpty()][string]$Target
+    [ValidateNotNullOrEmpty()][string]$Target,
+    [switch]$CleanBuildArtifacts,
+    [ValidateRange(0,100000)][double]$BuildCacheLimitGiB = 40
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -60,6 +65,9 @@ if ($Asio) {
 }
 if ($NoDefaultFeatures) { $featureArguments += '--no-default-features' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+if ($CleanBuildArtifacts -and $PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Use pwsh 7.3+ for post-check build cache maintenance.' }
+$buildLease = $null
 $runId = [guid]::NewGuid().ToString('N')
 $logs = Join-Path (Join-Path $taskRoot '.rust-validation/local-checks') $runId
 $targetArguments = if ($Target) { @('--target', $Target) } else { @() }
@@ -98,6 +106,7 @@ function Invoke-CargoCheck([string]$Name, [string[]]$Arguments) {
 
 Push-Location -LiteralPath $taskRoot
 try {
+    $buildLease = Enter-AudioLibBuildLease $taskRoot
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     Invoke-CargoCheck 'format' @('fmt', '--all', '--', '--check')
     if ($Asio) {
@@ -111,7 +120,12 @@ try {
     $scope = "$selection, $configuration configuration only; no-default-features=$([bool]$NoDefaultFeatures)"
     Write-Host "Local checks passed ($scope). Logs: $logs"
 } finally {
+    if ($buildLease) { $buildLease.Dispose() }
     [Environment]::SetEnvironmentVariable('CPAL_ASIO_DIR', $savedAsioDirectory, 'Process')
     [Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $savedClangDirectory, 'Process')
     Pop-Location
+}
+if ($CleanBuildArtifacts) {
+    & (Join-Path $PSScriptRoot 'clean-build-artifacts.ps1') -Action Run -Mode Debug -MaxGiB $BuildCacheLimitGiB
+    if ($LASTEXITCODE -ne 0) { throw 'Checks passed; build cache maintenance did not complete. Inspect its status; no process was stopped.' }
 }
