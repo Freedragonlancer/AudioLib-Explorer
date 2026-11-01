@@ -24,6 +24,10 @@ mod search_task_ui_tests;
 mod sidebar_section_tests;
 mod startup;
 #[cfg(test)]
+mod studio_review_tests;
+#[cfg(test)]
+mod studio_switch_review_tests;
+#[cfg(test)]
 mod studio_theme_tests;
 mod tag_chips;
 mod theme;
