@@ -57,6 +57,7 @@ fn offline_metadata_keeps_revert_and_recovery_exit_reachable() {
         let ui = window();
         ui.set_chinese(chinese);
         ui.set_has_selection(true);
+        ui.set_annotation_editor_visible(true);
         ui.set_metadata_dirty(true);
         ui.set_metadata_writes_blocked(true);
         ui.set_close_recovery_available(true);

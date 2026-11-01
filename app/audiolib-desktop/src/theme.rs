@@ -20,6 +20,9 @@ pub(crate) struct Palette {
     pub muted: u32,
     pub accent: u32,
     pub accent_hover: u32,
+    pub mint: u32,
+    pub apricot: u32,
+    pub coral: u32,
     pub on_accent: u32,
     pub selected: u32,
     pub checked: u32,
@@ -35,31 +38,34 @@ pub(crate) struct Palette {
     pub overlay: u32,
 }
 
-/// The original soft charcoal palette; identical to the defaults in `ui/theme.slint`.
+/// The sound-workspace palette; identical to the defaults in `ui/theme.slint`.
 pub(crate) const DEFAULT_PALETTE: Palette = Palette {
-    bg: 0xff18_1b20,
-    panel: 0xff20_242a,
-    raised: 0xff2a_3037,
-    hover: 0xff35_3d45,
-    border: 0xff35_3d45,
-    strong_border: 0xff69_7581,
-    ink: 0xffd9_dee3,
-    dim: 0xffaa_b2bd,
-    muted: 0xff95_a0ac,
-    accent: 0xff8f_aea6,
-    accent_hover: 0xffa8_c3bb,
-    on_accent: 0xff20_2b28,
-    selected: 0xff2b_3a38,
-    checked: 0xff35_4744,
-    alternate: 0xff22_282e,
-    warning: 0xffc3_b48e,
-    trough: 0xff15_181c,
-    segment: 0xff3a_434c,
-    danger: 0xffcf_9696,
-    danger_surface: 0xff3a_2a2d,
-    player: 0xff23_2a30,
-    player_border: 0xff46_5059,
-    tooltip: 0xff14_171c,
+    bg: 0xff202226,
+    panel: 0xff24272b,
+    raised: 0xff393c43,
+    hover: 0xff34383e,
+    border: 0xff383c43,
+    strong_border: 0xff626873,
+    ink: 0xffecebe7,
+    dim: 0xffadb0b7,
+    muted: 0xff858b94,
+    accent: 0xff2bbfbd,
+    accent_hover: 0xff66d2c9,
+    mint: 0xff79d5bc,
+    apricot: 0xffefc4a5,
+    coral: 0xffea8b75,
+    on_accent: 0xff102a2a,
+    selected: 0xff293e40,
+    checked: 0xff303c3e,
+    alternate: 0xff272a2f,
+    warning: 0xffd6ba98,
+    trough: 0xff1e2024,
+    segment: 0xff3b4148,
+    danger: 0xffdf9e98,
+    danger_surface: 0xff403033,
+    player: 0xff292c31,
+    player_border: 0xff41454c,
+    tooltip: 0xff191b1f,
     overlay: 0xa800_0000,
 };
 
@@ -118,6 +124,9 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     theme.set_muted(color(palette.muted));
     theme.set_accent(color(palette.accent));
     theme.set_accent_hover(color(palette.accent_hover));
+    theme.set_mint(color(palette.mint));
+    theme.set_apricot(color(palette.apricot));
+    theme.set_coral(color(palette.coral));
     theme.set_on_accent(color(palette.on_accent));
     theme.set_selected(color(palette.selected));
     theme.set_checked(color(palette.checked));
@@ -142,4 +151,5 @@ pub(crate) fn apply_font_sizes(ui: &AppWindow, ui_font: u32, list_font: u32) {
     let theme = ui.global::<crate::Theme>();
     theme.set_ui_font_px(ui_font);
     theme.set_list_font_px(list_font);
+    crate::detail_presentation::relayout(ui);
 }

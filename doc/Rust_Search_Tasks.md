@@ -18,7 +18,7 @@ All tasks use the current data source. Switching between libraries saves the old
 
 Each task retains its query text, complete search filters, selected directory and descendant policy, directory expansion, sort order, page, selected and checked records, selection anchor and view position. Raw filter drafts are retained too: changing tasks does not submit a partially typed tag or turn invalid duration text into a valid search. The current filter/details page and directory/favorites page are part of the task view.
 
-Column widths, pane widths and visibility, language, theme, interface scale, audio output and playback remain application preferences. Sorting is task-local; the existing table preference supplies the initial sort for a new task.
+Column widths, pane widths and visibility, result pagination and page size, language, theme, interface scale, audio output and playback remain application preferences. Appearance settings provide pagination (on by default), 1–1000 results per page (default 200), and independent visibility switches for the library sidebar and sound details. Disabling pagination allows continuous scrolling through all matches. Changing the paging policy resets every task's result position and row cache while retaining its search conditions, selection and checked identities. Sorting is task-local; the existing table preference supplies the initial sort for a new task.
 
 The audio engine and audition session are shared. Changing or closing a task does not load, start, pause or stop audio. Restoring a task's selected row may restore its details, but it must not pass through an audio-loading selection path. Playback remains subject to the existing explicit transport and selection actions.
 

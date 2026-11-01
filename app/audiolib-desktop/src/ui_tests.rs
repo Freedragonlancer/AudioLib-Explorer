@@ -547,7 +547,7 @@ fn audition_buttons_have_distinct_transport_actions_and_submit_transform_setting
 }
 
 #[test]
-fn single_click_play_checkbox_is_visible_and_clickable_in_both_languages_and_layouts() {
+fn single_click_play_menu_is_visible_and_clickable_in_both_languages_and_layouts() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {
         for (width, height) in [(1080.0, 700.0), (1440.0, 900.0)] {
@@ -566,25 +566,22 @@ fn single_click_play_checkbox_is_visible_and_clickable_in_both_languages_and_lay
             } else {
                 "Single-click play"
             };
+            let menu = if chinese { "播放" } else { "Playback" };
+            let popup = open_menu(&ui, menu);
             let checkbox = ElementHandle::find_by_accessible_label(&ui, label)
                 .next()
                 .unwrap_or_else(|| panic!("Missing checkbox: {label}"));
-            let origin = checkbox.absolute_position();
             let size = checkbox.size();
             assert!(size.width > 0.0 && size.height > 0.0, "{label} is hidden");
-            assert!(
-                origin.x >= 0.0 && origin.x + size.width <= width,
-                "{label} is horizontally clipped at {width}x{height}"
-            );
-            assert!(
-                origin.y >= 0.0 && origin.y + size.height <= height,
-                "{label} is vertically clipped at {width}x{height}"
-            );
-            click_label(&ui, label);
+            let origin = checkbox.absolute_position();
+            assert!(popup.x + origin.x >= 0.0 && popup.x + origin.x + size.width <= width);
+            assert!(popup.y + origin.y >= 0.0 && popup.y + origin.y + size.height <= height);
+            close_menu(&ui);
+            click_menu_item(&ui, menu, label);
             assert!(ui.get_audition_play_on_single_click());
             assert_eq!(&*changes.borrow(), &[true]);
             i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
-            click_label(&ui, label);
+            click_menu_item(&ui, menu, label);
             assert!(!ui.get_audition_play_on_single_click());
             assert_eq!(&*changes.borrow(), &[true, false]);
             ui.hide().unwrap();
@@ -713,8 +710,13 @@ fn result_row_position(ui: &AppWindow, label: &str) -> slint::LogicalPosition {
     let row = ElementHandle::find_by_accessible_label(ui, label)
         .find(|element| element.accessible_role() == Some(AccessibleRole::ListItem))
         .unwrap_or_else(|| panic!("Missing result row: {label}"));
-    let origin = row.absolute_position();
-    slint::LogicalPosition::new(origin.x + 8.0, origin.y + row.size().height / 2.0)
+    let name = row
+        .query_descendants()
+        .match_id("AppWindow::table-name-cell")
+        .find_first()
+        .expect("Filename cell");
+    let origin = name.absolute_position();
+    slint::LogicalPosition::new(origin.x + 8.0, origin.y + name.size().height / 2.0)
 }
 
 pub(crate) fn click_label(ui: &AppWindow, label: &str) {
@@ -751,19 +753,8 @@ fn click_at(ui: &AppWindow, position: slint::LogicalPosition) {
 }
 
 fn menu_bar_entry(ui: &AppWindow, title: &str) -> ElementHandle {
-    ElementHandle::find_by_element_type_name(ui, "MenuBarItem")
-        .find(|entry| {
-            let title = title.to_owned();
-            entry
-                .query_descendants()
-                .match_predicate(move |element| {
-                    element
-                        .accessible_label()
-                        .is_some_and(|label| label == title)
-                })
-                .find_first()
-                .is_some()
-        })
+    ElementHandle::find_by_accessible_label(ui, title)
+        .find(|entry| entry.accessible_role() == Some(AccessibleRole::Button))
         .unwrap_or_else(|| panic!("Missing menu bar entry: {title}"))
 }
 
@@ -786,6 +777,9 @@ fn click_menu_item(ui: &AppWindow, title: &str, label: &str) {
         .unwrap_or_else(|| panic!("Missing {title} menu item: {label}"));
     let origin = item.absolute_position();
     let size = item.size();
+    if std::env::var_os("AUDIOLIB_MENU_GEOMETRY").is_some() {
+        eprintln!("Menu {title} / {label}: anchor={popup:?}, item={origin:?}, size={size:?}");
+    }
     click_at(
         ui,
         slint::LogicalPosition::new(
@@ -1267,6 +1261,7 @@ fn folder_menu_modal_focus_keeps_path_input_and_tabs_out_of_background_metadata(
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         ui.set_chinese(chinese);
         ui.set_has_selection(true);
+        ui.set_annotation_editor_visible(true);
         ui.set_selected_id("42".into());
         ui.set_edit_tags("original".into());
         let edits = Rc::new(RefCell::new(0));
@@ -1973,7 +1968,15 @@ fn menu_bar_playback_view_and_help_preserve_selection_and_modal_guards() {
     ui.on_library_action(move |action| observed.borrow_mut().push(action));
     click_menu_item(&ui, "Help", "Shortcuts and basics…");
     assert!(ui.get_help_visible());
-    click_menu_item(&ui, "Library", "Manage sound library…");
+    // In-window menus disable their anchor while a modal owns the workbench.
+    let library_menu = menu_bar_entry(&ui, "Library");
+    assert_eq!(library_menu.accessible_enabled(), Some(false));
+    let origin = library_menu.absolute_position();
+    let size = library_menu.size();
+    click_at(
+        &ui,
+        slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0),
+    );
     assert!(libraries.borrow().is_empty());
     assert!(!ui.get_library_visible());
     assert!(ui.get_help_visible());
@@ -2201,6 +2204,7 @@ fn help_modal_blocks_background_metadata_input_in_both_languages() {
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         ui.set_chinese(chinese);
         ui.set_has_selection(true);
+        ui.set_annotation_editor_visible(true);
         ui.set_selected_id("42".into());
         ui.set_edit_tags("original".into());
         let edits = Rc::new(RefCell::new(0));
@@ -2611,7 +2615,10 @@ fn folder_context_menu_uses_window_coordinates_and_retains_its_original_path() {
         .next()
         .expect("folder context menu owner")
         .absolute_position();
-    assert!(owner.y > 0.0, "Menu bar must offset the popup owner");
+    assert!(
+        owner.y > 0.0,
+        "Folder workspace must offset the popup owner"
+    );
     let popup = slint::LogicalPosition::new(400.0, 300.0);
     ui.invoke_show_folder_menu(original.clone(), popup);
     ui.set_folders(ModelRc::new(VecModel::from(vec![FolderRow {
@@ -2624,7 +2631,7 @@ fn folder_context_menu_uses_window_coordinates_and_retains_its_original_path() {
         .expect("open folder context action");
     let origin = open.absolute_position();
     let size = open.size();
-    // Public show-folder-menu takes a window point. Adding the owner's menu-bar
+    // Public show-folder-menu takes a window point. Adding the owner's workspace
     // offset again would click a different row and fail this routing assertion.
     click_at(
         &ui,
@@ -2827,11 +2834,7 @@ fn full_width_rows_forward_ctrl_shift_selection_without_accidental_audition() {
     ui.show().unwrap();
     // Settle the native window's responsive layout before caching pointer coordinates.
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
-    let row = ElementHandle::find_by_accessible_label(&ui, "Selection.wav")
-        .find(|item| item.accessible_role() == Some(AccessibleRole::ListItem))
-        .unwrap();
-    let origin = row.absolute_position();
-    let position = slint::LogicalPosition::new(origin.x + 8.0, origin.y + row.size().height / 2.0);
+    let position = result_row_position(&ui, "Selection.wav");
     for (keys, toggle, range) in [
         (vec![], false, false),
         (vec![Key::Control], true, false),
@@ -3217,6 +3220,7 @@ fn server_mode_edits_annotations_but_keeps_structural_writes_disabled() {
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     ui.set_has_selection(true);
+    ui.set_annotation_editor_visible(true);
     ui.set_inspector_visible(true);
     ui.set_remote_mode(true);
     ui.show().unwrap();
@@ -3421,11 +3425,7 @@ fn dragging_a_result_row_requests_drag_out_once_and_progress_can_be_cancelled() 
     let requests = Rc::new(RefCell::new(Vec::new()));
     let observed = requests.clone();
     ui.on_drag_out_requested(move |id| observed.borrow_mut().push(id.to_string()));
-    let name = ElementHandle::find_by_accessible_label(&ui, "Drag me.wav")
-        .next()
-        .expect("row name");
-    let origin = name.absolute_position();
-    let start = slint::LogicalPosition::new(origin.x + 4.0, origin.y + 4.0);
+    let start = result_row_position(&ui, "Drag me.wav");
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position: start });
     ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -4473,5 +4473,72 @@ fn appearance_settings_live_in_the_view_menu_in_both_languages() {
             "View menu must open the Appearance page"
         );
         ui.set_settings_visible(false);
+    }
+}
+
+#[test]
+fn appearance_result_paging_and_pane_switches_apply_in_both_languages() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window()
+            .set_size(slint::LogicalSize::new(1440.0, 1000.0));
+        ui.set_chinese(chinese);
+        ui.set_settings_page(1);
+        ui.set_settings_visible(true);
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let observed = changes.clone();
+        let weak = ui.as_weak();
+        ui.on_result_paging_requested(move || {
+            let ui = weak.upgrade().unwrap();
+            observed.borrow_mut().push((
+                ui.get_results_pagination_enabled(),
+                ui.get_results_page_size(),
+            ));
+        });
+        ui.show().unwrap();
+        let (paging, library, details) = if chinese {
+            ("开启搜索结果分页", "显示音效库侧栏", "显示声音详情侧栏")
+        } else {
+            (
+                "Paginate search results",
+                "Show library sidebar",
+                "Show sound details",
+            )
+        };
+        click_label(&ui, paging);
+        assert!(!ui.get_results_pagination_enabled());
+        let size_control =
+            ElementHandle::find_by_element_id(&ui, "AppWindow::appearance-page-size")
+                .next()
+                .unwrap();
+        assert_eq!(size_control.accessible_enabled(), Some(false));
+        ui.set_settings_visible(false);
+        assert!(
+            ElementHandle::find_by_accessible_label(
+                &ui,
+                if chinese {
+                    "下一页搜索结果"
+                } else {
+                    "Next results page"
+                }
+            )
+            .next()
+            .is_none()
+        );
+        ui.set_settings_visible(true);
+        click_label(&ui, paging);
+        assert!(ui.get_results_pagination_enabled());
+        assert_eq!(size_control.accessible_enabled(), Some(true));
+        ui.set_results_page_size(73);
+        ui.invoke_result_paging_requested();
+        assert_eq!(changes.borrow().last(), Some(&(true, 73)));
+        click_label(&ui, library);
+        click_label(&ui, details);
+        assert!(!ui.get_sidebar_visible() && !ui.get_inspector_visible());
+        click_label(&ui, library);
+        click_label(&ui, details);
+        assert!(ui.get_sidebar_visible() && ui.get_inspector_visible());
+        ui.hide().unwrap();
     }
 }

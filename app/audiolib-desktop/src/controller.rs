@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
-use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform, ruler_marks};
+use crate::waveform_view::{
+    WaveView, db_from_gain, gain_from_db, render_waveform, render_waveform_mask, ruler_marks,
+};
 use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow, RulerTick};
 use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
@@ -136,6 +138,10 @@ fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
         tags_width: ui.get_table_tags_width(),
         order_by: table_sort_order(ui.get_sort_index()),
         descending: ui.get_sort_descending(),
+        pagination_enabled: ui.get_results_pagination_enabled(),
+        page_size: audiolib_core::config::normalize_results_page_size(i64::from(
+            ui.get_results_page_size(),
+        )),
     }
     .normalized()
 }
@@ -930,6 +936,8 @@ impl Controller {
         crate::theme::apply_theme(ui, &config.theme);
         crate::theme::apply_font_sizes(ui, config.ui_font_size, config.list_font_size);
         let table = config.audio_table.normalized();
+        ui.set_results_pagination_enabled(table.pagination_enabled);
+        ui.set_results_page_size(table.page_size as i32);
         ui.set_table_name_width(table.name_width);
         ui.set_table_duration_width(table.duration_width);
         ui.set_table_format_width(table.format_width);
@@ -1221,6 +1229,31 @@ impl Controller {
             }
         });
         let c = self.clone();
+        ui.on_result_paging_requested(move || {
+            let Some(ui) = c.ui.upgrade() else { return };
+            let previous = c.audio_table.lock().unwrap().clone();
+            if !c.available() || ui.get_search_workspace_loading() || ui.get_task_restoring() {
+                ui.set_results_pagination_enabled(previous.pagination_enabled);
+                ui.set_results_page_size(previous.page_size as i32);
+                return;
+            }
+            let next = table_preferences(&ui);
+            if next.pagination_enabled == previous.pagination_enabled
+                && next.page_size == previous.page_size
+            {
+                return;
+            }
+            c.persist_search_task(&ui);
+            ui.set_results_page_size(next.page_size as i32);
+            *c.audio_table.lock().unwrap() = next;
+            c.reset_result_paging_views();
+            ui.invoke_reset_result_list_scroll();
+            c.normalize_result_paging(&mut c.request.lock().unwrap(), true);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+            c.request_navigation_search(&ui, true, true);
+        });
+        let c = self.clone();
         ui.on_pane_layout_changed(move || {
             if c.available()
                 && let Some(ui) = c.ui.upgrade()
@@ -1346,6 +1379,12 @@ impl Controller {
                 crate::tag_chips::relayout(&ui);
             }
         });
+        let weak = ui.as_weak();
+        ui.on_detail_tags_relayout(move || {
+            if let Some(ui) = weak.upgrade() {
+                crate::detail_presentation::relayout(&ui);
+            }
+        });
         let c = self.clone();
         ui.on_color_filter_edited(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -1408,6 +1447,7 @@ impl Controller {
                         ui.get_audition_play_on_single_click() && !records[index as usize].missing;
                     drop(records);
                     c.select_row(index, false, false, play);
+                    ui.invoke_prefetch_result_navigation(index);
                 }
             }
         });
@@ -2836,6 +2876,7 @@ impl Controller {
             ui.set_selected_name("".into());
             ui.set_selected_path("".into());
             ui.set_selected_format("".into());
+            crate::detail_presentation::clear(ui);
             ui.set_selected_album("".into());
             ui.set_selected_album_id("".into());
             ui.set_selected_artwork_directory("".into());
@@ -2849,6 +2890,7 @@ impl Controller {
             ui.set_edit_favorite(false);
             ui.set_waveform_ready(false);
             ui.set_waveform_image(Image::default());
+            ui.set_waveform_mask(Image::default());
             ui.set_waveform_info("".into());
         }
     }
@@ -2894,6 +2936,7 @@ impl Controller {
         ui.set_selected_name("".into());
         ui.set_selected_path("".into());
         ui.set_selected_format("".into());
+        crate::detail_presentation::clear(ui);
         ui.set_selected_album("".into());
         ui.set_selected_album_id("".into());
         ui.set_selected_artwork_directory("".into());
@@ -2903,6 +2946,7 @@ impl Controller {
         ui.set_audio_ready(false);
         ui.set_waveform_ready(false);
         ui.set_waveform_image(Image::default());
+        ui.set_waveform_mask(Image::default());
         ui.set_waveform_info("".into());
         if ui.get_menu_has_page_rows() {
             ui.set_menu_has_page_rows(false);
@@ -3328,13 +3372,35 @@ impl Controller {
                                                 && state.result_window
                                         },
                                     );
+                                let paging = c2.audio_table.lock().unwrap().clone();
+                                let page_size = if paging.pagination_enabled {
+                                    paging.page_size as usize
+                                } else {
+                                    PAGE_SIZE
+                                };
+                                // A server snapshot may still contain records hidden after a
+                                // confirmed removal. Continuous browsing must pass an empty
+                                // SQL span instead of stopping before later visible matches.
+                                if !paging.pagination_enabled
+                                    && page.results.is_empty()
+                                    && let Some((returned, total)) = source_range
+                                    && returned > 0
+                                    && ((job.request.offset + returned) as u64) < total
+                                {
+                                    let mut request = c2.request.lock().unwrap();
+                                    request.offset = job.request.offset.saturating_add(returned);
+                                    request.limit = PAGE_SIZE;
+                                    drop(request);
+                                    c2.request_navigation_search(&ui, true, false);
+                                    return;
+                                }
                                 if job.request.offset > 0
                                     && (job.request.offset as u64) >= page.total_count
                                 {
                                     c2.request.lock().unwrap().offset =
-                                        (page.total_count.saturating_sub(1) / PAGE_SIZE as u64)
+                                        (page.total_count.saturating_sub(1) / page_size as u64)
                                             as usize
-                                            * PAGE_SIZE;
+                                            * page_size;
                                     let retained_status = c2
                                         .search_publication
                                         .lock()
@@ -3404,12 +3470,12 @@ impl Controller {
                                 ui.set_can_next(source_range.is_some_and(|(returned, total)| {
                                     ((job.request.offset + returned) as u64) < total
                                 }));
-                                let first_page = job.request.offset / PAGE_SIZE + 1;
+                                let first_page = job.request.offset / page_size + 1;
                                 let last_page = (job.request.offset
                                     + page.returned_count.saturating_sub(1))
-                                    / PAGE_SIZE
+                                    / page_size
                                     + 1;
-                                let pages = page.total_count.div_ceil(PAGE_SIZE as u64).max(1);
+                                let pages = page.total_count.div_ceil(page_size as u64).max(1);
                                 ui.set_page_label(
                                     if first_page == last_page {
                                         format!("{first_page}/{pages}")
@@ -3429,7 +3495,17 @@ impl Controller {
                                 };
                                 let chinese = c2.chinese.load(Ordering::Acquire);
                                 ui.set_result_summary(
-                                    if chinese {
+                                    if !paging.pagination_enabled && chinese {
+                                        format!(
+                                            "{} 条声音 · {:.1} ms",
+                                            page.total_count, page.execution_time_ms
+                                        )
+                                    } else if !paging.pagination_enabled {
+                                        format!(
+                                            "{} sounds · {:.1} ms",
+                                            page.total_count, page.execution_time_ms
+                                        )
+                                    } else if chinese {
                                         format!(
                                             "{shown} / {} 条 · {:.1} ms",
                                             page.total_count, page.execution_time_ms
@@ -3803,6 +3879,12 @@ impl Controller {
                         .file_path
                         .as_deref()
                         .map(|path| c.playback_display_name(path));
+                    // A server cache path identifies the original record, independently
+                    // of whichever record the inspector currently has selected.
+                    let playback_path = status
+                        .file_path
+                        .as_deref()
+                        .map(|path| c.playback_source_path(path));
                     let buffering = buffering_shown;
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
@@ -3832,6 +3914,10 @@ impl Controller {
                         ui.set_audio_ready(ready);
                         if let Some(name) = &playback_name {
                             ui.set_playback_name(name.as_str().into());
+                        }
+                        let playback_path = playback_path.as_deref().unwrap_or_default();
+                        if ui.get_playback_path().as_str() != playback_path {
+                            ui.set_playback_path(playback_path.into());
                         }
                         if !ui.get_volume_adjusting() {
                             if (ui.get_volume() - status.volume).abs() > 0.001 {
@@ -4085,8 +4171,28 @@ impl Controller {
         });
     }
 
+    fn normalize_result_paging(&self, request: &mut SearchRequest, reset: bool) {
+        let paging = self.audio_table.lock().unwrap();
+        if reset {
+            request.offset = 0;
+        }
+        if paging.pagination_enabled {
+            let size = paging.page_size as usize;
+            request.limit = size;
+            request.offset = request.offset / size * size;
+        } else {
+            request.limit = if reset {
+                PAGE_SIZE
+            } else {
+                request.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3)
+            };
+        }
+    }
+
     fn request_page(self: &Arc<Self>, ui: &AppWindow, delta: i32) {
+        let paging = self.audio_table.lock().unwrap().clone();
         if !self.available()
+            || !paging.pagination_enabled
             || ui.get_searching()
             || ui.get_background_blocked()
             || ui.get_task_restoring()
@@ -4098,11 +4204,11 @@ impl Controller {
         }
         let mut request = self.request.lock().unwrap();
         request.offset = if delta < 0 {
-            request.offset.saturating_sub(PAGE_SIZE)
+            request.offset.saturating_sub(paging.page_size as usize)
         } else {
-            request.offset.saturating_add(request.limit)
+            request.offset.saturating_add(paging.page_size as usize)
         };
-        request.limit = PAGE_SIZE;
+        request.limit = paging.page_size as usize;
         drop(request);
         self.request_navigation_search(ui, true, false);
     }
@@ -4110,6 +4216,7 @@ impl Controller {
     /// Keep at most three pages resident, loading before the viewport reaches an edge.
     fn extend_result_window(self: &Arc<Self>, ui: &AppWindow, direction: i32) -> bool {
         if !self.available()
+            || self.audio_table.lock().unwrap().pagination_enabled
             || ui.get_searching()
             || ui.get_background_blocked()
             || ui.get_task_restoring()
@@ -4197,11 +4304,7 @@ impl Controller {
             self.queue_unavailable_album_choices(ui, generation);
             return;
         }
-        request.limit = request.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3);
-        if reset {
-            request.limit = PAGE_SIZE;
-            request.offset = 0;
-        }
+        self.normalize_result_paging(&mut request, reset);
         let samples = [0, 44_100, 48_000, 88_200, 96_000, 192_000];
         let bits = [0, 16, 24, 32];
         let channels = [0, 1, 2, 4, 6, 8];
@@ -4793,6 +4896,7 @@ impl Controller {
                 c2.selection_request_completed(generation);
                 ui.set_waveform_ready(false);
                 ui.set_waveform_image(Image::default());
+                ui.set_waveform_mask(Image::default());
                 ui.set_waveform_info(
                     if c2.chinese.load(Ordering::Acquire) {
                         "文件缺失，请重新关联 WAV"
@@ -4964,6 +5068,7 @@ impl Controller {
         let job = job.clone();
         let c2 = self.clone();
         let pixels = render_waveform(data, job.width, job.height, job.view);
+        let mask = render_waveform_mask(data, job.width, job.height, job.view);
         let info = format!(
             "{} ch · {:.1} kHz · {}",
             data.channels,
@@ -4983,6 +5088,9 @@ impl Controller {
             }
             ui.set_waveform_image(Image::from_rgba8(
                 SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels, job.width, job.height),
+            ));
+            ui.set_waveform_mask(Image::from_rgba8(
+                SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&mask, job.width, job.height),
             ));
             let (start, end) = job.view.range(job.duration);
             ui.set_view_start(start as f32);
@@ -5081,6 +5189,7 @@ impl Controller {
                 ui.set_waveform_ready(false);
                 ui.set_waveform_progress(0.0);
                 ui.set_waveform_image(Image::default());
+                ui.set_waveform_mask(Image::default());
             }
             publish_wave_target(&ui, view, duration);
         });
@@ -7497,6 +7606,7 @@ fn same_patch(left: &MetadataPatch, right: &MetadataPatch) -> bool {
 }
 
 fn present_file(ui: &AppWindow, file: &AudioFile) {
+    crate::detail_presentation::present(ui, file);
     let album = file
         .album_entity
         .as_ref()
@@ -7633,6 +7743,8 @@ impl ListWaveformHost for Controller {
 }
 
 fn audio_row(file: &AudioFile) -> AudioRow {
+    let tag_labels = crate::detail_presentation::labels(file);
+    let tag_extra = tag_labels.len().saturating_sub(3).min(i32::MAX as usize) as i32;
     let marker = file
         .color
         .as_deref()
@@ -7646,7 +7758,7 @@ fn audio_row(file: &AudioFile) -> AudioRow {
             .parent()
             .map_or(String::new(), |path| path.to_string_lossy().into_owned())
             .into(),
-        duration: format!("{:.2}s", file.duration).into(),
+        duration: format_time(file.duration).into(),
         format: format!(
             "{:.1}k / {}b",
             file.sample_rate as f64 / 1000.0,
@@ -7655,6 +7767,10 @@ fn audio_row(file: &AudioFile) -> AudioRow {
         .into(),
         channels: file.channels.to_string().into(),
         tags: audiolib_core::display_tags(&file.tags, &file.attributes).into(),
+        tag_preview: ModelRc::new(VecModel::from(
+            tag_labels.into_iter().take(3).collect::<Vec<_>>(),
+        )),
+        tag_extra,
         album: file.album.clone().into(),
         favorite: file.favorite,
         missing: file.missing,

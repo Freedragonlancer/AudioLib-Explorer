@@ -171,6 +171,23 @@ fn same_search_definition(left: &SearchTaskDefinition, right: &SearchTaskDefinit
 }
 
 impl Controller {
+    pub(super) fn reset_result_paging_views(&self) {
+        let mut state = self.task_workspace.lock().unwrap();
+        state.caches.clear();
+        // A rejected editor draft can defer the replacement query. Do not let
+        // capture_search_task cache the old page under the new paging policy.
+        state.page_complete = false;
+        state.page_revision = None;
+        state.folders_revision = None;
+        state.pending_view = None;
+        for task in &mut state.workspace.session.tasks {
+            task.view.offset = 0;
+            task.view.list_top_row = 0;
+            task.view.list_row_offset = 0.0;
+            task.view.list_scroll_y = 0.0;
+        }
+    }
+
     pub(super) fn begin_task_search(&self, reset: bool) {
         let mut state = self.task_workspace.lock().unwrap();
         state.restore_failed = false;
@@ -1240,13 +1257,15 @@ impl Controller {
         *self.search_publication.lock().unwrap() = None;
         // Install one safe runtime for B before any fallible I/O. If validation
         // fails, none of A's request, directory IDs or checked rows can leak into B.
-        *self.request.lock().unwrap() = task.definition.to_request(
+        let mut request = task.definition.to_request(
             cache.as_ref().map_or_else(
                 || task_result_window_limit(&task.view, task_viewport_rows(ui)),
                 |cache| cache.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3),
             ),
             task.view.offset,
         );
+        self.normalize_result_paging(&mut request, false);
+        *self.request.lock().unwrap() = request;
         let stats = self.tree.lock().unwrap().stats.clone();
         *self.tree.lock().unwrap() = TreeState {
             stats,
@@ -1368,13 +1387,15 @@ impl Controller {
     ) {
         let album_missing = album_filter_unavailable(&task.definition);
         apply_task_controls(ui, &task);
-        *self.request.lock().unwrap() = task.definition.to_request(
+        let mut request = task.definition.to_request(
             cache.as_ref().map_or_else(
                 || task_result_window_limit(&task.view, task_viewport_rows(ui)),
                 |cache| cache.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3),
             ),
             task.view.offset,
         );
+        self.normalize_result_paging(&mut request, false);
+        *self.request.lock().unwrap() = request;
         let stats = self.tree.lock().unwrap().stats.clone();
         *self.tree.lock().unwrap() = cache.as_ref().map_or_else(
             || TreeState {

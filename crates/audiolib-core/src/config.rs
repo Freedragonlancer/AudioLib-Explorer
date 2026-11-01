@@ -255,7 +255,7 @@ pub struct AppPaths {
     pub audio_terms: Option<PathBuf>,
 }
 
-/// Audio result table widths in logical pixels and the library-wide search sort.
+/// Audio result table widths, result paging and the library-wide search sort.
 /// Missing preferences retain the default layout, while all widths stay within safe bounds.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -279,18 +279,26 @@ pub struct AudioTablePreferences {
     pub order_by: SortOrder,
     /// Reverse the selected ordering when true.
     pub descending: bool,
+    /// Show explicit pages instead of continuously scrolling through all matches.
+    #[serde(deserialize_with = "deserialize_pagination_enabled")]
+    pub pagination_enabled: bool,
+    /// Rows in an explicit page, bounded to 1..=1000. Continuous browsing stays bounded separately.
+    #[serde(deserialize_with = "deserialize_results_page_size")]
+    pub page_size: u32,
 }
 
 impl Default for AudioTablePreferences {
     fn default() -> Self {
         Self {
             name_width: 360.0,
-            duration_width: 80.0,
-            format_width: 100.0,
+            duration_width: 96.0,
+            format_width: 132.0,
             channels_width: 64.0,
-            tags_width: 160.0,
+            tags_width: 200.0,
             order_by: SortOrder::Relevance,
             descending: false,
+            pagination_enabled: true,
+            page_size: 200,
         }
     }
 }
@@ -316,8 +324,33 @@ impl AudioTablePreferences {
             tags_width: normalize_table_width(self.tags_width, 80.0, defaults.tags_width),
             order_by: self.order_by,
             descending: self.descending,
+            pagination_enabled: self.pagination_enabled,
+            page_size: normalize_results_page_size(i64::from(self.page_size)),
         }
     }
+}
+
+/// Bound a user-selected results page without allowing an unbounded provider query.
+pub fn normalize_results_page_size(value: i64) -> u32 {
+    value.clamp(1, 1000) as u32
+}
+
+fn deserialize_results_page_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .map_or(200, |value| value.round().clamp(1.0, 1000.0) as u32))
+}
+
+fn deserialize_pagination_enabled<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(true))
 }
 
 fn normalize_table_width(width: f32, minimum: f32, default: f32) -> f32 {
@@ -348,13 +381,21 @@ fn deserialize_name_width<'de, D: serde::Deserializer<'de>>(
 fn deserialize_duration_width<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<f32, D::Error> {
-    deserialize_table_width(deserializer, 60.0, 80.0)
+    deserialize_table_width(
+        deserializer,
+        60.0,
+        AudioTablePreferences::default().duration_width,
+    )
 }
 
 fn deserialize_format_width<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<f32, D::Error> {
-    deserialize_table_width(deserializer, 82.0, 100.0)
+    deserialize_table_width(
+        deserializer,
+        82.0,
+        AudioTablePreferences::default().format_width,
+    )
 }
 
 fn deserialize_channels_width<'de, D: serde::Deserializer<'de>>(
@@ -366,7 +407,11 @@ fn deserialize_channels_width<'de, D: serde::Deserializer<'de>>(
 fn deserialize_tags_width<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<f32, D::Error> {
-    deserialize_table_width(deserializer, 80.0, 160.0)
+    deserialize_table_width(
+        deserializer,
+        80.0,
+        AudioTablePreferences::default().tags_width,
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1385,6 +1430,8 @@ mod tests {
             tags_width: 245.0,
             order_by: SortOrder::Modified,
             descending: true,
+            pagination_enabled: false,
+            page_size: 77,
         };
         config.save().unwrap();
         let loaded = AppConfig::load_with_roots(root, &[]).unwrap();
@@ -1490,6 +1537,7 @@ mod tests {
             maximized: true,
             sidebar_width: Some(250.0),
             inspector_width: Some(380.0),
+            sidebar_visible: Some(false),
             inspector_visible: Some(false),
             filters_visible: Some(true),
             folders_section_expanded: Some(false),
@@ -1637,12 +1685,13 @@ mod tests {
             config.audio_table,
             AudioTablePreferences {
                 name_width: 360.0,
-                duration_width: 80.0,
+                duration_width: 96.0,
                 format_width: 82.0,
                 channels_width: 2000.0,
-                tags_width: 160.0,
+                tags_width: 200.0,
                 order_by: SortOrder::Modified,
                 descending: true,
+                ..Default::default()
             }
         );
         assert_eq!(config.language, "cn");
@@ -1707,6 +1756,34 @@ mod tests {
         .unwrap();
         let config = AppConfig::load_with_roots(directory.path().to_owned(), &[]).unwrap();
         assert!(!config.audition_play_on_single_click);
+    }
+
+    #[test]
+    fn result_paging_preferences_default_and_recover_each_invalid_field() {
+        let older: AudioTablePreferences =
+            serde_json::from_value(serde_json::json!({"name_width": 440})).unwrap();
+        assert!(older.pagination_enabled);
+        assert_eq!(older.page_size, 200);
+        for (value, expected) in [
+            (serde_json::json!(0), 1),
+            (serde_json::json!(10001), 1000),
+            (serde_json::json!(73), 73),
+            (serde_json::json!("invalid"), 200),
+        ] {
+            let parsed: AudioTablePreferences = serde_json::from_value(
+                serde_json::json!({"pagination_enabled":false,"page_size":value,"tags_width":275}),
+            )
+            .unwrap();
+            assert!(!parsed.pagination_enabled);
+            assert_eq!(parsed.page_size, expected);
+            assert_eq!(parsed.tags_width, 275.0);
+        }
+        let invalid: AudioTablePreferences = serde_json::from_value(
+            serde_json::json!({"pagination_enabled":"invalid","page_size":42}),
+        )
+        .unwrap();
+        assert!(invalid.pagination_enabled);
+        assert_eq!(invalid.page_size, 42);
     }
 
     #[test]

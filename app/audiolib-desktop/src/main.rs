@@ -5,6 +5,7 @@ mod artwork;
 #[cfg(test)]
 mod close_tests;
 mod controller;
+mod detail_presentation;
 mod diagnostics;
 mod dialogs;
 mod directory_artwork_choices;
@@ -34,6 +35,8 @@ mod updates;
 mod waveform_view;
 mod window_layout;
 mod window_repaint;
+#[cfg(test)]
+mod workbench_tests;
 use anyhow::{Context, Result};
 use audiolib_audio::{AudioEngine, PlaybackConfig};
 use audiolib_core::{DataProvider, config::AppConfig};

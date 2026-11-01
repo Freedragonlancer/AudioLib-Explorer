@@ -237,7 +237,7 @@ fn read_only_workspace_disables_task_mutations_without_blocking_search() {
     ui.invoke_begin_search_task_rename("task-1".into(), "Task 1".into(), false);
     assert!(!ui.get_search_task_rename_visible());
     ui.set_query("temporary query".into());
-    ElementHandle::find_by_accessible_label(&ui, "Search")
+    ElementHandle::find_by_accessible_label(&ui, "Run search")
         .next()
         .unwrap()
         .mock_single_click(PointerEventButton::Left);

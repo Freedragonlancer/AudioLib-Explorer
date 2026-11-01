@@ -63,10 +63,10 @@ fn table_headers_sort_and_dividers_track_absolute_pointer_with_limits_and_reset(
     press(&ui, start);
     move_to(&ui, slint::LogicalPosition::new(start.x + 35.0, start.y));
     settle();
-    near(ui.get_table_duration_width(), 115.0);
+    near(ui.get_table_duration_width(), 131.0);
     move_to(&ui, slint::LogicalPosition::new(start.x + 85.0, start.y));
     settle();
-    near(ui.get_table_duration_width(), 165.0);
+    near(ui.get_table_duration_width(), 181.0);
     release(&ui, slint::LogicalPosition::new(start.x + 85.0, start.y));
 
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
@@ -87,7 +87,7 @@ fn table_headers_sort_and_dividers_track_absolute_pointer_with_limits_and_reset(
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
     click(&ui, position);
     settle();
-    near(ui.get_table_duration_width(), 80.0);
+    near(ui.get_table_duration_width(), 96.0);
     assert_eq!(
         searches.get(),
         15,
@@ -142,7 +142,10 @@ fn resized_table_cells_follow_headers_during_horizontal_scroll_and_menu_reset() 
     let after = element(&ui, "table-name-header").absolute_position().x;
     assert!(
         after < before - 10.0,
-        "Overflowing columns must be horizontally scrollable"
+        "Overflowing columns must be horizontally scrollable: before={before}, after={after}, x={}, visible={}, total={}",
+        ui.get_table_scroll_x(),
+        ui.get_table_visible_width(),
+        ui.get_table_columns_total()
     );
     assert_cell_alignment(&ui);
 
@@ -171,10 +174,10 @@ fn resized_table_cells_follow_headers_during_horizontal_scroll_and_menu_reset() 
     );
     settle();
     near(ui.get_table_name_width(), 360.0);
-    near(ui.get_table_duration_width(), 80.0);
-    near(ui.get_table_format_width(), 100.0);
+    near(ui.get_table_duration_width(), 96.0);
+    near(ui.get_table_format_width(), 132.0);
     near(ui.get_table_channels_width(), 64.0);
-    near(ui.get_table_tags_width(), 160.0);
+    near(ui.get_table_tags_width(), 200.0);
     near(
         element(&ui, "table-name-header").absolute_position().x,
         before,
@@ -194,10 +197,13 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     ui.set_rows(ModelRc::new(rows.clone()));
     ui.show().unwrap();
     settle();
-    let before = element(&ui, "table-name-header").absolute_position().x;
+    // The first column can be fully clipped at the far end. Retain its real
+    // handle so scrolling checks do not depend on accessibility visibility.
+    let name_header = element(&ui, "table-name-header");
+    let before = name_header.absolute_position().x;
     // Saturate the scroll range: the album column extends beyond the Tags divider.
     scroll_table(&ui, "empty-result-list", -10_000.0);
-    let empty_offset = element(&ui, "table-name-header").absolute_position().x - before;
+    let empty_offset = name_header.absolute_position().x - before;
     assert!(
         empty_offset < -600.0,
         "An initially empty table must scroll"
@@ -219,7 +225,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     near(ui.get_table_tags_width(), 300.0);
     settle();
     scroll_table(&ui, "empty-result-list", -10_000.0);
-    let resized_offset = element(&ui, "table-name-header").absolute_position().x - before;
+    let resized_offset = name_header.absolute_position().x - before;
     near(resized_offset, empty_offset + 40.0);
 
     // Mutate the same model to exercise length changes, not only model replacement.
@@ -234,27 +240,18 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     };
     rows.push(row.clone());
     settle();
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        resized_offset,
-    );
+    near(name_header.absolute_position().x - before, resized_offset);
     assert_cell_alignment(&ui);
     scroll_table(&ui, "result-list", 240.0);
-    let populated_offset = element(&ui, "table-name-header").absolute_position().x - before;
+    let populated_offset = name_header.absolute_position().x - before;
     assert!(populated_offset > resized_offset + 100.0);
 
     rows.set_vec(Vec::new());
     settle();
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        populated_offset,
-    );
+    near(name_header.absolute_position().x - before, populated_offset);
     assert_eq!(ui.get_rows().row_count(), 0);
     scroll_table(&ui, "empty-result-list", -10_000.0);
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        resized_offset,
-    );
+    near(name_header.absolute_position().x - before, resized_offset);
     click(&ui, midpoint(&element(&ui, "table-tags-header")));
     settle();
     assert!(ui.get_sort_descending());
@@ -266,15 +263,12 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     rows.push(row.clone());
     settle();
     near(
-        element(&ui, "table-name-header").absolute_position().x - before,
+        name_header.absolute_position().x - before,
         resized_offset + 20.0,
     );
     assert_cell_alignment(&ui);
     scroll_table(&ui, "result-list", 10_000.0);
-    near(
-        element(&ui, "table-name-header").absolute_position().x,
-        before,
-    );
+    near(name_header.absolute_position().x, before);
     ui.window().set_size(slint::LogicalSize::new(2400.0, 900.0));
     settle();
     assert_cell_alignment(&ui);
@@ -286,16 +280,18 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     rows.set_vec(Vec::new());
     settle();
     scroll_table(&ui, "empty-result-list", -10_000.0);
-    let fractional_offset = element(&ui, "table-name-header").absolute_position().x - before;
+    let fractional_offset = name_header.absolute_position().x - before;
     assert!(fractional_offset < -600.0);
     rows.push(row.clone());
     settle();
     near(
-        element(&ui, "table-name-header").absolute_position().x - before,
+        name_header.absolute_position().x - before,
         fractional_offset,
     );
     assert_cell_alignment(&ui);
 
+    ui.set_inspector_visible(false);
+    settle();
     // Narrow columns have no horizontal range in either view. The fixed empty
     // overlay still accepts its clear action over the independent viewport.
     rows.set_vec(Vec::new());
@@ -303,10 +299,7 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     ui.set_table_tags_width(160.25);
     settle();
     scroll_table(&ui, "empty-result-list", -10_000.0);
-    near(
-        element(&ui, "table-name-header").absolute_position().x,
-        before,
-    );
+    near(name_header.absolute_position().x, before);
     let filters = Rc::new(Cell::new(0));
     let requested = filters.clone();
     ui.on_reset_filters(move || requested.set(requested.get() + 1));
@@ -321,46 +314,30 @@ fn empty_table_keeps_horizontal_extent_and_right_columns_operable_across_model_c
     rows.push(row.clone());
     settle();
     scroll_table(&ui, "result-list", -10_000.0);
-    near(
-        element(&ui, "table-name-header").absolute_position().x,
-        before,
-    );
+    near(name_header.absolute_position().x, before);
     assert_cell_alignment(&ui);
+    ui.set_inspector_visible(true);
+    settle();
     ui.set_table_name_width(1000.5);
     ui.set_table_tags_width(280.25);
     rows.set_vec(Vec::new());
     settle();
-    near(
-        element(&ui, "table-name-header").absolute_position().x,
-        before,
-    );
+    near(name_header.absolute_position().x, before);
     scroll_table_for(&ui, "empty-result-list", -10_000.0, 60);
     // The public PointerScrolled API uses Slint's immediate (Cancelled) phase.
     // Rapid model switches must preserve that input's offset in both views.
-    let moving_offset = element(&ui, "table-name-header").absolute_position().x - before;
+    let moving_offset = name_header.absolute_position().x - before;
     near(moving_offset, fractional_offset);
     rows.push(row.clone());
     settle();
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        moving_offset,
-    );
+    near(name_header.absolute_position().x - before, moving_offset);
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(60));
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        moving_offset,
-    );
+    near(name_header.absolute_position().x - before, moving_offset);
     rows.set_vec(Vec::new());
     settle();
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        moving_offset,
-    );
+    near(name_header.absolute_position().x - before, moving_offset);
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(250));
-    near(
-        element(&ui, "table-name-header").absolute_position().x - before,
-        moving_offset,
-    );
+    near(name_header.absolute_position().x - before, moving_offset);
     ui.hide().unwrap();
 }
 
@@ -434,6 +411,8 @@ fn child_table_controller_preferences() {
         tags_width: 150.0,
         order_by: SortOrder::Filename,
         descending: true,
+        pagination_enabled: false,
+        page_size: 200,
     };
     let playback = PlaybackConfig {
         volume: 0.25,
@@ -681,12 +660,50 @@ fn child_table_controller_preferences() {
                     assert_eq!(saved.playback["volume"], serde_json::json!(0.25));
                     assert!(saved.audition_play_on_single_click);
                     assert_names(&ui, (805..1005).rev());
+                    ui.set_results_pagination_enabled(true);
+                    ui.set_results_page_size(73);
+                    ui.invoke_result_paging_requested();
                     timer_phase.set(13);
+                }
+                13 => {
+                    if !page_published(&timer_controller) || ui.get_searching() { return; }
+                    assert_names(&ui, (932..1005).rev());
+                    assert_eq!(ui.get_page_label(), "1/14");
+                    assert!(!timer_controller.extend_result_window(&ui, 1));
+                    timer_controller.request_page(&ui, 1);
+                    timer_phase.set(14);
+                }
+                14 => {
+                    if !page_published(&timer_controller) || ui.get_searching() { return; }
+                    assert_names(&ui, (859..932).rev());
+                    assert_eq!(timer_controller.request.lock().unwrap().offset, 73);
+                    ui.set_sidebar_visible(false);
+                    ui.set_inspector_visible(false);
+                    ui.set_results_pagination_enabled(false);
+                    ui.invoke_result_paging_requested();
+                    timer_phase.set(15);
+                }
+                15 => {
+                    if !page_published(&timer_controller) || ui.get_searching() { return; }
+                    assert_names(&ui, (805..1005).rev());
+                    timer_controller.request_page(&ui, 1);
+                    assert_eq!(timer_controller.request.lock().unwrap().offset, 0);
+                    assert!(timer_controller.extend_result_window(&ui, 1));
+                    timer_phase.set(16);
+                }
+                16 => {
+                    if !page_published(&timer_controller) || ui.get_searching() { return; }
+                    assert_names(&ui, (605..1005).rev());
+                    let saved = AppConfig::load_in(saved_preferences.clone()).unwrap();
+                    if saved.audio_table.page_size != 73 || saved.audio_table.pagination_enabled
+                        || saved.window_layout.sidebar_visible != Some(false)
+                        || saved.window_layout.inspector_visible != Some(false) { return; }
+                    timer_phase.set(17);
                     slint::quit_event_loop().unwrap();
                 }
                 // Quit is queued; an already-ready timer callback can run once
                 // more before the event loop returns. Completion is idempotent.
-                13 => {}
+                17 => {}
                 _ => unreachable!(),
             }
         },
@@ -696,7 +713,7 @@ fn child_table_controller_preferences() {
     timer.stop();
     assert_eq!(
         phase.get(),
-        13,
+        17,
         "Sort and resize requests must save before shutdown"
     );
 
@@ -732,6 +749,10 @@ fn child_table_controller_preferences() {
     assert_eq!(saved.language, "cn");
     assert_eq!(saved.playback["volume"], serde_json::json!(0.25));
     assert!(saved.audition_play_on_single_click);
+    assert!(!saved.audio_table.pagination_enabled);
+    assert_eq!(saved.audio_table.page_size, 73);
+    assert_eq!(saved.window_layout.sidebar_visible, Some(false));
+    assert_eq!(saved.window_layout.inspector_visible, Some(false));
     assert!(
         returned_while_locked,
         "Table callback waited for configuration I/O"
@@ -820,15 +841,31 @@ fn page_published(controller: &Controller) -> bool {
 }
 
 fn assert_cell_alignment(ui: &AppWindow) {
+    let mut checked = 0;
     for column in ["name", "duration", "format", "channels", "tags"] {
-        let header = element(ui, &format!("table-{column}-header"));
-        let cell = element(ui, &format!("table-{column}-cell"));
-        near(
-            cell.absolute_position().x,
-            header.absolute_position().x + 12.0,
-        );
-        near(cell.size().width, header.size().width - 16.0);
+        let header =
+            ElementHandle::find_by_element_id(ui, &format!("AppWindow::table-{column}-header"))
+                .next();
+        let cell =
+            ElementHandle::find_by_element_id(ui, &format!("AppWindow::table-{column}-cell"))
+                .next();
+        match (header, cell) {
+            (Some(header), Some(cell)) => {
+                near(
+                    cell.absolute_position().x,
+                    header.absolute_position().x + 12.0,
+                );
+                near(cell.size().width, header.size().width - 16.0);
+                checked += 1;
+            }
+            (None, None) => {} // Both ends of a fully clipped column are inaccessible.
+            _ => panic!("Header/cell visibility differs for {column}"),
+        }
     }
+    assert!(
+        checked > 0,
+        "At least one visible data column must be checked"
+    );
 }
 
 fn scroll_table(ui: &AppWindow, viewport_id: &str, delta_x: f32) {
@@ -910,7 +947,10 @@ fn divider_drag_after_a_recent_click_keeps_the_dragged_width() {
     // default on release and persist the default.
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
-    ui.window().set_size(slint::LogicalSize::new(1800.0, 900.0));
+    // Leave the Tags divider wholly visible after widening Duration by 100 px.
+    ui.window().set_size(slint::LogicalSize::new(2200.0, 900.0));
+    // Keep the filename fixed so a Tags resize actually moves its divider.
+    ui.set_table_name_width(320.0);
     ui.show().unwrap();
     settle();
     let saves = Rc::new(Cell::new(0));
@@ -927,7 +967,7 @@ fn divider_drag_after_a_recent_click_keeps_the_dragged_width() {
     }
     release(&ui, slint::LogicalPosition::new(start.x + 100.0, start.y));
     settle();
-    near(ui.get_table_duration_width(), 180.0);
+    near(ui.get_table_duration_width(), 196.0);
     assert!(saves.get() > 0, "the dragged width must be saved");
 
     // Fine adjustment: a small drag and a quick second grab accumulate.
@@ -937,14 +977,14 @@ fn divider_drag_after_a_recent_click_keeps_the_dragged_width() {
     move_to(&ui, slint::LogicalPosition::new(start.x + 4.0, start.y));
     release(&ui, slint::LogicalPosition::new(start.x + 4.0, start.y));
     settle();
-    near(ui.get_table_tags_width(), 164.0);
+    near(ui.get_table_tags_width(), 204.0);
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(150));
     let second = slint::LogicalPosition::new(start.x + 4.0, start.y);
     press(&ui, second);
     move_to(&ui, slint::LogicalPosition::new(second.x + 6.0, second.y));
     release(&ui, slint::LogicalPosition::new(second.x + 6.0, second.y));
     settle();
-    near(ui.get_table_tags_width(), 170.0);
+    near(ui.get_table_tags_width(), 210.0);
 
     // A genuine double click (two presses without dragging) still resets.
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
@@ -953,7 +993,7 @@ fn divider_drag_after_a_recent_click_keeps_the_dragged_width() {
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
     click(&ui, position);
     settle();
-    near(ui.get_table_tags_width(), 160.0);
-    near(ui.get_table_duration_width(), 180.0);
+    near(ui.get_table_tags_width(), 200.0);
+    near(ui.get_table_duration_width(), 196.0);
     ui.hide().unwrap();
 }

@@ -245,19 +245,19 @@ fn pane_dividers_follow_absolute_pointer_movement_in_both_languages() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {
         let ui = window(chinese, 2200.0, 900.0);
-        near(ui.get_sidebar_width(), 198.0);
-        near(ui.get_inspector_width(), 320.0);
+        let original_left = ui.get_sidebar_width();
+        let original_right = ui.get_inspector_width();
         let results_before = element(&ui, "AppWindow::results-column").size().width;
 
         let left = begin_drag(&ui, divider_label(chinese, false));
         move_drag(&ui, left, 24.0);
-        near(ui.get_sidebar_preferred_width(), 222.0);
-        near(ui.get_sidebar_width(), 222.0);
+        near(ui.get_sidebar_preferred_width(), original_left + 24.0);
+        near(ui.get_sidebar_width(), original_left + 24.0);
         move_drag(&ui, left, 48.0);
-        near(ui.get_sidebar_preferred_width(), 246.0);
-        near(ui.get_sidebar_width(), 246.0);
+        near(ui.get_sidebar_preferred_width(), original_left + 48.0);
+        near(ui.get_sidebar_width(), original_left + 48.0);
         move_drag(&ui, left, 36.0);
-        near(ui.get_sidebar_preferred_width(), 234.0);
+        near(ui.get_sidebar_preferred_width(), original_left + 36.0);
         end_drag(&ui, left, 36.0);
         near(
             element(&ui, "AppWindow::results-column").size().width,
@@ -266,13 +266,13 @@ fn pane_dividers_follow_absolute_pointer_movement_in_both_languages() {
 
         let right = begin_drag(&ui, divider_label(chinese, true));
         move_drag(&ui, right, -24.0);
-        near(ui.get_inspector_preferred_width(), 344.0);
-        near(ui.get_inspector_width(), 344.0);
+        near(ui.get_inspector_preferred_width(), original_right + 24.0);
+        near(ui.get_inspector_width(), original_right + 24.0);
         move_drag(&ui, right, -48.0);
-        near(ui.get_inspector_preferred_width(), 368.0);
-        near(ui.get_inspector_width(), 368.0);
+        near(ui.get_inspector_preferred_width(), original_right + 48.0);
+        near(ui.get_inspector_width(), original_right + 48.0);
         move_drag(&ui, right, -36.0);
-        near(ui.get_inspector_preferred_width(), 356.0);
+        near(ui.get_inspector_preferred_width(), original_right + 36.0);
         end_drag(&ui, right, -36.0);
         near(
             element(&ui, "AppWindow::results-column").size().width,
@@ -509,7 +509,7 @@ fn extracted_fields_precede_collapsed_raw_metadata_and_selection_resets_disclosu
                 ),
                 (tags, "aircraft, engine, takeoff"),
             ] {
-                let field = labelled_value(&ui, label);
+                let field = reveal_source_field(&ui, label);
                 assert_eq!(field.accessible_value().as_deref(), Some(value));
                 let origin = field.absolute_position();
                 let size = field.size();
@@ -518,7 +518,7 @@ fn extracted_fields_precede_collapsed_raw_metadata_and_selection_resets_disclosu
                         && origin.x + size.width <= scroll_origin.x + scroll_size.width + 1.0
                         && origin.y >= scroll_origin.y - 1.0
                         && origin.y + size.height <= scroll_origin.y + scroll_size.height + 1.0,
-                    "{label} is clipped before scrolling at {width}x{height}: {origin:?} + {size:?}, viewport {scroll_origin:?} + {scroll_size:?}"
+                    "{label} is clipped after revealing at {width}x{height}: {origin:?} + {size:?}, viewport {scroll_origin:?} + {scroll_size:?}"
                 );
                 click_element(&ui, &field);
                 crate::ui_tests::send_keys(
@@ -771,6 +771,8 @@ fn source_tags_label(chinese: bool) -> &'static str {
 
 fn window(chinese: bool, width: f32, height: f32) -> AppWindow {
     let ui = AppWindow::new().unwrap();
+    // These regressions exercise the expanded source/annotation editor.
+    ui.set_annotation_editor_visible(true);
     ui.set_chinese(chinese);
     ui.window().set_size(slint::LogicalSize::new(width, height));
     ui.show().unwrap();
@@ -905,4 +907,31 @@ fn scroll_to_bottom(ui: &AppWindow, id: &str) {
         delta_y: -5000.0,
     });
     settle();
+}
+
+fn reveal_source_field(ui: &AppWindow, label: &str) -> ElementHandle {
+    let scroll = element(ui, "AppWindow::inspector-scroll");
+    scroll.scroll(0.0, 10_000.0);
+    settle();
+    for _ in 0..40 {
+        if let Some(field) = ElementHandle::find_by_accessible_label(ui, label)
+            .find(|field| field.accessible_value().is_some())
+        {
+            let top = scroll.absolute_position().y;
+            let bottom = top + scroll.size().height;
+            let origin = field.absolute_position();
+            if origin.y >= top && origin.y + field.size().height <= bottom {
+                return field;
+            }
+            if origin.y + field.size().height > bottom {
+                scroll.scroll(0.0, bottom - origin.y - field.size().height - 2.0);
+            } else {
+                scroll.scroll(0.0, top - origin.y + 2.0);
+            }
+        } else {
+            scroll.scroll(0.0, -64.0);
+        }
+        settle();
+    }
+    panic!("Could not reveal source field {label}");
 }

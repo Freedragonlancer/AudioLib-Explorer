@@ -17,8 +17,13 @@ fn row_position(ui: &AppWindow, name: &str) -> slint::LogicalPosition {
     let item = ElementHandle::find_by_accessible_label(ui, name)
         .find(|item| item.accessible_role() == Some(AccessibleRole::ListItem))
         .unwrap_or_else(|| panic!("Missing row: {name}"));
-    let origin = item.absolute_position();
-    slint::LogicalPosition::new(origin.x + 8.0, origin.y + item.size().height / 2.0)
+    let name = item
+        .query_descendants()
+        .match_id("AppWindow::table-name-cell")
+        .find_first()
+        .expect("Filename cell");
+    let origin = name.absolute_position();
+    slint::LogicalPosition::new(origin.x + 8.0, origin.y + name.size().height / 2.0)
 }
 
 fn click(ui: &AppWindow, position: slint::LogicalPosition) {

@@ -1112,6 +1112,20 @@ impl Controller {
         playback_name(path, remote.audio_names.get(path).map(String::as_str))
     }
 
+    /// Original resource path for a cached audition, independent of inspector selection.
+    /// Clone only the path; large embedded Metadata stays in its existing cached DTO.
+    pub(super) fn playback_source_path(&self, path: &Path) -> String {
+        self.remote
+            .lock()
+            .unwrap()
+            .audio_files
+            .get(path)
+            .map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |file| file.file_path.clone(),
+            )
+    }
+
     /// Wait off the UI thread after source/library/close admission has been closed.
     /// Sent plays finish their reply and settlement; queued unsent plays cancel.
     pub(super) fn wait_remote_plays(&self) -> Result<(), String> {
@@ -1731,6 +1745,19 @@ impl Controller {
             }
         };
         ui.set_data_source_label(label.into());
+        let indicator = if !remote {
+            1
+        } else {
+            let state = self.remote.lock().unwrap();
+            if state.last_error.is_some() {
+                3
+            } else if state.live_roots.is_some() {
+                2
+            } else {
+                0
+            }
+        };
+        ui.set_data_source_state(indicator);
         if !ui.get_ds_syncing() {
             let pending = self.remote.lock().unwrap().pending_sync.clone();
             ui.set_ds_sync_paused(pending.as_ref().is_some_and(|p| p.manual_paused));

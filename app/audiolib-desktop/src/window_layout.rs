@@ -24,6 +24,9 @@ pub(crate) fn restore_before_show(ui: &AppWindow, layout: &WindowLayoutPreferenc
     if let Some(visible) = layout.inspector_visible {
         ui.set_inspector_visible(visible);
     }
+    if let Some(visible) = layout.sidebar_visible {
+        ui.set_sidebar_visible(visible);
+    }
     if layout.maximized {
         window.set_maximized(true);
     }
@@ -33,6 +36,12 @@ pub(crate) fn restore_before_show(ui: &AppWindow, layout: &WindowLayoutPreferenc
 /// scale is applied because widths are stored at interface scale 100%.
 pub(crate) fn restore_panes(ui: &AppWindow, layout: &WindowLayoutPreferences) {
     let scale = interface_scale(ui);
+    if let Some(visible) = layout.sidebar_visible {
+        ui.set_sidebar_visible(visible);
+    }
+    if let Some(visible) = layout.inspector_visible {
+        ui.set_inspector_visible(visible);
+    }
     if let Some(width) = layout.sidebar_width {
         ui.set_sidebar_preferred_width(width * scale);
     }
@@ -120,6 +129,7 @@ pub(crate) fn capture(
     layout.sidebar_width = Some(ui.get_sidebar_preferred_width() / scale);
     layout.inspector_width = Some(ui.get_inspector_preferred_width() / scale);
     layout.inspector_visible = Some(ui.get_inspector_visible());
+    layout.sidebar_visible = Some(ui.get_sidebar_visible());
     layout.folders_section_expanded = Some(ui.get_folders_section_expanded());
     layout.libraries_section_expanded = Some(ui.get_libraries_section_expanded());
     layout.folders_section_ratio = Some(ui.get_folders_section_ratio());
@@ -150,6 +160,7 @@ mod tests {
             let saved = WindowLayoutPreferences {
                 sidebar_width: Some(260.0),
                 inspector_width: Some(340.0),
+                sidebar_visible: Some(false),
                 inspector_visible: Some(false),
                 filters_visible: Some(true),
                 folders_section_expanded: Some(false),
@@ -162,10 +173,12 @@ mod tests {
             assert_eq!(ui.get_sidebar_preferred_width(), 260.0 * scale);
             // A saved filter page is not restored: every start shows sound details.
             assert!(!ui.get_inspector_visible() && !ui.get_filters_visible());
+            assert!(!ui.get_sidebar_visible());
             let captured = capture(&ui, &saved);
             assert_eq!(captured.sidebar_width, Some(260.0));
             assert_eq!(captured.inspector_width, Some(340.0));
             assert_eq!(captured.inspector_visible, Some(false));
+            assert_eq!(captured.sidebar_visible, Some(false));
             assert_eq!(captured.filters_visible, Some(true));
             assert_eq!(captured.folders_section_expanded, Some(false));
             assert_eq!(captured.libraries_section_expanded, Some(true));

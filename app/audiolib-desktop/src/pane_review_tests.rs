@@ -10,11 +10,13 @@ fn pane_keyboard_arrows_resize_in_visual_direction_and_obey_limits() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {
         let ui = window(chinese);
+        let original_left = ui.get_sidebar_preferred_width();
+        let original_right = ui.get_inspector_preferred_width();
         click_divider(&ui, false);
         key(&ui, slint::platform::Key::RightArrow);
-        near(ui.get_sidebar_preferred_width(), 214.0);
+        near(ui.get_sidebar_preferred_width(), original_left + 16.0);
         key(&ui, slint::platform::Key::LeftArrow);
-        near(ui.get_sidebar_preferred_width(), 198.0);
+        near(ui.get_sidebar_preferred_width(), original_left);
         for _ in 0..30 {
             key(&ui, slint::platform::Key::RightArrow);
         }
@@ -26,9 +28,9 @@ fn pane_keyboard_arrows_resize_in_visual_direction_and_obey_limits() {
 
         click_divider(&ui, true);
         key(&ui, slint::platform::Key::LeftArrow);
-        near(ui.get_inspector_preferred_width(), 336.0);
+        near(ui.get_inspector_preferred_width(), original_right + 16.0);
         key(&ui, slint::platform::Key::RightArrow);
-        near(ui.get_inspector_preferred_width(), 320.0);
+        near(ui.get_inspector_preferred_width(), original_right);
         for _ in 0..30 {
             key(&ui, slint::platform::Key::LeftArrow);
         }

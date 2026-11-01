@@ -1,7 +1,7 @@
 // app/audiolib-desktop/ui/theme.slint
 import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
 
-// Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
+// Smoke-grey surfaces, teal interaction accents and restrained warm playback tones.
 export global Theme {
     // GUI scale factor (PR1: stays 1.0; nothing reads or writes it from Rust yet).
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
@@ -26,39 +26,64 @@ export global Theme {
     // Window default text size (was `default-font-size: 12px`).
     out property <length> ui-font-size: Theme.font(12);
     // Result list file-name cell (was `font-size: 12px`).
-    out property <length> list-font-size: Theme.list-font(12);
+    out property <length> list-font-size: Theme.list-font(14);
     // Palette tokens. The values here are the default theme; Rust (src/theme.rs) sets
     // them from the selected theme at startup and when the Theme setting changes.
-    in-out property <color> bg: #181b20;
-    in-out property <color> panel: #20242a;
-    in-out property <color> raised: #2a3037;
-    in-out property <color> hover: #353d45;
-    in-out property <color> border: #353d45;
-    in-out property <color> strong-border: #697581;
-    in-out property <color> ink: #d9dee3;
-    in-out property <color> dim: #aab2bd;
-    in-out property <color> muted: #95a0ac;
-    in-out property <color> accent: #8faea6;
-    in-out property <color> accent-hover: #a8c3bb;
-    in-out property <color> on-accent: #202b28;
-    in-out property <color> selected: #2b3a38;
-    in-out property <color> checked: #354744;
-    in-out property <color> alternate: #22282e;
-    in-out property <color> warning: #c3b48e;
+    in-out property <color> bg: #202226;
+    in-out property <color> panel: #24272b;
+    in-out property <color> raised: #393c43;
+    in-out property <color> hover: #34383e;
+    in-out property <color> border: #383c43;
+    in-out property <color> strong-border: #626873;
+    in-out property <color> ink: #ecebe7;
+    in-out property <color> dim: #adb0b7;
+    in-out property <color> muted: #858b94;
+    in-out property <color> accent: #2bbfbd;
+    in-out property <color> accent-hover: #66d2c9;
+    in-out property <color> mint: #79d5bc;
+    in-out property <color> apricot: #efc4a5;
+    in-out property <color> coral: #ea8b75;
+    in-out property <color> on-accent: #102a2a;
+    in-out property <color> selected: #293e40;
+    in-out property <color> checked: #303c3e;
+    in-out property <color> alternate: #272a2f;
+    in-out property <color> warning: #d6ba98;
     // Segmented switches (page tabs, panel toggles): a recessed track below `panel` and
     // a raised surface for the selected segment, so switches never read as buttons.
-    in-out property <color> trough: #15181c;
-    in-out property <color> segment: #3a434c;
+    in-out property <color> trough: #1e2024;
+    in-out property <color> segment: #3b4148;
     // Exclusion marks (excluded filter tags): restrained like `accent`, readable on `panel`.
-    in-out property <color> danger: #cf9696;
-    in-out property <color> danger-surface: #3a2a2d;
-    in-out property <color> player: #232a30;
-    in-out property <color> player-border: #465059;
-    in-out property <color> tooltip: #14171c;
+    in-out property <color> danger: #df9e98;
+    in-out property <color> danger-surface: #403033;
+    in-out property <color> player: #292c31;
+    in-out property <color> player-border: #41454c;
+    in-out property <color> tooltip: #191b1f;
     in-out property <color> overlay: #000000a8;
-    // Not themeable. Matches the pixel renderer. Frequency hues and noise-to-black are audio data.
+    // Localised warm-grey shading follows the reference's dark, nearly flat
+    // surfaces. Small vector gradients scale with each pane without lighting text.
+    out property <image> toolbar-backdrop: @image-url("surfaces/toolbar.svg");
+    out property <image> rail-backdrop: @image-url("surfaces/rail.svg");
+    out property <image> library-backdrop: @image-url("surfaces/library.svg");
+    out property <image> inspector-backdrop: @image-url("surfaces/inspector.svg");
+    out property <image> player-backdrop: @image-url("surfaces/player.svg");
+    out property <image> transport-backdrop: @image-url("surfaces/transport.svg");
+    out property <image> tab-indicator: @image-url("surfaces/tab-indicator.svg");
+    out property <color> toolbar-surface: #28282a;
+    out property <color> rail-surface: #2a2b2e;
+    out property <color> library-surface: #202224;
+    out property <color> inspector-surface: #202224;
+    out property <color> player-surface: #202225;
+    out property <color> table-surface: #1d1f21;
+    out property <color> table-alternate: #1f2123;
+    out property <brush> control-surface: @linear-gradient(180deg, #2e3033 0%, #25272a 100%);
+    out property <brush> control-hover-surface: @linear-gradient(180deg, #373a3d 0%, #2c3033 100%);
+    out property <brush> table-header-surface: @linear-gradient(180deg, #26282a 0%, #212325 100%);
+    out property <brush> table-toolbar-surface: @linear-gradient(180deg, #26282a 0%, #202224 100%);
+    out property <brush> table-footer-surface: @linear-gradient(180deg, #202224 0%, #202224 100%);
+    out property <brush> tab-surface: @linear-gradient(180deg, #343537 0%, #272a2c 100%);
+    // The spectral canvas and frequency colours are audio data. The neutral mask uses the panel surface.
     out property <color> spectral-canvas: #849094;
-    out property <color> normal-canvas: #1d2328;
+    out property <color> normal-canvas: transparent;
     // Motion. Transitions stay short and ease out; nothing bounces or travels far.
     // `motion` scales every duration below: 1 keeps the designed timing, 0 turns
     // transitions off (state changes then apply immediately).

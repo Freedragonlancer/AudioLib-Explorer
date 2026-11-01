@@ -43,6 +43,8 @@ pub struct WindowLayoutPreferences {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inspector_width: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_visible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub inspector_visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters_visible: Option<bool>,
@@ -93,6 +95,7 @@ impl WindowLayoutPreferences {
             maximized: flag("maximized").unwrap_or(false),
             sidebar_width: number("sidebar_width").map(|value| value as f32),
             inspector_width: number("inspector_width").map(|value| value as f32),
+            sidebar_visible: flag("sidebar_visible"),
             inspector_visible: flag("inspector_visible"),
             filters_visible: flag("filters_visible"),
             folders_section_expanded: flag("folders_section_expanded"),
@@ -130,6 +133,7 @@ impl WindowLayoutPreferences {
             maximized: self.maximized,
             sidebar_width: pane(self.sidebar_width, SIDEBAR_WIDTH_RANGE),
             inspector_width: pane(self.inspector_width, INSPECTOR_WIDTH_RANGE),
+            sidebar_visible: self.sidebar_visible,
             inspector_visible: self.inspector_visible,
             filters_visible: self.filters_visible,
             folders_section_expanded: self.folders_section_expanded,
@@ -257,6 +261,7 @@ mod tests {
             maximized: true,
             sidebar_width: Some(240.0),
             inspector_width: Some(360.0),
+            sidebar_visible: Some(false),
             inspector_visible: Some(false),
             filters_visible: Some(true),
             folders_section_expanded: Some(false),

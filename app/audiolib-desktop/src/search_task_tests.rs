@@ -113,6 +113,7 @@ fn fixture() -> Fixture {
             "language": "en",
             "audition_play_on_single_click": false,
             "max_search_tasks": 6,
+            "audio_table": {"pagination_enabled": false},
             "playback": playback,
         }))
         .unwrap(),
@@ -427,6 +428,78 @@ fn workspace_failures_block_library_switch(fixture: &Fixture) {
 #[test]
 fn task_switch_preserves_search_drafts_navigation_and_selection_without_loading_audio() {
     isolated("child_task_state_isolation");
+}
+
+#[test]
+fn paging_changes_invalidate_task_caches_and_apply_to_restored_tasks() {
+    isolated("child_paging_changes");
+}
+
+#[test]
+#[ignore = "launched by isolated parent"]
+fn child_paging_changes() {
+    let fixture = fixture();
+    let first = active_id(&fixture.ui);
+    fixture.controller.create_search_task();
+    let controller = fixture.controller.clone();
+    wait_for(&fixture.ui, move |ui| {
+        fully_published(&controller)
+            && !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+    });
+    let second = active_id(&fixture.ui);
+    search(&fixture, "gore", 3);
+    fixture.ui.set_results_page_size(2);
+    fixture.ui.set_results_pagination_enabled(true);
+    fixture.ui.invoke_result_paging_requested();
+    let controller = fixture.controller.clone();
+    wait_for(&fixture.ui, move |ui| {
+        fully_published(&controller) && !ui.get_searching() && ui.get_rows().row_count() == 2
+    });
+    assert_eq!(fixture.ui.get_page_label(), "1/2");
+    assert!(!fixture.controller.extend_result_window(&fixture.ui, 1));
+    fixture.controller.restore_search_task(&first);
+    let controller = fixture.controller.clone();
+    wait_for(&fixture.ui, move |ui| {
+        fully_published(&controller)
+            && !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && ui.get_rows().row_count() == 2
+    });
+    fixture.controller.request_page(&fixture.ui, 1);
+    let controller = fixture.controller.clone();
+    wait_for(&fixture.ui, move |ui| {
+        !ui.get_searching()
+            && fully_published(&controller)
+            && controller.request.lock().unwrap().offset == 2
+    });
+    assert_eq!(fixture.ui.get_rows().row_count(), 2);
+    // A one-letter editor draft defers searching but must still discard the
+    // old page position when the application's paging policy changes.
+    fixture.ui.set_query("g".into());
+    fixture.ui.set_results_pagination_enabled(false);
+    fixture.ui.invoke_result_paging_requested();
+    assert_eq!(fixture.controller.request.lock().unwrap().offset, 0);
+    assert!(!fixture.ui.get_searching());
+    fixture.ui.set_query("".into());
+    fixture.ui.invoke_search_requested(true);
+    let controller = fixture.controller.clone();
+    wait_for(&fixture.ui, move |ui| {
+        !ui.get_searching() && fully_published(&controller) && ui.get_rows().row_count() == 4
+    });
+    fixture.controller.restore_search_task(&second);
+    let controller = fixture.controller.clone();
+    wait_for(&fixture.ui, move |ui| {
+        !ui.get_searching()
+            && !ui.get_search_workspace_loading()
+            && !ui.get_task_restoring()
+            && fully_published(&controller)
+            && ui.get_rows().row_count() == 3
+    });
+    assert!(!fixture.ui.get_results_pagination_enabled());
+    assert_eq!(fixture.ui.get_results_page_size(), 2);
+    finish(&fixture);
 }
 
 #[test]

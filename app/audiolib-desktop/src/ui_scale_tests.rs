@@ -319,30 +319,30 @@ fn list_font_size_changes_only_list_rows_and_row_height() {
     // Defaults (13 px) keep the design sizes.
     apply_font_sizes(&ui, 13, 13);
     assert_eq!(theme.get_ui_font_size(), 12.0);
-    assert_eq!(theme.get_list_font_size(), 12.0);
-    assert_eq!(ui.get_result_row_height_px(), 22.0);
+    assert_eq!(theme.get_list_font_size(), 14.0);
+    assert_eq!(ui.get_result_row_height_px(), 32.0);
     // A larger list font enlarges list text and rows only.
     apply_font_sizes(&ui, 13, 20);
     assert_eq!(ui.get_list_font_px(), 20);
-    assert_eq!(theme.get_list_font_size(), 18.0); // round(12 * 20 / 13)
+    assert_eq!(theme.get_list_font_size(), 22.0); // round(14 * 20 / 13)
     assert_eq!(theme.get_ui_font_size(), 12.0);
-    assert_eq!(ui.get_result_row_height_px(), 34.0); // round(22 * 20 / 13)
+    assert_eq!(ui.get_result_row_height_px(), 49.0); // round(32 * 20 / 13)
     // A smaller list font never shrinks the rows below the design height.
     apply_font_sizes(&ui, 13, 10);
-    assert_eq!(theme.get_list_font_size(), 9.0);
-    assert_eq!(ui.get_result_row_height_px(), 22.0);
+    assert_eq!(theme.get_list_font_size(), 11.0);
+    assert_eq!(ui.get_result_row_height_px(), 32.0);
     // The interface font does not touch list rows.
     apply_font_sizes(&ui, 24, 13);
     assert_eq!(theme.get_ui_font_size(), 22.0); // round(12 * 24 / 13)
-    assert_eq!(theme.get_list_font_size(), 12.0);
-    assert_eq!(ui.get_result_row_height_px(), 22.0);
+    assert_eq!(theme.get_list_font_size(), 14.0);
+    assert_eq!(ui.get_result_row_height_px(), 32.0);
     // Font sizes combine with the interface scale in whole pixels; out of range clamps.
     theme.set_ui_scale(1.5);
     apply_font_sizes(&ui, 0, 99);
     assert_eq!((ui.get_ui_font_px(), ui.get_list_font_px()), (10, 24));
     assert_eq!(theme.get_ui_font_size(), 14.0); // round(12 * 1.5 * 10 / 13)
-    assert_eq!(theme.get_list_font_size(), 33.0); // round(12 * 1.5 * 24 / 13)
-    assert_eq!(ui.get_result_row_height_px(), 61.0); // round(22 * 1.5 * 24 / 13)
+    assert_eq!(theme.get_list_font_size(), 39.0); // round(14 * 1.5 * 24 / 13)
+    assert_eq!(ui.get_result_row_height_px(), 89.0); // round(32 * 1.5 * 24 / 13)
     ui.show().unwrap();
     save_snapshot(&ui, "list-font-24-x1.5-1080x700.png");
     ui.hide().unwrap();
@@ -382,7 +382,7 @@ fn default_theme_applied_from_rust_is_pixel_identical() {
 #[test]
 fn player_bar_states_render_in_both_languages_and_small_scaled_windows() {
     use crate::controller::{publish_playback_progress, publish_player_state, publish_wave_target};
-    use crate::waveform_view::{WaveView, render_waveform};
+    use crate::waveform_view::{WaveView, render_waveform, render_waveform_mask};
     use audiolib_audio::{AudioBackend, PlaybackState, PlaybackStatus, WaveformData, WaveformPeak};
     use std::time::Duration;
 
@@ -415,6 +415,10 @@ fn player_bar_states_render_in_both_languages_and_small_scaled_windows() {
     let pixels = render_waveform(&waveform, 1024, 120, WaveView::default());
     let waveform_image = slint::Image::from_rgba8(
         slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&pixels, 1024, 120),
+    );
+    let mask = render_waveform_mask(&waveform, 1024, 120, WaveView::default());
+    let waveform_mask = slint::Image::from_rgba8(
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&mask, 1024, 120),
     );
     let cases = [
         ("loading", PlaybackState::Loading),
@@ -457,6 +461,7 @@ fn player_bar_states_render_in_both_languages_and_small_scaled_windows() {
                 ui.set_waveform_progress(if name == "partial" { 0.35 } else { 1.0 });
                 if waveform_ready {
                     ui.set_waveform_image(waveform_image.clone());
+                    ui.set_waveform_mask(waveform_mask.clone());
                 }
                 let status = PlaybackStatus {
                     state,

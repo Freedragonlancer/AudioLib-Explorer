@@ -7,12 +7,18 @@
   "pregenerate_list_waveforms": true,
   "hold_list_waveform_batches_after_audition": false,
   "max_search_tasks": 6,
+  "window_layout": {
+    "sidebar_visible": true,
+    "inspector_visible": true
+  },
   "audio_table": {
+    "pagination_enabled": true,
+    "page_size": 200,
     "name_width": 360.0,
-    "duration_width": 80.0,
-    "format_width": 100.0,
+    "duration_width": 96.0,
+    "format_width": 132.0,
     "channels_width": 64.0,
-    "tags_width": 160.0,
+    "tags_width": 200.0,
     "order_by": "relevance",
     "descending": false
   },
