@@ -936,7 +936,7 @@ export component AppWindow inherits Window {
     // Both workbench presentations keep their own native scroll owners. Transfer
     // the same record anchor before changing their different result-row heights.
     private property <bool> workbench-switch-pending: false;
-    private property <bool> workbench-switch-first-applied: false;
+    private property <bool> task-viewport-first-applied: false;
     private property <int> workbench-switch-epoch: 0;
     private property <float> workbench-switch-result-row: 0;
     private property <float> workbench-switch-result-x: 0;
@@ -946,8 +946,10 @@ export component AppWindow inherits Window {
     private property <length> workbench-switch-tabs-x: 0px;
     private property <length> workbench-switch-main-x: 0px;
     private property <length> workbench-switch-main-y: 0px;
+    private property <int> workbench-user-reveal-epoch: 0;
+    private property <int> workbench-user-reveal-row: -1;
     public function prepare-workbench-switch() {
-        root.workbench-switch-first-applied = false;
+        root.task-viewport-first-applied = false;
         root.workbench-switch-result-row = root.task-result-scroll-y / max(1, root.task-result-row-height);
         root.workbench-switch-result-x = root.task-result-scroll-x;
         root.workbench-switch-folder-y = root.task-folder-scroll-y;
@@ -974,9 +976,47 @@ export component AppWindow inherits Window {
             root.workbench-switch-epoch = root.result-scroll-epoch;
         }
     }
+    // An explicit user selection or a source reset supersedes the presentation
+    // restore. A newer saved-task restore owns its own epoch and must survive.
+    function cancel-workbench-switch() {
+        workbench-user-reveal-timer.running = false;
+        root.workbench-user-reveal-row = -1;
+        let owns-restore = root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch;
+        root.workbench-switch-pending = false;
+        if owns-restore {
+            root.task-viewport-first-applied = false;
+            task-viewport-timer.running = false;
+            root.result-scroll-epoch += 1;
+            root.task-viewport-pending = false;
+            root.task-restoring = false;
+            root.preserve-result-scroll = false;
+        }
+    }
+    function user-row-clicked(index: int, toggle: bool, range: bool, play: bool) {
+        let incoming-view = (root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch) || workbench-user-reveal-timer.running;
+        root.cancel-workbench-switch();
+        root.row-clicked(index, toggle, range, play);
+        if incoming-view { root.schedule-workbench-user-reveal(); }
+    }
+    function user-selection-step(step: int) {
+        let incoming-view = (root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch) || workbench-user-reveal-timer.running;
+        root.cancel-workbench-switch();
+        root.selection-step-requested(step);
+        if incoming-view { root.schedule-workbench-user-reveal(); }
+    }
+    function schedule-workbench-user-reveal() {
+        if root.selected-row >= 0 && root.selected-row < root.rows.length {
+            root.workbench-user-reveal-epoch = root.result-scroll-epoch;
+            root.workbench-user-reveal-row = root.selected-row;
+            workbench-user-reveal-timer.running = true;
+            workbench-user-reveal-timer.restart();
+        }
+    }
     // Call after replacing the task's raw fields and models. A one-shot layout turn
     // keeps ListView's temporary empty range from discarding the restored position.
     public function restore-search-task-viewport(result-y: float, result-x: float, folder-y: float, filter-y: float, inspector-y: float) {
+        workbench-user-reveal-timer.running = false;
+        root.workbench-user-reveal-row = -1;
         root.preserve-result-scroll = true;
         root.result-user-scrolling = false;
         root.result-scroll-epoch += 1;
@@ -984,6 +1024,7 @@ export component AppWindow inherits Window {
         root.result-scroll-remote = root.remote-mode;
         root.task-restoring = true;
         root.task-viewport-pending = true;
+        root.task-viewport-first-applied = false;
         root.task-wanted-result-y = result-y;
         root.task-wanted-result-x = result-x;
         root.task-wanted-folder-y = folder-y;
@@ -994,8 +1035,8 @@ export component AppWindow inherits Window {
     }
     // Drop a viewport armed for the other source and the shared ListView's scroll offset.
     public function reset-result-list-scroll() {
-        root.workbench-switch-pending = false;
-        root.workbench-switch-first-applied = false;
+        root.cancel-workbench-switch();
+        root.task-viewport-first-applied = false;
         root.result-user-scrolling = false;
         root.preserve-result-scroll = false;
         root.result-scroll-epoch += 1;
@@ -1048,6 +1089,16 @@ export component AppWindow inherits Window {
     private property <length> classic-result-row-height: round(22 * Theme.ui-scale * Theme.list-row-factor) * 1px;
     private property <length> studio-result-row-height: round(32 * Theme.ui-scale * Theme.list-row-factor) * 1px;
     private property <length> result-row-height: Theme.modern-style ? root.studio-result-row-height : root.classic-result-row-height;
+    changed result-row-height => {
+        if root.task-viewport-pending && root.result-scroll-apply-epoch == root.result-scroll-epoch {
+            if root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch {
+                root.task-wanted-result-y = root.workbench-switch-result-row * root.task-result-row-height;
+            }
+            // A font/scale change can invalidate the virtualizer's first layout
+            // just like activating the incoming workbench does.
+            root.task-viewport-first-applied = false;
+        }
+    }
     in-out property <int> selected-folder: -1;
     in property <string> selected-folder-path: "";
     in property <[AudioRow]> rows;
@@ -1143,8 +1194,8 @@ export component AppWindow inherits Window {
     out property <length> main-viewport-width: (Theme.modern-style ? studio-main-scroll.viewport-width : main-scroll.viewport-width);
     out property <length> results-panel-height: (Theme.modern-style ? studio-results-panel.height : results-panel.height);
     out property <length> results-panel-min-height: Theme.ui-scale > 1 ? round(240 * Theme.ui-scale) * 1px : 0px;
-    out property <length> main-last-bottom: (Theme.modern-style ? audition.absolute-position.y + audition.height : status-row.absolute-position.y + status-row.height);
-    out property <length> main-last-right: (Theme.modern-style ? audition.absolute-position.x + audition.width : status-row.absolute-position.x + status-row.width);
+    out property <length> main-last-bottom: (Theme.modern-style ? studio-audition.absolute-position.y + studio-audition.height : status-row.absolute-position.y + status-row.height);
+    out property <length> main-last-right: (Theme.modern-style ? studio-audition.absolute-position.x + studio-audition.width : status-row.absolute-position.x + status-row.width);
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
     out property <length> settings-panel-bottom: settings-panel.absolute-position.y + settings-panel.height;
     out property <length> settings-last-bottom: root.settings-page == 1 ? appearance-buttons.absolute-position.y + appearance-buttons.height : audio-buttons.absolute-position.y + audio-buttons.height;
@@ -1285,7 +1336,9 @@ export component AppWindow inherits Window {
     in-out property <bool> audition-play-on-single-click: false;
     callback single-click-play-requested(bool);
     in-out property <float> volume-db: -1.9;
-    out property <bool> volume-adjusting: audition.volume-adjusting;
+    private property <float> audition-premute-db: -12;
+    private property <bool> audition-show-remaining: false;
+    out property <bool> volume-adjusting: Theme.modern-style ? studio-audition.volume-adjusting : audition.volume-adjusting;
     in property <string> volume-label: "-1.9 dB";
     in property <float> view-start: 0;
     in property <float> view-end: 0;
@@ -1326,9 +1379,15 @@ export component AppWindow inherits Window {
     in property <float> waveform-progress: 1;
     // The player bar marks rejected Pitch / Rate input: bit 1 Pitch, bit 2 Rate.
     callback audition-input-rejected(int);
-    audition-input-rejected(fields) => { audition.reject-input(fields); }
+    audition-input-rejected(fields) => {
+        if Theme.modern-style { studio-audition.reject-input(fields); }
+        else { audition.reject-input(fields); }
+    }
     // Called before replacing the presenter, while the old event receiver exists.
-    public function clear-audition-input-feedback() { audition.clear-input-feedback(); }
+    public function clear-audition-input-feedback() {
+        audition.clear-input-feedback();
+        studio-audition.clear-input-feedback();
+    }
     in property <bool> playback-smooth: false;
     in property <string> playback-clock: "";
     in property <float> confirmed-playback-rate: 1;
@@ -2087,10 +2146,31 @@ export component AppWindow inherits Window {
             }
         }
     }
+    // The incoming virtual list can anchor its first jump during layout. A
+    // takeover therefore repeats only the explicit selection's reveal once.
+    workbench-user-reveal-timer := Timer {
+        running: false; interval: 16ms;
+        triggered => {
+            self.running = false;
+            if root.workbench-user-reveal-row == root.selected-row && root.workbench-user-reveal-row >= 0 && root.workbench-user-reveal-epoch == root.result-scroll-epoch && !root.task-restoring && !root.background-blocked {
+                root.reveal-selected-row();
+                root.report-result-window();
+            }
+            root.workbench-user-reveal-row = -1;
+        }
+    }
     task-viewport-timer := Timer {
         running: false; interval: 16ms;
         triggered => {
             self.running = false;
+            // Stopping a native timer cannot revoke a callback already queued
+            // by the event loop. Reject it before touching any current sidebar.
+            if !root.task-viewport-pending || root.result-scroll-apply-epoch != root.result-scroll-epoch || root.result-scroll-remote != root.remote-mode {
+                return;
+            }
+            if root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch {
+                root.task-wanted-result-y = root.workbench-switch-result-row * root.task-result-row-height;
+            }
             let content-height = max(0, root.rows.length) * root.result-row-height;
             if root.task-viewport-pending && root.result-scroll-apply-epoch == root.result-scroll-epoch && root.result-scroll-remote == root.remote-mode && content-height > (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height) && (Theme.modern-style ? studio-result-list.viewport-height : result-list.viewport-height) < content-height - 1px {
                 // Wait for the arriving virtual repeater to measure its range;
@@ -2106,11 +2186,11 @@ export component AppWindow inherits Window {
                 root.table-viewport-x = clamp(root.task-wanted-result-x * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-width : result-list.visible-width) - root.table-content-size), 0px);
                 root.sync-table-viewport();
             }
-            if root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch && !root.workbench-switch-first-applied {
+            if !root.task-viewport-first-applied {
                 // A newly visible native ListView first anchors its virtual rows
                 // to the first item. Reapply the fractional row offset after one
                 // layout turn, before exposing a completed restore or prefetch.
-                root.workbench-switch-first-applied = true;
+                root.task-viewport-first-applied = true;
                 self.running = true;
                 self.restart();
                 return;
@@ -2131,6 +2211,9 @@ export component AppWindow inherits Window {
                         task-tabs-scroll.viewport-x = clamp(root.workbench-switch-tabs-x, min(0px, task-tabs-scroll.visible-width - task-tabs-scroll.viewport-width), 0px);
                         main-scroll.viewport-x = clamp(root.workbench-switch-main-x, min(0px, main-scroll.visible-width - main-scroll.viewport-width), 0px);
                         main-scroll.viewport-y = clamp(root.workbench-switch-main-y, min(0px, main-scroll.visible-height - main-scroll.viewport-height), 0px);
+                    }
+                    if root.active-search-task-index >= 0 && root.active-search-task-index < root.search-tasks.length {
+                        root.reveal-search-task(root.active-search-task-index);
                     }
                 }
                 root.workbench-switch-pending = false;
@@ -2768,8 +2851,8 @@ main-scroll := ScrollView {
                                 if event.text == Key.DownArrow || event.text == Key.UpArrow {
                                     let step = event.text == Key.DownArrow ? 1 : -1;
                                     if event.modifiers.shift && root.rows.length > 0 {
-                                        root.row-clicked(clamp(root.selected-row + step, 0, root.rows.length - 1), event.modifiers.control, true, false);
-                                    } else { root.selection-step-requested(step); }
+                                        root.user-row-clicked(clamp(root.selected-row + step, 0, root.rows.length - 1), event.modifiers.control, true, false);
+                                    } else { root.user-selection-step(step); }
                                     return accept;
                                 }
                                 if event.text == Key.PageUp || event.text == Key.PageDown {
@@ -2778,12 +2861,12 @@ main-scroll := ScrollView {
                                         if event.text == Key.PageDown && root.can-next { root.page-requested(1); }
                                     } else if root.rows.length > 0 {
                                         let step = max(1, floor(result-list.visible-height / root.classic-result-row-height));
-                                        root.row-clicked(clamp(root.selected-row + (event.text == Key.PageDown ? step : -step), 0, root.rows.length - 1), event.modifiers.control, event.modifiers.shift, false);
+                                        root.user-row-clicked(clamp(root.selected-row + (event.text == Key.PageDown ? step : -step), 0, root.rows.length - 1), event.modifiers.control, event.modifiers.shift, false);
                                     }
                                     return accept;
                                 }
                                 if (event.text == Key.Home || event.text == Key.End) && root.rows.length > 0 {
-                                    root.row-clicked(event.text == Key.Home ? 0 : root.rows.length - 1, event.modifiers.control, event.modifiers.shift, false); return accept;
+                                    root.user-row-clicked(event.text == Key.Home ? 0 : root.rows.length - 1, event.modifiers.control, event.modifiers.shift, false); return accept;
                                 }
                                 if event.text == " " && root.audio-ready { root.play-requested(); return accept; }
                                 if event.text == Key.Return && root.selected-row >= 0 { root.audition-requested(root.selected-row); return accept; }
@@ -2802,6 +2885,7 @@ main-scroll := ScrollView {
                                 changed viewport-x => { if !Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.table-viewport-x = self.viewport-x; } } }
                                 changed viewport-y => { if !Theme.modern-style { root.track-result-scroll(); } }
                                 scrolled => {
+                                    root.cancel-workbench-switch();
                                     // Real input takes over from a pending programmatic restore.
                                     if root.task-viewport-pending {
                                         root.result-scroll-epoch += 1;
@@ -2866,7 +2950,7 @@ main-scroll := ScrollView {
                                         }
                                         clicked => {
                                             results-focus.focus();
-                                            root.row-clicked(index, self.toggle-selection, self.range-selection, root.audition-play-on-single-click && !row.missing && !self.toggle-selection && !self.range-selection && !self.drag-sent);
+                                            root.user-row-clicked(index, self.toggle-selection, self.range-selection, root.audition-play-on-single-click && !row.missing && !self.toggle-selection && !self.range-selection && !self.drag-sent);
                                         }
                                         // Slint also emits clicked on the second release. In single-click
                                         // mode that click already owns playback, so do not request it again.
@@ -3124,7 +3208,53 @@ main-scroll := ScrollView {
             }
         }
 
-        classic-player-slot := Rectangle { height: (root.short-layout ? 190px : 222px) * Theme.ui-scale; }
+        audition := AuditionPanel {
+            active: !Theme.modern-style;
+            premute-db <=> root.audition-premute-db;
+            show-remaining <=> root.audition-show-remaining;
+            height: (root.short-layout ? 190px : 222px) * Theme.ui-scale;
+            expanded: root.audition-expanded;
+            narrow: root.content-width < 1440px * Theme.ui-scale;
+            waveform-mask: root.waveform-mask;
+            expanded-requested(value) => {
+                root.audition-expanded = value;
+                root.audition-preferred-height = (value ? 260px : 88px) * Theme.ui-scale;
+            }
+            compact: root.short-layout; spectral: root.peak-mode == 1;
+            play-on-single-click: root.audition-play-on-single-click;
+            chinese: root.chinese; ready: root.audio-ready && !root.selected-missing && !root.library-busy;
+            missing: root.selected-missing; busy: root.library-busy;
+            state: root.playback-state; error-text: root.playback-error; buffering: root.playback-buffering;
+            waveform-progress: root.waveform-progress;
+            output-backend: root.output-backend; output-rate: root.output-rate; output-xruns: root.output-xruns;
+            target-start: root.wave-target-start; target-end: root.wave-target-end;
+            relink-enabled: !root.closing && !root.library-busy && root.has-selection;
+            playing: root.playing; smooth-progress: root.playback-smooth; progress-clock: root.playback-clock; playback-rate: root.confirmed-playback-rate; waveform: root.waveform-image; waveform-ready: root.waveform-ready;
+            name: root.playback-name; info: root.waveform-info; output: root.output-summary;
+            position: root.play-position; duration: root.play-duration; time: root.play-time; end-time: root.play-end;
+            view-start: root.view-start; view-end: root.view-end; zoom: root.wave-zoom; ruler-ticks: root.ruler-ticks;
+            scroll <=> root.wave-scroll; volume-db <=> root.volume-db; volume-label: root.volume-label;
+            pitch-text <=> root.pitch-text; rate-text <=> root.speed-text; mono <=> root.audition-mono; repeat <=> root.audition-repeat;
+            play => { root.start-requested(); } pause => { root.pause-requested(); } stop => { root.stop-requested(); }
+            seek(value) => { root.seek-requested(value); }
+            seek-play(value) => { root.seek-play-requested(value); }
+            transform(pitch,rate,mono,repeat) => { root.transform-requested(pitch,rate,mono,repeat); }
+            volume(value) => { root.volume-db-requested(value); }
+            resize(w,h) => { root.waveform-resize-requested(w,h); }
+            zoom-change(factor) => { root.waveform-zoom-requested(factor); }
+            zoom-at(factor,fraction) => { root.waveform-wheel-zoom-requested(factor,fraction); }
+            pan(value) => { root.waveform-pan-requested(value); }
+            peaks => {
+                if Theme.modern-style {
+                    root.audition-expanded = true;
+                    root.audition-preferred-height = max(root.audition-preferred-height, 260px * Theme.ui-scale);
+                }
+                root.peaks-visible = true;
+            }
+            output-settings => { root.settings-page = 0; root.output-settings-requested(); root.settings-visible = true; }
+            retry => { if root.selected-row >= 0 { root.audition-requested(root.selected-row); } else { root.start-requested(); } }
+            relink => { root.file-action-requested(root.selected-id, 20); }
+        }
         status-row := HorizontalLayout { height: 16px * Theme.ui-scale;
             Label { horizontal-stretch: 1; min-width: 0px; text: root.drag-preparing && root.drag-progress != "" ? root.drag-progress : root.status; overflow: elide; font-size: Theme.font(10); }
             if root.drag-preparing: Rectangle { width: 52px * Theme.ui-scale;
@@ -3572,9 +3702,9 @@ main-scroll := ScrollView {
                                 if event.text == Key.DownArrow || event.text == Key.UpArrow {
                                     let step = event.text == Key.DownArrow ? 1 : -1;
                                     if event.modifiers.shift && root.rows.length > 0 {
-                                        root.row-clicked(clamp(root.selected-row + step, 0, root.rows.length - 1), event.modifiers.control, true, false);
+                                        root.user-row-clicked(clamp(root.selected-row + step, 0, root.rows.length - 1), event.modifiers.control, true, false);
 
-                                    } else { root.selection-step-requested(step); }
+                                    } else { root.user-selection-step(step); }
                                     return accept;
                                 }
                                 if event.text == Key.PageUp || event.text == Key.PageDown {
@@ -3583,13 +3713,13 @@ main-scroll := ScrollView {
                                         if event.text == Key.PageDown && root.can-next { root.page-requested(1); }
                                     } else if root.rows.length > 0 {
                                         let step = max(1, floor(studio-result-list.visible-height / root.studio-result-row-height));
-                                        root.row-clicked(clamp(root.selected-row + (event.text == Key.PageDown ? step : -step), 0, root.rows.length - 1), event.modifiers.control, event.modifiers.shift, false);
+                                        root.user-row-clicked(clamp(root.selected-row + (event.text == Key.PageDown ? step : -step), 0, root.rows.length - 1), event.modifiers.control, event.modifiers.shift, false);
 
                                     }
                                     return accept;
                                 }
                                 if (event.text == Key.Home || event.text == Key.End) && root.rows.length > 0 {
-                                    root.row-clicked(event.text == Key.Home ? 0 : root.rows.length - 1, event.modifiers.control, event.modifiers.shift, false);  return accept;
+                                    root.user-row-clicked(event.text == Key.Home ? 0 : root.rows.length - 1, event.modifiers.control, event.modifiers.shift, false);  return accept;
                                 }
                                 if event.text == " " && root.audio-ready { root.play-requested(); return accept; }
                                 if event.text == Key.Return && root.selected-row >= 0 { root.audition-requested(root.selected-row); return accept; }
@@ -3608,6 +3738,7 @@ main-scroll := ScrollView {
                                 changed viewport-x => { if Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.table-viewport-x = self.viewport-x; } } }
                                 changed viewport-y => { if Theme.modern-style { root.track-result-scroll(); } }
                                 scrolled => {
+                                    root.cancel-workbench-switch();
                                     // Real input takes over from a pending programmatic restore.
                                     if root.task-viewport-pending {
                                         root.result-scroll-epoch += 1;
@@ -3661,7 +3792,7 @@ main-scroll := ScrollView {
                                         }
                                         clicked => {
                                             studio-results-focus.focus();
-                                            root.row-clicked(index, self.toggle-selection, self.range-selection, root.audition-play-on-single-click && !row.missing && !self.toggle-selection && !self.range-selection && !self.drag-sent);
+                                            root.user-row-clicked(index, self.toggle-selection, self.range-selection, root.audition-play-on-single-click && !row.missing && !self.toggle-selection && !self.range-selection && !self.drag-sent);
                                         }
                                         // Slint also emits clicked on the second release. In single-click
                                         // mode that click already owns playback, so do not request it again.
@@ -3686,7 +3817,7 @@ main-scroll := ScrollView {
                                         label: (root.playing ? (root.chinese ? "暂停：" : "Pause: ") : (root.chinese ? "试听：" : "Audition: ")) + row.name;
                                         accessible-description: root.playback-state == 4 ? (root.chinese ? "已暂停，单击继续试听" : "Paused; click to resume audition") : (root.chinese ? "正在播放，单击暂停" : "Playing; click to pause");
                                         enabled: !root.background-blocked && !row.missing;
-                                        clicked => { if root.playing { root.pause-requested(); } else { root.row-clicked(index, false, false, true); } }
+                                        clicked => { if root.playing { root.pause-requested(); } else { root.user-row-clicked(index, false, false, true); } }
                                     }
 
                                 }
@@ -3947,27 +4078,11 @@ main-scroll := ScrollView {
             enabled: !root.background-blocked;
             resized(value) => { root.audition-preferred-height = clamp(-value, 88px * Theme.ui-scale, 360px * Theme.ui-scale); root.audition-expanded = root.audition-preferred-height > 160px * Theme.ui-scale; }
         }
-        studio-player-slot := Rectangle { height: root.audition-preferred-height; }
-    }
-    }
-    // Restore the clipping and scrollbar input ownership that the player had
-    // as a child of the ScrollView. Fluent's scrollbars overlay the viewport
-    // in fixed 14px strips; its visible-* dimensions include those strips.
-    player-viewport := Rectangle {
-        x: (Theme.modern-style ? studio-main-scroll.absolute-position.x : main-scroll.absolute-position.x) - parent.absolute-position.x;
-        y: (Theme.modern-style ? studio-main-scroll.absolute-position.y : main-scroll.absolute-position.y) - parent.absolute-position.y;
-        property <length> source-width: Theme.modern-style ? studio-main-scroll.visible-width : main-scroll.visible-width;
-        property <length> source-height: Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height;
-        property <length> content-width: Theme.modern-style ? studio-main-scroll.viewport-width : main-scroll.viewport-width;
-        property <length> content-height: Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height;
-        width: max(0px, self.source-width - (self.content-height > self.source-height ? 14px : 0px));
-        height: max(0px, self.source-height - (self.content-width > self.source-width ? 14px : 0px));
-        clip: true;
-    audition := AuditionPanel {
-            x: Theme.modern-style ? studio-player-slot.absolute-position.x - parent.absolute-position.x : classic-player-slot.absolute-position.x - parent.absolute-position.x;
-            y: Theme.modern-style ? studio-player-slot.absolute-position.y - parent.absolute-position.y : classic-player-slot.absolute-position.y - parent.absolute-position.y;
-            width: Theme.modern-style ? studio-player-slot.width : classic-player-slot.width;
-            height: Theme.modern-style ? root.audition-preferred-height : (root.short-layout ? 190px : 222px) * Theme.ui-scale;
+        studio-audition := AuditionPanel {
+            active: Theme.modern-style;
+            premute-db <=> root.audition-premute-db;
+            show-remaining <=> root.audition-show-remaining;
+            height: root.audition-preferred-height;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
@@ -4011,6 +4126,8 @@ main-scroll := ScrollView {
             relink => { root.file-action-requested(root.selected-id, 20); }
         }
     }
+    }
+
     }
     // Top-level focus scope also contains modal input, keeping shortcuts scoped to this window.
 

@@ -873,7 +873,13 @@ component WorkbenchAuditionPanel inherits Rectangle {
     changed smooth-progress => { root.sync-progress(false); }
     changed playback-rate => { root.sync-progress(false); }
     // A clock identity survives deferred coalescing of smooth false -> true.
-    changed progress-clock => { root.sync-progress(false); }
+    changed progress-clock => {
+        // generation:transport-revision identifies the engine source/seek clock.
+        // A gesture begun before a discontinuity cannot seek the replacement.
+        root.scrubbing = false;
+        root.sync-progress(false);
+    }
+    changed ready => { if !root.ready { root.scrubbing = false; } }
     function wheel-zoom(delta: length, fraction: float) -> EventResult {
         if root.ready && root.duration > 0 && delta != 0px {
             // Pixel deltas support both mouse detents and precision touchpads.
@@ -1192,6 +1198,12 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     }
                     scrub := TouchArea { enabled: root.ready; mouse-cursor: pointer;
                         pointer-event(event) => {
+                            // Slint cancellation uses button=other, including window
+                            // exit and disabled controls; handle it before filtering.
+                            if event.kind == PointerEventKind.cancel {
+                                root.scrubbing = false;
+                                return;
+                            }
                             if event.button != PointerEventButton.left { return; }
                             if event.kind == PointerEventKind.down {
                                 root.scrubbing = true;
@@ -1199,8 +1211,6 @@ component WorkbenchAuditionPanel inherits Rectangle {
                             } else if event.kind == PointerEventKind.up && root.scrubbing {
                                 root.scrubbing = false;
                                 root.seek-to(self.mouse-x / max(1px, self.width));
-                            } else if event.kind == PointerEventKind.cancel {
-                                root.scrubbing = false;
                             }
                         }
                         moved => { if root.scrubbing { root.scrub-x = clamp(self.mouse-x, 0px, self.width); } }
@@ -1283,6 +1293,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
 }
 
 export component AuditionPanel inherits Rectangle {
+    // Inactive facades keep their shared bindings without creating input owners.
+    in property <bool> active: true;
     in property <bool> compact: false;
     in property <bool> narrow: false;
     in property <image> waveform-mask;
@@ -1359,13 +1371,14 @@ export component AuditionPanel inherits Rectangle {
     property <int> rejection-fields: 0;
     property <int> rejection-revision: 0;
     // Keep view-only modern state when switching presentations during playback.
-    property <float> premute-db: -12;
-    property <bool> show-remaining: false;
+    in-out property <float> premute-db: -12;
+    in-out property <bool> show-remaining: false;
     property <bool> modern-style: Theme.modern-style;
     changed modern-style => { root.presenter-volume-adjusting = false; }
+    changed active => { if !root.active { root.presenter-volume-adjusting = false; } }
     height: Theme.modern-style ? (root.expanded ? 260px : 88px) * Theme.ui-scale
         : (root.compact ? 190px : 222px) * Theme.ui-scale;
-    if !Theme.modern-style: ClassicAuditionPanel {
+    if root.active && !Theme.modern-style: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
         compact: root.compact;
         spectral: root.spectral;
@@ -1411,7 +1424,7 @@ export component AuditionPanel inherits Rectangle {
         peaks => { root.peaks(); }
         output-settings => { root.output-settings(); }
     }
-    if Theme.modern-style: WorkbenchAuditionPanel {
+    if root.active && Theme.modern-style: WorkbenchAuditionPanel {
         width: parent.width; height: parent.height;
         narrow: root.narrow; waveform-mask: root.waveform-mask;
         expanded <=> root.expanded;

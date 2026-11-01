@@ -1185,8 +1185,9 @@ impl Controller {
             let id = crate::theme::theme_id(index);
             let studio = id == STUDIO_THEME;
             let changed = *c.theme.lock().unwrap() != id;
-            if let Some(ui) = c.ui.upgrade() {
-                crate::theme::apply_theme(&ui, &id);
+            let ui = c.ui.upgrade();
+            if let Some(ui) = &ui {
+                crate::theme::apply_theme(ui, &id);
                 if !studio {
                     ui.set_waveform_mask(Image::default());
                 }
@@ -1196,9 +1197,9 @@ impl Controller {
             // the current viewport on entry, including a selected but idle sound.
             if changed
                 && studio
-                && let Some(file) = c
-                    .waveform_file(&c.audio.status())
-                    .or_else(|| c.selected.lock().unwrap().clone())
+                && let Some(ui) = ui
+                && let Some(file) =
+                    c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
             {
                 c.queue_waveform(&file);
             }
@@ -1666,13 +1667,7 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_volume_requested(move |volume| {
-            c.command(AudioCommand::SetVolume(volume));
-            c.playback.lock().unwrap().volume = volume;
-            // The status poll skips volume publishing while the slider keeps focus,
-            // so refresh the dB label here to follow the drag live.
-            if let Some(ui) = c.ui.upgrade() {
-                ui.set_volume_label(volume_label(volume));
-            }
+            c.request_volume(volume);
         });
         let c = self.clone();
         ui.on_start_requested(move || {
@@ -1689,15 +1684,7 @@ impl Controller {
         ui.on_pause_requested(move || c.command(AudioCommand::Pause));
         let c = self.clone();
         ui.on_volume_db_requested(move |db| {
-            // The audition slider reports dB through this callback (not
-            // volume-requested). The status poll skips volume publishing while the
-            // slider is being adjusted, so the label must follow the drag here.
-            let volume = gain_from_db(db);
-            c.command(AudioCommand::SetVolume(volume));
-            c.playback.lock().unwrap().volume = volume;
-            if let Some(ui) = c.ui.upgrade() {
-                ui.set_volume_label(volume_label(volume));
-            }
+            c.request_volume(gain_from_db(db));
         });
         let c = self.clone();
         ui.on_transform_requested(move |pitch, rate, mono, repeat| {
@@ -1729,8 +1716,11 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_zoom_requested(move |factor| {
+            let Some(ui) = c.ui.upgrade() else {
+                return;
+            };
             let status = c.audio.status();
-            let Some(file) = c.waveform_file(&status) else {
+            let Some(file) = c.waveform_refresh_file(&status, ui.get_waveform_ready()) else {
                 return;
             };
             {
@@ -1752,7 +1742,7 @@ impl Controller {
                 return;
             };
             let status = c.audio.status();
-            let Some(file) = c.waveform_file(&status) else {
+            let Some(file) = c.waveform_refresh_file(&status, ui.get_waveform_ready()) else {
                 return;
             };
             let view = {
@@ -1770,9 +1760,13 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_pan_requested(move |scroll| {
+            let Some(ui) = c.ui.upgrade() else {
+                return;
+            };
             c.wave_follow_paused.store(true, Ordering::Release);
             c.wave_view.lock().unwrap().1.scroll = f64::from(scroll.clamp(0.0, 1.0));
-            if let Some(file) = c.waveform_file(&c.audio.status()) {
+            if let Some(file) = c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
+            {
                 c.queue_waveform(&file);
             }
         });
@@ -1788,7 +1782,9 @@ impl Controller {
                     view.variance = ui.get_peak_variance();
                     view.spectral = ui.get_peak_mode() == 1;
                 }
-                if let Some(file) = c.waveform_file(&c.audio.status()) {
+                if let Some(file) =
+                    c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
+                {
                     c.queue_waveform(&file);
                 }
             }
@@ -1847,7 +1843,9 @@ impl Controller {
             let old = *c.waveform_size.lock().unwrap();
             *c.waveform_size.lock().unwrap() = size;
             if old != size
-                && let Some(file) = c.waveform_file(&c.audio.status())
+                && let Some(ui) = c.ui.upgrade()
+                && let Some(file) =
+                    c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
             {
                 c.queue_waveform(&file);
             }
@@ -3081,6 +3079,59 @@ impl Controller {
         self.request_history_page(offset);
     }
 
+    /// Order the requested level with its FIFO admission. Never hold this lock
+    /// while waiting for the completion: GUI and IPC requests share this boundary.
+    fn enqueue_volume(
+        &self,
+        volume: f32,
+    ) -> audiolib_core::Result<audiolib_audio::CommandCompletion> {
+        if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
+            return Err(audiolib_core::Error::Validation(
+                "Volume must be 0..=1".into(),
+            ));
+        }
+        let mut playback = self.playback.lock().unwrap();
+        let completion = self
+            .audio
+            .enqueue_with_ack(AudioCommand::SetVolume(volume))?;
+        playback.volume = volume;
+        Ok(completion)
+    }
+
+    /// Enqueue GUI volume input without waiting for a driver or engine response.
+    fn request_volume(&self, volume: f32) {
+        match self.enqueue_volume(volume) {
+            Ok(_) => {
+                if let Some(ui) = self.ui.upgrade() {
+                    ui.set_volume_label(volume_label(volume));
+                }
+            }
+            Err(error) => {
+                // A rejected admission must not claim a new accepted level.
+                let requested = self.playback.lock().unwrap().volume;
+                if let Some(ui) = self.ui.upgrade() {
+                    ui.set_volume(requested);
+                    publish_volume(&ui, requested);
+                }
+                self.status(error.to_string());
+            }
+        }
+    }
+
+    // Focus can remain on the slider after a gesture. Protect newer local input
+    // from queued engine snapshots, while still reflecting an acknowledged local
+    // or IPC volume request without requiring the user to move keyboard focus.
+    fn publish_confirmed_volume(&self, ui: &AppWindow, confirmed: f32) {
+        let requested = self.playback.lock().unwrap().volume;
+        if ui.get_volume_adjusting() && (confirmed - requested).abs() > 0.000_01 {
+            return;
+        }
+        if (ui.get_volume() - confirmed).abs() > 0.001 {
+            ui.set_volume(confirmed);
+        }
+        publish_volume(ui, confirmed);
+    }
+
     fn start_workers(self: &Arc<Self>) {
         self.start_workspace_worker();
         self.start_artwork_worker();
@@ -3870,12 +3921,7 @@ impl Controller {
                         if ui.get_playback_path().as_str() != playback_path {
                             ui.set_playback_path(playback_path.into());
                         }
-                        if !ui.get_volume_adjusting() {
-                            if (ui.get_volume() - status.volume).abs() > 0.001 {
-                                ui.set_volume(status.volume);
-                            }
-                            publish_volume(&ui, status.volume);
-                        }
+                        c2.publish_confirmed_volume(&ui, status.volume);
                         if audition_changed {
                             publish_audition(&ui, status.audition);
                         }
@@ -5077,6 +5123,52 @@ impl Controller {
             return mapped;
         }
         playback_wave_file(status)
+    }
+
+    /// A presentation-only refresh retains the displayed/queued source. The engine
+    /// can still hold the previous sound while a new selection waits for Load.
+    /// Transport and external-IPC discovery keep using `waveform_file` independently.
+    fn waveform_refresh_file(
+        &self,
+        status: &audiolib_audio::PlaybackStatus,
+        current_waveform_ready: bool,
+    ) -> Option<AudioFile> {
+        let selected = self.selected.lock().unwrap().clone();
+        let pending = *self.audio_reload.lock().unwrap();
+        let displayed_path = self.wave_view.lock().unwrap().0.clone();
+        if let Some(file) = selected.as_ref()
+            && !file.missing
+            && (pending == Some(file.id)
+                || displayed_path.is_empty()
+                || same_path(Path::new(&file.file_path), Path::new(&displayed_path)))
+        {
+            return Some(file.clone());
+        }
+        if !current_waveform_ready && selected.as_ref().is_some_and(|file| file.missing) {
+            // Missing selections intentionally clear the old picture. Resizing or
+            // changing theme must not resurrect the engine's retained previous file.
+            return None;
+        }
+        if self.waveform_cancel.lock().unwrap().load(Ordering::Acquire)
+            || status.generation == self.removed_audio_generation.load(Ordering::Acquire)
+        {
+            // Library/source invalidation can retain the engine's stopped path.
+            // Only external-playback discovery may establish a new viewport then.
+            return None;
+        }
+        let playing = if self.remote_read_only() {
+            status
+                .file_path
+                .as_deref()
+                .and_then(|path| self.remote_wave_file(path))
+                .or_else(|| playback_wave_file(status))
+        } else {
+            playback_wave_file(status)
+        };
+        playing.filter(|file| {
+            displayed_path.is_empty()
+                || same_path(Path::new(&file.file_path), Path::new(&displayed_path))
+        })
     }
 
     fn queue_waveform(&self, file: &AudioFile) {
@@ -7042,13 +7134,12 @@ impl Controller {
         ) {
             self.list_waveforms.note_audition_start();
         }
-        match self.audio.send_and_wait(command, Duration::from_secs(4)) {
-            Ok(status) => {
-                if value["command"] == "volume" {
-                    self.playback.lock().unwrap().volume = status.volume;
-                }
-                audiolib_core::success(serde_json::json!(status))
-            }
+        let completion = match command {
+            AudioCommand::SetVolume(volume) => self.enqueue_volume(volume),
+            command => self.audio.enqueue_with_ack(command),
+        };
+        match completion.and_then(|completion| completion.wait(Duration::from_secs(4))) {
+            Ok(status) => audiolib_core::success(serde_json::json!(status)),
             Err(error) => audiolib_core::failure(&error.to_string()),
         }
     }
@@ -8093,6 +8184,159 @@ mod tests {
         assert_eq!(reload_target(&mut pending, None), None);
     }
     use audiolib_audio::{WaveformData, WaveformPeak};
+
+    #[test]
+    fn presentation_refresh_retains_pending_selection_and_rejects_cleared_missing_waveform() {
+        i_slint_backend_testing::init_no_event_loop();
+        let root = tempfile::tempdir().unwrap();
+        let path_a = root.path().join("A.wav");
+        let path_b = root.path().join("B.wav");
+        std::fs::write(&path_a, tiny_pcm_wav()).unwrap();
+        std::fs::write(&path_b, tiny_pcm_wav()).unwrap();
+        let provider = Arc::new(SqliteProvider::open(&root.path().join("library.db")).unwrap());
+        let engine = audiolib_audio::AudioEngine::new(PlaybackConfig::default()).unwrap();
+        // Load establishes the retained engine source without opening an output
+        // device or playing sound. B's Load is deliberately still pending below.
+        let loaded = engine
+            .handle()
+            .send_and_wait(AudioCommand::Load(path_a.clone()), Duration::from_secs(4))
+            .unwrap();
+        assert_eq!(loaded.state, PlaybackState::Ready);
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(
+            &ui,
+            provider,
+            engine.handle(),
+            AppConfig::load_in(root.path().join("preferences")).unwrap(),
+            PlaybackConfig::default(),
+        );
+        // Let external-playback discovery baseline A before staging B. Otherwise
+        // the poller's first observation could race this deliberately pending view.
+        let baseline = Instant::now();
+        while controller.wave_view.lock().unwrap().0 != path_a.to_string_lossy() {
+            assert!(
+                baseline.elapsed() < Duration::from_secs(2),
+                "A was not baselined"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let file_b = AudioFile {
+            id: 20,
+            filename: "B.wav".into(),
+            file_path: path_b.to_string_lossy().into_owned(),
+            sample_rate: loaded.sample_rate,
+            channels: loaded.channels,
+            duration: loaded.duration,
+            ..Default::default()
+        };
+        *controller.selected.lock().unwrap() = Some(file_b.clone());
+        present_file(&ui, &file_b);
+        controller.mark_audio_reload(file_b.id);
+        *controller.wave_view.lock().unwrap() = (
+            file_b.file_path.clone(),
+            WaveView {
+                zoom: 4.0,
+                scroll: 0.25,
+                ..Default::default()
+            },
+        );
+        ui.set_waveform_ready(false);
+        ui.invoke_theme_requested(crate::theme::theme_index(STUDIO_THEME));
+        let assert_b_view = || {
+            let state = controller.wave_view.lock().unwrap();
+            assert_eq!(state.0, file_b.file_path);
+            assert_eq!((state.1.zoom, state.1.scroll), (4.0, 0.25));
+        };
+        assert_b_view();
+        ui.invoke_waveform_resize_requested(480, 72);
+        assert_b_view();
+        // Presentation controls must keep the same pending B, just like a theme
+        // or size refresh, even though the engine is still reporting A.
+        ui.invoke_waveform_zoom_requested(2.0);
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        ui.invoke_waveform_wheel_zoom_requested(2.0, 0.5);
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        ui.invoke_waveform_pan_requested(0.4);
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        ui.invoke_peak_style_requested();
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        assert_eq!(
+            engine.handle().status().file_path.as_deref(),
+            Some(path_a.as_path())
+        );
+
+        // A missing B clears a formerly displayed A but leaves A loaded. Neither
+        // theme entry nor a presenter resize may start a fresh A render.
+        let mut missing_b = file_b.clone();
+        missing_b.missing = true;
+        *controller.selected.lock().unwrap() = Some(missing_b.clone());
+        present_file(&ui, &missing_b);
+        *controller.wave_view.lock().unwrap() =
+            (path_a.to_string_lossy().into_owned(), WaveView::default());
+        controller.invalidate_waveform();
+        ui.set_waveform_ready(false);
+        ui.set_waveform_image(Image::default());
+        ui.set_waveform_mask(Image::default());
+        let generation = controller.waveform_generation.load(Ordering::Acquire);
+        ui.invoke_theme_requested(crate::theme::theme_index(
+            audiolib_core::config::DEFAULT_THEME,
+        ));
+        ui.invoke_theme_requested(crate::theme::theme_index(STUDIO_THEME));
+        ui.invoke_waveform_resize_requested(500, 84);
+        ui.invoke_waveform_zoom_requested(2.0);
+        ui.invoke_waveform_wheel_zoom_requested(2.0, 0.5);
+        ui.invoke_waveform_pan_requested(0.5);
+        ui.invoke_peak_style_requested();
+        assert_eq!(
+            controller.waveform_generation.load(Ordering::Acquire),
+            generation
+        );
+        assert!(ui.get_selected_missing());
+        assert!(!ui.get_waveform_ready());
+        assert_eq!(ui.get_waveform_image().size().width, 0);
+        assert_eq!(ui.get_waveform_mask().size().width, 0);
+
+        // A genuine external audition already owning the viewport remains the
+        // refresh source even when the inspector points at another valid record.
+        *controller.selected.lock().unwrap() = Some(file_b.clone());
+        *controller.audio_reload.lock().unwrap() = None;
+        *controller.waveform_cancel.lock().unwrap() = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            controller
+                .waveform_refresh_file(&loaded, true)
+                .unwrap()
+                .file_path,
+            path_a.to_string_lossy()
+        );
+        let remote_file = AudioFile {
+            id: 70,
+            file_path: "Z:/Server/Original.wav".into(),
+            ..file_b
+        };
+        controller.set_remote_wave_file_for_test(path_a.clone(), remote_file.clone());
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.wave_view.lock().unwrap().0 = remote_file.file_path.clone();
+        assert_eq!(
+            controller
+                .waveform_refresh_file(&loaded, true)
+                .unwrap()
+                .file_path,
+            remote_file.file_path
+        );
+        controller.remote_mode.store(false, Ordering::Release);
+        // A source/library reset invalidates the old viewport even though the
+        // engine still reports A. A presentation change must not re-admit it.
+        *controller.selected.lock().unwrap() = None;
+        controller.wave_view.lock().unwrap().0 = path_a.to_string_lossy().into_owned();
+        controller.invalidate_waveform();
+        assert!(controller.waveform_refresh_file(&loaded, false).is_none());
+        *controller.waveform_cancel.lock().unwrap() = Arc::new(AtomicBool::new(false));
+        controller
+            .removed_audio_generation
+            .store(loaded.generation, Ordering::Release);
+        assert!(controller.waveform_refresh_file(&loaded, true).is_none());
+        controller.shutdown();
+    }
 
     #[test]
     fn missing_selection_rejects_queued_and_late_waveform_partials() {
