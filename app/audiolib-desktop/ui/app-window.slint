@@ -936,6 +936,7 @@ export component AppWindow inherits Window {
     // Both workbench presentations keep their own native scroll owners. Transfer
     // the same record anchor before changing their different result-row heights.
     private property <bool> workbench-switch-pending: false;
+    private property <bool> workbench-switch-first-applied: false;
     private property <int> workbench-switch-epoch: 0;
     private property <float> workbench-switch-result-row: 0;
     private property <float> workbench-switch-result-x: 0;
@@ -946,6 +947,7 @@ export component AppWindow inherits Window {
     private property <length> workbench-switch-main-x: 0px;
     private property <length> workbench-switch-main-y: 0px;
     public function prepare-workbench-switch() {
+        root.workbench-switch-first-applied = false;
         root.workbench-switch-result-row = root.task-result-scroll-y / max(1, root.task-result-row-height);
         root.workbench-switch-result-x = root.task-result-scroll-x;
         root.workbench-switch-folder-y = root.task-folder-scroll-y;
@@ -993,6 +995,7 @@ export component AppWindow inherits Window {
     // Drop a viewport armed for the other source and the shared ListView's scroll offset.
     public function reset-result-list-scroll() {
         root.workbench-switch-pending = false;
+        root.workbench-switch-first-applied = false;
         root.result-user-scrolling = false;
         root.preserve-result-scroll = false;
         root.result-scroll-epoch += 1;
@@ -1040,7 +1043,11 @@ export component AppWindow inherits Window {
     private property <bool> scan-controllable: root.scanning && !root.scan-cancelling && !root.scan-finalizing && !root.closing && !root.library-busy;
     in property <string> library-health: "";
     in-out property <int> selected-row: -1;
-    private property <length> result-row-height: round((Theme.modern-style ? 32 : 22) * Theme.ui-scale * Theme.list-row-factor) * 1px; // grows with the list font; whole pixels, so e.g. 1.25x gives 28px rather than 27.5px
+    // Each native ListView keeps a stable delegate height while hidden. Switching
+    // themes must not re-anchor its virtual rows after the viewport is restored.
+    private property <length> classic-result-row-height: round(22 * Theme.ui-scale * Theme.list-row-factor) * 1px;
+    private property <length> studio-result-row-height: round(32 * Theme.ui-scale * Theme.list-row-factor) * 1px;
+    private property <length> result-row-height: Theme.modern-style ? root.studio-result-row-height : root.classic-result-row-height;
     in-out property <int> selected-folder: -1;
     in property <string> selected-folder-path: "";
     in property <[AudioRow]> rows;
@@ -2099,6 +2106,15 @@ export component AppWindow inherits Window {
                 root.table-viewport-x = clamp(root.task-wanted-result-x * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-width : result-list.visible-width) - root.table-content-size), 0px);
                 root.sync-table-viewport();
             }
+            if root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch && !root.workbench-switch-first-applied {
+                // A newly visible native ListView first anchors its virtual rows
+                // to the first item. Reapply the fractional row offset after one
+                // layout turn, before exposing a completed restore or prefetch.
+                root.workbench-switch-first-applied = true;
+                self.running = true;
+                self.restart();
+                return;
+            }
             if Theme.modern-style { studio-folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, (Theme.modern-style ? studio-folder-list.visible-height : folder-list.visible-height) - (Theme.modern-style ? studio-folder-list.viewport-height : folder-list.viewport-height)), 0px); } else { folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, (Theme.modern-style ? studio-folder-list.visible-height : folder-list.visible-height) - (Theme.modern-style ? studio-folder-list.viewport-height : folder-list.viewport-height)), 0px); }
             root.task-filter-viewport-y = min(0px, root.task-wanted-filter-y * 1px);
             root.task-inspector-viewport-y = min(0px, root.task-wanted-inspector-y * 1px);
@@ -2761,7 +2777,7 @@ main-scroll := ScrollView {
                                         if event.text == Key.PageUp && root.can-previous { root.page-requested(-1); }
                                         if event.text == Key.PageDown && root.can-next { root.page-requested(1); }
                                     } else if root.rows.length > 0 {
-                                        let step = max(1, floor(result-list.visible-height / root.result-row-height));
+                                        let step = max(1, floor(result-list.visible-height / root.classic-result-row-height));
                                         root.row-clicked(clamp(root.selected-row + (event.text == Key.PageDown ? step : -step), 0, root.rows.length - 1), event.modifiers.control, event.modifiers.shift, false);
                                     }
                                     return accept;
@@ -2799,7 +2815,7 @@ main-scroll := ScrollView {
                                 changed visible-height => { if !Theme.modern-style { root.report-result-window(); } }
                                 changed viewport-width => { if !Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // Fixed child layout widths let ListView measure its horizontal scroll extent.
-                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: row.name;
                                     background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
@@ -3566,7 +3582,7 @@ main-scroll := ScrollView {
                                         if event.text == Key.PageUp && root.can-previous { root.page-requested(-1); }
                                         if event.text == Key.PageDown && root.can-next { root.page-requested(1); }
                                     } else if root.rows.length > 0 {
-                                        let step = max(1, floor(studio-result-list.visible-height / root.result-row-height));
+                                        let step = max(1, floor(studio-result-list.visible-height / root.studio-result-row-height));
                                         root.row-clicked(clamp(root.selected-row + (event.text == Key.PageDown ? step : -step), 0, root.rows.length - 1), event.modifiers.control, event.modifiers.shift, false);
 
                                     }
@@ -3605,22 +3621,22 @@ main-scroll := ScrollView {
                                 changed visible-height => { if Theme.modern-style { root.report-result-window(); } }
                                 changed viewport-width => { if Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // The real cell layout supplies ListView's minimum horizontal extent.
-                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.studio-result-row-height; accessible-role: list-item; accessible-label: row.name;
                                     background: root.selected-row == index ? Theme.selected : (row.checked ? Theme.checked : (studio-result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.table-alternate : Theme.table-surface)));
                                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border.with-alpha(0.35); }
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: root.table-state-size + 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
-                                        studio-table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; height: root.result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: root.selected-row == index ? Theme.accent : (row.missing ? Theme.warning : Theme.ink); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
-                                        if root.list-waveforms-visible: studio-table-wave-cell := Rectangle { width: root.table-wave-size - 24px * Theme.ui-scale; height: root.result-row-height;
+                                        studio-table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: root.selected-row == index ? Theme.accent : (row.missing ? Theme.warning : Theme.ink); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                        if root.list-waveforms-visible: studio-table-wave-cell := Rectangle { width: root.table-wave-size - 24px * Theme.ui-scale; height: root.studio-result-row-height;
                                             if row.wave-state == 0 || row.wave-state == 3: Rectangle { y: (parent.height - self.height) / 2; width: row.wave-state == 0 ? parent.width : parent.width * 0.4; height: 2px * Theme.ui-scale; background: Theme.strong-border; opacity: row.wave-state == 0 ? 0.7 : 0.35; }
                                             if row.wave-state == 2: Rectangle { y: parent.height / 2; width: parent.width; height: 1px; background: Theme.dim; opacity: 0.6; }
                                             if row.wave-state == 1: Image { y: 5px * Theme.ui-scale; width: parent.width; height: parent.height - 10px * Theme.ui-scale; source: row.wave; colorize: root.selected-row == index ? Theme.accent : Theme.dim; image-fit: fill; image-rendering: pixelated; }
                                             if row.wave-state == 4: Rectangle { y: 5px * Theme.ui-scale; height: parent.height - 10px * Theme.ui-scale; width: parent.width; background: Theme.warning.with-alpha(0.1); Image { width: parent.width; height: parent.height; source: row.wave; colorize: Theme.warning; image-fit: fill; opacity: 0.45; } }
                                         }
-                                        studio-table-duration-cell := Text { width: root.table-duration-size - 24px * Theme.ui-scale; height: root.result-row-height; text: row.duration-clock; color: root.selected-row == index ? Theme.accent : Theme.ink; vertical-alignment: center; font-family: "Consolas"; font-size: Theme.list-font(11); overflow: elide; }
-                                        studio-table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; height: root.result-row-height; text: row.format; color: root.selected-row == index ? Theme.accent : Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
-                                        studio-table-channels-cell := Text { width: root.table-channels-size - 24px * Theme.ui-scale; height: root.result-row-height; text: row.channels; color: root.selected-row == index ? Theme.accent : Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
-                                        studio-table-tags-cell := Rectangle { width: root.table-tags-size - 24px * Theme.ui-scale; height: root.result-row-height; clip: true;
+                                        studio-table-duration-cell := Text { width: root.table-duration-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: row.duration-clock; color: root.selected-row == index ? Theme.accent : Theme.ink; vertical-alignment: center; font-family: "Consolas"; font-size: Theme.list-font(11); overflow: elide; }
+                                        studio-table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: row.format; color: root.selected-row == index ? Theme.accent : Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
+                                        studio-table-channels-cell := Text { width: root.table-channels-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: row.channels; color: root.selected-row == index ? Theme.accent : Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
+                                        studio-table-tags-cell := Rectangle { width: root.table-tags-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; clip: true;
                                             HorizontalLayout { padding-top: 5px * Theme.ui-scale; padding-bottom: 5px * Theme.ui-scale; spacing: 4px * Theme.ui-scale; alignment: start;
                                                 for tag in row.tag-preview: DisplayTag { height: parent.height; text: tag; ink: root.selected-row == index ? Theme.accent : Theme.ink; text-size: Theme.list-font(10); max-width: max(20px * Theme.ui-scale, (parent.width - 8px * Theme.ui-scale - (row.tag-extra > 0 ? 28px * Theme.ui-scale : 0px)) / max(1, row.tag-preview.length)); }
                                                 if row.tag-extra > 0: Label { text: "+" + row.tag-extra; color: root.selected-row == index ? Theme.accent : Theme.dim; font-size: Theme.list-font(10); }
@@ -3628,7 +3644,7 @@ main-scroll := ScrollView {
                                             }
                                             Tooltip { text: @markdown("\{row.tags}"); }
                                         }
-                                        studio-table-album-cell := Text { width: root.table-album-size - 24px * Theme.ui-scale; height: root.result-row-height; text: row.album; color: root.selected-row == index ? Theme.accent : Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(11); }
+                                        studio-table-album-cell := Text { width: root.table-album-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: row.album; color: root.selected-row == index ? Theme.accent : Theme.dim; vertical-alignment: center; overflow: elide; font-size: Theme.list-font(11); }
                                     }
                                     Tooltip { text: @markdown("\{row.name}\n\{row.file-path}"); }
 
@@ -3934,6 +3950,19 @@ main-scroll := ScrollView {
         studio-player-slot := Rectangle { height: root.audition-preferred-height; }
     }
     }
+    // Restore the clipping and scrollbar input ownership that the player had
+    // as a child of the ScrollView. Fluent's scrollbars overlay the viewport
+    // in fixed 14px strips; its visible-* dimensions include those strips.
+    player-viewport := Rectangle {
+        x: (Theme.modern-style ? studio-main-scroll.absolute-position.x : main-scroll.absolute-position.x) - parent.absolute-position.x;
+        y: (Theme.modern-style ? studio-main-scroll.absolute-position.y : main-scroll.absolute-position.y) - parent.absolute-position.y;
+        property <length> source-width: Theme.modern-style ? studio-main-scroll.visible-width : main-scroll.visible-width;
+        property <length> source-height: Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height;
+        property <length> content-width: Theme.modern-style ? studio-main-scroll.viewport-width : main-scroll.viewport-width;
+        property <length> content-height: Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height;
+        width: max(0px, self.source-width - (self.content-height > self.source-height ? 14px : 0px));
+        height: max(0px, self.source-height - (self.content-width > self.source-width ? 14px : 0px));
+        clip: true;
     audition := AuditionPanel {
             x: Theme.modern-style ? studio-player-slot.absolute-position.x - parent.absolute-position.x : classic-player-slot.absolute-position.x - parent.absolute-position.x;
             y: Theme.modern-style ? studio-player-slot.absolute-position.y - parent.absolute-position.y : classic-player-slot.absolute-position.y - parent.absolute-position.y;
@@ -3981,6 +4010,7 @@ main-scroll := ScrollView {
             retry => { if root.selected-row >= 0 { root.audition-requested(root.selected-row); } else { root.start-requested(); } }
             relink => { root.file-action-requested(root.selected-id, 20); }
         }
+    }
     }
     // Top-level focus scope also contains modal input, keeping shortcuts scoped to this window.
 

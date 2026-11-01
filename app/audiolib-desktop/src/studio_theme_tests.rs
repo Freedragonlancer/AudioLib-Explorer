@@ -349,8 +349,18 @@ fn live_theme_switch_keeps_record_anchor_and_reports_only_the_active_viewport() 
     let classic_row_height = ui.get_task_result_row_height();
     ui.invoke_restore_search_task_viewport(-classic_row_height * anchor, 0.0, -120.0, 0.0, 0.0);
     settle_viewport(&ui);
-    assert!((ui.get_task_result_scroll_y() / classic_row_height + anchor).abs() < 0.01);
-    assert!((ui.get_task_folder_scroll_y() + 120.0).abs() < 1.0);
+    assert!(
+        (ui.get_task_result_scroll_y() / classic_row_height + anchor).abs() < 0.01,
+        "Initial Default restore: y={}, row-height={classic_row_height}, wanted-y={}, restoring={}",
+        ui.get_task_result_scroll_y(),
+        -classic_row_height * anchor,
+        ui.get_task_restoring()
+    );
+    assert!(
+        (ui.get_task_folder_scroll_y() + 120.0).abs() < 1.0,
+        "Initial folder restore: y={}, wanted=-120",
+        ui.get_task_folder_scroll_y()
+    );
 
     let windows = Rc::new(RefCell::new(Vec::new()));
     let observed = windows.clone();
@@ -362,21 +372,32 @@ fn live_theme_switch_keeps_record_anchor_and_reports_only_the_active_viewport() 
     for id in [STUDIO_THEME, DEFAULT_THEME, STUDIO_THEME, DEFAULT_THEME] {
         windows.borrow_mut().clear();
         apply_theme(&ui, id);
+        let scheduled_y = ui.get_task_result_scroll_y();
+        let scheduled_row_height = ui.get_task_result_row_height();
         settle_viewport(&ui);
+        let settled_y = ui.get_task_result_scroll_y();
+        let settled_folder_y = ui.get_task_folder_scroll_y();
         frame(&ui, &format!("studio-viewport-{id}"));
         let row_height = ui.get_task_result_row_height();
+        let actual_y = ui.get_task_result_scroll_y();
         if id == STUDIO_THEME {
             assert!(row_height > classic_row_height);
         } else {
             assert_eq!(row_height, classic_row_height);
         }
         assert!(
-            (ui.get_task_result_scroll_y() / row_height + anchor).abs() < 0.01,
-            "{id} changed the first visible record and its partial-row offset"
+            (actual_y / row_height + anchor).abs() < 0.01,
+            "{id} changed the record anchor: actual-y={actual_y}, row-height={row_height}, wanted-y={}, actual-anchor={}, wanted-anchor={anchor}, scheduled=({scheduled_y}, row-height={scheduled_row_height}), settled-y={settled_y}, settled-folder-y={settled_folder_y}, visible-height={}, restoring={}, callbacks={:?}",
+            -row_height * anchor,
+            -actual_y / row_height,
+            ui.get_task_result_visible_height(),
+            ui.get_task_restoring(),
+            windows.borrow()
         );
         assert!(
             (ui.get_task_folder_scroll_y() + 120.0).abs() < 1.0,
-            "{id} discarded the folder viewport"
+            "{id} discarded the folder viewport: actual={}, wanted=-120, settled={settled_folder_y}",
+            ui.get_task_folder_scroll_y()
         );
         assert_eq!(ui.get_selected_row(), 42);
         assert_eq!(ui.get_edit_tags().as_str(), "unsaved synthetic annotation");
