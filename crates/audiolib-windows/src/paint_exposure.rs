@@ -121,26 +121,28 @@ mod tests {
     use windows::Win32::{
         Graphics::Gdi::{InvalidateRect, RDW_INTERNALPAINT, RedrawWindow, ValidateRect},
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, SendMessageW, WINDOW_EX_STYLE, WS_POPUP,
+            CreateWindowExW, DestroyWindow, SendMessageW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_POPUP, WS_VISIBLE,
         },
     };
     use windows::core::w;
 
     #[test]
     fn internal_paint_requests_are_not_exposure_but_invalidation_is() {
-        // Hidden STATIC windows on this thread: no class registration, no desktop
-        // drawing. WM_PAINT is sent directly so the result does not depend on the
-        // message queue or on the window being visible.
+        // STATIC windows on this thread: no class registration. Windows keeps no
+        // update region for a hidden window, so they are visible but off-screen,
+        // never activated and kept off the taskbar. WM_PAINT is sent directly so
+        // the result does not depend on the message queue.
         let create = || {
             // SAFETY: plain window creation; destroyed at the end of the test.
             unsafe {
                 CreateWindowExW(
-                    WINDOW_EX_STYLE::default(),
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                     w!("STATIC"),
                     w!(""),
-                    WS_POPUP,
-                    0,
-                    0,
+                    WS_POPUP | WS_VISIBLE,
+                    -32000,
+                    -32000,
                     64,
                     64,
                     None,
@@ -149,7 +151,7 @@ mod tests {
                     None,
                 )
             }
-            .expect("create a hidden test window")
+            .expect("create an off-screen test window")
         };
         let hwnd = create();
         let other = create();
