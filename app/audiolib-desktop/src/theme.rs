@@ -1,10 +1,12 @@
 // app/audiolib-desktop/src/theme.rs
-//! Appearance themes and font sizes. A theme is a palette of Slint `Theme` color
-//! tokens set from Rust; only the default theme (the original look) ships for now.
+//! Appearance themes and font sizes. Built-in definitions live in core so settings
+//! validation, bilingual names and presentation selection share one registry.
 //! Font sizes are whole pixels; `Theme.font()` / `Theme.list-font()` combine them
 //! with the interface scale.
 use crate::AppWindow;
-use audiolib_core::config::{DEFAULT_THEME, THEME_IDS, clamp_font_size, normalize_theme};
+use audiolib_core::config::{
+    BUILTIN_THEMES, DEFAULT_THEME, PlayerStyle, THEME_IDS, clamp_font_size, normalize_theme,
+};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
 
 /// Color tokens of one theme, as `0xAARRGGBB`.
@@ -63,14 +65,6 @@ pub(crate) const DEFAULT_PALETTE: Palette = Palette {
     overlay: 0xa800_0000,
 };
 
-/// Palette and English/Chinese display names for a known theme identifier.
-fn theme_entry(id: &str) -> (&'static Palette, &'static str, &'static str) {
-    match id {
-        DEFAULT_THEME => (&DEFAULT_PALETTE, "Default", "默认"),
-        _ => (&DEFAULT_PALETTE, "Default", "默认"),
-    }
-}
-
 /// Appearance combo index for a theme identifier; unknown themes select the default.
 pub(crate) fn theme_index(id: &str) -> i32 {
     let id = normalize_theme(id);
@@ -88,24 +82,26 @@ pub(crate) fn theme_id(index: i32) -> String {
         .map_or_else(|| DEFAULT_THEME.to_owned(), |id| (*id).to_owned())
 }
 
-/// List the themes, select `id` and apply its palette to the Slint `Theme` global.
+/// List and apply a complete theme (palette and presentation) on the UI thread.
 pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     let names = |chinese: bool| {
-        let names = THEME_IDS
+        let names = BUILTIN_THEMES
             .iter()
-            .map(|id| {
-                let (_, english, chinese_name) = theme_entry(id);
-                SharedString::from(if chinese { chinese_name } else { english })
-            })
+            .map(|entry| SharedString::from(if chinese { entry.name_cn } else { entry.name }))
             .collect::<Vec<_>>();
         ModelRc::new(VecModel::from(names))
     };
     ui.set_theme_names(names(false));
     ui.set_theme_names_cn(names(true));
     let id = normalize_theme(id);
-    ui.set_theme_index(theme_index(&id));
-    let (palette, _, _) = theme_entry(&id);
+    let index = theme_index(&id);
+    ui.set_theme_index(index);
+    let entry = &BUILTIN_THEMES[index as usize];
+    // Both shipped themes deliberately share charcoal colors. Studio's new
+    // audition presentation is opt-in; spectral frequency colors remain data.
+    let palette = &DEFAULT_PALETTE;
     let theme = ui.global::<crate::Theme>();
+    theme.set_modern_style(entry.player_style == PlayerStyle::Studio);
     let color = Color::from_argb_encoded;
     theme.set_bg(color(palette.bg));
     theme.set_panel(color(palette.panel));
