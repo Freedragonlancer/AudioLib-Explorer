@@ -9,6 +9,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+$buildLease = $null
 $isWindowsTarget = $Target -ceq 'x86_64-pc-windows-msvc'
 if ($isWindowsTarget -ne [bool]$IsWindows) { throw 'The server release target must be built on its native OS.' }
 $compilerDetails = & rustc -vV
@@ -93,6 +95,7 @@ $quotedNativeFlags = @($nativeFlags | ForEach-Object { ConvertTo-NativeFlag $_ }
 $combinedNativeFlags = ($savedEnvironment[$nativeFlagKey] + ' ' + $quotedNativeFlags).Trim()
 $enteredWorkspace = $false
 try {
+    $buildLease = Enter-AudioLibBuildLease $taskRoot
     Push-Location -LiteralPath $taskRoot
     $enteredWorkspace = $true
     [Environment]::SetEnvironmentVariable($encodedFlagKey, ($releaseFlags -join $flagSeparator))
@@ -104,6 +107,7 @@ try {
     cargo build -p audiolib-server --release --locked --no-default-features --target $Target
     if ($LASTEXITCODE -ne 0) { throw 'Rust server release build failed.' }
 } finally {
+    if ($buildLease) { $buildLease.Dispose() }
     foreach ($key in $savedEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key])
     }

@@ -92,7 +92,10 @@ $taskProof = [ordered]@{
 }
 $taskEntered = $false
 $taskLock = $null
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+$buildLease = $null
 try {
+    $buildLease = Enter-AudioLibBuildLease $taskRoot
     $taskLock = [IO.File]::Open((Join-Path $taskBuildRoot '.audiolib-macos-client-release.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     Push-Location -LiteralPath $taskRoot
     $taskEntered = $true
@@ -114,9 +117,11 @@ try {
     Assert-Source
     $taskProof.success = $true
 } finally {
-    foreach ($key in $taskSaved.Keys) { [Environment]::SetEnvironmentVariable($key, $taskSaved[$key]) }
-    if ($taskEntered) { Pop-Location }
-    if ($taskLock) { $taskLock.Dispose() }
-    [IO.File]::WriteAllText($ReportPath, (($taskProof | ConvertTo-Json -Depth 8) + [char]10), [Text.UTF8Encoding]::new($false))
+    try {
+        foreach ($key in $taskSaved.Keys) { [Environment]::SetEnvironmentVariable($key, $taskSaved[$key]) }
+        if ($taskEntered) { Pop-Location }
+        if ($taskLock) { $taskLock.Dispose() }
+        [IO.File]::WriteAllText($ReportPath, (($taskProof | ConvertTo-Json -Depth 8) + [char]10), [Text.UTF8Encoding]::new($false))
+    } finally { if ($buildLease) { $buildLease.Dispose() } }
 }
 Write-Host "Native macOS client build passed. Private proof: $ReportPath"

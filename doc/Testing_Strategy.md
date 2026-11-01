@@ -46,6 +46,9 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 | `tools/validate-desktop-close.ps1` | 修改关闭流程、写入排空或扫描取消时。 |
 | `tools/validate-spectral-ui.ps1`、`tools/validate-window-repaint.ps1` | 修改对应的 Spectral/Waveform UI 或重绘行为时。 |
 | `tools/test-development-pipeline.ps1` | 修改 `check-local.ps1` 或 `build-release.ps1` 时，用 fake Cargo 验证范围路由、feature 和失败传播，不编译应用。 |
+| `tools/test-build-artifacts.ps1` | 修改编译缓存维护或租约时，使用自有临时 Cargo 目录验证预算、保留、链接/路径、归属、占用和交付后清理；不删除真实缓存或用户数据。 |
+| `tools/test-release-pipeline.ps1` | 修改 Release 执行器或计划时，使用隔离 Git、伪命令和文件验证参数、短输出、失败续跑、环境/源码/产物失效与独占锁；不运行真实应用构建。 |
+| `tools/test-local-release-install.ps1` | 修改固定安装器时验证包拒绝和数据保留；可用已验收运行文件在自有临时 checkout 中验证启动、身份及幂等复制，不动真实安装与工作库。 |
 | `tools/test-package-boundary.ps1`、`tools/test-server-package.ps1` | 打包规则变化时在本地运行合成回归；实际包的白名单、隐私与身份检查由本地打包/验收负责。 |
 | 百万记录基准、真实库搜索、`tools/validate-gui-search-performance.ps1`、播放起音测量 | 修改性能相关路径、处理性能回归，或用户明确要求测量时。日常功能和文档改动不跑。 |
 
@@ -54,6 +57,8 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 性能目标仍为 **P95 latency <500ms for 1M+ records**。报告实际测试规模、条件及测量结果；驱动报告的延迟不能替代按钮到实际出声的测量。不为普通开发验收反复读取或哈希整套真实库和源音频。
 
 ### 本地验证与云端最小检查
+
+完成实际编译/测试后使用 `check-local.ps1 -CleanBuildArtifacts` 或独立缓存维护命令，按默认 40 GiB 预算清理 debug；发布在交付完成后用管线同名开关维护。未超过预算不删除，纯文档或复用未变检查不重复扫描。构建/测试期间不清理，失败时保留缓存和诊断；详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
 GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。相关 `main`、`beta`、`codex/**` 推送会触发，纯文档和截图推送跳过；所有 Pull Request 均须返回 required `Linux (fmt)` 结果。`.github/workflows/release.yml` 仅在手动触发时只读核对已发布 Release 的身份、精确资产集合与 SHA256，不构建、不打包、不上传，也不承担运行验收。
 
