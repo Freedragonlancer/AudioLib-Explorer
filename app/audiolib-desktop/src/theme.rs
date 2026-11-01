@@ -22,6 +22,9 @@ pub(crate) struct Palette {
     pub muted: u32,
     pub accent: u32,
     pub accent_hover: u32,
+    pub mint: u32,
+    pub apricot: u32,
+    pub coral: u32,
     pub on_accent: u32,
     pub selected: u32,
     pub checked: u32,
@@ -50,6 +53,9 @@ pub(crate) const DEFAULT_PALETTE: Palette = Palette {
     muted: 0xff95_a0ac,
     accent: 0xff8f_aea6,
     accent_hover: 0xffa8_c3bb,
+    mint: 0xff8f_aea6,
+    apricot: 0xffc3_b48e,
+    coral: 0xffcf_9696,
     on_accent: 0xff20_2b28,
     selected: 0xff2b_3a38,
     checked: 0xff35_4744,
@@ -62,6 +68,37 @@ pub(crate) const DEFAULT_PALETTE: Palette = Palette {
     player: 0xff23_2a30,
     player_border: 0xff46_5059,
     tooltip: 0xff14_171c,
+    overlay: 0xa800_0000,
+};
+
+/// The PR #185 workbench palette, retained as the opt-in Studio theme.
+pub(crate) const STUDIO_PALETTE: Palette = Palette {
+    bg: 0xff20_2226,
+    panel: 0xff24_272b,
+    raised: 0xff39_3c43,
+    hover: 0xff34_383e,
+    border: 0xff38_3c43,
+    strong_border: 0xff62_6873,
+    ink: 0xffec_ebe7,
+    dim: 0xffad_b0b7,
+    muted: 0xff85_8b94,
+    accent: 0xff2b_bfbd,
+    accent_hover: 0xff66_d2c9,
+    mint: 0xff79_d5bc,
+    apricot: 0xffef_c4a5,
+    coral: 0xffea_8b75,
+    on_accent: 0xff10_2a2a,
+    selected: 0xff29_3e40,
+    checked: 0xff30_3c3e,
+    alternate: 0xff27_2a2f,
+    warning: 0xffd6_ba98,
+    trough: 0xff1e_2024,
+    segment: 0xff3b_4148,
+    danger: 0xffdf_9e98,
+    danger_surface: 0xff40_3033,
+    player: 0xff29_2c31,
+    player_border: 0xff41_454c,
+    tooltip: 0xff19_1b1f,
     overlay: 0xa800_0000,
 };
 
@@ -97,12 +134,17 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     let index = theme_index(&id);
     ui.set_theme_index(index);
     let entry = &BUILTIN_THEMES[index as usize];
-    // Both shipped themes deliberately share charcoal colors. Studio's new
-    // audition presentation is opt-in; spectral frequency colors remain data.
-    let palette = &DEFAULT_PALETTE;
+    // A new design gets its own palette and presentation. Preserve the original
+    // default, while spectral frequency colors remain independent audio data.
+    let palette = match entry.player_style {
+        PlayerStyle::Classic => &DEFAULT_PALETTE,
+        PlayerStyle::Studio => &STUDIO_PALETTE,
+    };
     let theme = ui.global::<crate::Theme>();
     let modern_style = entry.player_style == PlayerStyle::Studio;
-    if theme.get_modern_style() != modern_style {
+    let presentation_changed = theme.get_modern_style() != modern_style;
+    if presentation_changed {
+        ui.invoke_prepare_workbench_switch();
         // Clear transient events before Slint creates the new presenter and binds
         // its change trackers. Clearing on a deferred style-changed handler is late.
         ui.invoke_clear_audition_input_feedback();
@@ -120,6 +162,9 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     theme.set_muted(color(palette.muted));
     theme.set_accent(color(palette.accent));
     theme.set_accent_hover(color(palette.accent_hover));
+    theme.set_mint(color(palette.mint));
+    theme.set_apricot(color(palette.apricot));
+    theme.set_coral(color(palette.coral));
     theme.set_on_accent(color(palette.on_accent));
     theme.set_selected(color(palette.selected));
     theme.set_checked(color(palette.checked));
@@ -133,6 +178,9 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     theme.set_player_border(color(palette.player_border));
     theme.set_tooltip(color(palette.tooltip));
     theme.set_overlay(color(palette.overlay));
+    if presentation_changed {
+        ui.invoke_restore_workbench_switch();
+    }
 }
 
 /// Show and apply the interface and list font sizes (clamped to the supported range).
@@ -144,4 +192,5 @@ pub(crate) fn apply_font_sizes(ui: &AppWindow, ui_font: u32, list_font: u32) {
     let theme = ui.global::<crate::Theme>();
     theme.set_ui_font_px(ui_font);
     theme.set_list_font_px(list_font);
+    crate::detail_presentation::relayout(ui);
 }

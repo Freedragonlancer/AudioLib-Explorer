@@ -60,6 +60,7 @@ component Tool inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> active: false;
     in property <bool> primary: false;
+    in property <bool> subtle: false;
     in property <length> icon-size: 20px * Theme.ui-scale;
     in property <length> symbol-size: Theme.font(16);
     /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
@@ -68,25 +69,31 @@ component Tool inherits Rectangle {
     in property <bool> keyboard-active: true;
     out property <bool> has-focus: focus.has-focus;
     callback clicked();
-    width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+    width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; border-radius: 5px * Theme.ui-scale;
     property <bool> hovered: hit.has-hover && root.enabled;
     property <bool> pressed: hit.pressed && root.enabled;
     property <bool> tip-ready: false;
     property <bool> show-alt: root.alt && root.alt-icon.width > 0;
     property <color> ink: root.primary ? Theme.on-accent : (root.active ? Theme.accent-hover : Theme.ink);
     background: root.primary
-        ? (root.pressed ? Theme.accent.darker(0.18) : (root.hovered ? Theme.accent-hover : Theme.accent))
+        ? (root.pressed ? Theme.accent.darker(0.12) : Theme.accent)
         : root.active
             ? (root.pressed ? Theme.selected : (root.hovered ? Theme.checked.brighter(0.12) : Theme.checked))
-            : (root.pressed ? Theme.trough : (root.hovered ? Theme.hover : Theme.raised));
+            : (root.pressed ? Theme.trough : (root.hovered ? Theme.control-hover-surface : (root.subtle ? transparent : Theme.control-surface)));
     border-width: 1px;
-    border-color: focus.has-focus || root.active || root.primary ? Theme.accent : (root.hovered ? Theme.strong-border : Theme.border);
+    border-color: focus.has-focus || root.active || root.primary ? Theme.accent : (root.hovered ? Theme.strong-border : (root.subtle ? transparent : Theme.border));
     opacity: root.enabled ? 1 : 0.4;
     animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     animate opacity { duration: Theme.motion-base; easing: ease-out; }
     accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
+    if root.primary: Rectangle {
+        x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
+        border-radius: max(0px, root.border-radius - 1px); clip: true;
+        opacity: root.pressed ? 0.75 : 1;
+        Image { width: parent.width; height: parent.height; source: Theme.transport-backdrop; image-fit: fill; accessible-role: none; }
+    }
     // The face sinks slightly while pressed; the frame stays put.
     face := Rectangle {
         transform-scale: root.pressed ? 0.9 : 1;
@@ -288,6 +295,7 @@ component VolumeSlider inherits Rectangle {
 // The audio route at a glance: a colored dot (idle, active, xrun, error), the
 // backend and device rate; the full engine summary sits in the tooltip.
 component OutputPill inherits Rectangle {
+    in property <bool> compact: false;
     in property <bool> chinese;
     in property <string> backend;
     in property <string> rate;
@@ -306,12 +314,17 @@ component OutputPill inherits Rectangle {
     Timer { interval: 1000ms; running: root.alarm; triggered => { root.alarm = false; } }
     property <color> tone: root.failed ? Theme.danger : (root.alarm ? Theme.warning : (root.idle ? Theme.muted : Theme.accent));
     height: 22px * Theme.ui-scale; border-radius: self.height / 2; horizontal-stretch: 0;
-    background: hit.pressed ? Theme.trough : (hit.has-hover ? Theme.hover : Theme.raised);
-    border-width: 1px; border-color: root.alarm ? Theme.warning : (hit.has-hover ? Theme.strong-border : Theme.border);
+    background: hit.pressed ? Theme.trough : (hit.has-hover ? Theme.hover : (root.compact ? transparent : Theme.raised));
+    border-width: 1px; border-color: output-focus.has-focus ? Theme.accent : (root.alarm ? Theme.warning : (hit.has-hover ? Theme.strong-border : (root.compact ? transparent : Theme.border)));
     animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
     accessible-role: button; accessible-label: root.chinese ? "音频输出状态" : "Audio output status";
     accessible-description: root.details;
     accessible-action-default => { root.clicked(); }
+    forward-focus: output-focus;
+    output-focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } reject }
+    }
     HorizontalLayout {
         padding-left: 8px * Theme.ui-scale; padding-right: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
         VerticalLayout { alignment: center;
@@ -322,7 +335,7 @@ component OutputPill inherits Rectangle {
         }
         Text {
             min-width: 0px; overflow: elide; vertical-alignment: center; font-size: Theme.font(10); color: Theme.dim;
-            text: root.idle ? (root.chinese ? "输出空闲" : "Output idle") : root.backend + (root.rate != "" ? " · " + root.rate : "");
+            text: root.idle ? (root.chinese ? "输出空闲" : "Output idle") : root.backend + (!root.compact && root.rate != "" ? " · " + root.rate : "");
         }
         if root.xruns > 0: Text { text: root.xruns + " xruns"; color: Theme.warning; font-size: Theme.font(10); vertical-alignment: center; }
     }
@@ -633,8 +646,12 @@ component ClassicAuditionPanel inherits Rectangle {
     }
 }
 
-component MotionAuditionPanel inherits Rectangle {
+// Stable audition contract. Only the selected presentation is instantiated;
+// shared control values survive a theme switch and the renderer stays external.
+// Studio compact dock, imported from PR185 without its default-theme overwrite.
+component WorkbenchAuditionPanel inherits Rectangle {
     in property <bool> compact: false;
+    in property <bool> narrow: false;
     in property <bool> spectral: true;
     in property <bool> chinese;
     in property <bool> play-on-single-click: false;
@@ -793,297 +810,50 @@ component MotionAuditionPanel inherits Rectangle {
     changed name => { root.name-fresh = true; }
     Timer { interval: 40ms; running: root.name-fresh; triggered => { root.name-fresh = false; } }
 
-    height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
-    VerticalLayout { padding: 9px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
-        HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-            Tool { icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; hint: root.transport-hint; tip-align: -1; enabled: root.ready; clicked => { root.flash-at(0); root.seek(0); } }
-            Tool {
-                icon: @image-url("icons/play.svg"); alt-icon: @image-url("icons/pause.svg"); alt: root.playing; primary: true; enabled: root.ready;
-                label: root.playing ? (root.chinese ? "暂停" : "Pause") : (root.chinese ? "播放" : "Play");
-                hint: root.ready ? (root.chinese ? "空格" : "Space") : root.unavailable;
-                clicked => { root.toggle(); }
-            }
-            Tool { icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; hint: root.transport-hint; enabled: root.ready; clicked => { root.stop(); } }
-            Tool { icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; hint: root.repeat ? (root.chinese ? "已开启" : "On") : ""; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-            Rectangle { width: 1px; background: Theme.player-border; }
-            HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                Caption { text: root.chinese ? "音高" : "Pitch"; color: pitch-field.modified ? Theme.accent-hover : Theme.dim; animate color { duration: Theme.motion-base; } }
-                pitch-field := NumberField {
-                    width: 62px * Theme.ui-scale; enabled: root.ready; text <=> root.pitch-text;
-                    minimum: -24; maximum: 24; default-value: 0; step: 1; fine-step: 0.1;
-                    input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss";
-                    range-hint: root.chinese ? "音高范围 −24 ~ +24 半音" : "Pitch range −24 to +24 semitones";
-                    submit(value) => { root.transform(value, root.rate-text, root.mono, root.repeat); }
+    // A compact horizontal dock gives the central result list the remaining height.
+    in-out property <bool> expanded: false;
+    in property <image> waveform-mask;
+    callback expanded-requested(bool);
+    private property <bool> show-spectral: root.expanded && root.spectral;
+    height: 88px * Theme.ui-scale;
+    background: Theme.player-surface;
+    Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.player-backdrop; image-fit: fill; accessible-role: none; }
+    Rectangle { x: 0px; y: 0px; height: 1px; background: Theme.player-border; }
+    private property <float> font-factor: max(1, Theme.ui-font-px / 13.0);
+    GridLayout { padding-left: 12px * Theme.ui-scale; padding-right: 10px * Theme.ui-scale; padding-top: 6px * Theme.ui-scale; padding-bottom: 6px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+        VerticalLayout { row: 0; col: 0; width: 180px * Theme.ui-scale; alignment: center;
+            HorizontalLayout { spacing: 8px * Theme.ui-scale; alignment: start;
+                Tool {
+                    width: 48px * Theme.ui-scale; height: 48px * Theme.ui-scale; border-radius: 6px * Theme.ui-scale; icon-size: 22px * Theme.ui-scale; tip-align: -1;
+                    icon: @image-url("icons/play.svg"); alt-icon: @image-url("icons/pause.svg"); alt: root.playing; primary: true; enabled: root.ready;
+                    label: root.playing ? (root.chinese ? "暂停" : "Pause") : (root.chinese ? "播放" : "Play");
+                    hint: root.ready ? (root.chinese ? "空格" : "Space") : root.unavailable;
+                    clicked => { root.toggle(); }
                 }
-                Caption { text: root.chinese ? "半音" : "st"; }
+                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; hint: root.transport-hint; enabled: root.ready; clicked => { root.flash-at(0); root.seek(0); } }
+                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; hint: root.transport-hint; enabled: root.ready; clicked => { root.stop(); } }
+                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; hint: root.repeat ? (root.chinese ? "已开启" : "On") : ""; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             }
-            HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
-                Caption { text: root.chinese ? "速度" : "Rate"; color: rate-field.modified ? Theme.accent-hover : Theme.dim; animate color { duration: Theme.motion-base; } }
-                rate-field := NumberField {
-                    width: 57px * Theme.ui-scale; enabled: root.ready; text <=> root.rate-text;
-                    minimum: 0.25; maximum: 4; default-value: 1; step: 0.05; fine-step: 0.01;
-                    input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss";
-                    range-hint: root.chinese ? "速度范围 0.25 ~ 4.00 倍" : "Rate range 0.25 to 4.00×";
-                    submit(value) => { root.transform(root.pitch-text, value, root.mono, root.repeat); }
-                }
-                Caption { text: "×"; }
-            }
-            Tool {
-                icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate";
-                enabled: pitch-field.modified || rate-field.modified;
-                clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
-            }
-            Rectangle { width: 1px; background: Theme.player-border; }
-            Tool {
-                width: 28px * Theme.ui-scale; icon-size: 18px * Theme.ui-scale;
-                icon: @image-url("icons/volume.svg"); alt-icon: @image-url("icons/volume-mute.svg"); alt: root.muted; active: root.muted;
-                label: root.muted ? (root.chinese ? "取消静音" : "Unmute") : (root.chinese ? "静音" : "Mute");
-                clicked => { root.toggle-mute(); }
-            }
-            volume-control := VolumeSlider {
-                min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1;
-                label: root.chinese ? "音量" : "Volume"; value <=> root.volume-db;
-                changed(value) => { root.volume(value); }
-            }
-            Caption { width: 54px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; color: root.muted ? Theme.muted : Theme.dim; font-size: Theme.font(10); }
-            Tool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; symbol-size: Theme.font(11); label: root.chinese ? "单声道监听" : "Mono monitoring"; hint: root.mono ? (root.chinese ? "已开启" : "On") : ""; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
-            Rectangle { horizontal-stretch: 1; min-width: 0px; }
-            VerticalLayout { alignment: center; horizontal-stretch: 0;
-                OutputPill {
-                    chinese: root.chinese; backend: root.output-backend; rate: root.output-rate; xruns: root.output-xruns;
-                    failed: root.state == 7; details: root.output;
-                    clicked => { root.output-settings(); }
-                }
-            }
-            Tool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
-            Tool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; tip-align: 1; clicked => { root.output-settings(); } }
         }
-        wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: root.compact ? 45px * Theme.ui-scale : 70px * Theme.ui-scale; background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas;
-            border-color: wave-keys.has-focus ? Theme.accent : Theme.player-border; border-width: 1px; clip: true;
-            animate border-color { duration: Theme.motion-fast; }
-            accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
-            property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / root.shown-span, 0, 1) : 0;
-            property <bool> head-visible: root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end;
-            property <length> head-x: clamp(wave.played-fraction * wave.width, 1px, max(1px, wave.width - 1px));
-            property <color> head-color: root.spectral ? #f4faf7 : Theme.accent-hover;
-            property <float> head-opacity: root.state == 6 ? 0 : (root.playing ? 1 : 0.8);
-            animate head-opacity { duration: Theme.motion-slow; easing: ease-out; }
-            property <bool> pointer-in: root.ready && (scrub.has-hover || ruler-touch.has-hover || root.scrubbing);
-            property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.has-hover ? scrub.mouse-x : ruler-touch.mouse-x, 0px, wave.width);
-            changed width => { root.resize(self.width / 1px, self.height / 1px); }
-            changed height => { root.resize(self.width / 1px, self.height / 1px); }
-            // The last image, placed by its own range inside the drawn range: a pending
-            // zoom or pan moves the old picture until the new render replaces it.
-            Image {
-                source: root.waveform; height: parent.height; image-fit: fill;
-                x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
-                width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
-                opacity: root.waveform-ready ? 1 : 0;
-                animate opacity { duration: Theme.motion-slow; easing: ease-out; }
-                animate x, width { duration: Theme.motion-fast; easing: ease-out; }
-            }
-            // Loading: faint lanes and a sweeping highlight. The frame clock is read only meanwhile.
-            if root.phase == 1 && !root.waveform-ready: Rectangle {
-                property <float> sweep: Math.mod(animation-tick() / 1ms, 1400) / 1400;
-                property <color> lane: root.spectral ? #26323818 : #ffffff10;
-                Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
-                Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
-                Rectangle {
-                    width: parent.width * 0.3; x: (parent.width + self.width) * parent.sweep - self.width;
-                    background: @linear-gradient(90deg, #ffffff00 0%, (root.spectral ? #ffffff30 : #ffffff14) 50%, #ffffff00 100%);
-                }
-            }
-            // Render progress while a partial Waveform is already on screen.
-            if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
-                y: 0px; height: 2px * Theme.ui-scale; background: #00000020;
-                Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
-            }
-            // These overlays are paint-only, leaving click/scroll ownership to scrub.
-            if root.ready && root.duration > 0: Rectangle {
-                x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
-                background: root.spectral ? #183c3428 : #8faea622;
-                opacity: root.state == 6 ? 0.5 : 1;
-                animate opacity { duration: Theme.motion-slow; }
-                accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
-                accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
-                Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
-            }
-            // Landing glow for seeks and repeat wraps.
+        VerticalLayout { row: 0; col: 1; width: (root.narrow ? 192px : 240px) * Theme.ui-scale * root.font-factor; alignment: center; spacing: 2px * Theme.ui-scale;
             Rectangle {
-                width: 18px * Theme.ui-scale; x: (root.flash-time - root.shown-start) / root.shown-span * parent.width - self.width / 2;
-                background: @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.6) 50%, Theme.accent.with-alpha(0) 100%);
-                opacity: 0;
-                states [
-                    lit when root.flash-on: {
-                        opacity: 1;
-                        in { animate opacity { duration: 60ms * Theme.motion; } }
-                        out { animate opacity { duration: 420ms * Theme.motion; easing: ease-out; } }
+                height: max(20px * Theme.ui-scale, Theme.font(14)); min-width: 0px; horizontal-stretch: 1;
+                name-text := Text {
+                    x: 0px; width: max(0px, parent.width - status-badge.width - (status-badge.badge != "" ? 8px * Theme.ui-scale : 0px)); height: parent.height;
+                    text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name;
+                    overflow: elide; color: Theme.ink; font-size: Theme.font(12); horizontal-alignment: left; vertical-alignment: center;
+                    states [
+                    fresh when root.name-fresh: {
+                        opacity: 0;
+                        in { animate opacity { duration: 0ms; } }
+                        out { animate opacity { duration: Theme.motion-slow; easing: ease-out; } }
                     }
-                ]
-            }
-            // Playhead: a glow, a 2px line and a handle (filled while playing, hollow otherwise).
-            if wave.head-visible: Rectangle { x: wave.head-x - 3px * Theme.ui-scale; width: 6px * Theme.ui-scale; background: wave.head-color.with-alpha(0.2); opacity: wave.head-opacity; }
-            if wave.head-visible: Rectangle { x: wave.head-x - 1px; width: 2px; background: wave.head-color; opacity: wave.head-opacity; }
-            if wave.head-visible: Path {
-                x: wave.head-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
-                viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
-                fill: root.playing ? wave.head-color : transparent; stroke: wave.head-color; stroke-width: 1.5px;
-                opacity: wave.head-opacity;
-            }
-            // After the end, a hollow handle at the start: Play begins there.
-            Path {
-                x: -6px * Theme.ui-scale + (0 - root.shown-start) / root.shown-span * parent.width; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
-                viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
-                fill: transparent; stroke: wave.head-color; stroke-width: 1.5px;
-                opacity: root.ready && root.state == 6 && root.shown-start <= 0 ? 0.85 : 0;
-                animate opacity { duration: Theme.motion-slow; easing: ease-out; }
-            }
-            // Pointer: a hairline (accent while scrubbing) and the time under it.
-            if wave.pointer-in: Rectangle { x: wave.pointer-x; width: 1px; background: root.scrubbing ? Theme.accent : (root.spectral ? #ffffff80 : #ffffff40); }
-            if wave.pointer-in && root.scrubbing: Path {
-                x: wave.pointer-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
-                viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
-                fill: Theme.accent; stroke: Theme.accent; stroke-width: 1.5px;
-            }
-            if wave.pointer-in: Rectangle {
-                y: 10px * Theme.ui-scale; height: 18px * Theme.ui-scale; width: pointer-time.preferred-width + 12px * Theme.ui-scale;
-                x: clamp(wave.pointer-x - self.width / 2, 2px, max(2px, wave.width - self.width - 2px));
-                background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-color: root.scrubbing ? Theme.accent : Theme.strong-border; border-radius: 3px * Theme.ui-scale;
-                pointer-time := Text {
-                    text: Clock.format(root.time-at(wave.pointer-x / max(1px, wave.width)));
-                    color: root.scrubbing ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(10);
-                    horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
+                    ]
                 }
-            }
-            // Keyboard (after Tab): Space plays/pauses, Left/Right nudge (Shift: larger),
-            // Home returns to the start, + / - / 0 zoom. A click does not take focus, so
-            // list navigation keeps working after a seek.
-            wave-keys := FocusScope {
-                enabled: root.ready; focus-on-click: false;
-                key-pressed(event) => {
-                    if !root.ready { return reject; }
-                    if event.text == " " { root.toggle(); return accept; }
-                    if event.text == Key.LeftArrow || event.text == Key.RightArrow {
-                        let nudge = (event.modifiers.shift ? 0.25 : 0.05) * (root.shown-end - root.shown-start);
-                        root.seek(clamp(root.visual-position + (event.text == Key.LeftArrow ? -nudge : nudge), 0, root.duration));
-                        return accept;
-                    }
-                    if event.text == Key.Home { root.flash-at(0); root.seek(0); return accept; }
-                    if event.text == "+" || event.text == "=" { root.zoom-change(2); return accept; }
-                    if event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
-                    if event.text == "0" { root.zoom-change(0); return accept; }
-                    reject
-                }
-                scrub := TouchArea { enabled: root.ready; mouse-cursor: pointer;
-                    pointer-event(event) => {
-                        if event.button != PointerEventButton.left { return; }
-                        if event.kind == PointerEventKind.down {
-                            root.scrubbing = true;
-                            root.scrub-x = clamp(self.mouse-x, 0px, self.width);
-                        } else if event.kind == PointerEventKind.up && root.scrubbing {
-                            root.scrubbing = false;
-                            root.seek-to(self.mouse-x / max(1px, self.width));
-                        } else if event.kind == PointerEventKind.cancel {
-                            root.scrubbing = false;
-                        }
-                    }
-                    moved => { if root.scrubbing { root.scrub-x = clamp(self.mouse-x, 0px, self.width); } }
-                    scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
-                }
-            }
-            // Empty, loading, error, missing and maintenance states explain themselves.
-            if root.phase == 0 || root.phase == 1: VerticalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
-                Text {
-                    horizontal-alignment: center; font-size: Theme.font(11); color: root.spectral ? #263238 : Theme.dim;
-                    text: root.phase == 1
-                        ? (root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在加载声音…" : "Loading sound…"))
-                        : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition"));
-                }
-            }
-            if root.phase >= 3: VerticalLayout { alignment: center;
-                HorizontalLayout { alignment: center;
-                    Rectangle {
-                        background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
-                        border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
-                        HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
-                            VerticalLayout { alignment: center;
-                                Image {
-                                    width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; accessible-role: none;
-                                    source: root.phase == 4 ? @image-url("icons/file-missing.svg") : @image-url("icons/alert.svg");
-                                    colorize: root.phase == 3 ? Theme.danger : Theme.warning;
-                                }
-                            }
-                            VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
-                                Text {
-                                    font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
-                                    text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
-                                        : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
-                                        : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
-                                }
-                                if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
-                            }
-                            if root.phase == 3: VerticalLayout { alignment: center;
-                                Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
-                            }
-                            if root.phase == 4: VerticalLayout { alignment: center;
-                                Tool { width: 96px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重新关联…" : "Locate file…"; symbol-size: Theme.font(11); label: root.chinese ? "选择新位置，修复引用" : "Locate the moved WAV and repair"; primary: true; enabled: root.relink-enabled; clicked => { root.relink(); } }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ruler := Rectangle { height: 24px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
-            for tick in root.ruler-ticks: Rectangle {
-                x: clamp(tick.fraction * (ruler.width - 1px), 0px, ruler.width - 1px); width: 1px;
-                Rectangle { y: 0px; width: 1px; height: tick.major ? 9px * Theme.ui-scale : 4px * Theme.ui-scale; background: tick.major ? Theme.muted : Theme.muted.with-alpha(0.55); }
-                // Labels sit right of their tick so the line never crosses a digit.
-                if tick.label != "": Text {
-                    x: min(3px * Theme.ui-scale, ruler.width - parent.x - self.width); y: 10px * Theme.ui-scale; height: 13px * Theme.ui-scale;
-                    text: tick.label; color: Theme.dim; font-size: Theme.font(9);
-                }
-            }
-            ruler-touch := TouchArea { enabled: root.ready; mouse-cursor: pointer;
-                clicked => { root.seek-to(self.mouse-x / max(1px, self.width)); }
-                scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
-            }
-        }
-        HorizontalLayout { height: 18px * Theme.ui-scale; spacing: 7px * Theme.ui-scale;
-            Text {
-                width: 42px * Theme.ui-scale; vertical-alignment: center; font-size: Theme.font(10);
-                text: Math.round(root.zoom * 10) / 10 + "×"; color: root.zoom-pulse ? Theme.accent-hover : Theme.dim;
-                animate color { duration: Theme.motion-slow; easing: ease-out; }
-            }
-            Rectangle { horizontal-stretch: 1;
-                Text {
-                    x: 0px; height: parent.height;
-                    text: root.chinese ? "在波形上滚动滚轮缩放" : "Scroll on the waveform to zoom"; color: Theme.dim; font-size: Theme.font(9); vertical-alignment: center;
-                    opacity: root.ready && root.zoom <= 1.0001 ? 1 : 0;
-                    animate opacity { duration: Theme.motion-base; }
-                }
-                OverviewBar {
-                    width: parent.width; height: parent.height;
-                    chinese: root.chinese; zoom: root.zoom; enabled: root.ready; scroll <=> root.scroll;
-                    pan(value) => { root.pan(value); }
-                }
-            }
-            Tool { width: 28px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; symbol-size: Theme.font(14); tip-align: 1; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
-            Tool { width: 28px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; symbol-size: Theme.font(14); tip-align: 1; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
-            Tool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); icon-size: 16px * Theme.ui-scale; tip-align: 1; label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
-        }
-        HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
-            Rectangle { width: 208px * Theme.ui-scale;
-                Text {
-                    accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time";
-                    text: (root.show-remaining ? "−" + Clock.format(max(0, root.duration - root.position)) : root.time) + "  /  " + root.end-time;
-                    color: time-touch.has-hover ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center;
-                    animate color { duration: Theme.motion-fast; }
-                }
-                time-touch := TouchArea { mouse-cursor: pointer; clicked => { root.show-remaining = !root.show-remaining; } }
-            }
-            // Transport state badge; hidden while nothing is loaded.
-            status-badge := VerticalLayout { alignment: center; horizontal-stretch: 0;
-                property <string> badge: root.busy ? (root.chinese ? "维护中" : "Maintenance")
+                status-badge := Text {
+                    x: min(name-text.preferred-width, name-text.width) + (self.badge != "" ? 8px * Theme.ui-scale : 0px);
+                    width: self.preferred-width; height: parent.height;
+                    property <string> badge: root.busy ? (root.chinese ? "维护中" : "Maintenance")
                     : root.missing ? (root.chinese ? "文件缺失" : "Missing")
                     : root.state == 7 ? (root.chinese ? "出错" : "Error")
                     : root.state == 1 ? (root.chinese ? "加载中" : "Loading")
@@ -1092,45 +862,318 @@ component MotionAuditionPanel inherits Rectangle {
                     : root.state == 6 ? (root.chinese ? "已结束" : "Ended")
                     : root.state == 5 ? (root.chinese ? "已停止" : "Stopped")
                     : root.state == 2 ? (root.chinese ? "就绪" : "Ready") : "";
-                property <color> tone: root.state == 7 || root.missing ? Theme.danger
+                    property <color> tone: root.state == 7 || root.missing ? Theme.danger
                     : root.busy || (root.state == 3 && root.buffering) ? Theme.warning
                     : root.state == 3 ? Theme.accent : Theme.muted;
-                if status-badge.badge != "": Rectangle {
-                    height: 18px * Theme.ui-scale; border-radius: self.height / 2; horizontal-stretch: 0;
-                    background: status-badge.tone.with-alpha(0.14); border-width: 1px; border-color: status-badge.tone.with-alpha(0.45);
-                    animate background, border-color { duration: Theme.motion-base; }
-                    accessible-role: text; accessible-label: status-badge.badge;
-                    HorizontalLayout { padding-left: 7px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
-                        VerticalLayout { alignment: center;
-                            Rectangle { width: 6px * Theme.ui-scale; height: self.width; border-radius: self.width / 2; background: status-badge.tone; }
+                    text: self.badge; color: self.tone; font-size: Theme.font(9); vertical-alignment: center;
+                    accessible-role: text; accessible-label: self.badge;
+                }
+            }
+            Rectangle { height: max(22px * Theme.ui-scale, Theme.font(16)); horizontal-stretch: 1; min-width: 0px;
+                Text {
+                    x: 0px; width: parent.width; height: parent.height; horizontal-alignment: left;
+                    accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time";
+                    text: (root.show-remaining ? "−" + Clock.format(max(0, root.duration - root.position)) : root.time) + "  /  " + root.end-time;
+                    color: time-touch.has-hover ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center;
+                    animate color { duration: Theme.motion-fast; }
+                }
+                time-touch := TouchArea { mouse-cursor: pointer; clicked => { root.show-remaining = !root.show-remaining; } }
+            }
+        }
+        Rectangle { row: 0; col: 3; width: (root.narrow ? 398px : 440px) * Theme.ui-scale * root.font-factor; vertical-stretch: 1; min-height: max(64px * Theme.ui-scale, Theme.font(20) + 40px * Theme.ui-scale);
+            transform-controls := HorizontalLayout { width: parent.width; height: max(32px * Theme.ui-scale, Theme.font(20) + 12px * Theme.ui-scale); y: max(0px, min((parent.height - self.height) / 2, parent.height - self.height - 24px * Theme.ui-scale)); spacing: 8px * Theme.ui-scale;
+                HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
+                    Caption { text: root.chinese ? "音高" : "Pitch"; color: pitch-field.modified ? Theme.accent-hover : Theme.dim; animate color { duration: Theme.motion-base; } }
+                    pitch-field := NumberField {
+                        width: 62px * Theme.ui-scale * max(1, Theme.ui-font-px / 13.0); enabled: root.ready; text <=> root.pitch-text;
+                        minimum: -24; maximum: 24; default-value: 0; step: 1; fine-step: 0.1;
+                        input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss";
+                        range-hint: root.chinese ? "音高范围 −24 ~ +24 半音" : "Pitch range −24 to +24 semitones";
+                        submit(value) => { root.transform(value, root.rate-text, root.mono, root.repeat); }
+                    }
+                }
+                HorizontalLayout { spacing: 4px * Theme.ui-scale; horizontal-stretch: 0;
+                    Caption { text: root.chinese ? "速度" : "Rate"; color: rate-field.modified ? Theme.accent-hover : Theme.dim; animate color { duration: Theme.motion-base; } }
+                    rate-field := NumberField {
+                        width: 57px * Theme.ui-scale * max(1, Theme.ui-font-px / 13.0); enabled: root.ready; text <=> root.rate-text;
+                        minimum: 0.25; maximum: 4; default-value: 1; step: 0.05; fine-step: 0.01;
+                        input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss";
+                        range-hint: root.chinese ? "速度范围 0.25 ~ 4.00 倍" : "Rate range 0.25 to 4.00×";
+                        submit(value) => { root.transform(root.pitch-text, value, root.mono, root.repeat); }
+                    }
+                    Caption { text: "×"; }
+                }
+                Tool {
+                    width: 28px * Theme.ui-scale; height: 32px * Theme.ui-scale; subtle: true; icon-size: 18px * Theme.ui-scale;
+                    icon: @image-url("icons/volume.svg"); alt-icon: @image-url("icons/volume-mute.svg"); alt: root.muted; active: root.muted;
+                    label: root.muted ? (root.chinese ? "取消静音" : "Unmute") : (root.chinese ? "静音" : "Mute");
+                    hint: root.volume-label;
+                    clicked => { root.toggle-mute(); }
+                }
+                volume-control := VolumeSlider {
+                    min-width: 76px * Theme.ui-scale; horizontal-stretch: 1;
+                    label: root.chinese ? "音量" : "Volume"; value <=> root.volume-db;
+                    changed(value) => { root.volume(value); }
+                }
+            }
+            HorizontalLayout { width: parent.width; height: 24px * Theme.ui-scale; y: min(parent.height - self.height, transform-controls.y + transform-controls.height + 2px * Theme.ui-scale); spacing: 3px * Theme.ui-scale;
+                OutputPill {
+                    compact: true;
+                    chinese: root.chinese; backend: root.output-backend; rate: root.output-rate; xruns: root.output-xruns;
+                    failed: root.state == 7; details: root.output;
+                    clicked => { root.output-settings(); }
+                }
+                Caption { text: root.volume-label; font-size: Theme.font(9); }
+                Rectangle { horizontal-stretch: 1; }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 16px * Theme.ui-scale; icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; enabled: pitch-field.modified || rate-field.modified; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                Tool { width: 44px * Theme.ui-scale * root.font-factor; height: 24px * Theme.ui-scale; subtle: true; symbol: root.chinese ? "单声道" : "Mono"; symbol-size: Theme.font(10); label: root.chinese ? "单声道监听" : "Mono monitoring"; hint: root.mono ? (root.chinese ? "已开启" : "On") : ""; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+                Rectangle { width: 1px; height: 14px * Theme.ui-scale; y: (parent.height - self.height) / 2; background: Theme.border; }
+                Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "−"; symbol-size: Theme.font(14); label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
+                Tool { width: 22px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; symbol: "+"; symbol-size: Theme.font(14); label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon: @image-url("icons/fit.svg"); icon-size: 16px * Theme.ui-scale; label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
+                Rectangle { width: 1px; height: 14px * Theme.ui-scale; y: (parent.height - self.height) / 2; background: Theme.border; }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 17px * Theme.ui-scale; icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
+                Tool { width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; subtle: true; icon-size: 17px * Theme.ui-scale; icon: root.expanded ? @image-url("icons/chevron-down.svg") : @image-url("icons/chevron-up.svg"); label: root.expanded ? (root.chinese ? "收起试听波形" : "Compact audition waveform") : (root.chinese ? "展开试听波形" : "Expand audition waveform"); tip-align: 1; active: root.expanded; clicked => { root.expanded-requested(!root.expanded); } }
+            }
+        }
+        VerticalLayout { row: 0; col: 2; horizontal-stretch: 1; min-width: 220px * Theme.ui-scale; spacing: 0px;
+            wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.zoom > 1 ? 44px : 54px) * Theme.ui-scale; background: root.show-spectral && root.waveform-ready ? Theme.spectral-canvas : Theme.normal-canvas;
+                border-color: wave-keys.has-focus ? Theme.accent : (root.show-spectral ? Theme.player-border : transparent); border-width: 1px; clip: true;
+                animate border-color { duration: Theme.motion-fast; }
+                accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
+                property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / root.shown-span, 0, 1) : 0;
+                property <float> color-fraction: clamp((root.visual-position - root.view-start) / max(0.001, root.view-end - root.view-start), 0, 1);
+                property <bool> head-visible: root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end;
+                property <length> head-x: clamp(wave.played-fraction * wave.width, 1px, max(1px, wave.width - 1px));
+                property <color> head-color: root.show-spectral ? #f4faf7 : Theme.apricot;
+                property <float> head-opacity: root.state == 6 ? 0 : (root.playing ? 1 : 0.8);
+                animate head-opacity { duration: Theme.motion-slow; easing: ease-out; }
+                property <bool> pointer-in: root.ready && (scrub.has-hover || ruler-touch.has-hover || root.scrubbing);
+                property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.has-hover ? scrub.mouse-x : ruler-touch.mouse-x, 0px, wave.width);
+                changed width => { root.resize(self.width / 1px, self.height / 1px); }
+                changed height => { root.resize(self.width / 1px, self.height / 1px); }
+                // The last image, placed by its own range inside the drawn range: a pending
+                // zoom or pan moves the old picture until the new render replaces it.
+                Image {
+                    visible: root.show-spectral; source: root.waveform; height: parent.height; image-fit: fill;
+                    x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
+                    width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+                    opacity: root.waveform-ready ? 1 : 0;
+                    animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                    animate x, width { duration: Theme.motion-fast; easing: ease-out; }
+                }
+                Image {
+                    visible: !root.show-spectral; source: root.waveform-mask; colorize: Theme.dim; height: parent.height; image-fit: fill;
+                    x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
+                    width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+                    opacity: root.waveform-ready ? 1 : 0;
+                    animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                }
+                if !root.show-spectral && root.waveform-ready: Rectangle {
+                    x: 0px; y: 0px; width: wave.played-fraction * wave.width; height: wave.height; clip: true;
+                    for stripe in 64: Rectangle {
+                        private property <float> fraction: stripe / 63.0;
+                        private property <color> tone: self.fraction <= 0.78 ? Theme.accent.mix(Theme.mint, 1 - self.fraction / 0.78) : Theme.mint.mix(Theme.apricot, 1 - (self.fraction - 0.78) / 0.22);
+                        x: parent.width * stripe / 64; y: 0px; width: parent.width / 64 + 1px; height: parent.height; clip: true;
+                        Image {
+                            source: root.waveform-mask; colorize: parent.tone; height: wave.height; image-fit: fill;
+                            x: (root.view-start - root.shown-start) / root.shown-span * wave.width - parent.x;
+                            width: max(0px, (root.view-end - root.view-start) / root.shown-span * wave.width);
+                            opacity: root.waveform-ready ? 1 : 0;
+                            animate opacity { duration: Theme.motion-slow; easing: ease-out; }
                         }
-                        Text { text: status-badge.badge; color: Theme.ink; font-size: Theme.font(10); vertical-alignment: center; accessible-role: none; }
-                        if root.repeat: VerticalLayout { alignment: center;
-                            Image { source: @image-url("icons/repeat.svg"); colorize: Theme.accent-hover; width: 12px * Theme.ui-scale; height: 12px * Theme.ui-scale; accessible-role: none; }
+                    }
+                }
+                // Loading: faint lanes and a sweeping highlight. The frame clock is read only meanwhile.
+                if root.phase == 1 && !root.waveform-ready: Rectangle {
+                    property <float> sweep: Math.mod(animation-tick() / 1ms, 1400) / 1400;
+                    property <color> lane: Theme.dim.with-alpha(0.12);
+                    Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
+                    Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
+                    Rectangle {
+                        width: parent.width * 0.3; x: (parent.width + self.width) * parent.sweep - self.width;
+                        background: @linear-gradient(90deg, #ffffff00 0%, (root.show-spectral ? #ffffff30 : #ffffff14) 50%, #ffffff00 100%);
+                    }
+                }
+                // Render progress while a partial Waveform is already on screen.
+                if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
+                    y: 0px; height: 2px * Theme.ui-scale; background: #00000020;
+                    Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
+                }
+                // These overlays are paint-only, leaving click/scroll ownership to scrub.
+                if root.ready && root.duration > 0: Rectangle {
+                    x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
+                    background: root.show-spectral ? #183c3428 : transparent;
+                    opacity: root.state == 6 ? 0.5 : 1;
+                    animate opacity { duration: Theme.motion-slow; }
+                    accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
+                    accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
+                    Rectangle { visible: root.show-spectral; x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
+                }
+                // Landing glow for seeks and repeat wraps.
+                Rectangle {
+                    width: 18px * Theme.ui-scale; x: (root.flash-time - root.shown-start) / root.shown-span * parent.width - self.width / 2;
+                    background: @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.6) 50%, Theme.accent.with-alpha(0) 100%);
+                    opacity: 0;
+                    states [
+                    lit when root.flash-on: {
+                        opacity: 1;
+                        in { animate opacity { duration: 60ms * Theme.motion; } }
+                        out { animate opacity { duration: 420ms * Theme.motion; easing: ease-out; } }
+                    }
+                    ]
+                }
+                // Playhead: a glow, a 2px line and a handle (filled while playing, hollow otherwise).
+                if wave.head-visible: Rectangle { x: wave.head-x - 3px * Theme.ui-scale; width: 6px * Theme.ui-scale; background: wave.head-color.with-alpha(0.2); opacity: wave.head-opacity; }
+                if wave.head-visible: Rectangle { x: wave.head-x - 1px; width: 2px; background: wave.head-color; opacity: wave.head-opacity; }
+                if wave.head-visible: Path {
+                    x: wave.head-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
+                    viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
+                    fill: root.playing ? wave.head-color : transparent; stroke: wave.head-color; stroke-width: 1.5px;
+                    opacity: wave.head-opacity;
+                }
+                // After the end, a hollow handle at the start: Play begins there.
+                Path {
+                    x: -6px * Theme.ui-scale + (0 - root.shown-start) / root.shown-span * parent.width; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
+                    viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
+                    fill: transparent; stroke: wave.head-color; stroke-width: 1.5px;
+                    opacity: root.ready && root.state == 6 && root.shown-start <= 0 ? 0.85 : 0;
+                    animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                }
+                // Pointer: a hairline (accent while scrubbing) and the time under it.
+                if wave.pointer-in: Rectangle { x: wave.pointer-x; width: 1px; background: root.scrubbing ? Theme.accent : (root.show-spectral ? #ffffff80 : #ffffff40); }
+                if wave.pointer-in && root.scrubbing: Path {
+                    x: wave.pointer-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
+                    viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
+                    fill: Theme.accent; stroke: Theme.accent; stroke-width: 1.5px;
+                }
+                if wave.pointer-in: Rectangle {
+                    y: 10px * Theme.ui-scale; height: 18px * Theme.ui-scale; width: pointer-time.preferred-width + 12px * Theme.ui-scale;
+                    x: clamp(wave.pointer-x - self.width / 2, 2px, max(2px, wave.width - self.width - 2px));
+                    background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-color: root.scrubbing ? Theme.accent : Theme.strong-border; border-radius: 3px * Theme.ui-scale;
+                    pointer-time := Text {
+                        text: Clock.format(root.time-at(wave.pointer-x / max(1px, wave.width)));
+                        color: root.scrubbing ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(10);
+                        horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
+                    }
+                }
+                // Keyboard (after Tab): Space plays/pauses, Left/Right nudge (Shift: larger),
+                // Home returns to the start, + / - / 0 zoom. A click does not take focus, so
+                // list navigation keeps working after a seek.
+                wave-keys := FocusScope {
+                    enabled: root.ready; focus-on-click: false;
+                    key-pressed(event) => {
+                        if !root.ready { return reject; }
+                        if event.text == " " { root.toggle(); return accept; }
+                        if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                            let nudge = (event.modifiers.shift ? 0.25 : 0.05) * (root.shown-end - root.shown-start);
+                            root.seek(clamp(root.visual-position + (event.text == Key.LeftArrow ? -nudge : nudge), 0, root.duration));
+                            return accept;
+                        }
+                        if event.text == Key.Home { root.flash-at(0); root.seek(0); return accept; }
+                        if event.text == "+" || event.text == "=" { root.zoom-change(2); return accept; }
+                        if event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
+                        if event.text == "0" { root.zoom-change(0); return accept; }
+                        reject
+                    }
+                    scrub := TouchArea { enabled: root.ready; mouse-cursor: pointer;
+                        pointer-event(event) => {
+                            if event.button != PointerEventButton.left { return; }
+                            if event.kind == PointerEventKind.down {
+                                root.scrubbing = true;
+                                root.scrub-x = clamp(self.mouse-x, 0px, self.width);
+                            } else if event.kind == PointerEventKind.up && root.scrubbing {
+                                root.scrubbing = false;
+                                root.seek-to(self.mouse-x / max(1px, self.width));
+                            } else if event.kind == PointerEventKind.cancel {
+                                root.scrubbing = false;
+                            }
+                        }
+                        moved => { if root.scrubbing { root.scrub-x = clamp(self.mouse-x, 0px, self.width); } }
+                        scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
+                    }
+                }
+                // Empty, loading, error, missing and maintenance states explain themselves.
+                if root.phase == 0 || root.phase == 1: VerticalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
+                    Text {
+                        horizontal-alignment: center; font-size: Theme.font(11); color: root.show-spectral && root.waveform-ready ? #263238 : Theme.dim;
+                        text: root.phase == 1
+                        ? (root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在加载声音…" : "Loading sound…"))
+                        : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition"));
+                    }
+                }
+                if root.phase >= 3: VerticalLayout { alignment: center;
+                    HorizontalLayout { alignment: center;
+                        Rectangle {
+                            background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
+                            border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
+                            HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+                                VerticalLayout { alignment: center;
+                                    Image {
+                                        width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; accessible-role: none;
+                                        source: root.phase == 4 ? @image-url("icons/file-missing.svg") : @image-url("icons/alert.svg");
+                                        colorize: root.phase == 3 ? Theme.danger : Theme.warning;
+                                    }
+                                }
+                                VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
+                                    Text {
+                                        font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
+                                        text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
+                                        : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
+                                        : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
+                                    }
+                                    if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
+                                }
+                                if root.phase == 3: VerticalLayout { alignment: center;
+                                    Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
+                                }
+                                if root.phase == 4: VerticalLayout { alignment: center;
+                                    Tool { width: 96px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重新关联…" : "Locate file…"; symbol-size: Theme.font(11); label: root.chinese ? "选择新位置，修复引用" : "Locate the moved WAV and repair"; primary: true; enabled: root.relink-enabled; clicked => { root.relink(); } }
+                                }
+                            }
                         }
                     }
                 }
             }
-            Rectangle { width: 1px; background: Theme.player-border; }
-            name-text := Text {
-                horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center;
-                states [
-                    fresh when root.name-fresh: {
-                        opacity: 0;
-                        in { animate opacity { duration: 0ms; } }
-                        out { animate opacity { duration: Theme.motion-slow; easing: ease-out; } }
+            ruler := Rectangle { height: 20px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
+                for tick in root.ruler-ticks: Rectangle {
+                    x: clamp(tick.fraction * (ruler.width - 1px), 0px, ruler.width - 1px); width: 1px;
+                    Rectangle { y: 0px; width: 1px; height: tick.major ? 9px * Theme.ui-scale : 4px * Theme.ui-scale; background: tick.major ? Theme.muted : Theme.muted.with-alpha(0.55); }
+                    // Labels sit right of their tick so the line never crosses a digit.
+                    if tick.label != "": Text {
+                        x: min(3px * Theme.ui-scale, ruler.width - parent.x - self.width); y: 7px * Theme.ui-scale; height: 13px * Theme.ui-scale;
+                        text: tick.label; color: Theme.dim; font-size: Theme.font(9);
                     }
-                ]
+                }
+                ruler-touch := TouchArea { enabled: root.ready; mouse-cursor: pointer;
+                    clicked => { root.seek-to(self.mouse-x / max(1px, self.width)); }
+                    scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
+                }
             }
-            Caption { text: root.info; font-size: Theme.font(10); }
+            HorizontalLayout { visible: root.zoom > 1; height: root.zoom > 1 ? 10px * Theme.ui-scale : 0px; spacing: 7px * Theme.ui-scale;
+                Text {
+                    width: 42px * Theme.ui-scale; vertical-alignment: center; font-size: Theme.font(9);
+                    text: Math.round(root.zoom * 10) / 10 + "×"; color: root.zoom-pulse ? Theme.accent-hover : Theme.dim;
+                    animate color { duration: Theme.motion-slow; easing: ease-out; }
+                }
+                Rectangle { horizontal-stretch: 1;
+                    OverviewBar {
+                        width: parent.width; height: parent.height;
+                        chinese: root.chinese; zoom: root.zoom; enabled: root.ready; scroll <=> root.scroll;
+                        pan(value) => { root.pan(value); }
+                    }
+                }
+            }
         }
     }
 }
 
-// Stable audition contract. Only the selected presentation is instantiated;
-// shared control values survive a theme switch and the renderer stays external.
 export component AuditionPanel inherits Rectangle {
     in property <bool> compact: false;
+    in property <bool> narrow: false;
+    in property <image> waveform-mask;
+    in-out property <bool> expanded: false;
+    callback expanded-requested(bool);
     in property <bool> spectral: true;
     in property <bool> chinese;
     in property <bool> play-on-single-click: false;
@@ -1206,7 +1249,8 @@ export component AuditionPanel inherits Rectangle {
     property <bool> show-remaining: false;
     property <bool> modern-style: Theme.modern-style;
     changed modern-style => { root.presenter-volume-adjusting = false; }
-    height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale;
+    height: Theme.modern-style ? (root.expanded ? 260px : 88px) * Theme.ui-scale
+        : (root.compact ? 190px : 222px) * Theme.ui-scale;
     if !Theme.modern-style: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
         compact: root.compact;
@@ -1253,8 +1297,11 @@ export component AuditionPanel inherits Rectangle {
         peaks => { root.peaks(); }
         output-settings => { root.output-settings(); }
     }
-    if Theme.modern-style: MotionAuditionPanel {
+    if Theme.modern-style: WorkbenchAuditionPanel {
         width: parent.width; height: parent.height;
+        narrow: root.narrow; waveform-mask: root.waveform-mask;
+        expanded <=> root.expanded;
+        expanded-requested(value) => { root.expanded-requested(value); }
         compact: root.compact;
         spectral: root.spectral;
         chinese: root.chinese;

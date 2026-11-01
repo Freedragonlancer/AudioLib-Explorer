@@ -5,6 +5,7 @@ mod artwork;
 #[cfg(test)]
 mod close_tests;
 mod controller;
+mod detail_presentation;
 mod diagnostics;
 mod dialogs;
 mod directory_artwork_choices;
@@ -22,6 +23,8 @@ mod search_task_ui_tests;
 #[cfg(test)]
 mod sidebar_section_tests;
 mod startup;
+#[cfg(test)]
+mod studio_theme_tests;
 mod tag_chips;
 mod theme;
 #[cfg(test)]
@@ -286,6 +289,10 @@ fn run() -> Result<()> {
     window_repaint::install(ui.window());
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_chinese(config.language == "cn");
+    // Apply the saved workbench before the startup window opens. Opening or
+    // upgrading a large library must not temporarily show the default theme.
+    theme::apply_theme(&ui, &config.theme);
+    theme::apply_font_sizes(&ui, config.ui_font_size, config.list_font_size);
     // Smoke runs keep the design layout so screenshots stay deterministic.
     let restore_layout = !arguments.iter().any(|argument| argument == "--smoke-ui");
     if restore_layout {

@@ -294,6 +294,37 @@ pub(crate) fn render_waveform(
     rgba
 }
 
+/// Neutral alpha coverage of the same source peaks, channel lanes and display gain.
+/// Studio recolors and clips this layer on playback ticks without reading audio or
+/// rerendering peaks; the default and spectral frequency renderers remain unchanged.
+pub(crate) fn render_waveform_mask(
+    data: &WaveformData,
+    width: u32,
+    height: u32,
+    view: WaveView,
+) -> Vec<u8> {
+    let mut pixels = render_waveform(
+        data,
+        width,
+        height,
+        WaveView {
+            spectral: false,
+            ..view
+        },
+    );
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = if pixel == NORMAL_BACKGROUND {
+            0
+        } else if pixel[..3] == [55, 66, 72] {
+            45
+        } else {
+            255
+        };
+        pixel.copy_from_slice(&[255, 255, 255, alpha]);
+    }
+    pixels
+}
+
 pub(crate) fn db_from_gain(gain: f32) -> f32 {
     if gain <= 0.001 {
         -60.0
@@ -570,5 +601,61 @@ mod tests {
         );
         assert_eq!(&normal[0..4], &NORMAL_BACKGROUND);
         assert_eq!(&normal[10 * 4..11 * 4], &[143, 174, 166, 255]);
+    }
+
+    #[test]
+    fn progress_mask_preserves_channel_geometry_gain_and_transparent_background() {
+        use audiolib_audio::WaveformPeak;
+
+        let data = WaveformData {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 128,
+            samples_per_pixel: 16,
+            peaks: vec![
+                vec![WaveformPeak {
+                    min: -0.6,
+                    max: 0.8,
+                    ..Default::default()
+                }],
+                vec![WaveformPeak {
+                    min: -0.2,
+                    max: 0.3,
+                    ..Default::default()
+                }],
+            ],
+        };
+        for gain_db in [-6.0, 0.0, 6.0] {
+            let view = WaveView {
+                gain_db,
+                ..Default::default()
+            };
+            let normal = render_waveform(
+                &data,
+                8,
+                40,
+                WaveView {
+                    spectral: false,
+                    ..view
+                },
+            );
+            let mask = render_waveform_mask(&data, 8, 40, view);
+            assert_eq!(mask.len(), normal.len());
+            for (original, masked) in normal.chunks_exact(4).zip(mask.chunks_exact(4)) {
+                assert_eq!(masked[..3], [255; 3]);
+                assert_eq!(masked[3] == 0, original == NORMAL_BACKGROUND);
+            }
+            assert!(
+                mask[..20 * 8 * 4]
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] == 255)
+            );
+            assert!(
+                mask[20 * 8 * 4..]
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] == 255)
+            );
+        }
+        assert!(render_waveform_mask(&data, 0, 40, WaveView::default()).is_empty());
     }
 }
