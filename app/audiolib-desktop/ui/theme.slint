@@ -79,6 +79,7 @@ export global Theme {
 // Keep the standard input, keyboard and accessibility behavior; paint its accent
 // locally so Windows' system accent cannot compete with frequency colors.
 export component ThemedSlider inherits Rectangle {
+    in property <string> input-label;
     in property <float> minimum <=> native.minimum;
     in property <float> maximum <=> native.maximum;
     in property <float> step <=> native.step;
@@ -91,7 +92,22 @@ export component ThemedSlider inherits Rectangle {
     min-height: 20px * Theme.ui-scale; min-width: 20px * Theme.ui-scale;
     horizontal-stretch: 1; vertical-stretch: 0;
     in property <color> surface: Theme.player;
-    native := Slider { width: parent.width; height: parent.height; }
+    // Slint's native accessibility actions call SliderBase setters directly,
+    // bypassing its pointer/key enabled checks. Guard before mutating bound state.
+    function accessible-set-value(value: float) {
+        if !root.enabled { return; }
+        let next = clamp(value, root.minimum, root.maximum);
+        if next != root.value {
+            root.value = next;
+            root.changed(next);
+        }
+    }
+    native := Slider {
+        width: parent.width; height: parent.height; accessible-label: root.input-label;
+        accessible-action-set-value(v) => { if v.is-float() { root.accessible-set-value(v.to-float()); } }
+        accessible-action-increment => { root.accessible-set-value(root.value + root.step); }
+        accessible-action-decrement => { root.accessible-set-value(root.value - root.step); }
+    }
     Rectangle { background: root.surface; }
     property <float> fraction: clamp((root.value - root.minimum) / max(0.001, root.maximum - root.minimum), 0, 1);
     Rectangle {

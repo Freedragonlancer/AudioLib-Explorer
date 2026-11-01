@@ -495,13 +495,17 @@ component ClassicAuditionPanel inherits Rectangle {
     // renderer's modern, round-tick model.
     function ruler-label(index: int) -> string {
         let seconds = root.shown-start + (root.shown-end - root.shown-start) * index / 10;
-        let minutes = floor(seconds / 60);
-        let remainder = Math.mod(seconds, 60);
-        if root.shown-end - root.shown-start < 10 {
-            let tenths = round(remainder * 10);
-            return minutes + ":" + (tenths < 100 ? "0" : "") + floor(tenths / 10) + "." + Math.mod(tenths, 10);
-        }
-        return minutes + ":" + Clock.pad2(floor(remainder));
+        let span = root.shown-end - root.shown-start;
+        let scale = span < 0.1 ? 1000 : (span < 1 ? 100 : (span < 10 ? 10 : 1));
+        // Round the whole timestamp before splitting minutes so a rounded
+        // 59.96 seconds carries into 1:00.0 rather than producing 0:60.0.
+        let units = round(max(0, seconds) * scale);
+        let whole = floor(units / scale);
+        let text = floor(whole / 60) + ":" + Clock.pad2(Math.mod(whole, 60));
+        if scale == 1000 { return text + "." + Clock.pad3(Math.mod(units, scale)); }
+        if scale == 100 { return text + "." + Clock.pad2(Math.mod(units, scale)); }
+        if scale == 10 { return text + "." + Math.mod(units, scale); }
+        return text;
     }
     // The frame clock fills gaps between engine snapshots, with bounded prediction.
     // Repeated positions do not restart the clock; stalled output stops after 100ms.
@@ -550,7 +554,7 @@ component ClassicAuditionPanel inherits Rectangle {
             ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音量" : "Volume"; }
-            volume-control := Slider { min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
+            volume-control := Slider { input-label: root.chinese ? "音量" : "Volume"; min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
             ClassicTool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: Theme.font(9); }
@@ -615,7 +619,7 @@ component ClassicAuditionPanel inherits Rectangle {
         HorizontalLayout { height: 16px * Theme.ui-scale; spacing: 7px * Theme.ui-scale;
             Caption { width: 42px * Theme.ui-scale; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: Theme.font(10); }
             if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: Theme.font(9); }
-            Slider { horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
+            Slider { input-label: root.chinese ? "波形可视范围" : "Visible waveform range"; horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.ready && root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
             ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
             ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
             ClassicTool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
@@ -1188,6 +1192,12 @@ export component AuditionPanel inherits Rectangle {
     public function reject-input(fields: int) {
         root.rejection-fields = fields;
         root.rejection-revision += 1;
+    }
+    // Rejection revisions deliver events to the current presenter. They are not
+    // persistent view state: a newly created Studio must not replay an old event.
+    public function clear-input-feedback() {
+        root.rejection-fields = 0;
+        root.rejection-revision = 0;
     }
     property <int> rejection-fields: 0;
     property <int> rejection-revision: 0;

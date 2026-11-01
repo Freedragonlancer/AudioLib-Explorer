@@ -2373,6 +2373,222 @@ fn database_batch_and_confirmation_actions_are_reachable_in_both_languages() {
 }
 
 #[test]
+fn audition_sliders_keep_bilingual_accessible_names_in_both_themes() {
+    use audiolib_core::config::THEME_IDS;
+
+    i_slint_backend_testing::init_no_event_loop();
+    for id in THEME_IDS {
+        for chinese in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            crate::theme::apply_theme(&ui, id);
+            ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+            ui.set_chinese(chinese);
+            ui.set_audio_ready(true);
+            ui.set_play_duration(20.0);
+            ui.set_view_end(20.0);
+            ui.set_wave_zoom(4.0);
+            let volumes = Rc::new(RefCell::new(Vec::new()));
+            let observed = volumes.clone();
+            ui.on_volume_db_requested(move |db| observed.borrow_mut().push(db));
+            ui.show().unwrap();
+            for (label, minimum, maximum) in [
+                (if chinese { "音量" } else { "Volume" }, -60.0, 0.0),
+                (
+                    if chinese {
+                        "波形可视范围"
+                    } else {
+                        "Visible waveform range"
+                    },
+                    0.0,
+                    1.0,
+                ),
+            ] {
+                let slider = ElementHandle::find_by_accessible_label(&ui, label)
+                    .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+                    .unwrap_or_else(|| panic!("{id}: missing named slider {label}"));
+                assert_eq!(slider.accessible_value_minimum(), Some(minimum));
+                assert_eq!(slider.accessible_value_maximum(), Some(maximum));
+                assert_eq!(slider.accessible_enabled(), Some(true));
+                if minimum < 0.0 {
+                    slider.set_accessible_value("-6");
+                    assert!((ui.get_volume_db() + 6.0).abs() < 0.001);
+                    assert_eq!(volumes.borrow().last(), Some(&-6.0));
+                }
+            }
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn classic_waveform_pan_requires_ready_audio_for_pointer_keyboard_and_accessibility() {
+    use slint::platform::Key;
+
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+        ui.set_chinese(chinese);
+        ui.set_audio_ready(true);
+        ui.set_play_duration(20.0);
+        ui.set_view_end(20.0);
+        ui.set_wave_zoom(4.0);
+        ui.set_wave_scroll(0.5);
+        let pans = Rc::new(RefCell::new(Vec::new()));
+        let observed = pans.clone();
+        ui.on_waveform_pan_requested(move |value| observed.borrow_mut().push(value));
+        ui.show().unwrap();
+        let label = if chinese {
+            "波形可视范围"
+        } else {
+            "Visible waveform range"
+        };
+        let pan = ElementHandle::find_by_accessible_label(&ui, label)
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+            .expect("classic pan has an accessible slider owner");
+        pan.set_accessible_value("0.5");
+        pan.invoke_accessible_increment_action();
+        assert!((ui.get_wave_scroll() - 0.505).abs() < 0.001);
+        assert_eq!(pans.borrow().last(), Some(&ui.get_wave_scroll()));
+        let origin = pan.absolute_position();
+        let size = pan.size();
+        click_at(
+            &ui,
+            slint::LogicalPosition::new(origin.x + size.width * 0.75, origin.y + size.height / 2.0),
+        );
+        assert!(ui.get_wave_scroll() > 0.7 && ui.get_wave_scroll() < 0.8);
+        let before_key = ui.get_wave_scroll();
+        send_keys(&ui, &[Key::RightArrow.into()]);
+        assert!((ui.get_wave_scroll() - before_key - 0.005).abs() < 0.001);
+
+        for gate in ["not-ready", "missing", "maintenance", "full-range"] {
+            // Start each case with the real slider focused, then disable it.
+            ui.set_audio_ready(true);
+            ui.set_selected_missing(false);
+            ui.set_library_busy(false);
+            ui.set_wave_zoom(4.0);
+            pan.set_accessible_value("0.5");
+            click_at(
+                &ui,
+                slint::LogicalPosition::new(
+                    origin.x + size.width / 2.0,
+                    origin.y + size.height / 2.0,
+                ),
+            );
+            match gate {
+                "not-ready" => ui.set_audio_ready(false),
+                "missing" => ui.set_selected_missing(true),
+                "maintenance" => ui.set_library_busy(true),
+                "full-range" => ui.set_wave_zoom(1.0),
+                _ => unreachable!(),
+            }
+            assert_eq!(pan.accessible_enabled(), Some(false), "{gate}");
+            let previous = ui.get_wave_scroll();
+            let count = pans.borrow().len();
+            click_at(
+                &ui,
+                slint::LogicalPosition::new(
+                    origin.x + size.width * 0.75,
+                    origin.y + size.height / 2.0,
+                ),
+            );
+            send_keys(&ui, &[Key::RightArrow.into()]);
+            pan.set_accessible_value("0.8");
+            pan.invoke_accessible_increment_action();
+            pan.invoke_accessible_decrement_action();
+            assert_eq!(
+                pans.borrow().len(),
+                count,
+                "{gate}: disabled pan dispatched work"
+            );
+            assert_eq!(
+                ui.get_wave_scroll(),
+                previous,
+                "{gate}: disabled pan changed the view"
+            );
+        }
+        ui.set_audio_ready(true);
+        ui.set_selected_missing(false);
+        ui.set_library_busy(false);
+        ui.set_wave_zoom(4.0);
+        assert_eq!(pan.accessible_enabled(), Some(true));
+        pan.set_accessible_value("0.25");
+        assert!((ui.get_wave_scroll() - 0.25).abs() < 0.001);
+        assert_eq!(pans.borrow().last(), Some(&0.25));
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
+fn classic_waveform_ruler_carries_minutes_and_distinguishes_short_ranges() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.set_audio_ready(true);
+    ui.set_play_duration(120.0);
+    ui.show().unwrap();
+    for (start, end, decimals, precision) in [
+        (59.96_f32, 61.96_f32, 1, 0.1_f64),
+        (0.99, 1.04, 3, 0.001),
+        (59.996, 60.496, 2, 0.01),
+    ] {
+        ui.set_view_start(start);
+        ui.set_view_end(end);
+        let ruler = ElementHandle::find_by_accessible_label(&ui, "Waveform time ruler")
+            .next()
+            .expect("classic Waveform ruler");
+        let mut labels = ruler
+            .query_descendants()
+            .match_inherits("Text")
+            .find_all()
+            .into_iter()
+            .filter_map(|element| {
+                let text = element.accessible_label()?;
+                let (minutes, seconds) = text.split_once(':')?;
+                let minutes = minutes.parse::<u32>().expect("ruler minutes");
+                let seconds = seconds.parse::<f64>().expect("ruler seconds");
+                let decimals = text
+                    .split_once('.')
+                    .map_or(0, |(_, fraction)| fraction.len());
+                Some((element.absolute_position().x, minutes, seconds, decimals))
+            })
+            .collect::<Vec<_>>();
+        labels.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(
+            labels.len(),
+            11,
+            "all visible ruler labels must be readable"
+        );
+        for (index, (_, minutes, seconds, digits)) in labels.iter().enumerate() {
+            assert!(
+                (0.0..60.0).contains(seconds),
+                "seconds must carry into minutes"
+            );
+            assert_eq!(*digits, decimals, "precision must follow the visible range");
+            let actual = f64::from(*minutes) * 60.0 + seconds;
+            let expected = f64::from(start) + f64::from(end - start) * index as f64 / 10.0;
+            assert!(
+                (actual - expected).abs() <= precision * 0.501,
+                "tick {index}: {actual} vs {expected}"
+            );
+        }
+        if start > 59.9 {
+            assert_eq!(
+                labels[0].1, 1,
+                "rounding must carry the first tick into the next minute"
+            );
+            assert_eq!(labels[0].2, 0.0);
+        }
+        for pair in labels.windows(2) {
+            let left = f64::from(pair[0].1) * 60.0 + pair[0].2;
+            let right = f64::from(pair[1].1) * 60.0 + pair[1].2;
+            assert!(right > left, "zoomed ruler labels must remain distinct");
+        }
+    }
+    ui.hide().unwrap();
+}
+
+#[test]
 fn waveform_overview_is_tab_reachable_and_keyboard_pan_preserves_playback() {
     use slint::platform::Key;
     i_slint_backend_testing::init_no_event_loop();

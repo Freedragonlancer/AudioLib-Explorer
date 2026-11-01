@@ -482,6 +482,67 @@ fn theme_switch_preserves_transport_view_and_typography() {
 }
 
 #[test]
+fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
+    use crate::theme::apply_theme;
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use std::time::Duration;
+
+    init_software_backend();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.set_audio_ready(true);
+    ui.set_playback_state(2);
+    ui.set_waveform_ready(true); // Keep the loading shimmer out of field comparisons.
+    ui.global::<crate::Theme>().set_motion(0.0);
+    apply_theme(&ui, STUDIO_THEME);
+    ui.show().unwrap();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(2));
+    let frame = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        ui.window().take_snapshot().unwrap().as_bytes().to_vec()
+    };
+    let baseline = frame();
+    save_snapshot(&ui, "theme-feedback-baseline.png");
+
+    // The controller restores valid values before sending this rejection event.
+    // Confirm the current presenter still shows a newly rejected input.
+    ui.invoke_audition_input_rejected(1);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    assert!(frame() != baseline, "a new rejection must remain visible");
+    save_snapshot(&ui, "theme-feedback-active.png");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(2));
+    let expired = frame();
+    save_snapshot(&ui, "theme-feedback-expired.png");
+    assert!(expired == baseline, "the rejection feedback must expire");
+
+    apply_theme(&ui, DEFAULT_THEME);
+    let _classic = frame(); // Commit destruction before selecting Studio again.
+    apply_theme(&ui, STUDIO_THEME);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    save_snapshot(&ui, "theme-feedback-restored.png");
+    assert!(
+        frame() == baseline,
+        "switching must not replay an expired event"
+    );
+
+    apply_theme(&ui, DEFAULT_THEME);
+    let _classic = frame();
+    ui.invoke_audition_input_rejected(3);
+    apply_theme(&ui, STUDIO_THEME);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    assert!(
+        frame() == baseline,
+        "a classic event must not reach a new Studio"
+    );
+
+    // Repeated events in the selected Studio still deliver after its reset.
+    ui.invoke_audition_input_rejected(2);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    assert!(frame() != baseline, "new events must work after switching");
+    ui.hide().unwrap();
+}
+
+#[test]
 fn appearance_theme_keyboard_selection_applies_the_requested_style() {
     use crate::theme::{apply_theme, theme_id, theme_index};
     use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
