@@ -418,7 +418,218 @@ component OverviewBar inherits Rectangle {
     }
 }
 
-export component AuditionPanel inherits Rectangle {
+component ClassicTool inherits Rectangle {
+    in property <string> symbol;
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    in property <bool> primary: false;
+    /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
+    /// for the result list) keep working right after a click. Tabbed focus still
+    /// activates the button with Space/Return.
+    in property <bool> keyboard-active: true;
+    out property <bool> has-focus: focus.has-focus;
+    callback clicked();
+    width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
+    background: root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent) : (root.active ? Theme.selected : (hit.has-hover ? Theme.hover : Theme.raised));
+    border-width: 1px; border-color: focus.has-focus || root.active ? Theme.accent : Theme.border;
+    opacity: root.enabled ? 1 : 0.4;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    if root.icon.width > 0: Image { source: root.icon; colorize: root.primary ? Theme.on-accent : Theme.ink; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+    if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
+    focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; } reject } }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    if hit.has-hover: Rectangle { z: 10; y: -28px * Theme.ui-scale; height: 24px * Theme.ui-scale; width: max(86px * Theme.ui-scale, tip.preferred-width + 16px * Theme.ui-scale); background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px * Theme.ui-scale;
+        tip := Text { text: root.label; color: Theme.ink; font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
+    }
+}
+// Original beta presentation, retained from e619794.
+component ClassicAuditionPanel inherits Rectangle {
+    in property <bool> compact: false;
+    in property <bool> spectral: true;
+    in property <bool> chinese;
+    in property <bool> play-on-single-click: false;
+    in property <bool> ready;
+    in property <bool> playing;
+    in property <bool> smooth-progress: false;
+    in property <string> progress-clock;
+    in property <float> playback-rate: 1;
+    in property <image> waveform;
+    in property <bool> waveform-ready;
+    in property <string> name;
+    in property <string> info;
+    in property <string> output;
+    in property <float> position;
+    in property <float> duration;
+    in property <string> time;
+    in property <string> end-time;
+    in property <float> view-start;
+    in property <float> view-end;
+    in property <float> target-start;
+    in property <float> target-end;
+    in property <float> zoom: 1;
+    in-out property <float> scroll: 0;
+    in-out property <float> volume-db: -1.9;
+    out property <bool> volume-adjusting: volume-control.has-focus;
+    callback volume-focus-changed(bool);
+    changed volume-adjusting => { root.volume-focus-changed(root.volume-adjusting); }
+    in property <string> volume-label;
+    in-out property <string> pitch-text: "0.00";
+    in-out property <string> rate-text: "1.00";
+    in-out property <bool> mono: false;
+    in-out property <bool> repeat: false;
+    callback play(); callback pause(); callback stop(); callback seek(float); callback seek-play(float);
+    callback transform(string,string,bool,bool); callback volume(float);
+    callback resize(int,int); callback zoom-change(float); callback zoom-at(float,float); callback pan(float);
+    callback peaks(); callback output-settings();
+    // Share the current requested range while the renderer finishes its image.
+    // Labels, seeks and the transformed old image must describe the same timeline.
+    property <bool> has-target: root.target-end > root.target-start;
+    property <float> shown-start: root.has-target ? root.target-start : root.view-start;
+    property <float> shown-end: root.has-target ? root.target-end : root.view-end;
+    property <float> shown-span: max(0.001, root.shown-end - root.shown-start);
+    // Keep the original eleven evenly spaced labels without changing the shared
+    // renderer's modern, round-tick model.
+    function ruler-label(index: int) -> string {
+        let seconds = root.shown-start + (root.shown-end - root.shown-start) * index / 10;
+        let minutes = floor(seconds / 60);
+        let remainder = Math.mod(seconds, 60);
+        if root.shown-end - root.shown-start < 10 {
+            let tenths = round(remainder * 10);
+            return minutes + ":" + (tenths < 100 ? "0" : "") + floor(tenths / 10) + "." + Math.mod(tenths, 10);
+        }
+        return minutes + ":" + Clock.pad2(floor(remainder));
+    }
+    // The frame clock fills gaps between engine snapshots, with bounded prediction.
+    // Repeated positions do not restart the clock; stalled output stops after 100ms.
+    property <float> anchor-position: 0;
+    property <duration> anchor-tick: 0ms;
+    property <float> correction: 0;
+    property <duration> progress-elapsed: root.ready && root.playing && root.smooth-progress ? clamp(animation-tick() - root.anchor-tick, 0ms, 100ms) : 0ms;
+    property <float> visual-position: clamp(root.anchor-position + root.progress-elapsed / 1s * root.playback-rate + root.correction * (1 - root.progress-elapsed / 100ms), 0, root.duration);
+    function sync-progress(allow-correction: bool) {
+        let previous = root.visual-position;
+        let continuous = allow-correction && root.ready && root.playing && root.smooth-progress && abs(previous - root.position) < 0.1 * root.playback-rate;
+        root.anchor-position = root.position;
+        root.anchor-tick = animation-tick();
+        root.correction = continuous ? previous - root.position : 0;
+    }
+    init => { root.sync-progress(false); }
+    changed position => { root.sync-progress(true); }
+    changed playing => { root.sync-progress(false); }
+    changed smooth-progress => { root.sync-progress(false); }
+    changed playback-rate => { root.sync-progress(false); }
+    // A clock identity survives deferred coalescing of smooth false -> true.
+    changed progress-clock => { root.sync-progress(false); }
+    function wheel-zoom(delta: length, fraction: float) -> EventResult {
+        if root.ready && root.duration > 0 && delta != 0px {
+            // Pixel deltas support both mouse detents and precision touchpads.
+            root.zoom-at(Math.pow(2, clamp(delta / 120px, -2, 2)), clamp(fraction, 0, 1));
+            return accept;
+        }
+        return reject;
+    }
+    height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
+    VerticalLayout { padding: 9px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
+        HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+            ClassicTool { icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; enabled: root.ready; clicked => { root.seek(0); } }
+            ClassicTool { icon: @image-url("icons/play.svg"); label: root.chinese ? "播放" : "Play"; primary: true; active: root.playing; enabled: root.ready; clicked => { root.play(); } }
+            ClassicTool { icon: @image-url("icons/pause.svg"); label: root.chinese ? "暂停" : "Pause"; active: root.ready && !root.playing && root.position > 0; enabled: root.ready; clicked => { root.pause(); } }
+            ClassicTool { icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; enabled: root.ready; clicked => { root.stop(); } }
+            ClassicTool { icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Rectangle { width: 1px; background: Theme.player-border; }
+            Caption { text: root.chinese ? "音高" : "Pitch"; }
+            LineEdit { width: 62px * Theme.ui-scale; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
+            Caption { text: root.chinese ? "半音" : "st"; }
+            Caption { text: root.chinese ? "速度" : "Rate"; }
+            LineEdit { width: 57px * Theme.ui-scale; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
+            Caption { text: "×"; }
+            ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Rectangle { width: 1px; background: Theme.player-border; }
+            Caption { text: root.chinese ? "音量" : "Volume"; }
+            volume-control := Slider { min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
+            Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
+            ClassicTool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: Theme.font(9); }
+            ClassicTool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; clicked => { root.peaks(); } }
+            ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.output-settings(); } }
+        }
+        wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: root.compact ? 45px * Theme.ui-scale : 70px * Theme.ui-scale; background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
+            accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
+            property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / max(0.001, root.shown-end - root.shown-start), 0, 1) : 0;
+            changed width => { root.resize(self.width / 1px, self.height / 1px); }
+            changed height => { root.resize(self.width / 1px, self.height / 1px); }
+            Image {
+                source: root.waveform; height: parent.height; image-fit: fill;
+                x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
+                width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+            }
+            if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
+            // These overlays are paint-only, leaving click/scroll ownership to scrub.
+            if root.ready && root.duration > 0: Rectangle {
+                x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
+                background: root.spectral ? #183c3428 : #8faea622;
+                accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
+                accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
+                Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
+            }
+            if root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end: Rectangle {
+                x: wave.played-fraction * (parent.width - 1px); width: 1px;
+                background: root.spectral ? #f4faf7 : Theme.accent-hover;
+            }
+            if scrub.has-hover && root.ready: Rectangle { x: scrub.mouse-x; width: 1px; background: #ffffff30; }
+            // Preserve current keyboard transport without changing the classic layout.
+            wave-keys := FocusScope {
+                enabled: root.ready; focus-on-click: false;
+                key-pressed(event) => {
+                    if !root.ready { return reject; }
+                    if event.text == " " { if root.playing { root.pause(); } else { root.play(); } return accept; }
+                    if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                        let nudge = (event.modifiers.shift ? 0.25 : 0.05) * (root.shown-end - root.shown-start);
+                        root.seek(clamp(root.visual-position + (event.text == Key.LeftArrow ? -nudge : nudge), 0, root.duration));
+                        return accept;
+                    }
+                    if event.text == Key.Home { root.seek(0); return accept; }
+                    if event.text == "+" || event.text == "=" { root.zoom-change(2); return accept; }
+                    if event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
+                    if event.text == "0" { root.zoom-change(0); return accept; }
+                    reject
+                }
+                scrub := TouchArea { enabled: root.ready; mouse-cursor: pointer;
+                    clicked => { root.seek-play(root.shown-start + clamp(self.mouse-x/self.width,0,1)*(root.shown-end - root.shown-start)); }
+                    scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
+                }
+            }
+        }
+        Rectangle { height: 24px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
+            for tick in 51: Rectangle { x: tick * (parent.width - 1px) / 50; width: 1px; height: Math.mod(tick,5) == 0 ? 9px * Theme.ui-scale : 4px * Theme.ui-scale; background: Theme.muted; }
+            for index in 11: Text { x: clamp(index * (parent.width - 1px)/10,0px,parent.width - self.width); y: 10px * Theme.ui-scale; width: 55px * Theme.ui-scale; height: 13px * Theme.ui-scale; text: root.ruler-label(index); color: Theme.dim; font-size: Theme.font(9); horizontal-alignment: index == 10 ? right : left; }
+            TouchArea { enabled: root.ready; mouse-cursor: pointer;
+                clicked => { root.seek-play(root.shown-start + clamp(self.mouse-x/self.width,0,1)*(root.shown-end - root.shown-start)); }
+                scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
+            }
+        }
+        HorizontalLayout { height: 16px * Theme.ui-scale; spacing: 7px * Theme.ui-scale;
+            Caption { width: 42px * Theme.ui-scale; text: Math.round(root.zoom * 10) / 10 + "×"; font-size: Theme.font(10); }
+            if root.ready: Caption { text: root.chinese ? "滚轮缩放" : "Scroll to zoom"; font-size: Theme.font(9); }
+            Slider { horizontal-stretch: 1; minimum: 0; maximum: 1; step: 0.005; enabled: root.zoom > 1; value <=> root.scroll; changed => { root.pan(self.value); } }
+            ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "−"; label: root.chinese ? "缩小波形" : "Zoom out"; enabled: root.ready && root.zoom > 1; clicked => { root.zoom-change(0.5); } }
+            ClassicTool { width: 24px * Theme.ui-scale; height: 18px * Theme.ui-scale; symbol: "+"; label: root.chinese ? "放大波形" : "Zoom in"; enabled: root.ready && root.zoom < 128; clicked => { root.zoom-change(2); } }
+            ClassicTool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
+        }
+        HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center; }
+            Rectangle { width: 1px; background: Theme.player-border; }
+            Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; }
+            Caption { text: root.info; font-size: Theme.font(10); }
+        }
+    }
+}
+
+component MotionAuditionPanel inherits Rectangle {
     in property <bool> compact: false;
     in property <bool> spectral: true;
     in property <bool> chinese;
@@ -466,6 +677,8 @@ export component AuditionPanel inherits Rectangle {
     in-out property <float> scroll: 0;
     in-out property <float> volume-db: -1.9;
     out property <bool> volume-adjusting: volume-control.has-focus;
+    callback volume-focus-changed(bool);
+    changed volume-adjusting => { root.volume-focus-changed(root.volume-adjusting); }
     in property <string> volume-label;
     in-out property <string> pitch-text: "0.00";
     in-out property <string> rate-text: "1.00";
@@ -481,6 +694,9 @@ export component AuditionPanel inherits Rectangle {
         if Math.mod(fields, 2) == 1 { pitch-field.refuse(); }
         if fields >= 2 { rate-field.refuse(); }
     }
+    in property <int> rejection-fields;
+    in property <int> rejection-revision;
+    changed rejection-revision => { root.reject-input(root.rejection-fields); }
     // The frame clock fills gaps between engine snapshots, with bounded prediction.
     // Repeated positions do not restart the clock; stalled output stops after 100ms.
     property <float> anchor-position: 0;
@@ -551,7 +767,7 @@ export component AuditionPanel inherits Rectangle {
     property <bool> scrubbing: false;
     property <length> scrub-x: 0px;
 
-    property <float> premute-db: -12;
+    in-out property <float> premute-db: -12;
     property <bool> muted: root.volume-db <= -59.95;
     function toggle-mute() {
         if root.muted {
@@ -565,7 +781,7 @@ export component AuditionPanel inherits Rectangle {
         }
     }
 
-    property <bool> show-remaining: false;
+    in-out property <bool> show-remaining: false;
     property <bool> zoom-pulse: false;
     changed zoom => { root.zoom-pulse = true; }
     Timer { interval: 220ms; running: root.zoom-pulse; triggered => { root.zoom-pulse = false; } }
@@ -907,13 +1123,204 @@ export component AuditionPanel inherits Rectangle {
     }
 }
 
+// Stable audition contract. Only the selected presentation is instantiated;
+// shared control values survive a theme switch and the renderer stays external.
+export component AuditionPanel inherits Rectangle {
+    in property <bool> compact: false;
+    in property <bool> spectral: true;
+    in property <bool> chinese;
+    in property <bool> play-on-single-click: false;
+    in property <bool> ready;
+    // Why the transport may be unavailable: a missing source or library maintenance.
+    in property <bool> missing: false;
+    in property <bool> busy: false;
+    // Engine transport phase: 0 empty, 1 loading, 2 ready, 3 playing, 4 paused,
+    // 5 stopped, 6 ended, 7 error.
+    in property <int> state: 0;
+    in property <string> error-text;
+    // A network stream has run dry for a moment while playing.
+    in property <bool> buffering: false;
+    in property <bool> playing;
+    in property <bool> smooth-progress: false;
+    in property <string> progress-clock;
+    in property <float> playback-rate: 1;
+    in property <image> waveform;
+    in property <bool> waveform-ready;
+    // Share of the current Waveform render that has arrived (1 when complete).
+    in property <float> waveform-progress: 1;
+    in property <string> name;
+    in property <string> info;
+    // Full engine output summary (tooltip of the output status).
+    in property <string> output;
+    // Active backend ("" while idle) and device rate for the output status.
+    in property <string> output-backend;
+    in property <string> output-rate;
+    in property <int> output-xruns;
+    in property <float> position;
+    in property <float> duration;
+    in property <string> time;
+    in property <string> end-time;
+    // Source range of the displayed Waveform image.
+    in property <float> view-start;
+    in property <float> view-end;
+    // Requested range while its render is pending; equals view-* once the image lands.
+    // An empty range (end <= start) means no request is pending.
+    in property <float> target-start;
+    in property <float> target-end;
+    in property <float> zoom: 1;
+    in property <[RulerTick]> ruler-ticks;
+    in property <bool> relink-enabled: true;
+    in-out property <float> scroll: 0;
+    in-out property <float> volume-db: -1.9;
+    out property <bool> volume-adjusting: root.presenter-volume-adjusting;
+    property <bool> presenter-volume-adjusting: false;
+    in property <string> volume-label;
+    in-out property <string> pitch-text: "0.00";
+    in-out property <string> rate-text: "1.00";
+    in-out property <bool> mono: false;
+    in-out property <bool> repeat: false;
+    callback play(); callback pause(); callback stop(); callback seek(float); callback seek-play(float);
+    callback transform(string,string,bool,bool); callback volume(float);
+    callback resize(int,int); callback zoom-change(float); callback zoom-at(float,float); callback pan(float);
+    callback peaks(); callback output-settings();
+    callback retry(); callback relink();
+    /// The controller rejected typed transform input: bit 1 Pitch, bit 2 Rate.
+    public function reject-input(fields: int) {
+        root.rejection-fields = fields;
+        root.rejection-revision += 1;
+    }
+    property <int> rejection-fields: 0;
+    property <int> rejection-revision: 0;
+    // Keep view-only modern state when switching presentations during playback.
+    property <float> premute-db: -12;
+    property <bool> show-remaining: false;
+    property <bool> modern-style: Theme.modern-style;
+    changed modern-style => { root.presenter-volume-adjusting = false; }
+    height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale;
+    if !Theme.modern-style: ClassicAuditionPanel {
+        width: parent.width; height: parent.height;
+        compact: root.compact;
+        spectral: root.spectral;
+        chinese: root.chinese;
+        play-on-single-click: root.play-on-single-click;
+        ready: root.ready;
+        playing: root.playing;
+        smooth-progress: root.smooth-progress;
+        progress-clock: root.progress-clock;
+        playback-rate: root.playback-rate;
+        waveform: root.waveform;
+        waveform-ready: root.waveform-ready;
+        name: root.name;
+        info: root.info;
+        output: root.output;
+        position: root.position;
+        duration: root.duration;
+        time: root.time;
+        end-time: root.end-time;
+        view-start: root.view-start;
+        view-end: root.view-end;
+        target-start: root.target-start; target-end: root.target-end;
+        zoom: root.zoom;
+        volume-label: root.volume-label;
+        scroll <=> root.scroll;
+        volume-db <=> root.volume-db;
+        pitch-text <=> root.pitch-text;
+        rate-text <=> root.rate-text;
+        mono <=> root.mono;
+        repeat <=> root.repeat;
+        volume-focus-changed(adjusting) => { root.presenter-volume-adjusting = adjusting; }
+        play => { root.play(); }
+        pause => { root.pause(); }
+        stop => { root.stop(); }
+        seek(value) => { root.seek(value); }
+        seek-play(value) => { root.seek-play(value); }
+        transform(pitch, rate, mono, repeat) => { root.transform(pitch, rate, mono, repeat); }
+        volume(value) => { root.volume(value); }
+        resize(width, height) => { root.resize(width, height); }
+        zoom-change(value) => { root.zoom-change(value); }
+        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+        pan(value) => { root.pan(value); }
+        peaks => { root.peaks(); }
+        output-settings => { root.output-settings(); }
+    }
+    if Theme.modern-style: MotionAuditionPanel {
+        width: parent.width; height: parent.height;
+        compact: root.compact;
+        spectral: root.spectral;
+        chinese: root.chinese;
+        play-on-single-click: root.play-on-single-click;
+        ready: root.ready;
+        playing: root.playing;
+        smooth-progress: root.smooth-progress;
+        progress-clock: root.progress-clock;
+        playback-rate: root.playback-rate;
+        waveform: root.waveform;
+        waveform-ready: root.waveform-ready;
+        name: root.name;
+        info: root.info;
+        output: root.output;
+        position: root.position;
+        duration: root.duration;
+        time: root.time;
+        end-time: root.end-time;
+        view-start: root.view-start;
+        view-end: root.view-end;
+        zoom: root.zoom;
+        volume-label: root.volume-label;
+        missing: root.missing;
+        busy: root.busy;
+        state: root.state;
+        error-text: root.error-text;
+        buffering: root.buffering;
+        waveform-progress: root.waveform-progress;
+        output-backend: root.output-backend;
+        output-rate: root.output-rate;
+        output-xruns: root.output-xruns;
+        target-start: root.target-start;
+        target-end: root.target-end;
+        ruler-ticks: root.ruler-ticks;
+        relink-enabled: root.relink-enabled;
+        scroll <=> root.scroll;
+        volume-db <=> root.volume-db;
+        pitch-text <=> root.pitch-text;
+        rate-text <=> root.rate-text;
+        mono <=> root.mono;
+        repeat <=> root.repeat;
+        volume-focus-changed(adjusting) => { root.presenter-volume-adjusting = adjusting; }
+        premute-db <=> root.premute-db;
+        show-remaining <=> root.show-remaining;
+        rejection-fields: root.rejection-fields; rejection-revision: root.rejection-revision;
+        play => { root.play(); }
+        pause => { root.pause(); }
+        stop => { root.stop(); }
+        seek(value) => { root.seek(value); }
+        seek-play(value) => { root.seek-play(value); }
+        transform(pitch, rate, mono, repeat) => { root.transform(pitch, rate, mono, repeat); }
+        volume(value) => { root.volume(value); }
+        resize(width, height) => { root.resize(width, height); }
+        zoom-change(value) => { root.zoom-change(value); }
+        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+        pan(value) => { root.pan(value); }
+        peaks => { root.peaks(); }
+        output-settings => { root.output-settings(); }
+        retry => { root.retry(); }
+        relink => { root.relink(); }
+    }
+}
+
 export component PeakSettings inherits FocusScope {
     forward-focus: peaks-close;
     focus-on-click: false; focus-on-tab-navigation: false;
     property <bool> reverse-wrap: false;
+    property <bool> modern-style: Theme.modern-style;
+    function focus-close() {
+        if Theme.modern-style { peaks-close-modern.focus(); }
+        else { peaks-close-classic.focus(); }
+    }
+    changed modern-style => { if root.visible && root.enabled { root.focus-close(); } }
     capture-key-pressed(event) => {
         if event.text == Key.Escape { root.close(); return accept; }
-        if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && peaks-close.has-focus {
+        if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (peaks-close-classic.has-focus || peaks-close-modern.has-focus) {
             root.reverse-wrap = true; peaks-tab-end.focus(); root.reverse-wrap = false; return reject;
         }
         reject
@@ -933,7 +1340,23 @@ export component PeakSettings inherits FocusScope {
         VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
             HorizontalLayout { height: 30px * Theme.ui-scale;
                 Text { horizontal-stretch: 1; text: root.chinese ? "波形显示设置" : "Peak display settings"; color: Theme.ink; font-size: Theme.font(17); font-weight: 600; vertical-alignment: center; }
-                peaks-close := Tool { symbol: "×"; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
+                // A fixed focus proxy preserves the modal's forward/reverse wrap,
+                // while only the selected close control can receive keyboard input.
+                peaks-close := FocusScope {
+                    width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale;
+                    focus-on-click: false; focus-on-tab-navigation: false;
+                    focus-gained(reason) => { root.focus-close(); }
+                    peaks-close-classic := ClassicTool {
+                        visible: !Theme.modern-style; enabled: !Theme.modern-style;
+                        symbol: "×"; label: !Theme.modern-style ? (root.chinese ? "关闭" : "Close") : "";
+                        clicked => { root.close(); }
+                    }
+                    peaks-close-modern := Tool {
+                        visible: Theme.modern-style; enabled: Theme.modern-style;
+                        symbol: "×"; label: Theme.modern-style ? (root.chinese ? "关闭" : "Close") : "";
+                        clicked => { root.close(); }
+                    }
+                }
             }
             HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                 Caption { width: 90px * Theme.ui-scale; text: root.chinese ? "显示增益" : "Display gain"; }
@@ -966,5 +1389,5 @@ export component PeakSettings inherits FocusScope {
         }
     }
     }
-    peaks-tab-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !root.reverse-wrap { peaks-close.focus(); } } }
+    peaks-tab-end := FocusScope { width: 0px; height: 0px; focus-on-click: false; focus-gained(reason) => { if !root.reverse-wrap { root.focus-close(); } } }
 }

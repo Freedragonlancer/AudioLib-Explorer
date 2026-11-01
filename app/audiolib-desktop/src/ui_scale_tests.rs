@@ -4,7 +4,7 @@
 //! PNG so layouts can be compared pixel by pixel across revisions.
 use crate::{AppWindow, AudioRow, FolderRow};
 use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 fn init_software_backend() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
@@ -377,6 +377,165 @@ fn default_theme_applied_from_rust_is_pixel_identical() {
     );
 }
 
+#[test]
+fn theme_registry_round_trips_and_lists_both_languages() {
+    use crate::theme::{apply_theme, theme_id, theme_index};
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME, THEME_IDS};
+
+    init_software_backend();
+    let ui = AppWindow::new().unwrap();
+    for (index, id) in THEME_IDS.iter().enumerate() {
+        assert_eq!(theme_id(index as i32), *id);
+        assert_eq!(theme_index(id), index as i32);
+        apply_theme(&ui, id);
+        assert_eq!(ui.get_theme_index(), index as i32);
+        assert_eq!(
+            ui.global::<crate::Theme>().get_modern_style(),
+            *id == STUDIO_THEME
+        );
+        let english = ui.get_theme_names();
+        let chinese = ui.get_theme_names_cn();
+        assert_eq!(english.row_count(), THEME_IDS.len());
+        assert_eq!(chinese.row_count(), THEME_IDS.len());
+        for position in 0..THEME_IDS.len() {
+            assert!(!english.row_data(position).unwrap().is_empty());
+            assert!(!chinese.row_data(position).unwrap().is_empty());
+            assert_ne!(english.row_data(position), chinese.row_data(position));
+        }
+    }
+    for index in [-1, THEME_IDS.len() as i32, i32::MAX] {
+        assert_eq!(theme_id(index), DEFAULT_THEME);
+    }
+    apply_theme(&ui, "removed-theme");
+    assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_THEME));
+    assert!(!ui.global::<crate::Theme>().get_modern_style());
+}
+
+#[test]
+fn theme_switch_preserves_transport_view_and_typography() {
+    use crate::theme::{apply_font_sizes, apply_theme};
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+
+    init_software_backend();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.set_rows(synthetic_rows());
+    ui.set_folders(synthetic_folders());
+    ui.set_has_selection(true);
+    ui.set_selected_id("42".into());
+    ui.set_audio_ready(true);
+    ui.set_playing(false);
+    ui.set_playback_state(4);
+    ui.set_playback_name("Synthetic paused sound.wav".into());
+    ui.set_play_position(12.5);
+    ui.set_play_duration(30.0);
+    ui.set_view_start(7.5);
+    ui.set_view_end(15.0);
+    ui.set_wave_target_start(7.5);
+    ui.set_wave_target_end(15.0);
+    ui.set_wave_zoom(4.0);
+    ui.set_wave_scroll(0.25);
+    ui.set_pitch_text("3.00".into());
+    ui.set_speed_text("0.80".into());
+    ui.set_audition_mono(true);
+    ui.set_audition_repeat(true);
+    ui.set_volume_db(-12.0);
+    apply_font_sizes(&ui, 15, 17);
+    let theme = ui.global::<crate::Theme>();
+    theme.set_ui_scale(1.25);
+    theme.set_motion(0.0);
+    ui.show().unwrap();
+
+    let mut frames = Vec::new();
+    for id in [DEFAULT_THEME, STUDIO_THEME, DEFAULT_THEME] {
+        apply_theme(&ui, id);
+        assert_eq!(ui.get_selected_id().as_str(), "42");
+        assert!(ui.get_audio_ready());
+        assert!(!ui.get_playing());
+        assert_eq!(ui.get_playback_state(), 4);
+        assert_eq!(ui.get_play_position(), 12.5);
+        assert_eq!(ui.get_play_duration(), 30.0);
+        assert_eq!((ui.get_view_start(), ui.get_view_end()), (7.5, 15.0));
+        assert_eq!(
+            (ui.get_wave_target_start(), ui.get_wave_target_end()),
+            (7.5, 15.0)
+        );
+        assert_eq!((ui.get_wave_zoom(), ui.get_wave_scroll()), (4.0, 0.25));
+        assert_eq!(ui.get_pitch_text().as_str(), "3.00");
+        assert_eq!(ui.get_speed_text().as_str(), "0.80");
+        assert!(ui.get_audition_mono() && ui.get_audition_repeat());
+        assert_eq!(ui.get_volume_db(), -12.0);
+        assert_eq!((ui.get_ui_font_px(), ui.get_list_font_px()), (15, 17));
+        assert_eq!(theme.get_ui_scale(), 1.25);
+        frames.push(ui.window().take_snapshot().unwrap().as_bytes().to_vec());
+        save_snapshot(&ui, &format!("theme-switch-{id}.png"));
+    }
+    assert!(
+        frames[0] != frames[1],
+        "The theme must switch the player presentation"
+    );
+    assert!(
+        frames[0] == frames[2],
+        "Switching back must restore the classic presentation"
+    );
+    ui.hide().unwrap();
+}
+
+#[test]
+fn appearance_theme_keyboard_selection_applies_the_requested_style() {
+    use crate::theme::{apply_theme, theme_id, theme_index};
+    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use slint::platform::{Key, WindowEvent};
+    use std::{cell::Cell, rc::Rc};
+
+    init_software_backend();
+    for chinese in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+        ui.set_chinese(chinese);
+        ui.set_settings_page(1);
+        ui.set_settings_visible(true);
+        apply_theme(&ui, DEFAULT_THEME);
+        let requests = Rc::new(Cell::new(0));
+        ui.on_theme_requested({
+            let weak = ui.as_weak();
+            let requests = requests.clone();
+            move |index| {
+                requests.set(requests.get() + 1);
+                apply_theme(&weak.upgrade().unwrap(), &theme_id(index));
+            }
+        });
+        ui.show().unwrap();
+        ui.invoke_focus_settings_first();
+        for key in [Key::Tab, Key::DownArrow] {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        }
+        assert_eq!(requests.get(), 1);
+        assert_eq!(ui.get_theme_index(), theme_index(STUDIO_THEME));
+        assert!(ui.global::<crate::Theme>().get_modern_style());
+        let language = if chinese { "cn" } else { "en" };
+        save_snapshot(&ui, &format!("appearance-studio-{language}.png"));
+        for event in [
+            WindowEvent::KeyPressed {
+                text: Key::UpArrow.into(),
+            },
+            WindowEvent::KeyReleased {
+                text: Key::UpArrow.into(),
+            },
+        ] {
+            ui.window().dispatch_event(event);
+        }
+        assert_eq!(requests.get(), 2);
+        assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_THEME));
+        assert!(!ui.global::<crate::Theme>().get_modern_style());
+        save_snapshot(&ui, &format!("appearance-default-{language}.png"));
+        ui.hide().unwrap();
+    }
+}
+
 /// Render synthetic transport phases through the same controller publishers as
 /// the application. No decoder, device, filesystem source or library is opened.
 #[test]
@@ -384,6 +543,7 @@ fn player_bar_states_render_in_both_languages_and_small_scaled_windows() {
     use crate::controller::{publish_playback_progress, publish_player_state, publish_wave_target};
     use crate::waveform_view::{WaveView, render_waveform};
     use audiolib_audio::{AudioBackend, PlaybackState, PlaybackStatus, WaveformData, WaveformPeak};
+    use audiolib_core::config::THEME_IDS;
     use std::time::Duration;
 
     init_software_backend();
@@ -432,10 +592,11 @@ fn player_bar_states_render_in_both_languages_and_small_scaled_windows() {
         ("wide", 1440.0, 900.0, 1.0),
         ("small-scaled", 1080.0, 700.0, 2.0),
     ] {
-        for chinese in [false, true] {
+        for (id, chinese) in THEME_IDS.iter().flat_map(|id| [(*id, false), (*id, true)]) {
             for (name, state) in cases {
                 let ui = AppWindow::new().unwrap();
                 ui.window().set_size(slint::LogicalSize::new(width, height));
+                crate::theme::apply_theme(&ui, id);
                 ui.global::<crate::Theme>().set_ui_scale(scale);
                 ui.global::<crate::Theme>().set_motion(0.0);
                 ui.set_chinese(chinese);
@@ -496,7 +657,7 @@ fn player_bar_states_render_in_both_languages_and_small_scaled_windows() {
                     ui.invoke_scroll_main_to_end();
                 }
                 let language = if chinese { "cn" } else { "en" };
-                save_snapshot(&ui, &format!("player-{name}-{language}-{layout}.png"));
+                save_snapshot(&ui, &format!("player-{id}-{name}-{language}-{layout}.png"));
                 ui.hide().unwrap();
             }
         }

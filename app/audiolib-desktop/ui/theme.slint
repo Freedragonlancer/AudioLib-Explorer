@@ -3,6 +3,9 @@ import { Slider, CheckBox, LineEdit } from "std-widgets.slint";
 
 // Soft charcoal surfaces and restrained gray-teal actions keep spectral peaks readable.
 export global Theme {
+    // Complete theme presentation, selected with the palette by src/theme.rs.
+    // The default retains the original beta controls; Studio opts into the redesign.
+    in-out property <bool> modern-style: false;
     // GUI scale factor (PR1: stays 1.0; nothing reads or writes it from Rust yet).
     // Literal lengths are written as `Npx * Theme.ui-scale`. 0px and 1px hairlines
     // (borders, separators, `/ 1px` unit conversions) stay unscaled.

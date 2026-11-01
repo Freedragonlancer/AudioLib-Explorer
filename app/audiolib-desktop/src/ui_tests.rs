@@ -488,9 +488,49 @@ fn scan_progress_controls_pause_resume_cancel_and_guard_terminal_phases() {
 }
 
 #[test]
+fn classic_transport_keeps_separate_play_pause_and_shared_transform_state() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.set_audio_ready(true);
+    ui.set_pitch_text("7.00".into());
+    ui.set_speed_text("0.50".into());
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let observed = actions.clone();
+    ui.on_start_requested(move || observed.borrow_mut().push("play".to_owned()));
+    let observed = actions.clone();
+    ui.on_pause_requested(move || observed.borrow_mut().push("pause".to_owned()));
+    let observed = actions.clone();
+    ui.on_transform_requested(move |pitch, rate, mono, repeat| {
+        observed
+            .borrow_mut()
+            .push(format!("{pitch}/{rate}/{mono}/{repeat}"));
+    });
+    ui.show().unwrap();
+    click_label(&ui, "Play");
+    click_label(&ui, "Pause");
+    click_label(&ui, "Mono monitoring");
+    // A round trip through Studio must retain the toggled transform state.
+    crate::theme::apply_theme(&ui, audiolib_core::config::STUDIO_THEME);
+    crate::theme::apply_theme(&ui, audiolib_core::config::DEFAULT_THEME);
+    click_label(&ui, "Repeat sound");
+    assert_eq!(
+        &*actions.borrow(),
+        &[
+            "play",
+            "pause",
+            "7.00/0.50/true/false",
+            "7.00/0.50/true/true"
+        ]
+    );
+    ui.hide().unwrap();
+}
+
+#[test]
 fn audition_buttons_have_distinct_transport_actions_and_submit_transform_settings() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
+    crate::theme::apply_theme(&ui, audiolib_core::config::STUDIO_THEME);
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     ui.set_audio_ready(true);
     ui.set_pitch_text("7.00".into());
@@ -2338,6 +2378,7 @@ fn waveform_overview_is_tab_reachable_and_keyboard_pan_preserves_playback() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {
         let ui = AppWindow::new().unwrap();
+        crate::theme::apply_theme(&ui, audiolib_core::config::STUDIO_THEME);
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         ui.set_chinese(chinese);
         ui.set_audio_ready(true);
@@ -2417,6 +2458,7 @@ fn waveform_overview_is_tab_reachable_and_keyboard_pan_preserves_playback() {
 fn player_bar_states_offer_recovery_and_mute_restores_the_level() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
+    crate::theme::apply_theme(&ui, audiolib_core::config::STUDIO_THEME);
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     let actions = Rc::new(RefCell::new(Vec::new()));
     let observed = actions.clone();
