@@ -101,7 +101,13 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     // audition presentation is opt-in; spectral frequency colors remain data.
     let palette = &DEFAULT_PALETTE;
     let theme = ui.global::<crate::Theme>();
-    theme.set_modern_style(entry.player_style == PlayerStyle::Studio);
+    let modern_style = entry.player_style == PlayerStyle::Studio;
+    if theme.get_modern_style() != modern_style {
+        // Clear transient events before Slint creates the new presenter and binds
+        // its change trackers. Clearing on a deferred style-changed handler is late.
+        ui.invoke_clear_audition_input_feedback();
+    }
+    theme.set_modern_style(modern_style);
     let color = Color::from_argb_encoded;
     theme.set_bg(color(palette.bg));
     theme.set_panel(color(palette.panel));

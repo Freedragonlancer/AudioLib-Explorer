@@ -1051,6 +1051,8 @@ export component AppWindow inherits Window {
     // The player bar marks rejected Pitch / Rate input: bit 1 Pitch, bit 2 Rate.
     callback audition-input-rejected(int);
     audition-input-rejected(fields) => { audition.reject-input(fields); }
+    // Called before replacing the presenter, while the old event receiver exists.
+    public function clear-audition-input-feedback() { audition.clear-input-feedback(); }
     in property <bool> playback-smooth: false;
     in property <string> playback-clock: "";
     in property <float> confirmed-playback-rate: 1;
