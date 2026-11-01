@@ -387,11 +387,18 @@ fn fresh_album_dispatch(known: bool, cancel_with_short_query: bool) {
     let observed = controller.clone();
     let weak = ui.as_weak();
     let began = Instant::now();
+    let completed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let finished = completed.clone();
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(10),
         move || {
+            // The testing backend may tick again before consuming Quit. The
+            // completed branch deliberately changes the query, so run it once.
+            if finished.get() {
+                return;
+            }
             assert!(
                 began.elapsed() < Duration::from_secs(12),
                 "fresh album request was not resumed"
@@ -411,6 +418,7 @@ fn fresh_album_dispatch(known: bool, cancel_with_short_query: bool) {
                         .unavailable_album
                         .is_some()
                 );
+                finished.set(true);
                 ui.set_query("valid".into());
                 observed.request_search(&ui, true, false);
                 assert_eq!(observed.request.lock().unwrap().filters.album_id, Some(1));
@@ -429,6 +437,7 @@ fn fresh_album_dispatch(known: bool, cancel_with_short_query: bool) {
                 }
             {
                 assert_eq!(observed.request.lock().unwrap().filters.album_id, Some(1));
+                finished.set(true);
                 slint::quit_event_loop().unwrap();
             }
         },
@@ -436,6 +445,7 @@ fn fresh_album_dispatch(known: bool, cancel_with_short_query: bool) {
     ui.show().unwrap();
     slint::run_event_loop().unwrap();
     timer.stop();
+    assert!(completed.get(), "fresh album dispatch did not complete");
     assert_eq!(ui.get_rows().row_count(), usize::from(known));
     assert_eq!(ui.get_album_filter_unavailable(), !known);
     if known {

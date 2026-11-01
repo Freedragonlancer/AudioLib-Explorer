@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
-use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform};
-use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow};
+use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform, ruler_marks};
+use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow, RulerTick};
 use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
@@ -755,6 +755,9 @@ pub struct Controller {
     waveform_wake: Condvar,
     waveform_size: Mutex<(u32, u32)>,
     wave_view: Mutex<(String, WaveView)>,
+    /// A manual pan stops a zoomed Waveform from paging along with playback
+    /// until the next Play or click-to-play.
+    wave_follow_paused: AtomicBool,
     devices: Mutex<Vec<AudioDevice>>,
     device_generation: AtomicU64,
     scan_generation: AtomicU64,
@@ -1038,6 +1041,7 @@ impl Controller {
             waveform_wake: Condvar::new(),
             waveform_size: Mutex::new((1300, 100)),
             wave_view: Mutex::new((String::new(), WaveView::default())),
+            wave_follow_paused: AtomicBool::new(false),
             devices: Mutex::new(Vec::new()),
             device_generation: AtomicU64::new(0),
             scan_generation: AtomicU64::new(0),
@@ -1602,6 +1606,7 @@ impl Controller {
             if !c.available() {
                 return;
             }
+            c.wave_follow_paused.store(false, Ordering::Release);
             if c.audio.status().generation == c.removed_audio_generation.load(Ordering::Acquire) {
                 let selected = c.selected.lock().unwrap().as_ref().map(|file| file.id);
                 if let Some(id) = selected {
@@ -1632,6 +1637,7 @@ impl Controller {
         let c = self.clone();
         ui.on_seek_play_requested(move |position| {
             if c.available() {
+                c.wave_follow_paused.store(false, Ordering::Release);
                 c.command(AudioCommand::SeekAndPlay(position as f64));
             }
         });
@@ -1650,6 +1656,7 @@ impl Controller {
             if !c.available() {
                 return;
             }
+            c.wave_follow_paused.store(false, Ordering::Release);
             match c.audio_reload_target() {
                 Some(id) => c.select_id(id, true),
                 None => c.command(AudioCommand::Play),
@@ -1686,6 +1693,7 @@ impl Controller {
                 c.command(AudioCommand::SetAudition(settings));
             } else if let Some(ui) = c.ui.upgrade() {
                 publish_audition(&ui, c.audio.status().audition);
+                ui.invoke_audition_input_rejected(rejected_audition_fields(&pitch, &rate));
                 c.status(
                     if c.chinese.load(Ordering::Acquire) {
                         "Pitch 范围 -24 到 +24 半音；Rate 范围 0.25 到 4.0"
@@ -1724,17 +1732,22 @@ impl Controller {
             let Some(file) = c.waveform_file(&status) else {
                 return;
             };
-            zoom_waveform_at_pointer(
-                &ui,
-                &mut c.wave_view.lock().unwrap().1,
-                factor,
-                fraction,
-                file.duration,
-            );
+            let view = {
+                let mut state = c.wave_view.lock().unwrap();
+                zoom_waveform_at_pointer(&ui, &mut state.1, factor, fraction, file.duration);
+                state.1
+            };
+            // Later wheel steps anchor to the range drawn from now on.
+            publish_wave_target(&ui, view, file.duration);
+            let (start, end) = view.range(file.duration);
+            if !(start..=end).contains(&status.position) {
+                c.wave_follow_paused.store(true, Ordering::Release);
+            }
             c.queue_waveform(&file);
         });
         let c = self.clone();
         ui.on_waveform_pan_requested(move |scroll| {
+            c.wave_follow_paused.store(true, Ordering::Release);
             c.wave_view.lock().unwrap().1.scroll = f64::from(scroll.clamp(0.0, 1.0));
             if let Some(file) = c.waveform_file(&c.audio.status()) {
                 c.queue_waveform(&file);
@@ -3764,6 +3777,21 @@ impl Controller {
                             c.buffering_hint(false);
                         }
                     }
+                    // A zoomed Waveform pages along with playback unless the user panned away.
+                    if status.state == PlaybackState::Playing
+                        && !c.wave_follow_paused.load(Ordering::Acquire)
+                        && c.wave_view.lock().unwrap().1.zoom > 1.0
+                        && let Some(file) = c.waveform_file(&status)
+                    {
+                        let moved = {
+                            let mut state = c.wave_view.lock().unwrap();
+                            state.0 == file.file_path
+                                && state.1.follow(status.position, file.duration)
+                        };
+                        if moved {
+                            c.queue_waveform(&file);
+                        }
+                    }
                     let audition_changed = last_audition != Some(status.audition);
                     let error_changed = last_playback_error != status.error;
                     last_playback_error = status.error.clone();
@@ -3775,6 +3803,7 @@ impl Controller {
                         .file_path
                         .as_deref()
                         .map(|path| c.playback_display_name(path));
+                    let buffering = buffering_shown;
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.library_generation.load(Ordering::Acquire) != library_generation
@@ -3793,6 +3822,7 @@ impl Controller {
                             }
                         }
                         publish_playback_progress(&ui, &status, progress_continues);
+                        publish_player_state(&ui, &status, buffering);
                         let ready = !matches!(
                             status.state,
                             PlaybackState::Empty | PlaybackState::Loading | PlaybackState::Error
@@ -4959,17 +4989,7 @@ impl Controller {
             ui.set_view_end(end as f32);
             ui.set_wave_zoom(job.view.zoom as f32);
             ui.set_wave_scroll(job.view.scroll as f32);
-            let labels = (0..=10)
-                .map(|index| {
-                    let time = start + (end - start) * index as f64 / 10.0;
-                    if end - start < 10.0 {
-                        format!("{}:{:04.1}", (time / 60.0) as u64, time % 60.0).into()
-                    } else {
-                        format!("{}:{:02}", (time / 60.0) as u64, time as u64 % 60).into()
-                    }
-                })
-                .collect::<Vec<slint::SharedString>>();
-            ui.set_ruler_labels(ModelRc::new(VecModel::from(labels)));
+            ui.set_waveform_progress(progress as f32);
             ui.set_waveform_ready(true);
             ui.set_waveform_info(info.into());
         });
@@ -5028,6 +5048,7 @@ impl Controller {
                 state.0 = file.file_path.clone();
                 state.1.zoom = 1.0;
                 state.1.scroll = 0.0;
+                self.wave_follow_paused.store(false, Ordering::Release);
             }
             (state.1, changed)
         };
@@ -5044,16 +5065,25 @@ impl Controller {
             duration: file.duration,
             view,
             generation,
-            cancel,
+            cancel: cancel.clone(),
             width,
             height,
         });
-        if changed {
-            post(self.ui.clone(), |ui| {
+        // The requested range and its ruler show at once; the old image is drawn
+        // inside it until this render lands. A newer request supersedes this one.
+        let duration = file.duration;
+        let superseded = cancel;
+        post(self.ui.clone(), move |ui| {
+            if superseded.load(Ordering::Acquire) {
+                return;
+            }
+            if changed {
                 ui.set_waveform_ready(false);
+                ui.set_waveform_progress(0.0);
                 ui.set_waveform_image(Image::default());
-            });
-        }
+            }
+            publish_wave_target(&ui, view, duration);
+        });
         self.waveform_wake.notify_one();
     }
 
@@ -7658,8 +7688,13 @@ pub(crate) fn zoom_waveform_at_pointer(
     fraction: f32,
     duration: f64,
 ) {
-    let start = f64::from(ui.get_view_start());
-    let end = f64::from(ui.get_view_end());
+    // Anchor to the range drawn under the pointer: a pending request's range,
+    // else the displayed image's own range.
+    let (mut start, mut end) = (ui.get_wave_target_start(), ui.get_wave_target_end());
+    if end <= start {
+        (start, end) = (ui.get_view_start(), ui.get_view_end());
+    }
+    let (start, end) = (f64::from(start), f64::from(end));
     if end <= start {
         return;
     }
@@ -7704,6 +7739,99 @@ pub(crate) fn publish_playback_progress(
     ui.set_play_duration(status.duration as f32);
     ui.set_play_time(format_time(status.position).into());
     ui.set_play_end(format_time(status.duration).into());
+}
+
+/// Player-bar transport phase, see `AppWindow.playback-state`.
+fn playback_state_code(state: PlaybackState) -> i32 {
+    match state {
+        PlaybackState::Empty => 0,
+        PlaybackState::Loading => 1,
+        PlaybackState::Ready => 2,
+        PlaybackState::Playing => 3,
+        PlaybackState::Paused => 4,
+        PlaybackState::Stopped => 5,
+        PlaybackState::Ended => 6,
+        PlaybackState::Error => 7,
+    }
+}
+
+/// Publish the transport phase, playback error and output route that the player
+/// bar draws as state. `buffering` is the delayed network-starvation hint.
+pub(crate) fn publish_player_state(
+    ui: &AppWindow,
+    status: &audiolib_audio::PlaybackStatus,
+    buffering: bool,
+) {
+    ui.set_playback_state(playback_state_code(status.state));
+    let error = status.error.as_deref().unwrap_or_default();
+    if ui.get_playback_error().as_str() != error {
+        ui.set_playback_error(error.into());
+    }
+    ui.set_playback_buffering(buffering && status.state == PlaybackState::Playing);
+    let (backend, rate) = output_route(status);
+    if ui.get_output_backend().as_str() != backend {
+        ui.set_output_backend(backend.into());
+    }
+    if ui.get_output_rate().as_str() != rate {
+        ui.set_output_rate(rate.into());
+    }
+    ui.set_output_xruns(i32::try_from(status.underruns).unwrap_or(i32::MAX));
+}
+
+/// Active backend ("" while idle) and device rate, e.g. `("WASAPI", "48 kHz")`.
+fn output_route(status: &audiolib_audio::PlaybackStatus) -> (&'static str, String) {
+    let backend = match status.active_backend {
+        Some(AudioBackend::Asio) => "ASIO",
+        Some(AudioBackend::Wasapi) => default_backend_name(),
+        None => return ("", String::new()),
+    };
+    if status.device_sample_rate == 0 {
+        return (backend, String::new());
+    }
+    let khz = f64::from(status.device_sample_rate) / 1000.0;
+    let rate = if khz.fract() == 0.0 {
+        format!("{khz:.0} kHz")
+    } else {
+        format!("{khz:.1} kHz")
+    };
+    (backend, rate)
+}
+
+/// Publish the requested Waveform range, its zoom and its ruler ticks. The panel
+/// draws the last image inside this range until the render for it lands.
+pub(crate) fn publish_wave_target(ui: &AppWindow, view: WaveView, duration: f64) {
+    let (start, end) = view.range(duration);
+    ui.set_wave_target_start(start as f32);
+    ui.set_wave_target_end(end as f32);
+    ui.set_wave_zoom(view.zoom as f32);
+    ui.set_wave_scroll(view.scroll as f32);
+    let ticks = ruler_marks(start, end)
+        .into_iter()
+        .map(|mark| RulerTick {
+            fraction: mark.fraction as f32,
+            major: mark.label.is_some(),
+            label: mark.label.unwrap_or_default().into(),
+        })
+        .collect::<Vec<_>>();
+    ui.set_ruler_ticks(ModelRc::new(VecModel::from(ticks)));
+}
+
+/// Typed transform fields the engine would reject: bit 1 Pitch, bit 2 Rate.
+pub(crate) fn rejected_audition_fields(pitch: &str, rate: &str) -> i32 {
+    let valid = |settings: AuditionSettings| settings.validate().is_ok();
+    let pitch_ok = pitch.trim().parse::<f32>().is_ok_and(|pitch_semitones| {
+        valid(AuditionSettings {
+            pitch_semitones,
+            ..AuditionSettings::default()
+        })
+    });
+    let rate_ok = rate.trim().parse::<f32>().is_ok_and(|rate| {
+        valid(AuditionSettings {
+            rate,
+            ..AuditionSettings::default()
+        })
+    });
+    i32::from(!pitch_ok) | (i32::from(!rate_ok) << 1)
 }
 
 fn publish_audition(ui: &AppWindow, settings: AuditionSettings) {
@@ -9922,6 +10050,34 @@ mod tests {
         );
         let idle = output_summary(&audiolib_audio::PlaybackStatus::default());
         assert!(idle.contains("Output idle") && idle.contains("src — → out —"));
+    }
+
+    #[test]
+    fn output_route_names_the_active_backend_and_device_rate() {
+        let idle = audiolib_audio::PlaybackStatus::default();
+        assert_eq!(output_route(&idle), ("", String::new()));
+        let mut status = audiolib_audio::PlaybackStatus {
+            active_backend: Some(AudioBackend::Asio),
+            device_sample_rate: 48_000,
+            ..Default::default()
+        };
+        assert_eq!(output_route(&status), ("ASIO", "48 kHz".to_string()));
+        status.active_backend = Some(AudioBackend::Wasapi);
+        status.device_sample_rate = 44_100;
+        assert_eq!(
+            output_route(&status),
+            (default_backend_name(), "44.1 kHz".to_string())
+        );
+    }
+
+    #[test]
+    fn rejected_audition_fields_name_each_invalid_input() {
+        assert_eq!(rejected_audition_fields("0.00", "1.00"), 0);
+        assert_eq!(rejected_audition_fields(" -24 ", "4"), 0);
+        assert_eq!(rejected_audition_fields("25", "1.00"), 1);
+        assert_eq!(rejected_audition_fields("abc", "1.00"), 1);
+        assert_eq!(rejected_audition_fields("0", "0.2"), 2);
+        assert_eq!(rejected_audition_fields("NaN", "inf"), 3);
     }
 
     #[test]

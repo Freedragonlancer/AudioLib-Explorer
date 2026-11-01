@@ -37,6 +37,17 @@ struct ArtworkScript {
     png: Vec<u8>,
 }
 
+fn wait_for_artwork_request(script: &ArtworkScript) {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while script.hits.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "Synthetic artwork server did not receive the request"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
     request.lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;
@@ -381,6 +392,9 @@ fn child_remote_cover_busy() {
         let cancel = job.cancel.clone();
         let worker = controller.clone();
         let loading = std::thread::spawn(move || worker.load_artwork(&job));
+        // Exercise cancellation of an admitted HTTP request, rather than
+        // racing worker startup against the first UI timer tick.
+        wait_for_artwork_request(&script);
         let started = Instant::now();
         wait_for(&fixture.ui, |_| true);
         assert!(
@@ -398,12 +412,14 @@ fn child_remote_cover_busy() {
         let job = artwork_job(controller, &file);
         assert!(!job.cancel.load(Ordering::Acquire));
         let worker = controller.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+        let received = script.clone();
+        let replacing = std::thread::spawn(move || {
+            wait_for_artwork_request(&received);
             worker.artwork_epoch.fetch_add(1, Ordering::AcqRel);
         });
         let started = Instant::now();
         assert!(controller.load_artwork(&job).is_none());
+        replacing.join().unwrap();
         assert!(job.notice.lock().unwrap().is_none());
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -418,12 +434,14 @@ fn child_remote_cover_busy() {
         script.hits.lock().unwrap().clear();
         let job = artwork_job(controller, &file);
         let cancel = job.cancel.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+        let received = script.clone();
+        let cancelling = std::thread::spawn(move || {
+            wait_for_artwork_request(&received);
             cancel.store(true, Ordering::Release);
         });
         let started = Instant::now();
         assert!(controller.load_artwork(&job).is_none());
+        cancelling.join().unwrap();
         assert!(job.notice.lock().unwrap().is_none());
         assert!(
             started.elapsed() < Duration::from_secs(2),
