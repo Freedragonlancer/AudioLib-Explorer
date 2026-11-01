@@ -140,6 +140,11 @@ component PlayToggle inherits Rectangle {
     in property <string> label;
     in property <string> hint;
     in property <int> tip-align: 0;
+    // Corner radius of the face, glyph box size, and the theme's transport
+    // backdrop image inside the face (Studio).
+    in property <length> radius: 4px * Theme.ui-scale;
+    in property <length> glyph: 20px * Theme.ui-scale;
+    in property <bool> backdrop: false;
     callback clicked();
     width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale;
     property <bool> hovered: hit.has-hover && root.enabled;
@@ -167,7 +172,7 @@ component PlayToggle inherits Rectangle {
     // While playing, a quiet halo marks the live transport.
     Rectangle {
         x: -2px * Theme.ui-scale; y: self.x; width: parent.width - 2 * self.x; height: parent.height - 2 * self.y;
-        border-radius: 6px * Theme.ui-scale; border-width: 1px;
+        border-radius: root.radius + 2px * Theme.ui-scale; border-width: 1px;
         border-color: Theme.accent.with-alpha(root.playing && root.enabled ? 0.45 : 0);
         animate border-color { duration: Theme.motion-slow; easing: ease-out; }
     }
@@ -175,19 +180,25 @@ component PlayToggle inherits Rectangle {
         property <float> eased: 1 - Math.pow(1 - root.ring, 3);
         property <length> grow: self.eased * 9px * Theme.ui-scale;
         x: -self.grow; y: -self.grow; width: root.width + 2 * self.grow; height: root.height + 2 * self.grow;
-        border-radius: 4px * Theme.ui-scale + self.grow; border-width: 1.5px * Theme.ui-scale;
+        border-radius: root.radius + self.grow; border-width: 1.5px * Theme.ui-scale;
         border-color: Theme.accent-hover.with-alpha(0.75 * (1 - root.ring));
     }
     face := Rectangle {
         property <length> inset: root.pressed ? 2px * Theme.ui-scale : 0px;
         animate inset { duration: Theme.motion-fast; easing: ease-out; }
         x: self.inset; y: self.inset; width: parent.width - 2 * self.inset; height: parent.height - 2 * self.inset;
-        border-radius: 4px * Theme.ui-scale; border-width: 1px;
+        border-radius: root.radius; border-width: 1px;
         background: root.pressed ? Theme.accent.darker(0.18) : (root.hovered ? Theme.accent-hover : Theme.accent);
         border-color: focus.has-focus ? Theme.ink : (root.hovered ? Theme.accent-hover : Theme.accent);
         animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
+        if root.backdrop: Rectangle {
+            x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
+            border-radius: max(0px, root.radius - 1px); clip: true;
+            opacity: root.pressed ? 0.75 : 1;
+            Image { width: parent.width; height: parent.height; source: Theme.transport-backdrop; image-fit: fill; accessible-role: none; }
+        }
         Path {
-            property <length> size: (root.pressed ? 16px : (root.hovered ? 21px : 20px)) * Theme.ui-scale;
+            property <length> size: root.pressed ? root.glyph - 4px * Theme.ui-scale : (root.hovered ? root.glyph + 1px * Theme.ui-scale : root.glyph);
             animate size { duration: Theme.motion-fast; easing: ease-out; }
             width: self.size; height: self.size;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
@@ -532,11 +543,14 @@ component PlayedRegion {
     in property <float> fraction;
     in property <float> position;
     in property <float> duration;
-    in property <bool> spectral;
     in property <bool> chinese;
+    in property <color> tint;
+    // false keeps only the accessible range (nothing is drawn).
+    in property <bool> paint: true;
+    // Half strength after playback ended.
+    in property <bool> faded: false;
     property <length> head: root.fraction * root.width;
     property <length> tile: 32px;
-    property <brush> tint: root.spectral ? #183c3428 : #8faea622;
     // The played range for assistive technology. It has no fill, so it never
     // repaints anything when it grows.
     Rectangle {
@@ -544,10 +558,12 @@ component PlayedRegion {
         accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
         accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
     }
-    for i in Math.ceil(root.width / root.tile): Rectangle {
+    for i in root.paint ? Math.ceil(root.width / root.tile) : 0: Rectangle {
         x: i * root.tile; y: 0px; height: root.height;
         width: clamp(root.head - i * root.tile, 0px, root.tile);
         background: root.tint;
+        opacity: root.faded ? 0.5 : 1;
+        animate opacity { duration: Theme.motion-slow; }
         Rectangle { x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
     }
 }
@@ -709,8 +725,8 @@ component ClassicAuditionPanel inherits Rectangle {
             // These overlays are paint-only, leaving click/scroll ownership to scrub.
             if root.ready && root.duration > 0: PlayedRegion {
                 x: 0px; y: 0px; width: parent.width; height: parent.height;
-                fraction: wave.played-fraction; position: root.position; duration: root.duration;
-                spectral: root.spectral; chinese: root.chinese;
+                fraction: wave.played-fraction; position: root.position; duration: root.duration; chinese: root.chinese;
+                tint: root.spectral ? #183c3428 : #8faea622;
             }
             if root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end: Rectangle {
                 x: wave.played-fraction * (parent.width - 1px); width: 1px;
@@ -852,13 +868,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
         root.correction = continuous ? previous - root.position : 0;
     }
     init => { root.sync-progress(false); }
-    changed position => {
-        // Repeat wrapping back to the start is marked where playback resumes.
-        if root.repeat && root.playing && root.duration > 0 && root.anchor-position > root.duration * 0.75 && root.position < root.duration * 0.25 {
-            root.flash-at(root.position);
-        }
-        root.sync-progress(true);
-    }
+    changed position => { root.sync-progress(true); }
     changed playing => { root.sync-progress(false); }
     changed smooth-progress => { root.sync-progress(false); }
     changed playback-rate => { root.sync-progress(false); }
@@ -880,11 +890,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
     property <float> shown-end: root.has-target ? root.target-end : root.view-end;
     property <float> shown-span: max(0.001, root.shown-end - root.shown-start);
     function time-at(fraction: float) -> float { return root.shown-start + clamp(fraction, 0, 1) * (root.shown-end - root.shown-start); }
-    function seek-to(fraction: float) {
-        let seconds = root.time-at(fraction);
-        root.flash-at(seconds);
-        root.seek-play(seconds);
-    }
+    function seek-to(fraction: float) { root.seek-play(root.time-at(fraction)); }
 
     // What the timeline shows: 0 nothing loaded, 1 loading / analysing, 2 Waveform,
     // 3 load error, 4 missing source, 5 library maintenance.
@@ -896,12 +902,6 @@ component WorkbenchAuditionPanel inherits Rectangle {
         : root.state == 1 ? (root.chinese ? "正在加载" : "Loading")
         : (root.chinese ? "未加载声音" : "No sound loaded");
     property <string> transport-hint: root.ready ? "" : root.unavailable;
-
-    // A short glow where playback lands (seek, repeat wrap).
-    property <float> flash-time: 0;
-    property <bool> flash-on: false;
-    function flash-at(seconds: float) { root.flash-time = seconds; root.flash-on = true; }
-    Timer { interval: 90ms; running: root.flash-on; triggered => { root.flash-on = false; } }
 
     // Pointer scrubbing: the playhead preview follows the drag; release seeks.
     property <bool> scrubbing: false;
@@ -942,14 +942,14 @@ component WorkbenchAuditionPanel inherits Rectangle {
     GridLayout { padding-left: 12px * Theme.ui-scale; padding-right: 10px * Theme.ui-scale; padding-top: 6px * Theme.ui-scale; padding-bottom: 6px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
         VerticalLayout { row: 0; col: 0; width: 180px * Theme.ui-scale; alignment: center;
             HorizontalLayout { spacing: 8px * Theme.ui-scale; alignment: start;
-                Tool {
-                    width: 48px * Theme.ui-scale; height: 48px * Theme.ui-scale; border-radius: 6px * Theme.ui-scale; icon-size: 22px * Theme.ui-scale; tip-align: -1;
-                    icon: @image-url("icons/play.svg"); alt-icon: @image-url("icons/pause.svg"); alt: root.playing; primary: true; enabled: root.ready;
+                PlayToggle {
+                    width: 48px * Theme.ui-scale; height: 48px * Theme.ui-scale; radius: 6px * Theme.ui-scale; glyph: 22px * Theme.ui-scale; backdrop: true; tip-align: -1;
+                    playing: root.playing; enabled: root.ready;
                     label: root.playing ? (root.chinese ? "暂停" : "Pause") : (root.chinese ? "播放" : "Play");
                     hint: root.ready ? (root.chinese ? "空格" : "Space") : root.unavailable;
                     clicked => { root.toggle(); }
                 }
-                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; hint: root.transport-hint; enabled: root.ready; clicked => { root.flash-at(0); root.seek(0); } }
+                Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; hint: root.transport-hint; enabled: root.ready; clicked => { root.seek(0); } }
                 Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; hint: root.transport-hint; enabled: root.ready; clicked => { root.stop(); } }
                 Tool { width: 32px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; hint: root.repeat ? (root.chinese ? "已开启" : "On") : ""; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             }
@@ -1063,10 +1063,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / root.shown-span, 0, 1) : 0;
                 property <float> color-fraction: clamp((root.visual-position - root.view-start) / max(0.001, root.view-end - root.view-start), 0, 1);
                 property <bool> head-visible: root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end;
-                property <length> head-x: clamp(wave.played-fraction * wave.width, 1px, max(1px, wave.width - 1px));
                 property <color> head-color: root.show-spectral ? #f4faf7 : Theme.apricot;
-                property <float> head-opacity: root.state == 6 ? 0 : (root.playing ? 1 : 0.8);
-                animate head-opacity { duration: Theme.motion-slow; easing: ease-out; }
                 property <bool> pointer-in: root.ready && (scrub.has-hover || ruler-touch.has-hover || root.scrubbing);
                 property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.has-hover ? scrub.mouse-x : ruler-touch.mouse-x, 0px, wave.width);
                 changed width => { root.resize(self.width / 1px, self.height / 1px); }
@@ -1079,7 +1076,6 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
                     opacity: root.waveform-ready ? 1 : 0;
                     animate opacity { duration: Theme.motion-slow; easing: ease-out; }
-                    animate x, width { duration: Theme.motion-fast; easing: ease-out; }
                 }
                 Image {
                     visible: !root.show-spectral; source: root.waveform-mask; colorize: Theme.dim; height: parent.height; image-fit: fill;
@@ -1088,12 +1084,22 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     opacity: root.waveform-ready ? 1 : 0;
                     animate opacity { duration: Theme.motion-slow; easing: ease-out; }
                 }
+                // Played waveform in a gradient from the start (accent) to the playhead
+                // (apricot), drawn as 64 bands. The bands are laid out over `span`, the
+                // played width rounded up in 1/16 steps, and each band is cut at the
+                // playhead itself. Between steps only the band under the playhead
+                // changes, so a frame repaints one band instead of the whole played
+                // waveform; the gradient re-spreads at each step.
                 if !root.show-spectral && root.waveform-ready: Rectangle {
-                    x: 0px; y: 0px; width: wave.played-fraction * wave.width; height: wave.height; clip: true;
+                    x: 0px; y: 0px; width: wave.width; height: wave.height;
+                    property <length> head: wave.played-fraction * wave.width;
+                    property <float> step: 1.0625;
+                    property <length> span: self.head <= 32px ? 32px : min(wave.width, 32px * Math.pow(self.step, Math.ceil(Math.log(self.head / 32px, self.step) - 0.0001)));
                     for stripe in 64: Rectangle {
                         private property <float> fraction: stripe / 63.0;
                         private property <color> tone: self.fraction <= 0.78 ? Theme.accent.mix(Theme.mint, 1 - self.fraction / 0.78) : Theme.mint.mix(Theme.apricot, 1 - (self.fraction - 0.78) / 0.22);
-                        x: parent.width * stripe / 64; y: 0px; width: parent.width / 64 + 1px; height: parent.height; clip: true;
+                        x: parent.span * stripe / 64; y: 0px; height: parent.height; clip: true;
+                        width: clamp(parent.head - self.x, 0px, parent.span / 64 + 1px);
                         Image {
                             source: root.waveform-mask; colorize: parent.tone; height: wave.height; image-fit: fill;
                             x: (root.view-start - root.shown-start) / root.shown-span * wave.width - parent.x;
@@ -1103,16 +1109,12 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         }
                     }
                 }
-                // Loading: faint lanes and a sweeping highlight. The frame clock is read only meanwhile.
+                // Loading: faint channel lanes. Static, so a slow analysis never keeps the
+                // window repainting every frame.
                 if root.phase == 1 && !root.waveform-ready: Rectangle {
-                    property <float> sweep: Math.mod(animation-tick() / 1ms, 1400) / 1400;
                     property <color> lane: Theme.dim.with-alpha(0.12);
                     Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
                     Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
-                    Rectangle {
-                        width: parent.width * 0.3; x: (parent.width + self.width) * parent.sweep - self.width;
-                        background: @linear-gradient(90deg, #ffffff00 0%, (root.show-spectral ? #ffffff30 : #ffffff14) 50%, #ffffff00 100%);
-                    }
                 }
                 // Render progress while a partial Waveform is already on screen.
                 if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
@@ -1120,44 +1122,14 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
                 }
                 // These overlays are paint-only, leaving click/scroll ownership to scrub.
-                if root.ready && root.duration > 0: Rectangle {
-                    x: 0px; y: 0px; height: parent.height; width: wave.played-fraction * parent.width;
-                    background: root.show-spectral ? #183c3428 : transparent;
-                    opacity: root.state == 6 ? 0.5 : 1;
-                    animate opacity { duration: Theme.motion-slow; }
-                    accessible-role: progress-indicator; accessible-label: root.chinese ? "已播放区域" : "Played waveform region";
-                    accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
-                    Rectangle { visible: root.show-spectral; x: 0px; width: parent.width; y: parent.height - 3px * Theme.ui-scale; height: 3px * Theme.ui-scale; background: Theme.accent; }
+                if root.ready && root.duration > 0: PlayedRegion {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    fraction: wave.played-fraction; position: root.position; duration: root.duration; chinese: root.chinese;
+                    tint: #183c3428; paint: root.show-spectral; faded: root.state == 6;
                 }
-                // Landing glow for seeks and repeat wraps.
-                Rectangle {
-                    width: 18px * Theme.ui-scale; x: (root.flash-time - root.shown-start) / root.shown-span * parent.width - self.width / 2;
-                    background: @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.6) 50%, Theme.accent.with-alpha(0) 100%);
-                    opacity: 0;
-                    states [
-                    lit when root.flash-on: {
-                        opacity: 1;
-                        in { animate opacity { duration: 60ms * Theme.motion; } }
-                        out { animate opacity { duration: 420ms * Theme.motion; easing: ease-out; } }
-                    }
-                    ]
-                }
-                // Playhead: a glow, a 2px line and a handle (filled while playing, hollow otherwise).
-                if wave.head-visible: Rectangle { x: wave.head-x - 3px * Theme.ui-scale; width: 6px * Theme.ui-scale; background: wave.head-color.with-alpha(0.2); opacity: wave.head-opacity; }
-                if wave.head-visible: Rectangle { x: wave.head-x - 1px; width: 2px; background: wave.head-color; opacity: wave.head-opacity; }
-                if wave.head-visible: Path {
-                    x: wave.head-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
-                    viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
-                    fill: root.playing ? wave.head-color : transparent; stroke: wave.head-color; stroke-width: 1.5px;
-                    opacity: wave.head-opacity;
-                }
-                // After the end, a hollow handle at the start: Play begins there.
-                Path {
-                    x: -6px * Theme.ui-scale + (0 - root.shown-start) / root.shown-span * parent.width; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
-                    viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
-                    fill: transparent; stroke: wave.head-color; stroke-width: 1.5px;
-                    opacity: root.ready && root.state == 6 && root.shown-start <= 0 ? 0.85 : 0;
-                    animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                if wave.head-visible: Rectangle {
+                    x: wave.played-fraction * (parent.width - 1px); width: 1px;
+                    background: wave.head-color;
                 }
                 // Pointer: a hairline (accent while scrubbing) and the time under it.
                 if wave.pointer-in: Rectangle { x: wave.pointer-x; width: 1px; background: root.scrubbing ? Theme.accent : (root.show-spectral ? #ffffff80 : #ffffff40); }
@@ -1189,7 +1161,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                             root.seek(clamp(root.visual-position + (event.text == Key.LeftArrow ? -nudge : nudge), 0, root.duration));
                             return accept;
                         }
-                        if event.text == Key.Home { root.flash-at(0); root.seek(0); return accept; }
+                        if event.text == Key.Home { root.seek(0); return accept; }
                         if event.text == "+" || event.text == "=" { root.zoom-change(2); return accept; }
                         if event.text == "-" && root.zoom > 1 { root.zoom-change(0.5); return accept; }
                         if event.text == "0" { root.zoom-change(0); return accept; }
