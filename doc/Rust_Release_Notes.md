@@ -1,4 +1,4 @@
-# 0.8.7（准备中）：30 个搜索任务、主题切换与播放重绘
+# 0.8.7：30 个搜索任务、主题切换与播放重绘
 
 程序 0.8.7 | API /api/v1/ | schema 8 | 快照兼容 3..=8
 
@@ -16,7 +16,9 @@
 - 本地 beta 安装使用独立开发身份，防止自动更新误跳转到已发布的旧稳定包；新增可续跑的本地发布管线与有预算的编译缓存维护。
 - 原生窗口重绘验证可分别选择 Default / Studio，Studio 使用独立报告，避免后运行的主题覆盖先前结果。
 
-当前所选源码检查已通过，既有滚动及 Studio 锚点失败已在保留原断言的定向复验中通过；尚未完成本轮交付、原生验收、beta 门禁和最终多平台产物验收。范围、历史失败及各项实测身份见 [0.8.7 发布准备](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.8.7.md)。源 WAV、Metadata、资料库格式和服务端 API 沿用现有契约，正式资产仍为七个归档及各自 SHA256。
+本轮所选源码检查、交付、原生验收、beta 门禁及最终多平台产物验收已完成，[v0.8.7 正式 Release](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.8.7) 已发布七个归档及各自 SHA256，共十四项资产。标签与实际产物源码冻结为 `b5a98ff98fed501aafff0f6a4ef5015c8b4d435d`；后续 main `d0168f74182f52f493adb2a3b1fc9af0f3ec4eac` 仅整合验收工具和流程记录，没有移动标签或重建已验收产物。范围、历史失败及各项实测身份见 [0.8.7 发布记录](Rust_Release_0.8.7.md)。源 WAV、Metadata、资料库格式和服务端 API 沿用现有契约。
+
+Mac 客户端使用 ad-hoc 签名，未经 Apple 公证；Linux x64 服务端与 Docker linux/amd64 在 ARM64 主机的 AMD64 仿真环境验收，未覆盖物理 x64 硬件。没有新增声学输出延迟测量或真实 ASIO 硬件试验。
 
 # 0.8.6：连续浏览与试听播放条
 
