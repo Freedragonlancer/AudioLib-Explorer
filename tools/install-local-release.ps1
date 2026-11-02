@@ -7,6 +7,17 @@ param([string]$Source = 'dist/latest/portable')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (!$IsWindows) { throw 'Local Windows installation requires Windows.' }
+. (Join-Path $PSScriptRoot 'native-desktop-window.ps1')
+if (!('AudioLibLocalInstallNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AudioLibLocalInstallNative {
+    [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
+    public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
+}
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $taskSource = [IO.Path]::GetFullPath($Source, $taskRoot).TrimEnd('\')
 $taskDestination = Join-Path $taskRoot 'local_release'
@@ -50,7 +61,14 @@ $taskCopyPlan = @($taskFiles | ForEach-Object {
 })
 foreach ($taskProcess in @(Get-Process -Name AudioLibExplorer,AudioLibCli -ErrorAction SilentlyContinue)) {
     if ($taskProcess.Path -and $taskProcess.Path.StartsWith($taskDestination + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        if (!$taskProcess.CloseMainWindow() -or !$taskProcess.WaitForExit(30000)) { throw 'Installed application is still running/draining writes; close it gracefully before retrying.' }
+        $taskHandle = [AudioLibDesktopWindowSelector]::FindApplicationWindow($taskProcess.Id)
+        if ($taskHandle -eq [IntPtr]::Zero) {
+            $taskProcess.Refresh()
+            if ($taskProcess.HasExited) { continue }
+            throw 'Installed process has no visible application window; leave it running and close it gracefully before retrying.'
+        }
+        [AudioLibDesktopWindowSelector]::AssertApplicationWindow($taskHandle,$taskProcess.Id)
+        if (![AudioLibLocalInstallNative]::PostMessage($taskHandle,0x0010,[IntPtr]::Zero,[IntPtr]::Zero) -or !$taskProcess.WaitForExit(30000)) { throw 'Installed application is still running/draining writes; close it gracefully before retrying.' }
     }
 }
 New-Item -ItemType Directory -Path $taskEvidence -Force | Out-Null

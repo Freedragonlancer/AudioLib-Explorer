@@ -11,6 +11,7 @@ $taskSource=Join-Path $taskRoot 'payload'
 $taskInstalled=Join-Path $taskRoot 'local_release'
 New-Item -ItemType Directory -Path $taskTools,$taskSource,$taskInstalled | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-local-release.ps1') -Destination $taskTools
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native-desktop-window.ps1') -Destination $taskTools
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assert-portable-layout.ps1') -Destination $taskTools
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'portable-files.json') -Destination $taskTools
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Cargo.toml') -Destination $taskRoot
