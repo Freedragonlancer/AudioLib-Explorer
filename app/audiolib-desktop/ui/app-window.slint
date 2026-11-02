@@ -895,7 +895,7 @@ export component AppWindow inherits Window {
     in property <bool> search-workspace-read-only: false;
     changed search-workspace-read-only => { if root.search-workspace-read-only { root.search-task-rename-visible = false; } }
     in property <string> search-workspace-error: "";
-    in-out property <int> max-search-tasks: 6;
+    in-out property <int> max-search-tasks: 30;
     // Per-task navigation presentation; pane widths and appearance remain global.
     in-out property <int> library-sidebar-page: 0;
     in-out property <int> favorites-category: 0;
@@ -1048,15 +1048,50 @@ export component AppWindow inherits Window {
         root.table-viewport-x = 0px;
         root.sync-table-viewport();
     }
-    public function reveal-search-task(index: int) {
-        let left = max(0, index) * (root.task-tab-width + 3px * Theme.ui-scale);
-        let right = left + root.task-tab-width + (index == root.search-tasks.length - 1 ? 38px * Theme.ui-scale : 0px);
-        if left < -(Theme.modern-style ? studio-task-tabs-scroll.viewport-x : task-tabs-scroll.viewport-x) { if Theme.modern-style { studio-task-tabs-scroll.viewport-x = -left; } else { task-tabs-scroll.viewport-x = -left; } }
-        else if right > -(Theme.modern-style ? studio-task-tabs-scroll.viewport-x : task-tabs-scroll.viewport-x) + (Theme.modern-style ? studio-task-tabs-scroll.visible-width : task-tabs-scroll.visible-width) {
-            if Theme.modern-style { studio-task-tabs-scroll.viewport-x = (Theme.modern-style ? studio-task-tabs-scroll.visible-width : task-tabs-scroll.visible-width) - right; } else { task-tabs-scroll.viewport-x = (Theme.modern-style ? studio-task-tabs-scroll.visible-width : task-tabs-scroll.visible-width) - right; }
+    // A task's other pane offsets are independent of its result source. A
+    // presentation-only workbench restore instead belongs to the old source.
+    function discard-other-source-result-restore() {
+        let keep-panes = !root.workbench-switch-pending || root.workbench-switch-epoch != root.result-scroll-epoch;
+        let folder-y = root.task-wanted-folder-y;
+        let filter-y = root.task-wanted-filter-y;
+        let inspector-y = root.task-wanted-inspector-y;
+        root.reset-result-list-scroll();
+        if keep-panes {
+            root.restore-search-task-viewport(0, 0, folder-y, filter-y, inspector-y);
         }
     }
+    function apply-task-pane-viewport() {
+        if Theme.modern-style { studio-folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, (Theme.modern-style ? studio-folder-list.visible-height : folder-list.visible-height) - (Theme.modern-style ? studio-folder-list.viewport-height : folder-list.viewport-height)), 0px); } else { folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, (Theme.modern-style ? studio-folder-list.visible-height : folder-list.visible-height) - (Theme.modern-style ? studio-folder-list.viewport-height : folder-list.viewport-height)), 0px); }
+        root.task-filter-viewport-y = min(0px, root.task-wanted-filter-y * 1px);
+        root.task-inspector-viewport-y = min(0px, root.task-wanted-inspector-y * 1px);
+        root.task-sidebar-restore-revision += 1;
+    }
+    public function reveal-search-task(index: int) {
+        let left = max(0, index) * (root.task-tab-width + 3px * Theme.ui-scale);
+        let right = left + root.task-tab-width;
+        let current = Theme.modern-style ? studio-task-tabs-scroll.viewport-x : task-tabs-scroll.viewport-x;
+        root.position-task-tabs(left < -current ? -left : (right > -current + root.task-tabs-visible-width ? root.task-tabs-visible-width - right : current));
+    }
     private property <length> task-tab-width: (Theme.modern-style ? 224px : 320px) * Theme.ui-scale;
+    private property <length> task-tabs-content-width: max(0, root.search-tasks.length * (root.task-tab-width + 3px * Theme.ui-scale) - 3px * Theme.ui-scale);
+    private property <length> task-tabs-visible-width: Theme.modern-style ? studio-task-tabs-scroll.visible-width : task-tabs-scroll.visible-width;
+    private property <length> task-tabs-x: Theme.modern-style ? studio-task-tabs-scroll.viewport-x : task-tabs-scroll.viewport-x;
+    // Measure after layout so width-dependent controls cannot feed the window's minimum width.
+    private property <bool> task-tabs-overflow: false;
+    changed task-tabs-content-width => { root.update-task-tabs-overflow(); }
+    function update-task-tabs-overflow() {
+        root.task-tabs-overflow = root.task-tabs-content-width > (Theme.modern-style ? studio-task-tabs-bar.width : task-tabs-bar.width) - 47px * Theme.ui-scale;
+    }
+    changed task-tabs-visible-width => { root.reveal-search-task(root.active-search-task-index); }
+    function position-task-tabs(x: length) {
+        let bounded = clamp(x, min(0px, root.task-tabs-visible-width - root.task-tabs-content-width), 0px);
+        if Theme.modern-style { studio-task-tabs-scroll.viewport-x = bounded; }
+        else { task-tabs-scroll.viewport-x = bounded; }
+    }
+    function scroll-task-tabs(direction: int) {
+        // Retain one tab of overlap when possible so consecutive pages keep context.
+        root.position-task-tabs(root.task-tabs-x - direction * max(root.task-tab-width, root.task-tabs-visible-width - root.task-tab-width));
+    }
     public function begin-search-task-rename(id: string, name: string, saved: bool) {
         if root.search-workspace-read-only { return; }
         root.search-task-rename-id = id;
@@ -2165,7 +2200,11 @@ export component AppWindow inherits Window {
             self.running = false;
             // Stopping a native timer cannot revoke a callback already queued
             // by the event loop. Reject it before touching any current sidebar.
-            if !root.task-viewport-pending || root.result-scroll-apply-epoch != root.result-scroll-epoch || root.result-scroll-remote != root.remote-mode {
+            if !root.task-viewport-pending || root.result-scroll-apply-epoch != root.result-scroll-epoch {
+                return;
+            }
+            if root.result-scroll-remote != root.remote-mode {
+                root.discard-other-source-result-restore();
                 return;
             }
             if root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch {
@@ -2182,10 +2221,18 @@ export component AppWindow inherits Window {
             // A server result-list offset must not land on another source. Folder,
             // filter and inspector scrolls are not tied to that row model.
             if root.task-viewport-pending && root.result-scroll-apply-epoch == root.result-scroll-epoch && root.result-scroll-remote == root.remote-mode {
-                if Theme.modern-style { studio-result-list.viewport-y = clamp(root.task-wanted-result-y * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height) - content-height), 0px); } else { result-list.viewport-y = clamp(root.task-wanted-result-y * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height) - content-height), 0px); }
-                root.table-viewport-x = clamp(root.task-wanted-result-x * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-width : result-list.visible-width) - root.table-content-size), 0px);
+                // Pending getters must report the measured range, even while
+                // the second result pass protects the fractional row anchor.
+                root.task-wanted-result-y = clamp(root.task-wanted-result-y * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height) - content-height), 0px) / 1px;
+                root.task-wanted-result-x = clamp(root.task-wanted-result-x * 1px, min(0px, (Theme.modern-style ? studio-result-list.visible-width : result-list.visible-width) - root.table-content-size), 0px) / 1px;
+                if Theme.modern-style { studio-result-list.viewport-y = root.task-wanted-result-y * 1px; } else { result-list.viewport-y = root.task-wanted-result-y * 1px; }
+                root.table-viewport-x = root.task-wanted-result-x * 1px;
                 root.sync-table-viewport();
             }
+            let workbench-restore = root.workbench-switch-pending && root.workbench-switch-epoch == root.result-scroll-epoch;
+            // Ordinary task panes do not depend on the result ListView's second
+            // layout pass. Apply them before real wheel input can take over.
+            if !workbench-restore && !root.task-viewport-first-applied { root.apply-task-pane-viewport(); }
             if !root.task-viewport-first-applied {
                 // A newly visible native ListView first anchors its virtual rows
                 // to the first item. Reapply the fractional row offset after one
@@ -2195,10 +2242,7 @@ export component AppWindow inherits Window {
                 self.restart();
                 return;
             }
-            if Theme.modern-style { studio-folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, (Theme.modern-style ? studio-folder-list.visible-height : folder-list.visible-height) - (Theme.modern-style ? studio-folder-list.viewport-height : folder-list.viewport-height)), 0px); } else { folder-list.viewport-y = clamp(root.task-wanted-folder-y * 1px, min(0px, (Theme.modern-style ? studio-folder-list.visible-height : folder-list.visible-height) - (Theme.modern-style ? studio-folder-list.viewport-height : folder-list.viewport-height)), 0px); }
-            root.task-filter-viewport-y = min(0px, root.task-wanted-filter-y * 1px);
-            root.task-inspector-viewport-y = min(0px, root.task-wanted-inspector-y * 1px);
-            root.task-sidebar-restore-revision += 1;
+            if workbench-restore { root.apply-task-pane-viewport(); }
             if root.workbench-switch-pending {
                 // A later task/library restore supersedes this presentation-only
                 // request; its offsets must not be replaced by the old workbench.
@@ -2226,7 +2270,7 @@ export component AppWindow inherits Window {
     // A deferred mode change must not discard a restore armed for the mode now showing.
     changed remote-mode => {
         if root.task-viewport-pending && root.result-scroll-remote != root.remote-mode {
-            root.reset-result-list-scroll();
+            root.discard-other-source-result-restore();
         }
     }
     detail-tag-probe := Text { visible: false; text: root.detail-tag-probe-text; font-size: Theme.font(12); }
@@ -2508,11 +2552,17 @@ main-scroll := ScrollView {
             }
         }
         // Document tabs own the entire search workspace below, including its directory tree.
-        Rectangle { height: (root.short-layout ? 34px : 38px) * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale;
+        task-tabs-bar := Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; height: (root.short-layout ? 34px : 38px) * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale;
+            changed width => { root.update-task-tabs-overflow(); }
             accessible-role: tab-list; accessible-label: root.chinese ? "搜索任务" : "Search tasks";
-            HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale;
+            HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
+                if root.task-tabs-overflow: Action { width: 36px * Theme.ui-scale; subtle: true; label: "‹";
+                    action-label: root.chinese ? "向左翻页搜索任务" : "Scroll search tasks left";
+                    enabled: !root.background-blocked && root.task-tabs-x < -1px;
+                    clicked => { root.scroll-task-tabs(-1); }
+                }
                 task-tabs-scroll := ScrollView { horizontal-stretch: 1; min-width: 0px; viewport-height: (root.short-layout ? 32px : 36px) * Theme.ui-scale;
-                    viewport-width: root.search-tasks.length * (root.task-tab-width + 3px * Theme.ui-scale) + 38px * Theme.ui-scale;
+                    viewport-width: root.task-tabs-content-width;
                     HorizontalLayout { spacing: 3px * Theme.ui-scale; alignment: start;
                         for task in root.search-tasks: SearchTaskTab {
                             width: root.task-tab-width; name: task.name; active: task.active;
@@ -2527,13 +2577,18 @@ main-scroll := ScrollView {
                                 search-task-menu.show({x: position.x - search-task-menu.absolute-position.x, y: position.y - search-task-menu.absolute-position.y});
                             }
                         }
-                        Action { width: 34px * Theme.ui-scale; height: (root.short-layout ? 30px : 32px) * Theme.ui-scale; subtle: true;
-                            label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
-                            enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
-                            clicked => { root.search-task-created(); }
-                            Tooltip { text: @markdown("\{root.search-tasks.length}/\{root.max-search-tasks}"); }
-                        }
                     }
+                }
+                if root.task-tabs-overflow: Action { width: 36px * Theme.ui-scale; subtle: true; label: "›";
+                    action-label: root.chinese ? "向右翻页搜索任务" : "Scroll search tasks right";
+                    enabled: !root.background-blocked && root.task-tabs-x > min(0px, root.task-tabs-visible-width - root.task-tabs-content-width) + 1px;
+                    clicked => { root.scroll-task-tabs(1); }
+                }
+                Action { width: 36px * Theme.ui-scale; height: (root.short-layout ? 30px : 32px) * Theme.ui-scale; subtle: true;
+                    label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
+                    enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
+                    clicked => { root.search-task-created(); }
+                    Tooltip { text: @markdown("\{root.search-tasks.length}/\{root.max-search-tasks}"); }
                 }
             }
         }
@@ -3526,11 +3581,17 @@ main-scroll := ScrollView {
                 finished => { root.pane-layout-changed(); }
             }
             studio-results-column := VerticalLayout { horizontal-stretch: 1; min-width: 520px * Theme.ui-scale; spacing: 2px * Theme.ui-scale;
-                Rectangle { height: 34px * Theme.ui-scale; background: Theme.table-toolbar-surface; border-radius: 0px;
+                studio-task-tabs-bar := Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; height: 34px * Theme.ui-scale; background: Theme.table-toolbar-surface; border-radius: 0px;
+                    changed width => { root.update-task-tabs-overflow(); }
                     accessible-role: tab-list; accessible-label: root.chinese ? "搜索任务" : "Search tasks";
-                    HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale;
+                    HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
+                        if root.task-tabs-overflow: StudioAction { width: 36px * Theme.ui-scale; subtle: true; label: "‹";
+                            action-label: root.chinese ? "向左翻页搜索任务" : "Scroll search tasks left";
+                            enabled: !root.background-blocked && root.task-tabs-x < -1px;
+                            clicked => { root.scroll-task-tabs(-1); }
+                        }
                         studio-task-tabs-scroll := ScrollView { horizontal-stretch: 1; min-width: 0px; viewport-height: 32px * Theme.ui-scale;
-                            viewport-width: root.search-tasks.length * (root.task-tab-width + 3px * Theme.ui-scale) + 38px * Theme.ui-scale;
+                            viewport-width: root.task-tabs-content-width;
                             HorizontalLayout { spacing: 3px * Theme.ui-scale; alignment: start;
                                 for task in root.search-tasks: SearchTaskTab {
                                     width: root.task-tab-width; height: 32px * Theme.ui-scale; name: task.name; active: task.active;
@@ -3545,13 +3606,18 @@ main-scroll := ScrollView {
                                         search-task-menu.show({x: position.x - search-task-menu.absolute-position.x, y: position.y - search-task-menu.absolute-position.y});
                                     }
                                 }
-                                StudioAction { width: 34px * Theme.ui-scale; height: (root.short-layout ? 30px : 32px) * Theme.ui-scale; subtle: true;
-                                    label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
-                                    enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
-                                    clicked => { root.search-task-created(); }
-                                    Tooltip { text: @markdown("\{root.search-tasks.length}/\{root.max-search-tasks}"); }
-                                }
                             }
+                        }
+                        if root.task-tabs-overflow: StudioAction { width: 36px * Theme.ui-scale; subtle: true; label: "›";
+                            action-label: root.chinese ? "向右翻页搜索任务" : "Scroll search tasks right";
+                            enabled: !root.background-blocked && root.task-tabs-x > min(0px, root.task-tabs-visible-width - root.task-tabs-content-width) + 1px;
+                            clicked => { root.scroll-task-tabs(1); }
+                        }
+                        StudioAction { width: 36px * Theme.ui-scale; height: (root.short-layout ? 30px : 32px) * Theme.ui-scale; subtle: true;
+                            label: "+"; action-label: root.chinese ? "新建搜索任务" : "New search task";
+                            enabled: !root.background-blocked && !root.search-workspace-read-only && root.search-tasks.length < root.max-search-tasks;
+                            clicked => { root.search-task-created(); }
+                            Tooltip { text: @markdown("\{root.search-tasks.length}/\{root.max-search-tasks}"); }
                         }
                     }
                 }
@@ -4338,9 +4404,9 @@ main-scroll := ScrollView {
                 Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "字号 13 px 为默认大小，并与界面缩放叠加；列表字号只影响结果列表，行高随之调整。" : "13 px is the default size and combines with the interface scale. The list font only affects the result list; its rows grow to fit."; }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                     Label { width: 108px * Theme.ui-scale; text: root.chinese ? "最多搜索任务" : "Search task limit"; }
-                    SpinBox { horizontal-stretch: 1; enabled: root.settings-page == 1; minimum: 1; maximum: 6; step-size: 1; value <=> root.max-search-tasks; edited(value) => { root.max-search-tasks-requested(value); } }
+                    SpinBox { horizontal-stretch: 1; enabled: root.settings-page == 1; minimum: 1; maximum: 30; step-size: 1; value <=> root.max-search-tasks; edited(value) => { root.max-search-tasks-requested(value); } }
                 }
-                Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "每个任务保留独立的目录、检索条件和声音列表。最多支持 6 个任务。" : "Each task keeps its own folders, search and sound list. Up to 6 tasks are supported."; }
+                Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "每个任务保留独立的目录、检索条件和声音列表。最多支持 30 个任务；超出宽度时可横向滚动或使用左右翻页按钮。" : "Each task keeps its own folders, search and sound list. Up to 30 tasks are supported; scroll horizontally or use the arrow buttons when tabs overflow."; }
             }
             appearance-buttons := HorizontalLayout { width: parent.width; visible: root.settings-page == 1; y: parent.height - self.height; height: 33px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                 Rectangle { horizontal-stretch: 1; }

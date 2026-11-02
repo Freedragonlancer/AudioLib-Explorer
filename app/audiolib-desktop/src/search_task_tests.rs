@@ -112,7 +112,7 @@ fn fixture() -> Fixture {
             "active_database": root.join("library.db"),
             "language": "en",
             "audition_play_on_single_click": false,
-            "max_search_tasks": 6,
+            "max_search_tasks": audiolib_core::config::DEFAULT_MAX_SEARCH_TASKS,
             "playback": playback,
         }))
         .unwrap(),
@@ -558,7 +558,9 @@ fn task_capacity_and_lower_limit_never_discard_an_open_search() {
 fn child_task_capacity() {
     let fixture = fixture();
     let ui = &fixture.ui;
-    for count in 2..=6 {
+    let capacity = audiolib_core::search_workspace::MAX_SEARCH_TASKS;
+    assert_eq!(ui.get_max_search_tasks(), capacity as i32);
+    for count in 2..=capacity {
         ui.invoke_search_task_created();
         wait_for(ui, move |ui| {
             ui.get_search_tasks().row_count() == count
@@ -569,11 +571,13 @@ fn child_task_capacity() {
     let active = active_id(ui);
     let ids: Vec<_> = ui.get_search_tasks().iter().map(|task| task.id).collect();
     ui.invoke_search_task_created();
-    assert_eq!(ui.get_search_tasks().row_count(), 6);
+    assert_eq!(ui.get_search_tasks().row_count(), capacity);
     assert_eq!(active_id(ui), active);
+    ui.invoke_max_search_tasks_requested(i32::MAX);
+    assert_eq!(ui.get_max_search_tasks(), capacity as i32);
     ui.invoke_max_search_tasks_requested(2);
-    assert_eq!(ui.get_max_search_tasks(), 6);
-    assert_eq!(ui.get_search_tasks().row_count(), 6);
+    assert_eq!(ui.get_max_search_tasks(), capacity as i32);
+    assert_eq!(ui.get_search_tasks().row_count(), capacity);
     for id in ids {
         ui.invoke_search_task_closed(id);
     }
@@ -588,7 +592,8 @@ fn child_task_capacity() {
     assert_eq!(ui.get_max_search_tasks(), 1);
     ui.invoke_search_task_created();
     assert_eq!(ui.get_search_tasks().row_count(), 1);
-    ui.invoke_max_search_tasks_requested(6);
+    ui.invoke_max_search_tasks_requested(capacity as i32);
+    assert_eq!(ui.get_max_search_tasks(), capacity as i32);
     ui.invoke_search_task_created();
     assert_eq!(ui.get_search_tasks().row_count(), 2);
     wait_for(ui, |ui| {

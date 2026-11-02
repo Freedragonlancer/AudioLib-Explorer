@@ -1,6 +1,9 @@
 # tools/validate-window-repaint.ps1
 # Native Windows exposure regression; only the launched isolated test window is captured.
-param([Parameter(Mandatory=$true)][string]$BinaryDirectory)
+param(
+    [Parameter(Mandatory=$true)][string]$BinaryDirectory,
+    [ValidateSet('default','studio')][string]$Theme = 'default'
+)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'console-utf8.ps1')
 try {
@@ -12,6 +15,7 @@ if (!(Test-Path -LiteralPath $desktop) -or !(Test-Path -LiteralPath $cli)) { thr
 $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\','/')
 $testRoot = Join-Path $tempParent ('audiolib-window-repaint-' + [Guid]::NewGuid().ToString('N'))
 $artifacts = Join-Path $taskRoot '.rust-validation/window-repaint'
+if ($Theme -ne 'default') { $artifacts = Join-Path $artifacts $Theme }
 New-Item -ItemType Directory -Force -Path $testRoot,$artifacts | Out-Null
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 if (!('AudioLibRepaintNative' -as [type])) {
@@ -149,7 +153,7 @@ try {
     $env:SLINT_BACKEND = 'winit-software'
     $env:RUST_LOG = 'info'
     # Persist the owned library before any CLI/GUI startup can discover legacy inputs.
-    $settings = @{ active_database=(Join-Path $testRoot 'library.db'); language='en'; playback=@{volume=0.0}; allowed_scan_roots=@(); data_source=@{mode='local';server_url=''} } | ConvertTo-Json -Depth 5
+    $settings = @{ active_database=(Join-Path $testRoot 'library.db'); language='en'; theme=$Theme; playback=@{volume=0.0}; allowed_scan_roots=@(); data_source=@{mode='local';server_url=''} } | ConvertTo-Json -Depth 5
     [IO.File]::WriteAllText((Join-Path $testRoot 'settings.json'),$settings,[Text.UTF8Encoding]::new($false))
     $created = (& $cli db create (Join-Path $testRoot 'library.db') | Out-String) | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or !$created.success) { throw 'Isolated empty library creation failed.' }
@@ -246,6 +250,7 @@ try {
     $foregroundExposureVerified = @($cases | Where-Object { !$_.foreground_exposure_verified }).Count -eq 0
     $limitations = if ($foregroundExposureVerified) { @() } else { @('Input desktop was inaccessible for one or more cycles; retained client pixels were verified, but foreground exposure and focus restoration were not verified.') }
     $report = [PSCustomObject]@{ success=$true; binary_sha256=(Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash; native_client_size=@($before.Width,$before.Height); window_dpi=$dpi; capture_thread_dpi_context='per-monitor-aware-v2'; capture_method='owned-client-DC BitBlt SRCCOPY'; input_desktop_available=$inputDesktopAvailable; foreground_exposure_verified=$foregroundExposureVerified; initial_focus_request_succeeded=$initialFocusRequested; initial_app_foreground=$initialForeground; limitations=@($limitations); isolated_empty_library=$true; synthetic_unsaved_form=$true; cases=$cases }
+    $report | Add-Member -NotePropertyName theme -NotePropertyValue $Theme
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifacts 'report.json') -Encoding UTF8
     $report | ConvertTo-Json -Depth 5
 } catch {
