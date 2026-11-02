@@ -8,7 +8,8 @@
 |---|---|
 | 已发布基线 | [v0.8.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.8.6)，提交 `9b883f9c6c35886682ec3e1df1dbd40720c25339` |
 | 整理时 beta | `20455819ea15b642a33f779f6d83abde60a13d36` |
-| 目标程序版本 | 0.8.7，PATCH；最终候选提交待确定 |
+| 目标程序版本 | 0.8.7，PATCH；正式 main/tag 提交待确定 |
+| 本机候选应用身份 | beta `86acdac21468ac0f88228f5a4b613ad49c8eaa31`，合并 [#194](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/194) |
 | API / schema | `/api/v1/` / 8；快照兼容 `3..=8` |
 | 完整格式 | `ale-s8-cld1-t3-m2-p1-a1`，无新增数据库迁移 |
 | 正式资产 | 七个归档及各自 SHA256，共十四项，沿用现有命名契约 |
@@ -26,14 +27,10 @@
 - 区分普通搜索任务的视图恢复与主题工作台切换的恢复所有权，修正结果追加和远程/本地模式切换中的滚动回退。结果列表均保留两阶段恢复以保护小数行锚点，待恢复坐标按实测范围收敛；普通面板在首阶段应用，工作台面板在最终阶段应用，旧来源取消保护保持有效。相关测试、断言和等待时序未修改。
 - 原生重绘工具新增可选 `-Theme default|studio`，保留默认调用兼容，并为 Studio 单独保存报告，便于两主题验收。
 
-这些内容来自已合并的 [#186](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/186)、
-[#188](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/188)、
-[#189](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/189)、
-[#190](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/190)、
-[#191](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/191)、
-[#192](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/192)、
-[#193](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/193) 和
-[#187](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/187)。30 任务功能来自原工作区，在首轮版本准备后获用户确认追加，当前集成与运行时验收待完成。行为说明见[主题契约](Rust_Themes.md)、[搜索任务](Rust_Search_Tasks.md)与[发布说明](Rust_Release_Notes.md)。
+这些内容来自已合并的 [#186](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/186)、[#188](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/188)、
+[#189](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/189)、[#190](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/190)、
+[#191](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/191)、[#192](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/192)、[#193](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/193) 和
+[#187](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/187)。30 任务功能来自原工作区，在首轮版本准备后获用户确认追加，并经 #194 合入 beta；所选源码和本机 portable 验收已通过，原生窗口与 beta/平台门禁仍未通过。行为说明见[主题契约](Rust_Themes.md)、[搜索任务](Rust_Search_Tasks.md)与[发布说明](Rust_Release_Notes.md)。
 
 ## 暂不纳入的工作
 
@@ -71,7 +68,24 @@
 | 首次修复后 desktop 全量 | 471 passed / 2 failed / 154 ignored；失败原日志 `desktop.log` 保留，不计为全量通过 |
 | 第二次修正的原因 | `studio_switch_review_tests` 的 `explicit_end_key_selection_supersedes_a_pending_workbench_restore` 与 `pending_theme_restore_uses_the_current_font_and_scale_row_height` 在第 83 行 fixture 小数行锚点断言失败；修复恢复逻辑，测试/断言/等待时序未变 |
 | 第二次修正定向复验 | 106 passed / 0 failed / 51 ignored / 470 filtered，216.47 秒；ignored 为由父测试调用的 helper，不重复计为通过。覆盖原两项 Studio 锚点、四项滚动、旧工作台取消保护、30 任务/模型/缩放/主题与播放重绘；日志 `desktop-ui-final.log`。这是定向结果，不称为新一轮 package 全量通过 |
-| 实际 payload 与原生重绘 | 尚待构建、打包、portable、两主题原生验收及固定安装 |
+| 实际 payload 与原生重绘 | beta `86acdac21468` 的 Windows portable 已验收并安装；原生重绘失败，详见下节 |
+
+## 本机候选交付与原生门禁
+
+以下实际产物均来自 beta 应用提交 `86acdac21468ac0f88228f5a4b613ad49c8eaa31`；短阶段收据和原始日志位于私有目录 `.rust-validation/release-087/delivery/`，不在本文嵌入完整日志。
+
+| 阶段 | 当前结果 |
+|---|---|
+| Windows 默认 ASIO release | 构建通过，10 分 27 秒；打包许可证、旧更新器兼容及隐私检查通过 |
+| 本机实际 payload | portable、`validate-review-fixes.ps1 -CleanCheckout` 和 playback/IPC 均通过 |
+| 固定安装 | `X:/AI_Build/AudioLib_Explorer_oss/local_release/` 安装器通过版本、包文件 SHA256 与一次隔离启动；文件计数待最终汇总，不触及日常库和偏好 |
+| 独立 beta 开发安装 | `-Development` 安装进行中，最终状态及身份待汇总 |
+| Default 原生重绘 | **失败**：首次基线可见控件检查失败；诊断重试保存 `before.png` 后，在 refocus 第 1 轮未完成要求的前台切换。对应日志为 `repaint-default.log`、`repaint-default-attempt2.log`；首次原因尚不能归为环境或应用故障 |
+| Studio 原生重绘 | 未运行；同一前台切换前提尚未验证，不能宣称两主题门禁通过 |
+| beta 两端 / 多平台 | Mac beta refresh、Windows beta smoke 未运行，本机未配置 `AUDIOLIB_BETA_URL`；其他平台最终产物验收仍待完成 |
+| 缓存维护 | 原生验收失败，保留诊断缓存；仅预览自有缓存，精确结果待汇总。`C:/audiolib-build/target` 尚未注册，保持原样 |
+
+诊断脚本仅把基线截图保存移到原断言之前，失败也保留图像；断言与门禁未放宽，没有修改应用 Rust 源码，也不触发另一轮应用构建。
 
 ## 按实际影响执行的后续计划
 
@@ -97,7 +111,14 @@
 - 已完成：beta/已发布基线核对、范围划分、原始证据与缺口清单，0.8.7 版本/锁文件/发布说明同步、过时 PR 关闭及历史设计状态校正；用户随后确认将 30 任务功能纳入本轮。
 - 首轮版本准备实测通过：`check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6`、`git diff --check`；Windows client/server、Unix server、Mac client 四种原生 release plan 的 `Plan` 路由预览通过（`source_checks=not-requested`）。这是追加 30 任务前的原始记录，计划预览不运行构建、源码测试或平台验收。
 - 源码检查已通过：最终 desktop strict Clippy 与定向 106 passed / 0 failed / 51 ignored，结合未变 core142、db 工作区10、remote 离线工作区1、windows27、update29 及既有格式/Clippy 结果，完成本轮所选源码验证。保留各输入与 ignored 限制；首轮 desktop 的 471 passed / 2 failed / 154 ignored 仍是失败历史，未改称全量通过。
-- 待完成：提交并整合到 beta 后的实际构建身份、一次 payload 构建/打包、持久化保护与 portable 验收、未锁屏双主题重绘、固定安装，以及 beta 两端和最终多平台发布门禁。源码检查通过不替代交付或平台验收；尚未执行的结果不计为通过。
-- 本次未创建正式标签、未发布 Release、未部署 beta 服务端；未把旧构建或历史测试描述为本轮新验收。
+- 本机交付已通过：beta `86acdac21468` 的默认 ASIO 构建、打包、portable、review-fixes、playback/IPC 与固定 `local_release/` 安装，以及独立 Development beta 安装；缓存仅预览并保留诊断，精确汇总见下文。
+- 发布门禁未通过：Default 原生重绘两次失败，Studio 未运行；beta 两端与最终多平台验收仍待完成。所选源码和本机 portable 通过不替代这些门禁，不提升 main、不创建正式标签或发布 Release。
+- 本次未部署 beta 服务端；保留全部失败证据与诊断缓存，未把旧构建或历史测试描述为本轮新验收。
 
 门禁结果在实际执行后追加其提交、feature、平台与私有报告路径；不得将本文件的计划表当成通过记录。
+
+本轮本机汇总：固定安装验证 1,249 个 package-owned 文件（13 个内容更新），CLI 为 `AudioLibCli 0.8.7`，隔离桌面启动通过；`beta_release/` 的 Development 安装也已完成（1,249 文件）。两处安装使用同一已验收的客户端 payload，工作资料库与数据目录保留。
+
+缓存维护仅执行 Plan：已拥有的项目 target 约 **66.65 GiB 逻辑大小**，未执行删除，当前仍高于 40 GiB 预算。Plan 中的 `remaining_bytes=0` / `budget_met=true` 是执行所列删除后的预测，不能作为实际回收或当前达标记录。原生失败诊断保留期间暂不清理；未注册的 `C:/audiolib-build/target` 也完整保留。
+
+原生失败后，一个 owned `--smoke-view window-repaint` 测试进程在常规关闭后隐藏窗口但未退出。确认其可执行路径、专用 smoke 参数、隔离空库路径及 Metadata/扫描已排空日志后，仅对该超时测试实例执行了回收；保留临时数据与 `native-timeout-cleanup.json`。这不代表正常关闭验收通过，需与原生曝光/焦点门禁一并复核。
