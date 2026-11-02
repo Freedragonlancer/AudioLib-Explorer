@@ -164,12 +164,12 @@ Windows 使用既有客户端应用提交 `86acdac21468ac0f88228f5a4b613ad49c8ea
 - 首轮版本准备实测通过：`check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6`、`git diff --check`；Windows client/server、Unix server、Mac client 四种原生 release plan 的 `Plan` 路由预览通过（`source_checks=not-requested`）。这是追加 30 任务前的原始记录，计划预览不运行构建、源码测试或平台验收。
 - 源码检查已通过：最终 desktop strict Clippy 与定向 106 passed / 0 failed / 51 ignored，结合未变 core142、db 工作区10、remote 离线工作区1、windows27、update29 及既有格式/Clippy 结果，完成本轮所选源码验证。保留各输入与 ignored 限制；首轮 desktop 的 471 passed / 2 failed / 154 ignored 仍是失败历史，未改称全量通过。
 - Mac 源码检查已通过：`053c2a2` 的原生 arm64 desktop strict Clippy 与所选 106 passed / 0 failed / 51 ignored；不代表 Mac release payload、服务端或部署通过。
-- 本机交付与原生门禁已通过：beta `86acdac21468` 的默认 ASIO 构建、打包、portable、review-fixes、playback/IPC、固定 `local_release/` 与独立 Development beta 安装；同一 EXE 的 Default / Studio 原生曝光各九轮通过并正常退出。保留所有先前失败及工具修正记录，未另行重建应用。
+- 早期候选交付与原生门禁已通过：beta `86acdac21468` 的默认 ASIO 构建、打包、portable、review-fixes、playback/IPC、固定 `local_release/` 与独立 Development beta 安装；同一 EXE 的 Default / Studio 原生曝光各九轮通过并正常退出。保留所有先前失败及工具修正记录，未另行重建应用。
 - beta 两端已通过：Mac `b1e428c` 的原构建/替换/health 与只读根阶段续验结合通过；Windows `86acdac21468` 客户端完整 smoke 为 10 passed / 0 failed、20/20 流样本及 909,342 条全量同步。原根读取超时失败和配置根覆盖边界保留，恢复原因未证实。
 - 最终产物已通过：应用 main `b5a98ff98fed` 的七个归档分别完成实际构建/打包及本地验收；Windows 固定安装核对 1,249 文件、复制 6 文件并通过隔离启动，最终原生两主题各九轮使用独立工具 `2d25272` 验证通过。beta `b1e428c` / `86acdac21468` 证据仍保留原身份。
 - 本地冻结与资产核验已完成：annotated 标签 `v0.8.7` 固定 `b5a98ff98fed`，十四文件离线汇总核验通过；标签未推送，公开发布未执行。已验收本地产物不表示 GitHub Release 已存在或发布成功。
 - 缓存维护已完成：保留 Windows 原失败记录，在 Mac 原生恢复同一项目 target 的 debug 清理，独立复核剩余 0 B、40 GiB 预算达标；未登记外部 target 保留。
-- 保留全部失败证据与诊断缓存；本次文档/流程追加复用仍有效的原服务、客户端身份，没有把旧构建或历史测试描述为新执行。
+- 保留全部失败日志、报告与图像；本次文档/流程追加复用仍有效的原服务、客户端身份，没有把旧构建或历史测试描述为新执行。
 
 门禁结果在实际执行后追加其提交、feature、平台与私有报告路径；不得将本文件的计划表当成通过记录。
 
@@ -179,6 +179,8 @@ Windows 使用既有客户端应用提交 `86acdac21468ac0f88228f5a4b613ad49c8ea
 
 维护仅移除默认 target 下的 `debug` 与 `x86_64-pc-windows-msvc/debug`，保留 release、SDK、Cargo/Rustup home、工作库和源音频、dist、安装及验证证据。所有未登记的 Mac/Linux/C 外部缓存均未扫描、登记或清理，包括 `C:/audiolib-build/target`；原生失败诊断仍保留。
 
-原生失败后，一个 owned `--smoke-view window-repaint` 测试进程在常规关闭后隐藏窗口但未退出。确认其可执行路径、专用 smoke 参数、隔离空库路径及 Metadata/扫描已排空日志后，仅对该超时测试实例执行了回收；保留临时数据与 `native-timeout-cleanup.json`。该次回收仍不是正常关闭通过记录；后续已从工具窗口误选定位其失去唤醒目标的原因，并以精确窗口选择和两主题真实正常退出完成本轮复核，未把该现象归为新的 Rust 关闭排空故障。
+原生失败后，一个 owned `--smoke-view window-repaint` 测试进程在常规关闭后隐藏窗口但未退出。确认其可执行路径、专用 smoke 参数、隔离空库路径及 Metadata/扫描已排空日志后，仅对该超时测试实例执行了回收；保留临时数据与 `native-timeout-cleanup.json`。该次回收仍不是正常关闭通过记录；后续确认脚本存在可能误关工具窗口并丢失唤醒目标的路径，再以精确窗口选择和两主题真实正常退出完成本轮复核，未把该现象归为新的 Rust 关闭排空故障。
 
 最终产物准备时修正 Windows client 计划的归档声明：打包器常规输出为 latest ZIP/SHA256，计划现在记录这两个实际文件。Profiles 合成回归保留真实产物声明，验证错误的版本化声明会在验收和安装前失败，以及修正后两种 ASIO 路由通过；应用源码、包格式与白名单未变。私有日志为 .rust-validation/native-validation-087/pipeline-profiles-final.log。
+
+发布身份冻结后，验收驱动与本文的后续纯流程修正独立整合到 beta/main；应用输入未变。标签及七份已验收 payload 始终保持 b5a98ff98fed501aafff0f6a4ef5015c8b4d435d，不把后续流程提交冒称它们的新构建身份。
