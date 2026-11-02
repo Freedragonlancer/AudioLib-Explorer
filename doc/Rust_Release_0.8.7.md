@@ -10,6 +10,7 @@
 | 整理时 beta | `20455819ea15b642a33f779f6d83abde60a13d36` |
 | 目标程序版本 | 0.8.7，PATCH；正式 main/tag 提交待确定 |
 | 本机候选应用身份 | beta `86acdac21468ac0f88228f5a4b613ad49c8eaa31`，合并 [#194](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/194) |
+| beta 服务验收身份 | `b1e428cc4ceec2f3993b3fdc859f8227f18660d9`；后续文档/流程提交保留该服务与既有客户端的原始证据身份 |
 | API / schema | `/api/v1/` / 8；快照兼容 `3..=8` |
 | 完整格式 | `ale-s8-cld1-t3-m2-p1-a1`，无新增数据库迁移 |
 | 正式资产 | 七个归档及各自 SHA256，共十四项，沿用现有命名契约 |
@@ -30,7 +31,7 @@
 这些内容来自已合并的 [#186](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/186)、[#188](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/188)、
 [#189](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/189)、[#190](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/190)、
 [#191](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/191)、[#192](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/192)、[#193](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/193) 和
-[#187](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/187)。30 任务功能来自原工作区，在首轮版本准备后获用户确认追加，并经 #194 合入 beta；所选源码、本机 portable 与两主题原生窗口验收已通过，beta 两端和最终产物门禁仍待完成。行为说明见[主题契约](Rust_Themes.md)、[搜索任务](Rust_Search_Tasks.md)与[发布说明](Rust_Release_Notes.md)。
+[#187](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/187)。30 任务功能来自原工作区，在首轮版本准备后获用户确认追加，并经 #194 合入 beta；所选源码、本机 portable、两主题原生窗口和 beta 两端验收已通过，最终 main/tag 与正式产物门禁仍待完成。行为说明见[主题契约](Rust_Themes.md)、[搜索任务](Rust_Search_Tasks.md)与[发布说明](Rust_Release_Notes.md)。
 
 ## 暂不纳入的工作
 
@@ -83,7 +84,9 @@
 | 独立 beta 开发安装 | `-Development` 安装已完成，1,249 个包文件，与固定安装使用同一已验收 payload |
 | Default 原生重绘 | 首次基线检查及后续 refocus 失败记录保留。修正工具后通过：192 DPI（200%）、2214×1370 client，失焦/遮挡/最小化恢复各三轮，共九轮，采样 `changed_fraction=0`；`foreground_exposure_verified=true`、`normal_shutdown=true` |
 | Studio 原生重绘 | 通过：192 DPI（200%）、2214×1409 client，同样九轮、采样 `changed_fraction=0`，前台曝光与正常关闭均为 true |
-| beta 两端 / 多平台 | Mac beta refresh、Windows beta smoke 的本轮结果仍待完成；Mac 源码检查不替代 beta 服务验收或各平台最终产物验收 |
+| Mac beta 服务门禁 | `b1e428c` 构建、替换及 health 已通过；首轮根读取超时失败保留，同一 payload 的只读阶段续验确认唯一配置根为 206 / 4,096 字节 / WAVE，前后 health 均为 0.8.7 / `b1e428c` / ok / API v1 / schema 8 |
+| Windows beta smoke | exit 0，10 passed / 0 failed，20/20 配置根内流样本通过；强制全量同步 909,342 条，与服务端相等；快照 10,150.7 MiB，同步 147.2 秒，总计 160.38 秒 |
+| 最终多平台产物 | 尚未确定最终 main/tag 身份；beta 两端与 Mac 源码检查不替代七个归档及十四资产的正式构建和验收 |
 | 缓存维护 | 失败诊断完整保留；尚未执行预算清理 Run。成功交付后的预算维护仍待执行；`C:/audiolib-build/target` 未注册，保持原样 |
 
 首轮只将基线图保存移到断言前，仍失败；后续定位并修正的是验收工具，未修改应用 Rust 源码或重建应用：
@@ -96,10 +99,24 @@
 
 安装器及 playback 失败清理同步改用精确应用窗口选择器，无真实应用窗口时阻塞并保留进程和数据。已有安装合成回归及复用此 payload 的临时安装回归通过：1,249 文件身份一致，两次安装的复制数分别为 1,249 和 0，隔离启动、原有文件与偏好保留；日志 `.rust-validation/native-validation-087/installer-runtime.log`。这些检查只操作回归自有临时安装，不再次覆盖固定安装。
 
+## beta 两端验收与阶段续跑
+
+Mac beta 服务以 `b1e428cc4ceec2f3993b3fdc859f8227f18660d9` 构建，耗时 65.13 秒。原 refresh 耗时 18.78 秒：替换与 health 成功，但首个配置根的 15 秒读取超时，原始退出码 1 和失败日志完整保留，不改称首次 refresh 通过。
+
+随后同一根的同一 WAV（记录 ID 446）恢复可读：终端读取 0.437 秒、API Range 读取 0.008 秒，均完整取得 4,096 字节并识别 WAVE。超时后恢复的原因未证实，不能归因为已证实的 TCC 权限或磁盘唤醒问题；本轮没有为通过测试扩大访问权限或修改既有 beta 配置。
+
+独立只读阶段续验核对本地 HEAD、`origin/beta` 和实际 beta 服务均为预期提交，已冻结与安装的 server SHA256 均为 `b4a3433f75a4a488815e4b5860da192dde58bdfe5b55c741cdefae1af58c831f`，launcher、run 脚本、plist 与 config 四项哈希保持不变。唯一配置根的 Range 读取为 206、4,096 字节及有效 WAVE 头，前后 health 身份一致；阶段 exit 0。服务门禁结论来自原构建/替换/health 加只读根阶段续验，不是重新运行或覆盖原失败 refresh；没有再次构建、替换、重启，也未触及生产实例。私有收据为 `.rust-validation/release-087/beta-refresh/runs/beta-b1e428cc4cee-20261102T073546Z-040e1086/stage-resume.receipt.json`。
+
+Windows 使用既有客户端应用提交 `86acdac21468ac0f88228f5a4b613ad49c8eaa31` 的 Development beta 安装，对预期服务提交执行完整 smoke：10 passed / 0 failed，20/20 流样本通过，强制全量同步的 909,342 条与服务端一致。结果与私有原始日志索引见 `.rust-validation/release-087/beta-refresh/beta-smoke-result.json`。
+
+覆盖范围必须保留：资料库共 909,342 条，既有 beta 配置的一个根覆盖 80,562 条；其余 828,780 条可浏览 Metadata，但位于配置根外，`/stream` 返回 404。smoke 的流样本仅从配置根内选择，跳过了 172 个根外候选；这不是全资料库可播放验收，也没有通过修改配置或扩大权限掩盖该边界。
+
+本次追加只涉及文档/流程证据，复用 `b1e428c` 服务和 `86acdac21468` 客户端的原始身份；相关应用输入未变时不为文档提交重复构建或 refresh。最终 main/tag 的七个正式归档及十四资产仍须按最终身份构建和验收，不能将上述 beta 产物直接记为已验收的正式 payload。
+
 ## 按实际影响执行的后续计划
 
 1. 同步 workspace 与十个本地包的锁文件版本、README、版本规则及本轮发布说明；保留旧标签和历史证据身份。
-2. 运行版本预检及文档差异检查。首轮版本准备仅执行这些轻量检查和管线计划预览；追加 30 任务后的所选源码、交互、持久化及本机交付验证已按上表补齐，beta 两端及最终产物另行验收。
+2. 运行版本预检及文档差异检查。首轮版本准备仅执行这些轻量检查和管线计划预览；追加 30 任务后的所选源码、交互、持久化、本机交付及 beta 两端验证已按上表补齐，最终产物另行验收。
 
    ```powershell
    pwsh tools/check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6
@@ -110,7 +127,7 @@
 4. 30 任务回归须核对重开后的顺序、最后活动任务与视图，保留旧个人上限、降级拒读时原工作区不被覆盖，以及两主题/语言/支持缩放下的箭头、固定 `+` 和活动标签显示。配置持久化与工作区保存选择相关数据保护回归，并执行受影响的 [review validator](../tools/validate-review-fixes.ps1)；关闭排空或 Metadata/扫描行为变化时再补对应专项，保留仍有效的证据。播放与 IPC 变化使用 [playback validator](../tools/validate-playback-ipc.ps1)。
 5. 版本本身不触发全 workspace 或百万记录 benchmark。重绘风险使用 [window validator](../tools/validate-window-repaint.ps1) 的 `-BinaryDirectory` 参数及相关播放重绘测试；分别传 `-Theme default`、`-Theme studio`，报告写入 `.rust-validation/window-repaint/<theme>-<nonce>/report.json`，以输出的 `report_path` 为准。报告须确认焦点/露出真正执行；性能结论保留实际平台、分辨率、构建配置和采样条件。本轮实测为 192 DPI，不扩展声称 100% DPI 已完成原生验证。
 6. release pipeline、beta 安装或包规则若无可复用同源证据，分别执行已有 synthetic 回归；不修改规则时不重复包边界测试。
-7. 准备 beta 候选时使用独立 beta 数据目录和开发安装身份；由 Mac beta refresh 与 Windows [beta smoke](../tools/beta-smoke.ps1) 对同一预期提交验收。服务地址和凭据仅从本机环境提供。必要门禁失败继续阻止提升。
+7. 准备 beta 候选时使用独立 beta 数据目录和开发安装身份；由 Mac beta refresh 与 Windows [beta smoke](../tools/beta-smoke.ps1) 对同一预期服务提交验收。本轮已按上述阶段续验和完整 smoke 通过，保留原服务与客户端各自身份。服务地址和凭据仅从本机环境提供；后续相关应用输入未变的文档/流程提交复用这些证据，不重复部署。
 8. beta 通过后才按 [版本流程](Rust_Versioning.md) 提升 main。最终 main/tag 身份确定后，各原生平台构建、打包与验收各一次；Windows client 优先使用 [release pipeline](Rust_Release_Pipeline.md)，不要重复调用其内部阶段。
 9. Windows 实际 payload 通过一次 portable 验收后更新固定 `local_release/`，核对全部 package-owned SHA256、CLI 版本及一次隔离启动；保留 `%LOCALAPPDATA%/AudioLibExplorer/v1` 的库、Metadata、偏好与缓存。beta 安装不能替代固定安装。
 10. Mac 客户端与各服务端/Docker 包按本机计划及实际变更选择检查，记录未覆盖平台；最终正式包须具有同一发布提交身份。成功交付后执行一次 40 GiB debug 缓存预算维护，报告阻塞或未达预算。
@@ -122,8 +139,9 @@
 - 源码检查已通过：最终 desktop strict Clippy 与定向 106 passed / 0 failed / 51 ignored，结合未变 core142、db 工作区10、remote 离线工作区1、windows27、update29 及既有格式/Clippy 结果，完成本轮所选源码验证。保留各输入与 ignored 限制；首轮 desktop 的 471 passed / 2 failed / 154 ignored 仍是失败历史，未改称全量通过。
 - Mac 源码检查已通过：`053c2a2` 的原生 arm64 desktop strict Clippy 与所选 106 passed / 0 failed / 51 ignored；不代表 Mac release payload、服务端或部署通过。
 - 本机交付与原生门禁已通过：beta `86acdac21468` 的默认 ASIO 构建、打包、portable、review-fixes、playback/IPC、固定 `local_release/` 与独立 Development beta 安装；同一 EXE 的 Default / Studio 原生曝光各九轮通过并正常退出。保留所有先前失败及工具修正记录，未另行重建应用。
-- 尚待发布门禁：beta 两端与最终多平台产物验收。已有源码、本机 portable 和原生窗口结果不替代这些门禁，不据此提升 main、创建正式标签或发布 Release。
-- beta 两端与最终产物的结果待实际完成后追加；保留全部失败证据与诊断缓存，未把旧构建或历史测试描述为本轮新验收。
+- beta 两端已通过：Mac `b1e428c` 的原构建/替换/health 与只读根阶段续验结合通过；Windows `86acdac21468` 客户端完整 smoke 为 10 passed / 0 failed、20/20 流样本及 909,342 条全量同步。原根读取超时失败和配置根覆盖边界保留，恢复原因未证实。
+- 尚待完成：最终 main/tag 身份、七个正式归档及十四资产的构建/验收/发布流程，以及交付后的缓存预算维护。现有候选与 beta 证据不表示正式 payload 已验收或 Release 已发布。
+- 保留全部失败证据与诊断缓存；本次文档/流程追加复用仍有效的原服务、客户端身份，没有把旧构建或历史测试描述为新执行。
 
 门禁结果在实际执行后追加其提交、feature、平台与私有报告路径；不得将本文件的计划表当成通过记录。
 
@@ -132,3 +150,5 @@
 缓存维护仅执行 Plan：首轮预览时已拥有的项目 target 约 **66.65 GiB 逻辑大小**，未执行删除，不代表当前预算已达标。Plan 中的 `remaining_bytes=0` / `budget_met=true` 是执行所列删除后的预测，不能作为实际回收记录。预算 Run 待本轮交付后执行；原生失败诊断及未注册的 `C:/audiolib-build/target` 均保留。
 
 原生失败后，一个 owned `--smoke-view window-repaint` 测试进程在常规关闭后隐藏窗口但未退出。确认其可执行路径、专用 smoke 参数、隔离空库路径及 Metadata/扫描已排空日志后，仅对该超时测试实例执行了回收；保留临时数据与 `native-timeout-cleanup.json`。该次回收仍不是正常关闭通过记录；后续已从工具窗口误选定位其失去唤醒目标的原因，并以精确窗口选择和两主题真实正常退出完成本轮复核，未把该现象归为新的 Rust 关闭排空故障。
+
+最终产物准备时修正 Windows client 计划的归档声明：打包器常规输出为 latest ZIP/SHA256，计划现在记录这两个实际文件。Profiles 合成回归保留真实产物声明，验证错误的版本化声明会在验收和安装前失败，以及修正后两种 ASIO 路由通过；应用源码、包格式与白名单未变。私有日志为 .rust-validation/native-validation-087/pipeline-profiles-final.log。

@@ -36,6 +36,8 @@ pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.8.7 -Stage accept -Tail 15 
 | `tools/release-plans/macos-client.json` | Apple Silicon Mac 客户端，结构与原生验收合并运行；需要已登录桌面 |
 | `tools/release-plans/release-assets.json` | 只读获取已发布资产元数据，核对精确资产集合和本地归档 SHA256；使用已有 GitHub 凭据 |
 
+Windows 客户端计划按打包器的实际常规输出记录 `dist/latest/AudioLibExplorer-latest-win-x64-portable.zip` 及其 `.sha256`；`-Tag` 写入包的版本身份，不改变这两个本地文件名。
+
 其他计划通过 `-PlanFile` 选择。用 `-VariablesFile <private.json>` 覆盖该计划声明的变量；保留变量 `Tag`、`Commit`、`Root`、`RunDirectory`、`TargetDirectory`、`Asio` 不允许覆盖。`Asio` 由 `WithoutAsio` 自动派生，未声明 `WithoutAsio` 的计划为 false。例如 Windows 无 ASIO 配置为 `{"WithoutAsio":true}`，对应的 build/package/accept 和示例源码检查会同时改变；不追加另一套矩阵。Linux arm64 服务端为 `{"Target":"aarch64-unknown-linux-gnu","Suffix":"linux-arm64"}`，Mac 服务端为 `{"Target":"aarch64-apple-darwin","Suffix":"macos-arm64"}`，必须在匹配主机运行；仿真执行仍须明确记录。不同平台/特性使用独立运行目录。
 
 源码检查按实际改动选择，不因为管线名称包含 release 就全量重跑。将选好的阶段写入私有 `checks.json`，通过 `-ChecksFile` 前置执行；`tools/release-plans/checks.example.json` 仅示范受影响 Windows 客户端的单次 ASIO 检查。不要直接把示例当每次发布的必选清单。专项数据安全回归可作为额外阶段调用原脚本，参数与原入口一致。未传 `-ChecksFile` 时摘要明确记录 `source_checks=not-requested`，不宣称功能测试通过；已在别处完成的验证保留原身份，按 Testing Strategy 判断有效性。
