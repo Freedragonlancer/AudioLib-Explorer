@@ -395,7 +395,7 @@ pub struct AppConfig {
     /// audition start (deferred, not dropped). Off by default.
     #[serde(default)]
     pub hold_list_waveform_batches_after_audition: bool,
-    /// Maximum open search tasks, set in Appearance and bounded to 1..=6.
+    /// Maximum open search tasks, set in Appearance and bounded to 1..=30.
     #[serde(default = "default_max_search_tasks")]
     pub max_search_tasks: u32,
     /// Interface scale in percent: 100-200 in steps of 25, or 0 to follow the system.
@@ -477,7 +477,7 @@ struct SavedPreferences {
     #[serde(default)]
     data_source: DataSourceSettings,
 }
-/// Default open-task capacity; the hard limit remains six.
+/// Default open-task capacity, matching the hard workspace limit.
 pub const DEFAULT_MAX_SEARCH_TASKS: u32 = crate::search_workspace::MAX_SEARCH_TASKS as u32;
 
 /// Clamp a task capacity without deleting any already persisted tasks.
@@ -1457,8 +1457,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("userdata");
         let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
-        assert_eq!(config.max_search_tasks, 6);
-        for value in 1..=6 {
+        assert_eq!(config.max_search_tasks, 30);
+        for value in [1, 6, 7, 29, 30] {
             config.max_search_tasks = value;
             config.save().unwrap();
             assert_eq!(
@@ -1471,9 +1471,11 @@ mod tests {
         for (stored, expected) in [
             (serde_json::json!(0), 1),
             (serde_json::json!(-9), 1),
-            (serde_json::json!(99), 6),
-            (serde_json::json!("bad"), 6),
-            (serde_json::Value::Null, 6),
+            (serde_json::json!(31), 30),
+            (serde_json::json!(u32::MAX), 30),
+            (serde_json::json!(29.6), 30),
+            (serde_json::json!("bad"), 30),
+            (serde_json::Value::Null, 30),
         ] {
             std::fs::write(
                 &config.paths.settings,
@@ -1489,8 +1491,11 @@ mod tests {
             AppConfig::load_with_roots(root, &[])
                 .unwrap()
                 .max_search_tasks,
-            6
+            30
         );
+        for (value, expected) in [(0, 1), (6, 6), (7, 7), (30, 30), (31, 30), (u32::MAX, 30)] {
+            assert_eq!(normalize_max_search_tasks(value), expected);
+        }
     }
 
     #[test]

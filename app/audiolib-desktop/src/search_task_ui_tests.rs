@@ -124,87 +124,168 @@ fn active_task_toolbar_favorite_and_background_close_do_not_select_a_task() {
 }
 
 #[test]
-fn new_task_control_follows_the_last_tab_and_remains_reachable_after_horizontal_scrolling() {
+fn thirty_task_tabs_page_in_both_directions_with_a_fixed_new_task_control() {
     i_slint_backend_testing::init_no_event_loop();
-    for scale in [1.0, 2.0] {
-        let ui = AppWindow::new().unwrap();
-        ui.global::<crate::Theme>().set_ui_scale(scale);
-        // First inspect adjacency with both tabs visible. At 200% a 1080px
-        // viewport correctly clips the inline plus, so its accessibility entry
-        // is absent until horizontal scrolling reveals it.
-        ui.window()
-            .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
-        ui.set_search_tasks(tasks(2));
-        let created = Rc::new(RefCell::new(0));
-        let observed = created.clone();
-        ui.on_search_task_created(move || *observed.borrow_mut() += 1);
-        let selected = Rc::new(RefCell::new(Vec::new()));
-        let observed = selected.clone();
-        ui.on_search_task_selected(move |id| observed.borrow_mut().push(id.to_string()));
-        ui.show().unwrap();
-        settle();
+    for modern in [false, true] {
+        for scale in [1.0, 2.0] {
+            let ui = AppWindow::new().unwrap();
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.global::<crate::Theme>().set_modern_style(modern);
+            ui.window()
+                .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
+            ui.set_search_tasks(tasks(2));
+            let created = Rc::new(RefCell::new(0));
+            let observed = created.clone();
+            ui.on_search_task_created(move || *observed.borrow_mut() += 1);
+            let selected = Rc::new(RefCell::new(Vec::new()));
+            let observed = selected.clone();
+            ui.on_search_task_selected(move |id| observed.borrow_mut().push(id.to_string()));
+            ui.show().unwrap();
+            settle();
 
-        let plus = ElementHandle::find_by_accessible_label(&ui, "New search task")
-            .next()
-            .unwrap();
-        let last_tab = ElementHandle::find_by_accessible_label(&ui, "Search task: Task 1")
-            .next()
-            .unwrap();
-        let gap =
-            plus.absolute_position().x - last_tab.absolute_position().x - last_tab.size().width;
-        assert!(
-            gap >= -1.0 && gap < plus.size().width,
-            "New-task control must follow the last tab without a flexible empty gap, scale={scale}, gap={gap}"
-        );
-
-        // A five-tab strip overflows this narrow view at both supported scales.
-        // Scroll through the real ScrollView rather than invoking its offscreen button.
-        ui.window()
-            .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
-        ui.set_search_tasks(tasks(5));
-        settle();
-        let strip = ElementHandle::find_by_element_id(&ui, "AppWindow::task-tabs-scroll")
-            .next()
-            .unwrap();
-        ui.window().dispatch_event(WindowEvent::PointerScrolled {
-            position: slint::LogicalPosition::new(
-                strip.absolute_position().x + strip.size().width / 2.0,
-                strip.absolute_position().y + strip.size().height / 2.0,
-            ),
-            delta_x: -10_000.0,
-            delta_y: 0.0,
-        });
-        settle();
-        let plus = ElementHandle::find_by_accessible_label(&ui, "New search task")
-            .next()
-            .unwrap_or_else(|| {
-                panic!(
-                    "Inline plus missing after wheel-to-end at scale={scale}, strip={:?}+{:?}, window={:?}",
-                    strip.absolute_position(),
-                    strip.size(),
-                    ui.window().size()
-                )
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks right")
+                    .next()
+                    .is_none()
+            );
+            // New remains available at the start of a long strip without scrolling to its end.
+            ui.window()
+                .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
+            ui.set_search_tasks(tasks(29));
+            settle();
+            click(&ui, "New search task");
+            assert_eq!(*created.borrow(), 1);
+            ui.set_search_tasks(tasks(30));
+            settle();
+            let plus = ElementHandle::find_by_accessible_label(&ui, "New search task")
+                .next()
+                .unwrap();
+            let fixed_x = plus.absolute_position().x;
+            assert_eq!(plus.accessible_enabled(), Some(false));
+            plus.mock_single_click(PointerEventButton::Left);
+            assert_eq!(*created.borrow(), 1);
+            assert!(selected.borrow().is_empty());
+            let strip_id = if modern {
+                "AppWindow::studio-task-tabs-scroll"
+            } else {
+                "AppWindow::task-tabs-scroll"
+            };
+            let strip = ElementHandle::find_by_element_id(&ui, strip_id)
+                .next()
+                .unwrap();
+            assert!(
+                plus.absolute_position().x
+                    >= strip.absolute_position().x + strip.size().width - 1.0
+            );
+            let left = ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks left")
+                .next()
+                .unwrap();
+            assert_eq!(left.accessible_enabled(), Some(false));
+            for _ in 0..30 {
+                let right =
+                    ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks right")
+                        .next()
+                        .unwrap();
+                if right.accessible_enabled() == Some(false) {
+                    break;
+                }
+                right.mock_single_click(PointerEventButton::Left);
+                settle();
+            }
+            assert_eq!(
+                ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks right")
+                    .next()
+                    .unwrap()
+                    .accessible_enabled(),
+                Some(false)
+            );
+            let last = ElementHandle::find_by_accessible_label(&ui, "Search task: Task 29")
+                .next()
+                .unwrap();
+            assert!(last.absolute_position().x >= strip.absolute_position().x - 1.0);
+            assert!(
+                last.absolute_position().x + last.size().width
+                    <= strip.absolute_position().x + strip.size().width + 1.0
+            );
+            assert_eq!(
+                ElementHandle::find_by_accessible_label(&ui, "New search task")
+                    .next()
+                    .unwrap()
+                    .absolute_position()
+                    .x,
+                fixed_x
+            );
+            for _ in 0..30 {
+                let left = ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks left")
+                    .next()
+                    .unwrap();
+                if left.accessible_enabled() == Some(false) {
+                    break;
+                }
+                left.mock_single_click(PointerEventButton::Left);
+                settle();
+            }
+            assert_eq!(
+                ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks left")
+                    .next()
+                    .unwrap()
+                    .accessible_enabled(),
+                Some(false)
+            );
+            assert!(selected.borrow().is_empty(), "Paging must not switch tasks");
+            // Native horizontal wheel input still reaches the end independently of the arrows.
+            ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(
+                    strip.absolute_position().x + strip.size().width / 2.0,
+                    strip.absolute_position().y + strip.size().height / 2.0,
+                ),
+                delta_x: -100_000.0,
+                delta_y: 0.0,
             });
-        assert!(
-            plus.absolute_position().x >= strip.absolute_position().x - 1.0
-                && plus.absolute_position().x + plus.size().width
-                    <= strip.absolute_position().x + strip.size().width + 1.0,
-            "The inline new-task control must be fully reachable at the strip's scroll end, scale={scale}"
-        );
-        plus.mock_single_click(PointerEventButton::Left);
-        settle();
-        assert_eq!(*created.borrow(), 1);
-        assert!(selected.borrow().is_empty());
+            settle();
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, "Search task: Task 29")
+                    .next()
+                    .is_some()
+            );
 
-        // Active-task restoration reveals the last tab even when the strip starts left.
-        ui.set_search_tasks(tasks(6));
-        ui.invoke_reveal_search_task(0);
-        settle();
-        ui.invoke_reveal_search_task(5);
-        settle();
-        click(&ui, "Search task: Task 5");
-        assert_eq!(&*selected.borrow(), &["5"]);
-        ui.hide().unwrap();
+            // Active-task restoration reveals the last tab even when the strip starts left.
+            ui.invoke_reveal_search_task(0);
+            settle();
+            ui.invoke_reveal_search_task(29);
+            settle();
+            click(&ui, "Search task: Task 29");
+            assert_eq!(&*selected.borrow(), &["29"]);
+            ui.set_active_search_task_index(29);
+            ui.window()
+                .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
+            settle();
+            ui.window()
+                .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
+            settle();
+            let last = ElementHandle::find_by_accessible_label(&ui, "Search task: Task 29")
+                .next()
+                .unwrap();
+            assert!(last.absolute_position().x >= strip.absolute_position().x - 1.0);
+            assert!(
+                last.absolute_position().x + last.size().width
+                    <= strip.absolute_position().x + strip.size().width + 1.0
+            );
+            ui.set_active_search_task_index(0);
+            ui.set_search_tasks(tasks(2));
+            settle();
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks right")
+                    .next()
+                    .is_none()
+            );
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, "Search task: Task 0")
+                    .next()
+                    .is_some()
+            );
+            ui.hide().unwrap();
+        }
     }
 }
 
@@ -432,44 +513,48 @@ fn task_viewport_restore_survives_model_and_selection_replacement() {
 }
 
 #[test]
-fn six_task_tabs_and_saved_searches_render_at_all_supported_layout_extremes() {
+fn thirty_task_tabs_and_saved_searches_render_at_all_supported_layout_extremes() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
         mock_time: true,
         threading: false,
         renderer_name: Some("software".into()),
     })))
     .unwrap();
-    for scale in [1.0, 1.5, 2.0] {
-        for chinese in [false, true] {
-            let ui = AppWindow::new().unwrap();
-            ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
-            ui.global::<crate::Theme>().set_ui_scale(scale);
-            ui.set_chinese(chinese);
-            ui.set_search_tasks(tasks(6));
-            ui.set_library_sidebar_page(1);
-            ui.set_favorites_category(1);
-            ui.set_saved_search_tasks(ModelRc::new(VecModel::from(vec![SavedSearchTaskRow {
-                id: "saved-1".into(),
-                name: "森林环境声音 / Forest ambience".into(),
-                summary: "wind -interior · Ambience/Forest".into(),
-            }])));
-            ui.show().unwrap();
-            let pixels = ui.window().take_snapshot().unwrap();
-            assert!(pixels.width() >= 1080 && pixels.height() >= 700);
-            if let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") {
-                let directory = std::path::Path::new(&directory);
-                std::fs::create_dir_all(directory).unwrap();
-                let language = if chinese { "cn" } else { "en" };
-                image::save_buffer(
-                    directory.join(format!("tasks-{language}-x{scale}.png")),
-                    pixels.as_bytes(),
-                    pixels.width(),
-                    pixels.height(),
-                    image::ColorType::Rgba8,
-                )
-                .unwrap();
+    for modern in [false, true] {
+        for scale in [1.0, 1.5, 2.0] {
+            for chinese in [false, true] {
+                let ui = AppWindow::new().unwrap();
+                ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.set_chinese(chinese);
+                ui.set_search_tasks(tasks(30));
+                ui.set_library_sidebar_page(1);
+                ui.set_favorites_category(1);
+                ui.set_saved_search_tasks(ModelRc::new(VecModel::from(vec![SavedSearchTaskRow {
+                    id: "saved-1".into(),
+                    name: "森林环境声音 / Forest ambience".into(),
+                    summary: "wind -interior · Ambience/Forest".into(),
+                }])));
+                ui.show().unwrap();
+                let pixels = ui.window().take_snapshot().unwrap();
+                assert!(pixels.width() >= 1080 && pixels.height() >= 700);
+                if let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") {
+                    let directory = std::path::Path::new(&directory);
+                    std::fs::create_dir_all(directory).unwrap();
+                    let language = if chinese { "cn" } else { "en" };
+                    let style = if modern { "studio" } else { "classic" };
+                    image::save_buffer(
+                        directory.join(format!("tasks-{style}-{language}-x{scale}.png")),
+                        pixels.as_bytes(),
+                        pixels.width(),
+                        pixels.height(),
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+                ui.hide().unwrap();
             }
-            ui.hide().unwrap();
         }
     }
 }

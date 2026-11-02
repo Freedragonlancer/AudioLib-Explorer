@@ -13,13 +13,18 @@
 | 完整格式 | `ale-s8-cld1-t3-m2-p1-a1`，无新增数据库迁移 |
 | 正式资产 | 七个归档及各自 SHA256，共十四项，沿用现有命名契约 |
 
-本轮已合入 beta 的主要范围：
+本轮范围包括已合入 beta 的内容，以及用户确认追加到本候选的 30 任务功能：
 
 - 恢复原 Default 外观，注册可选 Studio 工作台；主题切换保留共享播放、Waveform 与浏览状态。
 - 修正 Studio 输入、静音确认、视图恢复与过期回调的竞态，保留原生键盘浏览行为。
 - 修复 Windows Common Controls 加载依赖。
 - 缩小播放重绘区域，缓存 Studio 表面位图，保留真实窗口露出时的完整重绘；恢复细播放头并完善播放/暂停反馈。
 - 本地 beta 使用开发身份并隔离自动更新；发布管线支持续跑、产物身份校验、固定安装和预算缓存维护。
+- 搜索任务上限从 6 提高至 30，新安装默认 30；已保存的个人上限（包括 6）保持原值，可在外观设置中调整。达到上限不替换已有任务，下调到低于当前任务数时要求先关闭任务。
+- Default / Studio 的任务栏在溢出时提供左右翻页箭头，激活或新建任务时自动显示对应标签；`+` 固定在滚动区旁。个人任务、收藏及恢复仍使用客户端工作区，不增加后台并行检索数。
+- 工作区格式版本保持 2；旧客户端仍拒绝超过 6 个任务的工作区，并进入保留原文件的只读回退，避免降级后覆盖丢失任务。此保护基于校验，不是资料库 schema 或 API 变更。
+- 区分普通搜索任务的视图恢复与主题工作台切换的恢复所有权，修正结果追加和远程/本地模式切换中的滚动回退。结果列表均保留两阶段恢复以保护小数行锚点，待恢复坐标按实测范围收敛；普通面板在首阶段应用，工作台面板在最终阶段应用，旧来源取消保护保持有效。相关测试、断言和等待时序未修改。
+- 原生重绘工具新增可选 `-Theme default|studio`，保留默认调用兼容，并为 Studio 单独保存报告，便于两主题验收。
 
 这些内容来自已合并的 [#186](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/186)、
 [#188](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/188)、
@@ -28,11 +33,10 @@
 [#191](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/191)、
 [#192](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/192)、
 [#193](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/193) 和
-[#187](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/187)。行为说明见[主题契约](Rust_Themes.md)与[发布说明](Rust_Release_Notes.md)。
+[#187](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/187)。30 任务功能来自原工作区，在首轮版本准备后获用户确认追加，当前集成与运行时验收待完成。行为说明见[主题契约](Rust_Themes.md)、[搜索任务](Rust_Search_Tasks.md)与[发布说明](Rust_Release_Notes.md)。
 
 ## 暂不纳入的工作
 
-- 原工作区尚未提交的“最多 30 个搜索任务 / 收藏夹”功能保持独立，当前按独立工作保留；如后续纳入，另行补齐其源码验证和交付，当前准备分支不包含这些改动。
 - [#185](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/185) 与已合并 Studio 外观部分重叠，但并非全部被取代：其独有的分页、结果数量、侧栏显示偏好和 draft 上传 helper 延后单独评估，不直接合入冲突分支。
 - [#135](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/135) / [#137](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/137) 的封面工作已由合并的 [#138](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/138) 接续；[#97](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/97) 的 marker 方向已有后续实现。这三个过时 PR 已关闭，保留分支与提交；[标记设计](api/Compatibility_Markers.md)已注明历史状态，未合入旧草稿代码。
 
@@ -47,23 +51,41 @@
 | #187，Windows 非 ASIO 测量 | 局部播放重绘、最小化恢复与缩放有记录 | 未执行 ASIO 打包及固定安装；锁屏使完整原生窗口露出验收中断，焦点/遮挡尚未完成 |
 | v0.8.6，`9b883f9c6c35` | 正式发布及十四资产记录 | 仅证明旧版，不能替代本轮候选或最终身份 |
 
-必须先处理四项滚动失败：`result_paging_tests::appending_rows_keeps_the_visible_content_and_other_pane_scrolls_in_place`
-及 #187 报告中的三项 `mode_switch_scroll_tests`。确认具体失败、修复或提供可复核的环境归因后，重跑失败及受影响检查。
+本轮 ASIO 运行已重现四项滚动失败：`result_paging_tests::appending_rows_keeps_the_visible_content_and_other_pane_scrolls_in_place`
+及 #187 报告中的三项 `mode_switch_scroll_tests`。首轮 desktop 全量不再出现这四项失败，但发现两项 Studio 小数行锚点失败；补齐两阶段恢复后，最终定向复验已覆盖并通过这六项及相关恢复保护，原断言和等待时序未改。
 在可交互、未锁定的 Windows 桌面完成两主题的原生焦点、遮挡、恢复与重绘验证；此前锁屏记录不算通过。
+
+## 本轮集成验证进展
+
+源码身份为 `fa9c53abe9287595823135f9280f8e43237be9e3` 加本轮集成差异；原始补丁、收据及日志保存在私有目录 `.rust-validation/release-087/integration/`。`source-receipt.json` 与 `validated-source.patch` 保留首轮已检输入；`source-receipt-final.json` 记录第二次视图恢复修正后的输入。core/db/remote/windows/update 源码未变，复用其通过结果；desktop-only strict Clippy 与受影响测试已单独复验通过。
+
+| 检查 | 当前实测结果 |
+|---|---|
+| 格式与选定 strict Clippy | 首轮 fmt 与 core/db/remote/desktop/cli/windows/update 的 all-targets、Rust 1.97.1 MSVC、客户端 ASIO 检查通过；第二次 UI 修正的 desktop-only strict Clippy 亦通过，日志 `clippy-ui-final.log` |
+| core | 142 passed，0 failed |
+| db `search_workspace` | 10 passed，0 failed |
+| remote 离线个人工作区消费者 | 1 passed，0 failed；其余测试未由这个定向命令执行 |
+| windows | 27 passed，0 failed |
+| update | 29 passed，0 failed，2 个 helper 用例 ignored，不计为通过 |
+| 滚动失败复现，修复前 | ASIO：22 passed / 4 failed / 2 ignored；确认为既有四项失败，日志 `scroll-before.log` 保留 |
+| 首次修复后 desktop 全量 | 471 passed / 2 failed / 154 ignored；失败原日志 `desktop.log` 保留，不计为全量通过 |
+| 第二次修正的原因 | `studio_switch_review_tests` 的 `explicit_end_key_selection_supersedes_a_pending_workbench_restore` 与 `pending_theme_restore_uses_the_current_font_and_scale_row_height` 在第 83 行 fixture 小数行锚点断言失败；修复恢复逻辑，测试/断言/等待时序未变 |
+| 第二次修正定向复验 | 106 passed / 0 failed / 51 ignored / 470 filtered，216.47 秒；ignored 为由父测试调用的 helper，不重复计为通过。覆盖原两项 Studio 锚点、四项滚动、旧工作台取消保护、30 任务/模型/缩放/主题与播放重绘；日志 `desktop-ui-final.log`。这是定向结果，不称为新一轮 package 全量通过 |
+| 实际 payload 与原生重绘 | 尚待构建、打包、portable、两主题原生验收及固定安装 |
 
 ## 按实际影响执行的后续计划
 
 1. 同步 workspace 与十个本地包的锁文件版本、README、版本规则及本轮发布说明；保留旧标签和历史证据身份。
-2. 运行版本预检及文档差异检查；本次准备只执行这些轻量检查和管线计划预览；没有构建、打包或更新应用安装。
+2. 运行版本预检及文档差异检查。首轮版本准备仅执行这些轻量检查和管线计划预览；追加 30 任务后需补齐其源码、交互、持久化及交付验证，结果按实际执行追加。
 
    ```powershell
    pwsh tools/check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6
    git diff --check
    ```
 
-3. 对最终候选按 [Testing Strategy](Testing_Strategy.md) 选择源码检查。覆盖 core 主题配置、desktop 的主题/输入/滚动/Waveform/重绘/更新策略、Windows 加载与露出、update 开发身份；公共接口检查相应直接消费者。Windows 客户端使用一次默认 ASIO 配置，先按[仓库规则](../AGENTS.md)准备并核验 SDK；不串行追加整套非 ASIO 矩阵。
-4. 复用仍有效的配置、关闭排空和数据保护证据；配置持久化或 Metadata/扫描行为若被后续修复影响，补相应回归及 [review validator](../tools/validate-review-fixes.ps1)，关闭行为变化再选 close validator。播放与 IPC 变化使用 [playback validator](../tools/validate-playback-ipc.ps1)。不因文档提及资料库便自动扩展库管理全套。
-5. 版本本身不触发全 workspace 或百万记录 benchmark。重绘风险使用 [window validator](../tools/validate-window-repaint.ps1) 的 `-BinaryDirectory` 参数及相关播放重绘测试；性能结论保留实际平台、分辨率、构建配置和采样条件。
+3. 对最终候选按 [Testing Strategy](Testing_Strategy.md) 选择源码检查。覆盖 core 的主题配置、1..=30 上限和工作区校验；db 的工作区往返、超限保存保护；remote 的客户端个人工作区消费者；desktop 的任务创建/恢复/收藏/限额、双主题任务栏与既有输入/滚动/Waveform/重绘/更新策略，以及 Windows 加载与露出、update 开发身份。公共接口检查相应直接消费者。Windows 客户端使用一次默认 ASIO 配置，先按[仓库规则](../AGENTS.md)准备并核验 SDK；不串行追加整套非 ASIO 矩阵。
+4. 30 任务回归须核对重开后的顺序、最后活动任务与视图，保留旧个人上限、降级拒读时原工作区不被覆盖，以及两主题/语言/支持缩放下的箭头、固定 `+` 和活动标签显示。配置持久化与工作区保存选择相关数据保护回归，并执行受影响的 [review validator](../tools/validate-review-fixes.ps1)；关闭排空或 Metadata/扫描行为变化时再补对应专项，保留仍有效的证据。播放与 IPC 变化使用 [playback validator](../tools/validate-playback-ipc.ps1)。
+5. 版本本身不触发全 workspace 或百万记录 benchmark。重绘风险使用 [window validator](../tools/validate-window-repaint.ps1) 的 `-BinaryDirectory` 参数及相关播放重绘测试；分别传 `-Theme default`、`-Theme studio`，默认报告为 `.rust-validation/window-repaint/report.json`，Studio 为其 `studio/report.json`。报告须确认焦点/露出真正执行；性能结论保留实际平台、分辨率、构建配置和采样条件。
 6. release pipeline、beta 安装或包规则若无可复用同源证据，分别执行已有 synthetic 回归；不修改规则时不重复包边界测试。
 7. 准备 beta 候选时使用独立 beta 数据目录和开发安装身份；由 Mac beta refresh 与 Windows [beta smoke](../tools/beta-smoke.ps1) 对同一预期提交验收。服务地址和凭据仅从本机环境提供。必要门禁失败继续阻止提升。
 8. beta 通过后才按 [版本流程](Rust_Versioning.md) 提升 main。最终 main/tag 身份确定后，各原生平台构建、打包与验收各一次；Windows client 优先使用 [release pipeline](Rust_Release_Pipeline.md)，不要重复调用其内部阶段。
@@ -72,9 +94,10 @@
 
 ## 当前状态
 
-- 已完成：beta/已发布基线核对、范围划分、原始证据与缺口清单，0.8.7 版本/锁文件/发布说明同步、过时 PR 关闭及历史设计状态校正。
-- 本次实测通过：`check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6`、`git diff --check`；Windows client/server、Unix server、Mac client 四种原生 release plan 的 `Plan` 路由预览通过（`source_checks=not-requested`）。计划预览不运行构建、源码测试或平台验收。
-- 待完成：最终候选身份、必要源码与失败回归、未锁屏重绘、beta 两端门禁、最终多平台 payload 与固定安装。
+- 已完成：beta/已发布基线核对、范围划分、原始证据与缺口清单，0.8.7 版本/锁文件/发布说明同步、过时 PR 关闭及历史设计状态校正；用户随后确认将 30 任务功能纳入本轮。
+- 首轮版本准备实测通过：`check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6`、`git diff --check`；Windows client/server、Unix server、Mac client 四种原生 release plan 的 `Plan` 路由预览通过（`source_checks=not-requested`）。这是追加 30 任务前的原始记录，计划预览不运行构建、源码测试或平台验收。
+- 源码检查已通过：最终 desktop strict Clippy 与定向 106 passed / 0 failed / 51 ignored，结合未变 core142、db 工作区10、remote 离线工作区1、windows27、update29 及既有格式/Clippy 结果，完成本轮所选源码验证。保留各输入与 ignored 限制；首轮 desktop 的 471 passed / 2 failed / 154 ignored 仍是失败历史，未改称全量通过。
+- 待完成：提交并整合到 beta 后的实际构建身份、一次 payload 构建/打包、持久化保护与 portable 验收、未锁屏双主题重绘、固定安装，以及 beta 两端和最终多平台发布门禁。源码检查通过不替代交付或平台验收；尚未执行的结果不计为通过。
 - 本次未创建正式标签、未发布 Release、未部署 beta 服务端；未把旧构建或历史测试描述为本轮新验收。
 
 门禁结果在实际执行后追加其提交、feature、平台与私有报告路径；不得将本文件的计划表当成通过记录。

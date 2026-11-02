@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// Persistent workspace encoding, independent of the library and snapshot schema.
 pub const SEARCH_WORKSPACE_VERSION: u32 = 2;
 /// Hard limit on simultaneously open search tasks; favorites do not count toward it.
-pub const MAX_SEARCH_TASKS: usize = 6;
+pub const MAX_SEARCH_TASKS: usize = 30;
 
 /// A user-data directory and immutable library scope captured before worker dispatch.
 /// Writers hold the desktop instance lease and serialize saves for this data directory.
@@ -297,7 +297,9 @@ impl SearchWorkspace {
         }
         validate_scope(&self.library_scope)?;
         if self.session.tasks.len() > MAX_SEARCH_TASKS {
-            return Err(invalid("At most six search tasks may be open"));
+            return Err(invalid(format!(
+                "At most {MAX_SEARCH_TASKS} search tasks may be open"
+            )));
         }
         let mut tasks = std::collections::HashSet::new();
         for task in &self.session.tasks {
@@ -500,13 +502,41 @@ mod tests {
         workspace.session.active_task_id = Some("missing".into());
         assert!(workspace.validate().is_err());
         workspace.session.active_task_id = None;
-        workspace.session.tasks = (0..7)
+        workspace.session.tasks = (0..=MAX_SEARCH_TASKS)
             .map(|index| SearchTask {
                 id: index.to_string(),
                 title: "Search".into(),
                 ..Default::default()
             })
             .collect();
+        assert!(workspace.validate().is_err());
+    }
+
+    #[test]
+    fn thirty_task_session_round_trip_retains_order_and_last_active_task() {
+        let mut workspace = SearchWorkspace::for_scope("server-library");
+        workspace.session.tasks = (0..30)
+            .map(|index| SearchTask {
+                id: format!("task-{index}"),
+                title: format!("Search {}", index + 1),
+                definition: SearchTaskDefinition {
+                    query: format!("sound {index}"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        workspace.session.active_task_id = Some("task-29".into());
+        workspace.validate().unwrap();
+        let restored: SearchWorkspace =
+            serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, workspace);
+        workspace.session.tasks.push(SearchTask {
+            id: "task-30".into(),
+            title: "Search 31".into(),
+            ..Default::default()
+        });
         assert!(workspace.validate().is_err());
     }
 }
