@@ -183,8 +183,8 @@ try {
         throw "The available input desktop did not give the owned test window foreground focus: requested=$initialFocusRequested; owned HWND=$handle; foreground HWND=$foregroundHandle; foreground PID=$foregroundOwner; foreground TID=$foregroundThread; owned visible=$([AudioLibRepaintNative]::IsWindowVisible($handle))."
     }
     $before = [AudioLibRepaintNative]::Capture($handle)
-    if (![AudioLibRepaintNative]::HasContent($before)) { throw 'The baseline client did not contain visible application controls.' }
     $before.Save((Join-Path $artifacts 'before.png'))
+    if (![AudioLibRepaintNative]::HasContent($before)) { throw 'The baseline client did not contain visible application controls. Captured baseline retained as before.png.' }
     $dpi = [AudioLibRepaintNative]::GetDpiForWindow($handle)
     $cases = @()
     foreach ($action in @('refocus','occlusion','minimize-restore')) {
