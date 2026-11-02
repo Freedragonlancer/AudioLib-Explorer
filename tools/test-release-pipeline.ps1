@@ -19,7 +19,7 @@ function Invoke-FixtureGit([string[]]$Arguments) {
 Invoke-FixtureGit @('init','-q')
 Invoke-FixtureGit @('config','user.name','Pipeline Test')
 Invoke-FixtureGit @('config','user.email','pipeline@example.invalid')
-[IO.File]::WriteAllText((Join-Path $taskRoot '.gitignore'), "target/`n.rust-validation/`n")
+[IO.File]::WriteAllText((Join-Path $taskRoot '.gitignore'), "target/`ndist/`nlocal_release/`n.rust-validation/`n")
 [IO.File]::WriteAllText((Join-Path $taskRoot 'source.txt'), 'source 1')
 $taskWorker=@'
 param([string]$Name,[bool]$Selected,[string[]]$Packages)
@@ -55,7 +55,11 @@ $taskSaved=[Environment]::GetEnvironmentVariable('AUDIOLIB_PIPELINE_TEST')
 $taskSavedGhToken=$env:GH_TOKEN
 $taskSavedNativeFlags=[Environment]::GetEnvironmentVariable('CXXFLAGS_x86_64_pc_windows_msvc')
 $taskSavedSlint=$env:SLINT_EMIT_DEBUG_INFO
+$taskSavedTarget=$env:CARGO_TARGET_DIR
 try {
+    # Real profile output declarations must stay inside this owned fixture,
+    # even when the caller uses an external build cache for actual releases.
+    $env:CARGO_TARGET_DIR=Join-Path $taskRoot 'target'
     if($Scope -eq 'All') {
     $null=Invoke-Pipeline 'Plan'
     if(Test-Path -LiteralPath $taskRun){throw 'Plan created run state.'}
@@ -188,16 +192,66 @@ if(Test-Path -LiteralPath target/move-head){
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'target') -Force | Out-Null
     $taskStub=@'
 param($Tag,[switch]$WithoutAsio,[switch]$SkipBuild,$BinaryDirectory,$Source,[string[]]$Package,[switch]$Asio)
-@{script=[IO.Path]::GetFileName($MyInvocation.MyCommand.Path);without_asio=[bool]$WithoutAsio;asio=[bool]$Asio;packages=@($Package)} | ConvertTo-Json -Compress | Add-Content -LiteralPath target/profile-calls.jsonl
+$ErrorActionPreference='Stop'
+$fixtureRoot=[IO.Path]::GetFullPath((Get-Location).Path)
+$fixtureTarget=Join-Path $fixtureRoot 'target'
+if (!$env:CARGO_TARGET_DIR -or [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) -cne $fixtureTarget) { throw 'Fake tools require the owned fixture target directory.' }
+function Write-FixtureFile([string]$Relative,[string]$Contents) {
+    $path=[IO.Path]::GetFullPath($Relative,$fixtureRoot)
+    if (!$path.StartsWith($fixtureRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Fake output escaped the fixture.' }
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($path)) -Force | Out-Null
+    [IO.File]::WriteAllText($path,$Contents)
+}
+$scriptName=[IO.Path]::GetFileName($MyInvocation.MyCommand.Path)
+@{script=$scriptName;without_asio=[bool]$WithoutAsio;asio=[bool]$Asio;packages=@($Package)} | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $fixtureTarget 'profile-calls.jsonl')
+# Model what each real tool produces, independently of the plan's declarations.
+switch -Exact ($scriptName) {
+    'build-release.ps1' {
+        Write-FixtureFile 'target/x86_64-pc-windows-msvc/release/AudioLibExplorer.exe' "desktop without_asio=$WithoutAsio"
+        Write-FixtureFile 'target/x86_64-pc-windows-msvc/release/AudioLibCli.exe' "cli without_asio=$WithoutAsio"
+    }
+    'package-portable.ps1' {
+        if (!$SkipBuild) { throw 'Profile packaging must reuse its build.' }
+        Write-FixtureFile 'dist/latest/portable/AudioLibExplorer.exe' ([IO.File]::ReadAllText((Join-Path $fixtureTarget 'x86_64-pc-windows-msvc/release/AudioLibExplorer.exe')))
+        Write-FixtureFile 'dist/latest/portable/AudioLibCli.exe' ([IO.File]::ReadAllText((Join-Path $fixtureTarget 'x86_64-pc-windows-msvc/release/AudioLibCli.exe')))
+        Write-FixtureFile 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip' "portable tag=$Tag without_asio=$WithoutAsio"
+        $hash=(Get-FileHash -LiteralPath (Join-Path $fixtureRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip') -Algorithm SHA256).Hash
+        Write-FixtureFile 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip.sha256' ($hash+'  AudioLibExplorer-latest-win-x64-portable.zip')
+    }
+    'validate-portable.ps1' {
+        if ($BinaryDirectory -cne 'dist/latest/portable') { throw 'Profile acceptance selected another payload.' }
+    }
+    'install-local-release.ps1' {
+        if ($Source -cne 'dist/latest/portable') { throw 'Profile installation selected another payload.' }
+        Write-FixtureFile 'local_release/installed.txt' ([IO.File]::ReadAllText((Join-Path $fixtureRoot 'dist/latest/portable/AudioLibExplorer.exe')))
+    }
+}
 '@
     $taskPlan=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-plans/windows-client.json') -Raw | ConvertFrom-Json -AsHashtable
     $taskPlan.require_tag=$false; $taskPlan.host='any'; $taskPlan.environment_tools=@()
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'tools') -Force | Out-Null
-    foreach($taskStep in $taskPlan.stages){$taskStep.outputs=@();[IO.File]::WriteAllText((Join-Path $taskRoot $taskStep.script),$taskStub)}
+    foreach($taskStep in $taskPlan.stages){[IO.File]::WriteAllText((Join-Path $taskRoot $taskStep.script),$taskStub)}
     [IO.File]::WriteAllText((Join-Path $taskRoot 'tools/check-local.ps1'),$taskStub)
-    $taskPlan | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $taskPlanPath -Encoding utf8
-    Invoke-FixtureGit @('add','.'); Invoke-FixtureGit @('commit','-qm','real profile routing with fake tools')
     $taskChecksPath=Join-Path $PSScriptRoot 'release-plans/checks.example.json'
+    $taskPackageStep=$taskPlan.stages | Where-Object id -eq 'package'
+    $taskPackageOutputs=@($taskPackageStep.outputs)
+    $taskPackageStep.outputs=@('dist/latest/portable','dist/latest/AudioLibExplorer-${Tag}-win-x64-portable.zip','dist/latest/AudioLibExplorer-${Tag}-win-x64-portable.zip.sha256')
+    $taskPlan | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $taskPlanPath -Encoding utf8
+    Invoke-FixtureGit @('add','.'); Invoke-FixtureGit @('commit','-qm','incorrect versioned package output fixture')
+    $taskProfileRun=$taskRun
+    $taskRun=Join-Path $taskRoot '.rust-validation/release-pipeline/incorrect-package-output'
+    $taskFailedOutput=Invoke-Pipeline 'Run' 1 @('-ChecksFile',$taskChecksPath)
+    $taskFailedState=Read-State
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    if($taskFailedState.stages.package.status -ne 'failed' -or $taskFailedState.stages.Contains('accept') -or $taskFailedState.stages.Contains('install') -or
+        ($taskCalls.script -join ',') -cne 'check-release.ps1,check-local.ps1,build-release.ps1,package-portable.ps1' -or
+        ($taskFailedOutput -join ' ') -notlike '*Missing stage artifact: dist/latest/AudioLibExplorer-v0.0.1-win-x64-portable.zip*') { throw 'A versioned declaration for the latest-only packager was not rejected before acceptance.' }
+    Write-Host 'PASS: actual latest-only package outputs reject an incorrect versioned artifact declaration before acceptance or installation.'
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    $taskRun=$taskProfileRun
+    $taskPackageStep.outputs=$taskPackageOutputs
+    $taskPlan | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $taskPlanPath -Encoding utf8
+    Invoke-FixtureGit @('add','.'); Invoke-FixtureGit @('commit','-qm','real profile routing with declared artifacts and fake tools')
     $null=Invoke-Pipeline 'Run' 0 @('-ChecksFile',$taskChecksPath)
     $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
     if(($taskCalls.script -join ',') -cne 'check-release.ps1,check-local.ps1,build-release.ps1,package-portable.ps1,validate-portable.ps1,install-local-release.ps1'){throw 'Actual profile stages ran out of order or were omitted.'}
@@ -221,6 +275,7 @@ param($Tag,[switch]$WithoutAsio,[switch]$SkipBuild,$BinaryDirectory,$Source,[str
     $env:GH_TOKEN=$taskSavedGhToken
     [Environment]::SetEnvironmentVariable('CXXFLAGS_x86_64_pc_windows_msvc',$taskSavedNativeFlags)
     $env:SLINT_EMIT_DEBUG_INFO=$taskSavedSlint
+    $env:CARGO_TARGET_DIR=$taskSavedTarget
     $env:GIT_CONFIG_COUNT=$taskSavedGitCount
     [Environment]::SetEnvironmentVariable(('GIT_CONFIG_KEY_'+$taskGitIndex),$null)
     [Environment]::SetEnvironmentVariable(('GIT_CONFIG_VALUE_'+$taskGitIndex),$null)

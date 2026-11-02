@@ -150,3 +150,5 @@ Windows 使用既有客户端应用提交 `86acdac21468ac0f88228f5a4b613ad49c8ea
 缓存维护仅执行 Plan：首轮预览时已拥有的项目 target 约 **66.65 GiB 逻辑大小**，未执行删除，不代表当前预算已达标。Plan 中的 `remaining_bytes=0` / `budget_met=true` 是执行所列删除后的预测，不能作为实际回收记录。预算 Run 待本轮交付后执行；原生失败诊断及未注册的 `C:/audiolib-build/target` 均保留。
 
 原生失败后，一个 owned `--smoke-view window-repaint` 测试进程在常规关闭后隐藏窗口但未退出。确认其可执行路径、专用 smoke 参数、隔离空库路径及 Metadata/扫描已排空日志后，仅对该超时测试实例执行了回收；保留临时数据与 `native-timeout-cleanup.json`。该次回收仍不是正常关闭通过记录；后续已从工具窗口误选定位其失去唤醒目标的原因，并以精确窗口选择和两主题真实正常退出完成本轮复核，未把该现象归为新的 Rust 关闭排空故障。
+
+最终产物准备时修正 Windows client 计划的归档声明：打包器常规输出为 latest ZIP/SHA256，计划现在记录这两个实际文件。Profiles 合成回归保留真实产物声明，验证错误的版本化声明会在验收和安装前失败，以及修正后两种 ASIO 路由通过；应用源码、包格式与白名单未变。私有日志为 .rust-validation/native-validation-087/pipeline-profiles-final.log。
