@@ -6,20 +6,20 @@
 
 ```powershell
 # 编辑期间预览；不构建、不验收、不创建运行目录。
-pwsh tools/release-pipeline.ps1 -Tag v0.8.6
+pwsh tools/release-pipeline.ps1 -Tag v0.8.7
 
 # 在已创建、指向当前干净 checkout 的实际发布标签上运行。
 # Windows 客户端：预检 → ASIO 构建 → 打包 → portable 验收 → 固定安装。
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.6
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.7
 
 # 原命令再次执行即续跑，成功阶段先核对输入、环境和产物再复用。
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.6
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.7
 
 # 只读取短状态，不执行 Git/Cargo 或重新验收；这是上次运行的快照。
-pwsh tools/release-pipeline.ps1 -Action Status -Tag v0.8.6
+pwsh tools/release-pipeline.ps1 -Action Status -Tag v0.8.7
 
 # 失败时只查看指定阶段的日志尾部，每个日志最多 80 行。
-pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.8.6 -Stage accept -Tail 15 -MaxCharacters 6000
+pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.8.7 -Stage accept -Tail 15 -MaxCharacters 6000
 ```
 
 每阶段开始/结束各输出一行 JSON，长阶段每 60 秒补一行状态，最后输出阶段摘要和 `state.json` 路径。完整 stdout/stderr 分开落盘，每次尝试保留独立日志和收据，续跑不覆盖原失败证据；根目录日志是便于下游阶段读取的最新副本。不要把整个日志、安装文件清单或历史验证报告读进对话。使用工具运行长管线后，等待同一会话的增量结果，通常每次等待 30–60 秒；无需对每个子命令再发工具调用。
@@ -41,10 +41,10 @@ pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.8.6 -Stage accept -Tail 15 
 源码检查按实际改动选择，不因为管线名称包含 release 就全量重跑。将选好的阶段写入私有 `checks.json`，通过 `-ChecksFile` 前置执行；`tools/release-plans/checks.example.json` 仅示范受影响 Windows 客户端的单次 ASIO 检查。不要直接把示例当每次发布的必选清单。专项数据安全回归可作为额外阶段调用原脚本，参数与原入口一致。未传 `-ChecksFile` 时摘要明确记录 `source_checks=not-requested`，不宣称功能测试通过；已在别处完成的验证保留原身份，按 Testing Strategy 判断有效性。
 
 ```powershell
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.6 -ChecksFile .rust-validation/checks.json
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.6 -PlanFile tools/release-plans/server.json
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.6 -PlanFile tools/release-plans/server-unix.json -VariablesFile .rust-validation/linux-arm64.json
-pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.6 -PlanFile tools/release-plans/macos-client.json
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.7 -ChecksFile .rust-validation/checks.json
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.7 -PlanFile tools/release-plans/server.json
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.7 -PlanFile tools/release-plans/server-unix.json -VariablesFile .rust-validation/linux-arm64.json
+pwsh tools/release-pipeline.ps1 -Action Run -Tag v0.8.7 -PlanFile tools/release-plans/macos-client.json
 ```
 
 Mac 构建失败的原始证明保留为独立 attempt 文件；成功后才更新供打包使用的证明。Mac 正式归档不可覆盖：已成功归档后来失效时，选择新的运行目录重新交付，不删除旧验收证据。Windows 安装器先核对完整包白名单、版本和所有目标路径，再关闭应用和复制文件；安装过程有独占锁，拒绝重叠来源路径。它缓存已经确认过的目录祖先检查，跳过内容相同的文件，仍核对所有包文件 SHA256、CLI 版本和一次隔离启动。锁定文件或未排空的实例使安装失败，不强杀进程，不清空安装目录和工作数据。相同安装产物的有效管线收据可直接复用。
