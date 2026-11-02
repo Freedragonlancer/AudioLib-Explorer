@@ -395,7 +395,7 @@ pub struct AppConfig {
     /// audition start (deferred, not dropped). Off by default.
     #[serde(default)]
     pub hold_list_waveform_batches_after_audition: bool,
-    /// Maximum open search tasks, set in Appearance and bounded to 1..=6.
+    /// Maximum open search tasks, set in Appearance and bounded to 1..=30.
     #[serde(default = "default_max_search_tasks")]
     pub max_search_tasks: u32,
     /// Interface scale in percent: 100-200 in steps of 25, or 0 to follow the system.
@@ -477,7 +477,7 @@ struct SavedPreferences {
     #[serde(default)]
     data_source: DataSourceSettings,
 }
-/// Default open-task capacity; the hard limit remains six.
+/// Default open-task capacity, matching the hard workspace limit.
 pub const DEFAULT_MAX_SEARCH_TASKS: u32 = crate::search_workspace::MAX_SEARCH_TASKS as u32;
 
 /// Clamp a task capacity without deleting any already persisted tasks.
@@ -520,8 +520,56 @@ pub fn normalize_ui_scale_percent(percent: u32) -> u32 {
 
 /// Identifier of the built-in default theme (the original palette).
 pub const DEFAULT_THEME: &str = "default";
+/// Identifier of the opt-in Studio theme, with the redesigned audition controls.
+pub const STUDIO_THEME: &str = "studio";
+
+/// Audition presentation selected by a theme; playback state remains shared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerStyle {
+    /// Original beta audition layout and controls.
+    Classic,
+    /// Redesigned audition controls, overview and motion.
+    Studio,
+}
+
+/// Built-in appearance definition shared by settings validation and the desktop.
+pub struct BuiltinTheme {
+    /// Stable settings identifier; existing identifiers must retain their appearance.
+    pub id: &'static str,
+    /// English name offered in Appearance settings.
+    pub name: &'static str,
+    /// Chinese name offered in Appearance settings.
+    pub name_cn: &'static str,
+    /// Audition controls and layout belonging to this theme.
+    pub player_style: PlayerStyle,
+}
+
+/// Single registry of shipped themes, with the original default first.
+pub const BUILTIN_THEMES: [BuiltinTheme; 2] = [
+    BuiltinTheme {
+        id: DEFAULT_THEME,
+        name: "Default",
+        name_cn: "默认",
+        player_style: PlayerStyle::Classic,
+    },
+    BuiltinTheme {
+        id: STUDIO_THEME,
+        name: "Studio",
+        name_cn: "工作室",
+        player_style: PlayerStyle::Studio,
+    },
+];
+
 /// Theme identifiers offered in the Appearance settings, in display order.
-pub const THEME_IDS: [&str; 1] = [DEFAULT_THEME];
+pub const THEME_IDS: [&str; BUILTIN_THEMES.len()] = {
+    let mut ids = [""; BUILTIN_THEMES.len()];
+    let mut index = 0;
+    while index < BUILTIN_THEMES.len() {
+        ids[index] = BUILTIN_THEMES[index].id;
+        index += 1;
+    }
+    ids
+};
 
 /// Keep a known theme identifier; anything else uses the default theme.
 pub fn normalize_theme(theme: &str) -> String {
@@ -1409,8 +1457,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("userdata");
         let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
-        assert_eq!(config.max_search_tasks, 6);
-        for value in 1..=6 {
+        assert_eq!(config.max_search_tasks, 30);
+        for value in [1, 6, 7, 29, 30] {
             config.max_search_tasks = value;
             config.save().unwrap();
             assert_eq!(
@@ -1423,9 +1471,11 @@ mod tests {
         for (stored, expected) in [
             (serde_json::json!(0), 1),
             (serde_json::json!(-9), 1),
-            (serde_json::json!(99), 6),
-            (serde_json::json!("bad"), 6),
-            (serde_json::Value::Null, 6),
+            (serde_json::json!(31), 30),
+            (serde_json::json!(u32::MAX), 30),
+            (serde_json::json!(29.6), 30),
+            (serde_json::json!("bad"), 30),
+            (serde_json::Value::Null, 30),
         ] {
             std::fs::write(
                 &config.paths.settings,
@@ -1441,8 +1491,11 @@ mod tests {
             AppConfig::load_with_roots(root, &[])
                 .unwrap()
                 .max_search_tasks,
-            6
+            30
         );
+        for (value, expected) in [(0, 1), (6, 6), (7, 7), (30, 30), (31, 30), (u32::MAX, 30)] {
+            assert_eq!(normalize_max_search_tasks(value), expected);
+        }
     }
 
     #[test]
@@ -1528,6 +1581,40 @@ mod tests {
             (Some(3), Some(4))
         );
         assert!(!loaded.window_layout.maximized);
+    }
+
+    #[test]
+    fn builtin_themes_round_trip_without_changing_other_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("userdata");
+        let mut config = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+        config.language = "cn".into();
+        config.ui_font_size = 17;
+        config.list_font_size = 19;
+        config.ui_scale_percent = 125;
+        assert_eq!(BUILTIN_THEMES[0].id, DEFAULT_THEME);
+        for (index, entry) in BUILTIN_THEMES.iter().enumerate() {
+            assert!(!entry.id.is_empty());
+            assert!(!entry.name.is_empty() && !entry.name_cn.is_empty());
+            assert!(
+                BUILTIN_THEMES[..index]
+                    .iter()
+                    .all(|other| other.id != entry.id)
+            );
+            config.theme = entry.id.into();
+            config.save().unwrap();
+            let loaded = AppConfig::load_with_roots(root.clone(), &[]).unwrap();
+            assert_eq!(loaded.theme, entry.id);
+            assert_eq!(loaded.language, "cn");
+            assert_eq!(loaded.ui_font_size, 17);
+            assert_eq!(loaded.list_font_size, 19);
+            assert_eq!(loaded.ui_scale_percent, 125);
+        }
+        config.theme = "missing-theme".into();
+        config.save().unwrap();
+        let loaded = AppConfig::load_with_roots(root, &[]).unwrap();
+        assert_eq!(loaded.theme, DEFAULT_THEME);
+        assert_eq!(loaded.ui_font_size, 17);
     }
 
     #[test]

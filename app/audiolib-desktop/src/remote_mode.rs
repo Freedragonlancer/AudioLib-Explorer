@@ -1112,6 +1112,20 @@ impl Controller {
         playback_name(path, remote.audio_names.get(path).map(String::as_str))
     }
 
+    /// Original resource path for a cached audition, independent of inspector selection.
+    /// Clone only the path; embedded Metadata stays in the cached owned record.
+    pub(super) fn playback_source_path(&self, path: &Path) -> String {
+        self.remote
+            .lock()
+            .unwrap()
+            .audio_files
+            .get(path)
+            .map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |file| file.file_path.clone(),
+            )
+    }
+
     /// Wait off the UI thread after source/library/close admission has been closed.
     /// Sent plays finish their reply and settlement; queued unsent plays cancel.
     pub(super) fn wait_remote_plays(&self) -> Result<(), String> {
@@ -4570,6 +4584,11 @@ mod tests {
         // The player shows the record's name, not its virtual registration name.
         assert_ne!(path.file_name().unwrap().to_string_lossy(), file.filename);
         assert_eq!(controller.playback_display_name(&path), file.filename);
+        assert_eq!(controller.playback_source_path(&path), file.file_path);
+        assert_eq!(
+            controller.playback_source_path(Path::new("C:/Local/Unmapped.wav")),
+            "C:/Local/Unmapped.wav"
+        );
         assert!(audiolib_audio::is_stream_source(&path));
         assert_eq!(audiolib_audio::probe(&path).unwrap().sample_rate, 48000);
         // Exercise the actual engine Load boundary, not just the HTTP reader: the

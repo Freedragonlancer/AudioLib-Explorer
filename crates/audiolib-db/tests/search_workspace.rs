@@ -329,6 +329,27 @@ fn unknown_workspace_conditions_cannot_be_lost_during_v1_upgrade_or_v2_replaceme
 }
 
 #[test]
+fn thirty_open_tasks_reopen_with_order_and_last_active_task_intact() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = provider(directory.path());
+    let target = SearchWorkspaceTarget::new(directory.path().join("userdata"), "server-A");
+    let mut workspace = SearchWorkspace::for_scope(&target.library_scope);
+    workspace.session.tasks = (0..30)
+        .map(|index| task(&index.to_string(), &format!("sound {index}")))
+        .collect();
+    workspace.session.active_task_id = Some("29".into());
+    workspace.session.tasks[29].view.list_scroll_y = -150.0;
+    workspace.session.tasks[29]
+        .view
+        .raw_inputs
+        .insert("duration_min".into(), "unfinished".into());
+    first.save_search_workspace(&target, &workspace).unwrap();
+    drop(first);
+    let reopened = provider(directory.path());
+    assert_eq!(reopened.load_search_workspace(&target).unwrap(), workspace);
+}
+
+#[test]
 fn too_many_open_tasks_do_not_replace_the_last_session() {
     let directory = tempfile::tempdir().unwrap();
     let provider = provider(directory.path());
@@ -337,7 +358,7 @@ fn too_many_open_tasks_do_not_replace_the_last_session() {
     workspace.session.tasks.push(task("one", "wood"));
     provider.save_search_workspace(&target, &workspace).unwrap();
     let before = fs::read(workspace_path(&target)).unwrap();
-    workspace.session.tasks = (0..7)
+    workspace.session.tasks = (0..=audiolib_core::search_workspace::MAX_SEARCH_TASKS)
         .map(|index| task(&index.to_string(), "wood"))
         .collect();
     assert!(provider.save_search_workspace(&target, &workspace).is_err());

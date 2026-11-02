@@ -6,7 +6,7 @@
   "show_album_artwork": true,
   "pregenerate_list_waveforms": true,
   "hold_list_waveform_batches_after_audition": false,
-  "max_search_tasks": 6,
+  "max_search_tasks": 30,
   "audio_table": {
     "name_width": 360.0,
     "duration_width": 80.0,

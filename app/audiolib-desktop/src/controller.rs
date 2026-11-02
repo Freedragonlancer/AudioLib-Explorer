@@ -11,14 +11,16 @@ use std::time::{Duration, Instant};
 use crate::list_waveforms::{
     ListWaveformCell, ListWaveformHost, ListWaveforms, render_list_waveform, window_ids,
 };
-use crate::waveform_view::{WaveView, db_from_gain, gain_from_db, render_waveform, ruler_marks};
+use crate::waveform_view::{
+    WaveView, db_from_gain, gain_from_db, render_waveform, render_waveform_mask, ruler_marks,
+};
 use crate::{AlbumRow, AppWindow, AudioRow, CrumbRow, FolderRow, LocalScanRootRow, RulerTick};
 use audiolib_audio::{
     AudioBackend, AudioCommand, AudioDevice, AudioEvent, AudioHandle, AuditionSettings,
     PlaybackConfig, PlaybackState, RatePolicy, WaveformRequest,
 };
 use audiolib_core::config::{
-    AppConfig, AudioTablePreferences, UI_SCALE_PERCENTS, normalize_ui_scale_percent,
+    AppConfig, AudioTablePreferences, STUDIO_THEME, UI_SCALE_PERCENTS, normalize_ui_scale_percent,
 };
 use audiolib_core::{
     Album, AlbumKind, AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder,
@@ -1181,10 +1183,26 @@ impl Controller {
         let c = self.clone();
         ui.on_theme_requested(move |index| {
             let id = crate::theme::theme_id(index);
-            if let Some(ui) = c.ui.upgrade() {
-                crate::theme::apply_theme(&ui, &id);
+            let studio = id == STUDIO_THEME;
+            let changed = *c.theme.lock().unwrap() != id;
+            let ui = c.ui.upgrade();
+            if let Some(ui) = &ui {
+                crate::theme::apply_theme(ui, &id);
+                if !studio {
+                    ui.set_waveform_mask(Image::default());
+                }
             }
             *c.theme.lock().unwrap() = id;
+            // The default renderer does not build Studio's progress mask. Refresh
+            // the current viewport on entry, including a selected but idle sound.
+            if changed
+                && studio
+                && let Some(ui) = ui
+                && let Some(file) =
+                    c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
+            {
+                c.queue_waveform(&file);
+            }
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
         });
@@ -1344,6 +1362,12 @@ impl Controller {
         ui.on_tag_chips_relayout(move || {
             if let Some(ui) = c.ui.upgrade() {
                 crate::tag_chips::relayout(&ui);
+            }
+        });
+        let weak = ui.as_weak();
+        ui.on_detail_tags_relayout(move || {
+            if let Some(ui) = weak.upgrade() {
+                crate::detail_presentation::relayout(&ui);
             }
         });
         let c = self.clone();
@@ -1643,13 +1667,7 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_volume_requested(move |volume| {
-            c.command(AudioCommand::SetVolume(volume));
-            c.playback.lock().unwrap().volume = volume;
-            // The status poll skips volume publishing while the slider keeps focus,
-            // so refresh the dB label here to follow the drag live.
-            if let Some(ui) = c.ui.upgrade() {
-                ui.set_volume_label(volume_label(volume));
-            }
+            c.request_volume(volume);
         });
         let c = self.clone();
         ui.on_start_requested(move || {
@@ -1666,15 +1684,7 @@ impl Controller {
         ui.on_pause_requested(move || c.command(AudioCommand::Pause));
         let c = self.clone();
         ui.on_volume_db_requested(move |db| {
-            // The audition slider reports dB through this callback (not
-            // volume-requested). The status poll skips volume publishing while the
-            // slider is being adjusted, so the label must follow the drag here.
-            let volume = gain_from_db(db);
-            c.command(AudioCommand::SetVolume(volume));
-            c.playback.lock().unwrap().volume = volume;
-            if let Some(ui) = c.ui.upgrade() {
-                ui.set_volume_label(volume_label(volume));
-            }
+            c.request_volume(gain_from_db(db));
         });
         let c = self.clone();
         ui.on_transform_requested(move |pitch, rate, mono, repeat| {
@@ -1706,8 +1716,11 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_zoom_requested(move |factor| {
+            let Some(ui) = c.ui.upgrade() else {
+                return;
+            };
             let status = c.audio.status();
-            let Some(file) = c.waveform_file(&status) else {
+            let Some(file) = c.waveform_refresh_file(&status, ui.get_waveform_ready()) else {
                 return;
             };
             {
@@ -1729,7 +1742,7 @@ impl Controller {
                 return;
             };
             let status = c.audio.status();
-            let Some(file) = c.waveform_file(&status) else {
+            let Some(file) = c.waveform_refresh_file(&status, ui.get_waveform_ready()) else {
                 return;
             };
             let view = {
@@ -1747,9 +1760,13 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_waveform_pan_requested(move |scroll| {
+            let Some(ui) = c.ui.upgrade() else {
+                return;
+            };
             c.wave_follow_paused.store(true, Ordering::Release);
             c.wave_view.lock().unwrap().1.scroll = f64::from(scroll.clamp(0.0, 1.0));
-            if let Some(file) = c.waveform_file(&c.audio.status()) {
+            if let Some(file) = c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
+            {
                 c.queue_waveform(&file);
             }
         });
@@ -1765,7 +1782,9 @@ impl Controller {
                     view.variance = ui.get_peak_variance();
                     view.spectral = ui.get_peak_mode() == 1;
                 }
-                if let Some(file) = c.waveform_file(&c.audio.status()) {
+                if let Some(file) =
+                    c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
+                {
                     c.queue_waveform(&file);
                 }
             }
@@ -1824,7 +1843,9 @@ impl Controller {
             let old = *c.waveform_size.lock().unwrap();
             *c.waveform_size.lock().unwrap() = size;
             if old != size
-                && let Some(file) = c.waveform_file(&c.audio.status())
+                && let Some(ui) = c.ui.upgrade()
+                && let Some(file) =
+                    c.waveform_refresh_file(&c.audio.status(), ui.get_waveform_ready())
             {
                 c.queue_waveform(&file);
             }
@@ -2836,6 +2857,7 @@ impl Controller {
             ui.set_selected_name("".into());
             ui.set_selected_path("".into());
             ui.set_selected_format("".into());
+            crate::detail_presentation::clear(ui);
             ui.set_selected_album("".into());
             ui.set_selected_album_id("".into());
             ui.set_selected_artwork_directory("".into());
@@ -2849,6 +2871,7 @@ impl Controller {
             ui.set_edit_favorite(false);
             ui.set_waveform_ready(false);
             ui.set_waveform_image(Image::default());
+            ui.set_waveform_mask(Image::default());
             ui.set_waveform_info("".into());
         }
     }
@@ -2894,6 +2917,7 @@ impl Controller {
         ui.set_selected_name("".into());
         ui.set_selected_path("".into());
         ui.set_selected_format("".into());
+        crate::detail_presentation::clear(ui);
         ui.set_selected_album("".into());
         ui.set_selected_album_id("".into());
         ui.set_selected_artwork_directory("".into());
@@ -2903,6 +2927,7 @@ impl Controller {
         ui.set_audio_ready(false);
         ui.set_waveform_ready(false);
         ui.set_waveform_image(Image::default());
+        ui.set_waveform_mask(Image::default());
         ui.set_waveform_info("".into());
         if ui.get_menu_has_page_rows() {
             ui.set_menu_has_page_rows(false);
@@ -3052,6 +3077,59 @@ impl Controller {
         };
         let offset = *offset;
         self.request_history_page(offset);
+    }
+
+    /// Order the requested level with its FIFO admission. Never hold this lock
+    /// while waiting for the completion: GUI and IPC requests share this boundary.
+    fn enqueue_volume(
+        &self,
+        volume: f32,
+    ) -> audiolib_core::Result<audiolib_audio::CommandCompletion> {
+        if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
+            return Err(audiolib_core::Error::Validation(
+                "Volume must be 0..=1".into(),
+            ));
+        }
+        let mut playback = self.playback.lock().unwrap();
+        let completion = self
+            .audio
+            .enqueue_with_ack(AudioCommand::SetVolume(volume))?;
+        playback.volume = volume;
+        Ok(completion)
+    }
+
+    /// Enqueue GUI volume input without waiting for a driver or engine response.
+    fn request_volume(&self, volume: f32) {
+        match self.enqueue_volume(volume) {
+            Ok(_) => {
+                if let Some(ui) = self.ui.upgrade() {
+                    ui.set_volume_label(volume_label(volume));
+                }
+            }
+            Err(error) => {
+                // A rejected admission must not claim a new accepted level.
+                let requested = self.playback.lock().unwrap().volume;
+                if let Some(ui) = self.ui.upgrade() {
+                    ui.set_volume(requested);
+                    publish_volume(&ui, requested);
+                }
+                self.status(error.to_string());
+            }
+        }
+    }
+
+    // Focus can remain on the slider after a gesture. Protect newer local input
+    // from queued engine snapshots, while still reflecting an acknowledged local
+    // or IPC volume request without requiring the user to move keyboard focus.
+    fn publish_confirmed_volume(&self, ui: &AppWindow, confirmed: f32) {
+        let requested = self.playback.lock().unwrap().volume;
+        if ui.get_volume_adjusting() && (confirmed - requested).abs() > 0.000_01 {
+            return;
+        }
+        if (ui.get_volume() - confirmed).abs() > 0.001 {
+            ui.set_volume(confirmed);
+        }
+        publish_volume(ui, confirmed);
     }
 
     fn start_workers(self: &Arc<Self>) {
@@ -3803,6 +3881,12 @@ impl Controller {
                         .file_path
                         .as_deref()
                         .map(|path| c.playback_display_name(path));
+                    // An in-memory/server cache registration maps back to the
+                    // original resource, independently of the inspector selection.
+                    let playback_path = status
+                        .file_path
+                        .as_deref()
+                        .map(|path| c.playback_source_path(path));
                     let buffering = buffering_shown;
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
@@ -3833,12 +3917,11 @@ impl Controller {
                         if let Some(name) = &playback_name {
                             ui.set_playback_name(name.as_str().into());
                         }
-                        if !ui.get_volume_adjusting() {
-                            if (ui.get_volume() - status.volume).abs() > 0.001 {
-                                ui.set_volume(status.volume);
-                            }
-                            publish_volume(&ui, status.volume);
+                        let playback_path = playback_path.as_deref().unwrap_or_default();
+                        if ui.get_playback_path().as_str() != playback_path {
+                            ui.set_playback_path(playback_path.into());
                         }
+                        c2.publish_confirmed_volume(&ui, status.volume);
                         if audition_changed {
                             publish_audition(&ui, status.audition);
                         }
@@ -4793,6 +4876,7 @@ impl Controller {
                 c2.selection_request_completed(generation);
                 ui.set_waveform_ready(false);
                 ui.set_waveform_image(Image::default());
+                ui.set_waveform_mask(Image::default());
                 ui.set_waveform_info(
                     if c2.chinese.load(Ordering::Acquire) {
                         "文件缺失，请重新关联 WAV"
@@ -4964,6 +5048,8 @@ impl Controller {
         let job = job.clone();
         let c2 = self.clone();
         let pixels = render_waveform(data, job.width, job.height, job.view);
+        let studio = *self.theme.lock().unwrap() == STUDIO_THEME;
+        let mask = studio.then(|| render_waveform_mask(data, job.width, job.height, job.view));
         let info = format!(
             "{} ch · {:.1} kHz · {}",
             data.channels,
@@ -4984,6 +5070,16 @@ impl Controller {
             ui.set_waveform_image(Image::from_rgba8(
                 SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels, job.width, job.height),
             ));
+            let mask = if ui.global::<crate::Theme>().get_modern_style() {
+                mask.map_or_else(Image::default, |mask| {
+                    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                        &mask, job.width, job.height,
+                    ))
+                })
+            } else {
+                Image::default()
+            };
+            ui.set_waveform_mask(mask);
             let (start, end) = job.view.range(job.duration);
             ui.set_view_start(start as f32);
             ui.set_view_end(end as f32);
@@ -5027,6 +5123,52 @@ impl Controller {
             return mapped;
         }
         playback_wave_file(status)
+    }
+
+    /// A presentation-only refresh retains the displayed/queued source. The engine
+    /// can still hold the previous sound while a new selection waits for Load.
+    /// Transport and external-IPC discovery keep using `waveform_file` independently.
+    fn waveform_refresh_file(
+        &self,
+        status: &audiolib_audio::PlaybackStatus,
+        current_waveform_ready: bool,
+    ) -> Option<AudioFile> {
+        let selected = self.selected.lock().unwrap().clone();
+        let pending = *self.audio_reload.lock().unwrap();
+        let displayed_path = self.wave_view.lock().unwrap().0.clone();
+        if let Some(file) = selected.as_ref()
+            && !file.missing
+            && (pending == Some(file.id)
+                || displayed_path.is_empty()
+                || same_path(Path::new(&file.file_path), Path::new(&displayed_path)))
+        {
+            return Some(file.clone());
+        }
+        if !current_waveform_ready && selected.as_ref().is_some_and(|file| file.missing) {
+            // Missing selections intentionally clear the old picture. Resizing or
+            // changing theme must not resurrect the engine's retained previous file.
+            return None;
+        }
+        if self.waveform_cancel.lock().unwrap().load(Ordering::Acquire)
+            || status.generation == self.removed_audio_generation.load(Ordering::Acquire)
+        {
+            // Library/source invalidation can retain the engine's stopped path.
+            // Only external-playback discovery may establish a new viewport then.
+            return None;
+        }
+        let playing = if self.remote_read_only() {
+            status
+                .file_path
+                .as_deref()
+                .and_then(|path| self.remote_wave_file(path))
+                .or_else(|| playback_wave_file(status))
+        } else {
+            playback_wave_file(status)
+        };
+        playing.filter(|file| {
+            displayed_path.is_empty()
+                || same_path(Path::new(&file.file_path), Path::new(&displayed_path))
+        })
     }
 
     fn queue_waveform(&self, file: &AudioFile) {
@@ -5081,6 +5223,7 @@ impl Controller {
                 ui.set_waveform_ready(false);
                 ui.set_waveform_progress(0.0);
                 ui.set_waveform_image(Image::default());
+                ui.set_waveform_mask(Image::default());
             }
             publish_wave_target(&ui, view, duration);
         });
@@ -6991,13 +7134,12 @@ impl Controller {
         ) {
             self.list_waveforms.note_audition_start();
         }
-        match self.audio.send_and_wait(command, Duration::from_secs(4)) {
-            Ok(status) => {
-                if value["command"] == "volume" {
-                    self.playback.lock().unwrap().volume = status.volume;
-                }
-                audiolib_core::success(serde_json::json!(status))
-            }
+        let completion = match command {
+            AudioCommand::SetVolume(volume) => self.enqueue_volume(volume),
+            command => self.audio.enqueue_with_ack(command),
+        };
+        match completion.and_then(|completion| completion.wait(Duration::from_secs(4))) {
+            Ok(status) => audiolib_core::success(serde_json::json!(status)),
             Err(error) => audiolib_core::failure(&error.to_string()),
         }
     }
@@ -7497,6 +7639,7 @@ fn same_patch(left: &MetadataPatch, right: &MetadataPatch) -> bool {
 }
 
 fn present_file(ui: &AppWindow, file: &AudioFile) {
+    crate::detail_presentation::present(ui, file);
     let album = file
         .album_entity
         .as_ref()
@@ -7633,6 +7776,8 @@ impl ListWaveformHost for Controller {
 }
 
 fn audio_row(file: &AudioFile) -> AudioRow {
+    let tag_labels = crate::detail_presentation::labels(file);
+    let tag_extra = tag_labels.len().saturating_sub(3).min(i32::MAX as usize) as i32;
     let marker = file
         .color
         .as_deref()
@@ -7647,6 +7792,7 @@ fn audio_row(file: &AudioFile) -> AudioRow {
             .map_or(String::new(), |path| path.to_string_lossy().into_owned())
             .into(),
         duration: format!("{:.2}s", file.duration).into(),
+        duration_clock: format_time(file.duration).into(),
         format: format!(
             "{:.1}k / {}b",
             file.sample_rate as f64 / 1000.0,
@@ -7655,6 +7801,10 @@ fn audio_row(file: &AudioFile) -> AudioRow {
         .into(),
         channels: file.channels.to_string().into(),
         tags: audiolib_core::display_tags(&file.tags, &file.attributes).into(),
+        tag_preview: ModelRc::new(VecModel::from(
+            tag_labels.into_iter().take(3).collect::<Vec<_>>(),
+        )),
+        tag_extra,
         album: file.album.clone().into(),
         favorite: file.favorite,
         missing: file.missing,
@@ -8036,6 +8186,159 @@ mod tests {
     use audiolib_audio::{WaveformData, WaveformPeak};
 
     #[test]
+    fn presentation_refresh_retains_pending_selection_and_rejects_cleared_missing_waveform() {
+        i_slint_backend_testing::init_no_event_loop();
+        let root = tempfile::tempdir().unwrap();
+        let path_a = root.path().join("A.wav");
+        let path_b = root.path().join("B.wav");
+        std::fs::write(&path_a, tiny_pcm_wav()).unwrap();
+        std::fs::write(&path_b, tiny_pcm_wav()).unwrap();
+        let provider = Arc::new(SqliteProvider::open(&root.path().join("library.db")).unwrap());
+        let engine = audiolib_audio::AudioEngine::new(PlaybackConfig::default()).unwrap();
+        // Load establishes the retained engine source without opening an output
+        // device or playing sound. B's Load is deliberately still pending below.
+        let loaded = engine
+            .handle()
+            .send_and_wait(AudioCommand::Load(path_a.clone()), Duration::from_secs(4))
+            .unwrap();
+        assert_eq!(loaded.state, PlaybackState::Ready);
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(
+            &ui,
+            provider,
+            engine.handle(),
+            AppConfig::load_in(root.path().join("preferences")).unwrap(),
+            PlaybackConfig::default(),
+        );
+        // Let external-playback discovery baseline A before staging B. Otherwise
+        // the poller's first observation could race this deliberately pending view.
+        let baseline = Instant::now();
+        while controller.wave_view.lock().unwrap().0 != path_a.to_string_lossy() {
+            assert!(
+                baseline.elapsed() < Duration::from_secs(2),
+                "A was not baselined"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let file_b = AudioFile {
+            id: 20,
+            filename: "B.wav".into(),
+            file_path: path_b.to_string_lossy().into_owned(),
+            sample_rate: loaded.sample_rate,
+            channels: loaded.channels,
+            duration: loaded.duration,
+            ..Default::default()
+        };
+        *controller.selected.lock().unwrap() = Some(file_b.clone());
+        present_file(&ui, &file_b);
+        controller.mark_audio_reload(file_b.id);
+        *controller.wave_view.lock().unwrap() = (
+            file_b.file_path.clone(),
+            WaveView {
+                zoom: 4.0,
+                scroll: 0.25,
+                ..Default::default()
+            },
+        );
+        ui.set_waveform_ready(false);
+        ui.invoke_theme_requested(crate::theme::theme_index(STUDIO_THEME));
+        let assert_b_view = || {
+            let state = controller.wave_view.lock().unwrap();
+            assert_eq!(state.0, file_b.file_path);
+            assert_eq!((state.1.zoom, state.1.scroll), (4.0, 0.25));
+        };
+        assert_b_view();
+        ui.invoke_waveform_resize_requested(480, 72);
+        assert_b_view();
+        // Presentation controls must keep the same pending B, just like a theme
+        // or size refresh, even though the engine is still reporting A.
+        ui.invoke_waveform_zoom_requested(2.0);
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        ui.invoke_waveform_wheel_zoom_requested(2.0, 0.5);
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        ui.invoke_waveform_pan_requested(0.4);
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        ui.invoke_peak_style_requested();
+        assert_eq!(controller.wave_view.lock().unwrap().0, file_b.file_path);
+        assert_eq!(
+            engine.handle().status().file_path.as_deref(),
+            Some(path_a.as_path())
+        );
+
+        // A missing B clears a formerly displayed A but leaves A loaded. Neither
+        // theme entry nor a presenter resize may start a fresh A render.
+        let mut missing_b = file_b.clone();
+        missing_b.missing = true;
+        *controller.selected.lock().unwrap() = Some(missing_b.clone());
+        present_file(&ui, &missing_b);
+        *controller.wave_view.lock().unwrap() =
+            (path_a.to_string_lossy().into_owned(), WaveView::default());
+        controller.invalidate_waveform();
+        ui.set_waveform_ready(false);
+        ui.set_waveform_image(Image::default());
+        ui.set_waveform_mask(Image::default());
+        let generation = controller.waveform_generation.load(Ordering::Acquire);
+        ui.invoke_theme_requested(crate::theme::theme_index(
+            audiolib_core::config::DEFAULT_THEME,
+        ));
+        ui.invoke_theme_requested(crate::theme::theme_index(STUDIO_THEME));
+        ui.invoke_waveform_resize_requested(500, 84);
+        ui.invoke_waveform_zoom_requested(2.0);
+        ui.invoke_waveform_wheel_zoom_requested(2.0, 0.5);
+        ui.invoke_waveform_pan_requested(0.5);
+        ui.invoke_peak_style_requested();
+        assert_eq!(
+            controller.waveform_generation.load(Ordering::Acquire),
+            generation
+        );
+        assert!(ui.get_selected_missing());
+        assert!(!ui.get_waveform_ready());
+        assert_eq!(ui.get_waveform_image().size().width, 0);
+        assert_eq!(ui.get_waveform_mask().size().width, 0);
+
+        // A genuine external audition already owning the viewport remains the
+        // refresh source even when the inspector points at another valid record.
+        *controller.selected.lock().unwrap() = Some(file_b.clone());
+        *controller.audio_reload.lock().unwrap() = None;
+        *controller.waveform_cancel.lock().unwrap() = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            controller
+                .waveform_refresh_file(&loaded, true)
+                .unwrap()
+                .file_path,
+            path_a.to_string_lossy()
+        );
+        let remote_file = AudioFile {
+            id: 70,
+            file_path: "Z:/Server/Original.wav".into(),
+            ..file_b
+        };
+        controller.set_remote_wave_file_for_test(path_a.clone(), remote_file.clone());
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.wave_view.lock().unwrap().0 = remote_file.file_path.clone();
+        assert_eq!(
+            controller
+                .waveform_refresh_file(&loaded, true)
+                .unwrap()
+                .file_path,
+            remote_file.file_path
+        );
+        controller.remote_mode.store(false, Ordering::Release);
+        // A source/library reset invalidates the old viewport even though the
+        // engine still reports A. A presentation change must not re-admit it.
+        *controller.selected.lock().unwrap() = None;
+        controller.wave_view.lock().unwrap().0 = path_a.to_string_lossy().into_owned();
+        controller.invalidate_waveform();
+        assert!(controller.waveform_refresh_file(&loaded, false).is_none());
+        *controller.waveform_cancel.lock().unwrap() = Arc::new(AtomicBool::new(false));
+        controller
+            .removed_audio_generation
+            .store(loaded.generation, Ordering::Release);
+        assert!(controller.waveform_refresh_file(&loaded, true).is_none());
+        controller.shutdown();
+    }
+
+    #[test]
     fn missing_selection_rejects_queued_and_late_waveform_partials() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -8120,7 +8423,7 @@ mod tests {
         );
         *controller.selected.lock().unwrap() = Some(present.clone());
         present_file(&ui, present);
-        let job = WaveJob {
+        let mut job = WaveJob {
             path: PathBuf::from(&present.file_path),
             remote_id: Some(present.id),
             sample_rate: 48000,
@@ -8165,6 +8468,19 @@ mod tests {
                     }
                     match observed.get() {
                         0 if ui.get_waveform_ready() => {
+                            if ui.get_waveform_mask().size().width != 0 {
+                                return Err("Default presentation retained a Studio mask".into());
+                            }
+                            // The real theme callback must refresh an idle selected
+                            // Waveform; no transport tick or new selection is needed.
+                            ui.invoke_theme_requested(crate::theme::theme_index(STUDIO_THEME));
+                            observed.set(4);
+                        }
+                        4 if ui.get_waveform_ready()
+                            && ui.get_waveform_mask().size().width != 0 =>
+                        {
+                            job.generation = c.waveform_generation.load(Ordering::Acquire);
+                            job.cancel = c.waveform_cancel.lock().unwrap().clone();
                             // This callback is queued with the old valid generation.
                             c.publish_waveform(&job, &data, 0.75);
                             c.select_id(missing_id, false);
@@ -8178,7 +8494,10 @@ mod tests {
                             observed.set(1);
                         }
                         1 if ui.get_selected_id() == missing_id.to_string() => {
-                            if !ui.get_selected_missing() || ui.get_waveform_ready() {
+                            if !ui.get_selected_missing()
+                                || ui.get_waveform_ready()
+                                || ui.get_waveform_mask().size().width != 0
+                            {
                                 return Err(
                                     "Missing selection retained the previous Waveform".into()
                                 );
@@ -8190,6 +8509,7 @@ mod tests {
                         2 => {
                             if ui.get_waveform_ready()
                                 || ui.get_waveform_image().size().width != 0
+                                || ui.get_waveform_mask().size().width != 0
                                 || !ui.get_selected_missing()
                             {
                                 return Err(

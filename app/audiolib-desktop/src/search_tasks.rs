@@ -832,7 +832,7 @@ impl Controller {
 
     pub(super) fn set_search_task_limit(&self, limit: i32) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let limit = limit.clamp(1, 6) as u32;
+        let limit = audiolib_core::config::normalize_max_search_tasks(limit.max(1) as u32);
         let count = self
             .task_workspace
             .lock()

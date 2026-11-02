@@ -8,7 +8,7 @@ $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskArtifacts = Join-Path $taskRoot ('.rust-validation/development-pipeline-tests/' + [guid]::NewGuid().ToString('N'))
 $taskTools = Join-Path $taskArtifacts 'tools'
 New-Item -ItemType Directory -Path $taskTools -Force | Out-Null
-foreach ($taskScript in @('check-local.ps1', 'build-release.ps1')) {
+foreach ($taskScript in @('check-local.ps1', 'build-release.ps1','build-cache.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskScript) -Destination $taskTools
 }
 @'
@@ -20,6 +20,17 @@ if ($taskState.FailPreparation) { throw 'Synthetic SDK preparation failed.' }
 
 $taskCalls = [Collections.Generic.List[object]]::new()
 $taskState = @{ Prepared=0; FailPreparation=$false; FailAt=0 }
+@'
+param($Action,$Mode,$MaxGiB)
+. (Join-Path $PSScriptRoot 'build-cache.ps1')
+$probe = Enter-AudioLibBuildLease (Split-Path -Parent $PSScriptRoot) -Exclusive
+try {
+    if ($Action -ne 'Run' -or $Mode -ne 'Debug' -or $MaxGiB -ne 40) { throw 'Unexpected post-check cleanup selection.' }
+    $taskState.Cleaned++
+    $global:LASTEXITCODE=0
+} finally { $probe.Dispose() }
+'@ | Set-Content -LiteralPath (Join-Path $taskTools 'clean-build-artifacts.ps1') -Encoding UTF8
+$taskState.Cleaned = 0
 $taskEnvironmentKeys = @('CPAL_ASIO_DIR', 'LIBCLANG_PATH', 'CARGO_ENCODED_RUSTFLAGS', 'CXXFLAGS_x86_64_pc_windows_msvc', 'CXXFLAGS_x86_64-pc-windows-msvc', 'CARGO_BUILD_TARGET')
 $taskOriginalEnvironment = @{}
 foreach ($taskKey in $taskEnvironmentKeys) {
@@ -138,6 +149,20 @@ try {
     if ($taskCalls.Count) { throw 'Build continued after SDK preparation failed.' }
     $taskState.FailPreparation = $false
     Write-Host 'PASS: every failed check or SDK preparation stops later stages and restores the environment.'
+
+    if ($PSVersionTable.PSVersion -ge [version]'7.3') {
+        Invoke-PipelineCase 'check-local.ps1' @{CleanBuildArtifacts=$true}
+        Assert-SingleWorkspacePass
+        if ($taskState.Cleaned -ne 1) { throw 'Successful checks did not run post-check maintenance.' }
+        $taskState.FailAt = 2
+        Invoke-PipelineCase 'check-local.ps1' @{CleanBuildArtifacts=$true} 'cargo exited with code 17'
+        if ($taskState.Cleaned -ne 1) { throw 'Failed checks cleaned their build/diagnostic cache.' }
+        $taskState.FailAt = 0
+    } else {
+        Invoke-PipelineCase 'check-local.ps1' @{CleanBuildArtifacts=$true} 'pwsh 7.3'
+        if ($taskCalls.Count -or $taskState.Cleaned) { throw 'Unsupported cleanup started work.' }
+    }
+    Write-Host 'PASS: optional cleanup runs only after successful checks and after releasing the build lease.'
 
     $env:CARGO_BUILD_TARGET = 'aarch64-apple-darwin'
     foreach ($taskWithoutAsio in @($true, $false)) {
