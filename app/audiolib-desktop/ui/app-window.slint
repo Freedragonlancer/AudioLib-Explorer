@@ -2555,13 +2555,16 @@ main-scroll := ScrollView {
         task-tabs-bar := Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; height: (root.short-layout ? 34px : 38px) * Theme.ui-scale; background: Theme.trough; border-radius: 7px * Theme.ui-scale;
             changed width => { root.update-task-tabs-overflow(); }
             accessible-role: tab-list; accessible-label: root.chinese ? "搜索任务" : "Search tasks";
-            HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
+            HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale; alignment: start;
                 if root.task-tabs-overflow: Action { width: 36px * Theme.ui-scale; subtle: true; label: "‹";
                     action-label: root.chinese ? "向左翻页搜索任务" : "Scroll search tasks left";
                     enabled: !root.background-blocked && root.task-tabs-x < -1px;
                     clicked => { root.scroll-task-tabs(-1); }
                 }
                 task-tabs-scroll := ScrollView { horizontal-stretch: 1; min-width: 0px; viewport-height: (root.short-layout ? 32px : 36px) * Theme.ui-scale;
+                    // Follow the last tab while space remains; the layout shrinks only this scroll area on overflow.
+                    preferred-width: root.task-tabs-content-width;
+                    max-width: root.task-tabs-content-width;
                     viewport-width: root.task-tabs-content-width;
                     HorizontalLayout { spacing: 3px * Theme.ui-scale; alignment: start;
                         for task in root.search-tasks: SearchTaskTab {
@@ -3584,13 +3587,15 @@ main-scroll := ScrollView {
                 studio-task-tabs-bar := Rectangle { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; height: 34px * Theme.ui-scale; background: Theme.table-toolbar-surface; border-radius: 0px;
                     changed width => { root.update-task-tabs-overflow(); }
                     accessible-role: tab-list; accessible-label: root.chinese ? "搜索任务" : "Search tasks";
-                    HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
+                    HorizontalLayout { padding-left: 4px * Theme.ui-scale; padding-right: 4px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale; alignment: start;
                         if root.task-tabs-overflow: StudioAction { width: 36px * Theme.ui-scale; subtle: true; label: "‹";
                             action-label: root.chinese ? "向左翻页搜索任务" : "Scroll search tasks left";
                             enabled: !root.background-blocked && root.task-tabs-x < -1px;
                             clicked => { root.scroll-task-tabs(-1); }
                         }
                         studio-task-tabs-scroll := ScrollView { horizontal-stretch: 1; min-width: 0px; viewport-height: 32px * Theme.ui-scale;
+                            preferred-width: root.task-tabs-content-width;
+                            max-width: root.task-tabs-content-width;
                             viewport-width: root.task-tabs-content-width;
                             HorizontalLayout { spacing: 3px * Theme.ui-scale; alignment: start;
                                 for task in root.search-tasks: SearchTaskTab {
