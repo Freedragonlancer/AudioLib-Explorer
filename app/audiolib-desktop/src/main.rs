@@ -15,6 +15,8 @@ mod list_waveforms;
 mod mode_switch_scroll_tests;
 #[cfg(test)]
 mod pane_review_tests;
+#[cfg(test)]
+mod playback_repaint_tests;
 mod progressive_waveform;
 #[cfg(test)]
 mod responsive_layout_tests;

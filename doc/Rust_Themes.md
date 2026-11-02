@@ -37,6 +37,30 @@ the default. Reuse the application inputs and callbacks so new presenters retain
 the same playback and Waveform contracts. Keep theme-specific animation and visual
 state inside that presenter, and do not create a second audio controller.
 
+### Playback repaint cost
+
+The window draws with Slint's software renderer and partial repaint, so a playback
+frame costs about the area it repaints and the work behind it. A presenter keeps
+the playhead cheap by following these rules:
+
+- Keep the playhead a thin Rectangle. Avoid glows, flashes and per-frame timers.
+- Do not bind values that many elements read to the playhead position. Slint marks
+  every dependent element changed on each frame, even when its value is the same.
+  Assign such values from a `changed` handler only when they really change, as the
+  Studio waveform gradient does with its band `span`.
+- Do not move or resize a clipping or translucent container on every frame when it
+  holds large children: a changed clip repaints all of its children in full. Cut
+  the content into small pieces, as the played-region tiles and gradient bands do.
+- Give artwork behind the player as bitmaps. The software renderer rasterizes an
+  SVG image again on every repaint that touches it; `theme.rs` rasterizes the
+  Studio surfaces once and passes them as `Theme.studio-*` images.
+- The software renderer ignores `transform-scale` and rotation. Animate width and
+  height instead.
+
+`playback_repaint_tests` plays every registered theme, compact and expanded, in
+waveform and Spectral Peaks mode, and fails when playback frames keep repainting
+more than a small part of the window. A new theme is covered once it is registered.
+
 For a theme change, verify registry/index mapping, settings round trips, bilingual
 Appearance selection, live switching and representative player states. The
 headless `ui_scale_tests` cover these UI behaviors. Setting

@@ -7,7 +7,7 @@ use crate::AppWindow;
 use audiolib_core::config::{
     BUILTIN_THEMES, DEFAULT_THEME, PlayerStyle, THEME_IDS, clamp_font_size, normalize_theme,
 };
-use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{Color, ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
 /// Color tokens of one theme, as `0xAARRGGBB`.
 pub(crate) struct Palette {
@@ -149,6 +149,9 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
         // its change trackers. Clearing on a deferred style-changed handler is late.
         ui.invoke_clear_audition_input_feedback();
     }
+    if modern_style {
+        install_studio_surfaces(&theme);
+    }
     theme.set_modern_style(modern_style);
     let color = Color::from_argb_encoded;
     theme.set_bg(color(palette.bg));
@@ -183,6 +186,84 @@ pub(crate) fn apply_theme(ui: &AppWindow, id: &str) {
     }
 }
 
+/// Studio surface artwork in the order of the `Theme.studio-*` images.
+const STUDIO_SURFACES: [&str; 7] = [
+    include_str!("../ui/surfaces/toolbar.svg"),
+    include_str!("../ui/surfaces/rail.svg"),
+    include_str!("../ui/surfaces/library.svg"),
+    include_str!("../ui/surfaces/inspector.svg"),
+    include_str!("../ui/surfaces/player.svg"),
+    include_str!("../ui/surfaces/transport.svg"),
+    include_str!("../ui/surfaces/tab-indicator.svg"),
+];
+
+thread_local! {
+    /// Rasterized once per UI thread; images share their pixels when cloned.
+    static STUDIO_SURFACE_IMAGES: Vec<Image> =
+        STUDIO_SURFACES.iter().map(|svg| rasterize_surface(svg)).collect();
+}
+
+/// Give the Studio backdrops bitmaps. The software renderer has no cache for
+/// rasterized SVG: an SVG backdrop is rasterized at its full drawn size on every
+/// repaint that touches it, which cost a whole frame budget per playback frame.
+/// Bitmaps are only sampled inside the repainted region.
+fn install_studio_surfaces(theme: &crate::Theme) {
+    STUDIO_SURFACE_IMAGES.with(|images| {
+        let [
+            toolbar,
+            rail,
+            library,
+            inspector,
+            player,
+            transport,
+            tab_indicator,
+        ] = images.as_slice()
+        else {
+            return;
+        };
+        theme.set_studio_toolbar(toolbar.clone());
+        theme.set_studio_rail(rail.clone());
+        theme.set_studio_library(library.clone());
+        theme.set_studio_inspector(inspector.clone());
+        theme.set_studio_player(player.clone());
+        theme.set_studio_transport(transport.clone());
+        theme.set_studio_tab_indicator(tab_indicator.clone());
+    });
+}
+
+/// Rasterize one surface at twice its design size, so typical HiDPI windows
+/// scale it down or barely up. The surfaces are smooth gradients that stretch
+/// (`preserveAspectRatio="none"`), so a fixed raster keeps their look.
+fn rasterize_surface(svg: &str) -> Image {
+    let doubled = double_svg_size(svg);
+    Image::load_from_svg_data(doubled.as_bytes())
+        .ok()
+        .and_then(|image| image.to_rgba8())
+        .map(Image::from_rgba8)
+        .unwrap_or_default()
+}
+
+/// Double the root element's `width` and `height`; the viewBox keeps the art.
+fn double_svg_size(svg: &str) -> String {
+    let Some(root_end) = svg.find('>') else {
+        return svg.to_owned();
+    };
+    let (root, rest) = svg.split_at(root_end);
+    let mut root = root.to_owned();
+    for attribute in [" width=\"", " height=\""] {
+        let Some(start) = root.find(attribute).map(|at| at + attribute.len()) else {
+            continue;
+        };
+        let Some(length) = root[start..].find('"') else {
+            continue;
+        };
+        if let Ok(value) = root[start..start + length].parse::<f64>() {
+            root.replace_range(start..start + length, &(value * 2.0).to_string());
+        }
+    }
+    root + rest
+}
+
 /// Show and apply the interface and list font sizes (clamped to the supported range).
 pub(crate) fn apply_font_sizes(ui: &AppWindow, ui_font: u32, list_font: u32) {
     let ui_font = clamp_font_size(i64::from(ui_font)) as i32;
@@ -193,4 +274,41 @@ pub(crate) fn apply_font_sizes(ui: &AppWindow, ui_font: u32, list_font: u32) {
     theme.set_ui_font_px(ui_font);
     theme.set_list_font_px(list_font);
     crate::detail_presentation::relayout(ui);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn studio_surfaces_rasterize_at_twice_their_design_size() {
+        assert_eq!(
+            double_svg_size(
+                r#"<svg xmlns="x" width="56" height="668" viewBox="0 0 100 1000"><path/></svg>"#
+            ),
+            r#"<svg xmlns="x" width="112" height="1336" viewBox="0 0 100 1000"><path/></svg>"#
+        );
+        STUDIO_SURFACE_IMAGES.with(|images| {
+            assert_eq!(images.len(), STUDIO_SURFACES.len());
+            let sizes: Vec<_> = images
+                .iter()
+                .map(|image| (image.size().width, image.size().height))
+                .collect();
+            assert_eq!(
+                sizes,
+                [
+                    (3832, 112),
+                    (112, 1336),
+                    (416, 1336),
+                    (592, 1336),
+                    (3832, 256),
+                    (200, 200),
+                    (448, 6)
+                ]
+            );
+            for image in images {
+                assert!(image.to_rgba8().is_some(), "a surface is a bitmap");
+            }
+        });
+    }
 }
