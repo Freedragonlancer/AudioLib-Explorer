@@ -31,7 +31,7 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
 
 本机阶段优先使用[Release 管线](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md)：`release-pipeline.ps1` 默认预览，`-Action Run` 串联已有构建/打包/验收，Windows 客户端还包含固定安装。一次调用只输出短状态，完整日志和续跑收据留在 `.rust-validation/`；不要逐阶段重新拼命令或反复读取长报告。源码测试仍按实际影响选择，管线不自动扩大全量矩阵，也不创建标签或自动发布。
 
-不得覆盖既有标签或把新构建当作旧 Release 的原产物。当前准备 0.8.7 候选，以已发布的 `v0.8.6` 为发布基线；API、schema 和完整存储格式未变，因此本次使用 PATCH 版本。发布前同步工作区、锁文件、双方程序版本与发布说明，并完成以下本地及 beta 门禁。既有 `v0.8.6` 及更早标签和资产保持原发布身份。发布状态以本地验收、beta 门禁与 Mac 产物检查的实测结果为准。本轮范围、原始验收身份与待完成门禁见 [0.8.7 发布准备](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.8.7.md)。
+不得覆盖既有标签或把新构建当作旧 Release 的原产物。[v0.8.7](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.8.7) 已正式发布，以 `v0.8.6` 为发布基线；API、schema 和完整存储格式未变，因此使用 PATCH 版本。正式标签与七份产物源码固定为 `b5a98ff98fed501aafff0f6a4ef5015c8b4d435d`，后续 main `d0168f74182f52f493adb2a3b1fc9af0f3ec4eac` 仅整合验收工具与流程记录，不移动标签或重建已验收资产。既有 `v0.8.6` 及更早标签和资产保持原发布身份。本轮范围、各阶段验收身份、远端发布核验及覆盖限制见 [0.8.7 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_0.8.7.md)。以下流程供后续发布沿用。
 
 历史基线说明：`v0.8.0` 的 Release 已撤回，但标签保留。0.8.1 当时按用户确认使用最后实际公开的 `v0.7.8` 为发布基线：程序 MINOR 从 7 升至 8，可写 schema 6 库升级为 8；撤回的 0.8.0 开发库（schema 7）也通过受保护迁移升级为 8。回退旧程序须配套恢复相应旧 schema 备份。这个例外不重写既有标签，也不改变后续版本的版本升级规则。
 
