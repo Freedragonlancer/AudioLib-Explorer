@@ -116,6 +116,144 @@ pub(crate) fn ready(conn: &Connection) -> Result<bool> {
     Ok(meta_i64(conn, "search_path_rev")? == Some(SEARCH_PATH_REV))
 }
 
+const CHECKPOINT_KEY: &str = "v9_dir_checkpoint";
+const BACKUP_KEY: &str = "v9_dir_backup";
+
+/// Resumable schema 9 path-index build (design §5.2), read without the writer.
+pub(crate) struct UpgradeState {
+    pub ready: bool,
+    /// Last folder id indexed; `Some` while a build is under way.
+    pub checkpoint: Option<i64>,
+    pub done: u64,
+    pub total: u64,
+    pub files: u64,
+    pub backup: Option<String>,
+}
+
+pub(crate) fn upgrade_state(conn: &Connection) -> Result<UpgradeState> {
+    let ready = ready(conn)?;
+    let checkpoint = meta_i64(conn, CHECKPOINT_KEY)?;
+    let count = |sql: &str, arg: i64| -> Result<u64> {
+        conn.query_row(sql, [arg], |row| row.get::<_, i64>(0))
+            .map(|n| n.max(0) as u64)
+            .map_err(db_error)
+    };
+    let total = count("SELECT count(*) FROM folders WHERE ?1=?1", 0)?;
+    let done = match checkpoint {
+        Some(last) => count("SELECT count(*) FROM folders WHERE id<=?1", last)?,
+        None => 0,
+    };
+    let files = count("SELECT count(*) FROM audio_files WHERE ?1=?1", 0)?;
+    let backup = conn
+        .query_row(
+            "SELECT value FROM library_meta WHERE key=?1",
+            [BACKUP_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    Ok(UpgradeState {
+        ready,
+        checkpoint,
+        done,
+        total,
+        files,
+        backup,
+    })
+}
+
+fn in_tx<T>(conn: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    let own = conn.is_autocommit();
+    if own {
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(db_error)?;
+    }
+    let result = body();
+    if own {
+        if result.is_ok() {
+            conn.execute_batch("COMMIT").map_err(db_error)?;
+        } else {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+    }
+    result
+}
+
+/// Step 1: add the empty tables and the checkpoint (fast, one transaction).
+pub(crate) fn upgrade_begin(conn: &Connection, backup: Option<&str>) -> Result<()> {
+    in_tx(conn, || {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs;",
+        )
+        .map_err(db_error)?;
+        conn.execute_batch(CREATE_DIR_FTS).map_err(db_error)?;
+        conn.execute_batch(CREATE_RUNS).map_err(db_error)?;
+        conn.execute("DELETE FROM library_meta WHERE key='search_path_rev'", [])
+            .map_err(db_error)?;
+        write_meta(conn, CHECKPOINT_KEY, "0")?;
+        match backup {
+            Some(path) => write_meta(conn, BACKUP_KEY, path),
+            None => Ok(()),
+        }
+    })
+}
+
+/// Step 2: index up to `limit` folders after the checkpoint and move the checkpoint in
+/// the same transaction. `false` once every folder is indexed.
+pub(crate) fn upgrade_batch(conn: &Connection, limit: i64) -> Result<bool> {
+    in_tx(conn, || {
+        let last = meta_i64(conn, CHECKPOINT_KEY)?
+            .ok_or_else(|| Error::Database("Path index upgrade was not started".into()))?;
+        let next: Option<i64> = conn
+            .query_row(
+                "SELECT max(id) FROM (SELECT id FROM folders WHERE id>?1 ORDER BY id LIMIT ?2)",
+                params![last, limit.max(1)],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let Some(next) = next else {
+            return Ok(false);
+        };
+        conn.execute(
+            "INSERT INTO audio_dir_search(rowid,path_tokens,path_tokens_tokenized)
+             SELECT id,
+              CASE WHEN parent_id IS NULL THEN '' ELSE t3_norm(COALESCE(folder_name,'')) END,
+              CASE WHEN parent_id IS NULL THEN '' ELSE audiolib_tokenize(t3_norm(COALESCE(folder_name,''))) END
+             FROM folders WHERE id>?1 AND id<=?2",
+            params![last, next],
+        )
+        .map_err(db_error)?;
+        write_meta(conn, CHECKPOINT_KEY, &next.to_string())?;
+        Ok(true)
+    })
+}
+
+/// Steps 3-4: runs, optimize, then publish `search_path_rev` (the switch).
+pub(crate) fn upgrade_finish(conn: &Connection) -> Result<()> {
+    in_tx(conn, || {
+        conn.execute("DELETE FROM audio_dir_runs", [])
+            .map_err(db_error)?;
+        conn.execute_batch(INSERT_RUNS).map_err(db_error)?;
+        conn.execute(
+            "INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize')",
+            [],
+        )
+        .map_err(db_error)?;
+        write_meta(conn, "search_path_rev", &SEARCH_PATH_REV.to_string())?;
+        write_meta(
+            conn,
+            "snapshot_format",
+            audiolib_core::compatibility::PLAN_B_V9_FORMAT,
+        )?;
+        let generation = meta_i64(conn, "dir_index_gen")?
+            .unwrap_or(0)
+            .saturating_add(1);
+        write_meta(conn, "dir_index_gen", &generation.to_string())?;
+        conn.execute("DELETE FROM library_meta WHERE key=?1", [CHECKPOINT_KEY])
+            .map_err(db_error)?;
+        Ok(())
+    })
+}
+
 /// Drop and rebuild both directory tables. Caller holds the library writer.
 pub(crate) fn rebuild(conn: &Connection) -> Result<()> {
     let own = conn.is_autocommit();
@@ -147,6 +285,8 @@ pub(crate) fn rebuild(conn: &Connection) -> Result<()> {
             .unwrap_or(0)
             .saturating_add(1);
         write_meta(conn, "dir_index_gen", &generation.to_string())?;
+        conn.execute("DELETE FROM library_meta WHERE key=?1", [CHECKPOINT_KEY])
+            .map_err(db_error)?;
         Ok(())
     })();
     if own {
@@ -166,7 +306,16 @@ pub(crate) fn maintain(
     dirs_changed: &[i64],
     dirs_files_changed: &[i64],
 ) -> Result<()> {
-    if !ready(conn)? || (dirs_changed.is_empty() && dirs_files_changed.is_empty()) {
+    if dirs_changed.is_empty() && dirs_files_changed.is_empty() {
+        return Ok(());
+    }
+    if !ready(conn)? {
+        // Mid-upgrade: keep already indexed segments current; runs are rebuilt at the end.
+        if let Some(last) = meta_i64(conn, CHECKPOINT_KEY)? {
+            for id in dirs_changed.iter().filter(|id| **id <= last) {
+                reindex_segment(conn, *id)?;
+            }
+        }
         return Ok(());
     }
     for id in dirs_changed {
@@ -1279,5 +1428,61 @@ mod tests {
         assert_eq!(&all[..main.len()], main.as_slice());
         assert!(all.contains(&11));
         assert!(!main.contains(&11));
+    }
+
+    #[test]
+    fn resumable_upgrade_cancels_between_batches_and_resumes_without_a_second_backup() {
+        use audiolib_core::local_upgrade::{LocalUpgradeOutcome, LocalUpgradePhase};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (dir, provider) = library();
+        provider
+            .writer()
+            .unwrap()
+            .execute("DELETE FROM library_meta WHERE key='search_path_rev'", [])
+            .unwrap();
+        assert!(!provider.path_search_ready().unwrap());
+        let plan = provider.local_upgrade_plan_impl().unwrap().expect("plan");
+        assert!(!plan.resuming);
+        assert!(plan.total > 0);
+        let backups = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".pre-schema9-")
+                })
+                .count()
+        };
+        let cancel = AtomicBool::new(false);
+        let outcome = provider
+            .run_local_upgrade_impl(&cancel, &mut |progress| {
+                if matches!(progress.phase, LocalUpgradePhase::PathBuild) {
+                    cancel.store(true, Ordering::Release);
+                }
+            })
+            .unwrap();
+        assert_eq!(outcome, LocalUpgradeOutcome::Cancelled);
+        assert!(!provider.path_search_ready().unwrap());
+        assert_eq!(backups(), 1);
+        let plan = provider
+            .local_upgrade_plan_impl()
+            .unwrap()
+            .expect("resume plan");
+        assert!(plan.resuming, "the checkpoint survives a cancel");
+        let again = AtomicBool::new(false);
+        let outcome = provider
+            .run_local_upgrade_impl(&again, &mut |_| {})
+            .unwrap();
+        assert!(
+            matches!(outcome, LocalUpgradeOutcome::Done { backup: Some(ref path) } if path.exists())
+        );
+        assert_eq!(backups(), 1, "a resume never backs up again");
+        assert!(provider.path_search_ready().unwrap());
+        assert!(provider.local_upgrade_plan_impl().unwrap().is_none());
+        assert_eq!(ids(&provider, "Kit", SearchScope::Path), vec![10, 11]);
     }
 }

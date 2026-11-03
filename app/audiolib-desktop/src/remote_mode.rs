@@ -384,6 +384,15 @@ impl AutoSync {
     }
 }
 
+/// §7.6 wording of a pending server revision: the user refreshes by clicking.
+pub(super) fn refresh_notice_text(chinese: bool) -> &'static str {
+    if chinese {
+        "服务器音效库已更新，点击刷新"
+    } else {
+        "Server library updated, click to refresh"
+    }
+}
+
 /// Notice text and kind for a revision check; `None` hides the notice. Pure so the
 /// decision of what the user sees is unit tested.
 pub(super) fn revision_notice(
@@ -411,7 +420,19 @@ pub(super) fn revision_notice(
     Some(match check {
         RevisionCheck::UpToDate { .. } => return None,
         RevisionCheck::NewRevision { cached, server } => (
-            update(if chinese {
+            update(if matches!(auto, AutoSync::Off) {
+                if chinese {
+                    format!(
+                        "{}（r{server}，当前缓存 r{cached}）",
+                        refresh_notice_text(true)
+                    )
+                } else {
+                    format!(
+                        "{} (revision {server}, cached {cached})",
+                        refresh_notice_text(false)
+                    )
+                }
+            } else if chinese {
                 format!("服务器素材库有更新：r{server}（当前缓存 r{cached}）")
             } else {
                 format!("Server library updated: revision {server} (cached {cached})")
@@ -1672,6 +1693,11 @@ impl Controller {
             })
             .flatten();
         let (text, kind) = notice.unwrap_or((String::new(), NOTICE_NONE));
+        ui.set_remote_notice_refresh(
+            kind == NOTICE_UPDATE
+                && (text.starts_with(refresh_notice_text(true))
+                    || text.starts_with(refresh_notice_text(false))),
+        );
         ui.set_remote_notice(text.into());
         ui.set_remote_notice_kind(kind);
     }

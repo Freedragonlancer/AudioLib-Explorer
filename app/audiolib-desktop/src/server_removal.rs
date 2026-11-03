@@ -142,6 +142,16 @@ impl ServerManage {
         }
     }
 
+    /// §4 vendor import limits when this PC may manage and the server offers it.
+    pub(super) fn vendor_import(&self) -> Option<audiolib_core::server_upgrade::VendorImportInfo> {
+        if !self.can_manage {
+            return None;
+        }
+        self.capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.vendor_import.clone())
+    }
+
     /// `/capabilities` of `server_url`, once read after the latest sync.
     pub(super) fn capabilities_for(&self, server_url: &str) -> Option<&Capabilities> {
         (self.url == server_url)
@@ -405,6 +415,13 @@ impl Controller {
         self.remote.lock().unwrap().manage.for_server(&url)
     }
 
+    /// Vendor import limits of the active server when this PC may manage it.
+    pub(crate) fn current_vendor_import(
+        &self,
+    ) -> Option<audiolib_core::server_upgrade::VendorImportInfo> {
+        self.current_server_manage().vendor_import()
+    }
+
     /// Show the gate on the menus (server mode only; local removals are not gated).
     pub(crate) fn publish_server_manage(&self, ui: &AppWindow) {
         let manage = if self.remote_read_only() {
@@ -412,6 +429,7 @@ impl Controller {
         } else {
             ServerManage::default()
         };
+        ui.set_vendor_import_available(manage.vendor_import().is_some());
         ui.set_server_can_manage(manage.can_manage);
         ui.set_server_manage_note(manage.note.into());
     }

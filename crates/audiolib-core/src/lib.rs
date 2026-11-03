@@ -14,12 +14,14 @@ pub mod config;
 pub mod library;
 pub mod list_waveform;
 pub mod list_waveform_i8;
+pub mod local_upgrade;
 mod metadata;
 pub mod profiles;
 pub mod search_workspace;
 pub mod server_upgrade;
 pub mod server_url;
 pub mod tag_filter;
+pub mod vendor_import;
 pub mod waveform_cache;
 pub mod waveform_rate;
 pub mod window_layout;
@@ -592,6 +594,42 @@ pub trait DataProvider: Send + Sync {
     /// provider. Default false; GUI hides「仅路径」and degrades「全部」to main.
     fn path_search_ready(&self) -> Result<bool> {
         Ok(false)
+    }
+    /// §7.1 plan for building the schema 9 path index of a local library; `None` when
+    /// nothing is needed (ready, read-only, or a provider without one).
+    fn local_upgrade_plan(&self) -> Result<Option<local_upgrade::LocalUpgradePlan>> {
+        Ok(None)
+    }
+    /// Run or resume that upgrade (§5.2); cancel is checked between batches.
+    fn run_local_upgrade(
+        &self,
+        _cancel: &std::sync::atomic::AtomicBool,
+        _progress: &mut dyn FnMut(local_upgrade::LocalUpgradeProgress),
+    ) -> Result<local_upgrade::LocalUpgradeOutcome> {
+        Err(Error::Validation(
+            "This provider has no local upgrade".into(),
+        ))
+    }
+    /// §4.5 vendor table preview (read-only); server mode with manage rights only.
+    fn vendor_import_preview(
+        &self,
+        _file: &std::path::Path,
+    ) -> Result<vendor_import::VendorImportPreview> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Commit a previewed batch; the same key replays the same result.
+    fn vendor_import_commit(
+        &self,
+        _import_id: &str,
+        _idempotency_key: &str,
+    ) -> Result<vendor_import::VendorImportResult> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    fn vendor_import_rollback(
+        &self,
+        _import_id: &str,
+    ) -> Result<vendor_import::VendorImportResult> {
+        Err(Error::Validation("Vendor import is not available".into()))
     }
     fn search(&self, request: &SearchRequest) -> Result<SearchPage>;
     /// Search that can be superseded by a newer GUI request. Providers may additionally
