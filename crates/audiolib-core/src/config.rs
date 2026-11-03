@@ -540,6 +540,17 @@ pub fn normalize_ui_scale_percent(percent: u32) -> u32 {
 pub const DEFAULT_THEME: &str = "default";
 /// Identifier of the opt-in Studio theme, with the redesigned audition controls.
 pub const STUDIO_THEME: &str = "studio";
+/// Identifier of the Studio workbench with the original default audition controls.
+pub const DEFAULT_V2_THEME: &str = "default-v2";
+
+/// Library workbench presentation selected independently of audition controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkbenchStyle {
+    /// Original beta navigation, search and library layout.
+    Classic,
+    /// Studio navigation, search and library layout.
+    Studio,
+}
 
 /// Audition presentation selected by a theme; playback state remains shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,23 +569,34 @@ pub struct BuiltinTheme {
     pub name: &'static str,
     /// Chinese name offered in Appearance settings.
     pub name_cn: &'static str,
+    /// Navigation, search and library layout belonging to this theme.
+    pub workbench_style: WorkbenchStyle,
     /// Audition controls and layout belonging to this theme.
     pub player_style: PlayerStyle,
 }
 
 /// Single registry of shipped themes, with the original default first.
-pub const BUILTIN_THEMES: [BuiltinTheme; 2] = [
+pub const BUILTIN_THEMES: [BuiltinTheme; 3] = [
     BuiltinTheme {
         id: DEFAULT_THEME,
         name: "Default",
         name_cn: "默认",
+        workbench_style: WorkbenchStyle::Classic,
         player_style: PlayerStyle::Classic,
     },
     BuiltinTheme {
         id: STUDIO_THEME,
         name: "Studio",
         name_cn: "工作室",
+        workbench_style: WorkbenchStyle::Studio,
         player_style: PlayerStyle::Studio,
+    },
+    BuiltinTheme {
+        id: DEFAULT_V2_THEME,
+        name: "Default v2",
+        name_cn: "默认 v2",
+        workbench_style: WorkbenchStyle::Studio,
+        player_style: PlayerStyle::Classic,
     },
 ];
 
