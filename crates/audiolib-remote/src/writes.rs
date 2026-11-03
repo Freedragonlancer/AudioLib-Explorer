@@ -523,6 +523,10 @@ impl DataProvider for RemoteProvider {
         self.snapshot.save_search_workspace(target, workspace)
     }
 
+    fn path_search_ready(&self) -> audiolib_core::Result<bool> {
+        self.snapshot.path_search_ready()
+    }
+
     fn search(&self, request: &SearchRequest) -> audiolib_core::Result<SearchPage> {
         self.snapshot.search(request)
     }

@@ -267,6 +267,17 @@ pub enum SearchScope {
     Path,
 }
 
+impl SearchScope {
+    /// Wire value for settings and (when not `main`) the HTTP `scope` parameter.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::All => "all",
+            Self::Path => "path",
+        }
+    }
+}
+
 fn scope_is_main(scope: &SearchScope) -> bool {
     *scope == SearchScope::Main
 }
@@ -576,6 +587,11 @@ pub trait DataProvider: Send + Sync {
     /// lifetime, before and after reading; `None` disables cache reuse.
     fn search_revision(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+    /// Whether directory-segment path search (`scope=all|path`) is usable on this
+    /// provider. Default false; GUI hides「仅路径」and degrades「全部」to main.
+    fn path_search_ready(&self) -> Result<bool> {
+        Ok(false)
     }
     fn search(&self, request: &SearchRequest) -> Result<SearchPage>;
     /// Search that can be superseded by a newer GUI request. Providers may additionally

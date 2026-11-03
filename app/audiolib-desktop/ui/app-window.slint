@@ -888,6 +888,11 @@ export component AppWindow inherits Window {
     in property <float> startup-motion;
     in-out property <bool> chinese: false;
     in-out property <string> query: "";
+    // §2.5 search scope: 0=全部(all), 1=仅文件名(main), 2=仅路径(path). Path is
+    // offered only while path-search-available (s9 directory index ready).
+    in-out property <int> search-scope-index: 0;
+    in property <bool> path-search-available: false;
+    callback search-scope-changed();
     in property <[SearchTaskRow]> search-tasks: [];
     in property <int> active-search-task-index: 0;
     in property <[SavedSearchTaskRow]> saved-search-tasks: [];
@@ -2610,6 +2615,15 @@ main-scroll := ScrollView {
                     edited => { root.search-requested(false); }
                     accepted => { root.search-requested(true); }
                 }
+                ComboBox {
+                    width: root.chinese ? 96px * Theme.ui-scale : 110px * Theme.ui-scale;
+                    enabled: !root.background-blocked;
+                    model: root.path-search-available
+                        ? (root.chinese ? ["全部", "仅文件名", "仅路径"] : ["All", "Filename", "Path"])
+                        : (root.chinese ? ["全部", "仅文件名"] : ["All", "Filename"]);
+                    current-index <=> root.search-scope-index;
+                    selected => { root.search-scope-changed(); }
+                }
                 if root.query != "": Action { width: 48px * Theme.ui-scale; label: root.chinese ? "清空" : "Clear"; clicked => { root.query = ""; root.search-requested(true); search-input.focus(); } }
                 Label { width: 42px * Theme.ui-scale; text: "Ctrl F"; horizontal-alignment: center; font-size: Theme.font(10); }
                 Action { width: 76px * Theme.ui-scale; primary: true; label: root.searching ? (root.chinese ? "搜索中" : "Searching") : (root.chinese ? "搜索" : "Search"); clicked => { root.search-requested(true); } }
@@ -3364,6 +3378,15 @@ main-scroll := ScrollView {
                             placeholder-text: root.chinese ? "搜索声音、标签和 Metadata…" : "Search sounds, tags and Metadata…";
                             edited => { root.search-requested(false); }
                             accepted => { root.search-requested(true); }
+                        }
+                        ComboBox {
+                            width: root.chinese ? 88px * Theme.ui-scale : 100px * Theme.ui-scale;
+                            enabled: !root.background-blocked;
+                            model: root.path-search-available
+                                ? (root.chinese ? ["全部", "仅文件名", "仅路径"] : ["All", "Filename", "Path"])
+                                : (root.chinese ? ["全部", "仅文件名"] : ["All", "Filename"]);
+                            current-index <=> root.search-scope-index;
+                            selected => { root.search-scope-changed(); }
                         }
                         if root.query != "": StudioAction { width: 26px * Theme.ui-scale; subtle: true; label: "×"; action-label: root.chinese ? "清空" : "Clear"; clicked => { root.query = ""; root.search-requested(true); studio-search-input.focus(); } }
                         if root.content-width >= 1280px * Theme.ui-scale: Label { width: 40px * Theme.ui-scale; text: "Ctrl F"; horizontal-alignment: center; font-size: Theme.font(10); }
