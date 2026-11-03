@@ -380,7 +380,9 @@ fn default_theme_applied_from_rust_is_pixel_identical() {
 #[test]
 fn theme_registry_round_trips_and_lists_both_languages() {
     use crate::theme::{apply_theme, theme_id, theme_index};
-    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME, THEME_IDS};
+    use audiolib_core::config::{
+        BUILTIN_THEMES, DEFAULT_THEME, PlayerStyle, THEME_IDS, WorkbenchStyle,
+    };
 
     init_software_backend();
     let ui = AppWindow::new().unwrap();
@@ -391,7 +393,11 @@ fn theme_registry_round_trips_and_lists_both_languages() {
         assert_eq!(ui.get_theme_index(), index as i32);
         assert_eq!(
             ui.global::<crate::Theme>().get_modern_style(),
-            *id == STUDIO_THEME
+            BUILTIN_THEMES[index].workbench_style == WorkbenchStyle::Studio
+        );
+        assert_eq!(
+            ui.global::<crate::Theme>().get_modern_player(),
+            BUILTIN_THEMES[index].player_style == PlayerStyle::Studio
         );
         let english = ui.get_theme_names();
         let chinese = ui.get_theme_names_cn();
@@ -409,12 +415,13 @@ fn theme_registry_round_trips_and_lists_both_languages() {
     apply_theme(&ui, "removed-theme");
     assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_THEME));
     assert!(!ui.global::<crate::Theme>().get_modern_style());
+    assert!(!ui.global::<crate::Theme>().get_modern_player());
 }
 
 #[test]
 fn theme_switch_preserves_transport_view_and_typography() {
     use crate::theme::{apply_font_sizes, apply_theme};
-    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use audiolib_core::config::{DEFAULT_THEME, DEFAULT_V2_THEME, STUDIO_THEME};
 
     init_software_backend();
     let ui = AppWindow::new().unwrap();
@@ -447,7 +454,13 @@ fn theme_switch_preserves_transport_view_and_typography() {
     ui.show().unwrap();
 
     let mut frames = Vec::new();
-    for id in [DEFAULT_THEME, STUDIO_THEME, DEFAULT_THEME] {
+    for id in [
+        DEFAULT_THEME,
+        STUDIO_THEME,
+        DEFAULT_V2_THEME,
+        STUDIO_THEME,
+        DEFAULT_THEME,
+    ] {
         apply_theme(&ui, id);
         assert_eq!(ui.get_selected_id().as_str(), "42");
         assert!(ui.get_audio_ready());
@@ -475,7 +488,7 @@ fn theme_switch_preserves_transport_view_and_typography() {
         "The theme must switch the player presentation"
     );
     assert!(
-        frames[0] == frames[2],
+        frames[0] == frames[4],
         "Switching back must restore the classic presentation"
     );
     ui.hide().unwrap();
@@ -484,7 +497,7 @@ fn theme_switch_preserves_transport_view_and_typography() {
 #[test]
 fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
     use crate::theme::apply_theme;
-    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use audiolib_core::config::{DEFAULT_THEME, DEFAULT_V2_THEME, STUDIO_THEME};
     use std::time::Duration;
 
     init_software_backend();
@@ -515,25 +528,27 @@ fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
     save_snapshot(&ui, "theme-feedback-expired.png");
     assert!(expired == baseline, "the rejection feedback must expire");
 
-    apply_theme(&ui, DEFAULT_THEME);
-    let _classic = frame(); // Commit destruction before selecting Studio again.
-    apply_theme(&ui, STUDIO_THEME);
-    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
-    save_snapshot(&ui, "theme-feedback-restored.png");
-    assert!(
-        frame() == baseline,
-        "switching must not replay an expired event"
-    );
+    for id in [DEFAULT_THEME, DEFAULT_V2_THEME] {
+        apply_theme(&ui, id);
+        let _classic = frame(); // Commit destruction before selecting Studio again.
+        apply_theme(&ui, STUDIO_THEME);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+        save_snapshot(&ui, &format!("theme-feedback-restored-from-{id}.png"));
+        assert!(
+            frame() == baseline,
+            "switching from {id} must not replay an expired event"
+        );
 
-    apply_theme(&ui, DEFAULT_THEME);
-    let _classic = frame();
-    ui.invoke_audition_input_rejected(3);
-    apply_theme(&ui, STUDIO_THEME);
-    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
-    assert!(
-        frame() == baseline,
-        "a classic event must not reach a new Studio"
-    );
+        apply_theme(&ui, id);
+        let _classic = frame();
+        ui.invoke_audition_input_rejected(3);
+        apply_theme(&ui, STUDIO_THEME);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+        assert!(
+            frame() == baseline,
+            "a classic event from {id} must not reach a new Studio"
+        );
+    }
 
     // Repeated events in the selected Studio still deliver after its reset.
     ui.invoke_audition_input_rejected(2);
@@ -545,7 +560,7 @@ fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
 #[test]
 fn appearance_theme_keyboard_selection_applies_the_requested_style() {
     use crate::theme::{apply_theme, theme_id, theme_index};
-    use audiolib_core::config::{DEFAULT_THEME, STUDIO_THEME};
+    use audiolib_core::config::{DEFAULT_THEME, DEFAULT_V2_THEME, STUDIO_THEME};
     use slint::platform::{Key, WindowEvent};
     use std::{cell::Cell, rc::Rc};
 
@@ -577,8 +592,24 @@ fn appearance_theme_keyboard_selection_applies_the_requested_style() {
         assert_eq!(requests.get(), 1);
         assert_eq!(ui.get_theme_index(), theme_index(STUDIO_THEME));
         assert!(ui.global::<crate::Theme>().get_modern_style());
+        assert!(ui.global::<crate::Theme>().get_modern_player());
         let language = if chinese { "cn" } else { "en" };
         save_snapshot(&ui, &format!("appearance-studio-{language}.png"));
+        for event in [
+            WindowEvent::KeyPressed {
+                text: Key::DownArrow.into(),
+            },
+            WindowEvent::KeyReleased {
+                text: Key::DownArrow.into(),
+            },
+        ] {
+            ui.window().dispatch_event(event);
+        }
+        assert_eq!(requests.get(), 2);
+        assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_V2_THEME));
+        assert!(ui.global::<crate::Theme>().get_modern_style());
+        assert!(!ui.global::<crate::Theme>().get_modern_player());
+        save_snapshot(&ui, &format!("appearance-default-v2-{language}.png"));
         for event in [
             WindowEvent::KeyPressed {
                 text: Key::UpArrow.into(),
@@ -589,9 +620,24 @@ fn appearance_theme_keyboard_selection_applies_the_requested_style() {
         ] {
             ui.window().dispatch_event(event);
         }
-        assert_eq!(requests.get(), 2);
+        assert_eq!(requests.get(), 3);
+        assert_eq!(ui.get_theme_index(), theme_index(STUDIO_THEME));
+        assert!(ui.global::<crate::Theme>().get_modern_style());
+        assert!(ui.global::<crate::Theme>().get_modern_player());
+        for event in [
+            WindowEvent::KeyPressed {
+                text: Key::UpArrow.into(),
+            },
+            WindowEvent::KeyReleased {
+                text: Key::UpArrow.into(),
+            },
+        ] {
+            ui.window().dispatch_event(event);
+        }
+        assert_eq!(requests.get(), 4);
         assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_THEME));
         assert!(!ui.global::<crate::Theme>().get_modern_style());
+        assert!(!ui.global::<crate::Theme>().get_modern_player());
         save_snapshot(&ui, &format!("appearance-default-{language}.png"));
         ui.hide().unwrap();
     }

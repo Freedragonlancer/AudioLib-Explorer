@@ -1856,7 +1856,7 @@ export component AppWindow inherits Window {
 
     // Menu targets are immutable IDs/paths captured when opened, never row positions.
     private property <length> content-width: (Theme.modern-style ? 1432px : 1408px) * Theme.ui-scale;
-    property <bool> wide-layout: root.content-width - (Theme.modern-style ? 56px * Theme.ui-scale : 0px) - root.sidebar-width - (root.inspector-visible ? root.inspector-width + 24px * Theme.ui-scale : 12px * Theme.ui-scale) >= 720px * Theme.ui-scale;
+    property <bool> wide-layout: root.content-width - root.sidebar-width - (root.inspector-visible ? root.inspector-width + 24px * Theme.ui-scale : 12px * Theme.ui-scale) >= 720px * Theme.ui-scale;
     property <bool> short-layout: false;
     changed height => { root.short-layout = self.height < 800px * Theme.ui-scale; }
     changed width => { root.content-width = self.width - (Theme.modern-style ? 8px : 32px) * Theme.ui-scale; }
@@ -1867,7 +1867,7 @@ export component AppWindow inherits Window {
     in-out property <bool> folders-section-expanded: true;
     in-out property <bool> libraries-section-expanded: true;
     in-out property <float> folders-section-ratio: 0.55;
-    private property <length> sidebar-budget: root.content-width - (Theme.modern-style ? 576px : 520px) * Theme.ui-scale - (root.inspector-visible ? 24px * Theme.ui-scale : 12px * Theme.ui-scale);
+    private property <length> sidebar-budget: root.content-width - 520px * Theme.ui-scale - (root.inspector-visible ? 24px * Theme.ui-scale : 12px * Theme.ui-scale);
     out property <length> sidebar-width: clamp(root.sidebar-preferred-width, 170px * Theme.ui-scale, min(480px * Theme.ui-scale, root.sidebar-budget - (root.inspector-visible ? 240px * Theme.ui-scale : 0px)));
     out property <length> inspector-width: clamp(root.inspector-preferred-width, 240px * Theme.ui-scale, min(600px * Theme.ui-scale, root.sidebar-budget - root.sidebar-width));
     // The right sidebar holds two pages: `inspector-visible` opens the sidebar and
@@ -3303,7 +3303,7 @@ main-scroll := ScrollView {
             zoom-at(factor,fraction) => { root.waveform-wheel-zoom-requested(factor,fraction); }
             pan(value) => { root.waveform-pan-requested(value); }
             peaks => {
-                if Theme.modern-style {
+                if Theme.modern-player {
                     root.audition-expanded = true;
                     root.audition-preferred-height = max(root.audition-preferred-height, 260px * Theme.ui-scale);
                 }
@@ -3339,7 +3339,7 @@ main-scroll := ScrollView {
         spacing: 3px * Theme.ui-scale;
         // One workbench toolbar; the operating system retains its own window controls.
         Rectangle { height: 56px * Theme.ui-scale; background: Theme.toolbar-surface;
-            Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.toolbar-backdrop; image-fit: fill; accessible-role: none; }
+            Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.toolbar-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
             HorizontalLayout { padding-left: 8px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                 HorizontalLayout { spacing: 10px * Theme.ui-scale; horizontal-stretch: 0;
                     Image { width: 34px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2; source: @image-url("../../../resources/icons/AudioLibExplorer.png"); image-fit: contain; accessible-role: none; }
@@ -3412,19 +3412,8 @@ main-scroll := ScrollView {
             }
         }
         studio-workspace := HorizontalLayout { vertical-stretch: 1; min-height: studio-results-column.min-height; spacing: 0px;
-            studio-navigation-rail := Rectangle { width: 56px * Theme.ui-scale; background: Theme.rail-surface;
-                Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.rail-backdrop; image-fit: fill; accessible-role: none; }
-                VerticalLayout { padding: 6px * Theme.ui-scale; padding-top: 16px * Theme.ui-scale; spacing: 12px * Theme.ui-scale; alignment: start;
-                    StudioIconSegment { width: 42px * Theme.ui-scale; height: 42px * Theme.ui-scale; icon: @image-url("icons/home.svg"); label: root.chinese ? "全部声音" : "All sounds"; enabled: !root.background-blocked; clicked => { root.library-sidebar-page = 0; root.favorites-only = false; root.all-library-requested(); } }
-                    StudioIconSegment { width: 42px * Theme.ui-scale; height: 42px * Theme.ui-scale; icon: @image-url("icons/folder.svg"); label: root.chinese ? "显示 / 收起素材目录" : "Show / hide library sidebar"; active: root.sidebar-visible && root.library-sidebar-page == 0; enabled: !root.background-blocked; clicked => { if root.library-sidebar-page != 0 { root.sidebar-visible = true; root.library-sidebar-page = 0; } else { root.sidebar-visible = !root.sidebar-visible; } } }
-                    StudioIconSegment { width: 42px * Theme.ui-scale; height: 42px * Theme.ui-scale; icon: @image-url("icons/star.svg"); label: root.chinese ? "收藏页" : "Favorites page"; active: root.library-sidebar-page == 1; enabled: !root.background-blocked; clicked => { root.sidebar-visible = true; root.library-sidebar-page = 1; root.favorites-category = 0; root.favorites-only = true; root.all-library-requested(); } }
-                    StudioIconSegment { width: 42px * Theme.ui-scale; height: 42px * Theme.ui-scale; icon: @image-url("icons/history.svg"); label: root.chinese ? "最近播放" : "Recent playback"; enabled: !root.background-blocked; clicked => { root.open-history(1); } }
-                    StudioIconSegment { width: 42px * Theme.ui-scale; height: 42px * Theme.ui-scale; icon: @image-url("icons/settings.svg"); label: root.chinese ? "外观设置" : "Appearance settings"; enabled: !root.background-blocked; clicked => { root.settings-page = 1; root.settings-visible = true; } }
-                    Rectangle { vertical-stretch: 1; }
-                }
-            }
             studio-library-sidebar := Rectangle { visible: root.sidebar-visible; width: root.sidebar-width; background: Theme.library-surface; border-radius: 3px * Theme.ui-scale; clip: true;
-                Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.library-backdrop; image-fit: fill; accessible-role: none; }
+                Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.library-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
                 VerticalLayout { padding: 12px * Theme.ui-scale; padding-top: (root.short-layout ? 8px : 12px) * Theme.ui-scale; padding-bottom: (root.short-layout ? 8px : 12px) * Theme.ui-scale; spacing: (root.short-layout ? 4px : 8px) * Theme.ui-scale;
                     HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                         Image { width: 18px * Theme.ui-scale; source: @image-url("icons/folder.svg"); colorize: Theme.accent; image-fit: contain; accessible-role: none; }
@@ -3947,7 +3936,7 @@ main-scroll := ScrollView {
                 finished => { root.pane-layout-changed(); }
             }
             if root.inspector-visible: studio-details-sidebar := Rectangle { width: root.inspector-width; background: Theme.inspector-surface; border-radius: 3px * Theme.ui-scale; clip: true;
-                Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.inspector-backdrop; image-fit: fill; accessible-role: none; }
+                Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.inspector-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
                 VerticalLayout { padding: 10px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
                     HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
                         Text { horizontal-stretch: 1; min-width: 0px; text: root.filters-visible ? (root.chinese ? "筛选声音" : "Filters") : (root.chinese ? "声音详情" : "Sound details"); font-size: Theme.font(15); font-weight: 500; color: Theme.ink; vertical-alignment: center; overflow: elide; }
@@ -4142,7 +4131,7 @@ main-scroll := ScrollView {
                 }
             }
         }
-        SidebarSectionDivider {
+        if Theme.modern-player: SidebarSectionDivider {
             height: 5px * Theme.ui-scale; pane-height: -root.audition-preferred-height;
             label: root.chinese ? "调整试听播放器高度" : "Resize audition dock";
             help: root.chinese ? "向上拖动展开波形，向下拖动收起" : "Drag up to expand the waveform; drag down to compact";
@@ -4153,7 +4142,7 @@ main-scroll := ScrollView {
             active: Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: root.audition-preferred-height;
+            height: Theme.modern-player ? root.audition-preferred-height : (root.short-layout ? 190px : 222px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
@@ -4186,7 +4175,7 @@ main-scroll := ScrollView {
             zoom-at(factor,fraction) => { root.waveform-wheel-zoom-requested(factor,fraction); }
             pan(value) => { root.waveform-pan-requested(value); }
             peaks => {
-                if Theme.modern-style {
+                if Theme.modern-player {
                     root.audition-expanded = true;
                     root.audition-preferred-height = max(root.audition-preferred-height, 260px * Theme.ui-scale);
                 }
