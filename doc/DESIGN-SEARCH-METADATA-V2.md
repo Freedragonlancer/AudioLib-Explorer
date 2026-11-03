@@ -1,6 +1,7 @@
 # 搜索与 Metadata v2 设计（schema 8 → 9）
 
 > 状态：设计稿，只含文档，不含业务代码。基于 `beta` 的 `4ff16a5`。
+> 2026-11-03 更新：合入服务端基准结论（路径采用方案 B，909,342 行服务端库副本实测）和 PR #208 附录 A（`b16c742`）的厂商表格调研要求。
 > 相关 issue：[#204](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/204)、[#205](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/205)、[#206](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/206)、[#207](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/207)。
 > 测试计划：[PR #208](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/208)（`doc/TEST-SEARCH-METADATA-V2.md`，分支 `test/search-metadata-v2-plan`）。§11 逐条回答了它第 10 节「待设计确认的问题」。
 > 标「待服务端确认」「待 Debug 补」「待 Paul 决定」的地方，在评审时补齐。
@@ -69,17 +70,17 @@
 
 ### 2.4 文件夹改名
 - 改名/移动在库里表现为 `folders` 变化 + 一批 `audio_files.folder_id` 或路径更新。
-- 新增列 `audio_files.path_tokenized`（见 §5），由触发器 `audio_files_au` 的 UPDATE OF 列表包含 `folder_id`、`path_key` 时重算。
-- 目录名本身改名（`folders.name` 变）时，后台任务按 `folder_closure` 找后代文件，每批 5,000 行更新 `path_tokenized`，不在 UI 线程做。批内一个事务；中断后按 `library_meta.path_reindex_progress` 续跑。
+- 新增列 `audio_files.path_tokenized`（见 §5），由触发器 `audio_files_au` 的 UPDATE OF 列表包含 `folder_id`、`path_key` 时重算，并同步写独立路径 FTS 表 `audio_path_search`（§10.1 方案 B）。
+- 目录名本身改名（`folders.name` 变）时，后台任务按 `folder_closure` 找后代文件，每批 5,000 行更新 `path_tokenized` 和 `audio_path_search`，不在 UI 线程做。批内一个事务；中断后按 `library_meta.path_reindex_progress` 续跑。
 - 改名期间旧路径仍可搜到，属可接受的短暂不一致。
 
 ### 2.5 「只搜文件名」
 - 提供。搜索框旁加一个过滤项「范围：全部 / 仅文件名 / 仅路径」，默认「全部」。
-- 实现为 FTS 列过滤 `{filename filename_tokenized} : ...`，不改 SQL 结构。
+- 「仅文件名」= 主表 `audio_search` 列过滤 `{filename filename_tokenized} : ...`；「仅路径」= 只查 `audio_path_search`；「全部」= 主表与路径表并行查询后合并（§10.4）。
 - 状态写入 settings，服务器模式同样可用（列过滤在本地 snapshot 上执行）。
 
 ### 2.6 排序权重
-见 §10.3 的 bm25 列权重表。原则：文件名 > 用户标签 > 厂商描述/内嵌描述 > 路径 > 备注。路径命中只做补充，不能把「文件夹名碰巧相同」的大量文件压到真正文件名命中之前。
+路径不进主表，不参与主表 bm25 权重（§10.3）。路径表单独排序，合并时路径命中排在同分文件名命中之后、只做补充，不能把「文件夹名碰巧相同」的大量文件压到真正文件名命中之前。
 
 ## 3. Vorbis / FLAC / OGG 标签
 
@@ -149,13 +150,18 @@
 - 覆盖的模板：UCS 官方表、Soundminer 导出、BaseHead 导出、Pro Sound Effects / Boom Library / Sound Ideas 常见的产品清单（具体列名样本待 Debug 收集真实表格后补测试夹具）。
 - 无法识别的列保存到 `vendor_metadata.extra_json`，不丢。
 
-### 4.2 编码、BOM、分隔符
-- 编码：有 BOM 按 BOM（UTF-8/UTF-16LE/BE）；无 BOM 先试严格 UTF-8，失败再试 GB18030，再失败 Windows-1252；预览里显示检测结果并允许手选。依赖 `encoding_rs`（Firefox 同款，MIT/Apache）。
-- 分隔符：对前 64 KiB 统计 `,`、`;`、`\t`、`|` 在引号外的出现次数，选每行计数方差最小且 ≥1 的；`.tsv` 直接用 `\t`。CSV 解析用 `csv` crate。
-- XLSX/XLS：用 `calamine`（纯 Rust，读 xlsx/xls/ods）；只读第一个非空工作表，预览可选工作表。
+### 4.2 编码、分隔符、格式识别（依据 PR #208 附录 A，`b16c742`）
+- 编码：有 BOM 按 BOM（UTF-8、UTF-16LE、UTF-16BE；样本里有 UTF-16LE 表）；无 BOM 先试严格 UTF-8，失败用 GBK 兜底；预览显示检测结果并允许手选。依赖 `encoding_rs`（MIT/Apache）。
+- 分隔符：嗅探逗号、Tab、分号（对前 64 KiB 统计引号外出现次数，选每行计数稳定且 ≥1 的）。CSV 解析用 `csv` crate。
+- **按文件头识别格式，不看扩展名**：`.csv.xls` 可能是文本 CSV，`.xls` 可能是 AppleDouble 资源文件。按魔数区分 xlsx（ZIP）、xls（OLE2/CFB）、文本。
+- 跳过 `._*`（AppleDouble）、`~$*`（Office 锁文件）、`@syno*`（Synology 元数据目录）。
+- 单文件失败（损坏、加密、格式不认）只记录到批次报告，不中断整个批次。
+- XLSX/XLS 用 `calamine`：**每个 sheet 在前 10 行内找表头**；多 sheet 逐个处理（样本中 57 个表有多 sheet），不只读第一个。
 
 ### 4.3 匹配文件
-匹配键按优先级尝试，预览中显示每行用了哪个键：
+匹配顺序（附录 A）：厂商根目录 / 全库文件名索引**精确匹配** → **去扩展名匹配** → 可选**模糊匹配**（默认关）。仍未匹配的行在预览标「未匹配」（样本中约 7% 的表存在未匹配行）。多语言表按路径合并：各语言文本都合进 `vendor_text`（都能搜到），详情显示优先中文、其次英文。
+
+细化的匹配键按优先级尝试，预览中显示每行用了哪个键：
 1. 校验和（表里有且库里已有该哈希时）。库内目前没有统一内容哈希，见 §11，初版可不启用。
 2. 相对路径（相对导入时选择的根目录或文件夹，NFC + 大小写不敏感 + 分隔符统一为 `/`）。
 3. 文件名（含扩展名；表里无扩展名时按文件名主干匹配）。
@@ -173,19 +179,21 @@
 - 三者都进 FTS，优先级只影响详情页显示哪一个值，不影响能否搜到。
 
 ### 4.5 预览、批次、回滚、幂等
+- 服务端流程：`preview` → `mapping`（确认/修改列映射）→ `commit`（带 `Idempotency-Key`，重复提交结果不变）→ 可 `rollback`。
 - 两阶段：`解析 + 匹配`（只读，生成预览：总行数、匹配/一对多/冲突/未匹配计数，前 200 行样本）→ 用户确认后 `应用`。
 - 每次应用生成一条 `vendor_import_batches` 记录（文件名、文件 SHA-256、列映射 JSON、行数、匹配数、状态、时间）。
 - 每条 `vendor_metadata` 记录带 `batch_id`；回滚 = 删除该批次的行并恢复被它覆盖的上一批次值（按 `superseded_by` 链）。
 - 幂等：同一文件 SHA-256 + 同一映射 + 同一目标范围再次导入时，提示「已导入过」，确认后结果不变（写入用 `INSERT ... ON CONFLICT(audio_file_id, field) DO UPDATE`，值相同不产生新版本）。
 
-### 4.6 大表性能
-- 流式解析，不整表进内存；匹配用库里一次性构建的 `filename → id` 和 `rel_path → id` 哈希表（90 万条约 100–150MB，待 Debug 实测）。
-- 写入每批 5,000 行一个事务，批间释放写锁并检查取消；FTS 同步由触发器完成。
-- 目标：10 万行表预览 < 10s，应用 < 60s（待实测）。
+### 4.6 大表性能与上限
+- 上限：单文件 50MB 或 20 万行，超出拒绝并在预览说明。**对 xls 同样生效**：calamine 只有 xlsx 可用 `worksheet_cells_reader` 流式读，xls 整 sheet 入内存。
+- CSV/xlsx 流式解析；匹配用库里一次性构建的 `filename → id` 和 `rel_path → id` 哈希表。
+- 写入每 5,000 行一批一个事务，批间释放写锁并检查取消；FTS 同步由触发器/应用层完成。
+- 实测（附录 A 样本）：449 个表（xls 209 / csv 127 / xlsx 103）+ 10 个 Soundminer txt，共 23 万行，全解析 0.8s，峰值内存 ≤30MB；合成 20 万行 xlsx 0.79s / 249MB。
 
 ### 4.7 服务器模式在哪导入
 - 在**服务端**导入。客户端是只读 snapshot（`remote_mode.rs:5`），不能写。
-- 初版走服务端管理页（局域网管理页）上传，或服务端 CLI；客户端只在 `can_manage` 为真时显示入口并上传文件到新接口 `POST /vendor-imports`（预览）和 `POST /vendor-imports/{id}/apply`，接口形状待服务端确认。导入完成后服务端 snapshot 修订号变化，客户端按现有机制重新同步。
+- 初版走服务端管理页（局域网管理页）上传，或服务端 CLI；客户端只在 `can_manage` 为真时显示入口并上传文件到新接口 `POST /vendor-imports`（预览）和 `POST /vendor-imports/{id}/apply`，服务端管理侧流程为 preview → mapping → commit（`Idempotency-Key`）→ rollback（§4.5）。导入完成后服务端 snapshot 修订号变化，客户端按现有机制重新同步。
 
 ### 4.8 公式与注入
 - 读：XLSX 公式单元格只取缓存值，不计算；没有缓存值则当空。CSV 中以 `=`、`+`、`-`、`@`、`\t`、`\r` 开头的值按文本保存（不执行任何东西，我们本来也不执行）。
@@ -215,32 +223,39 @@ CREATE INDEX idx_vendor_metadata_batch ON vendor_metadata(batch_id);
 ALTER TABLE audio_files ADD COLUMN path_tokenized TEXT;
 ALTER TABLE audio_files ADD COLUMN vendor_text TEXT;   -- 当前有效厂商值的拼接，供 FTS
 ```
-- FTS 新增两列（本地 `FTS_SCHEMA` 和 snapshot `CREATE_FTS` 同步）：`path_tokens`、`vendor_tokenized`。Vorbis 字段并入现有 source 列（`bwf_description_tokenized`），不新增列。
+```sql
+-- 方案 B：路径独立 FTS 表，主表 audio_search 列结构除 vendor_tokenized 外不变
+CREATE VIRTUAL TABLE audio_path_search USING fts5(path_tokenized, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2');
+```
+- 主 FTS 只新增一列 `vendor_tokenized`（本地 `FTS_SCHEMA` 和 snapshot `CREATE_FTS` 同步）；路径进独立表 `audio_path_search`（rowid = `audio_files.id`），不用 trigram。Vorbis 字段并入现有 source 列（`bwf_description_tokenized`），不新增列。
 - 触发器 `audio_files_au` 的 UPDATE OF 列表增加 `folder_id`、`path_tokenized`、`vendor_text`；`vendor_metadata` 写入后由应用层在同一事务内更新 `audio_files.vendor_text`（不在 vendor 表上挂触发器，避免批量导入时逐行重写 FTS 多次）。
 
 ### 5.2 全文索引重建：分批 + 续跑
-- 现有 `rebuild_search`（`schema.rs:997`）是单事务，`doc/api/README.md:454` 也明确「不支持分批提交或跨进程断点续做」。v9 改为：
+- 现状整库单事务重建耗时 499s（服务端副本实测），且回滚备份峰值多占 12.4GB。v9 改为可续跑分批：
   1. 迁移事务 A：建新表、加列、写 `library_meta.v9_progress = {stage, last_id}`，`user_version` 暂不改。
-  2. 回填阶段：按 `id` 升序每批 20,000 行（沿用 `source_tags` 的批大小）计算 `path_tokenized`、`vendor_text`，每批一个事务并更新 `last_id`。
-  3. 建新 FTS 表 `audio_search_v9`（新名字），按 `rowid` 分批 `INSERT INTO audio_search_v9(rowid, ...) SELECT ...`，同样记 `last_id`。
-  4. 收尾事务 B：校验行数、`DROP TABLE audio_search`、`ALTER TABLE audio_search_v9 RENAME TO audio_search`、重建触发器、写修订号、`user_version = 9`。
-- 任一阶段中断，下次打开从 `v9_progress` 续跑；阶段 1–3 期间旧 FTS 和旧触发器仍在，库仍可被 v9 程序只读搜索（降级到 schema 8 行为）。
+  2. 回填：按 `id` 升序分批计算 `path_tokenized`、`vendor_text`，每批一个事务并更新 `last_id`。
+  3. 建新主 FTS 表 `audio_search_v9` 分批写入；建 `audio_path_search` 分批写入。
+  4. 收尾事务 B：校验行数、换表（`DROP` + `RENAME`，实测 7ms）、重建触发器、写修订号、`user_version = 9`；之后 `optimize`。
+- 批大小：**自适应，每批 ≤2s**。基准用固定 2 万行：46 批共 227s，单批 p50 4.2s、p95 12.1s，超过 2s 目标，所以改为按上一批耗时调整行数。
+- `VACUUM`（实测 327s）**不放进迁移**，留作可选维护操作。
+- 任一阶段中断，下次打开从 `v9_progress` 续跑；阶段 1–3 期间旧 FTS 和旧触发器仍在，库仍可按 schema 8 行为只读搜索。
 - 续跑期间新写入：迁移持有现有 administration lease（`AGENTS.md`、`doc/Rust_Upgrade_Recovery.md:20`），排除跨实例写入；扫描在迁移完成前不启动。
 
 ### 5.3 备份、回滚、磁盘空间
 - 走现有共享迁移执行器（`doc/api/Library_Migration_Compatibility.md:189`）：迁移前生成 `audiolib-rollback-*.db`，quick_check + foreign_key_check 后记录路径。
-- 空间预检用 `space::ensure_free_space`（`space.rs:62`），所需 = 备份大小（≈ 主库）+ 新 FTS 预估（旧 FTS × 1.3）+ 峰值 WAL（预估一批行量 × 2），不承诺固定倍数（与 `Rust_Upgrade_Recovery.md:82` 一致）。
+- 空间预检用 `space::ensure_free_space`（`space.rs:62`），迁移前预检**空余空间 ≥ 库大小 × 1.3**，不足则不开始并给出 §7.1 空间不足提示。服务端管理端点 `/admin/api/migration`（状态/启动）、`/admin/api/search/rebuild`（单独重建搜索）。
 - 失败：未到阶段 4 时直接放弃新表/新列（`DROP TABLE audio_search_v9`，新列保留为 NULL 无害），库仍是 schema 8；阶段 4 失败由事务回滚。备份保留，不自动删除。
 
-### 5.4 耗时估算（10GB 级）
+### 5.4 耗时（服务端副本 909,342 行实测）
 
-| 阶段 | 90 万条估算 | 实测（待服务端补） |
-| --- | --- | --- |
-| 备份 + 校验 | 与现有迁移相同 | ____ |
-| 路径/厂商文本回填 | ____ | ____ |
-| 新 FTS 分批写入 | ____ | ____ |
-| 收尾 + 校验 | ____ | ____ |
-| 合计 | ____ | ____ |
+| 阶段 | 实测 |
+| --- | --- |
+| 现状整库重建（对照） | 499s，回滚备份峰值多占 12.4GB |
+| 主 FTS 分批（2 万行/批，46 批） | 227s（单批 p50 4.2s，p95 12.1s）；改自适应 ≤2s/批 |
+| 换表 | 7ms |
+| 主 FTS optimize | 20s |
+| 路径表插入 + optimize | 65s + 2.4s |
+| VACUUM（不进迁移） | 327s |
 
 测量工具：`cargo run --release --locked -p audiolib-db --bin upgrade-benchmark -- --source <snapshot.db>`（`doc/api/README.md:454`），在服务端副本上跑，Windows 与 macOS 分开记录。
 
@@ -253,26 +268,28 @@ ALTER TABLE audio_files ADD COLUMN vendor_text TEXT;   -- 当前有效厂商值�
 | WAV 内嵌字段 | 不变，不重扫 |
 
 ### 5.6 修订号与 snapshot 格式
-- `source_search_rev`：2 → 3（`source_metadata_search_text` 增加 vorbis group，且 FTS 列变化）。
+- `source_search_rev`：2 → 3。
 - `source_tags_rev`：保持 2，除非 `SOURCE_TAG_KEYS` 增加 UCS 键（若增加则 → 3，按 `schema.rs:467` 的分批续跑机制补算）。
 - `SEARCH_TEXT_VERSION`（tokenization）：3 → 4（路径 NFC/全角归一改变了分词输入）。
-- snapshot：schema 9 的 contentless FTS 多两列；`compatibility.rs` 新增 feature `path_search=1`、`vendor_metadata=1`、`vorbis_metadata=1`，`snapshot_format_id` 随之变化。v9 客户端可读 schema 3–9 的 snapshot；读 ≤8 的 snapshot 时不提供路径搜索（在 owned 副本里不做路径回填，避免客户端同步后长时间升级——是否在客户端补算见 §11）。
+- snapshot 格式：`ale-s9-cld1-t3-m2-p1-a1-sp1`；feature：`search_path`、`vorbis_tags`、`vendor_metadata`。
+- 过渡期服务端**另出 s8 兼容快照**：由 s9 派生，滤掉非 wav 行，多占约 10.6GB；建议保留**一个版本周期**（待 Paul 确认）。
+- v9 客户端可读 schema 3–9 的 snapshot；读 ≤8 的 snapshot 时不提供路径搜索。
 
 ## 6. 版本协商与降级
 
 | 情况 | 行为 |
 | --- | --- |
-| 旧客户端（≤ v0.8.x，只懂 schema 8）连新服务器（schema 9） | 服务端按 `Compatibility_Markers.md` §4 的标记判定，旧客户端读到不认识的 snapshot 格式 ID → 现有「需要升级客户端」提示；**服务端不降级产出 schema 8 snapshot**（待服务端确认是否要保留一段过渡期双格式） |
-| 新客户端连旧服务器（schema 8） | 正常同步 schema 8 snapshot；`path_search` 等 feature 缺失 → 隐藏「仅路径」选项、隐藏厂商导入入口；不提示 |
+| 旧客户端（≤ v0.8.x，只懂 schema 8）连新服务器（schema 9） | 服务端按 `Compatibility_Markers.md` §4 的标记判定，旧客户端读到不认识的 snapshot 格式 ID → 现有「需要升级客户端」提示；过渡期服务端额外产出 **s8 兼容快照**（由 s9 派生，滤掉非 wav 行），旧客户端继续同步；过渡期结束后旧客户端才看到「需要升级客户端」 |
+| 新客户端连旧服务器（schema 8） | 正常同步 schema 8 snapshot；`search_path` 等 feature 缺失 → 隐藏「仅路径」选项、隐藏厂商导入入口；不提示 |
 | 服务器正在迁移 | `/health` 显示迁移中，业务端点 503 + `Retry-After`；客户端保持上次 snapshot 离线可用，状态栏显示「服务器正在升级」，按 Retry-After 退避轮询 |
 | 本地库是旧 schema（≤8） | 打开时弹迁移确认框（§7.1）；用户拒绝 → 以只读方式打开不行（迁移执行器要求升级），所以拒绝 = 不打开该库，可切换到其它库 |
 | 本地库 schema 比程序新（≥10） | 现有逻辑：报不支持（`schema.rs:923`），提示更新程序 |
 | 本地库迁移中断 | 下次打开自动续跑，显示续跑进度，不再次确认、不再次备份 |
 
-capabilities 新增字段（**均待服务端确认**）：
+capabilities 新增字段（feature 名已由服务端确认，其余形状以服务端实现为准）：
 ```json
 {
-  "compatibility": { "features": { "path_search": 1, "vendor_metadata": 1, "vorbis_metadata": 1 } },
+  "compatibility": { "features": { "search_path": 1, "vendor_metadata": 1, "vorbis_tags": 1 } },
   "schema_version": 9,
   "migration": { "state": "idle|running|failed", "stage": "backfill|fts|finalize", "progress": 0.42 },
   "vendor_import": { "enabled": true, "max_upload_bytes": 52428800 }
@@ -345,34 +362,45 @@ capabilities 新增字段（**均待服务端确认**）：
 
 **搜索延迟不能变长，可以多占 CPU。** 合并门槛：schema 9 的 p95 不能比 schema 8 慢。
 
-### 10.1 路径搜索方案对比（以服务端实测为准）
+### 10.1 路径搜索方案：采用 B（独立 FTS 表）
 
-| | A：拆词后进 FTS 独立列 `path_tokens` | B：trigram 独立 FTS 表 |
+服务端在 909,342 行副本上实测（8790 实例的副本，不在生产库上跑）。**以下延迟数字均为热缓存 p50、B 为串行实现**；p95 和并行 B 尚未测，见 §10.6 合入闸门。
+
+| | A：主表 `audio_search` 加 `path_tokens` 列 | B：独立 FTS 表 `audio_path_search`，主表不变 |
 | --- | --- | --- |
-| 做法 | §2.2 拆词，与其它列同一张 `audio_search` | `CREATE VIRTUAL TABLE audio_path_tri USING fts5(path, tokenize='trigram')` |
-| 子串匹配 | 只到词（前缀用 `token*`） | 任意 ≥3 字符子串 |
-| 中文 | jieba 分词，与文件名一致 | 3 字以上子串；1–2 字不命中 |
-| 查询代价 | 与现有一次 MATCH 合并，无额外 JOIN | 需要第二次 MATCH 再与主结果合并 |
-| 索引体积 | 小（目录名高度重复） | 大（每字符 1 个 trigram，估算为路径文本 3 倍以上） |
-| 结论 | **推荐默认** | 作为备选原型一起测 |
+| 不搜路径时的影响 | 高频片段拖慢：`hdd_A_Lib` 3.8 → 192ms；bm25 排序 205–828ms；普通查询慢 2–11% | 主表不变，无影响 |
+| 中文 | 汉字无列过滤导致「爆炸」1 → 676 条 | 不影响主表结果 |
+| 查询代价 | 一次 MATCH | 第二只读连接并行查询路径表，额外 2–6ms；并行后 ≈ 主查询 |
+| 体积（以 FTS 2028.8MB 为基准） | +12.0% | +14.2%（289MB），≤15% |
+| 结论 | 否决 | **推荐** |
 
-禁止 `LIKE '%...%'` 全表扫描。
+热 p50（ms，现状 / A / B 串行）：
+
+| 查询 | 现状 | A | B 串行 |
+| --- | --- | --- | --- |
+| explosion | 17.4 | 17.6 | 20.5 |
+| whoosh | 20.3 | 21.8 | 26.1 |
+| Sonomar | 90.5 | 101 | 95.1 |
+
+- 前缀查询 `expl*` 6–7ms，不需要 prefix 索引。不用 trigram。
+- 禁止 `LIKE '%...%'` 全表扫描。
 
 ### 10.2 字段合并
-Vorbis 字段并入 `bwf_description_tokenized`（source 文本），厂商字段进 `vendor_tokenized` 列，二者都在现有 `audio_search` 里，一次 MATCH，不额外 JOIN `vendor_metadata`。
+Vorbis 字段并入 `bwf_description_tokenized`，厂商字段进主表 `vendor_tokenized` 列，一次 MATCH，不 JOIN `vendor_metadata`。路径只在 `audio_path_search`。
 
 ### 10.3 排序权重（bm25 列权重，初值，待基准调整）
-FTS 列顺序：filename, filename_tokenized, user_tags, user_tags_tokenized, bwf_description, bwf_description_tokenized, ixml_scene, ixml_scene_tokenized, ixml_take, ixml_take_tokenized, user_notes, user_notes_tokenized, path_tokens, vendor_tokenized
+主表 FTS 列顺序：filename, filename_tokenized, user_tags, user_tags_tokenized, bwf_description, bwf_description_tokenized, ixml_scene, ixml_scene_tokenized, ixml_take, ixml_take_tokenized, user_notes, user_notes_tokenized, vendor_tokenized
 
-`bm25(audio_search, 10, 10, 6, 6, 3, 3, 2, 2, 1, 1, 1, 1, 1.5, 3)`
+`bm25(audio_search, 10, 10, 6, 6, 3, 3, 2, 2, 1, 1, 1, 1, 3)`
 
-- 原文列只存不索引的部分保持现状；权重对其无影响。
-- 替换 `lib.rs:2085`、`:2115` 处的 `bm25(audio_search)`；`search_bm25.rs` 的长度缓存同步加两列。
+- 路径列改为独立表，**不再参与主表权重**；路径表单独 bm25，合并规则见 §10.4。
+- 替换 `lib.rs:2085`、`:2115` 处的 `bm25(audio_search)`；`search_bm25.rs` 的长度缓存同步加 `vendor_tokenized`。
 
 ### 10.4 分页、防抖、取消
 - 分页：保持现有 200 条一页（`Rust_GUI_Search_Performance.md:23`）。相关度排序继续 `ORDER BY score,rowid LIMIT ? OFFSET ?`；深翻页（OFFSET > 2,000）改为 keyset：`WHERE (score,rowid) > (?,?)`。
 - 防抖保持 30ms；新请求取消旧请求，沿用每 2,000 VM 指令检查取消标志的进度回调（`Rust_GUI_Search_Performance.md:50`）。
 - 「仅文件名/仅路径」切换视为新查询，同样取消旧查询。
+- 方案 B「全部」范围：主表与路径表在两个只读连接上并行查询，结果按 rowid 去重、合并排序（文件名/主表命中优先）；keyset 翻页游标覆盖两表，保证不漏不重；取消时**两个连接都停**。
 
 ### 10.5 后台任务不卡搜索
 导入、路径重算、FLAC/OGG 补抽取都在后台 worker：每批 ≤5,000 行、单批事务 < 200ms 目标，批间 `sleep(0)` 让出；WAL 模式下读不被写阻塞；搜索 worker 优先级不变。
@@ -387,16 +415,17 @@ FTS 列顺序：filename, filename_tokenized, user_tags, user_tags_tokenized, bw
 | 短词 | ak, 门, ui |
 | 路径片段 | Weapons Guns, Foley/Cloth, 环境 城市 |
 
-每类各 25 条，冷启动（新进程、OS 缓存不清，按现有口径说明）和热缓存各跑。
+每类各 25 条，热缓存和冷缓存（清 OS 文件缓存后）各跑。
 
-| 指标 | schema 8 冷 | schema 8 热 | schema 9 A 冷 | schema 9 A 热 | schema 9 B 冷 | schema 9 B 热 |
-| --- | --- | --- | --- | --- | --- | --- |
-| p50 (ms) | | | | | | |
-| p95 (ms) | | | | | | |
-| FTS 索引体积 | | | | | | |
-| snapshot 解压体积 | | | | | | |
+已测（热 p50、B 串行）见 §10.1。
 
-数据由服务端在生产实例的库副本上实测后补（不在生产库上跑）。
+### 10.7 方案 B 合入闸门（服务端负责补测；Debug 列入 #208 P0）
+1. 补测 **p95**：热缓存，以及清 OS 文件缓存后的冷缓存。
+2. 按**并行实现**实测 B：p95 不高于现状（schema 8）。
+3. 正确性：两表结果合并排序且去重；keyset 翻页不漏不重；取消时两个连接都停止。
+4. FTS 体积增长 ≤15%（B 实测 +14.2%）。
+
+数据在服务端库副本上实测（不在生产库上跑）。
 
 ## 11. 子 PR 拆分
 
@@ -412,30 +441,31 @@ FTS 列顺序：filename, filename_tokenized, user_tags, user_tags_tokenized, bw
 | PR8 | 服务端厂商导入接口 + 客户端上传入口 | PR5、PR7 |
 
 ### 待 Paul 决定
-1. 根目录名是否进路径索引（默认不进）。
-2. FLAC/OGG 默认收录，还是放设置开关（影响现有用户重扫后条目数变化）。
-3. 是否支持 `.opus`（需额外解码 crate）。
-4. 厂商导入 vs 内嵌 metadata 的显示优先级（草案：用户 > 厂商 > 内嵌）。
-5. 校验和匹配是否进初版（库内无统一内容哈希，计算需读全部文件）。
-6. 服务端是否在过渡期同时产出 schema 8 snapshot 给旧客户端。
-7. 客户端读 ≤8 的 snapshot 时是否本地补算路径列。
-8. 路径方案 A/B 的最终选择（以实测为准）。
-9. 下表 Q1–Q6（PR #208 §10）的推荐答案是否采纳。
+1. 路径是否采用方案 B（独立 FTS 表）——**推荐 B**，A 已被基准否决（§10.1）。
+2. 根目录名是否加可选开关进索引——建议做开关，**默认关**（不进）。
+3. s8 兼容快照保留多久——建议保留**一个版本周期**。
+4. FLAC/OGG 默认收录，还是放设置开关。
+5. 是否支持 `.opus`（需额外解码 crate）。
+6. 厂商导入 vs 内嵌 metadata 的显示优先级（草案：用户 > 厂商 > 内嵌）。
+7. 校验和匹配是否进初版。
+8. 下表 Q1–Q6（PR #208 §10）的推荐答案是否采纳。
 
 
 ### 对照测试计划第 10 节的推荐答案（同时列入待 Paul 决定）
 
 | # | 问题（PR #208 §10） | 推荐答案 | 理由 |
 | --- | --- | --- | --- |
-| Q1 | 路径 token 权重；是否加停用词 | `path_tokens` 权重 1.5（文件名 10、标签 6、内嵌/厂商 3，见 §10.3）。**加停用词**：静态表（`SFX`、`Sound Effects`、`Audio`、`WAV`、`Users`、`Library`、`Libraries`、`音效`、`素材` 等，存为资源文件，与 `audio_terms.txt` 并列）；根目录名不进索引（§2.1） | 通用段在 90 万条里几乎处处出现，bm25 区分度近 0 但会膨胀 posting list，拖慢查询、增大索引 |
+| Q1 | 路径 token 权重；是否加停用词 路径进独立表 `audio_path_search`，不参与主表权重（§10.3）。**加停用词**：静态表（`SFX`、`Sound Effects`、`Audio`、`WAV`、`Users`、`Library`、`Libraries`、`音效`、`素材` 等，存为资源文件，与 `audio_terms.txt` 并列）；根目录名不进索引（§2.1） | 通用段在 90 万条里几乎处处出现，bm25 区分度近 0 但会膨胀 posting list，拖慢查询、增大索引 |
 | Q2 | 中文 bigram 还是词典分词 | **词典分词**：沿用 jieba-rs + `resources/audio_terms.txt`，与现有所有 `_tokenized` 列一致；不引入 bigram | 查询端已用 jieba（`lib.rs:3097`），两种分词混用会造成同词不同 token；bigram 索引体积明显更大，很难守住 15% 上限 |
 | Q3 | Vorbis 白名单还是全量 | **白名单进索引，全量存 JSON**：§3.2 表中标「进 FTS」的键入索引；其它键原样存 `wav_metadata.vorbis`，只显示 | 防止 `ENCODER`、`REPLAYGAIN_*`、超长自定义键污染排序和膨胀索引；全量保存保证以后扩白名单只需重算、不需重扫 |
 | Q4 | CSV 与用户标签冲突谁优先；CSV 存哪 | **用户标注优先**，永不覆盖用户列。CSV 存独立表 `vendor_metadata`（带批次，可回滚），当前有效值反规范化到 `audio_files.vendor_text`，进 FTS 列 `vendor_tokenized`，**搜索不 JOIN** | 写进 tags 会无法按批回滚，也会和用户标签混淆；独立列满足「不多出 JOIN」 |
-| Q5 | 旧客户端遇 schema 9 snapshot：硬拒绝还是只读降级 | **硬拒绝并提示升级**（走现有 snapshot 格式 ID 判定，`Compatibility_Markers.md` §4），继续使用本机已有的旧 snapshot 离线浏览 | 已发布的旧客户端不认识新 FTS 列和 feature，无法安全读取；「只读降级」只能靠服务端另产 schema 8 snapshot，成本是双份 10GB 级产物，不推荐 |
-| Q6 | 索引增长上限 15% 是否可接受 | **接受**，作为合并门槛之一（与 p95 不变慢并列）。方案 A 预计在内；方案 B（trigram）若超 15% 即淘汰 | 目录名重复度高，拆词后新增 token 少；snapshot 现约 10.6GB，15% ≈ 1.6GB 是同步和磁盘可承受的上界 |
+| Q5 | 旧客户端遇 schema 9 snapshot：硬拒绝还是只读降级 | **硬拒绝并提示升级**（走现有 snapshot 格式 ID 判定，`Compatibility_Markers.md` §4），继续使用本机已有的旧 snapshot 离线浏览 | 已发布的旧客户端不认识新 FTS 列和 feature，无法安全读取；过渡期服务端另出 s8 兼容快照（多占约 10.6GB，建议保留一个版本周期），过渡期内旧客户端仍可同步 |
+| Q6 | 索引增长上限 15% 是否可接受 | **接受**，作为合并门槛之一（与 p95 不变慢并列）。实测 A +12.0%、B +14.2%，均在内；不用 trigram | 目录名重复度高，拆词后新增 token 少；snapshot 现约 10.6GB，15% ≈ 1.6GB 是同步和磁盘可承受的上界 |
 
 ### 待服务端补
-- §5.4 迁移耗时、§10.6 基准表、capabilities 新字段形状、厂商导入接口形状、是否双格式 snapshot。
+- §10.7 方案 B 闸门：热/冷 p95、并行 B 实测、合并/翻页/取消正确性。
+- 自适应批大小（≤2s/批）实现后的迁移耗时复测。
 
 ### 待 Debug 补
-- §8 边缘情况、§4.1 真实厂商表样本、§4.6 内存与耗时实测。
+- #208 P0：方案 B 闸门测试（§10.7）。
+- §8 边缘情况；厂商表真实样本夹具（附录 A 已提供调研数据）。
