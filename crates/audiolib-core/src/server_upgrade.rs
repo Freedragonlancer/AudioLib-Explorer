@@ -21,10 +21,23 @@ pub const SEARCH_PATH_REVISION: u32 = 1;
 pub const SEARCH_PATH_FEATURE: &str = "search_path";
 pub const VORBIS_TAGS_FEATURE: &str = "vorbis_tags";
 pub const VENDOR_METADATA_FEATURE: &str = "vendor_metadata";
-/// Ordinary responses during a migration carry the migration state here.
-pub const SCHEMA_MIGRATION_HEADER: &str = "x-audiolib-schema-migration";
-/// Legacy short migration state header; still accepted when the new one is absent.
+/// Ordinary responses during a migration carry the migration state here
+/// (agreed name, 11-03).
 pub const MIGRATION_HEADER: &str = "x-audiolib-migration";
+/// Read-only compatibility alias; accepted only when the canonical header is absent.
+pub const SCHEMA_MIGRATION_HEADER: &str = "x-audiolib-schema-migration";
+/// Header names read for the migration state, canonical first.
+pub const MIGRATION_HEADER_NAMES: [&str; 2] = [MIGRATION_HEADER, SCHEMA_MIGRATION_HEADER];
+
+/// Look up the migration header (canonical first, then the alias) and parse it.
+pub fn migration_header_from<'a>(
+    get: impl Fn(&str) -> Option<&'a str>,
+) -> Option<SchemaMigrationHeader> {
+    MIGRATION_HEADER_NAMES
+        .iter()
+        .find_map(|name| get(name))
+        .and_then(parse_schema_migration_header)
+}
 /// `unavailable` on an "all" scope search answered from the main table only.
 pub const PATH_SEARCH_HEADER: &str = "x-audiolib-path-search";
 /// Vendor metadata import API root (#214 / #208); subpaths hang off this.
@@ -292,7 +305,7 @@ pub fn parse_upgrade_available(value: &str) -> Option<UpgradeAvailable> {
     })
 }
 
-/// A parsed `x-audiolib-schema-migration` (or legacy) header value.
+/// A parsed `x-audiolib-migration` (or `x-audiolib-schema-migration` alias) header value.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaMigrationHeader {
     pub state: MigrationState,
@@ -1184,6 +1197,32 @@ mod tests {
         assert_eq!(parse_upgrade_available("yes").unwrap().version, None);
         assert_eq!(parse_upgrade_available(""), None);
         assert_eq!(parse_upgrade_available(&"9".repeat(513)), None);
+    }
+
+    #[test]
+    fn migration_header_canonical_and_alias_names() {
+        assert_eq!(MIGRATION_HEADER, "x-audiolib-migration");
+        assert_eq!(SCHEMA_MIGRATION_HEADER, "x-audiolib-schema-migration");
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            migration_header_from(move |name| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| *v)
+            })
+        };
+        let canonical = lookup(&[("x-audiolib-migration", "running; done=1; total=4")]).unwrap();
+        assert_eq!(canonical.state, MigrationState::Running);
+        let alias = lookup(&[("x-audiolib-schema-migration", "deferred; target=9")]).unwrap();
+        assert_eq!(alias.state, MigrationState::Deferred);
+        assert_eq!(alias.target, Some(9));
+        let both = lookup(&[
+            ("x-audiolib-schema-migration", "deferred"),
+            ("x-audiolib-migration", "switching"),
+        ])
+        .unwrap();
+        assert_eq!(both.state_label, "switching");
+        assert_eq!(lookup(&[("x-other", "running")]), None);
     }
 
     #[test]

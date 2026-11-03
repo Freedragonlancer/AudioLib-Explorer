@@ -6,8 +6,8 @@
 use crate::{Capabilities, RemoteClient};
 use audiolib_core::compatibility::SNAPSHOT_FORMAT_HEADER;
 use audiolib_core::server_upgrade::{
-    self, MIGRATION_HEADER, PATH_SEARCH_HEADER, SCHEMA_MIGRATION_HEADER, SchemaMigrationHeader,
-    ServerUpgradeInput, ServerUpgradeStatus, UPGRADE_AVAILABLE_HEADER, UpgradeAvailable,
+    self, PATH_SEARCH_HEADER, SchemaMigrationHeader, ServerUpgradeInput, ServerUpgradeStatus,
+    UPGRADE_AVAILABLE_HEADER, UpgradeAvailable,
 };
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -42,11 +42,9 @@ pub(crate) fn record(api: &str, headers: &ureq::http::HeaderMap) {
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= MAX_FORMAT_HEADER_BYTES)
         .map(str::to_string);
-    let migration = headers
-        .get(SCHEMA_MIGRATION_HEADER)
-        .or_else(|| headers.get(MIGRATION_HEADER))
-        .and_then(|value| value.to_str().ok())
-        .and_then(server_upgrade::parse_schema_migration_header);
+    let migration = server_upgrade::migration_header_from(|name| {
+        headers.get(name).and_then(|value| value.to_str().ok())
+    });
     let path_unavailable = headers
         .get(PATH_SEARCH_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -165,6 +163,7 @@ pub fn retry_during_migration<T>(
 mod tests {
     use super::*;
     use crate::test_server::{TestResponse, TestServer, marker_capabilities};
+    use audiolib_core::server_upgrade::MIGRATION_HEADER;
     use audiolib_core::server_upgrade::{
         MigrationRefusal, MigrationState, Notice, PLAN_B_V9_FORMAT, PathSearch,
     };
