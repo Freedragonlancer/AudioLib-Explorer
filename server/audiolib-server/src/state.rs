@@ -456,6 +456,13 @@ pub fn clone_error(error: &Error) -> Error {
         Error::Io(io) => Error::Io(std::io::Error::new(io.kind(), io.to_string())),
         Error::Cancelled => Error::Cancelled,
         Error::Busy(m) => Error::Busy(m.clone()),
+        Error::Migration {
+            refusal,
+            retry_after,
+        } => Error::Migration {
+            refusal: *refusal,
+            retry_after: *retry_after,
+        },
         Error::NotFound(m) => Error::NotFound(m.clone()),
         Error::NewerDatabase {
             what,

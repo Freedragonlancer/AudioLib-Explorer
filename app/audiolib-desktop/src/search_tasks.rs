@@ -1515,6 +1515,7 @@ impl Controller {
                 let cancel = Arc::new(AtomicBool::new(false));
                 *self.search_cancel.lock().unwrap() = cancel.clone();
                 *self.facet_job.lock().unwrap() = Some(SearchJob {
+                    path_probe: None,
                     request: self.request.lock().unwrap().clone(),
                     generation: self.search_generation.load(Ordering::Acquire),
                     not_before: Instant::now(),

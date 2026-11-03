@@ -148,9 +148,7 @@ pub fn retry_during_migration<T>(
             Err(error) if left > 1 => match error.migration_refusal() {
                 Some((refusal, retry_after)) => {
                     left -= 1;
-                    sleep(Duration::from_secs(
-                        retry_after.unwrap_or(refusal.default_retry_after()),
-                    ));
+                    sleep(Duration::from_secs(refusal.retry_after(retry_after)));
                 }
                 None => return Err(error),
             },
@@ -482,6 +480,8 @@ mod tests {
                 }
                 ("POST", "/admin/api/migration/pause") => {
                     assert_eq!(request.header("x-audiolib-admin"), Some("1"));
+                    assert_eq!(request.header("content-type"), Some("application/json"));
+                    assert_eq!(request.body, b"{}");
                     TestResponse::json(200, PAUSED_REPORT)
                 }
                 _ => TestResponse::json(404, r#"{"error_code":"NOT_FOUND","message":"no"}"#),
@@ -565,5 +565,39 @@ mod tests {
         assert!(!error.write_may_have_committed());
         assert_eq!(waits, vec![Duration::from_secs(30)]);
         assert!(error.localized(true).contains("路径搜索暂不可用"));
+    }
+
+    #[test]
+    fn path_probe_uses_path_scope_and_preserves_retry_after_and_cancellation() {
+        let server = TestServer::start(|request| {
+            assert_eq!(request.path, "/api/v1/search");
+            assert_eq!(request.method, "POST");
+            assert!(
+                request
+                    .header(audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER)
+                    .is_some()
+            );
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["scope"], "path");
+            assert_eq!(body["limit"], 1);
+            TestResponse::json(
+                503,
+                r#"{"error_code":"migration_in_progress","message":"wait"}"#,
+            )
+            .with_header("retry-after", "30")
+            .with_header(MIGRATION_HEADER, "running")
+        });
+        let client = RemoteClient::new(&server.url, "").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let error = client.probe_path_search(&cancel).unwrap_err();
+        assert_eq!(
+            error.migration_refusal(),
+            Some((MigrationRefusal::PathSearchInProgress, Some(30)))
+        );
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            client.probe_path_search(&cancel),
+            Err(crate::RemoteError::Cancelled)
+        ));
     }
 }

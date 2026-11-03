@@ -147,6 +147,8 @@ fn fixture() -> Fixture {
             .compute_list_waveform(file.id, Arc::new(AtomicBool::new(false)))
             .unwrap();
     }
+    // Prepare the accepted-library state before exercising navigation controls.
+    provider.rebuild_directory_search().unwrap();
     let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1600.0, 900.0));

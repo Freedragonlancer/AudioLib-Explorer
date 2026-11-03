@@ -1592,6 +1592,43 @@ export component AppWindow inherits Window {
     in property <string> remote-notice: "";
     in property <int> remote-notice-kind: 0;
     callback remote-notice-action();
+    in property <bool> remote-notice-refresh: false;
+    in-out property <bool> migration-visible: false;
+    in property <bool> migration-busy: false;
+    in property <bool> migration-can-manage: false;
+    in property <string> migration-state;
+    in property <string> migration-text;
+    in property <float> migration-progress: 0;
+    private property <string> migration-confirm-action;
+    callback migration-requested();
+    callback migration-action(string);
+    /// §7.1 local upgrade dialog: 0 hidden, 1 confirm, 2 progress, 3 cancel?, 4 failed, 5 no space.
+    in property <int> lu-state: 0;
+    in property <string> lu-title;
+    in property <string> lu-body;
+    in property <string> lu-question;
+    in property <string> lu-progress-text;
+    in property <float> lu-progress: 0;
+    in property <string> lu-diagnostics;
+    in property <string> lu-accept-label;
+    in property <string> lu-decline-label;
+    in property <string> lu-copy-label;
+    callback lu-accept();
+    callback lu-decline();
+    callback lu-cancel-requested();
+    callback lu-cancel-answer(bool);
+    callback lu-close();
+    /// §4 vendor import: menu gate (manage + capability) and dialog state
+    /// (0 hidden, 1 choose, 2 busy, 3 preview, 4 committed).
+    in property <bool> vendor-import-available: false;
+    in property <bool> vi-available: false;
+    in property <int> vi-state: 0;
+    in property <string> vi-text;
+    callback vendor-import-requested();
+    callback vi-pick();
+    callback vi-commit();
+    callback vi-rollback();
+    callback vi-close();
     callback remote-notice-dismissed();
     callback data-source-address-edited();
     callback data-source-address-form-changed();
@@ -1906,8 +1943,8 @@ export component AppWindow inherits Window {
     changed selected-id => { root.notes-visible = false; root.source-metadata-visible = false; }
     // A native menu remains outside the in-window overlays. Guard its items and
     // shortcuts too, so modal dialogs cannot launch overlapping operations.
-    property <bool> menu-ready: !root.startup-busy && !root.closing && !root.library-busy && !root.library-visible && !root.confirmation-visible && !root.batch-visible && !root.import-visible && !root.settings-visible && !root.peaks-visible && !root.about-visible && !root.help-visible && !root.debug-visible && !root.search-task-rename-visible && !root.search-workspace-loading;
-    out property <bool> background-blocked: root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible || root.update-visible || root.search-task-rename-visible || root.search-workspace-loading;
+    property <bool> menu-ready: !root.startup-busy && !root.closing && !root.library-busy && root.lu-state == 0 && root.vi-state == 0 && !root.migration-visible && !root.library-visible && !root.confirmation-visible && !root.batch-visible && !root.import-visible && !root.settings-visible && !root.peaks-visible && !root.about-visible && !root.help-visible && !root.debug-visible && !root.search-task-rename-visible && !root.search-workspace-loading;
+    out property <bool> background-blocked: root.lu-state != 0 || root.vi-state != 0 || root.migration-visible || root.startup-busy || root.closing || root.library-busy || root.library-visible || root.confirmation-visible || root.batch-visible || root.import-visible || root.settings-visible || root.peaks-visible || root.about-visible || root.help-visible || root.debug-visible || root.update-visible || root.search-task-rename-visible || root.search-workspace-loading;
     in property <string> selected-id: "";
     property <AudioRow> context-file;
     property <FolderRow> context-folder;
@@ -2310,7 +2347,9 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.chinese ? "移除当前目录（保留 WAV）…" : "Remove current folder (keep WAV)…") + root.removal-suffix; enabled: root.menu-ready && root.selected-folder-path != "" && root.removal-allowed; activated => { root.folder-action-requested(root.selected-folder-path, 1); } }
         }
         Menu { title: root.chinese ? "音效库" : "Library"; enabled: root.menu-ready;
+            MenuItem { title: root.chinese ? "服务器音效库迁移…" : "Server library migration…"; enabled: root.menu-ready && root.remote-mode; activated => { root.migration-requested(); } }
             MenuItem { title: root.chinese ? "音效库管理…" : "Manage sound library…"; enabled: root.menu-ready; shortcut: @keys(Control + D); activated => { root.open-library(0); } }
+            MenuItem { title: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; enabled: root.menu-ready && root.remote-mode && root.vendor-import-available; activated => { root.vendor-import-requested(); } }
             MenuItem { title: root.chinese ? "查看缺失文件 / 修复引用" : "Missing files / repair references"; enabled: root.menu-ready; activated => { root.show-missing-files(); } }
             // Not an everyday choice, so it lives here rather than in the list header; the
             // title names the current choice and the list footer flags a non-default one.
@@ -2458,6 +2497,7 @@ global-menu-view := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
 global-menu-library := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
         Menu { title: root.chinese ? "音效库" : "Library"; enabled: root.menu-ready;
             MenuItem { title: root.chinese ? "音效库管理…" : "Manage sound library…"; enabled: root.menu-ready; activated => { root.open-library(0); } }
+            MenuItem { title: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; enabled: root.menu-ready && root.vendor-import-available; activated => { root.vendor-import-requested(); } }
             MenuItem { title: root.chinese ? "查看缺失文件 / 修复引用" : "Missing files / repair references"; enabled: root.menu-ready; activated => { root.show-missing-files(); } }
             // Not an everyday choice, so it lives here rather than in the list header; the
             // title names the current choice and the list footer flags a non-default one.
@@ -2541,8 +2581,11 @@ main-scroll := ScrollView {
         }
         if root.remote-mode && root.remote-notice != "": Rectangle { height: 34px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning;
             HorizontalLayout { padding-left: 10px * Theme.ui-scale; padding-right: 2px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; padding-bottom: 2px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                Text { horizontal-stretch: 1; min-width: 0px; text: root.remote-notice; color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; }
-                if root.remote-notice-kind != 0: Action { width: 96px * Theme.ui-scale; primary: root.remote-notice-kind == 1; enabled: root.menu-ready && !root.ds-syncing; label: root.remote-notice-kind == 1 ? (root.ds-sync-paused ? (root.chinese ? "继续同步" : "Continue") : (root.chinese ? "同步" : "Sync")) : root.remote-notice-kind == 3 ? (root.chinese ? "设置…" : "Settings…") : (root.chinese ? "立即重试" : "Retry now"); clicked => { root.remote-notice-action(); } }
+                Rectangle { horizontal-stretch: 1; min-width: 0px;
+                    Text { text: root.remote-notice; color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; }
+                    TouchArea { enabled: root.remote-notice-kind != 0 && root.menu-ready && !root.ds-syncing; mouse-cursor: self.enabled ? pointer : default; accessible-role: button; accessible-label: root.remote-notice; clicked => { root.remote-notice-action(); } }
+                }
+                if root.remote-notice-kind != 0: Action { width: 96px * Theme.ui-scale; primary: root.remote-notice-kind == 1; enabled: root.menu-ready && !root.ds-syncing; label: root.remote-notice-kind == 1 ? (root.remote-notice-refresh ? (root.chinese ? "刷新" : "Refresh") : root.ds-sync-paused ? (root.chinese ? "继续同步" : "Continue") : (root.chinese ? "同步" : "Sync")) : root.remote-notice-kind == 3 ? (root.chinese ? "设置…" : "Settings…") : (root.chinese ? "立即重试" : "Retry now"); clicked => { root.remote-notice-action(); } }
                 Action { width: 30px * Theme.ui-scale; subtle: true; label: "×"; accessible-label: root.chinese ? "关闭提示" : "Dismiss notice"; clicked => { root.remote-notice-dismissed(); } }
             }
         }
@@ -3411,8 +3454,11 @@ main-scroll := ScrollView {
         }
         if root.remote-mode && root.remote-notice != "": Rectangle { height: 34px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning;
             HorizontalLayout { padding-left: 10px * Theme.ui-scale; padding-right: 2px * Theme.ui-scale; padding-top: 2px * Theme.ui-scale; padding-bottom: 2px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                Text { horizontal-stretch: 1; min-width: 0px; text: root.remote-notice; color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; }
-                if root.remote-notice-kind != 0: StudioAction { width: 96px * Theme.ui-scale; primary: root.remote-notice-kind == 1; enabled: root.menu-ready && !root.ds-syncing; label: root.remote-notice-kind == 1 ? (root.ds-sync-paused ? (root.chinese ? "继续同步" : "Continue") : (root.chinese ? "同步" : "Sync")) : root.remote-notice-kind == 3 ? (root.chinese ? "设置…" : "Settings…") : (root.chinese ? "立即重试" : "Retry now"); clicked => { root.remote-notice-action(); } }
+                Rectangle { horizontal-stretch: 1; min-width: 0px;
+                    Text { text: root.remote-notice; color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; }
+                    TouchArea { enabled: root.remote-notice-kind != 0 && root.menu-ready && !root.ds-syncing; mouse-cursor: self.enabled ? pointer : default; accessible-role: button; accessible-label: root.remote-notice; clicked => { root.remote-notice-action(); } }
+                }
+                if root.remote-notice-kind != 0: StudioAction { width: 96px * Theme.ui-scale; primary: root.remote-notice-kind == 1; enabled: root.menu-ready && !root.ds-syncing; label: root.remote-notice-kind == 1 ? (root.remote-notice-refresh ? (root.chinese ? "刷新" : "Refresh") : root.ds-sync-paused ? (root.chinese ? "继续同步" : "Continue") : (root.chinese ? "同步" : "Sync")) : root.remote-notice-kind == 3 ? (root.chinese ? "设置…" : "Settings…") : (root.chinese ? "立即重试" : "Retry now"); clicked => { root.remote-notice-action(); } }
                 StudioAction { width: 30px * Theme.ui-scale; subtle: true; label: "×"; accessible-label: root.chinese ? "关闭提示" : "Dismiss notice"; clicked => { root.remote-notice-dismissed(); } }
             }
         }
@@ -4961,6 +5007,9 @@ main-scroll := ScrollView {
                                                     Action { horizontal-stretch: 1; enabled: !root.library-busy && !root.remote-mode; label: root.chinese ? "导入标注…" : "Import annotations…"; clicked => { root.library-action(10); } }
                                                     Action { width: 92px * Theme.ui-scale; enabled: !root.library-busy; label: root.chinese ? "刷新信息" : "Refresh"; clicked => { root.library-action(0); } }
                                                 }
+                                                if root.remote-mode && root.vendor-import-available: HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
+                                                    Action { horizontal-stretch: 1; enabled: !root.library-busy; label: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; clicked => { root.vendor-import-requested(); } }
+                                                }
                                                 TextEdit { height: 110px * Theme.ui-scale; read-only: true; text: root.management-report; }
                                             }
                                         }
@@ -5441,6 +5490,75 @@ main-scroll := ScrollView {
                 }
                 Text { text: root.startup-message; color: Theme.dim; wrap: word-wrap; vertical-stretch: 1; }
                 Text { text: root.startup-elapsed; color: Theme.muted; font-size: Theme.font(12); }
+            }
+        }
+    }
+    if root.migration-visible: Rectangle {
+        background: Theme.overlay;
+        TouchArea { }
+        Rectangle { width: min(640px * Theme.ui-scale, parent.width - 32px); height: migration-col.preferred-height; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 8px; border-width: 1px; border-color: Theme.border;
+            migration-col := VerticalLayout { padding: 20px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                Text { text: root.chinese ? "服务器音效库迁移" : "Server library migration"; color: Theme.ink; font-size: Theme.font(18); }
+                Text { text: root.migration-text; color: Theme.ink; wrap: word-wrap; }
+                Rectangle { height: 6px * Theme.ui-scale; background: Theme.raised;
+                    Rectangle { width: parent.width * clamp(root.migration-progress, 0, 1); background: Theme.accent; }
+                }
+                Text { text: root.chinese ? "进度每 3 秒刷新。迁移期间可搜索主表，路径搜索等待索引发布。开始升级时服务器会预检并备份。" : "Progress refreshes every 3 seconds. Main search remains available while path search waits for publication. Starting runs server preflight and backup."; color: Theme.dim; wrap: word-wrap; }
+                if root.migration-confirm-action != "": Text { text: root.chinese ? "确认执行该操作？服务器会保留恢复所需的迁移状态。" : "Confirm this operation? The server retains migration recovery state."; color: Theme.warning; wrap: word-wrap; }
+                HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
+                    if root.migration-can-manage && root.migration-confirm-action == "": HorizontalLayout { spacing: 6px * Theme.ui-scale;
+                        if root.migration-state == "idle" || root.migration-state == "deferred" || root.migration-state == "rolled_back": Action { label: root.chinese ? "开始升级" : "Start upgrade"; enabled: !root.migration-busy; clicked => { root.migration-action("start"); } }
+                        if root.migration-state == "running": Action { label: root.chinese ? "暂停" : "Pause"; enabled: !root.migration-busy; clicked => { root.migration-action("pause"); } }
+                        if root.migration-state == "paused" || root.migration-state == "cancelled" || root.migration-state == "failed": Action { label: root.chinese ? "继续升级" : "Resume"; enabled: !root.migration-busy; clicked => { root.migration-action("resume"); } }
+                        if root.migration-state == "running" || root.migration-state == "paused": Action { label: root.chinese ? "取消迁移" : "Cancel migration"; enabled: !root.migration-busy; clicked => { root.migration-confirm-action = "cancel"; } }
+                        if root.migration-state == "done" || root.migration-state == "failed" || root.migration-state == "cancelled" || root.migration-state == "paused": Action { label: root.chinese ? "回滚" : "Roll back"; enabled: !root.migration-busy; clicked => { root.migration-confirm-action = "rollback"; } }
+                    }
+                    if root.migration-confirm-action != "": Action { label: root.chinese ? "确认" : "Confirm"; enabled: !root.migration-busy; clicked => { root.migration-action(root.migration-confirm-action); root.migration-confirm-action = ""; } }
+                    if root.migration-confirm-action != "": Action { label: root.chinese ? "返回" : "Back"; clicked => { root.migration-confirm-action = ""; } }
+                    Action { label: root.chinese ? "刷新进度" : "Refresh progress"; enabled: !root.migration-busy; clicked => { root.migration-action(""); } }
+                    Action { label: root.chinese ? "关闭" : "Close"; enabled: !root.migration-busy; clicked => { root.migration-visible = false; root.migration-confirm-action = ""; } }
+                }
+            }
+        }
+    }
+    if root.lu-state != 0 && !root.library-visible: Rectangle {
+        background: Theme.overlay;
+        TouchArea { }
+        Rectangle { width: 480px * Theme.ui-scale; height: lu-col.preferred-height; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 8px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
+            lu-col := VerticalLayout { padding: 16px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+                Text { text: root.lu-title; color: Theme.ink; font-size: Theme.font(14); font-weight: 600; wrap: word-wrap; }
+                Text { text: root.lu-state == 6 ? (root.chinese ? "该音效库已关闭，请选择其它音效库或继续升级。" : "This library is closed. Choose another library or continue upgrading.") : root.lu-state == 3 ? root.lu-question : root.lu-body; color: root.lu-state >= 4 ? Theme.warning : Theme.dim; wrap: word-wrap; }
+                if root.lu-state == 2 || root.lu-state == 3: Rectangle { height: 6px * Theme.ui-scale; background: Theme.raised; border-radius: 3px * Theme.ui-scale;
+                    Rectangle { x: 0; width: parent.width * clamp(root.lu-progress, 0, 1); background: Theme.accent; border-radius: 3px * Theme.ui-scale; }
+                }
+                if root.lu-state == 2 || root.lu-state == 3: Text { text: root.lu-progress-text; color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                if root.lu-state == 4: Text { text: root.lu-diagnostics; color: Theme.muted; font-size: Theme.font(10); wrap: word-wrap; }
+                HorizontalLayout { spacing: 8px * Theme.ui-scale; alignment: end; height: 32px * Theme.ui-scale;
+                    if root.lu-state == 1 || root.lu-state == 6: Action { width: 110px * Theme.ui-scale; primary: true; label: root.lu-accept-label; clicked => { root.lu-accept(); } }
+                    if root.lu-state == 1 || root.lu-state == 6: Action { width: 190px * Theme.ui-scale; label: root.lu-decline-label; clicked => { root.lu-decline(); } }
+                    if root.lu-state == 2: Action { width: 90px * Theme.ui-scale; label: root.chinese ? "取消" : "Cancel"; clicked => { root.lu-cancel-requested(); } }
+                    if root.lu-state == 3: Action { width: 110px * Theme.ui-scale; primary: true; label: root.chinese ? "确定取消" : "Cancel upgrade"; clicked => { root.lu-cancel-answer(true); } }
+                    if root.lu-state == 3: Action { width: 110px * Theme.ui-scale; label: root.chinese ? "继续升级" : "Keep going"; clicked => { root.lu-cancel-answer(false); } }
+                    if root.lu-state == 4: Action { width: 130px * Theme.ui-scale; label: root.lu-copy-label; clicked => { root.copy-text(root.lu-body + "\n" + root.lu-diagnostics); } }
+                    if root.lu-state == 4 || root.lu-state == 5: Action { width: 90px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.lu-close(); } }
+                }
+            }
+        }
+    }
+    if root.vi-state != 0: Rectangle {
+        background: Theme.overlay;
+        TouchArea { }
+        Rectangle { width: 520px * Theme.ui-scale; height: vi-col.preferred-height; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 8px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
+            vi-col := VerticalLayout { padding: 16px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+                Text { text: root.chinese ? "导入厂商资料" : "Import vendor metadata"; color: Theme.ink; font-size: Theme.font(14); font-weight: 600; }
+                Text { text: root.vi-text; color: root.vi-available ? Theme.dim : Theme.warning; wrap: word-wrap; }
+                HorizontalLayout { spacing: 8px * Theme.ui-scale; alignment: end; height: 32px * Theme.ui-scale;
+                    if root.vi-available && (root.vi-state == 1 || root.vi-state == 3): Action { width: 120px * Theme.ui-scale; primary: root.vi-state == 1; label: root.chinese ? "选择文件…" : "Choose file…"; clicked => { root.vi-pick(); } }
+                    if root.vi-state == 3: Action { width: 110px * Theme.ui-scale; primary: true; label: root.chinese ? "确认写入" : "Commit"; clicked => { root.vi-commit(); } }
+                    if root.vi-state == 4: Action { width: 110px * Theme.ui-scale; label: root.chinese ? "回滚本批" : "Roll back"; clicked => { root.vi-rollback(); } }
+                    if root.vi-state == 2: Text { text: root.chinese ? "处理中…" : "Working…"; color: Theme.dim; vertical-alignment: center; }
+                    if root.vi-state != 2: Action { width: 90px * Theme.ui-scale; label: root.chinese ? "关闭" : "Close"; clicked => { root.vi-close(); } }
+                }
             }
         }
     }

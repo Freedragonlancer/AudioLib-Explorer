@@ -73,6 +73,8 @@ mod library_progress;
 mod result_window;
 #[path = "search_tasks.rs"]
 mod search_tasks;
+#[path = "search_v2_ux.rs"]
+mod search_v2_ux;
 
 fn table_sort_order(index: i32) -> SortOrder {
     match index {
@@ -362,6 +364,7 @@ struct SearchJob {
     cancel: Arc<AtomicBool>,
     facet_revision: u64,
     provider: Arc<SqliteProvider>,
+    path_probe: Option<Arc<dyn DataProvider>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -701,6 +704,8 @@ pub struct Controller {
     sqlite: RwLock<Arc<SqliteProvider>>,
     library_generation: AtomicU64,
     library_busy: AtomicBool,
+    search_v2_ux: Mutex<search_v2_ux::UxState>,
+    search_v2_busy: AtomicBool,
     source_changing: AtomicBool,
     source_generation: AtomicU64,
     close_after_operation: AtomicBool,
@@ -905,6 +910,7 @@ impl Controller {
 
     fn available(&self) -> bool {
         !self.library_busy.load(Ordering::Acquire)
+            && !self.search_v2_busy.load(Ordering::Acquire)
             && !self.source_changing.load(Ordering::Acquire)
             && !self.closing.load(Ordering::Acquire)
             && !self.shutdown.load(Ordering::Acquire)
@@ -989,6 +995,8 @@ impl Controller {
             sqlite: RwLock::new(sqlite),
             library_generation: AtomicU64::new(0),
             library_busy: AtomicBool::new(false),
+            search_v2_ux: Mutex::default(),
+            search_v2_busy: AtomicBool::new(false),
             source_changing: AtomicBool::new(false),
             source_generation: AtomicU64::new(0),
             close_after_operation: AtomicBool::new(false),
@@ -1126,6 +1134,7 @@ impl Controller {
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_search_tasks(ui);
         self.bind_artwork(ui);
+        self.bind_search_v2_ux(ui);
         let c = self.clone();
         ui.on_exit_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -2913,6 +2922,11 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        self.search_v2_ux.lock().unwrap().reset();
+        ui.set_lu_state(0);
+        ui.set_vi_state(0);
+        ui.set_migration_visible(false);
+        ui.set_migration_busy(false);
         // The result ListView is shared. A source change must drop a server viewport;
         // a same-library refresh keeps the page the user was browsing.
         if !retain_navigation {
@@ -3391,7 +3405,10 @@ impl Controller {
                     let revision_before = provider.search_revision().ok().flatten();
                     let chinese = c.chinese.load(Ordering::Acquire);
                     let mut result = survive_panic(
-                        || provider.search_cancellable(&job.request, job.cancel.clone()),
+                        || {
+                            c.probe_migrating_path(&job)?;
+                            provider.search_cancellable(&job.request, job.cancel.clone())
+                        },
                         || {
                             audiolib_core::Error::Database(internal_error(
                                 chinese, "搜索", "Search",
@@ -3600,6 +3617,9 @@ impl Controller {
                             }
                             Err(error) => {
                                 ui.set_searching(false);
+                                if c2.retry_migrating_search(&ui, &error, job.generation) {
+                                    return;
+                                }
                                 ui.set_status(error.to_string().into());
                                 let retained_window =
                                     c2.search_publication.lock().unwrap().as_ref().is_some_and(
@@ -4269,6 +4289,7 @@ impl Controller {
         // their generation/cancellation scope and only fetch the adjoining rows.
         // A new query, sort, task or library still invalidates the entire scope.
         let job = SearchJob {
+            path_probe: self.path_probe_provider(&request),
             request,
             generation,
             not_before: Instant::now(),
@@ -4292,15 +4313,12 @@ impl Controller {
         }
     }
 
-    /// Offer「仅路径」only when the open provider has a ready directory index.
+    /// Local path searches need a ready index. Supported servers may be probed while migrating.
     fn refresh_path_search_availability(self: &Arc<Self>, ui: &AppWindow) {
-        let ready = self
-            .metadata_provider()
-            .ok()
-            .and_then(|provider| provider.path_search_ready().ok())
-            .unwrap_or(false);
-        ui.set_path_search_available(ready);
-        if !ready && ui.get_search_scope_index() >= 2 {
+        let ready = self.provider().path_search_ready().ok().unwrap_or(false);
+        let probe = self.remote_read_only() && self.server_path_search_offered();
+        ui.set_path_search_available(ready || probe);
+        if !ready && !probe && ui.get_search_scope_index() >= 2 {
             ui.set_search_scope_index(0);
             let chinese = self.chinese.load(Ordering::Acquire);
             ui.set_status(
@@ -4316,21 +4334,21 @@ impl Controller {
 
     /// Map the UI scope into the request, degrading when the directory index is absent.
     fn apply_search_scope(self: &Arc<Self>, ui: &AppWindow, request: &mut SearchRequest) {
-        let ready = self
-            .metadata_provider()
-            .ok()
-            .and_then(|provider| provider.path_search_ready().ok())
-            .unwrap_or(false);
-        ui.set_path_search_available(ready);
+        let ready = self.provider().path_search_ready().ok().unwrap_or(false);
+        let probe = self.remote_read_only() && self.server_path_search_offered();
+        ui.set_path_search_available(ready || probe);
+        if !ready {
+            self.maybe_offer_local_upgrade(ui);
+        }
         let chosen = search_scope_from_index(ui.get_search_scope_index());
         request.scope = match chosen {
-            SearchScope::Path if !ready => {
+            SearchScope::Path if !ready && !probe => {
                 let chinese = self.chinese.load(Ordering::Acquire);
                 ui.set_status(
                     if chinese {
-                        "服务器版本较旧，部分新功能（路径搜索、厂商资料导入）不可用。"
+                        "路径索引尚未就绪，已切换为主表搜索。"
                     } else {
-                        "This server is older; path search and vendor import are unavailable."
+                        "The path index is unavailable. Searching main fields instead."
                     }
                     .into(),
                 );
@@ -4346,7 +4364,7 @@ impl Controller {
     }
 
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
-        if !self.available() {
+        if !self.available() || self.search_v2_ux.lock().unwrap().declined {
             return;
         }
         self.persist_search_task(ui);
@@ -4460,6 +4478,16 @@ impl Controller {
         crate::tag_chips::apply_to(ui, &mut request.filters);
         request.order_by = table_sort_order(ui.get_sort_index());
         request.descending = ui.get_sort_descending();
+        let scope_notice = match search_v2_ux::constrain_path_scope(
+            &mut request,
+            self.chinese.load(Ordering::Acquire),
+        ) {
+            Ok(notice) => notice,
+            Err(message) => {
+                self.reject_search(ui, message);
+                return;
+            }
+        };
         if let Err(error) = request.validate() {
             self.reject_search(ui, error.to_string());
             return;
@@ -4475,6 +4503,7 @@ impl Controller {
         let job = SearchJob {
             cancel,
             facet_revision: self.facet_revision.load(Ordering::Acquire),
+            path_probe: self.path_probe_provider(&request),
             request,
             generation,
             not_before: Instant::now()
@@ -4495,7 +4524,7 @@ impl Controller {
             pending_folders: None,
             expected_folders: None,
             model_published: false,
-            retained_status: None,
+            retained_status: scope_notice,
             result_window: false,
         });
         *self.search_job.lock().unwrap() = Some(job.clone());
@@ -5506,6 +5535,7 @@ impl Controller {
             && self.source_changing.load(Ordering::Acquire)
             && !self.library_busy.load(Ordering::Acquire);
         if self.library_busy.load(Ordering::Acquire)
+            || self.search_v2_busy.load(Ordering::Acquire)
             || (self.source_changing.load(Ordering::Acquire) && !pending_source_sync)
         {
             self.close_after_operation.store(true, Ordering::Release);
@@ -7167,7 +7197,11 @@ impl Controller {
 
     /// Process the bounded local playback control protocol; never transports PCM.
     pub fn ipc(self: &Arc<Self>, value: serde_json::Value) -> serde_json::Value {
-        if self.library_busy.load(Ordering::Acquire) && value["command"] != "status" {
+        if (self.library_busy.load(Ordering::Acquire)
+            || self.search_v2_busy.load(Ordering::Acquire)
+            || self.search_v2_ux.lock().unwrap().declined)
+            && value["command"] != "status"
+        {
             return audiolib_core::failure("Library operation in progress");
         }
         let command = match value["command"].as_str() {

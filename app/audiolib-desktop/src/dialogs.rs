@@ -199,6 +199,8 @@ pub enum FileKind {
     JsonLines,
     Csv,
     Annotations,
+    /// §4 vendor metadata table (CSV / XLS / XLSX, detected by header).
+    VendorTable,
 }
 
 #[cfg(windows)]
@@ -253,6 +255,13 @@ pub fn choose(
         (FileKind::Image, _) => ("PNG / JPEG\0*.png;*.jpg;*.jpeg\0\0", "png"),
         (FileKind::JsonLines, _) => ("JSON Lines (*.jsonl)\0*.jsonl\0\0", "jsonl"),
         (FileKind::Csv, _) => ("CSV (*.csv)\0*.csv\0\0", "csv"),
+        (FileKind::VendorTable, true) => {
+            ("厂商资料表\0*.csv;*.xls;*.xlsx\0所有文件\0*.*\0\0", "csv")
+        }
+        (FileKind::VendorTable, false) => (
+            "Vendor tables\0*.csv;*.xls;*.xlsx\0All files\0*.*\0\0",
+            "csv",
+        ),
         (FileKind::Annotations, true) => ("音效库标注\0*.jsonl;*.csv\0所有文件\0*.*\0\0", "jsonl"),
         (FileKind::Annotations, false) => (
             "Library annotations\0*.jsonl;*.csv\0All files\0*.*\0\0",
@@ -272,6 +281,8 @@ pub fn choose(
         (FileKind::Wav, _, false) => "Choose WAV to repair file reference",
         (FileKind::Image, _, true) => "选择专辑封面",
         (FileKind::Image, _, false) => "Choose album artwork",
+        (FileKind::VendorTable, _, true) => "选择厂商资料表（CSV / XLS / XLSX）",
+        (FileKind::VendorTable, _, false) => "Choose a vendor table (CSV / XLS / XLSX)",
         (_, true, true) => "导出音效库标注",
         (_, true, false) => "Export library annotations",
         (_, false, true) => "导入音效库标注",
@@ -290,7 +301,7 @@ pub fn choose(
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")
             }
-            FileKind::Wav | FileKind::Image => String::new(),
+            FileKind::Wav | FileKind::Image | FileKind::VendorTable => String::new(),
         };
         for (target, value) in file.iter_mut().zip(name.encode_utf16()) {
             *target = value;
@@ -357,6 +368,8 @@ pub fn choose(
         (FileKind::Wav, _, false) => "Choose WAV to repair file reference",
         (FileKind::Image, _, true) => "选择专辑封面",
         (FileKind::Image, _, false) => "Choose album artwork",
+        (FileKind::VendorTable, _, true) => "选择厂商资料表（CSV / XLS / XLSX）",
+        (FileKind::VendorTable, _, false) => "Choose a vendor table (CSV / XLS / XLSX)",
         (_, true, true) => "导出音效库标注",
         (_, true, false) => "Export library annotations",
         (_, false, true) => "导入音效库标注",
@@ -369,6 +382,7 @@ pub fn choose(
         FileKind::JsonLines => "jsonl",
         FileKind::Csv => "csv",
         FileKind::Annotations => "jsonl\ncsv",
+        FileKind::VendorTable => "csv\nxls\nxlsx",
     };
     let date = chrono::Local::now().format("%Y-%m-%d");
     let name = if save {
@@ -379,7 +393,7 @@ pub fn choose(
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")
             }
-            FileKind::Wav | FileKind::Image => String::new(),
+            FileKind::Wav | FileKind::Image | FileKind::VendorTable => String::new(),
         }
     } else {
         String::new()

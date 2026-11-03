@@ -2304,6 +2304,154 @@ impl SqliteProvider {
         dir_search::ready(&conn)
     }
 
+    /// §7.1 plan for the schema 9 path index; `None` when ready or read-only. An empty
+    /// library is indexed at once without asking.
+    pub fn local_upgrade_plan_impl(
+        &self,
+    ) -> Result<Option<audiolib_core::local_upgrade::LocalUpgradePlan>> {
+        use audiolib_core::local_upgrade::LocalUpgradePlan;
+        if self.read_only {
+            return Ok(None);
+        }
+        let state = {
+            let conn = self.reader()?;
+            dir_search::upgrade_state(&conn)?
+        };
+        if state.ready {
+            return Ok(None);
+        }
+        if state.total == 0 {
+            self.rebuild_directory_search()?;
+            return Ok(None);
+        }
+        let database_bytes = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        // Server copy (909,342 rows): ~70 s path build; backup at ~150 MB/s.
+        let estimated_secs = state.files / 13_000 + database_bytes / (150 << 20);
+        Ok(Some(LocalUpgradePlan {
+            resuming: state.checkpoint.is_some(),
+            completed: state.done,
+            total: state.total,
+            database_bytes,
+            required_bytes: LocalUpgradePlan::required_for(database_bytes),
+            available_bytes: space::free_space(parent),
+            estimated_secs,
+        }))
+    }
+
+    /// Run or resume the path-index upgrade (§5.2): backup once, adaptive batches of at
+    /// most ~2 s each with the checkpoint in the same transaction, cancel between batches.
+    pub fn run_local_upgrade_impl(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+        progress: &mut dyn FnMut(audiolib_core::local_upgrade::LocalUpgradeProgress),
+    ) -> Result<audiolib_core::local_upgrade::LocalUpgradeOutcome> {
+        use audiolib_core::local_upgrade::{
+            LocalUpgradeOutcome, LocalUpgradePhase, LocalUpgradePlan, LocalUpgradeProgress,
+        };
+        use std::sync::atomic::Ordering;
+        if self.read_only {
+            return Err(Error::Validation("Library is read-only".into()));
+        }
+        let state = {
+            let conn = self.reader()?;
+            dir_search::upgrade_state(&conn)?
+        };
+        if state.ready {
+            return Ok(LocalUpgradeOutcome::Done { backup: None });
+        }
+        let mut backup = state.backup.clone().map(PathBuf::from);
+        if state.checkpoint.is_none() {
+            let parent = self
+                .path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_path_buf();
+            let bytes = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+            ensure_free_space(&parent, LocalUpgradePlan::required_for(bytes))?;
+            progress(LocalUpgradeProgress {
+                phase: LocalUpgradePhase::Backup,
+                completed: 0,
+                total: 1,
+            });
+            let stem = self
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "library".into());
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let destination = parent.join(format!("{stem}.pre-schema9-{stamp}.db"));
+            match self.backup_library_cancellable(&destination, cancel) {
+                Ok(_) => {}
+                Err(Error::Cancelled) => return Ok(LocalUpgradeOutcome::Cancelled),
+                Err(error) => return Err(error),
+            }
+            progress(LocalUpgradeProgress {
+                phase: LocalUpgradePhase::Backup,
+                completed: 1,
+                total: 1,
+            });
+            let text = destination.to_string_lossy().into_owned();
+            let conn = self.writer()?;
+            dir_search::upgrade_begin(&conn, Some(&text))?;
+            backup = Some(destination);
+        }
+        let mut batch: i64 = 200;
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(LocalUpgradeOutcome::Cancelled);
+            }
+            let started = std::time::Instant::now();
+            let more = {
+                let conn = self.writer()?;
+                dir_search::upgrade_batch(&conn, batch)?
+            };
+            let elapsed = started.elapsed();
+            if elapsed < std::time::Duration::from_millis(500) {
+                batch = (batch * 2).min(20_000);
+            } else if elapsed > std::time::Duration::from_secs(2) {
+                batch = (batch / 2).max(20);
+            }
+            let state = {
+                let conn = self.reader()?;
+                dir_search::upgrade_state(&conn)?
+            };
+            progress(LocalUpgradeProgress {
+                phase: LocalUpgradePhase::PathBuild,
+                completed: state.done,
+                total: state.total,
+            });
+            if !more {
+                break;
+            }
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Ok(LocalUpgradeOutcome::Cancelled);
+        }
+        progress(LocalUpgradeProgress {
+            phase: LocalUpgradePhase::Optimize,
+            completed: 0,
+            total: 1,
+        });
+        {
+            let conn = self.writer()?;
+            dir_search::upgrade_finish(&conn)?;
+        }
+        progress(LocalUpgradeProgress {
+            phase: LocalUpgradePhase::Switch,
+            completed: 1,
+            total: 1,
+        });
+        Ok(LocalUpgradeOutcome::Done { backup })
+    }
+
     /// Rebuild `audio_dir_search` and `audio_dir_runs` for the open library.
     pub fn rebuild_directory_search(&self) -> Result<()> {
         let conn = self.writer()?;
@@ -2641,6 +2789,18 @@ impl DataProvider for SqliteProvider {
 
     fn path_search_ready(&self) -> Result<bool> {
         self.directory_index_ready()
+    }
+
+    fn local_upgrade_plan(&self) -> Result<Option<audiolib_core::local_upgrade::LocalUpgradePlan>> {
+        self.local_upgrade_plan_impl()
+    }
+
+    fn run_local_upgrade(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+        progress: &mut dyn FnMut(audiolib_core::local_upgrade::LocalUpgradeProgress),
+    ) -> Result<audiolib_core::local_upgrade::LocalUpgradeOutcome> {
+        self.run_local_upgrade_impl(cancel, progress)
     }
 
     fn search_revision(&self) -> Result<Option<u64>> {
@@ -2993,7 +3153,7 @@ fn normalize_search_page(request: &SearchRequest) -> Result<std::borrow::Cow<'_,
 }
 
 /// Layered path search keeps the bench plan for an unfiltered relevance query.
-fn path_scope_is_unfiltered(request: &SearchRequest) -> bool {
+pub fn path_scope_is_unfiltered(request: &SearchRequest) -> bool {
     request.folder_id.is_none()
         && request.order_by == SortOrder::Relevance
         && request.filters.sample_rate.is_none()

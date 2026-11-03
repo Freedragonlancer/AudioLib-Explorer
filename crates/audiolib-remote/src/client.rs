@@ -868,7 +868,7 @@ impl RemoteClient {
     }
 
     /// Server origin (the API base without `/api/v1`) for the admin routes.
-    fn origin(&self) -> &str {
+    pub(crate) fn origin(&self) -> &str {
         self.api.strip_suffix("/api/v1").unwrap_or(&self.api)
     }
 
@@ -896,11 +896,16 @@ impl RemoteClient {
         }
         let path = format!("/admin/api/migration/{action}");
         let url = format!("{}{path}", self.origin());
-        let response = self
+        let mut request = self
             .writes
             .post(&url)
             .header("x-audiolib-admin", "1")
-            .send_empty()
+            .header("Content-Type", "application/json");
+        if self.expected_library_id.is_some() {
+            request = request.header(LIBRARY_ID_HEADER, self.write_library_id()?);
+        }
+        let response = request
+            .send("{}")
             .map_err(|error| RemoteError::from_transport(error, &url))?;
         self.read_admin_json(response, &format!("POST {path}"))
     }
@@ -919,6 +924,37 @@ impl RemoteClient {
             .map_err(|error| RemoteError::from_transport(error, context))?;
         serde_json::from_str(&body)
             .map_err(|error| RemoteError::Protocol(format!("{context}: {error}")))
+    }
+
+    /// Check the server's path-search gate without replacing snapshot-owned results.
+    pub(crate) fn probe_path_search(&self, cancel: &AtomicBool) -> Result<()> {
+        let request = audiolib_core::SearchRequest {
+            scope: audiolib_core::SearchScope::Path,
+            limit: 1,
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&request)
+            .map_err(|error| RemoteError::Validation(error.to_string()))?;
+        let compatibility = crate::compatibility::client_header()?;
+        let url = format!("{}/search", self.api);
+        cancellable_io(cancel, || {
+            let mut request = self
+                .agent
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header(
+                    audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                    &compatibility,
+                );
+            if !self.token.is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", self.token));
+            }
+            let response = request
+                .send(&body)
+                .map_err(|error| RemoteError::from_transport(error, &url))?;
+            self.checked(response, "POST /api/v1/search")?;
+            Ok(())
+        })
     }
 
     /// `GET /health` (no authentication).

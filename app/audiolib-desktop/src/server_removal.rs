@@ -132,6 +132,18 @@ pub(super) struct ServerManage {
 }
 
 impl ServerManage {
+    /// Keep a pending capability lookup usable, then disable unsupported peers.
+    pub(super) fn path_search_offered(&self) -> bool {
+        self.capabilities.as_ref().is_none_or(|capabilities| {
+            capabilities.schema_migration.is_some()
+                || capabilities.compatibility.as_ref().is_some_and(|manifest| {
+                    manifest
+                        .features
+                        .get(audiolib_core::server_upgrade::SEARCH_PATH_FEATURE)
+                        == Some(&audiolib_core::server_upgrade::SEARCH_PATH_REVISION)
+                })
+        })
+    }
     #[cfg(test)]
     pub(super) fn allowed_for_test(url: &str) -> Self {
         Self {
@@ -140,6 +152,16 @@ impl ServerManage {
             note: String::new(),
             capabilities: None,
         }
+    }
+
+    /// §4 vendor import limits when this PC may manage and the server offers it.
+    pub(super) fn vendor_import(&self) -> Option<audiolib_core::server_upgrade::VendorImportInfo> {
+        if !self.can_manage {
+            return None;
+        }
+        self.capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.vendor_import.clone())
     }
 
     /// `/capabilities` of `server_url`, once read after the latest sync.
@@ -405,6 +427,24 @@ impl Controller {
         self.remote.lock().unwrap().manage.for_server(&url)
     }
 
+    /// Path reads use the active peer's capabilities independently of write admission.
+    pub(in crate::controller) fn server_path_search_offered(&self) -> bool {
+        let url = self.config.lock().unwrap().data_source.server_url.clone();
+        self.remote
+            .lock()
+            .unwrap()
+            .manage
+            .for_server(&url)
+            .path_search_offered()
+    }
+
+    /// Vendor import limits of the active server when this PC may manage it.
+    pub(crate) fn current_vendor_import(
+        &self,
+    ) -> Option<audiolib_core::server_upgrade::VendorImportInfo> {
+        self.current_server_manage().vendor_import()
+    }
+
     /// Show the gate on the menus (server mode only; local removals are not gated).
     pub(crate) fn publish_server_manage(&self, ui: &AppWindow) {
         let manage = if self.remote_read_only() {
@@ -412,6 +452,11 @@ impl Controller {
         } else {
             ServerManage::default()
         };
+        ui.set_vendor_import_available(manage.vendor_import().is_some());
+        ui.set_path_search_available(
+            self.provider().path_search_ready().unwrap_or(false)
+                || (self.remote_read_only() && self.server_path_search_offered()),
+        );
         ui.set_server_can_manage(manage.can_manage);
         ui.set_server_manage_note(manage.note.into());
     }
@@ -464,6 +509,15 @@ pub(super) fn removal_folder_text(path: &str, chinese: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_peers_remain_selectable_while_known_legacy_peers_disable_path_search() {
+        let mut manage = super::ServerManage::default();
+        assert!(manage.path_search_offered());
+        manage.capabilities = Some(audiolib_remote::Capabilities::default());
+        assert!(!manage.path_search_offered());
+        manage.capabilities.as_mut().unwrap().schema_migration = Some(Default::default());
+        assert!(manage.path_search_offered());
+    }
     use super::*;
 
     fn state(library: &str, revision: u64) -> CacheState {

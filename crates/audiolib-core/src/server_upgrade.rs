@@ -156,8 +156,16 @@ impl MigrationRefusal {
 
     /// Retry delay when the server sent none (the agreed defaults).
     pub fn default_retry_after(self) -> u64 {
+        30
+    }
+
+    /// Honor a longer server delay and keep switching retries at least 30 seconds
+    /// apart, including peers that still advertise the earlier five-second delay.
+    pub fn retry_after(self, seconds: Option<u64>) -> u64 {
+        let seconds = seconds.filter(|value| *value > 0).unwrap_or(30);
         match self {
-            Self::PathSearchInProgress | Self::Switching => 30,
+            Self::Switching => seconds.max(30),
+            Self::PathSearchInProgress => seconds,
         }
     }
 
@@ -604,6 +612,10 @@ pub struct SchemaMigrationInfo {
 /// `/capabilities.vendor_import` (§6); limits are the server's, never assumed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorImportInfo {
+    /// Same-origin absolute route prefix. The import handlers are not implemented
+    /// by server PR #225, so deployments may advertise their actual route here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     pub revision: u32,
     pub max_file_bytes: u64,
     pub max_rows: u64,
@@ -1620,6 +1632,7 @@ mod tests {
     #[test]
     fn vendor_import_needs_feature_and_manage() {
         let limits = VendorImportInfo {
+            endpoint: None,
             revision: 1,
             max_file_bytes: 52_428_800,
             max_rows: 200_000,
