@@ -20,7 +20,8 @@ use crate::{
     waveform::WaveformParams,
 };
 use audiolib_core::{
-    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, ScanSession, TagEditMode,
+    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, ScanSession, SearchPage,
+    SearchRequest, TagEditMode,
 };
 use axum::{
     Json, Router,
@@ -136,6 +137,7 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             .route("/roots", post(add_root).route_layer(manage()))
             .route("/roots/{name}/check", post(check_root))
             .route("/audio/{id}", get(audio))
+            .route("/search", post(search_library))
             .route("/audio/{id}/metadata", patch(update_metadata))
             .route("/audio/metadata/batch", post(update_metadata_batch))
             .route("/audio/{id}/plays", post(record_play))
@@ -965,6 +967,17 @@ fn parse_id(raw: &str) -> Result<i64, ApiError> {
 fn parse_folder_id(raw: &str) -> Result<i64, ApiError> {
     raw.parse()
         .map_err(|_| ApiError::validation(format!("Folder id must be an integer, got {raw:?}")))
+}
+
+async fn search_library(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<SearchPage>, ApiError> {
+    let request: SearchRequest = json_body(&headers, body)?;
+    Ok(Json(
+        blocking(move || state.provider().search(&request)).await?,
+    ))
 }
 
 async fn audio(

@@ -131,6 +131,7 @@ pub(super) fn filtered_filename_page(
         query: request.query.clone(),
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
         cache_hit: false,
+        next_cursor: None,
     }))
 }
 

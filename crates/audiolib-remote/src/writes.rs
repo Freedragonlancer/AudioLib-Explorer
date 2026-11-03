@@ -200,6 +200,12 @@ impl RemoteWriter {
         &self.library_id
     }
 
+    /// Retry a write the server refused only because a migration is in progress
+    /// (`migration_in_progress` / `migration_switching`). Those refusals wrote nothing.
+    fn during_migration<T>(&self, op: impl FnMut() -> Result<T>) -> Result<T> {
+        crate::retry_during_migration(5, std::thread::sleep, op)
+    }
+
     /// The API client (capabilities, root checks and server scans, which are not
     /// `DataProvider` operations).
     pub fn client(&self) -> &RemoteClient {
@@ -240,7 +246,7 @@ impl RemoteWriter {
         let _write = WRITE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(self.removed(self.client.remove_audio(ids)?))
+        Ok(self.removed(self.during_migration(|| self.client.remove_audio(ids))?))
     }
 
     /// `DELETE /folders/{id}`: database records only (files untouched), then a sync.
@@ -248,7 +254,7 @@ impl RemoteWriter {
         let _write = WRITE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(self.removed(self.client.remove_folder(id)?))
+        Ok(self.removed(self.during_migration(|| self.client.remove_folder(id))?))
     }
 
     fn finish<T>(&self, value: T, files: &[AudioFile], before: u64, after: u64) -> WriteOutcome<T> {
@@ -304,7 +310,7 @@ impl RemoteWriter {
             file,
             revision_before,
             revision,
-        } = self.client.patch_metadata(id, patch)?;
+        } = self.during_migration(|| self.client.patch_metadata(id, patch))?;
         let mut outcome = self.finish(
             file.clone(),
             std::slice::from_ref(&file),
@@ -331,7 +337,7 @@ impl RemoteWriter {
             mut files,
             revision_before,
             revision,
-        } = self.client.batch_metadata(request)?;
+        } = self.during_migration(|| self.client.batch_metadata(request))?;
         let outcome = self.finish((), &files, revision_before, revision);
         if matches!(outcome.cache, CacheUpdate::Applied { .. }) {
             self.enrich_album_projection(&mut files);
@@ -489,6 +495,19 @@ pub fn core_error(error: RemoteError, chinese: bool) -> Error {
 }
 
 impl DataProvider for RemoteProvider {
+    fn server_upgrade_status(
+        &self,
+    ) -> audiolib_core::Result<Option<audiolib_core::server_upgrade::ServerUpgradeStatus>> {
+        let client = self.writer.client();
+        let capabilities = client
+            .capabilities()
+            .map_err(|error| core_error(error, self.chinese))?;
+        Ok(Some(crate::upgrade_hints::server_upgrade_status(
+            client,
+            &capabilities,
+        )))
+    }
+
     fn load_search_workspace(
         &self,
         target: &audiolib_core::SearchWorkspaceTarget,
@@ -502,6 +521,10 @@ impl DataProvider for RemoteProvider {
         workspace: &audiolib_core::SearchWorkspace,
     ) -> audiolib_core::Result<()> {
         self.snapshot.save_search_workspace(target, workspace)
+    }
+
+    fn path_search_ready(&self) -> audiolib_core::Result<bool> {
+        self.snapshot.path_search_ready()
     }
 
     fn search(&self, request: &SearchRequest) -> audiolib_core::Result<SearchPage> {

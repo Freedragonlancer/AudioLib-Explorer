@@ -4953,3 +4953,64 @@ async fn admin_runtime_reports_in_memory_state_and_is_lan_only() {
     .await;
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn search_scope_path_uses_directory_segments_and_keeps_main_order() {
+    let f = fixture();
+    let main = audiolib_core::SearchRequest {
+        query: "flyby".into(),
+        limit: 10,
+        ..Default::default()
+    };
+    let body = serde_json::to_string(&main).unwrap();
+    let response = send_json(
+        &f.state,
+        Method::POST,
+        "/api/v1/search",
+        Some(&body),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: serde_json::Value = json(response).await;
+    let main_ids: Vec<i64> = page["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(main_ids.len(), 2, "{page}");
+    assert!(page.get("next_cursor").is_none());
+
+    let mut path = main.clone();
+    // Aircraft holds 2 of the 3 scanned files, so the directory set is wider than
+    // half the library and is discarded. The word is not in the filenames either.
+    path.query = "Aircraft".into();
+    path.scope = audiolib_core::SearchScope::Path;
+    let response = send_json(
+        &f.state,
+        Method::POST,
+        "/api/v1/search",
+        Some(&serde_json::to_string(&path).unwrap()),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: serde_json::Value = json(response).await;
+    assert_eq!(page["results"].as_array().unwrap().len(), 0, "{page}");
+
+    let mut root = path.clone();
+    // The scan root's own name is not indexed.
+    root.query = "sounds".into();
+    let response = send_json(
+        &f.state,
+        Method::POST,
+        "/api/v1/search",
+        Some(&serde_json::to_string(&root).unwrap()),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: serde_json::Value = json(response).await;
+    assert_eq!(page["results"].as_array().unwrap().len(), 0, "{page}");
+}

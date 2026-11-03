@@ -122,6 +122,7 @@ fn child_real_pointer_preview_modes() {
         allowed_scan_roots: vec![sounds.canonicalize().unwrap()],
         data_source: Default::default(),
         data_source_fallback: None,
+        search_scope: "all".into(),
     };
     config.save().unwrap();
     let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
