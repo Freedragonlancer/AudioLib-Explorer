@@ -253,6 +253,23 @@ pub struct SearchFilters {
     pub album_id: Option<i64>,
 }
 
+/// Where a query is allowed to match. Omitted JSON stays `main` (current s8 order).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScope {
+    /// Filename and Metadata fields only, in the existing relevance order.
+    #[default]
+    Main,
+    /// Main-field matches first, then mixed, then path-only matches.
+    All,
+    /// Mixed and path-only matches. Pure main-field hits are omitted.
+    Path,
+}
+
+fn scope_is_main(scope: &SearchScope) -> bool {
+    *scope == SearchScope::Main
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SortOrder {
@@ -278,6 +295,15 @@ pub struct SearchRequest {
     pub offset: usize,
     pub order_by: SortOrder,
     pub descending: bool,
+    /// `main` (default), `all`, or `path`. Omitted requests keep s8 ordering.
+    #[serde(default, skip_serializing_if = "scope_is_main")]
+    pub scope: SearchScope,
+    /// Opaque keyset cursor. When set with `scope` `all` or `path`, it replaces offset/page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// 1-based page. Ignored when `cursor` is set; otherwise it replaces `offset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
 }
 impl Default for SearchRequest {
     fn default() -> Self {
@@ -290,6 +316,9 @@ impl Default for SearchRequest {
             offset: 0,
             order_by: SortOrder::Relevance,
             descending: false,
+            scope: SearchScope::Main,
+            cursor: None,
+            page: None,
         }
     }
 }
@@ -342,6 +371,27 @@ impl SearchRequest {
         }
         if self.limit == 0 || self.limit > 10_000 {
             return Err(Error::Validation("Search limit must be 1..=10000".into()));
+        }
+        if self.page == Some(0) {
+            return Err(Error::Validation("Search page must be 1 or greater".into()));
+        }
+        if let Some(page) = self.page
+            && page > 1
+            && (page as usize - 1).checked_mul(self.limit).is_none()
+        {
+            return Err(Error::Validation("Search page is too large".into()));
+        }
+        if self.cursor.as_ref().is_some_and(|cursor| {
+            cursor.is_empty() || cursor.len() > 512 || cursor.chars().any(|c| c.is_control())
+        }) {
+            return Err(Error::Validation(
+                "Search cursor is empty, too long, or contains a control character".into(),
+            ));
+        }
+        if self.scope == SearchScope::Main && self.cursor.is_some() {
+            return Err(Error::Validation(
+                "Search cursor requires scope all or path".into(),
+            ));
         }
         for duration in [self.filters.duration_min, self.filters.duration_max]
             .into_iter()
@@ -416,6 +466,9 @@ pub struct SearchPage {
     pub execution_time_ms: f64,
     pub cache_hit: bool,
     pub returned_count: usize,
+    /// Keyset cursor for the next page. Absent on the last page and on `scope=main`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
