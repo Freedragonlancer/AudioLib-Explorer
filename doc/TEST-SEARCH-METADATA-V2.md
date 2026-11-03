@@ -47,11 +47,14 @@
 | PG-14 | 「全部」范围查询时取消 | 两个连接都收到 interrupt 并返回 `OperationInterrupted`；取消后 50ms 内两个连接都没有 CPU 占用；没有残留的语句或事务（第二连接能立即复用）；旧结果不会显示出来 | U + I：在长查询途中取消，检查连接状态 | P0 |
 | PG-15 | 「仅文件名」范围（主表列过滤 `{filename filename_tokenized}`） | p95 ≤ schema 8 文件名查询的 p95 × 1.2 | C | P0 |
 | PG-16 | 高频路径片段查询（根目录名、命中 >5 万行的路径片段），作为**必测门禁查询**并入 PG-01/PG-10 查询集 | p95 ≤ schema 8 同一查询 p95 × 1.2（口径见上文统计方法）；server 已在 hdd_A_Lib 上复现回归 4.6ms → 649ms，修复前不得合入 | C：每个库至少取 5 条根目录名和 5 条命中 >5 万行的片段 | P0 |
-| PG-17 | keyset ??????????? `cursor`????? `next_cursor`??????? / ???? / ??????????????????? | ???? `next_cursor` ???????????????????????????? `next_cursor` ? `null`?????????????? = ?????????????????????????????**?????????????????????** | I | P0 |
+| PG-17 | keyset cursor 分页：请求带 `cursor`，响应回 `next_cursor`；可与 offset / page 共存，同时传时 cursor 优先 | 有下一页时返回非空 `next_cursor`；末页 `next_cursor` 为 `null`；cursor 对客户端不透明；与 offset/page 同时传时以 cursor 为准 | I | P0 |
 
 ---
 
 ## 2. 路径搜索（#204，方案 B）
+
+
+**接口约定（搜索 scope，2026-11-03 服务端已定）**：HTTP/API 参数 `scope=main|all|path`；**不传 scope 等于 `main`**，排序/命中与 schema 8 完全一致。客户端选「仅文件名」时不传参数（兼容 s8）；选「全部」传 `scope=all`；选「仅路径」传 `scope=path`。分层排序（PS-23）只在 `all` 与 `path` 下判定；`main`/缺省不走分层。
 
 | ID | 场景 / 输入 | 预期 | 验证 | 优先级 |
 |---|---|---|---|---|
@@ -65,7 +68,7 @@
 | PS-08 | 排序：「全部」范围下，查询词同时命中文件名和路径 | 主表命中排在只命中路径的前面；整个目录都命中时，前 50 条结果不能全被只命中路径的行占满 | I：在已知样本上断言排名 | P0 |
 | PS-09 | 盘符、通用段（`X:`、`Users`、`SFX`、`Sound Effects`、`音效`、`素材`） | 盘符不入索引；静态停用词表里的词不产生 token；根目录名默认不入索引，开关打开后才入 | U | P1 |
 | PS-10 | 路径中有 FTS 语法字符（`"`、`*`、`-`、`(`、`:`、`NEAR`） | 两张表的查询都正确转义，不报 FTS 语法错误 | U | P0 |
-| PS-11 | 范围切换「全部 / 仅文件名 / 仅路径」 | 「仅文件名」只查主表的文件名列；「仅路径」只查 `audio_path_search`；「全部」= 两者的并集（去重后）；同一查询下三者的集合关系成立 | I | P0 |
+| PS-11 | 范围切换「全部 / 仅文件名 / 仅路径」；HTTP `scope=main|all|path`（省略 = `main` = schema 8 行为）；UI「仅文件名 / 全部 / 仅路径」分别对应 `main`（或不传）/ `all` / `path` | 「仅文件名」=`main`/不传，只查主表文件名列，顺序与 s8 完全一致；「仅路径」=`path`，只查路径索引；「全部」=`all`，两表并集去重后按 PS-23 分层；同一查询下三者集合关系成立 | I | P0 |
 | PS-12 | `audio_path_search` 与 `audio_files` 一致 | rowid = `audio_files.id`；删除文件后路径行也删掉（`contentless_delete=1`）；两表行数相等；integrity-check 通过 | U + I | P0 |
 | PS-13 | 目录本身改名（`folders.name` 变化） | 后台任务按 `folder_closure` 找后代文件，每批 5,000 行更新；不在 UI 线程执行；中途 kill 后按 `library_meta.path_reindex_progress` 续跑，最终结果和一次跑完一致；期间搜索不被阻塞（PG-05） | I | P0 |
 | PS-14 | 主表结构不变 | `audio_search` 的列、tokenizer 和选项（contentless、`detail=full`、`columnsize=1`）都和 schema 8 相同，没有路径列，也没有厂商列；迁移前后主表不重建，token 不变（主表不做 NFC/全角半角归一化）；只出现在路径里的词在「仅文件名」范围下搜不到 | U：schema 断言 | P0 |
@@ -77,7 +80,7 @@
 | PS-20 | 「全部」范围多词查询，词分布在不同表 / 同一表：(a) `door` 只在路径、`slam` 只在文件名；(b) 两个词都只在路径；(c) 两个词都只在文件名 | 三种情况都命中该文件（按词取两表并集再求交，见 PS-16）；不因跨表而漏掉；同一文件只出现一次 | U + I：已知样本断言 | P0 |
 | PS-21 | 目录表方案下的多词跨表：一个词只在目录名里（目录表命中），另一个词只在文件名里（如目录 `Door`、文件 `slam_01.wav`） | 该文件命中且只出现一次；先按目录表命中的 `dir_id` 过滤文件、再与主表命中合并时不漏掉该文件；路径词不参与 bm25 排序，只做过滤；结果等于参考实现（同 PS-20 的按词并集再求交） | U + I：已知样本断言 | P0 |
 | PS-22 | 目录改名 / 移动 / 删除，分别走全量扫描和增量扫描 | 目录表和文件的 `dir_id` 映射同步更新；旧路径词搜不到、新路径词能搜到；没有漏掉的文件，也没有重复行；删除目录后，其下文件不再出现在路径搜索结果里，目录表无残留行 | I | P0 |
-| PS-23 | ?????2026-11-03 ????(a) ???????????????(b) ??????????????????????????????????????????????????????????????? bm25 ???? | (a) ????? schema 8 **??????**??? EM-09 ???????(b) ??????????????? > ???? > ????????????? bm25 ?????????? rowid ?????????????????????? | I????????? ID ?? | P0 |
+| PS-23 | 分层排序（2026-11-03 确认）：仅对 scope=`all` 与 `path` 判定分层；`main`/不传 scope 时结果顺序必须与 schema 8 **完全一致**（可作为 VN 兼容）。分层：主表字段全命中 > 混合命中 > 仅路径命中；同层内按主表 bm25；仅路径命中按 rowid 升序 | (a) `main`/缺省与 schema 8 **逐条一致**，可作 EM-09 / VN 兼容；(b) 主表字段全命中 > 混合命中 > 仅路径命中；同层按主表 bm25；仅路径命中按 rowid 升序；结果 ID 序列与参考实现一致 | I：对比结果 ID 序列 | P0 |
 
 ## 3. Vorbis / FLAC / OGG 标签（#205）
 
@@ -194,10 +197,11 @@
 | VN-07 | 客户端有更新可用；离线时检查更新 | 离线时静默失败，不阻塞启动 | G + I | P1 |
 | VN-08 | snapshot 格式 ID 和修订号 | 新快照的格式 ID 是 `ale-s9-cld1-t3-m2-p1-a1-sp1`（`-z1` 变体沿用 v8 规则）；`source_search_rev=3`；features 为 `search_path`、`vorbis_tags`、`vendor_metadata`；`CATALOG_REVISION=2`；主表 tokenizer 段是 `t3`，路径归一化版本由 `sp1` 表示，不出现 `t4` | U | P0 |
 | VN-12 | 路径 tokenizer 版本兼容：只认识 `sp1` 的客户端收到 `sp2` 的路径数据（包括格式 ID 被篡改、header 和快照内容不一致） | 判定为不兼容：重新拉取它能接受的格式，拿不到时禁用路径搜索（隐藏「仅路径」，「全部」只查主表）并提示升级；**绝不能**用 sp1 规则去查 sp2 的路径 token（不会静默错配）；主表搜索照常工作，结果不受影响 | U + I | P0 |
-| VN-09 | `/capabilities` 的结构 | 只新增字段、不改旧字段：`compatibility.features`、`snapshot_read_formats`、`database_write_formats`（只有 s9）、`library_schema.{current, source_search_rev, snapshot_formats_served}`、`schema_migration.{state, endpoint}`、`vendor_import.{revision, max_file_bytes, max_rows}`；旧客户端解析时不报错 | U + I | P0 |
-| VN-10 | 迁移中的客户端提示 | 客户端根据 `schema_migration.state` 和 `/health.upgrade` 显示“服务器正在升级库（x%）”；切换时收到 503，会按 `Retry-After` 重试，不报错退出 | I + G | P1 |
+| VN-09 | `/capabilities` 的结构 | 只新增字段、不改旧字段：`compatibility.features`、`snapshot_read_formats`、`database_write_formats`（只有 s9）、`library_schema.{current, source_search_rev, snapshot_formats_served}`、`schema_migration.{state, endpoint}`、`vendor_import.{revision, max_file_bytes, max_rows, max_row_text_bytes}`；旧客户端解析时不报错 | U + I | P0 |
+| VN-10 | 迁移中的客户端提示 | 客户端根据 `schema_migration.state`、响应头 `X-AudioLib-Schema-Migration`（`deferred|running|paused|failed` 等形态）和 `/health.upgrade` 显示“服务器正在升级库（x%）”；切换时收到 503，会按 `Retry-After` 重试，不报错退出 | I + G | P1 |
 | VN-11 | 迁移完成后的新快照 | 服务端主动预生成 s9 zstd，首个客户端不需要等约 44 s 的生成；`snapshot_id` 变化后客户端提示刷新 | I + C | P1 |
-| VN-13 | ???????????????? VN-01??????? `offset` / `page` ???????? `cursor` ? `offset`/`page` | ??????? `offset` / `page`????????????? = ????????????????? `cursor` ????? `offset`/`page` | I | P0 |
+| VN-13 | 搜索分页兼容（承接 VN-01）：仍接受旧 `offset` / `page`；同时传时 `cursor` 优先于 `offset`/`page` | 只传旧 `offset` / `page` 行为不变且与 s8 兼容；同时传时 `cursor` 优先于 `offset`/`page` | I | P0 |
+| VN-14 | 不传 `scope` 与显式 `scope=main`；对照 schema 8 同查询 | 两者结果 ID 序列与命中集合完全一致，且等于 schema 8（s8 兼容）；客户端「仅文件名」不传参数 | I | P0 |
 
 ### 7.1 s8 兼容快照（过渡期，暂定保留一个版本周期）
 
@@ -206,7 +210,7 @@
 | SC-01 | 旧客户端（v0.8.7）连 s9 服务端 | 只声明接受 s8 时，拿到由 s9 派生的 s8 兼容快照；同步成功，基础搜索正常，不崩溃 | I：真实旧版二进制 | P0 |
 | SC-02 | 过滤非 wav 行 | s8 快照里没有 flac/ogg 行；行数等于 s9 中 wav 行数；对 wav 行，EM-06 的命中数和 ID 集合与 schema 8 基线一致 | C：对比脚本 | P0 |
 | SC-03 | 派生快照的结构 | 没有 `audio_path_search` 和 `vendor_metadata`；`source_search_rev=2`；`user_version=8`；格式 ID 是 `ale-s8-cld1-t3-m2-p1-a1`；主表直接沿用 s9 的主表（不重建）；在 s8 快照上用 v0.8.7 跑 EM-06 和 PG-01 查询集，结果和 schema 8 基线一致；library_id 和 s9 相同；文件夹统计和过滤后的行一致 | U + I | P0 |
-| SC-04 | 升级提示 | 拿到 s8 快照的客户端收到响应头 `x-audiolib-upgrade-available: <version>`，`/capabilities` 里也有提示；客户端显示非阻塞的升级提示，每个会话只显示一次 | I + G | P0 |
+| SC-04 | 升级提示 | 拿到 s8 快照的客户端收到响应头 `X-AudioLib-Upgrade-Available`（取值同 `/capabilities.client_upgrade.level`），`/capabilities.client_upgrade` 里也有提示；客户端显示非阻塞的升级提示，每个会话只显示一次 | I + G | P0 |
 | SC-05 | 快照发放规则 | `x-audiolib-accept-snapshot-formats` 包含 s9 的客户端总是拿到 s9，不会退回 s8；只接受 s8 的客户端才拿到 s8 | I | P0 |
 | SC-06 | 写操作只接受 s9 客户端 | 旧客户端（s8）发写请求返回 409，库不被修改；s9 客户端的写请求正常 | I | P0 |
 | SC-07 | 派生快照里的厂商/Vorbis 文本 | `bwf_description_tokenized` 里已经包含 rev3 的厂商和 Vorbis 文本；旧客户端能读、能搜到，不报错 | I | P1 |
