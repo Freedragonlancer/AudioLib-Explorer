@@ -1,9 +1,9 @@
 # 服务端设计稿：搜索与 Metadata v2（schema 8 → 9）
 
-> 状态：设计稿（仅文档，未改代码、未推送）。基线：`origin/feat/search-metadata-v2` = beta `4ff16a5`（v0.8.7 = `b5a98ff`）。
+> 状态：设计稿（仅文档；基准原型在未提交 worktree）。验收口径：每条查询 5 轮、各轮 p95 中位数 ≤ s8 × 1.2。基线：`origin/feat/search-metadata-v2` = beta `4ff16a5`（v0.8.7 = `b5a98ff`）。
 > 关联：#204 路径搜索、#205 Vorbis/FLAC/OGG、#206 厂商 CSV/XLS(X)、#207 跟踪；客户端设计 PR #209（`doc/DESIGN-SEARCH-METADATA-V2.md` @ f594cc1）；测试计划 PR #208（附录 A @ b16c742）。
 > 实测环境：服务器测试机（macOS arm64），库副本 `<bench-dir>/bench.db`（来源 `<prod-backup>.db`，909,342 行，schema 8，10.64 GB）。
-> 所有生产实例（<prod-port>）上的动作都要 Paul 批准，本稿不动生产。
+> 所有 <prod-port> 上的动作都要 Paul 批准，本稿不动生产。
 
 ## 0. 现状（代码位置）
 
@@ -29,25 +29,41 @@
 ## 1. 能力和版本协商
 
 ### 1.1 新格式 ID 与特征
-- `TARGET_SCHEMA 8→9`；新 `PLAN_B_V9_FORMAT = "ale-s9-cld1-t3-m2-p1-a1-sp1"`（`sp1`=search path rev1）。
-- **t3 决定（已定）**：NFC + 全角→半角规范化**只作用于路径表 `audio_path_search` 及其查询词**；主表 `audio_search` 不规范化、不重建、一字节不变（`t3` 段含义不变，仍指主表分词版本）。实测副本上 5,985 行路径因此变化。是否同时出 `-z1` 压缩变体沿用 v8 规则。
+- `TARGET_SCHEMA 8→9`；新 `PLAN_B_V9_FORMAT = "ale-s9-cld1-t3-m2-p1-a1-sd1"`（`sd1` = 目录段路径索引 rev1，取代原逐文件 `sp1`）。
+- **t3 决定（已定）**：NFC + 全角→半角规范化**只作用于目录段索引 `audio_dir_search` 及其查询词**；主表 `audio_search` 不规范化、不重建、一字节不变（`t3` 段含义不变，仍指主表分词版本）。实测副本上 5,985 行路径因此变化。是否同时出 `-z1` 压缩变体沿用 v8 规则。
 - `source_search_revision 2 → 3`（Vorbis 组进入 `audiolib_source_text`），`snapshot_format_id()` 增加 `(ContentlessDelete, 9)` 分支。
+- **两个修订号的语义**：
+  - `source_search_rev`：主表 `audio_search` 的**源文本口径**（哪些字段拼进搜索文本）。rev3 = rev2 + Vorbis 组 + vendor_metadata。它变了表示主表 FTS 需按新口径重算受影响行；8→9 迁移时现有行都是 wav 且 vendor 表为空，新口径产出的文本与 rev2 逐字节相同，所以**迁移不重写主表**（MG-10 哈希不变），之后扫描到的 FLAC/OGG 行、厂商导入行才按 rev3 写入。客户端用它判断本地缓存的主表能否复用。
+  - `search_path_rev`：目录段索引的**分词/规范化/布局**版本（1 = t3 规范化、只存本段、根名不入）。它变了只需重建 `audio_dir_search`/`audio_dir_runs`（约 1 s），主表不动；游标里带它，不符返回 409 `CURSOR_STALE`。
 - snapshot 新增 3 个 features（进入 `FEATURES` 与格式 ID）：
-  - `search_path: 1` —— 路径 FTS 存在（推荐方案见 §3：独立表 `audio_path_search`）。
+  - `search_path: 1` —— 目录段路径索引存在（§3：`audio_dir_search` + `audio_dir_runs`）。
   - `vorbis_tags: 1` —— `metadata_json.wav_metadata.vorbis` 组及非 wav 文件可能出现。
   - `vendor_metadata: 1` —— `vendor_metadata` 表/列存在并参与搜索文本。
 - `/capabilities` 新字段（只增不改，老客户端忽略）：
 ```json
 {
   "compatibility": { "features": { "search_path": 1, "vorbis_tags": 1, "vendor_metadata": 1, "...": 0 },
-                     "snapshot_read_formats": ["...", "ale-s8-cld1-t3-m2-p1-a1", "ale-s9-cld1-t3-m2-p1-a1-sp1"],
-                     "database_write_formats": ["ale-s9-cld1-t3-m2-p1-a1-sp1"] },
-  "library_schema": { "current": 9, "source_search_rev": 3, "snapshot_formats_served": ["ale-s9-…-sp1", "ale-s8-cld1-t3-m2-p1-a1"] },
-  "schema_migration": { "state": "idle|running|paused|failed|done", "endpoint": "/admin/api/migration" },
-  "vendor_import": { "revision": 1, "max_file_bytes": 52428800, "max_rows": 200000 }
+                     "snapshot_read_formats": ["...", "ale-s8-cld1-t3-m2-p1-a1", "ale-s9-cld1-t3-m2-p1-a1-sd1"],
+                     "database_write_formats": ["ale-s9-cld1-t3-m2-p1-a1-sd1"] },
+  "library_schema": { "current": 9, "source_search_rev": 3, "snapshot_formats_served": ["ale-s9-…-sd1", "ale-s8-cld1-t3-m2-p1-a1"] },
+  "schema_migration": { "state": "deferred|idle|running|paused|failed|done", "endpoint": "/admin/api/migration" },
+  "vendor_import": { "revision": 1, "max_file_bytes": 52428800, "max_rows": 200000, "max_row_text_bytes": 262144 },
+  "client_upgrade": { "level": "recommended", "reason": "snapshot_format_downgraded",
+                      "missing_features": ["search_path", "vendor_metadata", "vorbis_tags"],
+                      "min_client_version": "0.9.0", "served_snapshot_format": "ale-s8-cld1-t3-m2-p1-a1" }
 }
 ```
 - `CATALOG_REVISION 1→2`。服务端写格式改为 v9。
+
+### 1.1.1 升级提示与 deferred 状态（提案）
+- `/capabilities.client_upgrade`（只在需要提示时出现，没有就是不需要）：
+  - `level`：`none` | `recommended`（能用，缺功能）| `required`（本客户端将被 409 拒绝）。
+  - `reason`：`snapshot_format_downgraded`（发的是 s8 兼容快照）| `snapshot_format_unsupported` | `feature_unavailable`。
+  - `missing_features`：客户端拿不到的 feature 名数组；`min_client_version`：能用全部功能的最低客户端版本；`served_snapshot_format`：本次会发的快照格式。
+- 响应头（任意 `/api/v1/*` 响应都可带，客户端只解析不依赖）：
+  - `X-AudioLib-Upgrade-Available: recommended; min=0.9.0; features="search_path,vendor_metadata,vorbis_tags"`（取值同 `client_upgrade.level`）。
+  - `X-AudioLib-Schema-Migration: deferred; target=9`（服务器已是新二进制、库仍是 s8、等管理员触发；`AUDIOLIB_DEFER_SCHEMA9=1` 时出现）；运行中为 `running; target=9; done=12000; total=20248`；`paused; error=disk_full`；`failed; error=read_only`。
+- 示例（deferred 期间旧客户端）：`/capabilities` 返回 `"schema_migration":{"state":"deferred","endpoint":"/admin/api/migration"}`，不返回 `client_upgrade`（还没有新功能可提示）；迁移完成后同一客户端收到 `"client_upgrade":{"level":"recommended","reason":"snapshot_format_downgraded",…}` 和响应头 `X-AudioLib-Upgrade-Available: recommended; min=0.9.0; features="search_path,vendor_metadata,vorbis_tags"`。
 
 ### 1.2 降级矩阵
 | 客户端 \ 服务端 | 旧服务端（s8） | 新服务端（s9） |
@@ -58,105 +74,111 @@
 
 ## 2. 迁移流程（8 → 9）
 
-1. **预检**：`ensure_free_space` ≥ 库大小 ×1.3（回滚备份 1× + WAL/新索引 ~0.3×，实测见 §5）。不足则拒绝并在 `/admin/api/migration` 报 `INSUFFICIENT_SPACE`。
-2. **备份**：沿用 `search_upgrade.rs:89` 的 `audiolib-rollback-*.db` + integrity/FK 校验；**永不自动删除**。
-3. **加列/建表（快、单事务）**：新增 `vendor_metadata` 表、`v9_checkpoint(k=1,last_id,done,phase)`；`CREATE VIRTUAL TABLE audio_path_search(path_tokens, path_tokens_tokenized, content='',contentless_delete=1,detail=full,columnsize=1,…)`。`user_version` 暂不变。
-4. **批量回填（可续跑）**：每批 20k 行一事务，事务内同时写 checkpoint；可取消、重启后从 `last_id` 继续。业务读写照常（触发器在步骤 3 已对新行/改名行写入路径表，回填用 `INSERT OR REPLACE` 语义的 delete+insert 保证幂等）。
-5. **optimize + 校验**：`INSERT INTO audio_path_search(audio_path_search) VALUES('optimize')`、`integrity-check`。
-6. **切换（单事务，毫秒级）**：写 `source_search_rev=3`、features、`user_version=9`；如果选了同表方案则在此 `ALTER TABLE … RENAME` 交换（实测 7 ms）。
-7. **新快照**：生成 s9 plain/zstd；s8 兼容快照按 §4.2 保留。
-8. **回滚**：切换前任何失败 → DROP 新表/checkpoint 即回到纯 s8（无需还原）；切换后 → 停服用 `audiolib-rollback-*.db` 还原（需 Paul 批准）。
+报告 phases 键固定为 `backup / path_build / optimize / switch`（目录表构建计入 `path_build`）。
 
-进度端点（新增，需 manage 权限）：
-- `GET /admin/api/migration` → `{state, phase, completed, total, batch_ms_p50, eta_s, started_at, rollback_backup, error}`
-- `POST /admin/api/migration/start|pause|resume|cancel`；`POST /admin/api/search/rebuild`（等同 CLI `db rebuild-search`，后台 + 同进度格式）。
-- `/health.upgrade` 镜像 `phase/completed/total` 给客户端提示。
+1. **预检**：
+   - 只读（库文件或所在目录不可写）→ `status=failed, error_code=read_only, stage=preflight`，**库不动**（不建表、不建备份），退出码 4。
+   - 可用空间 < 库大小 ×1.3 → `status=failed, error_code=disk_full, stage=preflight`，库不动，退出码 3。
+2. **backup**：SQLite 在线备份 API（`sqlite3_backup`，每步 65536 页）写 `<db>.audiolib-rollback-mig9.db` + `quick_check`；**永不自动删除**。实测 API 159.4 s vs `VACUUM INTO` 231.2 s，选 API。
+3. **path_build**（可续跑）：建 `audio_dir_search`、`audio_dir_runs`、`vendor_metadata`、`v9_checkpoint(phase,last_id,done)`；按 `folders.id` 每批 5000 目录一事务写段索引（delete+insert 幂等，checkpoint 同事务）；再一条语句重建 `audio_dir_runs`。进度 = `done/total`（目录数）。
+   - 运行中 `SQLITE_FULL` → 本批回滚，`status=paused, error_code=disk_full`，**checkpoint 保留**，腾出空间后续跑；退出码 5。
+4. **optimize**：`INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize')`。
+5. **switch**（单事务，毫秒级）：写 `snapshot_format`、`search_path_rev=1`、`source_search_rev=3`、`user_version=9`，删 checkpoint。`AUDIOLIB_MIGRATION_HOLD_SWITCH_MS` 测试钩子在 switch 前持写锁 N ms（已验证：持锁期间读者照常读 v8、写者 `SQLITE_BUSY`，放锁后 v9）。
+6. **新快照**：生成 s9 plain/zstd；s8 兼容快照按 §4.1 保留。
+7. **回滚**：switch 前任何失败 → 库仍是 s8（新表可 DROP，无需还原）；switch 后 → 停服用 rollback 备份还原（需 Paul 批准）。
 
-## 3. 路径搜索方案与实测延迟
+报告示例（`migrate9` 原型实际输出）：
+```json
+{"status":"done","error_code":null,"phases":{"backup":…,"path_build":…,"optimize":…,"switch":…},"progress":{"done":20248,"total":20248},"invariants":"… => OK","total_s":…}
+```
 
-测试方法：`path-fts-bench`（只在 tmp worktree 的未提交文件，真实 `audiolib_tokenize`），9 个查询各：新连接冷跑 1 次（OS 页缓存未清，"cold" 只代表 SQLite 冷缓存），热跑 20 次取 p50/p95。路径 = `file_path` 的目录部分去掉 `<mount-parent>/`（保留根名 <root-name>，用来测最坏情况）。
+管理接口（局域网限制 **且** `manage` 权限）：
+- `GET /admin/api/migration` → `{state, phase, progress:{done,total}, error_code, phases, rollback_backup, started_at}`
+- `POST /admin/api/migration/start|pause|resume|cancel`；`POST /admin/api/search/rebuild`。
+- `/health.upgrade` 镜像 `state/phase/done/total`。
 
-### 3.1 索引大小（dbstat，VACUUM 后）
-| 方案 | 大小 | 相对现有 FTS 2028.8 MB |
-|---|---|---|
-| A 同表加 `path_tokens`+`path_tokens_tokenized` | 2273 MB | **+12.0%**（<15% 上限） |
-| B 独立表 `audio_path_search`（原文+二元组） | 288.9 MB | +14.2% |
-| C 独立 trigram 表（仅原文） | 200.4 MB | +9.9%（但与现有二元组语义不一致，不推荐） |
+## 3. 路径搜索：目录段索引（方案 D，取代逐文件路径表）
 
-### 3.2 方案 B 实现：双连接真并行 + 合并 + keyset 分页 + 取消（`search-b-bench`，t3 路径表）
+### 3.1 结构
+- `audio_dir_search`：FTS5 contentless（`content='',contentless_delete=1,detail=full,columnsize=1`，`unicode61 remove_diacritics 2`），列 `path_tokens`、`path_tokens_tokenized`，**rowid = `folders.id` = `audio_files.folder_id`（dir_id）**，每个目录一行，只存**本段目录名** `t3_norm(folder_name)`（NFC + 全角→半角）及其 `audiolib_tokenize` 二元组。**库根/挂载前缀不入索引**：路径词只命中根名时路径结果为空。
+- `audio_dir_runs(dir_id, lo, hi, n)` WITHOUT ROWID，PK(dir_id, lo)：同一目录下**连续文件 id 段**。生产副本 909,342 文件 = 36,343 段，全部致密（`n = hi-lo+1`）。
+- 一个目录“路径命中”某词 ⇔ 它自己或任一祖先段命中（祖先展开在内存里做）。因此改名只重写 1 行段索引，移动目录不重写段索引。
+- 进程内 `RunIdx`（按 lo 排序的段、by_dir、父子表、总文件数），约 1 MB，启动时加载，`search_path_rev` 或目录表变更后重载。
+- 建表耗时 0.8–1.3 s（bench 副本，含 optimize）。旧的逐文件 `audio_path_search` 不再需要。
 
-**执行**：主连接 conn1 扫 `audio_search`，第二只读连接 conn2 同时扫 `audio_path_search`（`std::thread::scope`）。每边取全部命中的 `(bm25×权重, rowid)`（与 SQLite 做 `ORDER BY bm25 LIMIT` 时必须做的扫描相同）。
-**合并**：按 audio id 去重，分数取两边较优（bm25 越小越好）；路径列权重 1.5、比例系数 `PSCALE`（默认 1.0）。
-**分页**：keyset 游标 `(score, id)`，取 `(score,id) > cursor` 的前 N 条（`select_nth_unstable` 部分选择 + 排序），同分按 id 打破平局，与 OFFSET 无关。
-**取消**：两条连接各持 `InterruptHandle`，取消时同时 `sqlite3_interrupt`；两边都返回 `SQLITE_INTERRUPT` 后整体报错，连接立即可复用。
-**放弃的做法**：逐行“另一侧探查”去重（每页 200 次 `MATCH … AND rowid=?`）实测 explosion 3.9 s、Sonomar 48 s，不可用。
+### 3.2 查询与排序（scope=all|path；scope=main 与 s8 完全相同）
+- 每个查询词 `w`：主表命中 = s8 编译的 `compile(w)`；路径命中目录集 = `audio_dir_search MATCH t3(w)` 的目录 + 全部子孙目录。**路径词命中文件数 > 总文件数一半时视为过宽，丢弃该词的路径集（只走主表）**（实测：根名不入索引后 `<root-name>` 路径命中 0；顶层目录 `1_Boom` 8.9%；5 万行不作硬阈值，而是“≤5 万时把候选 runs 限制在子树内”的执行优化）。
+- 多词 AND（跨表）：文件命中 ⇔ 每个词都在主表或其路径集中命中（目录匹配掩码做 AND）。例：door 在目录、slam 在文件名可命中，结果按 id 去重。
+- 分层排序（keyset 游标 = `(tier_score, id)` 字典序）：
+  - 第 0 层「主字段完整命中」：整串在主表命中，分数 = 主表 bm25，顺序与 s8 **逐条一致**（直接执行 s8 的 `ORDER BY bm25,id LIMIT`）。
+  - 第 1 层「混合」：部分词在主表、部分在路径，同层按文件 rowid 升序。
+  - 第 2 层「纯路径」：全部词只在路径命中，同层按文件 rowid 升序（#208 PS-23/PG-17/VN-13）。
+- 执行：conn1 跑主表 TOP-k（s8 原句）；conn2 并行算各词目录集（目录 FTS + 内存展开）；只在当前页落到 1/2 层时才**按页**把目录集展开为文件（按 dir_runs 顺序流式取，取满一页即停），高频路径词不物化文件集合。纯路径词无主表命中时用 conn3 取它在主表的 rowid 集，与 conn1 并行。
+- 取消：三条连接各持 `InterruptHandle`，取消时全部 `sqlite3_interrupt`。
 
-测试：14 个查询（中文、英文、短词、路径片段、CatID、厂商、高频根名 `<root-name>`）；热跑 3 次预热后 60 次；冷跑 = 每次新连接 10 次。基线 = schema 8 现行查询（只扫主表，bm25 TOP200）。
+### 3.3 HTTP 契约
+- 请求：`scope=main|all|path`（默认 `main` = s8 行为）、`cursor`（不透明字符串，base64url 编码的 `(tier, score, id, search_path_rev)`）、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。
+- 响应：`items`、`next_cursor`（末页为 `null`）。游标里的 `search_path_rev` 与当前不符时返回 409 `CURSOR_STALE`，客户端从第一页重取。
+- 现状：服务端 `routes.rs` **还没有搜索路由**（客户端本地搜快照），`SearchRequest` 无 scope。以上是给服务端搜索/客户端本地搜索共用的契约；客户端本地实现走同一算法。
 
-> **冷缓存限制**：`sudo purge` 需要密码，非交互不可用，因此“冷”只代表 **SQLite 页缓存冷**（OS 文件缓存仍热）。
-> 冷跑里 B 比基线固定多 ~22–26 ms，在 0.2 ms 的 `爆炸` 上也一样 → 是基准程序为第二连接**新开连接 + 注册函数**的开销，不是查询本身。服务端 conn2 应常驻连接池，生产中不应出现这部分。
+### 3.4 实测（bench 副本 909,342 行，schema 8 基线 vs 目录段方案）
+口径（Paul 定）：每条查询 5 轮，每轮 3 次预热 + 60 次，取各轮 p95 的中位数，**≤ s8 × 1.2 即过**。
 
-#### 3.2.1 热（ms，60 次）schema 8 基线 vs schema 9（B，t3）
-| 查询 | s8 p50 | s8 p95 | s8 p99 | s9 p50 | s9 p95 | s9 p99 | p95 门槛（严格） | 说明 |
-|---|---|---|---|---|---|---|---|---|
-| 爆炸 | 0.04 | 0.05 | 0.06 | 0.21 | 0.22 | 0.23 | 不过 | 命中 1→200（路径新增 676），绝对 <0.3 ms |
-| 脚步 | 0.04 | 0.04 | 0.05 | 0.61 | 0.64 | 0.65 | 不过 | 命中 2→200（路径 2313），绝对 <1 ms |
-| explosion | 40.91 | 41.65 | 41.95 | 41.55 | 42.38 | 42.79 | 不过（+1.8%） | 噪声级 |
-| whoosh | 54.32 | 54.95 | 55.16 | 56.37 | 61.16 | 61.59 | 不过（+11%） | 上一轮 +5%（55.1→58.0）；路径命中 45k 合并成本 |
-| expl | 16.61 | 16.97 | 16.98 | 16.68 | 16.91 | 16.93 | 过 | |
-| door slam | 38.16 | 39.09 | 39.22 | 38.33 | 39.17 | 40.70 | 不过（+0.2%） | 噪声级；上一轮通过 |
-| Sonomar | 193.84 | 196.63 | 202.48 | 196.27 | 199.41 | 200.21 | 不过（+1.4%） | |
-| <root-name> | 4.44 | 4.58 | 5.20 | 643.79 | 648.99 | 653.08 | **不过（×140）** | 根名命中全部 909k 行 |
-| 1_Boom | 19.42 | 19.74 | 20.83 | 49.02 | 51.36 | 51.76 | **不过（×2.6）** | 顶层目录命中 80k 行 |
-| Construction Kit | 242.16 | 245.16 | 246.76 | 246.03 | 249.82 | 252.69 | 不过（+1.9%） | |
-| Crowds Concert | 112.09 | 113.43 | 114.36 | 113.20 | 115.35 | 116.09 | 不过（+1.7%） | |
-| CREAHmn | 6.10 | 6.25 | 6.26 | 5.72 | 6.05 | 6.17 | 过 | |
-| ROCKMvmt | 6.02 | 6.16 | 6.26 | 6.10 | 6.17 | 6.36 | 不过（+0.2%） | 噪声级 |
-| EXPLMisc | 11.63 | 13.53 | 13.71 | 11.47 | 11.79 | 12.27 | 过 | |
+#### 3.4.1 热（ms）：各轮 p95 与中位数
+| 查询 | s8 各轮 p95 | s9 各轮 p95 | s8 中位 | s9 中位 | 比值 | 门槛 |
+|---|---|---|---|---|---|---|
+| slam Foley | [51.52,50.46,50.89,50.96,50.86] | [50.91,50.48,51.24,50.67,53.16] | 50.89 | 50.91 | 1.000 | 过 |
+| Doors slam | [43.67,43.68,43.76,43.69,44.31] | [42.33,42.07,42.02,42.07,43.11] | 43.69 | 42.07 | 0.963 | 过 |
+| door Construction | [204.34,203.32,203.66,203.99,203.80] | [204.60,204.56,204.50,203.89,205.98] | 203.80 | 204.56 | 1.004 | 过 |
+| explosion 1_Boom | [12.72,12.65,12.42,12.21,12.43] | [13.75,14.87,13.75,13.66,13.91] | 12.43 | 13.75 | 1.106 | 过 |
+| whoosh Designed | [121.21,121.85,122.06,122.49,122.51] | [121.72,121.52,121.94,121.88,122.77] | 122.06 | 121.88 | 0.999 | 过 |
+| <root-name> explosion | [5.24,5.13,5.04,5.10,5.18] | [6.17,6.39,6.42,6.28,6.21] | 5.13 | 6.28 | 1.225 | **不过** |
+| 爆炸 | [0.05,0.05,0.05,0.05,0.05] | [0.08,0.07,0.07,0.07,0.07] | 0.05 | 0.07 | 1.585 | **不过** |
+| 脚步 | [0.05,0.05,0.05,0.05,0.05] | [0.08,0.08,0.08,0.09,0.09] | 0.05 | 0.08 | 1.810 | **不过** |
+| explosion | [44.17,42.73,43.51,44.56,43.68] | [43.78,42.97,43.21,43.49,43.83] | 43.68 | 43.49 | 0.996 | 过 |
+| whoosh | [56.36,55.66,55.54,55.93,55.66] | [57.63,56.23,55.82,56.00,56.16] | 55.66 | 56.16 | 1.009 | 过 |
+| expl | [16.95,16.92,17.06,17.07,17.08] | [17.02,17.10,17.00,17.12,17.13] | 17.06 | 17.10 | 1.002 | 过 |
+| door slam | [39.18,39.52,39.30,39.47,39.62] | [39.75,40.00,40.42,42.13,40.03] | 39.47 | 40.03 | 1.014 | 过 |
+| Sonomar | [206.25,199.33,219.96,200.21,199.95] | [209.18,220.07,199.61,199.34,200.11] | 200.21 | 200.11 | 0.999 | 过 |
+| <root-name> | [4.44,4.53,4.54,4.46,4.50] | [4.55,4.63,4.51,4.59,4.62] | 4.50 | 4.59 | 1.020 | 过 |
+| 1_Boom | [19.68,21.49,19.65,19.67,19.65] | [19.79,20.26,19.80,20.24,19.94] | 19.67 | 19.94 | 1.014 | 过 |
+| Construction Kit | [247.19,247.03,244.61,246.87,244.56] | [246.26,245.21,245.58,245.95,246.17] | 246.87 | 245.95 | 0.996 | 过 |
+| Crowds Concert | [114.26,115.52,115.87,114.07,114.22] | [114.66,114.72,114.55,114.78,114.50] | 114.26 | 114.66 | 1.003 | 过 |
+| CREAHmn | [5.86,5.89,5.84,5.92,5.82] | [5.94,5.85,5.95,5.89,6.47] | 5.86 | 5.94 | 1.013 | 过 |
+| ROCKMvmt | [6.21,6.09,6.20,6.53,6.21] | [6.13,6.18,6.43,6.25,6.16] | 6.21 | 6.18 | 0.996 | 过 |
+| EXPLMisc | [13.69,11.75,11.84,12.29,11.61] | [11.76,11.68,11.89,11.74,11.80] | 11.84 | 11.76 | 0.993 | 过 |
 
-#### 3.2.2 冷（ms，SQLite 冷，10 次，含新开连接）
-| 查询 | s8 p50 | s8 p95 | s9 p50 | s9 p95 | 门槛 |
-|---|---|---|---|---|---|
-| 爆炸 | 18.92 | 33.57 | 45.05 | 45.36 | 不过 |
-| 脚步 | 18.54 | 22.82 | 45.36 | 46.34 | 不过 |
-| explosion | 67.42 | 86.41 | 91.15 | 92.11 | 不过 |
-| whoosh | 80.50 | 101.93 | 105.39 | 106.67 | 不过 |
-| expl | 39.52 | 43.16 | 62.88 | 64.77 | 不过 |
-| door slam | 63.79 | 66.97 | 85.54 | 86.22 | 不过 |
-| Sonomar | 220.07 | 222.56 | 245.01 | 256.71 | 不过 |
-| <root-name> | 27.22 | 28.97 | 684.38 | 689.90 | 不过 |
-| 1_Boom | 43.48 | 44.33 | 93.19 | 95.37 | 不过 |
-| Construction Kit | 266.02 | 268.64 | 292.67 | 301.21 | 不过 |
-| Crowds Concert | 137.64 | 139.34 | 160.29 | 162.95 | 不过 |
-| CREAHmn | 28.25 | 30.65 | 51.66 | 52.47 | 不过 |
-| ROCKMvmt | 28.33 | 29.96 | 52.90 | 53.54 | 不过 |
-| EXPLMisc | 34.51 | 36.45 | 58.31 | 59.00 | 不过 |
+**17/20 通过。** 未过 3 条：
+- `<root-name> explosion` ×1.225（5.13→6.28 ms）：结果为空；`<root-name>` 路径过宽被丢弃，但要证明“混合层”为空，需取 `<root-name>` 的主表 rowid（conn3 约 5.3 ms），与 conn1 主查询并行时互相拖慢（主查询 5.0→5.9 ms）。已试：单段 rowid 范围、QoS、关 memstatus，都没有过线。
+- `爆炸` ×1.59、`脚步` ×1.81：绝对值 0.05→0.07/0.08 ms（+0.02–0.03 ms），是并行线程调度开销；而且 s9 结果数更多（1→676、2→2313）。
 
-#### 3.2.3 正确性与取消
-- keyset 翻 5 页（每页 200）vs 全量不分页合并结果：14 个查询全部 **dup=0、顺序不一致=0、无缺失**（命中 <1000 的查询翻到底，如 爆炸 676、EXPLMisc 109）。
-- 取消（两连接同时 `interrupt`，各 20 次）：<root-name>（未取消 646 ms）、Sonomar（205 ms）、Construction Kit（250 ms）、explosion（46 ms）在 5/30/100 ms 后取消，**全部 20/20 中断，取消到两线程都返回 p50 0.02–0.05 ms、最大 0.09 ms**；取消后连接可直接复用。explosion 100 ms 时查询已先完成（无可取消）。
+PG-16 相关单列（各轮 p95 中位数，ms）：`<root-name>` 4.50→4.59（×1.02，修前 ×140）；`1_Boom` 19.67→19.94（×1.01，修前 ×2.6）；`explosion 1_Boom` 12.43→13.75（×1.11，其中按目录取文件 `dir_files_page` p50 1.18 ms）；跨表 `slam Foley` 50.89→50.91（混合层 202 条）、`door Construction` 203.80→204.56（混合 140）。分阶段 p50（warmq，60 次）：`<root-name> explosion` dir_match 0.21 / nopath_main 5.26 / main_bm25 5.93；`explosion 1_Boom` dir_match 0.23 / main_bm25 12.25 / dir_files_page 1.18；`脚步` dir_match 0.02 / dir_files_page 0.02。
 
-### 3.3 结论（Debug #208 门槛：s9 p95 不得高于 s8）
-- 严格逐字比较：热 4/14 通过；但 explosion/door slam/ROCKMvmt/Sonomar/Construction Kit/Crowds Concert 超出 0.2–1.9%，在两轮之间会翻转（上一轮 explosion、door slam 通过），属噪声。**建议门槛写成 “p95 ≤ s8 p95 × 1.05 或 +1 ms”**，按此 14 个里 10 个通过。
-- **真失败及原因**：
-  1. `<root-name>`（×140）、`1_Boom`（×2.6）：高频路径片段命中几十万行，bm25 需对全部命中打分。修复：根名不入索引（§3.4①，基准里故意保留做最坏情况）；路径词 df 超阈值（如 >5% 库）时**不参与排序**，只作过滤（rowid 序 LIMIT）或改用 `folder_closure` 过滤。
-  2. `爆炸`/`脚步`：s8 只命中 1–2 行，s9 因路径新增几百上千行 → 结果更多，延迟仍 <1 ms，属预期的功能差异，建议门槛对 <5 ms 的查询用绝对值。
-  3. `whoosh` +5~11%：合并 45k 路径命中的 HashMap/选择成本。可优化：路径侧改为 SQL `ORDER BY bm25 LIMIT k` 先取 top-k，主侧对这些 id 做存在性合并；或命中数超上限时只取 top-k。
-  4. 冷跑全部不过：主因是基准每次为 conn2 新开连接（+~23 ms 固定）。服务端用常驻 conn2 后需复测；OS 冷缓存需要能 `sudo purge` 的环境复测。
+#### 3.4.2 冷态
+OS 冷缓存需要 `sudo purge`，由 Paul 在终端运行 `<bench-dir>/cold.sh`（每轮 purge 后单次冷样本，5 轮×10 次，输出各轮 p95 + 中位数 + ×1.2 判定）。SQLite 冷（OS 热）单次探针：`<root-name>` 6.06 vs 5.99、`1_Boom` 21.59 vs 21.76、`explosion 1_Boom` 16.2 vs 14.7、`door slam` 40.4 vs 41.4 ms。
 
-### 3.4 附加约束
-- ①默认**不索引根名**（与 PR #209 §2.1 一致）；②路径命中设上限（沿用 `MAX_RANKED_IDS`），超过只作过滤；③只存目录段，不重复文件名；④t3：路径段与查询词先 NFC + 全角转半角，再走 `audiolib_tokenize`；主表查询词**不**做此规范化；⑤trigram 不采用。
-- 多词跨表（如一词在文件名一词在路径）：本次 B 实现是“整串在主表 OR 整串在路径表”，跨表拆词交集未实现（`door slam` 不会匹配 door 在路径、slam 在文件名）。
+#### 3.4.3 正确性 / 翻页 / 取消
+- 20 条查询：第 0 层前缀与 s8 首页逐条一致（S8ORDER=true）；与逐文件路径表的 oracle 结果集比较 missing=0 / extra=0；keyset 翻 5 页 dup=0、顺序不一致=0。
+- 取消：`<root-name>`、`door slam`、`explosion 1_Boom` 各 20 次，20/20 中断，取消到返回 p50 0.01–0.02 ms。
+
+### 3.5 目录表维护（扫描/改名/移动/删除）
+在扫描写库的同一事务里，按本次 diff 得到 `dirs_changed`（新建/改名/移动的目录及其全部子孙、删除的目录）与 `dirs_files_changed`（文件增删、跨目录移动涉及的目录）：
+1. 段索引：对 `dirs_changed` 中每个 id `DELETE FROM audio_dir_search WHERE rowid=?` 再按 `folders` 现值插入（目录已删则插入为空操作）。改名只重写该目录 1 行（子孙靠内存祖先展开，自动生效）；移动目录时段名不变，段索引不重写，祖先关系随 `folders` 现值重载。
+2. 孤儿清扫（PS-21）：`DELETE FROM audio_dir_runs WHERE dir_id NOT IN (SELECT id FROM folders)`。
+3. runs 重算：对 `dirs_files_changed` 每个目录删掉旧段，按全局 id 相邻关系在该目录 id 跨度内重算（段不会跨别的目录的文件）。
+4. 同事务提交后 `search_path_rev` 不变，但递增 `dir_index_gen`，读侧据此重载 RunIdx；旧游标因 id 不变仍有效。
+5. 不变量（PS-21/PS-22，迁移、全量扫描、增量扫描后都校验）：`count(audio_dir_search) = count(folders)`、孤儿 runs = 0、runs 覆盖文件数 = `sum(n)` = `count(audio_files)`、没有 run 含别的目录的文件。
+实测（maint-test，同一事务后回滚）：删 1 个叶目录（243 文件）+ 跨目录移动 1 文件 + 新增 3 文件 + 改名 1 个有 5 个子孙的目录 → 维护 684 ms；维护前不变量 FAIL（孤儿 1、覆盖缺 4），维护后全部 OK；改名后段行 1、路径命中目录 5；删除目录残行 0；回滚后恢复原状。
 
 ## 4. snapshot 影响
 
 - 大小：B 方案 plain +~290 MB（10.64→~10.9 GB，+2.7%），zstd 预计 +~25–30 MB（二元组压缩率与现有相近，按 959 MB×2.7% 估）；TTFB（首次 zstd 生成 44 s）预计 +~1–2 s。厂商表与 Vorbis 字段按实际导入量另计。
 - schema 升级后旧 plain/zstd 快照立即作废（格式 ID 变），首个请求重新生成；建议迁移完成后由服务端**主动预生成** s9 zstd，避免首个客户端吃 44 s+。
 - 生成前 `ensure_free_space(plain/8)`（`state.rs:322`）仍适用。
-- **实测 s9→s8 派生（生产库副本）**：APFS clone 0.02 s → DROP `audio_path_search`/`vendor_metadata` + 删 meta + `user_version=8` 2.9 s → `VACUUM INTO` 109 s → zstd -3 12.5 s（页缓存热；bench 副本上冷 151 s）；**合计 125 s**。s8 快照 10.78 GB、zstd 945 MB，`quick_check=ok`，主 FTS 哈希与原 s8 相同。
+- **实测 s9→s8 派生（生产库副本）**：APFS clone 0.02 s → DROP 路径表/`vendor_metadata`（当时测的是旧逐文件表；目录表只有 2 万行，更快） + 删 meta + `user_version=8` 2.9 s → `VACUUM INTO` 109 s → zstd -3 12.5 s（页缓存热；bench 副本上冷 151 s）；**合计 125 s**。s8 快照 10.78 GB、zstd 945 MB，`quick_check=ok`，主 FTS 哈希与原 s8 相同。
 
 ### 4.1 双快照建议（过渡期）
-- 推荐过渡期（默认 1 个版本周期，以 Paul 最终决定为准）**同时保留一份 s8 兼容快照**：由 s9 库派生（DROP `audio_path_search`/`vendor_metadata`，`source_search_rev` 回写 2，`user_version=8`），按需生成、只读、同一 library_id。成本：多一份 ~10.6 GB plain + ~959 MB zstd 磁盘，生成约 1–2 min。
+- 推荐过渡期（默认 1 个版本周期，以 Paul 最终决定为准）**同时保留一份 s8 兼容快照**：由 s9 库派生（DROP `audio_dir_search`/`audio_dir_runs`/`vendor_metadata`，`source_search_rev` 回写 2，`user_version=8`），按需生成、只读、同一 library_id。成本：多一份 ~10.6 GB plain + ~959 MB zstd 磁盘，生成约 1–2 min。
 - 发放规则：按 `x-audiolib-accept-snapshot-formats` 优先 s9，否则 s8；只接受 s8 的客户端在 `/capabilities` 与响应头 `x-audiolib-upgrade-available` 收到升级提示。写操作只接受 s9 客户端（库实际格式 s9）。
 - 注意 s8 派生快照里的 `bwf_description_tokenized` 已含 Vorbis/厂商文本（rev3 数据）— 旧客户端可读、可搜，只是不会解释新字段，属可接受。
 
@@ -164,6 +186,11 @@
 
 | 项 | 数值 |
 |---|---|
+| **目录段方案完整 8→9（生产库副本 `h.db`，`migrate9`，备份 API）** | backup 164.9 s（含 quick_check）/ path_build 0.81 s / optimize 0.20 s / switch <1 ms；总 166.1 s；不变量 OK；目录 FTS integrity ok；MG-10 主表哈希 `721d95f2320d3d2a` 不变 |
+| 暂停/续跑（`i.db`，MAX_BATCHES=2） | 2 批后 `paused`，progress 10000/20248；续跑从 last_id=10000 继续，path_build 0.76 s，总 1.1 s，不变量 OK |
+| 运行中 disk_full（`j.db`，第 3 批模拟 `SQLITE_FULL`） | `status=paused, error_code=disk_full`，退出码 5，checkpoint 保留（dirs/10000/10000），库仍 v8；续跑完成，不变量 OK |
+| 只读（`k.db` chmod 444） | `status=failed, error_code=read_only, stage=preflight`，退出码 4；库仍 v8，无新表、无回滚文件 |
+| 预检空间不足（模拟 1 GB < 13.8 GB） | `status=failed, error_code=disk_full, stage=preflight`，退出码 3，32 ms；库不动、无回滚文件 |
 | 现有 FTS 全量重建（CLI `db rebuild-search`，含回滚备份 + integrity 校验，单事务） | **499 s**（user 162 s / sys 58 s，RSS 346 MB）；目录峰值 22.8 GB（库 10.4 GB → +12.4 GB = 回滚备份 10.6 GB + WAL ~1.6 GB） |
 | 重建后库大小 | 10.64 GB（不变） |
 | 同表 14 列新 FTS（一次性批插 5000/批） | 插入 243 s + optimize 20 s；+2049 MB |
@@ -178,7 +205,7 @@
 | 三种路径的结果一致 | 路径表行数 909,342 = audio_files；6 个查询命中计数三者完全一致；FTS `integrity-check` ok |
 | trigram 路径表 | 15.2 s + 1.6 s；+167 MB |
 | VACUUM（13.1 GB 库） | 327 s |
-- 推荐方案 B 的迁移（不含备份）实测 ~67 s，含备份约 5 min（备份占 ~3.8 min，是大头）；加回滚备份（复制 10.6 GB，副本复制实测 28 s，SQLite 在线备份 + 校验约 2–4 min）总计 <5 min。p95 单批 12 s 意味着写锁最长阻塞约 12 s → 批大小建议自适应（目标单批 ≤2 s，B 方案下 20k 行约 1.4 s）。
+- 下表其余行为旧逐文件路径表方案的历史数据，仅作对照。旧方案 B 的迁移（不含备份）实测 ~67 s，含备份约 5 min（备份占 ~3.8 min，是大头）；加回滚备份（复制 10.6 GB，副本复制实测 28 s，SQLite 在线备份 + 校验约 2–4 min）总计 <5 min。p95 单批 12 s 意味着写锁最长阻塞约 12 s → 批大小建议自适应（目标单批 ≤2 s，B 方案下 20k 行约 1.4 s）。
 - 不建议迁移内 VACUUM（327 s，且需再 1× 空间）；放到维护窗口可选。
 
 ## 6. 厂商 CSV/XLS(X) 导入 API（服务端）
@@ -198,7 +225,7 @@
 - 分隔符嗅探 `,` / tab / `;`（前 64 KiB 统计一致列数）；Soundminer txt 走 tab。
 - 跳过 `._*`、`~$*`、`@syno*`、`.DS_Store`；单文件失败不影响整体，记 `files[].error`。
 - 表头在前 ~10 行内找（别名表命中最多的一行）；多 sheet 逐个处理。
-- 上限：单文件 50 MB、单文件 20 万行（xls 同样生效）、单单元格 64 KiB、单行文本 256 KiB（与 `metadata.rs` 搜索文本上限一致）；超限文件整文件拒绝并在预览中显示。
+- 上限（与 #208 测试计划统一）：单文件 50 MB（52,428,800 字节）、单文件 20 万行（xls 同样生效）、单行文本 256 KiB（262,144 字节，超出截断并计数）；超限文件整文件拒绝并在预览中显示。现状：服务端**还没有**导入代码；客户端 #213 只从 `/capabilities.vendor_import` 读 `max_file_bytes/max_rows`（测试夹具 52,428,800/200,000）；代码里唯一的 256 KiB 是 `metadata.rs:129` 搜索文本拼接上限。实测参考（#208 附录 A）：20 万行 xlsx 全量物化 249 MB / 0.79 s，csv 162 MB。
 - 匹配：①厂商根目录（导入目录所在 root 子树）文件名索引；②全库文件名索引；③去扩展名匹配（`Foo` ↔ `Foo.wav/.flac`）；④可选 fuzzy（规范化空白/大小写/下划线，仅在预览中标“建议”，需用户确认）。相对路径列存在时优先路径精确匹配。多命中标“歧义”，不自动写。
 - 去重/合并：同一文件来自多张表（多语言重复表）时，按 (文件, 字段) 合并：非空优先 → 预设语言优先（zh > en > 其他，可配置）→ 后导入覆盖需显式选择；keywords 求并集去重。
 - 写入：`vendor_metadata(audio_file_id, import_id, field, value, source_file, sheet, row)`，并重算该行 `bwf_description_tokenized` 对应的派生搜索文本（走触发器更新 FTS）；`source_search_rev` 不变（rev3 已包含 vendor 组）。
@@ -212,16 +239,16 @@
 1. `/capabilities.compatibility.features` 含/不含 `search_path|vorbis_tags|vendor_metadata` → 客户端显示/隐藏功能。
 2. `/capabilities.schema_migration.state` + `/health.upgrade` → “服务器正在升级库（x%）”。
 3. 409 `SNAPSHOT_FORMAT_UNSUPPORTED` / 版本类 409 → “请升级客户端”。
-4. 只拿到 s8 兼容快照时响应头 `x-audiolib-upgrade-available: <version>` → 非阻塞提示。
+4. 只拿到 s8 兼容快照时：`/capabilities.client_upgrade` + 响应头 `X-AudioLib-Upgrade-Available`（§1.1.1）→ 非阻塞提示；deferred 时 `X-AudioLib-Schema-Migration: deferred; target=9`。
 5. 新快照可用（`snapshot_id` 变化）→ 客户端提示刷新。
 6. 厂商导入完成 / 回滚（`/api/vendor-import` 状态）→ 刷新快照提示。
 
 ## 9. 服务端视角的边界情况
 - 迁移中崩溃/断电：checkpoint 续跑；切换前失败即回到 s8，无需还原。
-- 迁移中扫描/写入：触发器先装，回填幂等（delete+insert）。改名风暴：路径表按 `folder_closure` 批量重算。
-- 磁盘不足：预检拒绝；运行中 `SQLITE_FULL` → 暂停并报错，保留 checkpoint。
+- 迁移中扫描/写入：触发器先装，回填幂等（delete+insert）。改名/移动/删除：按 §3.5 同事务维护目录表。
+- 磁盘不足：预检 `failed/disk_full`、库不动；运行中 `SQLITE_FULL` → `paused/disk_full`，保留 checkpoint。只读：预检 `failed/read_only`，库不动。
 - 超长路径（>4 KiB）截断并计数；NFD 路径（macOS）统一 NFC 后再分词。
-- 根名/共享前缀导致超高频路径词：根名不入索引 + 命中上限。
+- 根名/共享前缀导致超高频路径词：根名不入索引 + 命中超过一半文件即丢弃路径集（§3.2）。
 - 同一库多个服务端实例（<prod-port>/<beta-port>）共用 DB：迁移需独占 upgrade lease（已有 `*.upgrade.lock`）。
 - 回滚备份磁盘占用：保留，管理端只提示不自动删除。
 - 旧客户端写请求打到 s9 库：按库实际格式 409 拒绝。
@@ -235,4 +262,4 @@
 6. 回滚预案：切换前取消即可；切换后停服 → 用 `audiolib-rollback-*.db` 还原 → 回旧二进制。
 
 ## 附：基准原始数据
-`<bench-dir>/run.log`、`run2.log`、`du.log`、`du2.log`；基准程序 `<bench-worktree>/crates/audiolib-db/src/bin/path-fts-bench.rs`、`search-b-bench.rs`（未提交）；新数据 `run3.log`（B 首轮）、`run4.log`（t3 迁移 + 热/冷/分页/取消 + s8 派生）、`mig/run5.log` + `mig/mg10.log` + `mig/vq.log`（生产副本完整迁移）。
+`<bench-dir>/run7.log`（目录段方案：建表、maint-test、20 条查询 S8ORDER/oracle/翻页、取消、5 轮热测各轮 p95）、`mig/run8.log`（目录段方案生产副本迁移 + 暂停/disk_full/read_only/预检）、`cold.sh`（OS 冷态，Paul 运行）；基准程序 `<bench-worktree>/crates/audiolib-db/src/bin/search-b-bench.rs`（未提交）。旧逐文件方案数据：`run.log`–`run4.log`、`mig/run5.log`、`mig/run6.log`、`mig/mg10.log`。
