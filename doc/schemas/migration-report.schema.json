@@ -30,7 +30,7 @@
       ]
     },
     "error_code": {
-      "description": "null on success.",
+      "description": "null on success. disk_full: state paused, checkpoint kept, resume continues. read_only: blocked at preflight, state failed, no backup, DB untouched. io_error: other IO errors.",
       "enum": [
         null,
         "insufficient_space",
@@ -38,6 +38,8 @@
         "already_running",
         "backup_failed",
         "integrity_failed",
+        "disk_full",
+        "read_only",
         "io_error",
         "not_migrated"
       ]

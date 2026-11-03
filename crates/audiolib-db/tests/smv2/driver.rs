@@ -24,6 +24,7 @@
 //!   AUDIOLIB_MIGRATION_PAUSE_AFTER_BATCHES  pause after n committed batches
 //!   AUDIOLIB_MIGRATION_BATCH_ROWS           initial batch size
 //!   AUDIOLIB_MIGRATION_SLOW_BATCH           `<n>:<ms>` sleep inside batch n
+//!   AUDIOLIB_MIGRATION_HOLD_SWITCH_MS       (requested) hold `switching` for N ms
 //!   AUDIOLIB_DEFER_SCHEMA9=1                `startup` leaves s8, state=deferred
 //!   (`--sql-trace <file>` also exists under test-hooks)
 //!
@@ -50,6 +51,8 @@ pub const PAUSE_AFTER_BATCHES: &str = "AUDIOLIB_MIGRATION_PAUSE_AFTER_BATCHES";
 pub const BATCH_ROWS: &str = "AUDIOLIB_MIGRATION_BATCH_ROWS";
 pub const SLOW_BATCH: &str = "AUDIOLIB_MIGRATION_SLOW_BATCH";
 pub const FAULT: &str = "AUDIOLIB_MIGRATION_FAULT";
+/// Requested hook: hold the `switching` state for N ms (used when set).
+pub const HOLD_SWITCH_MS: &str = "AUDIOLIB_MIGRATION_HOLD_SWITCH_MS";
 
 pub struct Driver {
     program: PathBuf,

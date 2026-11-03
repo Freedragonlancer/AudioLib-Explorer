@@ -203,8 +203,19 @@ fn mg_04_read_only_db_is_not_migrated() {
     perm.set_readonly(true);
     fs::set_permissions(&db, perm.clone()).unwrap();
     let r = d.run("start", &db, &[]);
-    // Pending server confirm: read-only maps to io_error.
-    assert_eq!(r.error_code(), Some("io_error"), "{r:?}");
+    assert_eq!(r.error_code(), Some("read_only"), "{r:?}");
+    assert_eq!(r.state(), "failed", "{r:?}");
+    let backups = fs::read_dir(db.parent().unwrap())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("audiolib-rollback-")
+        })
+        .count();
+    assert_eq!(backups, 0, "read_only preflight must not take a backup");
     #[allow(clippy::permissions_set_readonly_false)]
     perm.set_readonly(false);
     fs::set_permissions(&db, perm).unwrap();
@@ -544,8 +555,7 @@ fn mg_13_sqlite_full_pauses_and_resumes() {
     let (_dir, db) = fixture().copy_db();
     let r = d.run("start", &db, &[env(FAULT, "sqlite_full:batch:2")]);
     assert_eq!(r.state(), "paused", "{r:?}");
-    // Pending server confirm: SQLITE_FULL maps to io_error (state paused, checkpoint kept).
-    assert_eq!(r.error_code(), Some("io_error"), "{r:?}");
+    assert_eq!(r.error_code(), Some("disk_full"), "{r:?}");
     assert!(
         table_exists(&conn(&db), "v9_checkpoint"),
         "checkpoint dropped on SQLITE_FULL"
@@ -950,7 +960,19 @@ fn mg_15_http_writes_rejected_during_switch() {
     let d = Arc::new(Driver::require());
     let id = any_id(&srv.db);
     let (d1, db1) = (d.clone(), srv.db.clone());
-    let runner = std::thread::spawn(move || d1.migrate_to_done(&db1));
+    // AUDIOLIB_MIGRATION_HOLD_SWITCH_MS (requested hook) keeps `switching` observable.
+    let hold = std::env::var(HOLD_SWITCH_MS).ok();
+    let runner = std::thread::spawn(move || {
+        let env: Vec<_> = hold.into_iter().map(|v| (HOLD_SWITCH_MS, v)).collect();
+        let mut last = d1.run("start", &db1, &env);
+        for _ in 0..10 {
+            if last.state() == "done" {
+                break;
+            }
+            last = d1.run("resume", &db1, &env);
+        }
+        assert_eq!(last.state(), "done", "{last:?}");
+    });
     let mut seen = false;
     while !runner.is_finished() {
         if srv.status().json()["state"] == "switching" {
@@ -969,7 +991,7 @@ fn mg_15_http_writes_rejected_during_switch() {
     runner.join().unwrap();
     assert!(
         seen,
-        "never observed a write inside the switch window (needs a switch-hold hook)"
+        "never observed a write inside the switch window (set AUDIOLIB_MIGRATION_HOLD_SWITCH_MS)"
     );
 }
 
