@@ -29,9 +29,9 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     ] {
         conn.execute("INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,user_notes,metadata_json) VALUES(?1,?2,?2,?2,?3,'original', '{\"unknown\":\"原文\"}')", params![id,format!("sound-{id}.wav"),folder]).unwrap();
     }
-    // Incremental replies require the server's authoritative RFC3339 timestamp.
+    // Incremental replies preserve the server's authoritative SQLite timestamp.
     conn.execute(
-        "UPDATE audio_files SET modified_at='2026-11-04T00:00:00Z'",
+        "UPDATE audio_files SET modified_at='2026-11-04 00:00:00.000000'",
         [],
     )
     .unwrap();
