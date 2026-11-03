@@ -2,6 +2,17 @@
 
 本阶段节点：**冷测闸门通过 + #211 合入 feat**，已达成。后续开发交给 Codex，各 bot 只在 PR 上审查。
 
+## 0. 接手第一步：全仓检查
+
+#219 等合入时 CI 只跑了 fmt，全仓 clippy 和 test 没跑过。接手后先在 feat `f765eca`（#220 合入后的 tip）上跑：
+
+```
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+有失败先修，再开新任务。
+
 ## 1. 分支与 tip
 
 | 项 | 值 |
