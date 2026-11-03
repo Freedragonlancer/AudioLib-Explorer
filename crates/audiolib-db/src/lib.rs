@@ -2203,7 +2203,24 @@ impl SqliteProvider {
             ));
         }
         if !self.directory_index_ready()? {
-            self.rebuild_directory_search()?;
+            // s8 snapshots / libraries without the directory index must not create
+            // tables here (read-only snapshots cannot, and local s8 must stay clean).
+            // PS-15:「全部」degrades to main;「仅路径」returns no hits.
+            if request.scope == SearchScope::Path {
+                return Ok(SearchPage {
+                    returned_count: 0,
+                    results: Vec::new(),
+                    total_count: 0,
+                    query: request.query.clone(),
+                    execution_time_ms: 0.0,
+                    cache_hit: false,
+                    next_cursor: None,
+                });
+            }
+            let mut browse = request.clone();
+            browse.scope = SearchScope::Main;
+            browse.cursor = None;
+            return self.search_impl(&browse, cancel);
         }
         let start = Instant::now();
         let mut conn = self.search_reader(cancel)?;
@@ -2616,6 +2633,10 @@ impl DataProvider for SqliteProvider {
         workspace: &audiolib_core::SearchWorkspace,
     ) -> Result<()> {
         search_workspace::save(target, workspace)
+    }
+
+    fn path_search_ready(&self) -> Result<bool> {
+        self.directory_index_ready()
     }
 
     fn search_revision(&self) -> Result<Option<u64>> {

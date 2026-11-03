@@ -25,7 +25,7 @@ use audiolib_core::config::{
 use audiolib_core::{
     Album, AlbumKind, AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder,
     LibraryExportFormat, ListWaveformSource, MaintenanceAction, MetadataPatch, ScanSession,
-    SearchFilters, SearchRequest, SortOrder, TagEditMode,
+    SearchFilters, SearchRequest, SearchScope, SortOrder, TagEditMode,
 };
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -83,6 +83,30 @@ fn table_sort_order(index: i32) -> SortOrder {
         5 => SortOrder::Tags,
         6 => SortOrder::Modified,
         _ => SortOrder::Relevance,
+    }
+}
+
+fn search_scope_index(scope: SearchScope) -> i32 {
+    match scope {
+        SearchScope::All => 0,
+        SearchScope::Main => 1,
+        SearchScope::Path => 2,
+    }
+}
+
+fn search_scope_from_index(index: i32) -> SearchScope {
+    match index {
+        1 => SearchScope::Main,
+        2 => SearchScope::Path,
+        _ => SearchScope::All,
+    }
+}
+
+fn search_scope_from_pref(value: &str) -> SearchScope {
+    match audiolib_core::config::normalize_search_scope(value).as_str() {
+        "main" => SearchScope::Main,
+        "path" => SearchScope::Path,
+        _ => SearchScope::All,
     }
 }
 
@@ -939,6 +963,10 @@ impl Controller {
         ui.set_table_tags_width(table.tags_width);
         ui.set_sort_index(sort_index(table.order_by));
         ui.set_sort_descending(table.descending);
+        ui.set_search_scope_index(search_scope_index(search_scope_from_pref(
+            &config.search_scope,
+        )));
+        ui.set_path_search_available(false);
         ui.set_volume(playback.volume);
         publish_audition(ui, playback.audition);
         publish_volume(ui, playback.volume);
@@ -1277,6 +1305,14 @@ impl Controller {
         ui.on_search_requested(move |immediate| {
             if let Some(ui) = c.ui.upgrade() {
                 c.request_search(&ui, immediate, true);
+            }
+        });
+        let c = self.clone();
+        ui.on_search_scope_changed(move || {
+            if let Some(ui) = c.ui.upgrade() {
+                c.persist_search_scope(&ui);
+                c.refresh_path_search_availability(&ui);
+                c.request_search(&ui, true, true);
             }
         });
         let c = self.clone();
@@ -4246,6 +4282,69 @@ impl Controller {
         true
     }
 
+    /// DESIGN §2.5: keep the chosen search scope in preferences.
+    fn persist_search_scope(&self, ui: &AppWindow) {
+        let scope = search_scope_from_index(ui.get_search_scope_index());
+        let mut config = self.config.lock().unwrap();
+        config.search_scope = scope.as_str().to_string();
+        if let Err(error) = config.save() {
+            tracing::warn!(%error, "Save search scope preference");
+        }
+    }
+
+    /// Offer「仅路径」only when the open provider has a ready directory index.
+    fn refresh_path_search_availability(self: &Arc<Self>, ui: &AppWindow) {
+        let ready = self
+            .metadata_provider()
+            .ok()
+            .and_then(|provider| provider.path_search_ready().ok())
+            .unwrap_or(false);
+        ui.set_path_search_available(ready);
+        if !ready && ui.get_search_scope_index() >= 2 {
+            ui.set_search_scope_index(0);
+            let chinese = self.chinese.load(Ordering::Acquire);
+            ui.set_status(
+                if chinese {
+                    "当前音效库不支持路径搜索，已改回「全部」（仅主表）。"
+                } else {
+                    "Path search is unavailable for this library; scope reset to All (main fields only)."
+                }
+                .into(),
+            );
+        }
+    }
+
+    /// Map the UI scope into the request, degrading when the directory index is absent.
+    fn apply_search_scope(self: &Arc<Self>, ui: &AppWindow, request: &mut SearchRequest) {
+        let ready = self
+            .metadata_provider()
+            .ok()
+            .and_then(|provider| provider.path_search_ready().ok())
+            .unwrap_or(false);
+        ui.set_path_search_available(ready);
+        let chosen = search_scope_from_index(ui.get_search_scope_index());
+        request.scope = match chosen {
+            SearchScope::Path if !ready => {
+                let chinese = self.chinese.load(Ordering::Acquire);
+                ui.set_status(
+                    if chinese {
+                        "服务器版本较旧，部分新功能（路径搜索、厂商资料导入）不可用。"
+                    } else {
+                        "This server is older; path search and vendor import are unavailable."
+                    }
+                    .into(),
+                );
+                ui.set_search_scope_index(1);
+                SearchScope::Main
+            }
+            SearchScope::All if !ready => SearchScope::Main,
+            other => other,
+        };
+        if request.scope == SearchScope::Main {
+            request.cursor = None;
+        }
+    }
+
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
         if !self.available() {
             return;
@@ -4265,6 +4364,7 @@ impl Controller {
         self.cancel_deferred_task_search();
         let mut request = self.request.lock().unwrap().clone();
         request.query = ui.get_query().to_string();
+        self.apply_search_scope(ui, &mut request);
         if request.needs_more_search_text() {
             ui.set_status(
                 if self.chinese.load(Ordering::Acquire) {
@@ -7044,6 +7144,11 @@ impl Controller {
         config.ui_font_size = self.ui_font_size.load(Ordering::Acquire);
         config.list_font_size = self.list_font_size.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
+        if let Some(ui) = self.ui.upgrade() {
+            config.search_scope = search_scope_from_index(ui.get_search_scope_index())
+                .as_str()
+                .to_string();
+        }
         config.max_search_tasks = self.max_search_tasks.load(Ordering::Acquire);
         config.window_layout = self.window_layout.lock().unwrap().clone();
         if let Ok(status) = confirmed {
@@ -9207,6 +9312,7 @@ mod tests {
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
             data_source_fallback: None,
+            search_scope: "all".into(),
         };
         config.save().unwrap();
         let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();

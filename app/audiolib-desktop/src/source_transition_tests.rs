@@ -103,6 +103,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         allowed_scan_roots: Vec::new(),
         data_source: Default::default(),
         data_source_fallback: None,
+        search_scope: "all".into(),
     };
     config.save().unwrap();
     config
