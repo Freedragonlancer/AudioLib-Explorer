@@ -442,7 +442,7 @@ fn s8_s9_pairs() -> Vec<(String, Hits, Hits)> {
 }
 
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn em_06_s9_hits_are_superset_of_s8() {
     for (q, h8, h9) in s8_s9_pairs().into_iter().take(PLANTED.len()) {
         let (a, b) = (id_set(&h8), id_set(&h9));
@@ -458,7 +458,7 @@ fn em_06_s9_hits_are_superset_of_s8() {
 }
 
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn em_07_08_s9_main_scope_identical() {
     for (q, h8, h9) in s8_s9_pairs()
         .into_iter()
@@ -470,7 +470,7 @@ fn em_07_08_s9_main_scope_identical() {
 }
 
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn em_09_s9_main_table_identical_to_s8() {
     // Default scope on s9 is "all"; main-table-only identity needs the filename scope.
     // Until the scope API exists, compare through the entrypoint's main-only query.
@@ -485,31 +485,19 @@ fn em_09_s9_main_table_identical_to_s8() {
     drop(s8);
     driver.migrate_to_done(&db);
     for (q, ids8) in UNICODE_QUERIES.iter().zip(before) {
-        let r = driver.run(
-            "main_search",
-            &db,
-            &[("AUDIOLIB_SMV2_QUERY", q.to_string())],
-        );
-        let ids9: BTreeSet<i64> = serde_json::from_value(r.report["ids"].clone()).unwrap();
+        let ids9 = driver.search("main_search", &db, q);
         assert_eq!(ids8, ids9, "{q}");
     }
 }
 
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn em_09_path_scope_matches_every_variant() {
     let driver = Driver::require();
     let f = fixture();
     let (_dir, db) = f.copy_db();
     driver.migrate_to_done(&db);
-    let ids_for = |q: &str| -> BTreeSet<i64> {
-        let r = driver.run(
-            "path_search",
-            &db,
-            &[("AUDIOLIB_SMV2_QUERY", q.to_string())],
-        );
-        serde_json::from_value(r.report["ids"].clone()).unwrap()
-    };
+    let ids_for = |q: &str| -> BTreeSet<i64> { driver.search("path_search", &db, q) };
     // Folder twins: full-width/half-width and NFD/NFC spellings must coincide.
     for (a, b) in [("ＳＦＸ", "SFX"), ("Cafe\u{301}", "Café")] {
         let (x, y) = (ids_for(a), ids_for(b));

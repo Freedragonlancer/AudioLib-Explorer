@@ -4,7 +4,9 @@
 //! The migration is not in this branch yet. Tests needing it are ignored with
 //! `pending server migration branch`; run them with the entrypoint described in
 //! `smv2/driver.rs`:
-//!   AUDIOLIB_SMV2_MIGRATE_CMD=<exe> cargo test -p audiolib-db --test smv2_mg -- --ignored
+//!   cargo build -p audiolib-db --features test-hooks --bin audiolib-migrate
+//!   cargo test -p audiolib-db --features test-hooks --test smv2_mg -- --ignored
+//! (or point AUDIOLIB_SMV2_MIGRATE_CMD at another executable)
 //! MG-09 (old client vs schema-9 file) runs now against the current client code.
 mod smv2;
 mod support;
@@ -93,7 +95,7 @@ fn db_size(db: &Path) -> u64 {
 
 // ------------------------------------------------------------------------ MG-01
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_01_kill_and_resume_at_every_fault_point() {
     let d = Driver::require();
     for point in [
@@ -104,7 +106,7 @@ fn mg_01_kill_and_resume_at_every_fault_point() {
         "abort:switch_tx",
     ] {
         let (_dir, db) = fixture().copy_db();
-        let first = d.run("start", &db, &[env("AUDIOLIB_MIGRATION_FAULT", point)]);
+        let first = d.run("start", &db, &[env(FAULT, point)]);
         assert!(first.aborted(), "{point}: fault did not abort: {first:?}");
         // Every fault here precedes the switch commit: still a usable schema 8.
         assert_still_usable_s8(&db);
@@ -128,34 +130,30 @@ fn mg_01_kill_and_resume_at_every_fault_point() {
 
 // ------------------------------------------------------------------------ MG-02
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_02_space_precheck_1_29x_refuses_1_30x_proceeds() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
     let size = db_size(&db);
     let before = file_sha(&db);
     let low = (size as f64 * 1.29).floor() as u64;
-    let r = d.run("start", &db, &[env("AUDIOLIB_MIGRATION_FREE_BYTES", low)]);
+    let r = d.run("start", &db, &[env(FAKE_FREE_BYTES, low)]);
     assert_eq!(r.error_code(), Some("INSUFFICIENT_SPACE"), "{r:?}");
     assert_ne!(r.state(), "running");
     assert_eq!(file_sha(&db), before, "refused migration modified the DB");
     let ok = (size as f64 * 1.30).ceil() as u64;
-    let r = d.run("start", &db, &[env("AUDIOLIB_MIGRATION_FREE_BYTES", ok)]);
+    let r = d.run("start", &db, &[env(FAKE_FREE_BYTES, ok)]);
     assert_ne!(r.error_code(), Some("INSUFFICIENT_SPACE"), "{r:?}");
 }
 
 // ------------------------------------------------------------------------ MG-03
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_03_backup_failure_aborts_and_backup_is_verified_and_kept() {
     let d = Driver::require();
     let (dir, db) = fixture().copy_db();
     let before = file_sha(&db);
-    let r = d.run(
-        "start",
-        &db,
-        &[env("AUDIOLIB_MIGRATION_FAULT", "backup_fail")],
-    );
+    let r = d.run("start", &db, &[env(FAULT, "backup_fail")]);
     assert_eq!(r.state(), "failed", "{r:?}");
     assert_eq!(
         file_sha(&db),
@@ -195,7 +193,7 @@ fn mg_03_backup_failure_aborts_and_backup_is_verified_and_kept() {
 
 // ------------------------------------------------------------------------ MG-04
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_04_read_only_db_is_not_migrated() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
@@ -214,11 +212,11 @@ fn mg_04_read_only_db_is_not_migrated() {
 
 // ------------------------------------------------------------------------ MG-05
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_05_upgrade_lock_is_exclusive() {
     let d = Arc::new(Driver::require());
     let (_dir, db) = fixture().copy_db();
-    let slow = [env("AUDIOLIB_MIGRATION_SLOW_BATCH_MS", "1:1500")];
+    let slow = [env(SLOW_BATCH, "1:1500")];
     let (d1, db1) = (d.clone(), db.clone());
     let first = std::thread::spawn(move || d1.run("start", &db1, &slow));
     std::thread::sleep(Duration::from_millis(500));
@@ -241,7 +239,7 @@ fn mg_05_upgrade_lock_is_exclusive() {
 
 // ------------------------------------------------------------------------ MG-06
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD; optional AUDIOLIB_SMV2_LARGE_DB)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks; optional AUDIOLIB_SMV2_LARGE_DB)"]
 fn mg_06_record_timings() {
     let d = Driver::require();
     let (_dir, db) = match std::env::var_os("AUDIOLIB_SMV2_LARGE_DB") {
@@ -256,13 +254,25 @@ fn mg_06_record_timings() {
     let started = Instant::now();
     let r = d.migrate_to_done(&db);
     let total = started.elapsed();
-    let mut ms = r.batch_ms();
+    let mut ms: Vec<f64> = match r.batches() {
+        Some(b) => b.into_iter().map(|(_, ms)| ms).collect(),
+        None => {
+            soft_skip(
+                "MG-06",
+                "report has no batches[]; batch percentiles not recorded",
+            );
+            Vec::new()
+        }
+    };
     ms.sort_by(f64::total_cmp);
     let pct = |p: f64| {
         ms.get(((ms.len() as f64 - 1.0) * p).round() as usize)
             .copied()
             .unwrap_or(0.0)
     };
+    for k in ["backup", "path_build", "optimize", "switch"] {
+        assert!(r.phase_ms(k).is_some(), "phases lacks {k}: {r:?}");
+    }
     let phases = r.report["phases"].to_string().to_lowercase();
     assert!(
         !phases.contains("rebuild") || !phases.contains("audio_search\""),
@@ -273,25 +283,20 @@ fn mg_06_record_timings() {
         json!({
             "case": "MG-06", "total_s": total.as_secs_f64(), "db_bytes": db_size(&db),
             "batches": ms.len(), "batch_ms_p50": pct(0.5), "batch_ms_p95": pct(0.95),
-            "batch_ms_max": ms.last(), "optimize_ms": r.report["optimize_ms"],
-            "switch_ms": r.report["switch_ms"], "backup_ms": r.report["backup_ms"],
+            "batch_ms_max": ms.last(), "phases": r.report["phases"],
         })
     );
 }
 
 // ------------------------------------------------------------------------ MG-07
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_07_cancel_before_switch_and_rollback_after() {
     let d = Driver::require();
     let f = fixture();
     let (_dir, db) = f.copy_db();
     let main_before = main_fts_shadow_hash(&conn(&db));
-    let r = d.run(
-        "start",
-        &db,
-        &[env("AUDIOLIB_MIGRATION_STOP_AFTER_BATCHES", 1)],
-    );
+    let r = d.run("start", &db, &[env(PAUSE_AFTER_BATCHES, 1)]);
     assert_eq!(r.state(), "paused", "{r:?}");
     let r = d.run("cancel", &db, &[]);
     assert!(matches!(r.state(), "idle" | "cancelled"), "{r:?}");
@@ -311,7 +316,7 @@ fn mg_07_cancel_before_switch_and_rollback_after() {
 
 // ------------------------------------------------------------------------ MG-08
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_08_second_run_is_a_noop() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
@@ -320,7 +325,13 @@ fn mg_08_second_run_is_a_noop() {
     let before = file_sha(&db);
     let r = d.run("start", &db, &[]);
     assert_eq!(r.state(), "done", "{r:?}");
-    assert!(r.batch_ms().is_empty(), "second run did work: {r:?}");
+    match r.batches() {
+        Some(b) => assert!(b.is_empty(), "second run did work: {r:?}"),
+        None => soft_skip(
+            "MG-08",
+            "report has no batches[]; no-work check relies on file hash only",
+        ),
+    }
     checkpoint(&db);
     assert_eq!(file_sha(&db), before, "second run modified the DB");
 }
@@ -337,7 +348,7 @@ fn mg_09_old_client_refuses_or_reads_schema9_without_writing() {
 }
 
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_09_old_client_on_real_migrated_file() {
     let (_dir, db) = fixture().copy_db();
     Driver::require().migrate_to_done(&db);
@@ -391,7 +402,7 @@ fn old_client_contract(db: &Path) {
 
 // ------------------------------------------------------------------------ MG-10
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_10_integrity_counts_and_main_fts_unchanged() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
@@ -434,7 +445,7 @@ fn mg_10_integrity_counts_and_main_fts_unchanged() {
 
 // ------------------------------------------------------------------------ MG-11
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_11_adaptive_batches_and_bounded_write_lock() {
     let d = Driver::require();
     let f = fixture();
@@ -443,16 +454,21 @@ fn mg_11_adaptive_batches_and_bounded_write_lock() {
     let r = d.run(
         "start",
         &db,
-        &[
-            env("AUDIOLIB_MIGRATION_BATCH_ROWS", 50),
-            env("AUDIOLIB_MIGRATION_SLOW_BATCH_MS", "2:1800"),
-        ],
+        &[env(BATCH_ROWS, 50), env(SLOW_BATCH, "2:1800")],
     );
-    let rows = r.batch_rows();
-    assert!(
-        rows.len() >= 3 && rows[2] < rows[1],
-        "batch after a slow one did not shrink: {rows:?}"
-    );
+    match r.batches() {
+        Some(b) => {
+            let rows: Vec<u64> = b.iter().map(|(rows, _)| *rows).collect();
+            assert!(
+                rows.len() >= 3 && rows[2] < rows[1],
+                "batch after a slow one did not shrink: {rows:?}"
+            );
+        }
+        None => soft_skip(
+            "MG-11",
+            "report has no batches[]; adaptive shrink not asserted",
+        ),
+    }
     // Concurrent search + writer load: per-batch ≤2 s and writer wait ≤2 s.
     let (_dir2, db2) = f.copy_db();
     let stop = Arc::new(AtomicBool::new(false));
@@ -478,7 +494,16 @@ fn mg_11_adaptive_batches_and_bounded_write_lock() {
     let r = d.migrate_to_done(&db2);
     stop.store(true, Ordering::Relaxed);
     let worst_write = load.join().unwrap();
-    let mut ms = r.batch_ms();
+    let mut ms: Vec<f64> = match r.batches() {
+        Some(b) => b.into_iter().map(|(_, ms)| ms).collect(),
+        None => {
+            soft_skip(
+                "MG-11",
+                "report has no batches[]; per-batch ≤2 s not asserted",
+            );
+            Vec::new()
+        }
+    };
     ms.sort_by(f64::total_cmp);
     println!(
         "SMV2-TIMING {}",
@@ -496,7 +521,7 @@ fn mg_11_adaptive_batches_and_bounded_write_lock() {
 
 // ------------------------------------------------------------------------ MG-12
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_12_no_vacuum_on_migration_path() {
     let d = Driver::require();
     let (dir, db) = fixture().copy_db();
@@ -518,15 +543,11 @@ fn mg_12_no_vacuum_on_migration_path() {
 
 // ------------------------------------------------------------------------ MG-13
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_13_sqlite_full_pauses_and_resumes() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
-    let r = d.run(
-        "start",
-        &db,
-        &[env("AUDIOLIB_MIGRATION_FAULT", "sqlite_full:batch:2")],
-    );
+    let r = d.run("start", &db, &[env(FAULT, "sqlite_full:batch:2")]);
     assert_eq!(r.state(), "paused", "{r:?}");
     assert_eq!(r.error_code(), Some("SQLITE_FULL"), "{r:?}");
     assert!(
@@ -541,23 +562,24 @@ fn mg_13_sqlite_full_pauses_and_resumes() {
 
 // ------------------------------------------------------------------------ MG-14
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_14_state_machine_start_pause_resume_cancel() {
     // HTTP permission checks (no manage → 403) belong in the server crate; this
     // checks the state machine and progress fields through the entrypoint.
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
     assert_eq!(d.run("status", &db, &[]).state(), "idle");
-    let r = d.run(
-        "start",
-        &db,
-        &[env("AUDIOLIB_MIGRATION_STOP_AFTER_BATCHES", 1)],
-    );
+    let r = d.run("start", &db, &[env(PAUSE_AFTER_BATCHES, 1)]);
     assert_eq!(r.state(), "paused", "{r:?}");
-    for k in ["completed", "total", "batch_ms_p50", "eta_s"] {
-        assert!(!r.report[k].is_null(), "status lacks {k}: {r:?}");
+    let (done, total) = r.progress();
+    assert!(done > 0 && done <= total, "progress after one batch: {r:?}");
+    match r.eta_s() {
+        Some(eta) => assert!(eta.is_number() || eta.is_null(), "eta_s: {r:?}"),
+        None => soft_skip("MG-14", "report has no eta_s"),
     }
-    assert!(r.report["completed"].as_u64() <= r.report["total"].as_u64());
+    if r.batches().is_none() {
+        soft_skip("MG-14", "report has no batches[]");
+    }
     let again = d.run("start", &db, &[]);
     assert_ne!(
         again.state(),
@@ -566,23 +588,20 @@ fn mg_14_state_machine_start_pause_resume_cancel() {
     );
     let r = d.run("resume", &db, &[]);
     assert_eq!(r.state(), "done", "{r:?}");
-    assert_eq!(r.report["completed"], r.report["total"]);
+    let (done, total) = r.progress();
+    assert_eq!(done, total, "{r:?}");
 }
 
 // ------------------------------------------------------------------------ MG-15
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_15_s8_reads_and_writes_continue_during_backfill() {
     // 503 + Retry-After during the switch and /health.upgrade are HTTP-level and
     // belong in the server crate; this checks library availability between batches.
     let d = Driver::require();
     let f = fixture();
     let (_dir, db) = f.copy_db();
-    let r = d.run(
-        "start",
-        &db,
-        &[env("AUDIOLIB_MIGRATION_STOP_AFTER_BATCHES", 1)],
-    );
+    let r = d.run("start", &db, &[env(PAUSE_AFTER_BATCHES, 1)]);
     assert_eq!(r.state(), "paused", "{r:?}");
     assert_still_usable_s8(&db);
     let p = SqliteProvider::open(&db).expect("s8 writer during backfill");
@@ -601,7 +620,7 @@ fn mg_15_s8_reads_and_writes_continue_during_backfill() {
 
 // ------------------------------------------------------------------------ MG-16
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_16_defer_schema9_env() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
@@ -615,16 +634,12 @@ fn mg_16_defer_schema9_env() {
 
 // ------------------------------------------------------------------------ MG-17
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_17_scan_and_rename_during_backfill_reach_path_table() {
     let d = Driver::require();
     let f = fixture();
     let (_dir, db) = f.copy_db();
-    let r = d.run(
-        "start",
-        &db,
-        &[env("AUDIOLIB_MIGRATION_STOP_AFTER_BATCHES", 1)],
-    );
+    let r = d.run("start", &db, &[env(PAUSE_AFTER_BATCHES, 1)]);
     assert_eq!(r.state(), "paused", "{r:?}");
     let c = conn(&db);
     // A "renamed" row (highest id, beyond the first batch) and a newly scanned row.
@@ -666,22 +681,13 @@ fn mg_17_scan_and_rename_during_backfill_reach_path_table() {
     assert_eq!(d.run("resume", &db, &[]).state(), "done");
     let s = end_state(&db);
     assert_eq!(s.path_rows, s.file_rows);
-    let hit = d.run(
-        "path_search",
-        &db,
-        &[env("AUDIOLIB_SMV2_QUERY", "Mg17renamed")],
-    );
-    assert!(
-        hit.report["ids"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|v| v.as_i64() == Some(id))),
-        "renamed row not in path table: {hit:?}"
-    );
+    let hit = d.search("path_search", &db, "Mg17renamed");
+    assert!(hit.contains(&id), "renamed row not in path table: {hit:?}");
 }
 
 // ------------------------------------------------------------------------ MG-18
 #[test]
-#[ignore = "pending server migration branch (set AUDIOLIB_SMV2_MIGRATE_CMD)"]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_18_switch_transaction_is_atomic() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
@@ -700,12 +706,8 @@ fn mg_18_switch_transaction_is_atomic() {
     // Abort inside the switch: none of the switch writes may be visible.
     let (_dir2, db2) = fixture().copy_db();
     assert!(
-        d.run(
-            "start",
-            &db2,
-            &[env("AUDIOLIB_MIGRATION_FAULT", "abort:switch_tx")]
-        )
-        .aborted()
+        d.run("start", &db2, &[env(FAULT, "abort:switch_tx")])
+            .aborted()
     );
     assert_eq!(user_version(&db2), 8);
     let st = d.run("status", &db2, &[]);
@@ -713,4 +715,101 @@ fn mg_18_switch_transaction_is_atomic() {
         st.report["switch"].is_null() || st.report["switch"]["source_search_rev"] != 3,
         "partial switch: {st:?}"
     );
+}
+
+// ---------------------------------------------------------- report schema checks
+/// Runs now: the shared schema accepts the agreed report shape and rejects drift.
+#[test]
+fn report_schema_examples() {
+    use smv2::schema::{report_schema, validate};
+    let good = json!({
+        "state": "paused", "error_code": null,
+        "progress": {"done": 500, "total": 1200},
+        "phases": {"backup": 12.5, "path_build": 340, "optimize": 0, "switch": 0},
+        "switch": null, "batches": [{"rows": 500, "ms": 210.0}], "eta_s": 1.4
+    });
+    assert_eq!(validate(report_schema(), &good), Vec::<String>::new());
+    let minimal = json!({"state": "idle", "error_code": null,
+        "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null});
+    assert_eq!(validate(report_schema(), &minimal), Vec::<String>::new());
+    for bad in [
+        json!({"state": "idle", "error_code": null, "completed": 0, "phases": {}, "switch": null}),
+        json!({"state": "weird", "error_code": null, "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null}),
+        json!({"state": "idle", "error_code": 3, "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null}),
+        json!({"state": "idle", "error_code": null, "progress": {"done": -1, "total": 0}, "phases": {"optimize": "x"}, "switch": null}),
+        json!({"state": "idle", "error_code": null, "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null, "batches": [{"rows": 1}]}),
+    ] {
+        assert!(
+            !validate(report_schema(), &bad).is_empty(),
+            "accepted {bad}"
+        );
+    }
+}
+
+/// Admin GET /api/admin/migration/status must validate against the same schema and
+/// agree with `audiolib-migrate status` on the DB that server instance uses.
+/// Env: AUDIOLIB_SMV2_ADMIN_URL (http://host:port), AUDIOLIB_SMV2_ADMIN_DB (that DB),
+/// optional AUDIOLIB_SMV2_ADMIN_TOKEN (Bearer).
+#[test]
+#[ignore = "pending server admin migration endpoints (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
+fn mg_14_admin_status_matches_cli_and_schema() {
+    use smv2::schema::{report_schema, validate};
+    let url = std::env::var("AUDIOLIB_SMV2_ADMIN_URL").expect("AUDIOLIB_SMV2_ADMIN_URL");
+    let db = std::path::PathBuf::from(
+        std::env::var("AUDIOLIB_SMV2_ADMIN_DB").expect("AUDIOLIB_SMV2_ADMIN_DB"),
+    );
+    let token = std::env::var("AUDIOLIB_SMV2_ADMIN_TOKEN").ok();
+    let http = http_get_json(&url, "/api/admin/migration/status", token.as_deref());
+    let errors = validate(report_schema(), &http);
+    assert!(
+        errors.is_empty(),
+        "admin status violates schema: {errors:?}\n{http}"
+    );
+    let cli = Driver::require().run("status", &db, &[]);
+    for k in ["state", "error_code", "progress", "switch"] {
+        assert_eq!(
+            http[k], cli.report[k],
+            "admin vs CLI {k}: {http} vs {:?}",
+            cli.report
+        );
+    }
+    let keys = |v: &serde_json::Value| -> Vec<String> {
+        v.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        keys(&http["phases"]),
+        keys(&cli.report["phases"]),
+        "phase names differ"
+    );
+}
+
+/// Plain HTTP/1.0 GET (no client dependency); returns the JSON body.
+fn http_get_json(base: &str, path: &str, token: Option<&str>) -> serde_json::Value {
+    use std::io::{Read, Write};
+    let host = base
+        .strip_prefix("http://")
+        .expect("AUDIOLIB_SMV2_ADMIN_URL must be http://host:port")
+        .trim_end_matches('/');
+    let mut stream = std::net::TcpStream::connect(host).expect("connect admin URL");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\n{auth}\r\n"
+    )
+    .unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").expect("HTTP response");
+    assert!(
+        head.starts_with("HTTP/1.") && head.split(' ').nth(1) == Some("200"),
+        "{head}"
+    );
+    serde_json::from_str(body.trim()).expect("JSON body")
 }

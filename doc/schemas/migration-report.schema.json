@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiolib/migration-report.schema.json",
+  "title": "AudioLib schema 8→9 migration report",
+  "description": "Last stdout line of `audiolib-migrate <action>` and the body of GET /api/admin/migration/status and POST /api/admin/migration/{start,pause,resume,cancel,rollback}. Exit 0 = ok; otherwise read error_code. Known error_code values: INSUFFICIENT_SPACE, SQLITE_FULL, READ_ONLY, LOCKED, BACKUP_FAILED. batches and eta_s are requested additions and may be absent.",
+  "type": "object",
+  "required": ["state", "error_code", "progress", "phases", "switch"],
+  "properties": {
+    "state": { "enum": ["idle", "running", "paused", "done", "failed", "cancelled"] },
+    "error_code": { "type": ["string", "null"] },
+    "progress": {
+      "type": "object",
+      "required": ["done", "total"],
+      "properties": {
+        "done": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "phases": {
+      "description": "Phase name → elapsed milliseconds. Requested keys: backup, path_build, optimize, switch.",
+      "type": "object",
+      "properties": {
+        "backup": { "type": "number", "minimum": 0 },
+        "path_build": { "type": "number", "minimum": 0 },
+        "optimize": { "type": "number", "minimum": 0 },
+        "switch": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "switch": {
+      "type": ["object", "null"],
+      "properties": {
+        "source_search_rev": { "type": "integer" },
+        "user_version": { "type": "integer" },
+        "features": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "batches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rows", "ms"],
+        "properties": {
+          "rows": { "type": "integer", "minimum": 0 },
+          "ms": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "eta_s": { "type": ["number", "null"], "minimum": 0 },
+    "ids": { "type": "array", "items": { "type": "integer" } },
+    "next_cursor": { "type": ["string", "null"] }
+  }
+}
