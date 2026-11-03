@@ -32,13 +32,49 @@ pub const MIGRATION_ACTIONS: [&str; 5] = ["start", "pause", "resume", "cancel", 
 pub const MIGRATION_IN_PROGRESS: &str = "migration_in_progress";
 /// `503` for writes during the switch (`Retry-After: 5`); nothing was written.
 pub const MIGRATION_SWITCHING: &str = "migration_switching";
-/// Search scope request values. PROVISIONAL: the server has not published the
-/// parameter name or values yet; change them only here.
+/// Search scope request parameter: `scope=main|all|path`; omitted means `main`
+/// (same behaviour as s8).
 pub const SEARCH_SCOPE_PARAM: &str = "scope";
+/// 只搜主表 (default; s8 ordering).
+pub const SEARCH_SCOPE_MAIN: &str = "main";
 /// 「路径」: path-only search (`503 migration_in_progress` while migrating).
 pub const SEARCH_SCOPE_PATH: &str = "path";
 /// 「全部」: main table plus paths (`x-audiolib-path-search: unavailable` while migrating).
 pub const SEARCH_SCOPE_ALL: &str = "all";
+
+/// Search scope chosen in the UI; `Main` is the default and is sent as no parameter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchScope {
+    #[default]
+    Main,
+    All,
+    Path,
+}
+
+impl SearchScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => SEARCH_SCOPE_MAIN,
+            Self::All => SEARCH_SCOPE_ALL,
+            Self::Path => SEARCH_SCOPE_PATH,
+        }
+    }
+
+    /// Query pair to send; `None` for `Main` so s8 servers see an unchanged request.
+    pub fn query(self) -> Option<(&'static str, &'static str)> {
+        (self != Self::Main).then(|| (SEARCH_SCOPE_PARAM, self.as_str()))
+    }
+
+    /// Parses a scope value; missing or empty means `Main`, unknown values are `None`.
+    pub fn parse(value: Option<&str>) -> Option<Self> {
+        match value.map(str::trim) {
+            None | Some("") | Some(SEARCH_SCOPE_MAIN) => Some(Self::Main),
+            Some(SEARCH_SCOPE_ALL) => Some(Self::All),
+            Some(SEARCH_SCOPE_PATH) => Some(Self::Path),
+            Some(_) => None,
+        }
+    }
+}
 
 /// Server search paging: send `cursor` (opaque, echoed verbatim), read `next_cursor`
 /// (`null` on the last page). `offset`/`page` stay accepted; with both, `cursor` wins.
@@ -346,8 +382,12 @@ pub fn migration_error_text(code: &str, chinese: bool) -> String {
         ("integrity_failed", true) => "完整性校验失败，已保留原音效库。",
         ("io_error", true) => "读写出错，请检查磁盘或网络存储。",
         ("not_migrated", true) => "音效库尚未迁移。",
-        ("disk_full", true) => "磁盘已满，迁移已暂停。请腾出空间后点「继续」。",
-        ("read_only", true) => "音效库不可写，请检查权限或只读挂载。",
+        ("disk_full", true) => {
+            "磁盘已满，迁移已暂停并保留检查点。请腾出空间后点「继续」从断点接着迁移。"
+        }
+        ("read_only", true) => {
+            "音效库不可写，迁移在预检阶段失败，原音效库未改动。请检查权限或只读挂载后重新开始。"
+        }
         ("insufficient_space", false) => {
             "Not enough disk space: the migration needs about 1.3 times the library size free."
         }
@@ -358,10 +398,10 @@ pub fn migration_error_text(code: &str, chinese: bool) -> String {
         ("io_error", false) => "A read or write failed; check the disk or network storage.",
         ("not_migrated", false) => "The library has not been migrated yet.",
         ("disk_full", false) => {
-            "The disk is full and the migration paused. Free space, then choose Resume."
+            "The disk is full; the migration paused and kept its checkpoint. Free space, then choose Resume to continue."
         }
         ("read_only", false) => {
-            "The library is not writable; check permissions or a read-only mount."
+            "The library is not writable; the migration failed at preflight and the library was not changed. Check permissions or a read-only mount, then start again."
         }
         (other, true) => return format!("错误代码：{other}"),
         (other, false) => return format!("error code: {other}"),
@@ -580,12 +620,12 @@ impl Notice {
                 "The server uses newer path search rules; path search is off and main search still works. Please update the client.".into()
             }
             (Self::Migrating { percent }, true) => format!(
-                "服务器正在升级音效库（{}%），暂时使用本地缓存。",
-                percent.map_or("?".into(), |p| p.to_string())
+                "服务器正在升级音效库（{}），暂时使用本地缓存。",
+                percent.map_or("准备中".into(), |p| format!("{p}%"))
             ),
             (Self::Migrating { percent }, false) => format!(
-                "The server is upgrading its sound library ({}%); using the local cache for now.",
-                percent.map_or("?".into(), |p| p.to_string())
+                "The server is upgrading its sound library ({}); using the local cache for now.",
+                percent.map_or("preparing".into(), |p| format!("{p}%"))
             ),
             (Self::Incompatible { server_version }, true) => format!(
                 "服务器版本较新（{}），当前客户端无法读取它的音效库。请更新客户端。",
@@ -1213,5 +1253,44 @@ mod tests {
         let health: HealthUpgrade =
             serde_json::from_str(r#"{"phase":"copying","completed":1,"total":4}"#).unwrap();
         assert_eq!(percent(health.completed, health.total), Some(25));
+    }
+
+    #[test]
+    fn zero_total_progress_reads_preparing_without_dividing() {
+        assert_eq!(percent(Some(0), Some(0)), None);
+        assert_eq!(percent(Some(5), Some(0)), None);
+        assert_eq!(percent(None, None), None);
+        let notice = Notice::Migrating {
+            percent: percent(Some(0), Some(0)),
+        };
+        assert!(
+            notice.text(true).contains("准备中"),
+            "{}",
+            notice.text(true)
+        );
+        assert!(notice.text(false).contains("preparing"));
+        assert!(!notice.text(true).contains('%'));
+        assert!(
+            Notice::Migrating { percent: Some(0) }
+                .text(true)
+                .contains("0%")
+        );
+    }
+
+    #[test]
+    fn search_scope_defaults_to_main_and_omits_the_parameter() {
+        assert_eq!(SearchScope::default(), SearchScope::Main);
+        assert_eq!(SearchScope::Main.query(), None);
+        assert_eq!(SearchScope::All.query(), Some(("scope", "all")));
+        assert_eq!(SearchScope::Path.query(), Some(("scope", "path")));
+        assert_eq!(SearchScope::parse(None), Some(SearchScope::Main));
+        assert_eq!(SearchScope::parse(Some("main")), Some(SearchScope::Main));
+        assert_eq!(SearchScope::parse(Some("")), Some(SearchScope::Main));
+        assert_eq!(SearchScope::parse(Some("path")), Some(SearchScope::Path));
+        assert_eq!(SearchScope::parse(Some("all")), Some(SearchScope::All));
+        assert_eq!(SearchScope::parse(Some("folder")), None);
+        for scope in [SearchScope::Main, SearchScope::All, SearchScope::Path] {
+            assert_eq!(SearchScope::parse(Some(scope.as_str())), Some(scope));
+        }
     }
 }
