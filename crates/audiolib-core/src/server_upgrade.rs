@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 /// Response header a newer server adds for an older client (§6, non-blocking).
 pub const UPGRADE_AVAILABLE_HEADER: &str = "x-audiolib-upgrade-available";
 /// Longest header value accepted; longer values are ignored.
-pub const MAX_UPGRADE_HEADER_BYTES: usize = 64;
+pub const MAX_UPGRADE_HEADER_BYTES: usize = 512;
 /// The schema 9 Plan B snapshot format this client recognizes (§3, §6).
 pub const PLAN_B_V9_FORMAT: &str = "ale-s9-cld1-t3-m2-p1-a1-sp1";
 /// Path search rules this client knows (`sp1`, `search_path: 1`).
@@ -21,9 +21,17 @@ pub const SEARCH_PATH_FEATURE: &str = "search_path";
 pub const VORBIS_TAGS_FEATURE: &str = "vorbis_tags";
 pub const VENDOR_METADATA_FEATURE: &str = "vendor_metadata";
 /// Ordinary responses during a migration carry the migration state here.
+pub const SCHEMA_MIGRATION_HEADER: &str = "x-audiolib-schema-migration";
+/// Legacy short migration state header; still accepted when the new one is absent.
 pub const MIGRATION_HEADER: &str = "x-audiolib-migration";
 /// `unavailable` on an "all" scope search answered from the main table only.
 pub const PATH_SEARCH_HEADER: &str = "x-audiolib-path-search";
+/// Vendor metadata import API root (#214 / #208); subpaths hang off this.
+pub const VENDOR_IMPORT_API: &str = "/api/vendor-import";
+/// Agreed vendor import limits (#208 / #214): 50 MB / 200k rows / 256 KiB per line.
+pub const VENDOR_IMPORT_MAX_FILE_BYTES: u64 = 52_428_800;
+pub const VENDOR_IMPORT_MAX_ROWS: u64 = 200_000;
+pub const VENDOR_IMPORT_MAX_ROW_TEXT_BYTES: u64 = 262_144;
 /// Admin migration status (read by every client that may reach it).
 pub const MIGRATION_STATUS_PATH: &str = "/admin/api/migration/status";
 /// Admin migration controls (`POST /admin/api/migration/{action}`), manage only.
@@ -159,30 +167,192 @@ impl MigrationRefusal {
 /// Highest schema and the tokenization this client understands.
 pub const MAX_KNOWN_SCHEMA: u32 = 9;
 
-/// A parsed `x-audiolib-upgrade-available` header.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpgradeAvailable {
-    /// Version the server names, when the value looks like one.
-    pub version: Option<String>,
+/// Upgrade advice level from `/capabilities.client_upgrade` or the upgrade header.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientUpgradeLevel {
+    #[default]
+    None,
+    Recommended,
+    Required,
+    #[serde(other)]
+    Unknown,
 }
 
-/// Parse the header value. Empty, oversized or non-printable values are ignored; a
-/// value that is not a version still means "an upgrade exists" without naming one.
+impl ClientUpgradeLevel {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "" => Self::None,
+            "recommended" => Self::Recommended,
+            "required" => Self::Required,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn needs_notice(self) -> bool {
+        matches!(self, Self::Recommended | Self::Required | Self::Unknown)
+    }
+
+    pub fn blocks_library(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
+/// `/capabilities.client_upgrade` (#214); absent means no prompt needed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientUpgradeInfo {
+    #[serde(default)]
+    pub level: ClientUpgradeLevel,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub missing_features: Vec<String>,
+    #[serde(default)]
+    pub min_client_version: Option<String>,
+    #[serde(default)]
+    pub served_snapshot_format: Option<String>,
+}
+
+/// A parsed `x-audiolib-upgrade-available` header (#214).
+/// Forms: `recommended; min=0.9.0; features="a,b"` or a bare version `0.9.0`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeAvailable {
+    pub level: ClientUpgradeLevel,
+    /// `min=` or a bare version value.
+    pub version: Option<String>,
+    pub features: Vec<String>,
+}
+
+/// Parse semicolon-separated tokens; first bare token is the level or a bare version.
 pub fn parse_upgrade_available(value: &str) -> Option<UpgradeAvailable> {
     let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_UPGRADE_HEADER_BYTES
-        || !value.chars().all(|c| c.is_ascii_graphic())
+    if value.is_empty() || value.len() > MAX_UPGRADE_HEADER_BYTES {
+        return None;
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_graphic() || c == ' ' || c == '"')
     {
         return None;
     }
-    let version_like = value.trim_start_matches(['v', 'V']);
-    let is_version = version_like.starts_with(|c: char| c.is_ascii_digit())
-        && version_like
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
-    Some(UpgradeAvailable {
-        version: is_version.then(|| version_like.to_string()),
+    let mut level = ClientUpgradeLevel::Recommended;
+    let mut version = None;
+    let mut features = Vec::new();
+    let mut saw_token = false;
+    for (index, raw) in value.split(';').enumerate() {
+        let token = raw.trim().trim_matches('"');
+        if token.is_empty() {
+            continue;
+        }
+        saw_token = true;
+        if let Some((key, val)) = token.split_once('=') {
+            let key = key.trim().to_ascii_lowercase();
+            let val = val.trim().trim_matches('"').trim();
+            match key.as_str() {
+                "min" | "version" => {
+                    if !val.is_empty() {
+                        version = Some(val.trim_start_matches(['v', 'V']).to_string());
+                    }
+                }
+                "features" => {
+                    features = val
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+                "level" => level = ClientUpgradeLevel::parse(val),
+                _ => {}
+            }
+        } else if index == 0 {
+            match token.to_ascii_lowercase().as_str() {
+                "none" | "recommended" | "required" => {
+                    level = ClientUpgradeLevel::parse(token);
+                }
+                _ => {
+                    let version_like = token.trim_start_matches(['v', 'V']);
+                    let is_version = version_like.starts_with(|c: char| c.is_ascii_digit())
+                        && version_like
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+                    if is_version {
+                        version = Some(version_like.to_string());
+                    }
+                    level = ClientUpgradeLevel::Recommended;
+                }
+            }
+        }
+    }
+    saw_token.then_some(UpgradeAvailable {
+        level,
+        version,
+        features,
+    })
+}
+
+/// A parsed `x-audiolib-schema-migration` (or legacy) header value.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaMigrationHeader {
+    pub state: MigrationState,
+    pub state_label: String,
+    pub target: Option<u32>,
+    pub done: Option<u64>,
+    pub total: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Parse `deferred; target=9` / `running; done=1; total=4` / `paused; error=disk_full`.
+pub fn parse_schema_migration_header(value: &str) -> Option<SchemaMigrationHeader> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_UPGRADE_HEADER_BYTES {
+        return None;
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_graphic() || c == ' ' || c == '"')
+    {
+        return None;
+    }
+    let mut state_label = String::new();
+    let mut target = None;
+    let mut done = None;
+    let mut total = None;
+    let mut error = None;
+    for (index, raw) in value.split(';').enumerate() {
+        let token = raw.trim().trim_matches('"');
+        if token.is_empty() {
+            continue;
+        }
+        if let Some((key, val)) = token.split_once('=') {
+            let key = key.trim().to_ascii_lowercase();
+            let val = val.trim().trim_matches('"').trim();
+            match key.as_str() {
+                "target" => target = val.parse().ok(),
+                "done" | "completed" => done = val.parse().ok(),
+                "total" => total = val.parse().ok(),
+                "error" | "error_code" => {
+                    if !val.is_empty() {
+                        error = Some(val.to_string());
+                    }
+                }
+                "state" if state_label.is_empty() => state_label = val.to_string(),
+                _ => {}
+            }
+        } else if index == 0 {
+            state_label = token.to_string();
+        }
+    }
+    if state_label.is_empty() {
+        return None;
+    }
+    Some(SchemaMigrationHeader {
+        state: MigrationState::parse(&state_label),
+        state_label,
+        target,
+        done,
+        total,
+        error,
     })
 }
 
@@ -424,6 +594,9 @@ pub struct VendorImportInfo {
     pub revision: u32,
     pub max_file_bytes: u64,
     pub max_rows: u64,
+    /// Max bytes of one row's text; omitted on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_row_text_bytes: Option<u64>,
 }
 
 /// `/health.upgrade`: `{phase, completed?, total?}` mirrored for every client.
@@ -525,8 +698,10 @@ pub struct ServerUpgradeInput {
     pub vendor_import: Option<VendorImportInfo>,
     pub health_upgrade: Option<HealthUpgrade>,
     pub admin_migration: Option<MigrationStatus>,
-    /// Last `x-audiolib-migration` value seen on an ordinary response.
-    pub migration_header: Option<String>,
+    /// Last schema-migration / legacy migration header seen on a response.
+    pub migration_header: Option<SchemaMigrationHeader>,
+    /// `/capabilities.client_upgrade`, when the server asks for a client update.
+    pub client_upgrade: Option<ClientUpgradeInfo>,
     /// An "all" scope search came back with `x-audiolib-path-search: unavailable`.
     pub path_search_header_unavailable: bool,
     /// Format IDs actually observed for the snapshot in use (library descriptor and
@@ -565,7 +740,10 @@ pub struct MigrationProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Notice {
     /// §7.6: the server advertised a newer client.
-    ClientUpgradeAvailable { version: Option<String> },
+    ClientUpgradeAvailable {
+        version: Option<String>,
+        level: ClientUpgradeLevel,
+    },
     /// VN-12: newer path rules; main search keeps working.
     PathSearchNeedsUpgrade,
     /// §7.3: migration in progress.
@@ -604,14 +782,24 @@ impl Notice {
 
     pub fn text(&self, chinese: bool) -> String {
         match (self, chinese) {
+            (Self::ClientUpgradeAvailable { level, .. }, true) if level.blocks_library() => {
+                "服务器版本较新，当前客户端无法继续使用该音效库。请更新客户端。".into()
+            }
             (Self::ClientUpgradeAvailable { .. }, true) => {
                 "服务器已升级，更新客户端可使用路径搜索和厂商资料".into()
             }
-            (Self::ClientUpgradeAvailable { version }, false) => match version {
+            (Self::ClientUpgradeAvailable { level, .. }, false) if level.blocks_library() => {
+                "The server is newer; this client can no longer use its sound library. Please update the client."
+                    .into()
+            }
+            (Self::ClientUpgradeAvailable { version, .. }, false) => match version {
                 Some(version) => format!(
                     "The server was upgraded; update the client ({version}) to use path search and vendor metadata"
                 ),
-                None => "The server was upgraded; update the client to use path search and vendor metadata".into(),
+                None => {
+                    "The server was upgraded; update the client to use path search and vendor metadata"
+                        .into()
+                }
             },
             (Self::PathSearchNeedsUpgrade, true) => {
                 "服务器的路径搜索规则较新，当前客户端已关闭路径搜索，主搜索不受影响。请更新客户端。".into()
@@ -711,10 +899,19 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         .filter(|id| !id.is_empty())
         .collect();
     let supports: Vec<FormatSupport> = served.iter().map(|id| format_support(id)).collect();
-    let incompatible = (!supports.is_empty()
-        && supports
-            .iter()
-            .all(|support| *support == FormatSupport::Incompatible))
+    let upgrade_required = input
+        .client_upgrade
+        .as_ref()
+        .is_some_and(|info| info.level.blocks_library())
+        || input
+            .upgrade_available
+            .as_ref()
+            .is_some_and(|upgrade| upgrade.level.blocks_library());
+    let incompatible = upgrade_required
+        || (!supports.is_empty()
+            && supports
+                .iter()
+                .all(|support| *support == FormatSupport::Incompatible))
         || input
             .observed_formats
             .iter()
@@ -749,15 +946,16 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
             .schema_migration
             .as_ref()
             .map(|migration| migration.state);
+        let interesting =
+            |state: MigrationState| state.in_progress() || state == MigrationState::Deferred;
         let header = input
             .migration_header
-            .as_deref()
-            .map(|state| (state.to_string(), MigrationState::parse(state)))
-            .filter(|(_, state)| state.in_progress());
+            .as_ref()
+            .filter(|header| interesting(header.state));
         if let Some(admin) = input
             .admin_migration
             .as_ref()
-            .filter(|m| m.kind().in_progress())
+            .filter(|m| interesting(m.kind()))
         {
             Some(MigrationProgress {
                 state: admin.kind(),
@@ -770,27 +968,35 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
                     .and_then(|p| percent(Some(p.done), Some(p.total))),
             })
         } else if header.is_some()
-            || capability.is_some_and(MigrationState::in_progress)
+            || capability.is_some_and(interesting)
             || input.health_upgrade.is_some()
         {
             let health = input.health_upgrade.clone().unwrap_or_default();
-            let (label, state) = header.unwrap_or_else(|| {
+            if let Some(header) = header {
+                Some(MigrationProgress {
+                    state: header.state,
+                    state_label: header.state_label.clone(),
+                    error_code: header.error.clone(),
+                    phase: health.phase.clone(),
+                    percent: percent(
+                        header.done.or(health.completed),
+                        header.total.or(health.total),
+                    ),
+                })
+            } else {
                 let state = capability.unwrap_or(MigrationState::Running);
-                (
-                    serde_json::to_value(state)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_string))
-                        .unwrap_or_default(),
+                let label = serde_json::to_value(state)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                Some(MigrationProgress {
                     state,
-                )
-            });
-            Some(MigrationProgress {
-                state,
-                state_label: label,
-                error_code: None,
-                phase: health.phase,
-                percent: percent(health.completed, health.total),
-            })
+                    state_label: label,
+                    error_code: None,
+                    phase: health.phase,
+                    percent: percent(health.completed, health.total),
+                })
+            }
         } else {
             None
         }
@@ -813,9 +1019,11 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         });
     } else {
         if let Some(migration) = &migration {
-            notices.push(Notice::Migrating {
-                percent: migration.percent,
-            });
+            if migration.state.in_progress() {
+                notices.push(Notice::Migrating {
+                    percent: migration.percent,
+                });
+            }
             if let Some(code) = migration
                 .error_code
                 .clone()
@@ -832,10 +1040,46 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         if path_search == PathSearch::NeedsClientUpgrade {
             notices.push(Notice::PathSearchNeedsUpgrade);
         }
-        if let Some(upgrade) = &input.upgrade_available {
-            notices.push(Notice::ClientUpgradeAvailable {
-                version: upgrade.version.clone(),
-            });
+        let from_capabilities = input
+            .client_upgrade
+            .as_ref()
+            .filter(|info| info.level.needs_notice());
+        let from_header = input
+            .upgrade_available
+            .as_ref()
+            .filter(|upgrade| upgrade.level.needs_notice());
+        if let Some(info) = from_capabilities {
+            if info.level.blocks_library() {
+                if !notices
+                    .iter()
+                    .any(|existing| matches!(existing, Notice::Incompatible { .. }))
+                {
+                    notices.push(Notice::Incompatible {
+                        server_version: info.min_client_version.clone(),
+                    });
+                }
+            } else {
+                notices.push(Notice::ClientUpgradeAvailable {
+                    version: info.min_client_version.clone(),
+                    level: info.level,
+                });
+            }
+        } else if let Some(upgrade) = from_header {
+            if upgrade.level.blocks_library() {
+                if !notices
+                    .iter()
+                    .any(|existing| matches!(existing, Notice::Incompatible { .. }))
+                {
+                    notices.push(Notice::Incompatible {
+                        server_version: upgrade.version.clone(),
+                    });
+                }
+            } else {
+                notices.push(Notice::ClientUpgradeAvailable {
+                    version: upgrade.version.clone(),
+                    level: upgrade.level,
+                });
+            }
         }
     }
     let vendor_import = input
@@ -908,7 +1152,9 @@ mod tests {
         assert_eq!(
             parse_upgrade_available(" 0.9.2 "),
             Some(UpgradeAvailable {
-                version: Some("0.9.2".into())
+                level: ClientUpgradeLevel::Recommended,
+                version: Some("0.9.2".into()),
+                features: vec![],
             })
         );
         assert_eq!(
@@ -918,10 +1164,114 @@ mod tests {
                 .as_deref(),
             Some("1.0.0-beta.1")
         );
+        let structured = parse_upgrade_available(
+            r#"recommended; min=0.9.0; features="search_path,vendor_metadata,vorbis_tags""#,
+        )
+        .unwrap();
+        assert_eq!(structured.level, ClientUpgradeLevel::Recommended);
+        assert_eq!(structured.version.as_deref(), Some("0.9.0"));
+        assert_eq!(
+            structured.features,
+            vec!["search_path", "vendor_metadata", "vorbis_tags"]
+        );
+        assert_eq!(
+            parse_upgrade_available("required; min=0.9.0")
+                .unwrap()
+                .level,
+            ClientUpgradeLevel::Required
+        );
         assert_eq!(parse_upgrade_available("yes").unwrap().version, None);
         assert_eq!(parse_upgrade_available(""), None);
-        assert_eq!(parse_upgrade_available("1.0 x"), None);
-        assert_eq!(parse_upgrade_available(&"9".repeat(65)), None);
+        assert_eq!(parse_upgrade_available(&"9".repeat(513)), None);
+    }
+
+    #[test]
+    fn schema_migration_header_parsing() {
+        let deferred = parse_schema_migration_header("deferred; target=9").unwrap();
+        assert_eq!(deferred.state, MigrationState::Deferred);
+        assert_eq!(deferred.target, Some(9));
+        let running =
+            parse_schema_migration_header("running; target=9; done=12000; total=20248").unwrap();
+        assert_eq!(running.state, MigrationState::Running);
+        assert_eq!(running.done, Some(12_000));
+        assert_eq!(running.total, Some(20_248));
+        assert_eq!(percent(running.done, running.total), Some(59));
+        let paused = parse_schema_migration_header("paused; error=disk_full").unwrap();
+        assert_eq!(paused.state, MigrationState::Paused);
+        assert_eq!(paused.error.as_deref(), Some("disk_full"));
+        let failed = parse_schema_migration_header("failed; error=read_only").unwrap();
+        assert_eq!(failed.state, MigrationState::Failed);
+        assert_eq!(failed.error.as_deref(), Some("read_only"));
+        assert_eq!(parse_schema_migration_header(""), None);
+    }
+
+    #[test]
+    fn client_upgrade_capabilities_map_to_notices() {
+        let mut input = v9_input(
+            &[compatibility::PLAN_B_FORMAT],
+            &[compatibility::PLAN_B_FORMAT],
+        );
+        input.client_upgrade = Some(ClientUpgradeInfo {
+            level: ClientUpgradeLevel::Recommended,
+            reason: Some("snapshot_format_downgraded".into()),
+            missing_features: vec!["search_path".into()],
+            min_client_version: Some("0.9.0".into()),
+            served_snapshot_format: Some(compatibility::PLAN_B_FORMAT.into()),
+        });
+        let status = evaluate(&input);
+        assert_eq!(
+            status.notices,
+            vec![Notice::ClientUpgradeAvailable {
+                version: Some("0.9.0".into()),
+                level: ClientUpgradeLevel::Recommended,
+            }]
+        );
+        input.client_upgrade.as_mut().unwrap().level = ClientUpgradeLevel::Required;
+        let status = evaluate(&input);
+        assert!(status.incompatible());
+        assert!(!status.main_search);
+        assert!(
+            status
+                .notices
+                .iter()
+                .any(|n| matches!(n, Notice::Incompatible { .. }))
+        );
+    }
+
+    #[test]
+    fn deferred_migration_header_is_surfaced_without_progress_notice() {
+        let mut input = v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT]);
+        input.migration_header = parse_schema_migration_header("deferred; target=9");
+        let status = evaluate(&input);
+        let migration = status.migration.as_ref().unwrap();
+        assert_eq!(migration.state, MigrationState::Deferred);
+        assert!(
+            !status
+                .notices
+                .iter()
+                .any(|n| matches!(n, Notice::Migrating { .. }))
+        );
+        assert_eq!(status.path_search, PathSearch::PausedForMigration);
+    }
+
+    #[test]
+    fn vendor_import_limits_match_agreed_contract() {
+        assert_eq!(VENDOR_IMPORT_MAX_FILE_BYTES, 52_428_800);
+        assert_eq!(VENDOR_IMPORT_MAX_ROWS, 200_000);
+        assert_eq!(VENDOR_IMPORT_MAX_ROW_TEXT_BYTES, 262_144);
+        assert_eq!(VENDOR_IMPORT_API, "/api/vendor-import");
+        let info: VendorImportInfo = serde_json::from_str(
+            r#"{"revision":1,"max_file_bytes":52428800,"max_rows":200000,"max_row_text_bytes":262144}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            info.max_row_text_bytes,
+            Some(VENDOR_IMPORT_MAX_ROW_TEXT_BYTES)
+        );
+        let legacy: VendorImportInfo =
+            serde_json::from_str(r#"{"revision":1,"max_file_bytes":52428800,"max_rows":200000}"#)
+                .unwrap();
+        assert_eq!(legacy.max_row_text_bytes, None);
     }
 
     #[test]
@@ -1077,14 +1427,14 @@ mod tests {
     #[test]
     fn unknown_migration_state_is_tolerated_and_shown() {
         let mut input = v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT]);
-        input.migration_header = Some("rebuilding_index".into());
+        input.migration_header = parse_schema_migration_header("rebuilding_index");
         let status = evaluate(&input);
         let migration = status.migration.as_ref().unwrap();
         assert_eq!(migration.state, MigrationState::Unknown);
         assert_eq!(migration.state_label, "rebuilding_index");
         assert_eq!(status.path_search, PathSearch::PausedForMigration);
         assert!(status.main_search);
-        input.migration_header = Some("done".into());
+        input.migration_header = parse_schema_migration_header("done");
         let status = evaluate(&input);
         assert!(status.migration.is_none());
         assert_eq!(status.path_search, PathSearch::Available);
@@ -1234,6 +1584,7 @@ mod tests {
             revision: 1,
             max_file_bytes: 52_428_800,
             max_rows: 200_000,
+            max_row_text_bytes: Some(262_144),
         };
         let mut input = v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT]);
         input.vendor_import = Some(limits.clone());

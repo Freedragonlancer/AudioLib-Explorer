@@ -106,6 +106,9 @@ pub struct Capabilities {
     /// Vendor metadata import limits; `None` when the server does not offer it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor_import: Option<audiolib_core::server_upgrade::VendorImportInfo>,
+    /// Client upgrade advice (#214); absent means no prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_upgrade: Option<audiolib_core::server_upgrade::ClientUpgradeInfo>,
 }
 
 fn known() -> bool {
@@ -127,6 +130,7 @@ impl Default for Capabilities {
             library_schema: None,
             schema_migration: None,
             vendor_import: None,
+            client_upgrade: None,
         }
     }
 }

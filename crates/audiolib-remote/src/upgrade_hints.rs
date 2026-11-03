@@ -6,8 +6,8 @@
 use crate::{Capabilities, RemoteClient};
 use audiolib_core::compatibility::SNAPSHOT_FORMAT_HEADER;
 use audiolib_core::server_upgrade::{
-    self, MIGRATION_HEADER, PATH_SEARCH_HEADER, ServerUpgradeInput, ServerUpgradeStatus,
-    UPGRADE_AVAILABLE_HEADER, UpgradeAvailable,
+    self, MIGRATION_HEADER, PATH_SEARCH_HEADER, SCHEMA_MIGRATION_HEADER, SchemaMigrationHeader,
+    ServerUpgradeInput, ServerUpgradeStatus, UPGRADE_AVAILABLE_HEADER, UpgradeAvailable,
 };
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -19,8 +19,8 @@ const MAX_FORMAT_HEADER_BYTES: usize = 256;
 pub(crate) struct Hint {
     pub upgrade: Option<UpgradeAvailable>,
     pub snapshot_format: Option<String>,
-    /// `x-audiolib-migration` of the latest response (absent: no migration).
-    pub migration: Option<String>,
+    /// Schema-migration / legacy migration header of the latest response.
+    pub migration: Option<SchemaMigrationHeader>,
     /// `x-audiolib-path-search: unavailable` seen since the migration started.
     pub path_search_unavailable: bool,
 }
@@ -43,11 +43,10 @@ pub(crate) fn record(api: &str, headers: &ureq::http::HeaderMap) {
         .filter(|value| !value.is_empty() && value.len() <= MAX_FORMAT_HEADER_BYTES)
         .map(str::to_string);
     let migration = headers
-        .get(MIGRATION_HEADER)
+        .get(SCHEMA_MIGRATION_HEADER)
+        .or_else(|| headers.get(MIGRATION_HEADER))
         .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= MAX_FORMAT_HEADER_BYTES)
-        .map(str::to_string);
+        .and_then(server_upgrade::parse_schema_migration_header);
     let path_unavailable = headers
         .get(PATH_SEARCH_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -128,6 +127,7 @@ pub fn server_upgrade_status(
         health_upgrade: health.and_then(|health| health.upgrade),
         admin_migration,
         migration_header: hint.migration,
+        client_upgrade: capabilities.client_upgrade.clone(),
         path_search_header_unavailable: hint.path_search_unavailable,
         observed_formats: observed,
         upgrade_available: hint.upgrade,
@@ -190,7 +190,8 @@ mod tests {
         assert_eq!(
             status.notices,
             vec![Notice::ClientUpgradeAvailable {
-                version: Some("0.9.0".into())
+                version: Some("0.9.0".into()),
+                level: audiolib_core::server_upgrade::ClientUpgradeLevel::Recommended,
             }]
         );
         assert!(status.main_search);
@@ -205,7 +206,8 @@ mod tests {
                     "snapshot_formats_served": ["ale-s9-cld1-t3-m2-p1-a1-sp2",
                         audiolib_core::compatibility::PLAN_B_FORMAT]},
                 "schema_migration": {"state": "running", "endpoint": "/admin/api/migration"},
-                "vendor_import": {"revision": 1, "max_file_bytes": 52428800, "max_rows": 200000}
+                "vendor_import": {"revision": 1, "max_file_bytes": 52428800, "max_rows": 200000,
+                    "max_row_text_bytes": 262144}
             }),
             serde_json::json!({"status":"ok","version":"0.9.0",
                 "upgrade": {"phase":"indexing","completed":3,"total":4}}),
@@ -245,6 +247,58 @@ mod tests {
         assert!(status.notices.is_empty());
         assert!(status.main_search);
         assert_eq!(status.path_search, PathSearch::NotOffered);
+    }
+
+    #[test]
+    fn structured_upgrade_and_schema_migration_headers() {
+        use audiolib_core::server_upgrade::{
+            ClientUpgradeLevel, SCHEMA_MIGRATION_HEADER, VENDOR_IMPORT_API,
+            VENDOR_IMPORT_MAX_FILE_BYTES, VENDOR_IMPORT_MAX_ROW_TEXT_BYTES, VENDOR_IMPORT_MAX_ROWS,
+        };
+        assert_eq!(VENDOR_IMPORT_API, "/api/vendor-import");
+        assert_eq!(VENDOR_IMPORT_MAX_FILE_BYTES, 52_428_800);
+        assert_eq!(VENDOR_IMPORT_MAX_ROWS, 200_000);
+        assert_eq!(VENDOR_IMPORT_MAX_ROW_TEXT_BYTES, 262_144);
+        let server = TestServer::start(move |request| match request.path.as_str() {
+            "/api/v1/health" => TestResponse::json(200, r#"{"status":"ok","version":"0.9.0"}"#),
+            "/api/v1/capabilities" => marker_capabilities(serde_json::json!({
+                "client_upgrade": {
+                    "level": "recommended",
+                    "reason": "snapshot_format_downgraded",
+                    "missing_features": ["search_path"],
+                    "min_client_version": "0.9.0",
+                    "served_snapshot_format": "ale-s8-cld1-t3-m2-p1-a1"
+                },
+                "schema_migration": {"state": "deferred", "endpoint": "/admin/api/migration"}
+            }))
+            .with_header(
+                UPGRADE_AVAILABLE_HEADER,
+                r#"recommended; min=0.9.0; features="search_path""#,
+            )
+            .with_header(SCHEMA_MIGRATION_HEADER, "deferred; target=9"),
+            _ => TestResponse::json(404, r#"{"error":{"code":"NOT_FOUND","message":"no"}}"#),
+        });
+        let client = RemoteClient::new(&server.url, "t").unwrap();
+        let capabilities = client.capabilities().unwrap();
+        assert_eq!(
+            capabilities.client_upgrade.as_ref().unwrap().level,
+            ClientUpgradeLevel::Recommended
+        );
+        let status = server_upgrade_status(&client, &capabilities);
+        assert_eq!(
+            status.migration.as_ref().unwrap().state,
+            MigrationState::Deferred
+        );
+        assert!(status.notices.contains(&Notice::ClientUpgradeAvailable {
+            version: Some("0.9.0".into()),
+            level: ClientUpgradeLevel::Recommended,
+        }));
+        assert!(
+            !status
+                .notices
+                .iter()
+                .any(|n| matches!(n, Notice::Migrating { .. }))
+        );
     }
 
     const RUNNING_REPORT: &str = r#"{"state":"running","error_code":null,
