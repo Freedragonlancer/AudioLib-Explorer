@@ -138,12 +138,12 @@ fn mg_02_space_precheck_1_29x_refuses_1_30x_proceeds() {
     let before = file_sha(&db);
     let low = (size as f64 * 1.29).floor() as u64;
     let r = d.run("start", &db, &[env(FAKE_FREE_BYTES, low)]);
-    assert_eq!(r.error_code(), Some("INSUFFICIENT_SPACE"), "{r:?}");
+    assert_eq!(r.error_code(), Some("insufficient_space"), "{r:?}");
     assert_ne!(r.state(), "running");
     assert_eq!(file_sha(&db), before, "refused migration modified the DB");
     let ok = (size as f64 * 1.30).ceil() as u64;
     let r = d.run("start", &db, &[env(FAKE_FREE_BYTES, ok)]);
-    assert_ne!(r.error_code(), Some("INSUFFICIENT_SPACE"), "{r:?}");
+    assert_ne!(r.error_code(), Some("insufficient_space"), "{r:?}");
 }
 
 // ------------------------------------------------------------------------ MG-03
@@ -155,6 +155,7 @@ fn mg_03_backup_failure_aborts_and_backup_is_verified_and_kept() {
     let before = file_sha(&db);
     let r = d.run("start", &db, &[env(FAULT, "backup_fail")]);
     assert_eq!(r.state(), "failed", "{r:?}");
+    assert_eq!(r.error_code(), Some("backup_failed"), "{r:?}");
     assert_eq!(
         file_sha(&db),
         before,
@@ -202,7 +203,8 @@ fn mg_04_read_only_db_is_not_migrated() {
     perm.set_readonly(true);
     fs::set_permissions(&db, perm.clone()).unwrap();
     let r = d.run("start", &db, &[]);
-    assert_eq!(r.error_code(), Some("READ_ONLY"), "{r:?}");
+    // Pending server confirm: read-only maps to io_error.
+    assert_eq!(r.error_code(), Some("io_error"), "{r:?}");
     #[allow(clippy::permissions_set_readonly_false)]
     perm.set_readonly(false);
     fs::set_permissions(&db, perm).unwrap();
@@ -223,7 +225,7 @@ fn mg_05_upgrade_lock_is_exclusive() {
     let second = d.run("start", &db, &[]);
     assert_eq!(
         second.error_code(),
-        Some("LOCKED"),
+        Some("locked"),
         "second migrator did not see upgrade.lock: {second:?}"
     );
     let first = first.join().unwrap();
@@ -234,7 +236,31 @@ fn mg_05_upgrade_lock_is_exclusive() {
     assert_eq!(ic, "ok");
     let mut lock = db.as_os_str().to_owned();
     lock.push(".upgrade.lock");
-    eprintln!("MG-05 lock path checked: {}", Path::new(&lock).display());
+    assert!(
+        !Path::new(&lock).exists(),
+        "upgrade.lock left behind after the owner finished"
+    );
+}
+
+/// `<db>.upgrade.lock` holding a dead pid is reclaimed automatically.
+#[test]
+#[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
+fn mg_05_stale_upgrade_lock_is_reclaimed() {
+    let d = Driver::require();
+    let (_dir, db) = fixture().copy_db();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--list")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    let mut lock = db.as_os_str().to_owned();
+    lock.push(".upgrade.lock");
+    fs::write(&lock, dead_pid.to_string()).unwrap();
+    let r = d.migrate_to_done(&db);
+    assert_eq!(r.error_code(), None, "{r:?}");
+    assert_eq!(user_version(&db), 9);
 }
 
 // ------------------------------------------------------------------------ MG-06
@@ -254,16 +280,8 @@ fn mg_06_record_timings() {
     let started = Instant::now();
     let r = d.migrate_to_done(&db);
     let total = started.elapsed();
-    let mut ms: Vec<f64> = match r.batches() {
-        Some(b) => b.into_iter().map(|(_, ms)| ms).collect(),
-        None => {
-            soft_skip(
-                "MG-06",
-                "report has no batches[]; batch percentiles not recorded",
-            );
-            Vec::new()
-        }
-    };
+    let mut ms: Vec<f64> = r.batches().into_iter().map(|(_, ms)| ms).collect();
+    assert!(!ms.is_empty(), "no batches recorded: {r:?}");
     ms.sort_by(f64::total_cmp);
     let pct = |p: f64| {
         ms.get(((ms.len() as f64 - 1.0) * p).round() as usize)
@@ -299,7 +317,7 @@ fn mg_07_cancel_before_switch_and_rollback_after() {
     let r = d.run("start", &db, &[env(PAUSE_AFTER_BATCHES, 1)]);
     assert_eq!(r.state(), "paused", "{r:?}");
     let r = d.run("cancel", &db, &[]);
-    assert!(matches!(r.state(), "idle" | "cancelled"), "{r:?}");
+    assert_eq!(r.state(), "cancelled", "{r:?}");
     let c = conn(&db);
     assert!(!table_exists(&c, "audio_path_search"));
     assert!(!table_exists(&c, "v9_checkpoint"));
@@ -309,7 +327,7 @@ fn mg_07_cancel_before_switch_and_rollback_after() {
     // After the switch: restore from audiolib-rollback-*.db.
     d.migrate_to_done(&db);
     let r = d.run("rollback", &db, &[]);
-    assert_eq!(r.state(), "idle", "{r:?}");
+    assert_eq!(r.state(), "rolled_back", "{r:?}");
     assert_still_usable_s8(&db);
     assert_eq!(main_fts_shadow_hash(&conn(&db)), main_before);
 }
@@ -325,13 +343,7 @@ fn mg_08_second_run_is_a_noop() {
     let before = file_sha(&db);
     let r = d.run("start", &db, &[]);
     assert_eq!(r.state(), "done", "{r:?}");
-    match r.batches() {
-        Some(b) => assert!(b.is_empty(), "second run did work: {r:?}"),
-        None => soft_skip(
-            "MG-08",
-            "report has no batches[]; no-work check relies on file hash only",
-        ),
-    }
+    assert!(r.batches().is_empty(), "second run did work: {r:?}");
     checkpoint(&db);
     assert_eq!(file_sha(&db), before, "second run modified the DB");
 }
@@ -456,19 +468,11 @@ fn mg_11_adaptive_batches_and_bounded_write_lock() {
         &db,
         &[env(BATCH_ROWS, 50), env(SLOW_BATCH, "2:1800")],
     );
-    match r.batches() {
-        Some(b) => {
-            let rows: Vec<u64> = b.iter().map(|(rows, _)| *rows).collect();
-            assert!(
-                rows.len() >= 3 && rows[2] < rows[1],
-                "batch after a slow one did not shrink: {rows:?}"
-            );
-        }
-        None => soft_skip(
-            "MG-11",
-            "report has no batches[]; adaptive shrink not asserted",
-        ),
-    }
+    let rows: Vec<u64> = r.batches().iter().map(|(rows, _)| *rows).collect();
+    assert!(
+        rows.len() >= 3 && rows[2] < rows[1],
+        "batch after a slow one did not shrink: {rows:?}"
+    );
     // Concurrent search + writer load: per-batch ≤2 s and writer wait ≤2 s.
     let (_dir2, db2) = f.copy_db();
     let stop = Arc::new(AtomicBool::new(false));
@@ -494,16 +498,7 @@ fn mg_11_adaptive_batches_and_bounded_write_lock() {
     let r = d.migrate_to_done(&db2);
     stop.store(true, Ordering::Relaxed);
     let worst_write = load.join().unwrap();
-    let mut ms: Vec<f64> = match r.batches() {
-        Some(b) => b.into_iter().map(|(_, ms)| ms).collect(),
-        None => {
-            soft_skip(
-                "MG-11",
-                "report has no batches[]; per-batch ≤2 s not asserted",
-            );
-            Vec::new()
-        }
-    };
+    let mut ms: Vec<f64> = r.batches().into_iter().map(|(_, ms)| ms).collect();
     ms.sort_by(f64::total_cmp);
     println!(
         "SMV2-TIMING {}",
@@ -549,7 +544,8 @@ fn mg_13_sqlite_full_pauses_and_resumes() {
     let (_dir, db) = fixture().copy_db();
     let r = d.run("start", &db, &[env(FAULT, "sqlite_full:batch:2")]);
     assert_eq!(r.state(), "paused", "{r:?}");
-    assert_eq!(r.error_code(), Some("SQLITE_FULL"), "{r:?}");
+    // Pending server confirm: SQLITE_FULL maps to io_error (state paused, checkpoint kept).
+    assert_eq!(r.error_code(), Some("io_error"), "{r:?}");
     assert!(
         table_exists(&conn(&db), "v9_checkpoint"),
         "checkpoint dropped on SQLITE_FULL"
@@ -573,19 +569,8 @@ fn mg_14_state_machine_start_pause_resume_cancel() {
     assert_eq!(r.state(), "paused", "{r:?}");
     let (done, total) = r.progress();
     assert!(done > 0 && done <= total, "progress after one batch: {r:?}");
-    match r.eta_s() {
-        Some(eta) => assert!(eta.is_number() || eta.is_null(), "eta_s: {r:?}"),
-        None => soft_skip("MG-14", "report has no eta_s"),
-    }
-    if r.batches().is_none() {
-        soft_skip("MG-14", "report has no batches[]");
-    }
-    let again = d.run("start", &db, &[]);
-    assert_ne!(
-        again.state(),
-        "running",
-        "duplicate start began a second task: {again:?}"
-    );
+    assert!(r.eta_s().is_number(), "eta_s while paused mid-run: {r:?}");
+    assert!(!r.batches().is_empty(), "{r:?}");
     let r = d.run("resume", &db, &[]);
     assert_eq!(r.state(), "done", "{r:?}");
     let (done, total) = r.progress();
@@ -625,11 +610,15 @@ fn mg_16_defer_schema9_env() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
     let r = d.run("startup", &db, &[env("AUDIOLIB_DEFER_SCHEMA9", 1)]);
-    assert_eq!(r.state(), "idle", "{r:?}");
+    assert_eq!(r.state(), "deferred", "{r:?}");
+    assert_eq!(user_version(&db), 8);
     assert_still_usable_s8(&db);
     assert!(!table_exists(&conn(&db), "audio_path_search"));
-    d.migrate_to_done(&db);
-    assert_eq!(user_version(&db), 9);
+    // Without the env, startup migrates an s8 library automatically.
+    let (_dir2, db2) = fixture().copy_db();
+    let r = d.run("startup", &db2, &[]);
+    assert_eq!(r.state(), "done", "{r:?}");
+    assert_eq!(user_version(&db2), 9);
 }
 
 // ------------------------------------------------------------------------ MG-17
@@ -691,6 +680,8 @@ fn mg_17_scan_and_rename_during_backfill_reach_path_table() {
 fn mg_18_switch_transaction_is_atomic() {
     let d = Driver::require();
     let (_dir, db) = fixture().copy_db();
+    let st = d.run("status", &db, &[]);
+    assert_eq!(st.report["switch"]["source_search_rev"], 2, "{st:?}");
     let r = d.migrate_to_done(&db);
     assert_eq!(user_version(&db), 9);
     let sw = &r.report["switch"];
@@ -712,7 +703,7 @@ fn mg_18_switch_transaction_is_atomic() {
     assert_eq!(user_version(&db2), 8);
     let st = d.run("status", &db2, &[]);
     assert!(
-        st.report["switch"].is_null() || st.report["switch"]["source_search_rev"] != 3,
+        st.report["switch"]["source_search_rev"] == 2,
         "partial switch: {st:?}"
     );
 }
@@ -726,19 +717,35 @@ fn report_schema_examples() {
         "state": "paused", "error_code": null,
         "progress": {"done": 500, "total": 1200},
         "phases": {"backup": 12.5, "path_build": 340, "optimize": 0, "switch": 0},
-        "switch": null, "batches": [{"rows": 500, "ms": 210.0}], "eta_s": 1.4
+        "switch": {"source_search_rev": 2, "features": []},
+        "batches": [{"rows": 500, "ms": 210.0}], "eta_s": 1.4
     });
     assert_eq!(validate(report_schema(), &good), Vec::<String>::new());
-    let minimal = json!({"state": "idle", "error_code": null,
-        "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null});
+    let minimal = json!({"state": "failed", "error_code": "backup_failed",
+        "progress": {"done": 0, "total": 0},
+        "phases": {"backup": 1, "path_build": 0, "optimize": 0, "switch": 0},
+        "switch": null, "batches": [], "eta_s": null});
     assert_eq!(validate(report_schema(), &minimal), Vec::<String>::new());
-    for bad in [
-        json!({"state": "idle", "error_code": null, "completed": 0, "phases": {}, "switch": null}),
-        json!({"state": "weird", "error_code": null, "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null}),
-        json!({"state": "idle", "error_code": 3, "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null}),
-        json!({"state": "idle", "error_code": null, "progress": {"done": -1, "total": 0}, "phases": {"optimize": "x"}, "switch": null}),
-        json!({"state": "idle", "error_code": null, "progress": {"done": 0, "total": 0}, "phases": {}, "switch": null, "batches": [{"rows": 1}]}),
+    let mut bad = Vec::new();
+    for (k, v) in [
+        ("state", json!("weird")),
+        ("error_code", json!("SQLITE_FULL")),
+        ("error_code", json!("INSUFFICIENT_SPACE")),
+        ("progress", json!({"done": -1, "total": 0})),
+        ("phases", json!({"optimize": 0})),
+        ("switch", json!({"source_search_rev": 4, "features": []})),
+        ("batches", json!([{"rows": 1}])),
     ] {
+        let mut b = minimal.clone();
+        b[k] = v;
+        bad.push(b);
+    }
+    for k in ["batches", "eta_s", "progress"] {
+        let mut b = minimal.clone();
+        b.as_object_mut().unwrap().remove(k);
+        bad.push(b);
+    }
+    for bad in bad {
         assert!(
             !validate(report_schema(), &bad).is_empty(),
             "accepted {bad}"
@@ -746,70 +753,259 @@ fn report_schema_examples() {
     }
 }
 
-/// Admin GET /api/admin/migration/status must validate against the same schema and
-/// agree with `audiolib-migrate status` on the DB that server instance uses.
-/// Env: AUDIOLIB_SMV2_ADMIN_URL (http://host:port), AUDIOLIB_SMV2_ADMIN_DB (that DB),
-/// optional AUDIOLIB_SMV2_ADMIN_TOKEN (Bearer).
-#[test]
-#[ignore = "pending server admin migration endpoints (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
-fn mg_14_admin_status_matches_cli_and_schema() {
-    use smv2::schema::{report_schema, validate};
-    let url = std::env::var("AUDIOLIB_SMV2_ADMIN_URL").expect("AUDIOLIB_SMV2_ADMIN_URL");
-    let db = std::path::PathBuf::from(
-        std::env::var("AUDIOLIB_SMV2_ADMIN_DB").expect("AUDIOLIB_SMV2_ADMIN_DB"),
+// ------------------------------------------------------- HTTP (pending server)
+// One disposable server instance serving AUDIOLIB_SMV2_ADMIN_DB (a fresh schema-8
+// copy, e.g. of the fixture). Each test needs that file back at schema 8, so run them
+// one at a time against a fresh instance:
+//   cargo test -p audiolib-db --features test-hooks --test smv2_mg mg_1 -- --ignored --test-threads=1
+// The migration is driven on that file with `audiolib-migrate` and held in progress
+// with AUDIOLIB_MIGRATION_PAUSE_AFTER_BATCHES / SLOW_BATCH.
+use smv2::http::{self, Server};
+
+fn server_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn fresh_s8_server() -> Server {
+    let srv = Server::from_env();
+    assert_eq!(
+        user_version(&srv.db),
+        8,
+        "AUDIOLIB_SMV2_ADMIN_DB must be a fresh schema-8 copy for this test"
     );
-    let token = std::env::var("AUDIOLIB_SMV2_ADMIN_TOKEN").ok();
-    let http = http_get_json(&url, "/api/admin/migration/status", token.as_deref());
-    let errors = validate(report_schema(), &http);
+    srv
+}
+
+fn any_id(db: &Path) -> i64 {
+    let c = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    c.query_row("SELECT min(id) FROM audio_files", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn assert_report_body(resp: &http::Response) -> serde_json::Value {
+    use smv2::schema::{report_schema, validate};
+    let body = resp.json();
+    let errors = validate(report_schema(), &body);
     assert!(
         errors.is_empty(),
-        "admin status violates schema: {errors:?}\n{http}"
+        "admin body violates schema: {errors:?}\n{resp:?}"
     );
-    let cli = Driver::require().run("status", &db, &[]);
-    for k in ["state", "error_code", "progress", "switch"] {
+    body
+}
+
+fn assert_http_error(resp: &http::Response, status: u16, code: &str, retry_after: &str) {
+    use smv2::schema::{http_schema, validate};
+    assert_eq!(resp.status, status, "{resp:?}");
+    let body = resp.json();
+    let errors = validate(&http_schema()["$defs"]["error_body"], &body);
+    assert!(
+        errors.is_empty(),
+        "error body violates schema: {errors:?}\n{resp:?}"
+    );
+    assert_eq!(body["error_code"], code, "{resp:?}");
+    assert_eq!(resp.header("retry-after"), Some(retry_after), "{resp:?}");
+}
+
+/// Admin GET /admin/api/migration/status validates against the shared schema and
+/// agrees with `audiolib-migrate status` on the same file (idle, then paused).
+#[test]
+#[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
+fn mg_14_admin_status_matches_cli_and_schema() {
+    let _g = server_lock();
+    let srv = fresh_s8_server();
+    let d = Driver::require();
+    let compare = |label: &str| {
+        let http = assert_report_body(&srv.status());
+        let cli = d.run("status", &srv.db, &[]);
+        for k in ["state", "error_code", "progress", "switch"] {
+            assert_eq!(
+                http[k], cli.report[k],
+                "{label}: admin vs CLI {k}: {http} vs {:?}",
+                cli.report
+            );
+        }
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            v.as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default()
+        };
         assert_eq!(
-            http[k], cli.report[k],
-            "admin vs CLI {k}: {http} vs {:?}",
-            cli.report
+            keys(&http["phases"]),
+            keys(&cli.report["phases"]),
+            "{label}: phase names"
+        );
+    };
+    compare("idle");
+    let r = d.run("start", &srv.db, &[env(PAUSE_AFTER_BATCHES, 1)]);
+    assert_eq!(r.state(), "paused", "{r:?}");
+    compare("paused");
+    assert_eq!(d.run("resume", &srv.db, &[]).state(), "done");
+    compare("done");
+}
+
+/// CLI: second start while running → exit 2 / already_running / current state;
+/// admin POST start → 409 with the same body; pause from another process lands
+/// through v9_control within one batch (≤2 s) plus the injected slow batch.
+#[test]
+#[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
+fn mg_14_http_already_running_and_cross_process_pause() {
+    let _g = server_lock();
+    let srv = fresh_s8_server();
+    let d = Arc::new(Driver::require());
+    let (d1, db1) = (d.clone(), srv.db.clone());
+    let runner = std::thread::spawn(move || {
+        d1.run(
+            "start",
+            &db1,
+            &[env(BATCH_ROWS, 50), env(SLOW_BATCH, "2:1500")],
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while d.run("status", &srv.db, &[]).state() != "running" {
+        assert!(Instant::now() < deadline, "migration never reached running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let again = d.run("start", &srv.db, &[]);
+    assert_eq!(again.code, Some(2), "{again:?}");
+    assert_eq!(again.error_code(), Some("already_running"), "{again:?}");
+    assert_eq!(again.state(), "running", "{again:?}");
+    let resp = srv.admin("start");
+    assert_eq!(resp.status, 409, "{resp:?}");
+    let body = assert_report_body(&resp);
+    assert_eq!(body["error_code"], "already_running");
+    assert_eq!(body["state"], "running");
+    let asked = Instant::now();
+    let p = d.run("pause", &srv.db, &[]);
+    assert!(p.ok(), "{p:?}");
+    assert!(table_exists(&conn(&srv.db), "v9_control"));
+    let first = runner.join().unwrap();
+    let took = asked.elapsed();
+    assert_eq!(first.state(), "paused", "{first:?}");
+    assert!(took <= Duration::from_millis(3500), "pause took {took:?}");
+    assert_eq!(d.run("resume", &srv.db, &[]).state(), "done");
+}
+
+/// During the backfill: reads 200 with x-audiolib-migration; path-only scope 503
+/// migration_in_progress (Retry-After 30); scope 全部 200 main-only with
+/// x-audiolib-path-search: unavailable.
+#[test]
+#[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
+fn mg_15_http_reads_and_scopes_during_backfill() {
+    let _g = server_lock();
+    let srv = fresh_s8_server();
+    let d = Driver::require();
+    let id = any_id(&srv.db);
+    let r = d.run("start", &srv.db, &[env(PAUSE_AFTER_BATCHES, 1)]);
+    assert_eq!(r.state(), "paused", "{r:?}");
+    let state = assert_report_body(&srv.status())["state"].clone();
+    assert_eq!(state, "paused");
+    for name in ["LIST", "MAIN_SEARCH", "PLAYBACK", "ARTWORK"] {
+        let resp = srv.call(name, id);
+        assert_eq!(resp.status, 200, "{name}: {resp:?}");
+        assert_eq!(
+            resp.header("x-audiolib-migration"),
+            state.as_str(),
+            "{name}: {resp:?}"
         );
     }
-    let keys = |v: &serde_json::Value| -> Vec<String> {
-        v.as_object()
-            .map(|o| o.keys().cloned().collect())
-            .unwrap_or_default()
-    };
+    let path = srv.call("PATH_SEARCH", id);
+    assert_http_error(&path, 503, "migration_in_progress", "30");
     assert_eq!(
-        keys(&http["phases"]),
-        keys(&cli.report["phases"]),
-        "phase names differ"
+        path.header("x-audiolib-migration"),
+        state.as_str(),
+        "{path:?}"
+    );
+    let all = srv.call("ALL_SEARCH", id);
+    assert_eq!(all.status, 200, "{all:?}");
+    assert_eq!(
+        all.header("x-audiolib-path-search"),
+        Some("unavailable"),
+        "{all:?}"
+    );
+    assert_eq!(
+        all.header("x-audiolib-migration"),
+        state.as_str(),
+        "{all:?}"
+    );
+    let main = srv.call("MAIN_SEARCH", id);
+    assert_eq!(
+        all.json(),
+        main.json(),
+        "scope 全部 must return main-table results only"
+    );
+    assert_eq!(d.run("resume", &srv.db, &[]).state(), "done");
+    let after = srv.call("LIST", id);
+    assert_eq!(after.header("x-audiolib-migration"), None, "{after:?}");
+    assert_eq!(srv.call("PATH_SEARCH", id).status, 200);
+}
+
+/// During `switching`: writes 503 migration_switching (Retry-After 5), reads 200.
+/// The switch window is short; status is polled while a slowed run finishes.
+#[test]
+#[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
+fn mg_15_http_writes_rejected_during_switch() {
+    let _g = server_lock();
+    let srv = fresh_s8_server();
+    let d = Arc::new(Driver::require());
+    let id = any_id(&srv.db);
+    let (d1, db1) = (d.clone(), srv.db.clone());
+    let runner = std::thread::spawn(move || d1.migrate_to_done(&db1));
+    let mut seen = false;
+    while !runner.is_finished() {
+        if srv.status().json()["state"] == "switching" {
+            for name in ["VENDOR_IMPORT", "ANNOTATIONS"] {
+                let resp = srv.call(name, id);
+                if resp.header("x-audiolib-migration") != Some("switching") {
+                    continue; // the switch ended between the two requests
+                }
+                assert_http_error(&resp, 503, "migration_switching", "5");
+                seen = true;
+            }
+            let read = srv.call("LIST", id);
+            assert_eq!(read.status, 200, "read during switch: {read:?}");
+        }
+    }
+    runner.join().unwrap();
+    assert!(
+        seen,
+        "never observed a write inside the switch window (needs a switch-hold hook)"
     );
 }
 
-/// Plain HTTP/1.0 GET (no client dependency); returns the JSON body.
-fn http_get_json(base: &str, path: &str, token: Option<&str>) -> serde_json::Value {
-    use std::io::{Read, Write};
-    let host = base
-        .strip_prefix("http://")
-        .expect("AUDIOLIB_SMV2_ADMIN_URL must be http://host:port")
-        .trim_end_matches('/');
-    let mut stream = std::net::TcpStream::connect(host).expect("connect admin URL");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
-    let auth = token
-        .map(|t| format!("Authorization: Bearer {t}\r\n"))
-        .unwrap_or_default();
-    write!(
-        stream,
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\n{auth}\r\n"
-    )
-    .unwrap();
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).unwrap();
-    let (head, body) = raw.split_once("\r\n\r\n").expect("HTTP response");
-    assert!(
-        head.starts_with("HTTP/1.") && head.split(' ').nth(1) == Some("200"),
-        "{head}"
+/// After a failure and after a rollback: status shows state + error_code, and the
+/// library endpoints behave as schema 8.
+#[test]
+#[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
+fn mg_14_http_failure_and_rollback_fall_back_to_s8() {
+    let _g = server_lock();
+    let srv = fresh_s8_server();
+    let d = Driver::require();
+    let id = any_id(&srv.db);
+    let rb = srv.admin("rollback");
+    assert!(rb.status >= 400, "{rb:?}");
+    assert_eq!(assert_report_body(&rb)["error_code"], "not_migrated");
+    let r = d.run("start", &srv.db, &[env(FAULT, "backup_fail")]);
+    assert_eq!(r.state(), "failed", "{r:?}");
+    let st = assert_report_body(&srv.status());
+    assert_eq!(
+        (st["state"].as_str(), st["error_code"].as_str()),
+        (Some("failed"), Some("backup_failed"))
     );
-    serde_json::from_str(body.trim()).expect("JSON body")
+    let s8_reads = |label: &str| {
+        for name in ["LIST", "MAIN_SEARCH", "PLAYBACK", "ARTWORK", "ANNOTATIONS"] {
+            let resp = srv.call(name, id);
+            assert!(resp.status < 300, "{label} {name}: {resp:?}");
+        }
+    };
+    s8_reads("after failure");
+    assert_eq!(user_version(&srv.db), 8);
+    d.migrate_to_done(&srv.db);
+    let rb = srv.admin("rollback");
+    assert_eq!(rb.status, 200, "{rb:?}");
+    assert_eq!(assert_report_body(&rb)["state"], "rolled_back");
+    let st = assert_report_body(&srv.status());
+    assert_eq!(st["state"], "rolled_back");
+    assert_eq!(user_version(&srv.db), 8);
+    s8_reads("after rollback");
 }

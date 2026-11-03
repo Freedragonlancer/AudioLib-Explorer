@@ -6,12 +6,11 @@ Usage: python tools/smv2-harness.py [--out report.md] [--ignored] [-- extra carg
   --ignored  also run ignored tests (MG migration cases need the audiolib-migrate
              binary built with --features test-hooks, or AUDIOLIB_SMV2_MIGRATE_CMD;
              EM-06 r824 needs AUDIOLIB_SMV2_BASELINE_DB; admin status needs
-             AUDIOLIB_SMV2_ADMIN_URL + AUDIOLIB_SMV2_ADMIN_DB).
+             AUDIOLIB_SMV2_ADMIN_URL + AUDIOLIB_SMV2_ADMIN_DB, one test at a time).
 Case IDs come from test names: em_09_* -> EM-09, mg_01_* -> MG-01, em_07_08_* -> both.
 A case is FAIL if any of its tests failed, PASS if every test passed, PARTIAL if some
 passed and the rest were skipped, SKIP if all were skipped (reason = ignore reason).
-A passing test that printed `SMV2-SKIP <case>: <reason>` (an optional report field such
-as batches/eta_s was absent) makes its case PARTIAL with that reason.
+A passing test that printed `SMV2-SKIP <case>: <reason>` makes its case PARTIAL.
 """
 import argparse, os, re, subprocess, sys
 from collections import OrderedDict

@@ -24,10 +24,16 @@
 //!   AUDIOLIB_MIGRATION_PAUSE_AFTER_BATCHES  pause after n committed batches
 //!   AUDIOLIB_MIGRATION_BATCH_ROWS           initial batch size
 //!   AUDIOLIB_MIGRATION_SLOW_BATCH           `<n>:<ms>` sleep inside batch n
-//!   AUDIOLIB_DEFER_SCHEMA9                  honoured by `startup`
+//!   AUDIOLIB_DEFER_SCHEMA9=1                `startup` leaves s8, state=deferred
+//!   (`--sql-trace <file>` also exists under test-hooks)
 //!
-//! Admin HTTP mirrors the CLI: POST /api/admin/migration/{start,pause,resume,cancel,
-//! rollback}, GET /api/admin/migration/status, same JSON.
+//! Cross-process control: `pause`/`cancel` write `v9_control(cmd, requested_at)`;
+//! the runner checks between batches and stops within 2 s. `<db>.upgrade.lock`
+//! holds the owner pid; a stale pid is reclaimed. Second `start` while running:
+//! exit 2, error_code `already_running`, state = current state.
+//!
+//! Admin HTTP mirrors the CLI: POST /admin/api/migration/{start,pause,resume,cancel,
+//! rollback}, GET /admin/api/migration/status, same JSON (see smv2/http.rs).
 use super::schema;
 use serde_json::Value;
 use std::{
@@ -44,11 +50,6 @@ pub const PAUSE_AFTER_BATCHES: &str = "AUDIOLIB_MIGRATION_PAUSE_AFTER_BATCHES";
 pub const BATCH_ROWS: &str = "AUDIOLIB_MIGRATION_BATCH_ROWS";
 pub const SLOW_BATCH: &str = "AUDIOLIB_MIGRATION_SLOW_BATCH";
 pub const FAULT: &str = "AUDIOLIB_MIGRATION_FAULT";
-
-/// Runtime soft skip of one assertion; tools/smv2-harness.py reports it per case.
-pub fn soft_skip(case: &str, reason: &str) {
-    println!("SMV2-SKIP {case}: {reason}");
-}
 
 pub struct Driver {
     program: PathBuf,
@@ -86,21 +87,22 @@ impl Outcome {
     pub fn phase_ms(&self, name: &str) -> Option<f64> {
         self.report["phases"][name].as_f64()
     }
-    /// `batches` is a requested addition: `None` when the entrypoint omits it.
-    pub fn batches(&self) -> Option<Vec<(u64, f64)>> {
-        self.report.get("batches")?.as_array().map(|b| {
-            b.iter()
-                .map(|x| {
-                    (
-                        x["rows"].as_u64().unwrap_or(0),
-                        x["ms"].as_f64().unwrap_or(0.0),
-                    )
-                })
-                .collect()
-        })
+    /// `batches[{rows,ms}]` (guaranteed by the agreed report).
+    pub fn batches(&self) -> Vec<(u64, f64)> {
+        self.report["batches"]
+            .as_array()
+            .unwrap_or_else(|| panic!("report lacks batches: {self:?}"))
+            .iter()
+            .map(|x| {
+                (
+                    x["rows"].as_u64().unwrap_or(0),
+                    x["ms"].as_f64().unwrap_or(0.0),
+                )
+            })
+            .collect()
     }
-    pub fn eta_s(&self) -> Option<&Value> {
-        self.report.get("eta_s")
+    pub fn eta_s(&self) -> &Value {
+        &self.report["eta_s"]
     }
 }
 

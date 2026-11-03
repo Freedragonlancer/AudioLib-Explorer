@@ -7,6 +7,7 @@
 //! regenerate them with `AUDIOLIB_SMV2_BLESS=1` (only at the default fixture size).
 #![allow(dead_code)]
 pub mod driver;
+pub mod http;
 pub mod schema;
 
 use crate::support;

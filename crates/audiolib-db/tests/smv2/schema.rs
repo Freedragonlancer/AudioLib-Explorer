@@ -15,6 +15,16 @@ pub fn report_schema() -> &'static Value {
     })
 }
 
+pub fn http_schema() -> &'static Value {
+    static S: OnceLock<Value> = OnceLock::new();
+    S.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../../doc/schemas/migration-http.schema.json"
+        ))
+        .expect("migration-http.schema.json is valid JSON")
+    })
+}
+
 /// Errors as `path: message`; empty when `value` conforms.
 pub fn validate(schema: &Value, value: &Value) -> Vec<String> {
     let mut errors = Vec::new();
