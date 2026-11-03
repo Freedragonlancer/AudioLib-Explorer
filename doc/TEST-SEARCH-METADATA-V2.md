@@ -23,7 +23,7 @@
 
 ## 1. P0 性能门禁（Performance Gate）
 
-**规则：只要有一项超出门禁，就不能合入 `feat/search-metadata-v2`。** 允许多用 CPU，但延迟不能变长。基准数据由 server bot 用 8790 生产库的**副本**提供（不碰生产服务）。路径搜索按方案 B 实现：独立 FTS 表 `audio_path_search`，主表 `audio_search` 不加路径列（列结构不变，内容按 t4 重建），路径不参与主表 bm25；「全部」范围在第二个只读连接上并行查两张表，再合并排序（设计 §10.4、§10.7）。
+**规则：只要有一项超出门禁，就不能合入 `feat/search-metadata-v2`。** 允许多用 CPU，但延迟不能变长。基准数据由 server bot 用 8790 生产库的**副本**提供（不碰生产服务）。路径搜索按方案 B 实现：独立 FTS 表 `audio_path_search`，主表 `audio_search` 不加路径列（列结构和内容都不变，迁移不重建主表），路径不参与主表 bm25；「全部」范围在第二个只读连接上并行查两张表，再合并排序（设计 §10.4、§10.7）。
 
 冷缓存的做法：重启进程，并清 OS 文件缓存（Windows 用 RAMMap `EmptyStandbyList`，Linux 用 `echo 3 > /proc/sys/vm/drop_caches`，macOS 用 `purge`）。热缓存：同一查询先预跑 3 次，再计时。
 
@@ -64,7 +64,7 @@
 | PS-11 | 范围切换「全部 / 仅文件名 / 仅路径」 | 「仅文件名」只查主表的文件名列；「仅路径」只查 `audio_path_search`；「全部」= 两者的并集（去重后）；同一查询下三者的集合关系成立 | I | P0 |
 | PS-12 | `audio_path_search` 与 `audio_files` 一致 | rowid = `audio_files.id`；删除文件后路径行也删掉（`contentless_delete=1`）；两表行数相等；integrity-check 通过 | U + I | P0 |
 | PS-13 | 目录本身改名（`folders.name` 变化） | 后台任务按 `folder_closure` 找后代文件，每批 5,000 行更新；不在 UI 线程执行；中途 kill 后按 `library_meta.path_reindex_progress` 续跑，最终结果和一次跑完一致；期间搜索不被阻塞（PG-05） | I | P0 |
-| PS-14 | 主表结构不变 | `audio_search` 的列、tokenizer 和选项（contentless、`detail=full`、`columnsize=1`）都和 schema 8 相同，没有路径列，也没有厂商列（存进去的 token 按 t4 规则重新生成，见 EM-09）；只出现在路径里的词在「仅文件名」范围下搜不到 | U：schema 断言 | P0 |
+| PS-14 | 主表结构不变 | `audio_search` 的列、tokenizer 和选项（contentless、`detail=full`、`columnsize=1`）都和 schema 8 相同，没有路径列，也没有厂商列；迁移前后主表不重建，token 不变（主表不做 NFC/全角半角归一化）；只出现在路径里的词在「仅文件名」范围下搜不到 | U：schema 断言 | P0 |
 | PS-15 | 新客户端连旧服务器（`/capabilities.compatibility.features` 里没有 `search_path`） | 隐藏「仅路径」和厂商相关的范围开关，「全部」退化成只查主表，不报错 | I | P1 |
 | PS-16 | 多词跨表（如 `pentax shutter`，一个词在文件名里、一个词在路径里） | 按词计算：每个词取（主表 ∪ 路径表）的命中，再对所有词求交集；结果等于参考实现；任意一个词两表都不命中时，结果为空 | U + I | P0 |
 | PS-17 | 超高频路径词（共享前缀、`Pro Sound Effect` 之类） | 路径命中数超过 `MAX_RANKED_IDS` 后只用于过滤，不参与排序；p95 仍满足 PG-10；根名不入索引时，搜根名不会命中全库 | I + C | P0 |
@@ -97,12 +97,12 @@
 | EM-06 | 基线命中数（r824 快照）：`zildjian`=323、`electrovoice`=228、`sortilege`=2776、`personage`=5943 | schema 9 的命中数 ≥ 基线，且基线命中的结果全部还在（新增结果只能来自路径或 Vorbis 字段，并逐条列出） | C：命中数脚本 + ID 集合对比 | P0 |
 | EM-07 | UCS CatID/Category 拼接（schema.rs:1075，metadata.rs:94-127） | token 不变，按 CatID 搜索的命中数一致 | U + C | P0 |
 | EM-08 | 用户标签、notes 搜索 | 和 schema 8 一致 | I | P0 |
-| EM-09 | 全角文件名样本（如 `ＥＸＰＬＯＳＩＯＮ_０１.wav`、`ﾄﾞｱ`）、NFD 文件名样本（macOS 写入的 `café`、`ガ` 分解形式） | 1）对每个样本查询，s9 主表的命中数 ≥ s8 主表的命中数，s8 命中的 ID 全部还在（不丢命中）；在不含这类样本的基线查询集上，两边命中数相等。2）s9 查询端做同样的归一化：用 NFC 或 NFD、全角或半角任意一种写法输入，都能搜到所有变体 | U：归一化 golden；C：s8/s9 命中数和 ID 集合对比 | P0 |
+| EM-09 | 全角文件名样本（如 `ＥＸＰＬＯＳＩＯＮ_０１.wav`、半角片假名）、NFD 文件名样本（macOS 写入的 `café`、`ガ` 分解形式） | 1）**主表**：主表不做归一化，对每个样本查询，s9 主表和 s8 主表的命中数和 ID 集合完全相同（不多也不少）。2）**路径搜索**：`audio_path_search` 和发往它的查询做 NFC 加全角/半角归一化，用 NFC 或 NFD、全角或半角任意一种写法输入，「仅路径」都能搜到所有变体；「全部」范围里多出的变体命中只能来自路径表 | U：路径归一化 golden；C：s8/s9 主表命中数和 ID 集合对比 | P0 |
 
 ## 5. 厂商 CSV/XLS 导入（#206）
 
 暂定决定（Paul 可能调整）：
-- **存储**：厂商文本并入 `bwf_description_tokenized`，主表的列结构不变（内容按 t4 规则重建，见 §6）。代价是厂商文本没法单独设权重。原始数据分开保存：厂商数据在 `vendor_metadata`，内嵌数据在原来的字段（BWF/iXML/Vorbis）里。
+- **存储**：厂商文本并入 `bwf_description_tokenized`，主表的列结构不变（主表不重建，厂商文本通过增量更新写入）。代价是厂商文本没法单独设权重。原始数据分开保存：厂商数据在 `vendor_metadata`，内嵌数据在原来的字段（BWF/iXML/Vorbis）里。
 - **优先级** 用户 > 厂商 > 内嵌 **只决定显示哪一个**；搜索时厂商和内嵌两种来源都能搜到。
 - **一行对应多个文件**：标为「歧义」，在预览里经用户确认前不自动写入。
 - **一个文件对应多行**（例如多语言重复表）：按（文件, 字段）合并，非空的值优先；keywords 取并集并去重。
@@ -150,20 +150,20 @@
 
 ## 6. 迁移 schema 8→9
 
-tokenizer 格式升级到 t4：NFC 加全角/半角归一化，会改变存进去的 token。因此迁移要**分批重建主表 `audio_search`**（基准约 227 s，20k 行/批，实际按单批 ≤2 s 自适应），然后再建路径表（约 70 s），最后在切换事务里原子换表；加上回滚备份，总耗时以实测为准（MG-06 记录）。迁移里不做 VACUUM。
+按服务端稿：迁移**只建路径表** `audio_path_search`（方案 B 约 70 s），主表 `audio_search` 不动、不重建，tokenizer 仍是 t3；NFC 和全角/半角归一化只用于路径表及发往路径表的查询，版本记在 `sp1`。迁移里不做 VACUUM。
 
 | ID | 场景 | 预期 | 验证 | 优先级 |
 |---|---|---|---|---|
-| MG-01 | 断电或被 kill -9（分别在主表重建、路径表回填的批边界和批中间，optimize 阶段，切换事务里） | 重启后从 `v9_checkpoint.last_id` 继续；回填用 delete+insert，所以结果幂等；最终结果和一次跑完一致；在切换前中断时，库仍是可用的 schema 8 | I：在多个点注入 kill；虚拟机强制断电至少 1 次 | P0 |
+| MG-01 | 断电或被 kill -9（分别在路径表回填的批边界和批中间，optimize 阶段，切换事务里） | 重启后从 `v9_checkpoint.last_id` 继续；回填用 delete+insert，所以结果幂等；最终结果和一次跑完一致；在切换前中断时，库仍是可用的 schema 8 | I：在多个点注入 kill；虚拟机强制断电至少 1 次 | P0 |
 | MG-02 | 空间预检 | 空余空间 < 库大小 ×1.3 时不开始迁移，`/admin/api/migration` 返回 `INSUFFICIENT_SPACE`，客户端显示空间不足提示；分别测 1.29× 和 1.30× 两个边界 | I：配额卷或 loop 设备 | P0 |
 | MG-03 | 自动备份失败 | 中止迁移，不修改原库；回滚备份 `audiolib-rollback-*.db` 通过 integrity/FK 校验后才继续；备份永远不自动删除 | I | P0 |
 | MG-04 | DB 文件只读 | 不尝试迁移，以只读方式打开或给出明确提示 | I | P0 |
 | MG-05 | DB 被另一个进程锁住，或另一个服务端实例共用同一个 DB | 迁移需要独占 `*.upgrade.lock`；拿不到锁时等待后提示，不损坏数据 | I | P0 |
-| MG-06 | 10.6 GB 库副本的迁移耗时 | 记录总耗时、每批耗时的 p50/p95/max、optimize 耗时、切换事务耗时；主表 t4 重建和路径表的耗时分开记录（基准分别约 227 s 和 70 s）；记录含备份的总耗时 | C | P0（必须记录） |
+| MG-06 | 10.6 GB 库副本的迁移耗时 | 记录总耗时、每批耗时的 p50/p95/max、optimize 耗时、切换事务耗时；路径表构建基准约 70 s；记录含备份的总耗时（服务端稿预期 <5 min），并确认没有主表重建阶段 | C | P0（必须记录） |
 | MG-07 | 回滚到备份 | 切换前取消：DROP 新表和 checkpoint 后回到纯 s8，不需要还原；切换后：用 `audiolib-rollback-*.db` 还原，schema 8 客户端能正常打开，搜索结果和基线一致 | I | P0 |
 | MG-08 | 迁移跑两次 | 第二次是空操作 | U | P0 |
 | MG-09 | 降级：旧客户端打开 schema 9 库 | 拒绝打开或以只读模式打开，并给出提示，不能写坏库 | I | P0 |
-| MG-10 | optimize 后执行 integrity-check | `audio_path_search`、新主表和 `audio_files` 三者行数一致；新主表的 token 等于按 t4 规则重新计算的结果（抽样 ≥1 万行比对）；切换前旧主表一直可查 | U | P0 |
+| MG-10 | optimize 后执行 integrity-check | `audio_path_search` 和 `audio_files` 行数一致；主 FTS 和迁移前完全相同（行数一致，FTS shadow 表逐字节对比 hash 相同） | U | P0 |
 | MG-11 | 自适应批大小 | 每批耗时 ≤2 s（p95 和 max 都记录）；上一批慢了下一批行数会减少；在并发搜索、并发扫描、慢盘三种负载下都满足；写锁最长阻塞时间 ≤2 s | I + C | P0 |
 | MG-12 | 迁移里没有 VACUUM | 断言迁移路径上没有执行 VACUUM；迁移后的库大小记录下来；VACUUM 可以作为单独的维护操作执行 | U + C | P0 |
 | MG-13 | 运行中磁盘写满（`SQLITE_FULL`） | 迁移转为 paused 并报错，`v9_checkpoint` 保留；腾出空间后 resume 能续跑，结果和一次跑完一致 | I | P0 |
@@ -184,8 +184,8 @@ tokenizer 格式升级到 t4：NFC 加全角/半角归一化，会改变存进�
 | VN-05 | “本地库需要迁移”的提示 | 文案准确；可以“稍后”关闭；同一版本只提示一次 | G | P1 |
 | VN-06 | 服务器版本或 schema 与客户端不匹配的提示 | 每个会话只提示一次，不重复弹窗 | G | P1 |
 | VN-07 | 客户端有更新可用；离线时检查更新 | 离线时静默失败，不阻塞启动 | G + I | P1 |
-| VN-08 | snapshot 格式 ID 和修订号 | 新快照的格式 ID 是 `ale-s9-cld1-t4-m2-p1-a1-sp1`（`-z1` 变体沿用 v8 规则）；`source_search_rev=3`；features 为 `search_path`、`vorbis_tags`、`vendor_metadata`；`CATALOG_REVISION=2`；文档和代码里不再出现 t3 版的 s9 格式 ID | U | P0 |
-| VN-12 | 按 t3 规则分词的客户端收到 t4 快照（包括格式 ID 被篡改、缺少 `-t4` 段、header 和快照内容不一致） | 能通过格式 ID 或 tokenization 版本判定为不兼容：重新拉取它能接受的格式（过渡期是 s8/t3），没有可用格式时提示升级；**绝不能**用 t3 规则去查 t4 的 token（不会出现静默丢命中）；本地已有的旧快照不被覆盖 | U + I | P0 |
+| VN-08 | snapshot 格式 ID 和修订号 | 新快照的格式 ID 是 `ale-s9-cld1-t3-m2-p1-a1-sp1`（`-z1` 变体沿用 v8 规则）；`source_search_rev=3`；features 为 `search_path`、`vorbis_tags`、`vendor_metadata`；`CATALOG_REVISION=2`；主表 tokenizer 段是 `t3`，路径归一化版本由 `sp1` 表示，不出现 `t4` | U | P0 |
+| VN-12 | 路径 tokenizer 版本兼容：只认识 `sp1` 的客户端收到 `sp2` 的路径数据（包括格式 ID 被篡改、header 和快照内容不一致） | 判定为不兼容：重新拉取它能接受的格式，拿不到时禁用路径搜索（隐藏「仅路径」，「全部」只查主表）并提示升级；**绝不能**用 sp1 规则去查 sp2 的路径 token（不会静默错配）；主表搜索照常工作，结果不受影响 | U + I | P0 |
 | VN-09 | `/capabilities` 的结构 | 只新增字段、不改旧字段：`compatibility.features`、`snapshot_read_formats`、`database_write_formats`（只有 s9）、`library_schema.{current, source_search_rev, snapshot_formats_served}`、`schema_migration.{state, endpoint}`、`vendor_import.{revision, max_file_bytes, max_rows}`；旧客户端解析时不报错 | U + I | P0 |
 | VN-10 | 迁移中的客户端提示 | 客户端根据 `schema_migration.state` 和 `/health.upgrade` 显示“服务器正在升级库（x%）”；切换时收到 503，会按 `Retry-After` 重试，不报错退出 | I + G | P1 |
 | VN-11 | 迁移完成后的新快照 | 服务端主动预生成 s9 zstd，首个客户端不需要等约 44 s 的生成；`snapshot_id` 变化后客户端提示刷新 | I + C | P1 |
@@ -196,12 +196,12 @@ tokenizer 格式升级到 t4：NFC 加全角/半角归一化，会改变存进�
 |---|---|---|---|---|
 | SC-01 | 旧客户端（v0.8.7）连 s9 服务端 | 只声明接受 s8 时，拿到由 s9 派生的 s8 兼容快照；同步成功，基础搜索正常，不崩溃 | I：真实旧版二进制 | P0 |
 | SC-02 | 过滤非 wav 行 | s8 快照里没有 flac/ogg 行；行数等于 s9 中 wav 行数；对 wav 行，EM-06 的命中数和 ID 集合与 schema 8 基线一致 | C：对比脚本 | P0 |
-| SC-03 | 派生快照的结构 | 没有 `audio_path_search` 和 `vendor_metadata`；`source_search_rev=2`；`user_version=8`；格式 ID 是 `ale-s8-cld1-t3-m2-p1-a1`；**主表按旧的 t3 规则重建**（不能直接复制 s9 的 t4 token）：在 s8 快照上用 v0.8.7 跑 EM-06 和 PG-01 查询集，结果和 schema 8 基线一致；library_id 和 s9 相同；文件夹统计和过滤后的行一致 | U + I | P0 |
+| SC-03 | 派生快照的结构 | 没有 `audio_path_search` 和 `vendor_metadata`；`source_search_rev=2`；`user_version=8`；格式 ID 是 `ale-s8-cld1-t3-m2-p1-a1`；主表直接沿用 s9 的主表（不重建）；在 s8 快照上用 v0.8.7 跑 EM-06 和 PG-01 查询集，结果和 schema 8 基线一致；library_id 和 s9 相同；文件夹统计和过滤后的行一致 | U + I | P0 |
 | SC-04 | 升级提示 | 拿到 s8 快照的客户端收到响应头 `x-audiolib-upgrade-available: <version>`，`/capabilities` 里也有提示；客户端显示非阻塞的升级提示，每个会话只显示一次 | I + G | P0 |
 | SC-05 | 快照发放规则 | `x-audiolib-accept-snapshot-formats` 包含 s9 的客户端总是拿到 s9，不会退回 s8；只接受 s8 的客户端才拿到 s8 | I | P0 |
 | SC-06 | 写操作只接受 s9 客户端 | 旧客户端（s8）发写请求返回 409，库不被修改；s9 客户端的写请求正常 | I | P0 |
 | SC-07 | 派生快照里的厂商/Vorbis 文本 | `bwf_description_tokenized` 里已经包含 rev3 的厂商和 Vorbis 文本；旧客户端能读、能搜到，不报错 | I | P1 |
-| SC-08 | 生成成本与失败处理 | 记录生成耗时（因为要按 t3 重建主表，和主表重建同一量级，以实测为准）和多占的磁盘（约 10.6 GB plain + 约 959 MB zstd）；生成失败不影响 s9 快照的发布；生成前做空间检查 | C + I | P1 |
+| SC-08 | 生成成本与失败处理 | 记录生成耗时（预期 1–2 min，没有主表重建）和多占的磁盘（约 10.6 GB plain + 约 959 MB zstd）；生成失败不影响 s9 快照的发布；生成前做空间检查 | C + I | P1 |
 | SC-09 | 厂商导入或扫描后 | s9 修订号变化后，s8 兼容快照也重新派生，旧客户端能拿到更新 | I | P1 |
 | SC-10 | 过渡期结束（关闭 s8 快照） | 旧客户端收到 409 `SNAPSHOT_FORMAT_UNSUPPORTED` 和“需要升级客户端”提示；本机已有的旧快照仍能离线浏览 | I + G | P1 |
 
@@ -216,7 +216,7 @@ tokenizer 格式升级到 t4：NFC 加全角/半角归一化，会改变存进�
 ## 9. 合入 beta 前的回归冒烟清单
 
 1. PG-01 到 PG-15 门禁全部通过（重点是 PG-10/11 并行两表的热、冷 p95，PG-12/13/14 正确性，以及 PG-07 ≤15%），数据附在 PR 中。
-2. EM-06 的 4 个基线命中数和 ID 集合对比通过；EM-09 全角/NFD 样本不丢命中。
+2. EM-06 的 4 个基线命中数和 ID 集合对比通过；EM-09 全角/NFD 样本主表命中数一致、路径搜索能匹配所有变体。
 3. 在 10.6 GB 库副本上完成一次 8→9 迁移，包括 MG-01 断电/kill 续跑、MG-02 空间预检、MG-11 单批 ≤2 s、MG-13 `SQLITE_FULL` 暂停后续跑、MG-07 回滚。
 4. 本地/服务器一致性 PA-01 通过。
 5. VN-01、VN-02 新旧版本交叉测试通过；SC-01、SC-02、SC-03、SC-04 和 VN-12 用真实 v0.8.7 客户端验证。
@@ -232,7 +232,7 @@ tokenizer 格式升级到 t4：NFC 加全角/半角归一化，会改变存进�
 5. **匹配规则**：一行对应多个文件时标为歧义、不自动写入；一个文件对应多行时非空优先、keywords 取并集；显示时中文优先，没有中文时用英文。→ CX-11、CX-28
 6. **旧客户端**：过渡期发 s8 兼容快照（过滤非 wav 行，附带升级提示头），之后硬拒绝并提示升级。→ §7.1
 7. **索引增长 ≤15%**：作为门禁（方案 B 实测 +14.2%）。→ PG-07
-8. **tokenizer t4**：NFC 加全角/半角归一化；s9 格式为 `ale-s9-cld1-t4-m2-p1-a1-sp1`，迁移要重建主表，s8 兼容快照按 t3 规则重建。→ EM-09、§6、VN-08、VN-12、SC-03
+8. **tokenizer 保持 t3（推翻之前的 t4 决定）**：主表 `audio_search` 不做归一化、不重建，s9 格式为 `ale-s9-cld1-t3-m2-p1-a1-sp1`；NFC 和全角/半角归一化只用于 `audio_path_search` 及发往它的查询，版本由 `sp1` 表示，以后再改就升到 `sp2`。迁移只建路径表；s8 兼容快照按原计划从 s9 派生。→ EM-09、§6、VN-08、VN-12、SC-03
 9. **导入上限**：50 MB（52428800）/ 20 万行 / 单行 256 KiB。→ CX-19～CX-23
 10. **s8 兼容快照保留一个版本周期**（等 Paul 最终确认）；显示语言中文优先，没有中文时用英文。→ §7.1、CX-28
 
