@@ -34,6 +34,7 @@ mod search_sorted;
 mod search_storage;
 mod search_text;
 mod search_workspace;
+mod snapshot_schema9;
 mod space;
 pub mod sqlite_engine;
 mod sqlite_mmap;
@@ -62,7 +63,7 @@ pub use schema::{MIN_SNAPSHOT_SCHEMA_VERSION, SCHEMA_VERSION};
 pub const MIN_SNAPSHOT_SCHEMA: i64 = schema::MIN_SNAPSHOT_SCHEMA_VERSION;
 /// Newest schema of a snapshot this client opens read-only. Older supported schemas
 /// use an owned copy when their derived search state needs upgrading; the source is preserved.
-pub const MAX_SNAPSHOT_SCHEMA: i64 = schema::SCHEMA_VERSION;
+pub const MAX_SNAPSHOT_SCHEMA: i64 = 9;
 const _: () = assert!(MIN_SNAPSHOT_SCHEMA <= MAX_SNAPSHOT_SCHEMA);
 
 /// Register the exact shared scalar functions required by library indexes/triggers.
@@ -854,6 +855,10 @@ impl SqliteProvider {
                 "Snapshot requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
             )));
         }
+        if version == 9 {
+            snapshot_schema9::validate_read(&conn)?;
+            return Ok(false);
+        }
         if version == schema::SCHEMA_VERSION && schema::current_format_ready(&conn)? {
             return Ok(false);
         }
@@ -969,10 +974,15 @@ impl SqliteProvider {
                 "Read-only database requires schema {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA}, found {version}"
             )));
         }
-        let (conn, actual_path, owned_directory) = if version == SCHEMA_VERSION
-            && schema::search_state_is_current(&source)?
-            && albums::ready(&source)?
-        {
+        let current = if version == 9 {
+            snapshot_schema9::validate_read(&source)?;
+            true
+        } else {
+            version == SCHEMA_VERSION
+                && schema::search_state_is_current(&source)?
+                && albums::ready(&source)?
+        };
+        let (conn, actual_path, owned_directory) = if current {
             (source, path.to_path_buf(), None)
         } else {
             schema::validate_library_identity(&source)?;
@@ -1072,7 +1082,9 @@ impl SqliteProvider {
         schema::ensure_ready(&conn)?;
         schema::validate_library_identity(&conn)?;
         schema::register_tokenizer(&conn, tokenizer.clone())?;
-        if version == schema::SCHEMA_VERSION && !schema::readable_format_ready(&conn)? {
+        if version == 9 {
+            snapshot_schema9::validate_read(&conn)?;
+        } else if version == schema::SCHEMA_VERSION && !schema::readable_format_ready(&conn)? {
             return Err(Error::Validation(
                 "Snapshot format is not ready for incremental Metadata".into(),
             ));

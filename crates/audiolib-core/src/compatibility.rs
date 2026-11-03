@@ -362,6 +362,29 @@ pub fn assess_library(
     }
     // Future formats cannot be diagnosed as corrupt merely because this tool
     // does not know their new columns, protocols or feature semantics.
+    if format.schema_version == 9 {
+        // Schema 9 is an explicit server format. Reading a completed snapshot
+        // does not grant the ordinary local writer a route to that format.
+        if format.snapshot_format_id().as_deref() != Some(PLAN_B_V9_FORMAT)
+            || evidence.pending.is_some()
+            || access == LibraryAccess::Write
+        {
+            return decision(None, Blocked, vec![Reason::ToolUpgradeRequired]);
+        }
+        if evidence.business_integrity == Some(false) {
+            return decision(
+                Some(RebuildRequired),
+                Blocked,
+                vec![Reason::BusinessDataUnrecoverable],
+            );
+        }
+        return if evidence.search_ready {
+            decision(Some(Compatible), Ready, vec![])
+        } else {
+            // No schema-8 recipe may repair or reinterpret schema-9 data.
+            decision(None, Blocked, vec![Reason::InvalidFormat])
+        };
+    }
     if format.schema_version > TARGET_SCHEMA {
         return decision(None, Blocked, vec![Reason::ToolUpgradeRequired]);
     }
@@ -707,6 +730,37 @@ pub fn peer_versions_compatible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_schema9_is_readable_but_never_a_local_write_or_repair_target() {
+        let mut proof = evidence();
+        let full = LibraryFormat::server_schema9();
+        let mut directory_only = full.clone();
+        directory_only.features.remove("vorbis_tags");
+        directory_only.features.remove("vendor_metadata");
+        for format in [full.clone(), directory_only] {
+            assert!(assess_library(&format, &proof, LibraryAccess::Read).direct_use);
+            let writable = assess_library(&format, &proof, LibraryAccess::Write);
+            assert!(!writable.direct_use);
+            assert_eq!(writable.execution_state, ExecutionState::Blocked);
+        }
+        proof.search_ready = false;
+        let incomplete = assess_library(&full, &proof, LibraryAccess::Read);
+        assert_eq!(incomplete.execution_state, ExecutionState::Blocked);
+        assert_ne!(
+            incomplete.disposition,
+            Some(MigrationDisposition::Migratable)
+        );
+        proof.search_ready = true;
+        for feature in ["search_path", "vendor_metadata", "vorbis_tags"] {
+            let mut future = full.clone();
+            future.features.insert(feature.into(), 2);
+            assert!(!assess_library(&future, &proof, LibraryAccess::Read).direct_use);
+        }
+        let mut partial = full;
+        partial.features.remove("vendor_metadata");
+        assert!(!assess_library(&partial, &proof, LibraryAccess::Read).direct_use);
+    }
 
     fn evidence() -> MigrationEvidence {
         MigrationEvidence {

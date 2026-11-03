@@ -1,5 +1,12 @@
 # Rust Remote (Server) Mode — Client
 
+Search Metadata v2 candidate: snapshot schemas 3–9 are admitted only with the
+matching complete format. Completed schema 9 is validated and opened read-only;
+older schemas retain their existing owned-copy preparation rules. Local working
+libraries remain schema 8. Upgrade clients before an explicit server migration;
+schema-8 compatibility snapshots have not been delivered. See the
+[candidate migration plan](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md).
+
 AudioLib Explorer can browse a library hosted by `server/audiolib-server` instead of the
 local working library. The client side is the `crates/audiolib-remote` crate (blocking
 HTTP client, snapshot sync, WebDAV mapping, audio cache, secrets) plus the desktop

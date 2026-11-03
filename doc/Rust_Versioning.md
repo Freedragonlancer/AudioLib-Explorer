@@ -1,5 +1,9 @@
 # AudioLib Explorer 版本规范
 
+下一版 Search Metadata v2 的发布准备见[0.9.0 迁移方案](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md)。
+候选源码暂保留 0.8.7 开发版本标识；本地写目标仍为 8，显式服务端迁移目标为 9，
+新客户端快照读取上限为 9。下表保留已发布 0.8.7 的基线，不代表新候选已发布或完成版本冻结。
+
 程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.7 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
 
 | 版本 | 来源（唯一事实） | 当前 | 含义 |

@@ -465,6 +465,25 @@ impl SqliteProvider {
         }
         Ok(())
     }
+
+    // Relinking preserves the business schema and maintains the directory index.
+    // Restore/maintenance still require the ordinary schema-8 writer contract.
+    #[cfg(feature = "scanner")]
+    fn require_relink_writable(&self) -> Result<()> {
+        if self.server_schema9 {
+            let conn = self.writer_unlocked()?;
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(db_error)?;
+            if version == 9 {
+                if self.read_only || conn.is_readonly("main").map_err(db_error)? {
+                    return Err(validation("Library was opened read-only"));
+                }
+                return crate::migration9::validate_ready(&conn);
+            }
+        }
+        self.require_writable()
+    }
     pub(crate) fn management_info(&self) -> Result<LibraryInfo> {
         let stats = self.stats()?;
         self.management_info_with(stats)
@@ -939,7 +958,7 @@ impl SqliteProvider {
         target: &Path,
         cancel: &AtomicBool,
     ) -> Result<u64> {
-        self.require_writable()?;
+        self.require_relink_writable()?;
         if !source.is_absolute() || !target.is_absolute() {
             return Err(validation("Folder relocation requires absolute paths"));
         }
@@ -958,6 +977,9 @@ impl SqliteProvider {
         check_cancel()?;
         let _scan = LibraryLease::acquire(&self.path)?;
         let _administration = AdministrationLease::exclusive(&self.path)?;
+        // Publication may have completed between initial admission and these
+        // leases. Recheck before examining targets or writing a rollback copy.
+        self.require_relink_writable()?;
         let target = audiolib_core::validate_scan_root(target, &[])?;
         if target.file_name().is_none() {
             return Err(validation("File system or drive roots cannot be relocated"));

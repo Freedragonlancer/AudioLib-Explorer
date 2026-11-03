@@ -4,6 +4,13 @@
 
 ## 1. 目标与边界
 
+Search Metadata v2 隔离候选新增显式服务端 schema 8→9 迁移及完成态 schema 9 快照读取；
+普通本地可写库仍为 8。新客户端必须先验证真实 s9 同步、Metadata 增量、离线重开和回滚，
+再切换服务端库。当前不提供已验收的 s8 过渡快照；未声明的厂商导入能力不能开放入口。
+迁移拒绝和切换拒写均按 `Retry-After: 30` 处理，正式响应头为 `x-audiolib-migration`。
+部署顺序与实际未完成项见[候选迁移方案](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md)；
+下文历史候选版本与测量保留原身份，不表示本候选已发布。
+
 当前 0.8.1 候选使用 schema 8 / `ale-s8-cld1-t3-m2-p1-a1`（`album_entities: 1`），
 专辑封面接口见 §8.2。新库、迁移输出及新服务端快照的 Metadata 物理列保持原始
 JSON TEXT，压缩暂缓；外层快照 zstd 传输保留。客户端与服务器须配套升级。

@@ -51,6 +51,9 @@ pub(super) fn prepare(conn: &mut Connection) -> Result<()> {
         .map_err(db_error)?;
     tx.execute_batch(dir_search::CREATE_RUNS)
         .map_err(db_error)?;
+    dir_search::install_tracking(&tx)?;
+    tx.execute("DELETE FROM audiolib_dir_dirty", [])
+        .map_err(db_error)?;
     tx.execute_batch(TRACK).map_err(db_error)?;
     tx.execute(
         "DELETE FROM library_meta WHERE key IN ('search_path_rev','snapshot_format')",
@@ -167,6 +170,7 @@ pub(super) fn clear_control(conn: &Connection) -> Result<()> {
     Ok(())
 }
 fn drop_paths(conn: &Connection) -> Result<()> {
+    dir_search::drop_tracking(conn)?;
     conn.execute_batch(DROP_TRACK).map_err(db_error)?;
     conn.execute_batch("DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs; DROP TABLE IF EXISTS v9_control;").map_err(db_error)?;
     // Keep the generation monotonic across rollback/re-migration so live readers
@@ -230,6 +234,7 @@ pub(super) fn publish(
     for id in changed {
         dir_search::reindex_segment(&tx, id)?;
     }
+    dir_search::finish_tracking(&tx)?;
     tx.execute("DELETE FROM audio_dir_runs", [])
         .map_err(db_error)?;
     tx.execute_batch(dir_search::INSERT_RUNS)
@@ -347,30 +352,22 @@ pub(super) fn validate_ready(conn: &Connection) -> Result<()> {
         )
         .optional()
         .map_err(db_error)?;
-    let fts: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE name='audio_dir_search'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    let runs: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE name='audio_dir_runs'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    let normalize = |s: &str| {
-        s.chars()
-            .filter(|c| !c.is_whitespace() && *c != ';')
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-    };
     if format.as_deref() != Some(audiolib_core::compatibility::PLAN_B_V9_FORMAT)
         || !dir_search::ready(conn)?
-        || normalize(&fts) != normalize(dir_search::CREATE_DIR_FTS)
-        || normalize(&runs) != normalize(dir_search::CREATE_RUNS)
+        || !crate::schema::definition::matches_sql(
+            conn,
+            "audio_dir_search",
+            "table",
+            "audio_dir_search",
+            dir_search::CREATE_DIR_FTS,
+        )?
+        || !crate::schema::definition::matches_sql(
+            conn,
+            "audio_dir_runs",
+            "table",
+            "audio_dir_runs",
+            dir_search::CREATE_RUNS,
+        )?
         || exists(conn, "v9_checkpoint")?
     {
         return Err(invalid("Incomplete schema-9 directory index"));

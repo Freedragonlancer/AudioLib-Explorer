@@ -1,9 +1,9 @@
 // crates/audiolib-core/src/local_upgrade.rs
-//! Local library upgrade to the schema 9 path index (design §5.2, §6, §7.1).
+//! Prepare directory-segment path search for a local library.
 //!
-//! The upgrade only adds the directory-segment path index; the main tables are not
-//! rebuilt. Batches are checkpointed so a cancelled or interrupted upgrade resumes
-//! from where it stopped without asking again and without a second backup (§6).
+//! This builds a derived index without publishing schema 9 or changing the local
+//! writable format. Batches are checkpointed so interrupted preparation resumes
+//! without asking again or making a second backup.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -117,9 +117,9 @@ pub fn size_text(bytes: u64) -> String {
 /// §7.1 confirm dialog title.
 pub fn confirm_title(chinese: bool) -> &'static str {
     if chinese {
-        "音效库需要升级"
+        "建立路径搜索索引"
     } else {
-        "Sound library needs an upgrade"
+        "Prepare path search"
     }
 }
 
@@ -129,20 +129,20 @@ pub fn confirm_body(plan: &LocalUpgradePlan, chinese: bool) -> String {
     let space = size_text(plan.required_bytes);
     if chinese {
         format!(
-            "本次更新将为音效库添加路径搜索索引。升级前会自动备份到同目录。预计需要 {time}，需要可用空间 {space}。升级中可以取消，下次打开会从中断处继续。"
+            "这一步为本地音效库建立路径搜索索引，资料库格式保持不变。开始前会自动备份到同目录。预计需要 {time}，需要可用空间 {space}。构建中可以取消，下次打开会从中断处继续。"
         )
     } else {
         format!(
-            "This update adds a path-search index to the sound library. A backup is created in the same folder first. The estimated time is {time}, with {space} of free space required. You can cancel during the upgrade and resume on the next open."
+            "This prepares a path-search index for the local sound library and keeps its format unchanged. A backup is created in the same folder first. The estimated time is {time}, with {space} of free space required. You can cancel during preparation and resume on the next open."
         )
     }
 }
 
 pub fn confirm_buttons(chinese: bool) -> (&'static str, &'static str) {
     if chinese {
-        ("立即升级", "暂不，打开其它音效库")
+        ("开始构建", "暂不，打开其它音效库")
     } else {
-        ("Upgrade now", "Not now, open another library")
+        ("Build index", "Not now, open another library")
     }
 }
 
@@ -152,12 +152,12 @@ pub fn progress_text(progress: &LocalUpgradeProgress, chinese: bool) -> String {
     let percent = progress.percent();
     if chinese {
         format!(
-            "正在升级音效库：{phase} {}/{}（{percent}%）",
+            "正在准备路径搜索：{phase} {}/{}（{percent}%）",
             progress.completed, progress.total
         )
     } else {
         format!(
-            "Upgrading sound library: {phase} {}/{} ({percent}%)",
+            "Preparing path search: {phase} {}/{} ({percent}%)",
             progress.completed, progress.total
         )
     }
@@ -167,15 +167,15 @@ pub fn cancel_confirm_text(chinese: bool) -> &'static str {
     if chinese {
         "已完成的部分会保留，下次打开会继续。确定取消吗？"
     } else {
-        "Finished work is kept and the next open continues. Cancel the upgrade?"
+        "Finished work is kept and the next open continues. Cancel index preparation?"
     }
 }
 
 pub fn resume_text(chinese: bool) -> &'static str {
     if chinese {
-        "继续上次未完成的升级…"
+        "继续上次未完成的路径索引构建…"
     } else {
-        "Continuing the unfinished upgrade…"
+        "Continuing unfinished path-index preparation…"
     }
 }
 
@@ -209,11 +209,11 @@ pub fn failed_text(backup: Option<&std::path::Path>, chinese: bool) -> String {
         });
     if chinese {
         format!(
-            "升级未完成，原有音效记录与标注保留。已提交的路径索引进度可能已保存，下次打开会续升。备份位置为 {path}。"
+            "路径索引构建未完成，原有音效记录与标注保留。已提交的路径索引进度可能已保存，下次打开会继续构建。备份位置为 {path}。"
         )
     } else {
         format!(
-            "Upgrade incomplete. Existing audio records and annotations are retained. Committed path-index progress may be saved for the next open to resume. Backup at {path}."
+            "Path-index preparation is incomplete. Existing audio records and annotations are retained. Committed path-index progress may be saved for the next open to resume. Backup at {path}."
         )
     }
 }
@@ -228,9 +228,9 @@ pub fn copy_diagnostics_label(chinese: bool) -> &'static str {
 
 pub fn cancelled_text(chinese: bool) -> &'static str {
     if chinese {
-        "升级已取消，已完成的部分会保留，下次打开会继续。"
+        "路径索引构建已取消，已完成的部分会保留，下次打开会继续。"
     } else {
-        "Upgrade cancelled; finished work is kept and the next open continues."
+        "Path-index preparation cancelled; finished work is kept and the next open continues."
     }
 }
 
@@ -279,7 +279,7 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("下次打开会从中断处继续"));
-        assert_eq!(confirm_buttons(true), ("立即升级", "暂不，打开其它音效库"));
+        assert_eq!(confirm_buttons(true), ("开始构建", "暂不，打开其它音效库"));
         let progress = LocalUpgradeProgress {
             phase: LocalUpgradePhase::PathBuild,
             completed: 5,
@@ -287,7 +287,7 @@ mod tests {
         };
         assert_eq!(
             progress_text(&progress, true),
-            "正在升级音效库：建立路径索引 5/10（50%）"
+            "正在准备路径搜索：建立路径索引 5/10（50%）"
         );
         assert!(insufficient_space_text(&plan, true).starts_with("磁盘空间不足：需要约 1.3 KB"));
         assert!(failed_text(None, true).contains("已提交的路径索引进度可能已保存"));

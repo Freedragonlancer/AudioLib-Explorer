@@ -1,5 +1,5 @@
 // app/audiolib-desktop/src/search_v2_ux.rs
-//! #209 client UX: the §7.1 local schema 9 (path index) upgrade dialog and the §4
+//! #209 client UX: the §7.1 local path-index preparation dialog and the §4
 //! vendor table import dialog (server mode, manage rights only). All library work goes
 //! through `DataProvider`; this module only drives the UI and worker threads.
 use super::{Controller, post};
@@ -368,7 +368,8 @@ impl Controller {
         true
     }
 
-    /// Ask once per opened local library whether the path index (schema 9) is missing.
+    /// Ask once per opened local library whether its derived path index is missing.
+    /// Preparing this local index does not publish the server's schema-9 format.
     /// The plan is read on a worker; nothing runs while another operation holds the
     /// library.
     pub(super) fn maybe_offer_local_upgrade(self: &Arc<Self>, ui: &AppWindow) {
@@ -521,7 +522,7 @@ impl Controller {
                 ui.set_lu_body(lu::failed_text(backup.as_deref(), chinese).into());
                 ui.set_lu_diagnostics(
                     format!(
-                        "AudioLib Explorer {}\nschema 9 path index upgrade failed\n{error}",
+                        "AudioLib Explorer {}\nLocal path-index preparation failed\n{error}",
                         env!("CARGO_PKG_VERSION")
                     )
                     .into(),
@@ -541,18 +542,20 @@ impl Controller {
 
     fn open_vendor_import(self: &Arc<Self>) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let chinese = self.chinese.load(Ordering::Acquire);
-        let remote = self.remote_read_only();
-        match self.vendor_limits() {
-            Some(limits) => {
-                ui.set_vi_available(true);
-                ui.set_vi_text(limits_text(limits, chinese).into());
-            }
-            None => {
-                ui.set_vi_available(false);
-                ui.set_vi_text(vi::unavailable_text(remote, chinese).into());
-            }
+        if !self.available() {
+            return;
         }
+        // The bundled server has no import handlers yet. A feature marker alone
+        // must not open a working import flow; the active peer must explicitly
+        // advertise import capabilities and admit this library's writes.
+        let Some(limits) = self.vendor_limits() else {
+            ui.set_vi_available(false);
+            ui.set_vi_state(VI_HIDDEN);
+            return;
+        };
+        let chinese = self.chinese.load(Ordering::Acquire);
+        ui.set_vi_available(true);
+        ui.set_vi_text(limits_text(limits, chinese).into());
         self.search_v2_ux.lock().unwrap().vendor = None;
         ui.set_vi_state(VI_CHOOSE);
     }
@@ -884,6 +887,27 @@ mod tests {
         c.search_generation.fetch_add(1, Ordering::AcqRel);
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(30));
         assert_eq!(c.search_generation.load(Ordering::Acquire), generation + 1);
+        c.shutdown();
+    }
+
+    #[test]
+    fn unadvertised_vendor_import_cannot_open_a_modal_through_a_stale_callback() {
+        i_slint_backend_testing::init_no_event_loop();
+        let root = tempfile::tempdir().unwrap();
+        let config =
+            audiolib_core::config::AppConfig::load_in(root.path().join("preferences")).unwrap();
+        let provider = Arc::new(audiolib_db::SqliteProvider::open(&config.paths.database).unwrap());
+        let engine = audiolib_audio::AudioEngine::new(Default::default()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let c = Controller::new(&ui, provider, engine.handle(), config, Default::default());
+        // A stale menu/property from the previous server cannot grant capability
+        // after switching to a local or unsupported library.
+        ui.set_vendor_import_available(true);
+        ui.invoke_vendor_import_requested();
+        assert_eq!(ui.get_vi_state(), VI_HIDDEN);
+        assert!(!ui.get_vi_available());
+        assert!(!c.search_v2_busy.load(Ordering::Acquire));
+        assert!(c.search_v2_ux.lock().unwrap().vendor.is_none());
         c.shutdown();
     }
 

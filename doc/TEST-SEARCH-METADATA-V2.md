@@ -199,15 +199,38 @@
 | VN-05 | “本地库需要迁移”的提示 | 文案准确；可以“稍后”关闭；同一版本只提示一次 | G | P1 |
 | VN-06 | 服务器版本或 schema 与客户端不匹配的提示 | 每个会话只提示一次，不重复弹窗 | G | P1 |
 | VN-07 | 客户端有更新可用；离线时检查更新 | 离线时静默失败，不阻塞启动 | G + I | P1 |
-| VN-08 | snapshot 格式 ID 和修订号 | 新快照的格式 ID 是 `ale-s9-cld1-t3-m2-p1-a1-sd1`（常量 `PLAN_B_V9_FORMAT`；`-z1` 变体沿用 v8 规则）；`source_search_rev=3`；features 为 `search_path`、`vorbis_tags`、`vendor_metadata`；`CATALOG_REVISION=2`；主表 tokenizer 段是 `t3`，目录段索引版本由 `sd1` 表示（`search_path_rev=1`），不出现 `t4`，也不使用已停用的 `sp1` | U | P0 |
+| VN-08 | snapshot 格式 ID 和修订号 | 验收目标：完成 s9 迁移后的格式 ID 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`PLAN_B_V9_FORMAT`），`source_search_rev=3`、`search_path_rev=1`，三项 feature 同事务发布；主表 tokenizer 为 `t3`，不出现 `t4` 或 `sp1`。目录标记不等于 Vorbis/厂商功能已验收；catalog 及压缩变体的现状差异见下文 | U + I | P0 |
 | VN-12 | 目录段版本兼容：只认识 `sd1` 的客户端收到 `sd2` 的目录段数据（包括格式 ID 被篡改、header 和快照内容不一致） | 判定为不兼容：重新拉取它能接受的格式，拿不到时禁用路径搜索（隐藏「仅路径」，「全部」只查主表）并提示升级；**绝不能**用 sd1 规则去查 sd2 的目录段 token（不会静默错配）；主表搜索照常工作，结果不受影响 | U + I | P0 |
-| VN-09 | `/capabilities` 的结构 | 只新增字段、不改旧字段：`compatibility.features`、`snapshot_read_formats`、`database_write_formats`（只有 s9）、`library_schema.{current, source_search_rev, snapshot_formats_served}`、`schema_migration.{state, endpoint}`、`vendor_import.{revision, max_file_bytes, max_rows, max_row_text_bytes}`；旧客户端解析时不报错 | U + I | P0 |
+| VN-09 | `/capabilities` 的结构 | 验收目标：只新增字段、不改旧字段；按实际库/角色报告 `compatibility.features`、`snapshot_read_formats`、`database_write_formats` 与 `library_schema`、`schema_migration`；只在业务端点可用时报告 `vendor_import` 能力及限额，旧客户端解析不报错。设计中的字段集与当前未实现项见下文，不把设计 JSON 当作已通过响应 | U + I | P0 |
 | VN-10 | 迁移中的客户端提示 | 客户端根据 `schema_migration.state`、响应头 `X-AudioLib-Schema-Migration`（`deferred|running|paused|failed` 等形态）和 `/health.upgrade` 显示“服务器正在升级库（x%）”；切换时收到 503，会按 `Retry-After` 重试，不报错退出 | I + G | P1 |
 | VN-11 | 迁移完成后的新快照 | 服务端主动预生成 s9 zstd，首个客户端不需要等约 44 s 的生成；`snapshot_id` 变化后客户端提示刷新 | I + C | P1 |
 | VN-13 | 搜索分页兼容（承接 VN-01）：仍接受旧 `offset` / `page`；同时传时 `cursor` 优先于 `offset`/`page` | 只传旧 `offset` / `page` 行为不变且与 s8 兼容；同时传时 `cursor` 优先于 `offset`/`page` | I | P0 |
 | VN-14 | 不传 `scope` 与显式 `scope=main`；对照 schema 8 同查询 | 两者结果 ID 序列与命中集合完全一致，且等于 schema 8（s8 兼容）；客户端「仅文件名」不传参数 | I | P0 |
 
-### 7.1 s8 兼容快照（过渡期，暂定保留一个版本周期）
+**VN-08/09 现状与目标（2026-11-04，首个合并候选 `02036a6`）：**
+完成服务端迁移的 s9 库与普通本地库的目标不同：`SCHEMA_VERSION` / `TARGET_SCHEMA` 仍为 8，
+本地升级 UI 当前仅构建路径索引，专用 server 打开入口才允许 s9 可写库。
+通用 manifest 已列 s9 读取格式，但初始仍只列 s8 写格式；真实 s9 快照读链和写准入修正及验证为
+**pending**。不得仅将全局常量改成 9 来使测试表看起来一致，或宣称所有本地库已迁移。
+
+原设计要求 `CATALOG_REVISION=2`，当前实现仍为 1；该目录修订不是实际库 schema。
+最终值及协商意义须随兼容修正定稿，不能将设计值 2 写成现有响应。
+`-z1` 是 Metadata 压缩存储格式；快照外层 zstd 传输不构成 s9 `-z1` 实现证明。
+
+VN-09 原设计字段为 `library_schema.{current,source_search_rev,snapshot_formats_served}`、
+`schema_migration.{state,endpoint}` 和
+`vendor_import.{revision,max_file_bytes,max_rows,max_row_text_bytes}`。
+初始服务端未完整输出这些字段，也没有厂商导入业务处理接口；feature 标记不得据此开启无实现入口。
+最终能力协商应同时验证 s8 本地写目标、s9 服务端写入和客户端实际只读快照能力。
+缺字段时客户端回退，未实现入口隐藏；字段兼容与格式兼容分别验收。
+合并候选后续结果记录在 [0.9.0 准备方案](Rust_Release_0.9.0.md)，不复用后台任务旧身份冒充集成通过。
+
+### 7.1 s8 兼容快照（设计目标：过渡期暂定一个版本周期）
+
+以下 SC 条目是双快照方案的验收目标，**当前尚无已验证的 s9→s8 派生及发放实现**。
+旧客户端连接 s9 服务当前不能据此承诺读取成功；须在正文发送前拒绝不支持的格式并保留旧缓存。
+若本轮选择所有客户端先升级、暂不提供双快照，必须明确批准该范围调整并记录旧端拒绝的验收；
+不能将 SC-01..09 静默记为已通过或因迁移器通过而跳过。
 
 | ID | 场景 | 预期 | 验证 | 优先级 |
 |---|---|---|---|---|

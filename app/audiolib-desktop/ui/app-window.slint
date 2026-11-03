@@ -2349,7 +2349,8 @@ export component AppWindow inherits Window {
         Menu { title: root.chinese ? "音效库" : "Library"; enabled: root.menu-ready;
             MenuItem { title: root.chinese ? "服务器音效库迁移…" : "Server library migration…"; enabled: root.menu-ready && root.remote-mode; activated => { root.migration-requested(); } }
             MenuItem { title: root.chinese ? "音效库管理…" : "Manage sound library…"; enabled: root.menu-ready; shortcut: @keys(Control + D); activated => { root.open-library(0); } }
-            MenuItem { title: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; enabled: root.menu-ready && root.remote-mode && root.vendor-import-available; activated => { root.vendor-import-requested(); } }
+            // Vendor import is offered inside library management only after a
+            // server explicitly advertises an implemented import handler.
             MenuItem { title: root.chinese ? "查看缺失文件 / 修复引用" : "Missing files / repair references"; enabled: root.menu-ready; activated => { root.show-missing-files(); } }
             // Not an everyday choice, so it lives here rather than in the list header; the
             // title names the current choice and the list footer flags a non-default one.
@@ -2497,7 +2498,7 @@ global-menu-view := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
 global-menu-library := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
         Menu { title: root.chinese ? "音效库" : "Library"; enabled: root.menu-ready;
             MenuItem { title: root.chinese ? "音效库管理…" : "Manage sound library…"; enabled: root.menu-ready; activated => { root.open-library(0); } }
-            MenuItem { title: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; enabled: root.menu-ready && root.vendor-import-available; activated => { root.vendor-import-requested(); } }
+            // Capability-gated vendor import lives inside library management.
             MenuItem { title: root.chinese ? "查看缺失文件 / 修复引用" : "Missing files / repair references"; enabled: root.menu-ready; activated => { root.show-missing-files(); } }
             // Not an everyday choice, so it lives here rather than in the list header; the
             // title names the current choice and the list footer flags a non-default one.
@@ -5516,7 +5517,7 @@ main-scroll := ScrollView {
         Rectangle { width: 480px * Theme.ui-scale; height: lu-col.preferred-height; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.panel; border-radius: 8px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
             lu-col := VerticalLayout { padding: 16px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
                 Text { text: root.lu-title; color: Theme.ink; font-size: Theme.font(14); font-weight: 600; wrap: word-wrap; }
-                Text { text: root.lu-state == 6 ? (root.chinese ? "该音效库已关闭，请选择其它音效库或继续升级。" : "This library is closed. Choose another library or continue upgrading.") : root.lu-state == 3 ? root.lu-question : root.lu-body; color: root.lu-state >= 4 ? Theme.warning : Theme.dim; wrap: word-wrap; }
+                Text { text: root.lu-state == 6 ? (root.chinese ? "该音效库已关闭，请选择其它音效库或建立路径索引。" : "This library is closed. Choose another library or prepare its path index.") : root.lu-state == 3 ? root.lu-question : root.lu-body; color: root.lu-state >= 4 ? Theme.warning : Theme.dim; wrap: word-wrap; }
                 if root.lu-state == 2 || root.lu-state == 3: Rectangle { height: 6px * Theme.ui-scale; background: Theme.raised; border-radius: 3px * Theme.ui-scale;
                     Rectangle { x: 0; width: parent.width * clamp(root.lu-progress, 0, 1); background: Theme.accent; border-radius: 3px * Theme.ui-scale; }
                 }
@@ -5526,8 +5527,8 @@ main-scroll := ScrollView {
                     if root.lu-state == 1 || root.lu-state == 6: Action { width: 110px * Theme.ui-scale; primary: true; label: root.lu-accept-label; clicked => { root.lu-accept(); } }
                     if root.lu-state == 1 || root.lu-state == 6: Action { width: 190px * Theme.ui-scale; label: root.lu-decline-label; clicked => { root.lu-decline(); } }
                     if root.lu-state == 2: Action { width: 90px * Theme.ui-scale; label: root.chinese ? "取消" : "Cancel"; clicked => { root.lu-cancel-requested(); } }
-                    if root.lu-state == 3: Action { width: 110px * Theme.ui-scale; primary: true; label: root.chinese ? "确定取消" : "Cancel upgrade"; clicked => { root.lu-cancel-answer(true); } }
-                    if root.lu-state == 3: Action { width: 110px * Theme.ui-scale; label: root.chinese ? "继续升级" : "Keep going"; clicked => { root.lu-cancel-answer(false); } }
+                    if root.lu-state == 3: Action { width: 110px * Theme.ui-scale; primary: true; label: root.chinese ? "确定取消" : "Cancel build"; clicked => { root.lu-cancel-answer(true); } }
+                    if root.lu-state == 3: Action { width: 110px * Theme.ui-scale; label: root.chinese ? "继续构建" : "Keep going"; clicked => { root.lu-cancel-answer(false); } }
                     if root.lu-state == 4: Action { width: 130px * Theme.ui-scale; label: root.lu-copy-label; clicked => { root.copy-text(root.lu-body + "\n" + root.lu-diagnostics); } }
                     if root.lu-state == 4 || root.lu-state == 5: Action { width: 90px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.lu-close(); } }
                 }

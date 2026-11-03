@@ -59,9 +59,9 @@ FROM (
   SELECT id, folder_id,
    CASE WHEN folder_id IS lag(folder_id) OVER (ORDER BY id) THEN 0 ELSE 1 END AS chg
   FROM audio_files
-  WHERE folder_id IS NOT NULL
  )
 )
+WHERE folder_id IS NOT NULL
 GROUP BY g;";
 
 /// NFC, then map ideographic space and fullwidth ASCII into their halfwidth forms.
@@ -101,7 +101,163 @@ pub(crate) fn restrict_to_subtree(estimated_files: i64) -> bool {
     estimated_files <= SUBTREE_FILE_LIMIT
 }
 
-pub(crate) fn ready(conn: &Connection) -> Result<bool> {
+const DIRTY_TABLE: &str = "CREATE TABLE audiolib_dir_dirty(
+ dir_id INTEGER PRIMARY KEY,segment INTEGER NOT NULL CHECK(segment IN (0,1)),
+ files INTEGER NOT NULL CHECK(files IN (0,1)))";
+// These triggers deliberately use only SQLite built-ins. Older schema-8 writers
+// can keep scanning without knowing the optional directory-index implementation.
+const DIRTY_TRIGGERS: &[(&str, &str, &str)] = &[
+    ("audiolib_dir_folder_insert", "folders", "CREATE TRIGGER audiolib_dir_folder_insert AFTER INSERT ON folders BEGIN
+     INSERT INTO audiolib_dir_dirty VALUES(new.id,1,1) ON CONFLICT(dir_id) DO UPDATE SET segment=1,files=1; END"),
+    ("audiolib_dir_folder_delete", "folders", "CREATE TRIGGER audiolib_dir_folder_delete AFTER DELETE ON folders BEGIN
+     INSERT INTO audiolib_dir_dirty VALUES(old.id,1,1) ON CONFLICT(dir_id) DO UPDATE SET segment=1,files=1; END"),
+    ("audiolib_dir_folder_update", "folders", "CREATE TRIGGER audiolib_dir_folder_update AFTER UPDATE OF id,folder_name,parent_id ON folders
+     WHEN old.id IS NOT new.id OR old.folder_name IS NOT new.folder_name OR old.parent_id IS NOT new.parent_id BEGIN
+     INSERT INTO audiolib_dir_dirty VALUES(old.id,1,CASE WHEN old.id IS NOT new.id THEN 1 ELSE 0 END)
+      ON CONFLICT(dir_id) DO UPDATE SET segment=1,files=max(files,excluded.files);
+     INSERT INTO audiolib_dir_dirty VALUES(new.id,1,CASE WHEN old.id IS NOT new.id THEN 1 ELSE 0 END)
+      ON CONFLICT(dir_id) DO UPDATE SET segment=1,files=max(files,excluded.files); END"),
+    ("audiolib_dir_folder_stats", "folders", "CREATE TRIGGER audiolib_dir_folder_stats AFTER UPDATE OF total_file_count ON folders
+     WHEN old.total_file_count IS NOT new.total_file_count BEGIN
+     UPDATE library_meta SET value=CAST(min(CAST(value AS INTEGER),9223372036854775806)+1 AS TEXT)
+      WHERE key='dir_index_gen'; END"),
+    ("audiolib_dir_audio_insert", "audio_files", "CREATE TRIGGER audiolib_dir_audio_insert AFTER INSERT ON audio_files BEGIN
+     INSERT INTO audiolib_dir_dirty SELECT dir_id,0,1 FROM audio_dir_runs WHERE new.id BETWEEN lo AND hi
+      ON CONFLICT(dir_id) DO UPDATE SET files=1;
+     INSERT INTO audiolib_dir_dirty SELECT new.folder_id,0,1 WHERE new.folder_id IS NOT NULL
+      ON CONFLICT(dir_id) DO UPDATE SET files=1; END"),
+    ("audiolib_dir_audio_delete", "audio_files", "CREATE TRIGGER audiolib_dir_audio_delete AFTER DELETE ON audio_files WHEN old.folder_id IS NOT NULL BEGIN
+     INSERT INTO audiolib_dir_dirty VALUES(old.folder_id,0,1) ON CONFLICT(dir_id) DO UPDATE SET files=1; END"),
+    ("audiolib_dir_audio_update", "audio_files", "CREATE TRIGGER audiolib_dir_audio_update AFTER UPDATE OF id,folder_id ON audio_files
+     WHEN old.id IS NOT new.id OR old.folder_id IS NOT new.folder_id BEGIN
+     INSERT INTO audiolib_dir_dirty SELECT dir_id,0,1 FROM audio_dir_runs WHERE new.id BETWEEN lo AND hi
+      ON CONFLICT(dir_id) DO UPDATE SET files=1;
+     INSERT INTO audiolib_dir_dirty SELECT old.folder_id,0,1 WHERE old.folder_id IS NOT NULL
+      ON CONFLICT(dir_id) DO UPDATE SET files=1;
+     INSERT INTO audiolib_dir_dirty SELECT new.folder_id,0,1 WHERE new.folder_id IS NOT NULL
+      ON CONFLICT(dir_id) DO UPDATE SET files=1; END"),
+];
+const DIRTY_OBJECTS: &str = "'audiolib_dir_dirty','audiolib_dir_folder_insert','audiolib_dir_folder_delete',
+ 'audiolib_dir_folder_update','audiolib_dir_folder_stats','audiolib_dir_audio_insert','audiolib_dir_audio_delete','audiolib_dir_audio_update'";
+
+fn tracking_present(conn: &Connection) -> Result<bool> {
+    let present: bool = conn
+        .query_row(
+            &format!(
+                "SELECT count(*)=8 AND sum(type='table')=1 AND sum(type='trigger')=7
+        FROM sqlite_schema WHERE name IN ({DIRTY_OBJECTS})"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if !present {
+        return Ok(false);
+    }
+    for (name, kind, table, sql) in std::iter::once((
+        "audiolib_dir_dirty",
+        "table",
+        "audiolib_dir_dirty",
+        DIRTY_TABLE,
+    ))
+    .chain(
+        DIRTY_TRIGGERS
+            .iter()
+            .map(|(name, table, sql)| (*name, "trigger", *table, *sql)),
+    ) {
+        if !crate::schema::definition::matches_sql(conn, name, kind, table, sql)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn install_tracking(conn: &Connection) -> Result<()> {
+    for (name, kind, table, sql) in std::iter::once((
+        "audiolib_dir_dirty",
+        "table",
+        "audiolib_dir_dirty",
+        DIRTY_TABLE,
+    ))
+    .chain(
+        DIRTY_TRIGGERS
+            .iter()
+            .map(|(name, table, sql)| (*name, "trigger", *table, *sql)),
+    ) {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !exists {
+            conn.execute_batch(sql).map_err(db_error)?;
+        } else if !crate::schema::definition::matches_sql(conn, name, kind, table, sql)? {
+            return Err(Error::Validation(format!(
+                "Directory change tracker differs from its supported definition: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Remove only the optional directory index's capture objects in the caller's transaction.
+pub(crate) fn drop_tracking(conn: &Connection) -> Result<()> {
+    // A reserved name alone does not prove ownership. Refuse collisions before
+    // dropping any object, including during a failed migration's cancellation.
+    for (name, kind, table, sql) in std::iter::once((
+        "audiolib_dir_dirty",
+        "table",
+        "audiolib_dir_dirty",
+        DIRTY_TABLE,
+    ))
+    .chain(
+        DIRTY_TRIGGERS
+            .iter()
+            .map(|(name, table, sql)| (*name, "trigger", *table, *sql)),
+    ) {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if exists && !crate::schema::definition::matches_sql(conn, name, kind, table, sql)? {
+            return Err(Error::Validation(format!(
+                "Directory change tracker ownership cannot be established: {name}"
+            )));
+        }
+    }
+    for (name, _, _) in DIRTY_TRIGGERS {
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name}"))
+            .map_err(db_error)?;
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS audiolib_dir_dirty")
+        .map_err(db_error)
+}
+
+/// Replay changes made during a full build before its runs are regenerated.
+/// The caller must publish the complete index and clear this queue in one transaction.
+pub(crate) fn finish_tracking(conn: &Connection) -> Result<()> {
+    install_tracking(conn)?;
+    let changed = conn
+        .prepare("SELECT dir_id FROM audiolib_dir_dirty WHERE segment=1 ORDER BY dir_id")
+        .map_err(db_error)?
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db_error)?;
+    for id in changed {
+        reindex_segment(conn, id)?;
+    }
+    conn.execute("DELETE FROM audiolib_dir_dirty", [])
+        .map_err(db_error)?;
+    Ok(())
+}
+
+fn index_published(conn: &Connection) -> Result<bool> {
     let tables: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='audio_dir_search')
@@ -114,6 +270,35 @@ pub(crate) fn ready(conn: &Connection) -> Result<bool> {
         return Ok(false);
     }
     Ok(meta_i64(conn, "search_path_rev")? == Some(SEARCH_PATH_REV))
+}
+
+pub(crate) fn ready(conn: &Connection) -> Result<bool> {
+    if !index_published(conn)? {
+        return Ok(false);
+    }
+    if tracking_present(conn)? {
+        return conn
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM audiolib_dir_dirty)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error);
+    }
+    // Historical schema-9 snapshots predate capture; old schema-8 binaries cannot
+    // write them. Keep those read-only inputs usable, but require preparation of
+    // untracked schema-8 indexes before claiming path-search readiness.
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    let any: bool = conn
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN ({DIRTY_OBJECTS}))"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    Ok(version == 9 && !any)
 }
 
 const CHECKPOINT_KEY: &str = "v9_dir_checkpoint";
@@ -187,6 +372,9 @@ pub(crate) fn upgrade_begin(conn: &Connection, backup: Option<&str>) -> Result<(
         .map_err(db_error)?;
         conn.execute_batch(CREATE_DIR_FTS).map_err(db_error)?;
         conn.execute_batch(CREATE_RUNS).map_err(db_error)?;
+        install_tracking(conn)?;
+        conn.execute("DELETE FROM audiolib_dir_dirty", [])
+            .map_err(db_error)?;
         conn.execute("DELETE FROM library_meta WHERE key='search_path_rev'", [])
             .map_err(db_error)?;
         write_meta(conn, CHECKPOINT_KEY, "0")?;
@@ -230,6 +418,7 @@ pub(crate) fn upgrade_batch(conn: &Connection, limit: i64) -> Result<bool> {
 /// Steps 3-4: runs, optimize, then publish `search_path_rev` (the switch).
 pub(crate) fn upgrade_finish(conn: &Connection) -> Result<()> {
     in_tx(conn, || {
+        finish_tracking(conn)?;
         conn.execute("DELETE FROM audio_dir_runs", [])
             .map_err(db_error)?;
         conn.execute_batch(INSERT_RUNS).map_err(db_error)?;
@@ -239,11 +428,7 @@ pub(crate) fn upgrade_finish(conn: &Connection) -> Result<()> {
         )
         .map_err(db_error)?;
         write_meta(conn, "search_path_rev", &SEARCH_PATH_REV.to_string())?;
-        write_meta(
-            conn,
-            "snapshot_format",
-            audiolib_core::compatibility::PLAN_B_V9_FORMAT,
-        )?;
+        write_snapshot_format(conn)?;
         let generation = meta_i64(conn, "dir_index_gen")?
             .unwrap_or(0)
             .saturating_add(1);
@@ -252,6 +437,24 @@ pub(crate) fn upgrade_finish(conn: &Connection) -> Result<()> {
             .map_err(db_error)?;
         Ok(())
     })
+}
+
+// Preparing a derived index does not upgrade the business schema. Only the
+// dedicated schema-9 migration may publish user_version=9 and its required features.
+fn write_snapshot_format(conn: &Connection) -> Result<()> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(db_error)?;
+    let format = match version {
+        8 => audiolib_core::compatibility::PLAN_B_FORMAT,
+        9 => audiolib_core::compatibility::PLAN_B_V9_FORMAT,
+        _ => {
+            return Err(Error::Validation(
+                "Directory index requires schema 8 or 9".into(),
+            ));
+        }
+    };
+    write_meta(conn, "snapshot_format", format)
 }
 
 /// Drop and rebuild both directory tables. Caller holds the library writer.
@@ -267,20 +470,18 @@ pub(crate) fn rebuild(conn: &Connection) -> Result<()> {
         .map_err(db_error)?;
         conn.execute_batch(CREATE_DIR_FTS).map_err(db_error)?;
         conn.execute_batch(CREATE_RUNS).map_err(db_error)?;
+        install_tracking(conn)?;
         conn.execute_batch(INSERT_SEGMENTS).map_err(db_error)?;
         conn.execute_batch(INSERT_RUNS).map_err(db_error)?;
+        conn.execute("DELETE FROM audiolib_dir_dirty", [])
+            .map_err(db_error)?;
         conn.execute(
             "INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize')",
             [],
         )
         .map_err(db_error)?;
         write_meta(conn, "search_path_rev", &SEARCH_PATH_REV.to_string())?;
-        // Directory-segment index id from the schema 8→9 design. `sd1`, not `sp1`.
-        write_meta(
-            conn,
-            "snapshot_format",
-            audiolib_core::compatibility::PLAN_B_V9_FORMAT,
-        )?;
+        write_snapshot_format(conn)?;
         let generation = meta_i64(conn, "dir_index_gen")?
             .unwrap_or(0)
             .saturating_add(1);
@@ -306,31 +507,60 @@ pub(crate) fn maintain(
     dirs_changed: &[i64],
     dirs_files_changed: &[i64],
 ) -> Result<()> {
-    if dirs_changed.is_empty() && dirs_files_changed.is_empty() {
-        return Ok(());
-    }
-    if !ready(conn)? {
-        // Mid-upgrade: keep already indexed segments current; runs are rebuilt at the end.
-        if let Some(last) = meta_i64(conn, CHECKPOINT_KEY)? {
-            for id in dirs_changed.iter().filter(|id| **id <= last) {
-                reindex_segment(conn, *id)?;
+    in_tx(conn, || {
+        if !index_published(conn)? {
+            // Mid-upgrade: keep already indexed segments current; runs are rebuilt at the end.
+            if let Some(last) = meta_i64(conn, CHECKPOINT_KEY)? {
+                for id in dirs_changed.iter().filter(|id| **id <= last) {
+                    reindex_segment(conn, *id)?;
+                }
+            }
+            return Ok(());
+        }
+        if !tracking_present(conn)? {
+            // An index predating capture cannot prove that older writers kept it
+            // current. Rebuild once while installing capture, never on every write.
+            return rebuild(conn);
+        }
+        let mut segments = dirs_changed.iter().copied().collect::<HashSet<_>>();
+        let mut files = dirs_files_changed.iter().copied().collect::<HashSet<_>>();
+        let pending = conn
+            .prepare("SELECT dir_id,segment,files FROM audiolib_dir_dirty")
+            .map_err(db_error)?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?;
+        for (id, segment, file) in pending {
+            if segment {
+                segments.insert(id);
+            }
+            if file {
+                files.insert(id);
             }
         }
-        return Ok(());
-    }
-    for id in dirs_changed {
-        reindex_segment(conn, *id)?;
-    }
-    conn.execute(
-        "DELETE FROM audio_dir_runs WHERE dir_id NOT IN (SELECT id FROM folders)",
-        [],
-    )
-    .map_err(db_error)?;
-    for id in dirs_files_changed {
-        conn.execute("DELETE FROM audio_dir_runs WHERE dir_id=?1", [id])
-            .map_err(db_error)?;
+        if segments.is_empty() && files.is_empty() {
+            return Ok(());
+        }
+        for id in segments {
+            reindex_segment(conn, id)?;
+        }
         conn.execute(
-            "INSERT INTO audio_dir_runs
+            "DELETE FROM audio_dir_runs WHERE dir_id NOT IN (SELECT id FROM folders)",
+            [],
+        )
+        .map_err(db_error)?;
+        for id in files {
+            conn.execute("DELETE FROM audio_dir_runs WHERE dir_id=?1", [id])
+                .map_err(db_error)?;
+            conn.execute(
+                "INSERT INTO audio_dir_runs
              SELECT folder_id, min(id), max(id), count(*)
              FROM (
               SELECT id, folder_id, sum(chg) OVER (ORDER BY id) AS g
@@ -345,17 +575,23 @@ pub(crate) fn maintain(
              )
              WHERE folder_id=?1
              GROUP BY g",
-            [id],
-        )
-        .map_err(db_error)?;
-    }
-    let generation = meta_i64(conn, "dir_index_gen")?
-        .unwrap_or(0)
-        .saturating_add(1);
-    write_meta(conn, "dir_index_gen", &generation.to_string())
+                [id],
+            )
+            .map_err(db_error)?;
+        }
+        let generation = meta_i64(conn, "dir_index_gen")?
+            .unwrap_or(0)
+            .saturating_add(1);
+        conn.execute("DELETE FROM audiolib_dir_dirty", [])
+            .map_err(db_error)?;
+        write_meta(conn, "dir_index_gen", &generation.to_string())
+    })
 }
 
 pub(crate) fn bump_generation(conn: &Connection) -> Result<()> {
+    // Reparenting can enqueue a segment before this existing cache-invalidation
+    // hook is called. Consume it incrementally rather than leaving a new scan dirty.
+    maintain(conn, &[], &[])?;
     if !ready(conn)? {
         return Ok(());
     }
@@ -1028,6 +1264,11 @@ fn matches_row(conn: &Connection, match_expr: &str, id: i64) -> Result<bool> {
 }
 
 fn load_index(conn: &Connection, cache: &DirIndexCache) -> Result<Arc<RunIdx>> {
+    if !ready(conn)? {
+        return Err(Error::Busy(
+            "Directory path index needs preparation before search".into(),
+        ));
+    }
     let generation = meta_i64(conn, "dir_index_gen")?.unwrap_or(0);
     let mut guard = cache
         .inner
@@ -1270,9 +1511,62 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(format, audiolib_core::compatibility::PLAN_B_V9_FORMAT);
-        assert!(format.ends_with("-sd1"));
+        assert_eq!(format, audiolib_core::compatibility::PLAN_B_FORMAT);
         (dir, provider)
+    }
+
+    #[test]
+    fn publishing_a_directory_index_preserves_the_actual_library_format() {
+        let (_dir, provider) = library();
+        let path = provider.database_path().to_path_buf();
+        let finish = |provider: &SqliteProvider| {
+            let conn = provider.writer().unwrap();
+            upgrade_begin(&conn, None).unwrap();
+            while upgrade_batch(&conn, 2).unwrap() {}
+            upgrade_finish(&conn).unwrap();
+        };
+        let check = |provider: &SqliteProvider, schema: i64, expected: &str| {
+            let conn = provider.reader().unwrap();
+            assert_eq!(
+                conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                schema
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT value FROM library_meta WHERE key='snapshot_format'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                expected
+            );
+        };
+        finish(&provider);
+        check(&provider, 8, audiolib_core::compatibility::PLAN_B_FORMAT);
+        drop(provider);
+        let local = SqliteProvider::open_existing(&path).unwrap();
+        check(&local, 8, audiolib_core::compatibility::PLAN_B_FORMAT);
+        assert_eq!(ids(&local, "Kit", SearchScope::Path), vec![10, 11]);
+        drop(local);
+        let report = crate::migration9::execute(
+            &path,
+            crate::migration9::Action::Start,
+            &crate::migration9::Options::default(),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert_eq!(report.state, crate::migration9::State::Done, "{report:?}");
+        let server = SqliteProvider::open_server_existing(
+            &path,
+            &std::sync::atomic::AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        server.rebuild_directory_search().unwrap();
+        check(&server, 9, audiolib_core::compatibility::PLAN_B_V9_FORMAT);
+        finish(&server);
+        check(&server, 9, audiolib_core::compatibility::PLAN_B_V9_FORMAT);
+        assert_eq!(ids(&server, "Kit", SearchScope::Path), vec![10, 11]);
     }
 
     fn ids(provider: &SqliteProvider, query: &str, scope: SearchScope) -> Vec<i64> {
@@ -1428,6 +1722,152 @@ mod tests {
         assert_eq!(&all[..main.len()], main.as_slice());
         assert!(all.contains(&11));
         assert!(!main.contains(&11));
+    }
+
+    fn legacy_connection(path: &std::path::Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        crate::register_library_functions(&conn).unwrap();
+        // Schema-8 main indexing knows these existing functions, but not t3_norm.
+        conn.remove_function("t3_norm", 1).unwrap();
+        conn
+    }
+
+    #[test]
+    fn older_scans_invalidate_readiness_and_pending_members_are_consumed_incrementally() {
+        let (_dir, provider) = library();
+        let path = provider.database_path().to_path_buf();
+        assert_eq!(ids(&provider, "Doors", SearchScope::Path), vec![30]);
+        drop(provider);
+        let legacy = legacy_connection(&path);
+        legacy.execute_batch("BEGIN;
+            INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES(6,'/lib/LegacyWind','LegacyWind',1);
+            INSERT INTO folder_closure VALUES(6,6,0),(1,6,1);
+            INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(31,'/lib/LegacyWind/quiet.wav','quiet.wav',6,0);
+            COMMIT;").unwrap();
+        let provider = SqliteProvider::open_existing(&path).unwrap();
+        assert!(!provider.path_search_ready().unwrap());
+        assert!(provider.local_upgrade_plan_impl().unwrap().is_some());
+        provider
+            .run_local_upgrade_impl(&std::sync::atomic::AtomicBool::new(false), &mut |_| {})
+            .unwrap();
+        assert!(provider.path_search_ready().unwrap());
+        assert_eq!(ids(&provider, "LegacyWind", SearchScope::Path), vec![31]);
+        provider
+            .update_metadata(
+                9,
+                &audiolib_core::MetadataPatch {
+                    notes: Some("annotation only".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            provider.path_search_ready().unwrap(),
+            "annotations must not dirty directory membership"
+        );
+        legacy
+            .execute_batch(
+                "BEGIN;
+            UPDATE audio_files SET folder_id=4 WHERE id=31;
+            DELETE FROM audio_files WHERE id=10;
+            UPDATE folders SET folder_name='GentleWind',parent_id=4 WHERE id=6;
+            COMMIT;",
+            )
+            .unwrap();
+        assert!(!provider.path_search_ready().unwrap());
+        assert!(
+            load_index(&provider.reader().unwrap(), &provider.dir_index).is_err(),
+            "a warm cache must not bypass pending changes"
+        );
+        {
+            let conn = provider.writer().unwrap();
+            conn.execute_batch("CREATE TRIGGER preserve_unaffected_runs BEFORE DELETE ON audio_dir_runs WHEN old.dir_id=1 BEGIN SELECT RAISE(ABORT,'unaffected directory'); END;
+                INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(32,'/lib/Doors/latch.wav','latch.wav',5,0);").unwrap();
+            maintain(&conn, &[], &[5]).unwrap();
+            assert!(ready(&conn).unwrap());
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM audiolib_dir_dirty", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert!(
+                conn.execute("DELETE FROM audio_dir_runs WHERE dir_id=1", [])
+                    .is_err(),
+                "incremental upkeep must preserve unrelated index extensions"
+            );
+        }
+        assert_eq!(ids(&provider, "Other", SearchScope::Path), vec![12, 31]);
+        assert_eq!(ids(&provider, "Kit", SearchScope::Path), vec![11]);
+        assert!(ids(&provider, "GentleWind", SearchScope::Path).is_empty());
+        legacy
+            .execute("DELETE FROM folders WHERE id=6", [])
+            .unwrap();
+        {
+            let conn = provider.writer().unwrap();
+            maintain(&conn, &[], &[]).unwrap();
+            assert!(ready(&conn).unwrap());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM audio_dir_search_docsize WHERE id=6",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn null_members_split_sparse_runs_and_legacy_statistics_invalidate_the_cache() {
+        let (_dir, provider) = library();
+        let legacy = legacy_connection(provider.database_path());
+        legacy.execute("INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(40,'/lib/Doors/latch.wav','latch.wav',5,0)", []).unwrap();
+        maintain(&provider.writer().unwrap(), &[], &[]).unwrap();
+        assert_eq!(ids(&provider, "Doors", SearchScope::Path), vec![30, 40]);
+        legacy.execute("INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(35,'/unassigned.wav','unassigned.wav',NULL,0)", []).unwrap();
+        assert!(!provider.path_search_ready().unwrap());
+        maintain(&provider.writer().unwrap(), &[], &[]).unwrap();
+        assert_eq!(ids(&provider, "Doors", SearchScope::Path), vec![30, 40]);
+        provider.rebuild_directory_search().unwrap();
+        assert_eq!(ids(&provider, "Doors", SearchScope::Path), vec![30, 40]);
+        legacy
+            .execute("UPDATE folders SET total_file_count=6 WHERE id=5", [])
+            .unwrap();
+        assert!(
+            ids(&provider, "Doors", SearchScope::Path).is_empty(),
+            "the existing wide-set policy still applies"
+        );
+        legacy.execute_batch("BEGIN; UPDATE audio_files SET missing=1 WHERE id=40; UPDATE folders SET total_file_count=1 WHERE id=5; COMMIT;").unwrap();
+        assert!(
+            provider.path_search_ready().unwrap(),
+            "statistics need cache refresh, not an index rebuild"
+        );
+        assert_eq!(ids(&provider, "Doors", SearchScope::Path), vec![30]);
+    }
+
+    #[test]
+    fn untracked_local_indexes_and_forged_capture_objects_are_not_ready() {
+        let (_dir, provider) = library();
+        {
+            let conn = provider.writer().unwrap();
+            drop_tracking(&conn).unwrap();
+            assert!(
+                !ready(&conn).unwrap(),
+                "an untracked schema-8 index may be stale"
+            );
+        }
+        provider.rebuild_directory_search().unwrap();
+        let conn = provider.writer().unwrap();
+        conn.execute_batch("DROP TRIGGER audiolib_dir_audio_insert;
+            CREATE TRIGGER audiolib_dir_audio_insert AFTER INSERT ON audio_files BEGIN SELECT 1; END;").unwrap();
+        assert!(!ready(&conn).unwrap());
+        assert!(
+            drop_tracking(&conn).is_err(),
+            "a name collision is not ownership"
+        );
+        assert!(install_tracking(&conn).is_err());
     }
 
     #[test]

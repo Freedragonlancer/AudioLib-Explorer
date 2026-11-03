@@ -760,7 +760,7 @@ fn validate_snapshot_with_progress_cancellable(
     check_cancelled(cancel)?;
     progress(CachePreparation::Validating);
     check_cancelled(cancel)?;
-    {
+    let version = {
         let conn = rusqlite::Connection::open(path)
             .map_err(|error| RemoteError::Snapshot(error.to_string()))?;
         conn.query_row("PRAGMA journal_mode=DELETE", [], |row| {
@@ -775,7 +775,8 @@ fn validate_snapshot_with_progress_cancellable(
                 "schema {version} is not supported by this client (expected {MIN_SNAPSHOT_SCHEMA}..={MAX_SNAPSHOT_SCHEMA})"
             )));
         }
-    }
+        version
+    };
     // The staging file belongs to this sync alone: check it in place (one quick_check, no
     // temporary copy of a possibly several-hundred-MB library).
     let report = SqliteProvider::check_owned_file_cancellable(path, cancel)?;
@@ -784,6 +785,13 @@ fn validate_snapshot_with_progress_cancellable(
             "integrity check failed: {}",
             serde_json::to_string(&report).unwrap_or_default()
         )));
+    }
+    if version == 9 {
+        // This is owned download staging. A completed schema-9 snapshot must
+        // satisfy its own directory contract and never enter the schema-8
+        // derived-state repair recipe, even when its markers are inconsistent.
+        SqliteProvider::validate_owned_snapshot_format_cancellable(path, cancel)?;
+        return SqliteProvider::owned_snapshot_info_cancellable(path, cancel).map_err(Into::into);
     }
     // Compatible legacy snapshots remain byte-format compatible. A new client
     // version alone is not a reason to convert a complete read-only cache to v6.
