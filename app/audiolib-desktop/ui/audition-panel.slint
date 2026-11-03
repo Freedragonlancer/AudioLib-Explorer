@@ -572,8 +572,11 @@ component ClassicTool inherits Rectangle {
     in property <string> symbol;
     in property <image> icon;
     in property <string> label;
+    in property <string> hint;
+    in property <int> tip-align: 0;
     in property <bool> enabled: true;
     in property <bool> active: false;
+    in property <bool> checkable: false;
     in property <bool> primary: false;
     /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
     /// for the result list) keep working right after a click. Tabbed focus still
@@ -581,28 +584,144 @@ component ClassicTool inherits Rectangle {
     in property <bool> keyboard-active: true;
     out property <bool> has-focus: focus.has-focus;
     callback clicked();
-    width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale; border-radius: 4px * Theme.ui-scale;
-    background: root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent) : (root.active ? Theme.selected : (hit.has-hover ? Theme.hover : Theme.raised));
-    border-width: 1px; border-color: focus.has-focus || root.active ? Theme.accent : Theme.border;
-    opacity: root.enabled ? 1 : 0.4;
-    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
-    accessible-action-default => { if root.enabled { root.clicked(); } }
+    width: 32px * Theme.ui-scale; height: 30px * Theme.ui-scale;
+    property <bool> hovered: hit.has-hover && root.enabled;
+    property <string> held-key;
+    property <bool> keyboard-held: root.held-key != "";
+    property <bool> pointer-armed: false;
+    property <bool> pressed: root.enabled && ((hit.pressed && root.pointer-armed) || root.keyboard-held);
+    property <bool> tip-ready: false;
+    // Only a short, local confirmation runs after activation. No idle clock or
+    // animation is tied to the transport position or to a whole player surface.
+    property <bool> flashing: false;
+    property <duration> flash-start: 0ms;
+    property <duration> flash-length: 180ms * Theme.motion;
+    property <float> flash: root.flashing && Theme.motion > 0
+        ? clamp((animation-tick() - root.flash-start) / root.flash-length, 0, 1) : 1;
+    Timer { interval: root.flash-length; running: root.flashing; triggered => { root.flashing = false; } }
+    function activate() {
+        if !root.enabled { return; }
+        if Theme.motion > 0 { root.flash-start = animation-tick(); root.flashing = true; }
+        root.clicked();
+    }
+    changed enabled => { if !root.enabled { root.held-key = ""; root.pointer-armed = false; } }
+    changed keyboard-active => { if !root.keyboard-active { root.held-key = ""; } }
+    accessible-role: button; accessible-label: root.label; accessible-description: root.hint;
+    accessible-enabled: root.enabled; accessible-checkable: root.checkable; accessible-checked: root.active;
+    accessible-action-default => { root.activate(); }
     forward-focus: focus;
-    if root.icon.width > 0: Image { source: root.icon; colorize: root.primary ? Theme.on-accent : Theme.ink; width: 20px * Theme.ui-scale; height: 20px * Theme.ui-scale; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-    if root.icon.width == 0: Text { text: root.symbol; color: root.primary ? Theme.on-accent : Theme.ink; font-size: Theme.font(16); horizontal-alignment: center; vertical-alignment: center; }
-    focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if root.keyboard-active && (event.text == " " || event.text == Key.Return) { root.clicked(); return accept; } reject } }
-    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
-    if hit.has-hover: Rectangle { z: 10; y: -28px * Theme.ui-scale; height: 24px * Theme.ui-scale; width: max(86px * Theme.ui-scale, tip.preferred-width + 16px * Theme.ui-scale); background: Theme.tooltip; border-width: 1px; border-color: Theme.strong-border; border-radius: 3px * Theme.ui-scale;
-        tip := Text { text: root.label; color: Theme.ink; font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
+    Rectangle {
+        x: -2px; y: -2px; width: parent.width + 4px; height: parent.height + 4px;
+        border-radius: 7px * Theme.ui-scale; border-width: 1px;
+        border-color: focus.has-focus ? Theme.accent : transparent;
+        animate border-color { duration: Theme.motion-fast; }
+    }
+    face := Rectangle {
+        // Keep the explanatory tooltip fully legible when the face is disabled.
+        opacity: root.enabled ? 1 : (root.active ? 0.85 : 0.38);
+        animate opacity { duration: Theme.motion-base; easing: ease-out; }
+        y: root.pressed ? 1px * Theme.ui-scale : 0px;
+        width: root.width; height: root.height;
+        border-radius: 5px * Theme.ui-scale;
+        background: root.primary
+            ? (root.pressed ? Theme.accent.darker(0.18) : (root.hovered ? Theme.accent-hover : Theme.accent))
+            : root.active
+                ? (root.pressed ? Theme.selected : Theme.checked)
+                : (root.pressed ? Theme.trough : (root.hovered ? Theme.hover : Theme.raised.mix(Theme.player, 0.3)));
+        border-width: 1px;
+        border-color: root.primary || root.active ? Theme.accent : (root.hovered ? Theme.strong-border : Theme.player-border);
+        animate background, border-color, y { duration: Theme.motion-fast; easing: ease-out; }
+        property <color> ink: root.primary ? Theme.on-accent : (root.active ? Theme.accent-hover : Theme.ink);
+        property <length> glyph: min(19px * Theme.ui-scale, max(10px * Theme.ui-scale, root.height - 6px * Theme.ui-scale)) - (root.pressed ? 2px * Theme.ui-scale : 0px);
+        if root.icon.width > 0: Image {
+            source: root.icon; colorize: face.ink; width: face.glyph; height: self.width;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            animate width, height, colorize { duration: Theme.motion-fast; easing: ease-out; }
+        }
+        if root.icon.width == 0: Text {
+            text: root.symbol; color: face.ink; font-size: Theme.font(14);
+            horizontal-alignment: center; vertical-alignment: center;
+            animate color { duration: Theme.motion-fast; }
+        }
+        if root.checkable && root.active: Rectangle {
+            width: 12px * Theme.ui-scale; height: 2px * Theme.ui-scale;
+            x: (parent.width - self.width) / 2; y: parent.height - self.height - 2px * Theme.ui-scale;
+            border-radius: 1px; background: root.primary ? Theme.on-accent : Theme.accent;
+        }
+        if root.flashing: Rectangle {
+            width: parent.width; height: parent.height; border-radius: 5px * Theme.ui-scale;
+            background: Theme.ink.with-alpha(0.18 * (1 - root.flash));
+        }
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        changed has-focus => { if !self.has-focus { root.held-key = ""; } }
+        key-pressed(event) => {
+            if event.text == Key.Escape && root.keyboard-held {
+                root.held-key = "";
+                return accept;
+            }
+            if root.keyboard-active && (event.text == " " || event.text == Key.Return) {
+                if !root.keyboard-held { root.held-key = event.text; }
+                return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if root.keyboard-active && (event.text == " " || event.text == Key.Return) {
+                if root.held-key == event.text {
+                    root.held-key = "";
+                    root.activate();
+                }
+                return accept;
+            }
+            reject
+        }
+    }
+    // Disabled controls still explain their state on hover; no disabled path can
+    // invoke a command. Mouse clicks deliberately leave result-list focus alone.
+    hit := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        // TouchArea emits clicked before the matching Up event. A disabled
+        // press must not become actionable if loading/EOF enables us before Up.
+        clicked => {
+            let activate = root.pointer-armed && root.enabled;
+            root.pointer-armed = false;
+            if activate { root.activate(); }
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.cancel {
+                root.pointer-armed = false;
+                return;
+            }
+            if event.button != PointerEventButton.left { return; }
+            if event.kind == PointerEventKind.down {
+                root.pointer-armed = root.enabled;
+            } else if event.kind == PointerEventKind.up {
+                root.pointer-armed = false;
+            }
+        }
+        changed has-hover => { if !self.has-hover { root.tip-ready = false; } }
+    }
+    Timer { interval: Theme.tooltip-delay; running: hit.has-hover && !root.tip-ready; triggered => { root.tip-ready = true; } }
+    Tip {
+        z: 10; anchor-width: root.width; anchor-height: root.height; align: root.tip-align;
+        text: root.label + (root.hint != "" ? "  ·  " + root.hint : "");
+        show: root.tip-ready && !hit.pressed && !root.keyboard-held;
     }
 }
-// Original beta presentation, retained from e619794.
+// Default v1/v2 retain the original Waveform layout and independent transport
+// actions, with shared state-aware controls and bounded interaction feedback.
 component ClassicAuditionPanel inherits Rectangle {
     in property <bool> compact: false;
     in property <bool> spectral: true;
     in property <bool> chinese;
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
+    in property <int> state: 0;
+    in property <bool> missing: false;
+    in property <bool> busy: false;
+    in property <bool> buffering: false;
     in property <bool> playing;
     in property <bool> smooth-progress: false;
     in property <string> progress-clock;
@@ -635,6 +754,21 @@ component ClassicAuditionPanel inherits Rectangle {
     callback transform(string,string,bool,bool); callback volume(float);
     callback resize(int,int); callback zoom-change(float); callback zoom-at(float,float); callback pan(float);
     callback peaks(); callback output-settings();
+    property <bool> transport-ready: root.ready && !root.missing && !root.busy && root.state != 1 && root.state != 7;
+    property <string> unavailable: root.busy ? (root.chinese ? "素材库操作中，请稍候" : "Library operation in progress")
+        : root.missing ? (root.chinese ? "源文件不可用，请重新链接" : "Source file unavailable; relink it first")
+        : root.state == 1 ? (root.chinese ? "正在加载声音，请稍候" : "Sound is loading")
+        : root.state == 7 ? (root.chinese ? "播放不可用，请重新选择声音或检查音频输出" : "Playback unavailable; reselect the sound or check audio output")
+        : (root.chinese ? "请先选择并加载声音" : "Select and load a sound first");
+    property <string> state-label: root.busy ? (root.chinese ? "处理中" : "Busy")
+        : root.missing ? (root.chinese ? "文件缺失" : "Missing")
+        : root.state == 1 ? (root.chinese ? "加载中" : "Loading")
+        : root.state == 3 ? (root.buffering ? (root.chinese ? "缓冲中" : "Buffering") : (root.chinese ? "播放中" : "Playing"))
+        : root.state == 4 ? (root.chinese ? "已暂停" : "Paused")
+        : root.state == 5 ? (root.chinese ? "已停止" : "Stopped")
+        : root.state == 6 ? (root.chinese ? "播放完毕" : "Ended")
+        : root.state == 7 ? (root.chinese ? "出错" : "Error")
+        : (root.chinese ? "就绪" : "Ready");
     // Share the current requested range while the renderer finishes its image.
     // Labels, seeks and the transformed old image must describe the same timeline.
     property <bool> has-target: root.target-end > root.target-start;
@@ -662,9 +796,15 @@ component ClassicAuditionPanel inherits Rectangle {
     property <float> anchor-position: 0;
     property <duration> anchor-tick: 0ms;
     property <float> correction: 0;
+    // Do not bind button opacity/animation directly to the ticking position.
+    // Slint propagates a dirty dependency even while position > 0 stays true;
+    // together with the clock this can repaint a whole strip of the player.
+    property <bool> at-start: true;
     property <duration> progress-elapsed: root.ready && root.playing && root.smooth-progress ? clamp(animation-tick() - root.anchor-tick, 0ms, 100ms) : 0ms;
     property <float> visual-position: clamp(root.anchor-position + root.progress-elapsed / 1s * root.playback-rate + root.correction * (1 - root.progress-elapsed / 100ms), 0, root.duration);
     function sync-progress(allow-correction: bool) {
+        let at-start = root.position <= 0;
+        if root.at-start != at-start { root.at-start = at-start; }
         let previous = root.visual-position;
         let continuous = allow-correction && root.ready && root.playing && root.smooth-progress && abs(previous - root.position) < 0.1 * root.playback-rate;
         root.anchor-position = root.position;
@@ -689,11 +829,59 @@ component ClassicAuditionPanel inherits Rectangle {
     height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
     VerticalLayout { padding: 9px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
         HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
-            ClassicTool { icon: @image-url("icons/start.svg"); label: root.chinese ? "回到开头" : "Go to start"; enabled: root.ready; clicked => { root.seek(0); } }
-            ClassicTool { icon: @image-url("icons/play.svg"); label: root.chinese ? "播放" : "Play"; primary: true; active: root.playing; enabled: root.ready; clicked => { root.play(); } }
-            ClassicTool { icon: @image-url("icons/pause.svg"); label: root.chinese ? "暂停" : "Pause"; active: root.ready && !root.playing && root.position > 0; enabled: root.ready; clicked => { root.pause(); } }
-            ClassicTool { icon: @image-url("icons/stop.svg"); label: root.chinese ? "停止" : "Stop"; enabled: root.ready; clicked => { root.stop(); } }
-            ClassicTool { icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound"; active: root.repeat; clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            Rectangle {
+                width: 141px * Theme.ui-scale; height: 32px * Theme.ui-scale;
+                background: Theme.trough; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
+                HorizontalLayout { padding: 2px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
+                    ClassicTool {
+                        height: 28px * Theme.ui-scale; icon: @image-url("icons/start.svg");
+                        label: root.chinese ? "回到开头" : "Go to start"; tip-align: -1;
+                        enabled: root.transport-ready && !root.at-start;
+                        hint: !root.transport-ready ? root.unavailable : (root.at-start ? (root.chinese ? "已在开头" : "Already at the beginning") : (root.chinese ? "回到声音开头" : "Return to the beginning"));
+                        clicked => { root.seek(0); }
+                    }
+                    ClassicTool {
+                        height: 28px * Theme.ui-scale; icon: @image-url("icons/play.svg");
+                        label: root.chinese ? "播放" : "Play"; tip-align: -1; primary: true; checkable: true;
+                        active: root.transport-ready && root.state == 3;
+                        enabled: root.transport-ready && root.state != 3;
+                        hint: !root.transport-ready ? root.unavailable
+                            : root.state == 6 ? (root.chinese ? "从头重播" : "Replay from beginning")
+                            : root.state == 4 ? (root.chinese ? "继续播放" : "Resume playback")
+                            : root.state == 3 ? (root.chinese ? "正在播放" : "Already playing")
+                            : (root.chinese ? "开始播放" : "Start playback");
+                        clicked => { root.play(); }
+                    }
+                    ClassicTool {
+                        height: 28px * Theme.ui-scale; icon: @image-url("icons/pause.svg");
+                        label: root.chinese ? "暂停" : "Pause"; tip-align: -1; checkable: true;
+                        active: root.transport-ready && root.state == 4;
+                        enabled: root.transport-ready && root.state == 3;
+                        hint: !root.transport-ready ? root.unavailable
+                            : root.state == 4 ? (root.chinese ? "已暂停，点击播放继续" : "Paused; press Play to resume")
+                            : root.state == 6 ? (root.chinese ? "播放完毕，点击播放重播" : "Playback ended; press Play to replay")
+                            : root.state == 3 ? (root.chinese ? "在当前位置暂停" : "Pause at the current position")
+                            : (root.chinese ? "当前未播放" : "Not playing");
+                        clicked => { root.pause(); }
+                    }
+                    ClassicTool {
+                        height: 28px * Theme.ui-scale; icon: @image-url("icons/stop.svg");
+                        label: root.chinese ? "停止" : "Stop"; tip-align: -1; checkable: true;
+                        active: root.transport-ready && root.state == 5;
+                        enabled: root.transport-ready && (root.state == 3 || root.state == 4 || !root.at-start);
+                        hint: !root.transport-ready ? root.unavailable
+                            : root.state == 5 && root.at-start ? (root.chinese ? "已停止并回到开头" : "Stopped at the beginning")
+                            : (root.chinese ? "停止并回到开头" : "Stop and return to the beginning");
+                        clicked => { root.stop(); }
+                    }
+                }
+            }
+            ClassicTool {
+                icon: @image-url("icons/repeat.svg"); label: root.chinese ? "循环整个声音" : "Repeat sound";
+                active: root.repeat; checkable: true;
+                hint: root.repeat ? (root.chinese ? "循环已开启，点击关闭" : "Repeat is on; click to turn off") : (root.chinese ? "循环已关闭，点击开启" : "Repeat is off; click to turn on");
+                clicked => { root.repeat = !root.repeat; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); }
+            }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音高" : "Pitch"; }
             LineEdit { width: 62px * Theme.ui-scale; text <=> root.pitch-text; enabled: root.ready; input-label: root.chinese ? "变调半音，回车或离开时应用" : "Pitch semitones, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(self.text, root.rate-text, root.mono, root.repeat); } } accepted => { root.transform(self.text, root.rate-text, root.mono, root.repeat); } }
@@ -701,15 +889,15 @@ component ClassicAuditionPanel inherits Rectangle {
             Caption { text: root.chinese ? "速度" : "Rate"; }
             LineEdit { width: 57px * Theme.ui-scale; text <=> root.rate-text; enabled: root.ready; input-label: root.chinese ? "保持音高的播放速度，回车或离开时应用" : "Pitch-preserving speed, applied on Enter or focus loss"; changed has-focus => { if !self.has-focus && root.ready { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } } accepted => { root.transform(root.pitch-text, self.text, root.mono, root.repeat); } }
             Caption { text: "×"; }
-            ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            ClassicTool { icon: @image-url("icons/reset.svg"); label: root.chinese ? "重置变调与速度" : "Reset Pitch / Rate"; hint: root.chinese ? "恢复 0 半音与 1× 速度" : "Restore 0 semitones and 1× speed"; clicked => { root.pitch-text = "0.00"; root.rate-text = "1.00"; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Rectangle { width: 1px; background: Theme.player-border; }
             Caption { text: root.chinese ? "音量" : "Volume"; }
             volume-control := Slider { input-label: root.chinese ? "音量" : "Volume"; min-width: 76px * Theme.ui-scale; max-width: 160px * Theme.ui-scale; horizontal-stretch: 1; minimum: -60; maximum: 0; step: 0.1; value <=> root.volume-db; changed => { root.volume(self.value); } }
             Caption { width: 66px * Theme.ui-scale; text: root.volume-label; horizontal-alignment: right; }
-            ClassicTool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
+            ClassicTool { width: 54px * Theme.ui-scale; symbol: root.chinese ? "单声道" : "Mono"; label: root.chinese ? "单声道监听" : "Mono monitoring"; active: root.mono; checkable: true; hint: root.mono ? (root.chinese ? "单声道监听已开启，点击关闭" : "Mono monitoring is on; click to turn off") : (root.chinese ? "单声道监听已关闭，点击开启" : "Mono monitoring is off; click to turn on"); clicked => { root.mono = !root.mono; root.transform(root.pitch-text, root.rate-text, root.mono, root.repeat); } }
             Caption { horizontal-stretch: 1; min-width: 0px; text: root.output; overflow: elide; horizontal-alignment: right; font-size: Theme.font(9); }
-            ClassicTool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; clicked => { root.peaks(); } }
-            ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; clicked => { root.output-settings(); } }
+            ClassicTool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
+            ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; tip-align: 1; clicked => { root.output-settings(); } }
         }
         wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: root.compact ? 45px * Theme.ui-scale : 70px * Theme.ui-scale; background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
             accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
@@ -721,7 +909,7 @@ component ClassicAuditionPanel inherits Rectangle {
                 x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
                 width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
             }
-            if !root.waveform-ready: Text { text: root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
+            if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
             // These overlays are paint-only, leaving click/scroll ownership to scrub.
             if root.ready && root.duration > 0: PlayedRegion {
                 x: 0px; y: 0px; width: parent.width; height: parent.height;
@@ -775,6 +963,12 @@ component ClassicAuditionPanel inherits Rectangle {
         HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
             Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center; }
             Rectangle { width: 1px; background: Theme.player-border; }
+            if root.state != 0 || root.missing || root.busy: Rectangle {
+                width: phase.preferred-width + 14px * Theme.ui-scale; height: 20px * Theme.ui-scale;
+                background: Theme.raised; border-radius: 4px * Theme.ui-scale;
+                accessible-role: text; accessible-label: root.chinese ? "播放状态" : "Playback status"; accessible-description: root.state-label;
+                phase := Text { text: root.state-label; color: root.state == 7 || root.missing ? Theme.danger : (root.state == 3 ? Theme.accent-hover : Theme.dim); font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
+            }
             Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; }
             Caption { text: root.info; font-size: Theme.font(10); }
         }
@@ -1373,18 +1567,20 @@ export component AuditionPanel inherits Rectangle {
     // Keep view-only modern state when switching presentations during playback.
     in-out property <float> premute-db: -12;
     in-out property <bool> show-remaining: false;
-    property <bool> modern-style: Theme.modern-style;
-    changed modern-style => { root.presenter-volume-adjusting = false; }
+    property <bool> modern-player: Theme.modern-player;
+    changed modern-player => { root.presenter-volume-adjusting = false; }
     changed active => { if !root.active { root.presenter-volume-adjusting = false; } }
-    height: Theme.modern-style ? (root.expanded ? 260px : 88px) * Theme.ui-scale
+    height: Theme.modern-player ? (root.expanded ? 260px : 88px) * Theme.ui-scale
         : (root.compact ? 190px : 222px) * Theme.ui-scale;
-    if root.active && !Theme.modern-style: ClassicAuditionPanel {
+    if root.active && !Theme.modern-player: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
         compact: root.compact;
         spectral: root.spectral;
         chinese: root.chinese;
         play-on-single-click: root.play-on-single-click;
         ready: root.ready;
+        state: root.state; missing: root.missing; busy: root.busy;
+        buffering: root.buffering;
         playing: root.playing;
         smooth-progress: root.smooth-progress;
         progress-clock: root.progress-clock;
@@ -1424,7 +1620,7 @@ export component AuditionPanel inherits Rectangle {
         peaks => { root.peaks(); }
         output-settings => { root.output-settings(); }
     }
-    if root.active && Theme.modern-style: WorkbenchAuditionPanel {
+    if root.active && Theme.modern-player: WorkbenchAuditionPanel {
         width: parent.width; height: parent.height;
         narrow: root.narrow; waveform-mask: root.waveform-mask;
         expanded <=> root.expanded;

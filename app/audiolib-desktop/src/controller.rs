@@ -5070,7 +5070,7 @@ impl Controller {
             ui.set_waveform_image(Image::from_rgba8(
                 SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels, job.width, job.height),
             ));
-            let mask = if ui.global::<crate::Theme>().get_modern_style() {
+            let mask = if ui.global::<crate::Theme>().get_modern_player() {
                 mask.map_or_else(Image::default, |mask| {
                     Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                         &mask, job.width, job.height,
