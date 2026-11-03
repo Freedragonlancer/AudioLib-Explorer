@@ -880,6 +880,7 @@ pub fn register_tokenizer(conn: &Connection, jieba: Arc<Jieba>) -> Result<()> {
         },
     )
     .map_err(db_error)?;
+    crate::dir_search::register_t3(conn)?;
     conn.create_scalar_function(
         "audiolib_path_key",
         1,

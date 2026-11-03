@@ -1,6 +1,6 @@
 // crates/audiolib-core/src/search_workspace.rs
 //! Owned client-local search tasks and explicitly saved search definitions.
-use crate::{Error, Result, SearchFilters, SearchRequest, SortOrder};
+use crate::{Error, Result, SearchFilters, SearchRequest, SearchScope, SortOrder};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -105,6 +105,9 @@ impl SearchTaskDefinition {
             offset,
             order_by: self.order_by,
             descending: self.descending,
+            scope: SearchScope::Main,
+            cursor: None,
+            page: None,
         }
     }
 

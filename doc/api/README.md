@@ -334,8 +334,8 @@ audiolib.example.com:8443 {
 
 - 搜索输入按客户端快照上的 `SearchRequest` 校验：查询最多 500 个字符；独立的非 Han 字母词至少需要两个可搜索 Unicode grapheme（组合重音不另计）。这是已确认的产品行为。GUI 输入一个字母时取消旧请求、保留当前结果与目录并显示“字母搜索请至少输入 2 个字符”，不发送新搜索。直接调用 core/db 或 CLI 则返回 `Validation`，不会当作零命中或内部数据库错误。多词中的单字母代码（例如 `P-51`）、单个 Han 字和纯数字沿用原规则。
 - 两个字母以上支持词内连续片段：`expl`、`plos`、`sion` 匹配 `explosion`，多个词之间为 AND；用户文本中的标点、`OR` 等不作为 FTS5 运算符。当前服务端 **尚未实现**下表的 `POST /search` 与 `/search/folders`，正常服务器模式在本地快照查询，因此不存在当前 HTTP 搜索端点的单字母 400/500 响应；若未来开放端点，按 §2.1 的现有映射应为 HTTP 400 `VALIDATION`。
-- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。理由：与本地实现完全一致，remote 改动最小。
-- 游标分页（服务端提议）列为待定：如果服务端需要快照一致性，建议游标为不透明字符串 `next_cursor`，内部编码排序键 + 最后一个 id；`SearchRequest` 再加可选 `cursor` 字段，有游标时忽略 `offset`。
+- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。`scope` 省略或 `main` 时排序与 schema 8 主表一致。
+- `scope=all|path` 使用目录段索引。格式 id 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`sd1`，不是 `sp1`）。请求可带不透明 `cursor`（同时传 `offset`/`page` 时以 cursor 为准）和 1 起的 `page`。响应 `next_cursor` 在末页省略。游标里的 `search_path_rev` 与库不一致时返回 409 `CURSOR_STALE`。`POST /search` 见下表。
 - 扫描历史与客户端本机播放历史使用 `limit` + `offset`；服务端兼容 `/history/plays` 始终返回 `[]`。
 
 ## 6. 端点清单
@@ -350,7 +350,7 @@ audiolib.example.com:8443 {
 | ✅ | GET | `/roots` | `folders`（求 `file_count`）+ 根状态缓存 + 扫描历史 | — | `[{ "name", "server_path", "webdav_url": "…" \| null（功能未完善，见 §7）, "file_count": n \| null, "missing_count": n, "online": bool, "status": "checking" \| "online" \| "waking" \| "offline", "status_message": "…" \| null, "checked_at": unix秒 \| null, "last_scan": { … } \| null, "scanning": bool }]`，见 §6.4 |
 | ✅ | POST | `/roots/{name}/check` | 根状态 | 无请求体 | 立即重查该根（最多约 2 秒），返回该根的 `/roots` 条目；未知根名 404 `NOT_FOUND`，见 §6.4 |
 | ⏳ | GET | `/stats` | `stats` | — | `LibraryStats` |
-| ⏳ | POST | `/search` | `search` | `SearchRequest` | `SearchPage` |
+| ✅ | POST | `/search` | `search` | `SearchRequest`（`scope=main\|all\|path`，可选 `cursor`/`page`） | `SearchPage`（含 `next_cursor`） |
 | ⏳ | POST | `/search/folders` | `search_folders` | `SearchRequest` | `Folder[]` |
 | ⏳ | GET | `/folders?parent_id=<id>` | `folders` | 不带 `parent_id` 为根 | `Folder[]` |
 | ✅ | GET | `/audio/{id}` | `get_audio` | — | `AudioFile`；无此记录 404 `NOT_FOUND`，非整数 id 400 `VALIDATION` |
