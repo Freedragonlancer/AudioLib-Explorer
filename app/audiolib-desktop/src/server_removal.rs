@@ -82,6 +82,32 @@ impl HiddenRecords {
     }
 }
 
+/// Server upgrade notices not shown yet for `url` in this session (each kind once per
+/// session; migration progress every time), joined for the status line. Never starts
+/// a download or install: the user updates through the existing update check.
+pub(super) fn upgrade_notice(
+    url: &str,
+    status: &audiolib_core::server_upgrade::ServerUpgradeStatus,
+    chinese: bool,
+) -> Option<String> {
+    use audiolib_core::server_upgrade::NoticeSession;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static SESSIONS: OnceLock<Mutex<HashMap<String, NoticeSession>>> = OnceLock::new();
+    let mut sessions = SESSIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let texts: Vec<String> = sessions
+        .entry(url.to_string())
+        .or_default()
+        .take(status)
+        .into_iter()
+        .map(|notice| notice.text(chinese))
+        .collect();
+    (!texts.is_empty()).then(|| texts.join(" "))
+}
+
 /// Removal gate of the active server for the menus (from its `/capabilities`).
 #[derive(Clone, Debug, Default)]
 pub(super) struct ServerManage {
@@ -270,15 +296,22 @@ impl Controller {
         let chinese = self.chinese.load(Ordering::Acquire);
         let c = self.clone();
         std::thread::spawn(move || {
+            let mut upgrade = None;
             let manage = match RemoteClient::new(&settings.server_url, &secrets.token)
-                .and_then(|client| client.capabilities())
+                .and_then(|client| client.capabilities().map(|reply| (client, reply)))
             {
-                Ok(capabilities) => ServerManage {
-                    url: settings.server_url.clone(),
-                    can_manage: capabilities.may_manage(),
-                    note: capabilities_note(&capabilities, chinese),
-                    capabilities: Some(capabilities),
-                },
+                Ok((client, capabilities)) => {
+                    upgrade = Some(audiolib_remote::server_upgrade_status(
+                        &client,
+                        &capabilities,
+                    ));
+                    ServerManage {
+                        url: settings.server_url.clone(),
+                        can_manage: capabilities.may_manage(),
+                        note: capabilities_note(&capabilities, chinese),
+                        capabilities: Some(capabilities),
+                    }
+                }
                 Err(error) => ServerManage {
                     url: settings.server_url.clone(),
                     can_manage: false,
@@ -293,6 +326,12 @@ impl Controller {
                     },
                 },
             };
+            if let Some(message) = upgrade
+                .as_ref()
+                .and_then(|status| upgrade_notice(&settings.server_url, status, chinese))
+            {
+                c.status(message);
+            }
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 c2.apply_server_manage(&ui, &settings.server_url, manage);
@@ -643,5 +682,33 @@ mod tests {
             english.contains("WAV files on the server are untouched"),
             "{english}"
         );
+    }
+}
+
+#[cfg(test)]
+mod upgrade_notice_tests {
+    use super::upgrade_notice;
+    use audiolib_core::server_upgrade::{Notice, PathSearch, ServerUpgradeStatus};
+
+    #[test]
+    fn upgrade_notices_show_once_per_session_and_progress_updates() {
+        let status = ServerUpgradeStatus {
+            path_search: PathSearch::NeedsClientUpgrade,
+            main_search: true,
+            vendor_import: None,
+            migration: None,
+            path_results_absent: false,
+            notices: vec![
+                Notice::PathSearchNeedsUpgrade,
+                Notice::Migrating { percent: Some(40) },
+            ],
+        };
+        let url = "http://upgrade-notice.test";
+        let first = upgrade_notice(url, &status, true).unwrap();
+        assert!(first.contains("路径搜索"));
+        assert!(first.contains("40%"));
+        let again = upgrade_notice(url, &status, true).unwrap();
+        assert!(!again.contains("路径搜索"));
+        assert!(again.contains("40%"));
     }
 }
