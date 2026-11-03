@@ -156,3 +156,71 @@
 4. CSV 导入和用户标签冲突时，默认优先级是什么？导入的数据是写进 tags 还是独立字段（不能多出 JOIN）？
 5. 旧客户端遇到 schema 9 快照时，应该硬拒绝还是只读降级？
 6. PG-07 索引增长 15% 的上限是否可以接受？
+
+## 附录 A. 真实厂商元数据表格普查与解析基准（2026-11-03）
+
+只读采集，没有修改素材库。素材根目录是 `\\Z4S-PAEH\hdd\A_Lib`，服务器镜像库 `library-r824` 中共 909,342 条 `audio_files`，有 38 个一级厂商目录。文件本身受授权限制、体积也大，所以没有入库，这里只记录特征。
+
+### A.1 普查结果
+
+- 按名称匹配（`*.csv/*.tsv/*.xls/*.xlsx`，或文件名含 metadata/soundminer）共找到 610 个文件，合计 182 MB。其中表格类 449 个：`.xls` 209、`.csv` 127、`.xlsx` 103、`.txt`（Soundminer 导出）10。另外还有 PDF 125、PNG/JPG 30、`.numbers` 1，以及 Synology 的 `@synoeastream/@synoresource` 旁路文件。
+- 文本编码（137 个 csv/txt）：UTF-8 117、ASCII 7、UTF-8 BOM 3、**UTF-16LE BOM 10**（9 个 Soundminer `.txt`，加上 1 个扩展名为 `.csv` 的 Tab 分隔文件）。**没有发现 GBK 或 cp1252**，也没有解码错误。
+- 分隔符：`,` 122、`\t` 11、`;` 4。
+- 工作簿：多 sheet 的有 57 个（最多 12 个 sheet）；有 15 个文件的行宽不一致（ragged）。
+- 解析失败 5 个：2 个 Sonniss `*.csv.xls` 实际是纯文本 CSV；2 个 SoundMorph `*.xls` 实际是 AppleDouble 资源叉（魔数 `00 05 16 07`，内容 "Mac OS X"）；1 个 `~$*.xlsx` 是 Office 锁文件（0 KB）。
+- 常见表头：Filename 366、Keywords 256、Description 255、Category 221、Library 211、Manufacturer 199、Source 196、BWDescription 173、SubCategory 162，也有 CatID、FXName、RecID、TrackTitle 等。很多文件第 1 行是标题或厂商名，真正的表头在第 2～3 行。
+
+### A.2 代表性样本
+
+| # | 路径（相对 A_Lib） | 特征 |
+|---|---|---|
+| S1 | `1_Boom/Crowds Concert Audiences/00_Crowds_Concert_Audiences_Metadata.xls` | BIFF xls，3.4 MB，4692 行，Soundminer 列齐全，是全量中 RSS 最高的样本 |
+| S2 | `1_Pro Sound Effect/The Odyssey Collection/Designed/The-Odyssey-Collection-Designed-Metadata.xlsx` | 行数最多（5159），第 1 行是标题，表头不在首行 |
+| S3 | `1_Boom/Cannons/Construction Kit/00_Cannons_CK_Metadata.xlsx` | 12 个 sheet，ragged，解析最慢之一 |
+| S4 | `3_VO Lib/人声_YDH配音源文件/《女神竞技场》配音格式需求_4.2.xlsx` | 体积最大（12 MB，主要是嵌入图片），但只有 905 行，8 个 sheet，中文，没有 Filename 列，只能按不带扩展名的 stem 匹配 |
+| S5 | `1_Sound Ideas/Premier/Premiere_Edition_6_The_2448/.../PE6 METADATA.txt` | Soundminer 导出，UTF-16LE BOM + Tab，扩展名是 `.txt` |
+| S6 | 同目录 `PE Vol. 6 Catalog.xls` | Filename 列不带扩展名；一份清单覆盖多张盘（`1of2`/`2of2` 目录） |
+| S7 | `1_SoundBits/Whooshes Impacts 2/Whooshes And Impacts 2.csv` | 扩展名是 `.csv`，实际是 UTF-16LE + Tab；只有 RecID，没有 Filename 列 |
+| S8 | `2_Cartoon Lib/Vintage_Anime_SFX/Vintage Anime SFX/VASE.csv` | `;` 分隔，表头首列为空 |
+| S9 | `4_Vehicle/Car Collection/Volvo_XC90/_Documents/Metadata Translations/Volvo XC 90 Sound File List - 中国語 (Japanese).csv` | UTF-8 CJK，同一库有 6 种语言的翻译表（会重复导入） |
+| S10 | `4_Others/Sonniss.com 2016 FX/Audio.Bundle.Part2/The Complete Sonniss Catalog - 2016.csv.xls`；`1_SoundMorph/Mechanism/_SoundMorph_Mechanism_Soundminer.xls`；`1_Boom/Aquatic Predators/~$00_...xlsx` | 伪装 xls（实为 CSV）、AppleDouble、Office 锁文件 |
+| S11 | `1_The Recordist/TR_Guns/TR_Guns_Rifle/The_AK_HD_Pro_Pt1/.../The_Recordist_The_AK_HD_Pro_List_XLS.xls` | 没有 Filename 列，只有 Description（`GUN: Assault Rifle: ... - DPA4062`），而实际文件名是去掉标点的近似值 |
+| S12 | `1_Pro Sound Effect/PSE_Gen Collection/Doors/Doors-Metadata.xlsx` | Filename 后缀 `_PSE_DRS_096` 和磁盘上的 `_PSE_GEN3_jif2O` 不一致（重新打包时改了名） |
+
+### A.3 解析基准
+
+环境：Dragonpark-Home，Rust release 版，依赖 `csv 1.4` + `encoding_rs 0.8.44` + `calamine 0.38`。先把文件复制到本地 SSD 再解析，这样不计 SMB I/O。实现是一次性读入，并把全部单元格物化为 `Vec<Vec<String>>`。parse 取 5 次的中位数；峰值 RSS 取进程 PeakWorkingSet 的最大值，包含约 5.4 MB 的进程基线。
+
+| 样本 | 大小 | 行（含表头） | parse ms | 进程 wall ms | 峰值 RSS MB | 行/秒 | 行命中率 | 文件覆盖率 |
+|---|---|---|---|---|---|---|---|---|
+| S1 Crowds .xls | 3478 KB | 4692 | 21.2 | 29.9 | 29.7 | 221k | 100% | 100% |
+| S2 Odyssey .xlsx | 310 KB | 5159 | 11.4 | 18.9 | 10.3 | 454k | 99.9% | 95.6% |
+| S3 Cannons CK .xlsx | 1773 KB | 3370 | 29.9 | 37.8 | 9.6 | 113k | 27.1% | 99.8% |
+| S4 女神竞技场 .xlsx | 12114 KB | 905 | 3.2 | 10.1 | 5.9 | 287k | 59.2%（仅 stem） | 0%（精确） |
+| S5 PE6 .txt UTF-16 | 1008 KB | 1100 | 2.1 | 9.4 | 9.2 | 535k | 31.8% | 100% |
+| S6 PE6 Catalog .xls | 282 KB | 1100 | 1.9 | 8.8 | 7.0 | 589k | 31.8%（仅 stem） | 0%（精确） |
+| S7 Whooshes .csv UTF-16 | 81 KB | 267 | 0.3 | 7.1 | 5.4 | 810k | 0% | 0% |
+| S8 VASE.csv `;` | 61 KB | 289 | 0.3 | 7.1 | 5.5 | 928k | 100% | 100% |
+| S9 Volvo JP .csv | 657 KB | 856 | 1.4 | 8.3 | 6.5 | 594k | 100% | 92.6% |
+| S10 Sonniss/AppleDouble | 109/4 KB | 0 | 0.1 | 6.7 | 5.4 | – | 解析失败 | – |
+| S11 Recordist AK | 60 KB | 227 | 0.4 | 7.1 | 5.6 | 632k | 0% | 0% |
+| S12 PSE Doors | 16 KB | 126 | 0.7 | 7.5 | 5.8 | 182k | 0% | 0% |
+| 合成 200k 行 CSV（10 列） | 39 MB | 200001 | 117.6 | 171.8 | 161.6 | 1.70M | – | – |
+| 合成 200k 行 XLSX（10 列） | 7.6 MB | 200001 | 788.5 | 845.4 | 248.9 | 254k | – | – |
+
+全量 449 个文件：共 230,345 行，parse 累计 797 ms，进程 wall 累计 4.2 s，峰值 RSS 最大 29.7 MB、中位数 5.8 MB。遍历厂商目录（SMB）收集文件名，单个目录最慢 1.16 s。匹配规则：任意单元格的 basename（不区分大小写）等于磁盘上的文件名记为精确命中，等于 stem 记为 stem 命中；匹配范围是表格所在的厂商目录，会跳过 Info/Data/Docs/Catalog/Metadata/Translations 这类子目录。在 440 个有音频的目录中，精确文件覆盖率 ≥90% 的有 362 个，为 0 的有 33 个；只能按 stem 命中的文件有 21 个。
+
+### A.4 对设计（#209）的影响
+
+1. **编码**：没有遇到 GBK 或 cp1252，但**必须支持 UTF-16LE BOM**（Soundminer 导出，且可能用 `.csv` 扩展名）。检测顺序建议为 BOM → UTF-8 校验 → GBK 兜底。**分隔符必须嗅探**（`,` `;` `\t`），不能由扩展名决定。
+2. **按内容识别格式**：`.xls` 可能是文本 CSV 或 AppleDouble 资源叉。需要按魔数分派（OLE `D0CF11E0` / ZIP `PK` / 文本）；应跳过 `._*`、`~$*`、`@syno*`，并且容错不中断。
+3. **表头定位**：大量文件第 1 行是标题。需要在前 N（≈10）行里扫描含 `Filename`/`File Name`/`FileName` 的行作为表头，并逐 sheet 处理（多 sheet 占 13%）。
+4. **匹配键**：
+   - 精确 basename（不区分大小写）在约 82% 的目录可行。
+   - 必须加一级 **stem（去扩展名）匹配**（Sound Ideas Catalog、VO 表格）。
+   - 一份表会覆盖多个分卷或 Part 目录（Recordist、Sound Ideas、Boom 多 sheet），所以**匹配范围应是整个厂商根目录或整库的 basename 索引**，不能只看同级目录：行命中率低，但文件覆盖率接近 100%。
+   - 约 7% 的表格没有 Filename 列（只有 Description 或 RecID），或者文件名在重新打包后被改过（PSE），这些无法可靠匹配。建议在导入预览里标为"未匹配"，不做模糊匹配，或者把模糊匹配作为可选项。
+   - 多语言翻译表会对同一文件重复导入，需要定义合并或去重规则（以 path + 列名为键，或按语言区分）。
+5. **内存**：真实表格最大只有 5159 行，峰值 RSS 不超过 30 MB，不构成风险。合成的 200k 行 XLSX 全量物化后达到 249 MB、0.79 s，CSV 为 162 MB；这些数字按 `Vec<Vec<String>>` 物化计，流式写库会更低，但流式方案未实测。calamine 对 xlsx 必须整 sheet 读入 Range，所以建议给导入设置行数和文件大小上限（例如 xlsx 50 MB），或者分 sheet 处理并分批写入。体积大不等于行数多：12 MB 的 xlsx 主要是图片。
+
+基准工具在 `C:\Users\Dragonpark\smv2-bench`，不在仓库内：`rbench/` 是 Rust 程序，`results.jsonl` 是全量结果，`samples_bench.json` 是样本结果。
