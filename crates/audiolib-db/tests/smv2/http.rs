@@ -9,6 +9,9 @@
 //! Library endpoints are not in this repo; defaults below are placeholders, each
 //! overridable with AUDIOLIB_SMV2_HTTP_<NAME> (e.g. AUDIOLIB_SMV2_HTTP_PLAYBACK).
 //! `{id}` is replaced with a library row id.
+//!
+//! Search `scope` (server 2026-11-03): `main|all|path`; omit = `main` (= schema 8).
+//! MAIN_SEARCH omits scope on purpose. Vendor import: `/api/vendor-import` (+ `/*`).
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -27,26 +30,22 @@ pub const ADMIN: &str = "/admin/api/migration";
 pub const ENDPOINTS: &[(&str, &str, &str, Option<&str>)] = &[
     ("LIST", "GET", "/api/library/files?limit=5", None),
     (
+        // omit scope (= main / s8)
         "MAIN_SEARCH",
         "GET",
-        "/api/search?q=zildjian&scope=filename",
+        "/api/search?q=zildjian",
         None,
     ),
-    (
-        "PATH_SEARCH",
-        "GET",
-        "/api/search?q=Urban&scope=%E8%B7%AF%E5%BE%84",
-        None,
-    ),
+    ("PATH_SEARCH", "GET", "/api/search?q=Urban&scope=path", None),
     (
         "ALL_SEARCH",
         "GET",
-        "/api/search?q=zildjian&scope=%E5%85%A8%E9%83%A8",
+        "/api/search?q=zildjian&scope=all",
         None,
     ),
     ("PLAYBACK", "GET", "/api/files/{id}/stream", None),
     ("ARTWORK", "GET", "/api/files/{id}/artwork", None),
-    ("VENDOR_IMPORT", "POST", "/api/vendor/import", Some("{}")),
+    ("VENDOR_IMPORT", "POST", "/api/vendor-import", Some("{}")),
     (
         "ANNOTATIONS",
         "POST",

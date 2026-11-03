@@ -472,8 +472,8 @@ fn em_07_08_s9_main_scope_identical() {
 #[test]
 #[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn em_09_s9_main_table_identical_to_s8() {
-    // Default scope on s9 is "all"; main-table-only identity needs the filename scope.
-    // Until the scope API exists, compare through the entrypoint's main-only query.
+    // Default/omit scope is main (= s8). Compare through the entrypoint's main-only query
+    // (HTTP MAIN_SEARCH omits scope; equivalent to scope=main).
     let driver = Driver::require();
     let f = fixture();
     let (_dir, db) = f.copy_db();

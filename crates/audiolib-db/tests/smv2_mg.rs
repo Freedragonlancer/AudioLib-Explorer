@@ -896,8 +896,8 @@ fn mg_14_http_already_running_and_cross_process_pause() {
     assert_eq!(d.run("resume", &srv.db, &[]).state(), "done");
 }
 
-/// During the backfill: reads 200 with x-audiolib-migration; path-only scope 503
-/// migration_in_progress (Retry-After 30); scope 全部 200 main-only with
+/// During the backfill: reads 200 with X-AudioLib-Schema-Migration; path-only scope 503
+/// migration_in_progress (Retry-After 30); scope=all 200 main-only with
 /// x-audiolib-path-search: unavailable.
 #[test]
 #[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
@@ -914,7 +914,7 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
         let resp = srv.call(name, id);
         assert_eq!(resp.status, 200, "{name}: {resp:?}");
         assert_eq!(
-            resp.header("x-audiolib-migration"),
+            resp.header("x-audiolib-schema-migration"),
             state.as_str(),
             "{name}: {resp:?}"
         );
@@ -922,7 +922,7 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
     let path = srv.call("PATH_SEARCH", id);
     assert_http_error(&path, 503, "migration_in_progress", "30");
     assert_eq!(
-        path.header("x-audiolib-migration"),
+        path.header("x-audiolib-schema-migration"),
         state.as_str(),
         "{path:?}"
     );
@@ -934,7 +934,7 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
         "{all:?}"
     );
     assert_eq!(
-        all.header("x-audiolib-migration"),
+        all.header("x-audiolib-schema-migration"),
         state.as_str(),
         "{all:?}"
     );
@@ -942,11 +942,15 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
     assert_eq!(
         all.json(),
         main.json(),
-        "scope 全部 must return main-table results only"
+        "scope=all must return main-table results only"
     );
     assert_eq!(d.run("resume", &srv.db, &[]).state(), "done");
     let after = srv.call("LIST", id);
-    assert_eq!(after.header("x-audiolib-migration"), None, "{after:?}");
+    assert_eq!(
+        after.header("x-audiolib-schema-migration"),
+        None,
+        "{after:?}"
+    );
     assert_eq!(srv.call("PATH_SEARCH", id).status, 200);
 }
 
@@ -978,7 +982,7 @@ fn mg_15_http_writes_rejected_during_switch() {
         if srv.status().json()["state"] == "switching" {
             for name in ["VENDOR_IMPORT", "ANNOTATIONS"] {
                 let resp = srv.call(name, id);
-                if resp.header("x-audiolib-migration") != Some("switching") {
+                if resp.header("x-audiolib-schema-migration") != Some("switching") {
                     continue; // the switch ended between the two requests
                 }
                 assert_http_error(&resp, 503, "migration_switching", "5");
