@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 default = ["scanner"]
 scanner = ["dep:audiolib-audio"]
+# Destructive migration fault injection is absent from ordinary builds.
+test-hooks = ["rusqlite/trace"]
 
 [dependencies]
 audiolib-core = { path = "../audiolib-core" }

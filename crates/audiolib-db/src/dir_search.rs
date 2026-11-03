@@ -28,13 +28,13 @@ pub(crate) const SEARCH_PATH_REV: i64 = 1;
 /// At or below this many estimated files, only that folder subtree's runs are scanned.
 const SUBTREE_FILE_LIMIT: i64 = 50_000;
 
-const CREATE_DIR_FTS: &str = "
+pub(crate) const CREATE_DIR_FTS: &str = "
 CREATE VIRTUAL TABLE audio_dir_search USING fts5(
  path_tokens,path_tokens_tokenized,
  content='',contentless_delete=1,detail=full,columnsize=1,
  tokenize='unicode61 remove_diacritics 2');";
 
-const CREATE_RUNS: &str = "
+pub(crate) const CREATE_RUNS: &str = "
 CREATE TABLE audio_dir_runs(
  dir_id INTEGER NOT NULL,
  lo INTEGER NOT NULL,
@@ -50,7 +50,7 @@ SELECT id,
  CASE WHEN parent_id IS NULL THEN '' ELSE audiolib_tokenize(t3_norm(COALESCE(folder_name,''))) END
 FROM folders;";
 
-const INSERT_RUNS: &str = "
+pub(crate) const INSERT_RUNS: &str = "
 INSERT INTO audio_dir_runs
 SELECT folder_id, min(id), max(id), count(*)
 FROM (
@@ -947,7 +947,7 @@ fn read_index(conn: &Connection) -> Result<RunIdx> {
     })
 }
 
-fn reindex_segment(conn: &Connection, id: i64) -> Result<()> {
+pub(crate) fn reindex_segment(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM audio_dir_search WHERE rowid=?1", [id])
         .map_err(db_error)?;
     conn.execute(

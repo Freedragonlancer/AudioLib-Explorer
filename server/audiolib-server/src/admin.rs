@@ -57,6 +57,11 @@ pub fn router(security: Arc<crate::Security>) -> Router<Service> {
         .route("/admin/admin.js", get(script))
         .route("/admin/api/status", get(status))
         .route("/admin/api/runtime", get(runtime))
+        .route("/admin/api/migration/status", get(crate::migration::status))
+        .route(
+            "/admin/api/migration/{action}",
+            post(crate::migration::action),
+        )
         .route("/admin/api/update", get(update_status))
         .route("/admin/api/update/check", post(check_update))
         .route("/admin/api/update/install", post(install_update))
@@ -92,6 +97,11 @@ async fn guard(
 ) -> Response {
     if let Err(error) = check(&request, &security) {
         return with_admin_headers(error.into_response());
+    }
+    if !request.uri().path().starts_with("/admin/api/migration/")
+        && let Some(response) = crate::migration::switching_write(&request)
+    {
+        return with_admin_headers(response);
     }
     with_admin_headers(next.run(request).await)
 }

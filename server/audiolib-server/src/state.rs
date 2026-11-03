@@ -740,7 +740,7 @@ impl AppState {
         // Allow another instance to finish creating and locking a new owner marker.
         remove_stale_snapshots(&snapshot_dir, Some(Duration::from_secs(30)));
         let opened = Instant::now();
-        let provider = Arc::new(SqliteProvider::open_existing_with_progress_cancellable(
+        let provider = Arc::new(SqliteProvider::open_server_existing(
             &config.library_db,
             cancel,
             |progress| {

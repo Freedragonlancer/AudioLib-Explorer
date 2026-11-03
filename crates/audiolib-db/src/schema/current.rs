@@ -16,7 +16,15 @@ pub(crate) fn readable_format_ready(conn: &Connection) -> Result<bool> {
 }
 
 fn format_ready(conn: &Connection, allow_p0: bool) -> Result<bool> {
-    if !format_ready_at_version(conn, allow_p0, SCHEMA_VERSION)? {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(db_error)?;
+    let expected = if allow_p0 && version == 9 {
+        9
+    } else {
+        SCHEMA_VERSION
+    };
+    if !format_ready_at_version(conn, allow_p0, expected)? {
         return Ok(false);
     }
     if !crate::albums::ready(conn)? {
@@ -58,6 +66,9 @@ fn format_ready_at_version(
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()
         .map_err(db_error)?;
     let mut expected = LibraryFormat::target().features;
+    if expected_version == 9 {
+        expected.insert("search_path".into(), 1);
+    }
     if allow_p0
         && features.get("metadata_storage") == Some(&1)
         && features.get("play_history_retired") == Some(&2)

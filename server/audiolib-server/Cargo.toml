@@ -15,6 +15,9 @@ categories = ["multimedia::audio"]
 name = "audiolib-server"
 path = "src/main.rs"
 
+[features]
+test-hooks = ["audiolib-db/test-hooks"]
+
 [dependencies]
 audiolib-update = { path = "../../crates/audiolib-update" }
 audiolib-core = { path = "../../crates/audiolib-core" }

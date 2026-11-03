@@ -87,6 +87,7 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
                 "search_indexes",
                 "search_storage",
                 "play_history_retired",
+                "search_path",
             ]
             .contains(&name.as_str())
             {
@@ -105,6 +106,7 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
         ("search_indexes", 1),
         ("search_storage", 1),
         ("play_history_retired", 2),
+        ("search_path", 1),
     ] {
         if let Some(version) = feature_version(conn, feature)?
             && version > supported
@@ -117,7 +119,18 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
         }
     }
     for (key, supported) in [
-        (SOURCE_SEARCH_REV_KEY, 2),
+        (
+            SOURCE_SEARCH_REV_KEY,
+            if conn
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .map_err(db_error)?
+                == 9
+            {
+                3
+            } else {
+                2
+            },
+        ),
         ("source_tags_rev", 2),
         ("source_tags_progress_rev", 2),
     ] {
@@ -206,6 +219,9 @@ pub(crate) fn search_state_is_current(conn: &Connection) -> Result<bool> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
+    if version == 9 {
+        return crate::migration9::validate_ready(conn).map(|()| true);
+    }
     if version == SCHEMA_VERSION {
         return readable_format_ready(conn);
     }
@@ -557,7 +573,11 @@ fn json_has_source_tags(json: &str) -> bool {
 }
 
 pub(crate) fn source_search_marked(conn: &Connection) -> Result<bool> {
-    Ok(meta_value(conn, SOURCE_SEARCH_REV_KEY)?.as_deref() == Some(SOURCE_SEARCH_REV))
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(db_error)?;
+    Ok(meta_value(conn, SOURCE_SEARCH_REV_KEY)?.as_deref()
+        == Some(if version == 9 { "3" } else { SOURCE_SEARCH_REV }))
 }
 
 fn register_metadata_storage(conn: &Connection) -> Result<()> {
