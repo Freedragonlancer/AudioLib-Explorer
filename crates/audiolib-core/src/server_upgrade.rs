@@ -20,6 +20,106 @@ pub const SEARCH_PATH_REVISION: u32 = 1;
 pub const SEARCH_PATH_FEATURE: &str = "search_path";
 pub const VORBIS_TAGS_FEATURE: &str = "vorbis_tags";
 pub const VENDOR_METADATA_FEATURE: &str = "vendor_metadata";
+/// Ordinary responses during a migration carry the migration state here.
+pub const MIGRATION_HEADER: &str = "x-audiolib-migration";
+/// `unavailable` on an "all" scope search answered from the main table only.
+pub const PATH_SEARCH_HEADER: &str = "x-audiolib-path-search";
+/// Admin migration status (read by every client that may reach it).
+pub const MIGRATION_STATUS_PATH: &str = "/admin/api/migration/status";
+/// Admin migration controls (`POST /admin/api/migration/{action}`), manage only.
+pub const MIGRATION_ACTIONS: [&str; 5] = ["start", "pause", "resume", "cancel", "rollback"];
+/// `503` while a path scope search waits for the migration (`Retry-After: 30`).
+pub const MIGRATION_IN_PROGRESS: &str = "migration_in_progress";
+/// `503` for writes during the switch (`Retry-After: 5`); nothing was written.
+pub const MIGRATION_SWITCHING: &str = "migration_switching";
+/// Search scope request values. PROVISIONAL: the server has not published the
+/// parameter name or values yet; change them only here.
+pub const SEARCH_SCOPE_PARAM: &str = "scope";
+/// 「路径」: path-only search (`503 migration_in_progress` while migrating).
+pub const SEARCH_SCOPE_PATH: &str = "path";
+/// 「全部」: main table plus paths (`x-audiolib-path-search: unavailable` while migrating).
+pub const SEARCH_SCOPE_ALL: &str = "all";
+
+/// Server search paging: send `cursor` (opaque, echoed verbatim), read `next_cursor`
+/// (`null` on the last page). `offset`/`page` stay accepted; with both, `cursor` wins.
+pub const SEARCH_CURSOR_PARAM: &str = "cursor";
+
+/// One page of a server search reply (`{ids, next_cursor}`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchCursorPage {
+    #[serde(default)]
+    pub ids: Vec<i64>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+impl SearchCursorPage {
+    /// Query pair for the next page, `None` after the last page. The cursor is never
+    /// parsed or rebuilt; callers URL-encode it.
+    pub fn next_query(&self) -> Option<(&'static str, &str)> {
+        self.next_cursor
+            .as_deref()
+            .map(|cursor| (SEARCH_CURSOR_PARAM, cursor))
+    }
+}
+
+/// Fixed `phases` keys of the status reply.
+pub const MIGRATION_PHASES: [&str; 4] = ["backup", "path_build", "optimize", "switch"];
+
+/// Controls offered for the migration: only with manage permission.
+pub fn migration_actions(can_manage: bool) -> &'static [&'static str] {
+    if can_manage { &MIGRATION_ACTIONS } else { &[] }
+}
+
+/// A `503` the server answers because of a migration, from its `error_code`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MigrationRefusal {
+    /// Path scope search: show "temporarily unavailable" and retry after the delay.
+    PathSearchInProgress,
+    /// A write during the switch: retry after the delay; never treat as lost.
+    Switching,
+}
+
+impl MigrationRefusal {
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            MIGRATION_IN_PROGRESS => Some(Self::PathSearchInProgress),
+            MIGRATION_SWITCHING => Some(Self::Switching),
+            _ => None,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::PathSearchInProgress => MIGRATION_IN_PROGRESS,
+            Self::Switching => MIGRATION_SWITCHING,
+        }
+    }
+
+    /// Retry delay when the server sent none (the agreed defaults).
+    pub fn default_retry_after(self) -> u64 {
+        match self {
+            Self::PathSearchInProgress => 30,
+            Self::Switching => 5,
+        }
+    }
+
+    pub fn text(self, chinese: bool) -> &'static str {
+        match (self, chinese) {
+            (Self::PathSearchInProgress, true) => {
+                "服务器正在升级音效库，路径搜索暂不可用，稍后自动重试。"
+            }
+            (Self::PathSearchInProgress, false) => {
+                "The server is upgrading its sound library; path search is temporarily unavailable and will retry."
+            }
+            (Self::Switching, true) => "服务器正在切换到新版音效库，修改未写入，稍后自动重试。",
+            (Self::Switching, false) => {
+                "The server is switching to the upgraded sound library; the change was not written and will retry."
+            }
+        }
+    }
+}
+
 /// Highest schema and the tokenization this client understands.
 pub const MAX_KNOWN_SCHEMA: u32 = 9;
 
@@ -148,24 +248,125 @@ pub struct LibrarySchemaInfo {
     pub snapshot_formats_served: Vec<String>,
 }
 
-/// Migration state values (§5.3); unknown values are kept as `Unknown`.
+/// Migration state values (agreed list); unknown values are kept as `Unknown`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationState {
     #[default]
     Idle,
+    Deferred,
+    Preflight,
+    BackingUp,
     Running,
     Paused,
-    Failed,
+    Switching,
     Done,
+    Failed,
+    Cancelled,
+    RolledBack,
     #[serde(other)]
     Unknown,
 }
 
 impl MigrationState {
+    /// Show progress (unknown values too: tolerant).
     pub fn in_progress(self) -> bool {
-        matches!(self, Self::Running | Self::Paused)
+        matches!(
+            self,
+            Self::Preflight
+                | Self::BackingUp
+                | Self::Running
+                | Self::Paused
+                | Self::Switching
+                | Self::Unknown
+        )
     }
+
+    /// Tolerant parse of the state text.
+    pub fn parse(value: &str) -> Self {
+        match value.trim() {
+            "idle" | "" => Self::Idle,
+            "deferred" => Self::Deferred,
+            "preflight" => Self::Preflight,
+            "backing_up" => Self::BackingUp,
+            "running" => Self::Running,
+            "paused" => Self::Paused,
+            "switching" => Self::Switching,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "rolled_back" => Self::RolledBack,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Ended without switching: the previous library stays in use.
+    pub fn failed(self) -> bool {
+        matches!(self, Self::Failed | Self::Cancelled | Self::RolledBack)
+    }
+}
+
+/// User-facing name of a state text; unknown values are shown as sent.
+pub fn migration_state_text(state: &str, chinese: bool) -> String {
+    let known = match (MigrationState::parse(state), chinese) {
+        (MigrationState::Unknown, _) => None,
+        (MigrationState::Idle, true) => Some("未开始"),
+        (MigrationState::Deferred, true) => Some("已推迟"),
+        (MigrationState::Preflight, true) => Some("预检中"),
+        (MigrationState::BackingUp, true) => Some("正在备份"),
+        (MigrationState::Running, true) => Some("正在迁移"),
+        (MigrationState::Paused, true) => Some("已暂停"),
+        (MigrationState::Switching, true) => Some("正在切换"),
+        (MigrationState::Done, true) => Some("已完成"),
+        (MigrationState::Failed, true) => Some("失败"),
+        (MigrationState::Cancelled, true) => Some("已取消"),
+        (MigrationState::RolledBack, true) => Some("已回滚"),
+        (MigrationState::Idle, false) => Some("not started"),
+        (MigrationState::Deferred, false) => Some("deferred"),
+        (MigrationState::Preflight, false) => Some("preflight checks"),
+        (MigrationState::BackingUp, false) => Some("backing up"),
+        (MigrationState::Running, false) => Some("migrating"),
+        (MigrationState::Paused, false) => Some("paused"),
+        (MigrationState::Switching, false) => Some("switching"),
+        (MigrationState::Done, false) => Some("done"),
+        (MigrationState::Failed, false) => Some("failed"),
+        (MigrationState::Cancelled, false) => Some("cancelled"),
+        (MigrationState::RolledBack, false) => Some("rolled back"),
+    };
+    known.map_or_else(|| state.trim().to_string(), str::to_string)
+}
+
+/// Hint for a migration `error_code` (agreed list); unknown codes are shown as sent.
+pub fn migration_error_text(code: &str, chinese: bool) -> String {
+    let known = match (code.trim(), chinese) {
+        ("insufficient_space", true) => "磁盘空间不足：迁移需要约音效库 1.3 倍的可用空间。",
+        ("locked", true) => "音效库正被其他程序占用，请关闭后重试。",
+        ("already_running", true) => "迁移已在进行中。",
+        ("backup_failed", true) => "备份失败，原音效库未改动。",
+        ("integrity_failed", true) => "完整性校验失败，已保留原音效库。",
+        ("io_error", true) => "读写出错，请检查磁盘或网络存储。",
+        ("not_migrated", true) => "音效库尚未迁移。",
+        ("disk_full", true) => "磁盘已满，迁移已暂停。请腾出空间后点「继续」。",
+        ("read_only", true) => "音效库不可写，请检查权限或只读挂载。",
+        ("insufficient_space", false) => {
+            "Not enough disk space: the migration needs about 1.3 times the library size free."
+        }
+        ("locked", false) => "The library is in use by another program; close it and retry.",
+        ("already_running", false) => "A migration is already running.",
+        ("backup_failed", false) => "The backup failed; the library was not changed.",
+        ("integrity_failed", false) => "The integrity check failed; the previous library is kept.",
+        ("io_error", false) => "A read or write failed; check the disk or network storage.",
+        ("not_migrated", false) => "The library has not been migrated yet.",
+        ("disk_full", false) => {
+            "The disk is full and the migration paused. Free space, then choose Resume."
+        }
+        ("read_only", false) => {
+            "The library is not writable; check permissions or a read-only mount."
+        }
+        (other, true) => return format!("错误代码：{other}"),
+        (other, false) => return format!("error code: {other}"),
+    };
+    known.to_string()
 }
 
 /// `/capabilities.schema_migration` (§6).
@@ -196,25 +397,80 @@ pub struct HealthUpgrade {
     pub total: Option<u64>,
 }
 
-/// `GET /admin/api/migration` (§5.3). `rollback_backup` is a server path: never shown.
+/// `progress` of the migration status reply.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationCounts {
+    #[serde(default)]
+    pub done: u64,
+    #[serde(default)]
+    pub total: u64,
+}
+
+/// One committed batch of the migration.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MigrationBatch {
+    #[serde(default)]
+    pub rows: u64,
+    #[serde(default)]
+    pub ms: f64,
+}
+
+/// `switch` of the status reply (`source_search_rev` 2 before, 3 after).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationSwitch {
+    #[serde(default)]
+    pub source_search_rev: Option<u32>,
+    #[serde(default)]
+    pub user_version: Option<u32>,
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+/// `GET /admin/api/migration/status` (same shape as the smv2 harness report).
+/// `state` is kept as text: its value set is not final.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MigrationStatus {
     #[serde(default)]
-    pub state: MigrationState,
+    pub state: String,
     #[serde(default)]
-    pub phase: Option<String>,
+    pub error_code: Option<String>,
     #[serde(default)]
-    pub completed: Option<u64>,
+    pub progress: Option<MigrationCounts>,
+    /// Milliseconds per phase (`backup`, `path_build`, `optimize`, `switch`).
     #[serde(default)]
-    pub total: Option<u64>,
+    pub phases: BTreeMap<String, f64>,
     #[serde(default)]
-    pub batch_ms_p50: Option<u64>,
+    pub switch: Option<MigrationSwitch>,
     #[serde(default)]
-    pub eta_s: Option<u64>,
-    #[serde(default, skip_serializing)]
-    pub rollback_backup: Option<String>,
+    pub batches: Vec<MigrationBatch>,
     #[serde(default)]
-    pub error: Option<String>,
+    pub eta_s: Option<f64>,
+}
+
+impl MigrationStatus {
+    pub fn kind(&self) -> MigrationState {
+        MigrationState::parse(&self.state)
+    }
+
+    /// Current phase: from the state, else the last phase with a recorded duration
+    /// (all four `phases` keys are always present, zero until reached).
+    pub fn phase(&self) -> Option<String> {
+        let from_state = match self.kind() {
+            MigrationState::BackingUp => Some("backup"),
+            MigrationState::Running => Some("path_build"),
+            MigrationState::Switching => Some("switch"),
+            _ => None,
+        };
+        from_state
+            .or_else(|| {
+                MIGRATION_PHASES
+                    .iter()
+                    .rev()
+                    .find(|phase| self.phases.get(**phase).is_some_and(|ms| *ms > 0.0))
+                    .copied()
+            })
+            .map(str::to_string)
+    }
 }
 
 /// Everything the evaluation looks at, gathered by the caller.
@@ -229,6 +485,10 @@ pub struct ServerUpgradeInput {
     pub vendor_import: Option<VendorImportInfo>,
     pub health_upgrade: Option<HealthUpgrade>,
     pub admin_migration: Option<MigrationStatus>,
+    /// Last `x-audiolib-migration` value seen on an ordinary response.
+    pub migration_header: Option<String>,
+    /// An "all" scope search came back with `x-audiolib-path-search: unavailable`.
+    pub path_search_header_unavailable: bool,
     /// Format IDs actually observed for the snapshot in use (library descriptor and
     /// snapshot response header); disagreement disables path search (VN-12).
     pub observed_formats: Vec<String>,
@@ -244,12 +504,18 @@ pub enum PathSearch {
     NotOffered,
     /// The server uses newer path rules than this client: hidden, prompt upgrade.
     NeedsClientUpgrade,
+    /// The server is migrating: path scope searches answer `503`, retry later.
+    PausedForMigration,
 }
 
 /// A migration the status bar shows (§7.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationProgress {
     pub state: MigrationState,
+    /// The raw state text (shown for values this client does not know).
+    pub state_label: String,
+    /// `error_code` of the status reply (e.g. `disk_full` while paused).
+    pub error_code: Option<String>,
     pub phase: Option<String>,
     /// `completed / total`, when both are known.
     pub percent: Option<u8>,
@@ -264,8 +530,15 @@ pub enum Notice {
     PathSearchNeedsUpgrade,
     /// §7.3: migration in progress.
     Migrating { percent: Option<u8> },
+    /// Paused with a reason the user can act on (e.g. `disk_full`: free space, resume).
+    MigrationPaused { error_code: String },
     /// §7.2: nothing the server offers is readable.
     Incompatible { server_version: Option<String> },
+    /// The migration failed or was rolled back; the old library stays in use.
+    MigrationFailed {
+        state: String,
+        error_code: Option<String>,
+    },
 }
 
 impl Notice {
@@ -275,13 +548,18 @@ impl Notice {
             Self::ClientUpgradeAvailable { .. } => "client-upgrade",
             Self::PathSearchNeedsUpgrade => "path-search-upgrade",
             Self::Migrating { .. } => "migrating",
+            Self::MigrationPaused { .. } => "migration-paused",
             Self::Incompatible { .. } => "incompatible",
+            Self::MigrationFailed { .. } => "migration-failed",
         }
     }
 
     /// Offer the existing "check for updates" action (never auto-install).
     pub fn offers_update_check(&self) -> bool {
-        !matches!(self, Self::Migrating { .. })
+        !matches!(
+            self,
+            Self::Migrating { .. } | Self::MigrationPaused { .. } | Self::MigrationFailed { .. }
+        )
     }
 
     pub fn text(&self, chinese: bool) -> String {
@@ -313,6 +591,27 @@ impl Notice {
                 "服务器版本较新（{}），当前客户端无法读取它的音效库。请更新客户端。",
                 server_version.as_deref().unwrap_or("未知")
             ),
+            (Self::MigrationPaused { error_code }, chinese) => format!(
+                "{}{}",
+                if chinese { "服务器音效库升级已暂停：" } else { "The server's library upgrade paused: " },
+                migration_error_text(error_code, chinese)
+            ),
+            (Self::MigrationFailed { state, error_code }, true) => format!(
+                "服务器音效库升级{}，仍在使用原音效库。{}",
+                migration_state_text(state, true),
+                error_code
+                    .as_deref()
+                    .map(|code| migration_error_text(code, true))
+                    .unwrap_or_default()
+            ),
+            (Self::MigrationFailed { state, error_code }, false) => format!(
+                "The server's library upgrade {}; the previous library stays in use. {}",
+                migration_state_text(state, false),
+                error_code
+                    .as_deref()
+                    .map(|code| migration_error_text(code, false))
+                    .unwrap_or_default()
+            ),
             (Self::Incompatible { server_version }, false) => format!(
                 "The server is newer ({}); this client cannot read its sound library. Please update the client.",
                 server_version.as_deref().unwrap_or("unknown")
@@ -339,6 +638,8 @@ pub struct ServerUpgradeStatus {
     /// Vendor import limits, only when offered and this request may manage.
     pub vendor_import: Option<VendorImportInfo>,
     pub migration: Option<MigrationProgress>,
+    /// An "all" scope result lacks path matches (mark it in the results).
+    pub path_results_absent: bool,
     pub notices: Vec<Notice>,
 }
 
@@ -408,22 +709,45 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
             .schema_migration
             .as_ref()
             .map(|migration| migration.state);
+        let header = input
+            .migration_header
+            .as_deref()
+            .map(|state| (state.to_string(), MigrationState::parse(state)))
+            .filter(|(_, state)| state.in_progress());
         if let Some(admin) = input
             .admin_migration
             .as_ref()
-            .filter(|m| m.state.in_progress())
+            .filter(|m| m.kind().in_progress())
         {
             Some(MigrationProgress {
-                state: admin.state,
-                phase: admin.phase.clone(),
-                percent: percent(admin.completed, admin.total),
+                state: admin.kind(),
+                state_label: admin.state.clone(),
+                error_code: admin.error_code.clone(),
+                phase: admin.phase(),
+                percent: admin
+                    .progress
+                    .as_ref()
+                    .and_then(|p| percent(Some(p.done), Some(p.total))),
             })
-        } else if capability.is_some_and(MigrationState::in_progress)
+        } else if header.is_some()
+            || capability.is_some_and(MigrationState::in_progress)
             || input.health_upgrade.is_some()
         {
             let health = input.health_upgrade.clone().unwrap_or_default();
+            let (label, state) = header.unwrap_or_else(|| {
+                let state = capability.unwrap_or(MigrationState::Running);
+                (
+                    serde_json::to_value(state)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                    state,
+                )
+            });
             Some(MigrationProgress {
-                state: capability.unwrap_or(MigrationState::Running),
+                state,
+                state_label: label,
+                error_code: None,
                 phase: health.phase,
                 percent: percent(health.completed, health.total),
             })
@@ -431,6 +755,17 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
             None
         }
     };
+    let path_search = if path_search == PathSearch::Available
+        && (migration.is_some() || input.path_search_header_unavailable)
+    {
+        PathSearch::PausedForMigration
+    } else {
+        path_search
+    };
+    let failed = input
+        .admin_migration
+        .as_ref()
+        .filter(|status| status.kind().failed());
 
     if incompatible {
         notices.push(Notice::Incompatible {
@@ -440,6 +775,18 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         if let Some(migration) = &migration {
             notices.push(Notice::Migrating {
                 percent: migration.percent,
+            });
+            if let Some(code) = migration
+                .error_code
+                .clone()
+                .filter(|_| migration.state == MigrationState::Paused)
+            {
+                notices.push(Notice::MigrationPaused { error_code: code });
+            }
+        } else if let Some(failed) = failed {
+            notices.push(Notice::MigrationFailed {
+                state: failed.state.clone(),
+                error_code: failed.error_code.clone(),
             });
         }
         if path_search == PathSearch::NeedsClientUpgrade {
@@ -461,6 +808,7 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         main_search: !incompatible,
         vendor_import,
         migration,
+        path_results_absent: input.path_search_header_unavailable,
         notices,
     }
 }
@@ -502,6 +850,17 @@ mod tests {
             observed_formats: observed.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn search_cursor_is_opaque_and_null_ends_paging() {
+        let page: SearchCursorPage =
+            serde_json::from_str(r#"{"ids":[3,1],"next_cursor":"b64:+/=?&x"}"#).unwrap();
+        assert_eq!(page.ids, vec![3, 1]);
+        assert_eq!(page.next_query(), Some(("cursor", "b64:+/=?&x")));
+        let last: SearchCursorPage =
+            serde_json::from_str(r#"{"ids":[],"next_cursor":null}"#).unwrap();
+        assert_eq!(last.next_query(), None);
     }
 
     #[test]
@@ -655,22 +1014,163 @@ mod tests {
         );
         assert!(!status.notices[0].offers_update_check());
 
-        input.admin_migration = Some(MigrationStatus {
-            state: MigrationState::Paused,
-            completed: Some(9),
-            total: Some(10),
-            rollback_backup: Some("secret-path".into()),
-            ..Default::default()
-        });
+        input.admin_migration = Some(
+            serde_json::from_str(
+                r#"{"state":"paused","error_code":null,"progress":{"done":9,"total":10},
+                "phases":{"backup":120,"path_build":4000,"optimize":0,"switch":0},"switch":null,
+                "batches":[{"rows":500,"ms":30}],"eta_s":12}"#,
+            )
+            .unwrap(),
+        );
         let status = evaluate(&input);
-        assert_eq!(status.migration.as_ref().unwrap().percent, Some(90));
-        let json = serde_json::to_string(input.admin_migration.as_ref().unwrap()).unwrap();
-        assert!(!json.contains("secret-path"));
+        let migration = status.migration.as_ref().unwrap();
+        assert_eq!(migration.percent, Some(90));
+        assert_eq!(migration.phase.as_deref(), Some("path_build"));
+        assert_eq!(migration.state, MigrationState::Paused);
 
         input.schema_migration.as_mut().unwrap().state = MigrationState::Done;
         input.health_upgrade = None;
         input.admin_migration = None;
         assert!(evaluate(&input).migration.is_none());
+    }
+
+    #[test]
+    fn unknown_migration_state_is_tolerated_and_shown() {
+        let mut input = v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT]);
+        input.migration_header = Some("rebuilding_index".into());
+        let status = evaluate(&input);
+        let migration = status.migration.as_ref().unwrap();
+        assert_eq!(migration.state, MigrationState::Unknown);
+        assert_eq!(migration.state_label, "rebuilding_index");
+        assert_eq!(status.path_search, PathSearch::PausedForMigration);
+        assert!(status.main_search);
+        input.migration_header = Some("done".into());
+        let status = evaluate(&input);
+        assert!(status.migration.is_none());
+        assert_eq!(status.path_search, PathSearch::Available);
+    }
+
+    #[test]
+    fn all_scope_without_path_results_is_marked() {
+        let mut input = v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT]);
+        input.path_search_header_unavailable = true;
+        let status = evaluate(&input);
+        assert!(status.path_results_absent);
+        assert_eq!(status.path_search, PathSearch::PausedForMigration);
+        assert!(status.main_search);
+    }
+
+    #[test]
+    fn failed_or_rolled_back_migration_reports_error_code() {
+        let mut input = v9_input(&[compatibility::PLAN_B_FORMAT], &[]);
+        input.admin_migration = Some(MigrationStatus {
+            state: "rolled_back".into(),
+            error_code: Some("insufficient_space".into()),
+            ..Default::default()
+        });
+        let status = evaluate(&input);
+        assert!(status.migration.is_none());
+        assert_eq!(
+            status.notices,
+            vec![Notice::MigrationFailed {
+                state: "rolled_back".into(),
+                error_code: Some("insufficient_space".into())
+            }]
+        );
+        let text = status.notices[0].text(true);
+        assert!(text.contains("已回滚") && text.contains("1.3 倍"), "{text}");
+
+        input.admin_migration = Some(MigrationStatus {
+            state: "failed".into(),
+            error_code: Some("read_only".into()),
+            ..Default::default()
+        });
+        assert!(evaluate(&input).notices[0].text(true).contains("不可写"));
+    }
+
+    #[test]
+    fn disk_full_pauses_and_asks_to_free_space() {
+        let mut input = v9_input(&[compatibility::PLAN_B_FORMAT], &[]);
+        input.admin_migration = Some(MigrationStatus {
+            state: "paused".into(),
+            error_code: Some("disk_full".into()),
+            progress: Some(MigrationCounts { done: 1, total: 2 }),
+            ..Default::default()
+        });
+        let status = evaluate(&input);
+        assert_eq!(
+            status.migration.as_ref().unwrap().state,
+            MigrationState::Paused
+        );
+        assert!(status.main_search);
+        let paused = status
+            .notices
+            .iter()
+            .find(|n| matches!(n, Notice::MigrationPaused { .. }))
+            .unwrap();
+        assert!(paused.text(true).contains("腾出空间后点「继续」"));
+    }
+
+    #[test]
+    fn every_agreed_state_and_error_code_has_chinese_text() {
+        for state in [
+            "idle",
+            "deferred",
+            "preflight",
+            "backing_up",
+            "running",
+            "paused",
+            "switching",
+            "done",
+            "failed",
+            "cancelled",
+            "rolled_back",
+        ] {
+            assert_ne!(
+                MigrationState::parse(state),
+                MigrationState::Unknown,
+                "{state}"
+            );
+            let text = migration_state_text(state, true);
+            assert!(!text.is_ascii(), "{state}: {text}");
+        }
+        for code in [
+            "insufficient_space",
+            "locked",
+            "already_running",
+            "backup_failed",
+            "integrity_failed",
+            "io_error",
+            "not_migrated",
+            "disk_full",
+            "read_only",
+        ] {
+            let text = migration_error_text(code, true);
+            assert!(!text.contains("错误代码"), "{code}: {text}");
+        }
+        assert_eq!(migration_state_text("warming_up", true), "warming_up");
+        assert_eq!(migration_error_text("quota_x", true), "错误代码：quota_x");
+        for active in ["preflight", "backing_up", "switching", "warming_up"] {
+            assert!(MigrationState::parse(active).in_progress(), "{active}");
+        }
+        for ended in ["failed", "cancelled", "rolled_back"] {
+            assert!(MigrationState::parse(ended).failed(), "{ended}");
+        }
+    }
+
+    #[test]
+    fn migration_refusals_and_controls() {
+        assert_eq!(
+            MigrationRefusal::from_code("migration_in_progress"),
+            Some(MigrationRefusal::PathSearchInProgress)
+        );
+        assert_eq!(
+            MigrationRefusal::from_code("migration_switching").map(|r| r.default_retry_after()),
+            Some(5)
+        );
+        assert_eq!(MigrationRefusal::from_code("BUSY"), None);
+        assert!(migration_actions(false).is_empty());
+        assert_eq!(migration_actions(true), &MIGRATION_ACTIONS);
     }
 
     #[test]
