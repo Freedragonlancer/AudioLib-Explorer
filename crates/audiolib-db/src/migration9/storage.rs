@@ -236,7 +236,7 @@ pub(super) fn publish(
         .saturating_add(1);
     put(&tx, "dir_index_gen", &generation.to_string())?;
     tx.execute(
-        "INSERT INTO audiolib_schema_features VALUES('search_path',1)",
+        "INSERT INTO audiolib_schema_features VALUES('search_path',1),('vorbis_tags',1),('vendor_metadata',1)",
         [],
     )
     .map_err(db_error)?;
@@ -288,7 +288,7 @@ pub(super) fn rollback(path: &Path, mut saved: Saved) -> Result<Report> {
         .map_err(db_error)?;
     drop_paths(&tx)?;
     tx.execute(
-        "DELETE FROM audiolib_schema_features WHERE feature='search_path'",
+        "DELETE FROM audiolib_schema_features WHERE feature IN ('search_path','vorbis_tags','vendor_metadata')",
         [],
     )
     .map_err(db_error)?;

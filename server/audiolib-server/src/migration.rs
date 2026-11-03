@@ -5,14 +5,97 @@ use audiolib_core::{DataProvider, SearchRequest, SearchScope};
 use audiolib_db::migration9::{self, Action, Failure, Options, Report, State as MigrationState};
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::time::Duration;
+use std::{sync::PoisonError, time::Duration};
 
 pub(crate) const HEADER: &str = audiolib_core::server_upgrade::MIGRATION_HEADER;
+
+/// A single canonical main response, including its original query diagnostics.
+pub(crate) struct CachedSearch {
+    revision: u64,
+    request: Vec<u8>,
+    body: Bytes,
+}
+
+fn search_body(
+    state: &AppState,
+    request: &SearchRequest,
+    cache: bool,
+) -> audiolib_core::Result<Bytes> {
+    let json_error = |error: serde_json::Error| audiolib_core::Error::Database(error.to_string());
+    if !cache {
+        state
+            .migration_search_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        return Ok(serde_json::to_vec(&state.provider().search(request)?)
+            .map_err(json_error)?
+            .into());
+    }
+    let key = serde_json::to_vec(request).map_err(json_error)?;
+    let revision = state.provider().search_revision()?;
+    {
+        let saved = state
+            .migration_search_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(saved) = saved.as_ref()
+            && Some(saved.revision) == revision
+            && saved.request == key
+        {
+            return Ok(saved.body.clone());
+        }
+    }
+    let page = state.provider().search(request)?;
+    let body: Bytes = serde_json::to_vec(&page).map_err(json_error)?.into();
+    // Never retain an oversized Metadata page or publish a response across a
+    // commit. The dedicated provider observer covers own and external writes.
+    if body.len() <= 4 * 1024 * 1024
+        && let Some(revision) = revision
+        && state.provider().search_revision()? == Some(revision)
+    {
+        *state
+            .migration_search_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(CachedSearch {
+            revision,
+            request: key,
+            body: body.clone(),
+        });
+    }
+    Ok(body)
+}
+
+/// Explicitly unauthenticated, native migration clients on a loopback listener.
+/// Default authentication, forwarded traffic and browser requests keep the admin guard.
+pub(crate) fn local_admin(request: &Request, security: &crate::Security) -> bool {
+    let headers = request.headers();
+    request.uri().path().starts_with("/admin/api/migration/")
+        && security.auth_mode() == crate::auth::AuthMode::Off
+        && request
+            .extensions()
+            .get::<crate::ConnectionInfo>()
+            .is_some_and(|info| {
+                info.peer.ip().to_canonical().is_loopback()
+                    && info
+                        .local
+                        .is_some_and(|local| local.ip().to_canonical().is_loopback())
+            })
+        && !crate::auth::has_forwarding_headers(headers)
+        && !headers.contains_key("origin")
+        && !headers.contains_key("sec-fetch-site")
+        && (matches!(*request.method(), Method::GET | Method::HEAD)
+            || headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(';').next() == Some("application/json")))
+}
 
 pub(crate) async fn status(
     State(service): State<Service>,
@@ -43,8 +126,8 @@ pub(crate) async fn action(
     headers: HeaderMap,
     extensions: axum::http::Extensions,
 ) -> Result<Response, ApiError> {
-    // The enclosing admin router enforces LAN, X-AudioLib-Admin and same-origin.
-    // Migration also requires manage permission; no test feature bypasses either.
+    // The admin router admits LAN clients or native loopback clients with auth off.
+    // Both paths still require the configured management permission.
     let connection = extensions.get::<crate::ConnectionInfo>();
     service.security().authorize_manage(&headers, connection)?;
     let action: Action = action.parse()?;
@@ -105,7 +188,27 @@ pub(crate) async fn headers(
     if let Some(report) = &report {
         request.extensions_mut().insert(report.clone());
     }
-    let mut response = next.run(request).await;
+    // Reserve the documented vendor-import write boundary during publication,
+    // including before an importer route is installed. Normal routing owns all
+    // other states. Authentication and management policy still precede rejection.
+    let vendor = request.uri().path() == "/api/vendor-import"
+        || request.uri().path().starts_with("/api/vendor-import/");
+    let mut response = if vendor && let Some(response) = switching_write(&request) {
+        let connection = request.extensions().get::<crate::ConnectionInfo>();
+        match service
+            .security()
+            .authorize(request.headers(), connection)
+            .and_then(|()| {
+                service
+                    .security()
+                    .authorize_manage(request.headers(), connection)
+            }) {
+            Ok(()) => response,
+            Err(error) => error.into_response(),
+        }
+    } else {
+        next.run(request).await
+    };
     if let Some(state) = response
         .extensions()
         .get::<MigrationState>()
@@ -158,14 +261,23 @@ pub(crate) async fn search(
         if fallback {
             request.scope = SearchScope::Main;
         }
-        Ok((fallback, Some(state.provider().search(&request)?)))
+        let cache = unavailable
+            && matches!(
+                report.state,
+                MigrationState::Preflight
+                    | MigrationState::BackingUp
+                    | MigrationState::Running
+                    | MigrationState::Paused
+                    | MigrationState::Switching
+            );
+        Ok((fallback, Some(search_body(&state, &request, cache)?)))
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
     let Some(page) = page else {
         return Ok(unavailable("migration_in_progress", "30"));
     };
-    let mut response = Json(page).into_response();
+    let mut response = ([("content-type", "application/json")], page).into_response();
     if report {
         response.headers_mut().insert(
             "x-audiolib-path-search",

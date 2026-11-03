@@ -567,6 +567,8 @@ struct Inner {
     root_policy: RootPolicy,
     /// `GET /library` statistics cache (see [`StatsCache`]).
     stats: StatsCache,
+    /// One bounded main-search response while schema-9 backfill is active.
+    migration_search: Mutex<Option<crate::migration::CachedSearch>>,
     /// Serializes root additions and removals from the admin page.
     roots_edit: Mutex<()>,
     stream_open_delay_ms: AtomicU64,
@@ -836,6 +838,7 @@ impl AppState {
                 root_policy: config.root_policy(),
                 roots_edit: Mutex::new(()),
                 stats: StatsCache::load(provider_path),
+                migration_search: Mutex::new(None),
                 stream_open_delay_ms: AtomicU64::new(0),
                 snapshot_delay_ms: AtomicU64::new(0),
                 stat_delay_ms: AtomicU64::new(0),
@@ -1002,6 +1005,10 @@ impl AppState {
     /// The library provider; future endpoints use it for all business data access.
     pub fn provider(&self) -> &Arc<SqliteProvider> {
         &self.inner.provider
+    }
+
+    pub(crate) fn migration_search_cache(&self) -> &Mutex<Option<crate::migration::CachedSearch>> {
+        &self.inner.migration_search
     }
 
     /// Immutable library identity pinned by this AppState and its DataProvider.

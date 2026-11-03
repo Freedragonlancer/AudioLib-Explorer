@@ -174,7 +174,14 @@ fn markers(conn: &Connection) -> Result<Switch> {
         source_search_rev,
         user_version,
         features: if user_version == 9 {
-            vec!["search_path".into()]
+            let mut statement = conn.prepare(
+                "SELECT feature FROM audiolib_schema_features WHERE feature IN ('search_path','vorbis_tags','vendor_metadata') AND version=1 ORDER BY feature",
+            ).map_err(db_error)?;
+            statement
+                .query_map([], |row| row.get(0))
+                .map_err(db_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(db_error)?
         } else {
             vec![]
         },
@@ -305,7 +312,13 @@ fn execute_inner(
                 storage::request_control(&path, action)?;
                 return status(&path);
             }
-            saved.report.error_code = Some(Failure::AlreadyRunning);
+            saved.report.error_code = Some(
+                if matches!(saved.report.state, State::Running | State::Switching) {
+                    Failure::AlreadyRunning
+                } else {
+                    Failure::Locked
+                },
+            );
             return Ok(saved.report);
         }
         Err(e) => return Err(e),
@@ -432,7 +445,25 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
     }
     crate::register_library_functions(&conn)?;
     storage::clear_control(&conn)?;
-    saved.report.state = State::Running;
+    saved.report.progress = conn
+        .query_row(
+            "SELECT done,total FROM v9_checkpoint WHERE singleton=1",
+            [],
+            |r| {
+                Ok(Progress {
+                    done: count(r, 0)?,
+                    total: count(r, 1)?,
+                })
+            },
+        )
+        .map_err(db_error)?;
+    // The first committed sample completes write-latency calibration. Preparation
+    // retains the preflight state until that checkpoint exists durably.
+    saved.report.state = if saved.report.progress.done == 0 {
+        State::Preflight
+    } else {
+        State::Running
+    };
     save(path, saved)?;
     let mut batch_rows = 5000usize;
     #[cfg(feature = "test-hooks")]
@@ -440,6 +471,16 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
         batch_rows = hooks::number("AUDIOLIB_MIGRATION_BATCH_ROWS")
             .map_or(batch_rows, |n| n.clamp(1, 50_000) as usize);
     }
+    // Sample several transactions even on small directory trees so latency feedback
+    // can reduce the next write lock before the entire backfill has completed.
+    let remaining: u64 = conn
+        .query_row(
+            "SELECT max(total-done,0) FROM v9_checkpoint WHERE singleton=1",
+            [],
+            |r| count(r, 0),
+        )
+        .map_err(db_error)?;
+    batch_rows = batch_rows.min(remaining.div_ceil(4).max(1) as usize);
     #[cfg(feature = "test-hooks")]
     let mut batch = 0;
     loop {
@@ -486,6 +527,7 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
         }
         tx.execute("UPDATE v9_checkpoint SET last_id=?1,done=done+?2,total=(SELECT count(*) FROM folders) WHERE singleton=1", params![ids.last(), ids.len() as i64]).map_err(db_error)?;
         tx.commit().map_err(db_error)?;
+        saved.report.state = State::Running;
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         saved.report.batches.push(Batch {
             rows: ids.len() as u64,

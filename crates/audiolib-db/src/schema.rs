@@ -88,6 +88,8 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
                 "search_storage",
                 "play_history_retired",
                 "search_path",
+                "vorbis_tags",
+                "vendor_metadata",
             ]
             .contains(&name.as_str())
             {
@@ -107,6 +109,8 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
         ("search_storage", 1),
         ("play_history_retired", 2),
         ("search_path", 1),
+        ("vorbis_tags", 1),
+        ("vendor_metadata", 1),
     ] {
         if let Some(version) = feature_version(conn, feature)?
             && version > supported

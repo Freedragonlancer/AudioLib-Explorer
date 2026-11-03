@@ -68,6 +68,12 @@ fn format_ready_at_version(
     let mut expected = LibraryFormat::target().features;
     if expected_version == 9 {
         expected.insert("search_path".into(), 1);
+        // Earlier directory-only s9 files remain readable. New publications commit
+        // both Metadata capabilities together, and partial feature sets are refused.
+        if features.contains_key("vorbis_tags") || features.contains_key("vendor_metadata") {
+            expected.insert("vorbis_tags".into(), 1);
+            expected.insert("vendor_metadata".into(), 1);
+        }
     }
     if allow_p0
         && features.get("metadata_storage") == Some(&1)

@@ -55,6 +55,10 @@ fn directory_only_switch_reopens_and_rollback_preserves_new_annotations() {
     let before = shadow(&db);
     let report = run(&db, Action::Start);
     assert_eq!(report.state, State::Done, "{report:?}");
+    assert_eq!(
+        report.switch.unwrap().features,
+        ["search_path", "vendor_metadata", "vorbis_tags"]
+    );
     assert_eq!(before, shadow(&db));
     let c = Connection::open(&db).unwrap();
     migration9::validate_ready(&c).unwrap();
@@ -206,6 +210,7 @@ fn subprocess_faults_resume_directory_batches_without_rebuilding_main() {
             8,
             "{fault}: publication must remain atomic"
         );
+        assert_eq!(c.query_row("SELECT count(*) FROM audiolib_schema_features WHERE feature IN ('search_path','vorbis_tags','vendor_metadata')", [], |r| r.get::<_,i64>(0)).unwrap(), 0, "{fault}");
         assert_eq!(
             c.query_row("SELECT done FROM v9_checkpoint", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -225,4 +230,42 @@ fn subprocess_faults_resume_directory_batches_without_rebuilding_main() {
             "{fault}"
         );
     }
+}
+
+#[test]
+fn earlier_directory_only_schema9_remains_readable_and_partial_features_fail() {
+    let (_dir, db) = fixture();
+    assert_eq!(run(&db, Action::Start).state, State::Done);
+    let c = Connection::open(&db).unwrap();
+    c.execute(
+        "DELETE FROM audiolib_schema_features WHERE feature='vendor_metadata'",
+        [],
+    )
+    .unwrap();
+    assert!(migration9::validate_ready(&c).is_err());
+    c.execute(
+        "DELETE FROM audiolib_schema_features WHERE feature='vorbis_tags'",
+        [],
+    )
+    .unwrap();
+    migration9::validate_ready(&c).unwrap();
+    assert_eq!(
+        run(&db, Action::Status).switch.unwrap().features,
+        ["search_path"]
+    );
+    let provider =
+        SqliteProvider::open_server_existing(&db, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(
+        provider
+            .search(&SearchRequest {
+                query: "SFX".into(),
+                scope: SearchScope::Path,
+                ..Default::default()
+            })
+            .unwrap()
+            .results
+            .len(),
+        1
+    );
+    assert_eq!(run(&db, Action::Rollback).state, State::RolledBack);
 }

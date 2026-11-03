@@ -150,7 +150,10 @@ impl LibraryFormat {
 
     /// Exact completed snapshot format; incomplete/unknown combinations have no ID.
     pub fn snapshot_format_id(&self) -> Option<String> {
-        if self == &Self::server_schema9() {
+        let mut directory_only = Self::server_schema9();
+        directory_only.features.remove("vorbis_tags");
+        directory_only.features.remove("vendor_metadata");
+        if self == &Self::server_schema9() || self == &directory_only {
             return Some(PLAN_B_V9_FORMAT.into());
         }
         if unknown_requirement(self).is_some()
@@ -206,6 +209,8 @@ impl LibraryFormat {
         format.schema_version = 9;
         format.source_search_revision = Some(3);
         format.features.insert("search_path".into(), 1);
+        format.features.insert("vorbis_tags".into(), 1);
+        format.features.insert("vendor_metadata".into(), 1);
         format
     }
 }
