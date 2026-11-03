@@ -290,12 +290,7 @@ mod tests {
                 _ => {}
             }
             if let Some(allowed) = rule["enum"].as_array() {
-                // Agreed after the schema was cut (see the gap list): disk_full, read_only.
-                let late = ["disk_full", "read_only"];
-                assert!(
-                    allowed.contains(value) || value.as_str().is_some_and(|v| late.contains(&v)),
-                    "{at}: {value}"
-                );
+                assert!(allowed.contains(value), "{at}: {value}");
             }
             if let Some(minimum) = rule["minimum"].as_f64()
                 && let Some(number) = value.as_f64()
