@@ -234,7 +234,7 @@ pub(crate) fn switching_write(request: &Request) -> Option<Response> {
             .get::<Report>()
             .is_some_and(|r| r.state == MigrationState::Switching)
     {
-        Some(unavailable("migration_switching", "5"))
+        Some(unavailable("migration_switching", "30"))
     } else {
         None
     }

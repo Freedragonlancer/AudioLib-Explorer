@@ -305,12 +305,12 @@ async fn paused_reads_scopes_and_switching_writes_follow_http_schema() {
     );
     let write = request(&state, Method::PATCH, "/api/v1/audio/1/metadata", false).await;
     assert_eq!(write.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(write.headers()["retry-after"], "5");
+    assert_eq!(write.headers()["retry-after"], "30");
     assert_eq!(write.headers()["x-audiolib-migration"], "switching");
     assert_eq!(json(write).await["error_code"], "migration_switching");
     let vendor = request(&state, Method::POST, "/api/vendor-import/batch", false).await;
     assert_eq!(vendor.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(vendor.headers()["retry-after"], "5");
+    assert_eq!(vendor.headers()["retry-after"], "30");
     assert_eq!(vendor.headers()["x-audiolib-migration"], "switching");
     assert_eq!(json(vendor).await["error_code"], "migration_switching");
     assert_eq!(

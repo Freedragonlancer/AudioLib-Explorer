@@ -41,7 +41,7 @@ Host 仍须通过管理入口检查。`manage_mode=off|lan` 仍拒绝回环管�
 - 回填期间，相同的有效 main 查询按 DataProvider 搜索修订复用一个至多 4 MiB 的
   完整 JSON 响应，含该次查询的真实诊断字段。all 回退与 main 可共享该响应。
   本进程写入、外部提交及恢复会使缓存失效，期间发生提交的查询结果不进入缓存。
-- switching 时写接口返回 503 `migration_switching`、`Retry-After: 5`；读接口继续服务。
+- switching 时写接口返回 503 `migration_switching`、`Retry-After: 30`；读接口继续服务。
 
 迁移预检只读权限和额外可用空间（至少库大小的 1.3 倍）。SQLite 在线备份写入同目录
 唯一的 `audiolib-rollback-mig9-*.db`，验证完整性、外键及库身份后保留，绝不自动删除。

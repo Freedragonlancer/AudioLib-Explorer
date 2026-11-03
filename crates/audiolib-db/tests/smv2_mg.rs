@@ -44,8 +44,11 @@ fn env(k: &'static str, v: impl ToString) -> (&'static str, String) {
 #[derive(Debug, PartialEq)]
 struct EndState {
     user_version: i64,
+    dir_rows: i64,
+    folder_rows: i64,
     path_rows: i64,
     file_rows: i64,
+    path_runs: Vec<(i64, i64, i64, i64)>,
     path_tokens: String,
     main_shadow: String,
 }
@@ -55,9 +58,18 @@ fn end_state(db: &Path) -> EndState {
     let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
     EndState {
         user_version: user_version(db),
-        path_rows: count("SELECT count(*) FROM audio_path_search"),
+        dir_rows: count("SELECT count(*) FROM audio_dir_search"),
+        folder_rows: count("SELECT count(*) FROM folders"),
+        path_rows: count("SELECT coalesce(sum(n),0) FROM audio_dir_runs"),
         file_rows: count("SELECT count(*) FROM audio_files"),
-        path_tokens: fts_instance_hash(&c, "audio_path_search"),
+        path_runs: c
+            .prepare("SELECT dir_id, lo, hi, n FROM audio_dir_runs ORDER BY dir_id, lo")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap(),
+        path_tokens: fts_instance_hash(&c, "audio_dir_search"),
         main_shadow: main_fts_shadow_hash(&c),
     }
 }
@@ -437,7 +449,7 @@ fn mg_10_integrity_counts_and_main_fts_unchanged() {
     drop(c);
     d.migrate_to_done(&db);
     let c = conn(&db);
-    for t in ["audio_search", "audio_path_search"] {
+    for t in ["audio_search", "audio_dir_search"] {
         c.execute(
             &format!("INSERT INTO {t}({t}) VALUES('integrity-check')"),
             [],
@@ -450,13 +462,31 @@ fn mg_10_integrity_counts_and_main_fts_unchanged() {
     assert_eq!(ic, "ok");
     let s = end_state(&db);
     assert_eq!(
+        s.dir_rows, s.folder_rows,
+        "audio_dir_search vs folders rows"
+    );
+    assert_eq!(
         s.path_rows, s.file_rows,
-        "audio_path_search vs audio_files rows"
+        "audio_dir_runs sum(n) vs audio_files rows"
     );
     let ids_match: i64 = c
-        .query_row("SELECT count(*) FROM audio_files WHERE id NOT IN (SELECT rowid FROM audio_path_search)", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM audio_files f WHERE NOT EXISTS (
+                SELECT 1 FROM audio_dir_runs r JOIN audio_dir_search d ON d.rowid=r.dir_id
+                WHERE r.dir_id=f.folder_id AND f.id BETWEEN r.lo AND r.hi)",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(ids_match, 0);
+    let orphan_runs: i64 = c
+        .query_row(
+            "SELECT count(*) FROM audio_dir_runs WHERE dir_id NOT IN (SELECT id FROM folders)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_runs, 0);
     assert_eq!(
         c.query_row("SELECT count(*) FROM audio_search", [], |r| r
             .get::<_, i64>(0))
@@ -679,6 +709,7 @@ fn mg_17_scan_and_rename_during_backfill_reach_path_table() {
     drop(c);
     assert_eq!(d.run("resume", &db, &[]).state(), "done");
     let s = end_state(&db);
+    assert_eq!(s.dir_rows, s.folder_rows);
     assert_eq!(s.path_rows, s.file_rows);
     let hit = d.search("path_search", &db, "Mg17renamed");
     assert!(hit.contains(&id), "renamed row not in path table: {hit:?}");
@@ -950,7 +981,7 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
     assert_eq!(srv.call("PATH_SEARCH", id).status, 200);
 }
 
-/// During `switching`: writes 503 migration_switching (Retry-After 5), reads 200.
+/// During `switching`: writes 503 migration_switching (Retry-After 30), reads 200.
 /// The switch window is short; status is polled while a slowed run finishes.
 #[test]
 #[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
@@ -981,7 +1012,7 @@ fn mg_15_http_writes_rejected_during_switch() {
                 if resp.header("x-audiolib-migration") != Some("switching") {
                     continue; // the switch ended between the two requests
                 }
-                assert_http_error(&resp, 503, "migration_switching", "5");
+                assert_http_error(&resp, 503, "migration_switching", "30");
                 seen = true;
             }
             let read = srv.call("LIST", id);
