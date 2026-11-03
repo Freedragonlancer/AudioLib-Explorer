@@ -507,6 +507,9 @@ pub const FEATURES: &[(&str, u32)] = &[
     (ALBUM_ENTITIES_FEATURE, ALBUM_ENTITIES_REVISION),
     ("list_waveform_jobs", 1),
     ("list_waveforms", 1),
+    ("search_path", 1),
+    ("vendor_metadata", 1),
+    ("vorbis_tags", 1),
     ("waveform_bundle_strong_etag", 1),
 ];
 /// Accepted-range shape kept for peers that still do range checks.
@@ -517,8 +520,8 @@ pub const PEER_APPLICATION_RANGES: &[&str] = &[">=0.6.0"];
 pub const SNAPSHOT_SCHEMA_MAX_HEADER: &str = "x-audiolib-snapshot-schema-max";
 pub const SEARCH_STORAGE_MAX_HEADER: &str = "x-audiolib-search-storage-max";
 pub const TOKENIZATION_MAX_HEADER: &str = "x-audiolib-tokenization-max";
-/// Highest schema the client reads.
-pub const SNAPSHOT_SCHEMA_MAX: u32 = TARGET_SCHEMA;
+/// Highest schema the client will accept on a snapshot download (s9 readable; writes stay at TARGET_SCHEMA).
+pub const SNAPSHOT_SCHEMA_MAX: u32 = 9;
 /// Highest search storage revision the client reads (matches `LibraryFormat::target()`).
 pub const SEARCH_STORAGE_MAX: u32 = 1;
 /// Highest tokenization revision the client reads.
@@ -642,6 +645,7 @@ pub fn compatibility_manifest() -> CompatibilityManifest {
             PLAN_B_V7_FORMAT.into(),
             PLAN_B_V8_COMPRESSED_FORMAT.into(),
             PLAN_B_FORMAT.into(),
+            PLAN_B_V9_FORMAT.into(),
         ],
         database_write_formats: vec![PLAN_B_FORMAT.into()],
         migration_source_schemas: (3..=TARGET_SCHEMA).collect(),
@@ -898,7 +902,7 @@ mod tests {
         assert_eq!(manifest.database_write_formats, vec![PLAN_B_FORMAT]);
         assert_eq!(manifest.migration_target_format, PLAN_B_FORMAT);
         assert_eq!(manifest.migration_source_schemas, vec![3, 4, 5, 6, 7, 8]);
-        assert_eq!(SNAPSHOT_SCHEMA_MAX, 8);
+        assert_eq!(SNAPSHOT_SCHEMA_MAX, 9);
         assert_eq!(
             manifest.snapshot_read_formats,
             vec![
@@ -911,8 +915,10 @@ mod tests {
                 PLAN_B_V7_FORMAT,
                 PLAN_B_V8_COMPRESSED_FORMAT,
                 PLAN_B_FORMAT,
+                PLAN_B_V9_FORMAT,
             ]
         );
+        assert_eq!(manifest.features.get("search_path"), Some(&1));
         for feature in [ALBUM_ENTITIES_FEATURE, ALBUM_ENTITY_ARTWORK_FEATURE] {
             assert_eq!(manifest.features.get(feature), Some(&1));
         }

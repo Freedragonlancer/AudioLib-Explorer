@@ -17,6 +17,7 @@ pub mod list_waveform_i8;
 mod metadata;
 pub mod profiles;
 pub mod search_workspace;
+pub mod server_upgrade;
 pub mod server_url;
 pub mod tag_filter;
 pub mod waveform_cache;
@@ -766,6 +767,13 @@ pub trait DataProvider: Send + Sync {
         format: LibraryExportFormat,
     ) -> Result<TransferReport>;
     fn import_annotations(&self, source: &Path) -> Result<TransferReport>;
+
+    /// How the connected server relates to this client version (newer server, older
+    /// server, schema migration, unknown snapshot formats). `None` (the default) for
+    /// local providers and servers that were not asked. Blocking: call off the UI thread.
+    fn server_upgrade_status(&self) -> Result<Option<server_upgrade::ServerUpgradeStatus>> {
+        Ok(None)
+    }
 
     /// Where this provider's list thumbnail Waveforms come from (doc/api/README.md
     /// §9.1–§9.3). `Unavailable` (the default) hides the list Waveform column.

@@ -82,6 +82,42 @@ impl HiddenRecords {
     }
 }
 
+/// Outcome of draining server-upgrade notices for one URL this session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct UpgradeNoticeOutcome {
+    pub text: Option<String>,
+    /// At least one drained notice should open the existing "check for updates" flow.
+    pub offer_update_check: bool,
+}
+
+/// Server upgrade notices not shown yet for `url` in this session (each kind once per
+/// session; migration progress every time), joined for the status line. Never starts
+/// a download or install: the user updates through the existing update check.
+pub(super) fn upgrade_notice(
+    url: &str,
+    status: &audiolib_core::server_upgrade::ServerUpgradeStatus,
+    chinese: bool,
+) -> UpgradeNoticeOutcome {
+    use audiolib_core::server_upgrade::NoticeSession;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static SESSIONS: OnceLock<Mutex<HashMap<String, NoticeSession>>> = OnceLock::new();
+    let mut sessions = SESSIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let notices = sessions.entry(url.to_string()).or_default().take(status);
+    let offer_update_check = notices.iter().any(|notice| notice.offers_update_check());
+    let texts: Vec<String> = notices
+        .into_iter()
+        .map(|notice| notice.text(chinese))
+        .collect();
+    UpgradeNoticeOutcome {
+        text: (!texts.is_empty()).then(|| texts.join(" ")),
+        offer_update_check,
+    }
+}
+
 /// Removal gate of the active server for the menus (from its `/capabilities`).
 #[derive(Clone, Debug, Default)]
 pub(super) struct ServerManage {
@@ -270,15 +306,22 @@ impl Controller {
         let chinese = self.chinese.load(Ordering::Acquire);
         let c = self.clone();
         std::thread::spawn(move || {
+            let mut upgrade = None;
             let manage = match RemoteClient::new(&settings.server_url, &secrets.token)
-                .and_then(|client| client.capabilities())
+                .and_then(|client| client.capabilities().map(|reply| (client, reply)))
             {
-                Ok(capabilities) => ServerManage {
-                    url: settings.server_url.clone(),
-                    can_manage: capabilities.may_manage(),
-                    note: capabilities_note(&capabilities, chinese),
-                    capabilities: Some(capabilities),
-                },
+                Ok((client, capabilities)) => {
+                    upgrade = Some(audiolib_remote::server_upgrade_status(
+                        &client,
+                        &capabilities,
+                    ));
+                    ServerManage {
+                        url: settings.server_url.clone(),
+                        can_manage: capabilities.may_manage(),
+                        note: capabilities_note(&capabilities, chinese),
+                        capabilities: Some(capabilities),
+                    }
+                }
                 Err(error) => ServerManage {
                     url: settings.server_url.clone(),
                     can_manage: false,
@@ -293,6 +336,26 @@ impl Controller {
                     },
                 },
             };
+            if let Some(status) = upgrade.as_ref() {
+                let notice = upgrade_notice(&settings.server_url, status, chinese);
+                if let Some(message) = notice.text.clone() {
+                    c.status(message);
+                }
+                if notice.offer_update_check {
+                    let prompt = notice.text.unwrap_or_else(|| {
+                        if chinese {
+                            "服务器已升级，请检查客户端更新。".into()
+                        } else {
+                            "The server was upgraded; please check for client updates.".into()
+                        }
+                    });
+                    let ui = c.ui.clone();
+                    post(ui, move |ui| {
+                        let _ = ui;
+                        crate::updates::offer_client_upgrade_check(prompt);
+                    });
+                }
+            }
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
                 c2.apply_server_manage(&ui, &settings.server_url, manage);
@@ -643,5 +706,52 @@ mod tests {
             english.contains("WAV files on the server are untouched"),
             "{english}"
         );
+    }
+}
+
+#[cfg(test)]
+mod upgrade_notice_tests {
+    use super::upgrade_notice;
+    use audiolib_core::server_upgrade::{Notice, PathSearch, ServerUpgradeStatus};
+
+    #[test]
+    fn upgrade_notices_show_once_per_session_and_progress_updates() {
+        let status = ServerUpgradeStatus {
+            path_search: PathSearch::NeedsClientUpgrade,
+            main_search: true,
+            vendor_import: None,
+            migration: None,
+            path_results_absent: false,
+            notices: vec![
+                Notice::PathSearchNeedsUpgrade,
+                Notice::Migrating { percent: Some(40) },
+            ],
+        };
+        let url = "http://upgrade-notice.test";
+        let first = upgrade_notice(url, &status, true);
+        let first_text = first.text.as_deref().unwrap();
+        assert!(first_text.contains("路径搜索"));
+        assert!(first_text.contains("40%"));
+        assert!(first.offer_update_check);
+        let again = upgrade_notice(url, &status, true);
+        let again_text = again.text.as_deref().unwrap();
+        assert!(!again_text.contains("路径搜索"));
+        assert!(again_text.contains("40%"));
+        assert!(!again.offer_update_check);
+    }
+
+    #[test]
+    fn migration_only_notice_does_not_offer_update_check() {
+        let status = ServerUpgradeStatus {
+            path_search: PathSearch::PausedForMigration,
+            main_search: true,
+            vendor_import: None,
+            migration: None,
+            path_results_absent: false,
+            notices: vec![Notice::Migrating { percent: Some(10) }],
+        };
+        let notice = upgrade_notice("http://upgrade-notice-mig.test", &status, true);
+        assert!(notice.text.unwrap().contains("10%"));
+        assert!(!notice.offer_update_check);
     }
 }
