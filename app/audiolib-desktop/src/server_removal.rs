@@ -82,6 +82,14 @@ impl HiddenRecords {
     }
 }
 
+/// Outcome of draining server-upgrade notices for one URL this session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct UpgradeNoticeOutcome {
+    pub text: Option<String>,
+    /// At least one drained notice should open the existing "check for updates" flow.
+    pub offer_update_check: bool,
+}
+
 /// Server upgrade notices not shown yet for `url` in this session (each kind once per
 /// session; migration progress every time), joined for the status line. Never starts
 /// a download or install: the user updates through the existing update check.
@@ -89,7 +97,7 @@ pub(super) fn upgrade_notice(
     url: &str,
     status: &audiolib_core::server_upgrade::ServerUpgradeStatus,
     chinese: bool,
-) -> Option<String> {
+) -> UpgradeNoticeOutcome {
     use audiolib_core::server_upgrade::NoticeSession;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -98,14 +106,16 @@ pub(super) fn upgrade_notice(
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let texts: Vec<String> = sessions
-        .entry(url.to_string())
-        .or_default()
-        .take(status)
+    let notices = sessions.entry(url.to_string()).or_default().take(status);
+    let offer_update_check = notices.iter().any(|notice| notice.offers_update_check());
+    let texts: Vec<String> = notices
         .into_iter()
         .map(|notice| notice.text(chinese))
         .collect();
-    (!texts.is_empty()).then(|| texts.join(" "))
+    UpgradeNoticeOutcome {
+        text: (!texts.is_empty()).then(|| texts.join(" ")),
+        offer_update_check,
+    }
 }
 
 /// Removal gate of the active server for the menus (from its `/capabilities`).
@@ -326,11 +336,25 @@ impl Controller {
                     },
                 },
             };
-            if let Some(message) = upgrade
-                .as_ref()
-                .and_then(|status| upgrade_notice(&settings.server_url, status, chinese))
-            {
-                c.status(message);
+            if let Some(status) = upgrade.as_ref() {
+                let notice = upgrade_notice(&settings.server_url, status, chinese);
+                if let Some(message) = notice.text.clone() {
+                    c.status(message);
+                }
+                if notice.offer_update_check {
+                    let prompt = notice.text.unwrap_or_else(|| {
+                        if chinese {
+                            "服务器已升级，请检查客户端更新。".into()
+                        } else {
+                            "The server was upgraded; please check for client updates.".into()
+                        }
+                    });
+                    let ui = c.ui.clone();
+                    post(ui, move |ui| {
+                        let _ = ui;
+                        crate::updates::offer_client_upgrade_check(prompt);
+                    });
+                }
             }
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
@@ -704,11 +728,30 @@ mod upgrade_notice_tests {
             ],
         };
         let url = "http://upgrade-notice.test";
-        let first = upgrade_notice(url, &status, true).unwrap();
-        assert!(first.contains("路径搜索"));
-        assert!(first.contains("40%"));
-        let again = upgrade_notice(url, &status, true).unwrap();
-        assert!(!again.contains("路径搜索"));
-        assert!(again.contains("40%"));
+        let first = upgrade_notice(url, &status, true);
+        let first_text = first.text.as_deref().unwrap();
+        assert!(first_text.contains("路径搜索"));
+        assert!(first_text.contains("40%"));
+        assert!(first.offer_update_check);
+        let again = upgrade_notice(url, &status, true);
+        let again_text = again.text.as_deref().unwrap();
+        assert!(!again_text.contains("路径搜索"));
+        assert!(again_text.contains("40%"));
+        assert!(!again.offer_update_check);
+    }
+
+    #[test]
+    fn migration_only_notice_does_not_offer_update_check() {
+        let status = ServerUpgradeStatus {
+            path_search: PathSearch::PausedForMigration,
+            main_search: true,
+            vendor_import: None,
+            migration: None,
+            path_results_absent: false,
+            notices: vec![Notice::Migrating { percent: Some(10) }],
+        };
+        let notice = upgrade_notice("http://upgrade-notice-mig.test", &status, true);
+        assert!(notice.text.unwrap().contains("10%"));
+        assert!(!notice.offer_update_check);
     }
 }

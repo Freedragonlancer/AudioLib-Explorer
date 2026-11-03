@@ -13,8 +13,9 @@ pub const UPGRADE_AVAILABLE_HEADER: &str = "x-audiolib-upgrade-available";
 /// Longest header value accepted; longer values are ignored.
 pub const MAX_UPGRADE_HEADER_BYTES: usize = 512;
 /// The schema 9 Plan B snapshot format this client recognizes (§3, §6).
-pub const PLAN_B_V9_FORMAT: &str = "ale-s9-cld1-t3-m2-p1-a1-sp1";
-/// Path search rules this client knows (`sp1`, `search_path: 1`).
+/// Re-export of the schema-9 format this client reads (`sd1`).
+pub use compatibility::PLAN_B_V9_FORMAT;
+/// Path search rules this client knows (`sd1`, `search_path: 1`).
 pub const SEARCH_PATH_REVISION: u32 = 1;
 /// Compatibility feature names introduced by the design (§6).
 pub const SEARCH_PATH_FEATURE: &str = "search_path";
@@ -356,12 +357,12 @@ pub fn parse_schema_migration_header(value: &str) -> Option<SchemaMigrationHeade
     })
 }
 
-/// Segments of a snapshot format ID such as `ale-s9-cld1-t3-m2-p1-a1-sp1`.
+/// Segments of a snapshot format ID such as `ale-s9-cld1-t3-m2-p1-a1-sd1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatId {
     pub schema: u32,
     pub tokenization: u32,
-    /// `sp{n}`; absent before schema 9.
+    /// `sd{n}` (directory-segment) or legacy `sp{n}`; absent before schema 9.
     pub search_path: Option<u32>,
 }
 
@@ -384,7 +385,7 @@ pub fn parse_format_id(id: &str) -> Option<FormatId> {
         if part.is_empty() {
             return None;
         }
-        if let Some(value) = number(part, "sp") {
+        if let Some(value) = number(part, "sd").or_else(|| number(part, "sp")) {
             if search_path.replace(value).is_some() {
                 return None;
             }
@@ -408,16 +409,19 @@ pub fn parse_format_id(id: &str) -> Option<FormatId> {
 pub enum FormatSupport {
     /// A format this build reads today.
     Readable,
-    /// The schema 9 `sp1` format: recognized, path search rules known.
+    /// The schema 9 `sd1` format: recognized, path search rules known.
     KnownPathSearch,
-    /// Main tables known but newer path search rules (`sp2`+): never query them with
-    /// `sp1` rules.
+    /// Main tables known but newer path search rules (`sd2`+): never query them with
+    /// `sd1` rules.
     NewerPathRules,
     /// Unknown schema/tokenization major or malformed: incompatible.
     Incompatible,
 }
 
 pub fn format_support(id: &str) -> FormatSupport {
+    if id == PLAN_B_V9_FORMAT {
+        return FormatSupport::KnownPathSearch;
+    }
     let manifest = compatibility::compatibility_manifest();
     if manifest
         .snapshot_read_formats
@@ -425,9 +429,6 @@ pub fn format_support(id: &str) -> FormatSupport {
         .any(|known| known == id)
     {
         return FormatSupport::Readable;
-    }
-    if id == PLAN_B_V9_FORMAT {
-        return FormatSupport::KnownPathSearch;
     }
     match parse_format_id(id) {
         Some(format)
@@ -926,7 +927,7 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         || (!supports.is_empty()
             && supports.contains(&FormatSupport::NewerPathRules)
             && !supports.contains(&FormatSupport::KnownPathSearch));
-    let consistent_sp1 = !input.observed_formats.is_empty()
+    let consistent_v9 = !input.observed_formats.is_empty()
         && input
             .observed_formats
             .iter()
@@ -935,7 +936,7 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         PathSearch::NotOffered
     } else if newer_rules {
         PathSearch::NeedsClientUpgrade
-    } else if input.capabilities_known && feature == Some(SEARCH_PATH_REVISION) && consistent_sp1 {
+    } else if input.capabilities_known && feature == Some(SEARCH_PATH_REVISION) && consistent_v9 {
         PathSearch::Available
     } else {
         PathSearch::NotOffered
@@ -1293,13 +1294,13 @@ mod tests {
             FormatSupport::KnownPathSearch
         );
         assert_eq!(
-            format_support("ale-s9-cld1-t3-m2-p1-a1-sp2"),
+            format_support("ale-s9-cld1-t3-m2-p1-a1-sd2"),
             FormatSupport::NewerPathRules
         );
         for unknown in [
-            "ale-s10-cld1-t3-m2-p1-a1-sp1",
-            "ale-s9-cld1-t4-m2-p1-a1-sp1",
-            "ale-s9-cld1-t3-m2-p1-a1-sp1-sp2",
+            "ale-s10-cld1-t3-m2-p1-a1-sd1",
+            "ale-s9-cld1-t4-m2-p1-a1-sd1",
+            "ale-s9-cld1-t3-m2-p1-a1-sd1-sd2",
             "xyz-s9",
             "ale-s9--t3",
         ] {
@@ -1312,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn sp1_server_offers_path_search() {
+    fn sd1_server_offers_path_search() {
         let status = evaluate(&v9_input(
             &[PLAN_B_V9_FORMAT, compatibility::PLAN_B_FORMAT],
             &[PLAN_B_V9_FORMAT],
@@ -1323,16 +1324,16 @@ mod tests {
     }
 
     #[test]
-    fn sp2_disables_path_search_but_keeps_main_search() {
-        let sp2 = "ale-s9-cld1-t3-m2-p1-a1-sp2";
-        let status = evaluate(&v9_input(&[sp2, compatibility::PLAN_B_FORMAT], &[]));
+    fn sd2_disables_path_search_but_keeps_main_search() {
+        let sd2 = "ale-s9-cld1-t3-m2-p1-a1-sd2";
+        let status = evaluate(&v9_input(&[sd2, compatibility::PLAN_B_FORMAT], &[]));
         assert_eq!(status.path_search, PathSearch::NeedsClientUpgrade);
         assert!(status.main_search);
         assert_eq!(status.notices, vec![Notice::PathSearchNeedsUpgrade]);
         assert!(status.notices[0].offers_update_check());
 
-        // Header says sp1 but the content descriptor says sp2 (VN-12 mismatch).
-        let status = evaluate(&v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT, sp2]));
+        // Header says sd1 but the content descriptor says sd2 (VN-12 mismatch).
+        let status = evaluate(&v9_input(&[PLAN_B_V9_FORMAT], &[PLAN_B_V9_FORMAT, sd2]));
         assert_eq!(status.path_search, PathSearch::NeedsClientUpgrade);
         assert!(status.main_search);
 
@@ -1344,7 +1345,7 @@ mod tests {
 
     #[test]
     fn unknown_major_is_incompatible() {
-        let status = evaluate(&v9_input(&["ale-s10-cld1-t4-m2-p1-a1-sp1"], &[]));
+        let status = evaluate(&v9_input(&["ale-s10-cld1-t4-m2-p1-a1-sd1"], &[]));
         assert!(status.incompatible());
         assert!(!status.main_search);
         assert_eq!(status.path_search, PathSearch::NotOffered);
@@ -1355,7 +1356,7 @@ mod tests {
         // An observed tampered format ID is incompatible as well.
         let status = evaluate(&v9_input(
             &[compatibility::PLAN_B_FORMAT],
-            &["ale-s9-cld1-t3-m2-p1-a1-spX"],
+            &["ale-s9-cld1-t3-m2-p1-a1-sdX"],
         ));
         assert!(status.incompatible());
     }

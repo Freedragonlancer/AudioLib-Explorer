@@ -203,7 +203,7 @@ mod tests {
         let server = server(
             serde_json::json!({
                 "library_schema": {"current": 9, "source_search_rev": 1,
-                    "snapshot_formats_served": ["ale-s9-cld1-t3-m2-p1-a1-sp2",
+                    "snapshot_formats_served": ["ale-s9-cld1-t3-m2-p1-a1-sd2",
                         audiolib_core::compatibility::PLAN_B_FORMAT]},
                 "schema_migration": {"state": "running", "endpoint": "/admin/api/migration"},
                 "vendor_import": {"revision": 1, "max_file_bytes": 52428800, "max_rows": 200000,
@@ -232,7 +232,7 @@ mod tests {
                 .notices
                 .contains(&Notice::Migrating { percent: Some(75) })
         );
-        assert_ne!(PLAN_B_V9_FORMAT, "ale-s9-cld1-t3-m2-p1-a1-sp2");
+        assert_ne!(PLAN_B_V9_FORMAT, "ale-s9-cld1-t3-m2-p1-a1-sd2");
     }
 
     #[test]

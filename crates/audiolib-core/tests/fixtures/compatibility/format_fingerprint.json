@@ -1,7 +1,7 @@
 {
   "capability_max": {
     "x-audiolib-search-storage-max": 1,
-    "x-audiolib-snapshot-schema-max": 8,
+    "x-audiolib-snapshot-schema-max": 9,
     "x-audiolib-tokenization-max": 3
   },
   "legacy_compressed": {
@@ -34,7 +34,8 @@
     "ale-s7-cld1-t3-m2-p0",
     "ale-s7-cld1-t3-m2-p1",
     "ale-s8-cld1-t3-m2-p1-a1-z1",
-    "ale-s8-cld1-t3-m2-p1-a1"
+    "ale-s8-cld1-t3-m2-p1-a1",
+    "ale-s9-cld1-t3-m2-p1-a1-sd1"
   ],
   "target": {
     "features": {
