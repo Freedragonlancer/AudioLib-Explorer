@@ -73,6 +73,8 @@ mod library_progress;
 mod result_window;
 #[path = "search_tasks.rs"]
 mod search_tasks;
+#[path = "search_v2_ux.rs"]
+mod search_v2_ux;
 
 fn table_sort_order(index: i32) -> SortOrder {
     match index {
@@ -1126,6 +1128,7 @@ impl Controller {
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_search_tasks(ui);
         self.bind_artwork(ui);
+        self.bind_search_v2_ux(ui);
         let c = self.clone();
         ui.on_exit_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -4322,6 +4325,9 @@ impl Controller {
             .and_then(|provider| provider.path_search_ready().ok())
             .unwrap_or(false);
         ui.set_path_search_available(ready);
+        if !ready {
+            self.maybe_offer_local_upgrade(ui);
+        }
         let chosen = search_scope_from_index(ui.get_search_scope_index());
         request.scope = match chosen {
             SearchScope::Path if !ready => {

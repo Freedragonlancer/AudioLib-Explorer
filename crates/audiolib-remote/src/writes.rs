@@ -527,6 +527,37 @@ impl DataProvider for RemoteProvider {
         self.snapshot.path_search_ready()
     }
 
+    fn vendor_import_preview(
+        &self,
+        file: &std::path::Path,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportPreview> {
+        self.writer
+            .client()
+            .vendor_import_preview(file)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+
+    fn vendor_import_commit(
+        &self,
+        import_id: &str,
+        idempotency_key: &str,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportResult> {
+        self.writer
+            .client()
+            .vendor_import_commit(import_id, idempotency_key)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+
+    fn vendor_import_rollback(
+        &self,
+        import_id: &str,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportResult> {
+        self.writer
+            .client()
+            .vendor_import_rollback(import_id)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+
     fn search(&self, request: &SearchRequest) -> audiolib_core::Result<SearchPage> {
         self.snapshot.search(request)
     }
