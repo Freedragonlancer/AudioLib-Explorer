@@ -65,11 +65,12 @@
 3. 拆分后复用现有 `audiolib_tokenize`（字母词生成二元组，中文 jieba-rs + `resources/audio_terms.txt`）：**路径列与文件名列用同一套分词**，片段/前缀查询语义一致，不另建 prefix 或 trigram 索引。
 4. 每条记录路径文本上限 4 KiB；超出截断尾部目录并累计截断计数（迁移/扫描报告里可见）。
 
-### 2.3 归一
+### 2.3 归一（只用于路径表）
+- 以下归一**只用于 `audio_path_search` 及发给它的查询词**；主表 `audio_search` 不归一、不重建，分词版本仍为 t3。路径表规则版本由 `sp1` 表示，规则再变则升 `sp2`。
 - 统一 Unicode NFC（macOS 来源路径常为 NFD，`é` 与 `é` 必须同一个词）。需新增 `unicode-normalization` crate（纯 Rust，无系统依赖，许可 MIT/Apache-2.0）。
 - 大小写：FTS5 `unicode61` 已大小写折叠；`remove_diacritics 2` 保持现状。
 - 全角 ASCII（`ＡＢＣ`）转半角（NFKC 只用于这一步，不对中文整体做 NFKC）。
-- 查询端 `compile_query`（`search_text.rs:203`）做同样的归一，保证两边一致。
+- 查询端 `compile_query`（`search_text.rs:203`）只对发往路径表的查询词做同样归一；发往主表的查询保持现状。验收见 PR #208 EM-09：全角/NFD 样本在 s9 与 s8 主表命中数和 ID 集合完全一致，变体只能经路径表命中。
 
 ### 2.4 文件夹改名
 - 改名/移动在库里表现为 `folders` 变化 + 一批 `audio_files.folder_id` 或路径更新。
@@ -230,7 +231,7 @@ CREATE VIRTUAL TABLE audio_path_search USING fts5(
   tokenize='unicode61 remove_diacritics 2');
 ```
 - 批次元数据（文件 SHA-256、映射、行数、状态）的表形状以服务端实现为准。
-- **主表列结构不变**（是否按新分词规则重建见 §5.2 选项）：厂商文本并入现有 source 文本 `bwf_description_tokenized`（与 Vorbis 同路），不加 `vendor_tokenized` 列，不换表。代价：厂商字段在 bm25 排序里**没有单独权重**（与内嵌描述同权）。
+- **主表 `audio_search` 不动**（不归一、不重建）：厂商文本并入现有 source 文本 `bwf_description_tokenized`（与 Vorbis 同路），不加 `vendor_tokenized` 列，不换表。代价：厂商字段在 bm25 排序里**没有单独权重**（与内嵌描述同权）。
 - 路径表两列：`path_tokens`（目录段原文，NFC）、`path_tokens_tokenized`（`audiolib_tokenize` 结果），rowid = `audio_files.id`。
 - `v9_checkpoint.phase` 的取值与 `schema_migration.state` 枚举一致（`idle|running|paused|failed|done`），细分阶段在 `/admin/api/migration.phase`。
 
@@ -240,10 +241,8 @@ CREATE VIRTUAL TABLE audio_path_search USING fts5(
   2. 回填：按 `id` 升序分批，事务内同时写 checkpoint；delete + insert 保证幂等；可取消，重启后从 `last_id` 继续。业务读写照常。
   3. `optimize` + integrity-check。
   4. 切换（单事务，毫秒级）：写 `source_search_rev=3`、features、`user_version=9`。
-- **分词版本升到 t4 后的两个选项**（待 Paul 定，§11）：
-  - (a) 归一只用于路径表：迁移约 70s；但主表里全角/NFD 的文件名等仍按旧规则分词，与查询端归一不一致。
-  - (b) **推荐**：查询进主表前也归一，主表 `audio_search` 按新规则重建：分批可续跑（建新表分批写入再 RENAME，或 DROP 后重插），参考实测 2 万行/批 46 批约 227s + optimize 20s，主表约 250s，另加路径表约 70s（均不含备份），入库与查询行为一致。
-  - 选 (b) 时迁移不再是「只建路径表 70s」；步骤 1–4 中主表重建与路径表回填共用同一 checkpoint 和自适应批大小。
+- **默认方案 (a)**：归一只用于路径表，迁移只建路径表，约 70s（不含备份）。代价：主表里全角/NFD 的文件名仍按现状分词，查主表时不会归一命中（路径表能命中）。
+- **备选 (b)**（§11 待 Paul 定是否改选）：升分词版本到 t4（`SEARCH_TEXT_VERSION` 3→4，格式 `ale-s9-cld1-t4-m2-p1-a1-sp1`），查询进主表前也归一，主表按新规则分批可续跑重建（参考 46 批约 227s + optimize 20s，主表约 250s，另加路径表约 70s）；s8 派生快照还需另备 t3 主表。
 - 批大小：**自适应，每批 ≤2s**（B 方案 2 万行约 1.4s）。2 万行固定批在同表最坏情况下 p95 12.1s，会长时间持写锁。
 - 运行中 `SQLITE_FULL`：暂停并报错，保留 checkpoint。
 - `VACUUM`（实测 327s）**不放进迁移**，放维护窗口可选。
@@ -267,8 +266,8 @@ CREATE VIRTUAL TABLE audio_path_search USING fts5(
 | 现状整库重建（对照） | 499s，回滚备份峰值多占 12.4GB |
 | 路径表插入 + optimize（方案 B） | 64.6s + 2.4s，约 70s |
 | 回滚备份 + 校验 | 约 2–4 min |
-| 选项 (a) 只建路径表 | 约 70s（不含备份） |
-| 选项 (b) 主表按 t4 重建 + 路径表（推荐） | 主表约 250s（227s + optimize 20s）+ 路径表约 70s，合计约 320s（不含备份） |
+| 默认 (a) 只建路径表 | 约 70s（不含备份） |
+| 备选 (b) 主表按 t4 重建 + 路径表 | 主表约 250s（227s + optimize 20s）+ 路径表约 70s，合计约 320s（不含备份） |
 | 合计（含备份） | (a) < 5 min；(b) 约 6–8 min |
 | VACUUM（不进迁移） | 327s |
 
@@ -288,10 +287,10 @@ CREATE VIRTUAL TABLE audio_path_search USING fts5(
 - `TARGET_SCHEMA` 8 → 9（`compatibility.rs:11`）；`CATALOG_REVISION` 1 → 2（`compatibility.rs:9`）。
 - `source_search_rev`：2 → 3（Vorbis/厂商组进入 `audiolib_source_text`）。
 - `source_tags_rev`：保持 2，除非 `SOURCE_TAG_KEYS` 增加 UCS 键。
-- `SEARCH_TEXT_VERSION`（tokenization）：3 → 4，格式 ID 中为 `t4`。理由：NFC/全半角归一改变了入库与查询两端的分词，旧客户端必须能明确识别不兼容（服务端已确认保持 t3 不安全）。
-- snapshot 格式：`ale-s9-cld1-t4-m2-p1-a1-sp1`，`-z1` 压缩变体沿用 v8 规则；feature `search_path`、`vorbis_tags`、`vendor_metadata`。服务端写格式改为 s9。
+- `SEARCH_TEXT_VERSION`（tokenization）：**不变，仍为 3**，格式 ID 中为 `t3`。主表不归一，入库与查询分词不变；NFC/全半角归一只在路径表，由 `sp1` 管（规则变升 `sp2`）。
+- snapshot 格式：`ale-s9-cld1-t3-m2-p1-a1-sp1`，`-z1` 压缩变体沿用 v8 规则；feature `search_path`、`vorbis_tags`、`vendor_metadata`。服务端写格式改为 s9。
 - **s8 兼容快照**（过渡期）：由 s9 库派生——DROP `audio_path_search` 和 `vendor_metadata`、`source_search_rev` 回写 2、`user_version=8`、滤掉非 wav 行；按需生成、只读、同一 library_id。成本：多一份约 10.6GB plain + 约 959MB zstd，生成约 1–2 分钟。派生快照的 `bwf_description_tokenized` 已含 Vorbis/厂商文本，旧客户端可搜，只是不解释新字段。
-  - s8 派生快照必须是 **t3 分词**（格式 `ale-s8-cld1-t3-m2-p1-a1`）：从 s9（t4）派生时需对主表按旧规则重建，或保留迁移前的旧主表供派生——**待服务端确认**。
+  - s8 派生快照照原方案从 s9 派生，主表不另外重建（两者主表同为 t3）；验收 PR #208 EM-09：s8/s9 主表命中数和 ID 集合一致。
   - 发放：按 `x-audiolib-accept-snapshot-formats` 优先发 s9，否则 s8；只拿 s8 的客户端收到响应头 `x-audiolib-upgrade-available`。
   - 写操作只接受 s9 客户端（按库实际格式，否则 409）。
   - 保留期：**建议一个版本周期**（待 Paul 定，§11；服务端稿建议 2 个发布周期）。
@@ -313,10 +312,10 @@ CREATE VIRTUAL TABLE audio_path_search USING fts5(
 {
   "compatibility": {
     "features": { "search_path": 1, "vorbis_tags": 1, "vendor_metadata": 1 },
-    "snapshot_read_formats": ["ale-s8-cld1-t3-m2-p1-a1", "ale-s9-cld1-t4-m2-p1-a1-sp1"],
-    "database_write_formats": ["ale-s9-cld1-t4-m2-p1-a1-sp1"]
+    "snapshot_read_formats": ["ale-s8-cld1-t3-m2-p1-a1", "ale-s9-cld1-t3-m2-p1-a1-sp1"],
+    "database_write_formats": ["ale-s9-cld1-t3-m2-p1-a1-sp1"]
   },
-  "library_schema": { "current": 9, "source_search_rev": 3, "snapshot_formats_served": ["ale-s9-cld1-t4-m2-p1-a1-sp1", "ale-s8-cld1-t3-m2-p1-a1"] },
+  "library_schema": { "current": 9, "source_search_rev": 3, "snapshot_formats_served": ["ale-s9-cld1-t3-m2-p1-a1-sp1", "ale-s8-cld1-t3-m2-p1-a1"] },
   "schema_migration": { "state": "idle|running|paused|failed|done", "endpoint": "/admin/api/migration" },
   "vendor_import": { "revision": 1, "max_file_bytes": 52428800, "max_rows": 200000 }
 }
@@ -477,7 +476,7 @@ Vorbis 字段和厂商字段都并入主表 `bwf_description_tokenized`（source
 1. 路径是否采用方案 B（独立 FTS 表）——**推荐 B**，A 已被基准否决（§10.1）。
 2. 根目录名是否加可选开关进索引——建议做开关，**默认关**（不进）。
 3. s8 兼容快照保留期——**建议一个版本周期**（服务端稿建议 2 个发布周期）。
-4. 迁移时主表是否按 t4 新分词规则重建（§5.2）：(a) 只归一路径表，约 70s，主表全角/NFD 不归一；(b) 主表也重建，主表约 250s（另加路径表约 70s），行为一致——**推荐 (b)**。
+4. 是否改选 (b)（§5.2）：默认 (a) 归一只用于路径表、迁移约 70s；(b) 升 t4 并重建主表，约 250s + 路径表 70s，主表全角/NFD 也归一。
 5. FLAC/OGG 默认收录，还是放设置开关。
 6. 是否支持 `.opus`（需额外解码 crate）。
 7. 厂商导入 vs 内嵌 metadata 的显示优先级（草案：用户 > 厂商 > 内嵌）。
@@ -500,7 +499,6 @@ Vorbis 字段和厂商字段都并入主表 `bwf_description_tokenized`（source
 - §10.7 方案 B 闸门：热/冷 p95、并行 B 实测、合并/翻页/取消正确性。
 - 自适应批大小（≤2s/批）实现后的迁移耗时复测。
 - s8 兼容快照派生与发放实现。
-- s8 派生快照的 t3 主表来源：派生时按旧规则重建，还是保留迁移前旧主表（§5.6）。
 
 （厂商导入合并规则已定，见 §4.3，Grok 暂定、Paul 可推翻，不再列入待定。）
 
