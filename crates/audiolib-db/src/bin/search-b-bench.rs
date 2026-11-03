@@ -1,3 +1,4 @@
+// crates/audiolib-db/src/bin/search-b-bench.rs
 //! Search benchmark: s8 (main FTS only) vs s9 / option B (main FTS + directory-segment path FTS).
 //!
 //! Usage: `search-b-bench <mode> <db>`; `cold1` = one OS-cold sample (caller runs `sudo purge` first), env Q=query ONLY=s8|s9.
@@ -89,7 +90,7 @@ fn reg_t3(c: &Connection) {
     .unwrap();
 }
 fn use_t3() -> bool {
-    std::env::var("T3").map_or(false, |v| v == "1")
+    std::env::var("T3").is_ok_and(|v| v == "1")
 }
 fn open_rw(db: &str) -> Connection {
     let c = Connection::open(db).unwrap();
@@ -111,10 +112,6 @@ fn open(db: &str) -> Connection {
 
 /// keyset cursor = (score, rowid); bm25 lower = better; ORDER BY score,rowid
 type Key = (f64, i64);
-fn lt(a: Key, b: Key) -> bool {
-    a.0 < b.0 || (a.0 == b.0 && a.1 < b.1)
-}
-
 struct Side {
     table: &'static str,
     w: &'static str,
@@ -126,12 +123,10 @@ impl Side {
         let sql = self.page_sql();
         let (s0, i0) = after.unwrap_or((f64::NEG_INFINITY, i64::MIN));
         let mut st = c.prepare_cached(&sql)?;
-        let r = st
-            .query_map(rusqlite::params![self.m, s0, i0, lim as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?
-            .collect();
-        r
+        st.query_map(rusqlite::params![self.m, s0, i0, lim as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect()
     }
     /// SQL used by `page`; `prepare_fts` prepares exactly this string so the statement cache hits.
     fn page_sql(&self) -> String {
@@ -139,20 +134,6 @@ impl Side {
         format!(
             "SELECT s,id FROM (SELECT rowid id, bm25({t},{w})*{k} s FROM {t} WHERE {t} MATCH ?1) WHERE s>?2 OR (s=?2 AND id>?3) ORDER BY s,id LIMIT ?4"
         )
-    }
-    fn all(&self, c: &Connection) -> rusqlite::Result<Vec<Key>> {
-        self.page(c, None, usize::MAX >> 2)
-    }
-    fn probe(&self, c: &Connection, id: i64) -> rusqlite::Result<Option<f64>> {
-        let (t, w, k) = (self.table, self.w, self.scale);
-        let mut st = c.prepare_cached(&format!(
-            "SELECT bm25({t},{w})*{k} FROM {t} WHERE {t} MATCH ?1 AND rowid=?2"
-        ))?;
-        let mut rows = st.query(rusqlite::params![self.m, id])?;
-        Ok(match rows.next()? {
-            Some(r) => Some(r.get(0)?),
-            None => None,
-        })
     }
 }
 fn sides(q: &str, pscale: f64) -> (Side, Side) {
@@ -181,20 +162,7 @@ fn sides(q: &str, pscale: f64) -> (Side, Side) {
     )
 }
 
-/// side match set: all (score,rowid) for this side (the same scan SQLite does for ORDER BY bm25 LIMIT)
-fn side_all(c: &Connection, me: &Side) -> rusqlite::Result<Vec<Key>> {
-    let (t, w, k) = (me.table, me.w, me.scale);
-    let mut st = c.prepare_cached(&format!(
-        "SELECT bm25({t},{w})*{k}, rowid FROM {t} WHERE {t} MATCH ?1"
-    ))?;
-    let r = st
-        .query_map([&me.m], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect();
-    r
-}
 type M = std::sync::Mutex<Connection>;
-const CAP_RANK: usize = 10_000; // path all-terms hits above this: unscored tier (rowid stream), no bm25
-const CAP_TERM: usize = 200_000; // per-term path set above this: treated as matching every row (root-like)
 fn words(q: &str) -> Vec<String> {
     q.split(|c: char| c.is_whitespace() || (!c.is_alphanumeric() && c != '_' && c != '.'))
         .filter(|w| !w.is_empty())
@@ -205,24 +173,8 @@ fn ids(c: &Connection, table: &str, m: &str, cap: usize) -> rusqlite::Result<Vec
     let mut st = c.prepare_cached(&format!(
         "SELECT rowid FROM {table} WHERE {table} MATCH ?1 LIMIT ?2"
     ))?;
-    let r = st
-        .query_map(rusqlite::params![m, cap as i64], |r| r.get(0))?
-        .collect();
-    r
-}
-fn path_m(w: &str) -> String {
-    compile(
-        &if use_t3() { t3(w) } else { w.to_string() },
-        "path_tokens",
-        "path_tokens_tokenized",
-    )
-}
-fn ptable() -> &'static str {
-    if use_t3() {
-        "audio_path_search_t3"
-    } else {
-        "audio_path_search"
-    }
+    st.query_map(rusqlite::params![m, cap as i64], |r| r.get(0))?
+        .collect()
 }
 type Set = std::collections::HashSet<i64>;
 // ---- directory-table design: path terms are matched on audio_dir_search (rowid = folders.id = audio_files.folder_id, "dir_id"),
@@ -315,8 +267,7 @@ type DirSet = HashMap<i64, f64>; // matched SEGMENT dirs -> bm25
 /// iff some ancestor-or-self segment matches -> rename touches one row, moves touch none.
 fn seg_match(c: &Connection, m: &str, scored: bool) -> rusqlite::Result<DirSet> {
     let mut st = c.prepare_cached(&seg_sql(scored))?;
-    let r = st.query_map([m], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
-    r
+    st.query_map([m], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
 }
 fn seg_sql(scored: bool) -> String {
     if scored {
@@ -330,7 +281,7 @@ fn seg_sql(scored: bool) -> String {
 }
 /// BENCH_PREPARE_OUTSIDE_TIMER=1: connect both FTS virtual tables on `c` by preparing the statements cold1 uses.
 fn prepare_outside_timer() -> bool {
-    std::env::var("BENCH_PREPARE_OUTSIDE_TIMER").map_or(false, |v| v == "1")
+    std::env::var("BENCH_PREPARE_OUTSIDE_TIMER").is_ok_and(|v| v == "1")
 }
 fn prepare_fts(c: &Connection, q: &str, pscale: f64) {
     c.prepare_cached(&sides(q, pscale).0.page_sql()).unwrap();
@@ -437,7 +388,6 @@ const T2: f64 = 2.0;
 struct PathRes {
     terms: Vec<DirSet>,
     k: usize,
-    nopath: Option<Vec<i64>>,
 }
 struct Parts {
     main: Vec<Key>,
@@ -481,11 +431,7 @@ fn gather(
         }
         let ests: Vec<i64> = sets.iter().map(est).collect();
         let k = (0..sets.len()).min_by_key(|&j| ests[j]).unwrap();
-        PathRes {
-            terms: sets,
-            k,
-            nopath: None,
-        }
+        PathRes { terms: sets, k }
     };
     pt("dir_match", t);
     let need_nopath = nw > 1
@@ -532,7 +478,7 @@ fn gather(
         let t = Instant::now();
         let c = c1.lock().unwrap();
         let r1 = (|| -> rusqlite::Result<(Vec<Key>, Set)> {
-            let in0 = after.map_or(true, |a| a.0 < 0.0);
+            let in0 = after.is_none_or(|a| a.0 < 0.0);
             let v = if in0 {
                 main.page(&c, after, lim)?
             } else {
@@ -551,10 +497,7 @@ fn gather(
         })();
         pt("main_bm25", t);
         drop(c);
-        let np = match h_np {
-            Some(h) => Some(h.join().unwrap().unwrap()),
-            None => None,
-        };
+        let np = h_np.map(|h| h.join().unwrap().unwrap());
         (r1, np)
     });
     let (main, mainfull) = r1?;
@@ -573,11 +516,11 @@ fn tier_stream(
     c3: &M,
     q: &str,
     p: &Parts,
-    mainfull: &Set,
     want: f64,
     cur: i64,
     need: usize,
 ) -> rusqlite::Result<Vec<i64>> {
+    let mainfull = &p.mainfull;
     let ws = words(q);
     let sets = &p.path.terms;
     let k = p.path.k;
@@ -587,40 +530,40 @@ fn tier_stream(
     if want == T2 && sets.iter().any(|s| s.is_empty()) {
         return Ok(vec![]);
     }
-    if want == T1 {
-        if let Some(np) = &p.nopath_main {
-            // every tier1 doc is in np (main hits of all path-less terms); check the rest in memory / by probe
-            let c3g = c3.lock().unwrap();
-            let mut probe = c3g.prepare_cached(
-                "SELECT 1 FROM audio_search WHERE audio_search MATCH ?1 AND rowid=?2",
-            )?;
-            let mut out = vec![];
-            for &id in &np[np.partition_point(|&x| x <= cur)..] {
-                if out.len() >= need {
-                    break;
-                }
-                if mainfull.contains(&id) {
-                    continue;
-                }
-                let Some(d) = dir_of(id) else { continue };
-                let hit: Vec<bool> = (0..sets.len())
-                    .map(|j| !sets[j].is_empty() && anc_score(&sets[j], d).is_some())
-                    .collect();
-                if !hit.iter().any(|&h| h) {
-                    continue;
-                }
-                if (0..sets.len()).all(|j| {
-                    hit[j]
-                        || sets[j].is_empty()
-                        || probe
-                            .exists(rusqlite::params![compile(&ws[j], RAW, DER), id])
-                            .unwrap_or(false)
-                }) {
-                    out.push(id)
-                }
+    if want == T1
+        && let Some(np) = &p.nopath_main
+    {
+        // every tier1 doc is in np (main hits of all path-less terms); check the rest in memory / by probe
+        let c3g = c3.lock().unwrap();
+        let mut probe = c3g.prepare_cached(
+            "SELECT 1 FROM audio_search WHERE audio_search MATCH ?1 AND rowid=?2",
+        )?;
+        let mut out = vec![];
+        for &id in &np[np.partition_point(|&x| x <= cur)..] {
+            if out.len() >= need {
+                break;
             }
-            return Ok(out);
+            if mainfull.contains(&id) {
+                continue;
+            }
+            let Some(d) = dir_of(id) else { continue };
+            let hit: Vec<bool> = (0..sets.len())
+                .map(|j| !sets[j].is_empty() && anc_score(&sets[j], d).is_some())
+                .collect();
+            if !hit.iter().any(|&h| h) {
+                continue;
+            }
+            if (0..sets.len()).all(|j| {
+                hit[j]
+                    || sets[j].is_empty()
+                    || probe
+                        .exists(rusqlite::params![compile(&ws[j], RAW, DER), id])
+                        .unwrap_or(false)
+            }) {
+                out.push(id)
+            }
         }
+        return Ok(out);
     }
     let c3g = c3.lock().unwrap();
     let c2g = c2.lock().unwrap();
@@ -761,7 +704,6 @@ fn b_page(
     pt("merge_sort", tm);
     if v.len() < lim {
         let t = Instant::now();
-        let mainfull = &p.mainfull;
         for tier in [T1, T2] {
             if v.len() >= lim {
                 break;
@@ -771,7 +713,7 @@ fn b_page(
                 Some((s, _)) if s > tier => continue,
                 _ => i64::MIN,
             };
-            let got = tier_stream(c2, c3, q, &p, mainfull, tier, cur, lim - v.len())?;
+            let got = tier_stream(c2, c3, q, &p, tier, cur, lim - v.len())?;
             v.extend(got.into_iter().map(|id| (tier, id)));
         }
         pt("dir_files_page", t);
@@ -818,7 +760,7 @@ fn base_page(c: &Connection, q: &str) -> Vec<Key> {
     sides(q, 1.0).0.page(c, None, PAGE).unwrap()
 }
 
-fn pct(v: &mut Vec<f64>) -> (f64, f64, f64) {
+fn pct(v: &mut [f64]) -> (f64, f64, f64) {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let at = |p: f64| {
         v[((v.len() as f64 * p).ceil() as usize)
@@ -841,24 +783,22 @@ fn time<F: FnMut() -> usize>(n: usize, mut f: F) -> (Vec<f64>, usize) {
 
 /// full (re)build of the directory tables; incremental maintenance = same statements restricted to affected dir_ids
 fn build_dir(c: &Connection) {
-    c.execute_batch(&format!("BEGIN; DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs;
+    c.execute_batch("BEGIN; DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs;
       CREATE VIRTUAL TABLE audio_dir_search USING fts5(path_tokens,path_tokens_tokenized,content='',contentless_delete=1,detail=full,columnsize=1,tokenize='unicode61 remove_diacritics 2');
       INSERT INTO audio_dir_search(rowid,path_tokens,path_tokens_tokenized) SELECT id, t3_norm(folder_name), audiolib_tokenize(t3_norm(folder_name)) FROM folders;
       CREATE TABLE audio_dir_runs(dir_id INTEGER NOT NULL, lo INTEGER NOT NULL, hi INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(dir_id, lo)) WITHOUT ROWID;
       INSERT INTO audio_dir_runs SELECT folder_id, min(id), max(id), count(*) FROM (SELECT id, folder_id, sum(chg) OVER (ORDER BY id) g FROM (SELECT id, folder_id, CASE WHEN folder_id IS lag(folder_id) OVER (ORDER BY id) THEN 0 ELSE 1 END chg FROM audio_files)) GROUP BY g;
-      INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize'); COMMIT;")).unwrap();
+      INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize'); COMMIT;").unwrap();
 }
 /// incremental maintenance for affected dir_ids (scan diff): deleted dirs -> rows removed; renamed/moved dirs (+subtree) -> reindexed;
 /// runs recomputed for every dir whose file set changed, using global id adjacency so runs never span another dir's file.
 fn maint_dirs(c: &Connection, dirs_changed: &[i64], dirs_files_changed: &[i64]) {
-    let ins = format!(
-        "INSERT INTO audio_dir_search(rowid,path_tokens,path_tokens_tokenized) SELECT id, t3_norm(folder_name), audiolib_tokenize(t3_norm(folder_name)) FROM folders WHERE id=?1"
-    );
+    let ins = "INSERT INTO audio_dir_search(rowid,path_tokens,path_tokens_tokenized) SELECT id, t3_norm(folder_name), audiolib_tokenize(t3_norm(folder_name)) FROM folders WHERE id=?1";
     for &d in dirs_changed {
         // includes deleted ids and every descendant of a renamed/moved dir
         c.execute("DELETE FROM audio_dir_search WHERE rowid=?1", [d])
             .unwrap();
-        c.execute(&ins, [d]).unwrap(); // no-op if folder deleted
+        c.execute(ins, [d]).unwrap(); // no-op if folder deleted
     }
     // orphan sweep (PS-21): any dir row whose folder no longer exists
     c.execute_batch("DELETE FROM audio_dir_runs WHERE dir_id NOT IN (SELECT id FROM folders);")
@@ -900,19 +840,31 @@ fn dir_invariants(c: &Connection) -> String {
         }
     )
 }
+#[cfg(target_os = "macos")]
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos: u32, rel: i32) -> i32;
 }
+#[cfg(target_os = "macos")]
 fn qos() {
     if std::env::var("QOS").is_ok() {
+        // SAFETY: macOS accepts this QoS class and relative priority 0 for the
+        // calling thread; the function takes no pointers or borrowed data.
         unsafe {
-            pthread_set_qos_class_self_np(0x21, 0);
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         }
     }
 }
+#[cfg(not(target_os = "macos"))]
+fn qos() {}
+
 fn main() {
     qos();
     if std::env::var("MEMSTATUS0").is_ok() {
+        // SAFETY: this process has not opened a SQLite connection or started
+        // worker threads; SQLITE_CONFIG_MEMSTATUS takes one C int argument.
         unsafe {
             rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0i32);
         }
@@ -1063,7 +1015,7 @@ fn main() {
             }
             let ests: Vec<i64> = sets.iter().map(est).collect();
             println!("terms={ws:?} ests_after_half={ests:?} ests_before={ests0:?}");
-            for (j, w) in ws.iter().enumerate() {
+            for w in &ws {
                 let m = compile(w, RAW, DER);
                 let t = Instant::now();
                 let v = ids(&c1.lock().unwrap(), "audio_search", &m, usize::MAX >> 2).unwrap();
@@ -1144,7 +1096,6 @@ fn main() {
                     t.elapsed().as_secs_f64() * 1e3
                 );
             }
-            return;
         }
 
         "warmq" => {
