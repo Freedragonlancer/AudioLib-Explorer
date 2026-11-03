@@ -946,11 +946,7 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
     );
     assert_eq!(d.run("resume", &srv.db, &[]).state(), "done");
     let after = srv.call("LIST", id);
-    assert_eq!(
-        after.header("x-audiolib-migration"),
-        None,
-        "{after:?}"
-    );
+    assert_eq!(after.header("x-audiolib-migration"), None, "{after:?}");
     assert_eq!(srv.call("PATH_SEARCH", id).status, 200);
 }
 
