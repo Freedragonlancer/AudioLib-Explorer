@@ -489,6 +489,19 @@ pub fn core_error(error: RemoteError, chinese: bool) -> Error {
 }
 
 impl DataProvider for RemoteProvider {
+    fn server_upgrade_status(
+        &self,
+    ) -> audiolib_core::Result<Option<audiolib_core::server_upgrade::ServerUpgradeStatus>> {
+        let client = self.writer.client();
+        let capabilities = client
+            .capabilities()
+            .map_err(|error| core_error(error, self.chinese))?;
+        Ok(Some(crate::upgrade_hints::server_upgrade_status(
+            client,
+            &capabilities,
+        )))
+    }
+
     fn load_search_workspace(
         &self,
         target: &audiolib_core::SearchWorkspaceTarget,

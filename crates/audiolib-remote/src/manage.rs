@@ -96,6 +96,16 @@ pub struct Capabilities {
     /// servers (only the §9.2 switch, status and pause/resume).
     #[serde(default)]
     pub list_waveform_jobs: Option<audiolib_core::waveform_cache::WaveformJobsCapability>,
+    /// Library schema and served snapshot formats (search metadata v2); `None` on
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_schema: Option<audiolib_core::server_upgrade::LibrarySchemaInfo>,
+    /// Schema migration state (search metadata v2); `None` on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_migration: Option<audiolib_core::server_upgrade::SchemaMigrationInfo>,
+    /// Vendor metadata import limits; `None` when the server does not offer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_import: Option<audiolib_core::server_upgrade::VendorImportInfo>,
 }
 
 fn known() -> bool {
@@ -114,6 +124,9 @@ impl Default for Capabilities {
             list_waveforms: None,
             pregenerate_list_waveforms: None,
             list_waveform_jobs: None,
+            library_schema: None,
+            schema_migration: None,
+            vendor_import: None,
         }
     }
 }
