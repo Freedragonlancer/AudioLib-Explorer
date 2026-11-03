@@ -848,9 +848,21 @@ impl SqliteProvider {
         let mut writer = self.writer()?;
         let tx = writer.transaction().map_err(db_error)?;
         let mut removed = 0;
+        let mut folders = Vec::new();
         for id in ids {
+            let folder: Option<i64> = tx
+                .query_row(
+                    "SELECT folder_id FROM audio_files WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if let Some(folder) = folder {
+                folders.push(folder);
+            }
             removed += remove_one(&tx, id)?;
         }
+        crate::dir_search::maintain(&tx, &[], &folders)?;
         refresh_folder_statistics(&tx)?;
         tx.commit().map_err(db_error)?;
         Ok(removed)
@@ -896,6 +908,7 @@ impl SqliteProvider {
             tx.execute("DELETE FROM folders WHERE id=?1", [folder])
                 .map_err(db_error)?;
         }
+        crate::dir_search::maintain(&tx, &folder_ids, &folder_ids)?;
         refresh_folder_statistics(&tx)?;
         tx.commit().map_err(db_error)?;
         Ok(removed)
@@ -1227,6 +1240,7 @@ impl SqliteProvider {
             ],
         )
         .map_err(db_error)?;
+        crate::dir_search::maintain(&tx, &[root], &[])?;
         for (id, text, key, mtime) in &moved_files {
             check_cancel()?;
             tx.execute("UPDATE audio_files SET file_path=?2,path_key=?3,source_mtime_ns=?4,missing=0,modified_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1", params![id,text,key,mtime]).map_err(db_error)?;

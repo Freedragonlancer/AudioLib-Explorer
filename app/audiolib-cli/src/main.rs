@@ -704,6 +704,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
                 offset: *offset,
                 order_by,
                 descending: *descending,
+                ..Default::default()
             };
             let page = provider.search(&request)?;
             if let Some(message) = empty_library_notice(page.total_count, || {

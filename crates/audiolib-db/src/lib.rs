@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod album_tests;
 mod albums;
+mod dir_search;
 #[cfg(test)]
 mod folder_rollup_tests;
 #[cfg(test)]
@@ -45,7 +46,7 @@ use audiolib_core::{
     Album, AlbumFacet, AudioFile, BackupReport, BatchMetadataReport, BatchMetadataRequest,
     DataProvider, Error, FileVisibility, Folder, IntegrityReport, LibraryExportFormat, LibraryInfo,
     LibraryStats, MaintenanceAction, MaintenanceReport, MetadataPatch, RestoreReport, Result,
-    ScanSession, SearchPage, SearchRequest, SortOrder, TransferReport,
+    ScanSession, SearchPage, SearchRequest, SearchScope, SortOrder, TransferReport,
 };
 use jieba_rs::Jieba;
 use rusqlite::{
@@ -274,6 +275,7 @@ pub struct SqliteProvider {
     derived_tags: AtomicBool,
     /// Session state of local list Waveforms (computed file versions, decode failures).
     list_waveform_memory: list_waveforms::ListWaveformMemory,
+    dir_index: dir_search::DirIndexCache,
     // Declared last so every SQLite connection closes before the owned directory is removed.
     _owned_snapshot_directory: Option<tempfile::TempDir>,
 }
@@ -690,6 +692,7 @@ impl SqliteProvider {
             read_gate: RwLock::new(()),
             derived_tags: AtomicBool::new(derived),
             list_waveform_memory: Default::default(),
+            dir_index: Default::default(),
             _owned_snapshot_directory: None,
         };
         // Identity admission obtains the exclusive administration lease itself;
@@ -1022,6 +1025,7 @@ impl SqliteProvider {
             read_gate: RwLock::new(()),
             derived_tags: AtomicBool::new(derived),
             list_waveform_memory: Default::default(),
+            dir_index: Default::default(),
             _owned_snapshot_directory: owned_directory,
         })
     }
@@ -1307,6 +1311,7 @@ impl SqliteProvider {
         let mut added = 0;
         let mut updated = 0;
         let mut folders = std::collections::HashMap::new();
+        let mut file_folders = Vec::new();
         let mut find_existing = tx.prepare_cached(
             "SELECT file_path,id,metadata_json,COALESCE(file_size,0),source_mtime_ns FROM audio_files WHERE path_key=?1 ORDER BY id",
         ).map_err(db_error)?;
@@ -1353,6 +1358,21 @@ impl SqliteProvider {
                     *entry.insert(ensure_folder(tx, folder, &item.root)?)
                 }
             };
+            file_folders.push(folder_id);
+            if let Some(id) = existing {
+                let previous: Option<i64> = tx
+                    .query_row(
+                        "SELECT folder_id FROM audio_files WHERE id=?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .map_err(db_error)?;
+                if let Some(previous) = previous
+                    && previous != folder_id
+                {
+                    file_folders.push(previous);
+                }
+            }
             let filename = item
                 .path
                 .file_name()
@@ -1449,6 +1469,9 @@ impl SqliteProvider {
                 .execute(params_from_iter(header_values))
                 .map_err(db_error)?;
         }
+        file_folders.sort_unstable();
+        file_folders.dedup();
+        dir_search::maintain(tx, &[], &file_folders)?;
         Ok((added, updated))
     }
 
@@ -1932,6 +1955,7 @@ impl SqliteProvider {
             query: request.query.clone(),
             execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
             cache_hit,
+            next_cursor: None,
         }))
     }
 
@@ -1941,6 +1965,11 @@ impl SqliteProvider {
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<SearchPage> {
         request.validate()?;
+        let normalized = normalize_search_page(request)?;
+        let request = normalized.as_ref();
+        if request.scope != SearchScope::Main {
+            return self.search_scoped(request, cancel);
+        }
         let start = Instant::now();
         let mut conn = self.search_reader(cancel.clone())?;
         let revision_before = self.observe_search_revision()?;
@@ -2073,6 +2102,7 @@ impl SqliteProvider {
                 query: request.query.clone(),
                 execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cache_hit: false,
+                next_cursor: None,
             });
         }
         let sorted_page_sql =
@@ -2150,7 +2180,113 @@ impl SqliteProvider {
             query: request.query.clone(),
             execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
             cache_hit: false,
+            next_cursor: None,
         })
+    }
+
+    /// Directory-segment search. `scope=main` never reaches this path.
+    fn search_scoped(
+        &self,
+        request: &SearchRequest,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<SearchPage> {
+        if request.query.trim().is_empty() {
+            let mut browse = request.clone();
+            browse.scope = SearchScope::Main;
+            browse.cursor = None;
+            return self.search_impl(&browse, cancel);
+        }
+        if !path_scope_is_unfiltered(request) {
+            return Err(Error::Validation(
+                "Directory path search supports relevance order without a folder or metadata filter"
+                    .into(),
+            ));
+        }
+        if !self.directory_index_ready()? {
+            self.rebuild_directory_search()?;
+        }
+        let start = Instant::now();
+        let mut conn = self.search_reader(cancel)?;
+        let tx = conn.transaction().map_err(db_error)?;
+        let page = dir_search::search(&dir_search::DirSearch {
+            conn: &tx,
+            cache: &self.dir_index,
+            jieba: &self.tokenizer,
+            query: &request.query,
+            scope: request.scope,
+            visibility: request.filters.visibility,
+            cursor: request.cursor.as_deref(),
+            offset: request.offset,
+            limit: request.limit,
+        })?;
+        let ids = page.hits.iter().map(|hit| hit.id).collect::<Vec<_>>();
+        let json =
+            serde_json::to_string(&ids).map_err(|error| Error::Database(error.to_string()))?;
+        let projection = audio_projection(&tx)?;
+        let mut statement = tx
+            .prepare(&format!(
+                "SELECT {projection} FROM audio_files af WHERE af.id IN (SELECT value FROM json_each(?1))"
+            ))
+            .map_err(db_error)?;
+        let mut files = statement
+            .query_map(params![json], audio_from_row)
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?
+            .into_iter()
+            .map(|file| (file.id, file))
+            .collect::<std::collections::HashMap<_, _>>();
+        let results = ids
+            .into_iter()
+            .map(|id| {
+                files.remove(&id).ok_or_else(|| {
+                    Error::Database("Path search and Metadata snapshots disagree".into())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = page
+            .has_more
+            .then(|| {
+                page.hits.last().map(|hit| {
+                    dir_search::encode_cursor(
+                        hit.tier,
+                        hit.score,
+                        hit.id,
+                        dir_search::SEARCH_PATH_REV,
+                    )
+                })
+            })
+            .flatten();
+        let skipped = if request.cursor.is_some() {
+            0
+        } else {
+            request.offset as u64
+        };
+        let total_count = if page.short_circuited {
+            0
+        } else {
+            skipped + results.len() as u64 + u64::from(page.has_more)
+        };
+        Ok(SearchPage {
+            returned_count: results.len(),
+            results,
+            total_count,
+            query: request.query.clone(),
+            execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+            cache_hit: false,
+            next_cursor,
+        })
+    }
+
+    fn directory_index_ready(&self) -> Result<bool> {
+        let conn = self.reader()?;
+        dir_search::ready(&conn)
+    }
+
+    /// Rebuild `audio_dir_search` and `audio_dir_runs` for the open library.
+    pub fn rebuild_directory_search(&self) -> Result<()> {
+        let conn = self.writer()?;
+        dir_search::rebuild(&conn)
     }
 
     fn search_folders_impl(
@@ -2816,6 +2952,40 @@ struct SearchSql {
     values: Vec<Value>,
 }
 
+fn normalize_search_page(request: &SearchRequest) -> Result<std::borrow::Cow<'_, SearchRequest>> {
+    let Some(page) = request.page else {
+        return Ok(std::borrow::Cow::Borrowed(request));
+    };
+    if request.cursor.is_some() {
+        return Ok(std::borrow::Cow::Borrowed(request));
+    }
+    let mut copy = request.clone();
+    copy.offset = (page as usize - 1)
+        .checked_mul(request.limit)
+        .ok_or_else(|| Error::Validation("Search page is too large".into()))?;
+    copy.page = None;
+    Ok(std::borrow::Cow::Owned(copy))
+}
+
+/// Layered path search keeps the bench plan for an unfiltered relevance query.
+fn path_scope_is_unfiltered(request: &SearchRequest) -> bool {
+    request.folder_id.is_none()
+        && request.order_by == SortOrder::Relevance
+        && request.filters.sample_rate.is_none()
+        && request.filters.bit_depth.is_none()
+        && request.filters.channels.is_none()
+        && request.filters.duration_min.is_none()
+        && request.filters.duration_max.is_none()
+        && !request.filters.favorites_only
+        && !request.filters.tagged_only
+        && request.filters.tag_contains.is_none()
+        && request.filters.include_tags.is_empty()
+        && request.filters.exclude_tags.is_empty()
+        && request.filters.color.is_none()
+        && request.filters.album.is_none()
+        && request.filters.album_id.is_none()
+}
+
 // Results and directory facets must compile exactly the same query and filters.
 fn search_sql(
     conn: &Connection,
@@ -3133,6 +3303,7 @@ fn ensure_folder(conn: &Connection, folder: &Path, root: &Path) -> Result<i64> {
             .map_err(db_error)?;
             repair_folder_subtree(conn, id)?;
             albums::refresh_folder_membership(conn, id)?;
+            dir_search::bump_generation(conn)?;
         } else {
             conn.execute("INSERT OR IGNORE INTO folder_closure(ancestor_id,descendant_id,depth) VALUES(?1,?1,0)",[id]).map_err(db_error)?;
         }
@@ -3155,6 +3326,7 @@ fn ensure_folder(conn: &Connection, folder: &Path, root: &Path) -> Result<i64> {
         [id],
     )
     .map_err(db_error)?;
+    dir_search::maintain(conn, &[id], &[])?;
     if let Some(parent) = parent_id {
         conn.execute(
             "INSERT OR IGNORE INTO folder_closure(ancestor_id,descendant_id,depth)

@@ -13,6 +13,9 @@ pub const TARGET_SCHEMA: u32 = 8;
 pub const TOKENIZATION_REVISION: u32 = 3;
 /// Format identifiers are exact sets, not a promise that all lower integers work.
 pub const PLAN_B_FORMAT: &str = "ale-s8-cld1-t3-m2-p1-a1";
+/// Schema 9 directory-segment path index. `sd1` is that index's revision;
+/// the retired per-file path suffix `sp1` is not a format id.
+pub const PLAN_B_V9_FORMAT: &str = "ale-s9-cld1-t3-m2-p1-a1-sd1";
 /// Experimental schema-8 snapshots with compressed Metadata remain read-only inputs.
 pub const PLAN_B_V8_COMPRESSED_FORMAT: &str = "ale-s8-cld1-t3-m2-p1-a1-z1";
 /// Schema-7 Plan B used per-record album names and uncompressed Metadata.
@@ -889,6 +892,9 @@ mod tests {
     #[test]
     fn manifest_advertises_schema8_and_retains_earlier_read_formats() {
         let manifest = compatibility_manifest();
+        assert_eq!(PLAN_B_V9_FORMAT, "ale-s9-cld1-t3-m2-p1-a1-sd1");
+        assert!(PLAN_B_V9_FORMAT.ends_with("-sd1"));
+        assert!(!PLAN_B_V9_FORMAT.contains("sp1"));
         assert_eq!(manifest.database_write_formats, vec![PLAN_B_FORMAT]);
         assert_eq!(manifest.migration_target_format, PLAN_B_FORMAT);
         assert_eq!(manifest.migration_source_schemas, vec![3, 4, 5, 6, 7, 8]);
