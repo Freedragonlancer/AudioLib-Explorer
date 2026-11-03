@@ -8,6 +8,8 @@
 mod hooks;
 mod report;
 mod storage;
+#[cfg(test)]
+mod tests;
 use crate::{db_error, dir_search, management::AdministrationLease};
 use audiolib_core::{DataProvider, Error, Result, SearchRequest, SearchScope};
 pub use report::{Batch, Failure, Progress, Report, State, Switch};
@@ -594,6 +596,18 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
 }
 
 fn stop(path: &Path, conn: &Connection, saved: &mut Saved, cancel: &AtomicBool) -> Result<bool> {
+    // A control writer waiting for the preceding batch must commit before the
+    // next batch can overtake it. Never wait here with a SQLite writer held.
+    let _control = storage::ControlLease::acquire(path)?;
+    stop_requested(path, conn, saved, cancel)
+}
+
+fn stop_requested(
+    path: &Path,
+    conn: &Connection,
+    saved: &mut Saved,
+    cancel: &AtomicBool,
+) -> Result<bool> {
     let cmd: Option<String> = conn
         .query_row("SELECT cmd FROM v9_control WHERE singleton=1", [], |r| {
             r.get(0)

@@ -3,6 +3,29 @@
 use super::*;
 use crate::management::LibraryLease;
 
+/// Serialize control admission with batch boundaries and publication. Control
+/// writers acquire this before their administration lease. The runner waits only
+/// outside SQLite write transactions, then observes every admitted command.
+/// Keep the sidecar in place to preserve its cross-process lock identity.
+pub(super) struct ControlLease(fs::File);
+impl ControlLease {
+    pub(super) fn acquire(path: &Path) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(sidecar(path, ".migration9-control.lock"))?;
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+impl Drop for ControlLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 const TRACK: &str = "
 CREATE TABLE v9_checkpoint(singleton INTEGER PRIMARY KEY CHECK(singleton=1),phase TEXT NOT NULL,last_id INTEGER,done INTEGER NOT NULL,total INTEGER NOT NULL);
 INSERT INTO v9_checkpoint SELECT 1,'path_build',NULL,0,count(*) FROM folders;
@@ -121,10 +144,15 @@ pub(super) fn backup(
 }
 
 pub(super) fn request_control(path: &Path, action: Action) -> Result<()> {
+    let _control = ControlLease::acquire(path)?;
     // Control rows are writes too: an unrelated restore/maintenance operation
     // must exclude them under the same administration lease as annotations.
     let _administration = AdministrationLease::shared(path)?;
     let conn = open(path, true)?;
+    if version(&conn)? == 9 {
+        // Publication won admission. Do not leave a stale command for a later run.
+        return Ok(());
+    }
     if !exists(&conn, "v9_control")? {
         return Err(Error::Busy(
             "Migration is still preparing; retry control request".into(),
@@ -172,7 +200,11 @@ pub(super) fn publish(
     saved: &mut Saved,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    if stop(path, conn, saved, cancel)? {
+    // Drain admitted pause/cancel writers, including their shared admin leases,
+    // before checking control and acquiring the exclusive publication lease.
+    // Retain admission through commit so no request can enter between these steps.
+    let _control = ControlLease::acquire(path)?;
+    if stop_requested(path, conn, saved, cancel)? {
         return Ok(());
     }
     saved.report.state = State::Switching;
