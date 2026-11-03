@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "audiolib/migration-http.schema.json",
   "title": "AudioLib migration HTTP rules",
-  "description": "Admin endpoints: POST /admin/api/migration/{start,pause,resume,cancel,rollback}, GET /admin/api/migration/status; body per migration-report.schema.json. While a migration is not idle/done every response carries `X-AudioLib-Schema-Migration: <state>`. Reads (list, main search, playback, artwork) stay 200. A path-only search (scope=path) before the path table is ready → 503 {error_code: migration_in_progress}, Retry-After: 30. Scope all (`scope=all`) → 200 with main-table results only and `x-audiolib-path-search: unavailable`. During `switching`, writes (vendor import, annotations) → 503 {error_code: migration_switching}, Retry-After: 5; reads 200. Second start while running → 409 with the report body (error_code already_running).",
+  "description": "Admin endpoints: POST /admin/api/migration/{start,pause,resume,cancel,rollback}, GET /admin/api/migration/status; body per migration-report.schema.json. While a migration is not idle/done every response carries `x-audiolib-migration: <state>`. Reads (list, main search, playback, artwork) stay 200. A path-only search (scope=path) before the path table is ready → 503 {error_code: migration_in_progress}, Retry-After: 30. Scope all (`scope=all`) → 200 with main-table results only and `x-audiolib-path-search: unavailable`. During `switching`, writes (vendor import, annotations) → 503 {error_code: migration_switching}, Retry-After: 5; reads 200. Second start while running → 409 with the report body (error_code already_running).",
   "$defs": {
     "error_body": {
       "type": "object",
@@ -21,7 +21,7 @@
     "headers": {
       "type": "object",
       "properties": {
-        "x-audiolib-schema-migration": {
+        "x-audiolib-migration": {
           "$ref": "migration-report.schema.json#/properties/state"
         },
         "x-audiolib-path-search": {
@@ -58,7 +58,7 @@
     },
     {
       "when": "any response while migration state is not idle/done",
-      "header": "x-audiolib-schema-migration"
+      "header": "x-audiolib-migration"
     },
     {
       "when": "POST start while running",
