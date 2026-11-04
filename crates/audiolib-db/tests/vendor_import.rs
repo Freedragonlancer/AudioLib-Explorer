@@ -215,7 +215,7 @@ fn real_biff_and_streaming_xlsx_use_magic_multiple_sheets_and_later_headers() {
 
 #[test]
 fn text_encoding_rfc4180_and_separator_detection_preserve_decoded_values() {
-    let (_temp, provider, _) = fixture(false);
+    let (temp, provider, _) = fixture(false);
     for (name, encoding) in [
         ("utf16le.csv", "UTF-16LE"),
         ("utf16be.csv", "UTF-16BE"),
@@ -227,13 +227,18 @@ fn text_encoding_rfc4180_and_separator_detection_preserve_decoded_values() {
         assert_eq!(preview.matched, 1);
         assert!(preview.samples[0].values["description"].contains('中'));
     }
-    let preview = provider
-        .vendor_import_preview_impl(&input("basic.csv"))
-        .unwrap();
-    assert_eq!(
-        preview.samples[1].values["description"],
-        "\"Quoted\" slam\nsecond line"
-    );
+    // Write exact owned bytes: checkout autocrlf must not decide which raw cell
+    // newlines the parser is expected to retain. Both RFC4180 forms stay intact.
+    for newline in ["\n", "\r\n"] {
+        let expected = format!("\"Quoted\" slam{newline}second line");
+        let csv = format!(
+            "Filename,Description{newline}slam.wav,\"\"\"Quoted\"\" slam{newline}second line\"{newline}"
+        );
+        let path = text(temp.path(), "quoted-rfc4180.csv", &csv);
+        let preview = provider.vendor_import_preview_impl(&path).unwrap();
+        assert_eq!(preview.rows, 1);
+        assert_eq!(preview.samples[0].values["description"], expected);
+    }
 }
 
 #[test]

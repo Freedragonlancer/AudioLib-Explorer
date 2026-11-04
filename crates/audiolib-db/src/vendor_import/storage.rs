@@ -375,7 +375,7 @@ pub(super) struct EventRow<'a> {
 }
 
 pub(super) fn add_event(conn: &Connection, event: EventRow<'_>) -> Result<()> {
-    conn.execute("INSERT OR IGNORE INTO audiolib_vendor_events(import_id,audio_file_id,field,value,source_file,sheet,row,overwrite,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![event.import,event.id,event.field,event.value,event.source_file,event.sheet,super::sql_u64(event.row)?,event.overwrite,event.language]).map_err(db_error)?;
+    conn.execute("INSERT OR IGNORE INTO audiolib_vendor_events(import_id,audio_file_id,field,value,source_file,sheet,row,overwrite,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![event.import,event.id,event.field,event.value,event.source_file,event.sheet,super::sql_u64(event.row)?,event.overwrite,event.language]).map_err(db_error)?;
     Ok(())
 }
 
