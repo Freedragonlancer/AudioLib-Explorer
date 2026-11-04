@@ -10,7 +10,10 @@ use crate::server_upgrade::{
     VendorImportInfo,
 };
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::Read;
 use std::path::Path;
 
 /// Limits used for one import: the server's `/capabilities.vendor_import`, falling back to
@@ -119,10 +122,9 @@ impl VendorPrecheckError {
     }
 }
 
-/// Refuse a file that certainly exceeds the limits. Text tables are streamed line by
-/// line (a quoted newline only makes the count conservative upward for rows, so rows
-/// are compared with one header row of slack); spreadsheets are size-checked only and
-/// the server enforces rows per sheet.
+/// Refuse only skipped/empty/oversized inputs before upload. Logical CSV records and
+/// decoded row sizes must be checked by the real parser: physical newlines inside
+/// quotes and UTF-16 byte widths are not safe reasons to reject a valid table here.
 pub fn precheck(
     path: &Path,
     limits: VendorLimits,
@@ -148,13 +150,10 @@ pub fn precheck(
     let mut head = [0u8; 8];
     let read = file.read(&mut head)?;
     let format = sniff_format(&head[..read]);
-    if format != VendorFormat::Text {
-        return Ok(Ok(format));
-    }
-    let file = std::fs::File::open(path)?;
-    Ok(check_text(BufReader::new(file), limits).map(|()| format))
+    Ok(Ok(format))
 }
 
+#[cfg(test)]
 fn check_text(mut reader: impl BufRead, limits: VendorLimits) -> Result<(), VendorPrecheckError> {
     // UTF-16 doubles the byte count of every character; compare against twice the limit.
     let utf16 = match reader.fill_buf() {
@@ -218,6 +217,103 @@ pub struct VendorFileResult {
     pub rows: u64,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub encoding: String,
+    #[serde(default)]
+    pub delimiter: Option<String>,
+    #[serde(default)]
+    pub truncated_rows: u64,
+}
+
+/// Canonical field -> source header mapping; filename/path identify the audio, not annotations.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorColumnMapping {
+    pub filename: Option<String>,
+    pub relative_path: Option<String>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, String>,
+}
+
+/// A per-sheet override; header_row is one based in the original spreadsheet/text records.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorSheetMapping {
+    pub source_file: String,
+    pub sheet: String,
+    pub header_row: Option<u64>,
+    pub mapping: VendorColumnMapping,
+}
+
+/// Recoverable preview/commit settings. Confirmations are explicit row_id -> audio id choices.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VendorImportOptions {
+    pub vendor_root: Option<String>,
+    pub fuzzy: bool,
+    pub overwrite: bool,
+    pub encoding: Option<String>,
+    pub delimiter: Option<String>,
+    pub preferred_languages: Vec<String>,
+    pub mapping: Option<VendorColumnMapping>,
+    pub sheet_mappings: Vec<VendorSheetMapping>,
+    pub confirmations: BTreeMap<String, i64>,
+    pub template: Option<String>,
+}
+
+/// A named reusable mapping persisted in the owned preview store.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorMappingTemplate {
+    pub id: String,
+    pub name: String,
+    pub mapping: VendorColumnMapping,
+    pub encoding: Option<String>,
+    pub delimiter: Option<String>,
+}
+
+/// One source sheet and its detected header/mapping, including sheets with no matching key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorSheetPreview {
+    pub source_file: String,
+    pub sheet: String,
+    pub header_row: u64,
+    pub headers: Vec<String>,
+    pub mapping: VendorColumnMapping,
+    pub rows: u64,
+}
+
+/// An explicit candidate offered for ambiguous or fuzzy matching; never an implicit write.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorMatchCandidate {
+    pub id: i64,
+    pub path: String,
+}
+
+/// A bounded row sample. Full row details can be paged by row_id in the preview store.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorRowPreview {
+    pub row_id: String,
+    pub source_file: String,
+    pub sheet: String,
+    pub row: u64,
+    pub values: BTreeMap<String, String>,
+    pub matched_id: Option<i64>,
+    pub candidates: Vec<VendorMatchCandidate>,
+    /// Exact full candidate-set size; candidates embeds only its bounded first page.
+    #[serde(default)]
+    pub candidate_count: u64,
+    #[serde(default)]
+    pub candidates_truncated: bool,
+    pub suggested: bool,
+    pub user_conflict: bool,
+}
+
+/// A bounded page from the full disk-backed candidate set; any page can be confirmed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorCandidatePage {
+    pub offset: u64,
+    pub total: u64,
+    pub candidates: Vec<VendorMatchCandidate>,
 }
 
 /// `POST /api/vendor-import/preview` and `GET /api/vendor-import/{id}` replies. Fields
@@ -239,6 +335,16 @@ pub struct VendorImportPreview {
     pub suggested: u64,
     #[serde(default)]
     pub files: Vec<VendorFileResult>,
+    #[serde(default)]
+    pub sheets: Vec<VendorSheetPreview>,
+    #[serde(default)]
+    pub samples: Vec<VendorRowPreview>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub options: VendorImportOptions,
+    #[serde(default)]
+    pub can_commit: bool,
 }
 
 /// Commit / rollback reply.
@@ -252,6 +358,26 @@ pub struct VendorImportResult {
     pub written: u64,
     #[serde(default)]
     pub restored: u64,
+}
+
+/// Durable progress of a preview or a batched commit/rollback; state survives process exit.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorImportStatus {
+    pub preview: VendorImportPreview,
+    pub result: Option<VendorImportResult>,
+    pub completed: u64,
+    pub total: u64,
+    pub cancellable: bool,
+    pub error: Option<String>,
+    /// Stable operation identity for resuming this library's authorized import history.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// A bounded page of durable import history.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorImportHistory {
+    pub imports: Vec<VendorImportStatus>,
 }
 
 pub fn preview_summary(preview: &VendorImportPreview, chinese: bool) -> String {
@@ -325,6 +451,14 @@ pub fn rolled_back_text(result: &VendorImportResult, chinese: bool) -> String {
     } else {
         format!("Batch {} rolled back.", result.import_id)
     }
+}
+
+/// Quote one report/export cell as literal CSV text, including spreadsheet formula prefixes.
+/// Parsing/import never executes formulas; export must also keep these strings as data.
+pub fn report_csv_cell(value: &str) -> String {
+    let dangerous = value.trim_start().starts_with(['=', '+', '-', '@']);
+    let prefix = if dangerous { "'" } else { "" };
+    format!("\"{prefix}{}\"", value.replace('"', "\"\""))
 }
 
 /// Entry point disabled reason: local libraries do not import yet (§4.7 covers server
@@ -419,5 +553,15 @@ mod tests {
             text.contains("匹配 3") && text.contains("a.xls：encrypted"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn quoted_newlines_are_left_to_the_real_parser_and_report_formulas_are_literal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("quoted.csv");
+        std::fs::write(&path, "Filename,Description\nfoo.wav,\"one\ntwo\nthree\"\n").unwrap();
+        assert!(precheck(&path, limits(1, 100)).unwrap().is_ok());
+        assert_eq!(report_csv_cell("=SUM(A1:A2)"), "\"'=SUM(A1:A2)\"");
+        assert_eq!(report_csv_cell("one,\"two\""), "\"one,\"\"two\"\"\"");
     }
 }

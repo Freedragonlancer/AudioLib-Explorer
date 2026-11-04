@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Catalog version identifies capability semantics independently of application SemVer.
-pub const CATALOG_REVISION: u32 = 1;
+pub const CATALOG_REVISION: u32 = 2;
 /// Plan B's completed business schema.
 pub const TARGET_SCHEMA: u32 = 8;
 /// Completed tokenizer encoding; 4 in an old live upgrade is a temporary marker.

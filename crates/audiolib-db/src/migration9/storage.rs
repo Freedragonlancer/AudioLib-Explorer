@@ -254,6 +254,7 @@ pub(super) fn publish(
     if folders != indexed || missing {
         return Err(invalid("Directory index count mismatch"));
     }
+    crate::vendor_import::ensure_schema(&tx)?;
     put(
         &tx,
         "snapshot_format",

@@ -87,6 +87,8 @@ fn vendor_preview_commit_and_rollback_are_distinct_busy_guarded_actions() {
     ui.set_chinese(false);
     ui.set_vi_available(true);
     ui.set_vi_state(3);
+    ui.set_vi_has_preview(true);
+    ui.set_vi_can_commit(true);
     let actions = Rc::new(RefCell::new(Vec::new()));
     let seen = actions.clone();
     ui.on_vi_commit(move || seen.borrow_mut().push("commit"));
@@ -94,6 +96,9 @@ fn vendor_preview_commit_and_rollback_are_distinct_busy_guarded_actions() {
     ui.on_vi_rollback(move || seen.borrow_mut().push("rollback"));
     ui.show().unwrap();
     click_label(&ui, "Commit");
+    ui.set_vi_mapping_dirty(true);
+    click_label(&ui, "Commit");
+    assert_eq!(&*actions.borrow(), &["commit"]);
     ui.set_vi_state(2);
     assert!(ui.get_background_blocked());
     assert!(
@@ -102,8 +107,83 @@ fn vendor_preview_commit_and_rollback_are_distinct_busy_guarded_actions() {
             .is_none()
     );
     ui.set_vi_state(4);
+    ui.set_vi_can_rollback(true);
     click_label(&ui, "Roll back");
+    assert_eq!(&*actions.borrow(), &["commit"]);
+    click_label(&ui, "Back");
+    click_label(&ui, "Roll back");
+    click_label(&ui, "Confirm rollback");
     assert_eq!(&*actions.borrow(), &["commit", "rollback"]);
+    ui.hide().unwrap();
+}
+
+#[test]
+fn vendor_progress_cancel_and_history_are_separate_actions() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_chinese(false);
+    ui.window()
+        .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+    ui.set_vi_available(true);
+    ui.set_vi_state(2);
+    ui.set_vi_cancellable(true);
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = calls.clone();
+    ui.on_vi_cancel(move || seen.borrow_mut().push("cancel".into()));
+    let seen = calls.clone();
+    ui.on_vi_load_history(move || seen.borrow_mut().push("history".into()));
+    let seen = calls.clone();
+    ui.on_vi_select_history(move |index| seen.borrow_mut().push(format!("batch {index}")));
+    ui.set_vi_history(slint::ModelRc::new(slint::VecModel::from(vec![
+        crate::VendorHistoryRow {
+            id: "old-batch".into(),
+            text: "Old committed batch".into(),
+        },
+    ])));
+    ui.show().unwrap();
+    click_label(&ui, "Cancel import");
+    click_label(&ui, "Import history");
+    assert_eq!(&*calls.borrow(), &["cancel"]);
+    ui.set_vi_state(1);
+    click_label(&ui, "Import history");
+    click_label(&ui, "Old committed batch");
+    assert_eq!(&*calls.borrow(), &["cancel", "history", "batch 0"]);
+    ui.hide().unwrap();
+}
+
+#[test]
+fn vendor_full_candidate_picker_keeps_selection_explicit_and_busy_guarded() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_chinese(false);
+    ui.window()
+        .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+    ui.set_vi_state(3);
+    ui.set_vi_editable(true);
+    ui.set_vi_candidates_visible(true);
+    ui.set_vi_candidates(slint::ModelRc::new(slint::VecModel::from(vec![
+        "Choose a candidate".into(),
+        "41 · /complete/path/door.wav".into(),
+    ])));
+    ui.set_vi_candidates_range("33–64 / 75".into());
+    ui.set_vi_candidates_next(true);
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = calls.clone();
+    ui.on_vi_candidates_page(move |direction| seen.borrow_mut().push(format!("page {direction}")));
+    let seen = calls.clone();
+    ui.on_vi_candidate_confirmed(move || seen.borrow_mut().push("confirm".into()));
+    ui.show().unwrap();
+    click_label(&ui, "Use selected candidate");
+    assert!(calls.borrow().is_empty());
+    click_label(&ui, "Next candidates");
+    assert_eq!(&*calls.borrow(), &["page 1"]);
+    ui.set_vi_candidate_index(1);
+    ui.set_vi_state(2);
+    click_label(&ui, "Use selected candidate");
+    assert_eq!(&*calls.borrow(), &["page 1"]);
+    ui.set_vi_state(3);
+    click_label(&ui, "Use selected candidate");
+    assert_eq!(&*calls.borrow(), &["page 1", "confirm"]);
     ui.hide().unwrap();
 }
 

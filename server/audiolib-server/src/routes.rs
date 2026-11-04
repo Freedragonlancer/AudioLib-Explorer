@@ -245,8 +245,24 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
     let api = with_request_timeout(timeout, open)
         .merge(protected)
         .layer(middleware::from_fn(guard_api_mutation));
+    let vendor = Router::new()
+        .route(
+            audiolib_core::server_upgrade::VENDOR_IMPORT_API,
+            get(crate::vendor_import::history),
+        )
+        .nest(
+            audiolib_core::server_upgrade::VENDOR_IMPORT_API,
+            crate::vendor_import::router(),
+        )
+        .route_layer(manage())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ))
+        .layer(middleware::from_fn(guard_api_mutation));
     Router::new()
         .nest(API_BASE, api)
+        .merge(with_request_timeout(Duration::from_secs(300), vendor))
         .merge(with_request_timeout(
             timeout,
             crate::admin::router(state.security().clone()),
@@ -390,6 +406,9 @@ pub const LIBRARY_ID_HEADER: &str = "x-audiolib-library-id";
 /// Exact methods of every client route carrying `require_manage`, including HEAD
 /// for the GET filesystem browser. Match the router's path template, never a raw URI.
 fn managed_route(method: &Method, path: &str) -> bool {
+    if path.starts_with(audiolib_core::server_upgrade::VENDOR_IMPORT_API) {
+        return true;
+    }
     match *method {
         Method::GET | Method::HEAD => path.ends_with("/fs"),
         Method::PATCH => path.ends_with("/roots/{name}") || path.ends_with("/settings"),
@@ -435,6 +454,12 @@ fn library_mutation(request: &Request) -> bool {
         return false;
     };
     let path = path.as_str();
+    if path.starts_with(audiolib_core::server_upgrade::VENDOR_IMPORT_API) {
+        return !matches!(
+            *request.method(),
+            Method::GET | Method::HEAD | Method::OPTIONS
+        );
+    }
     match *request.method() {
         Method::PATCH => path.ends_with("/audio/{id}/metadata") || path.ends_with("/roots/{name}"),
         Method::DELETE => path.ends_with("/folders/{id}") || path.ends_with("/roots/{name}"),
@@ -520,6 +545,7 @@ async fn require_manage(State(service): State<Service>, request: Request, next: 
 /// external and whether it may manage the library.
 async fn capabilities(
     State(service): State<Service>,
+    migration: Option<Extension<audiolib_db::migration9::Report>>,
     request: Request,
 ) -> Json<CapabilitiesResponse> {
     let connection = request.extensions().get::<ConnectionInfo>().copied();
@@ -527,8 +553,91 @@ async fn capabilities(
         .security()
         .classify(request.headers(), connection.as_ref());
     let manage_mode = service.security().manage_mode();
+    use audiolib_core::server_upgrade::{
+        ClientUpgradeInfo, ClientUpgradeLevel, LibrarySchemaInfo, SchemaMigrationInfo,
+        VendorImportInfo,
+    };
+    let mut compatibility = audiolib_core::compatibility::compatibility_manifest();
+    let ready = match service.readiness() {
+        Readiness::Ready(state) => Some(state),
+        _ => None,
+    };
+    let format = if let Some(state) = &ready {
+        let state = state.clone();
+        blocking(move || state.snapshot_format()).await.ok()
+    } else {
+        None
+    };
+    if let Some(format) = &format {
+        compatibility.database_write_formats = vec![format.id.clone()];
+    }
+    let served = ready
+        .as_ref()
+        .and_then(|state| state.read_format_for_peer(request.headers(), true).ok());
+    let library_schema = format.as_ref().map(|format| {
+        let mut formats = vec![format.id.clone()];
+        if format.format.schema_version == 9
+            && ready
+                .as_ref()
+                .is_some_and(AppState::legacy_snapshots_enabled)
+        {
+            formats.push(audiolib_core::compatibility::PLAN_B_FORMAT.into());
+        }
+        LibrarySchemaInfo {
+            current: Some(format.format.schema_version),
+            source_search_rev: format.format.source_search_revision,
+            snapshot_formats_served: formats,
+        }
+    });
+    let client_upgrade: Option<ClientUpgradeInfo> = format
+        .as_ref()
+        .filter(|source| {
+            source.format.schema_version == 9
+                && served.as_ref().is_none_or(|s| s.format.schema_version != 9)
+        })
+        .map(|_| {
+            let mut hint = crate::compatibility::legacy_upgrade_info();
+            if served.is_none() {
+                hint.level = ClientUpgradeLevel::Required;
+                hint.reason = Some("snapshot_format_unsupported".into());
+                hint.served_snapshot_format = None;
+            }
+            hint
+        });
+    let schema_migration = ready.as_ref().map(|_| SchemaMigrationInfo {
+        state: migration
+            .as_ref()
+            .map(|r| {
+                serde_json::from_value(serde_json::json!(r.0.state.as_str())).unwrap_or_default()
+            })
+            .unwrap_or(
+                if format
+                    .as_ref()
+                    .is_some_and(|f| f.format.schema_version == 9)
+                {
+                    audiolib_core::server_upgrade::MigrationState::Done
+                } else {
+                    audiolib_core::server_upgrade::MigrationState::Deferred
+                },
+            ),
+        endpoint: Some("/admin/api/migration".into()),
+    });
     Json(CapabilitiesResponse {
-        compatibility: audiolib_core::compatibility::compatibility_manifest(),
+        compatibility,
+        library_schema,
+        schema_migration,
+        vendor_import: ready.map(|_| VendorImportInfo {
+            endpoint: Some(audiolib_core::server_upgrade::VENDOR_IMPORT_API.into()),
+            revision: 1,
+            max_file_bytes: 52_428_800,
+            max_rows: 200_000,
+            max_row_text_bytes: Some(262_144),
+        }),
+        client_upgrade,
+        search_scopes: ["main", "all", "path", "filename"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         manage_mode,
         external: origin == RequestOrigin::External,
         can_manage: manage_mode.allows(origin),
@@ -855,7 +964,21 @@ async fn health(
     State(service): State<Service>,
     migration: Option<Extension<audiolib_db::migration9::Report>>,
 ) -> Json<HealthResponse> {
+    let actual_schema = match service.readiness() {
+        Readiness::Ready(state) => blocking(move || {
+            state
+                .snapshot_format()
+                .map(|format| i64::from(format.format.schema_version))
+        })
+        .await
+        .ok(),
+        _ => None,
+    };
     let (status, message) = match service.readiness() {
+        Readiness::Ready(_) if actual_schema.is_none() => (
+            "error",
+            Some("Library format is temporarily unavailable".to_string()),
+        ),
         Readiness::Ready(_) => ("ok", None),
         Readiness::Starting => ("starting", None),
         // Details (which may include paths) stay in the log and authenticated 503 replies.
@@ -869,15 +992,31 @@ async fn health(
         message,
         public_url: service.security().public_url(),
         api_version: crate::API_VERSION.into(),
-        schema_version: migration
-            .and_then(|r| r.0.switch)
-            .map_or(audiolib_db::SCHEMA_VERSION, |s| s.user_version),
+        schema_version: actual_schema
+            .or_else(|| {
+                migration
+                    .and_then(|r| r.0.switch)
+                    .map(|switch| switch.user_version)
+            })
+            .unwrap_or(audiolib_db::SCHEMA_VERSION),
         commit: crate::COMMIT.into(),
     })
 }
 
-async fn library(Extension(state): Extension<AppState>) -> Result<impl IntoResponse, ApiError> {
-    Ok(Json(blocking(move || state.library_response()).await?))
+async fn library(
+    Extension(state): Extension<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let info = blocking_api(move || state.library_info_for_peer(&headers)).await?;
+    let legacy = info.library_schema == 9 && info.info.schema_version == 8;
+    let mut response = Json(info).into_response();
+    if legacy {
+        response.headers_mut().insert(
+            audiolib_core::server_upgrade::UPGRADE_AVAILABLE_HEADER,
+            crate::compatibility::legacy_upgrade_header()?,
+        );
+    }
+    Ok(response)
 }
 
 async fn roots(Extension(state): Extension<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -2311,6 +2450,7 @@ async fn snapshot(
     let Query(query) = query.map_err(|rejection| {
         ApiError::validation(format!("Invalid snapshot query: {}", rejection.body_text()))
     })?;
+    let pinned = query.snapshot_id.is_some();
     if let Some(id) = &query.snapshot_id
         && !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
     {
@@ -2318,11 +2458,16 @@ async fn snapshot(
     }
     // Refuse unsupported current formats before starting a costly backup. A pinned
     // request is admitted against its own immutable format below instead.
-    if query.snapshot_id.is_none() {
-        let format_state = state.clone();
-        let format = blocking(move || format_state.snapshot_format()).await?;
-        crate::compatibility::admit(&headers, &format)?;
-    }
+    let format_state = state.clone();
+    let admission_headers = headers.clone();
+    let (selected, source_schema) = blocking_api(move || {
+        let source_schema = format_state.snapshot_format()?.format.schema_version;
+        Ok((
+            format_state.read_format_for_peer(&admission_headers, false)?,
+            source_schema,
+        ))
+    })
+    .await?;
     let wanted_encoding = if accepts_zstd(&headers) {
         SnapshotEncoding::Zstd
     } else {
@@ -2342,13 +2487,20 @@ async fn snapshot(
     } else {
         // Detached single-flight preparation continues past the response wait budget.
         let (prepared, file) = state
-            .snapshot_within_budget(wanted_encoding == SnapshotEncoding::Zstd)
-            .await
+            .snapshot_for_peer(wanted_encoding == SnapshotEncoding::Zstd, &headers)
+            .await?
             .ok_or_else(ApiError::snapshot_preparing)??;
         let retain = state.clone();
         blocking(move || retain.retain_snapshot(prepared, file, wanted_encoding)).await?
     };
     let representation = lease.representation();
+    if !pinned && representation.snapshot_format != selected {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "SNAPSHOT_FORMAT_UNSUPPORTED",
+            "Snapshot format changed during preparation; retry",
+        ));
+    }
     crate::compatibility::admit(&headers, &representation.snapshot_format)?;
     if !accepts_snapshot_encoding(&headers, representation.encoding) {
         return Err(ApiError::new(
@@ -2381,6 +2533,12 @@ async fn snapshot(
         representation.revision
     ))?;
     let mut response_headers = HeaderMap::new();
+    if source_schema == 9 && representation.snapshot_format.format.schema_version == 8 {
+        response_headers.insert(
+            audiolib_core::server_upgrade::UPGRADE_AVAILABLE_HEADER,
+            crate::compatibility::legacy_upgrade_header()?,
+        );
+    }
     crate::compatibility::response_headers(&mut response_headers, &representation.snapshot_format)?;
     response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response_headers.insert(header::CONTENT_DISPOSITION, disposition);

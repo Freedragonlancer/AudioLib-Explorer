@@ -605,6 +605,7 @@ pub(crate) fn bump_generation(conn: &Connection) -> Result<()> {
 struct Run {
     lo: i64,
     hi: i64,
+    count: i64,
     dense: bool,
     dir: i64,
 }
@@ -614,7 +615,6 @@ struct RunIdx {
     by_dir: HashMap<i64, Vec<usize>>,
     parent: HashMap<i64, i64>,
     children: HashMap<i64, Vec<i64>>,
-    tfc: HashMap<i64, i64>,
 }
 
 #[derive(Default)]
@@ -731,7 +731,7 @@ pub(crate) fn search(request: &DirSearch<'_>) -> Result<DirPage> {
         let matched = compile_query_columns(jieba, &t3_norm(term), PATH_RAW, PATH_DERIVED)?;
         sets.push(segment_matches(conn, &matched)?);
     }
-    let total_files: i64 = index.all.iter().map(|run| run.hi - run.lo + 1).sum();
+    let total_files: i64 = index.all.iter().map(|run| run.count).sum();
     for set in &mut sets {
         if path_set_too_wide(estimate(set, &index), total_files) {
             set.clear();
@@ -769,6 +769,9 @@ pub(crate) fn search(request: &DirSearch<'_>) -> Result<DirPage> {
             .map(|term| compile_query(jieba, term))
             .collect::<Result<Vec<_>>>()?;
         for tier in [1_u8, 2] {
+            if scope == SearchScope::Path && tier == 1 {
+                continue;
+            }
             if produced.len() >= want {
                 break;
             }
@@ -965,6 +968,12 @@ fn classify(
     }
     if !any_path {
         return Ok(None);
+    }
+    if scope == SearchScope::Path && !all_path {
+        return Ok(None);
+    }
+    if scope == SearchScope::Path {
+        return Ok(Some(2));
     }
     for term in &missed {
         if !matches_row(conn, &term_match[*term], id)? {
@@ -1183,7 +1192,7 @@ fn subtree_files(index: &RunIdx, dir: i64) -> i64 {
         if let Some(runs) = index.by_dir.get(&dir) {
             for &slot in runs {
                 let run = index.all[slot];
-                count += run.hi - run.lo + 1;
+                count += run.count;
             }
         }
         if let Some(children) = index.children.get(&dir) {
@@ -1196,14 +1205,7 @@ fn subtree_files(index: &RunIdx, dir: i64) -> i64 {
 fn estimate(set: &HashSet<i64>, index: &RunIdx) -> i64 {
     top_dirs(set, index)
         .into_iter()
-        .map(|dir| {
-            let counted = index.tfc.get(&dir).copied().unwrap_or(0);
-            if counted > 0 {
-                counted
-            } else {
-                subtree_files(index, dir)
-            }
-        })
+        .map(|dir| subtree_files(index, dir))
         .sum()
 }
 
@@ -1294,7 +1296,8 @@ fn read_index(conn: &Connection) -> Result<RunIdx> {
             Ok(Run {
                 lo,
                 hi,
-                dense: count == hi - lo + 1,
+                count,
+                dense: hi.checked_sub(lo).and_then(|span| span.checked_add(1)) == Some(count),
                 dir: row.get(3)?,
             })
         })
@@ -1307,7 +1310,6 @@ fn read_index(conn: &Connection) -> Result<RunIdx> {
     }
     let mut parent = HashMap::new();
     let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut tfc = HashMap::new();
     let mut folders = conn
         .prepare("SELECT id, parent_id, COALESCE(total_file_count, 0) FROM folders")
         .map_err(db_error)?;
@@ -1322,7 +1324,7 @@ fn read_index(conn: &Connection) -> Result<RunIdx> {
         .map_err(db_error)?;
     for row in rows {
         let (id, parent_id, files) = row.map_err(db_error)?;
-        tfc.insert(id, files);
+        let _ = files;
         if let Some(parent_id) = parent_id {
             parent.insert(id, parent_id);
             children.entry(parent_id).or_default().push(id);
@@ -1333,7 +1335,6 @@ fn read_index(conn: &Connection) -> Result<RunIdx> {
         by_dir,
         parent,
         children,
-        tfc,
     })
 }
 
@@ -1380,7 +1381,7 @@ fn write_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn base64url(bytes: &[u8]) -> String {
+pub(crate) fn base64url(bytes: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     let mut index = 0;
@@ -1408,7 +1409,7 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-fn base64url_decode(value: &str) -> std::result::Result<Vec<u8>, ()> {
+pub(crate) fn base64url_decode(value: &str) -> std::result::Result<Vec<u8>, ()> {
     fn value_of(byte: u8) -> std::result::Result<u8, ()> {
         Ok(match byte {
             b'A'..=b'Z' => byte - b'A',

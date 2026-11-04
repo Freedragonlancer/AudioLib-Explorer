@@ -93,6 +93,7 @@ fn search_scope_index(scope: SearchScope) -> i32 {
         SearchScope::All => 0,
         SearchScope::Main => 1,
         SearchScope::Path => 2,
+        SearchScope::Filename => 3,
     }
 }
 
@@ -100,6 +101,7 @@ fn search_scope_from_index(index: i32) -> SearchScope {
     match index {
         1 => SearchScope::Main,
         2 => SearchScope::Path,
+        3 => SearchScope::Filename,
         _ => SearchScope::All,
     }
 }
@@ -108,6 +110,7 @@ fn search_scope_from_pref(value: &str) -> SearchScope {
     match audiolib_core::config::normalize_search_scope(value).as_str() {
         "main" => SearchScope::Main,
         "path" => SearchScope::Path,
+        "filename" => SearchScope::Filename,
         _ => SearchScope::All,
     }
 }
@@ -2516,7 +2519,7 @@ impl Controller {
                     }
                     LibraryOperation::Relink(id, path) => {
                         let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
-                        let path = audiolib_core::validate_wav_path(path, &allowed_roots)
+                        let path = audiolib_core::validate_audio_path(path, &allowed_roots)
                             .map_err(|error| error.to_string())?;
                         if provider
                             .find_audio_by_path(&path)
@@ -2922,6 +2925,10 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        // A forced source reset must invalidate the old import's UI admission and
+        // cancel its original provider, while retaining its durable checkpoint.
+        self.cancel_vendor_for_transition();
+        self.search_v2_busy.store(false, Ordering::Release);
         self.search_v2_ux.lock().unwrap().reset();
         ui.set_lu_state(0);
         ui.set_vi_state(0);
@@ -4318,7 +4325,7 @@ impl Controller {
         let ready = self.provider().path_search_ready().ok().unwrap_or(false);
         let probe = self.remote_read_only() && self.server_path_search_offered();
         ui.set_path_search_available(ready || probe);
-        if !ready && !probe && ui.get_search_scope_index() >= 2 {
+        if !ready && !probe && ui.get_search_scope_index() == 2 {
             ui.set_search_scope_index(0);
             let chinese = self.chinese.load(Ordering::Acquire);
             ui.set_status(
@@ -4478,16 +4485,6 @@ impl Controller {
         crate::tag_chips::apply_to(ui, &mut request.filters);
         request.order_by = table_sort_order(ui.get_sort_index());
         request.descending = ui.get_sort_descending();
-        let scope_notice = match search_v2_ux::constrain_path_scope(
-            &mut request,
-            self.chinese.load(Ordering::Acquire),
-        ) {
-            Ok(notice) => notice,
-            Err(message) => {
-                self.reject_search(ui, message);
-                return;
-            }
-        };
         if let Err(error) = request.validate() {
             self.reject_search(ui, error.to_string());
             return;
@@ -4524,7 +4521,7 @@ impl Controller {
             pending_folders: None,
             expected_folders: None,
             model_published: false,
-            retained_status: scope_notice,
+            retained_status: None,
             result_window: false,
         });
         *self.search_job.lock().unwrap() = Some(job.clone());
@@ -5539,6 +5536,7 @@ impl Controller {
             || (self.source_changing.load(Ordering::Acquire) && !pending_source_sync)
         {
             self.close_after_operation.store(true, Ordering::Release);
+            self.cancel_vendor_for_transition();
             return;
         }
         if self.closing.load(Ordering::Acquire) {
@@ -6824,7 +6822,7 @@ impl Controller {
             return;
         }
         if action == 20 {
-            self.choose_file(false, crate::dialogs::FileKind::Wav, move |path| {
+            self.choose_file(false, crate::dialogs::FileKind::Audio, move |path| {
                 LibraryOperation::Relink(id, path)
             });
         } else if action == 21 {
@@ -7076,6 +7074,7 @@ impl Controller {
 
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
+        self.cancel_vendor_for_transition();
         if let Some(ui) = self.ui.upgrade() {
             self.persist_search_task(&ui);
         }

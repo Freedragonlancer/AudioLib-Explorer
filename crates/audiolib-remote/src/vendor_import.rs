@@ -5,7 +5,7 @@
 
 use crate::client::RemoteClient;
 use crate::error::{RemoteError, Result};
-use audiolib_core::vendor_import::{VendorImportPreview, VendorImportResult};
+use audiolib_core::vendor_import::*;
 use std::path::Path;
 use std::time::Duration;
 
@@ -50,6 +50,17 @@ impl RemoteClient {
         body: Option<&[u8]>,
         idempotency_key: Option<&str>,
     ) -> Result<String> {
+        self.vendor_http("POST", path, content_type, body, idempotency_key)
+    }
+
+    fn vendor_http(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<String>,
+        body: Option<&[u8]>,
+        idempotency_key: Option<&str>,
+    ) -> Result<String> {
         let capabilities = self.capabilities()?;
         if !capabilities.may_manage() {
             return Err(RemoteError::Forbidden(
@@ -61,12 +72,21 @@ impl RemoteClient {
         })?;
         let prefix = vendor_prefix(info.endpoint.as_deref())?;
         let url = format!("{}{prefix}{path}", self.origin());
-        let context = format!("POST {prefix}{path}");
+        let context = format!("{method} {prefix}{path}");
         let library_id = self.write_library_id()?;
         let compatibility = crate::compatibility::client_header()?;
         let agent = crate::client::agent(UPLOAD_TIMEOUT, Duration::from_secs(30));
-        let mut request = agent
-            .post(&url)
+        let request = match method {
+            "GET" => agent.get(&url).force_send_body(),
+            "PUT" => agent.put(&url),
+            "POST" => agent.post(&url),
+            _ => {
+                return Err(RemoteError::Validation(
+                    "Unsupported vendor import method".into(),
+                ));
+            }
+        };
+        let mut request = request
             .header("x-audiolib-admin", "1")
             .header(crate::client::LIBRARY_ID_HEADER, library_id.as_str())
             .header(
@@ -138,6 +158,179 @@ impl RemoteClient {
         Ok(preview)
     }
 
+    /// Preview a bounded batch of tables with explicit mapping and matching options.
+    pub fn vendor_import_preview_files(
+        &self,
+        files: &[std::path::PathBuf],
+        options: &VendorImportOptions,
+    ) -> Result<VendorImportPreview> {
+        if files.is_empty() || files.len() > 512 {
+            return Err(RemoteError::Validation(
+                "Select 1..512 vendor tables".into(),
+            ));
+        }
+        let capabilities = self.capabilities()?;
+        let info = capabilities.vendor_import.ok_or_else(|| {
+            RemoteError::Unsupported("This server does not implement vendor import".into())
+        })?;
+        let limits = VendorLimits::from(&info);
+        let boundary = format!(
+            "audiolib-vendor-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        );
+        let options =
+            serde_json::to_vec(options).map_err(|e| RemoteError::Validation(e.to_string()))?;
+        if options.len() > 1024 * 1024 {
+            return Err(RemoteError::Validation(
+                "Vendor options exceed 1 MiB".into(),
+            ));
+        }
+        let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"options\"\r\nContent-Type: application/json\r\n\r\n").into_bytes();
+        body.extend_from_slice(&options);
+        body.extend_from_slice(b"\r\n");
+        let mut bytes_total = 0_u64;
+        for file in files {
+            use std::io::Read;
+            let length = std::fs::metadata(file)?.len();
+            if length > limits.max_file_bytes {
+                return Err(RemoteError::Validation(format!(
+                    "Vendor file exceeds {} bytes",
+                    limits.max_file_bytes
+                )));
+            }
+            bytes_total = bytes_total.saturating_add(length);
+            if bytes_total > 510 * 1024 * 1024 {
+                return Err(RemoteError::Validation(
+                    "Vendor upload batch exceeds the upload budget".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(file)?
+                .take(limits.max_file_bytes.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > limits.max_file_bytes {
+                return Err(RemoteError::Validation(
+                    "Vendor file grew past its upload limit".into(),
+                ));
+            }
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            let part = multipart_body(&boundary, &name, &bytes);
+            let closing = format!("--{boundary}--\r\n");
+            body.extend_from_slice(part.strip_suffix(closing.as_bytes()).ok_or_else(|| {
+                RemoteError::Protocol("Invalid vendor multipart encoding".into())
+            })?);
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        let text = self.vendor_http(
+            "POST",
+            "/preview",
+            Some(format!("multipart/form-data; boundary={boundary}")),
+            Some(&body),
+            None,
+        )?;
+        vendor_json(&text)
+    }
+
+    /// Read durable import status, including progress and recovery keys.
+    pub fn vendor_import_status(&self, id: &str) -> Result<VendorImportStatus> {
+        vendor_json(&self.vendor_http(
+            "GET",
+            &format!("/{}", crate::util::encode_path_segment(id)),
+            None,
+            None,
+            None,
+        )?)
+    }
+    /// Re-preview an existing batch with explicit column mappings or match confirmations.
+    pub fn vendor_import_mapping(
+        &self,
+        id: &str,
+        options: &VendorImportOptions,
+    ) -> Result<VendorImportPreview> {
+        let bytes =
+            serde_json::to_vec(options).map_err(|e| RemoteError::Validation(e.to_string()))?;
+        vendor_json(&self.vendor_http(
+            "PUT",
+            &format!("/{}/mapping", crate::util::encode_path_segment(id)),
+            Some("application/json".into()),
+            Some(&bytes),
+            None,
+        )?)
+    }
+    /// Page unresolved and matched rows without downloading the whole table.
+    pub fn vendor_import_rows(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<VendorRowPreview>> {
+        vendor_json(&self.vendor_http(
+            "GET",
+            &format!(
+                "/{}/rows?offset={offset}&limit={limit}",
+                crate::util::encode_path_segment(id)
+            ),
+            None,
+            None,
+            None,
+        )?)
+    }
+    /// Read batches associated with the opened library.
+    pub fn vendor_import_history(&self) -> Result<VendorImportHistory> {
+        vendor_json(&self.vendor_http("GET", "/", None, None, None)?)
+    }
+
+    /// Page every candidate of one ambiguous row with bounded reply size.
+    pub fn vendor_import_candidates(
+        &self,
+        id: &str,
+        row_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<VendorCandidatePage> {
+        let row = crate::util::encode_path_segment(row_id);
+        vendor_json(&self.vendor_http(
+            "GET",
+            &format!(
+                "/{}/candidates?row_id={row}&offset={offset}&limit={limit}",
+                crate::util::encode_path_segment(id)
+            ),
+            None,
+            None,
+            None,
+        )?)
+    }
+    /// Read reusable column mappings.
+    pub fn vendor_import_templates(&self) -> Result<Vec<VendorMappingTemplate>> {
+        vendor_json(&self.vendor_http("GET", "/templates", None, None, None)?)
+    }
+    /// Save an explicitly selected reusable column mapping.
+    pub fn vendor_import_save_template(
+        &self,
+        template: &VendorMappingTemplate,
+    ) -> Result<VendorMappingTemplate> {
+        let bytes =
+            serde_json::to_vec(template).map_err(|e| RemoteError::Validation(e.to_string()))?;
+        vendor_json(&self.vendor_http(
+            "PUT",
+            "/templates",
+            Some("application/json".into()),
+            Some(&bytes),
+            None,
+        )?)
+    }
+    /// Request cancellation at a committed import batch boundary.
+    pub fn vendor_import_cancel(&self, id: &str) -> Result<VendorImportStatus> {
+        vendor_json(&self.vendor_call(
+            &format!("/{}/cancel", crate::util::encode_path_segment(id)),
+            None,
+            None,
+            None,
+        )?)
+    }
+
     /// `POST /vendor-import/{id}/commit`; replaying the same key returns the same result.
     pub fn vendor_import_commit(&self, import_id: &str, key: &str) -> Result<VendorImportResult> {
         let id = crate::util::encode_path_segment(import_id);
@@ -153,6 +346,11 @@ impl RemoteClient {
         serde_json::from_str(&text)
             .map_err(|error| RemoteError::Protocol(format!("vendor rollback: {error}")))
     }
+}
+
+fn vendor_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {
+    serde_json::from_str(text)
+        .map_err(|e| RemoteError::Protocol(format!("Vendor import reply: {e}")))
 }
 
 fn vendor_prefix(configured: Option<&str>) -> Result<&str> {

@@ -19,8 +19,10 @@ use std::{
 };
 use symphonia::core::{
     codecs::audio::AudioDecoder,
+    common::Limit,
     formats::{FormatReader, SeekMode, SeekTo, TrackType, probe::Hint},
     io::MediaSourceStream,
+    meta::MetadataOptions,
     packet::Packet,
     units::{Duration, Timestamp},
 };
@@ -108,6 +110,11 @@ impl Decoder {
     /// (0 = unbuffered). Decoded samples are identical either way.
     pub fn open_with_read_buffer(path: &Path, read_buffer: usize) -> Result<Self> {
         let info = read_info(path)?;
+        if info.metadata.encoding == "OPUS" {
+            return Err(Error::Audio(
+                "Opus Metadata is supported, but this build has no Opus playback decoder".into(),
+            ));
+        }
         let buffer = source_buffer(path);
         let mut probe = None;
         let source = if matches!(info.format_tag, 1 | 3) {
@@ -139,9 +146,22 @@ impl Decoder {
             let stream =
                 MediaSourceStream::new(Box::new(MediaAdapter::new(inner, len)), Default::default());
             let mut hint = Hint::new();
-            hint.with_extension("wav");
+            hint.with_extension(if info.format_tag != 0 {
+                "wav"
+            } else if info.metadata.attributes["container"] == "Ogg" {
+                "ogg"
+            } else {
+                "flac"
+            });
             let reader = symphonia::default::get_probe()
-                .probe(&hint, stream, Default::default(), Default::default())
+                .probe(
+                    &hint,
+                    stream,
+                    Default::default(),
+                    MetadataOptions::default()
+                        .limit_tag_bytes(Limit::Maximum(1024 * 1024))
+                        .limit_visual_bytes(Limit::Maximum(0)),
+                )
                 .map_err(audio_error)?;
             let track = reader
                 .default_track(TrackType::Audio)
@@ -155,7 +175,7 @@ impl Decoder {
                 .make_audio_decoder(params, &Default::default())
                 .map_err(audio_error)?;
             let frames_per_block = params.frames_per_block.unwrap_or(1);
-            if frames_per_block > 1 {
+            if info.format_tag != 0 && frames_per_block > 1 {
                 // Symphonia 0.6.1's RIFF seek uses frame_ts * block_size for
                 // ADPCM; byte positions actually require block_index * block_size.
                 // Packetize complete WAV blocks here, preserving the codec decoder

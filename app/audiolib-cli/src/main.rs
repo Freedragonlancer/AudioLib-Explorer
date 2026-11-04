@@ -792,7 +792,7 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             },
         })?),
         Command::Relink { id, path } => {
-            let target = audiolib_core::validate_wav_path(path, &config.allowed_scan_roots)?;
+            let target = audiolib_core::validate_audio_path(path, &config.allowed_scan_roots)?;
             json!(provider.relink_audio(*id, &target)?)
         }
         Command::Remove { ids, .. } => json!({"removed":provider.remove_audio(ids)?}),

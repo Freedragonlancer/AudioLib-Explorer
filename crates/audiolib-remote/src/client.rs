@@ -520,8 +520,27 @@ impl RemoteClient {
         authenticated: bool,
     ) -> Result<ureq::http::Response<ureq::Body>> {
         let url = format!("{}{path}", self.api);
+        let catalog = audiolib_core::compatibility::compatibility_manifest();
+        let catalog_json =
+            serde_json::to_string(&catalog).map_err(|e| RemoteError::Protocol(e.to_string()))?;
+        let accepted = catalog.snapshot_read_formats.join(", ");
         let response = crate::abort::call_fresh(|| {
             let mut request = agent.get(&url);
+            if matches!(path, "/library" | "/capabilities") {
+                request = request
+                    .header(
+                        audiolib_core::compatibility::CLIENT_COMPATIBILITY_HEADER,
+                        &catalog_json,
+                    )
+                    .header(
+                        audiolib_core::compatibility::ACCEPT_FORMATS_HEADER,
+                        &accepted,
+                    )
+                    .header(
+                        audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX_HEADER,
+                        &audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX.to_string(),
+                    );
+            }
             if authenticated && !self.token.is_empty() {
                 request = request.header("Authorization", &format!("Bearer {}", self.token));
             }

@@ -28,6 +28,7 @@ pub mod state;
 pub mod stream;
 pub mod tls;
 pub mod update;
+mod vendor_import;
 pub mod waveform;
 pub mod wf_job;
 pub mod wfdb;

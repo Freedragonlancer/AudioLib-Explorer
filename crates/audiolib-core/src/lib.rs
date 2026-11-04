@@ -272,8 +272,10 @@ pub enum SearchScope {
     Main,
     /// Main-field matches first, then mixed, then path-only matches.
     All,
-    /// Mixed and path-only matches. Pure main-field hits are omitted.
+    /// Every term must match directory names or their ancestors, without main fields.
     Path,
+    /// Filename columns only; independent of the backwards-compatible main scope.
+    Filename,
 }
 
 impl SearchScope {
@@ -283,6 +285,7 @@ impl SearchScope {
             Self::Main => "main",
             Self::All => "all",
             Self::Path => "path",
+            Self::Filename => "filename",
         }
     }
 }
@@ -316,7 +319,7 @@ pub struct SearchRequest {
     pub offset: usize,
     pub order_by: SortOrder,
     pub descending: bool,
-    /// `main` (default), `all`, or `path`. Omitted requests keep s8 ordering.
+    /// `main` (default), `all`, `path`, or `filename`. Omitted requests keep s8 ordering.
     #[serde(default, skip_serializing_if = "scope_is_main")]
     pub scope: SearchScope,
     /// Opaque keyset cursor. When set with `scope` `all` or `path`, it replaces offset/page.
@@ -409,7 +412,8 @@ impl SearchRequest {
                 "Search cursor is empty, too long, or contains a control character".into(),
             ));
         }
-        if self.scope == SearchScope::Main && self.cursor.is_some() {
+        if matches!(self.scope, SearchScope::Main | SearchScope::Filename) && self.cursor.is_some()
+        {
             return Err(Error::Validation(
                 "Search cursor requires scope all or path".into(),
             ));
@@ -624,11 +628,73 @@ pub trait DataProvider: Send + Sync {
             "This provider has no local upgrade".into(),
         ))
     }
-    /// §4.5 vendor table preview (read-only); server mode with manage rights only.
+    /// Whether this provider implements vendor import and permits library management.
+    fn vendor_import_available(&self) -> Result<bool> {
+        Ok(false)
+    }
+    /// Vendor table preview (read-only); remote mode also requires manage permission.
     fn vendor_import_preview(
         &self,
         _file: &std::path::Path,
     ) -> Result<vendor_import::VendorImportPreview> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Preview multiple tables without modifying the library; options control mapping and matching.
+    fn vendor_import_preview_files(
+        &self,
+        _files: &[std::path::PathBuf],
+        _options: &vendor_import::VendorImportOptions,
+    ) -> Result<vendor_import::VendorImportPreview> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Read a durable preview or its current commit/rollback progress.
+    fn vendor_import_status(&self, _import_id: &str) -> Result<vendor_import::VendorImportStatus> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Recompute matching with explicit mappings or ambiguity confirmations; no library write.
+    fn vendor_import_mapping(
+        &self,
+        _import_id: &str,
+        _options: &vendor_import::VendorImportOptions,
+    ) -> Result<vendor_import::VendorImportPreview> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Page bounded preview rows, including unresolved match candidates.
+    fn vendor_import_rows(
+        &self,
+        _import_id: &str,
+        _offset: u64,
+        _limit: u64,
+    ) -> Result<Vec<vendor_import::VendorRowPreview>> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Page all candidates for an ambiguous preview row without materializing them all.
+    fn vendor_import_candidates(
+        &self,
+        _import_id: &str,
+        _row_id: &str,
+        _offset: u64,
+        _limit: u64,
+    ) -> Result<vendor_import::VendorCandidatePage> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// List import batches for this library only.
+    fn vendor_import_history(&self) -> Result<vendor_import::VendorImportHistory> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Read reusable mappings scoped to this provider's owned library state.
+    fn vendor_import_templates(&self) -> Result<Vec<vendor_import::VendorMappingTemplate>> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Persist an explicitly chosen mapping template without writing audio metadata.
+    fn vendor_import_save_template(
+        &self,
+        _template: &vendor_import::VendorMappingTemplate,
+    ) -> Result<vendor_import::VendorMappingTemplate> {
+        Err(Error::Validation("Vendor import is not available".into()))
+    }
+    /// Cancel at a durable batch boundary; completed batches remain resumable or rollbackable.
+    fn vendor_import_cancel(&self, _import_id: &str) -> Result<vendor_import::VendorImportStatus> {
         Err(Error::Validation("Vendor import is not available".into()))
     }
     /// Commit a previewed batch; the same key replays the same result.
@@ -968,6 +1034,31 @@ pub fn validate_wav_path(path: &Path, allowed_roots: &[PathBuf]) -> Result<PathB
     let parent = canonical
         .parent()
         .ok_or_else(|| Error::Validation("WAV parent folder is required".into()))?;
+    validate_scan_root(parent, allowed_roots)?;
+    Ok(canonical)
+}
+
+/// File types that can be scanned and decoded by the shipped source-audio pipeline.
+pub fn is_supported_audio_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        ["wav", "flac", "ogg", "oga"]
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    })
+}
+
+/// Resolve an existing supported audio target before enforcing its configured root.
+/// Use the returned real path for all subsequent I/O, never the unchecked original link.
+pub fn validate_audio_path(path: &Path, allowed_roots: &[PathBuf]) -> Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    if !canonical.is_file() || !is_supported_audio_extension(&canonical) {
+        return Err(Error::Validation(
+            "Target must be an existing WAV, FLAC or Ogg audio file".into(),
+        ));
+    }
+    let parent = canonical
+        .parent()
+        .ok_or_else(|| Error::Validation("Audio parent folder is required".into()))?;
     validate_scan_root(parent, allowed_roots)?;
     Ok(canonical)
 }

@@ -1,12 +1,14 @@
 // app/audiolib-desktop/src/search_v2_ux.rs
 //! #209 client UX: the §7.1 local path-index preparation dialog and the §4
-//! vendor table import dialog (server mode, manage rights only). All library work goes
+//! vendor table import dialog (local or server with manage rights). All library work goes
 //! through `DataProvider`; this module only drives the UI and worker threads.
 use super::{Controller, post};
 use crate::AppWindow;
 use audiolib_core::DataProvider;
 use audiolib_core::local_upgrade::{self as lu, LocalUpgradeOutcome, LocalUpgradePlan};
-use audiolib_core::vendor_import::{self as vi, VendorLimits};
+use audiolib_core::vendor_import::VendorLimits;
+#[path = "vendor_import_ui.rs"]
+mod vendor_ui;
 use slint::ComponentHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,12 +30,6 @@ const VI_BUSY: i32 = 2;
 const VI_PREVIEW: i32 = 3;
 const VI_COMMITTED: i32 = 4;
 
-struct PendingImport {
-    import_id: String,
-    /// One key per preview: a retried commit replays the same result (§4.5).
-    key: String,
-}
-
 #[derive(Default)]
 pub(super) struct UxState {
     /// Library already checked this session, so a declined or cancelled upgrade is not
@@ -41,7 +37,7 @@ pub(super) struct UxState {
     offered: Option<u64>,
     pub(super) declined: bool,
     cancel: Option<Arc<AtomicBool>>,
-    vendor: Option<PendingImport>,
+    vendor: vendor_ui::VendorUiState,
     migration_request: u64,
 }
 
@@ -49,6 +45,7 @@ impl UxState {
     pub(super) fn reset(&mut self) {
         *self = Self {
             migration_request: self.migration_request.wrapping_add(1),
+            vendor: self.vendor.next_session(),
             ..Self::default()
         };
     }
@@ -75,37 +72,6 @@ pub(super) fn limits_text(limits: VendorLimits, chinese: bool) -> String {
             limits.max_rows
         )
     }
-}
-
-/// Preserve active filters and sorting when the directory engine cannot combine
-/// them with path matching. An explicit path-only request keeps its scope and fails
-/// validation, so it cannot quietly return main-field results.
-pub(super) fn constrain_path_scope(
-    request: &mut audiolib_core::SearchRequest,
-    chinese: bool,
-) -> Result<Option<String>, String> {
-    use audiolib_core::SearchScope;
-    if request.scope == SearchScope::Main
-        || request.query.trim().is_empty()
-        || audiolib_db::path_scope_is_unfiltered(request)
-    {
-        return Ok(None);
-    }
-    if request.scope == SearchScope::Path {
-        return Err(if chinese {
-            "仅路径搜索需要相关性排序，并清除目录与 Metadata 筛选。"
-        } else {
-            "Path-only search requires relevance order and cleared folder and Metadata filters."
-        }
-        .into());
-    }
-    request.scope = SearchScope::Main;
-    request.cursor = None;
-    Ok(Some(if chinese {
-        "当前筛选或排序仅搜索主表。清除目录与 Metadata 筛选并选择相关性排序可包含路径结果。"
-    } else {
-        "The current filters or sort use main fields. Clear folder and Metadata filters and use relevance order to include path matches."
-    }.into()))
 }
 
 impl Controller {
@@ -221,22 +187,7 @@ impl Controller {
             }
         });
 
-        let c = self.clone();
-        ui.on_vendor_import_requested(move || c.open_vendor_import());
-        let c = self.clone();
-        ui.on_vi_pick(move || c.pick_vendor_table());
-        let c = self.clone();
-        ui.on_vi_commit(move || c.commit_vendor_import());
-        let c = self.clone();
-        ui.on_vi_rollback(move || c.rollback_vendor_import());
-        let c = self.clone();
-        ui.on_vi_close(move || {
-            if let Some(ui) = c.ui.upgrade()
-                && ui.get_vi_state() != VI_BUSY
-            {
-                ui.set_vi_state(VI_HIDDEN);
-            }
-        });
+        self.bind_vendor_import(ui);
     }
 
     /// Poll the shared server report and dispatch only explicit administrator actions.
@@ -531,203 +482,6 @@ impl Controller {
             }
         }
     }
-
-    fn vendor_limits(&self) -> Option<VendorLimits> {
-        if !self.remote_read_only() {
-            return None;
-        }
-        self.current_vendor_import()
-            .map(|info| VendorLimits::from(&info))
-    }
-
-    fn open_vendor_import(self: &Arc<Self>) {
-        let Some(ui) = self.ui.upgrade() else { return };
-        if !self.available() {
-            return;
-        }
-        // The bundled server has no import handlers yet. A feature marker alone
-        // must not open a working import flow; the active peer must explicitly
-        // advertise import capabilities and admit this library's writes.
-        let Some(limits) = self.vendor_limits() else {
-            ui.set_vi_available(false);
-            ui.set_vi_state(VI_HIDDEN);
-            return;
-        };
-        let chinese = self.chinese.load(Ordering::Acquire);
-        ui.set_vi_available(true);
-        ui.set_vi_text(limits_text(limits, chinese).into());
-        self.search_v2_ux.lock().unwrap().vendor = None;
-        ui.set_vi_state(VI_CHOOSE);
-    }
-
-    fn pick_vendor_table(self: &Arc<Self>) {
-        let Some(ui) = self.ui.upgrade() else { return };
-        if !self.available() || !matches!(ui.get_vi_state(), VI_CHOOSE | VI_PREVIEW) {
-            return;
-        }
-        let Some(limits) = self.vendor_limits() else {
-            return;
-        };
-        let chinese = self.chinese.load(Ordering::Acquire);
-        let owner = crate::dialogs::owner_handle(ui.window());
-        let provider = match self.remote_provider() {
-            Ok(provider) => provider,
-            Err(error) => {
-                ui.set_vi_text(error.into());
-                return;
-            }
-        };
-        let previous = ui.get_vi_state();
-        let previous_text = ui.get_vi_text().to_string();
-        let generation = self.library_generation.load(Ordering::Acquire);
-        self.search_v2_busy.store(true, Ordering::Release);
-        ui.set_vi_state(VI_BUSY);
-        ui.set_vi_text(
-            if chinese {
-                "正在检查并上传预览…"
-            } else {
-                "Checking and uploading for preview…"
-            }
-            .into(),
-        );
-        let c = self.clone();
-        std::thread::spawn(move || {
-            let outcome = (|| {
-                let Some(path) = crate::dialogs::choose(
-                    false,
-                    crate::dialogs::FileKind::VendorTable,
-                    chinese,
-                    owner,
-                )?
-                else {
-                    return Ok(None);
-                };
-                if c.close_after_operation.load(Ordering::Acquire) {
-                    return Ok(None);
-                }
-                vi::precheck(&path, limits)
-                    .map_err(|error| error.to_string())?
-                    .map_err(|reason| reason.text(chinese))?;
-                provider
-                    .vendor_import_preview(&path)
-                    .map(Some)
-                    .map_err(|error| error.to_string())
-            })();
-            let c2 = c.clone();
-            post(c.ui.clone(), move |ui| {
-                c2.search_v2_busy.store(false, Ordering::Release);
-                if c2.close_after_operation.swap(false, Ordering::AcqRel) {
-                    c2.request_close(&ui);
-                    return;
-                }
-                if c2.library_generation.load(Ordering::Acquire) != generation {
-                    return;
-                }
-                match outcome {
-                    Ok(Some(preview)) => {
-                        c2.search_v2_ux.lock().unwrap().vendor = Some(PendingImport {
-                            key: idempotency_key(&preview.import_id),
-                            import_id: preview.import_id.clone(),
-                        });
-                        ui.set_vi_text(vi::preview_summary(&preview, chinese).into());
-                        ui.set_vi_state(VI_PREVIEW);
-                    }
-                    Ok(None) => {
-                        ui.set_vi_text(previous_text.into());
-                        ui.set_vi_state(previous);
-                    }
-                    Err(text) => {
-                        c2.search_v2_ux.lock().unwrap().vendor = None;
-                        ui.set_vi_text(text.into());
-                        ui.set_vi_state(VI_CHOOSE);
-                    }
-                }
-            });
-        });
-    }
-
-    fn commit_vendor_import(self: &Arc<Self>) {
-        self.vendor_write(true);
-    }
-
-    fn rollback_vendor_import(self: &Arc<Self>) {
-        self.vendor_write(false);
-    }
-
-    fn vendor_write(self: &Arc<Self>, commit: bool) {
-        let Some(ui) = self.ui.upgrade() else { return };
-        let chinese = self.chinese.load(Ordering::Acquire);
-        if !self.available()
-            || self.vendor_limits().is_none()
-            || (commit && ui.get_vi_state() != VI_PREVIEW)
-            || (!commit && ui.get_vi_state() != VI_COMMITTED)
-        {
-            return;
-        }
-        let Some((import_id, key)) = self
-            .search_v2_ux
-            .lock()
-            .unwrap()
-            .vendor
-            .as_ref()
-            .map(|pending| (pending.import_id.clone(), pending.key.clone()))
-        else {
-            return;
-        };
-        let provider = match self.remote_provider() {
-            Ok(provider) => provider,
-            Err(error) => {
-                ui.set_vi_text(error.into());
-                return;
-            }
-        };
-        let previous = ui.get_vi_state();
-        let generation = self.library_generation.load(Ordering::Acquire);
-        self.search_v2_busy.store(true, Ordering::Release);
-        ui.set_vi_state(VI_BUSY);
-        let c = self.clone();
-        std::thread::spawn(move || {
-            let provider = provider.as_ref() as &dyn DataProvider;
-            let result = if commit {
-                provider.vendor_import_commit(&import_id, &key)
-            } else {
-                provider.vendor_import_rollback(&import_id)
-            };
-            let c2 = c.clone();
-            post(c.ui.clone(), move |ui| {
-                c2.search_v2_busy.store(false, Ordering::Release);
-                if c2.library_generation.load(Ordering::Acquire) != generation {
-                    return;
-                }
-                match result {
-                    Ok(reply) => {
-                        if commit {
-                            ui.set_vi_text(vi::committed_text(&reply, chinese).into());
-                            ui.set_vi_state(VI_COMMITTED);
-                        } else {
-                            c2.search_v2_ux.lock().unwrap().vendor = None;
-                            ui.set_vi_text(vi::rolled_back_text(&reply, chinese).into());
-                            ui.set_vi_state(VI_CHOOSE);
-                        }
-                        // §7.6: the server revision moved; offer the refresh at once.
-                        ui.set_remote_notice(
-                            super::remote_mode::refresh_notice_text(chinese).into(),
-                        );
-                        ui.set_remote_notice_kind(super::remote_mode::NOTICE_UPDATE);
-                        ui.set_remote_notice_refresh(true);
-                        c2.wake_revision_poller();
-                    }
-                    Err(error) => {
-                        ui.set_vi_text(error.to_string().into());
-                        ui.set_vi_state(previous);
-                    }
-                }
-                if c2.close_after_operation.swap(false, Ordering::AcqRel) {
-                    c2.request_close(&ui);
-                }
-            });
-        });
-    }
 }
 
 fn migration_text(
@@ -768,8 +522,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_constraints_preserve_filters_and_never_widen_explicit_path_search() {
+    fn scope_selection_preserves_directory_metadata_sort_and_cursor() {
         use audiolib_core::{SearchFilters, SearchRequest, SearchScope, SortOrder};
+        i_slint_backend_testing::init_no_event_loop();
+        let root = tempfile::tempdir().unwrap();
+        let config =
+            audiolib_core::config::AppConfig::load_in(root.path().join("preferences")).unwrap();
+        let provider = Arc::new(audiolib_db::SqliteProvider::open(&config.paths.database).unwrap());
+        provider.rebuild_directory_search().unwrap();
+        let engine = audiolib_audio::AudioEngine::new(Default::default()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let c = Controller::new(&ui, provider, engine.handle(), config, Default::default());
         let requests = [
             SearchRequest {
                 folder_id: Some(4),
@@ -790,29 +553,16 @@ mod tests {
         ];
         for mut request in requests {
             request.query = "wind".into();
-            request.scope = SearchScope::Path;
-            let wanted = request.clone();
-            assert!(constrain_path_scope(&mut request, false).is_err());
-            assert_eq!(
-                serde_json::to_value(&request).unwrap(),
-                serde_json::to_value(&wanted).unwrap()
-            );
-            request.scope = SearchScope::All;
-            request.cursor = Some("old-page".into());
-            assert!(constrain_path_scope(&mut request, false).unwrap().is_some());
-            assert_eq!(request.scope, SearchScope::Main);
-            assert_eq!(request.filters, wanted.filters);
-            assert_eq!(request.folder_id, wanted.folder_id);
-            assert_eq!(request.order_by, wanted.order_by);
-            assert!(request.cursor.is_none());
+            for scope in [SearchScope::Path, SearchScope::All, SearchScope::Filename] {
+                request.scope = scope;
+                request.cursor = Some("current-page".into());
+                let wanted = serde_json::to_value(&request).unwrap();
+                ui.set_search_scope_index(super::super::search_scope_index(scope));
+                c.apply_search_scope(&ui, &mut request);
+                assert_eq!(serde_json::to_value(&request).unwrap(), wanted);
+            }
         }
-        let mut request = SearchRequest {
-            query: "wind".into(),
-            scope: SearchScope::All,
-            ..Default::default()
-        };
-        assert!(constrain_path_scope(&mut request, true).unwrap().is_none());
-        assert_eq!(request.scope, SearchScope::All);
+        c.shutdown();
     }
 
     #[test]
@@ -901,13 +651,15 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         let c = Controller::new(&ui, provider, engine.handle(), config, Default::default());
         // A stale menu/property from the previous server cannot grant capability
-        // after switching to a local or unsupported library.
+        // after switching to an unsupported server library.
+        c.remote_mode.store(true, Ordering::Release);
+        ui.set_remote_mode(true);
         ui.set_vendor_import_available(true);
         ui.invoke_vendor_import_requested();
         assert_eq!(ui.get_vi_state(), VI_HIDDEN);
         assert!(!ui.get_vi_available());
         assert!(!c.search_v2_busy.load(Ordering::Acquire));
-        assert!(c.search_v2_ux.lock().unwrap().vendor.is_none());
+        assert!(c.search_v2_ux.lock().unwrap().vendor.pending.is_none());
         c.shutdown();
     }
 

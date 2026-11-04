@@ -194,7 +194,7 @@ pub fn choose_folder(_chinese: bool, _owner: usize) -> Result<Option<PathBuf>, S
 pub enum FileKind {
     Database,
     NewLibrary,
-    Wav,
+    Audio,
     Image,
     JsonLines,
     Csv,
@@ -251,7 +251,7 @@ pub fn choose(
             "Library SQLite database (*.db)\0*.db\0All files\0*.*\0\0",
             "db",
         ),
-        (FileKind::Wav, _) => ("WAV / BWF\0*.wav\0\0", "wav"),
+        (FileKind::Audio, _) => ("WAV / FLAC / Ogg\0*.wav;*.flac;*.ogg;*.oga\0\0", "wav"),
         (FileKind::Image, _) => ("PNG / JPEG\0*.png;*.jpg;*.jpeg\0\0", "png"),
         (FileKind::JsonLines, _) => ("JSON Lines (*.jsonl)\0*.jsonl\0\0", "jsonl"),
         (FileKind::Csv, _) => ("CSV (*.csv)\0*.csv\0\0", "csv"),
@@ -277,8 +277,8 @@ pub fn choose(
         (FileKind::Database, true, false) => "Back up sound library",
         (FileKind::Database, false, true) => "选择音效库数据库",
         (FileKind::Database, false, false) => "Choose sound library database",
-        (FileKind::Wav, _, true) => "选择 WAV，修复文件引用",
-        (FileKind::Wav, _, false) => "Choose WAV to repair file reference",
+        (FileKind::Audio, _, true) => "选择音频文件，修复文件引用",
+        (FileKind::Audio, _, false) => "Choose audio to repair file reference",
         (FileKind::Image, _, true) => "选择专辑封面",
         (FileKind::Image, _, false) => "Choose album artwork",
         (FileKind::VendorTable, _, true) => "选择厂商资料表（CSV / XLS / XLSX）",
@@ -301,7 +301,7 @@ pub fn choose(
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")
             }
-            FileKind::Wav | FileKind::Image | FileKind::VendorTable => String::new(),
+            FileKind::Audio | FileKind::Image | FileKind::VendorTable => String::new(),
         };
         for (target, value) in file.iter_mut().zip(name.encode_utf16()) {
             *target = value;
@@ -364,8 +364,8 @@ pub fn choose(
         (FileKind::Database, true, false) => "Back up sound library",
         (FileKind::Database, false, true) => "选择音效库数据库",
         (FileKind::Database, false, false) => "Choose sound library database",
-        (FileKind::Wav, _, true) => "选择 WAV，修复文件引用",
-        (FileKind::Wav, _, false) => "Choose WAV to repair file reference",
+        (FileKind::Audio, _, true) => "选择音频文件，修复文件引用",
+        (FileKind::Audio, _, false) => "Choose audio to repair file reference",
         (FileKind::Image, _, true) => "选择专辑封面",
         (FileKind::Image, _, false) => "Choose album artwork",
         (FileKind::VendorTable, _, true) => "选择厂商资料表（CSV / XLS / XLSX）",
@@ -377,7 +377,7 @@ pub fn choose(
     };
     let types = match kind {
         FileKind::Database | FileKind::NewLibrary => "db\nsqlite\nsqlite3",
-        FileKind::Wav => "wav",
+        FileKind::Audio => "wav\nflac\nogg\noga",
         FileKind::Image => "png\njpg\njpeg",
         FileKind::JsonLines => "jsonl",
         FileKind::Csv => "csv",
@@ -393,7 +393,7 @@ pub fn choose(
             FileKind::JsonLines | FileKind::Annotations => {
                 format!("AudioLib-annotations-{date}.jsonl")
             }
-            FileKind::Wav | FileKind::Image | FileKind::VendorTable => String::new(),
+            FileKind::Audio | FileKind::Image | FileKind::VendorTable => String::new(),
         }
     } else {
         String::new()

@@ -500,7 +500,8 @@ enum ProbeOutcome {
 const FINGERPRINT_SQL: &str = "SELECT file_path,id,COALESCE(file_size,0),source_mtime_ns,\
     COALESCE(json_extract(CASE WHEN json_valid(audiolib_metadata_json(metadata_json)) \
     THEN audiolib_metadata_json(metadata_json) ELSE '{}' END,\
-    '$.wav_metadata.version'),0) FROM audio_files WHERE path_key=?1";
+    '$.wav_metadata.vorbis_version'),json_extract(CASE WHEN json_valid(audiolib_metadata_json(metadata_json)) \
+    THEN audiolib_metadata_json(metadata_json) ELSE '{}' END,'$.wav_metadata.version'),0) FROM audio_files WHERE path_key=?1";
 
 fn probe_entry(
     path: &Path,
@@ -540,7 +541,18 @@ fn probe_entry(
         if let Some((id, prior_size, prior_mtime, metadata_version)) =
             crate::path_identity::choose(&text, candidates, true)?
             && (prior_size, prior_mtime, metadata_version)
-                == (size, Some(mtime_ns), audiolib_audio::WAV_METADATA_VERSION)
+                == (
+                    size,
+                    Some(mtime_ns),
+                    if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+                    {
+                        audiolib_audio::WAV_METADATA_VERSION
+                    } else {
+                        audiolib_audio::VORBIS_METADATA_VERSION
+                    },
+                )
         {
             return Ok(ProbeOutcome::Unchanged(id));
         }
@@ -627,12 +639,7 @@ fn walk_directory(
             Ok(kind) if kind.is_dir() && recursive => {
                 walk_directory(&path, root, true, cancellation, stop, sender, visited)
             }
-            Ok(kind)
-                if kind.is_file()
-                    && path
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("wav")) =>
-            {
+            Ok(kind) if kind.is_file() && audiolib_audio::is_supported_audio_extension(&path) => {
                 if sender.send(Entry::Audio(path)).is_err() {
                     return;
                 }

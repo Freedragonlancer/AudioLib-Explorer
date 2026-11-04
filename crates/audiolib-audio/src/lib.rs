@@ -1,5 +1,5 @@
 // crates/audiolib-audio/src/lib.rs
-//! Streaming WAV metadata, playback, and multichannel Waveform analysis.
+//! Streaming WAV/FLAC/Ogg Metadata, playback, and multichannel Waveform analysis.
 #[cfg(feature = "playback")]
 mod audition;
 // Decoder/resampler paths are only reached through the playback engine; the headless build keeps them for tests.
@@ -12,6 +12,7 @@ mod source;
 mod spectral;
 #[cfg(test)]
 mod tests;
+mod vorbis_metadata;
 mod wav;
 mod wav_metadata;
 mod waveform;
@@ -35,6 +36,7 @@ pub use engine::{
 /// Compatibility name for the persisted output-device configuration contract.
 #[cfg(feature = "playback")]
 pub type AudioOutputConfig = PlaybackConfig;
+pub use vorbis_metadata::{VORBIS_METADATA_VERSION, is_supported_audio_extension};
 pub use wav::{probe, probe_file_with_artwork, probe_with_artwork};
 pub use wav_metadata::{Artwork, WAV_METADATA_VERSION};
 pub use waveform::{

@@ -1179,7 +1179,7 @@ impl SqliteProvider {
             let audio = audio.map_err(db_error)?;
             check_cancel()?;
             let desired = target.join(suffix(&audio.file_path)?);
-            let real = audiolib_core::validate_wav_path(&desired, std::slice::from_ref(&target))
+            let real = audiolib_core::validate_audio_path(&desired, std::slice::from_ref(&target))
                 .map_err(|error| {
                     validation(format!(
                         "Invalid corresponding relocation WAV {}: {error}",
@@ -1290,12 +1290,10 @@ impl SqliteProvider {
     pub(crate) fn management_relink(&self, id: i64, path: &Path) -> Result<AudioFile> {
         let _lease = LibraryLease::acquire(&self.path)?;
         let path = path.canonicalize()?;
-        if !path.is_file()
-            || !path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
-        {
-            return Err(validation("Relink target must be an existing WAV file"));
+        if !path.is_file() || !audiolib_core::is_supported_audio_extension(&path) {
+            return Err(validation(
+                "Relink target must be an existing WAV, FLAC or Ogg file",
+            ));
         }
         let before = fs::metadata(&path)?;
         let metadata = audiolib_audio::probe(&path)?;

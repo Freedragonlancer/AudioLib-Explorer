@@ -68,7 +68,13 @@ fn directory_only_switch_reopens_and_rollback_preserves_new_annotations() {
             .unwrap(),
         3
     );
-    assert_eq!(c.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('audio_path_search','vendor_metadata','v9_checkpoint')",[],|r| r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(c.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('audio_path_search','v9_checkpoint')",[],|r| r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM vendor_metadata", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert!(
         SqliteProvider::open(&db).is_err(),
         "ordinary client must not silently become an s9 writer"

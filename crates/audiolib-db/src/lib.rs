@@ -23,6 +23,7 @@ mod path_identity;
 #[cfg(feature = "scanner")]
 pub mod scanner;
 mod schema;
+mod scoped_search;
 mod search_bm25;
 mod search_cache;
 mod search_candidates;
@@ -34,10 +35,12 @@ mod search_sorted;
 mod search_storage;
 mod search_text;
 mod search_workspace;
+mod snapshot_legacy;
 mod snapshot_schema9;
 mod space;
 pub mod sqlite_engine;
 mod sqlite_mmap;
+pub mod vendor_import;
 mod wal;
 pub use wal::CheckpointStage;
 mod waveforms_db;
@@ -238,6 +241,7 @@ pub(crate) fn tokenize(jieba: &Jieba, value: &str) -> String {
 #[cfg(feature = "scanner")]
 const HEADER_ATTRIBUTES: &[&str] = &[
     "wav_metadata",
+    "container",
     "bwf_description",
     "bwf_originator",
     "bwf_originator_reference",
@@ -1619,7 +1623,7 @@ fn finish_scan_transaction(
         ensure_scan_seen_table(tx)?;
         progress.removed = tx.execute(
                 &format!(
-                    "UPDATE audio_files SET missing=1 WHERE {scope} AND missing=0 AND lower(filename) LIKE '%.wav'
+                    "UPDATE audio_files SET missing=1 WHERE {scope} AND missing=0 AND (lower(filename) LIKE '%.wav' OR lower(filename) LIKE '%.flac' OR lower(filename) LIKE '%.ogg' OR lower(filename) LIKE '%.oga')
                 AND (seen_scan_id IS NULL OR seen_scan_id<>?2)
                 AND NOT EXISTS(SELECT 1 FROM temp.scan_seen s WHERE s.session_id=?2 AND s.audio_id=audio_files.id)"
                 ),
@@ -1793,7 +1797,7 @@ impl SqliteProvider {
             }
         };
         check_cancel()?;
-        let query = compile_query(&self.tokenizer, &request.query)?;
+        let query = compile_request_query(&self.tokenizer, request)?;
         let cached = cache_eligible
             .then(|| self.ranking_cache.lock().unwrap().get(revision, &query))
             .flatten();
@@ -1983,7 +1987,7 @@ impl SqliteProvider {
         request.validate()?;
         let normalized = normalize_search_page(request)?;
         let request = normalized.as_ref();
-        if request.scope != SearchScope::Main {
+        if matches!(request.scope, SearchScope::All | SearchScope::Path) {
             return self.search_scoped(request, cancel);
         }
         let start = Instant::now();
@@ -2212,12 +2216,6 @@ impl SqliteProvider {
             browse.cursor = None;
             return self.search_impl(&browse, cancel);
         }
-        if !path_scope_is_unfiltered(request) {
-            return Err(Error::Validation(
-                "Directory path search supports relevance order without a folder or metadata filter"
-                    .into(),
-            ));
-        }
         if !self.directory_index_ready()? {
             // s8 snapshots / libraries without the directory index must not create
             // tables here (read-only snapshots cannot, and local s8 must stay clean).
@@ -2237,6 +2235,14 @@ impl SqliteProvider {
             browse.scope = SearchScope::Main;
             browse.cursor = None;
             return self.search_impl(&browse, cancel);
+        }
+        if !path_scope_is_unfiltered(request)
+            || request
+                .cursor
+                .as_deref()
+                .is_some_and(|cursor| cursor.starts_with("v2."))
+        {
+            return scoped_search::page(self, request, cancel);
         }
         let start = Instant::now();
         let mut conn = self.search_reader(cancel)?;
@@ -2476,6 +2482,11 @@ impl SqliteProvider {
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<Folder>> {
         request.validate()?;
+        if matches!(request.scope, SearchScope::All | SearchScope::Path)
+            && !request.query.trim().is_empty()
+        {
+            return scoped_search::folders(self, request, cancel);
+        }
         let has_query = !request.query.trim().is_empty();
         let visibility_only = request.filters
             == (audiolib_core::SearchFilters {
@@ -2534,7 +2545,7 @@ impl SqliteProvider {
             .map_err(db_error)?;
             let revision = self.observe_search_revision()?;
             if revision_before == revision {
-                let query = compile_query(&self.tokenizer, &request.query)?;
+                let query = compile_request_query(&self.tokenizer, request)?;
                 (
                     self.ranking_cache.lock().unwrap().get(revision, &query),
                     Some(revision),
@@ -2727,6 +2738,85 @@ impl SqliteProvider {
 }
 
 impl DataProvider for SqliteProvider {
+    fn vendor_import_available(&self) -> Result<bool> {
+        Ok(!self.read_only)
+    }
+    fn vendor_import_preview(
+        &self,
+        file: &Path,
+    ) -> Result<audiolib_core::vendor_import::VendorImportPreview> {
+        self.vendor_import_preview_impl(file)
+    }
+    fn vendor_import_preview_files(
+        &self,
+        files: &[PathBuf],
+        options: &audiolib_core::vendor_import::VendorImportOptions,
+    ) -> Result<audiolib_core::vendor_import::VendorImportPreview> {
+        self.vendor_import_preview_files_impl(files, options)
+    }
+    fn vendor_import_status(
+        &self,
+        id: &str,
+    ) -> Result<audiolib_core::vendor_import::VendorImportStatus> {
+        self.vendor_import_status_impl(id)
+    }
+    fn vendor_import_mapping(
+        &self,
+        id: &str,
+        options: &audiolib_core::vendor_import::VendorImportOptions,
+    ) -> Result<audiolib_core::vendor_import::VendorImportPreview> {
+        self.vendor_import_mapping_impl(id, options)
+    }
+    fn vendor_import_rows(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<audiolib_core::vendor_import::VendorRowPreview>> {
+        self.vendor_import_rows_impl(id, offset, limit)
+    }
+    fn vendor_import_history(&self) -> Result<audiolib_core::vendor_import::VendorImportHistory> {
+        self.vendor_import_history_impl()
+    }
+    fn vendor_import_candidates(
+        &self,
+        id: &str,
+        row_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<audiolib_core::vendor_import::VendorCandidatePage> {
+        self.vendor_import_candidates_impl(id, row_id, offset, limit)
+    }
+    fn vendor_import_templates(
+        &self,
+    ) -> Result<Vec<audiolib_core::vendor_import::VendorMappingTemplate>> {
+        self.vendor_import_templates_impl()
+    }
+    fn vendor_import_save_template(
+        &self,
+        template: &audiolib_core::vendor_import::VendorMappingTemplate,
+    ) -> Result<audiolib_core::vendor_import::VendorMappingTemplate> {
+        self.vendor_import_save_template_impl(template)
+    }
+    fn vendor_import_cancel(
+        &self,
+        id: &str,
+    ) -> Result<audiolib_core::vendor_import::VendorImportStatus> {
+        self.vendor_import_cancel_impl(id)
+    }
+    fn vendor_import_commit(
+        &self,
+        id: &str,
+        key: &str,
+    ) -> Result<audiolib_core::vendor_import::VendorImportResult> {
+        self.vendor_import_commit_impl(id, key)
+    }
+    fn vendor_import_rollback(
+        &self,
+        id: &str,
+    ) -> Result<audiolib_core::vendor_import::VendorImportResult> {
+        self.vendor_import_rollback_impl(id)
+    }
     fn album_facets(&self, request: &SearchRequest) -> Result<Vec<AlbumFacet>> {
         SqliteProvider::album_facets(self, request)
     }
@@ -3201,10 +3291,20 @@ fn search_sql(
     ];
     let mut values = Vec::<Value>::new();
     let mut from = "audio_files af".to_string();
-    if !request.query.trim().is_empty() {
+    if !request.query.trim().is_empty()
+        && matches!(request.scope, SearchScope::All | SearchScope::Path)
+    {
+        conditions.push(scoped_search::predicate(
+            conn,
+            tokenizer,
+            &request.query,
+            request.scope,
+            &mut values,
+        )?);
+    } else if !request.query.trim().is_empty() {
         from = fts_search_from(false).into();
         conditions.push("audio_search MATCH ?".into());
-        values.push(Value::Text(compile_query(tokenizer, &request.query)?));
+        values.push(Value::Text(compile_request_query(tokenizer, request)?));
     }
     if let Some(folder) = request.folder_id.filter(|_| include_folder) {
         if request.include_subfolders {
@@ -3463,6 +3563,20 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
 /// Plain-text queries are quoted tokens, so punctuation cannot become SQL or FTS operators.
 fn compile_query(jieba: &Jieba, query: &str) -> Result<String> {
     search_text::compile_query(jieba, query)
+}
+
+fn compile_request_query(jieba: &Jieba, request: &SearchRequest) -> Result<String> {
+    if request.scope == SearchScope::Filename {
+        search_text::compile_query_columns(
+            jieba,
+            &request.query,
+            "{filename}",
+            "{filename_tokenized}",
+        )
+        .map(|query| format!("{{filename filename_tokenized}} : ({query})"))
+    } else {
+        compile_query(jieba, &request.query)
+    }
 }
 
 #[cfg(feature = "scanner")]

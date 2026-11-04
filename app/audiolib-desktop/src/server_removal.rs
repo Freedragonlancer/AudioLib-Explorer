@@ -82,7 +82,7 @@ impl HiddenRecords {
     }
 }
 
-/// Outcome of draining server-upgrade notices for one URL this session.
+/// Outcome of draining server-upgrade notices for one server library this session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct UpgradeNoticeOutcome {
     pub text: Option<String>,
@@ -90,23 +90,27 @@ pub(super) struct UpgradeNoticeOutcome {
     pub offer_update_check: bool,
 }
 
-/// Server upgrade notices not shown yet for `url` in this session (each kind once per
-/// session; migration progress every time), joined for the status line. Never starts
+/// Server upgrade notices not shown yet for `(url, library_id)` in this session
+/// (each kind once; migration progress every time), joined for the status line. Never starts
 /// a download or install: the user updates through the existing update check.
 pub(super) fn upgrade_notice(
     url: &str,
+    library_id: &str,
     status: &audiolib_core::server_upgrade::ServerUpgradeStatus,
     chinese: bool,
 ) -> UpgradeNoticeOutcome {
     use audiolib_core::server_upgrade::NoticeSession;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static SESSIONS: OnceLock<Mutex<HashMap<String, NoticeSession>>> = OnceLock::new();
+    static SESSIONS: OnceLock<Mutex<HashMap<(String, String), NoticeSession>>> = OnceLock::new();
     let mut sessions = SESSIONS
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let notices = sessions.entry(url.to_string()).or_default().take(status);
+    let notices = sessions
+        .entry((url.to_string(), library_id.to_string()))
+        .or_default()
+        .take(status);
     let offer_update_check = notices.iter().any(|notice| notice.offers_update_check());
     let texts: Vec<String> = notices
         .into_iter()
@@ -324,6 +328,14 @@ impl Controller {
     /// Ask the active server's `/capabilities` for the menu gate (after each sync).
     pub(crate) fn refresh_server_manage(self: &Arc<Self>) {
         let settings = self.config.lock().unwrap().data_source.clone();
+        let generation = self.library_generation.load(Ordering::Acquire);
+        let library_id = self
+            .remote
+            .lock()
+            .unwrap()
+            .state
+            .as_ref()
+            .map(|state| state.library_id.clone());
         let secrets = self.secrets();
         let chinese = self.chinese.load(Ordering::Acquire);
         let c = self.clone();
@@ -358,28 +370,34 @@ impl Controller {
                     },
                 },
             };
-            if let Some(status) = upgrade.as_ref() {
-                let notice = upgrade_notice(&settings.server_url, status, chinese);
-                if let Some(message) = notice.text.clone() {
-                    c.status(message);
-                }
-                if notice.offer_update_check {
-                    let prompt = notice.text.unwrap_or_else(|| {
-                        if chinese {
-                            "服务器已升级，请检查客户端更新。".into()
-                        } else {
-                            "The server was upgraded; please check for client updates.".into()
-                        }
-                    });
-                    let ui = c.ui.clone();
-                    post(ui, move |ui| {
-                        let _ = ui;
-                        crate::updates::offer_client_upgrade_check(prompt);
-                    });
-                }
-            }
             let c2 = c.clone();
             post(c.ui.clone(), move |ui| {
+                if c2.library_generation.load(Ordering::Acquire) != generation
+                    || !c2.remote_read_only()
+                    || c2.config.lock().unwrap().data_source.server_url != settings.server_url
+                    || c2
+                        .remote
+                        .lock()
+                        .unwrap()
+                        .state
+                        .as_ref()
+                        .map(|state| &state.library_id)
+                        != library_id.as_ref()
+                {
+                    return;
+                }
+                // Until the library is identified, do not consume another library's
+                // notice session. The normal sync refusal still supplies its error.
+                if let (Some(library_id), Some(status)) = (library_id.as_deref(), upgrade.as_ref())
+                {
+                    let notice = upgrade_notice(&settings.server_url, library_id, status, chinese);
+                    if let Some(message) = notice.text.clone() {
+                        ui.set_status(message.into());
+                    }
+                    if notice.offer_update_check {
+                        crate::updates::offer_client_upgrade_check(notice.text.unwrap_or_default());
+                    }
+                }
                 c2.apply_server_manage(&ui, &settings.server_url, manage);
             });
         });
@@ -452,7 +470,11 @@ impl Controller {
         } else {
             ServerManage::default()
         };
-        ui.set_vendor_import_available(manage.vendor_import().is_some());
+        ui.set_vendor_import_available(if self.remote_read_only() {
+            manage.vendor_import().is_some()
+        } else {
+            self.provider().vendor_import_available().unwrap_or(false)
+        });
         ui.set_path_search_available(
             self.provider().path_search_ready().unwrap_or(false)
                 || (self.remote_read_only() && self.server_path_search_offered()),
@@ -782,16 +804,22 @@ mod upgrade_notice_tests {
             ],
         };
         let url = "http://upgrade-notice.test";
-        let first = upgrade_notice(url, &status, true);
+        let first = upgrade_notice(url, "library-a", &status, true);
         let first_text = first.text.as_deref().unwrap();
         assert!(first_text.contains("路径搜索"));
         assert!(first_text.contains("40%"));
         assert!(first.offer_update_check);
-        let again = upgrade_notice(url, &status, true);
+        let again = upgrade_notice(url, "library-a", &status, true);
         let again_text = again.text.as_deref().unwrap();
         assert!(!again_text.contains("路径搜索"));
         assert!(again_text.contains("40%"));
         assert!(!again.offer_update_check);
+        let another = upgrade_notice(url, "library-b", &status, true);
+        assert!(
+            another.offer_update_check,
+            "another library at the same URL has its own notices"
+        );
+        assert!(another.text.unwrap().contains("路径搜索"));
     }
 
     #[test]
@@ -804,7 +832,12 @@ mod upgrade_notice_tests {
             path_results_absent: false,
             notices: vec![Notice::Migrating { percent: Some(10) }],
         };
-        let notice = upgrade_notice("http://upgrade-notice-mig.test", &status, true);
+        let notice = upgrade_notice(
+            "http://upgrade-notice-mig.test",
+            "library-migration",
+            &status,
+            true,
+        );
         assert!(notice.text.unwrap().contains("10%"));
         assert!(!notice.offer_update_check);
     }

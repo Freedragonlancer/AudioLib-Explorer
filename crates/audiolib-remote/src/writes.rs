@@ -574,6 +574,105 @@ impl DataProvider for RemoteProvider {
         Ok(false)
     }
 
+    fn vendor_import_available(&self) -> audiolib_core::Result<bool> {
+        let capabilities = self
+            .writer
+            .client()
+            .capabilities()
+            .map_err(|error| core_error(error, self.chinese))?;
+        Ok(capabilities.may_manage() && capabilities.vendor_import.is_some())
+    }
+
+    fn vendor_import_preview_files(
+        &self,
+        files: &[std::path::PathBuf],
+        options: &audiolib_core::vendor_import::VendorImportOptions,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportPreview> {
+        self.writer
+            .during_migration(|| {
+                self.writer
+                    .client()
+                    .vendor_import_preview_files(files, options)
+            })
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_status(
+        &self,
+        id: &str,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportStatus> {
+        self.writer
+            .client()
+            .vendor_import_status(id)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_mapping(
+        &self,
+        id: &str,
+        options: &audiolib_core::vendor_import::VendorImportOptions,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportPreview> {
+        self.writer
+            .during_migration(|| self.writer.client().vendor_import_mapping(id, options))
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_rows(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> audiolib_core::Result<Vec<audiolib_core::vendor_import::VendorRowPreview>> {
+        self.writer
+            .client()
+            .vendor_import_rows(id, offset, limit)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_history(
+        &self,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportHistory> {
+        self.writer
+            .client()
+            .vendor_import_history()
+            .map_err(|error| core_error(error, self.chinese))
+    }
+
+    fn vendor_import_candidates(
+        &self,
+        id: &str,
+        row_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorCandidatePage> {
+        self.writer
+            .client()
+            .vendor_import_candidates(id, row_id, offset, limit)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_templates(
+        &self,
+    ) -> audiolib_core::Result<Vec<audiolib_core::vendor_import::VendorMappingTemplate>> {
+        self.writer
+            .client()
+            .vendor_import_templates()
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_save_template(
+        &self,
+        template: &audiolib_core::vendor_import::VendorMappingTemplate,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorMappingTemplate> {
+        self.writer
+            .client()
+            .vendor_import_save_template(template)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+    fn vendor_import_cancel(
+        &self,
+        id: &str,
+    ) -> audiolib_core::Result<audiolib_core::vendor_import::VendorImportStatus> {
+        self.writer
+            .client()
+            .vendor_import_cancel(id)
+            .map_err(|error| core_error(error, self.chinese))
+    }
+
     fn vendor_import_preview(
         &self,
         file: &std::path::Path,

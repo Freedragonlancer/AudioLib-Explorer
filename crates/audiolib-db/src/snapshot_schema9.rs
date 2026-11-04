@@ -7,7 +7,18 @@ use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
 
 pub(crate) fn validate_read(conn: &Connection) -> Result<()> {
     schema::validate_library_identity(conn)?;
-    migration9::validate_ready(conn)
+    migration9::validate_ready(conn)?;
+    let vendor: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN (
+         'vendor_metadata','vendor_import_log','audiolib_vendor_baseline','audiolib_vendor_jobs','audiolib_vendor_events'))",
+        [], |row| row.get(0),
+    ).map_err(db_error)?;
+    // Earlier completed directory-only s9 inputs have none of these objects.
+    // Once any reserved vendor structure exists, require the entire owned layout.
+    if vendor {
+        crate::vendor_import::validate_schema(conn)?;
+    }
+    Ok(())
 }
 
 fn invalid(message: &str) -> Error {
