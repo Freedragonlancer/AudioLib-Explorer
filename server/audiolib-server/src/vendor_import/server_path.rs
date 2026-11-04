@@ -304,7 +304,10 @@ mod tests {
                 Err(error) => {
                     // Windows deliberately denies rename while the authorized file
                     // handle lacks FILE_SHARE_DELETE. Unix retains the opened inode.
-                    assert!(cfg!(windows), "{error}");
+                    #[cfg(windows)]
+                    assert!(matches!(error.raw_os_error(), Some(5 | 32 | 33)), "{error}");
+                    #[cfg(not(windows))]
+                    panic!("Owned Unix fixture rename unexpectedly failed: {error}");
                 }
             }
         })
