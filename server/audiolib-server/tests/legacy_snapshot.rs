@@ -84,18 +84,38 @@ fn fixture(path: &Path) {
         &AtomicBool::new(false),
     );
     assert_eq!(report.state, migration9::State::Done, "{report:?}");
+    assert_source_projection(path, "after schema-9 migration");
 }
 
 fn fixture_schema8(path: &Path) {
     drop(SqliteProvider::open(path).unwrap());
     let conn = Connection::open(path).unwrap();
     audiolib_db::register_library_functions(&conn).unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(
+        r#"{
+        "unknown_extension": {"retained": true},
+        "wav_metadata": {
+            "riff_info": {"ICMT": "embeddedtext"},
+            "fields": {"description": "embeddedtext", "keywords": ["embeddedtag"]},
+            "vorbis": {"DESCRIPTION": "vorbistext"}
+        },
+        "vendor_metadata": {"fields": {"description": ["vendortext"]}}
+    }"#,
+    )
+    .expect("legacy snapshot fixture Metadata must be valid JSON before FTS insertion");
+    conn.execute_batch(
+        "INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'owned','OwnedRoot');
+        INSERT INTO folder_closure VALUES(1,1,0);",
+    )
+    .unwrap();
+    // Real extracted WAV descriptions retain their raw INFO field as well as the
+    // canonical display mirror. Binding validated JSON prevents a malformed fixture
+    // from silently becoming empty source text in the production SQL function.
+    conn.execute("INSERT INTO audio_files(id,file_path,filename,folder_id,user_notes,user_tags,favorite,metadata_json)
+        VALUES(1,'owned/one.wav','one.wav',1,'userannotation','usertag',1,?1)",
+        [metadata.to_string()]).unwrap();
     conn.execute_batch(r#"
-        INSERT INTO folders(id,folder_path,folder_name) VALUES(1,'owned','OwnedRoot');
-        INSERT INTO folder_closure VALUES(1,1,0);
         INSERT INTO audio_files(id,file_path,filename,folder_id,user_notes,user_tags,favorite,metadata_json) VALUES
-        (1,'owned/one.wav','one.wav',1,'userannotation','usertag',1,
-          '{"unknown_extension":{"retained":true},"wav_metadata":{"fields":{"description":"embeddedtext","keywords":["embeddedtag"]},"vorbis":{"DESCRIPTION":"vorbistext"}},"vendor_metadata":{"fields":{"description":["vendortext"]}}'),
         (2,'owned/two.WAV','two.WAV',1,'secondannotation','',0,'{}'),
         (3,'owned/three.flac','three.flac',1,'flacannotation','',0,'{}'),
         (4,'owned/four.ogg','four.ogg',1,'oggannotation','',0,'{}');
@@ -105,10 +125,16 @@ fn fixture_schema8(path: &Path) {
         INSERT INTO waveform_cache(id,audio_file_id) VALUES(1,1),(2,3);
     "#).unwrap();
     drop(conn);
+    assert_source_projection(path, "before schema-9 migration");
 }
 
 fn ids(path: &Path, query: &str) -> Vec<i64> {
     let provider = SqliteProvider::open_read_only(path).unwrap();
+    assert_eq!(
+        provider.database_path(),
+        path,
+        "completed fixture must query its original FTS, not an owned repair"
+    );
     provider
         .search(&audiolib_core::SearchRequest {
             query: query.into(),
@@ -119,6 +145,16 @@ fn ids(path: &Path, query: &str) -> Vec<i64> {
         .into_iter()
         .map(|file| file.id)
         .collect()
+}
+
+fn assert_source_projection(path: &Path, stage: &str) {
+    for term in ["vendortext", "vorbistext", "embeddedtext"] {
+        assert_eq!(
+            ids(path, term),
+            [1],
+            "{stage}: missing seeded source text {term}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
