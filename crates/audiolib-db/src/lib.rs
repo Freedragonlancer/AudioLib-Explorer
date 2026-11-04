@@ -3496,6 +3496,7 @@ fn search_sql(
 
 // Typed, owned result columns: preserve unknown attributes and all legacy BWF/iXML fields.
 // Legacy NULL/nonbinary visibility stays unchanged in storage; only exact zero is present.
+// Column 36 stays reserved; declared album uses the Metadata already decoded for this row.
 const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE(af.file_size,0),
  COALESCE(af.sample_rate,0),COALESCE(af.bit_depth,0),COALESCE(af.channels,0),COALESCE(af.duration,0),
  COALESCE(af.user_tags,''),af.user_color,COALESCE(af.user_notes,''),af.favorite,
@@ -3504,7 +3505,7 @@ const AUDIO_SELECT: &str = "af.id,af.file_path,af.filename,af.folder_id,COALESCE
  af.bwf_time_reference,af.bwf_version,af.bwf_umid,af.ixml_scene,af.ixml_take,af.ixml_tape,
  af.ixml_circled,af.ixml_wild_track,af.ixml_no_good,af.codec,af.created_at,af.modified_at,
  af.peak_amplitude,af.rms_level,af.spectral_centroid,af.zero_crossing_rate,(af.missing IS NOT 0),
- audiolib_album_key(af.metadata_json)";
+ NULL";
 
 fn album_expression(_conn: &Connection) -> Result<&'static str> {
     Ok("audiolib_album_key(af.metadata_json)")
@@ -3539,7 +3540,7 @@ fn snapshot_modified_at(file: &AudioFile) -> Result<&str> {
 }
 
 fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
-    let raw = metadata_storage::decode_value(row.get_ref(14)?).map_err(|error| {
+    let raw = metadata_storage::decode_view(row.get_ref(14)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(14, rusqlite::types::Type::Blob, Box::new(error))
     })?;
     let mut attributes =
@@ -3547,6 +3548,7 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
     if !attributes.is_object() {
         attributes = serde_json::json!({"legacy_attributes":attributes});
     }
+    let album = audiolib_core::album(&attributes);
     let object = attributes.as_object_mut().expect("attributes object");
     let description: String = row.get(13)?;
     if !description.is_empty() {
@@ -3606,7 +3608,7 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
         favorite: row.get(12)?,
         bext_description: row.get(13)?,
         attributes,
-        album: row.get(36)?,
+        album,
         album_id: row.get(37)?,
         album_entity: row
             .get::<_, Option<String>>(38)?

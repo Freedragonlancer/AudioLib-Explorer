@@ -454,3 +454,94 @@ fn sparse_ids_null_fields_and_missing_rows_keep_fast_all_generic_and_facets_cons
         assert_eq!(facets, from_rows);
     }
 }
+
+#[test]
+fn generic_scoped_empty_and_deep_pages_keep_exact_totals_without_metadata_sentinels() {
+    let (_temp, provider) = fixture();
+    for scope in [SearchScope::Path, SearchScope::All] {
+        let mut selected = request(scope, "corridor");
+        selected.order_by = SortOrder::Duration;
+        selected.filters.bit_depth = Some(24);
+        let complete = provider.search(&selected).unwrap();
+        assert_eq!(
+            complete.total_count,
+            if scope == SearchScope::Path { 3 } else { 5 }
+        );
+        assert!(complete.total_count_exact);
+        selected.offset = 999;
+        let deep = provider.search(&selected).unwrap();
+        assert_eq!(deep.total_count, complete.total_count);
+        assert!(deep.total_count_exact);
+        assert!(deep.results.is_empty());
+        assert_eq!(deep.returned_count, 0);
+        assert!(deep.next_cursor.is_none());
+
+        selected.offset = 0;
+        selected.filters.sample_rate = Some(12_345);
+        let empty = provider.search(&selected).unwrap();
+        assert_eq!(empty.total_count, 0);
+        assert!(empty.total_count_exact);
+        assert!(empty.results.is_empty());
+        assert!(empty.next_cursor.is_none());
+    }
+}
+
+#[test]
+fn generic_scoped_duration_pages_keep_null_order_ties_and_cursor_position_in_both_directions() {
+    let (temp, provider) = fixture();
+    let conn = Connection::open(temp.path().join("scope.db")).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
+    conn.execute(
+        "UPDATE audio_files SET duration=NULL WHERE id IN (1,3,4)",
+        [],
+    )
+    .unwrap();
+    for (scope, query, members) in [
+        (SearchScope::Path, "corridor", "1,2,3"),
+        (SearchScope::All, "corridor shutter", "1,2,4"),
+    ] {
+        for descending in [false, true] {
+            let direction = if descending { "DESC" } else { "ASC" };
+            // Independent raw stored-value oracle: DTOs coalesce NULL duration
+            // to zero, so sorting decoded AudioFile.duration would hide this risk.
+            let expected = conn.prepare(&format!(
+                "SELECT id FROM audio_files WHERE id IN ({members}) ORDER BY duration {direction},id ASC"
+            )).unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let mut selected = request(scope, query);
+            selected.order_by = SortOrder::Duration;
+            selected.descending = descending;
+            selected.filters.bit_depth = Some(24);
+            selected.limit = 1;
+            let mut visited = Vec::new();
+            for page_index in 0..expected.len() {
+                let page = provider.search(&selected).unwrap();
+                assert_eq!(page.total_count, expected.len() as u64);
+                assert!(page.total_count_exact);
+                assert_eq!(page.results.len(), 1);
+                visited.push(page.results[0].id);
+                if page_index + 1 == expected.len() {
+                    assert!(page.next_cursor.is_none());
+                } else {
+                    assert!(page.next_cursor.as_deref().unwrap().starts_with("v2."));
+                }
+                selected.cursor = page.next_cursor;
+                selected.offset = 999;
+                selected.page = Some(999);
+            }
+            assert_eq!(visited, expected, "{scope:?} descending={descending}");
+            assert_eq!(
+                visited.iter().copied().collect::<BTreeSet<_>>().len(),
+                visited.len()
+            );
+            // After consuming the cursor, a genuine offset beyond the set still
+            // returns its full exact total and no fabricated AudioFile.
+            selected.page = None;
+            let exhausted = provider.search(&selected).unwrap();
+            assert_eq!(exhausted.total_count, expected.len() as u64);
+            assert!(exhausted.total_count_exact);
+            assert!(exhausted.results.is_empty());
+            assert!(exhausted.next_cursor.is_none());
+        }
+    }
+}

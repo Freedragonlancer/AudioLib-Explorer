@@ -269,13 +269,6 @@ pub(crate) fn page(
         )",
         conditions.join(" AND ")
     );
-    let total = tx
-        .query_row(
-            &format!("{common} SELECT COUNT(*) FROM matching"),
-            params_from_iter(&values),
-            |r| unsigned(r, 0),
-        )
-        .map_err(db_error)?;
     let text = matches!(request.order_by, SortOrder::Filename | SortOrder::Tags);
     let key = if text {
         "r.sort_value COLLATE NOCASE"
@@ -322,15 +315,42 @@ pub(crate) fn page(
     }));
     let offset = values.len();
     let projection = audio_projection(&tx)?;
-    let mut statement = tx.prepare(&format!(
-        "{common} SELECT {projection} FROM matching r JOIN audio_files af ON af.id=r.id
-         {continuation} ORDER BY r.tier ASC,{key} {direction},r.id ASC LIMIT ?{limit} OFFSET ?{offset}"
-    )).map_err(db_error)?;
-    let mut results = statement
-        .query_map(params_from_iter(&values), audio_from_row)
-        .map_err(db_error)?
-        .collect::<rusqlite::Result<Vec<_>>>()
+    let page_key = if text {
+        "h.page_sort_value COLLATE NOCASE"
+    } else {
+        "h.page_sort_value"
+    };
+    // Count and page share exactly one complete membership in this snapshot.
+    // Hydrate only the bounded page, before the count singleton's outer join:
+    // an empty/deep page must not run Metadata functions on a synthetic NULL row.
+    let mut statement = tx
+        .prepare(&format!(
+            "{common},
+         paged AS MATERIALIZED (
+           SELECT r.id,r.tier,r.sort_value FROM matching r {continuation}
+           ORDER BY r.tier ASC,{key} {direction},r.id ASC LIMIT ?{limit} OFFSET ?{offset}
+         ),
+         hydrated AS MATERIALIZED (
+           SELECT {projection},r.tier AS page_tier,r.sort_value AS page_sort_value,r.id AS page_id
+           FROM paged r JOIN audio_files af ON af.id=r.id
+         ),
+         exact_count AS MATERIALIZED (SELECT COUNT(*) AS n FROM matching)
+         SELECT h.*,c.n FROM exact_count c LEFT JOIN hydrated h ON 1
+         ORDER BY h.page_tier ASC,{page_key} {direction},h.page_id ASC"
+        ))
         .map_err(db_error)?;
+    let count_column = statement.column_count() - 1;
+    let mut rows = statement
+        .query(params_from_iter(&values))
+        .map_err(db_error)?;
+    let mut total = 0;
+    let mut results = Vec::new();
+    while let Some(row) = rows.next().map_err(db_error)? {
+        total = unsigned(row, count_column).map_err(db_error)?;
+        if row.get::<_, Option<i64>>(0).map_err(db_error)?.is_some() {
+            results.push(audio_from_row(row).map_err(db_error)?);
+        }
+    }
     let more = results.len() > request.limit;
     results.truncate(request.limit);
     let next_cursor = if more {
