@@ -189,7 +189,7 @@ fn paths_deeper_than_256_segments_keep_native_filtered_and_facets_consistent() {
         tx.execute("INSERT INTO folder_closure SELECT ancestor_id,?1,depth+1 FROM folder_closure WHERE descendant_id=?2",params![id,parent]).unwrap();
         parent = id;
     }
-    tx.execute("UPDATE audio_files SET folder_id=310 WHERE id<=4", [])
+    tx.execute("UPDATE audio_files SET folder_id=310,file_path=?1||'/'||filename,path_key=?1||'/'||filename WHERE id<=4", [path])
         .unwrap();
     tx.commit().unwrap();
     provider.rebuild_directory_search().unwrap();
