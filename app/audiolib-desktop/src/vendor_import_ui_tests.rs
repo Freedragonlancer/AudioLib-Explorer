@@ -82,13 +82,9 @@ fn async_controller() -> (AppWindow, Arc<Controller>, audiolib_audio::AudioEngin
     .unwrap();
     let (ui, c, engine) = controller(&root);
     let weak = ui.as_weak();
-    let pending = c.clone();
     pump_until(move || {
         weak.upgrade().is_some_and(|ui| {
-            !ui.get_search_workspace_loading()
-                && !ui.get_task_restoring()
-                && !ui.get_searching()
-                && !pending.task_workspace.lock().unwrap().loading
+            !ui.get_search_workspace_loading() && !ui.get_task_restoring() && !ui.get_searching()
         })
     });
     (ui, c, engine)
