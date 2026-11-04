@@ -674,6 +674,9 @@ impl SqliteProvider {
             Self::upgrade_owned_snapshot(stage.path())?;
             let target = Connection::open(stage.path()).map_err(db_error)?;
             schema::register_tokenizer(&target, self.tokenizer.clone())?;
+            // Cache lineage is derived state. The restored destination must not
+            // inherit a watermark which names a prior live reader generation.
+            crate::search_tracking::drop_owned(&target)?;
             // A restore may bring back fewer/lower IDs than this installation has
             // already issued. Keep those identities retired even after replacement.
             let high_water = {
@@ -704,6 +707,7 @@ impl SqliteProvider {
                 .lock()
                 .map_err(|_| Error::Database("Reader pool lock was poisoned".into()))?
                 .clear();
+            self.reset_search_caches()?;
             snapshot_to_file(&mut writer, &rollback_backup)?;
             let replacement =
                 Connection::open_with_flags(stage.path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -769,6 +773,7 @@ impl SqliteProvider {
                 .lock()
                 .map_err(|_| Error::Database("Reader pool lock was poisoned".into()))?
                 .clear();
+            self.reset_search_caches()?;
             snapshot_to_file(&mut writer, &rollback_backup)?;
             let operation = (|| -> Result<IntegrityReport> {
                 match action {

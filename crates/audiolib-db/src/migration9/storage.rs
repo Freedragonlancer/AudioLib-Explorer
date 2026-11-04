@@ -15,8 +15,10 @@ impl ControlLease {
             .truncate(false)
             .read(true)
             .write(true)
-            .open(sidecar(path, ".migration9-control.lock"))?;
-        file.lock()?;
+            .open(sidecar(path, ".migration9-control.lock"))
+            .map_err(|error| io_error("control_open", error))?;
+        file.lock()
+            .map_err(|error| io_error("control_lock", error))?;
         Ok(Self(file))
     }
 }

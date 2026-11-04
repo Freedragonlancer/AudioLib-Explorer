@@ -91,6 +91,7 @@ impl SqliteProvider {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(db_error)?;
+            crate::search_tracking::drop_owned(&tx)?;
             dir_search::drop_tracking(&tx)?;
             let control: bool = tx
                 .query_row(

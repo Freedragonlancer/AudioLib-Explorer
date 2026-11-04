@@ -255,7 +255,7 @@ struct Entry {
 }
 
 fn rows(conn: &Connection, id: i64) -> Result<Vec<Entry>> {
-    let mut query = conn.prepare("SELECT import_id,field,value,source_file,sheet,row,language FROM vendor_metadata WHERE audio_file_id=?1 ORDER BY field,value,import_id").map_err(db_error)?;
+    let mut query = conn.prepare_cached("SELECT import_id,field,value,source_file,sheet,row,language FROM vendor_metadata WHERE audio_file_id=?1 ORDER BY field,value,import_id").map_err(db_error)?;
     query
         .query_map([id], |row| {
             Ok(Entry {
@@ -284,7 +284,7 @@ struct SourceBeforeImage {
 /// Verify every saved source receipt before using its provenance. Never restore its
 /// embedded values: later rescans must survive rollback of only the vendor source.
 pub(super) fn verify_before(conn: &Connection, import: &str, id: i64) -> Result<()> {
-    let saved:Option<(String,String,String,String)>=conn.query_row("SELECT before_rows,before_vendor_json,before_derived,before_source_json FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2",params![import,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
+    let saved:Option<(String,String,String,String)>=conn.prepare_cached("SELECT before_rows,before_vendor_json,before_derived,before_source_json FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2").map_err(db_error)?.query_row(params![import,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
     let (rows, vendor, derived, source) = saved
         .ok_or_else(|| invalid("Vendor before-image is missing; automatic rollback refused"))?;
     let entries: Vec<Entry> = serde_json::from_str(&rows).map_err(invalid)?;
@@ -312,11 +312,9 @@ pub(super) fn verify_before(conn: &Connection, import: &str, id: i64) -> Result<
         ));
     }
     let recomputed: String = conn
-        .query_row(
-            "SELECT audiolib_tokenize(audiolib_source_text(?1,?2))",
-            params![source.bwf, json(&source.metadata)?],
-            |r| r.get(0),
-        )
+        .prepare_cached("SELECT audiolib_tokenize(audiolib_source_text(?1,?2))")
+        .map_err(db_error)?
+        .query_row(params![source.bwf, json(&source.metadata)?], |r| r.get(0))
         .map_err(db_error)?;
     if recomputed != derived {
         return Err(invalid("Vendor before-image derived text is inconsistent"));
@@ -325,14 +323,14 @@ pub(super) fn verify_before(conn: &Connection, import: &str, id: i64) -> Result<
 }
 
 pub(super) fn save_before(conn: &Connection, import: &str, id: i64) -> Result<()> {
-    let captured:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2)",params![import,id],|r|r.get(0)).map_err(db_error)?;
+    let captured:bool=conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2)").map_err(db_error)?.query_row(params![import,id],|r|r.get(0)).map_err(db_error)?;
     if captured {
         let baseline: bool = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM audiolib_vendor_baseline WHERE audio_file_id=?1)",
-                [id],
-                |r| r.get(0),
             )
+            .map_err(db_error)?
+            .query_row([id], |r| r.get(0))
             .map_err(db_error)?;
         if !baseline {
             return Err(invalid(
@@ -341,7 +339,7 @@ pub(super) fn save_before(conn: &Connection, import: &str, id: i64) -> Result<()
         }
         return verify_before(conn, import, id);
     }
-    let (metadata, derived,bwf): (String, String,String) = conn.query_row("SELECT metadata_json,audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)),coalesce(bwf_description,'') FROM audio_files WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?))).map_err(db_error)?;
+    let (metadata, derived,bwf): (String, String,String) = conn.prepare_cached("SELECT metadata_json,audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)),coalesce(bwf_description,'') FROM audio_files WHERE id=?1").map_err(db_error)?.query_row([id], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?))).map_err(db_error)?;
     let metadata: Value = serde_json::from_str(&metadata).map_err(invalid)?;
     let vendor = metadata
         .get("vendor_metadata")
@@ -355,10 +353,10 @@ pub(super) fn save_before(conn: &Connection, import: &str, id: i64) -> Result<()
         rows_sha256: format!("{:x}", Sha256::digest(original.as_bytes())),
         vendor_sha256: format!("{:x}", Sha256::digest(vendor.as_bytes())),
     })?;
-    conn.execute("INSERT OR IGNORE INTO vendor_import_log(import_id,audio_file_id,before_rows,before_vendor_json,before_derived,before_source_json) VALUES(?1,?2,?3,?4,?5,?6)", params![import,id,original,vendor,derived,source]).map_err(db_error)?;
+    conn.prepare_cached("INSERT OR IGNORE INTO vendor_import_log(import_id,audio_file_id,before_rows,before_vendor_json,before_derived,before_source_json) VALUES(?1,?2,?3,?4,?5,?6)").map_err(db_error)?.execute(params![import,id,original,vendor,derived,source]).map_err(db_error)?;
     // The baseline is taken from the first persisted before-image, never reconstructed
     // from max IDs or the current post-import projection during recovery.
-    conn.execute("INSERT OR IGNORE INTO audiolib_vendor_baseline(audio_file_id,rows_json,vendor_json) SELECT audio_file_id,before_rows,before_vendor_json FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2", params![import,id]).map_err(db_error)?;
+    conn.prepare_cached("INSERT OR IGNORE INTO audiolib_vendor_baseline(audio_file_id,rows_json,vendor_json) SELECT audio_file_id,before_rows,before_vendor_json FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2").map_err(db_error)?.execute(params![import,id]).map_err(db_error)?;
     Ok(())
 }
 
@@ -375,7 +373,7 @@ pub(super) struct EventRow<'a> {
 }
 
 pub(super) fn add_event(conn: &Connection, event: EventRow<'_>) -> Result<()> {
-    conn.execute("INSERT OR IGNORE INTO audiolib_vendor_events(import_id,audio_file_id,field,value,source_file,sheet,row,overwrite,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![event.import,event.id,event.field,event.value,event.source_file,event.sheet,super::sql_u64(event.row)?,event.overwrite,event.language]).map_err(db_error)?;
+    conn.prepare_cached("INSERT OR IGNORE INTO audiolib_vendor_events(import_id,audio_file_id,field,value,source_file,sheet,row,overwrite,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)").map_err(db_error)?.execute(params![event.import,event.id,event.field,event.value,event.source_file,event.sheet,super::sql_u64(event.row)?,event.overwrite,event.language]).map_err(db_error)?;
     Ok(())
 }
 
@@ -412,15 +410,15 @@ fn language_rank(declared: &str, text: &str, preferred: &[String]) -> usize {
 /// Distinct source batches can own the same value without duplicating searchable text.
 pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
     let baseline: (String, String) = conn
-        .query_row(
+        .prepare_cached(
             "SELECT rows_json,vendor_json FROM audiolib_vendor_baseline WHERE audio_file_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .map_err(db_error)?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(db_error)?;
     let originals: Vec<Entry> = serde_json::from_str(&baseline.0).map_err(invalid)?;
     let baseline_vendor = serde_json::from_str::<Value>(&baseline.1).map_err(invalid)?;
-    let preferred:Option<String>=conn.query_row("SELECT j.options_json FROM audiolib_vendor_jobs j WHERE EXISTS(SELECT 1 FROM audiolib_vendor_events e WHERE e.import_id=j.import_id AND e.audio_file_id=?1) ORDER BY j.job_order DESC LIMIT 1",[id],|r|r.get(0)).optional().map_err(db_error)?;
+    let preferred:Option<String>=conn.prepare_cached("SELECT j.options_json FROM audiolib_vendor_jobs j WHERE EXISTS(SELECT 1 FROM audiolib_vendor_events e WHERE e.import_id=j.import_id AND e.audio_file_id=?1) ORDER BY j.job_order DESC LIMIT 1").map_err(db_error)?.query_row([id],|r|r.get(0)).optional().map_err(db_error)?;
     let preferred = preferred
         .as_deref()
         .map(serde_json::from_str::<audiolib_core::vendor_import::VendorImportOptions>)
@@ -457,7 +455,7 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
             }
         }
     }
-    let mut query = conn.prepare("SELECT e.import_id,e.field,e.value,e.source_file,e.sheet,e.row,e.overwrite,e.language FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 ORDER BY j.job_order,e.field,e.value").map_err(db_error)?;
+    let mut query = conn.prepare_cached("SELECT e.import_id,e.field,e.value,e.source_file,e.sheet,e.row,e.overwrite,e.language FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 ORDER BY j.job_order,e.field,e.value").map_err(db_error)?;
     let events = query
         .query_map([id], |r| {
             Ok((
@@ -496,12 +494,14 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
             }
         }
     }
-    conn.execute("DELETE FROM vendor_metadata WHERE audio_file_id=?1", [id])
+    conn.prepare_cached("DELETE FROM vendor_metadata WHERE audio_file_id=?1")
+        .map_err(db_error)?
+        .execute([id])
         .map_err(db_error)?;
     let mut fields = BTreeMap::<String, Vec<String>>::new();
     for entry in active.values() {
         if has_events || entry.import_id != "legacy-mirror" {
-            conn.execute("INSERT INTO vendor_metadata(audio_file_id,import_id,field,value,source_file,sheet,row,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,entry.import_id,entry.field,entry.value,entry.source_file,entry.sheet,super::sql_u64(entry.row)?,entry.language]).map_err(db_error)?;
+            conn.prepare_cached("INSERT INTO vendor_metadata(audio_file_id,import_id,field,value,source_file,sheet,row,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)").map_err(db_error)?.execute(params![id,entry.import_id,entry.field,entry.value,entry.source_file,entry.sheet,super::sql_u64(entry.row)?,entry.language]).map_err(db_error)?;
         }
         fields
             .entry(entry.field.clone())
@@ -549,16 +549,21 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         Value::Object(object)
     };
     let original: String = conn
-        .query_row(
-            "SELECT metadata_json FROM audio_files WHERE id=?1",
-            [id],
-            |r| r.get(0),
-        )
+        .prepare_cached("SELECT metadata_json FROM audio_files WHERE id=?1")
+        .map_err(db_error)?
+        .query_row([id], |r| r.get(0))
         .map_err(db_error)?;
     let mut metadata: Value = serde_json::from_str(&original).map_err(invalid)?;
     let object = metadata
         .as_object_mut()
         .ok_or_else(|| invalid("Audio Metadata is not a JSON object"))?;
+    // Raw events, normalized provenance and job accounting above still persist.
+    // Equal projected values do not need an audio row write or FTS rebuild.
+    if (mirror.is_null() && !object.contains_key("vendor_metadata"))
+        || (!mirror.is_null() && object.get("vendor_metadata") == Some(&mirror))
+    {
+        return Ok(());
+    }
     if mirror.is_null() {
         object.remove("vendor_metadata");
     } else {
@@ -567,10 +572,9 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
     let updated = json(&metadata)?;
     // Existing production triggers update contentless FTS in this same transaction.
     // User annotations and embedded fields are never part of this SET clause.
-    conn.execute(
-        "UPDATE audio_files SET metadata_json=?1 WHERE id=?2",
-        params![updated, id],
-    )
-    .map_err(db_error)?;
+    conn.prepare_cached("UPDATE audio_files SET metadata_json=?1 WHERE id=?2")
+        .map_err(db_error)?
+        .execute(params![updated, id])
+        .map_err(db_error)?;
     Ok(())
 }

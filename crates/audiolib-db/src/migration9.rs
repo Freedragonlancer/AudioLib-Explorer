@@ -64,6 +64,45 @@ struct Saved {
     report: Report,
 }
 
+// Keep a separate stable inode: locking the JSON file itself would lose
+// exclusion when its atomic publication replaces that inode. All current
+// load/status readers share this lease with save. Legacy/read-only sources
+// without a report lock remain readable without creating coordination files.
+struct ReportLease(fs::File);
+impl ReportLease {
+    fn reader(path: &Path) -> Result<Option<Self>> {
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .open(sidecar(path, ".migration9-report.lock"))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error("report_reader_open", error)),
+        };
+        file.lock_shared()
+            .map_err(|error| io_error("report_reader_lock", error))?;
+        Ok(Some(Self(file)))
+    }
+
+    fn writer(path: &Path) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(sidecar(path, ".migration9-report.lock"))
+            .map_err(|error| io_error("report_writer_open", error))?;
+        file.lock()
+            .map_err(|error| io_error("report_writer_lock", error))?;
+        Ok(Self(file))
+    }
+}
+impl Drop for ReportLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -71,6 +110,16 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 fn invalid(message: &str) -> Error {
     Error::Validation(message.into())
+}
+fn io_error(stage: &'static str, error: std::io::Error) -> Error {
+    tracing::warn!(stage, os_code = error.raw_os_error(), kind = ?error.kind(), "Schema-9 filesystem operation failed");
+    #[cfg(feature = "test-hooks")]
+    eprintln!(
+        "SMV2_IO_FAILURE stage={stage} os_code={:?} kind={:?}",
+        error.raw_os_error(),
+        error.kind()
+    );
+    Error::Io(error)
 }
 // Keep diagnostics structural: SQL text, bound Metadata and filesystem paths are
 // deliberately excluded. Test-hook runs can retain the native SQLite cause.
@@ -189,6 +238,7 @@ fn exists(conn: &Connection, table: &str) -> Result<bool> {
 }
 fn load(path: &Path, conn: &Connection) -> Result<Saved> {
     let id = identity(conn)?;
+    let _report = ReportLease::reader(path)?;
     match fs::read(sidecar(path, ".migration9.json")) {
         Ok(bytes) => {
             let saved: Saved = serde_json::from_slice(&bytes)
@@ -228,14 +278,18 @@ fn load(path: &Path, conn: &Connection) -> Result<Saved> {
     }
 }
 fn save(path: &Path, saved: &Saved) -> Result<()> {
+    let _report = ReportLease::writer(path)?;
     let mut tmp = tempfile::NamedTempFile::new_in(
         path.parent()
             .ok_or_else(|| invalid("Database parent missing"))?,
-    )?;
+    )
+    .map_err(|error| io_error("save_create", error))?;
     serde_json::to_writer(tmp.as_file_mut(), saved).map_err(|e| invalid(&e.to_string()))?;
-    tmp.as_file_mut().sync_all()?;
+    tmp.as_file_mut()
+        .sync_all()
+        .map_err(|error| io_error("save_sync", error))?;
     tmp.persist(sidecar(path, ".migration9.json"))
-        .map_err(|e| Error::Io(e.error))?;
+        .map_err(|e| io_error("save_persist", e.error))?;
     Ok(())
 }
 fn markers(conn: &Connection) -> Result<Switch> {
@@ -781,7 +835,8 @@ impl crate::SqliteProvider {
             revision_reader: Mutex::new(None),
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
-            document_lengths: Mutex::new(None),
+            document_lengths: Mutex::new(Default::default()),
+            search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
             tokenizer,
             read_gate: RwLock::new(()),

@@ -26,6 +26,7 @@ mod schema;
 mod scoped_search;
 mod search_bm25;
 mod search_cache;
+mod search_cache_control;
 mod search_candidates;
 mod search_exclude;
 mod search_facets;
@@ -34,6 +35,7 @@ mod search_rank_parallel;
 mod search_sorted;
 mod search_storage;
 mod search_text;
+mod search_tracking;
 mod search_workspace;
 mod snapshot_legacy;
 mod snapshot_schema9;
@@ -140,6 +142,7 @@ pub fn snapshot_schema_supported(version: i64) -> bool {
 use serde::{Deserialize, Serialize};
 pub use space::ensure_free_space;
 use std::{
+    collections::VecDeque,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -276,7 +279,8 @@ pub struct SqliteProvider {
     /// Cursors expire when the provider/library is reopened, even if data_version resets.
     cursor_session: uuid::Uuid,
     ranking_cache: Mutex<search_cache::RankingCache>,
-    document_lengths: Mutex<Option<(u64, Arc<search_bm25::Lengths>)>>,
+    document_lengths: Mutex<VecDeque<(search_cache::CacheRevision, Arc<search_bm25::Lengths>)>>,
+    search_cache_observation: Mutex<Option<search_cache_control::Observation>>,
     parallel_rank_reserved: AtomicBool,
     tokenizer: Arc<Jieba>,
     read_gate: RwLock<()>,
@@ -697,7 +701,8 @@ impl SqliteProvider {
             revision_reader: Mutex::new(None),
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
-            document_lengths: Mutex::new(None),
+            document_lengths: Mutex::new(Default::default()),
+            search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
             tokenizer,
             read_gate: RwLock::new(()),
@@ -780,6 +785,7 @@ impl SqliteProvider {
             .lock()
             .map_err(|_| Error::Database("Reader pool lock was poisoned".into()))?
             .clear();
+        self.reset_search_caches()?;
         let cancel = AtomicBool::new(false);
         let namespace = migration::admit_import_identity(&self.path, &desired_namespace, &cancel)?;
         *self
@@ -1041,7 +1047,8 @@ impl SqliteProvider {
             revision_reader: Mutex::new(None),
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
-            document_lengths: Mutex::new(None),
+            document_lengths: Mutex::new(Default::default()),
+            search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
             tokenizer: load_tokenizer(),
             read_gate: RwLock::new(()),
@@ -1280,6 +1287,10 @@ impl SqliteProvider {
     #[cfg(feature = "scanner")]
     pub(crate) fn start_scan(&self, root: &Path, incremental: bool) -> Result<i64> {
         let mut conn = self.writer()?;
+        // Read before the business transaction so its first statement retains
+        // the existing write-lock admission. Folder reattachment can update AF
+        // album membership, so only an unchanged tracked epoch is bookkeeping.
+        let search_epoch = search_tracking::epoch(&conn)?;
         let tx = conn.transaction().map_err(db_error)?;
         // The exclusive scan lease proves any prior Running session was abandoned.
         tx.execute_batch("UPDATE scan_sessions SET status='failed',end_time=strftime('%Y-%m-%d %H:%M:%f','now'),
@@ -1297,7 +1308,13 @@ impl SqliteProvider {
         )
         .map_err(db_error)?;
         let id = tx.last_insert_rowid();
+        let unchanged_search_epoch =
+            search_epoch.is_some() && search_epoch == search_tracking::epoch(&tx)?;
         tx.commit().map_err(db_error)?;
+        if unchanged_search_epoch && self.search_cache_bookkeeping_committed(&conn).is_err() {
+            let _ = self.reset_search_caches();
+            tracing::debug!("Scan session kept; cache bookkeeping was discarded");
+        }
         Ok(id)
     }
 
@@ -1319,9 +1336,24 @@ impl SqliteProvider {
         session_id: i64,
     ) -> Result<(u64, u64)> {
         let mut conn = self.writer()?;
-        let tx = conn.transaction().map_err(db_error)?;
+        // Capture the cache baseline only after writer admission. Promoting a
+        // read snapshot after another annotation commit would yield BUSY_SNAPSHOT.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let search_cache = self.begin_search_cache_batch(&tx)?;
         let result = self.apply_scan_items(&tx, items, Some(session_id))?;
+        // Preserve the existing scanner cancellation boundary: once admitted,
+        // this batch drains atomically. Cache work has no scan-control side effect.
+        let search_cache =
+            self.prepare_search_cache_batch(&tx, search_cache, &AtomicBool::new(false))?;
         tx.commit().map_err(db_error)?;
+        if let Some(candidate) = search_cache
+            && self.publish_search_cache_batch(candidate).is_err()
+        {
+            let _ = self.reset_search_caches();
+            tracing::debug!("Scan batch kept; search cache publication was discarded");
+        }
         Ok(result)
     }
 
@@ -1550,6 +1582,15 @@ impl SqliteProvider {
             mark_scan_session_cancelled(&conn, progress)?;
             return Err(Error::Cancelled);
         }
+        if result.is_ok() && !cleanup {
+            // Incremental finalization updates scan history/folder statistics,
+            // not audio_files or FTS. Keep the exact committed tracked epoch hot.
+            // Full cleanup can mark AF rows missing and is not bookkeeping.
+            if self.search_cache_bookkeeping_committed(&conn).is_err() {
+                let _ = self.reset_search_caches();
+                tracing::debug!("Scan finalization kept; cache bookkeeping was discarded");
+            }
+        }
         result
     }
 }
@@ -1752,35 +1793,6 @@ impl SqliteProvider {
             .map_err(db_error)
     }
 
-    fn rank_document_lengths(
-        &self,
-        tx: &Connection,
-        stable_revision: Option<u64>,
-        cancel: Option<&AtomicBool>,
-    ) -> Result<Option<Arc<search_bm25::Lengths>>> {
-        let Some(revision) = stable_revision else {
-            return search_bm25::load_lengths(tx, cancel);
-        };
-        let mut cached = self
-            .document_lengths
-            .lock()
-            .map_err(|_| Error::Database("Document-length cache lock was poisoned".into()))?;
-        if let Some((cached_revision, lengths)) = cached.as_ref()
-            && *cached_revision == revision
-        {
-            return Ok(Some(lengths.clone()));
-        }
-        // The caller pinned this transaction between matching observer values.
-        // Decode each document length once rather than issuing a docsize lookup
-        // for every scored row. A concurrent commit only forbids publication;
-        // the owned values remain valid for this request's pinned snapshot.
-        let lengths = search_bm25::load_lengths(tx, cancel)?;
-        if self.observe_search_revision()? == revision {
-            *cached = lengths.as_ref().map(|lengths| (revision, lengths.clone()));
-        }
-        Ok(lengths)
-    }
-
     fn ranked_search(
         &self,
         tx: &Connection,
@@ -1802,8 +1814,18 @@ impl SqliteProvider {
         };
         check_cancel()?;
         let query = compile_request_query(&self.tokenizer, request)?;
-        let cached = cache_eligible
-            .then(|| self.ranking_cache.lock().unwrap().get(revision, &query))
+        let cache_revision = self.cache_revision(tx, revision)?;
+        // A tracked epoch belongs to this pinned SQLite snapshot. Untracked
+        // formats retain the before/after observer proof used by older readers.
+        let rank_cache_eligible =
+            cache_eligible || matches!(cache_revision, search_cache::CacheRevision::Tracked(_));
+        let cached = rank_cache_eligible
+            .then(|| {
+                self.ranking_cache
+                    .lock()
+                    .unwrap()
+                    .get(&cache_revision, &query)
+            })
             .flatten();
         let cache_hit = cached.is_some();
         let ids = if let Some(ids) = cached {
@@ -1835,11 +1857,14 @@ impl SqliteProvider {
             let ids = Arc::new(ids);
             // Comparing the same observer before/after the pinned reader snapshot
             // prevents publishing a ranking under a revision from another commit.
-            if cache_eligible && self.observe_search_revision()? == revision {
+            if rank_cache_eligible
+                && (matches!(cache_revision, search_cache::CacheRevision::Tracked(_))
+                    || self.observe_search_revision()? == revision)
+            {
                 self.ranking_cache
                     .lock()
                     .unwrap()
-                    .insert(revision, query, ids.clone());
+                    .insert(cache_revision, query, ids.clone());
             }
             ids
         };
@@ -2577,11 +2602,17 @@ impl SqliteProvider {
             .optional()
             .map_err(db_error)?;
             let revision = self.observe_search_revision()?;
-            if revision_before == revision {
+            let cache_revision = self.cache_revision(&tx, revision)?;
+            if revision_before == revision
+                || matches!(cache_revision, search_cache::CacheRevision::Tracked(_))
+            {
                 let query = compile_request_query(&self.tokenizer, request)?;
                 (
-                    self.ranking_cache.lock().unwrap().get(revision, &query),
-                    Some(revision),
+                    self.ranking_cache
+                        .lock()
+                        .unwrap()
+                        .get(&cache_revision, &query),
+                    Some(cache_revision),
                 )
             } else {
                 (None, None)
@@ -2596,7 +2627,7 @@ impl SqliteProvider {
         let query_ids = match (values.first(), ranked_ids.as_ref()) {
             (Some(Value::Text(query)), None) if has_query => {
                 search_candidates::query_ids(&tx, query, &check_cancel, || {
-                    let Some(revision) = pinned_revision else {
+                    let Some(revision) = pinned_revision.as_ref() else {
                         return Ok(None);
                     };
                     match self.ranking_cache.try_lock() {

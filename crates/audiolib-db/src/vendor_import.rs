@@ -49,6 +49,14 @@ struct Input {
     path: PathBuf,
 }
 
+/// Staging is immutable under operation.lock; only the live audio path needs
+/// another check after the writer transaction has been acquired.
+struct CommitRow {
+    ordinal: u64,
+    row: VendorRowPreview,
+    expected_path: Option<String>,
+}
+
 fn unlinked(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
@@ -1001,6 +1009,7 @@ impl SqliteProvider {
                 tx.execute("INSERT INTO audiolib_vendor_jobs(import_id,idempotency_key,options_hash,state,created,preview_json,options_json) VALUES(?1,?2,?3,'running',?4,?5,?6)",params![id,key,options_hash,now()?,json(&preview)?,json(&preview.options)?]).map_err(db_error)?;
             }
             tx.commit().map_err(db_error)?;
+            let _ = self.search_cache_bookkeeping_committed(&conn);
         }
         clear_error(&stage)?;
         // Calibrate on a small first batch before approaching the 5000-row ceiling.
@@ -1016,6 +1025,7 @@ impl SqliteProvider {
                     [id],
                 )
                 .map_err(db_error)?;
+                let _ = self.search_cache_bookkeeping_committed(&conn);
                 return Ok(VendorImportResult {
                     import_id: id.into(),
                     state: Some("paused".into()),
@@ -1024,7 +1034,7 @@ impl SqliteProvider {
                 });
             }
             let batch = {
-                let mut query=stage.prepare("SELECT ordinal,result,candidate_set FROM rows WHERE ordinal>?1 ORDER BY ordinal LIMIT ?2").map_err(db_error)?;
+                let mut query=stage.prepare_cached("SELECT ordinal,result,candidate_set FROM rows WHERE ordinal>?1 ORDER BY ordinal LIMIT ?2").map_err(db_error)?;
                 query
                     .query_map(params![sql_u64(checkpoint)?, sql_u64(batch_rows)?], |r| {
                         Ok((
@@ -1041,25 +1051,51 @@ impl SqliteProvider {
                 break;
             }
             let started = Instant::now();
+            // Decode and consult the owned preview before acquiring the main
+            // writer. The per-job operation lock keeps mappings/candidates fixed.
+            let batch = {
+                let mut paths = stage.prepare_cached("SELECT c.display_path FROM candidate_set_members m JOIN candidates c ON c.id=m.audio_id WHERE m.set_id=?1 AND m.audio_id=?2").map_err(db_error)?;
+                batch
+                    .into_iter()
+                    .map(|(ordinal, encoded, candidate_set)| {
+                        let row: VendorRowPreview = decode(&encoded)?;
+                        let expected_path = if let Some(audio_id) = row.matched_id
+                            && !row.values.is_empty()
+                        {
+                            paths
+                                .query_row(params![candidate_set, audio_id], |r| r.get(0))
+                                .optional()
+                                .map_err(db_error)?
+                        } else {
+                            None
+                        };
+                        Ok(CommitRow {
+                            ordinal,
+                            row,
+                            expected_path,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
             {
                 let mut conn = self.writer()?;
-                let tx = conn.transaction().map_err(db_error)?;
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db_error)?;
+                let search_cache = self.begin_search_cache_batch(&tx)?;
                 let mut affected = BTreeSet::new();
-                for (ordinal, encoded, candidate_set) in &batch {
-                    let row: VendorRowPreview = decode(encoded)?;
+                for prepared in &batch {
+                    let row = &prepared.row;
                     if let Some(audio_id) = row.matched_id
                         && !row.values.is_empty()
                     {
                         let actual: Option<String> = tx
-                            .query_row(
-                                "SELECT file_path FROM audio_files WHERE id=?1",
-                                [audio_id],
-                                |r| r.get(0),
-                            )
+                            .prepare_cached("SELECT file_path FROM audio_files WHERE id=?1")
+                            .map_err(db_error)?
+                            .query_row([audio_id], |r| r.get(0))
                             .optional()
                             .map_err(db_error)?;
-                        let expected:Option<String> = stage.query_row("SELECT c.display_path FROM candidate_set_members m JOIN candidates c ON c.id=m.audio_id WHERE m.set_id=?1 AND m.audio_id=?2",params![candidate_set,audio_id],|r|r.get(0)).optional().map_err(db_error)?;
-                        if expected.is_none() || actual != expected {
+                        if prepared.expected_path.is_none() || actual != prepared.expected_path {
                             return Err(invalid(
                                 "Audio identity/path changed after preview; create a fresh preview",
                             ));
@@ -1086,17 +1122,33 @@ impl SqliteProvider {
                         affected.insert(audio_id);
                         written += 1;
                     }
-                    checkpoint = *ordinal;
+                    checkpoint = prepared.ordinal;
                 }
-                for audio_id in affected {
-                    storage::project(&tx, audio_id)?;
+                for audio_id in &affected {
+                    storage::project(&tx, *audio_id)?;
                 }
                 tx.execute(
                     "UPDATE audiolib_vendor_jobs SET checkpoint=?2,written=?3 WHERE import_id=?1",
                     params![id, sql_u64(checkpoint)?, sql_u64(written)?],
                 )
                 .map_err(db_error)?;
+                let search_cache = match self.prepare_search_cache_batch(&tx, search_cache, cancel)
+                {
+                    Ok(candidate) => candidate,
+                    // Cache work is optional. Cancellation still commits the
+                    // requested batch and pauses at the existing durable boundary.
+                    Err(Error::Cancelled) => None,
+                    Err(error) => return Err(error),
+                };
                 tx.commit().map_err(db_error)?;
+                if let Some(candidate) = search_cache
+                    && self.publish_search_cache_batch(candidate).is_err()
+                {
+                    // A late cache publication failure cannot turn a durable
+                    // business commit into a failed import. Fall back to rebuild.
+                    let _ = self.reset_search_caches();
+                    tracing::debug!("Vendor commit kept; search cache publication was discarded");
+                }
             }
             if started.elapsed() > Duration::from_secs(2) {
                 batch_rows = (batch_rows / 2).max(1);
@@ -1114,6 +1166,7 @@ impl SqliteProvider {
         {
             let conn = self.writer()?;
             conn.execute("UPDATE audiolib_vendor_jobs SET state='committed',commit_result=?2,last_error=NULL,operation='commit' WHERE import_id=?1",params![id,json(&result)?]).map_err(db_error)?;
+            let _ = self.search_cache_bookkeeping_committed(&conn);
         }
         progress(self.vendor_import_status_impl(id)?);
         Ok(result)
@@ -1147,6 +1200,7 @@ impl SqliteProvider {
                 ));
             }
             conn.execute("UPDATE audiolib_vendor_jobs SET state='rolling_back',last_error=NULL,operation='rollback' WHERE import_id=?1 AND state<>'rolled_back'",[id]).map_err(db_error)?;
+            let _ = self.search_cache_bookkeeping_committed(&conn);
         }
         clear_error(&self.vendor_stage(id)?)?;
         loop {
@@ -1163,7 +1217,10 @@ impl SqliteProvider {
                 break;
             }
             let mut conn = self.writer()?;
-            let tx = conn.transaction().map_err(db_error)?;
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(db_error)?;
+            let search_cache = self.begin_search_cache_batch(&tx)?;
             for audio_id in &ids {
                 // Before-images are retained and required even if another batch replaced the same value.
                 storage::verify_before(&tx, id, *audio_id)?;
@@ -1179,7 +1236,15 @@ impl SqliteProvider {
                 params![id, i64::try_from(ids.len()).map_err(invalid)?],
             )
             .map_err(db_error)?;
+            let search_cache =
+                self.prepare_search_cache_batch(&tx, search_cache, &AtomicBool::new(false))?;
             tx.commit().map_err(db_error)?;
+            if let Some(candidate) = search_cache
+                && self.publish_search_cache_batch(candidate).is_err()
+            {
+                let _ = self.reset_search_caches();
+                tracing::debug!("Vendor rollback kept; search cache publication was discarded");
+            }
         }
         let conn = self.writer()?;
         conn.execute(
@@ -1187,6 +1252,7 @@ impl SqliteProvider {
             [id],
         )
         .map_err(db_error)?;
+        let _ = self.search_cache_bookkeeping_committed(&conn);
         let (written, restored): (u64, u64) = conn
             .query_row(
                 "SELECT written,restored FROM audiolib_vendor_jobs WHERE import_id=?1",

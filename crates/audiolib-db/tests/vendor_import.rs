@@ -496,6 +496,99 @@ fn duplicate_values_and_overlapping_rollbacks_do_not_erase_other_batches_or_new_
 }
 
 #[test]
+fn unchanged_vendor_projection_keeps_all_provenance_without_rewriting_audio_or_fts() {
+    let (temp, provider, database) = fixture(false);
+    let first = text(
+        temp.path(),
+        "first.csv",
+        "Filename,Description\ndoor.wav,unchangedprojectionword\n",
+    );
+    let first = provider.vendor_import_preview_impl(&first).unwrap();
+    provider
+        .vendor_import_commit_impl(&first.import_id, "same-projection-first")
+        .unwrap();
+    let conn = connection(&database);
+    conn.execute_batch("CREATE TABLE controlled_audio_updates(n INTEGER NOT NULL); INSERT INTO controlled_audio_updates VALUES(0); CREATE TRIGGER controlled_count_audio_updates AFTER UPDATE OF metadata_json ON audio_files BEGIN UPDATE controlled_audio_updates SET n=n+1; END;").unwrap();
+    let before: String = conn
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let postings = fts_hash(&database);
+    let repeated = text(
+        temp.path(),
+        "repeated.csv",
+        "Filename,Description\ndoor.wav,unchangedprojectionword\ndoor.wav,unchangedprojectionword\n",
+    );
+    let repeated = provider.vendor_import_preview_impl(&repeated).unwrap();
+    let result = provider
+        .vendor_import_commit_impl(&repeated.import_id, "same-projection-repeated")
+        .unwrap();
+    assert_eq!(result.written, 2, "Raw source rows are still accounted for");
+    assert_eq!(conn.query_row("SELECT count(*) FROM audiolib_vendor_events WHERE audio_file_id=1 AND field='description'", [], |row| row.get::<_,i64>(0)).unwrap(), 3);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM vendor_metadata WHERE audio_file_id=1 AND field='description'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT n FROM controlled_audio_updates", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        before
+    );
+    assert_eq!(fts_hash(&database), postings);
+
+    provider
+        .vendor_import_rollback_impl(&first.import_id)
+        .unwrap();
+    assert_eq!(conn.query_row("SELECT count(*) FROM audiolib_vendor_events WHERE audio_file_id=1 AND field='description'", [], |row| row.get::<_,i64>(0)).unwrap(), 2);
+    assert_eq!(
+        conn.query_row(
+            "SELECT import_id FROM vendor_metadata WHERE audio_file_id=1 AND field='description'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        repeated.import_id
+    );
+    assert_eq!(
+        conn.query_row("SELECT n FROM controlled_audio_updates", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(fts_hash(&database), postings);
+    provider
+        .vendor_import_rollback_impl(&repeated.import_id)
+        .unwrap();
+    assert_eq!(
+        conn.query_row("SELECT n FROM controlled_audio_updates", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(count(&provider, "unchangedprojectionword"), 0);
+    assert_eq!(provider.get_audio(1).unwrap().notes, "protectednote");
+    assert_eq!(provider.get_audio(1).unwrap().tags, "protectedtag");
+}
+
+#[test]
 fn explicit_overwrite_rollback_preserves_a_later_batch_and_uses_original_before_image() {
     let (temp, provider, _) = fixture(false);
     let a = text(

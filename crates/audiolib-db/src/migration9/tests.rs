@@ -3,6 +3,90 @@
 use super::*;
 use std::sync::mpsc;
 
+#[cfg(windows)]
+#[test]
+fn durable_report_publication_during_coordinated_readers_keeps_complete_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(crate::SqliteProvider::open(&path).unwrap());
+    let conn = open(&path, false).unwrap();
+    let mut saved = load(&path, &conn).unwrap();
+    save(&path, &saved).unwrap();
+    let stop = AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let stop = &stop;
+            let path = &path;
+            scope.spawn(move || {
+                let reader = open(path, false).unwrap();
+                while !stop.load(Ordering::Acquire) {
+                    // The production load/status path participates in the same
+                    // stable lease. Uncoordinated raw/AV readers are not claimed.
+                    let current = load(path, &reader).unwrap();
+                    assert_eq!(current.library_id, identity(&reader).unwrap());
+                }
+            });
+        }
+        let result = (|| {
+            for sequence in 0..500 {
+                saved.report.progress.done = sequence;
+                save(&path, &saved)?;
+            }
+            Ok::<_, Error>(())
+        })();
+        stop.store(true, Ordering::Release);
+        result
+    });
+    outcome.unwrap();
+    assert_eq!(load(&path, &conn).unwrap().report.progress.done, 499);
+}
+
+#[cfg(windows)]
+#[test]
+fn durable_report_readonly_legacy_status_creates_no_coordination_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(crate::SqliteProvider::open(&path).unwrap());
+    let conn = open(&path, false).unwrap();
+    let saved = load(&path, &conn).unwrap();
+    let report = sidecar(&path, ".migration9.json");
+    fs::write(&report, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let before = fs::read(&report).unwrap();
+    let original_permissions = fs::metadata(&path).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions).unwrap();
+    let result = status(&path);
+    fs::set_permissions(&path, original_permissions).unwrap();
+    assert_eq!(result.unwrap().state, State::Idle);
+    assert_eq!(fs::read(&report).unwrap(), before);
+    assert!(!sidecar(&path, ".migration9-report.lock").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn durable_report_real_readonly_refusal_preserves_existing_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(crate::SqliteProvider::open(&path).unwrap());
+    let conn = open(&path, false).unwrap();
+    let mut saved = load(&path, &conn).unwrap();
+    save(&path, &saved).unwrap();
+    let report = sidecar(&path, ".migration9.json");
+    let before = fs::read(&report).unwrap();
+    let original_permissions = fs::metadata(&report).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&report, permissions).unwrap();
+    saved.report.progress.done = 123;
+    let result = save(&path, &saved);
+    fs::set_permissions(&report, original_permissions).unwrap();
+    assert!(
+        matches!(result,Err(Error::Io(ref error)) if error.kind()==std::io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(fs::read(&report).unwrap(), before);
+}
+
 #[test]
 fn an_existing_sqlite_writer_is_locked_and_preserves_the_source() {
     let dir = tempfile::tempdir().unwrap();
