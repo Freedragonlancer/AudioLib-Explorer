@@ -106,20 +106,21 @@
 - 进程内 `RunIdx`（按 lo 排序的段、by_dir、父子表、总文件数），约 1 MB，启动时加载，`search_path_rev` 或目录表变更后重载。
 - 建表耗时 0.8–1.3 s（bench 副本，含 optimize）。旧的逐文件 `audio_path_search` 不再需要。
 
-### 3.2 查询与排序（scope=all|path；scope=main 与 s8 完全相同）
+### 3.2 查询与排序（all/path/filename；main 保留 s8 行为）
 - 每个查询词 `w`：主表命中 = s8 编译的 `compile(w)`；路径命中目录集 = `audio_dir_search MATCH t3(w)` 的目录 + 全部子孙目录。**路径词命中文件数 > 总文件数一半时视为过宽，丢弃该词的路径集（只走主表）**（实测：根名不入索引后 `<root-name>` 路径命中 0；顶层目录 `1_Boom` 8.9%；5 万行不作硬阈值，而是“≤5 万时把候选 runs 限制在子树内”的执行优化）。
-- 多词 AND（跨表）：文件命中 ⇔ 每个词都在主表或其路径集中命中（目录匹配掩码做 AND）。例：door 在目录、slam 在文件名可命中，结果按 id 去重。
+- `all` 多词 AND（跨表）：文件命中 ⇔ 每个词都在主表或其路径集中命中（目录匹配掩码做 AND）。例：door 在目录、slam 在文件名可命中，结果按 id 去重。`path` 严格要求每个词均在目录/祖先目录命中；主字段不补足词。`filename` 仅限定文件名及其分词列；`main` 仍覆盖原有主字段，UI 名称为“主字段”。
 - 分层排序（keyset 游标 = `(tier_score, id)` 字典序）：
   - 第 0 层「主字段完整命中」：整串在主表命中，分数 = 主表 bm25，顺序与 s8 **逐条一致**（直接执行 s8 的 `ORDER BY bm25,id LIMIT`）。
   - 第 1 层「混合」：部分词在主表、部分在路径，同层按文件 rowid 升序。
   - 第 2 层「纯路径」：全部词只在路径命中，同层按文件 rowid 升序（#208 PS-23/PG-17/VN-13）。
 - 执行：conn1 跑主表 TOP-k（s8 原句）；conn2 并行算各词目录集（目录 FTS + 内存展开）；只在当前页落到 1/2 层时才**按页**把目录集展开为文件（按 dir_runs 顺序流式取，取满一页即停），高频路径词不物化文件集合。纯路径词无主表命中时用 conn3 取它在主表的 rowid 集，与 conn1 并行。
 - 取消：三条连接各持 `InterruptHandle`，取消时全部 `sqlite3_interrupt`。
+- 带筛选或非相关性排序的 `all/path` 使用参数化 SQL，将逐词 FTS5 目录匹配与闭包成员条件交给 SQLite；不在应用内物化全部文件 ID。目录、专辑、收藏及 Metadata 条件与普通搜索共用。相关性排序仍按以上三层；显式排序作用于整个命中集合，游标同时绑定请求和库修订号。folder/album facets 使用同一集合与读事务。
 
 ### 3.3 HTTP 契约
-- 请求：`scope=main|all|path`（默认 `main` = s8 行为）、`cursor`（不透明字符串，base64url 编码的 `(tier, score, id, search_path_rev)`）、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。
+- 请求 DTO：`scope=main|all|path|filename`（默认 `main` = s8 行为）、不透明 `cursor`、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。目录相关性游标与筛选/排序游标使用不同内部编码，调用方不得自行构造。
 - 响应：`items`、`next_cursor`（末页为 `null`）。游标里的 `search_path_rev` 与当前不符时返回 409 `CURSOR_STALE`，客户端从第一页重取。
-- 现状：服务端 `routes.rs` **还没有搜索路由**（客户端本地搜快照），`SearchRequest` 无 scope。以上是给服务端搜索/客户端本地搜索共用的契约；客户端本地实现走同一算法。
+- 现状：服务端 `routes.rs` 没有在线搜索路由；`SearchRequest` 已实现上述四种 scope，服务器模式在校验后的本地只读快照上搜索，与本地库共用查询实现。这里的请求/响应是 DataProvider 契约，不表示已有 HTTP 搜索端点。
 
 ### 3.4 实测（bench 副本 909,342 行，schema 8 基线 vs 目录段方案）
 口径（Paul 定）：每条查询 5 轮，每轮 3 次预热 + 60 次，取各轮 p95 的中位数，**≤ s8 × 1.2 即过**。
