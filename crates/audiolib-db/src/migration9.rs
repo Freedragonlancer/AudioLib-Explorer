@@ -692,6 +692,7 @@ impl crate::SqliteProvider {
             writer: Mutex::new(conn),
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
+            cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
             document_lengths: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
