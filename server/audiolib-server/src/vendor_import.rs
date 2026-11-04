@@ -4,14 +4,17 @@ use crate::{ApiError, AppState, Service};
 use audiolib_core::{DataProvider, vendor_import::*};
 use axum::{
     Extension, Json, Router,
+    extract::FromRequest,
     extract::multipart::MultipartRejection,
     extract::rejection::{JsonRejection, QueryRejection},
-    extract::{DefaultBodyLimit, Multipart, Path, Query},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, Request},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
+
+mod server_path;
 
 pub(crate) const UPLOAD_LIMIT: usize = 512 * 1024 * 1024;
 const MAX_FILES: usize = 512;
@@ -98,11 +101,39 @@ fn upload_error(message: impl Into<String>) -> ApiError {
 async fn preview(
     Extension(state): Extension<AppState>,
     headers: HeaderMap,
-    multipart: Result<Multipart, MultipartRejection>,
+    request: Request,
 ) -> Result<Json<VendorImportPreview>, ApiError> {
     bound_library(&state, &headers)?;
-    let mut multipart =
+    if headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"))
+        })
+    {
+        let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+            .await
+            .map_err(|_| {
+                upload_error("Server-path options exceed 1 MiB or have an invalid body")
+            })?;
+        let input =
+            serde_json::from_slice(&body).map_err(|error| upload_error(error.to_string()))?;
+        return Ok(Json(server_path::preview(state, input).await?));
+    }
+    let multipart: Result<Multipart, MultipartRejection> =
+        Multipart::from_request(request, &()).await;
+    let multipart =
         multipart.map_err(|e| ApiError::new(e.status(), "VALIDATION", e.body_text()))?;
+    preview_upload(state, multipart).await
+}
+
+async fn preview_upload(
+    state: AppState,
+    mut multipart: Multipart,
+) -> Result<Json<VendorImportPreview>, ApiError> {
     let directory = tempfile::tempdir()
         .map_err(audiolib_core::Error::from)
         .map_err(ApiError::from)?;

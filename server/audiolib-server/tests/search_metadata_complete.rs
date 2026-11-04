@@ -88,6 +88,79 @@ fn source_library(root: &Path, with_wav: bool) -> PathBuf {
     database
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vendor_server_directory_preview_is_root_bound_read_only_and_commits_real_tables() {
+    let root = tempfile::tempdir().unwrap();
+    let database = source_library(root.path(), true);
+    let tables = root.path().join("sources/tables/nested");
+    fs::create_dir_all(&tables).unwrap();
+    for name in ["basic.csv", "basic.xls", "basic.xlsx"] {
+        fs::copy(
+            fixtures("audiolib-db/tests/fixtures/vendor_import").join(name),
+            tables.join(name),
+        )
+        .unwrap();
+    }
+    with_server(root.path(), "all", move |url| {
+        let client = RemoteClient::new(&url, "").unwrap();
+        migrate(&client);
+        let before = client.library().unwrap();
+        for body in [
+            serde_json::json!({"root":"Owned", "root_relative_dir":"../outside"}),
+            serde_json::json!({"root":"Owned", "root_relative_dir":"C:\\private"}),
+            serde_json::json!({"root":"Unknown", "root_relative_dir":"tables"}),
+        ] {
+            let (status, _) = http(
+                &url,
+                "POST",
+                "/api/vendor-import/preview",
+                Some(&before.library_id),
+                &[("Content-Type", "application/json")],
+                &serde_json::to_vec(&body).unwrap(),
+            );
+            assert_eq!(status, 400, "{body}");
+        }
+        let body =
+            serde_json::to_vec(&serde_json::json!({"root":"Owned", "root_relative_dir":"tables"}))
+                .unwrap();
+        let (status, bytes) = http(
+            &url,
+            "POST",
+            "/api/vendor-import/preview",
+            Some(&before.library_id),
+            &[("Content-Type", "application/json; charset=utf-8")],
+            &body,
+        );
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+        let preview: VendorImportPreview = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(preview.files.len(), 3, "{preview:?}");
+        assert!(preview.can_commit, "{preview:?}");
+        assert_eq!(client.library().unwrap().revision, before.revision);
+        assert!(
+            SqliteProvider::open_read_only(&database)
+                .unwrap()
+                .search(&SearchRequest {
+                    query: "vendoruniqueword".into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .results
+                .is_empty()
+        );
+        let committed = client
+            .vendor_import_commit(&preview.import_id, "server-directory-tables")
+            .unwrap();
+        assert!(committed.written > 0, "{committed:?}");
+        assert!(client.library().unwrap().revision > before.revision);
+        client.vendor_import_rollback(&preview.import_id).unwrap();
+        assert_eq!(
+            client.library().unwrap().audio_files(),
+            before.audio_files()
+        );
+    })
+    .await;
+}
+
 /// Keep server shutdown and owned background workers outside the assertion task.
 async fn with_server<T: Send + 'static>(
     root: &Path,
