@@ -95,11 +95,11 @@ impl SqliteProvider {
             let mut reader = self.search_page_reader(cancel.clone())?;
             let before = self.observe_search_revision()?;
             let tx = reader.transaction().map_err(db_error)?;
-            tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()
-            .map_err(db_error)?;
+            tx.prepare_cached("SELECT id FROM audio_files LIMIT 1")
+                .map_err(db_error)?
+                .query_row([], |row| row.get::<_, i64>(0))
+                .optional()
+                .map_err(db_error)?;
             let revision = self.observe_search_revision()?;
             check_cancel(cancel.as_deref())?;
             if before == revision {

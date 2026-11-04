@@ -1819,10 +1819,13 @@ impl SqliteProvider {
                 .map_err(db_error)?;
             *observer = Some(conn);
         }
-        observer
+        let mut statement = observer
             .as_ref()
             .unwrap()
-            .query_row("PRAGMA data_version", [], |row| unsigned(row, 0))
+            .prepare_cached("PRAGMA data_version")
+            .map_err(db_error)?;
+        statement
+            .query_row([], |row| unsigned(row, 0))
             .map_err(db_error)
     }
 
