@@ -651,11 +651,17 @@ on the audio thread.
 Vendor preview has two source modes at the capability-advertised origin-relative
 `/api/vendor-import/preview` endpoint: multipart uploads, or `application/json`
 `{"root":"<configured root name>","root_relative_dir":"tables/vendor","options":{...}}`.
-The server-directory JSON mode is implemented in the isolated `b873b21` fix candidate;
-integration and current-run acceptance remain pending. Its JSON body is capped at
+The server-directory JSON mode and opened-handle isolation are integrated in the
+development candidate; current-run acceptance is recorded separately. Its JSON body is capped at
 1 MiB. It recursively discovers only regular CSV/TSV/TXT/XLS/XLSX files under the
 resolved configured root, skips discovered links, and rejects parent/absolute paths,
-unknown roots and canonical root escapes. Limits are 512 tables and 100,000 directory
+unknown roots and root escapes. Relative directory link components are refused.
+Unix opens remain relative to held directory FDs with no-follow; Windows checks the
+actual opened object's path and rejects reparses while pinning the directory chain.
+Validated file handles are copied into owned staging with their original names;
+the parser never reopens a mutable external source path. Copies retain at most the
+per-file limit plus one byte for individual oversize refusal, within a 512 MiB batch
+input budget, so other valid tables can still preview. Limits are 512 tables and 100,000 directory
 entries. Empty relative directory selects the whole root. Unless supplied explicitly,
 `options.vendor_root` defaults to the configured root's real path for audio matching,
 not the selected table subdirectory. Preview creates owned parsing/recovery artifacts
