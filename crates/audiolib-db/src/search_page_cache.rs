@@ -476,10 +476,10 @@ mod tests {
         let mut cache = PageCache::default();
         insert(&mut cache, 1, text_entry(key.clone(), "kept"));
         let large = SearchPage {
-            results: vec![AudioFile {
+            results: vec![AudioFile::from(audiolib_core::AudioFileData {
                 attributes: serde_json::json!({"preserved": "x".repeat(MAX_ENTRY_ENCODED_BYTES)}),
                 ..Default::default()
-            }],
+            })],
             ..Default::default()
         };
         assert!(PreparedCacheEntry::new(key.clone(), Arc::new(large)).is_none());

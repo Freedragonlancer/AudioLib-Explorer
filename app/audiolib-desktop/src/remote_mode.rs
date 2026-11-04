@@ -4218,10 +4218,10 @@ mod tests {
 
     #[test]
     fn webdav_fallback_needs_a_user_configured_address() {
-        let file = AudioFile {
+        let file = AudioFile::from(audiolib_core::AudioFileData {
             file_path: "/srv/sfx/a b.wav".into(),
             ..Default::default()
-        };
+        });
         let roots = vec![RemoteRoot {
             name: "sfx".into(),
             server_path: "/srv/sfx".into(),

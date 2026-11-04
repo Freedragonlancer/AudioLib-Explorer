@@ -315,6 +315,7 @@ impl RemoteWriter {
             if file.album_id.is_none()
                 && let Ok(local) = snapshot.get_audio(file.id)
             {
+                let local = local.into_data();
                 file.album_id = local.album_id;
                 file.album_entity = local.album_entity;
             }
@@ -765,6 +766,7 @@ impl DataProvider for RemoteProvider {
         if file.album_id.is_none()
             && let Ok(local) = self.snapshot.get_audio(id)
         {
+            let local = local.into_data();
             file.album_id = local.album_id;
             file.album_entity = local.album_entity;
         }

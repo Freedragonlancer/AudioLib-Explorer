@@ -1603,9 +1603,28 @@ impl SqliteProvider {
     ) -> Result<()> {
         let mut conn = self.writer()?;
         let result = run_interruptible(&mut conn, interrupt, |conn| {
-            let tx = conn.transaction().map_err(db_error)?;
+            // Admit the writer before capturing the cache/read snapshot. A
+            // deferred transaction could otherwise fail its first write after
+            // a concurrent annotation commit with BUSY_SNAPSHOT.
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(db_error)?;
+            let search_cache = if cleanup {
+                None
+            } else {
+                Some(self.begin_search_cache_batch(&tx)?)
+            };
             finish_scan_transaction(&tx, root, progress, cleanup, recursive)?;
-            tx.commit().map_err(db_error)
+            // Even history/statistics-only commits change the full-page
+            // revision. Recompute owned pages in this exact final image; an
+            // unchanged AF epoch cannot validate old presentation DTOs.
+            let search_cache = match search_cache {
+                Some(baseline) => {
+                    self.prepare_search_cache_batch(&tx, baseline, interrupt.as_ref())?
+                }
+                None => None,
+            };
+            self.commit_search_cache_batch(tx, search_cache)
         });
         if result.is_err()
             && (interrupt.load(Ordering::Acquire) || matches!(result, Err(Error::Cancelled)))
@@ -1615,16 +1634,16 @@ impl SqliteProvider {
             mark_scan_session_cancelled(&conn, progress)?;
             return Err(Error::Cancelled);
         }
-        if result.is_ok() && !cleanup {
-            // Incremental finalization updates scan history/folder statistics,
-            // not audio_files or FTS. Keep the exact committed tracked epoch hot.
-            // Full cleanup can mark AF rows missing and is not bookkeeping.
-            if self.search_cache_bookkeeping_committed(&conn).is_err() {
-                let _ = self.reset_search_caches();
-                tracing::debug!("Scan finalization kept; cache bookkeeping was discarded");
-            }
+        // The interrupt hook/watcher are gone before publication. A cancellation
+        // racing after COMMIT must not turn durable scan/history work into an
+        // error; a failed optional cache publication only discards caches.
+        if let Some(candidate) = result?
+            && self.publish_search_cache_batch(&conn, candidate).is_err()
+        {
+            let _ = self.reset_search_caches();
+            tracing::debug!("Scan finalization kept; search cache publication was discarded");
         }
-        result
+        Ok(())
     }
 }
 
@@ -3628,7 +3647,7 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
             object.insert(name.into(), value.into());
         }
     }
-    Ok(AudioFile {
+    Ok(AudioFile::from(audiolib_core::AudioFileData {
         id: row.get(0)?,
         file_path: row.get(1)?,
         filename: row.get(2)?,
@@ -3659,7 +3678,7 @@ fn audio_from_row(row: &Row<'_>) -> rusqlite::Result<AudioFile> {
             })
             .transpose()?,
         missing: row.get(35)?,
-    })
+    }))
 }
 
 /// Plain-text queries are quoted tokens, so punctuation cannot become SQL or FTS operators.
@@ -4565,7 +4584,7 @@ mod search_cancellation_tests {
                 .unwrap();
         }
         drop(connection);
-        let original = provider.get_audio(1).unwrap().attributes;
+        let original = provider.get_audio(1).unwrap().into_data().attributes;
         // Copying the displayed source tag into the editable annotation must not
         // change its key. Both kinds of blank annotations must select the source.
         for tags in [

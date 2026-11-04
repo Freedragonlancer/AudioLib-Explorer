@@ -9,6 +9,7 @@ use std::sync::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub mod albums;
+mod audio_file;
 pub mod compatibility;
 pub mod config;
 pub mod library;
@@ -26,6 +27,7 @@ pub mod waveform_cache;
 pub mod waveform_rate;
 pub mod window_layout;
 pub use albums::{Album, AlbumFacet, AlbumKind, MAX_ALBUM_MEMBERS};
+pub use audio_file::AudioFile;
 pub use library::*;
 pub use list_waveform::{
     LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
@@ -190,8 +192,10 @@ pub struct AudioMetadata {
     pub attributes: serde_json::Value,
 }
 
+/// Owned audio-record fields used to construct or consume an [`AudioFile`].
+/// The wire representation and field defaults remain identical to `AudioFile`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AudioFile {
+pub struct AudioFileData {
     pub id: i64,
     pub file_path: String,
     pub filename: String,
@@ -530,10 +534,10 @@ mod search_page_count_tests {
         let old: SearchPage = serde_json::from_value(legacy).unwrap();
         assert!(old.total_count_exact);
         let lower = SearchPage {
-            results: vec![AudioFile {
+            results: vec![AudioFile::from(AudioFileData {
                 id: 1,
                 ..Default::default()
-            }],
+            })],
             returned_count: 1,
             total_count: 2,
             total_count_exact: false,
@@ -1269,13 +1273,13 @@ mod tests {
 
     #[test]
     fn audio_dto_ignores_retired_and_unknown_legacy_json_fields() {
-        let file = AudioFile {
+        let file = AudioFile::from(AudioFileData {
             id: 7,
             filename: "owned.wav".into(),
             notes: "retain this annotation".into(),
             attributes: serde_json::json!({"unknown_extension":{"preserved":true}}),
             ..Default::default()
-        };
+        });
         let clean = serde_json::to_value(&file).unwrap();
         let mut legacy = clean.clone();
         legacy["play_count"] = serde_json::json!(17);

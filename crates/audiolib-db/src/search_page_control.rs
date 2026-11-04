@@ -19,6 +19,8 @@ use std::{
 };
 
 #[cfg(test)]
+mod cow_isolation_tests;
+#[cfg(test)]
 mod rank_deprioritization_tests;
 #[cfg(test)]
 mod tests;
@@ -109,7 +111,7 @@ impl SqliteProvider {
                     .map_err(|_| Error::Database("First-page cache lock was poisoned".into()))?
                     .get(revision, &key);
                 if let Some(cached) = cached {
-                    // Deep DTO cloning and cursor encoding never hold the cache lock.
+                    // Response cloning and cursor encoding never hold the cache lock.
                     let mut page = cached.page.clone();
                     page.next_cursor = crate::scoped_search::encode_committed_first_page_cursor(
                         self,

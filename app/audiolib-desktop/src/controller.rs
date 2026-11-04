@@ -6856,7 +6856,7 @@ impl Controller {
             let provider = self.provider();
             let c = self.clone();
             std::thread::spawn(move || match provider.get_audio(id) {
-                Ok(file) => c.open_explorer(file.file_path, true),
+                Ok(file) => c.open_explorer(file.into_data().file_path, true),
                 Err(error) => c.status(error.to_string()),
             });
         } else if quick_metadata_patch(action, false).is_some() {
@@ -6953,7 +6953,7 @@ impl Controller {
                 let Some(source) = source else {
                     return Ok(files
                         .into_iter()
-                        .map(|file| PathBuf::from(file.file_path))
+                        .map(|file| PathBuf::from(&file.file_path))
                         .filter(|path| path.is_file())
                         .collect());
                 };
@@ -7619,12 +7619,14 @@ fn playback_wave_file(status: &audiolib_audio::PlaybackStatus) -> Option<AudioFi
     if status.sample_rate == 0 || status.state == PlaybackState::Loading {
         return None;
     }
-    status.file_path.as_ref().map(|path| AudioFile {
-        file_path: path.to_string_lossy().into_owned(),
-        sample_rate: status.sample_rate,
-        channels: status.channels,
-        duration: status.duration,
-        ..Default::default()
+    status.file_path.as_ref().map(|path| {
+        AudioFile::from(audiolib_core::AudioFileData {
+            file_path: path.to_string_lossy().into_owned(),
+            sample_rate: status.sample_rate,
+            channels: status.channels,
+            duration: status.duration,
+            ..Default::default()
+        })
     })
 }
 
@@ -8383,7 +8385,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        let file_b = AudioFile {
+        let file_b = AudioFile::from(audiolib_core::AudioFileData {
             id: 20,
             filename: "B.wav".into(),
             file_path: path_b.to_string_lossy().into_owned(),
@@ -8391,7 +8393,7 @@ mod tests {
             channels: loaded.channels,
             duration: loaded.duration,
             ..Default::default()
-        };
+        });
         *controller.selected.lock().unwrap() = Some(file_b.clone());
         present_file(&ui, &file_b);
         controller.mark_audio_reload(file_b.id);
@@ -8471,11 +8473,11 @@ mod tests {
                 .file_path,
             path_a.to_string_lossy()
         );
-        let remote_file = AudioFile {
+        let remote_file = AudioFile::from(audiolib_core::AudioFileData {
             id: 70,
             file_path: "Z:/Server/Original.wav".into(),
-            ..file_b
-        };
+            ..file_b.into_data()
+        });
         controller.set_remote_wave_file_for_test(path_a.clone(), remote_file.clone());
         controller.remote_mode.store(true, Ordering::Release);
         controller.wave_view.lock().unwrap().0 = remote_file.file_path.clone();
@@ -10305,10 +10307,10 @@ mod tests {
     }
 
     fn saved_file(job: &MetadataJob) -> AudioFile {
-        let mut file = AudioFile {
+        let mut file = AudioFile::from(audiolib_core::AudioFileData {
             id: job.id,
             ..Default::default()
-        };
+        });
         if let MetadataWrite::Draft(draft) = &job.write {
             apply_metadata_patch(&mut file, &draft.patch);
         }
@@ -10374,10 +10376,10 @@ mod tests {
         state.complete(&next, &Ok(saved_file(&next)));
         assert_eq!(state.completed, next_barrier);
         let (file, dirty) = state.for_display(
-            &AudioFile {
+            &AudioFile::from(audiolib_core::AudioFileData {
                 id: 1,
                 ..Default::default()
-            },
+            }),
             barrier,
         );
         assert_eq!(file.tags, "library B");
@@ -10404,11 +10406,11 @@ mod tests {
     #[test]
     fn returning_to_a_file_preserves_its_draft_and_a_late_save_overrides_a_stale_read() {
         let mut state = MetadataState::default();
-        let stale_a = AudioFile {
+        let stale_a = AudioFile::from(audiolib_core::AudioFileData {
             id: 1,
             tags: "old database value".into(),
             ..Default::default()
-        };
+        });
         state.edit(1, annotation("new A", "pending A"));
         state.enqueue_draft(1).unwrap();
         let pending_a = state.next().unwrap();
@@ -10470,20 +10472,20 @@ mod tests {
         let mut state = MetadataState::default();
         present_file(
             &ui,
-            &AudioFile {
+            &AudioFile::from(audiolib_core::AudioFileData {
                 id: 1,
                 filename: "A.wav".into(),
                 ..Default::default()
-            },
+            }),
         );
         ui.set_edit_tags("A draft".into());
         ui.set_metadata_dirty(true);
         // B's background read has finished, but B's event-loop publication has not.
-        let background_b = AudioFile {
+        let background_b = AudioFile::from(audiolib_core::AudioFileData {
             id: 2,
             filename: "B.wav".into(),
             ..Default::default()
-        };
+        });
         capture_editor_draft(&mut state, &ui);
         capture_editor_draft(&mut state, &ui);
         assert!(state.drafts.contains_key(&1));
@@ -10620,11 +10622,11 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         present_file(
             &ui,
-            &AudioFile {
+            &AudioFile::from(audiolib_core::AudioFileData {
                 id: 42,
                 color: Some("legacy-blue".into()),
                 ..Default::default()
-            },
+            }),
         );
         ui.set_edit_favorite(true);
         ui.set_metadata_dirty(true);

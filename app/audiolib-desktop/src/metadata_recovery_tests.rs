@@ -791,10 +791,10 @@ fn child_restore_confirmed_server_metadata() {
                 let job = state.next().unwrap();
                 state.complete(
                     &job,
-                    &Ok(AudioFile {
+                    &Ok(AudioFile::from(audiolib_core::AudioFileData {
                         id,
                         ..Default::default()
-                    }),
+                    })),
                 );
             }
             assert!(!state.saved.contains_key(&confirmed.id));

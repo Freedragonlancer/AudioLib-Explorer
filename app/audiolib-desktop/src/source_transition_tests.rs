@@ -225,11 +225,11 @@ pub(super) fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
 }
 
 fn selected(controller: &Controller, ui: &AppWindow, notes: &str) {
-    let file = AudioFile {
+    let file = AudioFile::from(audiolib_core::AudioFileData {
         id: 1,
         filename: "server A sound.wav".into(),
         ..Default::default()
-    };
+    });
     *controller.selected.lock().unwrap() = Some(file.clone());
     present_file(ui, &file);
     ui.set_edit_notes(notes.into());
@@ -2329,11 +2329,11 @@ fn source_switch_flow(edit_active_profile: bool) {
         let mut socket = accept(&a);
         sent.send(request(&mut socket)).unwrap();
         wait_release.recv_timeout(Duration::from_secs(8)).unwrap();
-        let file = AudioFile {
+        let file = AudioFile::from(audiolib_core::AudioFileData {
             id: 1,
             notes: "draft belongs to A".into(),
             ..Default::default()
-        };
+        });
         let body = serde_json::json!({"file":file,"revision_before":1,"revision":2}).to_string();
         respond(&mut socket, "200 OK", &body);
     });
@@ -2735,7 +2735,7 @@ fn child_ready_preview_viewport() {
     let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
     controller.remote_mode.store(true, Ordering::Release);
     controller.remote_busy.store(true, Ordering::Release);
-    let file = AudioFile {
+    let file = AudioFile::from(audiolib_core::AudioFileData {
         id: 42,
         filename: "original.wav".into(),
         file_path: "/server/original.wav".into(),
@@ -2743,7 +2743,7 @@ fn child_ready_preview_viewport() {
         channels: 6,
         duration: 2.0,
         ..Default::default()
-    };
+    });
     {
         let mut remote = controller.remote.lock().unwrap();
         remote.state = Some(CacheState {

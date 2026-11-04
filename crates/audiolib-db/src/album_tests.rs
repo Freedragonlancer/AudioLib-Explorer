@@ -239,7 +239,7 @@ fn declared_name_filters_keep_empty_library_distinct_from_folder_display_names()
     assert_eq!(provider.search(&named).unwrap().total_count, 0);
     let file = provider.get_audio(1).unwrap();
     assert!(file.album.is_empty());
-    assert_eq!(file.album_entity.unwrap().name, "Folder");
+    assert_eq!(file.album_entity.as_ref().unwrap().name, "Folder");
 }
 
 #[test]

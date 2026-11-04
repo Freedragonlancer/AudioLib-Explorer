@@ -1,6 +1,6 @@
 # 0.9.0 发布准备与两端迁移方案
 
-状态：**#204–206 功能已实现，相关源级、真实 HTTP、官方旧 CLI 与迁移演练已有通过证据；PG05 严格并发门槛仍阻塞，最新优化待完成性能复测，实际 GUI/最终包/安装未完成，未发布**。
+状态：**发布准备中。#204–206已有实现及相应源级/兼容证据，官方旧GUI声明范围完成；当前AudioFile COW工作集仍有Vorbis缓存命中回归失败，PG05严格1.1仍阻塞，新候选GUI/实际包/安装未完成，未发布。**
 `0.9.0` 是拟定 MINOR 版本；Cargo 当前仍为 `0.8.7`，最终发行版本与跨平台 payload 尚未冻结。
 生产服务、工作库和源 WAV 未变更；固定 `local_release/` 仍是下述上一轮已验收候选，须在本轮验证后更新。
 feat → beta、beta → main、标签、发布以及实际服务部署各须取得相应授权。
@@ -28,10 +28,11 @@ feat → beta、beta → main、标签、发布以及实际服务部署各须取
 | 上一轮已验收/安装源码 | `bebf27211af741f1b3f11b7f2190b60e791fbe08`；当时尚无完整 Vorbis/厂商导入链路，下文历史结果只覆盖当时范围 |
 | 本轮实现基线 | `4e77492aa78525fbed1f8c772013ba80a18447f6`，包含 #204–206 实现及新增回归；其后边界修正分别复验，下文记录组合证据，不宣称一次全仓全绿 |
 | 迁移与旧 CLI 配对基线 | `d116dcd890fc03c7506c5b514d1338d296e18e68`；真实官方0.8.7 CLI 双快照、旧写拒绝、刷新和离线配对通过；不是最终包身份 |
-| 最近完整 MG 身份 | `fd2e04eb30bcb47b04a52d7af691cc1bb13adec9`，完整 MG24/24、40.28秒通过；后来性能改动须按风险复验，不倒改该结果身份 |
+| 最近完整 MG 身份 | `3562eead704357dcbe6e78bfabc9f083174990c4`，完整MG24/24、41.55秒通过；较早 `fd2e04e` 的40.28秒结果保留，不倒改身份 |
 | 最近已提交性能实现 | `0b3f2f7b1de32cf00fe3c4ca46045169b778bbc1`，整页缓存原型；此前 `ffcfbce` 合并 scoped membership/减少重复 Metadata 投影；组合源检查与实际诊断见第5节 |
 | 最新已验证改动 | `2c456979872e47cc15f6f52dbe832ad3ed0dd770`：池化升级锁句柄、读取快路径和重复排名维护削减；fmt、DB strict Clippy、35项定向单元、14个DB集成目标123项及2个HTTP目标7项通过；并发诊断仍未达标，不能称发行冻结 |
-| 当前性能 WIP | 在保持原快照固定与修订号证明的前提下，复用两条固定 SQL 的 prepared statement；相关取消、授权和缓存失效回归待复验 |
+| 当前提交基线 | HEAD `3562eead704357dcbe6e78bfabc9f083174990c4`，包含固定SQL prepared statement复用；该身份已有原生MG、官方旧GUI和下述性能诊断，仍不是发行冻结 |
+| 当前COW候选 | 基于3562eea：整个AudioFile共享不可变Data、写时复制；五包ASIO strict通过，扫描完成事务的缓存维护遗漏已修复，原Vorbis断言通过。后续44条测试目标调用1225通过/0失败/165忽略，与此前通过范围有重叠；性能及最终包仍待验 |
 
 ### 1.1 三项核心功能核对与 fix 任务
 
@@ -86,7 +87,7 @@ feat → beta、beta → main、标签、发布以及实际服务部署各须取
   VN-08/09、Metadata 增量与重扫已有源级/HTTP 证据；最终包/部署仍待验，不能只凭 feature 标记通过。
 - [ ] **FIX-08 · P0：旧客户端过渡。** 已实现 s8/s9 双快照、精确协商和旧端 s9 写保护；
   派生 s8 只保留 WAV，保留已合入主表的厂商/Vorbis 搜索词；默认开启0.9过渡期兼容快照。
-  SC 源级与官方0.8.7 CLI 配对已通过（`d116dcd`）；关闭兼容配置拒绝同步且保留旧缓存。官方旧 GUI 和最终包仍待验。
+  SC 源级与官方0.8.7 CLI 配对已通过（`d116dcd`）；关闭兼容配置拒绝同步且保留旧缓存。官方旧GUI在 `3562eea` 的声明范围已完成；新候选GUI及最终包仍待验。
 - [ ] **FIX-09 · P1：按库提示与去重。** 已改用稳定库身份隔离升级通知，
   库身份/切换/去重已有源级交互回归；最终实际 GUI 待验。
 
@@ -150,8 +151,9 @@ portable 中文路径索引提示及安装后界面截图已检查。二进制�
 | s9 完整格式 | `ale-s9-cld1-t3-m2-p1-a1-sd1`；主 FTS5 tokenizer 为 t3，目录修订为 sd1 | 检查真实 schema/features/结构/身份；`source_search_rev=3` 与三项 feature 原子发布；保持原主 FTS5 不变 |
 | 客户端只读快照 | 支持完整格式校验的 schema3..9；s9 原样只读打开，owned staging 检查目录 FTS5、成员、runs 覆盖及无脏队列；真实 HTTP 同步和 Metadata 增量已通过 | 不把 s9 交给 schema8 修复器；未来/不完整格式拒绝并保留旧缓存 |
 | `/capabilities` | catalog2、API v1，按实际源库和角色报告读写格式、迁移、四种 scope 和厂商导入限额；普通客户端本地写格式仍为8 | 真实服务角色/格式及旧 JSON 形状解析回归已通过；正式版本及原生部署另验 |
-| s8 派生快照 | 已实现 s9/8 双缓存与精确协商；8派生只含 WAV、移除目录与厂商自有表，沿用已有主 FTS5 的 rev3 词和库身份；新端优先9 | router 配对、修订变化及关闭兼容选项回归通过；官方0.8.7 CLI 与 `d116dcd` 的真实兼容配对通过；最终新包和旧 GUI 待验 |
+| s8 派生快照 | 已实现 s9/8 双缓存与精确协商；8派生只含 WAV、移除目录与厂商自有表，沿用已有主 FTS5 的 rev3 词和库身份；新端优先9 | router 配对、修订变化及关闭兼容选项回归通过；官方0.8.7 CLI 与 `d116dcd` 的真实兼容配对通过；官方旧GUI在3562eea的声明范围完成；最终新包待验 |
 | 厂商导入 / Vorbis | 真实 CSV/XLS/XLSX、本地与服务端完整导入/回滚和 FLAC/Ogg/OGA 提取、重扫、搜索已接通；不支持的服务器隐藏入口 | 较早29项与后续受影响32项目标分别通过，真实 HTTP/离线链路和解析资源演练通过；PG05、原生交互与新包待验。Opus 仅标签，无原生解码 |
+| AudioFile COW（当前WIP） | `AudioFileData`保留原字段、类型和serde属性；`AudioFile`以私有Arc持有整条记录，Clone共享、修改时分离，手工serde仍输出原JSON | **公开Rust源码接口变化**：构造使用`AudioFileData`后转`AudioFile`，移出字段先`into_data()`；JSON/API格式、数据库schema、`AudioMetadata`及`attributes: Value`不变。直接消费者和实际性能仍按新身份验收 |
 | 服务端交付布局 | 新包包含 server 与不带 test-hooks 的离线 `audiolib-migrate`；仍为七归档十四资产 | layout_revision=2、automatic_upgrade_compatible=false、manual_bootstrap_required=true；minimum_updater_version=0.9.0。冻结0.7.8旧政策真实拒绝，新政策合成验证通过；首次手动引导，开发0.8.7候选不是已发布新更新器 |
 
 目录索引自有 SQL 触发器捕获旧 schema8 写入产生的目录实体/层次及音频成员变化，不依赖新增
@@ -234,39 +236,41 @@ NULL 归属行分开 runs，避免被路径范围误命中。缺捕获机制的�
 | 阶段 | 所需证据 | 当前 |
 | --- | --- | --- |
 | 契约与文档 | schema/features/能力/Retry-After 一致；链接及差异检查 | catalog2、switching30、实际格式和能力已统一；本次仅文档收口，不产生新的运行验收 |
-| 受影响源码 | fmt、strict Clippy、相关测试及直接消费者 | `0b3f2f7` 对应组合检查见下文；当前 pool/快路径/排名去重 WIP 的 fmt、DB strict及选定范围165项通过/0失败（35单元、123 DB集成、7 HTTP），原始身份收据待归档；新commit与完整性能验收尚未完成 |
-| 迁移安全 | MG24、跨进程控制、备份、取消/恢复、切换拒写 | 最近完整执行为 `fd2e04e`，24/24、40.28秒通过；后续改动按影响复验。保留旧 BUSY/监督器/报告替换竞争及修正日志。演练不等于实际 VM 断电、配额/全部文件系统或最终 production migrator 包验收 |
-| 两端真实 HTTP / 旧客户端 | 全量/增量、离线、回滚、实际官方旧二进制 | `2db7efd` 的5个同步目标16项、rooted7项通过；官方0.8.7 CLI 与 `d116dcd` 的双快照、旧写拒绝、修订刷新、关闭兼容保缓存及离线配对通过；不是最新包重跑，旧 GUI 仅完成隔离准备 |
+| 受影响源码 | fmt、strict Clippy、相关测试及直接消费者 | COW五包ASIO strict通过；Core187及DB lib326通过/5忽略。原Vorbis失败保留且修正后完整通过；后续DB strict、server NoDefault strict通过，44条目标调用1225通过/0失败/165忽略，复用此前未受影响结果，不累加为唯一个案总数 |
+| 迁移安全 | MG24、跨进程控制、备份、取消/恢复、切换拒写 | 最近完整执行为 `3562eea`，24/24、41.55秒通过；COW及后续扫描修正仍按影响复验。保留旧 BUSY/监督器/报告替换竞争及修正日志。演练不等于实际 VM 断电、配额/全部文件系统或最终 production migrator 包验收 |
+| 两端真实 HTTP / 旧客户端 | 全量/增量、离线、回滚、实际官方旧二进制 | `2db7efd` 的5个同步目标16项、rooted7项通过；官方0.8.7 CLI与d116dcd配对通过。官方0.8.7原生GUI对3562eea完成O1–O12声明范围；独立旧写HTTP409、拒同步保缓存和冷离线重开有证据，均不是新候选正式包验收 |
 | 搜索正确性 / 解析资源 | 完整 oracle/分页/深目录/NULL、表格RSS/边界、恢复 | `fd2e04e` 八范围完整 oracle/分页通过；18项资源边界、10k/200k CSV/XLSX、近50MiB有效 BIFF和真实退出恢复已有原身份证据。当前优化后最终完整 oracle/分页尚待复验，不把微基准代替集合正确性 |
-| 百万记录性能 | 绝对 P95 <500ms；PG05五轮中位数倍率≤1.1 | **BLOCKED**。`0b3f2f7` 的 a58单轮诊断 warm100+facets P95=227.8722ms、结果页P95=0.1408ms，绝对门槛通过；五类 PG05 诊断倍率仍全部超1.1，详见下表。它不是正式五轮验收 |
-| 桌面交互 | 范围/分页、导入、迁移、关闭排空及两个现代主题 | 已有源级交互/异步回归；原507项、后续定向与父/子进程结果各保留原身份。最终新包实际 GUI、新格式播放及官方旧 GUI 均待验 |
+| 百万记录性能 | 绝对 P95 <500ms；PG05五轮中位数倍率≤1.1 | **BLOCKED**。最近完成的3562eea单轮b3df诊断warm100+facets P95=213.9338ms、结果页P95=0.1073ms；4/5请求倍率≤1.1，Filename=1.66667仍失败。当前COW尚无完成的正式性能验收，单轮不能代替五轮 |
+| 桌面交互 | 范围/分页、导入、迁移、关闭排空及两个现代主题 | 已有源级交互/异步回归；原507项、后续定向与父/子进程结果各保留原身份。官方旧GUI声明范围已完成；新候选原生GUI、新格式播放和最终包仍待验 |
 | 原生文件系统 | 根句柄、复制/替换、权限与限额 | Windows本地NTFS7项、自有SMB/UNC6项通过；另1项创建测试链接返回OS1，该链接替换场景未验证。不能用该平台结果代替 Mac/Linux 原生路径 |
 | Windows实际包 | 客户端ASIO；server+migrate双二进制；许可/隐私/启动/数据安全 | 本轮尚未构建/打包。client479/server260许可闭包及合成材料/边界检查通过，含C#假二进制与53项Docker合成检查；无真实Docker daemon/image执行证明，旧 `bebf272` 包不替代本轮 |
 | 最终安装 | 固定目录所有package-owned文件SHA256、CLI版本、隔离桌面启动 | 仍为上轮 `bebf272`、1252文件安装；实际新包通过后才更新主工作区固定 `local_release/`，候选工作树不创建另一个日常安装 |
 
-最新完成的性能诊断为私有 run `a58cc7dbe9ad4bbd8cae85f0243c80ed`，源码 `0b3f2f7`。
-它使用原 `d116dcd` 五轮导入/回滚后的百万记录语料，通过只读 SQLite online backup 复制到新 owned 目录；
-原 DB/WAL/报告保持不变。OS cache 未 purge，fresh process/provider 不称真实冷缓存。
+最近完成的主性能诊断为 run `b3df63be340b4718af8c0d66ef85733c`，源码 `3562eea`，
+`diagnostic_only=true`。warm100+facets P95=213.9338ms、结果页P95=0.1073ms；严格PG05仍阻塞。
+它使用原 `d116dcd` 五轮导入/回滚后的百万记录语料，经只读SQLite online backup复制到新owned目录；
+原DB/WAL/报告保持不变。OS cache未purge，fresh process/provider不称真实冷缓存。
 
-| PG05请求 | 空闲p95（ms） | 写入p95（ms） | 倍率（上限1.1） |
+| PG05请求 | 空闲p95（ms） | 写入p95（ms） | 单轮倍率（上限1.1） |
 | --- | --- | --- | --- |
-| Main / relevance | 0.1517 | 0.2060 | 1.35794，未过 |
-| All / relevance | 0.1263 | 0.2243 | 1.77593，未过 |
-| Path / 收藏+48kHz / Filename排序 | 0.1508 | 0.2139 | 1.41844，未过 |
-| strict Filename / Filename排序 | 0.1487 | 0.2220 | 1.49294，未过 |
-| 空中文 strict Filename / relevance | 0.1387 | 0.1841 | 1.32733，未过 |
+| Main / relevance | 0.0407 | 0.0410 | 1.00737，在限内 |
+| All / relevance | 0.0563 | 0.0498 | 0.88455，在限内 |
+| Path / 收藏+48kHz / Filename排序 | 0.0539 | 0.0401 | 0.74397，在限内 |
+| strict Filename / Filename排序 | 0.0318 | 0.0530 | **1.66667，未过** |
+| 空中文 strict Filename / relevance | 0.0124 | 0.0109 | 0.87903，在限内 |
 
-各类约4905次缓存命中仍未满足相对门槛；不能因绝对耗时很低而免除 PG05。
-约2.55/2.36/2.02秒的批次 work interval 包含取数、投影/预维护、提交和状态处理，不是精确SQL持锁时间。
-随后 `2c45697` 的私有 run `f2eaba01ef1843f7b7647586ee46ff99` 完成单轮诊断：
-warm100+facets P95=232.1117ms、结果页P95=0.149ms；主字段、全部、筛选路径、文件名及空中文的
-空闲/写入P95分别为0.0304/0.0461、0.0406/0.0556、0.0355/0.0459、0.0313/0.0584、0.0100/0.0146ms。
-对应倍率1.51645、1.36946、1.29296、1.86581、1.46，仍未满足1.1；这仍是诊断，不是正式五轮验收。
-私有 helper 将两侧计时统一为 public search 返回即停表，校验/记录均在计时外；
-较快查询曾触达50000条采样保护上限，原 `41401b` 中止夹具保留且不复用，不能算通过。
-采样保护上限改为500000后才完成上述诊断；180秒截止、完整oracle、实际导入、取消排空、
-至少3批和每类30条真实重叠样本、正式五轮及1.1门槛均保留，不改写 a58 的旧报告。
-当前继续定位固定 SQL 准备及并发命中开销；新的改动和诊断不得覆盖已有结果身份。
+只达到4/5个单轮诊断边界，不能宣布正式PG05通过。phase `441df` 的分段诊断发现整条DTO深克隆开销：
+Main的JSON约400字节且未变化，Clone仍由约20.6增至36.5微秒；Filename JSON约400增至3806字节、
+包含约51行vendor数据时，Clone约20.7增至46.7微秒。这支持正在检查的**整个AudioFile COW**，
+不把attributes-only原型视为已经解决瓶颈。临时phase计时模块已按原字节精确移除；
+2KiB inline lookup-key仍是私有未接入原型，不是当前发行代码或验收证据。
+
+原有失败和计时身份继续保留：`0b3f2f7` 的a58单轮warm227.8722ms/结果页0.1408ms，
+五类倍率依次1.35794、1.77593、1.41844、1.49294、1.32733；`2c45697` 的f2eaba诊断亦未达1.1。
+较快查询曾触达50000条采样保护上限，`41401b`中止夹具不复用、不算通过。
+私有helper现两侧均在public search返回即停表，校验/记录在计时外；样本保护上限500000，
+180秒截止、完整oracle、实际导入、取消/join排空、至少3批和每类30条真实重叠样本、正式五轮与1.1门槛均保留。
+批次work interval包括取数、投影/预维护、提交和状态，不是精确SQL持锁时间；未对旧结果追溯重算。
 
 较早结果继续保留原条件：`d116dcd` 百万记录100查询P95=112.537ms，扩展 warm P95=443.843ms/结果页329.371ms；
 原五轮 PG05 失败。`fd2e04e` 的 run `07c5d07da8724b568898f13cb61fcc20` 完整 oracle通过，
@@ -295,18 +299,33 @@ ASIO 使用已验证 SDK 和实际发布配置，不再追加无关的非 ASIO �
 `ffcfbce` 的57个DB顶层目标587通过/34忽略，server2目标7通过、fmt/DB strict通过。
 `0b3f2f7` 对应源检查的DB lib曾309通过、1个取消钩子用例失败，修复后定向8个取消及5个controller通过；
 其余56个DB目标294通过/29忽略，server2目标7通过，fmt/DB strict通过。
-当前 WIP 另有 pool8、page-control7、snapshot8、cache-control4、cancellation8，共35项定向单元通过；
-其后14个DB集成目标123项和2个HTTP目标7项通过，本次选定范围合计165通过/0失败，源码仍为 `0b3f2f7 + 冻结WIP`。
-该165项与上述历史执行有重叠，不能再累加，也不称一次完整workspace通过。
-实际新payload与GUI尚待交付，不以这些源级结果替代安装验收。
+较早pool/快路径/排名去重检查的35项单元、123项DB集成及7项HTTP，合计165通过/0失败，
+对应后来的 `2c45697` 实现；这些历史执行有重叠，不继续累计成workspace总数。
+当前31文件COW输入在3562eea基线上：选定core/db/remote/desktop/cli五包ASIO strict已通过；
+Core187通过（含6个新COW行为测试），DB lib326通过/5忽略（含真实provider/cache COW回归）。
+选定测试已完成59个目标823通过；第60个vorbis_scan目标为1通过/1失败，累计观察824通过、1失败、34忽略后中止。
+失败位于 `vorbis_scan.rs:250` 的阳性cache_hit断言；它尚不证明结果或Metadata陈旧，也不能改写成通过。
+随后修正扫描完成事务：IMMEDIATE准入后，在同一实际最终图像中准备canonical页面，成功提交后经原有Dw/revision证明发布；
+不重标旧DTO、不放宽原断言。`owned-file-validation-finalize-bf7bb9968ca04a65b54960d0816f1393` 完成复验：
+取消/缓存/扫描/Vorbis/Waveform相关47通过；Desktop/remote实际ASIO的8条目标调用809通过/162忽略；
+server NoDefault的25条目标调用369通过/3忽略；DB及server strict通过，源码前后身份一致。
+合计44条目标调用1225通过/0失败/165忽略；过滤DB-lib重复使用同一binary，部分扫描目标与先前结果重叠，不能直接与823相加。
+此前Core、CLI和未受扫描收尾影响的DB结果保留原始输入/特性/二进制身份，形成组合证据，非一次完整workspace重跑。
+新候选原生GUI、实际payload与固定安装仍未交付。
 
-最小证据定位：MG `final-fd2e04e-full24-47803f776b6044cc9c85669b3e480dc1/result.json`；
-官方旧CLI `old-client-ed106a3ddcf6429691f204efbea81a5f/report.json`（candidate=`d116dcd`，
+最小证据定位：MG `final-3562eea-full24-42dd609abce047f8a2e5b4644cfe76d7/result.json`；
+官方旧GUI `old-gui-e9a8c716ab574d98b2fee7a2d9b82bcd/native-gui-final-receipt.json`，绑定源码3562eea、
+官方0.8.7 GUI SHA256=`859541a34d4eb05a04ddcda4f92d88596253235bc8ad1ed66a723999489faf81`。
+旧GUI在隔离服务中s8初次449条→迁移后WAV-only派生8的409条，vendor搜索通过；
+GUI禁止编辑/保存，不声称它发出禁止的PATCH；独立同旧契约HTTP写入409且服务器/缓存未改。
+兼容关闭后同步明确失败且DB/cache字节保留；服务端正常停止后，官方旧GUI冷重开离线vendor搜索通过，全部正常退出0。
+它完成O1–O12声明范围，不覆盖新候选GUI、正式server包或其他平台。
+官方旧CLI证据仍为 `old-client-ed106a3ddcf6429691f204efbea81a5f/report.json`（candidate=d116dcd，
 旧归档SHA256=`2ee3f3984e570ffadfe62ec052be2d0707e2845e0aa003434b2f337267fa6ba7`，
-旧CLI SHA256=`f6fcd7d803311712d96ca704535dcafc5428d538fd770af1374749991fc7fb6f`）；
-性能为上述 a58 的 `search/pg05-probe-result.json` 和独立 warm报告。
-私有 `first-page-cache-checks`、`first-page-cache-resume-checks` 保留各源命令/EXE及输入补丁，
-`pg05-timer-symmetry` 保留计时修正身份；最终新执行使用新 receipt，不重绑定变更的 helper 冒充原编译。
+旧CLI SHA256=`f6fcd7d803311712d96ca704535dcafc5428d538fd770af1374749991fc7fb6f`）。
+性能为上述b3df的 `search/pg05-probe-result.json` 与独立warm报告；phase441df仅用于归因。
+COW检查保留 `owned-file-validation-*` 的实际输入/特性/EXE及停止位置，修正后重验使用新身份；
+既有报告及计时修正收据不覆盖，不将变更的helper重绑定为旧编译。
 
 性能目标仍为 **P95 latency <500ms for 1M+ records**；s9/s8 相对闸门为原约定的
 每查询五轮、每轮 p95 的中位数不超过 s8 ×1.2；PG05另要求并发/空闲五轮p95中位数≤1.1。

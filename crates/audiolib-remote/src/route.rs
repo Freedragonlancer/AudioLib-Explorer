@@ -204,7 +204,7 @@ mod tests {
     use super::*;
 
     fn wav(sample_rate: u32, bit_depth: u16, channels: u16) -> AudioFile {
-        AudioFile {
+        AudioFile::from(audiolib_core::AudioFileData {
             id: 1,
             filename: "x.wav".into(),
             file_path: "/S/x.wav".into(),
@@ -212,7 +212,7 @@ mod tests {
             bit_depth,
             channels,
             ..Default::default()
-        }
+        })
     }
 
     fn pcm(rate: u32, channels: Option<u16>) -> AudioRoute {

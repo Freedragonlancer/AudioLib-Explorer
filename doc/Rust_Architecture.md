@@ -27,6 +27,19 @@ than silently omitting new files. New writers consume that queue incrementally w
 index updates and generation changes in one transaction; Metadata annotations do
 not dirty directory membership. Preparing that index never relabels schema 8 as 9.
 
+`AudioFile` is an owned copy-on-write presentation snapshot. Cloning a result page
+shares immutable complete records; mutable field access first detaches the whole
+`AudioFileData`, including strings, nested Metadata and shared-album values. Caller
+edits cannot change a retained page or another response and do not imply a database
+write. The private `Arc` does not escape. JSON fields, defaults and required-field
+validation remain the bare-record contract; `AudioMetadata` and stored attributes
+remain owned `serde_json::Value`. Rust callers construct `AudioFileData` and convert
+it with `AudioFile::from`, or consume an `AudioFile` with `into_data` before moving
+fields. This changes Rust construction syntax without changing the HTTP/snapshot
+wire format. Cache entry, generation and encoded-byte budgets remain unchanged;
+the extra allocation when hydrating a row must still be covered by performance
+acceptance rather than assumed free.
+
 AudioLib Explorer `0.8.3` uses the Rust workspace and schema 8 / Plan B storage, including shared album entities and original Metadata JSON TEXT. The writable format is `ale-s8-cld1-t3-m2-p1-a1`; Metadata compression is deferred. The snapshot's outer zstd transport remains enabled. See [shared albums and Metadata storage](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md), the [shared migration contract](api/Library_Migration_Compatibility.md), [artwork contracts](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md) and [storage CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier development-version measurements remain historical evidence.
 
 This document supersedes Python-specific implementation choices in Technical_Architecture.md. Its Appendix A remains the terminology reference. The Python implementation and its test scripts have been removed from the working tree; earlier committed versions preserve their history. The original SQLite database and local config/audiolib_config.yaml remain read-only migration inputs. New features use the Rust workspace.

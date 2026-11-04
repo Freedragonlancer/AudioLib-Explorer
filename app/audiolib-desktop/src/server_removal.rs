@@ -556,11 +556,11 @@ mod tests {
     }
 
     fn file(id: i64, folder: Option<i64>) -> AudioFile {
-        AudioFile {
+        AudioFile::from(audiolib_core::AudioFileData {
             id,
             folder_id: folder,
-            ..AudioFile::default()
-        }
+            ..audiolib_core::AudioFileData::default()
+        })
     }
 
     #[test]
