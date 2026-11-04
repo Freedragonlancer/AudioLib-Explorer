@@ -246,10 +246,6 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
         .merge(protected)
         .layer(middleware::from_fn(guard_api_mutation));
     let vendor = Router::new()
-        .route(
-            audiolib_core::server_upgrade::VENDOR_IMPORT_API,
-            get(crate::vendor_import::history),
-        )
         .nest(
             audiolib_core::server_upgrade::VENDOR_IMPORT_API,
             crate::vendor_import::router(),

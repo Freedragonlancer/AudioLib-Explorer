@@ -135,6 +135,19 @@ async fn vendor_server_directory_preview_is_root_bound_read_only_and_commits_rea
         let preview: VendorImportPreview = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(preview.files.len(), 3, "{preview:?}");
         assert!(preview.can_commit, "{preview:?}");
+        let oversized_mapping = vec![b' '; 1024 * 1024 + 1];
+        let (status, _) = http(
+            &url,
+            "PUT",
+            &format!("/api/vendor-import/{}/mapping", preview.import_id),
+            Some(&before.library_id),
+            &[("Content-Type", "application/json")],
+            &oversized_mapping,
+        );
+        assert_eq!(
+            status, 413,
+            "Mapping JSON must be rejected at the 1MiB extraction boundary"
+        );
         assert_eq!(client.library().unwrap().revision, before.revision);
         assert!(
             SqliteProvider::open_read_only(&database)

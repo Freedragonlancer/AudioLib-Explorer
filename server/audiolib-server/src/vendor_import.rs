@@ -60,7 +60,10 @@ impl Drop for ImportRevisionHold {
 pub(crate) fn router() -> Router<Service> {
     Router::new()
         .route("/", get(history))
-        .route("/preview", post(preview))
+        .route(
+            "/preview",
+            post(preview).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
+        )
         .route("/templates", get(templates).put(save_template))
         .route("/{id}", get(status))
         .route("/{id}/rows", get(rows))
@@ -69,7 +72,7 @@ pub(crate) fn router() -> Router<Service> {
         .route("/{id}/commit", post(commit))
         .route("/{id}/cancel", post(cancel))
         .route("/{id}/rollback", post(rollback))
-        .layer(DefaultBodyLimit::max(UPLOAD_LIMIT))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
 }
 
 fn bound_library(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
