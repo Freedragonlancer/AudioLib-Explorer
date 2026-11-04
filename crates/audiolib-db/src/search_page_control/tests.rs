@@ -235,7 +235,7 @@ fn external_album_or_folder_commit_rejects_precomputed_full_pages() {
                 .first_page_cache
                 .lock()
                 .unwrap()
-                .get(revision, &key)
+                .get(revision, key.bytes())
                 .is_none()
         );
         drop(writer);
@@ -307,7 +307,7 @@ fn old_pinned_dtos_keep_their_generation_and_new_hits_emit_current_v2_cursors() 
         .first_page_cache
         .lock()
         .unwrap()
-        .get(old_revision, &key)
+        .get(old_revision, key.bytes())
         .unwrap();
     let mut reader =
         Connection::open_with_flags(provider.database_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -340,7 +340,7 @@ fn old_pinned_dtos_keep_their_generation_and_new_hits_emit_current_v2_cursors() 
         .first_page_cache
         .lock()
         .unwrap()
-        .get(old_revision, &key)
+        .get(old_revision, key.bytes())
         .unwrap();
     assert!(Arc::ptr_eq(&retained, &old_cached));
     assert_eq!(old_cached.page.results[0].notes, "original");

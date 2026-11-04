@@ -231,7 +231,7 @@ fn a_rejected_oversize_page_keeps_full_rank_maintenance_and_returns_current_meta
             .first_page_cache
             .lock()
             .unwrap()
-            .get(observer, &key)
+            .get(observer, key.bytes())
             .is_none()
     );
 }

@@ -10,6 +10,10 @@ use std::{
     sync::Arc,
 };
 
+mod lookup_request;
+
+pub(crate) use lookup_request::LookupRequest;
+
 pub(crate) const MAX_PAGE_ENTRIES: usize = 8;
 pub(crate) const MAX_PAGE_GENERATIONS: usize = 2;
 pub(crate) const MAX_PAGE_ENCODED_BYTES: usize = 8 * 1024 * 1024;
@@ -23,23 +27,16 @@ pub(crate) struct PageRequest {
 }
 
 impl PageRequest {
-    /// Prepare outside the cache mutex. Ineligible/oversized input uses normal SQL.
-    /// Pagination must have been normalized by the provider before this call.
+    /// Test convenience for owned requests; production admits borrowed lookups
+    /// only after a stable, size-checked miss. Uses the same validator and bytes.
+    #[cfg(test)]
     pub(crate) fn new(request: &SearchRequest) -> Option<Arc<Self>> {
-        if request.cursor.is_some()
-            || request.page.is_some()
-            || request.offset != 0
-            || !(1..=200).contains(&request.limit)
-            || request.validate().is_err()
-        {
-            return None;
-        }
-        let mut encoded = KeyWriter::default();
-        serde_json::to_writer(&mut encoded, request).ok()?;
-        Some(Arc::new(Self {
-            request: request.clone(),
-            key: encoded.bytes,
-        }))
+        LookupRequest::new(request)?.into_owned()
+    }
+
+    /// Exact serialized identity; lookups borrow the same bytes without cloning.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.key
     }
 
     /// An immutable request; hot-list callers may clone it after releasing locks.
@@ -50,31 +47,6 @@ impl PageRequest {
     /// Encoded bytes reserved for a payload after charging this request's key.
     pub(crate) fn payload_budget(&self) -> usize {
         MAX_ENTRY_ENCODED_BYTES - self.key.len()
-    }
-}
-
-#[derive(Default)]
-struct KeyWriter {
-    bytes: Vec<u8>,
-}
-
-impl Write for KeyWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let next = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .filter(|next| *next <= MAX_ENTRY_ENCODED_BYTES)
-            .ok_or_else(|| io::Error::other("First-page key exceeds encoded budget"))?;
-        self.bytes
-            .try_reserve(next - self.bytes.len())
-            .map_err(|_| io::Error::other("First-page key allocation unavailable"))?;
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -129,7 +101,7 @@ impl<P: Serialize> PreparedCacheEntry<P> {
             limit: request.payload_budget(),
         };
         serde_json::to_writer(&mut counter, page.as_ref()).ok()?;
-        let encoded_bytes = request.key.len().checked_add(counter.bytes)?;
+        let encoded_bytes = request.bytes().len().checked_add(counter.bytes)?;
         Some(Self {
             request,
             page,
@@ -201,9 +173,9 @@ impl<P> PageCache<P> {
 
     /// Return only an Arc. Clone owned DTOs and encode current cursors off-lock.
     /// An old pinned lookup does not change the current generation or LRU order.
-    pub(crate) fn get(&mut self, revision: u64, request: &PageRequest) -> Option<Arc<P>> {
+    pub(crate) fn get(&mut self, revision: u64, key: &[u8]) -> Option<Arc<P>> {
         let index = self.entries.iter().position(|entry| {
-            entry.revision == revision && entry.prepared.request.key == request.key
+            entry.revision == revision && entry.prepared.request.bytes() == key
         })?;
         if self.generations.back() != Some(&revision) {
             return Some(self.entries[index].prepared.page.clone());
@@ -339,7 +311,7 @@ mod tests {
         insert(&mut cache, 3, text_entry(original.clone(), "main"));
         assert_eq!(
             cache
-                .get(3, &PageRequest::new(&base).unwrap())
+                .get(3, PageRequest::new(&base).unwrap().bytes())
                 .unwrap()
                 .as_str(),
             "main"
@@ -383,7 +355,7 @@ mod tests {
         ] {
             assert!(
                 cache
-                    .get(3, &PageRequest::new(&different).unwrap())
+                    .get(3, PageRequest::new(&different).unwrap().bytes())
                     .is_none()
             );
         }
@@ -395,23 +367,23 @@ mod tests {
         let key = request("vehicle");
         let mut cache = PageCache::default();
         insert(&mut cache, 4, text_entry(key.clone(), "old"));
-        let pinned = cache.get(4, &key).unwrap();
+        let pinned = cache.get(4, key.bytes()).unwrap();
         insert(&mut cache, 19, text_entry(key.clone(), "new"));
-        assert_eq!(cache.get(4, &key).unwrap().as_str(), "old");
+        assert_eq!(cache.get(4, key.bytes()).unwrap().as_str(), "old");
         insert(&mut cache, 4, text_entry(key.clone(), "late old"));
         insert(&mut cache, 7, text_entry(request("late"), "late unknown"));
         assert_eq!(cache.generations, VecDeque::from([4, 19]));
-        assert_eq!(cache.get(19, &key).unwrap().as_str(), "new");
+        assert_eq!(cache.get(19, key.bytes()).unwrap().as_str(), "new");
         drop(cache.register_revision(42));
-        assert!(cache.get(4, &key).is_none());
+        assert!(cache.get(4, key.bytes()).is_none());
         assert_eq!(pinned.as_str(), "old");
         insert(&mut cache, 19, text_entry(key.clone(), "late retained"));
-        assert_eq!(cache.get(19, &key).unwrap().as_str(), "new");
+        assert_eq!(cache.get(19, key.bytes()).unwrap().as_str(), "new");
         insert(&mut cache, 42, text_entry(key.clone(), "current"));
-        assert_eq!(cache.get(42, &key).unwrap().as_str(), "current");
+        assert_eq!(cache.get(42, key.bytes()).unwrap().as_str(), "current");
         drop(cache.clear());
         insert(&mut cache, 2, text_entry(key.clone(), "new observer"));
-        assert_eq!(cache.get(2, &key).unwrap().as_str(), "new observer");
+        assert_eq!(cache.get(2, key.bytes()).unwrap().as_str(), "new observer");
     }
 
     #[test]
@@ -424,8 +396,8 @@ mod tests {
         insert(&mut cache, 10, text_entry(a.clone(), "old a"));
         insert(&mut cache, 20, text_entry(a.clone(), "new a"));
         insert(&mut cache, 20, text_entry(b.clone(), "new b"));
-        cache.get(20, &a).unwrap();
-        cache.get(10, &c).unwrap();
+        cache.get(20, a.bytes()).unwrap();
+        cache.get(10, c.bytes()).unwrap();
         let hot = cache.maintenance_requests();
         assert_eq!(
             hot.iter()
@@ -450,10 +422,10 @@ mod tests {
         assert_eq!(cache.encoded_bytes, MAX_PAGE_ENCODED_BYTES);
         let first = request("word0");
         let last = request("word7");
-        cache.get(11, &first).unwrap();
+        cache.get(11, first.bytes()).unwrap();
         insert(&mut cache, 11, text_entry(request("replacement"), "small"));
-        assert!(cache.get(11, &request("word1")).is_none());
-        assert!(cache.get(11, &first).is_some());
+        assert!(cache.get(11, request("word1").bytes()).is_none());
+        assert!(cache.get(11, first.bytes()).is_some());
         let replacement = text_entry(last.clone(), "replaced last");
         let exact_charge = last.key.len() + serde_json::to_vec("replaced last").unwrap().len();
         assert_eq!(replacement.encoded_bytes, exact_charge);
@@ -487,7 +459,7 @@ mod tests {
         huge_key.filters.album = Some("x".repeat(MAX_ENTRY_ENCODED_BYTES));
         assert!(huge_key.validate().is_ok());
         assert!(PageRequest::new(&huge_key).is_none());
-        assert_eq!(cache.get(1, &key).unwrap().as_str(), "kept");
+        assert_eq!(cache.get(1, key.bytes()).unwrap().as_str(), "kept");
         let mut counter = CountWriter {
             bytes: usize::MAX,
             limit: usize::MAX,
@@ -519,9 +491,9 @@ mod tests {
         let mut left = PageCache::default();
         let mut right: PageCache<Counted> = PageCache::default();
         insert(&mut left, 31, prepared);
-        let found = left.get(31, &key).unwrap();
+        let found = left.get(31, key.bytes()).unwrap();
         assert!(Arc::ptr_eq(&found, &payload));
-        assert!(right.get(31, &key).is_none());
+        assert!(right.get(31, key.bytes()).is_none());
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         drop(left.clear());
         assert!(Arc::ptr_eq(&found, &payload));

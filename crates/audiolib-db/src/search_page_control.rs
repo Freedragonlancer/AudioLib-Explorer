@@ -4,7 +4,7 @@
 //! no other connection committed between its admitted transaction and publication.
 use crate::{
     SqliteProvider, db_error,
-    search_page_cache::{PageRequest, PreparedCacheEntry, encoded_fits},
+    search_page_cache::{LookupRequest, PageRequest, PreparedCacheEntry, encoded_fits},
     search_snapshot,
 };
 use audiolib_core::{Error, Result, SearchPage, SearchRequest, SearchScope, SortOrder};
@@ -89,7 +89,7 @@ impl SqliteProvider {
         let normalized = crate::normalize_search_page(request)?;
         let request = normalized.as_ref();
         let start = Instant::now();
-        let Some(key) = PageRequest::new(request) else {
+        let Some(key) = LookupRequest::new(request) else {
             return self.search_impl_uncached(request, cancel);
         };
         check_cancel(cancel.as_deref())?;
@@ -109,7 +109,7 @@ impl SqliteProvider {
                     .first_page_cache
                     .lock()
                     .map_err(|_| Error::Database("First-page cache lock was poisoned".into()))?
-                    .get(revision, &key);
+                    .get(revision, key.bytes());
                 if let Some(cached) = cached {
                     // Response cloning and cursor encoding never hold the cache lock.
                     let mut page = cached.page.clone();
@@ -139,7 +139,9 @@ impl SqliteProvider {
                 page: &page,
                 has_more,
             };
-            if encoded_fits(&borrowed, key.payload_budget()) {
+            if encoded_fits(&borrowed, key.payload_budget())
+                && let Some(key) = key.into_owned()
+            {
                 let mut owned = page.clone();
                 owned.next_cursor = None;
                 if let Some(entry) = PreparedCacheEntry::new(

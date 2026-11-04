@@ -40,6 +40,14 @@ wire format. Cache entry, generation and encoded-byte budgets remain unchanged;
 the extra allocation when hydrating a row must still be covered by performance
 acceptance rather than assumed free.
 
+First-page lookup serializes the exact normalized request into a 2 KiB stack
+buffer before taking the cache mutex. Larger keys spill into bounded owned
+storage under the unchanged 1 MiB encoded-entry limit. A hit borrows those bytes;
+only a stable, cacheable miss acquires an owned request and key, without another
+serialization. This removes common lookup-key allocations; result vectors,
+normalization and cursors can still allocate. Revision proofs and encoded cache
+budgets are unchanged.
+
 AudioLib Explorer `0.8.3` uses the Rust workspace and schema 8 / Plan B storage, including shared album entities and original Metadata JSON TEXT. The writable format is `ale-s8-cld1-t3-m2-p1-a1`; Metadata compression is deferred. The snapshot's outer zstd transport remains enabled. See [shared albums and Metadata storage](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md), the [shared migration contract](api/Library_Migration_Compatibility.md), [artwork contracts](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md) and [storage CR record](api/Search_Storage_B_CR.md) for compatibility, retirement and recovery. Earlier development-version measurements remain historical evidence.
 
 This document supersedes Python-specific implementation choices in Technical_Architecture.md. Its Appendix A remains the terminology reference. The Python implementation and its test scripts have been removed from the working tree; earlier committed versions preserve their history. The original SQLite database and local config/audiolib_config.yaml remain read-only migration inputs. New features use the Rust workspace.
