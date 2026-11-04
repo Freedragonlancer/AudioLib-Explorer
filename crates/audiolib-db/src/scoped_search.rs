@@ -41,7 +41,7 @@ pub(crate) fn predicate(
                )
                SELECT dir_id FROM matched WHERE
                  (SELECT COALESCE(SUM(n),0) FROM audio_dir_runs WHERE dir_id IN matched)*2
-                 <= (SELECT COALESCE(SUM(n),0) FROM audio_dir_runs)
+                 <= (SELECT COUNT(*) FROM audio_files)
              )"
         );
         if scope == SearchScope::Path {

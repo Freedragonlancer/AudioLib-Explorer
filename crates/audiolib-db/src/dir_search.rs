@@ -731,7 +731,11 @@ pub(crate) fn search(request: &DirSearch<'_>) -> Result<DirPage> {
         let matched = compile_query_columns(jieba, &t3_norm(term), PATH_RAW, PATH_DERIVED)?;
         sets.push(segment_matches(conn, &matched)?);
     }
-    let total_files: i64 = index.all.iter().map(|run| run.count).sum();
+    // Unassigned files are library members too. Count in this pinned read snapshot,
+    // independently of legacy folder statistics or the directory-index cache.
+    let total_files: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audio_files", [], |row| row.get(0))
+        .map_err(db_error)?;
     for set in &mut sets {
         if path_set_too_wide(estimate(set, &index), total_files) {
             set.clear();
@@ -1311,20 +1315,15 @@ fn read_index(conn: &Connection) -> Result<RunIdx> {
     let mut parent = HashMap::new();
     let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
     let mut folders = conn
-        .prepare("SELECT id, parent_id, COALESCE(total_file_count, 0) FROM folders")
+        .prepare("SELECT id, parent_id FROM folders")
         .map_err(db_error)?;
     let rows = folders
         .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
         })
         .map_err(db_error)?;
     for row in rows {
-        let (id, parent_id, files) = row.map_err(db_error)?;
-        let _ = files;
+        let (id, parent_id) = row.map_err(db_error)?;
         if let Some(parent_id) = parent_id {
             parent.insert(id, parent_id);
             children.entry(parent_id).or_default().push(id);
@@ -1821,7 +1820,7 @@ mod tests {
     }
 
     #[test]
-    fn null_members_split_sparse_runs_and_legacy_statistics_invalidate_the_cache() {
+    fn sparse_runs_and_wide_sets_use_actual_members_including_unassigned_files() {
         let (_dir, provider) = library();
         let legacy = legacy_connection(provider.database_path());
         legacy.execute("INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(40,'/lib/Doors/latch.wav','latch.wav',5,0)", []).unwrap();
@@ -1836,9 +1835,10 @@ mod tests {
         legacy
             .execute("UPDATE folders SET total_file_count=6 WHERE id=5", [])
             .unwrap();
-        assert!(
-            ids(&provider, "Doors", SearchScope::Path).is_empty(),
-            "the existing wide-set policy still applies"
+        assert_eq!(
+            ids(&provider, "Doors", SearchScope::Path),
+            vec![30, 40],
+            "stale legacy folder statistics must not replace actual run membership"
         );
         legacy.execute_batch("BEGIN; UPDATE audio_files SET missing=1 WHERE id=40; UPDATE folders SET total_file_count=1 WHERE id=5; COMMIT;").unwrap();
         assert!(
@@ -1846,6 +1846,22 @@ mod tests {
             "statistics need cache refresh, not an index rebuild"
         );
         assert_eq!(ids(&provider, "Doors", SearchScope::Path), vec![30]);
+        for id in 41..=44 {
+            legacy.execute("INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(?1,?2,'latch.wav',5,0)",
+                params![id,format!("/lib/Doors/latch-{id}.wav")]).unwrap();
+        }
+        maintain(&provider.writer().unwrap(), &[], &[]).unwrap();
+        assert_eq!(
+            ids(&provider, "Doors", SearchScope::Path),
+            vec![30, 41, 42, 43, 44],
+            "six path members of twelve total (including an unassigned row) are exactly half, not too wide"
+        );
+        legacy.execute("INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES(45,'/lib/Doors/latch-45.wav','latch.wav',5,0)",[]).unwrap();
+        maintain(&provider.writer().unwrap(), &[], &[]).unwrap();
+        assert!(
+            ids(&provider, "Doors", SearchScope::Path).is_empty(),
+            "seven path members of thirteen total must still obey the >50% wide-set policy"
+        );
     }
 
     #[test]
