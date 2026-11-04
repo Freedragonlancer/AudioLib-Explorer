@@ -588,6 +588,7 @@ pub(crate) fn maintain(
     })
 }
 
+#[cfg(feature = "scanner")]
 pub(crate) fn bump_generation(conn: &Connection) -> Result<()> {
     // Reparenting can enqueue a segment before this existing cache-invalidation
     // hook is called. Consume it incrementally rather than leaving a new scan dirty.

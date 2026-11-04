@@ -112,6 +112,15 @@ fn clear_error(stage: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn validate_commit_resume(operation: Option<&str>, restored: u64) -> Result<()> {
+    if operation == Some("rollback") || restored > 0 {
+        return Err(invalid(
+            "Cannot resume commit after rollback has started; finish this batch's rollback and create a fresh preview",
+        ));
+    }
+    Ok(())
+}
+
 impl SqliteProvider {
     // Best effort secondary recording must never hide the original operation error.
     fn vendor_record_failure(&self, id: &str, operation: &str, key: Option<&str>, error: &Error) {
@@ -858,6 +867,26 @@ impl SqliteProvider {
             ));
         }
         let _lock = self.vendor_job_lock(id)?;
+        // This is admission refusal, not a failed write. Preserve the original
+        // rollback error/phase/checkpoint so repeated commit retries cannot erase
+        // the reason that only rollback recovery is now safe. Completed receipts
+        // retain their immutable replay contract inside the normal commit path.
+        {
+            let conn = self.reader()?;
+            if storage::schema_exists(&conn)? {
+                let phase: Option<(Option<String>, u64)> = conn
+                    .query_row(
+                        "SELECT operation,restored FROM audiolib_vendor_jobs WHERE import_id=?1 AND commit_result IS NULL",
+                        [id],
+                        |row| Ok((row.get(0)?, crate::unsigned(row, 1)?)),
+                    )
+                    .optional()
+                    .map_err(db_error)?;
+                if let Some((operation, restored)) = phase {
+                    validate_commit_resume(operation.as_deref(), restored)?;
+                }
+            }
+        }
         let result = self.vendor_import_commit_locked(id, key, cancel, progress);
         if let Err(error) = &result {
             self.vendor_record_failure(id, "commit", Some(key), error);
@@ -880,8 +909,9 @@ impl SqliteProvider {
         {
             let conn = self.reader()?;
             if storage::schema_exists(&conn)? {
-                let saved:Option<(String,String,Option<String>)>=conn.query_row("SELECT idempotency_key,options_hash,commit_result FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_error)?;
-                if let Some((saved_key, hash, receipt)) = saved {
+                type Receipt = (String, String, Option<String>, Option<String>, u64);
+                let saved:Option<Receipt>=conn.query_row("SELECT idempotency_key,options_hash,commit_result,operation,restored FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,crate::unsigned(r,4)?))).optional().map_err(db_error)?;
+                if let Some((saved_key, hash, receipt, operation, restored)) = saved {
                     if saved_key != key || hash != options_hash {
                         return Err(invalid(
                             "Idempotency-Key or mapping differs from the persisted import",
@@ -892,6 +922,7 @@ impl SqliteProvider {
                         clear_error(&stage)?;
                         return Ok(result);
                     }
+                    validate_commit_resume(operation.as_deref(), restored)?;
                 }
             }
         }
@@ -925,10 +956,27 @@ impl SqliteProvider {
             if owner.as_deref().is_some_and(|owner| owner != id) {
                 return Err(invalid("Idempotency-Key belongs to another preview"));
             }
-            type Existing = (String, String, String, u64, u64, Option<String>);
-            let existing:Option<Existing>=tx.query_row("SELECT idempotency_key,options_hash,state,checkpoint,written,commit_result FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,crate::unsigned(r,3)?,crate::unsigned(r,4)?,r.get(5)?))).optional().map_err(db_error)?;
-            if let Some((saved_key, hash, state, saved_checkpoint, saved_written, receipt)) =
-                existing
+            type Existing = (
+                String,
+                String,
+                String,
+                u64,
+                u64,
+                Option<String>,
+                Option<String>,
+                u64,
+            );
+            let existing:Option<Existing>=tx.query_row("SELECT idempotency_key,options_hash,state,checkpoint,written,commit_result,operation,restored FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,crate::unsigned(r,3)?,crate::unsigned(r,4)?,r.get(5)?,r.get(6)?,crate::unsigned(r,7)?))).optional().map_err(db_error)?;
+            if let Some((
+                saved_key,
+                hash,
+                state,
+                saved_checkpoint,
+                saved_written,
+                receipt,
+                operation,
+                restored,
+            )) = existing
             {
                 if saved_key != key || hash != options_hash {
                     return Err(invalid(
@@ -938,6 +986,7 @@ impl SqliteProvider {
                 if let Some(receipt) = receipt {
                     return decode(&receipt);
                 }
+                validate_commit_resume(operation.as_deref(), restored)?;
                 if matches!(state.as_str(), "rolling_back" | "rolled_back") {
                     return Err(invalid("This import is being rolled back"));
                 }

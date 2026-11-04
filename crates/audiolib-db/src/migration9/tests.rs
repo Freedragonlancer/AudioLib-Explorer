@@ -4,12 +4,116 @@ use super::*;
 use std::sync::mpsc;
 
 #[test]
+fn an_existing_sqlite_writer_is_locked_and_preserves_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(crate::SqliteProvider::open(&path).unwrap());
+    let blocker = open(&path, true).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // Retain the competing transaction until the migration's complete admission
+    // deadline expires. This reproduces contention without scheduler luck.
+    let started = Instant::now();
+    let report = execute(
+        &path,
+        Action::Start,
+        &Options::default(),
+        &AtomicBool::new(false),
+    );
+    let elapsed = started.elapsed();
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(report.error_code, Some(Failure::Locked), "{report:?}");
+    assert_eq!(report.state, State::Paused);
+    assert!(elapsed < Duration::from_secs(11), "{elapsed:?}");
+    assert_eq!(version(&blocker).unwrap(), 8);
+    assert!(!exists(&blocker, "v9_checkpoint").unwrap());
+    assert!(crate::schema::current_format_ready(&blocker).unwrap());
+}
+
+#[test]
+fn admission_survives_a_writer_held_longer_than_the_old_busy_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(crate::SqliteProvider::open(&path).unwrap());
+    let (holding, held) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let path = &path;
+        scope.spawn(move || {
+            let blocker = open(path, true).unwrap();
+            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+            holding.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(2200));
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+        let report = execute(
+            path,
+            Action::Start,
+            &Options::default(),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(report.state, State::Done, "{report:?}");
+        assert_eq!(report.error_code, None);
+        assert_eq!(report.switch.unwrap().user_version, 9);
+    });
+}
+
+#[test]
+fn admission_cancels_promptly_without_losing_a_checkpoint_and_can_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(crate::SqliteProvider::open(&path).unwrap());
+    // Let the real migration create its verified backup/checkpoint, then pause
+    // before publication. A blocked resume must leave that durable state intact.
+    let cancel = AtomicBool::new(true);
+    let mut conn = open(&path, true).unwrap();
+    let mut saved = load(&path, &conn).unwrap();
+    saved.report.state = State::Running;
+    storage::backup(&path, &conn, &mut saved, &AtomicBool::new(false)).unwrap();
+    storage::prepare(&mut conn, &AtomicBool::new(false)).unwrap();
+    save(&path, &saved).unwrap();
+    let before: (i64, i64) = conn
+        .query_row("SELECT done,total FROM v9_checkpoint", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    cancel.store(false, Ordering::Release);
+    let started = Instant::now();
+    let report = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.store(true, Ordering::Release);
+        });
+        execute(&path, Action::Resume, &Options::default(), &cancel)
+    });
+    let elapsed = started.elapsed();
+    conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(report.state, State::Paused, "{report:?}");
+    assert_eq!(report.error_code, None);
+    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    let after: (i64, i64) = conn
+        .query_row("SELECT done,total FROM v9_checkpoint", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(before, after);
+    let resumed = execute(
+        &path,
+        Action::Resume,
+        &Options::default(),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(resumed.state, State::Done, "{resumed:?}");
+    assert_eq!(resumed.error_code, None);
+}
+
+#[test]
 fn control_requests_remain_excluded_by_library_maintenance() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.db");
     drop(crate::SqliteProvider::open(&path).unwrap());
     let mut conn = open(&path, true).unwrap();
-    storage::prepare(&mut conn).unwrap();
+    storage::prepare(&mut conn, &AtomicBool::new(false)).unwrap();
     let _administration = AdministrationLease::exclusive(&path).unwrap();
     assert!(matches!(
         storage::request_control(&path, Action::Pause),
@@ -30,7 +134,7 @@ fn publication_drains_admitted_control_before_taking_exclusive_administration() 
         let path = dir.path().join("library.db");
         drop(crate::SqliteProvider::open(&path).unwrap());
         let mut conn = open(&path, true).unwrap();
-        storage::prepare(&mut conn).unwrap();
+        storage::prepare(&mut conn, &AtomicBool::new(false)).unwrap();
         let mut saved = load(&path, &conn).unwrap();
         saved.report.state = State::Running;
         save(&path, &saved).unwrap();

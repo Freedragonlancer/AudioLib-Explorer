@@ -10,7 +10,7 @@ mod report;
 mod storage;
 #[cfg(test)]
 mod tests;
-use crate::{db_error, dir_search, management::AdministrationLease};
+use crate::{dir_search, management::AdministrationLease};
 use audiolib_core::{DataProvider, Error, Result, SearchRequest, SearchScope};
 pub use report::{Batch, Failure, Progress, Report, State, Switch};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -71,6 +71,86 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 fn invalid(message: &str) -> Error {
     Error::Validation(message.into())
+}
+// Keep diagnostics structural: SQL text, bound Metadata and filesystem paths are
+// deliberately excluded. Test-hook runs can retain the native SQLite cause.
+fn db_error(error: rusqlite::Error) -> Error {
+    if let rusqlite::Error::SqliteFailure(code, _) = &error {
+        tracing::warn!(
+            sqlite_extended_code = code.extended_code,
+            "Schema-9 SQLite operation failed"
+        );
+        #[cfg(feature = "test-hooks")]
+        eprintln!("SMV2_SQLITE_FAILURE extended_code={}", code.extended_code);
+        if matches!(
+            code.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        ) {
+            return Error::Busy("Schema-9 SQLite writer is busy; retry the migration".into());
+        }
+    }
+    crate::db_error(error)
+}
+
+// SQLite's default busy handler backs off for increasingly long intervals. A
+// stream of short annotation transactions can repeatedly win those intervals.
+// Retry only writer admission, without an open transaction or a held write lock.
+// Admission has a finite ten-second deadline and cancellation is inspected
+// between attempts. This wait owns no writer lock; batch timings measure the
+// admitted transaction separately. Restore the ordinary two-second busy timeout
+// before executing any SQL inside an admitted transaction.
+fn write_admission<T>(
+    conn: &Connection,
+    cancel: &AtomicBool,
+    mut attempt: impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T> {
+    if !conn.is_autocommit() {
+        return Err(invalid(
+            "Migration writer admission requires an idle connection",
+        ));
+    }
+    conn.busy_timeout(Duration::ZERO).map_err(db_error)?;
+    let started = Instant::now();
+    let deadline = Duration::from_secs(10);
+    let mut retries = 0u64;
+    let result = loop {
+        if cancel.load(Ordering::Acquire) {
+            break Err(Error::Cancelled);
+        }
+        match attempt() {
+            Ok(value) => break Ok(value),
+            Err(error) => {
+                let retryable = matches!(&error, rusqlite::Error::SqliteFailure(code, _)
+                    if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked));
+                let remaining = deadline.saturating_sub(started.elapsed());
+                if !retryable || !conn.is_autocommit() || remaining.is_zero() {
+                    break Err(db_error(error));
+                }
+                // Vary the short delay to avoid remaining in phase with a
+                // competing writer's repeated commit/reacquire cycle.
+                std::thread::sleep(Duration::from_millis(1 + retries % 8).min(remaining));
+                retries += 1;
+            }
+        }
+    };
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(db_error)?;
+    if retries != 0 {
+        tracing::debug!(
+            retries,
+            wait_ms = started.elapsed().as_millis(),
+            "Schema-9 writer admission completed"
+        );
+    }
+    result
+}
+
+fn begin_write<'a>(conn: &'a Connection, cancel: &AtomicBool) -> Result<rusqlite::Transaction<'a>> {
+    // new_unchecked accepts a shared Connection reference; write_admission
+    // requires autocommit and never attempts a nested transaction.
+    write_admission(conn, cancel, || {
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+    })
 }
 fn open(path: &Path, write: bool) -> Result<Connection> {
     let conn = Connection::open_with_flags(
@@ -264,7 +344,7 @@ fn owner_active(path: &Path) -> Result<bool> {
 }
 
 fn failed(mut report: Report, error: Failure) -> Report {
-    report.state = if error == Failure::DiskFull {
+    report.state = if matches!(error, Failure::DiskFull | Failure::Locked) {
         State::Paused
     } else {
         State::Failed
@@ -366,7 +446,12 @@ fn execute_inner(
     }
     let result = run(&path, &mut saved, options, cancel);
     if let Err(e) = result {
-        saved.report = failed(saved.report, classify(&e));
+        if matches!(e, Error::Cancelled) {
+            saved.report.state = State::Paused;
+            saved.report.error_code = None;
+        } else {
+            saved.report = failed(saved.report, classify(&e));
+        }
         let _ = save(&path, &saved);
     }
     Ok(saved.report)
@@ -398,8 +483,7 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
         hooks::trace(&mut conn, trace)?;
     }
     let _ = options;
-    conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
-        .map_err(db_error)?;
+    drop(begin_write(&conn, cancel)?);
     let resume = exists(&conn, "v9_checkpoint")?;
     if !resume {
         // A new attempt gets a fresh recovery point, including writes made after
@@ -441,12 +525,12 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
             save(path, saved)?;
             return Ok(());
         }
-        storage::prepare(&mut conn)?;
+        storage::prepare(&mut conn, cancel)?;
     } else {
         storage::validate_backup(path, saved)?;
     }
     crate::register_library_functions(&conn)?;
-    storage::clear_control(&conn)?;
+    storage::clear_control(&conn, cancel)?;
     saved.report.progress = conn
         .query_row(
             "SELECT done,total FROM v9_checkpoint WHERE singleton=1",
@@ -489,10 +573,9 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
         if stop(path, &conn, saved, cancel)? {
             return Ok(());
         }
+        let admission_started = Instant::now();
+        let tx = begin_write(&conn, cancel)?;
         let start = Instant::now();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(db_error)?;
         let last: Option<i64> = tx
             .query_row(
                 "SELECT last_id FROM v9_checkpoint WHERE singleton=1",
@@ -535,7 +618,8 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
             rows: ids.len() as u64,
             ms,
         });
-        *saved.report.phases.get_mut("path_build").unwrap() += ms;
+        *saved.report.phases.get_mut("path_build").unwrap() +=
+            admission_started.elapsed().as_secs_f64() * 1000.0;
         saved.report.progress = conn
             .query_row(
                 "SELECT done,total FROM v9_checkpoint WHERE singleton=1",
@@ -581,11 +665,14 @@ fn run(path: &Path, saved: &mut Saved, options: &Options, cancel: &AtomicBool) -
     let optimize = Instant::now();
     #[cfg(feature = "test-hooks")]
     hooks::abort("abort:optimize");
-    conn.execute(
-        "INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize')",
-        [],
-    )
-    .map_err(db_error)?;
+    let optimize_tx = begin_write(&conn, cancel)?;
+    optimize_tx
+        .execute(
+            "INSERT INTO audio_dir_search(audio_dir_search) VALUES('optimize')",
+            [],
+        )
+        .map_err(db_error)?;
+    optimize_tx.commit().map_err(db_error)?;
     saved
         .report
         .phases

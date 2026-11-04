@@ -535,6 +535,170 @@ fn explicit_overwrite_rollback_preserves_a_later_batch_and_uses_original_before_
 }
 
 #[test]
+fn partial_rollback_failure_cannot_resume_the_old_commit_checkpoint() {
+    let (temp, provider, database) = fixture(false);
+    let conn = connection(&database);
+    let mut csv = String::from("Filename,Description\n");
+    {
+        let tx = conn.unchecked_transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO audio_files(id,file_path,path_key,filename,folder_id,metadata_json) VALUES(?1,?2,?2,?3,1,'{}')").unwrap();
+            for id in 3..7003 {
+                let filename = format!("guard_{id}.wav");
+                let path = temp.path().join("audio").join(&filename);
+                insert
+                    .execute(params![id, path.to_string_lossy(), filename])
+                    .unwrap();
+                csv.push_str(&format!("guard_{id}.wav,partialrollbackmarker\n"));
+            }
+        }
+        tx.commit().unwrap();
+    }
+    let file = text(temp.path(), "partial.csv", &csv);
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    assert_eq!(preview.rows, 7000);
+    assert_eq!(preview.matched, 7000);
+    let cancel = AtomicBool::new(false);
+    let paused = provider
+        .vendor_import_commit_cancellable_impl(
+            &preview.import_id,
+            "partial-rollback-key",
+            &cancel,
+            &mut |status| {
+                if status.completed > 5000 {
+                    cancel.store(true, Ordering::Release);
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(paused.state.as_deref(), Some("paused"));
+    assert!(paused.written > 5000 && paused.written < preview.rows);
+
+    // The first real 5000-ID rollback transaction commits. The next transaction
+    // encounters a deterministic owned-fixture write fault, retaining its events.
+    conn.execute_batch("CREATE TRIGGER controlled_late_rollback BEFORE DELETE ON audiolib_vendor_events WHEN OLD.audio_file_id>5002 BEGIN SELECT RAISE(ABORT,'controlled late rollback fault'); END;").unwrap();
+    let error = provider
+        .vendor_import_rollback_impl(&preview.import_id)
+        .unwrap_err();
+    assert!(error.to_string().contains("controlled late rollback fault"));
+    conn.execute_batch("DROP TRIGGER controlled_late_rollback")
+        .unwrap();
+    let status = provider
+        .vendor_import_status_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(status.preview.state.as_deref(), Some("failed"));
+    assert_eq!(status.result.as_ref().unwrap().restored, 5000);
+    assert_eq!(
+        count(&provider, "partialrollbackmarker"),
+        paused.written - 5000
+    );
+    let saved: String = conn.query_row("SELECT json_array(state,operation,checkpoint,written,restored,last_error,commit_result) FROM audiolib_vendor_jobs WHERE import_id=?1",[&preview.import_id],|row|row.get(0)).unwrap();
+    let postings = fts_hash(&database);
+    for _ in 0..2 {
+        let error = provider
+            .vendor_import_commit_impl(&preview.import_id, "partial-rollback-key")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot resume commit after rollback has started")
+        );
+        let actual: String = conn.query_row("SELECT json_array(state,operation,checkpoint,written,restored,last_error,commit_result) FROM audiolib_vendor_jobs WHERE import_id=?1",[&preview.import_id],|row|row.get(0)).unwrap();
+        assert_eq!(
+            actual, saved,
+            "Admission refusal must preserve rollback diagnosis and checkpoint"
+        );
+        assert_eq!(fts_hash(&database), postings);
+        assert_eq!(
+            provider
+                .vendor_import_status_impl(&preview.import_id)
+                .unwrap()
+                .error,
+            status.error
+        );
+    }
+    let rolled_back = provider
+        .vendor_import_rollback_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(rolled_back.state.as_deref(), Some("rolled_back"));
+    assert_eq!(rolled_back.restored, paused.written);
+    assert_eq!(count(&provider, "partialrollbackmarker"), 0);
+    assert_eq!(provider.get_audio(1).unwrap().notes, "protectednote");
+}
+
+#[test]
+fn zero_restored_failed_rollback_keeps_its_phase_across_repeated_commit_refusals() {
+    let (_temp, provider, database) = fixture(false);
+    let preview = provider
+        .vendor_import_preview_impl(&input("basic.csv"))
+        .unwrap();
+    let cancel = AtomicBool::new(false);
+    let paused = provider
+        .vendor_import_commit_cancellable_impl(
+            &preview.import_id,
+            "zero-restored-key",
+            &cancel,
+            &mut |_| cancel.store(true, Ordering::Release),
+        )
+        .unwrap();
+    assert_eq!(paused.state.as_deref(), Some("paused"));
+    let conn = connection(&database);
+    conn.execute_batch("CREATE TRIGGER controlled_early_rollback BEFORE DELETE ON audiolib_vendor_events BEGIN SELECT RAISE(ABORT,'controlled early rollback fault'); END;").unwrap();
+    assert!(
+        provider
+            .vendor_import_rollback_impl(&preview.import_id)
+            .unwrap_err()
+            .to_string()
+            .contains("controlled early rollback fault")
+    );
+    conn.execute_batch("DROP TRIGGER controlled_early_rollback")
+        .unwrap();
+    let saved: String = conn.query_row("SELECT json_array(state,operation,checkpoint,written,restored,last_error,commit_result) FROM audiolib_vendor_jobs WHERE import_id=?1",[&preview.import_id],|row|row.get(0)).unwrap();
+    assert_eq!(
+        provider
+            .vendor_import_status_impl(&preview.import_id)
+            .unwrap()
+            .result
+            .unwrap()
+            .restored,
+        0
+    );
+    for _ in 0..2 {
+        assert!(
+            provider
+                .vendor_import_commit_impl(&preview.import_id, "zero-restored-key")
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot resume commit after rollback has started")
+        );
+        let actual: String = conn.query_row("SELECT json_array(state,operation,checkpoint,written,restored,last_error,commit_result) FROM audiolib_vendor_jobs WHERE import_id=?1",[&preview.import_id],|row|row.get(0)).unwrap();
+        assert_eq!(actual, saved);
+    }
+    provider
+        .vendor_import_rollback_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(count(&provider, "vendoruniqueword"), 0);
+
+    // The new guard never changes the completed immutable-receipt contract.
+    let completed = provider
+        .vendor_import_preview_impl(&input("basic.csv"))
+        .unwrap();
+    let receipt = provider
+        .vendor_import_commit_impl(&completed.import_id, "completed-receipt-key")
+        .unwrap();
+    provider
+        .vendor_import_rollback_impl(&completed.import_id)
+        .unwrap();
+    assert_eq!(
+        provider
+            .vendor_import_commit_impl(&completed.import_id, "completed-receipt-key")
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(count(&provider, "vendoruniqueword"), 0);
+}
+
+#[test]
 fn multilang_merge_is_order_independent_and_keywords_are_a_union() {
     let (temp, provider, database) = fixture(false);
     let file = text(
