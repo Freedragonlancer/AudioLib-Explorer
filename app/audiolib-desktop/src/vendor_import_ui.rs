@@ -50,11 +50,17 @@ fn candidate_total(row: &VendorRowPreview) -> u64 {
 struct ActiveVendorWrite {
     provider: Arc<dyn DataProvider>,
     import_id: String,
+    cancellable: bool,
     cancel_requested: Arc<AtomicBool>,
 }
 
 impl ActiveVendorWrite {
     fn cancel(&self) {
+        // Rollback has durable batch commits but no cancellation protocol. Close
+        // must drain it, rather than issuing a misleading import cancel request.
+        if !self.cancellable {
+            return;
+        }
         if self.cancel_requested.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -565,7 +571,17 @@ impl Controller {
         let chinese = self.chinese.load(Ordering::Acquire);
         ui.set_vi_candidates_visible(false);
         set_options(ui, &preview.options);
-        ui.set_vi_text(audiolib_core::vendor_import::preview_summary(&preview, chinese).into());
+        let summary = audiolib_core::vendor_import::preview_summary(&preview, chinese);
+        ui.set_vi_text(
+            match status
+                .and_then(|status| status.error.as_deref())
+                .filter(|error| !error.trim().is_empty())
+            {
+                Some(error) => format!("{summary}\n{error}"),
+                None => summary,
+            }
+            .into(),
+        );
         ui.set_vi_files(
             preview
                 .files
@@ -1470,12 +1486,13 @@ impl Controller {
         self.search_v2_ux.lock().unwrap().vendor.active = Some(ActiveVendorWrite {
             provider: provider.clone(),
             import_id: id.clone(),
+            cancellable: commit,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         });
         let active = Arc::new(AtomicBool::new(true));
         self.search_v2_ux.lock().unwrap().vendor.poll = Some(active.clone());
         ui.set_vi_rollback_confirm(false);
-        ui.set_vi_cancellable(true);
+        ui.set_vi_cancellable(commit);
         let selected_id = self.selected.lock().unwrap().as_ref().map(|file| file.id);
         let c = self.clone();
         let polling_provider = provider.clone();
@@ -1496,7 +1513,9 @@ impl Controller {
                         ui.set_vi_progress_text(
                             format!("{} / {}", status.completed, status.total).into(),
                         );
-                        ui.set_vi_cancellable(status.cancellable);
+                        // An old/stale status can still describe the previously
+                        // committed import while this rollback has just started.
+                        ui.set_vi_cancellable(commit && status.cancellable);
                     });
                 }
                 std::thread::sleep(Duration::from_millis(500));

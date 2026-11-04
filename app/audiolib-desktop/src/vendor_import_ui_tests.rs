@@ -138,6 +138,35 @@ fn paused_history_retains_original_commit_key_and_disables_mapping_changes() {
 }
 
 #[test]
+fn failed_history_keeps_persisted_error_visible_without_offering_a_resume() {
+    i_slint_backend_testing::init_no_event_loop();
+    let root = tempfile::tempdir().unwrap();
+    let (ui, c, _engine) = controller(root.path());
+    let mut preview = preview();
+    preview.state = Some("failed".into());
+    let status = VendorImportStatus {
+        preview: preview.clone(),
+        result: Some(VendorImportResult {
+            state: Some("failed".into()),
+            written: 1,
+            ..Default::default()
+        }),
+        idempotency_key: Some("failed-original-key".into()),
+        error: Some("owned preview is incomplete".into()),
+        ..Default::default()
+    };
+    c.publish_vendor_preview(&ui, preview, Some(&status));
+    assert!(ui.get_vi_text().contains("owned preview is incomplete"));
+    assert!(!ui.get_vi_resumable());
+    assert!(!ui.get_vi_can_commit());
+    assert!(!ui.get_vi_editable());
+    assert!(ui.get_vi_can_rollback());
+    ui.invoke_vi_commit();
+    assert!(!c.search_v2_busy.load(Ordering::Acquire));
+    c.shutdown();
+}
+
+#[test]
 fn parser_options_round_trip_and_csv_export_neutralizes_formulas() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
@@ -184,6 +213,15 @@ impl ControlledProvider {
         );
         assert_eq!(&*cancelled, &["current-library-batch"]);
     }
+    fn wait_write_release(&self) {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            entered.send(()).unwrap();
+        }
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.wake.wait(released).unwrap();
+        }
+    }
 }
 
 macro_rules! delegate {
@@ -225,17 +263,20 @@ impl DataProvider for ControlledProvider {
         })
     }
     fn vendor_import_commit(&self, id: &str, _: &str) -> core::Result<VendorImportResult> {
-        if let Some(entered) = self.entered.lock().unwrap().take() {
-            entered.send(()).unwrap();
-        }
-        let mut released = self.released.lock().unwrap();
-        while !*released {
-            released = self.wake.wait(released).unwrap();
-        }
+        self.wait_write_release();
         Ok(VendorImportResult {
             import_id: id.into(),
             state: Some("paused".into()),
             written: 1,
+            ..Default::default()
+        })
+    }
+    fn vendor_import_rollback(&self, id: &str) -> core::Result<VendorImportResult> {
+        self.wait_write_release();
+        Ok(VendorImportResult {
+            import_id: id.into(),
+            state: Some("rolled_back".into()),
+            restored: 1,
             ..Default::default()
         })
     }
@@ -286,6 +327,14 @@ fn controlled(
     c: &Arc<Controller>,
     ui: &AppWindow,
 ) -> (Arc<ControlledProvider>, mpsc::Receiver<()>) {
+    controlled_operation(c, ui, true)
+}
+
+fn controlled_operation(
+    c: &Arc<Controller>,
+    ui: &AppWindow,
+    commit: bool,
+) -> (Arc<ControlledProvider>, mpsc::Receiver<()>) {
     let (entered, seen) = mpsc::channel();
     let provider = Arc::new(ControlledProvider {
         inner: c.provider(),
@@ -299,9 +348,13 @@ fn controlled(
     });
     c.search_v2_ux.lock().unwrap().vendor.provider_override = Some(provider.clone());
     c.publish_vendor_preview(ui, preview(), None);
-    c.vendor_write(true);
+    if !commit {
+        ui.set_vi_can_rollback(true);
+        ui.set_vi_rollback_confirm(true);
+    }
+    c.vendor_write(commit);
     seen.recv_timeout(Duration::from_secs(5))
-        .expect("commit starts");
+        .expect("controlled vendor write starts");
     (provider, seen)
 }
 
@@ -454,6 +507,7 @@ fn close_cancels_original_import_and_waits_for_safe_worker_completion() {
     let root = tempfile::tempdir().unwrap();
     let (ui, c, _engine) = controller(root.path());
     let (provider, _) = controlled(&c, &ui);
+    assert!(ui.get_vi_cancellable());
     c.request_close(&ui);
     provider.wait_cancel();
     assert!(c.close_after_operation.load(Ordering::Acquire));
@@ -466,6 +520,39 @@ fn close_cancels_original_import_and_waits_for_safe_worker_completion() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(!c.search_v2_busy.load(Ordering::Acquire));
+    assert!(c.closing.load(Ordering::Acquire));
+    c.shutdown();
+}
+
+#[test]
+fn rollback_cannot_be_cancelled_by_poll_or_close_and_drains_before_exit() {
+    i_slint_backend_testing::init_no_event_loop();
+    let root = tempfile::tempdir().unwrap();
+    let (ui, c, _engine) = controller(root.path());
+    let (provider, _) = controlled_operation(&c, &ui, false);
+    assert!(!ui.get_vi_cancellable());
+    // The controlled provider deliberately returns cancellable=true, as an old
+    // import status could before the new rollback phase becomes visible.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ui.get_vi_progress_text() != "0 / 1" && Instant::now() < deadline {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        ui.get_vi_progress_text(),
+        "0 / 1",
+        "status polling actually reaches the UI"
+    );
+    assert!(!ui.get_vi_cancellable());
+    ui.invoke_vi_cancel();
+    c.request_close(&ui);
+    assert!(provider.cancelled.lock().unwrap().is_empty());
+    assert!(c.search_v2_busy.load(Ordering::Acquire));
+    assert!(!c.closing.load(Ordering::Acquire));
+    assert!(c.close_after_operation.load(Ordering::Acquire));
+    provider.release();
+    wait_vendor_job(&c);
+    assert!(provider.cancelled.lock().unwrap().is_empty());
     assert!(c.closing.load(Ordering::Acquire));
     c.shutdown();
 }
