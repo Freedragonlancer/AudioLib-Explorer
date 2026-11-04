@@ -1140,9 +1140,9 @@ impl SqliteProvider {
                     Err(Error::Cancelled) => None,
                     Err(error) => return Err(error),
                 };
-                tx.commit().map_err(db_error)?;
+                let search_cache = self.commit_search_cache_batch(tx, search_cache)?;
                 if let Some(candidate) = search_cache
-                    && self.publish_search_cache_batch(candidate).is_err()
+                    && self.publish_search_cache_batch(&conn, candidate).is_err()
                 {
                     // A late cache publication failure cannot turn a durable
                     // business commit into a failed import. Fall back to rebuild.
@@ -1238,9 +1238,9 @@ impl SqliteProvider {
             .map_err(db_error)?;
             let search_cache =
                 self.prepare_search_cache_batch(&tx, search_cache, &AtomicBool::new(false))?;
-            tx.commit().map_err(db_error)?;
+            let search_cache = self.commit_search_cache_batch(tx, search_cache)?;
             if let Some(candidate) = search_cache
-                && self.publish_search_cache_batch(candidate).is_err()
+                && self.publish_search_cache_batch(&conn, candidate).is_err()
             {
                 let _ = self.reset_search_caches();
                 tracing::debug!("Vendor rollback kept; search cache publication was discarded");

@@ -182,6 +182,23 @@ pub(crate) fn page(
             "CURSOR_STALE: library changed while opening search".into(),
         ));
     }
+    page_in_snapshot(provider, &tx, request, revision, start)
+}
+
+/// Execute the complete scoped page in the caller's pinned snapshot. This does
+/// not open another reader or admit uncommitted directory/ranking cache state.
+pub(crate) fn page_in_snapshot(
+    provider: &SqliteProvider,
+    tx: &Connection,
+    request: &SearchRequest,
+    revision: u64,
+    start: Instant,
+) -> Result<SearchPage> {
+    if tx.is_autocommit() {
+        return Err(Error::Database(
+            "Scoped search snapshot requires an active transaction".into(),
+        ));
+    }
     let identity = fingerprint(provider, request)?;
     let cursor = request
         .cursor
@@ -211,7 +228,7 @@ pub(crate) fn page(
         conditions,
         mut values,
     } = search_sql(
-        &tx,
+        tx,
         &provider.tokenizer,
         request,
         true,
@@ -228,7 +245,7 @@ pub(crate) fn page(
         )?));
         let parameter = values.len();
         let path = predicate(
-            &tx,
+            tx,
             &provider.tokenizer,
             &request.query,
             SearchScope::Path,
@@ -314,7 +331,7 @@ pub(crate) fn page(
             .map_err(|_| Error::Validation("Offset is too large".into()))?
     }));
     let offset = values.len();
-    let projection = audio_projection(&tx)?;
+    let projection = audio_projection(tx)?;
     let page_key = if text {
         "h.page_sort_value COLLATE NOCASE"
     } else {
@@ -379,6 +396,35 @@ pub(crate) fn page(
         cache_hit: false,
         next_cursor,
     })
+}
+
+/// Encode a committed first-page continuation without trusting a provisional
+/// writer cursor or a native cursor's opaque representation. Both scoped plans
+/// order by tier, then exact main BM25 (or zero for other tiers), then audio ID.
+pub(crate) fn encode_committed_first_page_cursor(
+    provider: &SqliteProvider,
+    request: &SearchRequest,
+    revision: u64,
+    last_id: Option<i64>,
+    has_more: bool,
+) -> Result<Option<String>> {
+    if !has_more
+        || request.query.trim().is_empty()
+        || !matches!(request.scope, SearchScope::All | SearchScope::Path)
+    {
+        return Ok(None);
+    }
+    let id = last_id.ok_or_else(|| {
+        Error::Database("Scoped first page has a continuation without a last audio ID".into())
+    })?;
+    let cursor = FilterCursor {
+        request: fingerprint(provider, request)?,
+        revision,
+        id,
+    };
+    serde_json::to_vec(&cursor)
+        .map(|bytes| Some(format!("v2.{}", dir_search::base64url(&bytes))))
+        .map_err(|error| Error::Database(error.to_string()))
 }
 
 pub(crate) fn folders(

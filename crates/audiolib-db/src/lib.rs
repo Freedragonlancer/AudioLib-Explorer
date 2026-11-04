@@ -31,7 +31,10 @@ mod search_candidates;
 mod search_exclude;
 mod search_facets;
 mod search_include;
+mod search_page_cache;
+mod search_page_control;
 mod search_rank_parallel;
+mod search_snapshot;
 mod search_sorted;
 mod search_storage;
 mod search_text;
@@ -279,6 +282,7 @@ pub struct SqliteProvider {
     /// Cursors expire when the provider/library is reopened, even if data_version resets.
     cursor_session: uuid::Uuid,
     ranking_cache: Mutex<search_cache::RankingCache>,
+    first_page_cache: Mutex<search_page_cache::PageCache<search_page_control::PresentationPage>>,
     document_lengths: Mutex<VecDeque<(search_cache::CacheRevision, Arc<search_bm25::Lengths>)>>,
     search_cache_observation: Mutex<Option<search_cache_control::Observation>>,
     parallel_rank_reserved: AtomicBool,
@@ -701,6 +705,7 @@ impl SqliteProvider {
             revision_reader: Mutex::new(None),
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
+            first_page_cache: Mutex::new(Default::default()),
             document_lengths: Mutex::new(Default::default()),
             search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
@@ -1047,6 +1052,7 @@ impl SqliteProvider {
             revision_reader: Mutex::new(None),
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
+            first_page_cache: Mutex::new(Default::default()),
             document_lengths: Mutex::new(Default::default()),
             search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
@@ -1347,9 +1353,9 @@ impl SqliteProvider {
         // this batch drains atomically. Cache work has no scan-control side effect.
         let search_cache =
             self.prepare_search_cache_batch(&tx, search_cache, &AtomicBool::new(false))?;
-        tx.commit().map_err(db_error)?;
+        let search_cache = self.commit_search_cache_batch(tx, search_cache)?;
         if let Some(candidate) = search_cache
-            && self.publish_search_cache_batch(candidate).is_err()
+            && self.publish_search_cache_batch(&conn, candidate).is_err()
         {
             let _ = self.reset_search_caches();
             tracing::debug!("Scan batch kept; search cache publication was discarded");
@@ -2010,7 +2016,7 @@ impl SqliteProvider {
         }))
     }
 
-    fn search_impl(
+    fn search_impl_uncached(
         &self,
         request: &SearchRequest,
         cancel: Option<Arc<AtomicBool>>,
@@ -4243,6 +4249,9 @@ mod search_cancellation_tests {
             ..Default::default()
         };
         assert!(!provider.search(&request).unwrap().cache_hit);
+        // Exercise the ranked-ID cancellation boundary even when a newer
+        // first-page layer could satisfy the same request without this SQL.
+        provider.clear_first_pages().unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let hydrated = Arc::new(AtomicBool::new(false));
         let reader = provider.reader().unwrap();
@@ -4275,6 +4284,56 @@ mod search_cancellation_tests {
             Err(Error::Cancelled)
         ));
         assert!(!hydrated.load(Ordering::Acquire));
+        let reader = provider.reader().unwrap();
+        reader
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        drop(reader);
+        assert!(provider.search(&request).unwrap().cache_hit);
+    }
+
+    #[test]
+    fn cached_first_page_observes_cancellation_after_reader_pin() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider =
+            SqliteProvider::open(&directory.path().join("cached-page-cancel.db")).unwrap();
+        provider
+            .writer()
+            .unwrap()
+            .execute(
+                "INSERT INTO audio_files(file_path,filename) VALUES('metal.wav','metal.wav')",
+                [],
+            )
+            .unwrap();
+        let request = SearchRequest {
+            query: "metal".into(),
+            ..Default::default()
+        };
+        provider.search(&request).unwrap();
+        assert!(provider.search(&request).unwrap().cache_hit);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = cancel.clone();
+        let reader = provider.reader().unwrap();
+        reader
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "audio_files",
+                        column_name: "id",
+                        ..
+                    }
+                ) {
+                    signal.store(true, Ordering::Release);
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        drop(reader);
+        assert!(matches!(
+            provider.search_cancellable(&request, cancel),
+            Err(Error::Cancelled)
+        ));
         let reader = provider.reader().unwrap();
         reader
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)

@@ -8,7 +8,7 @@ use crate::{
     search_tracking,
 };
 use audiolib_core::{Error, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
 use std::{
     collections::VecDeque,
     sync::{
@@ -35,6 +35,7 @@ pub(super) struct BatchBaseline {
     observer: u64,
     lengths: Vec<(CacheRevision, Arc<search_bm25::Lengths>)>,
     queries: Vec<(String, usize)>,
+    first_pages: Option<crate::search_page_control::PageBatchBaseline>,
 }
 
 /// Entirely owned candidates, usable only after the exact writer epoch commits.
@@ -42,6 +43,12 @@ pub(super) struct PreparedBatch {
     epoch: search_tracking::Epoch,
     lengths: Option<Arc<search_bm25::Lengths>>,
     rankings: Vec<(String, Arc<Vec<i64>>)>,
+    first_pages: Option<crate::search_page_control::PreparedPages>,
+}
+
+/// Only a successful COMMIT can construct this publication capability.
+pub(super) struct CommittedBatch {
+    prepared: PreparedBatch,
 }
 
 fn cancelled(cancel: Option<&AtomicBool>) -> Result<()> {
@@ -85,6 +92,7 @@ impl SqliteProvider {
     /// Reset under the caller's administration/read gate. No SQL or observer
     /// replacement: its existing PRAGMA identity must also invalidate cursors.
     pub(super) fn reset_search_caches(&self) -> Result<()> {
+        self.clear_first_pages()?;
         let mut observation = self
             .search_cache_observation
             .lock()
@@ -364,6 +372,7 @@ impl SqliteProvider {
     /// Called before AF changes inside the writer's transaction. Capture only
     /// query text/count hints before optional journal installation changes lineage.
     pub(super) fn begin_search_cache_batch(&self, tx: &Connection) -> Result<BatchBaseline> {
+        let first_pages = self.begin_first_pages(tx)?;
         let queries = self
             .ranking_cache
             .lock()
@@ -386,6 +395,7 @@ impl SqliteProvider {
             observer: self.observe_search_revision()?,
             lengths,
             queries,
+            first_pages,
         })
     }
 
@@ -412,6 +422,7 @@ impl SqliteProvider {
                 epoch,
                 lengths: None,
                 rankings: Vec::new(),
+                first_pages: self.prepare_first_pages(tx, baseline.first_pages, cancel)?,
             }));
         }
         let mut selected = Vec::new();
@@ -494,12 +505,36 @@ impl SqliteProvider {
             epoch,
             lengths,
             rankings,
+            first_pages: self.prepare_first_pages(tx, baseline.first_pages, cancel)?,
         }))
     }
 
-    /// Call only after tx.commit succeeds. Aborted/prepared candidates are dropped.
-    /// A racing commit with another epoch rejects publication rather than relabeling.
-    pub(super) fn publish_search_cache_batch(&self, prepared: PreparedBatch) -> Result<()> {
+    /// Consume the actual business transaction before granting publication.
+    /// A rollback/error cannot produce a committed-page capability.
+    /// The caller must pass the same lexical transaction that built `prepared`.
+    pub(super) fn commit_search_cache_batch(
+        &self,
+        tx: Transaction<'_>,
+        prepared: Option<PreparedBatch>,
+    ) -> Result<Option<CommittedBatch>> {
+        tx.commit().map_err(db_error)?;
+        Ok(prepared.map(|prepared| CommittedBatch { prepared }))
+    }
+
+    /// Publish only the candidate consumed by a successful business COMMIT.
+    /// The caller retains its same writer guard through the observer/Dw fence.
+    pub(super) fn publish_search_cache_batch(
+        &self,
+        conn: &Connection,
+        committed: CommittedBatch,
+    ) -> Result<()> {
+        let mut prepared = committed.prepared;
+        self.publish_first_pages(conn, prepared.first_pages.take())?;
+        self.publish_rankings(prepared)
+    }
+
+    /// Rank-only identities retain their AF epoch proof and never publish pages.
+    fn publish_rankings(&self, prepared: PreparedBatch) -> Result<()> {
         let Some((Some(current), observer)) = self.live_search_cache_state()? else {
             return Ok(());
         };
@@ -559,10 +594,11 @@ impl SqliteProvider {
         let Some(epoch) = search_tracking::epoch(conn)? else {
             return Ok(());
         };
-        self.publish_search_cache_batch(PreparedBatch {
+        self.publish_rankings(PreparedBatch {
             epoch,
             lengths: None,
             rankings: Vec::new(),
+            first_pages: None,
         })
     }
 }
@@ -646,7 +682,7 @@ mod tests {
             .unwrap();
         assert_eq!(aborted.rankings[0].1.as_ref(), &native_ids(&tx, "wind"));
         tx.rollback().unwrap();
-        provider.publish_search_cache_batch(aborted).unwrap();
+        provider.publish_rankings(aborted).unwrap();
         assert!(Arc::ptr_eq(
             &original,
             &provider
@@ -679,7 +715,7 @@ mod tests {
                 .is_none()
         );
         tx.commit().unwrap();
-        provider.publish_search_cache_batch(prepared).unwrap();
+        provider.publish_rankings(prepared).unwrap();
         assert_eq!(
             provider
                 .ranking_cache
