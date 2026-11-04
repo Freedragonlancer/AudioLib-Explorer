@@ -334,9 +334,11 @@ impl std::ops::DerefMut for ReadLease<'_> {
 }
 impl Drop for ReadLease<'_> {
     fn drop(&mut self) {
-        // A cancelled search must never poison a later user of this pooled reader.
+        // A cancelled search or unfinished explicit transaction must never
+        // poison the next pooled reader. Closing a dirty connection rolls its
+        // transaction back while this lease still holds the reader/admin gates.
         if let Some(conn) = self.conn.as_ref()
-            && conn.progress_handler(0, None::<fn() -> bool>).is_err()
+            && (!conn.is_autocommit() || conn.progress_handler(0, None::<fn() -> bool>).is_err())
         {
             self.conn.take();
         }
@@ -1210,12 +1212,15 @@ impl SqliteProvider {
             .read_gate
             .read()
             .map_err(|_| Error::Database("Library reader gate was poisoned".into()))?;
-        if let Some(conn) = self
+        let pooled = self
             .read_pool
             .lock()
             .map_err(|_| Error::Database("Reader pool lock was poisoned".into()))?
-            .pop()
-        {
+            .pop();
+        // Refuse an inherited transaction even if a future/internal caller put
+        // one in the pool without passing through ReadLease::drop. The rejected
+        // connection closes outside the pool mutex before opening a fresh one.
+        if let Some(conn) = pooled.filter(Connection::is_autocommit) {
             if check_ready {
                 schema::ensure_ready(&conn)?;
             }

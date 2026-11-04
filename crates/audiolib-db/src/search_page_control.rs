@@ -8,7 +8,7 @@ use crate::{
     search_snapshot,
 };
 use audiolib_core::{Error, Result, SearchPage, SearchRequest, SearchScope, SortOrder};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde::Serialize;
 use std::{
     sync::{
@@ -20,6 +20,8 @@ use std::{
 
 #[cfg(test)]
 mod cow_isolation_tests;
+#[cfg(test)]
+mod implicit_pin_tests;
 #[cfg(test)]
 mod rank_deprioritization_tests;
 #[cfg(test)]
@@ -94,17 +96,28 @@ impl SqliteProvider {
         };
         check_cancel(cancel.as_deref())?;
         {
-            let mut reader = self.search_page_reader(cancel.clone())?;
+            let reader = self.search_page_reader(cancel.clone())?;
             let before = self.observe_search_revision()?;
-            let tx = reader.transaction().map_err(db_error)?;
-            tx.prepare_cached("SELECT id FROM audio_files LIMIT 1")
-                .map_err(db_error)?
-                .query_row([], |row| row.get::<_, i64>(0))
-                .optional()
-                .map_err(db_error)?;
+            {
+                // This single statement pins an implicit SQLite read snapshot.
+                // Rows drop/reset before the cached statement returns, and both
+                // end before the second observer read; no read transaction is
+                // retained during owned DTO cloning/cursor encoding.
+                let mut statement = reader
+                    .prepare_cached("SELECT id FROM audio_files LIMIT 1")
+                    .map_err(db_error)?;
+                let mut rows = statement.query([]).map_err(db_error)?;
+                if let Some(row) = rows.next().map_err(db_error)? {
+                    row.get::<_, i64>(0).map_err(db_error)?;
+                }
+            }
             let revision = self.observe_search_revision()?;
             check_cancel(cancel.as_deref())?;
             if before == revision {
+                // The cached DTO is already a complete canonical image of R.
+                // Equal observations prove the implicit pin saw that same R.
+                // A later commit may leave this owned old image usable, but the
+                // next lookup and its continuation must observe the newer R.
                 let cached = self
                     .first_page_cache
                     .lock()
