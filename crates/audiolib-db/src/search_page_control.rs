@@ -7,7 +7,7 @@ use crate::{
     search_page_cache::{PageRequest, PreparedCacheEntry, encoded_fits},
     search_snapshot,
 };
-use audiolib_core::{Error, Result, SearchPage, SearchRequest};
+use audiolib_core::{Error, Result, SearchPage, SearchRequest, SearchScope, SortOrder};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod rank_deprioritization_tests;
 #[cfg(test)]
 mod tests;
 
@@ -47,6 +49,17 @@ pub(super) struct PreparedPages {
     writer_revision: u64,
     observer_revision: u64,
     entries: Vec<PreparedCacheEntry<PresentationPage>>,
+    prepared_relevance_queries: Vec<String>,
+}
+
+impl PreparedPages {
+    /// An accepted first page makes duplicate full-rank maintenance optional.
+    /// This is only a work hint: page IDs never stand in for a complete ranking.
+    pub(super) fn has_prepared_relevance_query(&self, query: &str) -> bool {
+        self.prepared_relevance_queries
+            .iter()
+            .any(|prepared| prepared == query)
+    }
 }
 
 fn check_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
@@ -79,8 +92,8 @@ impl SqliteProvider {
         };
         check_cancel(cancel.as_deref())?;
         {
+            let mut reader = self.search_page_reader(cancel.clone())?;
             let before = self.observe_search_revision()?;
-            let mut reader = self.search_reader(cancel.clone())?;
             let tx = reader.transaction().map_err(db_error)?;
             tx.query_row("SELECT id FROM audio_files LIMIT 1", [], |row| {
                 row.get::<_, i64>(0)
@@ -194,6 +207,7 @@ impl SqliteProvider {
         };
         let start = Instant::now();
         let mut entries = Vec::new();
+        let mut prepared_relevance_queries = Vec::new();
         for key in baseline.requests {
             check_cancel(Some(cancel))?;
             if start.elapsed() >= PREPARATION_BUDGET {
@@ -201,6 +215,15 @@ impl SqliteProvider {
             }
             match search_snapshot::first_page(self, conn, key.request(), cancel) {
                 Ok(Some(snapshot)) => {
+                    let request = key.request();
+                    let relevance_query = if request.order_by == SortOrder::Relevance
+                        && matches!(request.scope, SearchScope::Main | SearchScope::Filename)
+                        && !request.query.trim().is_empty()
+                    {
+                        crate::compile_request_query(&self.tokenizer, request).ok()
+                    } else {
+                        None
+                    };
                     if let Some(entry) = PreparedCacheEntry::new(
                         key,
                         Arc::new(PresentationPage {
@@ -209,6 +232,11 @@ impl SqliteProvider {
                         }),
                     ) {
                         entries.push(entry);
+                        if let Some(query) = relevance_query
+                            && !prepared_relevance_queries.contains(&query)
+                        {
+                            prepared_relevance_queries.push(query);
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -229,6 +257,7 @@ impl SqliteProvider {
             writer_revision: baseline.writer_revision,
             observer_revision: baseline.observer_revision,
             entries,
+            prepared_relevance_queries,
         }))
     }
 

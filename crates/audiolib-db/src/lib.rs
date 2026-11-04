@@ -283,6 +283,7 @@ pub struct SqliteProvider {
     cursor_session: uuid::Uuid,
     ranking_cache: Mutex<search_cache::RankingCache>,
     first_page_cache: Mutex<search_page_cache::PageCache<search_page_control::PresentationPage>>,
+    search_upgrade_pool: management::SearchUpgradePool,
     document_lengths: Mutex<VecDeque<(search_cache::CacheRevision, Arc<search_bm25::Lengths>)>>,
     search_cache_observation: Mutex<Option<search_cache_control::Observation>>,
     parallel_rank_reserved: AtomicBool,
@@ -706,6 +707,7 @@ impl SqliteProvider {
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
             first_page_cache: Mutex::new(Default::default()),
+            search_upgrade_pool: Default::default(),
             document_lengths: Mutex::new(Default::default()),
             search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
@@ -1053,6 +1055,7 @@ impl SqliteProvider {
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
             first_page_cache: Mutex::new(Default::default()),
+            search_upgrade_pool: Default::default(),
             document_lengths: Mutex::new(Default::default()),
             search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
@@ -1192,10 +1195,16 @@ impl SqliteProvider {
     }
 
     fn reader(&self) -> Result<ReadLease<'_>> {
+        self.reader_inner(true)
+    }
+
+    // Only a full-page lookup proven by its pinned observer stamp may skip the
+    // SQL ready probes. Both paths keep the same local gate and OS upgrade lease.
+    fn reader_inner(&self, check_ready: bool) -> Result<ReadLease<'_>> {
         let upgrade = if self.read_only {
             None
         } else {
-            Some(management::SearchUpgradeLease::acquire(&self.path, false)?)
+            Some(self.search_upgrade_pool.acquire_shared(&self.path)?)
         };
         let gate = self
             .read_gate
@@ -1207,7 +1216,9 @@ impl SqliteProvider {
             .map_err(|_| Error::Database("Reader pool lock was poisoned".into()))?
             .pop()
         {
-            schema::ensure_ready(&conn)?;
+            if check_ready {
+                schema::ensure_ready(&conn)?;
+            }
             return Ok(ReadLease {
                 conn: Some(conn),
                 pool: &self.read_pool,
@@ -1232,7 +1243,9 @@ impl SqliteProvider {
         conn.pragma_update(None, "mmap_size", sqlite_reader_mmap_bytes(&self.path))
             .map_err(db_error)?;
         schema::register_casefold(&conn)?;
-        schema::ensure_ready(&conn)?;
+        if check_ready {
+            schema::ensure_ready(&conn)?;
+        }
         Ok(ReadLease {
             conn: Some(conn),
             pool: &self.read_pool,
@@ -1242,13 +1255,27 @@ impl SqliteProvider {
     }
 
     fn search_reader(&self, cancel: Option<Arc<AtomicBool>>) -> Result<ReadLease<'_>> {
+        self.search_reader_inner(cancel, true)
+    }
+
+    /// Lookup-only reader. A miss must drop this lease and use the checked path;
+    /// a hit needs equal before/pin/after observer values and a ready-built entry.
+    fn search_page_reader(&self, cancel: Option<Arc<AtomicBool>>) -> Result<ReadLease<'_>> {
+        self.search_reader_inner(cancel, false)
+    }
+
+    fn search_reader_inner(
+        &self,
+        cancel: Option<Arc<AtomicBool>>,
+        check_ready: bool,
+    ) -> Result<ReadLease<'_>> {
         if cancel
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))
         {
             return Err(Error::Cancelled);
         }
-        let conn = self.reader()?;
+        let conn = self.reader_inner(check_ready)?;
         if cancel
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))

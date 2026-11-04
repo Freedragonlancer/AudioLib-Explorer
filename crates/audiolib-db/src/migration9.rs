@@ -836,6 +836,7 @@ impl crate::SqliteProvider {
             cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
             first_page_cache: Mutex::new(Default::default()),
+            search_upgrade_pool: Default::default(),
             document_lengths: Mutex::new(Default::default()),
             search_cache_observation: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),

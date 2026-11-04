@@ -57,6 +57,10 @@ pub(super) fn first_page(
             "First-page snapshot requires an active transaction".into(),
         ));
     }
+    // A response may authorize later lookup-only readers, so prove readiness
+    // in this same writer snapshot before any candidate SQL or owned DTO exists.
+    crate::schema::ensure_ready(tx)?;
+    check_cancel(cancel)?;
     let start = Instant::now();
     let mut page = if matches!(request.scope, SearchScope::All | SearchScope::Path)
         && !request.query.trim().is_empty()
@@ -477,5 +481,100 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn pending_migration_commit_cannot_consume_a_previously_ready_cached_page() {
+        for marker in ["audiolib_search_upgrade", "audiolib_storage_migration"] {
+            let (_directory, provider) = fixture(true);
+            let selection = request(SearchScope::Main, "door");
+            provider.search(&selection).unwrap();
+            assert!(provider.search(&selection).unwrap().cache_hit);
+            let external = Connection::open(provider.database_path()).unwrap();
+            external
+                .execute_batch(&format!("CREATE TABLE {marker}(singleton INTEGER)"))
+                .unwrap();
+            assert!(
+                matches!(provider.search(&selection), Err(Error::Busy(_))),
+                "{marker}"
+            );
+            external
+                .execute_batch(&format!("DROP TABLE {marker}"))
+                .unwrap();
+            assert_eq!(provider.search(&selection).unwrap().total_count, 2);
+            assert!(provider.search(&selection).unwrap().cache_hit);
+        }
+    }
+
+    #[test]
+    fn exclusive_upgrade_still_blocks_cached_lookup_and_cancel_is_checked_first() {
+        let (_directory, provider) = fixture(true);
+        let selection = request(SearchScope::Main, "door");
+        provider.search(&selection).unwrap();
+        assert!(provider.search(&selection).unwrap().cache_hit);
+        let exclusive =
+            crate::management::SearchUpgradeLease::acquire(provider.database_path(), true).unwrap();
+        assert!(matches!(provider.search(&selection), Err(Error::Busy(_))));
+        let cancelled = std::sync::Arc::new(AtomicBool::new(true));
+        assert!(matches!(
+            provider.search_cancellable(&selection, cancelled),
+            Err(Error::Cancelled)
+        ));
+        drop(exclusive);
+        assert!(provider.search(&selection).unwrap().cache_hit);
+    }
+
+    #[test]
+    fn unready_writer_snapshot_cannot_produce_a_ready_response_candidate() {
+        for marker in ["audiolib_search_upgrade", "audiolib_storage_migration"] {
+            let (_directory, provider) = fixture(true);
+            let mut writer = provider.writer().unwrap();
+            let tx = writer
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute_batch(&format!("CREATE TABLE {marker}(singleton INTEGER)"))
+                .unwrap();
+            let candidate = first_page(
+                &provider,
+                &tx,
+                &request(SearchScope::Main, "door"),
+                &AtomicBool::new(false),
+            );
+            assert!(matches!(candidate, Err(Error::Busy(_))), "{marker}");
+            assert_eq!(
+                tx.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            tx.rollback().unwrap();
+        }
+    }
+
+    #[test]
+    fn cached_lookup_still_requires_an_authorized_main_snapshot_pin() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let (_directory, provider) = fixture(true);
+        let selection = request(SearchScope::Main, "door");
+        provider.search(&selection).unwrap();
+        assert!(provider.search(&selection).unwrap().cache_hit);
+        let reader = provider.reader().unwrap();
+        reader.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::Read {table_name,..} if table_name=="audio_files") {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        })).unwrap();
+        drop(reader);
+        assert!(
+            provider.search(&selection).is_err(),
+            "a ready cache does not bypass the pinned reader's authorizer"
+        );
+        let reader = provider.reader().unwrap();
+        reader
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        drop(reader);
+        assert!(provider.search(&selection).unwrap().cache_hit);
     }
 }

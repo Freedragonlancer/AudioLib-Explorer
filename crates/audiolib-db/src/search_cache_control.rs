@@ -417,12 +417,15 @@ impl SqliteProvider {
         let Some(changed) = search_tracking::delta(tx, from, &epoch)? else {
             return Ok(None);
         };
+        // Prefer complete owned first pages. Their accepted exact compiled keys
+        // may suppress duplicate optional scoring, never supply partial rank IDs.
+        let first_pages = self.prepare_first_pages(tx, baseline.first_pages, cancel)?;
         if changed.is_empty() && from == &epoch {
             return Ok(Some(PreparedBatch {
                 epoch,
                 lengths: None,
                 rankings: Vec::new(),
-                first_pages: self.prepare_first_pages(tx, baseline.first_pages, cancel)?,
+                first_pages,
             }));
         }
         let mut selected = Vec::new();
@@ -484,6 +487,14 @@ impl SqliteProvider {
         let mut rankings = Vec::new();
         for (query, count) in selected {
             cancelled(Some(cancel))?;
+            // Selection/count/length budgets above stay unchanged. Do not fill
+            // skipped slots with new queries and erase the saved writer work.
+            if first_pages
+                .as_ref()
+                .is_some_and(|pages| pages.has_prepared_relevance_query(&query))
+            {
+                continue;
+            }
             let ids = if count == 0 {
                 Some(Arc::new(Vec::new()))
             } else {
@@ -505,7 +516,7 @@ impl SqliteProvider {
             epoch,
             lengths,
             rankings,
-            first_pages: self.prepare_first_pages(tx, baseline.first_pages, cancel)?,
+            first_pages,
         }))
     }
 
