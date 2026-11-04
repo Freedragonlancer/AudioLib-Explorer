@@ -69,6 +69,8 @@ mod client_review_tests;
 mod history;
 #[path = "library_progress.rs"]
 mod library_progress;
+#[path = "result_page_navigation.rs"]
+mod result_page_navigation;
 #[path = "result_window.rs"]
 mod result_window;
 #[path = "search_tasks.rs"]
@@ -783,6 +785,7 @@ pub struct Controller {
     artwork_actions_wake: Condvar,
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
+    result_pages: Mutex<result_page_navigation::ResultPageNavigation>,
     waveform_generation: AtomicU64,
     waveform_cancel: Mutex<Arc<AtomicBool>>,
     waveform_job: Mutex<Option<WaveJob>>,
@@ -1076,6 +1079,7 @@ impl Controller {
             artwork_actions_wake: Condvar::new(),
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
+            result_pages: Mutex::new(Default::default()),
             waveform_generation: AtomicU64::new(0),
             waveform_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             waveform_job: Mutex::new(None),
@@ -2925,6 +2929,7 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        self.result_pages.lock().unwrap().clear();
         // A forced source reset must invalidate the old import's UI admission and
         // cancel its original provider, while retaining its durable checkpoint.
         self.cancel_vendor_for_transition();
@@ -3430,7 +3435,7 @@ impl Controller {
                     let source_range = result
                         .as_ref()
                         .ok()
-                        .map(|page| (page.returned_count, page.total_count));
+                        .map(result_page_navigation::SourcePage::from);
                     // Server removals stay hidden until the resync swaps the snapshot.
                     if let Ok(page) = result.as_mut() {
                         c.hide_removed_in_page(page);
@@ -3466,7 +3471,8 @@ impl Controller {
                                                 && state.result_window
                                         },
                                     );
-                                if job.request.offset > 0
+                                if page.total_count_exact
+                                    && job.request.offset > 0
                                     && (job.request.offset as u64) >= page.total_count
                                 {
                                     c2.request.lock().unwrap().offset =
@@ -3539,15 +3545,25 @@ impl Controller {
                                     ui.invoke_restore_result_window_viewport(y);
                                 }
                                 ui.set_can_previous(job.request.offset > 0);
-                                ui.set_can_next(source_range.is_some_and(|(returned, total)| {
-                                    ((job.request.offset + returned) as u64) < total
+                                ui.set_can_next(source_range.as_ref().is_some_and(|source| {
+                                    c2.result_pages
+                                        .lock()
+                                        .unwrap()
+                                        .published(&job.request, source)
                                 }));
                                 let first_page = job.request.offset / PAGE_SIZE + 1;
                                 let last_page = (job.request.offset
                                     + page.returned_count.saturating_sub(1))
                                     / PAGE_SIZE
                                     + 1;
-                                let pages = page.total_count.div_ceil(PAGE_SIZE as u64).max(1);
+                                let pages = if page.total_count_exact {
+                                    page.total_count
+                                        .div_ceil(PAGE_SIZE as u64)
+                                        .max(1)
+                                        .to_string()
+                                } else {
+                                    "?".into()
+                                };
                                 ui.set_page_label(
                                     if first_page == last_page {
                                         format!("{first_page}/{pages}")
@@ -3556,7 +3572,7 @@ impl Controller {
                                     }
                                     .into(),
                                 );
-                                let shown = if page.total_count == 0 {
+                                let shown = if page.returned_count == 0 {
                                     "0".into()
                                 } else {
                                     format!(
@@ -3566,16 +3582,21 @@ impl Controller {
                                     )
                                 };
                                 let chinese = c2.chinese.load(Ordering::Acquire);
+                                let total = if page.total_count_exact {
+                                    page.total_count.to_string()
+                                } else {
+                                    format!("≥{}", page.total_count)
+                                };
                                 ui.set_result_summary(
                                     if chinese {
                                         format!(
                                             "{shown} / {} 条 · {:.1} ms",
-                                            page.total_count, page.execution_time_ms
+                                            total, page.execution_time_ms
                                         )
                                     } else {
                                         format!(
                                             "{shown} of {} sounds · {:.1} ms",
-                                            page.total_count, page.execution_time_ms
+                                            total, page.execution_time_ms
                                         )
                                     }
                                     .into(),
@@ -3623,6 +3644,9 @@ impl Controller {
                                 c2.search_task_page_ready(&ui, workspace_revision);
                             }
                             Err(error) => {
+                                let mut request = c2.request.lock().unwrap();
+                                c2.result_pages.lock().unwrap().failed(&mut request);
+                                drop(request);
                                 ui.set_searching(false);
                                 if c2.retry_migrating_search(&ui, &error, job.generation) {
                                     return;
@@ -4243,12 +4267,10 @@ impl Controller {
             return;
         }
         let mut request = self.request.lock().unwrap();
-        request.offset = if delta < 0 {
-            request.offset.saturating_sub(PAGE_SIZE)
-        } else {
-            request.offset.saturating_add(request.limit)
-        };
-        request.limit = PAGE_SIZE;
+        self.result_pages
+            .lock()
+            .unwrap()
+            .step(&mut request, delta, PAGE_SIZE);
         drop(request);
         self.request_navigation_search(ui, true, false);
     }
@@ -4270,6 +4292,8 @@ impl Controller {
         if count == 0 {
             return false;
         }
+        request.cursor = None;
+        self.result_pages.lock().unwrap().clear();
         let span = request.limit;
         if direction < 0 {
             let added = request.offset.min(PAGE_SIZE);
@@ -4365,9 +4389,6 @@ impl Controller {
             SearchScope::All if !ready => SearchScope::Main,
             other => other,
         };
-        if request.scope == SearchScope::Main {
-            request.cursor = None;
-        }
     }
 
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
@@ -4388,6 +4409,10 @@ impl Controller {
         ui.set_searching(false);
         self.cancel_deferred_task_search();
         let mut request = self.request.lock().unwrap().clone();
+        self.result_pages
+            .lock()
+            .unwrap()
+            .prepare_query(&mut request, reset);
         request.query = ui.get_query().to_string();
         self.apply_search_scope(ui, &mut request);
         if request.needs_more_search_text() {

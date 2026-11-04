@@ -59,14 +59,19 @@ impl HiddenRecords {
                 .is_some_and(|folder| self.folders.contains(&folder))
     }
 
-    /// Drop hidden rows from a result page. The total only loses the rows of this page
-    /// (other pages are not read); the resync corrects it.
+    /// Drop hidden rows without pretending to know their query-wide membership.
+    /// Subtracting all known removals gives a conservative lower bound; the
+    /// currently visible rows remain a proven minimum even for unrelated removals.
     fn filter_page(&self, page: &mut SearchPage) {
         let before = page.results.len();
         page.results.retain(|file| !self.hides(file));
         let dropped = before - page.results.len();
         page.returned_count = page.returned_count.saturating_sub(dropped);
-        page.total_count = page.total_count.saturating_sub(dropped as u64);
+        page.total_count = page
+            .total_count
+            .saturating_sub(self.removed.max(self.ids.len() as u64))
+            .max(page.returned_count as u64);
+        page.total_count_exact = false;
     }
 
     fn filter_folders(&self, folders: &mut Vec<Folder>) {
@@ -581,7 +586,8 @@ mod tests {
         hidden.filter_page(&mut page);
         let ids: Vec<i64> = page.results.iter().map(|file| file.id).collect();
         assert_eq!(ids, [1, 5]);
-        assert_eq!((page.returned_count, page.total_count), (2, 117));
+        assert_eq!((page.returned_count, page.total_count), (2, 111));
+        assert!(!page.total_count_exact);
         let folder = |id| Folder {
             id,
             path: format!("/f{id}"),
@@ -606,6 +612,29 @@ mod tests {
         hidden.add(&state("other", 1), &[9], &HashSet::new(), 1);
         assert!(!hidden.ids.contains(&2) && hidden.ids.contains(&9));
         assert_eq!((hidden.since, hidden.removed), (1, 1));
+    }
+
+    #[test]
+    fn unrelated_removals_never_reduce_the_bound_below_visible_rows_or_change_the_cursor() {
+        let mut hidden = HiddenRecords::default();
+        hidden.add(
+            &state("lib", 12),
+            &(100..140).collect::<Vec<_>>(),
+            &HashSet::new(),
+            40,
+        );
+        let mut page = SearchPage {
+            results: vec![file(1, None), file(2, None), file(3, None)],
+            total_count: 4,
+            total_count_exact: false,
+            returned_count: 3,
+            next_cursor: Some("provider-owned-position".into()),
+            ..Default::default()
+        };
+        hidden.filter_page(&mut page);
+        assert_eq!((page.returned_count, page.total_count), (3, 3));
+        assert!(!page.total_count_exact);
+        assert_eq!(page.next_cursor.as_deref(), Some("provider-owned-position"));
     }
 
     #[test]

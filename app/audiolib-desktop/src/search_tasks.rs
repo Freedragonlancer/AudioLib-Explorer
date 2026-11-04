@@ -123,7 +123,12 @@ fn folder_ref(folder: &Folder) -> SearchFolderRef {
     }
 }
 
-fn fresh_task(order_by: SortOrder, descending: bool, chinese: bool) -> SearchTask {
+fn fresh_task(
+    order_by: SortOrder,
+    descending: bool,
+    scope: SearchScope,
+    chinese: bool,
+) -> SearchTask {
     SearchTask {
         id: unique_id(),
         title: if chinese { "默认搜索" } else { "default" }.into(),
@@ -131,6 +136,7 @@ fn fresh_task(order_by: SortOrder, descending: bool, chinese: bool) -> SearchTas
         definition: SearchTaskDefinition {
             order_by,
             descending,
+            scope,
             ..Default::default()
         },
         view: SearchTaskView::default(),
@@ -143,6 +149,7 @@ fn fresh_task(order_by: SortOrder, descending: bool, chinese: bool) -> SearchTas
 // different contents and must not be silently merged by a task switch.
 fn same_search_definition(left: &SearchTaskDefinition, right: &SearchTaskDefinition) -> bool {
     left.query == right.query
+        && left.scope == right.scope
         && left.include_subfolders == right.include_subfolders
         && left.filters == right.filters
         && match (&left.album_binding, &right.album_binding) {
@@ -565,6 +572,7 @@ impl Controller {
                     let task = fresh_task(
                         preferences.order_by,
                         preferences.descending,
+                        search_scope_from_index(ui.get_search_scope_index()),
                         c2.chinese.load(Ordering::Acquire),
                     );
                     state.workspace.session.active_task_id = Some(task.id.clone());
@@ -713,8 +721,14 @@ impl Controller {
             inspector_scroll_y: ui.get_task_inspector_scroll_y(),
         };
         let album_binding = self.capture_task_album_binding(&request, previous.as_ref(), &records);
+        let displayed_range = self
+            .result_pages
+            .lock()
+            .unwrap()
+            .matches_current_request(&request);
         let definition = SearchTaskDefinition {
             query: request.query,
+            scope: search_scope_from_index(ui.get_search_scope_index()),
             folder: tree
                 .selected
                 .and_then(|id| tree.known.get(&id).map(folder_ref))
@@ -748,7 +762,11 @@ impl Controller {
             task.view = view;
         }
         if let Some(revision) = state.page_revision.filter(|revision| {
-            state.page_complete && state.folders_revision == Some(*revision) && !ui.get_searching()
+            state.page_complete
+                && state.folders_revision == Some(*revision)
+                && !ui.get_searching()
+                && displayed_range
+                && search_scope_from_index(ui.get_search_scope_index()) == request.scope
         }) {
             state.caches.insert(
                 id,
@@ -885,6 +903,7 @@ impl Controller {
         let task = fresh_task(
             prefs.order_by,
             prefs.descending,
+            search_scope_from_index(ui.get_search_scope_index()),
             self.chinese.load(Ordering::Acquire),
         );
         let id = task.id.clone();
@@ -961,6 +980,7 @@ impl Controller {
             state.workspace.session.tasks.push(fresh_task(
                 SortOrder::Relevance,
                 false,
+                search_scope_from_index(ui.get_search_scope_index()),
                 self.chinese.load(Ordering::Acquire),
             ));
         }
@@ -1240,6 +1260,7 @@ impl Controller {
         *self.search_publication.lock().unwrap() = None;
         // Install one safe runtime for B before any fallible I/O. If validation
         // fails, none of A's request, directory IDs or checked rows can leak into B.
+        self.result_pages.lock().unwrap().clear();
         *self.request.lock().unwrap() = task.definition.to_request(
             cache.as_ref().map_or_else(
                 || task_result_window_limit(&task.view, task_viewport_rows(ui)),
@@ -1367,6 +1388,7 @@ impl Controller {
         folders: Vec<Folder>,
     ) {
         let album_missing = album_filter_unavailable(&task.definition);
+        self.result_pages.lock().unwrap().clear();
         apply_task_controls(ui, &task);
         *self.request.lock().unwrap() = task.definition.to_request(
             cache.as_ref().map_or_else(
@@ -1791,6 +1813,7 @@ fn task_inputs_valid(task: &SearchTask) -> bool {
 
 fn apply_task_controls(ui: &AppWindow, task: &SearchTask) {
     let definition = &task.definition;
+    ui.set_search_scope_index(search_scope_index(definition.scope));
     ui.set_album_filter_unavailable(album_filter_unavailable(definition));
     let label = definition
         .album_binding
