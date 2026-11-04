@@ -84,6 +84,88 @@ fn set(provider: &SqliteProvider, request: &SearchRequest) -> BTreeSet<i64> {
 }
 
 #[test]
+fn optimized_cursor_binds_query_scope_visibility_revision_and_provider_session() {
+    let (temp, provider) = fixture();
+    let mut original = request(SearchScope::Path, "corridor");
+    original.limit = 1;
+    let page = provider.search(&original).unwrap();
+    let cursor = page.next_cursor.unwrap();
+    assert!(cursor.len() <= 512);
+    for mut changed in [
+        SearchRequest {
+            query: "metal".into(),
+            ..original.clone()
+        },
+        SearchRequest {
+            scope: SearchScope::All,
+            ..original.clone()
+        },
+        SearchRequest {
+            filters: SearchFilters {
+                visibility: audiolib_core::library::FileVisibility::All,
+                ..original.filters.clone()
+            },
+            ..original.clone()
+        },
+    ] {
+        changed.cursor = Some(cursor.clone());
+        let error = provider.search(&changed).unwrap_err().to_string();
+        assert!(error.contains("CURSOR_STALE"), "{error}");
+    }
+    original.cursor = Some(cursor.clone());
+    let other = SqliteProvider::open_existing(&temp.path().join("scope.db")).unwrap();
+    assert!(
+        other
+            .search(&original)
+            .unwrap_err()
+            .to_string()
+            .contains("CURSOR_STALE")
+    );
+    provider
+        .update_metadata(
+            1,
+            &MetadataPatch {
+                notes: Some("new annotation".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        provider
+            .search(&original)
+            .unwrap_err()
+            .to_string()
+            .contains("CURSOR_STALE")
+    );
+}
+
+#[test]
+fn optimized_cursor_preserves_global_position_and_reports_count_accuracy() {
+    let (_temp, provider) = fixture();
+    let mut selection = request(SearchScope::Path, "corridor");
+    selection.limit = 1;
+    let mut all = Vec::new();
+    for index in 0..3 {
+        let page = provider.search(&selection).unwrap();
+        all.extend(page.results.iter().map(|file| file.id));
+        assert_eq!(page.total_count_exact, index == 2);
+        assert_eq!(page.total_count, if index == 0 { 2 } else { 3 });
+        selection.cursor = page.next_cursor;
+        // Cursor position wins over a caller's unrelated offset.
+        selection.offset = 900;
+    }
+    assert_eq!(all, vec![1, 2, 3]);
+    assert!(selection.cursor.is_none());
+    let page = provider.search(&selection).unwrap();
+    assert!(page.results.is_empty());
+    assert!(!page.total_count_exact);
+    assert_eq!(
+        page.total_count, 0,
+        "an unproven deep offset is not a lower bound"
+    );
+}
+
+#[test]
 fn filename_scope_excludes_notes_for_letters_han_and_numeric_terms() {
     let (_temp, provider) = fixture();
     assert_eq!(

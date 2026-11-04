@@ -67,6 +67,57 @@ struct FilterCursor {
     id: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct NativeCursor {
+    request: String,
+    revision: u64,
+    position: u64,
+    inner: String,
+}
+
+/// Validate the opaque optimized-page cursor before exposing its inner rank key.
+pub(crate) fn native_cursor(
+    provider: &SqliteProvider,
+    request: &SearchRequest,
+    revision: u64,
+) -> Result<Option<(String, u64)>> {
+    let Some(raw) = request.cursor.as_deref() else {
+        return Ok(None);
+    };
+    let bytes = raw
+        .strip_prefix("v3.")
+        .ok_or_else(|| Error::Validation("CURSOR_STALE: search cursor protocol changed".into()))
+        .and_then(|raw| {
+            dir_search::base64url_decode(raw)
+                .map_err(|_| Error::Validation("Search cursor is invalid".into()))
+        })?;
+    let value: NativeCursor = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::Validation("Search cursor is invalid".into()))?;
+    if value.request != fingerprint(provider, request)? || value.revision != revision {
+        return Err(Error::Validation(
+            "CURSOR_STALE: search or library changed".into(),
+        ));
+    }
+    Ok(Some((value.inner, value.position)))
+}
+
+pub(crate) fn encode_native_cursor(
+    provider: &SqliteProvider,
+    request: &SearchRequest,
+    revision: u64,
+    position: u64,
+    inner: String,
+) -> Result<String> {
+    let value = NativeCursor {
+        request: fingerprint(provider, request)?,
+        revision,
+        position,
+        inner,
+    };
+    let bytes = serde_json::to_vec(&value).map_err(|error| Error::Database(error.to_string()))?;
+    Ok(format!("v3.{}", dir_search::base64url(&bytes)))
+}
+
 fn number_conditions(conditions: Vec<String>, parameters: usize) -> Result<Vec<String>> {
     let mut last = 0_usize;
     let mut output = Vec::with_capacity(conditions.len());
@@ -106,6 +157,7 @@ fn fingerprint(provider: &SqliteProvider, request: &SearchRequest) -> Result<Str
     identity.offset = 0;
     identity.page = None;
     let mut hash = Sha256::new();
+    hash.update(provider.cursor_session.as_bytes());
     hash.update(provider.path.to_string_lossy().as_bytes());
     hash.update(serde_json::to_vec(&identity).map_err(|e| Error::Validation(e.to_string()))?);
     Ok(format!("{:x}", hash.finalize()))
@@ -298,6 +350,7 @@ pub(crate) fn page(
         None
     };
     Ok(SearchPage {
+        total_count_exact: true,
         returned_count: results.len(),
         results,
         total_count: total,

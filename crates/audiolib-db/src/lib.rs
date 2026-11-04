@@ -273,6 +273,8 @@ pub struct SqliteProvider {
     writer: Mutex<Connection>,
     read_pool: Mutex<Vec<Connection>>,
     revision_reader: Mutex<Option<Connection>>,
+    /// Cursors expire when the provider/library is reopened, even if data_version resets.
+    cursor_session: uuid::Uuid,
     ranking_cache: Mutex<search_cache::RankingCache>,
     document_lengths: Mutex<Option<(u64, Arc<search_bm25::Lengths>)>>,
     parallel_rank_reserved: AtomicBool,
@@ -693,6 +695,7 @@ impl SqliteProvider {
             writer: Mutex::new(conn),
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
+            cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
             document_lengths: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
@@ -1036,6 +1039,7 @@ impl SqliteProvider {
             writer: Mutex::new(conn),
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
+            cursor_session: uuid::Uuid::new_v4(),
             ranking_cache: Mutex::new(Default::default()),
             document_lengths: Mutex::new(None),
             parallel_rank_reserved: AtomicBool::new(false),
@@ -1901,6 +1905,7 @@ impl SqliteProvider {
             };
             if ids.is_empty() {
                 return Ok(Some(SearchPage {
+                    total_count_exact: true,
                     query: request.query.clone(),
                     execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
                     cache_hit,
@@ -1969,6 +1974,7 @@ impl SqliteProvider {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Some(SearchPage {
+            total_count_exact: true,
             returned_count: results.len(),
             results,
             total_count,
@@ -2116,6 +2122,7 @@ impl SqliteProvider {
         };
         if request.offset as u64 >= total {
             return Ok(SearchPage {
+                total_count_exact: true,
                 returned_count: 0,
                 results: Vec::new(),
                 total_count: total,
@@ -2194,6 +2201,7 @@ impl SqliteProvider {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(db_error)?;
         Ok(SearchPage {
+            total_count_exact: true,
             returned_count: results.len(),
             results,
             total_count: total,
@@ -2222,6 +2230,7 @@ impl SqliteProvider {
             // PS-15:「全部」degrades to main;「仅路径」returns no hits.
             if request.scope == SearchScope::Path {
                 return Ok(SearchPage {
+                    total_count_exact: true,
                     returned_count: 0,
                     results: Vec::new(),
                     total_count: 0,
@@ -2245,8 +2254,23 @@ impl SqliteProvider {
             return scoped_search::page(self, request, cancel);
         }
         let start = Instant::now();
+        let before = self.observe_search_revision()?;
         let mut conn = self.search_reader(cancel)?;
         let tx = conn.transaction().map_err(db_error)?;
+        tx.query_row("SELECT COUNT(*) FROM library_meta", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(db_error)?;
+        let revision = self.observe_search_revision()?;
+        if before != revision {
+            return Err(Error::Validation(
+                "CURSOR_STALE: library changed while opening search".into(),
+            ));
+        }
+        let cursor = scoped_search::native_cursor(self, request, revision)?;
+        let position = cursor
+            .as_ref()
+            .map_or(request.offset as u64, |(_, position)| *position);
         let page = dir_search::search(&dir_search::DirSearch {
             conn: &tx,
             cache: &self.dir_index,
@@ -2254,7 +2278,7 @@ impl SqliteProvider {
             query: &request.query,
             scope: request.scope,
             visibility: request.filters.visibility,
-            cursor: request.cursor.as_deref(),
+            cursor: cursor.as_ref().map(|(inner, _)| inner.as_str()),
             offset: request.offset,
             limit: request.limit,
         })?;
@@ -2283,33 +2307,42 @@ impl SqliteProvider {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let next_position = position.saturating_add(results.len() as u64);
         let next_cursor = page
             .has_more
             .then(|| {
                 page.hits.last().map(|hit| {
-                    dir_search::encode_cursor(
-                        hit.tier,
-                        hit.score,
-                        hit.id,
-                        dir_search::SEARCH_PATH_REV,
+                    scoped_search::encode_native_cursor(
+                        self,
+                        request,
+                        revision,
+                        next_position,
+                        dir_search::encode_cursor(
+                            hit.tier,
+                            hit.score,
+                            hit.id,
+                            dir_search::SEARCH_PATH_REV,
+                        ),
                     )
                 })
             })
-            .flatten();
-        let skipped = if request.cursor.is_some() {
-            0
-        } else {
-            request.offset as u64
-        };
+            .flatten()
+            .transpose()?;
+        let total_count_exact = !page.has_more
+            && (page.short_circuited || position == 0 || cursor.is_some() || !results.is_empty());
         let total_count = if page.short_circuited {
             0
+        } else if results.is_empty() && cursor.is_none() && position != 0 {
+            // An arbitrary deep offset gives no evidence about the skipped count.
+            0
         } else {
-            skipped + results.len() as u64 + u64::from(page.has_more)
+            next_position.saturating_add(u64::from(page.has_more))
         };
         Ok(SearchPage {
             returned_count: results.len(),
             results,
             total_count,
+            total_count_exact,
             query: request.query.clone(),
             execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
             cache_hit: false,
