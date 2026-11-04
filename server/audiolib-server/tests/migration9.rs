@@ -283,7 +283,8 @@ async fn paused_reads_scopes_and_switching_writes_follow_http_schema() {
         request(&state, Method::POST, "/api/vendor-import", false)
             .await
             .status(),
-        StatusCode::NOT_FOUND
+        // The implemented history resource is GET-only. Its POST is not an import.
+        StatusCode::METHOD_NOT_ALLOWED
     );
     let mut lock = db.as_os_str().to_os_string();
     lock.push(".migration9.lock");

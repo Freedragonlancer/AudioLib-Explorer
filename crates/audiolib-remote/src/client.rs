@@ -539,6 +539,14 @@ impl RemoteClient {
                     .header(
                         audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX_HEADER,
                         &audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX.to_string(),
+                    )
+                    .header(
+                        audiolib_core::compatibility::SEARCH_STORAGE_MAX_HEADER,
+                        &audiolib_core::compatibility::SEARCH_STORAGE_MAX.to_string(),
+                    )
+                    .header(
+                        audiolib_core::compatibility::TOKENIZATION_MAX_HEADER,
+                        &audiolib_core::compatibility::TOKENIZATION_MAX.to_string(),
                     );
             }
             if authenticated && !self.token.is_empty() {

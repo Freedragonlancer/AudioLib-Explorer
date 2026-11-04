@@ -250,6 +250,10 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             audiolib_core::server_upgrade::VENDOR_IMPORT_API,
             crate::vendor_import::router(),
         )
+        .route(
+            &format!("{}/", audiolib_core::server_upgrade::VENDOR_IMPORT_API),
+            get(crate::vendor_import::history),
+        )
         .route_layer(manage())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
