@@ -5,6 +5,95 @@ use audiolib_core::{self as core, vendor_import::*};
 use slint::Model;
 use std::sync::{Condvar, Mutex, mpsc};
 
+const ASYNC_ROOT_ENV: &str = "AUDIOLIB_VENDOR_UI_ASYNC_ROOT";
+
+fn isolated_async(child: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("controller::search_v2_ux::vendor_ui::tests::{child}"),
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(ASYNC_ROOT_ENV, root.path())
+        .env("AUDIOLIB_DATA_DIR", root.path().join("preferences"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{child}: {}\n{stdout}\n{stderr}",
+        output.status
+    );
+}
+
+fn pump_until(ready: impl Fn() -> bool + 'static) {
+    let ready = std::rc::Rc::new(ready);
+    if ready() {
+        return;
+    }
+    let started = Instant::now();
+    let completed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = completed.clone();
+    let poll = ready.clone();
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(10),
+        move || {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "vendor UI event-loop transition completes"
+            );
+            if poll() && !observed.replace(true) {
+                slint::quit_event_loop().unwrap();
+            }
+        },
+    );
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    assert!(
+        completed.get() || ready(),
+        "event loop exited before the expected vendor publication"
+    );
+}
+
+fn async_controller() -> (AppWindow, Arc<Controller>, audiolib_audio::AudioEngine) {
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = std::path::PathBuf::from(
+        std::env::var_os(ASYNC_ROOT_ENV).expect("isolated parent supplies an owned root"),
+    );
+    assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+    let preferences = root.join("preferences");
+    std::fs::create_dir_all(&preferences).unwrap();
+    // Explicit fixture settings prevent first-run discovery of any working library.
+    std::fs::write(
+        preferences.join("settings.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "active_database": root.join("library.db"),
+            "language": "en",
+            "audition_play_on_single_click": false,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (ui, c, engine) = controller(&root);
+    let weak = ui.as_weak();
+    let pending = c.clone();
+    pump_until(move || {
+        weak.upgrade().is_some_and(|ui| {
+            !ui.get_search_workspace_loading()
+                && !ui.get_task_restoring()
+                && !ui.get_searching()
+                && !pending.task_workspace.lock().unwrap().loading
+        })
+    });
+    (ui, c, engine)
+}
+
 fn preview() -> VendorImportPreview {
     VendorImportPreview {
         import_id: "current-library-batch".into(),
@@ -373,12 +462,9 @@ fn paged_provider(c: &Arc<Controller>) -> Arc<ControlledProvider> {
     provider
 }
 
-fn wait_vendor_job(c: &Controller) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while c.search_v2_busy.load(Ordering::Acquire) && Instant::now() < deadline {
-        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn wait_vendor_job(c: &Arc<Controller>) {
+    let pending = c.clone();
+    pump_until(move || !pending.search_v2_busy.load(Ordering::Acquire));
     assert!(
         !c.search_v2_busy.load(Ordering::Acquire),
         "vendor page request completes"
@@ -387,9 +473,13 @@ fn wait_vendor_job(c: &Controller) {
 
 #[test]
 fn candidates_beyond_inline_cap_can_be_paged_inspected_and_explicitly_confirmed() {
-    i_slint_backend_testing::init_no_event_loop();
-    let root = tempfile::tempdir().unwrap();
-    let (ui, c, _engine) = controller(root.path());
+    isolated_async("child_candidates_beyond_inline_cap");
+}
+
+#[test]
+#[ignore = "isolated real event-loop candidate paging regression"]
+fn child_candidates_beyond_inline_cap() {
+    let (ui, c, _engine) = async_controller();
     let provider = paged_provider(&c);
     let mut preview = preview();
     preview.samples[0].candidates = (1..=32)
@@ -455,9 +545,13 @@ fn candidates_beyond_inline_cap_can_be_paged_inspected_and_explicitly_confirmed(
 
 #[test]
 fn byte_bounded_row_pages_advance_by_actual_length_and_previous_offsets() {
-    i_slint_backend_testing::init_no_event_loop();
-    let root = tempfile::tempdir().unwrap();
-    let (ui, c, _engine) = controller(root.path());
+    isolated_async("child_byte_bounded_row_pages");
+}
+
+#[test]
+#[ignore = "isolated real event-loop row paging regression"]
+fn child_byte_bounded_row_pages() {
+    let (ui, c, _engine) = async_controller();
     let provider = paged_provider(&c);
     let mut preview = preview();
     preview.rows = 9;
@@ -503,9 +597,13 @@ fn byte_bounded_row_pages_advance_by_actual_length_and_previous_offsets() {
 
 #[test]
 fn close_cancels_original_import_and_waits_for_safe_worker_completion() {
-    i_slint_backend_testing::init_no_event_loop();
-    let root = tempfile::tempdir().unwrap();
-    let (ui, c, _engine) = controller(root.path());
+    isolated_async("child_close_cancels_original_import");
+}
+
+#[test]
+#[ignore = "isolated real event-loop cancelled import close regression"]
+fn child_close_cancels_original_import() {
+    let (ui, c, _engine) = async_controller();
     let (provider, _) = controlled(&c, &ui);
     assert!(ui.get_vi_cancellable());
     c.request_close(&ui);
@@ -514,11 +612,7 @@ fn close_cancels_original_import_and_waits_for_safe_worker_completion() {
     assert!(c.search_v2_busy.load(Ordering::Acquire));
     assert!(!c.closing.load(Ordering::Acquire));
     provider.release();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while c.search_v2_busy.load(Ordering::Acquire) && Instant::now() < deadline {
-        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_vendor_job(&c);
     assert!(!c.search_v2_busy.load(Ordering::Acquire));
     assert!(c.closing.load(Ordering::Acquire));
     c.shutdown();
@@ -526,18 +620,22 @@ fn close_cancels_original_import_and_waits_for_safe_worker_completion() {
 
 #[test]
 fn rollback_cannot_be_cancelled_by_poll_or_close_and_drains_before_exit() {
-    i_slint_backend_testing::init_no_event_loop();
-    let root = tempfile::tempdir().unwrap();
-    let (ui, c, _engine) = controller(root.path());
+    isolated_async("child_rollback_drains_before_exit");
+}
+
+#[test]
+#[ignore = "isolated real event-loop rollback progress and close regression"]
+fn child_rollback_drains_before_exit() {
+    let (ui, c, _engine) = async_controller();
     let (provider, _) = controlled_operation(&c, &ui, false);
     assert!(!ui.get_vi_cancellable());
     // The controlled provider deliberately returns cancellable=true, as an old
     // import status could before the new rollback phase becomes visible.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while ui.get_vi_progress_text() != "0 / 1" && Instant::now() < deadline {
-        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let weak = ui.as_weak();
+    pump_until(move || {
+        weak.upgrade()
+            .is_some_and(|ui| ui.get_vi_progress_text() == "0 / 1")
+    });
     assert_eq!(
         ui.get_vi_progress_text(),
         "0 / 1",
