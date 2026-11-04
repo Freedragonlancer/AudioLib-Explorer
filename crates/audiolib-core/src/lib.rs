@@ -483,10 +483,14 @@ impl SearchRequest {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchPage {
     pub results: Vec<AudioFile>,
     pub total_count: u64,
+    /// False means `total_count` is a lower bound, never an exact last-page bound.
+    /// Older replies omit this field and retain their exact-count semantics.
+    #[serde(default = "search_count_exact_default")]
+    pub total_count_exact: bool,
     pub query: String,
     pub execution_time_ms: f64,
     pub cache_hit: bool,
@@ -494,6 +498,54 @@ pub struct SearchPage {
     /// Keyset cursor for the next page. Absent on the last page and on `scope=main`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+fn search_count_exact_default() -> bool {
+    true
+}
+
+impl Default for SearchPage {
+    fn default() -> Self {
+        Self {
+            results: Vec::new(),
+            total_count: 0,
+            total_count_exact: true,
+            query: String::new(),
+            execution_time_ms: 0.0,
+            cache_hit: false,
+            returned_count: 0,
+            next_cursor: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_page_count_tests {
+    use super::*;
+
+    #[test]
+    fn old_replies_default_to_exact_counts_and_lower_bounds_round_trip() {
+        let mut legacy = serde_json::to_value(SearchPage::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("total_count_exact");
+        let old: SearchPage = serde_json::from_value(legacy).unwrap();
+        assert!(old.total_count_exact);
+        let lower = SearchPage {
+            results: vec![AudioFile {
+                id: 1,
+                ..Default::default()
+            }],
+            returned_count: 1,
+            total_count: 2,
+            total_count_exact: false,
+            next_cursor: Some("opaque-next-position".into()),
+            ..Default::default()
+        };
+        let decoded: SearchPage =
+            serde_json::from_slice(&serde_json::to_vec(&lower).unwrap()).unwrap();
+        assert!(!decoded.total_count_exact);
+        assert_eq!(decoded.total_count, 2);
+        assert_eq!(decoded.next_cursor, lower.next_cursor);
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
