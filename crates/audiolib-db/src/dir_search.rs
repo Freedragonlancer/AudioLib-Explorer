@@ -1149,7 +1149,11 @@ fn ancestor_has(set: &HashSet<i64>, index: &RunIdx, mut dir: i64) -> bool {
 
 fn dir_of(index: &RunIdx, id: i64) -> Option<i64> {
     let position = index.all.partition_point(|run| run.hi < id);
-    (position < index.all.len() && index.all[position].lo <= id).then_some(index.all[position].dir)
+    index
+        .all
+        .get(position)
+        .filter(|run| run.lo <= id)
+        .map(|run| run.dir)
 }
 
 fn top_dirs(set: &HashSet<i64>, index: &RunIdx) -> Vec<i64> {
@@ -1567,6 +1571,16 @@ mod tests {
         finish(&server);
         check(&server, 9, audiolib_core::compatibility::PLAN_B_V9_FORMAT);
         assert_eq!(ids(&server, "Kit", SearchScope::Path), vec![10, 11]);
+    }
+
+    #[test]
+    fn directory_lookup_handles_ids_outside_and_between_runs() {
+        let (_temp, provider) = library();
+        let index = read_index(&provider.reader().unwrap()).unwrap();
+        for id in [i64::MIN, 8, 13, 29, 31, i64::MAX] {
+            assert_eq!(dir_of(&index, id), None, "{id}");
+        }
+        assert_eq!(dir_of(&index, 30), Some(5));
     }
 
     fn ids(provider: &SqliteProvider, query: &str, scope: SearchScope) -> Vec<i64> {
