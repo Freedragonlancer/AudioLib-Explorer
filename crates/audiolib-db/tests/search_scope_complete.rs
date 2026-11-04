@@ -166,6 +166,52 @@ fn optimized_cursor_preserves_global_position_and_reports_count_accuracy() {
 }
 
 #[test]
+fn paths_deeper_than_256_segments_keep_native_filtered_and_facets_consistent() {
+    let (temp, provider) = fixture();
+    let mut conn = Connection::open(temp.path().join("scope.db")).unwrap();
+    audiolib_db::register_library_functions(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    let mut parent = 1;
+    let mut path = "/library-root".to_owned();
+    for id in 10..=310 {
+        let name = if id == 10 {
+            "AncestorOnly DeepSeek"
+        } else if id == 310 {
+            "DeepSeek"
+        } else {
+            "segment"
+        };
+        path.push('/');
+        path.push_str(name);
+        tx.execute("INSERT INTO folders(id,folder_path,folder_name,parent_id,depth) VALUES(?1,?2,?3,?4,?5)",params![id,path,name,parent,id-9]).unwrap();
+        tx.execute("INSERT INTO folder_closure VALUES(?1,?1,0)", [id])
+            .unwrap();
+        tx.execute("INSERT INTO folder_closure SELECT ancestor_id,?1,depth+1 FROM folder_closure WHERE descendant_id=?2",params![id,parent]).unwrap();
+        parent = id;
+    }
+    tx.execute("UPDATE audio_files SET folder_id=310 WHERE id<=4", [])
+        .unwrap();
+    tx.commit().unwrap();
+    provider.rebuild_directory_search().unwrap();
+    for word in ["AncestorOnly", "DeepSeek"] {
+        let native = request(SearchScope::Path, word);
+        assert_eq!(ids(&provider, &native), vec![1, 2, 3, 4], "{word}");
+        let mut filtered = native.clone();
+        filtered.filters.bit_depth = Some(24);
+        assert_eq!(set(&provider, &filtered), set(&provider, &native));
+        let facets = provider.search_folders(&filtered).unwrap();
+        assert_eq!(
+            facets
+                .iter()
+                .find(|folder| folder.id == 310)
+                .unwrap()
+                .file_count,
+            4
+        );
+    }
+}
+
+#[test]
 fn filename_scope_excludes_notes_for_letters_han_and_numeric_terms() {
     let (_temp, provider) = fixture();
     assert_eq!(

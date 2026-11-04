@@ -1135,7 +1135,7 @@ fn path_full(sets: &[HashSet<i64>], index: &RunIdx, dir: i64) -> bool {
 }
 
 fn ancestor_has(set: &HashSet<i64>, index: &RunIdx, mut dir: i64) -> bool {
-    for _ in 0..256 {
+    for _ in 0..=index.parent.len() {
         if set.contains(&dir) {
             return true;
         }
@@ -1161,7 +1161,7 @@ fn top_dirs(set: &HashSet<i64>, index: &RunIdx) -> Vec<i64> {
         .copied()
         .filter(|&dir| {
             let mut cursor = dir;
-            for _ in 0..256 {
+            for _ in 0..=index.parent.len() {
                 match index.parent.get(&cursor) {
                     Some(&parent) if parent != cursor => {
                         if set.contains(&parent) {
