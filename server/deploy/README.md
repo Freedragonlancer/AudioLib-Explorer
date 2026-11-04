@@ -119,10 +119,25 @@ Program version = workspace `Cargo.toml`, API = `/api/v1/`, library schema = `SC
 
 ## Automatic release updates
 
-Every server start checks the official GitHub repository in the background. The listener
+The next 0.9.0 server payload uses layout revision 2: both `audiolib-server`
+and the production `audiolib-migrate` executable are delivered (with `.exe` on
+Windows). The frozen 0.7.8 updater policy refuses this new layout. Bootstrap it
+manually after validating the archive and checksum; do not use an older
+server's automatic install action for this transition. Package reports record
+`automatic_upgrade_compatible=false`, `manual_bootstrap_required=true` and
+`minimum_updater_version=0.9.0`. A development binary reporting 0.8.7 is not a
+published 0.9.0 updater. See the [release runbook](../../doc/Rust_Release_0.9.0.md) for client-first deployment,
+deferred server migration and backup/rollback pairing. Keep configuration,
+credentials and the existing library outside the payload. With the service
+stopped, the delivered tool supports `audiolib-migrate status|start|rollback
+--db <owned-library-path>` and emits JSON; it has no `--version` command and
+does not include test-only fault-injection hooks.
+
+For native installations with automatic updates enabled, every server start checks
+the official GitHub repository in the background. The listener
 and library opening do not wait for GitHub. Open the LAN-only `/admin` page to see the
 result, release notes, or retry a failed/offline check. Confirm the displayed release tag
-to download, validate its archive and checksum, drain requests and library work, install
+to download a layout-compatible update, validate its archive and checksum, drain requests and library work, install
 the package-owned files, and restart with the same arguments, environment and working
 directory. Database, audio files, configuration, tokens and generated runtime data stay
 outside the update payload. A running scan must finish or be cancelled before confirming.
