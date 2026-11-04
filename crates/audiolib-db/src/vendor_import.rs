@@ -90,8 +90,42 @@ fn get_meta<T: serde::de::DeserializeOwned>(conn: &Connection, key: &str) -> Res
         .map_err(db_error)?;
     decode(&value)
 }
+fn optional_meta<T: serde::de::DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<T>> {
+    conn.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| {
+        r.get::<_, String>(0)
+    })
+    .optional()
+    .map_err(db_error)?
+    .map(|s| decode(&s))
+    .transpose()
+}
+fn clear_error(stage: &Connection) -> Result<()> {
+    stage
+        .execute(
+            "DELETE FROM meta WHERE key IN ('last_error','last_operation')",
+            [],
+        )
+        .map_err(db_error)?;
+    Ok(())
+}
 
 impl SqliteProvider {
+    // Best effort secondary recording must never hide the original operation error.
+    fn vendor_record_failure(&self, id: &str, operation: &str, key: Option<&str>, error: &Error) {
+        if let Ok(stage) = self.vendor_stage(id) {
+            let _ = set_meta(&stage, "last_error", &format!("{operation}: {error}"));
+            let _ = set_meta(&stage, "last_operation", &operation);
+        }
+        if matches!(operation, "commit" | "rollback")
+            && let Ok(conn) = self.writer()
+            && storage::schema_exists(&conn).is_ok_and(|v| v)
+        {
+            let _=conn.execute("UPDATE audiolib_vendor_jobs SET state='failed',last_error=?3,operation=?4 WHERE import_id=?1 AND (?2 IS NULL OR idempotency_key=?2) AND state IN ('running','paused','failed','rolling_back')",params![id,key,format!("{operation}: {error}"),operation]);
+        }
+    }
     fn vendor_root_directory(&self, create: bool) -> Result<PathBuf> {
         let name = self
             .path
@@ -229,6 +263,16 @@ impl SqliteProvider {
         File::create(directory.join("owner"))?.write_all(self.album_namespace().as_bytes())?;
         let mut stage = Connection::open(directory.join("preview.db")).map_err(db_error)?;
         stage_schema(&stage)?;
+        set_meta(
+            &stage,
+            "preview",
+            &VendorImportPreview {
+                import_id: id.clone(),
+                state: Some("preparing".into()),
+                options: options.clone(),
+                ..Default::default()
+            },
+        )?;
         let mut inputs = Vec::new();
         let mut rejected = Vec::new();
         let mut labels = BTreeSet::new();
@@ -238,11 +282,12 @@ impl SqliteProvider {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let name = if labels.insert(basename.clone()) {
-                basename.clone()
-            } else {
-                format!("{}:{basename}", index + 1)
-            };
+            let mut name = basename.clone();
+            let mut suffix = index + 1;
+            while !labels.insert(name.clone()) {
+                name = format!("{suffix}:{basename}");
+                suffix += 1;
+            }
             let copied = (|| -> Result<Input> {
                 if is_skipped_name(&basename) {
                     return Err(invalid("System/Office lock file skipped"));
@@ -288,23 +333,24 @@ impl SqliteProvider {
         set_meta(&stage, "rejected", &rejected)?;
         set_meta(&stage, "cancel", &false)?;
         set_meta(&stage, "created", &now()?)?;
-        {
+        let result = (|| {
             let library = self.reader()?;
             matching::build_index(&mut stage, &library)?;
-        }
-        let result = self.vendor_parse_preview(&id, &mut stage, options);
+            self.vendor_parse_preview(&id, &mut stage, options)
+        })();
         if let Err(error) = &result {
             set_meta(
                 &stage,
                 "preview",
                 &VendorImportPreview {
-                    import_id: id,
+                    import_id: id.clone(),
                     state: Some("failed".into()),
                     warnings: vec![error.to_string()],
                     options: options.clone(),
                     ..Default::default()
                 },
             )?;
+            self.vendor_record_failure(&id, "preview", None, error);
         }
         result
     }
@@ -324,12 +370,15 @@ impl SqliteProvider {
                 stage
                     .execute_batch("RELEASE vendor_preview")
                     .map_err(db_error)?;
+                clear_error(stage)?;
                 Ok(preview)
             }
             Err(error) => {
                 stage
                     .execute_batch("ROLLBACK TO vendor_preview; RELEASE vendor_preview")
                     .map_err(db_error)?;
+                let _ = set_meta(stage, "last_error", &format!("preview: {error}"));
+                let _ = set_meta(stage, "last_operation", &"preview");
                 Err(error)
             }
         }
@@ -628,11 +677,13 @@ impl SqliteProvider {
         let mut result = None;
         let mut completed = 0;
         let mut idempotency_key = None;
+        let mut error: Option<String> = optional_meta(&stage, "last_error")?;
         {
             let conn = self.reader()?;
             if storage::schema_exists(&conn)? {
-                let job:Option<(String,u64,u64,u64,String)>=conn.query_row("SELECT state,checkpoint,written,restored,idempotency_key FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,crate::unsigned(r,1)?,crate::unsigned(r,2)?,crate::unsigned(r,3)?,r.get(4)?))).optional().map_err(db_error)?;
-                if let Some((mut state, checkpoint, written, restored, key)) = job {
+                let job:Option<(String,u64,u64,u64,String,Option<String>)>=conn.query_row("SELECT state,checkpoint,written,restored,idempotency_key,last_error FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,crate::unsigned(r,1)?,crate::unsigned(r,2)?,crate::unsigned(r,3)?,r.get(4)?,r.get(5)?))).optional().map_err(db_error)?;
+                if let Some((mut state, checkpoint, written, restored, key, saved_error)) = job {
+                    error = saved_error.or(error);
                     idempotency_key = Some(key);
                     if state == "running" {
                         let owner = OpenOptions::new()
@@ -664,7 +715,7 @@ impl SqliteProvider {
             result,
             completed,
             cancellable,
-            error: None,
+            error,
             idempotency_key,
         })
     }
@@ -807,8 +858,43 @@ impl SqliteProvider {
             ));
         }
         let _lock = self.vendor_job_lock(id)?;
+        let result = self.vendor_import_commit_locked(id, key, cancel, progress);
+        if let Err(error) = &result {
+            self.vendor_record_failure(id, "commit", Some(key), error);
+        }
+        result
+    }
+
+    fn vendor_import_commit_locked(
+        &self,
+        id: &str,
+        key: &str,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(VendorImportStatus),
+    ) -> Result<VendorImportResult> {
         let stage = self.vendor_stage(id)?;
         let preview: VendorImportPreview = get_meta(&stage, "preview")?;
+        let options_hash = format!("{:x}", Sha256::digest(json(&preview.options)?.as_bytes()));
+        // A durable receipt needs no source payload. In particular a restored backup
+        // may recover only preview_json while still owning the completed commit result.
+        {
+            let conn = self.reader()?;
+            if storage::schema_exists(&conn)? {
+                let saved:Option<(String,String,Option<String>)>=conn.query_row("SELECT idempotency_key,options_hash,commit_result FROM audiolib_vendor_jobs WHERE import_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_error)?;
+                if let Some((saved_key, hash, receipt)) = saved {
+                    if saved_key != key || hash != options_hash {
+                        return Err(invalid(
+                            "Idempotency-Key or mapping differs from the persisted import",
+                        ));
+                    }
+                    if let Some(receipt) = receipt {
+                        let result = decode(&receipt)?;
+                        clear_error(&stage)?;
+                        return Ok(result);
+                    }
+                }
+            }
+        }
         if !preview.can_commit {
             return Err(invalid(
                 "Preview has no confirmed matches or lacks an identity-column mapping",
@@ -822,7 +908,6 @@ impl SqliteProvider {
                 "Recoverable source preview is incomplete; restore its owned source files before resuming",
             ));
         }
-        let options_hash = format!("{:x}", Sha256::digest(json(&preview.options)?.as_bytes()));
         let mut checkpoint = 0u64;
         let mut written = 0u64;
         {
@@ -859,7 +944,7 @@ impl SqliteProvider {
                 checkpoint = saved_checkpoint;
                 written = saved_written;
                 tx.execute(
-                    "UPDATE audiolib_vendor_jobs SET state='running' WHERE import_id=?1",
+                    "UPDATE audiolib_vendor_jobs SET state='running',last_error=NULL,operation='commit' WHERE import_id=?1",
                     [id],
                 )
                 .map_err(db_error)?;
@@ -868,11 +953,14 @@ impl SqliteProvider {
             }
             tx.commit().map_err(db_error)?;
         }
-        set_meta(&stage, "cancel", &false)?;
+        clear_error(&stage)?;
         // Calibrate on a small first batch before approaching the 5000-row ceiling.
         let mut batch_rows = 256u64;
         loop {
             if cancel.load(Ordering::Acquire) || get_meta::<bool>(&stage, "cancel")? {
+                // Consume only this cancellation. Never reset an unobserved request
+                // when starting a commit/resume: it may race the UI worker startup.
+                set_meta(&stage, "cancel", &false)?;
                 let conn = self.writer()?;
                 conn.execute(
                     "UPDATE audiolib_vendor_jobs SET state='paused' WHERE import_id=?1",
@@ -927,7 +1015,9 @@ impl SqliteProvider {
                                 "Audio identity/path changed after preview; create a fresh preview",
                             ));
                         }
-                        storage::save_before(&tx, id, audio_id)?;
+                        if !affected.contains(&audio_id) {
+                            storage::save_before(&tx, id, audio_id)?;
+                        }
                         for (field, value) in &row.values {
                             storage::add_event(
                                 &tx,
@@ -940,6 +1030,7 @@ impl SqliteProvider {
                                     sheet: &row.sheet,
                                     row: row.row,
                                     overwrite: preview.options.overwrite,
+                                    language: row.values.get("language").map_or("", String::as_str),
                                 },
                             )?;
                         }
@@ -973,7 +1064,7 @@ impl SqliteProvider {
         };
         {
             let conn = self.writer()?;
-            conn.execute("UPDATE audiolib_vendor_jobs SET state='committed',commit_result=?2 WHERE import_id=?1",params![id,json(&result)?]).map_err(db_error)?;
+            conn.execute("UPDATE audiolib_vendor_jobs SET state='committed',commit_result=?2,last_error=NULL,operation='commit' WHERE import_id=?1",params![id,json(&result)?]).map_err(db_error)?;
         }
         progress(self.vendor_import_status_impl(id)?);
         Ok(result)
@@ -983,6 +1074,14 @@ impl SqliteProvider {
     /// Later imports and rescanned embedded Metadata survive, including overlapping fields.
     pub fn vendor_import_rollback_impl(&self, id: &str) -> Result<VendorImportResult> {
         let _lock = self.vendor_job_lock(id)?;
+        let result = self.vendor_import_rollback_locked(id);
+        if let Err(error) = &result {
+            self.vendor_record_failure(id, "rollback", None, error);
+        }
+        result
+    }
+
+    fn vendor_import_rollback_locked(&self, id: &str) -> Result<VendorImportResult> {
         {
             let conn = self.writer()?;
             validate_schema(&conn)?;
@@ -998,8 +1097,9 @@ impl SqliteProvider {
                     "This preview has no committed batches to roll back",
                 ));
             }
-            conn.execute("UPDATE audiolib_vendor_jobs SET state='rolling_back' WHERE import_id=?1 AND state<>'rolled_back'",[id]).map_err(db_error)?;
+            conn.execute("UPDATE audiolib_vendor_jobs SET state='rolling_back',last_error=NULL,operation='rollback' WHERE import_id=?1 AND state<>'rolled_back'",[id]).map_err(db_error)?;
         }
+        clear_error(&self.vendor_stage(id)?)?;
         loop {
             let ids = {
                 let conn = self.reader()?;
@@ -1017,12 +1117,7 @@ impl SqliteProvider {
             let tx = conn.transaction().map_err(db_error)?;
             for audio_id in &ids {
                 // Before-images are retained and required even if another batch replaced the same value.
-                let captured:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2)",params![id,audio_id],|r|r.get(0)).map_err(db_error)?;
-                if !captured {
-                    return Err(invalid(
-                        "Vendor before-image is missing; automatic rollback refused",
-                    ));
-                }
+                storage::verify_before(&tx, id, *audio_id)?;
                 tx.execute(
                     "DELETE FROM audiolib_vendor_events WHERE import_id=?1 AND audio_file_id=?2",
                     params![id, audio_id],
@@ -1039,7 +1134,7 @@ impl SqliteProvider {
         }
         let conn = self.writer()?;
         conn.execute(
-            "UPDATE audiolib_vendor_jobs SET state='rolled_back' WHERE import_id=?1",
+            "UPDATE audiolib_vendor_jobs SET state='rolled_back',last_error=NULL,operation='rollback' WHERE import_id=?1",
             [id],
         )
         .map_err(db_error)?;

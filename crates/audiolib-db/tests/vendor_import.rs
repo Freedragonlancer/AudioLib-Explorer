@@ -3,6 +3,7 @@
 use audiolib_core::{DataProvider, SearchRequest, vendor_import::*};
 use audiolib_db::SqliteProvider;
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -59,6 +60,33 @@ fn count(provider: &SqliteProvider, query: &str) -> u64 {
 fn projection(path: &Path, id: i64) -> String {
     connection(path).query_row("SELECT audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)) FROM audio_files WHERE id=?1",[id],|r|r.get(0)).unwrap()
 }
+fn fts_hash(path: &Path) -> String {
+    fts_subset_hash(path, None)
+}
+fn fts_subset_hash(path: &Path, id: Option<i64>) -> String {
+    let conn = connection(path);
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE temp.vendor_postings USING fts5vocab(main,audio_search,instance)",
+    )
+    .unwrap();
+    let mut query=conn.prepare("SELECT term,doc,col,offset FROM temp.vendor_postings WHERE (?1 IS NULL OR doc=?1) ORDER BY term,doc,col,offset").unwrap();
+    let mut hash = Sha256::new();
+    for row in query
+        .query_map([id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+    {
+        hash.update(serde_json::to_vec(&row.unwrap()).unwrap());
+        hash.update(b"\n");
+    }
+    format!("{hash:x}", hash = hash.finalize())
+}
 
 #[test]
 fn preview_is_business_read_only_and_commit_rollback_preserve_metadata_and_fts() {
@@ -73,6 +101,7 @@ fn preview_is_business_read_only_and_commit_rollback_preserve_metadata_and_fts()
         )
         .unwrap();
     let derived = projection(&database, 1);
+    let postings = fts_hash(&database);
     let preview = provider
         .vendor_import_preview_impl(&input("basic.csv"))
         .unwrap();
@@ -128,6 +157,11 @@ fn preview_is_business_read_only_and_commit_rollback_preserve_metadata_and_fts()
         .unwrap();
     assert_eq!(rollback.state.as_deref(), Some("rolled_back"));
     assert_eq!(projection(&database, 1), derived);
+    assert_eq!(
+        fts_hash(&database),
+        postings,
+        "logical FTS tokens/columns/offsets restore exactly, independent of FTS segment layout"
+    );
     assert_eq!(count(&provider, "vendoruniqueword"), 0);
     assert_eq!(
         provider
@@ -555,6 +589,17 @@ fn commit_pause_resume_is_atomic_and_status_exposes_the_original_key() {
         .vendor_import_status_impl(&preview.import_id)
         .unwrap();
     assert_eq!(status.idempotency_key.as_deref(), Some("resumable-key"));
+    provider
+        .vendor_import_cancel_impl(&preview.import_id)
+        .unwrap();
+    let pending = provider
+        .vendor_import_commit_impl(&preview.import_id, "resumable-key")
+        .unwrap();
+    assert_eq!(pending.state.as_deref(), Some("paused"));
+    assert_eq!(
+        pending.written, partial.written,
+        "a cancellation already delivered before the worker starts must not be erased"
+    );
     let complete = provider
         .vendor_import_commit_impl(&preview.import_id, "resumable-key")
         .unwrap();
@@ -632,7 +677,7 @@ fn committed_rollback_history_survives_missing_preview_sidecars() {
         "Filename,Description\ndoor.wav,historyword\n",
     );
     let preview = provider.vendor_import_preview_impl(&file).unwrap();
-    provider
+    let receipt = provider
         .vendor_import_commit_impl(&preview.import_id, "history-key")
         .unwrap();
     drop(provider);
@@ -643,10 +688,498 @@ fn committed_rollback_history_survives_missing_preview_sidecars() {
     let history = reopened.vendor_import_history_impl().unwrap();
     assert_eq!(history.imports.len(), 1);
     assert_eq!(history.imports[0].preview.import_id, preview.import_id);
+    assert_eq!(
+        reopened
+            .vendor_import_commit_impl(&preview.import_id, "history-key")
+            .unwrap(),
+        receipt,
+        "receipt replay does not require lost preview payloads"
+    );
     reopened
         .vendor_import_rollback_impl(&preview.import_id)
         .unwrap();
     assert_eq!(count(&reopened, "historyword"), 0);
+    assert_eq!(
+        reopened
+            .vendor_import_commit_impl(&preview.import_id, "history-key")
+            .unwrap(),
+        receipt,
+        "rollback does not change the original commit receipt"
+    );
+}
+
+#[test]
+fn aliases_utf8_bom_empty_and_header_only_inputs_keep_the_original_contracts() {
+    let (temp, provider, _) = fixture(false);
+    let file = text(
+        temp.path(),
+        "aliases.csv",
+        "\u{feff}Filename,BWDescription,Manufacturer\ndoor.wav,bomdescriptionword,bompublisherword\n",
+    );
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    assert_eq!(preview.files[0].encoding, "UTF-8");
+    assert_eq!(
+        preview.samples[0].values["description"],
+        "bomdescriptionword"
+    );
+    assert_eq!(preview.samples[0].values["publisher"], "bompublisherword");
+    for content in ["", "Filename,Description\n"] {
+        let empty = text(temp.path(), "empty.csv", content);
+        let preview = provider.vendor_import_preview_impl(&empty).unwrap();
+        assert_eq!(preview.rows, 0);
+        assert!(!preview.can_commit);
+        assert!(
+            preview.files[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("No data")
+        );
+    }
+}
+
+#[test]
+fn explicit_header_override_requires_a_real_row_and_headers_obey_the_text_budget() {
+    let (temp, provider, _) = fixture(false);
+    let path = text(
+        temp.path(),
+        "headers.csv",
+        "Title\nFilename,Description\ndoor.wav,headerword\n",
+    );
+    let options = VendorImportOptions {
+        sheet_mappings: vec![VendorSheetMapping {
+            source_file: "headers.csv".into(),
+            sheet: "text".into(),
+            header_row: Some(10),
+            mapping: VendorColumnMapping {
+                filename: Some("Filename".into()),
+                fields: BTreeMap::from([("description".into(), "Description".into())]),
+                ..Default::default()
+            },
+        }],
+        ..Default::default()
+    };
+    let preview = provider
+        .vendor_import_preview_with_options_impl(&path, &options)
+        .unwrap();
+    assert_eq!(preview.rows, 0);
+    assert!(!preview.can_commit);
+    assert!(
+        preview.files[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("header row")
+    );
+    let path = text(
+        temp.path(),
+        "large-header.csv",
+        &format!(
+            "Filename,Description,{}\ndoor.wav,headerword,ignored\n",
+            "x".repeat(300_000)
+        ),
+    );
+    let preview = provider.vendor_import_preview_impl(&path).unwrap();
+    assert_eq!(preview.rows, 1);
+    assert!(preview.can_commit);
+    assert_eq!(preview.files[0].truncated_rows, 1);
+    assert!(
+        preview.sheets[0]
+            .headers
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
+            <= 262_144
+    );
+}
+
+#[test]
+fn xlsx_cached_formulas_are_data_and_merged_cells_keep_the_upper_left_value() {
+    let (temp, provider, _) = fixture(false);
+    let path = temp.path().join("formulas-merged.xlsx");
+    workbook_with_first_sheet(
+        &path,
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Filename</t></is></c><c r="B1" t="inlineStr"><is><t>Description</t></is></c><c r="C1" t="inlineStr"><is><t>Category</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>door.wav</t></is></c><c r="B2"><f>1/0</f><v>7</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>slam.wav</t></is></c><c r="B3" t="inlineStr"><is><t>mergedupperword</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="B3:C3"/></mergeCells></worksheet>"#,
+    );
+    let preview = provider.vendor_import_preview_impl(&path).unwrap();
+    assert!(preview.files[0].error.is_none(), "{preview:?}");
+    let row = preview
+        .samples
+        .iter()
+        .find(|r| r.values.get("description").is_some_and(|v| v == "7"))
+        .unwrap();
+    assert_eq!(row.matched_id, Some(1));
+    let row = preview
+        .samples
+        .iter()
+        .find(|r| {
+            r.values
+                .get("description")
+                .is_some_and(|v| v == "mergedupperword")
+        })
+        .unwrap();
+    assert_eq!(row.matched_id, Some(2));
+    assert!(!row.values.contains_key("category"));
+    for value in ["=SUM(A1)", "+command", "-command", "@command"] {
+        assert!(report_csv_cell(value).starts_with("\"'"));
+    }
+}
+
+#[test]
+fn declared_language_priority_retains_all_sources_and_respects_full_preferences() {
+    let (temp, provider, database) = fixture(false);
+    let content = "Filename,Description,Language\ndoor.wav,AAAfrword,French\ndoor.wav,ZZZenword,en-GB\ndoor.wav,中文优先词,zh-CN\n";
+    let file = text(temp.path(), "declared.csv", content);
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    provider
+        .vendor_import_commit_impl(&preview.import_id, "declared-default")
+        .unwrap();
+    let raw: String = connection(&database)
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        value["vendor_metadata"]["fields"]["description"],
+        serde_json::json!(["中文优先词", "ZZZenword", "AAAfrword"])
+    );
+    for term in ["AAAfrword", "ZZZenword", "中文优先词"] {
+        assert_eq!(count(&provider, term), 1);
+    }
+    let en:String=connection(&database).query_row("SELECT language FROM audiolib_vendor_events WHERE field='description' AND value='ZZZenword'",[],|r|r.get(0)).unwrap();
+    assert_eq!(en, "en-GB", "declared raw language provenance is preserved");
+    let options = VendorImportOptions {
+        preferred_languages: vec!["fr".into(), "zh".into(), "en".into()],
+        ..Default::default()
+    };
+    let reversed = text(
+        temp.path(),
+        "reverse.csv",
+        "Filename,Description,Language\ndoor.wav,中文优先词,zh-CN\ndoor.wav,ZZZenword,en-GB\ndoor.wav,AAAfrword,French\n",
+    );
+    let second = provider
+        .vendor_import_preview_with_options_impl(&reversed, &options)
+        .unwrap();
+    provider
+        .vendor_import_commit_impl(&second.import_id, "declared-preference")
+        .unwrap();
+    let raw: String = connection(&database)
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        value["vendor_metadata"]["fields"]["description"],
+        serde_json::json!(["AAAfrword", "中文优先词", "ZZZenword"])
+    );
+    provider
+        .vendor_import_rollback_impl(&second.import_id)
+        .unwrap();
+    let raw: String = connection(&database)
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["vendor_metadata"]["fields"]["description"],
+        serde_json::json!(["中文优先词", "ZZZenword", "AAAfrword"])
+    );
+}
+
+#[test]
+fn duplicate_text_keeps_each_declared_language_without_duplicate_mirror_values() {
+    let (temp, provider, database) = fixture(false);
+    let file = text(
+        temp.path(),
+        "same-value-languages.csv",
+        "Filename,Description,Language\ndoor.wav,zsharedword,fr\ndoor.wav,zsharedword,en\ndoor.wav,aforeignword,de\n",
+    );
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    provider
+        .vendor_import_commit_impl(&preview.import_id, "same-value-languages")
+        .unwrap();
+    let conn = connection(&database);
+    assert_eq!(conn.query_row("SELECT count(*) FROM audiolib_vendor_events WHERE field='description' AND value='zsharedword'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    let raw: String = conn
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["vendor_metadata"]["fields"]["description"],
+        serde_json::json!(["zsharedword", "aforeignword"])
+    );
+}
+
+#[test]
+fn same_named_inputs_and_repeated_values_keep_distinct_source_provenance() {
+    let (temp, provider, database) = fixture(false);
+    let mut files = Vec::new();
+    for (folder, value) in [("a", "sourceaword"), ("b", "sourcebword")] {
+        let directory = temp.path().join(folder);
+        fs::create_dir(&directory).unwrap();
+        files.push(text(
+            &directory,
+            "metadata.csv",
+            &format!("Filename,Description,Keywords\ndoor.wav,sharedsameword,{value}\n"),
+        ));
+    }
+    let preview = provider
+        .vendor_import_preview_files_impl(&files, &VendorImportOptions::default())
+        .unwrap();
+    assert_eq!(preview.rows, 2);
+    assert_eq!(preview.matched, 2);
+    assert_ne!(preview.samples[0].row_id, preview.samples[1].row_id);
+    assert_ne!(
+        preview.samples[0].source_file,
+        preview.samples[1].source_file
+    );
+    provider
+        .vendor_import_commit_impl(&preview.import_id, "same-names")
+        .unwrap();
+    let conn = connection(&database);
+    assert_eq!(conn.query_row("SELECT count(*) FROM audiolib_vendor_events WHERE field='description' AND value='sharedsameword'",[],|r|r.get::<_,i64>(0)).unwrap(),2,"same searchable value retains both raw source rows");
+    assert_eq!(conn.query_row("SELECT count(DISTINCT source_file) FROM audiolib_vendor_events WHERE field='description'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(conn.query_row("SELECT count(*) FROM vendor_metadata WHERE field='description' AND value='sharedsameword'",[],|r|r.get::<_,i64>(0)).unwrap(),1,"normalized materialization deduplicates text only");
+    for term in ["sourceaword", "sourcebword", "sharedsameword"] {
+        assert_eq!(count(&provider, term), 1);
+    }
+    provider
+        .vendor_import_rollback_impl(&preview.import_id)
+        .unwrap();
+    for term in ["sourceaword", "sourcebword", "sharedsameword"] {
+        assert_eq!(count(&provider, term), 0);
+    }
+}
+
+#[test]
+fn mirror_only_vendor_baseline_survives_a_new_import_and_exact_rollback() {
+    let (temp, provider, database) = fixture(false);
+    let conn = connection(&database);
+    let original = serde_json::json!({"unknown":42,"vendor_metadata":{"fields":{"description":["legacymirrorword"],"keywords":["legacytag"]},"unknown_vendor":{"keep":17}}});
+    conn.execute(
+        "UPDATE audio_files SET metadata_json=?1 WHERE id=1",
+        [original.to_string()],
+    )
+    .unwrap();
+    let before = projection(&database, 1);
+    let postings = fts_hash(&database);
+    let file = text(
+        temp.path(),
+        "new.csv",
+        "Filename,Description\ndoor.wav,newmirrorword\n",
+    );
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    provider
+        .vendor_import_commit_impl(&preview.import_id, "mirror-only")
+        .unwrap();
+    assert_eq!(count(&provider, "legacymirrorword"), 1);
+    assert_eq!(count(&provider, "newmirrorword"), 1);
+    provider
+        .vendor_import_rollback_impl(&preview.import_id)
+        .unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+        original
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM vendor_metadata", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(projection(&database, 1), before);
+    assert_eq!(fts_hash(&database), postings);
+}
+
+#[test]
+fn commit_errors_are_durable_and_explicit_retry_clears_the_error() {
+    let (temp, provider, database) = fixture(false);
+    let file = text(
+        temp.path(),
+        "fail.csv",
+        "Filename,Description\ndoor.wav,durableerrorword\n",
+    );
+    let preview = provider.vendor_import_preview_impl(&file).unwrap();
+    let conn = connection(&database);
+    let path: String = conn
+        .query_row("SELECT file_path FROM audio_files WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "UPDATE audio_files SET file_path=file_path||'.changed' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    assert!(
+        provider
+            .vendor_import_commit_impl(&preview.import_id, "durable-error")
+            .is_err()
+    );
+    drop(provider);
+    let provider = SqliteProvider::open_existing(&database).unwrap();
+    let status = provider
+        .vendor_import_status_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(status.preview.state.as_deref(), Some("failed"));
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("identity/path changed")
+    );
+    assert_eq!(status.completed, 0);
+    assert!(
+        conn.query_row(
+            "SELECT last_error IS NOT NULL FROM audiolib_vendor_jobs",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    conn.execute("UPDATE audio_files SET file_path=?1 WHERE id=1", [path])
+        .unwrap();
+    provider
+        .vendor_import_commit_impl(&preview.import_id, "durable-error")
+        .unwrap();
+    let status = provider
+        .vendor_import_status_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(status.preview.state.as_deref(), Some("committed"));
+    assert!(status.error.is_none());
+    assert_eq!(count(&provider, "durableerrorword"), 1);
+}
+
+#[test]
+fn invalid_mapping_error_is_recoverable_and_does_not_replace_the_last_good_preview() {
+    let (_temp, provider, database) = fixture(false);
+    let preview = provider
+        .vendor_import_preview_impl(&input("basic.csv"))
+        .unwrap();
+    let before = fs::read(&database).unwrap();
+    let options = VendorImportOptions {
+        vendor_root: Some("/outside-known-library".into()),
+        ..Default::default()
+    };
+    assert!(
+        provider
+            .vendor_import_mapping_impl(&preview.import_id, &options)
+            .is_err()
+    );
+    let status = provider
+        .vendor_import_status_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(status.preview.rows, preview.rows);
+    assert!(status.error.is_some());
+    assert_eq!(fs::read(&database).unwrap(), before);
+    provider
+        .vendor_import_mapping_impl(&preview.import_id, &VendorImportOptions::default())
+        .unwrap();
+    assert!(
+        provider
+            .vendor_import_status_impl(&preview.import_id)
+            .unwrap()
+            .error
+            .is_none()
+    );
+}
+
+#[test]
+fn corrupt_before_image_is_refused_atomically_and_new_embedded_metadata_survives_recovery() {
+    let (temp, provider, database) = fixture(false);
+    let preview = provider
+        .vendor_import_preview_impl(&input("basic.csv"))
+        .unwrap();
+    provider
+        .vendor_import_commit_impl(&preview.import_id, "before-image")
+        .unwrap();
+    let conn = connection(&database);
+    let saved: String = conn
+        .query_row(
+            "SELECT before_derived FROM vendor_import_log WHERE audio_file_id=2",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let postings = fts_hash(&database);
+    conn.execute(
+        "UPDATE vendor_import_log SET before_derived='corrupt' WHERE audio_file_id=2",
+        [],
+    )
+    .unwrap();
+    assert!(
+        provider
+            .vendor_import_rollback_impl(&preview.import_id)
+            .is_err()
+    );
+    assert_eq!(
+        fts_hash(&database),
+        postings,
+        "all rows in failed rollback batch stay committed"
+    );
+    let status = provider
+        .vendor_import_status_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(status.preview.state.as_deref(), Some("failed"));
+    assert!(status.error.as_deref().unwrap().contains("before-image"));
+    conn.execute(
+        "UPDATE vendor_import_log SET before_derived=?1 WHERE audio_file_id=2",
+        [saved],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE audio_files SET bwf_description='newembeddedword' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    provider
+        .vendor_import_rollback_impl(&preview.import_id)
+        .unwrap();
+    assert_eq!(count(&provider, "newembeddedword"), 1);
+    assert_eq!(count(&provider, "vendoruniqueword"), 0);
+    let raw: String = conn
+        .query_row(
+            "SELECT metadata_json FROM audio_files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap()
+            .get("vendor_metadata")
+            .is_none()
+    );
+    let fresh = temp.path().join("expected.db");
+    let expected = SqliteProvider::open(&fresh).unwrap();
+    drop(expected);
+    let other = connection(&fresh);
+    other.execute("INSERT INTO audio_files(id,file_path,path_key,filename,bwf_description,user_tags,user_notes,metadata_json) SELECT 1,'/synthetic/door.wav','/synthetic/door.wav','door.wav','newembeddedword','protectedtag','protectednote','{\"unknown\":{\"keep\":42}}'",[]).unwrap();
+    assert_eq!(projection(&database, 1), projection(&fresh, 1));
+    assert_eq!(
+        fts_subset_hash(&database, Some(1)),
+        fts_subset_hash(&fresh, Some(1)),
+        "post-rollback FTS exactly equals current embedded source plus remaining vendor values"
+    );
 }
 
 fn workbook_with_first_sheet(path: &Path, xml: &str) {

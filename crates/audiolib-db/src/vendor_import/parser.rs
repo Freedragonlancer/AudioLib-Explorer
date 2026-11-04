@@ -32,14 +32,13 @@ pub(super) fn canonical(header: &str) -> Option<&'static str> {
         "filepath" | "relativepath" | "path" | "完整路径" | "路径" | "相对路径" => {
             "relative_path"
         }
-        "description" | "desc" | "bwfdescription" | "描述" | "说明" | "中文描述" | "英文描述" => {
-            "description"
-        }
+        "description" | "desc" | "bwfdescription" | "bwdescription" | "描述" | "说明"
+        | "中文描述" | "英文描述" => "description",
         "keywords" | "keyword" | "tags" | "关键词" | "关键字" | "标签" => "keywords",
         "category" | "类别" | "分类" => "category",
         "subcategory" | "子类" | "子分类" => "subcategory",
         "library" | "libraryname" | "库名" | "音效库" => "library",
-        "publisher" | "vendor" | "厂商" | "发行商" => "publisher",
+        "publisher" | "vendor" | "manufacturer" | "厂商" | "发行商" => "publisher",
         "source" | "来源" => "source",
         "designer" | "设计师" => "designer",
         "language" | "lang" | "语言" => "language",
@@ -87,21 +86,25 @@ impl<F: FnMut(Event) -> Result<()>> Sheet<'_, F> {
             .sheet_mappings
             .iter()
             .find(|m| m.source_file == self.source && m.sheet == self.name);
-        let selected = override_mapping
-            .and_then(|m| m.header_row)
-            .and_then(|row| self.pending.iter().position(|(n, _)| *n == row))
-            .unwrap_or_else(|| {
-                self.pending
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(index, (_, cells))| {
-                        (
-                            cells.iter().filter(|s| canonical(s).is_some()).count(),
-                            std::cmp::Reverse(*index),
-                        )
-                    })
-                    .map_or(0, |(i, _)| i)
-            });
+        let selected = if let Some(row) = override_mapping.and_then(|m| m.header_row) {
+            self.pending
+                .iter()
+                .position(|(n, _)| *n == row)
+                .ok_or_else(|| {
+                    invalid("Requested header row is not present in the first ten source rows")
+                })?
+        } else {
+            self.pending
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, (_, cells))| {
+                    (
+                        cells.iter().filter(|s| canonical(s).is_some()).count(),
+                        std::cmp::Reverse(*index),
+                    )
+                })
+                .map_or(0, |(i, _)| i)
+        };
         let (header_row, headers) = &self.pending[selected];
         let mapping = override_mapping
             .map(|m| m.mapping.clone())
@@ -124,10 +127,23 @@ impl<F: FnMut(Event) -> Result<()>> Sheet<'_, F> {
         Ok(())
     }
 
-    fn data(&mut self, row: u64, mut cells: Vec<String>) -> Result<()> {
+    fn data(&mut self, row: u64, cells: Vec<String>) -> Result<()> {
         if cells.iter().all(|s| s.trim().is_empty()) {
             return Ok(());
         }
+        if let Some(info) = &mut self.info {
+            info.rows += 1;
+        }
+        (self.emit)(Event::Row {
+            sheet: self.name.into(),
+            row,
+            cells,
+        })
+    }
+
+    fn push(&mut self, row: u64, mut cells: Vec<String>) -> Result<()> {
+        // The first ten buffered records may become headers; they obey the same
+        // decoded text bound as subsequent data rather than bypassing truncation.
         let mut remaining = self.limit as usize;
         let mut truncated = false;
         for cell in &mut cells {
@@ -142,17 +158,6 @@ impl<F: FnMut(Event) -> Result<()>> Sheet<'_, F> {
             remaining = remaining.saturating_sub(cell.len());
         }
         self.truncated += u64::from(truncated);
-        if let Some(info) = &mut self.info {
-            info.rows += 1;
-        }
-        (self.emit)(Event::Row {
-            sheet: self.name.into(),
-            row,
-            cells,
-        })
-    }
-
-    fn push(&mut self, row: u64, cells: Vec<String>) -> Result<()> {
         if self.info.is_none() {
             self.pending.push((row, cells));
             if self.pending.len() == 10 {
@@ -206,6 +211,9 @@ fn encoding(path: &Path, requested: Option<&str>) -> Result<&'static Encoding> {
     }
     if head[..count].starts_with(&[0xfe, 0xff]) {
         return Ok(UTF_16BE);
+    }
+    if head[..count].starts_with(&[0xef, 0xbb, 0xbf]) {
+        return Ok(UTF_8);
     }
     if strict_utf8(path)? {
         Ok(UTF_8)
@@ -410,4 +418,61 @@ pub(super) fn parse(
         return Err(invalid("No data: table contains no data rows"));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn input(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/vendor_import")
+            .join(name)
+    }
+    #[test]
+    fn every_real_format_checks_exact_bytes_before_loading_and_all_sheet_row_totals() {
+        assert_eq!(VendorLimits::default().max_file_bytes, 52_428_800);
+        assert_eq!(VendorLimits::default().max_rows, 200_000);
+        for (name, rows) in [("basic.csv", 2), ("basic.xls", 3), ("basic.xlsx", 3)] {
+            let path = input(name);
+            let bytes = std::fs::metadata(&path).unwrap().len();
+            for allowance in [bytes - 1, bytes, bytes + 1] {
+                let limits = VendorLimits {
+                    max_file_bytes: allowance,
+                    ..VendorLimits::default()
+                };
+                let mut remaining = super::super::resources::TOTAL_DECODED_BYTES;
+                let result = parse(
+                    &path,
+                    name,
+                    &VendorImportOptions::default(),
+                    limits,
+                    &mut remaining,
+                    |_| Ok(()),
+                );
+                assert_eq!(result.is_ok(), allowance >= bytes, "{name}: {allowance}");
+            }
+            // Small real multi-sheet fixtures exercise the same exact threshold
+            // logic without generating a second 200k stress workbook per unit test.
+            for allowance in [rows - 1, rows, rows + 1] {
+                let limits = VendorLimits {
+                    max_rows: allowance,
+                    ..VendorLimits::default()
+                };
+                let mut remaining = super::super::resources::TOTAL_DECODED_BYTES;
+                let result = parse(
+                    &path,
+                    name,
+                    &VendorImportOptions::default(),
+                    limits,
+                    &mut remaining,
+                    |_| Ok(()),
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    allowance >= rows,
+                    "{name}: rows {allowance}"
+                );
+            }
+        }
+    }
 }

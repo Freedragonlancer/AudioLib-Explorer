@@ -4,6 +4,7 @@ use super::{Result, db_error, invalid, json};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const TABLES: &[(&str, &[&str])] = &[
@@ -17,6 +18,7 @@ const TABLES: &[(&str, &[&str])] = &[
             "source_file",
             "sheet",
             "row",
+            "language",
         ],
     ),
     (
@@ -27,6 +29,7 @@ const TABLES: &[(&str, &[&str])] = &[
             "before_rows",
             "before_vendor_json",
             "before_derived",
+            "before_source_json",
         ],
     ),
     (
@@ -48,6 +51,8 @@ const TABLES: &[(&str, &[&str])] = &[
             "preview_json",
             "options_json",
             "commit_result",
+            "last_error",
+            "operation",
         ],
     ),
     (
@@ -61,6 +66,7 @@ const TABLES: &[(&str, &[&str])] = &[
             "sheet",
             "row",
             "overwrite",
+            "language",
         ],
     ),
 ];
@@ -122,6 +128,10 @@ fn validate_existing(conn: &Connection, required: bool) -> Result<()> {
                 ("audio_file_id", 2),
                 ("field", 3),
                 ("value", 4),
+                ("language", 5),
+                ("source_file", 6),
+                ("sheet", 7),
+                ("row", 8),
             ],
             _ => return Err(invalid("Unregistered vendor table")),
         };
@@ -176,11 +186,11 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS vendor_metadata(
           audio_file_id INTEGER NOT NULL REFERENCES audio_files(id) ON DELETE CASCADE,
           import_id TEXT NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL,
-          source_file TEXT NOT NULL, sheet TEXT NOT NULL, row INTEGER NOT NULL,
+          source_file TEXT NOT NULL, sheet TEXT NOT NULL, row INTEGER NOT NULL,language TEXT NOT NULL,
           PRIMARY KEY(audio_file_id,field,value));
         CREATE TABLE IF NOT EXISTS vendor_import_log(
           import_id TEXT NOT NULL,audio_file_id INTEGER NOT NULL,
-          before_rows TEXT NOT NULL,before_vendor_json TEXT NOT NULL,before_derived TEXT NOT NULL,
+          before_rows TEXT NOT NULL,before_vendor_json TEXT NOT NULL,before_derived TEXT NOT NULL,before_source_json TEXT NOT NULL,
           PRIMARY KEY(import_id,audio_file_id));
         CREATE TABLE IF NOT EXISTS audiolib_vendor_baseline(
           audio_file_id INTEGER PRIMARY KEY, rows_json TEXT NOT NULL,vendor_json TEXT NOT NULL);
@@ -189,13 +199,13 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
           idempotency_key TEXT NOT NULL UNIQUE,options_hash TEXT NOT NULL,state TEXT NOT NULL,
           checkpoint INTEGER NOT NULL DEFAULT 0,written INTEGER NOT NULL DEFAULT 0,
           restored INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,
-          preview_json TEXT NOT NULL,options_json TEXT NOT NULL,commit_result TEXT);
+          preview_json TEXT NOT NULL,options_json TEXT NOT NULL,commit_result TEXT,last_error TEXT,operation TEXT);
         CREATE TABLE IF NOT EXISTS audiolib_vendor_events(
           import_id TEXT NOT NULL REFERENCES audiolib_vendor_jobs(import_id),
           audio_file_id INTEGER NOT NULL REFERENCES audio_files(id) ON DELETE CASCADE,
           field TEXT NOT NULL,value TEXT NOT NULL,source_file TEXT NOT NULL,sheet TEXT NOT NULL,
-          row INTEGER NOT NULL,overwrite INTEGER NOT NULL,
-          PRIMARY KEY(import_id,audio_file_id,field,value));
+          row INTEGER NOT NULL,overwrite INTEGER NOT NULL,language TEXT NOT NULL,
+          PRIMARY KEY(import_id,audio_file_id,field,value,language,source_file,sheet,row));
         CREATE INDEX IF NOT EXISTS audiolib_vendor_events_audio ON audiolib_vendor_events(audio_file_id);
         RELEASE audiolib_vendor_schema;",
     )
@@ -240,10 +250,12 @@ struct Entry {
     source_file: String,
     sheet: String,
     row: u64,
+    #[serde(default)]
+    language: String,
 }
 
 fn rows(conn: &Connection, id: i64) -> Result<Vec<Entry>> {
-    let mut query = conn.prepare("SELECT import_id,field,value,source_file,sheet,row FROM vendor_metadata WHERE audio_file_id=?1 ORDER BY field,value,import_id").map_err(db_error)?;
+    let mut query = conn.prepare("SELECT import_id,field,value,source_file,sheet,row,language FROM vendor_metadata WHERE audio_file_id=?1 ORDER BY field,value,import_id").map_err(db_error)?;
     query
         .query_map([id], |row| {
             Ok(Entry {
@@ -253,11 +265,63 @@ fn rows(conn: &Connection, id: i64) -> Result<Vec<Entry>> {
                 source_file: row.get(3)?,
                 sheet: row.get(4)?,
                 row: crate::unsigned(row, 5)?,
+                language: row.get(6)?,
             })
         })
         .map_err(db_error)?
         .collect::<rusqlite::Result<_>>()
         .map_err(db_error)
+}
+
+#[derive(Serialize, Deserialize)]
+struct SourceBeforeImage {
+    bwf: String,
+    metadata: Value,
+    rows_sha256: String,
+    vendor_sha256: String,
+}
+
+/// Verify every saved source receipt before using its provenance. Never restore its
+/// embedded values: later rescans must survive rollback of only the vendor source.
+pub(super) fn verify_before(conn: &Connection, import: &str, id: i64) -> Result<()> {
+    let saved:Option<(String,String,String,String)>=conn.query_row("SELECT before_rows,before_vendor_json,before_derived,before_source_json FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2",params![import,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
+    let (rows, vendor, derived, source) = saved
+        .ok_or_else(|| invalid("Vendor before-image is missing; automatic rollback refused"))?;
+    let entries: Vec<Entry> = serde_json::from_str(&rows).map_err(invalid)?;
+    let vendor: Value = serde_json::from_str(&vendor).map_err(invalid)?;
+    let source: SourceBeforeImage = serde_json::from_str(&source).map_err(invalid)?;
+    if format!("{:x}", Sha256::digest(rows.as_bytes())) != source.rows_sha256
+        || format!("{:x}", Sha256::digest(json(&vendor)?.as_bytes())) != source.vendor_sha256
+    {
+        return Err(invalid(
+            "Vendor before-image receipt checksum is inconsistent",
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    if entries
+        .iter()
+        .any(|e| e.field.is_empty() || !unique.insert((&e.field, &e.value)))
+        || source
+            .metadata
+            .get("vendor_metadata")
+            .unwrap_or(&Value::Null)
+            != &vendor
+    {
+        return Err(invalid(
+            "Vendor before-image source/provenance is inconsistent",
+        ));
+    }
+    let recomputed: String = conn
+        .query_row(
+            "SELECT audiolib_tokenize(audiolib_source_text(?1,?2))",
+            params![source.bwf, json(&source.metadata)?],
+            |r| r.get(0),
+        )
+        .map_err(db_error)?;
+    if recomputed != derived {
+        return Err(invalid("Vendor before-image derived text is inconsistent"));
+    }
+    Ok(())
 }
 
 pub(super) fn save_before(conn: &Connection, import: &str, id: i64) -> Result<()> {
@@ -275,9 +339,9 @@ pub(super) fn save_before(conn: &Connection, import: &str, id: i64) -> Result<()
                 "Vendor baseline is missing for a persisted before-image",
             ));
         }
-        return Ok(());
+        return verify_before(conn, import, id);
     }
-    let (metadata, derived): (String, String) = conn.query_row("SELECT metadata_json,audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)) FROM audio_files WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(db_error)?;
+    let (metadata, derived,bwf): (String, String,String) = conn.query_row("SELECT metadata_json,audiolib_tokenize(audiolib_source_text(bwf_description,metadata_json)),coalesce(bwf_description,'') FROM audio_files WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?))).map_err(db_error)?;
     let metadata: Value = serde_json::from_str(&metadata).map_err(invalid)?;
     let vendor = metadata
         .get("vendor_metadata")
@@ -285,7 +349,13 @@ pub(super) fn save_before(conn: &Connection, import: &str, id: i64) -> Result<()
         .unwrap_or(Value::Null);
     let original = json(&rows(conn, id)?)?;
     let vendor = json(&vendor)?;
-    conn.execute("INSERT OR IGNORE INTO vendor_import_log(import_id,audio_file_id,before_rows,before_vendor_json,before_derived) VALUES(?1,?2,?3,?4,?5)", params![import,id,original,vendor,derived]).map_err(db_error)?;
+    let source = json(&SourceBeforeImage {
+        bwf,
+        metadata,
+        rows_sha256: format!("{:x}", Sha256::digest(original.as_bytes())),
+        vendor_sha256: format!("{:x}", Sha256::digest(vendor.as_bytes())),
+    })?;
+    conn.execute("INSERT OR IGNORE INTO vendor_import_log(import_id,audio_file_id,before_rows,before_vendor_json,before_derived,before_source_json) VALUES(?1,?2,?3,?4,?5,?6)", params![import,id,original,vendor,derived,source]).map_err(db_error)?;
     // The baseline is taken from the first persisted before-image, never reconstructed
     // from max IDs or the current post-import projection during recovery.
     conn.execute("INSERT OR IGNORE INTO audiolib_vendor_baseline(audio_file_id,rows_json,vendor_json) SELECT audio_file_id,before_rows,before_vendor_json FROM vendor_import_log WHERE import_id=?1 AND audio_file_id=?2", params![import,id]).map_err(db_error)?;
@@ -301,11 +371,41 @@ pub(super) struct EventRow<'a> {
     pub sheet: &'a str,
     pub row: u64,
     pub overwrite: bool,
+    pub language: &'a str,
 }
 
 pub(super) fn add_event(conn: &Connection, event: EventRow<'_>) -> Result<()> {
-    conn.execute("INSERT OR IGNORE INTO audiolib_vendor_events(import_id,audio_file_id,field,value,source_file,sheet,row,overwrite) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![event.import,event.id,event.field,event.value,event.source_file,event.sheet,super::sql_u64(event.row)?,event.overwrite]).map_err(db_error)?;
+    conn.execute("INSERT OR IGNORE INTO audiolib_vendor_events(import_id,audio_file_id,field,value,source_file,sheet,row,overwrite,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![event.import,event.id,event.field,event.value,event.source_file,event.sheet,super::sql_u64(event.row)?,event.overwrite,event.language]).map_err(db_error)?;
     Ok(())
+}
+
+fn language(value: &str, text: &str) -> String {
+    let folded = value.trim().to_lowercase().replace('_', "-");
+    let language = folded.split('-').next().unwrap_or_default();
+    match language {
+        "zh" | "chinese" | "中文" | "汉语" => "zh".into(),
+        "en" | "english" | "英文" | "英语" => "en".into(),
+        "fr" | "french" | "法语" => "fr".into(),
+        "de" | "german" | "德语" => "de".into(),
+        "ja" | "japanese" | "日语" => "ja".into(),
+        "" => {
+            if text.chars().any(|c| ('\u{3400}'..='\u{9fff}').contains(&c)) {
+                "zh".into()
+            } else if text.is_ascii() {
+                "en".into()
+            } else {
+                "und".into()
+            }
+        }
+        other => other.to_owned(),
+    }
+}
+fn language_rank(declared: &str, text: &str, preferred: &[String]) -> usize {
+    let actual = language(declared, text);
+    preferred
+        .iter()
+        .position(|p| language(p, "") == actual)
+        .unwrap_or(preferred.len())
 }
 
 /// Recompute the materialized table and metadata mirror from active immutable events.
@@ -319,11 +419,45 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         )
         .map_err(db_error)?;
     let originals: Vec<Entry> = serde_json::from_str(&baseline.0).map_err(invalid)?;
+    let baseline_vendor = serde_json::from_str::<Value>(&baseline.1).map_err(invalid)?;
+    let preferred:Option<String>=conn.query_row("SELECT j.options_json FROM audiolib_vendor_jobs j WHERE EXISTS(SELECT 1 FROM audiolib_vendor_events e WHERE e.import_id=j.import_id AND e.audio_file_id=?1) ORDER BY j.job_order DESC LIMIT 1",[id],|r|r.get(0)).optional().map_err(db_error)?;
+    let preferred = preferred
+        .as_deref()
+        .map(serde_json::from_str::<audiolib_core::vendor_import::VendorImportOptions>)
+        .transpose()
+        .map_err(invalid)?
+        .map(|o| o.preferred_languages)
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| vec!["zh".into(), "en".into()]);
     let mut active = BTreeMap::<(String, String), Entry>::new();
     for entry in originals {
         active.insert((entry.field.clone(), entry.value.clone()), entry);
     }
-    let mut query = conn.prepare("SELECT e.import_id,e.field,e.value,e.source_file,e.sheet,e.row,e.overwrite FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 ORDER BY j.job_order,e.field,e.value").map_err(db_error)?;
+    // Older compatibility copies intentionally retain this unknown mirror while
+    // stripping formal tables. Treat its text as a baseline source, never discard it.
+    if let Some(fields) = baseline_vendor.get("fields").and_then(Value::as_object) {
+        for (field, value) in fields {
+            let values = match value {
+                Value::String(s) => vec![s.as_str()],
+                Value::Array(v) => v.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            for value in values.into_iter().filter(|s| !s.trim().is_empty()) {
+                active
+                    .entry((field.clone(), value.into()))
+                    .or_insert_with(|| Entry {
+                        import_id: "legacy-mirror".into(),
+                        field: field.clone(),
+                        value: value.into(),
+                        source_file: "legacy-mirror".into(),
+                        sheet: String::new(),
+                        row: 0,
+                        language: String::new(),
+                    });
+            }
+        }
+    }
+    let mut query = conn.prepare("SELECT e.import_id,e.field,e.value,e.source_file,e.sheet,e.row,e.overwrite,e.language FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 ORDER BY j.job_order,e.field,e.value").map_err(db_error)?;
     let events = query
         .query_map([id], |r| {
             Ok((
@@ -334,6 +468,7 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
                     source_file: r.get(3)?,
                     sheet: r.get(4)?,
                     row: crate::unsigned(r, 5)?,
+                    language: r.get(7)?,
                 },
                 r.get::<_, bool>(6)?,
             ))
@@ -347,15 +482,27 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         if overwrite && overwritten.insert((entry.import_id.clone(), entry.field.clone())) {
             active.retain(|(field, _), _| field != &entry.field);
         }
-        active
-            .entry((entry.field.clone(), entry.value.clone()))
-            .or_insert(entry);
+        let key = (entry.field.clone(), entry.value.clone());
+        match active.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if language_rank(&entry.language, &entry.value, &preferred)
+                    < language_rank(&slot.get().language, &slot.get().value, &preferred)
+                {
+                    slot.insert(entry);
+                }
+            }
+        }
     }
     conn.execute("DELETE FROM vendor_metadata WHERE audio_file_id=?1", [id])
         .map_err(db_error)?;
     let mut fields = BTreeMap::<String, Vec<String>>::new();
     for entry in active.values() {
-        conn.execute("INSERT INTO vendor_metadata(audio_file_id,import_id,field,value,source_file,sheet,row) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,entry.import_id,entry.field,entry.value,entry.source_file,entry.sheet,super::sql_u64(entry.row)?]).map_err(db_error)?;
+        if has_events || entry.import_id != "legacy-mirror" {
+            conn.execute("INSERT INTO vendor_metadata(audio_file_id,import_id,field,value,source_file,sheet,row,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,entry.import_id,entry.field,entry.value,entry.source_file,entry.sheet,super::sql_u64(entry.row)?,entry.language]).map_err(db_error)?;
+        }
         fields
             .entry(entry.field.clone())
             .or_default()
@@ -376,24 +523,21 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         }
         *values = keywords.into_values().collect();
     }
-    let preferred:Option<String>=conn.query_row("SELECT j.options_json FROM audiolib_vendor_jobs j WHERE EXISTS(SELECT 1 FROM audiolib_vendor_events e WHERE e.import_id=j.import_id AND e.audio_file_id=?1) ORDER BY j.job_order DESC LIMIT 1",[id],|r|r.get(0)).optional().map_err(db_error)?;
-    let english_first = preferred
-        .as_deref()
-        .and_then(|s| {
-            serde_json::from_str::<audiolib_core::vendor_import::VendorImportOptions>(s).ok()
-        })
-        .and_then(|o| o.preferred_languages.into_iter().next())
-        .is_some_and(|s| s.eq_ignore_ascii_case("en"));
-    for values in fields.values_mut() {
+    for (field, values) in &mut fields {
         values.sort_by_key(|s| {
             (
-                s.chars().any(|c| ('\u{3400}'..='\u{9fff}').contains(&c)) == english_first,
+                language_rank(
+                    active
+                        .get(&(field.clone(), s.clone()))
+                        .map_or("", |e| e.language.as_str()),
+                    s,
+                    &preferred,
+                ),
                 s.clone(),
             )
         });
         values.dedup();
     }
-    let baseline_vendor = serde_json::from_str::<Value>(&baseline.1).map_err(invalid)?;
     let mirror = if !has_events {
         baseline_vendor
     } else {
