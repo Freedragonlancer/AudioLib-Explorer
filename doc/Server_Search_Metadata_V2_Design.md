@@ -119,7 +119,8 @@
 
 ### 3.3 HTTP 契约
 - 请求 DTO：`scope=main|all|path|filename`（默认 `main` = s8 行为）、不透明 `cursor`、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。目录相关性游标与筛选/排序游标使用不同内部编码，调用方不得自行构造。
-- 响应：`items`、`next_cursor`（末页为 `null`）。游标里的 `search_path_rev` 与当前不符时返回 409 `CURSOR_STALE`，客户端从第一页重取。
+- 响应页含记录、`total_count`、`total_count_exact` 和 `next_cursor`（末页为 `null`）。优化的目录分页在未遍历完时返回已知下界，`total_count_exact=false`；界面显示“至少/≥”，不把下界当最终页数。客户端以 `next_cursor` 和已走过的位置导航，最后一页才确认精确总数。普通/文件名及 SQL 筛选页返回精确总数。
+- 游标绑定请求条件、provider 会话和数据库变更修订；改查询、范围、筛选、排序、库内容或重开库后必须拒绝旧游标并从第一页重取。API 错误为 `CURSOR_STALE`，HTTP 搜索若后续实现则映射409；当前错误由 DataProvider 返回。`search_path_rev` 仍描述目录格式版本，不能替代内容修订。
 - 现状：服务端 `routes.rs` 没有在线搜索路由；`SearchRequest` 已实现上述四种 scope，服务器模式在校验后的本地只读快照上搜索，与本地库共用查询实现。这里的请求/响应是 DataProvider 契约，不表示已有 HTTP 搜索端点。
 
 ### 3.4 实测（bench 副本 909,342 行，schema 8 基线 vs 目录段方案）
