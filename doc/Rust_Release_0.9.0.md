@@ -225,6 +225,18 @@ GUI回滚、management-off/reader权限界面及B警告后实际替换未执行�
 Mac `mac-native-fe13-fd8728591e9b4e6bb087cd454f7a8212`；实际NAS `nas-sidecar-b50ef7c7435b4adeab9e98b92858f8e9`；
 GUI `native-gui-selected-final-b5ce5a1e4bf0486495aa23b3f5a66610.json` 摘要 `d827c04d6d51269bbdc898f980fdbbb51c45222da7565e34eb108734a0d83bd6`。
 
+### 1.5 核心范围代码审查
+
+2026-11-05 对 `cbb2f884c989a3ef89dafd653207ec3554f075b9` 相对 feat 的候选改动做定向 CR，
+覆盖增量扫描与自动表格来源保全、schema8/9 准入及缓存发布、Metadata 提交与回滚，
+以及最近 All/Path 续页计数和共享 Waveform 连接生命周期；未发现可确认的新增 P0/P1/P2 代码问题。
+这次仅审阅源码并复用已有验证，没有新增 Cargo、GUI、性能或全局回归结果，PG05 和未完成 GUI 门禁保持原状态。
+测试程序在后续复查时已无目标窗口、GUI 或启动器进程；未观测其退出码或方式，未发送强制终止。
+
+导入入口按实际能力描述：桌面原生文件选择器当前列出 CSV/XLS/XLSX，文本解析支持 tab 分隔；
+后端手动解析和服务端目录预览另支持 TSV/TXT，不将其等同于原生选择器可列出的格式。
+普通 WAV 扫描自动发现同目录 CSV/TSV/XLS/XLSX。该说明修正不改变应用二进制或已验收包身份。
+
 ## 2. 存储目标与当前实现边界
 
 程序版本、API、常规本地写目标和实际服务端库格式分别记录，不用一个 schema 常量替代所有含义：
