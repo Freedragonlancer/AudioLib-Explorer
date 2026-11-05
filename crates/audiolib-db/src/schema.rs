@@ -1041,6 +1041,7 @@ fn rebuild_search_in_transaction_with_progress(
     conn: &Connection,
     progress: &mut dyn FnMut(SnapshotUpgradeProgress) -> Result<()>,
 ) -> Result<()> {
+    crate::search_tracking::drop_owned(conn)?;
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS audio_files_ai; DROP TRIGGER IF EXISTS audio_files_au;
         DROP TRIGGER IF EXISTS audio_files_ad; DROP TABLE IF EXISTS audio_search;",

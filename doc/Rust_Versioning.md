@@ -1,31 +1,37 @@
 # AudioLib Explorer 版本规范
 
-程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。下表描述当前 0.8.7 源码；历史开发版本和已发布版本的验证记录保留原来的版本标识。
+下一版 Search Metadata v2 的发布准备见[0.9.0 迁移方案](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md)。
+候选源码暂保留 0.8.7 开发版本标识；本地写目标仍为 8，显式服务端迁移目标为 9，
+新客户端快照读取上限为9。下表分别列出已发布0.8.7基线和当前开发能力，不代表新候选已发布或完成版本冻结。
 
-| 版本 | 来源（唯一事实） | 当前 | 含义 |
-|---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version`（MAJOR.MINOR.PATCH） | 0.8.7 | 客户端、CLI、服务端共用，发布时一起升 |
-| API 版本 | URL 路径前缀 `/api/v1/` | v1 | 客户端与服务端的 HTTP 接口契约；不兼容改动才换成 `/api/v2/` |
-| schema 版本 | `crates/audiolib-db/src/schema.rs` 的整数常量 `SCHEMA_VERSION` | 8 | SQLite 资料库结构（`user_version`） |
+程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。已发布 `v0.8.7` 与暂用同一程序版本号的开发候选具有不同源码和二进制身份；历史记录保留原来的身份。
 
-当前可写完整格式为 `ale-s8-cld1-t3-m2-p1-a1`，必需 feature 包括 `album_entities=1`，Metadata 保持原始 JSON TEXT；Metadata 压缩暂缓。实验格式 `ale-s8-cld1-t3-m2-p1-a1-z1` 的 `metadata_storage=1` 仅保留为严格只读兼容来源，不在可写目录或迁移目标中。快照外层 zstd 传输与 Metadata 列存储分别协商。
+| 版本 | 来源（唯一事实） | 已发布 v0.8.7 | 当前开发候选 | 含义 |
+|---|---|---|---|---|
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version` | 0.8.7 | 0.8.7 开发标识；拟定0.9.0尚未冻结 | 客户端、CLI、服务端共用，发布时一起升 |
+| API 版本 | URL 路径前缀 `/api/v1/` | v1 | v1 | 不兼容改动才换成 `/api/v2/` |
+| 普通本地写目标 | DB `SCHEMA_VERSION` 与 Core `compatibility::TARGET_SCHEMA` | 8 | 8 | 常规本地写者仍拒绝s9写入 |
+| 专用服务端写目标 | Core `compatibility::SERVER_TARGET_SCHEMA`，由 `LibraryFormat::server_schema9()` 使用 | 8（当时沿用本地目标） | 9 | 显式服务端迁移及专用s9写者，不从本地常量推导 |
+| 客户端快照读取范围 | DB `MIN_SNAPSHOT_SCHEMA_VERSION` 至 Core `compatibility::SNAPSHOT_SCHEMA_MAX` | 3..=8 | 3..=9 | 还须校验完整格式、feature、结构与身份 |
 
-schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`），但这不是充分的兼容判据；必须同时核对 storage、tokenization、Metadata、退役 feature 及迁移协议。客户端先验证快照身份、结构和完整性；当前 schema 8 的完整快照直接只读打开。schema 3–7 即使原搜索状态就绪，也仅在客户端拥有的 staging/copy 中升级并建立共享专辑投影；原始只读文件保持不变。收紧下限（提高 `MIN_SNAPSHOT_SCHEMA_VERSION`）属于不兼容变化，应同时评估是否需要升 MAJOR 或 API 版本。
+普通本地可写完整格式仍为 `ale-s8-cld1-t3-m2-p1-a1`；专用服务端显式迁移目标为 `ale-s9-cld1-t3-m2-p1-a1-sd1`。必需 feature、目录结构和身份按各自完整格式校验。Metadata 保持原始 JSON TEXT；压缩实验格式 `ale-s8-cld1-t3-m2-p1-a1-z1` 的 `metadata_storage=1` 仅保留为严格只读兼容来源，不在可写目录或迁移目标中。快照外层 zstd 传输与 Metadata 列存储分别协商。
+
+快照读取边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SNAPSHOT_SCHEMA_MAX`：已发布0.8.7为 `3..=8`，当前开发候选为 `3..=9`。普通本地写目标8不是读取上限，`MAX_KNOWN_SCHEMA` 也不是服务端迁移目标。客户端先验证快照身份、结构、完整性、storage、tokenization、Metadata、feature及迁移协议；完整s8/s9快照按各自契约只读打开。schema3–7的派生升级和共享专辑投影仅在客户端拥有的 staging/copy 中运行，原始只读文件保持不变。收紧读取下限属于不兼容变化，应评估 MAJOR 或 API 版本。
 
 ## 规则
 
-1. **schema 变了，程序版本至少升 MINOR**（`SCHEMA_VERSION` 与发布基线相比不同；历史 0.8.1 使用下述明确的基线例外）。
+1. **本地或专用服务端可写目标改变，程序版本至少升 MINOR**：分别比较 `SCHEMA_VERSION` 与 `SERVER_TARGET_SCHEMA`；旧标签没有服务端独立常量时，基线服务端目标沿用其本地目标。单独拓宽快照读取上限属于兼容能力增加，按功能及兼容策略决定版本，不能冒充写目标变化。历史0.8.1使用下述明确基线例外。
 2. 标签必须是 `vX.Y.Z`，预发布为 `vX.Y.Z-rc.N` 或 `vX.Y.Z-beta.N`，且 `X.Y.Z` 必须与 `Cargo.toml` 一致。其他预发布后缀会被拒绝。
 3. 程序版本不得低于基准标签的版本。
 4. 服务端与远程客户端源码中出现的 `/api/vN` 必须只有一个版本。
-5. `doc/Rust_Release_Notes.md` 必须有**一行**同时写明程序版本、API 版本、schema 版本和快照兼容范围，例如：
+5. `doc/Rust_Release_Notes.md` 的现代候选必须有**一行**同时写明程序、API、本地写目标、服务端写目标和实际快照读取范围；旧标签保留原来的单schema版本行。例如最终版本冻结后：
 
-   `程序 0.4.0 | API /api/v1/ | schema 5 | 快照兼容 3..=5`
+   `程序 0.9.0 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9`
 
 6. 发布产物附 SHA256：各平台打包器生成 `<archive>.sha256`，本机发布步骤把它连同包上传为 Release 资产，并写入发布说明正文。
    从 0.8.4 起，每个 Release 精确发布六个归档及各自的 `.sha256`，共十二个资产：Windows x64 客户端、Mac arm64 客户端、Mac arm64 服务端、Linux x64 服务端，以及 Docker linux/amd64、linux/arm64 离线镜像。文件名分别为 `AudioLibExplorer-<tag>-win-x64-portable.zip`、`AudioLibExplorer-<tag>-macos-arm64.zip`、`AudioLibServer-<tag>-macos-arm64.tar.gz`、`AudioLibServer-<tag>-linux-x64.tar.gz`、`AudioLibServer-<tag>-docker-linux-amd64.tar.gz`、`AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。0.8.3 保留三个包、六个资产；0.8.2 及更早版本保持两个包、四个资产。Mac 客户端手动更新，Docker 导入镜像并重建容器；Windows 客户端及 Mac arm64、Linux x64 原生服务端保留程序内更新。从 0.8.5（首个纳入版本）起增加 Windows x64 服务端 `AudioLibServer-<tag>-win-x64.zip`，共七个归档、十四个资产（门槛常量见 `tools/verify-release-assets.ps1` 的 `$WindowsServerFirstVersion`）；0.8.4 及更早版本保持原资产集合，源码构建仍可用。详见 [Windows 服务端发布](Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。
 
-规则 1 到 5 由 `tools/check-release.ps1` 检查，失败时列出全部错误并以非零退出。
+规则1到5由 `tools/check-release.ps1` 检查，失败时列出错误并以非零退出。`tools/test-check-release.ps1` 在隔离合成Git资料库验证服务端单独升版、历史基线、读取上限及版本行，不创建本仓库标签或运行应用。当前0.8.7开发标识尚未升MINOR，因此不能据它宣称通过拟定0.9.0的发布门槛。
 
 ## 发布流程
 
@@ -37,8 +43,9 @@ schema 边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SCHEMA_VERSION`（当前 `3..=8`
 
 1. 把 `Cargo.toml` 的 workspace version 改为目标版本（同时更新 `Cargo.lock`）。
 2. 在 `doc/Rust_Release_Notes.md` 写发布说明，并加入上述版本行。
-3. 本地预检（不创建标签，标签用参数传入）：
-   `pwsh tools/check-release.ps1 -Tag v0.8.7 -BaseTag v0.8.6`
+3. 本地预检（不创建标签，标签用参数传入）；完成目标0.9.0的Cargo/锁文件冻结后，例如：
+   `pwsh tools/check-release.ps1 -Tag v0.9.0 -BaseTag v0.8.7`
+   当前0.8.7开发标识尚不满足该标签和MINOR门槛；发布准备不伪造通过。
    仅标签去除 beta/rc 后缀后为 `v0.8.1`且未给出 `-BaseTag` 时，脚本默认 `v0.7.8`；显式 `-BaseTag` 始终优先。其他版本仍默认取除自身外最新的 `vX.Y.Z` 标签。显式以撤回标签 `v0.8.0` 作基线仍会按 schema 7→8 检查并拒绝仅 PATCH 的比较；这不是移动或替换该标签。
 4. 正式发布前按实际改动选择 package、直接消费者及专项回归，使用实际发布的 target/features 检查一次。`check-local.ps1 -Package <packages>` 支持按包执行；只有影响广泛或无法判断时才使用全 workspace。客户端、无播放服务端及各平台不因同属一次 Release 而互相重复功能测试；无 ASIO 条件分支仅在受影响时定向补测；相关应用/测试源码、feature、工具链与环境未变时复用已通过结果，标签或文档变化本身不触发 Cargo 重跑。日常按 [Testing Strategy](Testing_Strategy.md) 选择最小范围；修复后只重跑失败和受影响检查，不删减数据安全回归。缺少平台或硬件覆盖时明确记录。
 5. 合并后在发布提交上打标签 `v0.8.7`（或对应的预发布标签）并推送。

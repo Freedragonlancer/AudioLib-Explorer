@@ -155,7 +155,7 @@ async fn health_is_public_and_reports_crate_version() {
         commit == "unknown" || (commit.len() >= 7 && commit.chars().all(|c| c.is_ascii_hexdigit())),
         "{body}"
     );
-    assert_eq!(body["compatibility_catalog_revision"], 1);
+    assert_eq!(body["compatibility_catalog_revision"], 2);
     assert_eq!(body.as_object().unwrap().len(), 7, "{body}");
 }
 

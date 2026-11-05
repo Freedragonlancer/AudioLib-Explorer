@@ -177,11 +177,11 @@ mod tests {
         std::fs::write(&second, b"two").unwrap();
         let key = |library: &str, source: &Path| {
             let metadata = source.metadata().unwrap();
-            let file = audiolib_core::AudioFile {
+            let file = audiolib_core::AudioFile::from(audiolib_core::AudioFileData {
                 file_path: source.to_string_lossy().into(),
                 file_size: metadata.len(),
                 ..Default::default()
-            };
+            });
             thumbnail_path(root.path(), Path::new(library), &file, "Same album")
         };
         let original = key("first.db", &first);

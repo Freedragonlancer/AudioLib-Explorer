@@ -59,7 +59,8 @@ pub struct Progress {
     pub done: u64,
     pub total: u64,
 }
-/// Time and actual row count for one committed directory batch.
+/// SQLite writer-lock time and actual row count for one committed directory batch.
+/// Admission waits are excluded here and retained in the path-build phase time.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Batch {
     pub rows: u64,

@@ -72,6 +72,7 @@ mod test_server;
 mod tls;
 mod upgrade_hints;
 mod util;
+mod vendor_import;
 mod waveform_cache;
 mod writes;
 pub use waveform_cache::waveform_cache_error;

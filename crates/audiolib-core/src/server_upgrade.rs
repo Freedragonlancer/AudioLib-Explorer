@@ -54,7 +54,7 @@ pub const MIGRATION_ACTIONS: [&str; 5] = ["start", "pause", "resume", "cancel", 
 pub const MIGRATION_IN_PROGRESS: &str = "migration_in_progress";
 /// `503` for writes during the switch (`Retry-After: 30`); nothing was written.
 pub const MIGRATION_SWITCHING: &str = "migration_switching";
-/// Search scope request parameter: `scope=main|all|path`; omitted means `main`
+/// Search scope request parameter: `scope=main|all|path|filename`; omitted means `main`
 /// (same behaviour as s8).
 pub const SEARCH_SCOPE_PARAM: &str = "scope";
 /// 只搜主表 (default; s8 ordering).
@@ -63,6 +63,8 @@ pub const SEARCH_SCOPE_MAIN: &str = "main";
 pub const SEARCH_SCOPE_PATH: &str = "path";
 /// 「全部」: main table plus paths (`x-audiolib-path-search: unavailable` while migrating).
 pub const SEARCH_SCOPE_ALL: &str = "all";
+/// File-name columns only; excludes notes, tags and embedded/source Metadata.
+pub const SEARCH_SCOPE_FILENAME: &str = "filename";
 
 /// Search scope chosen in the UI; `Main` is the default and is sent as no parameter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -71,6 +73,8 @@ pub enum SearchScope {
     Main,
     All,
     Path,
+    /// Restrict every term to file-name columns.
+    Filename,
 }
 
 impl SearchScope {
@@ -79,6 +83,7 @@ impl SearchScope {
             Self::Main => SEARCH_SCOPE_MAIN,
             Self::All => SEARCH_SCOPE_ALL,
             Self::Path => SEARCH_SCOPE_PATH,
+            Self::Filename => SEARCH_SCOPE_FILENAME,
         }
     }
 
@@ -93,6 +98,7 @@ impl SearchScope {
             None | Some("") | Some(SEARCH_SCOPE_MAIN) => Some(Self::Main),
             Some(SEARCH_SCOPE_ALL) => Some(Self::All),
             Some(SEARCH_SCOPE_PATH) => Some(Self::Path),
+            Some(SEARCH_SCOPE_FILENAME) => Some(Self::Filename),
             Some(_) => None,
         }
     }
@@ -156,8 +162,16 @@ impl MigrationRefusal {
 
     /// Retry delay when the server sent none (the agreed defaults).
     pub fn default_retry_after(self) -> u64 {
+        30
+    }
+
+    /// Honor a longer server delay and keep switching retries at least 30 seconds
+    /// apart, including peers that still advertise the earlier five-second delay.
+    pub fn retry_after(self, seconds: Option<u64>) -> u64 {
+        let seconds = seconds.filter(|value| *value > 0).unwrap_or(30);
         match self {
-            Self::PathSearchInProgress | Self::Switching => 30,
+            Self::Switching => seconds.max(30),
+            Self::PathSearchInProgress => seconds,
         }
     }
 
@@ -604,6 +618,10 @@ pub struct SchemaMigrationInfo {
 /// `/capabilities.vendor_import` (§6); limits are the server's, never assumed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorImportInfo {
+    /// Same-origin absolute route prefix. The import handlers are not implemented
+    /// by server PR #225, so deployments may advertise their actual route here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     pub revision: u32,
     pub max_file_bytes: u64,
     pub max_rows: u64,
@@ -1620,6 +1638,7 @@ mod tests {
     #[test]
     fn vendor_import_needs_feature_and_manage() {
         let limits = VendorImportInfo {
+            endpoint: None,
             revision: 1,
             max_file_bytes: 52_428_800,
             max_rows: 200_000,
@@ -1673,13 +1692,19 @@ mod tests {
         assert_eq!(SearchScope::Main.query(), None);
         assert_eq!(SearchScope::All.query(), Some(("scope", "all")));
         assert_eq!(SearchScope::Path.query(), Some(("scope", "path")));
+        assert_eq!(SearchScope::Filename.query(), Some(("scope", "filename")));
         assert_eq!(SearchScope::parse(None), Some(SearchScope::Main));
         assert_eq!(SearchScope::parse(Some("main")), Some(SearchScope::Main));
         assert_eq!(SearchScope::parse(Some("")), Some(SearchScope::Main));
         assert_eq!(SearchScope::parse(Some("path")), Some(SearchScope::Path));
         assert_eq!(SearchScope::parse(Some("all")), Some(SearchScope::All));
         assert_eq!(SearchScope::parse(Some("folder")), None);
-        for scope in [SearchScope::Main, SearchScope::All, SearchScope::Path] {
+        for scope in [
+            SearchScope::Main,
+            SearchScope::All,
+            SearchScope::Path,
+            SearchScope::Filename,
+        ] {
             assert_eq!(SearchScope::parse(Some(scope.as_str())), Some(scope));
         }
     }

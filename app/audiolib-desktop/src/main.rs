@@ -25,6 +25,8 @@ mod search_scope_tests;
 #[cfg(test)]
 mod search_task_ui_tests;
 #[cfg(test)]
+mod search_v2_ui_tests;
+#[cfg(test)]
 mod sidebar_section_tests;
 mod startup;
 #[cfg(test)]

@@ -999,13 +999,13 @@ mod tests {
     }
 
     fn record() -> AudioFile {
-        AudioFile {
+        AudioFile::from(audiolib_core::AudioFileData {
             id: 7,
             file_path: "/Volumes/SFX/thunder.wav".into(),
             filename: "雷声 近.wav".into(),
             file_size: 300_000,
-            ..AudioFile::default()
-        }
+            ..audiolib_core::AudioFileData::default()
+        })
     }
 
     fn item(server: &TestServer) -> DownloadItem {

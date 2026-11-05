@@ -110,9 +110,11 @@ mod tests {
 
     fn rows(start: i64, count: i64) -> Vec<AudioFile> {
         (start..start + count)
-            .map(|id| AudioFile {
-                id,
-                ..Default::default()
+            .map(|id| {
+                AudioFile::from(audiolib_core::AudioFileData {
+                    id,
+                    ..Default::default()
+                })
             })
             .collect()
     }

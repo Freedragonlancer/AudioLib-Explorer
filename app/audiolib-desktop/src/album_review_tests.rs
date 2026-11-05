@@ -135,6 +135,7 @@ fn child_album_navigation() {
 
     // Queue an old local publication, then switch library context before delivery.
     let stale = SearchJob {
+        path_probe: None,
         request: controller.request.lock().unwrap().clone(),
         generation: controller.search_generation.load(Ordering::Acquire),
         not_before: Instant::now(),
