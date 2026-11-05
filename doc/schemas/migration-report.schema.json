@@ -153,14 +153,14 @@
       "items": {
         "type": "integer"
       },
-      "description": "Search actions only (main_search/path_search --q --limit --cursor): {ids, next_cursor}."
+      "description": "Search actions only (main_search/path_search --q --limit --cursor): {ids, next_cursor}. This projection omits SearchPage.total_count. Directory searches use limit + 1 lookahead; their total_count is an observed prefix lower bound without a cursor, or a page-local suffix count after a cursor, never a guaranteed global total while more results remain. See doc/api/README.md section 5."
     },
     "next_cursor": {
       "type": [
         "string",
         "null"
       ],
-      "description": "null when there are no more pages."
+      "description": "Authoritative directory-search continuation: nonempty when lookahead found another hit, null when there are no more pages. The migration search projection uses null; the HTTP SearchPage omits this field on its last page. Internal has_more is not an additional response field."
     }
   }
 }

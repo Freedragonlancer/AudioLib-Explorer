@@ -118,8 +118,8 @@
 
 ### 3.3 HTTP 契约
 - 请求：`scope=main|all|path`（默认 `main` = s8 行为）、`cursor`（不透明字符串，base64url 编码的 `(tier, score, id, search_path_rev)`）、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。
-- 响应：`items`、`next_cursor`（末页为 `null`）。游标里的 `search_path_rev` 与当前不符时返回 409 `CURSOR_STALE`，客户端从第一页重取。
-- 现状：服务端 `routes.rs` **还没有搜索路由**（客户端本地搜快照），`SearchRequest` 无 scope。以上是给服务端搜索/客户端本地搜索共用的契约；客户端本地实现走同一算法。
+- 响应使用 `SearchPage`：`results`、`returned_count`、`total_count`、`next_cursor`（末页省略）。非空目录搜索只取 `limit + 1` 条：无 cursor 时 `total_count` 是已观察前缀的数量，有下一页时只是总数下界；有 cursor 时只计当前 cursor 之后这一页和前瞻记录，末页也不是全查询总数。`next_cursor` 才是目录搜索继续翻页的依据，内部 `has_more` 不增加到响应中。主表、空查询浏览和不可用时的 `all` 主表回退保持精确总数。详见 [API 分页契约](api/README.md#5-分页)。
+- 服务端 `routes.rs` 已有 `POST /search` 和 `GET /search`；正常服务器模式客户端仍在本地快照查询，使用同一 `SearchRequest`/`SearchPage`。游标里的 `search_path_rev` 与当前不符时返回 409 `CURSOR_STALE`，客户端从第一页重取。迁移工具的搜索动作另投影为 `ids`、`next_cursor`（末页为 `null`），不返回 `SearchPage.total_count`。
 
 ### 3.4 实测（bench 副本 909,342 行，schema 8 基线 vs 目录段方案）
 口径（Paul 定）：每条查询 5 轮，每轮 3 次预热 + 60 次，取各轮 p95 的中位数，**≤ s8 × 1.2 即过**。

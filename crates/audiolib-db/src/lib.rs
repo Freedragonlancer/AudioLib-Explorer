@@ -2278,15 +2278,12 @@ impl SqliteProvider {
                 })
             })
             .flatten();
-        let skipped = if request.cursor.is_some() {
-            0
-        } else {
-            request.offset as u64
-        };
         let total_count = if page.short_circuited {
             0
         } else {
-            skipped + results.len() as u64 + u64::from(page.has_more)
+            // Count only observed hits, including the lookahead. An offset past
+            // the end must not manufacture matches; cursors count their suffix.
+            page.observed_count as u64
         };
         Ok(SearchPage {
             returned_count: results.len(),

@@ -333,9 +333,10 @@ audiolib.example.com:8443 {
 ## 5. 分页
 
 - 搜索输入按客户端快照上的 `SearchRequest` 校验：查询最多 500 个字符；独立的非 Han 字母词至少需要两个可搜索 Unicode grapheme（组合重音不另计）。这是已确认的产品行为。GUI 输入一个字母时取消旧请求、保留当前结果与目录并显示“字母搜索请至少输入 2 个字符”，不发送新搜索。直接调用 core/db 或 CLI 则返回 `Validation`，不会当作零命中或内部数据库错误。多词中的单字母代码（例如 `P-51`）、单个 Han 字和纯数字沿用原规则。
-- 两个字母以上支持词内连续片段：`expl`、`plos`、`sion` 匹配 `explosion`，多个词之间为 AND；用户文本中的标点、`OR` 等不作为 FTS5 运算符。当前服务端 **尚未实现**下表的 `POST /search` 与 `/search/folders`，正常服务器模式在本地快照查询，因此不存在当前 HTTP 搜索端点的单字母 400/500 响应；若未来开放端点，按 §2.1 的现有映射应为 HTTP 400 `VALIDATION`。
-- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。`scope` 省略或 `main` 时排序与 schema 8 主表一致。
-- `scope=all|path` 使用目录段索引。格式 id 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`sd1`，不是 `sp1`）。请求可带不透明 `cursor`（同时传 `offset`/`page` 时以 cursor 为准）和 1 起的 `page`。响应 `next_cursor` 在末页省略。游标里的 `search_path_rev` 与库不一致时返回 409 `CURSOR_STALE`。`POST /search` 见下表。
+- 两个字母以上支持词内连续片段：`expl`、`plos`、`sion` 匹配 `explosion`，多个词之间为 AND；用户文本中的标点、`OR` 等不作为 FTS5 运算符。服务端已实现 `POST /search` 和 `GET /search?q=…&scope=…&limit=…&cursor=…`；无效搜索输入按 §2.1 返回 HTTP 400 `VALIDATION`。`POST /search/folders` 仍未实现，正常服务器模式客户端仍在本地快照查询。
+- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。`scope` 省略或 `main` 时排序与 schema 8 主表一致，`total_count` 是精确总数。空查询浏览，以及目录索引不可用时 `all` 回退到主表的响应，也沿用主表的精确总数。
+- 非空 `scope=all|path` 使用目录段索引。格式 id 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`sd1`，不是 `sp1`）。请求可带不透明 `cursor`（同时传 `offset`/`page` 时以 cursor 为准）和 1 起的 `page`。目录搜索只取当前页和一条前瞻记录（`limit + 1`），不为总数遍历全部命中。无 cursor 时，`total_count` 是已观察到的结果前缀数量：有效非末页为 `offset + returned_count + 1`，属于总数下界；遍历到末尾后才是精确总数。带 cursor 时，`total_count` 只计该 cursor 之后当前页和前瞻记录，通常为 `returned_count + 1`，末页为 `returned_count`，**不是整个查询的总数**，不能累加或用于计算最终页数。
+- 目录搜索以非空 `next_cursor` 作为继续翻页的依据；末页省略 `next_cursor`。内部 `has_more` 来自前瞻记录，不是 `SearchPage` 的响应字段。游标里的 `search_path_rev` 与库不一致时返回 409 `CURSOR_STALE`。这个 `limit + 1` 契约不改变主表计数、响应字段或数据库格式。当前桌面端仍按已有数字显示 `total_count`，目录搜索显示值应理解为上述页计数；精确总数/总页数的界面调整不属于本次修复。
 - 扫描历史与客户端本机播放历史使用 `limit` + `offset`；服务端兼容 `/history/plays` 始终返回 `[]`。
 
 ## 6. 端点清单

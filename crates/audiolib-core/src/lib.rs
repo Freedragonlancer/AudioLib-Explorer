@@ -473,6 +473,14 @@ impl SearchRequest {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SearchPage {
     pub results: Vec<AudioFile>,
+    /// Exact match count for main search, including empty-query browsing and
+    /// `all` falling back to main when the directory index is unavailable.
+    /// Non-empty directory searches (`all`/`path`) only observe a `limit + 1`
+    /// page: without a cursor this is a lower bound on the full result count;
+    /// with a cursor it counts only the observed suffix after that cursor.
+    /// A lookahead hit contributes one, so this is not an exact global total
+    /// while more results remain. Use `next_cursor` for directory continuation,
+    /// not this value to calculate a final page count.
     pub total_count: u64,
     pub query: String,
     pub execution_time_ms: f64,
