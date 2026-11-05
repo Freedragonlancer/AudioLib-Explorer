@@ -125,7 +125,7 @@ fn check(request: &Request, security: &crate::Security) -> Result<(), ApiError> 
         }
     {
         return Err(ApiError::admin_lan_only(
-            "Open the admin page directly from another device on the LAN, using the server's IP address or LAN hostname and configured port",
+            "Open the admin page directly using the server's IP address, localhost or a LAN hostname, with the configured port",
         ));
     }
     let changing = !matches!(

@@ -43,7 +43,7 @@
 | PG-10 | 「全部」范围（`scope=all`，热缓存）：主表与目录段索引合并 | p95 ≤ schema 8 同一查询集的 p95 × 1.2；同时记录分层合并的额外耗时（设计 §10.1 估计 2–6ms） | C：查询集 ×30 次，记录 p50/p95/max | P0 |
 | PG-11 | 「全部」范围（`scope=all`，冷缓存，清 OS 文件缓存） | p95 ≤ schema 8 冷缓存 p95 × 1.2；目录段索引首次载入的耗时单独记录 | C：每轮清缓存后重跑 | P0 |
 | PG-12 | 合并排序与去重的正确性 | 同一文件在主表和目录段都命中时只出现一次；主表（文件名/描述）命中排在只命中路径的前面；同分按文件 id 稳定排序；结果与参考实现的 ID 序列完全一致 | U + I：已知样本库 + 随机查询对比 | P0 |
-| PG-13 | keyset 翻页（OFFSET > 2,000 时用游标；游标覆盖主表层、混合层和仅路径层） | 逐页取完的结果 = 一次取全集，不漏不重；页边界正好落在层与层交界、同分并列、某一层先取完时都正确；翻页期间有后台写入时，已返回的行不重复出现 | U + I：每页 200 条遍历 ≥5 万条结果 | P0 |
+| PG-13 | keyset 翻页（OFFSET > 2,000 时用游标；游标覆盖主表层、混合层和仅路径层） | 库不变时逐页取完 = 一次取全集，不漏不重；覆盖层交界、同分并列及某层先取完。查询、范围、条件、排序、库内容或 provider 会话变化后旧游标须以 `CURSOR_STALE` 拒绝，客户端丢弃旧续页、从第一页重取，不混合两代结果 | U + I：每页 200 条遍历 ≥5 万条结果，并注入变更 | P0 |
 | PG-14 | 「全部」或「仅路径」查询时取消 | 搜索返回 `OperationInterrupted`；取消后没有残留的语句或事务；旧结果不会显示出来 | U + I：在长查询途中取消，检查连接状态 | P0 |
 | PG-15 | 「仅文件名」范围（主表列过滤 `{filename filename_tokenized}`） | p95 ≤ schema 8 文件名查询的 p95 × 1.2 | C | P0 |
 | PG-16 | 高频路径片段查询（根目录名、命中 >5 万行的路径片段），作为**必测门禁查询**并入 PG-01/PG-10 查询集。目录命中集为空时走产品代码里的主表 `LIMIT 1` 探空短路（#216，见下；过闸数字来自 #215 的 bench） | p95 ≤ schema 8 同一查询 p95 × 1.2（口径见上文统计方法）；热测过闸例：`hdd_A_Lib explosion` 5 轮 p95 中位 s8 **5.18** ms / s9 **4.78** ms，比 **0.922** ≤ 1.2 → **PG PASS**（此前曾复现 4.6ms → 649ms 的回归，修复+短路前不得合入） | C：每个库至少取 5 条根目录名和 5 条命中 >5 万行的片段 | P0 |
@@ -57,7 +57,7 @@
 ## 2. 路径搜索（#204，方案 B）
 
 
-**接口约定（搜索 scope，2026-11-03 服务端已定；目录段索引见 #216）**：HTTP/API 参数 `scope=main|all|path`；**不传 scope 等于 `main`**，排序/命中与 schema 8 完全一致。客户端选「仅文件名」时不传参数（兼容 s8）；选「全部」传 `scope=all`；选「仅路径」传 `scope=path`。分层排序（PS-23）只在 `all` 与 `path` 下判定；`main`/缺省不走分层。路径索引是 `audio_dir_search` 加 `audio_dir_runs`，不是逐文件的 `audio_path_search`。
+**接口约定（2026-11-04 修正范围歧义）**：`SearchRequest.scope=main|all|path|filename`；**不传 scope 等于 `main`**，保留 schema 8 的主字段命中与排序。UI「主字段」对应 `main`，「仅文件名」对应独立的 `filename`，「全部」对应 `all`，「仅路径」对应 `path`。`filename` 限定文件名列；`path` 要求每个词都命中目录或祖先目录，文件名/Metadata 不补足路径词；跨来源 AND 只用于 `all`。分层排序（PS-23）只在 `all` 下形成三层；`main`/缺省不走分层。客户端在经过校验的远程快照上执行相同查询；当前没有在线 HTTP 搜索端点。路径索引是 `audio_dir_search` 加 `audio_dir_runs`，不是逐文件的 `audio_path_search`。
 
 | ID | 场景 / 输入 | 预期 | 验证 | 优先级 |
 |---|---|---|---|---|
@@ -71,22 +71,40 @@
 | PS-08 | 排序：「全部」范围下，查询词同时命中文件名和路径 | 主表命中排在只命中路径的前面；整个目录都命中时，前 50 条结果不能全被只命中路径的行占满 | I：在已知样本上断言排名 | P0 |
 | PS-09 | 盘符、通用段（`X:`、`Users`、`SFX`、`Sound Effects`、`音效`、`素材`） | 盘符不入索引；静态停用词表里的词不产生 token；根目录名默认不入索引，开关打开后才入 | U | P1 |
 | PS-10 | 路径中有 FTS 语法字符（`"`、`*`、`-`、`(`、`:`、`NEAR`） | 主表和 `audio_dir_search` 的查询都正确转义，不报 FTS 语法错误 | U | P0 |
-| PS-11 | 范围切换「全部 / 仅文件名 / 仅路径」；HTTP `scope=main|all|path`（省略 = `main` = schema 8 行为）；UI「仅文件名 / 全部 / 仅路径」分别对应 `main`（或不传）/ `all` / `path` | 「仅文件名」=`main`/不传，只查主表文件名列，顺序与 s8 完全一致；「仅路径」=`path`，只查 `audio_dir_search` / `audio_dir_runs`；「全部」=`all`，主表与目录段并集去重后按 PS-23 分层；同一查询下三者集合关系成立 | I | P0 |
+| PS-11 | 范围切换「全部 / 主字段 / 仅路径 / 仅文件名」；scope 为 `all/main/path/filename`，省略仍为 `main` | 主字段保留 s8 的文件名、标注和内嵌 Metadata 搜索；仅文件名只查文件名列；仅路径的每个词都须命中目录；全部允许跨来源 AND；以英文、中文和数字词验证集合、分页、筛选及排序，本地与 HTTP 同步后的快照一致 | I | P0 |
 | PS-12 | `audio_dir_search` / `audio_dir_runs` 与目录、文件一致 | `audio_dir_search` 的 rowid = `folders.id`，行数 = `count(folders)`（`contentless_delete=1`）；`audio_dir_runs` 无孤儿行，`sum(n) = count(audio_files)`，没有 run 含别的目录的文件；删目录后段行和 runs 都没有残留；integrity-check 通过 | U + I | P0 |
 | PS-13 | 目录本身改名（`folders.name` 变化） | 后台任务按 `folder_closure` 找后代文件，每批 5,000 行更新；不在 UI 线程执行；中途 kill 后按 `library_meta.path_reindex_progress` 续跑，最终结果和一次跑完一致；期间搜索不被阻塞（PG-05） | I | P0 |
 | PS-14 | 主表结构不变 | `audio_search` 的列、tokenizer 和选项（contentless、`detail=full`、`columnsize=1`）都和 schema 8 相同，没有路径列，也没有厂商列；迁移前后主表不重建，token 不变（主表不做 NFC/全角半角归一化）；只出现在路径里的词在「仅文件名」范围下搜不到 | U：schema 断言 | P0 |
 | PS-15 | 新客户端连旧服务器（`/capabilities.compatibility.features` 里没有 `search_path`） | 隐藏「仅路径」和厂商相关的范围开关，「全部」退化成只查主表，不报错 | I | P1 |
-| PS-16 | 多词跨表（如 `pentax shutter`，一个词在文件名里、一个词在路径里） | 按词计算：每个词取（主表 ∪ 目录段）的命中，再对所有词求交集；结果等于参考实现；任意一个词两边都不命中时，结果为空 | U + I | P0 |
+| PS-16 | All 范围多词跨表（如 `pentax shutter`，一个词在文件名里、一个词在路径里） | `scope=all` 按词计算：每个词取（主表 ∪ 目录段）的命中，再对所有词求交集；结果等于参考实现；任意一个词两边都不命中时，结果为空。`scope=path` 严格要求每个词均命中目录，不用主字段补足 | U + I | P0 |
 | PS-17 | 超高频路径词（共享前缀、`Pro Sound Effect` 之类） | 路径词估计命中文件数超过全库一半时丢弃该词的目录集，只走主表；估计 ≤5 万时只扫描子树内的 `audio_dir_runs`。p95 仍满足 PG-10；根名不入索引时，搜根名不会命中全库 | I + C | P0 |
 | PS-18 | 超长路径（>4 KiB）和 macOS NFD 路径 | 超长路径截断后入索引，截断次数计入统计或日志；NFD 先统一成 NFC 再分词，NFC 和 NFD 写法搜到的结果相同 | U | P1 |
 | PS-19 | `audio_dir_search` 只存本段目录名 | 目录段 token 不包含文件名本身；只出现在文件名里的词，在「仅路径」范围下搜不到 | U | P1 |
 | PS-20 | 「全部」范围多词查询，词分布在不同表 / 同一表：(a) `door` 只在路径、`slam` 只在文件名；(b) 两个词都只在路径；(c) 两个词都只在文件名 | 三种情况都命中该文件（按词取主表与目录段的并集再求交，见 PS-16）；不因跨表而漏掉；同一文件只出现一次 | U + I：已知样本断言 | P0 |
 | PS-21 | 目录表方案下的多词跨表：一个词只在目录名里（目录表命中），另一个词只在文件名里（如目录 `Door`、文件 `slam_01.wav`） | 该文件命中且只出现一次；先按目录表命中的 `dir_id` 过滤文件、再与主表命中合并时不漏掉该文件；路径词不参与 bm25 排序，只做过滤；结果等于参考实现（同 PS-20 的按词并集再求交） | U + I：已知样本断言 | P0 |
 | PS-22 | 目录改名 / 移动 / 删除，分别走全量扫描和增量扫描 | 目录表和文件的 `dir_id` 映射同步更新；旧路径词搜不到、新路径词能搜到；没有漏掉的文件，也没有重复行；删除目录后，其下文件不再出现在路径搜索结果里，目录表无残留行 | I | P0 |
-| PS-23 | 分层排序（2026-11-03 确认）：仅对 scope=`all` 与 `path` 判定分层；`main`/不传 scope 时结果顺序必须与 schema 8 **完全一致**（可作为 VN 兼容）。分层：主表字段全命中 > 混合命中 > 仅路径命中；同层内按主表 bm25；仅路径命中按 rowid 升序 | (a) `main`/缺省与 schema 8 **逐条一致**，可作 EM-09 / VN 兼容；(b) 主表字段全命中 > 混合命中 > 仅路径命中；同层按主表 bm25；仅路径命中按 rowid 升序；结果 ID 序列与参考实现一致 | I：对比结果 ID 序列 | P0 |
+| PS-23 | 分层排序与服务端设计 §3.2 统一：`all` 为主字段完整命中 > 混合命中 > 纯路径命中；第0层按主表 bm25、ID，混合和纯路径层按 ID；严格 `path` 只含路径集合。`main`/缺省保持 s8 顺序。显式非相关性排序作用于完整命中集合 | 用不同主字段分数构造混合命中参考序列，断言其按 ID；第0层及 `main` 与 s8 **逐条一致**。覆盖全量、筛选、各排序和分页；游标过期须明确拒绝，不重放旧页 | I：对比结果 ID 序列 | P0 |
 | PS-24 | 目录命中集为空的短路（产品代码 #216；bench 过闸见 #215）：(a) 该词在 `audio_dir_search` 无命中且主表 `LIMIT 1` 也无命中；(b) 目录集为空但主表有命中 | (a) 返回空页（0 行），跳过全量主扫描；(b) **不得**因短路漏掉主表命中，仍应返回主表命中（集合与不短路参考实现一致） | U + I：构造目录空/主表空与目录空/主表有两组样本 | P0 |
+| PS-25 | 路径结果超过一页，任务/收藏在不同 scope 间切换，再恢复；远程删除覆盖层 | 任务保存各自范围，旧任务缺字段默认 Main；`total_count_exact=false` 显示至少/≥，不按下界 clamp 或关闭下一页。游标位置优先于请求 offset；末页确认精确总数；返回上一页和刷新不混用旧游标，删除覆盖层不冒充精确总数 | U + I + G | P0 |
+| PS-26 | 超过256层的合法目录、稀疏文件 ID 和 NULL folder_id | 原生及带无损筛选的 Path/All 集合和 facets 一致，祖先匹配不截断；路径覆盖阈值按真实 run 成员和全库记录计算，不信任陈旧目录统计；无归属 ID 在最后 run 后不崩溃 | U + I | P0 |
 
 ## 3. Vorbis / FLAC / OGG 标签（#205）
+
+当前候选已接通默认 `wav/flac/ogg/oga` 扫描、真实格式 probe、FLAC/Vorbis 解码和 seek，
+并复用注册的 `ByteSource`（包括无真实文件的流身份和 `.wav` 缓存名）。以下仍是验收断言，
+本段不把新增实现或测试文件记为已通过，也不代替跨平台、真实 HTTP Range 和 PG 性能验收。
+
+提取器将原文放在 `wav_metadata.vorbis`，键转为大写，重复值保留为多值；规范映射放入
+`wav_metadata.fields`。映射键的白名单限制规范字段，不删除未知 textual key 的原文；原文也进入
+现有 Metadata 搜索投影，图片键/二进制例外。提取预算为 comment 1 MiB、最多 4096 项、
+每个保留值 16 KiB；越界/截断记录警告，安全读出的前缀可保留，无效 UTF-8 有损替换。
+`vorbis_version=1` 参与增量扫描 fingerprint；旧提取版本会重新读取，用户标注、未知扩展和独立厂商镜像保留。
+
+Opus 目前仅支持 OpusHead/OpusTags probe，不默认扫描 `.opus`，没有 bundled Opus decoder，
+播放须明确返回 unsupported。Ogg Vorbis、Ogg FLAC 与链式 Ogg 标签按第一条逻辑流提取；
+不能将 VB-07 的“都能提取”解释成所有 Ogg codec 都能播放。播放层虽传入 tag/visual 限额，
+Symphonia 0.6.1 embedded readers 的恶意长度保护还依赖 FLAC ScopedStream/物理块和 Ogg 16 MiB packet 边界，
+不能把提取器 1 MiB 预算写成总播放内存上限。
 
 | ID | 场景 / 输入 | 预期 | 验证 | 优先级 |
 |---|---|---|---|---|
@@ -96,8 +114,8 @@
 | VB-04 | 值不是 UTF-8 | 有损解码，不丢整条记录、不 panic | U | P0 |
 | VB-05 | 值为空、只有 `KEY=`、没有 `=` | 忽略，不产生空 token | U | P1 |
 | VB-06 | 带嵌入图片（METADATA_BLOCK_PICTURE / FLAC PICTURE） | 不进 FTS，不把 base64 当文本 | U | P0 |
-| VB-07 | Opus（OpusTags）、Ogg Vorbis、OGG 封装的 FLAC、链式 OGG | 都能提取；链式 OGG 至少取第一段 | U + I | P1 |
-| VB-08 | 未知 key、key 大小写混用 | key 统一大小写；未知 key 按白名单策略处理（见待确认问题） | U | P1 |
+| VB-07 | Opus（OpusTags）、Ogg Vorbis、OGG 封装的 FLAC、链式 OGG | 都能提取；链式 OGG 至少取第一段；另外确认 Opus 仅标签支持、播放明确 unsupported，不扩大 codec 承诺 | U + I | P1 |
+| VB-08 | 未知 key、key 大小写混用 | key 统一大小写；规范字段按映射白名单，未知 textual key 原文保留；图片键仍排除（边界见上） | U | P1 |
 | VB-09 | 已入库的 FLAC/OGG 文件需要重新提取 | 有触发机制；重提取在后台运行，不阻塞搜索（见 PG-05） | I | P0 |
 
 ## 4. 现有元数据回归
@@ -123,7 +141,25 @@
 - **一个文件对应多行**（例如多语言重复表）：按（文件, 字段）合并，非空的值优先；keywords 取并集并去重。
 - **显示语言**：中文优先，没有中文时用英文。
 
-流程：`POST /api/vendor-import/preview` →（`PUT …/{id}/mapping`）→ `POST …/{id}/commit`（带 `Idempotency-Key`）→ 必要时 `POST …/{id}/rollback`。所有接口都需要 manage 权限和 `X-AudioLib-Library-Id`。
+手动流程：`POST /api/vendor-import/preview` →（`PUT …/{id}/mapping`）→ `POST …/{id}/commit`（带 `Idempotency-Key`）→ 必要时 `POST …/{id}/rollback`。所有接口都需要 manage 权限和 `X-AudioLib-Library-Id`。
+
+用户追加的自动流程纳入 #206：本地客户端/CLI 或服务端扫描 WAV 时，同时发现同目录 CSV/TSV/XLS/XLSX，
+在 WAV 批次写入后识别表头、匹配并合并 Metadata。自动匹配只接受表格同目录下唯一且本轮扫描实际确认的 WAV，
+不使用全库同名、stem 或 fuzzy 回退；不把外部绝对路径、父目录或子目录路径降为同名匹配。
+手动映射、跨目录选择和歧义确认继续使用上述手动流程。
+
+| ID | 自动扫描场景 | 预期 | 验证 | 优先级 |
+| --- | --- | --- | --- | --- |
+| AS-01 | 本地扫描目录内真实 WAV + CSV/BIFF8 XLS/OOXML XLSX | 自动识别各 sheet 的表头，同目录唯一 WAV 得到新增可搜字段；源音频与表格字节不变 | I + G | P0 |
+| AS-02 | 内嵌 Metadata 与表格值相同/部分重复，含大小写、空白、Unicode、keyword 列表差异 | 显示及搜索投影去重，保留原始来源；不同值保留；用户标签、备注、评分、收藏和颜色不变 | U + I | P0 |
+| AS-03 | 相同内容重复扫描；仅表格变化；表格不变而新增 WAV；内嵌值改变 | 幂等；无需强制重提取 WAV 即可更新；只替换该表格自己的贡献，保留其他表格和手动批次 | I | P0 |
+| AS-04 | 多目录同名 WAV、同目录不唯一的别名、外部/穿越路径、非 WAV；未关联表格插行/重排 | 不跨目录或近似匹配，不误写；歧义和未匹配计数可见，允许改用手动导入；部分关联时只合并新值并保留该表全部旧贡献，完整匹配后才清理自身过时值 | I | P0 |
+| AS-05 | 损坏/无匹配列/超限/不可读表格、表格消失或 NAS 掉线 | 可诊断且保留最后一次有效 Metadata；不删除源文件、不用失败输入抹掉旧来源 | I | P0 |
+| AS-06 | 解析、提交或暂停时取消/关闭；重复扫描恢复 | 完整解析后才写；提交有界且事务原子，已提交来源保留，重扫不重复；扫描锁及关闭排空契约继续成立 | I + G | P0 |
+| AS-07 | 服务端 s8 与真实迁移后 s9 自动扫描；只改表格并同步 | 权限与库身份校验继续适用；revision/快照更新，新客户端同步及离线重开可搜，过渡期 s8 快照保留 WAV 新文本 | HTTP + I | P0 |
+| AS-08 | 大目录遍历与并发搜索 | 发现表格使用有界队列和磁盘 spool，不把所有路径或行收进内存；复用分批缓存维护及 PG05 门槛 | I + P | P0 |
+
+AS 用例属于新增验收范围，执行结果须绑定实际源码和包；此前手动 CX 通过不能替代它们。
 
 上限：单文件 50 MB（`/capabilities.vendor_import.max_file_bytes = 52428800`）、20 万行（`max_rows = 200000`）、单行文本 256 KiB。测试按这些值的边界 ±1 来做，并断言 capabilities 返回的就是这两个数。
 
@@ -199,15 +235,49 @@
 | VN-05 | “本地库需要迁移”的提示 | 文案准确；可以“稍后”关闭；同一版本只提示一次 | G | P1 |
 | VN-06 | 服务器版本或 schema 与客户端不匹配的提示 | 每个会话只提示一次，不重复弹窗 | G | P1 |
 | VN-07 | 客户端有更新可用；离线时检查更新 | 离线时静默失败，不阻塞启动 | G + I | P1 |
-| VN-08 | snapshot 格式 ID 和修订号 | 新快照的格式 ID 是 `ale-s9-cld1-t3-m2-p1-a1-sd1`（常量 `PLAN_B_V9_FORMAT`；`-z1` 变体沿用 v8 规则）；`source_search_rev=3`；features 为 `search_path`、`vorbis_tags`、`vendor_metadata`；`CATALOG_REVISION=2`；主表 tokenizer 段是 `t3`，目录段索引版本由 `sd1` 表示（`search_path_rev=1`），不出现 `t4`，也不使用已停用的 `sp1` | U | P0 |
+| VN-08 | snapshot 格式 ID 和修订号 | 验收目标：完成 s9 迁移后的格式 ID 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`PLAN_B_V9_FORMAT`），`source_search_rev=3`、`search_path_rev=1`，三项 feature 同事务发布；主表 tokenizer 为 `t3`，不出现 `t4` 或 `sp1`。目录标记不等于 Vorbis/厂商功能已验收；catalog 及压缩变体的现状差异见下文 | U + I | P0 |
 | VN-12 | 目录段版本兼容：只认识 `sd1` 的客户端收到 `sd2` 的目录段数据（包括格式 ID 被篡改、header 和快照内容不一致） | 判定为不兼容：重新拉取它能接受的格式，拿不到时禁用路径搜索（隐藏「仅路径」，「全部」只查主表）并提示升级；**绝不能**用 sd1 规则去查 sd2 的目录段 token（不会静默错配）；主表搜索照常工作，结果不受影响 | U + I | P0 |
-| VN-09 | `/capabilities` 的结构 | 只新增字段、不改旧字段：`compatibility.features`、`snapshot_read_formats`、`database_write_formats`（只有 s9）、`library_schema.{current, source_search_rev, snapshot_formats_served}`、`schema_migration.{state, endpoint}`、`vendor_import.{revision, max_file_bytes, max_rows, max_row_text_bytes}`；旧客户端解析时不报错 | U + I | P0 |
+| VN-09 | `/capabilities` 的结构 | 验收目标：只新增字段、不改旧字段；按实际库/角色报告 `compatibility.features`、`snapshot_read_formats`、`database_write_formats` 与 `library_schema`、`schema_migration`；只在业务端点可用时报告 `vendor_import` 能力及限额，旧客户端解析不报错。当前实现边界与待验收项见下文，不把设计 JSON 当作已通过响应 | U + I | P0 |
 | VN-10 | 迁移中的客户端提示 | 客户端根据 `schema_migration.state`、响应头 `X-AudioLib-Schema-Migration`（`deferred|running|paused|failed` 等形态）和 `/health.upgrade` 显示“服务器正在升级库（x%）”；切换时收到 503，会按 `Retry-After` 重试，不报错退出 | I + G | P1 |
 | VN-11 | 迁移完成后的新快照 | 服务端主动预生成 s9 zstd，首个客户端不需要等约 44 s 的生成；`snapshot_id` 变化后客户端提示刷新 | I + C | P1 |
 | VN-13 | 搜索分页兼容（承接 VN-01）：仍接受旧 `offset` / `page`；同时传时 `cursor` 优先于 `offset`/`page` | 只传旧 `offset` / `page` 行为不变且与 s8 兼容；同时传时 `cursor` 优先于 `offset`/`page` | I | P0 |
 | VN-14 | 不传 `scope` 与显式 `scope=main`；对照 schema 8 同查询 | 两者结果 ID 序列与命中集合完全一致，且等于 schema 8（s8 兼容）；客户端「仅文件名」不传参数 | I | P0 |
 
-### 7.1 s8 兼容快照（过渡期，暂定保留一个版本周期）
+**VN-08/09 当前实现与验收边界（2026-11-04，#204–206 扩展候选）：**
+完成服务端迁移的 s9 库与普通本地库的目标不同：`SCHEMA_VERSION` / `TARGET_SCHEMA` 仍为 8，
+本地升级 UI 当前仅构建路径索引，专用 server 打开入口才允许 s9 可写库。
+通用客户端 manifest 列出已知 schema 3–9 完整格式的只读能力，普通写目标仍只列 s8；
+服务端 capabilities 的 `database_write_formats` 则按实际源库列 s8 或完成态 s9。
+真实读9/写8边界、专用 server9 写入及完整 owned 快照校验已实现，相关回归必须绑定本轮源/二进制身份，
+不得仅将全局常量改成 9 或宣称所有本地库已迁移。restore/maintenance 仍保留 s8 写 guard。
+
+`CATALOG_REVISION=2` 已实现；catalog revision 是信息字段，不做相等版本准入，不代替 marker/协议/格式验证。
+当前开发构建的应用版本仍是 **0.8.7**，并未正式发布 0.9.0；升级提示 `min` 取实际构建版本。
+`-z1` 是 Metadata 压缩存储格式；快照外层 zstd 传输不构成 s9 `-z1` 实现证明。
+
+VN-09 当前服务端输出 `library_schema.{current,source_search_rev,snapshot_formats_served}`、
+`schema_migration.{state,endpoint}`、真实 `vendor_import.{endpoint,revision,max_file_bytes,max_rows,max_row_text_bytes}`、
+`client_upgrade` 与四个 `search_scopes`。导入限额为每文件 52,428,800 bytes、200,000 行、每行 262,144 bytes；
+路由仍受鉴权、manage 权限、库身份和实际格式准入约束。
+`GET /library` 的 `schema_version`/format/stats 是协商结果，新增 `library_schema` 是实际源 schema；
+`library_id`/revision 绑定源库。现代端同样发送完整 accept/max 头；历史无标记 `/library` 可默认看兼容8信息，
+不构成无标记快照下载的例外。能力协商须同时验证这些角色，不能只看程序版本字符串。
+缺字段时客户端回退，未实现入口隐藏；字段兼容与格式兼容分别验收。
+本轮具体测试/真实旧客户端配对结果另记，不将新增字段或旧身份报告当成本轮验收已通过。
+
+### 7.1 s8 兼容快照（设计目标：过渡期暂定一个版本周期）
+
+当前候选已实现 s9→s8 派生及协商发放，默认 `legacy_snapshot_enabled=true`，计划覆盖 0.9 过渡周期；
+以下 **SC-01..10 仍是验收断言，不因实现存在而自动通过**。真实官方 0.8.7、原生新客户端、失败缓存保全及
+大库成本均须按本轮候选身份分别验证，不能以早期“旧端拒绝9”的报告代替过渡成功验收。
+
+兼容副本只在 owned staging 修改：按 WAV 过滤文件和已知关联，移除目录索引/capture、正式 vendor 表，
+不重建主表或主 FTS；WAV 原有 rev3 词项、Metadata 扩展镜像和用户标注保留，统计按过滤后行刷新。
+原生/兼容及 plain/zstd 缓存和任务隔离，使用同一源 library_id/revision；新 revision 重新派生最新副本。
+不安全的未知扩展关联、校验失败、取消或空间不足均不得发布兼容副本，且不影响有效原生表示。
+无标记 `/library` 的 WAV 聚合不先做 GB 级复制；快照下载仍要求 catalog、精确 accept 格式和修订头。
+兼容信息/快照共享 recommended 提示，原生9不误提示；关闭过渡后旧端 required/409，保留最后已验证缓存供离线读取。
+旧端即使可读派生8，也不能写源9。SC-03 的 `vendor_metadata` 指正式存储表，非保留在 WAV JSON 中的未知扩展镜像。
 
 | ID | 场景 | 预期 | 验证 | 优先级 |
 |---|---|---|---|---|
@@ -242,9 +312,9 @@
 
 ## 10. 设计决定（#209 @ cddc7e3、服务端稿及之后的决定）
 
-1. **路径**：目录段索引 `audio_dir_search` + `audio_dir_runs`（#216），主表不变，路径不参与主表 bm25。`scope` 省略或 `main` 时顺序与 schema 8 一致；`all` / `path` 才做分层。多词按词计算（主 ∪ 目录段）再求交集。路径词估计命中超过全库一半时丢弃该词的目录集。加静态停用词表；根名默认不入索引。目录命中集为空且主表 `LIMIT 1` 也空时返回空页并跳过全量主扫描。→ §1、§2
+1. **路径**：目录段索引 `audio_dir_search` + `audio_dir_runs`（#216），主表不变，路径不参与主表 bm25。`scope` 省略或 `main` 时顺序与 schema 8 一致；`all` 按三层排序，多词按词计算（主 ∪ 目录段）再求交集；`path` 严格要求每个词均命中目录，不用主字段补足。路径词估计命中超过全库一半时丢弃该词的目录集。加静态停用词表；根名默认不入索引。目录命中集为空且主表 `LIMIT 1` 也空时返回空页并跳过全量主扫描。→ §1、§2
 2. **中文分词**：用 jieba 词典分词，不用 bigram。→ PS-03
-3. **Vorbis**：白名单里的键进索引，全部键存 JSON。→ §3
+3. **Vorbis**：规范字段按映射白名单；全部保留的 textual key 原文存 JSON 并参与 Metadata 搜索，图片键除外，受提取预算约束。→ §3
 4. **厂商文本**：并入 `bwf_description_tokenized`，不新增 FTS 列，所以没法单独设权重；原始数据在 `vendor_metadata`；显示优先级 用户 > 厂商 > 内嵌，两种来源都能搜到。→ PG-04、CX-30～CX-32
 5. **匹配规则**：一行对应多个文件时标为歧义、不自动写入；一个文件对应多行时非空优先、keywords 取并集；显示时中文优先，没有中文时用英文。→ CX-11、CX-28
 6. **旧客户端**：过渡期发 s8 兼容快照（过滤非 wav 行，附带升级提示头），之后硬拒绝并提示升级。→ §7.1

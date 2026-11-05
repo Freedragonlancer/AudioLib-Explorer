@@ -259,6 +259,7 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
 
 pub(super) fn rebuild_search(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction().map_err(db_error)?;
+    crate::search_tracking::drop_owned(&tx)?;
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS audio_files_ai; DROP TRIGGER IF EXISTS audio_files_au;
         DROP TRIGGER IF EXISTS audio_files_ad; DROP TABLE IF EXISTS audio_search;",

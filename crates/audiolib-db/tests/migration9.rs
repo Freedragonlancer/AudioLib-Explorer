@@ -68,7 +68,13 @@ fn directory_only_switch_reopens_and_rollback_preserves_new_annotations() {
             .unwrap(),
         3
     );
-    assert_eq!(c.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('audio_path_search','vendor_metadata','v9_checkpoint')",[],|r| r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(c.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('audio_path_search','v9_checkpoint')",[],|r| r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM vendor_metadata", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert!(
         SqliteProvider::open(&db).is_err(),
         "ordinary client must not silently become an s9 writer"
@@ -268,4 +274,148 @@ fn earlier_directory_only_schema9_remains_readable_and_partial_features_fail() {
         1
     );
     assert_eq!(run(&db, Action::Rollback).state, State::RolledBack);
+}
+
+#[cfg(feature = "scanner")]
+#[test]
+fn server_schema9_relinks_real_wav_roots_without_enabling_restore_or_maintenance() {
+    use audiolib_core::MaintenanceAction;
+    use audiolib_db::{ScanCancellation, ScanOptions, ScanService};
+    use std::{fs, sync::Arc};
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("original");
+    let target = temp.path().join("relocated");
+    for root in [&source, &target] {
+        fs::create_dir_all(root.join("SFX")).unwrap();
+    }
+    let mut wav = b"RIFF".to_vec();
+    wav.extend(38_u32.to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16_u32.to_le_bytes());
+    wav.extend(1_u16.to_le_bytes());
+    wav.extend(1_u16.to_le_bytes());
+    wav.extend(48000_u32.to_le_bytes());
+    wav.extend(96000_u32.to_le_bytes());
+    wav.extend(2_u16.to_le_bytes());
+    wav.extend(16_u16.to_le_bytes());
+    wav.extend(b"data");
+    wav.extend(2_u32.to_le_bytes());
+    wav.extend(0_i16.to_le_bytes());
+    fs::write(source.join("SFX/clip.wav"), &wav).unwrap();
+    fs::write(target.join("SFX/clip.wav"), &wav).unwrap();
+    let unrelated = temp.path().join("unrelated");
+    fs::create_dir_all(unrelated.join("other")).unwrap();
+    for name in ["ambient.wav", "neutral.wav"] {
+        fs::write(unrelated.join("other").join(name), &wav).unwrap();
+    }
+    let db = temp.path().join("library.db");
+    let provider = Arc::new(SqliteProvider::open(&db).unwrap());
+    ScanService::new(provider.clone())
+        .scan(
+            &source,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    ScanService::new(provider.clone())
+        .scan(
+            &unrelated,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    let original = provider
+        .find_audio_by_path(&source.join("SFX/clip.wav"))
+        .unwrap()
+        .unwrap();
+    provider
+        .update_metadata(
+            original.id,
+            &MetadataPatch {
+                notes: Some("retained after relink".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let backup = temp.path().join("schema8-backup.db");
+    provider.backup_library(&backup).unwrap();
+    drop(provider);
+    assert_eq!(run(&db, Action::Start).state, State::Done);
+    assert!(SqliteProvider::open_existing(&db).is_err());
+    let server =
+        SqliteProvider::open_server_existing(&db, &AtomicBool::new(false), |_| {}).unwrap();
+    // Neither path has schema-9 restore/rebuild semantics. Relink admission must
+    // not expand their existing writer guard as a side effect.
+    assert!(server.restore_library(&backup).is_err());
+    assert!(
+        server
+            .maintain_library(MaintenanceAction::Optimize)
+            .is_err()
+    );
+    assert!(
+        server
+            .maintain_library(MaintenanceAction::RebuildSearch)
+            .is_err()
+    );
+    assert!(
+        SqliteProvider::open_read_only(&db)
+            .unwrap()
+            .relink_folder(&source, &target)
+            .is_err()
+    );
+    let conn = support::connection(&db).unwrap();
+    conn.execute(
+        "DELETE FROM audiolib_schema_features WHERE feature='vendor_metadata'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        server.relink_folder(&source, &target).is_err(),
+        "incomplete schema 9 must be refused"
+    );
+    assert_eq!(
+        server.get_audio(original.id).unwrap().file_path,
+        original.file_path
+    );
+    conn.execute(
+        "INSERT INTO audiolib_schema_features VALUES('vendor_metadata',1)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(server.relink_folder(&source, &target).unwrap(), 1);
+    let moved = server.get_audio(original.id).unwrap();
+    assert_eq!(
+        moved.file_path,
+        audiolib_db::display_path(&target.join("SFX/clip.wav").canonicalize().unwrap())
+    );
+    assert_eq!(moved.folder_id, original.folder_id);
+    assert_eq!(moved.notes, "retained after relink");
+    let matches = server
+        .search(&SearchRequest {
+            query: "SFX".into(),
+            scope: SearchScope::Path,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        matches
+            .results
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>(),
+        vec![original.id]
+    );
+    assert_eq!(fs::read(source.join("SFX/clip.wav")).unwrap(), wav);
+    assert_eq!(fs::read(target.join("SFX/clip.wav")).unwrap(), wav);
+    let conn = Connection::open(&db).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+    migration9::validate_ready(&conn).unwrap();
 }

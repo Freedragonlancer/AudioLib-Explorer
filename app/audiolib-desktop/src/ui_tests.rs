@@ -493,13 +493,26 @@ fn classic_transport_keeps_separate_play_pause_and_shared_transform_state() {
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     ui.set_audio_ready(true);
+    ui.set_playback_state(2);
     ui.set_pitch_text("7.00".into());
     ui.set_speed_text("0.50".into());
     let actions = Rc::new(RefCell::new(Vec::new()));
     let observed = actions.clone();
-    ui.on_start_requested(move || observed.borrow_mut().push("play".to_owned()));
+    let weak = ui.as_weak();
+    ui.on_start_requested(move || {
+        observed.borrow_mut().push("play".to_owned());
+        let ui = weak.upgrade().unwrap();
+        ui.set_playback_state(3);
+        ui.set_playing(true);
+    });
     let observed = actions.clone();
-    ui.on_pause_requested(move || observed.borrow_mut().push("pause".to_owned()));
+    let weak = ui.as_weak();
+    ui.on_pause_requested(move || {
+        observed.borrow_mut().push("pause".to_owned());
+        let ui = weak.upgrade().unwrap();
+        ui.set_playback_state(4);
+        ui.set_playing(false);
+    });
     let observed = actions.clone();
     ui.on_transform_requested(move |pitch, rate, mono, repeat| {
         observed
@@ -524,6 +537,66 @@ fn classic_transport_keeps_separate_play_pause_and_shared_transform_state() {
         ]
     );
     ui.hide().unwrap();
+}
+
+#[test]
+fn studio_workbench_view_menu_reaches_library_and_inspector_without_the_rail() {
+    use audiolib_core::config::{DEFAULT_V2_THEME, STUDIO_THEME};
+
+    i_slint_backend_testing::init_no_event_loop();
+    for id in [DEFAULT_V2_THEME, STUDIO_THEME] {
+        for chinese in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+            ui.set_chinese(chinese);
+            crate::theme::apply_theme(&ui, id);
+            ui.set_sidebar_visible(false);
+            ui.set_inspector_visible(false);
+            ui.show().unwrap();
+            let view = if chinese { "视图" } else { "View" };
+            click_menu_item(
+                &ui,
+                view,
+                if chinese {
+                    "显示素材目录"
+                } else {
+                    "Show library sidebar"
+                },
+            );
+            assert!(ui.get_sidebar_visible());
+            click_menu_item(
+                &ui,
+                view,
+                if chinese {
+                    "显示筛选"
+                } else {
+                    "Show filters"
+                },
+            );
+            assert!(ui.get_inspector_visible() && ui.get_filters_visible());
+            click_menu_item(
+                &ui,
+                view,
+                if chinese {
+                    "显示声音详情"
+                } else {
+                    "Show sound details"
+                },
+            );
+            assert!(ui.get_inspector_visible() && !ui.get_filters_visible());
+            click_menu_item(
+                &ui,
+                view,
+                if chinese {
+                    "显示侧栏（筛选 / 详情）"
+                } else {
+                    "Show side panel (filters / details)"
+                },
+            );
+            assert!(!ui.get_inspector_visible());
+            ui.hide().unwrap();
+        }
+    }
 }
 
 #[test]

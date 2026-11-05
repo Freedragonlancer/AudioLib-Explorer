@@ -2246,6 +2246,59 @@ mod tests {
         }
     }
     #[test]
+    fn reused_output_loads_flac_oga_then_ogg_with_correct_ready_pcm_and_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut output = prepared_output(&temp.path().join("device.wav"));
+        output.sample_rate = 8000;
+        let realtime = output.realtime.clone();
+        let mut worker = worker(PlaybackStatus::default());
+        worker.output = Some(output);
+        for name in ["comments.flac", "comments.oga", "comments.ogg"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/fixtures/vorbis")
+                .join(name);
+            let expected = Decoder::open(&path).unwrap().read(4096).unwrap();
+            worker
+                .execute_command(AudioCommand::Load(path.clone()))
+                .unwrap();
+            let ready = worker.snapshot();
+            assert_eq!(ready.state, PlaybackState::Ready, "{name}");
+            assert_eq!(ready.file_path.as_ref(), Some(&path));
+            assert_eq!(ready.error, None, "{name}");
+            assert_eq!(ready.sample_rate, 8000);
+            assert!((ready.duration - 0.08).abs() < 0.000001);
+            assert!(Arc::ptr_eq(
+                &worker.output.as_ref().unwrap().realtime,
+                &realtime
+            ));
+            worker.execute_command(AudioCommand::Play).unwrap();
+            let output = worker.output.as_mut().unwrap();
+            let mut rendered = Vec::new();
+            loop {
+                while let Some(sample) = output.realtime.ring.pop() {
+                    rendered.push(sample);
+                }
+                if output.eof {
+                    break;
+                }
+                output.fill().unwrap();
+            }
+            let expected_stereo: Vec<_> = expected
+                .iter()
+                .flat_map(|sample| [*sample, *sample])
+                .collect();
+            assert_eq!(rendered, expected_stereo, "{name} complete reused-ring PCM");
+            assert_eq!(rendered.len(), 1280);
+            assert!(rendered.iter().any(|sample| sample.abs() > 0.001));
+            worker.execute_command(AudioCommand::Pause).unwrap();
+            let ended = worker.snapshot();
+            assert_eq!(ended.state, PlaybackState::Ended, "{name}");
+            assert_eq!(ended.file_path.as_ref(), Some(&path));
+            assert_eq!(ended.error, None, "{name}");
+        }
+    }
+
+    #[test]
     fn idle_wasapi_output_releases_after_grace_without_changing_transport() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("idle-wasapi.wav");

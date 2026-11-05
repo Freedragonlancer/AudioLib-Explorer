@@ -1859,7 +1859,6 @@ fn migrate9(db: &str) {
         c.execute_batch("BEGIN; DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs;
             CREATE VIRTUAL TABLE audio_dir_search USING fts5(path_tokens,path_tokens_tokenized,content='',contentless_delete=1,detail=full,columnsize=1,tokenize='unicode61 remove_diacritics 2');
             CREATE TABLE audio_dir_runs(dir_id INTEGER NOT NULL, lo INTEGER NOT NULL, hi INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(dir_id, lo)) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS vendor_metadata(audio_file_id INTEGER NOT NULL, import_id TEXT NOT NULL, field TEXT NOT NULL, value TEXT, source_file TEXT, sheet TEXT, row INTEGER);
             CREATE TABLE v9_checkpoint(k INTEGER PRIMARY KEY CHECK(k=1), last_id INTEGER NOT NULL, done INTEGER NOT NULL, phase TEXT NOT NULL);
             INSERT INTO v9_checkpoint VALUES(1,-9223372036854775808,0,'dirs'); COMMIT;").unwrap();
     }

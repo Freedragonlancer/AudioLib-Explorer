@@ -223,6 +223,7 @@ fn thirty_task_tabs_page_in_both_directions_with_a_fixed_new_task_control() {
             let ui = AppWindow::new().unwrap();
             ui.global::<crate::Theme>().set_ui_scale(scale);
             ui.global::<crate::Theme>().set_modern_style(modern);
+            ui.global::<crate::Theme>().set_modern_player(modern);
             ui.window()
                 .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
             ui.set_search_tasks(tasks(2));
@@ -619,6 +620,7 @@ fn thirty_task_tabs_and_saved_searches_render_at_all_supported_layout_extremes()
                 ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
                 ui.global::<crate::Theme>().set_ui_scale(scale);
                 ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_modern_player(modern);
                 ui.set_chinese(chinese);
                 ui.set_search_tasks(tasks(30));
                 ui.set_library_sidebar_page(1);

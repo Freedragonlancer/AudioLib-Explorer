@@ -1,5 +1,13 @@
 # Rust Remote (Server) Mode — Client
 
+Search Metadata v2 candidate: snapshot schemas 3–9 are admitted only with the
+matching complete format. Completed schema 9 is validated and opened read-only;
+older schemas retain their existing owned-copy preparation rules. Local working
+libraries remain schema 8. The candidate now negotiates a native schema-9 snapshot
+or a separate WAV-only schema-8 compatibility copy; actual paired-client and migration
+acceptance is recorded separately. See the
+[candidate migration plan](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md).
+
 AudioLib Explorer can browse a library hosted by `server/audiolib-server` instead of the
 local working library. The client side is the `crates/audiolib-remote` crate (blocking
 HTTP client, snapshot sync, WebDAV mapping, audio cache, secrets) plus the desktop
@@ -228,6 +236,33 @@ remaining components are percent-encoded and appended to the effective URL. The 
 report shows each root's effective URL and its source (user / server / base URL).
 
 ## Sync and the snapshot cache
+
+The catalog revision is 2. A client can read the known complete schema-3–9 formats,
+but ordinary local writers still target schema 8. `/capabilities` reports the server's
+actual write format and `library_schema.current`/`source_search_rev`, separately from
+the snapshot formats it serves. `/library.schema_version`, `snapshot_format` and
+statistics describe the negotiated representation; its new `library_schema` field
+describes the actual source. Library identity and revision always belong to that source.
+Modern `/library` requests send the same complete catalog/accept/max headers as snapshot
+requests. Historical unmarked `/library` requests can see compatibility information;
+an unmarked snapshot download is still refused.
+
+`legacy_snapshot_enabled` defaults to true for the planned 0.9 transition cycle.
+A peer explicitly accepting schema 9 receives it. A valid peer accepting only schema 8
+receives a separately cached owned projection with non-WAV rows and newer normalized
+tables removed. The server preserves WAV rows, original Metadata, user annotations,
+opaque vendor mirrors and the existing main FTS text, without rebuilding that index;
+folder statistics reflect the remaining WAV rows. New source revisions require new
+latest snapshots; retained fixed representations keep their immutable identity.
+Failure never publishes a partial projection or replaces the
+client's last valid database, `cache.json` or `active.json`.
+
+Compatibility replies carry the shared recommended upgrade header and capability hint;
+native schema-9 replies do not carry a downgrade prompt. Disabling the transition returns
+409 `SNAPSHOT_FORMAT_UNSUPPORTED` and a required hint for old peers while preserving their
+offline cache and native9 access. Writes are admitted against the actual source format,
+so a derived8 reader cannot write the schema-9 source. The current development binary is
+still version 0.8.7: upgrade `min` uses that build identity, not a published 0.9.0 claim.
 
 Layout under `<data dir>/remote/`:
 
@@ -612,6 +647,27 @@ local mode), the client posts `POST /audio/{id}/plays` on a short-lived worker t
 record is identified by the playback cache path it was played from. Nothing of this runs
 on the audio thread.
 ## Server management (scans, history, removals)
+
+Vendor preview has two source modes at the capability-advertised origin-relative
+`/api/vendor-import/preview` endpoint: multipart uploads, or `application/json`
+`{"root":"<configured root name>","root_relative_dir":"tables/vendor","options":{...}}`.
+The server-directory JSON mode and opened-handle isolation are integrated in the
+development candidate; current-run acceptance is recorded separately. Its JSON body is capped at
+1 MiB. It recursively discovers only regular CSV/TSV/TXT/XLS/XLSX files under the
+resolved configured root, skips discovered links, and rejects parent/absolute paths,
+unknown roots and root escapes. Relative directory link components are refused.
+Unix opens remain relative to held directory FDs with no-follow; Windows checks the
+actual opened object's path and rejects reparses while pinning the directory chain.
+Validated file handles are copied into owned staging with their original names;
+the parser never reopens a mutable external source path. Copies retain at most the
+per-file limit plus one byte for individual oversize refusal, within a 512 MiB batch
+input budget, so other valid tables can still preview. Limits are 512 tables and 100,000 directory
+entries. Empty relative directory selects the whole root. Unless supplied explicitly,
+`options.vendor_root` defaults to the configured root's real path for audio matching,
+not the selected table subdirectory. Preview creates owned parsing/recovery artifacts
+but commits no library Metadata; commit remains a separate identity-bound managed
+request with an idempotency key. Both preview modes retain bearer/manage, actual-format
+and library-identity admission before body parsing. See [API §6.11](api/README.md#vendor-import-preview).
 
 `audiolib_remote::RemoteClient` has typed calls for API §6.6–§6.10; the CLI exposes the
 read-only ones. The desktop's 服务器音效库 page (design B1/B2) uses `roots`,

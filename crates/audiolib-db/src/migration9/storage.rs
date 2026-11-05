@@ -15,8 +15,10 @@ impl ControlLease {
             .truncate(false)
             .read(true)
             .write(true)
-            .open(sidecar(path, ".migration9-control.lock"))?;
-        file.lock()?;
+            .open(sidecar(path, ".migration9-control.lock"))
+            .map_err(|error| io_error("control_open", error))?;
+        file.lock()
+            .map_err(|error| io_error("control_lock", error))?;
         Ok(Self(file))
     }
 }
@@ -38,18 +40,20 @@ CREATE TRIGGER v9_dir_delete AFTER DELETE ON folders BEGIN INSERT OR IGNORE INTO
 ";
 const DROP_TRACK: &str = "DROP TRIGGER IF EXISTS v9_dir_insert; DROP TRIGGER IF EXISTS v9_dir_update; DROP TRIGGER IF EXISTS v9_dir_delete; DROP TABLE IF EXISTS v9_dirty_dirs; DROP TABLE IF EXISTS v9_checkpoint;";
 
-pub(super) fn prepare(conn: &mut Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA journal_mode=WAL;")
-        .map_err(db_error)?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(db_error)?;
+pub(super) fn prepare(conn: &mut Connection, cancel: &AtomicBool) -> Result<()> {
+    write_admission(conn, cancel, || {
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+    })?;
+    let tx = begin_write(conn, cancel)?;
     // A prior explicit s8 experimental path rebuild is disposable derived state.
     tx.execute_batch("DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs;")
         .map_err(db_error)?;
     tx.execute_batch(dir_search::CREATE_DIR_FTS)
         .map_err(db_error)?;
     tx.execute_batch(dir_search::CREATE_RUNS)
+        .map_err(db_error)?;
+    dir_search::install_tracking(&tx)?;
+    tx.execute("DELETE FROM audiolib_dir_dirty", [])
         .map_err(db_error)?;
     tx.execute_batch(TRACK).map_err(db_error)?;
     tx.execute(
@@ -161,12 +165,13 @@ pub(super) fn request_control(path: &Path, action: Action) -> Result<()> {
     conn.execute("INSERT INTO v9_control VALUES(1,?1,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(singleton) DO UPDATE SET cmd=excluded.cmd,requested_at=excluded.requested_at", [if action == Action::Cancel { "cancel" } else { "pause" }]).map_err(db_error)?;
     Ok(())
 }
-pub(super) fn clear_control(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM v9_control", [])
-        .map_err(db_error)?;
-    Ok(())
+pub(super) fn clear_control(conn: &Connection, cancel: &AtomicBool) -> Result<()> {
+    let tx = begin_write(conn, cancel)?;
+    tx.execute("DELETE FROM v9_control", []).map_err(db_error)?;
+    tx.commit().map_err(db_error)
 }
 fn drop_paths(conn: &Connection) -> Result<()> {
+    dir_search::drop_tracking(conn)?;
     conn.execute_batch(DROP_TRACK).map_err(db_error)?;
     conn.execute_batch("DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs; DROP TABLE IF EXISTS v9_control;").map_err(db_error)?;
     // Keep the generation monotonic across rollback/re-migration so live readers
@@ -213,9 +218,7 @@ pub(super) fn publish(
     let _scan = LibraryLease::acquire(path)?;
     let _administration = AdministrationLease::exclusive(path)?;
     let started = Instant::now();
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(db_error)?;
+    let tx = begin_write(conn, cancel)?;
     if identity(&tx)? != saved.library_id || version(&tx)? != 8 {
         return Err(invalid("Source changed before schema-9 publication"));
     }
@@ -230,6 +233,7 @@ pub(super) fn publish(
     for id in changed {
         dir_search::reindex_segment(&tx, id)?;
     }
+    dir_search::finish_tracking(&tx)?;
     tx.execute("DELETE FROM audio_dir_runs", [])
         .map_err(db_error)?;
     tx.execute_batch(dir_search::INSERT_RUNS)
@@ -249,6 +253,7 @@ pub(super) fn publish(
     if folders != indexed || missing {
         return Err(invalid("Directory index count mismatch"));
     }
+    crate::vendor_import::ensure_schema(&tx)?;
     put(
         &tx,
         "snapshot_format",
@@ -347,30 +352,22 @@ pub(super) fn validate_ready(conn: &Connection) -> Result<()> {
         )
         .optional()
         .map_err(db_error)?;
-    let fts: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE name='audio_dir_search'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    let runs: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE name='audio_dir_runs'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    let normalize = |s: &str| {
-        s.chars()
-            .filter(|c| !c.is_whitespace() && *c != ';')
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-    };
     if format.as_deref() != Some(audiolib_core::compatibility::PLAN_B_V9_FORMAT)
         || !dir_search::ready(conn)?
-        || normalize(&fts) != normalize(dir_search::CREATE_DIR_FTS)
-        || normalize(&runs) != normalize(dir_search::CREATE_RUNS)
+        || !crate::schema::definition::matches_sql(
+            conn,
+            "audio_dir_search",
+            "table",
+            "audio_dir_search",
+            dir_search::CREATE_DIR_FTS,
+        )?
+        || !crate::schema::definition::matches_sql(
+            conn,
+            "audio_dir_runs",
+            "table",
+            "audio_dir_runs",
+            dir_search::CREATE_RUNS,
+        )?
         || exists(conn, "v9_checkpoint")?
     {
         return Err(invalid("Incomplete schema-9 directory index"));

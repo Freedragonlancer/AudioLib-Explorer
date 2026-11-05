@@ -15,7 +15,11 @@
 //!
 //! Search `scope` (server 2026-11-03): `main|all|path`; omit = `main` (= schema 8).
 //! MAIN_SEARCH omits scope on purpose. Vendor import: `/api/vendor-import` (+ `/*`).
-use audiolib_core::compatibility::{CLIENT_COMPATIBILITY_HEADER, compatibility_manifest};
+use audiolib_core::compatibility::{
+    ACCEPT_FORMATS_HEADER, CLIENT_COMPATIBILITY_HEADER, SEARCH_STORAGE_MAX,
+    SEARCH_STORAGE_MAX_HEADER, SNAPSHOT_SCHEMA_MAX, SNAPSHOT_SCHEMA_MAX_HEADER, TOKENIZATION_MAX,
+    TOKENIZATION_MAX_HEADER, compatibility_manifest,
+};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -131,10 +135,12 @@ impl Server {
             .map(|t| format!("Authorization: Bearer {t}\r\n"))
             .unwrap_or_default();
         let body = body.unwrap_or("");
-        let catalog = serde_json::to_string(&compatibility_manifest()).unwrap();
+        let manifest = compatibility_manifest();
+        let accepted = manifest.snapshot_read_formats.join(",");
+        let catalog = serde_json::to_string(&manifest).unwrap();
         write!(
             s,
-            "{method} {path} HTTP/1.0\r\nHost: {}\r\nAccept: application/json\r\n{auth}X-AudioLib-Admin: 1\r\nX-AudioLib-Library-Id: {}\r\n{CLIENT_COMPATIBILITY_HEADER}: {catalog}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "{method} {path} HTTP/1.0\r\nHost: {}\r\nAccept: application/json\r\n{auth}X-AudioLib-Admin: 1\r\nX-AudioLib-Library-Id: {}\r\n{CLIENT_COMPATIBILITY_HEADER}: {catalog}\r\n{ACCEPT_FORMATS_HEADER}: {accepted}\r\n{SNAPSHOT_SCHEMA_MAX_HEADER}: {SNAPSHOT_SCHEMA_MAX}\r\n{SEARCH_STORAGE_MAX_HEADER}: {SEARCH_STORAGE_MAX}\r\n{TOKENIZATION_MAX_HEADER}: {TOKENIZATION_MAX}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             self.host,
             self.library_id,
             body.len()
