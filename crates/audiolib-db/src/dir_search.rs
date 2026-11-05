@@ -902,20 +902,22 @@ fn tier_ids(query: &TierQuery<'_>, tier: u8, after_id: i64, limit: usize) -> Res
     if limit == 0 {
         return Ok(Vec::new());
     }
+    // Path is a strict directory-only AND; mixed sources belong to All only.
+    if tier == 1 && scope == SearchScope::Path {
+        return Ok(Vec::new());
+    }
     if tier == 1 && (term_match.len() < 2 || sets.iter().all(HashSet::is_empty)) {
         return Ok(Vec::new());
     }
     if tier == 2 && sets.iter().any(HashSet::is_empty) {
         return Ok(Vec::new());
     }
-    let accept = |id: i64| -> Result<bool> {
-        Ok(classify(conn, index, sets, term_match, full_match, scope, id)? == Some(tier))
-    };
     if tier == 2 {
         let Some(smallest) = smallest_set(sets, index) else {
             return Ok(Vec::new());
         };
         let runs = runs_for(index, &sets[smallest]);
+        let mut main = MainPostings::new(full_match, after_id, i64::MAX);
         return stream_runs(
             conn,
             &runs,
@@ -923,79 +925,167 @@ fn tier_ids(query: &TierQuery<'_>, tier: u8, after_id: i64, limit: usize) -> Res
             limit,
             visibility,
             |dir| path_full(sets, index, dir),
-            accept,
+            // Path scope retains full path hits even when main also matches.
+            // All scope excludes its earlier tier-0 hits with one advancing stream.
+            |id| Ok(scope != SearchScope::All || !main.contains(conn, id)?),
         );
     }
-    if let Some(empty) = sets.iter().position(HashSet::is_empty) {
-        return stream_main(
-            conn,
-            &term_match[empty],
-            after_id,
-            limit,
-            visibility,
-            accept,
-        );
-    }
-    let union = union_sets(sets);
-    let runs = runs_for(index, &union);
-    stream_runs(
-        conn,
-        &runs,
-        after_id,
-        limit,
-        visibility,
-        |dir| ancestor_has(&union, index, dir),
-        accept,
-    )
+    stream_mixed(query, after_id, limit)
 }
 
-fn classify(
-    conn: &Connection,
-    index: &RunIdx,
-    sets: &[HashSet<i64>],
-    term_match: &[String],
-    full_match: &str,
-    scope: SearchScope,
-    id: i64,
-) -> Result<Option<u8>> {
-    let dir = dir_of(index, id);
-    let mut all_path = true;
-    let mut any_path = false;
-    let mut missed = Vec::new();
-    for (term, set) in sets.iter().enumerate() {
-        let matched = dir.is_some_and(|folder| ancestor_has(set, index, folder));
-        if matched {
-            any_path = true;
-        } else {
-            all_path = false;
-            missed.push(term);
+/// A bounded rowid-ordered FTS stream. No posting list is materialized in full,
+/// and each refill advances its lower bound instead of restarting MATCH per file.
+struct MainPostings<'a> {
+    expression: &'a str,
+    after: i64,
+    upper: i64,
+    ids: Vec<i64>,
+    position: usize,
+    done: bool,
+}
+
+impl<'a> MainPostings<'a> {
+    fn new(expression: &'a str, after: i64, upper: i64) -> Self {
+        Self {
+            expression,
+            after,
+            upper,
+            ids: Vec::new(),
+            position: 0,
+            done: false,
         }
     }
-    if !any_path {
-        return Ok(None);
+
+    fn head(&mut self, conn: &Connection) -> Result<Option<i64>> {
+        if self.position == self.ids.len() {
+            if self.done {
+                return Ok(None);
+            }
+            let mut statement = conn
+                .prepare_cached(
+                    "SELECT rowid FROM audio_search WHERE audio_search MATCH ?1
+                     AND rowid>?2 AND rowid<=?3 ORDER BY rowid LIMIT 256",
+                )
+                .map_err(db_error)?;
+            self.ids = statement
+                .query_map(params![self.expression, self.after, self.upper], |row| {
+                    row.get(0)
+                })
+                .map_err(db_error)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(db_error)?;
+            self.position = 0;
+            self.done = self.ids.len() < 256;
+            if let Some(last) = self.ids.last() {
+                self.after = *last;
+            }
+        }
+        Ok(self.ids.get(self.position).copied())
     }
-    if scope == SearchScope::Path && !all_path {
-        return Ok(None);
+
+    fn advance(&mut self) {
+        self.position += 1;
     }
-    if scope == SearchScope::Path {
-        return Ok(Some(2));
+
+    /// Call with increasing IDs; skip untouched gaps before refilling a batch.
+    fn contains(&mut self, conn: &Connection, id: i64) -> Result<bool> {
+        self.position = self.ids.partition_point(|candidate| *candidate < id);
+        if self.position == self.ids.len() {
+            self.after = self.after.max(id.saturating_sub(1));
+        }
+        Ok(self.head(conn)? == Some(id))
     }
-    for term in &missed {
-        if !matches_row(conn, &term_match[*term], id)? {
-            return Ok(None);
+}
+
+fn stream_mixed(query: &TierQuery<'_>, after_id: i64, limit: usize) -> Result<Vec<i64>> {
+    let TierQuery {
+        conn,
+        index,
+        sets,
+        term_match,
+        full_match,
+        visibility,
+        ..
+    } = *query;
+    let mut missing_by_dir = HashMap::new();
+    let mut needed = vec![false; sets.len()];
+    let mut low = i64::MAX;
+    let mut high = i64::MIN;
+    for (&dir, slots) in &index.by_dir {
+        let missed = sets
+            .iter()
+            .enumerate()
+            .filter_map(|(term, set)| (!ancestor_has(set, index, dir)).then_some(term))
+            .collect::<Vec<_>>();
+        // Pure main and complete path directories cannot contribute to tier 1.
+        // In particular, a full-path page need not open the main FTS table at all.
+        if missed.is_empty() || missed.len() == sets.len() {
+            continue;
+        }
+        let mut has_remaining_run = false;
+        for &slot in slots {
+            let run = index.all[slot];
+            if run.hi > after_id {
+                low = low.min(run.lo);
+                high = high.max(run.hi);
+                has_remaining_run = true;
+            }
+        }
+        if has_remaining_run {
+            for &term in &missed {
+                needed[term] = true;
+            }
+            missing_by_dir.insert(dir, missed);
         }
     }
-    let main_full = matches_row(conn, full_match, id)?;
-    if all_path {
-        if scope == SearchScope::All && main_full {
-            return Ok(None);
+    if missing_by_dir.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lower = after_id.max(low.saturating_sub(1));
+    let mut streams = term_match
+        .iter()
+        .enumerate()
+        .filter(|(term, _)| needed[*term])
+        .map(|(term, expression)| (term, MainPostings::new(expression, lower, high)))
+        .collect::<Vec<_>>();
+    let mut main_full = MainPostings::new(full_match, lower, high);
+    let mut main_terms = vec![false; sets.len()];
+    let mut visible = conn
+        .prepare_cached(&format!(
+            "SELECT 1 FROM audio_files WHERE id=?1 AND folder_id=?2 AND {}",
+            visibility_sql(visibility)
+        ))
+        .map_err(db_error)?;
+    let mut out = Vec::new();
+    while out.len() < limit {
+        let mut next = None;
+        for (_, stream) in &mut streams {
+            if let Some(id) = stream.head(conn)? {
+                next = Some(next.map_or(id, |previous: i64| previous.min(id)));
+            }
         }
-        return Ok(Some(2));
+        let Some(id) = next else { break };
+        main_terms.fill(false);
+        for (term, stream) in &mut streams {
+            if stream.head(conn)? == Some(id) {
+                main_terms[*term] = true;
+                stream.advance();
+            }
+        }
+        let Some(dir) = dir_of(index, id) else {
+            continue;
+        };
+        let Some(missed) = missing_by_dir.get(&dir) else {
+            continue;
+        };
+        if missed.iter().all(|term| main_terms[*term])
+            && !main_full.contains(conn, id)?
+            && visible.exists(params![id, dir]).map_err(db_error)?
+        {
+            out.push(id);
+        }
     }
-    if main_full {
-        return Ok(None);
-    }
-    Ok(Some(1))
+    Ok(out)
 }
 
 fn stream_runs(
@@ -1036,59 +1126,6 @@ fn stream_runs(
     Ok(out)
 }
 
-fn stream_main(
-    conn: &Connection,
-    match_expr: &str,
-    after_id: i64,
-    limit: usize,
-    visibility: FileVisibility,
-    mut accept_id: impl FnMut(i64) -> Result<bool>,
-) -> Result<Vec<i64>> {
-    let mut out = Vec::new();
-    let mut cursor = after_id;
-    let mut statement = conn
-        .prepare_cached(
-            "SELECT rowid FROM audio_search WHERE audio_search MATCH ?1 AND rowid>?2 ORDER BY rowid LIMIT 256",
-        )
-        .map_err(db_error)?;
-    let mut visible = conn
-        .prepare_cached(&format!(
-            "SELECT 1 FROM audio_files WHERE id=?1 AND {}",
-            visibility_sql(visibility)
-        ))
-        .map_err(db_error)?;
-    loop {
-        if out.len() >= limit {
-            break;
-        }
-        let ids = statement
-            .query_map(params![match_expr, cursor], |row| row.get(0))
-            .map_err(db_error)?
-            .collect::<rusqlite::Result<Vec<i64>>>()
-            .map_err(db_error)?;
-        let Some(last) = ids.last().copied() else {
-            break;
-        };
-        let short = ids.len() < 256;
-        for id in ids {
-            if !visible.exists(params![id]).map_err(db_error)? {
-                continue;
-            }
-            if accept_id(id)? {
-                out.push(id);
-                if out.len() == limit {
-                    break;
-                }
-            }
-        }
-        cursor = last;
-        if short {
-            break;
-        }
-    }
-    Ok(out)
-}
-
 fn expand(
     conn: &Connection,
     run: &Run,
@@ -1110,12 +1147,12 @@ fn expand(
         return Ok(());
     }
     let sql = format!(
-        "SELECT id FROM audio_files WHERE id>=?1 AND id<=?2 AND {} ORDER BY id LIMIT ?3",
+        "SELECT id FROM audio_files WHERE id>=?1 AND id<=?2 AND folder_id=?4 AND {} ORDER BY id LIMIT ?3",
         visibility_sql(visibility)
     );
     let mut statement = conn.prepare_cached(&sql).map_err(db_error)?;
     let rows = statement
-        .query_map(params![lo, run.hi, limit as i64], |row| row.get(0))
+        .query_map(params![lo, run.hi, limit as i64, run.dir], |row| row.get(0))
         .map_err(db_error)?;
     for id in rows {
         out.push(id.map_err(db_error)?);
@@ -1226,10 +1263,6 @@ fn smallest_set(sets: &[HashSet<i64>], index: &RunIdx) -> Option<usize> {
         .map(|(slot, _)| slot)
 }
 
-fn union_sets(sets: &[HashSet<i64>]) -> HashSet<i64> {
-    sets.iter().flatten().copied().collect()
-}
-
 fn runs_for(index: &RunIdx, set: &HashSet<i64>) -> Vec<Run> {
     if set.is_empty() {
         return Vec::new();
@@ -1265,13 +1298,6 @@ fn main_has_hit(conn: &Connection, match_expr: &str) -> Result<bool> {
         .prepare_cached("SELECT rowid FROM audio_search WHERE audio_search MATCH ?1 LIMIT 1")
         .map_err(db_error)?;
     statement.exists(params![match_expr]).map_err(db_error)
-}
-
-fn matches_row(conn: &Connection, match_expr: &str, id: i64) -> Result<bool> {
-    let mut statement = conn
-        .prepare_cached("SELECT 1 FROM audio_search WHERE audio_search MATCH ?1 AND rowid=?2")
-        .map_err(db_error)?;
-    statement.exists(params![match_expr, id]).map_err(db_error)
 }
 
 fn load_index(conn: &Connection, cache: &DirIndexCache) -> Result<Arc<RunIdx>> {
@@ -1460,6 +1486,8 @@ mod tests {
     use super::*;
     use crate::{DataProvider, SqliteProvider};
     use audiolib_core::SearchRequest;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn normalization_folds_fullwidth_and_keeps_halfwidth() {
@@ -1956,5 +1984,410 @@ mod tests {
         assert!(provider.path_search_ready().unwrap());
         assert!(provider.local_upgrade_plan_impl().unwrap().is_none());
         assert_eq!(ids(&provider, "Kit", SearchScope::Path), vec![10, 11]);
+    }
+    fn overlapping_library() -> (tempfile::TempDir, SqliteProvider) {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = SqliteProvider::open(&dir.path().join("library.db")).unwrap();
+        provider
+            .writer()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO folders(id,folder_path,folder_name,parent_id,total_file_count) VALUES
+                 (1,'/lib','LibraryRoot',NULL,12),
+                 (2,'/lib/Borg','Borg',1,5),
+                 (3,'/lib/Borg/Sound','Sound',2,3),
+                 (4,'/lib/Other','Other',1,6),
+                 (5,'/lib/Sound','Sound',1,1);
+                 INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES
+                 (2,'/lib/Borg/Sound/borg sound.wav','borg sound.wav',3,0),
+                 (4,'/lib/Borg/Sound/quiet.wav','quiet.wav',3,1),
+                 (8,'/lib/Borg/Sound/quiet2.wav','quiet2.wav',3,0),
+                 (10,'/lib/Borg/sound.wav','sound.wav',2,0),
+                 (12,'/lib/Borg/borg sound.wav','borg sound.wav',2,0),
+                 (14,'/lib/Sound/borg.wav','borg.wav',5,0);
+                 WITH RECURSIVE n(id) AS (VALUES(20) UNION ALL SELECT id+1 FROM n WHERE id<25)
+                 INSERT INTO audio_files(id,file_path,filename,folder_id,missing)
+                 SELECT id,'/lib/Other/'||id||'.wav','quiet.wav',4,0 FROM n;",
+            )
+            .unwrap();
+        provider.rebuild_directory_search().unwrap();
+        (dir, provider)
+    }
+
+    fn add_stream_refill_rows(provider: &SqliteProvider) {
+        provider
+            .writer()
+            .unwrap()
+            .execute_batch(
+                "WITH RECURSIVE n(id) AS (VALUES(100) UNION ALL SELECT id+1 FROM n WHERE id<699)
+                 INSERT INTO audio_files(id,file_path,filename,folder_id,missing)
+                 SELECT id,'/lib/Borg/'||id||'.wav',
+                        CASE WHEN id%2=0 THEN 'borg sound.wav' ELSE 'sound.wav' END,2,0 FROM n;
+                 WITH RECURSIVE n(id) AS (VALUES(2000) UNION ALL SELECT id+1 FROM n WHERE id<2599)
+                 INSERT INTO audio_files(id,file_path,filename,folder_id,missing)
+                 SELECT id,'/lib/Other/'||id||'.wav','quiet.wav',4,0 FROM n;",
+            )
+            .unwrap();
+        // Keep the real Borg membership below half of the whole library. Do not
+        // substitute stale folder statistics for C's actual-member wide-set rule.
+        provider.rebuild_directory_search().unwrap();
+    }
+
+    #[test]
+    fn all_mixed_stream_requires_missing_terms_while_path_stays_directory_only() {
+        let (_dir, provider) = overlapping_library();
+        assert_eq!(ids(&provider, "Borg Sound", SearchScope::Path), vec![2, 8]);
+        let main = ids(&provider, "Borg Sound", SearchScope::Main);
+        let all = ids(&provider, "Borg Sound", SearchScope::All);
+        assert_eq!(&all[..main.len()], main.as_slice());
+        assert_eq!(&all[main.len()..], &[10, 14, 8]);
+        provider
+            .writer()
+            .unwrap()
+            .execute_batch(
+                "UPDATE audio_files SET filename='sound indoor.wav' WHERE id=10;
+                 UPDATE audio_files SET filename='borg indoor.wav' WHERE id=14;
+                 UPDATE audio_files SET filename='borg sound indoor.wav' WHERE id=2;
+                 INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES
+                 (11,'/lib/folderless-gap.wav','sound indoor.wav',NULL,0),
+                 (30,'/lib/folderless.wav','borg sound indoor.wav',NULL,0);",
+            )
+            .unwrap();
+        provider.rebuild_directory_search().unwrap();
+        assert!(ids(&provider, "Borg Sound Indoor", SearchScope::Path).is_empty());
+        let main = ids(&provider, "Borg Sound Indoor", SearchScope::Main);
+        assert!(main.contains(&30));
+        let all = ids(&provider, "Borg Sound Indoor", SearchScope::All);
+        assert_eq!(&all[..main.len()], main.as_slice());
+        assert_eq!(&all[main.len()..], &[10, 14]);
+        assert!(
+            !all.contains(&11),
+            "a folderless partial main hit is not mixed"
+        );
+    }
+
+    #[test]
+    fn all_posting_refills_preserve_reference_order_and_global_cursor_counts() {
+        let (_dir, provider) = overlapping_library();
+        add_stream_refill_rows(&provider);
+        let mut expected = provider
+            .search(&SearchRequest {
+                query: "Borg Sound".into(),
+                scope: SearchScope::Main,
+                limit: 1000,
+                ..Default::default()
+            })
+            .unwrap()
+            .results
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>();
+        assert!(
+            expected.len() > 256,
+            "fixture must refill the full-main exclusion stream"
+        );
+        expected.extend([10, 14]);
+        expected.extend((100..700).filter(|id| id % 2 != 0));
+        expected.push(8);
+        let request = SearchRequest {
+            query: "Borg Sound".into(),
+            scope: SearchScope::All,
+            limit: 1000,
+            ..Default::default()
+        };
+        let complete = provider.search(&request).unwrap();
+        assert_eq!(
+            complete
+                .results
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(ids(&provider, "Borg Sound", SearchScope::Path), vec![2, 8]);
+        let mut cursor = None;
+        let mut walked = Vec::new();
+        loop {
+            let before = walked.len();
+            let page = provider
+                .search(&SearchRequest {
+                    limit: 137,
+                    offset: if cursor.is_some() { 999 } else { 0 },
+                    cursor,
+                    ..request.clone()
+                })
+                .unwrap();
+            assert_eq!(page.returned_count, page.results.len());
+            let end = (before + 137).min(expected.len());
+            assert_eq!(
+                page.results.iter().map(|file| file.id).collect::<Vec<_>>(),
+                expected[before..end]
+            );
+            walked.extend(page.results.iter().map(|file| file.id));
+            if page.total_count_exact {
+                assert_eq!(page.total_count, u64::try_from(expected.len()).unwrap());
+            } else {
+                let observed = walked.len() + usize::from(page.next_cursor.is_some());
+                assert!(page.total_count >= u64::try_from(observed).unwrap());
+                assert!(page.total_count <= u64::try_from(expected.len()).unwrap());
+            }
+            if page.next_cursor.is_none() {
+                assert!(page.total_count_exact);
+                assert_eq!(page.total_count, u64::try_from(expected.len()).unwrap());
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+        assert_eq!(walked, expected);
+    }
+
+    fn all_directory_first_page_vm_work(files: i64, partial: bool) -> usize {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = SqliteProvider::open(&dir.path().join("library.db")).unwrap();
+        {
+            let writer = provider.writer().unwrap();
+            writer
+                .execute_batch(
+                    "INSERT INTO folders(id,folder_path,folder_name,parent_id) VALUES
+                     (1,'/lib','LibraryRoot',NULL),
+                     (2,'/lib/Borg Sound','Borg Sound',1),
+                     (3,'/lib/Other','Other',1);",
+                )
+                .unwrap();
+            writer
+                .execute(
+                    "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<?1)
+                     INSERT INTO audio_files(id,file_path,filename,folder_id,missing)
+                     SELECT id*2,'/lib/Borg Sound/'||id||'.wav','quiet.wav',2,0 FROM n
+                     UNION ALL
+                     SELECT ?1*2+id,'/lib/Other/'||id||'.wav','quiet.wav',3,0 FROM n",
+                    [files],
+                )
+                .unwrap();
+            if partial {
+                writer
+                    .execute_batch(
+                        "UPDATE folders SET folder_name='Borg' WHERE id=2;
+                         UPDATE folders SET folder_name='Sound' WHERE id=3;
+                         UPDATE audio_files SET filename='sound.wav' WHERE id=2;
+                         UPDATE audio_files SET filename='borg.wav'
+                         WHERE id=(SELECT min(id) FROM audio_files WHERE folder_id=3);",
+                    )
+                    .unwrap();
+            }
+        }
+        provider.rebuild_directory_search().unwrap();
+        let conn = provider.reader().unwrap();
+        load_index(&conn, &provider.dir_index).unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&ticks);
+        conn.progress_handler(
+            100,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+        let page = search(&DirSearch {
+            conn: &conn,
+            cache: &provider.dir_index,
+            jieba: &provider.tokenizer,
+            query: "Borg Sound",
+            scope: SearchScope::All,
+            visibility: FileVisibility::Present,
+            cursor: None,
+            offset: 0,
+            limit: 5,
+        });
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        let page = page.unwrap();
+        let expected = if partial {
+            vec![2, files * 2 + 1]
+        } else {
+            vec![2, 4, 6, 8, 10]
+        };
+        assert_eq!(
+            page.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(page.has_more, !partial);
+        let work = ticks.load(Ordering::Relaxed);
+        if !partial {
+            // C's strict Path route must still avoid the main FTS table entirely
+            // for a complete directory AND; All legitimately uses its main tier.
+            conn.authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Read { table_name, .. }
+                    if table_name == "audio_search")
+                {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .unwrap();
+            let path = search(&DirSearch {
+                conn: &conn,
+                cache: &provider.dir_index,
+                jieba: &provider.tokenizer,
+                query: "Borg Sound",
+                scope: SearchScope::Path,
+                visibility: FileVisibility::Present,
+                cursor: None,
+                offset: 0,
+                limit: 5,
+            });
+            conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .unwrap();
+            assert_eq!(
+                path.unwrap()
+                    .hits
+                    .iter()
+                    .map(|hit| hit.id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        drop(conn);
+        assert_eq!(
+            provider
+                .search(&SearchRequest {
+                    query: "Borg Sound".into(),
+                    scope: SearchScope::All,
+                    limit: 5,
+                    ..Default::default()
+                })
+                .unwrap()
+                .results
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        work
+    }
+
+    #[test]
+    fn all_complete_path_first_page_avoids_exhaustive_mixed_expansion() {
+        let small = all_directory_first_page_vm_work(512, false);
+        let large = all_directory_first_page_vm_work(8192, false);
+        assert!(small > 0);
+        assert!(
+            large <= small * 2,
+            "complete-path All VM callbacks grew from {small} to {large}"
+        );
+    }
+
+    #[test]
+    fn all_sparse_mixed_first_page_uses_bounded_posting_streams() {
+        let small = all_directory_first_page_vm_work(512, true);
+        let large = all_directory_first_page_vm_work(8192, true);
+        assert!(small > 0);
+        assert!(
+            large <= small * 2,
+            "mixed All VM callbacks grew from {small} to {large}"
+        );
+    }
+
+    #[test]
+    fn posting_refill_interrupts_and_does_not_poison_the_next_reader() {
+        let (_dir, provider) = overlapping_library();
+        add_stream_refill_rows(&provider);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let conn = provider.search_reader(Some(cancel.clone())).unwrap();
+        let expression = compile_query(&provider.tokenizer, "sound").unwrap();
+        let mut stream = MainPostings::new(&expression, i64::MIN, i64::MAX);
+        let mut previous = i64::MIN;
+        for _ in 0..256 {
+            let id = stream.head(&conn).unwrap().unwrap();
+            assert!(id > previous);
+            previous = id;
+            stream.advance();
+        }
+        let signal = cancel.clone();
+        conn.progress_handler(1, Some(move || signal.load(Ordering::Acquire)))
+            .unwrap();
+        cancel.store(true, Ordering::Release);
+        assert!(matches!(stream.head(&conn), Err(Error::Cancelled)));
+        drop(conn);
+        // The flag intentionally remains set. ReadLease must remove its hook;
+        // a later real query on the pool must not inherit cancellation.
+        let page = provider
+            .search(&SearchRequest {
+                query: "sound".into(),
+                limit: 5,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.results.len(), 5);
+    }
+
+    #[test]
+    fn sparse_expansion_checks_the_recorded_folder_and_keeps_null_main_hits() {
+        let (_dir, provider) = overlapping_library();
+        provider
+            .writer()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES
+             (3,'/lib/folderless-missing.wav','quiet.wav',NULL,1),
+             (6,'/lib/folderless-main.wav','borg sound.wav',NULL,0);",
+            )
+            .unwrap();
+        provider.rebuild_directory_search().unwrap();
+        let conn = provider.reader().unwrap();
+        let mut expanded = Vec::new();
+        // Directly exercise expansion of a legacy sparse interval. Normal C run
+        // construction and snapshot validation already split/refuse foreign gaps.
+        expand(
+            &conn,
+            &Run {
+                lo: 2,
+                hi: 8,
+                count: 3,
+                dense: false,
+                dir: 3,
+            },
+            2,
+            20,
+            FileVisibility::All,
+            &mut expanded,
+        )
+        .unwrap();
+        assert_eq!(expanded, vec![2, 4, 8]);
+        drop(conn);
+        assert_eq!(ids(&provider, "Borg Sound", SearchScope::Path), vec![2, 8]);
+        let main = ids(&provider, "Borg Sound", SearchScope::Main);
+        assert!(main.contains(&6));
+        let all = ids(&provider, "Borg Sound", SearchScope::All);
+        assert_eq!(&all[..main.len()], main.as_slice());
+        assert_eq!(&all[main.len()..], &[10, 14, 8]);
+        let mut request = SearchRequest {
+            query: "Borg Sound".into(),
+            scope: SearchScope::Path,
+            ..Default::default()
+        };
+        request.filters.visibility = FileVisibility::Missing;
+        assert_eq!(
+            provider
+                .search(&request)
+                .unwrap()
+                .results
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
+        request.filters.visibility = FileVisibility::All;
+        assert_eq!(
+            provider
+                .search(&request)
+                .unwrap()
+                .results
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 8]
+        );
     }
 }

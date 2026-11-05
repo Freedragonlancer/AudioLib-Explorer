@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 pub const CATALOG_REVISION: u32 = 2;
 /// Plan B's completed business schema.
 pub const TARGET_SCHEMA: u32 = 8;
+/// Explicit server migration target; ordinary local writers retain [`TARGET_SCHEMA`].
+pub const SERVER_TARGET_SCHEMA: u32 = 9;
 /// Completed tokenizer encoding; 4 in an old live upgrade is a temporary marker.
 pub const TOKENIZATION_REVISION: u32 = 3;
 /// Format identifiers are exact sets, not a promise that all lower integers work.
@@ -206,7 +208,7 @@ impl LibraryFormat {
     /// Explicit server migration target. Ordinary local writers still target schema 8.
     pub fn server_schema9() -> Self {
         let mut format = Self::target();
-        format.schema_version = 9;
+        format.schema_version = SERVER_TARGET_SCHEMA;
         format.source_search_revision = Some(3);
         format.features.insert("search_path".into(), 1);
         format.features.insert("vorbis_tags".into(), 1);

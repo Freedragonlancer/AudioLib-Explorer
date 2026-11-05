@@ -76,7 +76,7 @@
 | PS-13 | 目录本身改名（`folders.name` 变化） | 后台任务按 `folder_closure` 找后代文件，每批 5,000 行更新；不在 UI 线程执行；中途 kill 后按 `library_meta.path_reindex_progress` 续跑，最终结果和一次跑完一致；期间搜索不被阻塞（PG-05） | I | P0 |
 | PS-14 | 主表结构不变 | `audio_search` 的列、tokenizer 和选项（contentless、`detail=full`、`columnsize=1`）都和 schema 8 相同，没有路径列，也没有厂商列；迁移前后主表不重建，token 不变（主表不做 NFC/全角半角归一化）；只出现在路径里的词在「仅文件名」范围下搜不到 | U：schema 断言 | P0 |
 | PS-15 | 新客户端连旧服务器（`/capabilities.compatibility.features` 里没有 `search_path`） | 隐藏「仅路径」和厂商相关的范围开关，「全部」退化成只查主表，不报错 | I | P1 |
-| PS-16 | 多词跨表（如 `pentax shutter`，一个词在文件名里、一个词在路径里） | 按词计算：每个词取（主表 ∪ 目录段）的命中，再对所有词求交集；结果等于参考实现；任意一个词两边都不命中时，结果为空 | U + I | P0 |
+| PS-16 | All 范围多词跨表（如 `pentax shutter`，一个词在文件名里、一个词在路径里） | `scope=all` 按词计算：每个词取（主表 ∪ 目录段）的命中，再对所有词求交集；结果等于参考实现；任意一个词两边都不命中时，结果为空。`scope=path` 严格要求每个词均命中目录，不用主字段补足 | U + I | P0 |
 | PS-17 | 超高频路径词（共享前缀、`Pro Sound Effect` 之类） | 路径词估计命中文件数超过全库一半时丢弃该词的目录集，只走主表；估计 ≤5 万时只扫描子树内的 `audio_dir_runs`。p95 仍满足 PG-10；根名不入索引时，搜根名不会命中全库 | I + C | P0 |
 | PS-18 | 超长路径（>4 KiB）和 macOS NFD 路径 | 超长路径截断后入索引，截断次数计入统计或日志；NFD 先统一成 NFC 再分词，NFC 和 NFD 写法搜到的结果相同 | U | P1 |
 | PS-19 | `audio_dir_search` 只存本段目录名 | 目录段 token 不包含文件名本身；只出现在文件名里的词，在「仅路径」范围下搜不到 | U | P1 |
@@ -312,7 +312,7 @@ VN-09 当前服务端输出 `library_schema.{current,source_search_rev,snapshot_
 
 ## 10. 设计决定（#209 @ cddc7e3、服务端稿及之后的决定）
 
-1. **路径**：目录段索引 `audio_dir_search` + `audio_dir_runs`（#216），主表不变，路径不参与主表 bm25。`scope` 省略或 `main` 时顺序与 schema 8 一致；`all` / `path` 才做分层。多词按词计算（主 ∪ 目录段）再求交集。路径词估计命中超过全库一半时丢弃该词的目录集。加静态停用词表；根名默认不入索引。目录命中集为空且主表 `LIMIT 1` 也空时返回空页并跳过全量主扫描。→ §1、§2
+1. **路径**：目录段索引 `audio_dir_search` + `audio_dir_runs`（#216），主表不变，路径不参与主表 bm25。`scope` 省略或 `main` 时顺序与 schema 8 一致；`all` 按三层排序，多词按词计算（主 ∪ 目录段）再求交集；`path` 严格要求每个词均命中目录，不用主字段补足。路径词估计命中超过全库一半时丢弃该词的目录集。加静态停用词表；根名默认不入索引。目录命中集为空且主表 `LIMIT 1` 也空时返回空页并跳过全量主扫描。→ §1、§2
 2. **中文分词**：用 jieba 词典分词，不用 bigram。→ PS-03
 3. **Vorbis**：规范字段按映射白名单；全部保留的 textual key 原文存 JSON 并参与 Metadata 搜索，图片键除外，受提取预算约束。→ §3
 4. **厂商文本**：并入 `bwf_description_tokenized`，不新增 FTS 列，所以没法单独设权重；原始数据在 `vendor_metadata`；显示优先级 用户 > 厂商 > 内嵌，两种来源都能搜到。→ PG-04、CX-30～CX-32

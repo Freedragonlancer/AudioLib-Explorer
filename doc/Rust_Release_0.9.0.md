@@ -1,8 +1,9 @@
 # 0.9.0 发布准备与两端迁移方案
 
-状态：**发布准备中。#204–206含手动及同目录自动表格导入，新增源级/HTTP/真实表格验收已通过；OGG seek 与表格重预览选择修正已验证。PG05严格1.1仍阻塞，最新源码的原生GUI、实际包及安装尚未完成，未发布。**
+状态：**发布准备中。#204–206含手动及同目录自动表格导入，源级、HTTP、真实表格及额外实际音频验收已有通过证据。`fe13b05` 的Windows客户端和双二进制服务端开发包、固定安装及选定原生GUI交互已验收；完整五轮PG05仍未达到严格1.1门槛，未发布。**
+阶段调整：当前三项核心功能及Waveform的受影响定向检查已通过，保留必要数据保全，下一步交付开发候选；PG05、百万记录性能、全平台验收及全局回归留到正式release阶段，现有失败/未验状态保留，不作为开发功能先交付的前置通过条件。
 `0.9.0` 是拟定 MINOR 版本；Cargo 当前仍为 `0.8.7`，最终发行版本与跨平台 payload 尚未冻结。
-生产服务、工作库和源 WAV 未变更；固定 `local_release/` 仍是下述上一轮已验收候选，须在本轮验证后更新。
+生产服务、工作库和源 WAV 未变更；主工作区固定 `local_release/` 已更新为 `fe13b05` 开发包并核对907个文件。其后的服务端目标常量和Waveform共享连接修正属于新源码，尚未打包安装，不能改写fe13包的身份。
 feat → beta、beta → main、标签、发布以及实际服务部署各须取得相应授权。
 
 ## 1. 候选范围与证据身份
@@ -12,7 +13,7 @@ feat → beta、beta → main、标签、发布以及实际服务部署各须取
 用户随后明确要求完成三项任务的全部开发。实现现已包含四种搜索范围与筛选/排序、真实 FLAC/Ogg 标签提取，
 以及本地和服务端 CSV/XLS/XLSX 手动导入；本轮端到端、资源和交付验收仍进行中。
 用户追加要求：普通 WAV 扫描同时自动关联同目录厂商表格，与内嵌 Metadata 比对、去重导入。
-该自动流程已实现并列入 #206 的本次发布范围，新增99项定向回归及真实表格验收通过；原生界面和实际包交付仍待完成。
+该自动流程已实现并列入 #206 的本次发布范围，Windows新增/受影响99项定向回归及真实表格验收通过；另有原生Mac62项及后续独立60项源检查、实际NAS109条音频和fe13选定GUI/包交付证据，范围分别见1.3、1.4节。
 迁移管理、客户端提示/刷新、Default v2 和播放器反馈为配套范围。
 完成全部核心功能并验收后才能冻结完整发布范围；schema feature 标记、客户端适配或原型不能代替交付。
 原始设计与验收目标见 [服务端设计](Server_Search_Metadata_V2_Design.md)、
@@ -34,24 +35,29 @@ feat → beta、beta → main、标签、发布以及实际服务部署各须取
 | 最近已提交性能实现 | `0b3f2f7b1de32cf00fe3c4ca46045169b778bbc1`，整页缓存原型；此前 `ffcfbce` 合并 scoped membership/减少重复 Metadata 投影；组合源检查与实际诊断见第5节 |
 | 最新已验证改动 | `2c456979872e47cc15f6f52dbe832ad3ed0dd770`：池化升级锁句柄、读取快路径和重复排名维护削减；fmt、DB strict Clippy、35项定向单元、14个DB集成目标123项及2个HTTP目标7项通过；并发诊断仍未达标，不能称发行冻结 |
 | 旧GUI和MG配对身份 | `3562eead704357dcbe6e78bfabc9f083174990c4`，包含固定SQL prepared statement复用；该身份已有原生MG、官方旧GUI和下述性能诊断，仍不是发行冻结 |
-| 当前COW候选 | 基于3562eea：整个AudioFile共享不可变Data、写时复制；五包ASIO strict通过，扫描完成事务的缓存维护遗漏已修复，原Vorbis断言通过。后续44条测试目标调用1225通过/0失败/165忽略，与此前通过范围有重叠；性能及最终包仍待验 |
+| 较早COW验证候选 | 基于3562eea：整个AudioFile共享不可变Data、写时复制；五包ASIO strict通过，扫描完成事务的缓存维护遗漏已修复，原Vorbis断言通过。后续44条测试目标调用1225通过/0失败/165忽略，与此前通过范围有重叠；保留其实际输入身份 |
 | 后续缓存键优化 | COW及扫描收尾已提交为`20c4024bd3cf31c708f31b9e10f21b5f43e667a8`；其后使用2KiB内联精确序列化查找键，仅在准入时取得所有权；DB strict与61项定向测试通过。容量、代次、revision证明与JSON身份不变，新性能验收待完成 |
-| 当前性能修正基线 | `0628cc4a41b54a5d0b2359fcfae34fedf5b44041`；八组完整集合及续页oracle通过，100轮含facets的P95为209.0956ms。完整五轮PG05仍失败：五组写入/空闲P95比值1.353–1.443；绝对延迟通过不能替代严格1.1门槛。后续隐式读取修改须以新的身份重验 |
+| 较早性能修正基线 | `0628cc4a41b54a5d0b2359fcfae34fedf5b44041`；八组完整集合及续页oracle通过，100轮含facets的P95为209.0956ms。完整五轮PG05失败：倍率1.353–1.443；保留原报告，不改写为后续身份 |
 | 隐式缓存读取修正 | `9102197`，仅缓存查找以单条真实audio_files读取建立隐式snapshot；语句reset后比较observer前后revision，保留OS lease、reader gate、取消和完整失效契约。fmt、DB test-hooks strict及11条目标调用96项通过/0失败；含6项新取消/脏连接/真实提交交错回归。run68174015单轮warm含facets P95=257.419ms；五组并发比值1.11–1.167，仍无正式PG05通过证据 |
 | 成对自动更新修正 | `8f4766e`，当前server布局要求匹配平台迁移器；Unix TAR迁移器执行位与server一致。updater strict、33通过/2忽略，server NoDefault updates3项通过；完整pair安装/缺件拒绝/第二文件失败恢复已有真实文件回归。Unix执行位原生测试和部署脚本验收另行记录 |
-| 原生GUI发现的修正 | `9f9b7f1`：Vorbis 合法负起始时间及空 primer 不再造成加载失败，seek 与顺序 PCM 对齐；重预览按文件/sheet身份保留选择。Audio 原包112项及后续定向 golden 1项组成113项通过/3忽略的组合证据，Desktop vendor15项通过；并非一次新全仓运行，修正后的实际GUI仍须复验 |
-| 同目录自动表格扫描 | 基于`9f9b7f1`的本轮源码：默认随客户端/CLI/服务端扫描发现CSV/TSV/XLS/XLSX，限定同目录且本次成功扫描的唯一WAV；保留原始来源，规范去重、重扫更新和取消保全。Windows/MSVC1.97.1下新增/受影响99项通过，严格检查与真实XLS验证见1.3节；不是已发布或已安装payload身份 |
+| 原生GUI发现的修正 | `9f9b7f1`：Vorbis合法负起始时间及空primer不再造成加载失败，seek与顺序PCM对齐；重预览按文件/sheet身份保留选择。Audio112项及后续golden1项组成113通过/3忽略的组合证据，Desktop vendor15项通过；实际fe13 GUI已复验格式复用及P2所选映射，见1.4节 |
+| 同目录自动表格扫描 | 功能整合为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`：客户端/CLI/服务端扫描CSV/TSV/XLS/XLSX，限定同目录且本轮成功扫描的唯一WAV；原始来源、规范去重、重扫、部分关联和取消保全。Windows99项与Mac62项分别记录，不合计为一次workspace运行 |
+| 当前已验收Windows开发包 | `fe13b05f43cc75ae3de6373aedc390d4afdf2858`；运行版本0.8.7，客户端三阶段及服务端四阶段通过，主工作区907文件固定安装、选定GUI和实际NAS109条验收通过。不是最终0.9.0/main/tag产物 |
+| 最近完整性能验收 | 同一 `fe13b05`，run `81110616bd274a5fa9a07e58483887da`：完整oracle与续页通过、warm100+facets P95=209.4968ms；正式五轮均有充分真实并发，但五组倍率1.19118–1.21311，严格PG05失败；两个首次search+facets合计也超过500ms |
+| fe13后源码修正 | `SERVER_TARGET_SCHEMA=9`区分两类写目标，DB快照读上限引用Core；首版`4ec`的Windows27项属于旧输入，`04c`尾部修正28项已在Mac和Windows通过。All窄移植/测试加强的`d1c746fd`保留严格Path/v3；Mac60项和Windows62项核心定向检查各自通过，范围不同不相加。正式PG05留release，新payload仍待交付，安装仍为fe13 |
+| 待闭环上游输入 | `codex/fix-path-search-timeout` 基于 `8b53f7b33181282893c5424fb027b88874213936`（上游#225）；首轮`ea937cb`完成后已选取All算法及管理提示窄移植，未带入其混合Path/旧计数契约。新一轮CLI仍活跃，最终稳定输入待再次比较，不整合WIP；原f252620身份保持历史事实 |
 
 ### 1.1 三项核心功能核对与 fix 任务
 
 下列复选框表示**完整发布验收及交付**，不把源码存在、单项通过或开发诊断当作全部完成。
+开发收口复用1.3、1.4节实际NAS、GUI及已有定向证据；fe13后的核心/Waveform修正已完成相应定向检查，新包验收待做，不重复无关全局或百万性能运行。
 原始任务继续使用已有 Issue；已有结果保留实际源码、特性、环境和二进制身份。
 
 | 核心任务 | 已实现并有相应源级/链路证据 | 剩余发布验收 |
 | --- | --- | --- |
-| CORE-01 / [#204 路径可搜](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/204) | 四种范围、严格目录多词/祖先目录、跨来源 AND、筛选/排序/完整分页和 facets；本地库及真实同步快照链路 | 当前性能 WIP、完整五轮 PG05、最终 GUI/实际包与匹配平台 |
-| CORE-02 / [#205 Vorbis 标签提取](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/205) | 真实 FLAC/Ogg/OGA 提取、原文与规范字段、FTS5、增量重提取保全、受支持解码；真实 HTTP 与离线链路已有通过证据 | 最终包中新格式播放/操作、原生 GUI 与平台验收；不以 WAV-only IPC 冒充新增 codec 实测 |
-| CORE-03 / [#206 厂商表格导入](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/206) | 手动解析/映射/模板、候选确认和来源级回滚；新增WAV同目录自动表格扫描、嵌入比对去重、幂等更新、取消保全及s8/s9同步/离线HTTP回归 | PG05 真实导入并发性能仍阻塞；自动与手动流程的最终 GUI、实际包、平台和安装 |
+| CORE-01 / [#204 路径可搜](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/204) | 四种范围、严格目录多词/祖先目录、跨来源AND、筛选/排序/分页及facets；fe13 GUI实际Path/Main和同步链路见1.4 | 严格PG05、首次组合延迟、最终main/tag实际包及匹配平台；不把选定GUI观察扩成全部交互通过 |
+| CORE-02 / [#205 Vorbis 标签提取](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/205) | 真实FLAC/Ogg/OGA提取、FTS5、重提取保全、HTTP/离线；fe13实际GUI连续FLAC→OGA→OGG复用输出、Waveform与Ended0.080通过 | 最终版本实际包和平台验收；没有物理输出、ASIO硬件或点击到出声延迟声明 |
+| CORE-03 / [#206 厂商表格导入](https://github.com/Freedragonlancer/AudioLib-Explorer/issues/206) | 手动映射/模板/候选和来源回滚；同目录自动扫描、嵌入比对、幂等与取消保全及s8/s9真实HTTP；fe13选定GUI、Windows包/安装及NAS109条通过 | 真实导入并发PG05仍是正式发布门禁；GUI回滚及off-role权限界面未执行，正式HTTP/包证明另列；最终发行平台及身份待冻结 |
 
 具体功能边界：
 
@@ -101,9 +107,9 @@ feat → beta、beta → main、标签、发布以及实际服务部署各须取
   VN-08/09、Metadata 增量与重扫已有源级/HTTP 证据；最终包/部署仍待验，不能只凭 feature 标记通过。
 - [ ] **FIX-08 · P0：旧客户端过渡。** 已实现 s8/s9 双快照、精确协商和旧端 s9 写保护；
   派生 s8 只保留 WAV，保留已合入主表的厂商/Vorbis 搜索词；默认开启0.9过渡期兼容快照。
-  SC 源级与官方0.8.7 CLI 配对已通过（`d116dcd`）；关闭兼容配置拒绝同步且保留旧缓存。官方旧GUI在 `3562eea` 的声明范围已完成；新候选GUI及最终包仍待验。
+  SC源级与官方0.8.7 CLI配对通过（`d116dcd`）；关闭兼容配置拒绝同步并保留旧缓存。官方旧GUI的 `3562eea` 声明范围保留；fe13新GUI的迁移/离线和开发包另见1.4，不改写旧客户端配对身份。
 - [ ] **FIX-09 · P1：按库提示与去重。** 已改用稳定库身份隔离升级通知，
-  库身份/切换/去重已有源级交互回归；最终实际 GUI 待验。
+  库身份/切换/去重已有源级回归；fe13实际GUI观察到同URL换UUID警告且旧缓存视图保留，未点击警告后的Sync，不宣称已替换到B。
 
 验收说明：本轮已有 MG/快照结果证明当前迁移实现；客户端 mock 仅证明请求/回复包装，
 把 WAV 行改成 `.flac/.ogg` 扩展名的夹具不能证明真实标签解析，benchmark 私有厂商表不能证明正式导入。
@@ -140,12 +146,12 @@ CORE-02/03 完成前不将“完整搜索范围扩充”或“完整 Metadata v2
 
 以上是上一轮 `bebf272` 及其输入的历史验收；日志、命令、源码/二进制摘要保留在私有 `audiolib-release-090`。
 本轮 #204–206、当前缓存及兼容演练的证据在私有 `audiolib-204-206`，不沿用旧包作为新功能通过证明。
-Windows x64 ASIO 构建、打包及 portable 7 项通过；`validate-review-fixes.ps1 -CleanCheckout`
+以下仍为 `bebf272` 的历史交付：Windows x64 ASIO构建、打包及portable7项通过；`validate-review-fixes.ps1 -CleanCheckout`
 10 项、`validate-library-management.ps1` 10 项通过，均使用隔离合成数据，未打开真实工作库或音频设备。
 固定安装核对 1252 个 package-owned 文件（更新13个）、CLI `AudioLibCli 0.8.7` 和隔离桌面启动通过；
 portable 中文路径索引提示及安装后界面截图已检查。二进制源码身份仍为 `bebf272`，后续纯文档提交不改写该身份。
 
-| 已验收并安装的 EXE | SHA256 |
+| 历史已验收并安装的 EXE（bebf272） | SHA256 |
 | --- | --- |
 | `AudioLibCli.exe` | `a468d19640b0b01fed103019d6aea3aa5a1641cd93d0e67507ef20cd60093b21` |
 | `AudioLibExplorer.exe` | `e383a52466a0ac42a53ab4b9a0e98fc322112e8b94e7b22c85928e8051dda300` |
@@ -164,13 +170,61 @@ portable 中文路径索引提示及安装后界面截图已检查。二进制�
 | 核心协议 | vendor相关10项通过，含新统计对象缺字段/未来字段兼容；原扫描计数不与表格计数混合 |
 | 真实HTTP | 3个目标14项通过；新增s8及真实迁移后s9扫描→只改表格→revision/快照→RemoteProvider→停服离线重开；旧派生s8检索、新旧reader代次隔离和本地工作库/sidecars不变 |
 | 实际厂商表格 | 用户提供的真实XLS只读副本识别109行、1个sheet；以3个表内文件名生成隔离真实RIFF/BWF音频，自动匹配3条、Description参与检索，第二次增量Metadata更新0。表格副本字节、生成WAV字节/mtime及用户标注均保全；不是原NAS音频全量扫描 |
-| 桌面显示 | 既有扫描完成/运行时语言回归1项通过；原生GUI及自动统计的实际布局仍待验 |
+| 桌面显示 | 扫描完成/运行时语言回归1项通过；fe13实际GUI的自动内容、重复扫描数字、P2与两个语言/主题观察另见1.4，不扩成所有GUI流程通过 |
 | 静态检查 | 格式检查通过；Core/DB/Remote/Desktop/CLI实际ASIO配置严格all-target Clippy、DB独立no-default-features lib、server原生no-default-features all-target，以及修正后真实样本test target严格检查均通过 |
 
 真实样本第一次验证在查询词采样阶段失败；测试现使用正式SearchRequest输入校验过滤未就绪词，
 已选查询和Metadata字段、保全断言仍严格执行。复验通过并记录1个被拒绝的采样词，未更改真实表格内容。
 上述单元/集成计数不等同最终payload、硬件或原生界面验收。
-Mac SSH及原生Rust/PowerShell/Docker入口已恢复且只读盘点通过，新候选Mac/Linux/Docker构建与验收尚未执行。
+另有原生Mac `fe13b05` 的62项选定源检查通过：Rust/Cargo1.97.1、`aarch64-apple-darwin`、SDK27.0，干净隔离源码及Cargo.lock未变，保留原报告的shell nofile256记录，不倒改为后续子进程条件。
+范围为DB自动来源8项、scanner2项、扫描集成9项、vendor32项、server真实HTTP8/9共2项、headless Vorbis9项；DB/server strict通过。
+这是原生源检查，不是Mac客户端GUI、签名、实际包或部署。原音频filter零测试的记录保留，后续真正执行9项的结果单列，不冒充首轮覆盖。
+
+后续独立Mac输入为fe13加六个Rust文件，patch `4d59457ae18fa80178d4938a31ef0ce9568565cf12813184b84aade01b126505`，含目录`d1c746fd`与Waveform`04c0892e`。Waveform28、目录整组20（含6个新增）及scope完整目标12，共60通过/0失败/0忽略；DB all-targets/test-hooks、DB独立NoDefault lib及Remote NoDefault all-targets三项strict通过。
+六文件和依赖输入前后相同，旧62源码/锁文件/原收据不变，不合计成一次workspace运行。实测SSH/dev-env为256、pwsh原生子进程为10240，显式按后者验证，不声称256 FD预算；准备阶段的private caller失败原件保留，不扩称产品失败。
+私有证据简名为 `mac-native-delta-b8d56fdac8e040c1a6e3b7092f9c8ba1/summary.json`，摘要 `6ea8fe189bedcef2646536e4999931a5c96658bac76e18bc44ac2d52901d0a72`。本轮没有MacGUI、包、生产部署、维护或性能测试；正式PG05五轮留release，最终payload仍待验。
+Windows独立核心检查62项、一次fmt、DB/Remote默认特性all-targets strict及DB NoDefault lib strict均通过；输入为fe13加六Rust文件，delta `84455bfec37ddff4119295b79dde7bf5c619b5810810d026038fd697ac1b1540`。私有证据 `windows-core-functional-94f749889e6b4b4f87160b4d17baa0d7/result.json`，摘要 `511b05fc5643b2323f30f6613e195c7e48a11105f41788b713aa25929e46c29f`。同机另有外部任务，本轮仅证明功能，不给性能结论；不与Mac60项累加。
+
+实际NAS额外验收使用用户指定目录的109个真实WAV及1个XLS，在新隔离库中完成109行全部匹配、0歧义/未匹配/错误；
+首次Metadata更新6条、103条与嵌入内容去重，增量109个WAV未变、Metadata更新0，109个公开AudioFile DTO一致，3个Metadata查询命中。
+13条CLI命令均exit0；109个源文件名/大小/mtime、XLS完整SHA及3个WAV抽样SHA前后相同，抽样共11,122,658字节，没有全量散列600MB音频或打开工作库。
+这与前述真实XLS副本/3个生成WAV测试是两次不同的验收；真实路径、表格内容和日志只保留在私有证据。
+
+### 1.4 当前Windows开发包、固定安装与选定GUI
+
+已验收的源码身份为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`，运行版本仍为0.8.7。
+客户端build/package/portable-accept三阶段，以及显式release benchmark helper、production server+migrate build/package/native-accept四阶段通过。
+服务端实际包验证包含无test-hooks保护和owned8→9→8迁移，不以源测试或合成假二进制代替。
+
+| 当前开发包EXE | SHA256 |
+| --- | --- |
+| `AudioLibExplorer.exe` | `7f9b16c60bf1006da5aaa02735e49a5562cc194e295fef325d790fe3b25ea92c` |
+| `AudioLibCli.exe` | `a5ff1b74edefc335b2a96f7b6d84ff705cb4c49f64f4f325dd6803b008ae9618` |
+| `audiolib-server.exe` | `e050021f3f6d33224cc548b39bfc3d367969ecf1439002d752f6f7b2324dbf2b` |
+| `audiolib-migrate.exe` | `22c6b07e6347485804c8bf64821f3acf0f729506eda6c73a4373822fec4f319c` |
+
+主工作区唯一固定 `local_release/` 的907个package-owned文件与已验收包一致，更新71个文件；CLI0.8.7、隔离桌面启动和安装后诊断通过。
+手动验收实际经该目录 `Start-AudioLibExplorer.cmd` 启动，记录真实GUI PID/path/创建时间及可见窗口句柄，保持隔离userdata/IPC、音量0、不自动关闭。
+安装未打开或复制日常工作库、偏好和缓存；这次交付是开发候选，不覆盖已发布v0.8.7资产，也不是最终0.9.0/main/tag产物。
+
+| 选定原生GUI范围 | 实际观察 |
+| --- | --- |
+| 新格式播放 | 连续FLAC→OGA→OGG复用输出，Waveform可见、Ended0.080，无原加载错误；静音观察，不声明硬件出声或延迟 |
+| 同目录自动表格 | 新2个WAV由GUI首次扫描，库74→76；保存独立用户标签后加入两行CSV。嵌入等值描述只显示一次，新增描述Main命中1条，标签保留 |
+| 重复扫描数字 | 实际显示0新增/0更新/0缺失/2未变/0问题、1表/2匹配行/0Metadata更新/2未变/0未匹配/0歧义；总数76。第二次扫描的updated1未直接留存，不能从后端结果补成GUI观察 |
+| P2重预览/模板 | BIFF English页表头2→1→2后仍选English；恢复3个匹配及Filename/Description/Keywords。实际保存模板使用English映射；当前模板契约不持久化sheet/header_row，二者的GUI稳定性与映射落盘分别记录 |
+| 主题与关闭 | Defaultv2英文/中文内容和布局可见；正常X关闭、短暂“正在保存更改”后窗口及目标进程消失。未捕获GUI exitcode，不把进程消失写成exit0 |
+| 远端迁移/离线 | A初始schema8/74条，经GUI迁移74/74完成，live GET确认schema9；Path查询2条、自动扫描后76条和新词Main命中1条。正常关闭及停服后固定安装冷重开，离线缓存仍76条/新词1条 |
+| 同URL换库 | B的新UUID被识别，Retry后显示更换身份警告，旧A缓存76条及新词1条保留；auto_sync=false，未点击警告后的Sync，不宣称已打开B快照 |
+| A/B生命周期 | 两个owned production server会话均经专用console Ctrl+C正常排空，exit0及normal_stop_verified=true；A保存的startup schema8不是迁移后的实时schema9 |
+
+GUI回滚、management-off/reader权限界面及B警告后实际替换未执行；正式HTTP与production服务包验收是独立证据，不能把这些GUI项记为通过。
+五条Waveform替换警告已定位到同文件多个SQLite连接的生命周期；首版`4ec`输入保留原Windows os5失败及27项定向通过，后续`04c`尾部修正28项已在Mac和Windows通过。
+这些修正及服务端目标常量属于fe13之后的新源码；两平台核心检查不代替实际修正包和GUI警告复核，不将已安装fe13包改称包含修正。
+
+最小私有证据身份：Windows `accepted-payloads.json` 摘要 `b179acb8adacb02be28cb5748defb05a4fb1b7e5690f4b69a0932ce93f7803eb`；
+Mac `mac-native-fe13-fd8728591e9b4e6bb087cd454f7a8212`；实际NAS `nas-sidecar-b50ef7c7435b4adeab9e98b92858f8e9`；
+GUI `native-gui-selected-final-b5ce5a1e4bf0486495aa23b3f5a66610.json` 摘要 `d827c04d6d51269bbdc898f980fdbbb51c45222da7565e34eb108734a0d83bd6`。
 
 ## 2. 存储目标与当前实现边界
 
@@ -182,10 +236,10 @@ Mac SSH及原生Rust/PowerShell/Docker入口已恢复且只读盘点通过，新
 | 普通本地可写库 | `SCHEMA_VERSION=8`、`TARGET_SCHEMA=8`；本地路径索引构建与重建保持真实 s8 格式，重开保护已覆盖 | 普通本地写入不支持 s9；不能将路径索引准备称为主库升级9 |
 | 显式服务端迁移 | `audiolib-migrate` 或管理 API 将完整 s8 发布为 s9；专用 `open_server_existing` 可重新打开 s9；Metadata 和根 relink 已有回归 | restore/maintenance 保持 schema8 保护；实际生产部署及平台验收另行执行 |
 | s9 完整格式 | `ale-s9-cld1-t3-m2-p1-a1-sd1`；主 FTS5 tokenizer 为 t3，目录修订为 sd1 | 检查真实 schema/features/结构/身份；`source_search_rev=3` 与三项 feature 原子发布；保持原主 FTS5 不变 |
-| 客户端只读快照 | 支持完整格式校验的 schema3..9；s9 原样只读打开，owned staging 检查目录 FTS5、成员、runs 覆盖及无脏队列；真实 HTTP 同步和 Metadata 增量已通过 | 不把 s9 交给 schema8 修复器；未来/不完整格式拒绝并保留旧缓存 |
+| 客户端只读快照 | 支持完整格式校验的 schema3..9；DB的`MAX_SNAPSHOT_SCHEMA`直接引用Core的`SNAPSHOT_SCHEMA_MAX`，避免读上限漂移；s9 原样只读打开，owned staging 检查目录 FTS5、成员、runs 覆盖及无脏队列；真实 HTTP 同步和 Metadata 增量已通过 | 不把 s9 交给 schema8 修复器；未来/不完整格式拒绝并保留旧缓存 |
 | `/capabilities` | catalog2、API v1，按实际源库和角色报告读写格式、迁移、四种 scope 和厂商导入限额；普通客户端本地写格式仍为8 | 真实服务角色/格式及旧 JSON 形状解析回归已通过；正式版本及原生部署另验 |
-| s8 派生快照 | 已实现 s9/8 双缓存与精确协商；8派生只含 WAV、移除目录与厂商自有表，沿用已有主 FTS5 的 rev3 词和库身份；新端优先9 | router 配对、修订变化及关闭兼容选项回归通过；官方0.8.7 CLI 与 `d116dcd` 的真实兼容配对通过；官方旧GUI在3562eea的声明范围完成；最终新包待验 |
-| 厂商导入 / Vorbis | 真实 CSV/XLS/XLSX、本地与服务端完整导入/回滚和 FLAC/Ogg/OGA 提取、重扫、搜索已接通；不支持的服务器隐藏入口 | 较早29项与后续受影响32项目标分别通过，真实 HTTP/离线链路和解析资源演练通过；PG05、原生交互与新包待验。Opus 仅标签，无原生解码 |
+| s8 派生快照 | 已实现 s9/8 双缓存与精确协商；8派生只含 WAV、移除目录与厂商自有表，沿用已有主 FTS5 的 rev3 词和库身份；新端优先9 | router 配对、修订变化及关闭兼容选项回归通过；官方0.8.7 CLI 与 `d116dcd` 的真实兼容配对通过；官方旧GUI在3562eea的声明范围完成；fe13包验收见1.4，最终发行payload的旧端配对待验 |
+| 厂商导入 / Vorbis | 真实 CSV/XLS/XLSX、本地与服务端完整导入/回滚和 FLAC/Ogg/OGA 提取、重扫、搜索已接通；不支持的服务器隐藏入口 | 较早29项与后续受影响32项目标分别通过，真实 HTTP/离线链路和解析资源演练通过；PG05、未执行的原生交互及最终发行payload待验；fe13选定GUI和开发包验收见1.4。Opus 仅标签，无原生解码 |
 | AudioFile COW | `AudioFileData`保留原字段、类型和serde属性；`AudioFile`以私有Arc持有整条记录，Clone共享、修改时分离，手工serde仍输出原JSON | **公开Rust源码接口变化**：构造使用`AudioFileData`后转`AudioFile`，移出字段先`into_data()`；JSON/API格式、数据库schema、`AudioMetadata`及`attributes: Value`不变。直接消费者源级检查已通过，实际性能及最终包仍按新身份验收 |
 | 服务端交付布局 | 新包包含 server 与不带 test-hooks 的离线 `audiolib-migrate`；仍为七归档十四资产 | layout_revision=2、automatic_upgrade_compatible=false、manual_bootstrap_required=true；minimum_updater_version=0.9.0。冻结0.7.8旧政策真实拒绝，新政策合成验证通过；首次手动引导，开发0.8.7候选不是已发布新更新器 |
 
@@ -209,7 +263,8 @@ NULL 归属行分开 runs，避免被路径范围误命中。缺捕获机制的�
 | 旧 0.8.7 → 原 s8 服务 | 沿用已有路径，保留旧快照 | 沿用已支持的 s8 写契约 |
 | 新客户端 → 原 s8 服务 | 基础同步继续，主字段与仅文件名可用；缺服务能力时隐藏迁移/厂商入口，路径按实际索引 readiness 开放 | s8 写入仍须通过现有身份与权限检查 |
 | 旧/新客户端 → 新二进制、库仍 s8 | 基础读取和旧快照保持可用；新功能只按实际能力开放 | 不因换二进制自动视作库已升级 |
-| 回填中 → 客户端快照查询 | 主字段/文件名继续可查；无就绪目录索引时 All 回退主字段、Path 显示待准备。实际查询在客户端快照执行，不宣称已有在线 `/search` 路由 | 普通支持写入可继续；管理迁移状态可读，客户端显示阶段及已提交计数；预留路径查询拒绝契约为503/Retry-After 30 |
+| 回填中 → 客户端快照查询 | 主字段/文件名继续可查；无就绪目录索引时All回退主字段、Path显示待准备。RemoteProvider日常查询在已校验的本地只读快照执行 | 普通支持写入可继续；管理迁移状态可读，客户端显示阶段及已提交计数 |
+| 服务端在线查询 | 已有GET/POST `/api/v1/search`，经迁移准入和DataProvider搜索；与客户端快照查询是两个执行入口 | 普通路由30秒超时返回408；迁移尚未就绪时Path返回503/Retry-After 30，All可回退Main并带不可用标记，不称“预留路由” |
 | switching | 读取继续；保留当前缓存，拒绝混合代际状态 | 写入 503 `migration_switching`、Retry-After 30；按原请求语义重试，避免重复提交 |
 | 新客户端 → 完成 s9 | 精确接受9时总是取得9；完整校验后只读打开，真实全量同步、四种范围、标签/导入搜索、离线重开及回滚重同步有源测试证据 | 客户端快照仍只读；写回经服务端身份/角色/库格式准入；Metadata 与 owned cache 增量已测，导入/回滚后提示刷新 |
 | 旧 0.8.7 → 完成 s9，兼容开启 | 只接受8时发放 WAV-only s8，保留已合入主表的厂商/Vorbis词；默认在0.9过渡期保留 | 旧8写契约不能因拿到派生8就写源9，服务端拒绝不匹配写入（409）；给出升级头与能力字段，不承诺旧 UI 呈现新增提示 |
@@ -263,27 +318,47 @@ NULL 归属行分开 runs，避免被路径范围误命中。缺捕获机制的�
   必须按最终 recipe、实际新增功能及原生包再验证，不能把 `user_version=8` 等同旧二进制写入保真。
   不将历史设计中的“直接恢复整个备份”作为默认操作，否则可能覆盖新写入。
 - 若新增 Vorbis、厂商字段或其他 s9 业务数据后不能无损退回 s8，停止自动回退，先评估和保全数据。
+  执行前须由管理员通过受支持预检/数据审查确认；当前迁移器不自动证明旧二进制可安全写入。仅降schema或保留注释不代表旧写入者理解新增业务。
   不向旧二进制交付不支持的库，也不靠删除新增业务数据获得兼容；完整备份恢复另需授权及写入排空，并明确备份之后数据的处置。
 - 所有回退保留源 WAV、原备份、Metadata、标注及未知扩展；不以重扫代替数据保全。
 
-## 5. 最小验证范围与发布阻塞
+## 5. 开发定向验证与正式发布门禁
 
 集成候选后续修改由实际风险选择检查；已有全仓结果不能覆盖新合并行为。
+开发阶段仅补#204/#205/#206与Waveform受影响的定向检查、直接消费者和必要的数据保全；保留迁移、取消/恢复、写入排空和源文件不变断言。下表的百万性能、全平台及全局回归属于正式发布阶段，失败或未验不得记为通过，也不阻止核心功能完成定向验收后先交付开发版。
 
 | 阶段 | 所需证据 | 当前 |
 | --- | --- | --- |
-| 契约与文档 | schema/features/能力/Retry-After 一致；链接及差异检查 | catalog2、switching30、实际格式和能力已统一；文档检查与Rust/脚本运行证据分别记录 |
+| 契约与文档 | schema/features/能力/Retry-After及版本规则一致 | 本地写8/专用服务端写9/快照3..9分开记录，catalog2及switching30统一；发布checker AST与12个合成Git门槛回归通过。当前Cargo仍0.8.7，不宣称通过0.9.0发布检查 |
 | 受影响源码 | fmt、strict Clippy、相关测试及直接消费者 | COW五包ASIO strict通过；Core187及DB lib326通过/5忽略。原Vorbis失败保留且修正后完整通过；后续DB strict、server NoDefault strict通过，44条目标调用1225通过/0失败/165忽略，复用此前未受影响结果，不累加为唯一个案总数 |
 | 缓存读取 / 成对更新修正 | 取消/提交交错/连接复用、包缺件和升级恢复 | 隐式读取11条目标调用96通过/0失败，含server NoDefault updates3项；fullfmt与DB test-hooks strict通过。updater all-target strict及33通过/2忽略，覆盖成对安装/缺件拒绝/第二文件失败恢复。Unix执行位仍须匹配平台验收，shell成对部署另验 |
 | 成对部署 / beta库刷新 | 匹配双bin和验收收据、停止排空、一致备份、失败恢复 | Git Bash独立语法检查及66场景全部通过；覆盖缺件/错hash/错receipt、第二文件失败、旧迁移器不存在、标记恢复、持续迁移保留整对、停服失败不启动第二实例、排空后schema变化拒换、真实owned SQLite/WAL逻辑备份与失败保护。只使用fake服务和隔离SQLite，不代替Mac launchd/TCC/真实根目录及平台验收 |
-| 迁移安全 | MG24、跨进程控制、备份、取消/恢复、切换拒写 | 最近完整执行为 `3562eea`，24/24、41.55秒通过；COW及后续扫描修正仍按影响复验。保留旧 BUSY/监督器/报告替换竞争及修正日志。演练不等于实际 VM 断电、配额/全部文件系统或最终 production migrator 包验收 |
+| 迁移安全 | MG24、跨进程控制、备份、取消/恢复、切换拒写 | 完整MG保留 `3562eea` 的24/24、41.55秒身份；fe13 Windows production包另有owned8→9→8通过。均不等于实际VM断电、全部文件系统或生产规模owned副本迁移门槛 |
 | 两端真实 HTTP / 旧客户端 | 全量/增量、离线、回滚、实际官方旧二进制 | `2db7efd` 的5个同步目标16项、rooted7项通过；官方0.8.7 CLI与d116dcd配对通过。官方0.8.7原生GUI对3562eea完成O1–O12声明范围；独立旧写HTTP409、拒同步保缓存和冷离线重开有证据，均不是新候选正式包验收 |
-| 搜索正确性 / 解析资源 | 完整 oracle/分页/深目录/NULL、表格RSS/边界、恢复 | `0628cc4` 八范围完整 oracle/分页通过；18项资源边界、10k/200k CSV/XLSX、近50MiB有效 BIFF和真实退出恢复已有原身份证据。后续隐式读取修改仍需按新身份复验，不把微基准代替集合正确性 |
-| 百万记录性能 | 绝对 P95 <500ms；PG05五轮中位数倍率≤1.1 | **BLOCKED**。`0628cc4` 完整五轮run53276831，五组倍率1.353–1.443；run0c95367b warm100+facets P95=209.0956ms、结果页P95=0.0381ms。八个first-only请求的search/facets各自<500ms，但其中两组顺序合计超过500ms，不称全部合计通过。后续读取修正尚待复测 |
-| 桌面交互 | 范围/分页、导入、迁移、关闭排空及两个现代主题 | 已有源级交互/异步回归；原507项、后续定向与父/子进程结果各保留原身份。官方旧GUI声明范围已完成；新候选原生GUI、新格式播放和最终包仍待验 |
-| 原生文件系统 | 根句柄、复制/替换、权限与限额 | Windows本地NTFS7项、自有SMB/UNC6项通过；另1项创建测试链接返回OS1，该链接替换场景未验证。不能用该平台结果代替 Mac/Linux 原生路径 |
-| Windows实际包 | 客户端ASIO；server+migrate双二进制；许可/隐私/启动/数据安全 | 本轮尚未构建/打包。client479/server260许可闭包及合成材料/边界检查通过，含C#假二进制与53项Docker合成检查；无真实Docker daemon/image执行证明，旧 `bebf272` 包不替代本轮 |
-| 最终安装 | 固定目录所有package-owned文件SHA256、CLI版本、隔离桌面启动 | 仍为上轮 `bebf272`、1252文件安装；实际新包通过后才更新主工作区固定 `local_release/`，候选工作树不创建另一个日常安装 |
+| 搜索正确性 / 解析资源 | 完整oracle/分页/深目录/NULL、表格RSS/边界、恢复 | fe13 run81110616完整八范围oracle及所有续页通过，203.778秒；18项边界、10k/200k CSV/XLSX、近50MiB有效BIFF及真实退出恢复保留原身份证据，不与新运行重复累计 |
+| 百万记录性能 | 绝对P95<500ms；PG05五轮中位数倍率≤1.1 | **BLOCKED**。最新fe13 run81110616正式五轮全部充分重叠，五组倍率1.19118/1.20732/1.19277/1.20290/1.21311，均失败。warm100+facets P95=209.4968ms通过；首次search/facets各自通过，但case1/6合计575.4356/547.2962ms失败。保留旧53276831、0c95367b及诊断，不用绝对延迟代替倍率 |
+| 桌面交互 | 范围、导入、迁移、关闭与主题 | fe13固定安装选定GUI实际通过范围见1.4；回滚/off-role界面和B警告后Sync未执行。旧GUI、源级异步回归与新GUI分开，不宣称全界面清单通过 |
+| 原生文件系统 | 根句柄、复制/替换、权限与限额 | Windows本地NTFS7项、自有SMB/UNC6项通过，另1项创建链接返回OS1未验；旧Mac62项含Unix根/父目录/源文件/preview链接替换防护及原shell256记录；后续六文件delta60项的原生子进程实际10240，均不等于MacGUI/TCC、Linux或全部文件系统 |
+| Windows实际开发包 | 客户端ASIO；server+migrate；许可/隐私/启动/数据安全 | fe13客户端和production服务端七阶段实际通过，见1.4；client479/server260许可闭包及53项Docker合成检查不等于实际Docker运行。fe13后Waveform/常量源码修正仍需新payload验证 |
+| 固定安装 / 最终身份 | 所有package-owned文件SHA、CLI版本、隔离启动 | fe13主工作区907文件/71更新、CLI0.8.7和隔离桌面/诊断通过。新源码修正尚未安装，最终0.9/main/tag及发布后摘要同步仍待完成 |
+
+最新正式性能身份为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`，run `81110616bd274a5fa9a07e58483887da`，
+以私有 `compact-summary.json` 定位；1.198GB原始样本保留，不复制到仓库或覆盖旧报告。
+八范围完整集合和续页oracle通过（203.778秒）；8个fresh-first请求的search/facets独立通过，
+但case1与case6两阶段顺序合计分别575.4356ms和547.2962ms，未达到合计500ms门槛。
+warm100含facets的P95为209.4968ms、结果页P95为0.0365ms。OS cache未purge，不能称真实冷缓存。
+
+| PG05正式五轮 | 空闲p95中位数（µs） | 并发写入p95中位数（µs） | 倍率（上限1.1） |
+| --- | --- | --- | --- |
+| Main / relevance | 6.8 | 8.1 | **1.19118，失败** |
+| All / relevance | 8.2 | 9.9 | **1.20732，失败** |
+| Path / 过滤与Filename排序 | 8.3 | 9.9 | **1.19277，失败** |
+| strict Filename / Filename排序 | 6.9 | 8.3 | **1.20290，失败** |
+| 空中文 strict Filename / relevance | 6.1 | 7.4 | **1.21311，失败** |
+
+五轮均 `sufficient=true`，仍执行真实导入与回滚、原有预热/空闲及真实写入重叠要求。
+所有倍率失败，不能因缓存命中、微秒级绝对延迟或后续phase原型宣称正式PG05通过。fe13后新源码另有身份，不回标此轮结果。
+后续私有phase `67a`自然exit0、真实三批导入后回滚，但计时受新后台CLI并行编译污染，不计作PG05或新性能通过，也未证明剩余根因；当时`guard-v2`仅准备、未执行。
 
 较早的主性能诊断 run `b3df63be340b4718af8c0d66ef85733c`，源码 `3562eea`，
 `diagnostic_only=true`。warm100+facets P95=213.9338ms、结果页P95=0.1073ms；严格PG05仍阻塞。
@@ -359,7 +434,7 @@ Core187通过（含6个新COW行为测试），DB lib326通过/5忽略（含真�
 server NoDefault的25条目标调用369通过/3忽略；DB及server strict通过，源码前后身份一致。
 合计44条目标调用1225通过/0失败/165忽略；过滤DB-lib重复使用同一binary，部分扫描目标与先前结果重叠，不能直接与823相加。
 此前Core、CLI和未受扫描收尾影响的DB结果保留原始输入/特性/二进制身份，形成组合证据，非一次完整workspace重跑。
-新候选原生GUI、实际payload与固定安装仍未交付。
+以上为较早COW源码复验历史；其后fe13开发包、固定安装及选定GUI的实际交付见1.4，不倒改这些检查的输入身份。
 
 最小证据定位：MG `final-3562eea-full24-42dd609abce047f8a2e5b4644cfe76d7/result.json`；
 官方旧GUI `old-gui-e9a8c716ab574d98b2fee7a2d9b82bcd/native-gui-final-receipt.json`，绑定源码3562eea、
@@ -379,10 +454,11 @@ COW检查保留 `owned-file-validation-*` 的实际输入/特性/EXE及停止位
 每查询五轮、每轮 p95 的中位数不超过 s8 ×1.2；PG05另要求并发/空闲五轮p95中位数≤1.1。
 绝对延迟、s9/s8及并发倍率分别报告，缺少真实冷缓存/平台条件时明确未验。
 
-剩余发行条件：CORE-01..03 与关联 P0/P1 的最终实际验收、当前 WIP 源检查及完整 oracle/严格 PG05，
-以及 GUI、原生平台、实际包/固定安装和授权后的部署尚未完成。方案已明确客户端先就绪 → 手动引导新服务、库保持8
-→ 管理员显式迁移；双快照窗口结束及生产执行另需决议。最终版本和 payload 尚未冻结。
-上一轮 Windows 开发候选本机交付已完成；本轮新增行为尚未本机交付，也不能当作最终 main/tag 的正式发行 payload。
+剩余发行条件：严格PG05正式五轮及首次组合延迟、后台CLI第二轮稳定输入复核、fe13后修正的新payload与警告复核、最终版本/main/tag冻结、
+Mac客户端原生GUI/签名/实际包及匹配Mac/Linux/Docker平台交付、生产规模owned副本迁移/恢复与配对门槛。
+已完成的fe13 Windows开发包/固定安装和选定GUI不再列为全盘未验；未执行GUI交互与后端正式证据分别记录。
+方案仍为客户端先就绪 → 手动引导新服务、库保持8 → 管理员显式迁移；双快照窗口结束及生产执行另行决定。
+本轮Windows开发候选已本机交付，但不是最终0.9.0/main/tag正式发行payload；生产部署、发布和发布后安装同步尚未执行。
 上一轮候选缓存维护回收逻辑空间 88.44 GiB，保留 release 后剩余2.58 GiB，当时40 GiB 预算达成；本轮收尾再维护。
 新登记的私有 MG 缓存5.73 GiB因缺真实 Cargo `CACHEDIR.TAG` 被清理工具拒绝，已保留，未伪造标记；
 本次两处缓存合计约8.31 GiB。清理工具的原始成功/失败记录均保留。
@@ -393,8 +469,9 @@ COW检查保留 `owned-file-validation-*` 的实际输入/特性/EXE及停止位
 
 范围和版本冻结后先按 [版本规范](Rust_Versioning.md) 及 [发布管线](Rust_Release_Pipeline.md)
 预检，再以最终 main/tag 身份在匹配原生主机构建各 payload 一次、验收一次。
-目前 Cargo 未改至 0.9.0，也未创建对应标签。若先交付 Windows 开发候选，须在最终冻结后
-按实际 Cargo `0.8.7` 标识构建和验收；当前尚未交付，不代表正式0.9.0或七包发行完成。
+目前 Cargo 未改至 0.9.0，也未创建对应标签。Windows `fe13b05` 开发候选已按实际
+Cargo `0.8.7` 构建、验收并完成固定安装；后续源码修正尚未交付。最终0.9.0/main/tag
+身份及七包发行仍待冻结和验收。
 
 | 公开归档（`<tag>` 为最终批准标签） | 验收与更新边界 |
 | --- | --- |

@@ -120,8 +120,8 @@
 ### 3.3 HTTP 契约
 - 请求 DTO：`scope=main|all|path|filename`（默认 `main` = s8 行为）、不透明 `cursor`、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。目录相关性游标与筛选/排序游标使用不同内部编码，调用方不得自行构造。
 - 响应页含记录、`total_count`、`total_count_exact` 和 `next_cursor`（末页为 `null`）。优化的目录分页在未遍历完时返回已知下界，`total_count_exact=false`；界面显示“至少/≥”，不把下界当最终页数。客户端以 `next_cursor` 和已走过的位置导航，最后一页才确认精确总数。普通/文件名及 SQL 筛选页返回精确总数。
-- 游标绑定请求条件、provider 会话和数据库变更修订；改查询、范围、筛选、排序、库内容或重开库后必须拒绝旧游标并从第一页重取。API 错误为 `CURSOR_STALE`，HTTP 搜索若后续实现则映射409；当前错误由 DataProvider 返回。`search_path_rev` 仍描述目录格式版本，不能替代内容修订。
-- 现状：服务端 `routes.rs` 没有在线搜索路由；`SearchRequest` 已实现上述四种 scope，服务器模式在校验后的本地只读快照上搜索，与本地库共用查询实现。这里的请求/响应是 DataProvider 契约，不表示已有 HTTP 搜索端点。
+- 游标绑定请求条件、provider 会话和数据库变更修订；改查询、范围、筛选、排序、库内容或重开库后必须拒绝旧游标并从第一页重取。DataProvider 的 `CURSOR_STALE` 在现有 HTTP 搜索中映射为409，其他无效输入映射为400 `VALIDATION`。`search_path_rev` 仍描述目录格式版本，不能替代内容修订。
+- 现状：服务端已有 `GET /api/v1/search` 和 `POST /api/v1/search`，使用上述四种 scope 和 DataProvider 契约；`POST /search/folders` 尚未实现。RemoteProvider 日常查询仍在校验后的本地只读快照上执行，与本地库共用查询实现，不通过在线搜索路由。
 
 ### 3.4 实测（bench 副本 909,342 行，schema 8 基线 vs 目录段方案）
 口径（Paul 定）：每条查询 5 轮，每轮 3 次预热 + 60 次，取各轮 p95 的中位数，**≤ s8 × 1.2 即过**。
@@ -235,8 +235,8 @@ OS 冷缓存需要 `sudo purge`，由 Paul 在终端运行 `<bench-dir>/cold.sh`
 - 写入：`vendor_metadata(audio_file_id, import_id, field, value, source_file, sheet, row)`，并重算该行 `bwf_description_tokenized` 对应的派生搜索文本（走触发器更新 FTS）；`source_search_rev` 不变（rev3 已包含 vendor 组）。
 
 ## 7. Vorbis/FLAC/OGG（服务端）
-- 扫描器 `scanner.rs:633` 扩展名白名单加 `flac/ogg/oga`（受特性开关 `scan_extensions` 控制，默认待 Paul 定）；symphonia 开 `flac,ogg,vorbis`。
-- 新扫描到的非 wav 文件，旧客户端拿到 s8 兼容快照时也会看到（只是不能播放/解码时报错）→ s8 派生快照建议**过滤掉非 wav 行**，避免旧客户端出错。
+- 历史提案曾将扩展白名单与默认值留待决定；当前扫描默认支持 WAV、FLAC、Ogg Vorbis 和 OGA/Ogg FLAC，symphonia 已启用 `flac,ogg,vorbis`。
+- 历史提案担心旧端收到非 WAV 后解码失败；当前 s8 兼容派生快照已强制过滤非 WAV 行，旧端不会收到这些新格式记录。接受原生 s9 的新客户端可同步完整来源。
 - 已有 wav 库无需重扫；FLAC/OGG 需要一次增量扫描（管理员触发）。
 
 ## 8. 服务端需要暴露的客户端提示触发点

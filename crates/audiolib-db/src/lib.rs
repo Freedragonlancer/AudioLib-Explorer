@@ -71,7 +71,7 @@ pub use schema::{MIN_SNAPSHOT_SCHEMA_VERSION, SCHEMA_VERSION};
 pub const MIN_SNAPSHOT_SCHEMA: i64 = schema::MIN_SNAPSHOT_SCHEMA_VERSION;
 /// Newest schema of a snapshot this client opens read-only. Older supported schemas
 /// use an owned copy when their derived search state needs upgrading; the source is preserved.
-pub const MAX_SNAPSHOT_SCHEMA: i64 = 9;
+pub const MAX_SNAPSHOT_SCHEMA: i64 = audiolib_core::compatibility::SNAPSHOT_SCHEMA_MAX as i64;
 const _: () = assert!(MIN_SNAPSHOT_SCHEMA <= MAX_SNAPSHOT_SCHEMA);
 
 /// Register the exact shared scalar functions required by library indexes/triggers.
