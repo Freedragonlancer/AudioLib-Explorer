@@ -4983,8 +4983,8 @@ async fn search_scope_path_uses_directory_segments_and_keeps_main_order() {
     assert!(page.get("next_cursor").is_none());
 
     let mut path = main.clone();
-    // Aircraft holds 2 of the 3 scanned files, so the directory set is wider than
-    // half the library and is discarded. The word is not in the filenames either.
+    // A schema-8 library without the published directory index reports readiness
+    // explicitly instead of silently returning an empty path page.
     path.query = "Aircraft".into();
     path.scope = audiolib_core::SearchScope::Path;
     let response = send_json(
@@ -4995,9 +4995,52 @@ async fn search_scope_path_uses_directory_segments_and_keeps_main_order() {
         Some(TOKEN),
     )
     .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "30");
+    assert_eq!(
+        json::<serde_json::Value>(response).await["error_code"],
+        "migration_in_progress"
+    );
+
+    let migrated = audiolib_db::migration9::execute(
+        &f.db,
+        audiolib_db::migration9::Action::Start,
+        &Default::default(),
+        &std::sync::atomic::AtomicBool::new(false),
+    );
+    assert_eq!(migrated.state, audiolib_db::migration9::State::Done);
+    let response = send_json(
+        &f.state,
+        Method::POST,
+        "/api/v1/search",
+        Some(&serde_json::to_string(&path).unwrap()),
+        Some(TOKEN),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     let page: serde_json::Value = json(response).await;
+    // Aircraft still covers 2 of 3 files, so the existing broad-directory rule
+    // discards that set. Publication must not change path-search semantics.
     assert_eq!(page["results"].as_array().unwrap().len(), 0, "{page}");
+    let after = send_json(
+        &f.state,
+        Method::POST,
+        "/api/v1/search",
+        Some(&body),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(after.status(), StatusCode::OK);
+    let after: serde_json::Value = json(after).await;
+    assert_eq!(
+        after["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["id"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        main_ids
+    );
 
     let mut root = path.clone();
     // The scan root's own name is not indexed.

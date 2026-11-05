@@ -20,8 +20,8 @@ use crate::{
     waveform::WaveformParams,
 };
 use audiolib_core::{
-    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, ScanSession, SearchPage,
-    SearchRequest, TagEditMode,
+    AudioFile, BatchMetadataRequest, DataProvider, MetadataPatch, ScanSession, SearchRequest,
+    TagEditMode,
 };
 use axum::{
     Json, Router,
@@ -137,7 +137,7 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
             .route("/roots", post(add_root).route_layer(manage()))
             .route("/roots/{name}/check", post(check_root))
             .route("/audio/{id}", get(audio))
-            .route("/search", post(search_library))
+            .route("/search", post(search_library).get(search_query))
             .route("/audio/{id}/metadata", patch(update_metadata))
             .route("/audio/metadata/batch", post(update_metadata_batch))
             .route("/audio/{id}/plays", post(record_play))
@@ -253,6 +253,10 @@ pub fn router_with_request_timeout(service: impl Into<Service>, timeout: Duratio
         ))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::migration::headers,
+        ))
         // `ApiError` already logs every 5xx it produces (503 `UNAVAILABLE` at debug); the
         // default ERROR-level failure event would duplicate it on every client poll.
         .layer(
@@ -318,6 +322,9 @@ async fn require_bearer(
     };
     if let Err(error) = authorized {
         return error.into_response();
+    }
+    if let Some(response) = crate::migration::switching_write(&request) {
+        return response;
     }
     if !matches!(
         *request.method(),
@@ -481,7 +488,10 @@ async fn require_token(State(service): State<Service>, request: Request, next: N
         .security()
         .authorize(request.headers(), connection.as_ref())
     {
-        Ok(()) => next.run(request).await,
+        Ok(()) => match crate::migration::switching_write(&request) {
+            Some(response) => response,
+            None => next.run(request).await,
+        },
         Err(error) => error.into_response(),
     }
 }
@@ -841,7 +851,10 @@ where
         .map_err(ApiError::from)
 }
 
-async fn health(State(service): State<Service>) -> Json<HealthResponse> {
+async fn health(
+    State(service): State<Service>,
+    migration: Option<Extension<audiolib_db::migration9::Report>>,
+) -> Json<HealthResponse> {
     let (status, message) = match service.readiness() {
         Readiness::Ready(_) => ("ok", None),
         Readiness::Starting => ("starting", None),
@@ -856,7 +869,9 @@ async fn health(State(service): State<Service>) -> Json<HealthResponse> {
         message,
         public_url: service.security().public_url(),
         api_version: crate::API_VERSION.into(),
-        schema_version: audiolib_db::SCHEMA_VERSION,
+        schema_version: migration
+            .and_then(|r| r.0.switch)
+            .map_or(audiolib_db::SCHEMA_VERSION, |s| s.user_version),
         commit: crate::COMMIT.into(),
     })
 }
@@ -973,11 +988,37 @@ async fn search_library(
     Extension(state): Extension<AppState>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
-) -> Result<Json<SearchPage>, ApiError> {
+) -> Result<Response, ApiError> {
     let request: SearchRequest = json_body(&headers, body)?;
-    Ok(Json(
-        blocking(move || state.provider().search(&request)).await?,
-    ))
+    crate::migration::search(state, request).await
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    scope: audiolib_core::SearchScope,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+async fn search_query(
+    Extension(state): Extension<AppState>,
+    query: Result<Query<SearchQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query.map_err(|e| ApiError::validation(e.body_text()))?;
+    crate::migration::search(
+        state,
+        SearchRequest {
+            query: query.q,
+            scope: query.scope,
+            limit: query.limit.unwrap_or(100),
+            cursor: query.cursor,
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 async fn audio(

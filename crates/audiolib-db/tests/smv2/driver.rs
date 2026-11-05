@@ -131,6 +131,9 @@ impl Driver {
     fn exec(&self, args: &[&std::ffi::OsStr], env: &[(&str, String)]) -> Outcome {
         let mut cmd = Command::new(&self.program);
         cmd.args(args);
+        // Only the switching-observation case explicitly forwards this hook.
+        // Inheriting it in other cases would invalidate their write-lock timings.
+        cmd.env_remove(HOLD_SWITCH_MS);
         for (k, v) in env {
             cmd.env(k, v);
         }

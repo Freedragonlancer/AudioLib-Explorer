@@ -17,6 +17,7 @@ mod management;
 mod metadata_plain_tests;
 pub(crate) mod metadata_storage;
 pub mod migration;
+pub mod migration9;
 mod owned_cancellation;
 mod path_identity;
 #[cfg(feature = "scanner")]
@@ -263,6 +264,7 @@ pub struct SqliteProvider {
     album_namespace: RwLock<String>,
     legacy_album_scope: RwLock<Option<String>>,
     read_only: bool,
+    server_schema9: bool,
     writer: Mutex<Connection>,
     read_pool: Mutex<Vec<Connection>>,
     revision_reader: Mutex<Option<Connection>>,
@@ -682,6 +684,7 @@ impl SqliteProvider {
             legacy_album_scope: RwLock::new(albums::legacy_scope(&conn)?),
             path: path.to_path_buf(),
             read_only: false,
+            server_schema9: false,
             writer: Mutex::new(conn),
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
@@ -1015,6 +1018,7 @@ impl SqliteProvider {
             legacy_album_scope: RwLock::new(albums::legacy_scope(&conn)?),
             path: actual_path,
             read_only: true,
+            server_schema9: false,
             writer: Mutex::new(conn),
             read_pool: Mutex::new(Vec::new()),
             revision_reader: Mutex::new(None),
@@ -1135,7 +1139,7 @@ impl SqliteProvider {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db_error)?;
-        if version != schema::SCHEMA_VERSION {
+        if version != schema::SCHEMA_VERSION && !(self.server_schema9 && version == 9) {
             return Err(Error::Busy(
                 "Library format changed; reopen before writing".into(),
             ));

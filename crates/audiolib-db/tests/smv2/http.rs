@@ -1,17 +1,21 @@
 // crates/audiolib-db/tests/smv2/http.rs
-//! Plain HTTP/1.0 client for the pending server tests (no client dependency).
+//! Plain HTTP/1.0 client for native migration acceptance (no client dependency).
 //!
 //! Env: AUDIOLIB_SMV2_ADMIN_URL (http://host:port of a disposable test instance),
 //! AUDIOLIB_SMV2_ADMIN_DB (the library file that instance serves; the tests drive
 //! the migration on it with `audiolib-migrate` and mutate it), optional
 //! AUDIOLIB_SMV2_ADMIN_TOKEN (Bearer).
 //!
-//! Library endpoints are not in this repo; defaults below are placeholders, each
-//! overridable with AUDIOLIB_SMV2_HTTP_<NAME> (e.g. AUDIOLIB_SMV2_HTTP_PLAYBACK).
+//! Library endpoints use the native server API, each overridable with
+//! AUDIOLIB_SMV2_HTTP_<NAME> (e.g. AUDIOLIB_SMV2_HTTP_PLAYBACK).
 //! `{id}` is replaced with a library row id.
+//! Optional AUDIOLIB_SMV2_RESET_SERVER_CMD runs before each HTTP fixture opens.
+//! It must synchronously restart the disposable server on the same URL and replace
+//! ADMIN_DB with a fresh owned schema-8 copy. Assertions stay in smv2_mg.rs.
 //!
 //! Search `scope` (server 2026-11-03): `main|all|path`; omit = `main` (= schema 8).
 //! MAIN_SEARCH omits scope on purpose. Vendor import: `/api/vendor-import` (+ `/*`).
+use audiolib_core::compatibility::{CLIENT_COMPATIBILITY_HEADER, compatibility_manifest};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -28,28 +32,33 @@ pub const ADMIN: &str = "/admin/api/migration";
 
 /// (name, method, default path, body). Writes are the vendor import and annotations.
 pub const ENDPOINTS: &[(&str, &str, &str, Option<&str>)] = &[
-    ("LIST", "GET", "/api/library/files?limit=5", None),
+    ("LIST", "GET", "/api/v1/search?limit=5", None),
     (
         // omit scope (= main / s8)
         "MAIN_SEARCH",
         "GET",
-        "/api/search?q=zildjian",
+        "/api/v1/search?q=zildjian",
         None,
     ),
-    ("PATH_SEARCH", "GET", "/api/search?q=Urban&scope=path", None),
+    (
+        "PATH_SEARCH",
+        "GET",
+        "/api/v1/search?q=Urban&scope=path",
+        None,
+    ),
     (
         "ALL_SEARCH",
         "GET",
-        "/api/search?q=zildjian&scope=all",
+        "/api/v1/search?q=zildjian&scope=all",
         None,
     ),
-    ("PLAYBACK", "GET", "/api/files/{id}/stream", None),
-    ("ARTWORK", "GET", "/api/files/{id}/artwork", None),
+    ("PLAYBACK", "GET", "/api/v1/audio/{id}/stream", None),
+    ("ARTWORK", "GET", "/api/v1/audio/{id}/artwork", None),
     ("VENDOR_IMPORT", "POST", "/api/vendor-import", Some("{}")),
     (
         "ANNOTATIONS",
-        "POST",
-        "/api/files/{id}/annotations",
+        "PATCH",
+        "/api/v1/audio/{id}/metadata",
         Some(r#"{"tags":"smv2"}"#),
     ),
 ];
@@ -75,24 +84,42 @@ impl Response {
 pub struct Server {
     host: String,
     token: Option<String>,
+    library_id: String,
     pub db: PathBuf,
 }
 
 impl Server {
     pub fn from_env() -> Server {
+        if let Some(command) = std::env::var_os("AUDIOLIB_SMV2_RESET_SERVER_CMD") {
+            let status = std::process::Command::new(command)
+                .status()
+                .expect("reset disposable server");
+            assert!(status.success(), "disposable server reset failed: {status}");
+        }
         let url = std::env::var("AUDIOLIB_SMV2_ADMIN_URL").expect("AUDIOLIB_SMV2_ADMIN_URL");
         let host = url
             .strip_prefix("http://")
             .expect("AUDIOLIB_SMV2_ADMIN_URL must be http://host:port")
             .trim_end_matches('/')
             .to_string();
-        Server {
+        let mut server = Server {
             host,
             token: std::env::var("AUDIOLIB_SMV2_ADMIN_TOKEN").ok(),
+            library_id: String::new(),
             db: std::env::var("AUDIOLIB_SMV2_ADMIN_DB")
                 .expect("AUDIOLIB_SMV2_ADMIN_DB")
                 .into(),
-        }
+        };
+        let library = server.request("GET", "/api/v1/library", None);
+        assert_eq!(
+            library.status, 200,
+            "fixture library unavailable: {library:?}"
+        );
+        server.library_id = library.json()["library_id"]
+            .as_str()
+            .expect("served library identity")
+            .to_owned();
+        server
     }
 
     pub fn request(&self, method: &str, path: &str, body: Option<&str>) -> Response {
@@ -104,10 +131,12 @@ impl Server {
             .map(|t| format!("Authorization: Bearer {t}\r\n"))
             .unwrap_or_default();
         let body = body.unwrap_or("");
+        let catalog = serde_json::to_string(&compatibility_manifest()).unwrap();
         write!(
             s,
-            "{method} {path} HTTP/1.0\r\nHost: {}\r\nAccept: application/json\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "{method} {path} HTTP/1.0\r\nHost: {}\r\nAccept: application/json\r\n{auth}X-AudioLib-Admin: 1\r\nX-AudioLib-Library-Id: {}\r\n{CLIENT_COMPATIBILITY_HEADER}: {catalog}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             self.host,
+            self.library_id,
             body.len()
         )
         .unwrap();

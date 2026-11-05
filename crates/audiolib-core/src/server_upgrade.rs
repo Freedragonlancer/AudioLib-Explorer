@@ -52,7 +52,7 @@ pub const MIGRATION_STATUS_PATH: &str = "/admin/api/migration/status";
 pub const MIGRATION_ACTIONS: [&str; 5] = ["start", "pause", "resume", "cancel", "rollback"];
 /// `503` while a path scope search waits for the migration (`Retry-After: 30`).
 pub const MIGRATION_IN_PROGRESS: &str = "migration_in_progress";
-/// `503` for writes during the switch (`Retry-After: 5`); nothing was written.
+/// `503` for writes during the switch (`Retry-After: 30`); nothing was written.
 pub const MIGRATION_SWITCHING: &str = "migration_switching";
 /// Search scope request parameter: `scope=main|all|path`; omitted means `main`
 /// (same behaviour as s8).
@@ -157,8 +157,7 @@ impl MigrationRefusal {
     /// Retry delay when the server sent none (the agreed defaults).
     pub fn default_retry_after(self) -> u64 {
         match self {
-            Self::PathSearchInProgress => 30,
-            Self::Switching => 5,
+            Self::PathSearchInProgress | Self::Switching => 30,
         }
     }
 
@@ -1596,7 +1595,7 @@ mod tests {
         );
         assert_eq!(
             MigrationRefusal::from_code("migration_switching").map(|r| r.default_retry_after()),
-            Some(5)
+            Some(30)
         );
         assert_eq!(MigrationRefusal::from_code("BUSY"), None);
         assert!(migration_actions(false).is_empty());

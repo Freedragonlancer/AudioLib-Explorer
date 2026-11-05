@@ -420,7 +420,7 @@ mod tests {
         );
         assert_matches_http_schema(
             Some("migration_switching"),
-            &[("retry-after", "5"), (MIGRATION_HEADER, "switching")],
+            &[("retry-after", "30"), (MIGRATION_HEADER, "switching")],
         );
         assert_matches_http_schema(
             None,
@@ -535,7 +535,7 @@ mod tests {
                     503,
                     r#"{"error_code":"migration_switching","message":"switch"}"#,
                 )
-                .with_header("retry-after", "5")
+                .with_header("retry-after", "30")
             } else {
                 TestResponse::json(200, r#"{"status":"ok","version":"0.9.0"}"#)
             }
@@ -545,7 +545,7 @@ mod tests {
         let health =
             retry_during_migration(5, |delay| waits.push(delay), || client.health()).unwrap();
         assert_eq!(health.version, "0.9.0");
-        assert_eq!(waits, vec![Duration::from_secs(5); 2]);
+        assert_eq!(waits, vec![Duration::from_secs(30); 2]);
 
         let path = TestServer::start(|_| {
             TestResponse::json(

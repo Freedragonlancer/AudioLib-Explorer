@@ -12,7 +12,7 @@ mod smv2;
 mod support;
 
 use audiolib_core::{DataProvider, MetadataPatch};
-use audiolib_db::SqliteProvider;
+use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use rusqlite::Connection;
 use serde_json::json;
 use smv2::{driver::*, *};
@@ -44,8 +44,11 @@ fn env(k: &'static str, v: impl ToString) -> (&'static str, String) {
 #[derive(Debug, PartialEq)]
 struct EndState {
     user_version: i64,
+    dir_rows: i64,
+    folder_rows: i64,
     path_rows: i64,
     file_rows: i64,
+    path_runs: Vec<(i64, i64, i64, i64)>,
     path_tokens: String,
     main_shadow: String,
 }
@@ -55,9 +58,18 @@ fn end_state(db: &Path) -> EndState {
     let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
     EndState {
         user_version: user_version(db),
-        path_rows: count("SELECT count(*) FROM audio_path_search"),
+        dir_rows: count("SELECT count(*) FROM audio_dir_search"),
+        folder_rows: count("SELECT count(*) FROM folders"),
+        path_rows: count("SELECT coalesce(sum(n),0) FROM audio_dir_runs"),
         file_rows: count("SELECT count(*) FROM audio_files"),
-        path_tokens: fts_instance_hash(&c, "audio_path_search"),
+        path_runs: c
+            .prepare("SELECT dir_id, lo, hi, n FROM audio_dir_runs ORDER BY dir_id, lo")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap(),
+        path_tokens: fts_instance_hash(&c, "audio_dir_search"),
         main_shadow: main_fts_shadow_hash(&c),
     }
 }
@@ -437,7 +449,7 @@ fn mg_10_integrity_counts_and_main_fts_unchanged() {
     drop(c);
     d.migrate_to_done(&db);
     let c = conn(&db);
-    for t in ["audio_search", "audio_path_search"] {
+    for t in ["audio_search", "audio_dir_search"] {
         c.execute(
             &format!("INSERT INTO {t}({t}) VALUES('integrity-check')"),
             [],
@@ -450,13 +462,31 @@ fn mg_10_integrity_counts_and_main_fts_unchanged() {
     assert_eq!(ic, "ok");
     let s = end_state(&db);
     assert_eq!(
+        s.dir_rows, s.folder_rows,
+        "audio_dir_search vs folders rows"
+    );
+    assert_eq!(
         s.path_rows, s.file_rows,
-        "audio_path_search vs audio_files rows"
+        "audio_dir_runs sum(n) vs audio_files rows"
     );
     let ids_match: i64 = c
-        .query_row("SELECT count(*) FROM audio_files WHERE id NOT IN (SELECT rowid FROM audio_path_search)", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM audio_files f WHERE NOT EXISTS (
+                SELECT 1 FROM audio_dir_runs r JOIN audio_dir_search d ON d.rowid=r.dir_id
+                WHERE r.dir_id=f.folder_id AND f.id BETWEEN r.lo AND r.hi)",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(ids_match, 0);
+    let orphan_runs: i64 = c
+        .query_row(
+            "SELECT count(*) FROM audio_dir_runs WHERE dir_id NOT IN (SELECT id FROM folders)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_runs, 0);
     assert_eq!(
         c.query_row("SELECT count(*) FROM audio_search", [], |r| r
             .get::<_, i64>(0))
@@ -636,52 +666,72 @@ fn mg_16_defer_schema9_env() {
 #[ignore = "pending server migration branch (audiolib-migrate, feature test-hooks)"]
 fn mg_17_scan_and_rename_during_backfill_reach_path_table() {
     let d = Driver::require();
-    let f = fixture();
+    // This case renames source directories, so it owns a separate WAV fixture.
+    let f = Fixture::default_size();
     let (_dir, db) = f.copy_db();
     let r = d.run("start", &db, &[env(PAUSE_AFTER_BATCHES, 1)]);
     assert_eq!(r.state(), "paused", "{r:?}");
-    let c = conn(&db);
-    // A "renamed" row (highest id, beyond the first batch) and a newly scanned row.
+    let mut c = conn(&db);
+    // t3 indexes directory segments. Select a file in the directory being renamed
+    // explicitly: max(audio_files.id) can be a non-WAV clone in another directory.
     let id: i64 = c
-        .query_row("SELECT max(id) FROM audio_files", [], |r| r.get(0))
+        .query_row(
+            "SELECT max(af.id) FROM audio_files af JOIN folders d ON d.id=af.folder_id WHERE d.folder_name='Urban'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    c.execute(
-        "UPDATE audio_files SET file_path=replace(file_path,'Urban','Mg17renamed') WHERE id=?1",
-        [id],
-    )
-    .unwrap();
-    let cols: Vec<String> = c
-        .prepare("SELECT name FROM pragma_table_info('audio_files') WHERE name<>'id'")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    let names = cols
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sel = cols
-        .iter()
-        .map(|c| {
-            if c == "file_path" || c.contains("path") {
-                format!(
-                    "CASE WHEN typeof(\"{c}\")='text' THEN \"{c}\" || '.mg17new' ELSE \"{c}\" END"
-                )
-            } else {
-                format!("\"{c}\"")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    c.execute(&format!("INSERT INTO audio_files({names}) SELECT {sel} FROM audio_files WHERE id=(SELECT min(id) FROM audio_files)"), []).unwrap();
+    let source = f.root.join("Ambience/Urban");
+    let renamed = f.root.join("Ambience/Mg17renamed");
+    fs::rename(&source, &renamed).unwrap();
+    // Model a committed child-directory rename, retaining folder/file identities
+    // and closure. The public relink operation only accepts top-level roots,
+    // whose own names are deliberately excluded from t3 path terms.
+    let tx = c.transaction().unwrap();
+    assert_eq!(
+        tx.execute(
+            "UPDATE folders SET folder_name='Mg17renamed',folder_path=replace(folder_path,'Urban','Mg17renamed') WHERE id=(SELECT folder_id FROM audio_files WHERE id=?1)",
+            [id],
+        )
+        .unwrap(),
+        1
+    );
+    assert!(
+        tx.execute(
+            "UPDATE audio_files SET file_path=replace(file_path,'Urban','Mg17renamed'),path_key=replace(path_key,'urban','mg17renamed') WHERE folder_id=(SELECT folder_id FROM audio_files WHERE id=?1)",
+            [id],
+        )
+        .unwrap() > 0
+    );
+    tx.commit().unwrap();
     drop(c);
+    let provider = Arc::new(SqliteProvider::open(&db).unwrap());
+    let scanned = f.root.join("Mg17scanned/new.wav");
+    fs::create_dir_all(scanned.parent().unwrap()).unwrap();
+    fs::write(&scanned, riff(&[])).unwrap();
+    let progress = ScanService::new(provider.clone())
+        .scan(
+            &f.root,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(progress.errors, 0);
+    assert_eq!(progress.added, 1);
+    let scanned_id = provider.find_audio_by_path(&scanned).unwrap().unwrap().id;
+    drop(provider);
     assert_eq!(d.run("resume", &db, &[]).state(), "done");
     let s = end_state(&db);
+    assert_eq!(s.dir_rows, s.folder_rows);
     assert_eq!(s.path_rows, s.file_rows);
     let hit = d.search("path_search", &db, "Mg17renamed");
     assert!(hit.contains(&id), "renamed row not in path table: {hit:?}");
+    assert!(!d.search("path_search", &db, "Urban").contains(&id));
+    assert!(
+        d.search("path_search", &db, "Mg17scanned")
+            .contains(&scanned_id)
+    );
 }
 
 // ------------------------------------------------------------------------ MG-18
@@ -950,7 +1000,7 @@ fn mg_15_http_reads_and_scopes_during_backfill() {
     assert_eq!(srv.call("PATH_SEARCH", id).status, 200);
 }
 
-/// During `switching`: writes 503 migration_switching (Retry-After 5), reads 200.
+/// During `switching`: writes 503 migration_switching (Retry-After 30), reads 200.
 /// The switch window is short; status is polled while a slowed run finishes.
 #[test]
 #[ignore = "pending server migration HTTP (set AUDIOLIB_SMV2_ADMIN_URL, AUDIOLIB_SMV2_ADMIN_DB)"]
@@ -981,7 +1031,7 @@ fn mg_15_http_writes_rejected_during_switch() {
                 if resp.header("x-audiolib-migration") != Some("switching") {
                     continue; // the switch ended between the two requests
                 }
-                assert_http_error(&resp, 503, "migration_switching", "5");
+                assert_http_error(&resp, 503, "migration_switching", "30");
                 seen = true;
             }
             let read = srv.call("LIST", id);

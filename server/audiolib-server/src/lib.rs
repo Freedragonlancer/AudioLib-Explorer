@@ -14,6 +14,7 @@ pub mod config;
 pub mod error;
 pub mod list_waveform;
 pub mod manage;
+mod migration;
 pub mod pcm;
 pub mod preview;
 pub mod revision;
