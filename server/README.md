@@ -50,8 +50,8 @@ packages exclude test hooks. Their inventory and acceptance reports bind both ha
 This layout requires a **manual server bootstrap** from pre-0.9 installations. The
 frozen old updater genuinely rejects the new migration binary; package metadata states
 `automatic_upgrade_compatible=false`, `manual_bootstrap_required=true`, layout revision 2
-and minimum published updater version `0.9.0`. The development 0.8.7 candidate is not a
-published 0.9 release. Preserve the library, configuration and rollback backups, install
+and minimum published updater version `0.9.0`. The candidate program version is frozen
+at 0.9.0 but remains unpublished. Preserve the library, configuration and rollback backups, install
 the complete native payload while the old server is gracefully stopped, and follow the
 client/server migration runbook before explicitly migrating the library. Offline recovery
 uses the packaged tool, for example `audiolib-migrate status --db /path/to/library.db`;

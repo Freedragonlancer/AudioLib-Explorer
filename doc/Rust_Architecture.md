@@ -15,8 +15,8 @@ negotiated representation. Its default-enabled `legacy_snapshot_enabled` transit
 serves a WAV-only owned schema-8 copy of a schema-9 source, without rebuilding main
 FTS or changing source audio, business IDs or annotations. Native/legacy caches and
 jobs are separate and source-revision bound. Turning it off refuses old peers while
-retaining their valid offline cache. The current development version remains 0.8.7;
-neither the catalog revision nor these contracts announce a published 0.9.0 release.
+retaining their valid offline cache. The candidate program version is frozen at 0.9.0;
+release acceptance remains pending, and 0.9.0 has not been published.
 
 Owned schema-9 staging validates SQLite/main FTS and directory FTS, exact folder
 membership and disjoint run coverage before publication. Ordinary read-only opens

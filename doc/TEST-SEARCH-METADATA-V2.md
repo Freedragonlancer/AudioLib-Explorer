@@ -252,7 +252,7 @@ AS 用例属于新增验收范围，执行结果须绑定实际源码和包；�
 不得仅将全局常量改成 9 或宣称所有本地库已迁移。restore/maintenance 仍保留 s8 写 guard。
 
 `CATALOG_REVISION=2` 已实现；catalog revision 是信息字段，不做相等版本准入，不代替 marker/协议/格式验证。
-当前开发构建的应用版本仍是 **0.8.7**，并未正式发布 0.9.0；升级提示 `min` 取实际构建版本。
+当前候选的程序版本已冻结为 **0.9.0**，尚未正式发布；升级提示 `min` 取实际构建版本，旧0.8.7夹具与验收记录保留原身份。
 `-z1` 是 Metadata 压缩存储格式；快照外层 zstd 传输不构成 s9 `-z1` 实现证明。
 
 VN-09 当前服务端输出 `library_schema.{current,source_search_rev,snapshot_formats_served}`、
