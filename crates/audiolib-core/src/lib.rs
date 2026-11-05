@@ -497,13 +497,14 @@ pub struct SearchPage {
     /// native unfiltered relevance route counts only observed hits: without a
     /// cursor this includes the traversed prefix, skipped hits and lookahead;
     /// with a cursor it includes only the observed suffix after that cursor,
-    /// ignoring the request offset. An exhausted nonzero offset without a cursor
-    /// returns zero with `total_count_exact = false`. An offset never invents
-    /// matches. Use `next_cursor` for native directory continuation.
+    /// ignoring the request offset. An offset never invents matches. Use
+    /// `total_count_exact` to distinguish an exact global count, and `next_cursor`
+    /// for native directory continuation.
     pub total_count: u64,
-    /// False means `total_count` is a lower bound, never an exact last-page bound.
-    /// Native directory search marks a terminal cursor page exact for its
-    /// observed suffix; that cursor-local count is not a global match total.
+    /// True means `total_count` is the exact global match count. False means a
+    /// lower bound that must not determine a global final page count. For native
+    /// directory search this is an observed prefix or cursor-local suffix, even
+    /// on a final cursor page.
     /// Older replies omit this field and retain their exact-count semantics.
     #[serde(default = "search_count_exact_default")]
     pub total_count_exact: bool,

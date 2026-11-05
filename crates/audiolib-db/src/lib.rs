@@ -2416,12 +2416,8 @@ impl SqliteProvider {
             })
             .flatten()
             .transpose()?;
-        let total_count_exact = !page.has_more
-            && (page.short_circuited || position == 0 || cursor.is_some() || !results.is_empty());
+        let total_count_exact = !page.has_more && (page.short_circuited || cursor.is_none());
         let total_count = if page.short_circuited {
-            0
-        } else if results.is_empty() && cursor.is_none() && position != 0 {
-            // An arbitrary deep offset gives no evidence about the skipped count.
             0
         } else {
             // Count only observed hits, including the lookahead. An offset past

@@ -145,10 +145,10 @@ fn optimized_cursor_reports_observed_suffix_and_deep_offset_counts() {
     let mut selection = request(SearchScope::Path, "corridor");
     selection.limit = 1;
     let mut all = Vec::new();
-    for (index, observed_count) in [2, 2, 1].into_iter().enumerate() {
+    for observed_count in [2, 2, 1] {
         let page = provider.search(&selection).unwrap();
         all.extend(page.results.iter().map(|file| file.id));
-        assert_eq!(page.total_count_exact, index == 2);
+        assert!(!page.total_count_exact);
         assert_eq!(page.total_count, observed_count);
         selection.cursor = page.next_cursor;
         // Cursor position wins over a caller's unrelated offset.
@@ -158,10 +158,10 @@ fn optimized_cursor_reports_observed_suffix_and_deep_offset_counts() {
     assert!(selection.cursor.is_none());
     let page = provider.search(&selection).unwrap();
     assert!(page.results.is_empty());
-    assert!(!page.total_count_exact);
+    assert!(page.total_count_exact);
     assert_eq!(
-        page.total_count, 0,
-        "an unproven deep offset is not a lower bound"
+        page.total_count, 3,
+        "an exhausted no-cursor traversal counts observed matches, not its offset"
     );
 }
 
