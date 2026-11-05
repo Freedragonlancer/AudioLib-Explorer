@@ -25,7 +25,7 @@ use audiolib_core::config::{
 use audiolib_core::{
     Album, AlbumKind, AudioFile, BatchMetadataRequest, DataProvider, FileVisibility, Folder,
     LibraryExportFormat, ListWaveformSource, MaintenanceAction, MetadataPatch, ScanSession,
-    SearchFilters, SearchRequest, SortOrder, TagEditMode,
+    SearchFilters, SearchRequest, SearchScope, SortOrder, TagEditMode,
 };
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -69,10 +69,14 @@ mod client_review_tests;
 mod history;
 #[path = "library_progress.rs"]
 mod library_progress;
+#[path = "result_page_navigation.rs"]
+mod result_page_navigation;
 #[path = "result_window.rs"]
 mod result_window;
 #[path = "search_tasks.rs"]
 mod search_tasks;
+#[path = "search_v2_ux.rs"]
+mod search_v2_ux;
 
 fn table_sort_order(index: i32) -> SortOrder {
     match index {
@@ -83,6 +87,33 @@ fn table_sort_order(index: i32) -> SortOrder {
         5 => SortOrder::Tags,
         6 => SortOrder::Modified,
         _ => SortOrder::Relevance,
+    }
+}
+
+fn search_scope_index(scope: SearchScope) -> i32 {
+    match scope {
+        SearchScope::All => 0,
+        SearchScope::Main => 1,
+        SearchScope::Path => 2,
+        SearchScope::Filename => 3,
+    }
+}
+
+fn search_scope_from_index(index: i32) -> SearchScope {
+    match index {
+        1 => SearchScope::Main,
+        2 => SearchScope::Path,
+        3 => SearchScope::Filename,
+        _ => SearchScope::All,
+    }
+}
+
+fn search_scope_from_pref(value: &str) -> SearchScope {
+    match audiolib_core::config::normalize_search_scope(value).as_str() {
+        "main" => SearchScope::Main,
+        "path" => SearchScope::Path,
+        "filename" => SearchScope::Filename,
+        _ => SearchScope::All,
     }
 }
 
@@ -338,6 +369,7 @@ struct SearchJob {
     cancel: Arc<AtomicBool>,
     facet_revision: u64,
     provider: Arc<SqliteProvider>,
+    path_probe: Option<Arc<dyn DataProvider>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -677,6 +709,8 @@ pub struct Controller {
     sqlite: RwLock<Arc<SqliteProvider>>,
     library_generation: AtomicU64,
     library_busy: AtomicBool,
+    search_v2_ux: Mutex<search_v2_ux::UxState>,
+    search_v2_busy: AtomicBool,
     source_changing: AtomicBool,
     source_generation: AtomicU64,
     close_after_operation: AtomicBool,
@@ -751,6 +785,7 @@ pub struct Controller {
     artwork_actions_wake: Condvar,
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
+    result_pages: Mutex<result_page_navigation::ResultPageNavigation>,
     waveform_generation: AtomicU64,
     waveform_cancel: Mutex<Arc<AtomicBool>>,
     waveform_job: Mutex<Option<WaveJob>>,
@@ -881,6 +916,7 @@ impl Controller {
 
     fn available(&self) -> bool {
         !self.library_busy.load(Ordering::Acquire)
+            && !self.search_v2_busy.load(Ordering::Acquire)
             && !self.source_changing.load(Ordering::Acquire)
             && !self.closing.load(Ordering::Acquire)
             && !self.shutdown.load(Ordering::Acquire)
@@ -939,6 +975,10 @@ impl Controller {
         ui.set_table_tags_width(table.tags_width);
         ui.set_sort_index(sort_index(table.order_by));
         ui.set_sort_descending(table.descending);
+        ui.set_search_scope_index(search_scope_index(search_scope_from_pref(
+            &config.search_scope,
+        )));
+        ui.set_path_search_available(false);
         ui.set_volume(playback.volume);
         publish_audition(ui, playback.audition);
         publish_volume(ui, playback.volume);
@@ -961,6 +1001,8 @@ impl Controller {
             sqlite: RwLock::new(sqlite),
             library_generation: AtomicU64::new(0),
             library_busy: AtomicBool::new(false),
+            search_v2_ux: Mutex::default(),
+            search_v2_busy: AtomicBool::new(false),
             source_changing: AtomicBool::new(false),
             source_generation: AtomicU64::new(0),
             close_after_operation: AtomicBool::new(false),
@@ -1037,6 +1079,7 @@ impl Controller {
             artwork_actions_wake: Condvar::new(),
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
+            result_pages: Mutex::new(Default::default()),
             waveform_generation: AtomicU64::new(0),
             waveform_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             waveform_job: Mutex::new(None),
@@ -1098,6 +1141,7 @@ impl Controller {
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_search_tasks(ui);
         self.bind_artwork(ui);
+        self.bind_search_v2_ux(ui);
         let c = self.clone();
         ui.on_exit_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -1277,6 +1321,14 @@ impl Controller {
         ui.on_search_requested(move |immediate| {
             if let Some(ui) = c.ui.upgrade() {
                 c.request_search(&ui, immediate, true);
+            }
+        });
+        let c = self.clone();
+        ui.on_search_scope_changed(move || {
+            if let Some(ui) = c.ui.upgrade() {
+                c.persist_search_scope(&ui);
+                c.refresh_path_search_availability(&ui);
+                c.request_search(&ui, true, true);
             }
         });
         let c = self.clone();
@@ -2471,7 +2523,7 @@ impl Controller {
                     }
                     LibraryOperation::Relink(id, path) => {
                         let allowed_roots = c.config.lock().unwrap().allowed_scan_roots.clone();
-                        let path = audiolib_core::validate_wav_path(path, &allowed_roots)
+                        let path = audiolib_core::validate_audio_path(path, &allowed_roots)
                             .map_err(|error| error.to_string())?;
                         if provider
                             .find_audio_by_path(&path)
@@ -2877,6 +2929,16 @@ impl Controller {
     }
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
+        self.result_pages.lock().unwrap().clear();
+        // A forced source reset must invalidate the old import's UI admission and
+        // cancel its original provider, while retaining its durable checkpoint.
+        self.cancel_vendor_for_transition();
+        self.search_v2_busy.store(false, Ordering::Release);
+        self.search_v2_ux.lock().unwrap().reset();
+        ui.set_lu_state(0);
+        ui.set_vi_state(0);
+        ui.set_migration_visible(false);
+        ui.set_migration_busy(false);
         // The result ListView is shared. A source change must drop a server viewport;
         // a same-library refresh keeps the page the user was browsing.
         if !retain_navigation {
@@ -3355,7 +3417,10 @@ impl Controller {
                     let revision_before = provider.search_revision().ok().flatten();
                     let chinese = c.chinese.load(Ordering::Acquire);
                     let mut result = survive_panic(
-                        || provider.search_cancellable(&job.request, job.cancel.clone()),
+                        || {
+                            c.probe_migrating_path(&job)?;
+                            provider.search_cancellable(&job.request, job.cancel.clone())
+                        },
                         || {
                             audiolib_core::Error::Database(internal_error(
                                 chinese, "搜索", "Search",
@@ -3370,7 +3435,7 @@ impl Controller {
                     let source_range = result
                         .as_ref()
                         .ok()
-                        .map(|page| (page.returned_count, page.total_count));
+                        .map(result_page_navigation::SourcePage::from);
                     // Server removals stay hidden until the resync swaps the snapshot.
                     if let Ok(page) = result.as_mut() {
                         c.hide_removed_in_page(page);
@@ -3406,7 +3471,13 @@ impl Controller {
                                                 && state.result_window
                                         },
                                     );
-                                if job.request.offset > 0
+                                // An exact cursor count can describe only the remaining
+                                // suffix. Opaque continuations cannot establish a global
+                                // total for offset clamping or result labels.
+                                let global_count_exact =
+                                    page.total_count_exact && job.request.cursor.is_none();
+                                if global_count_exact
+                                    && job.request.offset > 0
                                     && (job.request.offset as u64) >= page.total_count
                                 {
                                     c2.request.lock().unwrap().offset =
@@ -3479,15 +3550,25 @@ impl Controller {
                                     ui.invoke_restore_result_window_viewport(y);
                                 }
                                 ui.set_can_previous(job.request.offset > 0);
-                                ui.set_can_next(source_range.is_some_and(|(returned, total)| {
-                                    ((job.request.offset + returned) as u64) < total
+                                ui.set_can_next(source_range.as_ref().is_some_and(|source| {
+                                    c2.result_pages
+                                        .lock()
+                                        .unwrap()
+                                        .published(&job.request, source)
                                 }));
                                 let first_page = job.request.offset / PAGE_SIZE + 1;
                                 let last_page = (job.request.offset
                                     + page.returned_count.saturating_sub(1))
                                     / PAGE_SIZE
                                     + 1;
-                                let pages = page.total_count.div_ceil(PAGE_SIZE as u64).max(1);
+                                let pages = if global_count_exact {
+                                    page.total_count
+                                        .div_ceil(PAGE_SIZE as u64)
+                                        .max(1)
+                                        .to_string()
+                                } else {
+                                    "?".into()
+                                };
                                 ui.set_page_label(
                                     if first_page == last_page {
                                         format!("{first_page}/{pages}")
@@ -3496,7 +3577,7 @@ impl Controller {
                                     }
                                     .into(),
                                 );
-                                let shown = if page.total_count == 0 {
+                                let shown = if page.returned_count == 0 {
                                     "0".into()
                                 } else {
                                     format!(
@@ -3506,16 +3587,21 @@ impl Controller {
                                     )
                                 };
                                 let chinese = c2.chinese.load(Ordering::Acquire);
+                                let total = if global_count_exact {
+                                    page.total_count.to_string()
+                                } else {
+                                    format!("≥{}", page.total_count)
+                                };
                                 ui.set_result_summary(
                                     if chinese {
                                         format!(
                                             "{shown} / {} 条 · {:.1} ms",
-                                            page.total_count, page.execution_time_ms
+                                            total, page.execution_time_ms
                                         )
                                     } else {
                                         format!(
                                             "{shown} of {} sounds · {:.1} ms",
-                                            page.total_count, page.execution_time_ms
+                                            total, page.execution_time_ms
                                         )
                                     }
                                     .into(),
@@ -3563,7 +3649,13 @@ impl Controller {
                                 c2.search_task_page_ready(&ui, workspace_revision);
                             }
                             Err(error) => {
+                                let mut request = c2.request.lock().unwrap();
+                                c2.result_pages.lock().unwrap().failed(&mut request);
+                                drop(request);
                                 ui.set_searching(false);
+                                if c2.retry_migrating_search(&ui, &error, job.generation) {
+                                    return;
+                                }
                                 ui.set_status(error.to_string().into());
                                 let retained_window =
                                     c2.search_publication.lock().unwrap().as_ref().is_some_and(
@@ -4180,12 +4272,10 @@ impl Controller {
             return;
         }
         let mut request = self.request.lock().unwrap();
-        request.offset = if delta < 0 {
-            request.offset.saturating_sub(PAGE_SIZE)
-        } else {
-            request.offset.saturating_add(request.limit)
-        };
-        request.limit = PAGE_SIZE;
+        self.result_pages
+            .lock()
+            .unwrap()
+            .step(&mut request, delta, PAGE_SIZE);
         drop(request);
         self.request_navigation_search(ui, true, false);
     }
@@ -4207,6 +4297,8 @@ impl Controller {
         if count == 0 {
             return false;
         }
+        request.cursor = None;
+        self.result_pages.lock().unwrap().clear();
         let span = request.limit;
         if direction < 0 {
             let added = request.offset.min(PAGE_SIZE);
@@ -4233,6 +4325,7 @@ impl Controller {
         // their generation/cancellation scope and only fetch the adjoining rows.
         // A new query, sort, task or library still invalidates the entire scope.
         let job = SearchJob {
+            path_probe: self.path_probe_provider(&request),
             request,
             generation,
             not_before: Instant::now(),
@@ -4246,8 +4339,65 @@ impl Controller {
         true
     }
 
+    /// DESIGN §2.5: keep the chosen search scope in preferences.
+    fn persist_search_scope(&self, ui: &AppWindow) {
+        let scope = search_scope_from_index(ui.get_search_scope_index());
+        let mut config = self.config.lock().unwrap();
+        config.search_scope = scope.as_str().to_string();
+        if let Err(error) = config.save() {
+            tracing::warn!(%error, "Save search scope preference");
+        }
+    }
+
+    /// Local path searches need a ready index. Supported servers may be probed while migrating.
+    fn refresh_path_search_availability(self: &Arc<Self>, ui: &AppWindow) {
+        let ready = self.provider().path_search_ready().ok().unwrap_or(false);
+        let probe = self.remote_read_only() && self.server_path_search_offered();
+        ui.set_path_search_available(ready || probe);
+        if !ready && !probe && ui.get_search_scope_index() == 2 {
+            ui.set_search_scope_index(0);
+            let chinese = self.chinese.load(Ordering::Acquire);
+            ui.set_status(
+                if chinese {
+                    "当前音效库不支持路径搜索，已改回「全部」（仅主表）。"
+                } else {
+                    "Path search is unavailable for this library; scope reset to All (main fields only)."
+                }
+                .into(),
+            );
+        }
+    }
+
+    /// Map the UI scope into the request, degrading when the directory index is absent.
+    fn apply_search_scope(self: &Arc<Self>, ui: &AppWindow, request: &mut SearchRequest) {
+        let ready = self.provider().path_search_ready().ok().unwrap_or(false);
+        let probe = self.remote_read_only() && self.server_path_search_offered();
+        ui.set_path_search_available(ready || probe);
+        if !ready {
+            self.maybe_offer_local_upgrade(ui);
+        }
+        let chosen = search_scope_from_index(ui.get_search_scope_index());
+        request.scope = match chosen {
+            SearchScope::Path if !ready && !probe => {
+                let chinese = self.chinese.load(Ordering::Acquire);
+                ui.set_status(
+                    if chinese {
+                        "路径索引尚未就绪，已切换为主表搜索。"
+                    } else {
+                        "The path index is unavailable. Searching main fields instead."
+                    }
+                    .into(),
+                );
+                ui.set_search_scope_index(1);
+                SearchScope::Main
+            }
+            SearchScope::All if !ready => SearchScope::Main,
+            other => other,
+        };
+    }
+
     fn request_navigation_search(self: &Arc<Self>, ui: &AppWindow, immediate: bool, reset: bool) {
-        if !self.available() {
+        if !self.available() || self.search_v2_ux.lock().unwrap().declined {
             return;
         }
         self.persist_search_task(ui);
@@ -4264,7 +4414,12 @@ impl Controller {
         ui.set_searching(false);
         self.cancel_deferred_task_search();
         let mut request = self.request.lock().unwrap().clone();
+        self.result_pages
+            .lock()
+            .unwrap()
+            .prepare_query(&mut request, reset);
         request.query = ui.get_query().to_string();
+        self.apply_search_scope(ui, &mut request);
         if request.needs_more_search_text() {
             ui.set_status(
                 if self.chinese.load(Ordering::Acquire) {
@@ -4375,6 +4530,7 @@ impl Controller {
         let job = SearchJob {
             cancel,
             facet_revision: self.facet_revision.load(Ordering::Acquire),
+            path_probe: self.path_probe_provider(&request),
             request,
             generation,
             not_before: Instant::now()
@@ -5070,7 +5226,7 @@ impl Controller {
             ui.set_waveform_image(Image::from_rgba8(
                 SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels, job.width, job.height),
             ));
-            let mask = if ui.global::<crate::Theme>().get_modern_style() {
+            let mask = if ui.global::<crate::Theme>().get_modern_player() {
                 mask.map_or_else(Image::default, |mask| {
                     Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                         &mask, job.width, job.height,
@@ -5406,9 +5562,11 @@ impl Controller {
             && self.source_changing.load(Ordering::Acquire)
             && !self.library_busy.load(Ordering::Acquire);
         if self.library_busy.load(Ordering::Acquire)
+            || self.search_v2_busy.load(Ordering::Acquire)
             || (self.source_changing.load(Ordering::Acquire) && !pending_source_sync)
         {
             self.close_after_operation.store(true, Ordering::Release);
+            self.cancel_vendor_for_transition();
             return;
         }
         if self.closing.load(Ordering::Acquire) {
@@ -5705,7 +5863,7 @@ impl Controller {
         } else {
             "Incremental scan"
         };
-        let message = if chinese {
+        let mut message = if chinese {
             format!(
                 "{state} · 已检查 {} 个音效 · 新增 {} · 更新 {} · 未变化 {} · 问题 {}",
                 progress.processed,
@@ -5724,6 +5882,14 @@ impl Controller {
                 progress.errors
             )
         };
+        let vendor = audiolib_core::vendor_import::automatic_scan_summary(
+            &progress.vendor_metadata,
+            chinese,
+        );
+        if !vendor.is_empty() {
+            message.push_str(" · ");
+            message.push_str(&vendor);
+        }
         ui.set_scan_summary(message.clone().into());
         ui.set_status(format!("{message} · {}", progress.current_path).into());
     }
@@ -6694,7 +6860,7 @@ impl Controller {
             return;
         }
         if action == 20 {
-            self.choose_file(false, crate::dialogs::FileKind::Wav, move |path| {
+            self.choose_file(false, crate::dialogs::FileKind::Audio, move |path| {
                 LibraryOperation::Relink(id, path)
             });
         } else if action == 21 {
@@ -6703,7 +6869,7 @@ impl Controller {
             let provider = self.provider();
             let c = self.clone();
             std::thread::spawn(move || match provider.get_audio(id) {
-                Ok(file) => c.open_explorer(file.file_path, true),
+                Ok(file) => c.open_explorer(file.into_data().file_path, true),
                 Err(error) => c.status(error.to_string()),
             });
         } else if quick_metadata_patch(action, false).is_some() {
@@ -6800,7 +6966,7 @@ impl Controller {
                 let Some(source) = source else {
                     return Ok(files
                         .into_iter()
-                        .map(|file| PathBuf::from(file.file_path))
+                        .map(|file| PathBuf::from(&file.file_path))
                         .filter(|path| path.is_file())
                         .collect());
                 };
@@ -6946,6 +7112,7 @@ impl Controller {
 
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
+        self.cancel_vendor_for_transition();
         if let Some(ui) = self.ui.upgrade() {
             self.persist_search_task(&ui);
         }
@@ -7044,6 +7211,11 @@ impl Controller {
         config.ui_font_size = self.ui_font_size.load(Ordering::Acquire);
         config.list_font_size = self.list_font_size.load(Ordering::Acquire);
         config.audio_table = self.audio_table.lock().unwrap().clone();
+        if let Some(ui) = self.ui.upgrade() {
+            config.search_scope = search_scope_from_index(ui.get_search_scope_index())
+                .as_str()
+                .to_string();
+        }
         config.max_search_tasks = self.max_search_tasks.load(Ordering::Acquire);
         config.window_layout = self.window_layout.lock().unwrap().clone();
         if let Ok(status) = confirmed {
@@ -7062,7 +7234,11 @@ impl Controller {
 
     /// Process the bounded local playback control protocol; never transports PCM.
     pub fn ipc(self: &Arc<Self>, value: serde_json::Value) -> serde_json::Value {
-        if self.library_busy.load(Ordering::Acquire) && value["command"] != "status" {
+        if (self.library_busy.load(Ordering::Acquire)
+            || self.search_v2_busy.load(Ordering::Acquire)
+            || self.search_v2_ux.lock().unwrap().declined)
+            && value["command"] != "status"
+        {
             return audiolib_core::failure("Library operation in progress");
         }
         let command = match value["command"].as_str() {
@@ -7236,6 +7412,12 @@ fn scan_result_summary(
             progress.errors
         )
     };
+    let vendor =
+        audiolib_core::vendor_import::automatic_scan_summary(&progress.vendor_metadata, chinese);
+    if !vendor.is_empty() {
+        summary.push_str(" · ");
+        summary.push_str(&vendor);
+    }
     if full && (progress.errors > 0 || progress.state != audiolib_core::ScanState::Completed) {
         summary.push_str(if chinese {
             " · 本次未标记缺失文件"
@@ -7456,12 +7638,14 @@ fn playback_wave_file(status: &audiolib_audio::PlaybackStatus) -> Option<AudioFi
     if status.sample_rate == 0 || status.state == PlaybackState::Loading {
         return None;
     }
-    status.file_path.as_ref().map(|path| AudioFile {
-        file_path: path.to_string_lossy().into_owned(),
-        sample_rate: status.sample_rate,
-        channels: status.channels,
-        duration: status.duration,
-        ..Default::default()
+    status.file_path.as_ref().map(|path| {
+        AudioFile::from(audiolib_core::AudioFileData {
+            file_path: path.to_string_lossy().into_owned(),
+            sample_rate: status.sample_rate,
+            channels: status.channels,
+            duration: status.duration,
+            ..Default::default()
+        })
     })
 }
 
@@ -8220,7 +8404,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        let file_b = AudioFile {
+        let file_b = AudioFile::from(audiolib_core::AudioFileData {
             id: 20,
             filename: "B.wav".into(),
             file_path: path_b.to_string_lossy().into_owned(),
@@ -8228,7 +8412,7 @@ mod tests {
             channels: loaded.channels,
             duration: loaded.duration,
             ..Default::default()
-        };
+        });
         *controller.selected.lock().unwrap() = Some(file_b.clone());
         present_file(&ui, &file_b);
         controller.mark_audio_reload(file_b.id);
@@ -8308,11 +8492,11 @@ mod tests {
                 .file_path,
             path_a.to_string_lossy()
         );
-        let remote_file = AudioFile {
+        let remote_file = AudioFile::from(audiolib_core::AudioFileData {
             id: 70,
             file_path: "Z:/Server/Original.wav".into(),
-            ..file_b
-        };
+            ..file_b.into_data()
+        });
         controller.set_remote_wave_file_for_test(path_a.clone(), remote_file.clone());
         controller.remote_mode.store(true, Ordering::Release);
         controller.wave_view.lock().unwrap().0 = remote_file.file_path.clone();
@@ -9207,6 +9391,7 @@ mod tests {
             allowed_scan_roots: Vec::new(),
             data_source: Default::default(),
             data_source_fallback: None,
+            search_scope: "all".into(),
         };
         config.save().unwrap();
         let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
@@ -10141,10 +10326,10 @@ mod tests {
     }
 
     fn saved_file(job: &MetadataJob) -> AudioFile {
-        let mut file = AudioFile {
+        let mut file = AudioFile::from(audiolib_core::AudioFileData {
             id: job.id,
             ..Default::default()
-        };
+        });
         if let MetadataWrite::Draft(draft) = &job.write {
             apply_metadata_patch(&mut file, &draft.patch);
         }
@@ -10210,10 +10395,10 @@ mod tests {
         state.complete(&next, &Ok(saved_file(&next)));
         assert_eq!(state.completed, next_barrier);
         let (file, dirty) = state.for_display(
-            &AudioFile {
+            &AudioFile::from(audiolib_core::AudioFileData {
                 id: 1,
                 ..Default::default()
-            },
+            }),
             barrier,
         );
         assert_eq!(file.tags, "library B");
@@ -10240,11 +10425,11 @@ mod tests {
     #[test]
     fn returning_to_a_file_preserves_its_draft_and_a_late_save_overrides_a_stale_read() {
         let mut state = MetadataState::default();
-        let stale_a = AudioFile {
+        let stale_a = AudioFile::from(audiolib_core::AudioFileData {
             id: 1,
             tags: "old database value".into(),
             ..Default::default()
-        };
+        });
         state.edit(1, annotation("new A", "pending A"));
         state.enqueue_draft(1).unwrap();
         let pending_a = state.next().unwrap();
@@ -10306,20 +10491,20 @@ mod tests {
         let mut state = MetadataState::default();
         present_file(
             &ui,
-            &AudioFile {
+            &AudioFile::from(audiolib_core::AudioFileData {
                 id: 1,
                 filename: "A.wav".into(),
                 ..Default::default()
-            },
+            }),
         );
         ui.set_edit_tags("A draft".into());
         ui.set_metadata_dirty(true);
         // B's background read has finished, but B's event-loop publication has not.
-        let background_b = AudioFile {
+        let background_b = AudioFile::from(audiolib_core::AudioFileData {
             id: 2,
             filename: "B.wav".into(),
             ..Default::default()
-        };
+        });
         capture_editor_draft(&mut state, &ui);
         capture_editor_draft(&mut state, &ui);
         assert!(state.drafts.contains_key(&1));
@@ -10456,11 +10641,11 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         present_file(
             &ui,
-            &AudioFile {
+            &AudioFile::from(audiolib_core::AudioFileData {
                 id: 42,
                 color: Some("legacy-blue".into()),
                 ..Default::default()
-            },
+            }),
         );
         ui.set_edit_favorite(true);
         ui.set_metadata_dirty(true);

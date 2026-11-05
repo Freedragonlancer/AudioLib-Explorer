@@ -16,7 +16,15 @@ pub(crate) fn readable_format_ready(conn: &Connection) -> Result<bool> {
 }
 
 fn format_ready(conn: &Connection, allow_p0: bool) -> Result<bool> {
-    if !format_ready_at_version(conn, allow_p0, SCHEMA_VERSION)? {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(db_error)?;
+    let expected = if allow_p0 && version == 9 {
+        9
+    } else {
+        SCHEMA_VERSION
+    };
+    if !format_ready_at_version(conn, allow_p0, expected)? {
         return Ok(false);
     }
     if !crate::albums::ready(conn)? {
@@ -58,6 +66,15 @@ fn format_ready_at_version(
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()
         .map_err(db_error)?;
     let mut expected = LibraryFormat::target().features;
+    if expected_version == 9 {
+        expected.insert("search_path".into(), 1);
+        // Earlier directory-only s9 files remain readable. New publications commit
+        // both Metadata capabilities together, and partial feature sets are refused.
+        if features.contains_key("vorbis_tags") || features.contains_key("vendor_metadata") {
+            expected.insert("vorbis_tags".into(), 1);
+            expected.insert("vendor_metadata".into(), 1);
+        }
+    }
     if allow_p0
         && features.get("metadata_storage") == Some(&1)
         && features.get("play_history_retired") == Some(&2)
@@ -242,6 +259,7 @@ pub(crate) fn create_current(conn: &mut Connection) -> Result<()> {
 
 pub(super) fn rebuild_search(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction().map_err(db_error)?;
+    crate::search_tracking::drop_owned(&tx)?;
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS audio_files_ai; DROP TRIGGER IF EXISTS audio_files_au;
         DROP TRIGGER IF EXISTS audio_files_ad; DROP TABLE IF EXISTS audio_search;",

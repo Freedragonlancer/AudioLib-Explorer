@@ -8,6 +8,8 @@ mod album_review;
 mod favorite_review;
 #[path = "search_task_lifecycle_review_tests.rs"]
 mod lifecycle_review;
+#[path = "search_task_scope_paging_tests.rs"]
+mod scope_paging;
 #[path = "search_task_ui_review_tests.rs"]
 mod ui_review;
 #[path = "search_task_waveform_review_tests.rs"]
@@ -147,6 +149,8 @@ fn fixture() -> Fixture {
             .compute_list_waveform(file.id, Arc::new(AtomicBool::new(false)))
             .unwrap();
     }
+    // Prepare the accepted-library state before exercising navigation controls.
+    provider.rebuild_directory_search().unwrap();
     let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1600.0, 900.0));

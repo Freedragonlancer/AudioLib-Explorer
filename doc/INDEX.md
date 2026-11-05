@@ -17,6 +17,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Album Artwork](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Artwork.md) | Local/server covers, custom images, hiding/restoring and thumbnail cache management |
 | [Shared Albums and Metadata Storage](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Shared_Albums.md) | Schema 8 ownership, namespaces, original Metadata TEXT and safe migration |
 | [Search Upgrade Recovery](Rust_Upgrade_Recovery.md) | Committed upgrade batches, crash recovery, startup progress, WAL and snapshot cleanup |
+| [Schema 9 server migration](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Schema9_Migration.md) | Resumable directory-only migration, shared CLI/HTTP reports and rollback |
 | [Remote Mode (client)](Rust_Remote_Mode.md) | Server data source: settings/secrets, snapshot sync, WebDAV URL mapping, read-only rules and playback cache |
 | [Server API](api/README.md) | `server/audiolib-server` HTTP contract and client behaviour |
 | [Spectral Peaks and Audition](Rust_Spectral_Audition.md) | Waveform colors, bounded analysis and playback transforms |
@@ -32,6 +33,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Changes in the current Windows portable release |
 | [0.8.7 release preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.8.7.md) | Beta scope, original validation evidence, unresolved gates and delivery plan |
+| [0.9.0 release and migration preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md) | Proposed next-version scope, client/server migration matrix, evidence identities and pending delivery gates |
 | [Automatic updates](Rust_Auto_Update.md) | Startup GitHub release checks, stable/beta channels, verified downloads and deployment |
 | [Linux and Docker delivery](Rust_Linux_Docker_Release.md) | Native Linux server archives, offline amd64/arm64 Docker images, Compose and platform acceptance |
 | [Review Fixes](Rust_Review_Fixes.md) | Reviewed defects, corrections and regression coverage |

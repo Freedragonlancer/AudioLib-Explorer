@@ -4,11 +4,11 @@
 
 [English](README.md)
 
-AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它把大型 WAV 音效库索引到 SQLite（FTS5）中，提供即时搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。
+AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。它将大型 WAV、FLAC、Ogg Vorbis/OGA 音效库索引到 SQLite（FTS5），支持路径、内嵌标签及厂商 Metadata 搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。本分支已将程序版本冻结为0.9.0，发布准备仍在进行，当前源码版本与已发布版本分别记录。
 
-- **源码开发版本：** 0.8.7（工作区 `Cargo.toml`）
+- **源码开发版本：** 0.9.0（工作区 `Cargo.toml`）
 - **HTTP API：** `/api/v1/`（客户端与服务端）
-- **数据库 schema：** 8（快照 schema 范围 3..=8；仅支持明确识别的完整格式）
+- **数据库 schema：** 普通本地 writer 为8；服务端显式迁移后为9，使用专用 writer；客户端只读校验快照3..=9。
 - **可写库格式：** `ale-s8-cld1-t3-m2-p1-a1`；受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。
 - **许可证：** [GPL-3.0-only](LICENSE)
 
@@ -22,9 +22,9 @@ AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编�
 | --- | --- | --- |
 | Windows x64 客户端 | `AudioLibExplorer-<tag>-win-x64-portable.zip` | 程序内自动更新 |
 | macOS arm64 客户端 | `AudioLibExplorer-<tag>-macos-arm64.zip` | 初期手动安装与更新 |
-| macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 管理页面自动更新 |
-| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 服务端管理页面更新，程序目录需可写；须显式指定配置，见下方启动说明 |
-| Linux x64 服务端 | `AudioLibServer-<tag>-linux-x64.tar.gz` | 管理页面自动更新 |
+| macOS arm64 服务端 | `AudioLibServer-<tag>-macos-arm64.tar.gz` | 0.9新布局首次手动引导，之后管理页面更新 |
+| Windows x64 服务端（0.8.5 起） | `AudioLibServer-<tag>-win-x64.zip` | 0.9新布局首次手动引导，之后服务端管理页更新；须显式指定配置 |
+| Linux x64 服务端 | `AudioLibServer-<tag>-linux-x64.tar.gz` | 0.9新布局首次手动引导，之后管理页面更新 |
 | Docker amd64 | `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` | 导入镜像并重建容器 |
 | Docker arm64 | `AudioLibServer-<tag>-docker-linux-arm64.tar.gz` | 导入镜像并重建容器 |
 
@@ -34,16 +34,17 @@ Windows 客户端解压后通过 `Start-AudioLibExplorer.cmd` 启动。Mac 客�
 
 ## 功能
 
-- 最多 30 个独立搜索任务页签（外观设置可调整上限，保留已有个人限制），分别保留目录、筛选和列表状态；溢出时可用箭头翻页，新增按钮始终可见。个人搜索任务收藏按库分类保存，重启恢复打开任务。详见[搜索任务](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Search_Tasks.md)。
-- 增量/完整文件夹扫描，提取专业 WAV Metadata（BWF `bext`、iXML、INFO、ID3、XMP，只读兼容 Soundminer SMED）。不会修改源 WAV 文件。
-- 基于 SQLite FTS5 的搜索，支持中文分词（jieba-rs）、标签/分类筛选；文档化目标为 100 万以上记录 P95 < 500 ms。
-- 流式解码播放、设备采样率重采样、波形与频谱视图、独立的音高/速率试听（SoundTouch），支持 WASAPI 与可选 ASIO 输出。
+- 最多30个独立搜索任务页签，保存各自目录、范围、筛选和列表状态，支持个人收藏与重启恢复。详见[搜索任务](doc/Rust_Search_Tasks.md)。
+- 增量/完整扫描 WAV、FLAC、OGG、OGA，提取专业 WAV Metadata（BWF `bext`、iXML、INFO、ID3、XMP、只读 Soundminer SMED）及 Vorbis comment，保留重复值、中文和未知字段。内嵌原文与用户标注分开保存。OpusTags 可提取，原生播放器不解码 Opus；链式 Ogg 至少提取首个逻辑流。
+- 四种搜索范围：主字段保留旧字段搜索，仅文件名严格限定名称，仅路径匹配目录/祖先，全部支持跨来源组合；支持中文分词、目录/专辑/收藏/Metadata筛选和排序。路径范围需先完成索引准备；本地准备保持 schema8。目标为 **P95 latency <500ms for 1M+ records**。
+- 本地和有管理权限的服务器模式支持厂商 CSV、XLS、XLSX：编码/表头/sheet预览、列映射与模板、路径/文件名匹配、歧义候选分页确认、幂等批次提交、取消/续导与回滚。厂商和内嵌文本都参与搜索，用户标注保留。
+- 流式解码播放、设备采样率重采样、Waveform 与频谱视图、独立的音高/速率试听（SoundTouch），支持 WASAPI 与可选 ASIO 输出。
 - 资料库管理：添加文件夹、修复被移动或改名的文件、批量标注、备份/恢复、完整性检查、JSONL/CSV 交换。
 - 命令行工具 `AudioLibCli`（JSON/表格/CSV 输出、库管理、控制正在运行的桌面实例播放）。
 - 服务器模式：`server/audiolib-server` 通过 `/api/v1/` 提供一个资料库（快照、Range 流式音频、预览、Waveform、令牌认证、仅局域网管理页）。客户端只读打开经过校验的快照；Metadata 和管理写入使用绑定库身份的 HTTP 请求。已测旧服务端 0.4.11 和 0.5.0 仍可读取。
 - 中英文双语界面。
 
-将服务端库迁移为当前格式前，先升级到支持该格式的客户端版本，再在维护窗口迁移服务端库。实际库修改必须携带有效现代兼容目录，明确支持服务端当前完整格式。旧播放路由继续返回空操作结果，但 HTTP 200 不保证旧客户端能反序列化响应。播放历史仅保存在各客户端本机。播放历史调整的背景见[历史 v6 契约](doc/api/Schema_V6_Iteration.md)。
+服务端迁移前先准备可读8/9的客户端、隔离副本和回滚备份。0.9服务端包加入离线 `audiolib-migrate`，超出旧更新器白名单，因此首次手动引导安装；保留旧程序、launcher、配置及数据，确认仍为8后再显式启动迁移。完成9后，新客户端取得9；默认过渡期为旧端提供 WAV-only 的真实8快照，旧端不得写9。配置关闭兼容快照后，旧客户端保留最后有效缓存。部署顺序、保留周期和回退边界见[发布与迁移方案](doc/Rust_Release_0.9.0.md)。播放历史仅保存在各客户端本机。
 
 ## 构建
 
@@ -61,7 +62,7 @@ Windows 客户端要求 MSVC 构建工具以及固定版本的 Rust 工具链（
 
 完成实际编译/测试后，可给本地检查或发布管线加 `-CleanBuildArtifacts`，超过默认 40 GiB 预算才清理 debug 缓存，预算由 `-BuildCacheLimitGiB` 调整。独立预览用 `pwsh tools/clean-build-artifacts.ps1`；release 产物、包、固定安装、SDK 和用户数据保留。详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
-Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.8.7 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。在已登录桌面的 Mac 上给打包命令加 `-ValidateRuntime`，一次完成结构与原生运行验收；仅延后运行验收、产物变化或换机复核时单独运行 `validate-macos-client.ps1`。仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.9.0 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。在已登录桌面的 Mac 上给打包命令加 `-ValidateRuntime`，一次完成结构与原生运行验收；仅延后运行验收、产物变化或换机复核时单独运行 `validate-macos-client.ps1`。仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
 
@@ -107,7 +108,7 @@ if (!(Test-Path -LiteralPath $serverConfig)) {
 }
 ```
 
-启动前编辑该配置：把 Unix 示例中的 `library_db` 和每个 `[[roots]].server_path` 换为已有的 Windows 资料库和真实音频目录。Windows 路径可使用 TOML 单引号字符串，例如 `library_db = 'C:\ProgramData\AudioLibServer\library.db'` 和 `server_path = 'D:\Sounds'`；升级时保留已有的配置路径与资料库。需要 FLAC 试听时，单独安装 ffmpeg，并设置绝对路径，例如 `ffmpeg_path = 'C:\Tools\ffmpeg\bin\ffmpeg.exe'`。默认值仍为 macOS Homebrew 的 `/opt/homebrew/bin/ffmpeg`；缺少 ffmpeg 时仅 FLAC 试听返回 503 `TRANSCODER_UNAVAILABLE`，PCM 试听和直接流不受影响。
+启动前编辑该配置：把 Unix 示例中的 `library_db` 和每个 `[[roots]].server_path` 换为已有的 Windows 资料库和真实音频目录。Windows 路径可使用 TOML 单引号字符串，例如 `library_db = 'C:\ProgramData\AudioLibServer\library.db'` 和 `server_path = 'D:\Sounds'`；升级时保留配置路径与资料库。新客户端内置 FLAC、Vorbis 和 Ogg-FLAC 直接解码。仅在需要服务端预览转码时另行安装 ffmpeg，并设置绝对路径，例如 `ffmpeg_path = 'C:\Tools\ffmpeg\bin\ffmpeg.exe'`；缺少 ffmpeg 时该预览端点返回503 `TRANSCODER_UNAVAILABLE`，直接流及客户端原生解码继续可用。
 
 保存配置后显式启动：
 
@@ -115,7 +116,7 @@ if (!(Test-Path -LiteralPath $serverConfig)) {
 .\audiolib-server.exe --config $serverConfig
 ```
 
-Windows 服务端通过自身管理页面更新，程序目录须可写；桌面客户端更新器不更新服务端。ZIP 不包含 Windows 服务注册，详见 [Windows 服务端发布](doc/Rust_Windows_Server_Release.md)。
+Windows 服务端0.9新布局首次采用手动引导安装，后续由自身管理页更新，程序目录须可写。ZIP 提供 server 与离线迁移工具；Windows 服务注册及数据目录按[Windows 服务端发布](doc/Rust_Windows_Server_Release.md)配置。
 
 Linux 示例：
 

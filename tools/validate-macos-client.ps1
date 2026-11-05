@@ -12,6 +12,7 @@ param(
     [switch]$TestBoundaries
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'dependency-licenses.ps1')
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Use PowerShell 7.3 or newer.' }
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -246,6 +247,8 @@ foreach ($mapping in $taskManifest.files) {
     if (!$taskAllowed.Add((Path-Key ('Contents/Resources/' + $mapping.destination)))) { throw 'Duplicate resource destination.' }
 }
 $taskNoticesPath = Join-Path $BundlePath 'Contents/Resources/licenses/dependencies.json'
+$null=$taskAllowed.Add((Path-Key 'Contents/Resources/licenses/inventory.json'))
+$null=Test-AudioLibLicenseBundle -PayloadRoot $BundlePath -Prefix 'Contents/Resources/licenses' -ExpectedRoots @('audiolib-desktop','audiolib-cli') -Target 'aarch64-apple-darwin' -NoDefaultFeatures -ExpectedArtifacts @() -SignedBundle
 $taskNotices = @([IO.File]::ReadAllText($taskNoticesPath) | ConvertFrom-Json)
 $noticeIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($notice in $taskNotices) {

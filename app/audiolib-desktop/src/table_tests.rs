@@ -450,6 +450,8 @@ fn child_table_controller_preferences() {
             |_| {},
         )
         .unwrap();
+    // Table interactions exercise a library whose path-index upgrade is complete.
+    provider.rebuild_directory_search().unwrap();
     let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
     let ui = AppWindow::new().unwrap();
     // This fixture exercises scrolling and preferences. On-demand Waveform

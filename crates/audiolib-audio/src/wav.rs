@@ -20,7 +20,7 @@ pub(crate) struct WavInfo {
     pub artwork: Option<Artwork>,
 }
 
-/// Read RIFF/RF64 headers and public embedded Metadata without decoding audio samples.
+/// Read WAV, FLAC or Ogg audio headers and bounded public embedded Metadata.
 pub fn probe(path: &Path) -> Result<AudioMetadata> {
     Ok(read_info_impl(path, true, false)?.metadata)
 }
@@ -76,6 +76,9 @@ fn read_info_reader(
 ) -> Result<WavInfo> {
     let mut header = [0_u8; 12];
     file.read_exact(&mut header)?;
+    if matches!(&header[..4], b"fLaC" | b"OggS") {
+        return crate::vorbis_metadata::read_info(file, file_len, include_metadata);
+    }
     if !matches!(&header[..4], b"RIFF" | b"RF64" | b"BW64") || &header[8..] != b"WAVE" {
         return Err(Error::Audio(
             "Expected little-endian RIFF/RF64/BW64 WAV".into(),

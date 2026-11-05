@@ -124,6 +124,98 @@ fn active_task_toolbar_favorite_and_background_close_do_not_select_a_task() {
 }
 
 #[test]
+fn new_task_control_follows_tabs_and_docks_when_resizing_both_themes() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for theme in audiolib_core::config::THEME_IDS {
+        for scale in [1.0, 2.0] {
+            let ui = AppWindow::new().unwrap();
+            crate::theme::apply_theme(&ui, theme);
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.window()
+                .set_size(slint::LogicalSize::new(2400.0 * scale, 900.0 * scale));
+            ui.set_search_tasks(tasks(1));
+            ui.on_search_task_selected(|_| panic!("Resizing and paging must not select a task"));
+            let created = Rc::new(RefCell::new(0));
+            let observed = created.clone();
+            ui.on_search_task_created(move || *observed.borrow_mut() += 1);
+            ui.show().unwrap();
+            settle();
+
+            let control = |label: &str| {
+                ElementHandle::find_by_accessible_label(&ui, label)
+                    .next()
+                    .unwrap_or_else(|| {
+                        panic!("Missing control: {label}, theme={theme}, scale={scale}")
+                    })
+            };
+            let follows_last_tab = |count| {
+                let last = control(&format!("Search task: Task {}", count - 1));
+                let plus = control("New search task");
+                let gap =
+                    plus.absolute_position().x - (last.absolute_position().x + last.size().width);
+                assert!(
+                    (-1.0..plus.size().width / 4.0).contains(&gap),
+                    "New must follow the last tab: gap={gap}, theme={theme}, scale={scale}"
+                );
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, "Scroll search tasks right")
+                        .next()
+                        .is_none()
+                );
+                plus.absolute_position().x
+            };
+
+            let first_x = follows_last_tab(1);
+            ui.set_search_tasks(tasks(3));
+            settle();
+            assert!(follows_last_tab(3) > first_x);
+            ui.set_search_tasks(tasks(1));
+            settle();
+            assert!((follows_last_tab(1) - first_x).abs() < 1.0);
+
+            // Keep the model unchanged while the window crosses the overflow threshold.
+            ui.set_search_tasks(tasks(4));
+            settle();
+            follows_last_tab(4);
+            if scale == 1.0 {
+                snapshot_if_requested(&ui, &format!("task-add-following-{theme}"));
+            }
+            ui.window()
+                .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
+            settle();
+            let plus = control("New search task");
+            let bar = control("Search tasks");
+            let right_gap = bar.absolute_position().x + bar.size().width
+                - (plus.absolute_position().x + plus.size().width);
+            assert!(
+                (-1.0..plus.size().width / 4.0).contains(&right_gap),
+                "Overflow must dock New at the bar's right edge: gap={right_gap}, theme={theme}, scale={scale}"
+            );
+            assert_eq!(plus.accessible_enabled(), Some(true));
+            let fixed_x = plus.absolute_position().x;
+            click(&ui, "Scroll search tasks right");
+            assert!((control("New search task").absolute_position().x - fixed_x).abs() < 1.0);
+            click(&ui, "New search task");
+            assert_eq!(*created.borrow(), 1);
+            if scale == 1.0 {
+                snapshot_if_requested(&ui, &format!("task-add-docked-{theme}"));
+            }
+
+            ui.window()
+                .set_size(slint::LogicalSize::new(2400.0 * scale, 900.0 * scale));
+            settle();
+            follows_last_tab(4);
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
 fn thirty_task_tabs_page_in_both_directions_with_a_fixed_new_task_control() {
     i_slint_backend_testing::init_no_event_loop();
     for modern in [false, true] {
@@ -131,6 +223,7 @@ fn thirty_task_tabs_page_in_both_directions_with_a_fixed_new_task_control() {
             let ui = AppWindow::new().unwrap();
             ui.global::<crate::Theme>().set_ui_scale(scale);
             ui.global::<crate::Theme>().set_modern_style(modern);
+            ui.global::<crate::Theme>().set_modern_player(modern);
             ui.window()
                 .set_size(slint::LogicalSize::new(1440.0 * scale, 900.0 * scale));
             ui.set_search_tasks(tasks(2));
@@ -527,6 +620,7 @@ fn thirty_task_tabs_and_saved_searches_render_at_all_supported_layout_extremes()
                 ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
                 ui.global::<crate::Theme>().set_ui_scale(scale);
                 ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_modern_player(modern);
                 ui.set_chinese(chinese);
                 ui.set_search_tasks(tasks(30));
                 ui.set_library_sidebar_page(1);

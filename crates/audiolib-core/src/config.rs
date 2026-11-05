@@ -414,6 +414,10 @@ pub struct AppConfig {
     /// [`AppConfig::ui_font_size`].
     #[serde(default = "default_font_size")]
     pub list_font_size: u32,
+    /// Search scope beside the query box: `all` (default), `main`, or `path`
+    /// (DESIGN-SEARCH-METADATA-V2 §2.5). Unknown values load as `all`.
+    #[serde(default = "default_search_scope")]
+    pub search_scope: String,
     /// Persistent table layout and sorting, applied to every search page.
     #[serde(default)]
     pub audio_table: AudioTablePreferences,
@@ -468,6 +472,8 @@ struct SavedPreferences {
     ui_font_size: u32,
     #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
     list_font_size: u32,
+    #[serde(default = "default_search_scope")]
+    search_scope: String,
     #[serde(default)]
     audio_table: AudioTablePreferences,
     #[serde(default)]
@@ -487,6 +493,18 @@ pub fn normalize_max_search_tasks(value: u32) -> u32 {
 
 fn default_max_search_tasks() -> u32 {
     DEFAULT_MAX_SEARCH_TASKS
+}
+
+fn default_search_scope() -> String {
+    "all".into()
+}
+
+/// Keep a supported search-scope preference; anything else becomes `all`.
+pub fn normalize_search_scope(value: &str) -> String {
+    match value.trim() {
+        "main" | "path" | "all" => value.trim().to_string(),
+        _ => "all".into(),
+    }
 }
 
 fn lenient_max_search_tasks<'de, D: serde::Deserializer<'de>>(
@@ -522,6 +540,17 @@ pub fn normalize_ui_scale_percent(percent: u32) -> u32 {
 pub const DEFAULT_THEME: &str = "default";
 /// Identifier of the opt-in Studio theme, with the redesigned audition controls.
 pub const STUDIO_THEME: &str = "studio";
+/// Identifier of the Studio workbench with the original default audition controls.
+pub const DEFAULT_V2_THEME: &str = "default-v2";
+
+/// Library workbench presentation selected independently of audition controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkbenchStyle {
+    /// Original beta navigation, search and library layout.
+    Classic,
+    /// Studio navigation, search and library layout.
+    Studio,
+}
 
 /// Audition presentation selected by a theme; playback state remains shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,23 +569,34 @@ pub struct BuiltinTheme {
     pub name: &'static str,
     /// Chinese name offered in Appearance settings.
     pub name_cn: &'static str,
+    /// Navigation, search and library layout belonging to this theme.
+    pub workbench_style: WorkbenchStyle,
     /// Audition controls and layout belonging to this theme.
     pub player_style: PlayerStyle,
 }
 
 /// Single registry of shipped themes, with the original default first.
-pub const BUILTIN_THEMES: [BuiltinTheme; 2] = [
+pub const BUILTIN_THEMES: [BuiltinTheme; 3] = [
     BuiltinTheme {
         id: DEFAULT_THEME,
         name: "Default",
         name_cn: "默认",
+        workbench_style: WorkbenchStyle::Classic,
         player_style: PlayerStyle::Classic,
     },
     BuiltinTheme {
         id: STUDIO_THEME,
         name: "Studio",
         name_cn: "工作室",
+        workbench_style: WorkbenchStyle::Studio,
         player_style: PlayerStyle::Studio,
+    },
+    BuiltinTheme {
+        id: DEFAULT_V2_THEME,
+        name: "Default v2",
+        name_cn: "默认 v2",
+        workbench_style: WorkbenchStyle::Studio,
+        player_style: PlayerStyle::Classic,
     },
 ];
 
@@ -722,6 +762,7 @@ impl AppConfig {
             theme: default_theme(),
             ui_font_size: DEFAULT_FONT_SIZE,
             list_font_size: DEFAULT_FONT_SIZE,
+            search_scope: default_search_scope(),
             audio_table: AudioTablePreferences::default(),
             window_layout: Default::default(),
             allowed_scan_roots: Vec::new(),
@@ -781,6 +822,7 @@ impl AppConfig {
             config.theme = normalize_theme(&saved.theme);
             config.ui_font_size = clamp_font_size(i64::from(saved.ui_font_size));
             config.list_font_size = clamp_font_size(i64::from(saved.list_font_size));
+            config.search_scope = normalize_search_scope(&saved.search_scope);
             config.audio_table = saved.audio_table.normalized();
             config.window_layout = saved.window_layout.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
@@ -837,6 +879,7 @@ impl AppConfig {
             theme: normalize_theme(&self.theme),
             ui_font_size: clamp_font_size(i64::from(self.ui_font_size)),
             list_font_size: clamp_font_size(i64::from(self.list_font_size)),
+            search_scope: normalize_search_scope(&self.search_scope),
             audio_table: self.audio_table.normalized(),
             window_layout: self.window_layout.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),
