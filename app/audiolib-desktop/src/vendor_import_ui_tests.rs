@@ -3,7 +3,10 @@
 use super::*;
 use audiolib_core::{self as core, vendor_import::*};
 use slint::Model;
-use std::sync::{Condvar, Mutex, mpsc};
+use std::{
+    collections::VecDeque,
+    sync::{Condvar, Mutex, mpsc},
+};
 
 const ASYNC_ROOT_ENV: &str = "AUDIOLIB_VENDOR_UI_ASYNC_ROOT";
 
@@ -128,6 +131,38 @@ fn preview() -> VendorImportPreview {
         }],
         ..Default::default()
     }
+}
+
+fn workbook_preview() -> VendorImportPreview {
+    let mut preview = preview();
+    preview.sheets = [
+        ("catalog.xls", "中文", 1, "文件名", "描述"),
+        ("catalog.xls", "English", 2, "Filename", "Description"),
+        (
+            "other.xls",
+            "English",
+            7,
+            "Other filename",
+            "Other description",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(file, sheet, header_row, filename, description)| VendorSheetPreview {
+            source_file: file.into(),
+            sheet: sheet.into(),
+            header_row,
+            headers: vec![filename.into(), description.into()],
+            mapping: VendorColumnMapping {
+                filename: Some(filename.into()),
+                fields: [("description".into(), description.into())].into(),
+                ..Default::default()
+            },
+            rows: 1,
+        },
+    )
+    .collect();
+    preview
 }
 
 fn controller(root: &std::path::Path) -> (AppWindow, Arc<Controller>, audiolib_audio::AudioEngine) {
@@ -279,6 +314,9 @@ struct ControlledProvider {
     cancel_wake: Condvar,
     row_calls: Mutex<Vec<u64>>,
     candidate_calls: Mutex<Vec<u64>>,
+    mapping_replies: Mutex<VecDeque<VendorImportPreview>>,
+    mapping_calls: Mutex<Vec<(String, VendorImportOptions)>>,
+    saved_templates: Mutex<Vec<VendorMappingTemplate>>,
 }
 
 impl ControlledProvider {
@@ -346,6 +384,43 @@ impl DataProvider for ControlledProvider {
             cancellable: true,
             ..Default::default()
         })
+    }
+    fn vendor_import_mapping(
+        &self,
+        id: &str,
+        options: &VendorImportOptions,
+    ) -> core::Result<VendorImportPreview> {
+        self.mapping_calls
+            .lock()
+            .unwrap()
+            .push((id.into(), options.clone()));
+        let mut preview = self
+            .mapping_replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| core::Error::Validation("No controlled mapping reply".into()))?;
+        if preview.import_id != id {
+            return Err(core::Error::Validation("Unexpected mapping import".into()));
+        }
+        preview.options = options.clone();
+        Ok(preview)
+    }
+    fn vendor_import_save_template(
+        &self,
+        template: &VendorMappingTemplate,
+    ) -> core::Result<VendorMappingTemplate> {
+        let mut templates = self.saved_templates.lock().unwrap();
+        let mut saved = template.clone();
+        saved.id = format!("owned-template-{}", templates.len());
+        templates.push(saved.clone());
+        Ok(saved)
+    }
+    fn vendor_import_templates(&self) -> core::Result<Vec<VendorMappingTemplate>> {
+        Ok(self.saved_templates.lock().unwrap().clone())
+    }
+    fn vendor_import_history(&self) -> core::Result<VendorImportHistory> {
+        Ok(VendorImportHistory::default())
     }
     fn vendor_import_commit(&self, id: &str, _: &str) -> core::Result<VendorImportResult> {
         self.wait_write_release();
@@ -430,6 +505,9 @@ fn controlled_operation(
         cancel_wake: Condvar::new(),
         row_calls: Mutex::new(Vec::new()),
         candidate_calls: Mutex::new(Vec::new()),
+        mapping_replies: Mutex::new(VecDeque::new()),
+        mapping_calls: Mutex::new(Vec::new()),
+        saved_templates: Mutex::new(Vec::new()),
     });
     c.search_v2_ux.lock().unwrap().vendor.provider_override = Some(provider.clone());
     c.publish_vendor_preview(ui, preview(), None);
@@ -453,6 +531,9 @@ fn paged_provider(c: &Arc<Controller>) -> Arc<ControlledProvider> {
         cancel_wake: Condvar::new(),
         row_calls: Mutex::new(Vec::new()),
         candidate_calls: Mutex::new(Vec::new()),
+        mapping_replies: Mutex::new(VecDeque::new()),
+        mapping_calls: Mutex::new(Vec::new()),
+        saved_templates: Mutex::new(Vec::new()),
     });
     c.search_v2_ux.lock().unwrap().vendor.provider_override = Some(provider.clone());
     provider
@@ -465,6 +546,142 @@ fn wait_vendor_job(c: &Arc<Controller>) {
         !c.search_v2_busy.load(Ordering::Acquire),
         "vendor page request completes"
     );
+}
+
+fn selected_sheet(c: &Arc<Controller>, ui: &AppWindow) -> VendorSheetPreview {
+    c.search_v2_ux
+        .lock()
+        .unwrap()
+        .vendor
+        .pending
+        .as_ref()
+        .unwrap()
+        .preview
+        .sheets[usize::try_from(ui.get_vi_sheet_index()).unwrap()]
+    .clone()
+}
+
+#[test]
+fn preview_selection_resets_for_new_import_missing_sheet_and_new_session() {
+    i_slint_backend_testing::init_no_event_loop();
+    let root = tempfile::tempdir().unwrap();
+    let (ui, c, _engine) = controller(root.path());
+    let initial = workbook_preview();
+    let english = initial.sheets[1].clone();
+    c.publish_vendor_preview(&ui, initial.clone(), None);
+    ui.set_vi_sheet_index(1);
+    ui.invoke_vi_sheet_selected();
+
+    // The same sheet label in another file is deliberately first after reorder.
+    // Keeping a numeric index or matching only the sheet name both choose wrong.
+    let mut reordered = initial.clone();
+    reordered.sheets.rotate_right(1);
+    c.publish_vendor_preview(&ui, reordered.clone(), None);
+    assert_eq!(ui.get_vi_sheet_index(), 2);
+    assert_eq!(selected_sheet(&c, &ui), english);
+
+    reordered
+        .sheets
+        .retain(|sheet| sheet.source_file != english.source_file || sheet.sheet != english.sheet);
+    c.publish_vendor_preview(&ui, reordered.clone(), None);
+    assert_eq!(ui.get_vi_sheet_index(), 0);
+    assert_eq!(selected_sheet(&c, &ui), reordered.sheets[0]);
+
+    let mut next = initial;
+    next.import_id = "next-library-batch".into();
+    c.publish_vendor_preview(&ui, next.clone(), None);
+    assert_eq!(ui.get_vi_sheet_index(), 0);
+    assert_eq!(selected_sheet(&c, &ui), next.sheets[0]);
+    ui.set_vi_sheet_index(1);
+    ui.invoke_vi_sheet_selected();
+    {
+        let mut state = c.search_v2_ux.lock().unwrap();
+        state.vendor = state.vendor.next_session();
+    }
+    c.publish_vendor_preview(&ui, next.clone(), None);
+    assert_eq!(ui.get_vi_sheet_index(), 0);
+    assert_eq!(selected_sheet(&c, &ui), next.sheets[0]);
+
+    next.sheets.clear();
+    c.publish_vendor_preview(&ui, next, None);
+    assert_eq!(ui.get_vi_sheet_index(), 0);
+    assert_eq!(ui.get_vi_headers().row_count(), 0);
+    assert_eq!(ui.get_vi_mapping_rows().row_count(), 0);
+    c.shutdown();
+}
+
+#[test]
+fn repreview_preserves_sheet_identity_and_template_source() {
+    isolated_async("child_repreview_preserves_sheet_identity_and_template_source");
+}
+
+#[test]
+#[ignore = "isolated real event-loop mapping and template-source regression"]
+fn child_repreview_preserves_sheet_identity_and_template_source() {
+    let (ui, c, _engine) = async_controller();
+    let provider = paged_provider(&c);
+    let mut initial = workbook_preview();
+    initial.options.encoding = Some("UTF-8".into());
+    initial.options.delimiter = Some("\t".into());
+    let english = initial.sheets[1].clone();
+    let mut row_one = initial.clone();
+    row_one.sheets.rotate_right(1);
+    row_one.sheets[2].header_row = 1;
+    *provider.mapping_replies.lock().unwrap() = [row_one, initial.clone()].into();
+    c.publish_vendor_preview(&ui, initial.clone(), None);
+    ui.set_vi_sheet_index(1);
+    ui.invoke_vi_sheet_selected();
+
+    for row in [1_u64, 2] {
+        ui.set_vi_header_row(row.to_string().into());
+        ui.invoke_vi_options_changed();
+        assert!(ui.get_vi_mapping_dirty());
+        ui.invoke_vi_apply_mapping();
+        wait_vendor_job(&c);
+        let selected = selected_sheet(&c, &ui);
+        assert_eq!(selected.source_file, english.source_file);
+        assert_eq!(selected.sheet, english.sheet);
+        assert_eq!(selected.header_row, row);
+        assert_eq!(ui.get_vi_header_row().parse::<u64>().unwrap(), row);
+        assert_eq!(selected.mapping, english.mapping);
+    }
+    {
+        let calls = provider.mapping_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        for (call, (id, options)) in calls.iter().enumerate() {
+            assert_eq!(id, &initial.import_id);
+            assert_eq!(options.sheet_mappings.len(), initial.sheets.len());
+            for sheet in &initial.sheets {
+                let mapping = options
+                    .sheet_mappings
+                    .iter()
+                    .find(|mapping| {
+                        mapping.source_file == sheet.source_file && mapping.sheet == sheet.sheet
+                    })
+                    .unwrap();
+                let expected_row =
+                    if sheet.source_file == english.source_file && sheet.sheet == english.sheet {
+                        [1, 2][call]
+                    } else {
+                        sheet.header_row
+                    };
+                assert_eq!(mapping.header_row, Some(expected_row));
+                assert_eq!(mapping.mapping, sheet.mapping);
+            }
+        }
+    }
+    ui.set_vi_template_name("Owned English mapping".into());
+    ui.invoke_vi_save_template();
+    wait_vendor_job(&c);
+    let saved = provider.saved_templates.lock().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].mapping, english.mapping);
+    assert_ne!(saved[0].mapping, initial.sheets[0].mapping);
+    assert_ne!(saved[0].mapping, initial.sheets[2].mapping);
+    assert_eq!(saved[0].encoding, initial.options.encoding);
+    assert_eq!(saved[0].delimiter, initial.options.delimiter);
+    drop(saved);
+    c.shutdown();
 }
 
 #[test]

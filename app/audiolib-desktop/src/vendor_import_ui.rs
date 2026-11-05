@@ -568,6 +568,31 @@ impl Controller {
         preview: VendorImportPreview,
         status: Option<&VendorImportStatus>,
     ) {
+        // Resolve the old file/sheet identity before changing any UI models.
+        // Re-parsing this import can reorder sheets; a different import/session
+        // must start from its own first sheet instead of inheriting an old index.
+        let selected_sheet = {
+            let state = self.search_v2_ux.lock().unwrap();
+            state
+                .vendor
+                .pending
+                .as_ref()
+                .filter(|pending| {
+                    !preview.import_id.is_empty() && pending.preview.import_id == preview.import_id
+                })
+                .and_then(|pending| {
+                    usize::try_from(ui.get_vi_sheet_index())
+                        .ok()
+                        .and_then(|index| pending.preview.sheets.get(index))
+                })
+                .and_then(|selected| {
+                    preview.sheets.iter().position(|sheet| {
+                        sheet.source_file == selected.source_file && sheet.sheet == selected.sheet
+                    })
+                })
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0)
+        };
         let chinese = self.chinese.load(Ordering::Acquire);
         ui.set_vi_candidates_visible(false);
         set_options(ui, &preview.options);
@@ -610,7 +635,7 @@ impl Controller {
                 sheet.source_file, sheet.sheet, sheet.rows
             )
         })));
-        ui.set_vi_sheet_index(0);
+        ui.set_vi_sheet_index(selected_sheet);
         ui.set_vi_has_preview(true);
         ui.set_vi_page(0);
         let phase = status

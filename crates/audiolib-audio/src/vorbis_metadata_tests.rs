@@ -96,6 +96,96 @@ fn real_compressed_sources_decode_and_seek_without_using_wav_block_layout() {
 }
 
 #[test]
+fn compressed_preroll_seek_matches_sequential_pcm_and_eof() {
+    for name in ["comments.ogg", "comments.flac", "comments.oga"] {
+        let path = fixture(name);
+        let mut sequential = Decoder::open(&path).unwrap();
+        let expected = sequential.read(4096).unwrap();
+        assert_eq!(expected.len(), 640, "{name}");
+        assert!(expected.iter().any(|sample| sample.abs() > 0.001));
+        assert!(sequential.read(1).unwrap().is_empty());
+        let mut decoder = Decoder::open(&path).unwrap();
+        for (index, start) in [0_usize, 1, 64, 255, 256, 320, 639, 640, 0]
+            .into_iter()
+            .enumerate()
+        {
+            // Ogg must support repeated seeks/EOF on this reader. Native FLAC
+            // and OGA follow the production fresh-decoder-per-seek pattern.
+            if index > 0 && name != "comments.ogg" {
+                decoder = Decoder::open(&path).unwrap();
+            }
+            decoder
+                .seek(start as u64)
+                .unwrap_or_else(|error| panic!("{name} seek {start}: {error}"));
+            assert_eq!(
+                decoder
+                    .read(4096)
+                    .unwrap_or_else(|error| panic!("{name} read after seek {start}: {error}")),
+                expected[start..],
+                "{name} seek {start}"
+            );
+            assert!(
+                decoder.read(1).unwrap().is_empty(),
+                "{name} seek {start} EOF"
+            );
+        }
+        decoder.seek(u64::MAX).unwrap();
+        assert!(decoder.read(1).unwrap().is_empty(), "{name} clamped EOF");
+    }
+}
+
+#[test]
+fn compressed_preroll_resampling_and_audition_keep_complete_pcm() {
+    use crate::decoder::ResampledDecoder;
+    for name in ["comments.flac", "comments.oga", "comments.ogg"] {
+        let path = fixture(name);
+        let expected = Decoder::open(&path).unwrap().read(4096).unwrap();
+        for start in [0_usize, 64, 320, 640] {
+            let mut decoder =
+                ResampledDecoder::new(Decoder::open(&path).unwrap(), 8000, start as u64).unwrap();
+            let mut samples = Vec::new();
+            while !decoder.is_finished() {
+                samples.extend(decoder.next().unwrap());
+            }
+            assert_eq!(samples, expected[start..], "{name} converted seek {start}");
+            assert!(decoder.next().unwrap().is_empty());
+        }
+        let mut converted = ResampledDecoder::new(Decoder::open(&path).unwrap(), 16000, 0).unwrap();
+        let mut samples = Vec::new();
+        while !converted.is_finished() {
+            samples.extend(converted.next().unwrap());
+        }
+        assert_eq!(samples.len(), 1280, "{name} resampled complete tail");
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        assert!(samples.iter().any(|sample| sample.abs() > 0.001));
+        #[cfg(feature = "playback")]
+        {
+            let mut audition = crate::audition::AuditionDecoder::new(
+                Decoder::open(&path).unwrap(),
+                8000,
+                0,
+                0,
+                crate::AuditionSettings::default(),
+            )
+            .unwrap();
+            let mut stereo = Vec::new();
+            while !audition.is_finished() {
+                stereo.extend(audition.next().unwrap());
+            }
+            let expected_stereo: Vec<_> = expected
+                .iter()
+                .flat_map(|sample| [*sample, *sample])
+                .collect();
+            assert_eq!(
+                stereo, expected_stereo,
+                "{name} audition starts at valid frame zero"
+            );
+            assert!(audition.next().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
 fn compressed_virtual_sources_probe_decode_and_seek_with_opaque_or_wav_cache_names() {
     let owned = tempfile::tempdir().unwrap();
     for name in ["comments.flac", "comments.ogg", "comments.oga"] {

@@ -71,6 +71,9 @@ enum Source {
         reader: Box<dyn FormatReader>,
         decoder: Box<dyn AudioDecoder>,
         track: u32,
+        /// Bounded encoder delay gives a reset decoder enough pre-roll before
+        /// the requested presentation frame, including seeks near frame zero.
+        seek_preroll: u64,
         pending: Vec<f32>,
         offset: usize,
     },
@@ -212,6 +215,7 @@ impl Decoder {
             } else {
                 Source::Symphonia {
                     track: track.id,
+                    seek_preroll: u64::from(track.delay.unwrap_or_default()),
                     reader,
                     decoder,
                     pending: Vec::new(),
@@ -245,6 +249,13 @@ impl Decoder {
 
     pub fn seek(&mut self, frame: u64) -> Result<()> {
         let frame = frame.min(self.info.metadata.frames);
+        // The presentation EOF is valid even when a format's timestamp seek
+        // excludes that boundary. A later seek still resets source/pending state.
+        if frame == self.info.metadata.frames {
+            self.frame = frame;
+            return Ok(());
+        }
+        let channels = usize::from(self.info.metadata.channels);
         let actual_frame = match &mut self.source {
             Source::Pcm(file) => {
                 file.seek(SeekFrom::Start(
@@ -256,14 +267,16 @@ impl Decoder {
                 reader,
                 decoder,
                 track,
+                seek_preroll,
                 pending,
                 offset,
             } => {
-                let seeked = reader
+                reader
                     .seek(
                         SeekMode::Accurate,
                         SeekTo::Timestamp {
-                            ts: Timestamp::try_from(frame).map_err(audio_error)?,
+                            ts: Timestamp::try_from(frame.saturating_sub(*seek_preroll))
+                                .map_err(audio_error)?,
                             track_id: *track,
                         },
                     )
@@ -271,7 +284,46 @@ impl Decoder {
                 decoder.reset();
                 pending.clear();
                 *offset = 0;
-                u64::try_from(seeked.actual_ts.get()).map_err(audio_error)?
+                // The returned seek anchor is a container packet timestamp,
+                // not the first PCM frame: Vorbis can return a negative primer,
+                // and the first packet after reset decodes to no samples.
+                // Gapless decoding has already removed packet.trim_start/end.
+                // Derive the retained PCM's position from its own PTS + start
+                // trim, physically discard any PCM before presentation zero,
+                // then use the ordinary bounded read loop to reach `frame`.
+                loop {
+                    let packet = reader.next_packet().map_err(audio_error)?.ok_or_else(|| {
+                        Error::Audio("Unexpected end of audio during seek".into())
+                    })?;
+                    if packet.track_id != *track {
+                        continue;
+                    }
+                    let audio = decoder.decode(&packet).map_err(audio_error)?;
+                    if audio.samples_interleaved() == 0 {
+                        continue;
+                    }
+                    pending.resize(audio.samples_interleaved(), 0.0);
+                    audio.copy_to_slice_interleaved(&mut *pending);
+                    let timestamp = packet
+                        .pts
+                        .checked_add(packet.trim_start)
+                        .ok_or_else(|| Error::Audio("Decoded PCM timestamp overflow".into()))?
+                        .get();
+                    if timestamp < 0 {
+                        let decoded_frames = pending.len() / channels;
+                        // The min proves this conversion and channel product
+                        // fit the actual retained sample buffer on every host.
+                        let skip = timestamp.unsigned_abs().min(decoded_frames as u64) as usize;
+                        *offset = skip * channels;
+                        if *offset == pending.len() {
+                            pending.clear();
+                            *offset = 0;
+                            continue;
+                        }
+                        break 0;
+                    }
+                    break u64::try_from(timestamp).map_err(audio_error)?;
+                }
             }
             Source::Blocks {
                 file,
@@ -300,7 +352,6 @@ impl Decoder {
             ));
         }
         self.frame = actual_frame;
-        let channels = usize::from(self.info.metadata.channels);
         while self.frame < frame {
             let discard = (frame - self.frame).min(2048) as usize;
             if self.read(discard)?.len() < channels {
@@ -358,6 +409,7 @@ impl Decoder {
                 track,
                 pending,
                 offset,
+                ..
             } => {
                 while output.len() < frames * channels {
                     if *offset < pending.len() {
