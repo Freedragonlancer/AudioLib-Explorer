@@ -5858,7 +5858,7 @@ impl Controller {
         } else {
             "Incremental scan"
         };
-        let message = if chinese {
+        let mut message = if chinese {
             format!(
                 "{state} · 已检查 {} 个音效 · 新增 {} · 更新 {} · 未变化 {} · 问题 {}",
                 progress.processed,
@@ -5877,6 +5877,14 @@ impl Controller {
                 progress.errors
             )
         };
+        let vendor = audiolib_core::vendor_import::automatic_scan_summary(
+            &progress.vendor_metadata,
+            chinese,
+        );
+        if !vendor.is_empty() {
+            message.push_str(" · ");
+            message.push_str(&vendor);
+        }
         ui.set_scan_summary(message.clone().into());
         ui.set_status(format!("{message} · {}", progress.current_path).into());
     }
@@ -7399,6 +7407,12 @@ fn scan_result_summary(
             progress.errors
         )
     };
+    let vendor =
+        audiolib_core::vendor_import::automatic_scan_summary(&progress.vendor_metadata, chinese);
+    if !vendor.is_empty() {
+        summary.push_str(" · ");
+        summary.push_str(&vendor);
+    }
     if full && (progress.errors > 0 || progress.state != audiolib_core::ScanState::Completed) {
         summary.push_str(if chinese {
             " · 本次未标记缺失文件"

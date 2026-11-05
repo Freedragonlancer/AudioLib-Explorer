@@ -242,7 +242,7 @@ pub(crate) fn drop_legacy_snapshot_storage(conn: &Connection) -> Result<()> {
     .map_err(db_error)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
     import_id: String,
     field: String,
@@ -408,7 +408,78 @@ fn language_rank(declared: &str, text: &str, preferred: &[String]) -> usize {
 
 /// Recompute the materialized table and metadata mirror from active immutable events.
 /// Distinct source batches can own the same value without duplicating searchable text.
+/// Automatic jobs are source-owned refreshes, not immutable manual previews.
+pub(super) fn automatic_job(conn: &Connection, id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT CASE WHEN json_valid(preview_json) THEN json_extract(preview_json,'$._automatic.kind')='sidecar-v1' ELSE 0 END FROM audiolib_vendor_jobs WHERE import_id=?1",
+        [id],
+        |row| row.get::<_, Option<bool>>(0),
+    )
+    .optional()
+    .map(|value| value.flatten().unwrap_or(false))
+    .map_err(db_error)
+}
+
+fn automatic_key(value: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    crate::schema::fold_case(&value.nfc().collect::<String>())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn field_values(field: &str, value: &str) -> Vec<String> {
+    if field == "keywords" {
+        value
+            .split([',', ';', '|', '\r', '\n', '，', '；', '、'])
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        vec![value.trim().to_owned()]
+    }
+}
+
+fn known_automatic_values(field: &str, bwf: &str, metadata: &Value) -> BTreeSet<String> {
+    let mut values = BTreeSet::new();
+    let mut add = |value: &Value| {
+        let texts = match value {
+            Value::String(text) => vec![text.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        for text in texts {
+            for text in field_values(field, text) {
+                values.insert(automatic_key(&text));
+            }
+        }
+    };
+    add(&metadata["wav_metadata"]["fields"][field]);
+    for group in ["riff_info", "ixml", "axml", "xmp", "id3", "smed", "vorbis"] {
+        if let Some(fields) = metadata["wav_metadata"][group].as_object() {
+            for (key, value) in fields {
+                if super::parser::canonical(key) == Some(field) {
+                    add(value);
+                }
+            }
+        }
+    }
+    if field == "description" && !bwf.trim().is_empty() {
+        values.insert(automatic_key(bwf));
+    }
+    values
+}
+
 pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
+    let (original, bwf): (String, String) = conn
+        .query_row(
+            "SELECT metadata_json,coalesce(bwf_description,'') FROM audio_files WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(db_error)?;
+    let mut metadata: Value = serde_json::from_str(&original).map_err(invalid)?;
     let baseline: (String, String) = conn
         .prepare_cached(
             "SELECT rows_json,vendor_json FROM audiolib_vendor_baseline WHERE audio_file_id=?1",
@@ -418,7 +489,7 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         .map_err(db_error)?;
     let originals: Vec<Entry> = serde_json::from_str(&baseline.0).map_err(invalid)?;
     let baseline_vendor = serde_json::from_str::<Value>(&baseline.1).map_err(invalid)?;
-    let preferred:Option<String>=conn.prepare_cached("SELECT j.options_json FROM audiolib_vendor_jobs j WHERE EXISTS(SELECT 1 FROM audiolib_vendor_events e WHERE e.import_id=j.import_id AND e.audio_file_id=?1) ORDER BY j.job_order DESC LIMIT 1").map_err(db_error)?.query_row([id],|r|r.get(0)).optional().map_err(db_error)?;
+    let preferred:Option<String>=conn.prepare_cached("SELECT j.options_json FROM audiolib_vendor_jobs j WHERE EXISTS(SELECT 1 FROM audiolib_vendor_events e WHERE e.import_id=j.import_id AND e.audio_file_id=?1) AND (CASE WHEN json_valid(j.preview_json) THEN json_extract(j.preview_json,'$._automatic.kind') IS NOT 'sidecar-v1' ELSE 1 END) ORDER BY j.job_order DESC LIMIT 1").map_err(db_error)?.query_row([id],|r|r.get(0)).optional().map_err(db_error)?;
     let preferred = preferred
         .as_deref()
         .map(serde_json::from_str::<audiolib_core::vendor_import::VendorImportOptions>)
@@ -427,9 +498,9 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         .map(|o| o.preferred_languages)
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| vec!["zh".into(), "en".into()]);
-    let mut active = BTreeMap::<(String, String), Entry>::new();
+    let mut active = BTreeMap::<(String, String), (Entry, bool)>::new();
     for entry in originals {
-        active.insert((entry.field.clone(), entry.value.clone()), entry);
+        active.insert((entry.field.clone(), entry.value.clone()), (entry, false));
     }
     // Older compatibility copies intentionally retain this unknown mirror while
     // stripping formal tables. Treat its text as a baseline source, never discard it.
@@ -443,19 +514,24 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
             for value in values.into_iter().filter(|s| !s.trim().is_empty()) {
                 active
                     .entry((field.clone(), value.into()))
-                    .or_insert_with(|| Entry {
-                        import_id: "legacy-mirror".into(),
-                        field: field.clone(),
-                        value: value.into(),
-                        source_file: "legacy-mirror".into(),
-                        sheet: String::new(),
-                        row: 0,
-                        language: String::new(),
+                    .or_insert_with(|| {
+                        (
+                            Entry {
+                                import_id: "legacy-mirror".into(),
+                                field: field.clone(),
+                                value: value.into(),
+                                source_file: "legacy-mirror".into(),
+                                sheet: String::new(),
+                                row: 0,
+                                language: String::new(),
+                            },
+                            false,
+                        )
                     });
             }
         }
     }
-    let mut query = conn.prepare_cached("SELECT e.import_id,e.field,e.value,e.source_file,e.sheet,e.row,e.overwrite,e.language FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 ORDER BY j.job_order,e.field,e.value").map_err(db_error)?;
+    let mut query = conn.prepare_cached("SELECT e.import_id,e.field,e.value,e.source_file,e.sheet,e.row,e.overwrite,e.language,CASE WHEN json_valid(j.preview_json) THEN json_extract(j.preview_json,'$._automatic.kind')='sidecar-v1' ELSE 0 END,j.job_order FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 ORDER BY j.job_order,e.field,e.value").map_err(db_error)?;
     let events = query
         .query_map([id], |r| {
             Ok((
@@ -469,13 +545,17 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
                     language: r.get(7)?,
                 },
                 r.get::<_, bool>(6)?,
+                r.get::<_, Option<bool>>(8)?.unwrap_or(false),
+                r.get::<_, i64>(9)?,
             ))
         })
         .map_err(db_error)?;
     let mut overwritten = BTreeSet::new();
+    let mut source_order = BTreeMap::new();
     let mut has_events = false;
     for event in events {
-        let (entry, overwrite) = event.map_err(db_error)?;
+        let (entry, overwrite, automatic, order) = event.map_err(db_error)?;
+        source_order.insert(entry.import_id.clone(), order);
         has_events = true;
         if overwrite && overwritten.insert((entry.import_id.clone(), entry.field.clone())) {
             active.retain(|(field, _), _| field != &entry.field);
@@ -483,26 +563,97 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         let key = (entry.field.clone(), entry.value.clone());
         match active.entry(key) {
             std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(entry);
+                slot.insert((entry, automatic));
             }
             std::collections::btree_map::Entry::Occupied(mut slot) => {
-                if language_rank(&entry.language, &entry.value, &preferred)
-                    < language_rank(&slot.get().language, &slot.get().value, &preferred)
+                let (current, current_automatic) = slot.get();
+                if (*current_automatic && !automatic)
+                    || (*current_automatic == automatic
+                        && language_rank(&entry.language, &entry.value, &preferred)
+                            < language_rank(&current.language, &current.value, &preferred))
                 {
-                    slot.insert(entry);
+                    slot.insert((entry, automatic));
                 }
             }
         }
     }
-    conn.prepare_cached("DELETE FROM vendor_metadata WHERE audio_file_id=?1")
-        .map_err(db_error)?
-        .execute([id])
-        .map_err(db_error)?;
-    let mut fields = BTreeMap::<String, Vec<String>>::new();
-    for entry in active.values() {
-        if has_events || entry.import_id != "legacy-mirror" {
+    // Raw events remain immutable provenance. Only the automatic projection is
+    // supplementary: current embedded/manual values suppress duplicates. User
+    // tags remain independent; removing one must not remove source Metadata.
+    let mut known = BTreeMap::<String, BTreeSet<String>>::new();
+    for (entry, automatic) in active.values() {
+        let values = known
+            .entry(entry.field.clone())
+            .or_insert_with(|| known_automatic_values(&entry.field, &bwf, &metadata));
+        if !automatic {
+            for value in field_values(&entry.field, &entry.value) {
+                values.insert(automatic_key(&value));
+            }
+        }
+    }
+    let mut projected = BTreeMap::new();
+    // Prefer the earliest active automatic source's original spelling. Adding a
+    // canonically equal later table must not churn an existing projection.
+    let mut ordered = active.into_values().collect::<Vec<_>>();
+    ordered.sort_by(|(left, left_auto), (right, right_auto)| {
+        (
+            left_auto,
+            source_order.get(&left.import_id),
+            &left.field,
+            &left.value,
+        )
+            .cmp(&(
+                right_auto,
+                source_order.get(&right.import_id),
+                &right.field,
+                &right.value,
+            ))
+    });
+    for (mut entry, automatic) in ordered {
+        if automatic {
+            let mut seen = BTreeSet::new();
+            let values = field_values(&entry.field, &entry.value)
+                .into_iter()
+                .filter(|value| {
+                    let key = automatic_key(value);
+                    !key.is_empty()
+                        && !known
+                            .get(&entry.field)
+                            .is_some_and(|values| values.contains(&key))
+                        && seen.insert(key)
+                })
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                continue;
+            }
+            known.entry(entry.field.clone()).or_default().extend(seen);
+            entry.value = if entry.field == "keywords" {
+                values.join(", ")
+            } else {
+                values[0].clone()
+            };
+        }
+        projected
+            .entry((entry.field.clone(), entry.value.clone()))
+            .or_insert(entry);
+    }
+    let active = projected;
+    let desired: Vec<_> = active
+        .values()
+        .filter(|entry| has_events || entry.import_id != "legacy-mirror")
+        .cloned()
+        .collect();
+    if rows(conn, id)? != desired {
+        conn.prepare_cached("DELETE FROM vendor_metadata WHERE audio_file_id=?1")
+            .map_err(db_error)?
+            .execute([id])
+            .map_err(db_error)?;
+        for entry in &desired {
             conn.prepare_cached("INSERT INTO vendor_metadata(audio_file_id,import_id,field,value,source_file,sheet,row,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)").map_err(db_error)?.execute(params![id,entry.import_id,entry.field,entry.value,entry.source_file,entry.sheet,super::sql_u64(entry.row)?,entry.language]).map_err(db_error)?;
         }
+    }
+    let mut fields = BTreeMap::<String, Vec<String>>::new();
+    for entry in active.values() {
         fields
             .entry(entry.field.clone())
             .or_default()
@@ -538,7 +689,7 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         });
         values.dedup();
     }
-    let mirror = if !has_events {
+    let mirror = if !has_events || fields.is_empty() {
         baseline_vendor
     } else {
         let mut object = baseline_vendor.as_object().cloned().unwrap_or_default();
@@ -548,12 +699,6 @@ pub(super) fn project(conn: &Connection, id: i64) -> Result<()> {
         );
         Value::Object(object)
     };
-    let original: String = conn
-        .prepare_cached("SELECT metadata_json FROM audio_files WHERE id=?1")
-        .map_err(db_error)?
-        .query_row([id], |r| r.get(0))
-        .map_err(db_error)?;
-    let mut metadata: Value = serde_json::from_str(&original).map_err(invalid)?;
     let object = metadata
         .as_object_mut()
         .ok_or_else(|| invalid("Audio Metadata is not a JSON object"))?;

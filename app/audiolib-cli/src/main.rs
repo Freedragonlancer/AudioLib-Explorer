@@ -735,12 +735,17 @@ fn operation(args: &Arguments) -> anyhow::Result<Value> {
             json!(service.scan(path, &options, &cancellation, |progress| {
                 if last_update.elapsed().as_millis() > 500 {
                     eprintln!(
-                        "scan: discovered={} processed={} added={} updated={} errors={}",
+                        "scan: discovered={} processed={} added={} updated={} errors={} vendor_tables={} vendor_matched={} vendor_updated={} vendor_unmatched={} vendor_ambiguous={}",
                         progress.discovered,
                         progress.processed,
                         progress.added,
                         progress.updated,
-                        progress.errors
+                        progress.errors,
+                        progress.vendor_metadata.tables,
+                        progress.vendor_metadata.matched,
+                        progress.vendor_metadata.updated,
+                        progress.vendor_metadata.unmatched,
+                        progress.vendor_metadata.ambiguous
                     );
                     last_update = Instant::now();
                 }

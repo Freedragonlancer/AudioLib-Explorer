@@ -16,6 +16,57 @@ use std::io::BufRead;
 use std::io::Read;
 use std::path::Path;
 
+/// Automatic table Metadata collected during a WAV scan. Counts are separate from
+/// audio-header probing: a changed table can update an otherwise unchanged WAV.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VendorScanSummary {
+    /// Eligible CSV/TSV/XLS/XLSX files examined within the scanned directory tree.
+    pub tables: u64,
+    /// Data rows examined across the tables' sheets.
+    pub rows: u64,
+    /// Rows associated with exactly one same-directory WAV.
+    pub matched: u64,
+    /// Audio projections changed, counted once per (table, audio record).
+    /// Different tables contributing to the same WAV are separate operations.
+    pub updated: u64,
+    /// Unchanged audio projections, counted once per (table, audio record).
+    pub unchanged: u64,
+    /// Rows with multiple same-directory candidates; no automatic write occurs.
+    pub ambiguous: u64,
+    /// Rows without a safe same-directory WAV match.
+    pub unmatched: u64,
+}
+
+/// Compact live/final scan status shared by local and server-mode desktop views.
+/// No table text or source paths are included in this presentation summary.
+pub fn automatic_scan_summary(summary: &VendorScanSummary, chinese: bool) -> String {
+    if summary.tables == 0 {
+        return String::new();
+    }
+    if chinese {
+        format!(
+            "表格 {} · 匹配 {} 行 · Metadata 更新 {} · 未变化 {} · 未匹配 {} · 歧义 {}",
+            summary.tables,
+            summary.matched,
+            summary.updated,
+            summary.unchanged,
+            summary.unmatched,
+            summary.ambiguous
+        )
+    } else {
+        format!(
+            "{} tables · {} matched rows · {} Metadata updated · {} unchanged · {} unmatched · {} ambiguous",
+            summary.tables,
+            summary.matched,
+            summary.updated,
+            summary.unchanged,
+            summary.unmatched,
+            summary.ambiguous
+        )
+    }
+}
+
 /// Limits used for one import: the server's `/capabilities.vendor_import`, falling back to
 /// the design defaults for fields an older server omits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -477,6 +528,43 @@ pub fn unavailable_text(remote: bool, chinese: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_replies_preserve_automatic_counts_and_accept_older_servers() {
+        let old: crate::ScanProgress = serde_json::from_str(
+            r#"{"session_id":7,"state":"completed","processed":3,"updated":0}"#,
+        )
+        .unwrap();
+        assert_eq!(old.vendor_metadata, VendorScanSummary::default());
+        let summary = VendorScanSummary {
+            tables: 2,
+            rows: 9,
+            matched: 5,
+            updated: 3,
+            unchanged: 1,
+            ambiguous: 1,
+            unmatched: 3,
+        };
+        let encoded = serde_json::to_value(crate::ScanProgress {
+            vendor_metadata: summary,
+            ..old
+        })
+        .unwrap();
+        let decoded: crate::ScanProgress = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.vendor_metadata, summary);
+        assert_eq!(decoded.processed, 3);
+        assert_eq!(
+            decoded.updated, 0,
+            "Table writes are separate from WAV probing"
+        );
+        let future: crate::ScanProgress = serde_json::from_value(serde_json::json!({
+            "vendor_metadata": {"tables": 1, "future_count": 99},
+            "future_scan_option": true
+        }))
+        .unwrap();
+        assert_eq!(future.vendor_metadata.tables, 1);
+        assert_eq!(future.vendor_metadata.updated, 0);
+    }
 
     fn limits(rows: u64, line: u64) -> VendorLimits {
         VendorLimits {

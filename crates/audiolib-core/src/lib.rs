@@ -611,6 +611,10 @@ pub struct ScanProgress {
     pub added: u64,
     pub updated: u64,
     pub unchanged: u64,
+    /// Same-directory vendor tables are scanned after audio headers, including
+    /// incremental scans where only the table has changed. Older servers omit it.
+    #[serde(default)]
+    pub vendor_metadata: vendor_import::VendorScanSummary,
     #[serde(default)]
     pub removed: u64,
     pub errors: u64,

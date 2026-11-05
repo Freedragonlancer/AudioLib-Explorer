@@ -31,13 +31,50 @@ The ordinary source-extension set is `.wav`, `.flac`, `.ogg` and `.oga`, with ac
 
 Vendor CSV, BIFF XLS and OOXML XLSX imports are separate from embedded extraction and user-annotation import. Preview reads owned source copies, detects files/sheets/encoding and matches existing library records; human mappings and ambiguous/fuzzy confirmations are reviewed before commit. The desktop supports writable local libraries and capability/management-gated remote imports through `DataProvider`. Remote parsing and writes run on the server, bound to the actual library identity. See the [library import workflow](Rust_Library_Management.md#厂商-csv--xls--xlsx-资料导入) and [server API](api/README.md).
 
-Committed provenance is stored separately from embedded groups and mirrored into `attributes.vendor_metadata.fields`. Filename and relative-path mappings identify records; description, keywords, category/subcategory, library, publisher, designer and custom canonical fields remain vendor values. They never become assignments to user tags/notes, and they do not rewrite `wav_metadata.vorbis`, XML, BWF or other embedded originals. Empty/unmapped columns do not erase an existing value; replacing existing vendor fields requires the explicit overwrite option.
+Committed provenance is stored separately from embedded groups and mirrored into `attributes.vendor_metadata.fields`. Filename and relative-path mappings identify records; description, keywords, category/subcategory, library, publisher, designer and custom canonical fields remain vendor values. They never become assignments to user tags/notes, and they do not rewrite `wav_metadata.vorbis`, XML, BWF or other embedded originals. In the manual import workflow, empty/unmapped columns do not erase an existing value; replacing existing vendor fields requires the explicit overwrite option. Automatic source refresh follows the completeness and preservation rules below.
 
-The preferred display description uses controlled vendor description first, then the embedded description/BWF fallback. The declared library/album name can use the vendor library field. Read-only source tags combine vendor and embedded keywords/categories with duplicates removed; list display can combine those with user tags while `AudioFile.tags` remains the actual user-authored value. User tag filters continue to act on user tags. Custom vendor fields remain available in the mirror and source search text.
+The preferred display description uses controlled vendor description first, then the embedded description/BWF fallback. The declared library/album name can use the vendor library field. Read-only source tags combine vendor and embedded keywords/categories with duplicates removed; list display can combine those with user tags while `AudioFile.tags` remains the actual user-authored value. Tag filters can also match derived source tags without assigning them to user annotations. Custom vendor fields remain available in the mirror and source search text.
 
 commit uses durable batch checkpoints and an idempotency receipt. A paused commit resumes the same batch/key; replay does not import again. A confirmed rollback removes that batch's contribution and reprojects retained batches against current embedded Metadata. It preserves later user edits and later scans rather than restoring an obsolete whole-record JSON image. Main-library backups retain committed provenance and undo history; owned original tables, in-progress preview stores and mapping templates live beside the library and must be retained separately when continuation/template recovery is required.
 
 ## Rescanning and search
+
+Ordinary local, CLI and server scans also discover same-directory CSV/TSV/XLS/XLSX tables.
+After audio-header batches drain, the shared scanner parses the tables and associates rows only
+with a unique WAV in the table's own directory that was confirmed by this scan. It does not use
+the manual importer's global filename, stem or fuzzy fallbacks. A row naming an external,
+parent or child directory is left for manual import rather than matched by basename alone.
+Recognized headers and all supported sheets use the same bounded parser as manual preview.
+
+Automatic sources retain their raw provenance while the projected values are compared with
+embedded Metadata and retained table contributions, removing equivalent Unicode, whitespace and case variants.
+Merged tag display also removes duplicates with user tags; the independent vendor source remains
+available if the user later removes an annotation. Different source values remain available;
+user annotations and embedded originals remain unchanged.
+Rescanning the same table is idempotent. A changed table whose rows can all be associated safely
+replaces only its own earlier contribution. A table-only change is processed even when every WAV header is unchanged.
+Newly scanned WAVs are matched even if the table bytes have not changed. Missing, unreadable,
+malformed or unrecognizable tables retain their last valid contribution; a missing NAS file is
+never interpreted as an instruction to erase Metadata. Manual import remains the route for
+custom mappings and unresolved matches.
+
+An audio rescan re-evaluates retained automatic sources against the new embedded values even
+when their table is absent or unreadable. Previously equivalent table text therefore remains
+searchable if the WAV's embedded Metadata changes. When any row is unmatched or ambiguous,
+safe new matches are imported while all of that table's prior contributions are retained.
+This also protects sources when a workbook has been reordered or rows inserted; row coordinates
+are not proof that an earlier contribution was deleted. Old values can remain until the table
+matches completely or an explicit source rollback removes its contributions. Empty/header-only
+tables also retain the last valid source.
+
+Discovery uses bounded channels and an owned disk-backed path spool, not an unbounded list of
+all library tables. Parsing completes in owned staging before any Metadata is written. Bounded
+transactions retain committed work on cancellation; a later scan re-evaluates the source safely.
+The live/final `ScanProgress.vendor_metadata` reports table, match, update, unchanged, ambiguous
+and unmatched counts separately from WAV-header counts. Server scans keep their management and
+library-identity checks. Table-only projection changes invalidate the snapshot revision, so
+clients refresh the read-only s8/s9 snapshot and can search the new text offline. This does not
+change the ordinary local schema8 writer or implicitly start a schema9 migration.
 
 Playback and Waveform decoding use a separate lightweight header path that seeks past embedded Metadata. Audition does not repeatedly decrypt SMED artwork or parse large XML/ID3 chunks; full extraction runs only when scanning or explicitly probing Metadata.
 

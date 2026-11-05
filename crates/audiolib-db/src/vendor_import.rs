@@ -1,6 +1,8 @@
 // crates/audiolib-db/src/vendor_import.rs
 //! Recoverable vendor-table import, with owned previews and transactional business provenance.
 //! Preview files never modify the library. Commit/rollback use the provider's administration lease.
+#[cfg(feature = "scanner")]
+mod automatic;
 mod matching;
 mod parser;
 mod resources;
@@ -21,6 +23,20 @@ use std::{
 };
 
 pub(crate) use storage::{drop_legacy_snapshot_storage, ensure_schema, validate_schema};
+
+/// Re-evaluate supplementary last-good table values after embedded WAV changes.
+/// This runs in the caller's scan transaction, even if the table disappeared.
+#[cfg(feature = "scanner")]
+pub(crate) fn reproject_automatic_if_present(conn: &Connection, id: i64) -> Result<()> {
+    if !storage::schema_exists(conn)? {
+        return Ok(());
+    }
+    let present:bool=conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM audiolib_vendor_events e JOIN audiolib_vendor_jobs j USING(import_id) WHERE e.audio_file_id=?1 AND CASE WHEN json_valid(j.preview_json) THEN json_extract(j.preview_json,'$._automatic.kind')='sidecar-v1' ELSE 0 END)").map_err(db_error)?.query_row([id],|row|row.get(0)).map_err(db_error)?;
+    if present {
+        storage::project(conn, id)?;
+    }
+    Ok(())
+}
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::Validation(message.to_string())
 }
@@ -77,6 +93,35 @@ fn unlinked(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn owner_matches(path: &Path, owner: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    unlinked(path)?;
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != owner.len() as u64 {
+        return Ok(false);
+    }
+    let mut bytes = Vec::with_capacity(owner.len() + 1);
+    (&mut file)
+        .take(owner.len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == owner.as_bytes())
+}
+
+fn legacy_templates(path: &Path) -> Result<bool> {
+    if !path.is_file() || fs::metadata(path)?.len() > 2 * 1024 * 1024 {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes.len() <= 2 * 1024 * 1024
+        && serde_json::from_slice::<Vec<VendorMappingTemplate>>(&bytes).is_ok())
 }
 
 fn stage_schema(conn: &Connection) -> Result<()> {
@@ -153,8 +198,59 @@ impl SqliteProvider {
         unlinked(&root)?;
         if create {
             fs::create_dir_all(&root)?;
+            let marker = root.join(".audiolib-owner");
+            if marker.exists() {
+                if !owner_matches(&marker, &self.album_namespace())? {
+                    return Err(invalid("Vendor staging root belongs to another library"));
+                }
+            } else {
+                // Adopt only the complete, recognizable older owned layout. A
+                // user's same-named audio directory must never become hidden.
+                for child in fs::read_dir(&root)? {
+                    let child = child?;
+                    let name = child.file_name().to_string_lossy().into_owned();
+                    unlinked(&child.path())?;
+                    let owned_job = name.len() == 32
+                        && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        && child.file_type()?.is_dir()
+                        && owner_matches(&child.path().join("owner"), &self.album_namespace())?;
+                    let owned_templates = (name == "templates.json"
+                        && child.file_type()?.is_file()
+                        && legacy_templates(&child.path())?)
+                        || (name == "templates.lock"
+                            && child.file_type()?.is_file()
+                            && child.metadata()?.len() == 0);
+                    if !owned_job && !owned_templates {
+                        return Err(invalid(
+                            "Refusing to adopt a nonempty foreign vendor staging directory",
+                        ));
+                    }
+                }
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(marker)?
+                    .write_all(self.album_namespace().as_bytes())?;
+            }
         }
         Ok(root)
+    }
+
+    /// The exact verified preview root, excluded from source-table discovery.
+    /// Foreign same-named directories remain ordinary user scan inputs.
+    #[cfg(feature = "scanner")]
+    pub(crate) fn vendor_import_owned_root(&self) -> Result<Option<PathBuf>> {
+        let root = match self.vendor_root_directory(false) {
+            Ok(root) => root,
+            Err(Error::Validation(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let marker = root.join(".audiolib-owner");
+        if marker.is_file() && owner_matches(&marker, &self.album_namespace()).unwrap_or(false) {
+            unlinked(&marker)?;
+            return Ok(Some(root.canonicalize()?));
+        }
+        Ok(None)
     }
 
     fn vendor_job_directory(&self, id: &str) -> Result<PathBuf> {
@@ -164,7 +260,7 @@ impl SqliteProvider {
         let root = self.vendor_root_directory(false)?;
         let job = root.join(id);
         unlinked(&job)?;
-        if !job.is_dir() || fs::read_to_string(job.join("owner"))? != self.album_namespace() {
+        if !job.is_dir() || !owner_matches(&job.join("owner"), &self.album_namespace())? {
             return Err(invalid("Vendor preview belongs to another library"));
         }
         Ok(job)
@@ -882,6 +978,11 @@ impl SqliteProvider {
         {
             let conn = self.reader()?;
             if storage::schema_exists(&conn)? {
+                if storage::automatic_job(&conn, id)? {
+                    return Err(invalid(
+                        "Resume automatic table Metadata by rescanning its source directory",
+                    ));
+                }
                 let phase: Option<(Option<String>, u64)> = conn
                     .query_row(
                         "SELECT operation,restored FROM audiolib_vendor_jobs WHERE import_id=?1 AND commit_result IS NULL",

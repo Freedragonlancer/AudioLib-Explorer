@@ -1562,6 +1562,9 @@ impl SqliteProvider {
             header_columns
                 .execute(params_from_iter(header_values))
                 .map_err(db_error)?;
+            // Last-good sidecar events remain independent of whether this
+            // scan can still read their table. Re-evaluate embedded dedup now.
+            vendor_import::reproject_automatic_if_present(tx, id)?;
         }
         file_folders.sort_unstable();
         file_folders.dedup();

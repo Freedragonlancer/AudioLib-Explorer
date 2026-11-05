@@ -664,6 +664,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
   "session_id": 17, "state": "running", "paused": false, "finalizing": false,
   "discovered": 0, "processed": 0, "added": 0, "updated": 0, "unchanged": 0, "removed": 0,
   "errors": 0, "error_details": [], "errors_truncated": 0,
+  "vendor_metadata": { "tables": 0, "rows": 0, "matched": 0, "updated": 0, "unchanged": 0, "ambiguous": 0, "unmatched": 0 },
   "current_path": "/srv/audiolib/music/SFX_Main/Foley/Doors", "message": "",
   "root": "SFX_Main", "subpath": "Foley/Doors", "mode": "incremental",
   "active": true, "pause_requested": false, "cancel_requested": false, "revision": null
@@ -681,6 +682,14 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 
 `ScanProgress` 原有字段：`state`（`running` \| `completed` \| `cancelled` \| `failed`）、`finalizing`（已开始最终的原子对账，之后不再接受控制）、`discovered`/`processed`（找到/处理的 WAV 数）、`added`、`updated`、`unchanged`、`removed`（标为 missing 的记录数）、`errors` + `error_details`（最多 100 条 `{path, message}`，其余计入 `errors_truncated`）、`current_path`（服务端绝对路径，同 §3 的路径暴露约定）、`message`。
 
+新增 `vendor_metadata` 是同目录厂商表格自动扫描的独立计数，不改变音频头的上述计数：
+`tables` 为发现并检查的 CSV/TSV/XLS/XLSX 数，`rows` 为数据行数，`matched` 为唯一同目录 WAV 匹配行数，
+`updated`/`unchanged` 为各表处理后 Metadata 投影改变/不变的音频记录数，
+`ambiguous`/`unmatched` 为不自动写入的行数。多张表分别作用于同一个 WAV 时可分别计数。
+旧服务端缺少该对象或其中字段时全部按零读取，旧客户端忽略新增字段。
+本进程保留的完整会话提供这些计数；早期/重启后的 `ScanSession` 历史没有该细分信息，不据零值推断没有导入。
+自动来源与提交状态另随厂商导入历史持久保存。
+
 规则：
 
 - **返回时机与超时**：返回前服务端要解析根目录和 `subpath`（NAS 硬盘休眠时可能要 20–30 秒或更久），所以 `POST /scans` **不受 30 秒限制**。客户端放弃等待（断开）时扫描照常开始，用 `GET /scans/current` 找回。
@@ -688,6 +697,12 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 - **同一时间只有一个扫描**：本服务端已有扫描（运行或暂停中，含刚开始解析目录的）→ 409 `BUSY`（`message` 含会话 id）；另一个进程（CLI、本地模式桌面端）正在扫描或维护同一个库 → 409 `BUSY`。扫描期间 `POST /audio/metadata/batch` 返回 409 `BUSY`（§6.3，与本地模式相同）；单条 `PATCH /audio/{id}/metadata` 和 `POST /audio/{id}/plays` 照常可用。
 - **慢盘、空根、出错（§6.4 的规则不变）**：根目录不存在/不可读时扫描直接失败、不改记录；扫描途中目录读取出错（例如卷断开）、遇到符号链接（不跟随）、被取消或失败时都**不做 missing 对账**；全量扫描遇到完全为空的根（典型的未挂载挂载点）也不对账；慢只会让扫描变慢。单个文件读不出来记一条 `error_details`，扫描继续（但全量扫描只要有任何错误就不做 missing 对账）。
 - **子目录扫描**：扫描范围是 `subpath` 之下；它的文件夹记录挂在所属根的文件夹树下（必要时先建好从根到该子目录的文件夹记录），不会变成单独的顶层文件夹。全量子目录扫描只对该子目录范围做 missing 对账。
+- **同目录表格**：音频批次完成后处理遍历中发现的厂商表格，增量扫描也检查未变化 WAV 旁的表格。
+  只自动关联同目录唯一的 WAV，不做全库、stem 或 fuzzy 匹配；歧义/未匹配行保留给手动流程。
+  与内嵌字段比较去重，保留原始来源及用户标注；完整安全匹配的新表格替换自身旧贡献，其他来源不变。
+  表格存在未匹配或歧义时，先合并安全的新值并保留该表全部旧贡献，避免插行/重排导致来源误删；
+  修正到完整匹配或显式回滚该来源后再收敛旧值。
+  损坏、不可读或消失的表格不抹去上一次有效贡献。解析及分批提交继续接受暂停/取消，已提交批次保留。
 - **停机 / 重新部署**：服务端收到停止信号时立即取消正在进行（含暂停中）的扫描，最多等 10 秒让它把会话记为 `cancelled`（已提交的批次保留；每批一个事务，库不会损坏；不做 missing 对账）。停止期间新的 `POST /scans` → 503 `UNAVAILABLE`。若扫描线程卡在 NAS 上 10 秒内没结束，进程照常退出，库里该会话保持 `running`，直到下一次扫描开始时被标为 `failed`（`Previous scanning process exited before finalization`）；`GET /scans/{id}` 对这种会话返回 `active: false`，`message` 说明它不在本服务端运行。
 
 #### 进度：`GET /scans/{session_id}` 与 `GET /scans/current`
@@ -711,7 +726,7 @@ HTTP 200 视为 DTO 兼容保证；须先升级客户端，之后在维护窗口
 #### revision 规则
 
 - **扫描期间 `revision` 冻结**：扫描分批提交（每批 128 个文件一个事务），但 `/library` 轮询不会每批递增，客户端不会在扫描中途反复下载整库快照。扫描期间请求的快照标的是冻结的 `revision`，内容不旧于它（可能已含部分扫描结果）。
-- **结束（完成、取消或失败）时最多递增一次**：扫描有改动（`added`、`updated`、`removed` 任一 > 0，或文件/文件夹/missing 统计变化），或扫描期间有其他进程写过库 → `revision` +1，按 revision 缓存的快照随之失效；否则**不递增**（扫描会话记录和“本次已见”标记的写入不算改动）。因此：**无改动的增量扫描不递增**；全量扫描会重写每条记录（`updated` = 文件数），**总会递增**。
+- **结束（完成、取消或失败）时最多递增一次**：扫描有改动（`added`、`updated`、`removed`、`vendor_metadata.updated` 任一 > 0，或文件/文件夹/missing 统计变化），或扫描期间有其他进程写过库 → `revision` +1，按 revision 缓存的快照随之失效；否则**不递增**（扫描会话记录和“本次已见”标记的写入不算改动）。因此：**无改动的增量扫描不递增**；只改变表格 Metadata 也会递增并通知客户端同步。全量扫描会重写每条记录（`updated` = 文件数），**总会递增**。
 - 结束后的 `revision` 在响应的 `revision` 字段里；与客户端缓存的 `revision` 不同就按 §4 同步快照（下一次 `/library` 轮询也会看到）。
 - 扫描期间成功的单条 metadata 写入照常递增：`revision_before` = 冻结值 + 1（已包含此前的扫描提交），`revision` = 冻结值 + 2；客户端按 §4 规则：`revision_before` 与本地不同就做快照同步。被拒绝的写入（例如 409 `BUSY` 的批量写入）不改变 `revision`。
 - 快照里也有扫描会话表，但无改动的扫描不递增 `revision`，所以本地快照里的扫描历史可能落后；**显示扫描历史请用 `GET /history/scans`**（§6.7）。

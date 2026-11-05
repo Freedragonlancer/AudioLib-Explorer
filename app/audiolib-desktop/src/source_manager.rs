@@ -2727,6 +2727,12 @@ fn scan_text(scan: Option<&ServerScan>, chinese: bool) -> String {
             progress.errors
         )
     };
+    let vendor =
+        audiolib_core::vendor_import::automatic_scan_summary(&progress.vendor_metadata, chinese);
+    if !vendor.is_empty() {
+        text.push('\n');
+        text.push_str(&vendor);
+    }
     if !progress.current_path.is_empty() {
         text.push('\n');
         text.push_str(&progress.current_path);
