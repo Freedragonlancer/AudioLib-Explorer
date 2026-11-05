@@ -208,9 +208,24 @@ fn child_lower_bound_path_pages() {
         first
     );
 
-    // Without a cursor, traversing beyond the end observes the exact global
-    // total. Restoration clamps to and reloads the actual final page.
+    // An exhausted nonzero offset has no exact global count. Do not invent a
+    // total from the offset or clamp it to a last page that was not observed.
     controller.request.lock().unwrap().offset = 1_000;
+    controller.request_navigation_search(ui, true, false);
+    let ready = controller.clone();
+    wait_for(ui, move |ui| {
+        !ui.get_searching() && ui.get_rows().row_count() == 0 && fully_published(&ready)
+    });
+    assert_eq!(controller.request.lock().unwrap().offset, 1_000);
+    assert!(controller.request.lock().unwrap().cursor.is_none());
+    assert_eq!(ui.get_page_label(), "6/?");
+    assert!(ui.get_result_summary().contains("≥0 sounds"));
+    assert!(ui.get_can_previous());
+    assert!(!ui.get_can_next());
+
+    // A populated terminal page without a cursor has traversed the full prefix
+    // and can still publish its exact global total.
+    controller.request.lock().unwrap().offset = PAGE_SIZE;
     controller.request_navigation_search(ui, true, false);
     let ready = controller.clone();
     wait_for(ui, move |ui| {

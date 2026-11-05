@@ -2497,7 +2497,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_path_terms_keep_mixed_main_and_sparse_pages_distinct() {
+    fn overlapping_path_terms_keep_directory_and_main_pages_distinct() {
         let (_dir, provider) = overlapping_library();
         let main = ids(&provider, "Borg Sound", SearchScope::Main);
         assert_eq!(main, vec![2, 12]);
@@ -2505,35 +2505,40 @@ mod tests {
         assert_eq!(&all[..main.len()], main.as_slice());
         assert_eq!(&all[main.len()..], &[10, 14, 8]);
         // Full path hits remain in path scope even when main also matches (2).
-        // A partial path hit already satisfied by main stays excluded (12).
-        assert_eq!(
-            ids(&provider, "Borg Sound", SearchScope::Path),
-            vec![10, 14, 2, 8]
-        );
+        // A filename cannot complete a partial directory match (10, 12, 14).
+        assert_eq!(ids(&provider, "Borg Sound", SearchScope::Path), vec![2, 8]);
 
         for scope in [SearchScope::Path, SearchScope::All] {
             let full = ids(&provider, "Borg Sound", scope);
             let mut cursor = None;
             let mut paged = Vec::new();
-            for (page_index, expected) in full.chunks(2).enumerate() {
+            for (page_index, expected) in full.chunks(1).enumerate() {
                 let request = SearchRequest {
                     query: "Borg Sound".into(),
                     scope,
-                    limit: 2,
+                    limit: 1,
                     ..Default::default()
                 };
+                // Exercise native suffix counts; the presentation cache may
+                // replace a repeated first page's cursor with a materialized one.
                 let offset_page = provider
-                    .search(&SearchRequest {
-                        offset: page_index * 2,
-                        ..request.clone()
-                    })
+                    .search_scoped(
+                        &SearchRequest {
+                            offset: page_index,
+                            ..request.clone()
+                        },
+                        None,
+                    )
                     .unwrap();
                 let cursor_page = provider
-                    .search(&SearchRequest {
-                        offset: if cursor.is_some() { 999 } else { 0 },
-                        cursor: cursor.clone(),
-                        ..request
-                    })
+                    .search_scoped(
+                        &SearchRequest {
+                            offset: if cursor.is_some() { 999 } else { 0 },
+                            cursor: cursor.clone(),
+                            ..request
+                        },
+                        None,
+                    )
                     .unwrap();
                 let returned = cursor_page
                     .results
@@ -2549,15 +2554,16 @@ mod tests {
                         .collect::<Vec<_>>(),
                     returned
                 );
-                let remaining = full.len() - page_index * 2;
-                assert_eq!(cursor_page.total_count, remaining.min(3) as u64);
+                let remaining = full.len() - page_index;
+                assert_eq!(cursor_page.total_count, remaining.min(2) as u64);
+                assert_eq!(cursor_page.total_count_exact, remaining <= 1);
                 assert_eq!(
                     offset_page.total_count,
-                    (page_index * 2 + remaining.min(3)) as u64
+                    (page_index + remaining.min(2)) as u64
                 );
                 paged.extend(returned);
                 cursor = cursor_page.next_cursor;
-                assert_eq!(cursor.is_some(), remaining > 2);
+                assert_eq!(cursor.is_some(), remaining > 1);
             }
             assert_eq!(paged, full);
             let beyond_end = provider
@@ -2577,7 +2583,7 @@ mod tests {
 
         for (visibility, expected) in [
             (FileVisibility::Missing, vec![4]),
-            (FileVisibility::All, vec![10, 14, 2, 4, 8]),
+            (FileVisibility::All, vec![2, 4, 8]),
         ] {
             let mut request = SearchRequest {
                 query: "Borg Sound".into(),
@@ -2640,9 +2646,9 @@ mod tests {
         // and visibility is checked in SQLite, so expanding the whole subtree
         // produces VM work proportional to its size even without main probes.
         load_index(&conn, &provider.dir_index).unwrap();
-        conn.authorizer(Some(move |context: AuthContext<'_>| {
+        conn.authorizer(Some(|context: AuthContext<'_>| {
             if matches!(context.action, AuthAction::Read { table_name, .. }
-                if table_name == "audio_search" && !partial)
+                if table_name == "audio_search")
             {
                 Authorization::Deny
             } else {
@@ -2676,7 +2682,7 @@ mod tests {
             .unwrap();
         let page = result.unwrap();
         let expected = if partial {
-            vec![2, files as i64 * 2 + 1]
+            Vec::new()
         } else {
             vec![2, 4, 6, 8, 10]
         };
@@ -2684,7 +2690,7 @@ mod tests {
             page.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
             expected
         );
-        assert_eq!(page.observed_count, if partial { 2 } else { 6 });
+        assert_eq!(page.observed_count, if partial { 0 } else { 6 });
         assert_eq!(page.has_more, !partial);
         ticks.load(Ordering::Relaxed)
     }
@@ -2703,18 +2709,18 @@ mod tests {
     }
 
     #[test]
-    fn sparse_mixed_matches_do_not_restart_main_match_for_each_path_file() {
+    fn partial_directory_matches_do_not_probe_main_or_scan_each_path_file() {
         let small = directory_first_page_vm_work(512, true);
         let large = directory_first_page_vm_work(8192, true);
         assert!(small > 0);
         assert!(
             large <= small * 2,
-            "mixed page VM callbacks grew from {small} to {large}"
+            "partial-directory Path VM callbacks grew from {small} to {large}"
         );
     }
 
     #[test]
-    fn mixed_stream_requires_every_missing_term_and_excludes_full_main() {
+    fn path_requires_every_term_in_directories_while_all_can_complete_from_main() {
         let (_dir, provider) = overlapping_library();
         provider
             .writer()
@@ -2723,36 +2729,55 @@ mod tests {
                 "UPDATE audio_files SET filename='sound indoor.wav' WHERE id=10;
              UPDATE audio_files SET filename='borg indoor.wav' WHERE id=14;
              UPDATE audio_files SET filename='borg sound indoor.wav' WHERE id=2;
+             INSERT INTO folders(id,folder_path,folder_name,parent_id,total_file_count) VALUES
+             (6,'/lib/Borg/Sound/Indoor','Indoor',3,1);
              INSERT INTO audio_files(id,file_path,filename,folder_id,missing) VALUES
              (11,'/lib/folderless-gap.wav','sound indoor.wav',NULL,0),
-             (30,'/lib/folderless.wav','borg sound indoor.wav',NULL,0);",
+             (30,'/lib/folderless.wav','borg sound indoor.wav',NULL,0),
+             (32,'/lib/Borg/Sound/Indoor/quiet.wav','quiet.wav',6,0);",
             )
             .unwrap();
         provider.rebuild_directory_search().unwrap();
         assert_eq!(
             ids(&provider, "Borg Sound Indoor", SearchScope::Path),
-            vec![10, 14]
+            vec![32]
         );
         let all = ids(&provider, "Borg Sound Indoor", SearchScope::All);
         let main = ids(&provider, "Borg Sound Indoor", SearchScope::Main);
         assert_eq!(&all[..main.len()], main.as_slice());
-        assert_eq!(&all[main.len()..], &[10, 14]);
+        assert!(main.contains(&30), "folderless full-main hits remain valid");
+        assert_eq!(&all[main.len()..], &[10, 14, 32]);
     }
 
     #[test]
-    fn mixed_posting_batches_and_full_main_exclusions_survive_cursor_boundaries() {
+    fn directory_pages_and_all_posting_batches_survive_cursor_boundaries() {
         let (_dir, provider) = overlapping_library();
+        add_stream_refill_rows(&provider);
         provider
             .writer()
             .unwrap()
             .execute_batch(
-                "WITH RECURSIVE n(id) AS (VALUES(100) UNION ALL SELECT id+1 FROM n WHERE id<699)
+                "WITH RECURSIVE n(id) AS (VALUES(1000) UNION ALL SELECT id+1 FROM n WHERE id<1599)
              INSERT INTO audio_files(id,file_path,filename,folder_id,missing)
-             SELECT id,'/lib/Borg/'||id||'.wav',
-                    CASE WHEN id%10=0 THEN 'borg sound.wav' ELSE 'sound.wav' END,2,0 FROM n;",
+             SELECT id,
+                    CASE WHEN id%2=0 THEN '/lib/Borg/Sound/' ELSE '/lib/Other/' END||id||'.wav',
+                    'quiet.wav',CASE WHEN id%2=0 THEN 3 ELSE 4 END,0 FROM n;",
             )
             .unwrap();
         provider.rebuild_directory_search().unwrap();
+        let main = provider
+            .search(&SearchRequest {
+                query: "Borg Sound".into(),
+                scope: SearchScope::Main,
+                limit: 1000,
+                ..Default::default()
+            })
+            .unwrap()
+            .results
+            .into_iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>();
+        assert!(main.len() > 256, "full-main exclusions must refill");
         for scope in [SearchScope::Path, SearchScope::All] {
             let request = SearchRequest {
                 query: "Borg Sound".into(),
@@ -2768,10 +2793,19 @@ mod tests {
                 .map(|file| file.id)
                 .collect::<Vec<_>>();
             if scope == SearchScope::Path {
-                let expected = [10, 14]
+                let expected = [2, 8]
                     .into_iter()
-                    .chain((100..700).filter(|id| id % 10 != 0))
-                    .chain([2, 8])
+                    .chain((1000..1600).step_by(2))
+                    .collect::<Vec<_>>();
+                assert_eq!(full, expected);
+            } else {
+                let expected = main
+                    .iter()
+                    .copied()
+                    .chain([10, 14])
+                    .chain((100..700).filter(|id| id % 2 != 0))
+                    .chain([8])
+                    .chain((1000..1600).step_by(2))
                     .collect::<Vec<_>>();
                 assert_eq!(full, expected);
             }
@@ -2781,10 +2815,14 @@ mod tests {
                 let page = provider
                     .search(&SearchRequest {
                         limit: 137,
+                        offset: if cursor.is_some() { 999 } else { 0 },
                         cursor,
                         ..request.clone()
                     })
                     .unwrap();
+                let observed = page.results.len() + usize::from(page.next_cursor.is_some());
+                assert_eq!(page.total_count, observed as u64);
+                assert_eq!(page.total_count_exact, page.next_cursor.is_none());
                 paged.extend(page.results.into_iter().map(|file| file.id));
                 cursor = page.next_cursor;
                 if cursor.is_none() {
@@ -2808,10 +2846,7 @@ mod tests {
             )
             .unwrap();
         provider.rebuild_directory_search().unwrap();
-        assert_eq!(
-            ids(&provider, "Borg Sound", SearchScope::Path),
-            vec![10, 14, 2, 8]
-        );
+        assert_eq!(ids(&provider, "Borg Sound", SearchScope::Path), vec![2, 8]);
         let main = ids(&provider, "Borg Sound", SearchScope::Main);
         assert!(main.contains(&6));
         let all = ids(&provider, "Borg Sound", SearchScope::All);
@@ -2819,7 +2854,7 @@ mod tests {
         assert_eq!(&all[main.len()..], &[10, 14, 8]);
         for (visibility, expected) in [
             (FileVisibility::Missing, vec![4]),
-            (FileVisibility::All, vec![10, 14, 2, 4, 8]),
+            (FileVisibility::All, vec![2, 4, 8]),
         ] {
             let mut request = SearchRequest {
                 query: "Borg Sound".into(),
