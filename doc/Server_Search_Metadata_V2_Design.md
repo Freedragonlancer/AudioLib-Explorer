@@ -120,7 +120,7 @@
 
 ### 3.3 HTTP 契约
 - 请求 DTO：`scope=main|all|path|filename`（默认 `main` = s8 行为）、不透明 `cursor`、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。目录相关性游标与筛选/排序游标使用不同内部编码，调用方不得自行构造。
-- 响应使用 `SearchPage`：`results`、`returned_count`、`total_count`、`total_count_exact` 和 `next_cursor`（末页省略）。优化的非空目录分页只观察当前页、一条前瞻及实际跳过的前缀，不为总数遍历全部命中。无 cursor 时 `total_count` 是已观察前缀的数量，有下一页时只是下界；遍历到末尾后才是精确总数，超出末尾的 offset 也不能凭空增加计数。有 cursor 时只计该 cursor 之后当前页和前瞻记录，即使末页也不是全查询总数，`total_count_exact=false`；仅证明全查询为空的短路可返回精确的 0。主表、文件名、空查询浏览、不可用时的 `all` 主表回退以及 SQL 筛选/排序页保持精确总数。详见 [API 分页契约](api/README.md#5-分页)。
+- 响应使用 `SearchPage`：`results`、`returned_count`、`total_count`、`total_count_exact` 和 `next_cursor`（末页省略）。优化的非空目录分页只观察当前页、一条前瞻及实际跳过的前缀，不为总数遍历全部命中。无 cursor 时 `total_count` 是已观察前缀的数量，有下一页时只是下界；无下一页时，第一页或含结果的页面才确认精确总数。无 cursor 的非零 offset 空页返回 0，未经短路证明全查询为空时 `total_count_exact=false`，不能凭 offset 制造计数。有 cursor 时只计该 cursor 之后当前页和前瞻记录，有下一页时 `total_count_exact=false`，末页为 `true`；末页的标记只确认该游标范围已穷尽，局部计数仍不是全查询总数。短路证明全查询为空时返回精确的 0。主表、文件名、空查询浏览、不可用时的 `all` 主表回退以及 SQL 筛选/排序页保持精确总数。详见 [API 分页契约](api/README.md#5-分页)。
 - 目录分页以 `next_cursor` 和已走过的位置导航；内部 `has_more` 不增加到响应中。`total_count_exact=false` 时界面显示“至少/≥”，不能把 cursor 局部计数或下界当最终总数/页数。
 - 游标绑定请求条件、provider 会话和数据库变更修订；改查询、范围、筛选、排序、库内容或重开库后必须拒绝旧游标并从第一页重取。DataProvider 的 `CURSOR_STALE` 在现有 HTTP 搜索中映射为409，其他无效输入映射为400 `VALIDATION`。`search_path_rev` 仍描述目录格式版本，不能替代内容修订。
 - 现状：服务端已有 `GET /api/v1/search` 和 `POST /api/v1/search`，使用上述四种 scope 和 DataProvider 契约；`POST /search/folders` 尚未实现。RemoteProvider 日常查询仍在校验后的本地只读快照上执行，与本地库共用查询实现，不通过在线搜索路由。迁移工具的搜索动作另投影为 `ids`、`next_cursor`（末页为 `null`），不返回 `SearchPage.total_count`。
