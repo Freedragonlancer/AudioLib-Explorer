@@ -414,6 +414,10 @@ pub struct AppConfig {
     /// [`AppConfig::ui_font_size`].
     #[serde(default = "default_font_size")]
     pub list_font_size: u32,
+    /// Search scope beside the query box: `all` (default), `main`, or `path`
+    /// (DESIGN-SEARCH-METADATA-V2 §2.5). Unknown values load as `all`.
+    #[serde(default = "default_search_scope")]
+    pub search_scope: String,
     /// Persistent table layout and sorting, applied to every search page.
     #[serde(default)]
     pub audio_table: AudioTablePreferences,
@@ -468,6 +472,8 @@ struct SavedPreferences {
     ui_font_size: u32,
     #[serde(default = "default_font_size", deserialize_with = "lenient_font_size")]
     list_font_size: u32,
+    #[serde(default = "default_search_scope")]
+    search_scope: String,
     #[serde(default)]
     audio_table: AudioTablePreferences,
     #[serde(default)]
@@ -487,6 +493,18 @@ pub fn normalize_max_search_tasks(value: u32) -> u32 {
 
 fn default_max_search_tasks() -> u32 {
     DEFAULT_MAX_SEARCH_TASKS
+}
+
+fn default_search_scope() -> String {
+    "all".into()
+}
+
+/// Keep a supported search-scope preference; anything else becomes `all`.
+pub fn normalize_search_scope(value: &str) -> String {
+    match value.trim() {
+        "main" | "path" | "all" => value.trim().to_string(),
+        _ => "all".into(),
+    }
 }
 
 fn lenient_max_search_tasks<'de, D: serde::Deserializer<'de>>(
@@ -744,6 +762,7 @@ impl AppConfig {
             theme: default_theme(),
             ui_font_size: DEFAULT_FONT_SIZE,
             list_font_size: DEFAULT_FONT_SIZE,
+            search_scope: default_search_scope(),
             audio_table: AudioTablePreferences::default(),
             window_layout: Default::default(),
             allowed_scan_roots: Vec::new(),
@@ -803,6 +822,7 @@ impl AppConfig {
             config.theme = normalize_theme(&saved.theme);
             config.ui_font_size = clamp_font_size(i64::from(saved.ui_font_size));
             config.list_font_size = clamp_font_size(i64::from(saved.list_font_size));
+            config.search_scope = normalize_search_scope(&saved.search_scope);
             config.audio_table = saved.audio_table.normalized();
             config.window_layout = saved.window_layout.normalized();
             config.allowed_scan_roots = saved.allowed_scan_roots;
@@ -859,6 +879,7 @@ impl AppConfig {
             theme: normalize_theme(&self.theme),
             ui_font_size: clamp_font_size(i64::from(self.ui_font_size)),
             list_font_size: clamp_font_size(i64::from(self.list_font_size)),
+            search_scope: normalize_search_scope(&self.search_scope),
             audio_table: self.audio_table.normalized(),
             window_layout: self.window_layout.normalized(),
             allowed_scan_roots: self.allowed_scan_roots.clone(),

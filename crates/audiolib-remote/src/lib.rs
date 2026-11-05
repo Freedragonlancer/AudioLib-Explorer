@@ -70,7 +70,9 @@ mod sync;
 #[cfg(test)]
 mod test_server;
 mod tls;
+mod upgrade_hints;
 mod util;
+mod vendor_import;
 mod waveform_cache;
 mod writes;
 pub use waveform_cache::waveform_cache_error;
@@ -134,6 +136,7 @@ pub use sync::{
     validate_snapshot,
 };
 pub use tls::{TRUST_STORE, TlsInfo};
+pub use upgrade_hints::{retry_during_migration, server_upgrade_status};
 pub use util::encode_path_segment;
 pub use writes::{
     CacheUpdate, RemoteProvider, RemoteWriter, WriteEvent, WriteListener, WriteOutcome,
