@@ -261,8 +261,8 @@ Compatibility replies carry the shared recommended upgrade header and capability
 native schema-9 replies do not carry a downgrade prompt. Disabling the transition returns
 409 `SNAPSHOT_FORMAT_UNSUPPORTED` and a required hint for old peers while preserving their
 offline cache and native9 access. Writes are admitted against the actual source format,
-so a derived8 reader cannot write the schema-9 source. The current development binary is
-still version 0.8.7: upgrade `min` uses that build identity, not a published 0.9.0 claim.
+so a derived8 reader cannot write the schema-9 source. The candidate program version is
+frozen at 0.9.0: upgrade `min` uses the actual build identity; 0.9.0 remains unpublished.
 
 Layout under `<data dir>/remote/`:
 

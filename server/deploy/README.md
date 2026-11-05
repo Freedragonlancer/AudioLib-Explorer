@@ -125,8 +125,8 @@ Windows). The frozen 0.7.8 updater policy refuses this new layout. Bootstrap it
 manually after validating the archive and checksum; do not use an older
 server's automatic install action for this transition. Package reports record
 `automatic_upgrade_compatible=false`, `manual_bootstrap_required=true` and
-`minimum_updater_version=0.9.0`. A development binary reporting 0.8.7 is not a
-published 0.9.0 updater. See the [release runbook](../../doc/Rust_Release_0.9.0.md) for client-first deployment,
+`minimum_updater_version=0.9.0`. The candidate program version is frozen at 0.9.0
+but remains unpublished. See the [release runbook](../../doc/Rust_Release_0.9.0.md) for client-first deployment,
 deferred server migration and backup/rollback pairing. Keep configuration,
 credentials and the existing library outside the payload. With the service
 stopped, the delivered tool supports `audiolib-migrate status|start|rollback
@@ -138,7 +138,7 @@ does not include test-only fault-injection hooks.
 `tools/beta-refresh.sh` builds `audiolib-server` and `audiolib-migrate` together in
 one native `cargo build --release --locked --no-default-features` invocation,
 selecting only those two bins. Beta always requires the complete layout-2 pair,
-even while the development Cargo version remains 0.8.7. Set required
+including for the version-frozen 0.9.0 candidate. Set required
 `BETA_DATABASE_PATH` to the actual absolute `library_db` from the active beta
 configuration; `BETA_DATA_DIR/library.db` is never inferred as that proof. It stages and verifies
 both files before any service stop (including `--with-db`), and does not replace

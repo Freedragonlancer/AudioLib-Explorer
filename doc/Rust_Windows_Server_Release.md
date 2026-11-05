@@ -44,7 +44,7 @@ pwsh tools/validate-server-package.ps1 -Tag vX.Y.Z -Target x86_64-pc-windows-msv
 layout 2 是下一大型版本的交付准备，不回写历史资产。0.9 之前的服务端更新器不接受新增
 迁移程序，需要正常停服后人工安装完整包作为引导升级；冻结 v0.7.8 文件策略保持真实拒绝。
 包报告标记 `automatic_upgrade_compatible=false`、`manual_bootstrap_required=true`、
-`minimum_updater_version=0.9.0`，开发用 0.8.7 候选不代表已发布 0.9。
+`minimum_updater_version=0.9.0`，当前程序版本已冻结为 0.9.0，尚未发布。
 原生验收必须验证两个 EXE 的 SHA、生产迁移程序拒绝 test-hooks 参数，并在独立临时库
 执行 JSON status/start/status/rollback/status，确认 8→9→8；不读取工作库。七归档、十四资产不变。
 

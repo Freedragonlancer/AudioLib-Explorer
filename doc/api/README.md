@@ -49,8 +49,8 @@ CR、修复及历次隔离证据见 [方案 B CR](Search_Storage_B_CR.md)；p1�
 
 候选的 `compatibility.catalog_revision` 为 **2**。该数字是目录修订，既不是实际库 schema，
 也不是必须相等的对端版本门槛；仍按 marker、协议、精确格式 ID 和完整 feature 校验。
-本次开发构建的程序版本仍为 **0.8.7**，尚未发布 0.9.0；升级提示的 `min` 取实际构建版本，
-当前示例 `recommended; min=0.8.7; features="search_path,vorbis_tags,vendor_metadata"` 不代表正式发布。
+本次候选的程序版本已冻结为 **0.9.0**，尚未发布；升级提示的 `min` 取实际构建版本，
+当前示例 `recommended; min=0.9.0; features="search_path,vorbis_tags,vendor_metadata"` 不代表正式发布。
 
 - 客户端通用目录声明可只读接收 schema 3–9 的已知完整格式，普通本地 `database_write_formats`
   仍为 `ale-s8-cld1-t3-m2-p1-a1`。完成态 s9 不进入客户端的 schema-8 修复或写入流程。
