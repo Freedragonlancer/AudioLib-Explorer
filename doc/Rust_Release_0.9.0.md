@@ -1,9 +1,9 @@
 # 0.9.0 发布准备与两端迁移方案
 
-状态：**发布准备中。#204–206含手动及同目录自动表格导入，源级、HTTP、真实表格及额外实际音频验收已有通过证据。`fe13b05` 的Windows客户端和双二进制服务端开发包、固定安装及选定原生GUI交互已验收；完整五轮PG05仍未达到严格1.1门槛，未发布。**
-阶段调整：当前三项核心功能及Waveform的受影响定向检查已通过，保留必要数据保全，下一步交付开发候选；PG05、百万记录性能、全平台验收及全局回归留到正式release阶段，现有失败/未验状态保留，不作为开发功能先交付的前置通过条件。
+状态：**发布准备中。#204–206含手动及同目录自动表格导入，源级、HTTP、真实表格及额外实际音频验收已有通过证据。Windows客户端 `f70156e` 开发候选已构建、验收并完成固定安装，本轮核心GUI补验因工具阻塞未完成，保留release门禁；`fe13b05` 双二进制服务端开发包及既有选定GUI证据保留原身份。完整五轮PG05仍未达到严格1.1门槛，未发布。**
+阶段调整：当前三项核心功能及Waveform的受影响定向检查已通过，保留必要数据保全，开发候选已交付；PG05、百万记录性能、全平台验收及全局回归留到正式release阶段，现有失败/未验状态保留，不作为开发功能先交付的前置通过条件。
 `0.9.0` 是拟定 MINOR 版本；Cargo 当前仍为 `0.8.7`，最终发行版本与跨平台 payload 尚未冻结。
-生产服务、工作库和源 WAV 未变更；主工作区固定 `local_release/` 已更新为 `fe13b05` 开发包并核对907个文件。其后的服务端目标常量和Waveform共享连接修正属于新源码，尚未打包安装，不能改写fe13包的身份。
+生产服务、工作库和源 WAV 未变更；主工作区固定 `local_release/` 已更新为 `f70156e` 客户端开发包并核对907个文件、更新9个文件，包含服务端目标常量和Waveform共享连接修正。既有fe13包及GUI结果不回标为当前身份。
 feat → beta、beta → main、标签、发布以及实际服务部署各须取得相应授权。
 
 ## 1. 候选范围与证据身份
@@ -42,15 +42,15 @@ feat → beta、beta → main、标签、发布以及实际服务部署各须取
 | 成对自动更新修正 | `8f4766e`，当前server布局要求匹配平台迁移器；Unix TAR迁移器执行位与server一致。updater strict、33通过/2忽略，server NoDefault updates3项通过；完整pair安装/缺件拒绝/第二文件失败恢复已有真实文件回归。Unix执行位原生测试和部署脚本验收另行记录 |
 | 原生GUI发现的修正 | `9f9b7f1`：Vorbis合法负起始时间及空primer不再造成加载失败，seek与顺序PCM对齐；重预览按文件/sheet身份保留选择。Audio112项及后续golden1项组成113通过/3忽略的组合证据，Desktop vendor15项通过；实际fe13 GUI已复验格式复用及P2所选映射，见1.4节 |
 | 同目录自动表格扫描 | 功能整合为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`：客户端/CLI/服务端扫描CSV/TSV/XLS/XLSX，限定同目录且本轮成功扫描的唯一WAV；原始来源、规范去重、重扫、部分关联和取消保全。Windows99项与Mac62项分别记录，不合计为一次workspace运行 |
-| 当前已验收Windows开发包 | `fe13b05f43cc75ae3de6373aedc390d4afdf2858`；运行版本0.8.7，客户端三阶段及服务端四阶段通过，主工作区907文件固定安装、选定GUI和实际NAS109条验收通过。不是最终0.9.0/main/tag产物 |
-| 最近完整性能验收 | 同一 `fe13b05`，run `81110616bd274a5fa9a07e58483887da`：完整oracle与续页通过、warm100+facets P95=209.4968ms；正式五轮均有充分真实并发，但五组倍率1.19118–1.21311，严格PG05失败；两个首次search+facets合计也超过500ms |
-| fe13后源码修正 | `SERVER_TARGET_SCHEMA=9`区分两类写目标，DB快照读上限引用Core；首版`4ec`的Windows27项属于旧输入，`04c`尾部修正28项已在Mac和Windows通过。All窄移植/测试加强的`d1c746fd`保留严格Path/v3；Mac60项和Windows62项核心定向检查各自通过，范围不同不相加。正式PG05留release，新payload仍待交付，安装仍为fe13 |
+| 当前已验收Windows客户端开发包 | `f70156e0a54dddb812584d24564f2601fe6e4ebe`；运行版本0.8.7，build/package/portable-accept/install通过，主工作区907文件固定安装、更新9个文件及隔离启动通过。本轮核心GUI补验因工具阻塞未完成，保留release门禁；不是最终0.9.0/main/tag产物。fe13服务端包、选定GUI和实际NAS109条保留原身份 |
+| 最近完整性能验收 | `fe13b05`，run `81110616bd274a5fa9a07e58483887da`：完整oracle与续页通过、warm100+facets P95=209.4968ms；正式五轮均有充分真实并发，但五组倍率1.19118–1.21311，严格PG05失败；两个首次search+facets合计也超过500ms |
+| fe13后源码修正 | `SERVER_TARGET_SCHEMA=9`区分两类写目标，DB快照读上限引用Core；首版`4ec`的Windows27项属于旧输入，`04c`尾部修正28项已在Mac和Windows通过。All窄移植/测试加强的`d1c746fd`保留严格Path/v3；Mac60项和Windows62项核心定向检查各自通过，范围不同不相加。正式PG05留release，f701客户端开发包已交付，最终发行payload仍待验 |
 | 待闭环上游输入 | `codex/fix-path-search-timeout` 基于 `8b53f7b33181282893c5424fb027b88874213936`（上游#225）；首轮`ea937cb`完成后已选取All算法及管理提示窄移植，未带入其混合Path/旧计数契约。新一轮CLI仍活跃，最终稳定输入待再次比较，不整合WIP；原f252620身份保持历史事实 |
 
 ### 1.1 三项核心功能核对与 fix 任务
 
 下列复选框表示**完整发布验收及交付**，不把源码存在、单项通过或开发诊断当作全部完成。
-开发收口复用1.3、1.4节实际NAS、GUI及已有定向证据；fe13后的核心/Waveform修正已完成相应定向检查，新包验收待做，不重复无关全局或百万性能运行。
+开发收口复用1.3、1.4节实际NAS、GUI及已有定向证据；核心/Waveform修正已完成相应定向检查及f701客户端包/安装验收，核心GUI补验因工具阻塞未完成，保留release门禁，不重复无关全局或百万性能运行。
 原始任务继续使用已有 Issue；已有结果保留实际源码、特性、环境和二进制身份。
 
 | 核心任务 | 已实现并有相应源级/链路证据 | 剩余发布验收 |
@@ -192,19 +192,18 @@ Windows独立核心检查62项、一次fmt、DB/Remote默认特性all-targets st
 
 ### 1.4 当前Windows开发包、固定安装与选定GUI
 
-已验收的源码身份为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`，运行版本仍为0.8.7。
-客户端build/package/portable-accept三阶段，以及显式release benchmark helper、production server+migrate build/package/native-accept四阶段通过。
-服务端实际包验证包含无test-hooks保护和owned8→9→8迁移，不以源测试或合成假二进制代替。
+当前客户端源码身份为 `f70156e0a54dddb812584d24564f2601fe6e4ebe`，运行版本仍为0.8.7；build/package/portable-accept/install四阶段通过。
+双二进制服务端包的既有验收身份仍为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`：显式release benchmark helper、production server+migrate build/package/native-accept四阶段通过，包含无test-hooks保护和owned8→9→8迁移，不回标为f701服务端包。
 
-| 当前开发包EXE | SHA256 |
+| 开发包EXE（源码身份） | SHA256 |
 | --- | --- |
-| `AudioLibExplorer.exe` | `7f9b16c60bf1006da5aaa02735e49a5562cc194e295fef325d790fe3b25ea92c` |
-| `AudioLibCli.exe` | `a5ff1b74edefc335b2a96f7b6d84ff705cb4c49f64f4f325dd6803b008ae9618` |
-| `audiolib-server.exe` | `e050021f3f6d33224cc548b39bfc3d367969ecf1439002d752f6f7b2324dbf2b` |
-| `audiolib-migrate.exe` | `22c6b07e6347485804c8bf64821f3acf0f729506eda6c73a4373822fec4f319c` |
+| `AudioLibExplorer.exe`（f701） | `1193cb6ca13a1ff3594b449a8c66f122ab518b7e03bd3160d346247e8cd2e962` |
+| `AudioLibCli.exe`（f701） | `41e28e816b4ab6c5d39baf55bbeeb8b45d4aa2a562a3824f8b7352728028dbd0` |
+| `audiolib-server.exe`（fe13） | `e050021f3f6d33224cc548b39bfc3d367969ecf1439002d752f6f7b2324dbf2b` |
+| `audiolib-migrate.exe`（fe13） | `22c6b07e6347485804c8bf64821f3acf0f729506eda6c73a4373822fec4f319c` |
 
-主工作区唯一固定 `local_release/` 的907个package-owned文件与已验收包一致，更新71个文件；CLI0.8.7、隔离桌面启动和安装后诊断通过。
-手动验收实际经该目录 `Start-AudioLibExplorer.cmd` 启动，记录真实GUI PID/path/创建时间及可见窗口句柄，保持隔离userdata/IPC、音量0、不自动关闭。
+主工作区唯一固定 `local_release/` 的907个package-owned文件与f701已验收包一致，更新9个文件；CLI0.8.7及隔离桌面启动通过。交付证据为 `delivery/runs/f70156e0a54dddb812584d24564f2601fe6e4ebe/state.json`，摘要 `2fbe4267d1afd519ed39c41d7b08980421b2fc2d1c2988d895fd8fa48297db8b`；固定安装记录 `local-install/f2f2e31191d7475eab7661effc10c03d/report.json`。
+手动验收经该目录 `Start-AudioLibExplorer.cmd` 启动并隔离userdata/IPC；本轮f701仅实际观察到本地 `Path index built`。原生文件选择对话框工具阻塞，手动BIFF、重复同步及Waveform GUI补验未完成，保留release门禁；以下选定观察仅属于此前fe13身份，未记为本轮最终GUI通过。
 安装未打开或复制日常工作库、偏好和缓存；这次交付是开发候选，不覆盖已发布v0.8.7资产，也不是最终0.9.0/main/tag产物。
 
 | 选定原生GUI范围 | 实际观察 |
@@ -220,9 +219,9 @@ Windows独立核心检查62项、一次fmt、DB/Remote默认特性all-targets st
 
 GUI回滚、management-off/reader权限界面及B警告后实际替换未执行；正式HTTP与production服务包验收是独立证据，不能把这些GUI项记为通过。
 五条Waveform替换警告已定位到同文件多个SQLite连接的生命周期；首版`4ec`输入保留原Windows os5失败及27项定向通过，后续`04c`尾部修正28项已在Mac和Windows通过。
-这些修正及服务端目标常量属于fe13之后的新源码；两平台核心检查不代替实际修正包和GUI警告复核，不将已安装fe13包改称包含修正。
+这些修正及服务端目标常量已进入f701客户端开发包并安装；两平台核心检查及包验收不代替本轮GUI警告复核，不将此前fe13观察改称当前GUI通过。
 
-最小私有证据身份：Windows `accepted-payloads.json` 摘要 `b179acb8adacb02be28cb5748defb05a4fb1b7e5690f4b69a0932ce93f7803eb`；
+此前fe13的最小私有证据身份：Windows `accepted-payloads.json` 摘要 `b179acb8adacb02be28cb5748defb05a4fb1b7e5690f4b69a0932ce93f7803eb`；
 Mac `mac-native-fe13-fd8728591e9b4e6bb087cd454f7a8212`；实际NAS `nas-sidecar-b50ef7c7435b4adeab9e98b92858f8e9`；
 GUI `native-gui-selected-final-b5ce5a1e4bf0486495aa23b3f5a66610.json` 摘要 `d827c04d6d51269bbdc898f980fdbbb51c45222da7565e34eb108734a0d83bd6`。
 
@@ -339,8 +338,8 @@ NULL 归属行分开 runs，避免被路径范围误命中。缺捕获机制的�
 | 百万记录性能 | 绝对P95<500ms；PG05五轮中位数倍率≤1.1 | **BLOCKED**。最新fe13 run81110616正式五轮全部充分重叠，五组倍率1.19118/1.20732/1.19277/1.20290/1.21311，均失败。warm100+facets P95=209.4968ms通过；首次search/facets各自通过，但case1/6合计575.4356/547.2962ms失败。保留旧53276831、0c95367b及诊断，不用绝对延迟代替倍率 |
 | 桌面交互 | 范围、导入、迁移、关闭与主题 | fe13固定安装选定GUI实际通过范围见1.4；回滚/off-role界面和B警告后Sync未执行。旧GUI、源级异步回归与新GUI分开，不宣称全界面清单通过 |
 | 原生文件系统 | 根句柄、复制/替换、权限与限额 | Windows本地NTFS7项、自有SMB/UNC6项通过，另1项创建链接返回OS1未验；旧Mac62项含Unix根/父目录/源文件/preview链接替换防护及原shell256记录；后续六文件delta60项的原生子进程实际10240，均不等于MacGUI/TCC、Linux或全部文件系统 |
-| Windows实际开发包 | 客户端ASIO；server+migrate；许可/隐私/启动/数据安全 | fe13客户端和production服务端七阶段实际通过，见1.4；client479/server260许可闭包及53项Docker合成检查不等于实际Docker运行。fe13后Waveform/常量源码修正仍需新payload验证 |
-| 固定安装 / 最终身份 | 所有package-owned文件SHA、CLI版本、隔离启动 | fe13主工作区907文件/71更新、CLI0.8.7和隔离桌面/诊断通过。新源码修正尚未安装，最终0.9/main/tag及发布后摘要同步仍待完成 |
+| Windows实际开发包 | 客户端ASIO；server+migrate；许可/隐私/启动/数据安全 | f701客户端build/package/portable-accept/install通过；fe13 production服务端四阶段保留原身份，见1.4。client479/server260许可闭包及53项Docker合成检查不等于实际Docker运行，最终发行payload待验 |
+| 固定安装 / 最终身份 | 所有package-owned文件SHA、CLI版本、隔离启动 | f701主工作区907文件/9更新、CLI0.8.7及隔离桌面启动通过；核心GUI补验因工具阻塞未完成，保留release门禁。最终0.9/main/tag及发布后摘要同步仍待完成 |
 
 最新正式性能身份为 `fe13b05f43cc75ae3de6373aedc390d4afdf2858`，run `81110616bd274a5fa9a07e58483887da`，
 以私有 `compact-summary.json` 定位；1.198GB原始样本保留，不复制到仓库或覆盖旧报告。
@@ -454,14 +453,14 @@ COW检查保留 `owned-file-validation-*` 的实际输入/特性/EXE及停止位
 每查询五轮、每轮 p95 的中位数不超过 s8 ×1.2；PG05另要求并发/空闲五轮p95中位数≤1.1。
 绝对延迟、s9/s8及并发倍率分别报告，缺少真实冷缓存/平台条件时明确未验。
 
-剩余发行条件：严格PG05正式五轮及首次组合延迟、后台CLI第二轮稳定输入复核、fe13后修正的新payload与警告复核、最终版本/main/tag冻结、
+剩余发行条件：严格PG05正式五轮及首次组合延迟、后台CLI第二轮稳定输入复核、f701核心GUI警告复核及最终发行payload、最终版本/main/tag冻结、
 Mac客户端原生GUI/签名/实际包及匹配Mac/Linux/Docker平台交付、生产规模owned副本迁移/恢复与配对门槛。
-已完成的fe13 Windows开发包/固定安装和选定GUI不再列为全盘未验；未执行GUI交互与后端正式证据分别记录。
+已完成的f701 Windows客户端包/固定安装和此前fe13选定GUI不再列为全盘未验；本轮工具阻塞未完成的GUI补验及其他未执行交互与后端正式证据分别记录。
 方案仍为客户端先就绪 → 手动引导新服务、库保持8 → 管理员显式迁移；双快照窗口结束及生产执行另行决定。
 本轮Windows开发候选已本机交付，但不是最终0.9.0/main/tag正式发行payload；生产部署、发布和发布后安装同步尚未执行。
-上一轮候选缓存维护回收逻辑空间 88.44 GiB，保留 release 后剩余2.58 GiB，当时40 GiB 预算达成；本轮收尾再维护。
-新登记的私有 MG 缓存5.73 GiB因缺真实 Cargo `CACHEDIR.TAG` 被清理工具拒绝，已保留，未伪造标记；
-本次两处缓存合计约8.31 GiB。清理工具的原始成功/失败记录均保留。
+上一轮候选缓存维护回收逻辑空间 88.44 GiB，保留 release 后剩余2.58 GiB，当时40 GiB 预算达成。本轮f701单次formal维护仅处理候选自身 `project-target`：原192465560921字节，回收188034813885字节（约175.12GiB），剩4430747036字节（约4.13GiB），40GiB预算达成；保留release、SDK、dist、固定安装与数据。证据为 `delivery/runs/f70156e0a54dddb812584d24564f2601fe6e4ebe/final-cache-maintenance.json`；未扫描/清理tagless或未登记外部缓存，不宣称全机达标。
+当时新登记的私有 MG 缓存5.73 GiB因缺真实 Cargo `CACHEDIR.TAG` 被清理工具拒绝，已保留，未伪造标记；
+该历史任务两处缓存合计约8.31 GiB。清理工具的原始成功/失败记录均保留。
 原后台任务曾报告外部未登记缓存约 140.52 GiB / 80.97 GiB，回收 0，40 GiB 预算未达成；
 不自动清理未登记历史缓存，不将该限制隐藏为清理成功。
 
@@ -469,8 +468,8 @@ Mac客户端原生GUI/签名/实际包及匹配Mac/Linux/Docker平台交付、�
 
 范围和版本冻结后先按 [版本规范](Rust_Versioning.md) 及 [发布管线](Rust_Release_Pipeline.md)
 预检，再以最终 main/tag 身份在匹配原生主机构建各 payload 一次、验收一次。
-目前 Cargo 未改至 0.9.0，也未创建对应标签。Windows `fe13b05` 开发候选已按实际
-Cargo `0.8.7` 构建、验收并完成固定安装；后续源码修正尚未交付。最终0.9.0/main/tag
+目前 Cargo 未改至 0.9.0，也未创建对应标签。Windows客户端 `f70156e` 开发候选已按实际
+Cargo `0.8.7` 构建、验收并完成固定安装；核心GUI补验因工具阻塞未完成，保留release门禁。最终0.9.0/main/tag
 身份及七包发行仍待冻结和验收。
 
 | 公开归档（`<tag>` 为最终批准标签） | 验收与更新边界 |
