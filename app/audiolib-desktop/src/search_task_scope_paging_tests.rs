@@ -146,7 +146,7 @@ fn seed_path_pages(fixture: &Fixture) {
 }
 
 #[test]
-fn lower_bound_path_pages_use_continuations_and_only_final_totals_are_exact() {
+fn lower_bound_path_pages_use_continuations_and_observed_counts() {
     isolated("scope_paging::child_lower_bound_path_pages");
 }
 
@@ -177,9 +177,9 @@ fn child_lower_bound_path_pages() {
     });
     assert_eq!(controller.request.lock().unwrap().offset, PAGE_SIZE);
     assert!(controller.request.lock().unwrap().cursor.is_some());
-    assert_eq!(ui.get_page_label(), "2/2");
-    assert!(!ui.get_result_summary().contains('≥'));
-    assert!(ui.get_result_summary().contains("251 sounds"));
+    // A cursor page reports its observed suffix, not an exact global total.
+    assert_eq!(ui.get_page_label(), "2/?");
+    assert!(ui.get_result_summary().contains("≥51 sounds"));
     assert!(!ui.get_can_next());
     let second = controller
         .records
@@ -208,8 +208,8 @@ fn child_lower_bound_path_pages() {
         first
     );
 
-    // Unknown empty deep offsets have a lower bound of zero, not an exact empty
-    // library. Restoration keeps its position instead of clamping to page one.
+    // An exhausted nonzero offset has no exact global count. Do not invent a
+    // total from the offset or clamp it to a last page that was not observed.
     controller.request.lock().unwrap().offset = 1_000;
     controller.request_navigation_search(ui, true, false);
     let ready = controller.clone();
@@ -217,7 +217,25 @@ fn child_lower_bound_path_pages() {
         !ui.get_searching() && ui.get_rows().row_count() == 0 && fully_published(&ready)
     });
     assert_eq!(controller.request.lock().unwrap().offset, 1_000);
-    assert!(ui.get_result_summary().contains("≥0"));
+    assert!(controller.request.lock().unwrap().cursor.is_none());
+    assert_eq!(ui.get_page_label(), "6/?");
+    assert!(ui.get_result_summary().contains("≥0 sounds"));
+    assert!(ui.get_can_previous());
+    assert!(!ui.get_can_next());
+
+    // A populated terminal page without a cursor has traversed the full prefix
+    // and can still publish its exact global total.
+    controller.request.lock().unwrap().offset = PAGE_SIZE;
+    controller.request_navigation_search(ui, true, false);
+    let ready = controller.clone();
+    wait_for(ui, move |ui| {
+        !ui.get_searching() && ui.get_rows().row_count() == 51 && fully_published(&ready)
+    });
+    assert_eq!(controller.request.lock().unwrap().offset, PAGE_SIZE);
+    assert!(controller.request.lock().unwrap().cursor.is_none());
+    assert_eq!(ui.get_page_label(), "2/2");
+    assert!(!ui.get_result_summary().contains('≥'));
+    assert!(ui.get_result_summary().contains("251 sounds"));
     assert!(ui.get_can_previous());
     assert!(!ui.get_can_next());
     finish(&fixture);

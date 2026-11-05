@@ -8,6 +8,17 @@
 //! main (`audio_search`) and directory (`audio_dir_search`) FTS statements before the timer starts. This models the
 //! server's pooled readers, which connect each FTS virtual table once per connection, not per query. Page cache and
 //! OS cache stay cold (purge still runs before each sample); only statement preparation moves out of the timed section.
+//!
+//! `provider <db>` measures production server-provider search on an owned temporary
+//! copy, including result hydration. Supply an immutable, complete SQLite snapshot;
+//! a nonempty source WAL is refused. Source copying and provider startup are outside
+//! the timer; SQLite only opens the owned copy. Defaults: the three timeout queries, all scopes,
+//! five rounds, three warmups per round, `WARM=60` measured samples per round.
+//! `Q` selects one query and `ROUNDS` changes the round count. JSONL output contains
+//! timings/counts, never record paths. Main on this same fixture is a surrogate s8-main
+//! baseline, not a measurement of an actual schema-8 fixture or a performance gate.
+use audiolib_core::{DataProvider, SearchRequest, SearchScope};
+use audiolib_db::SqliteProvider;
 use rusqlite::{Connection, InterruptHandle, OpenFlags};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -781,6 +792,249 @@ fn time<F: FnMut() -> usize>(n: usize, mut f: F) -> (Vec<f64>, usize) {
     (v, hits)
 }
 
+#[derive(PartialEq, Eq)]
+struct ProviderPageSignature {
+    ids: Vec<i64>,
+    total_count: u64,
+    has_next_cursor: bool,
+}
+
+struct ProviderTiming {
+    scope: SearchScope,
+    median_p95_ms: f64,
+    page: ProviderPageSignature,
+}
+
+/// Run the shipped provider rather than the historical SQL prototypes in this binary.
+fn provider_bench(db: &str, warm: usize) -> Result<(), String> {
+    let rounds = match std::env::var("ROUNDS") {
+        Ok(value) => value
+            .parse::<usize>()
+            .map_err(|_| "ROUNDS must be a positive integer".to_string())?,
+        Err(std::env::VarError::NotPresent) => 5,
+        Err(_) => return Err("ROUNDS must be a positive integer".into()),
+    };
+    if rounds == 0 || warm == 0 {
+        return Err("ROUNDS and WARM must be positive".into());
+    }
+    let queries = match std::env::var("Q") {
+        Ok(query) => vec![query],
+        Err(std::env::VarError::NotPresent) => {
+            ["Borg Sound", "Rain Indoor Ambiences", "Car Collection"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        }
+        Err(_) => return Err("Q must contain Unicode search text".into()),
+    };
+    for query in &queries {
+        if query.trim().is_empty() {
+            return Err("Q must contain a nonempty search query".into());
+        }
+        SearchRequest {
+            query: query.clone(),
+            ..Default::default()
+        }
+        .validate()
+        .map_err(|_| "Q does not meet the search input contract".to_string())?;
+    }
+    let source = std::path::Path::new(db);
+    let mut wal_path = source.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    let require_complete_snapshot = || match std::fs::metadata(&wal_path) {
+        Ok(metadata) if metadata.len() != 0 => Err(
+            "Provider mode requires an immutable complete snapshot without a nonempty WAL"
+                .to_string(),
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Cannot verify the source snapshot WAL state".to_string()),
+    };
+    require_complete_snapshot()?;
+    let before =
+        std::fs::metadata(source).map_err(|_| "Cannot inspect the source snapshot".to_string())?;
+    let before_modified = before
+        .modified()
+        .map_err(|_| "Cannot verify the source snapshot modification time".to_string())?;
+    let owned = tempfile::Builder::new()
+        .prefix("audiolib-provider-bench-")
+        .tempdir()
+        .map_err(|_| "Cannot create an owned benchmark directory".to_string())?;
+    let copied = owned.path().join("library.db");
+    {
+        let mut input = std::fs::File::open(source)
+            .map_err(|_| "Cannot read the source snapshot".to_string())?;
+        let mut output = std::fs::File::create(&copied)
+            .map_err(|_| "Cannot create the owned benchmark copy".to_string())?;
+        std::io::copy(&mut input, &mut output)
+            .map_err(|_| "Cannot copy the source snapshot into the owned directory".to_string())?;
+    }
+    require_complete_snapshot()?;
+    let after =
+        std::fs::metadata(source).map_err(|_| "Cannot recheck the source snapshot".to_string())?;
+    if before.len() != after.len() || after.modified().ok() != Some(before_modified) {
+        return Err(
+            "Source snapshot changed while copying; use an immutable complete snapshot".into(),
+        );
+    }
+    let probe = Connection::open_with_flags(&copied, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| "Cannot open the benchmark fixture read-only".to_string())?;
+    let schema_version: i64 = probe
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|_| "Cannot read benchmark fixture schema".to_string())?;
+    let format: String = probe
+        .query_row(
+            "SELECT value FROM library_meta WHERE key='snapshot_format'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Cannot read benchmark fixture format".to_string())?;
+    if schema_version != 9 || format != audiolib_core::compatibility::PLAN_B_V9_FORMAT {
+        return Err("Provider mode requires a published schema-9 sd1 fixture".into());
+    }
+    drop(probe);
+    let provider = SqliteProvider::open_server_existing(
+        &copied,
+        &std::sync::atomic::AtomicBool::new(false),
+        |_| {},
+    )
+    .map_err(|_| {
+        "Cannot initialize the production server provider on the owned copy".to_string()
+    })?;
+    if !provider
+        .path_search_ready()
+        .map_err(|_| "Cannot verify the published directory index".to_string())?
+    {
+        return Err(
+            "Provider mode requires a ready directory index; fallback is not measured".into(),
+        );
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "mode": "provider", "phase": "conditions", "sqlite": rusqlite::version(),
+            "schema_version": schema_version, "format": format, "limit": PAGE,
+            "rounds": rounds, "warmups_per_round": 3, "samples_per_round": warm,
+            "clock": "wall_time_including_hydration", "cache": "warm_provider_and_os",
+            "provider": "server_provider", "owned_fixture_copy": true,
+            "source_unmodified": true, "read_only_search_operations": true,
+            "copy_timed": false, "provider_startup_timed": false, "http_timed": false,
+            "baseline": "surrogate_s8_main_on_same_s9_fixture", "actual_s8_fixture": false,
+            "acceptance_gate": "not_evaluated"
+        })
+    );
+    for query in queries {
+        let mut timings = Vec::new();
+        for scope in [SearchScope::Main, SearchScope::All, SearchScope::Path] {
+            let request = SearchRequest {
+                query: query.clone(),
+                scope,
+                limit: PAGE,
+                ..Default::default()
+            };
+            let mut expected = None;
+            let mut round_p95 = Vec::with_capacity(rounds);
+            for round in 1..=rounds {
+                let mut samples = Vec::with_capacity(warm);
+                let mut cache_hits = 0;
+                for sample in 0..warm.saturating_add(3) {
+                    let start = Instant::now();
+                    let page = provider.search(&request).map_err(|_| {
+                        format!(
+                            "Production provider search failed in scope {}",
+                            scope.as_str()
+                        )
+                    })?;
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    let signature = ProviderPageSignature {
+                        ids: page.results.iter().map(|file| file.id).collect(),
+                        total_count: page.total_count,
+                        has_next_cursor: page.next_cursor.is_some(),
+                    };
+                    if expected.as_ref().is_some_and(|value| *value != signature) {
+                        return Err(
+                            "Search results changed during measurement; use a stable owned fixture"
+                                .into(),
+                        );
+                    }
+                    expected.get_or_insert(signature);
+                    if sample >= 3 {
+                        samples.push(elapsed);
+                        cache_hits += usize::from(page.cache_hit);
+                    }
+                }
+                let (p50, p95, p99) = pct(&mut samples);
+                round_p95.push(p95);
+                let page = expected.as_ref().expect("positive sample count");
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "mode": "provider", "phase": "round", "query": query,
+                        "scope": scope.as_str(), "round": round, "p50_ms": p50,
+                        "p95_ms": p95, "p99_ms": p99, "returned_count": page.ids.len(),
+                        "total_count": page.total_count, "has_next_cursor": page.has_next_cursor,
+                        "ranking_cache_hits": cache_hits,
+                        "total_count_semantics": if scope == SearchScope::Main {
+                            "exact"
+                        } else {
+                            "limit_plus_one_observed_prefix"
+                        }
+                    })
+                );
+            }
+            let mut sorted = round_p95.clone();
+            sorted.sort_by(f64::total_cmp);
+            let middle = sorted.len() / 2;
+            let median_p95_ms = if sorted.len().is_multiple_of(2) {
+                (sorted[middle - 1] + sorted[middle]) / 2.0
+            } else {
+                sorted[middle]
+            };
+            let page = expected.expect("positive round and sample counts");
+            println!(
+                "{}",
+                serde_json::json!({
+                    "mode": "provider", "phase": "summary", "query": query,
+                    "scope": scope.as_str(), "round_p95_ms": round_p95,
+                    "median_p95_ms": median_p95_ms, "returned_count": page.ids.len(),
+                    "total_count": page.total_count, "has_next_cursor": page.has_next_cursor
+                })
+            );
+            timings.push(ProviderTiming {
+                scope,
+                median_p95_ms,
+                page,
+            });
+        }
+        let main = &timings[0];
+        for measured in &timings[1..] {
+            let comparable = measured.scope == SearchScope::All
+                && !main.page.ids.is_empty()
+                && measured.page.ids == main.page.ids
+                && main.median_p95_ms > 0.0;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "mode": "provider", "phase": "comparison", "query": query,
+                    "scope": measured.scope.as_str(),
+                    "baseline": "surrogate_s8_main_on_same_s9_fixture",
+                    "actual_s8_fixture": false, "same_nonempty_ordered_page": comparable,
+                    "ratio_to_surrogate_main": comparable.then(|| measured.median_p95_ms / main.median_p95_ms),
+                    "acceptance_gate": "not_evaluated",
+                    "reason": if comparable {
+                        "same_page_timing_only_not_actual_schema8_acceptance"
+                    } else if measured.scope == SearchScope::Path {
+                        "path_scope_has_different_result_semantics"
+                    } else {
+                        "different_or_empty_page_or_zero_baseline"
+                    }
+                })
+            );
+        }
+    }
+    Ok(())
+}
+
 /// full (re)build of the directory tables; incremental maintenance = same statements restricted to affected dir_ids
 fn build_dir(c: &Connection) {
     c.execute_batch("BEGIN; DROP TABLE IF EXISTS audio_dir_search; DROP TABLE IF EXISTS audio_dir_runs;
@@ -887,6 +1141,12 @@ fn main() {
         ridx(&open(db));
     }
     match a[1].as_str() {
+        "provider" => {
+            if let Err(message) = provider_bench(db, warm) {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
         "warm" => {
             let (c1, c2, c3) = (M::new(open(db)), M::new(open(db)), M::new(open(db)));
             let rounds: usize = std::env::var("ROUNDS")

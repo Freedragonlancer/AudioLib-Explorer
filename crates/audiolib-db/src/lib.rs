@@ -2424,7 +2424,9 @@ impl SqliteProvider {
             // An arbitrary deep offset gives no evidence about the skipped count.
             0
         } else {
-            next_position.saturating_add(u64::from(page.has_more))
+            // Count only observed hits, including the lookahead. An offset past
+            // the end must not manufacture matches; cursors count their suffix.
+            page.observed_count as u64
         };
         Ok(SearchPage {
             returned_count: results.len(),

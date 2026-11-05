@@ -3471,7 +3471,12 @@ impl Controller {
                                                 && state.result_window
                                         },
                                     );
-                                if page.total_count_exact
+                                // An exact cursor count can describe only the remaining
+                                // suffix. Opaque continuations cannot establish a global
+                                // total for offset clamping or result labels.
+                                let global_count_exact =
+                                    page.total_count_exact && job.request.cursor.is_none();
+                                if global_count_exact
                                     && job.request.offset > 0
                                     && (job.request.offset as u64) >= page.total_count
                                 {
@@ -3556,7 +3561,7 @@ impl Controller {
                                     + page.returned_count.saturating_sub(1))
                                     / PAGE_SIZE
                                     + 1;
-                                let pages = if page.total_count_exact {
+                                let pages = if global_count_exact {
                                     page.total_count
                                         .div_ceil(PAGE_SIZE as u64)
                                         .max(1)
@@ -3582,7 +3587,7 @@ impl Controller {
                                     )
                                 };
                                 let chinese = c2.chinese.load(Ordering::Acquire);
-                                let total = if page.total_count_exact {
+                                let total = if global_count_exact {
                                     page.total_count.to_string()
                                 } else {
                                     format!("≥{}", page.total_count)

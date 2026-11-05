@@ -371,8 +371,10 @@ audiolib.example.com:8443 {
 
 - 搜索输入按客户端快照上的 `SearchRequest` 校验：查询最多 500 个字符；独立的非 Han 字母词至少需要两个可搜索 Unicode grapheme（组合重音不另计）。这是已确认的产品行为。GUI 输入一个字母时取消旧请求、保留当前结果与目录并显示“字母搜索请至少输入 2 个字符”，不发送新搜索。直接调用 core/db 或 CLI 则返回 `Validation`，不会当作零命中或内部数据库错误。多词中的单字母代码（例如 `P-51`）、单个 Han 字和纯数字沿用原规则。
 - 两个字母以上支持词内连续片段：`expl`、`plos`、`sion` 匹配 `explosion`，多个词之间为 AND；用户文本中的标点、`OR` 等不作为 FTS5 运算符。服务端已有 `POST /search` 和 `GET /search?q=…&scope=…&limit=…&cursor=…`，无效搜索输入按 §2.1 返回 HTTP 400 `VALIDATION`，过期游标返回409 `CURSOR_STALE`。`POST /search/folders` 尚未实现；RemoteProvider 日常查询仍在本地校验后的只读快照执行。
-- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count`。`scope` 省略或 `main` 时排序与 schema 8 主表一致。
-- `scope=all|path` 使用目录段索引。格式 id 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`sd1`，不是 `sp1`）。请求可带不透明 `cursor`（同时传 `offset`/`page` 时以 cursor 为准）和 1 起的 `page`。响应 `next_cursor` 在末页省略。游标里的 `search_path_rev` 与库不一致时返回 409 `CURSOR_STALE`。`POST /search` 见下表。
+- v1 沿用 `SearchRequest` 的 `limit` + `offset`（UI 现在每页 200），响应带 `total_count` 和 `total_count_exact`。`scope` 省略或 `main` 时排序与 schema 8 主表一致；主表、`filename`、空查询浏览，以及目录索引不可用时 `all` 回退到主表的响应，均保持精确总数。
+- 非空 `scope=all|path` 使用目录段索引。格式 id 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`（`sd1`，不是 `sp1`）。请求可带不透明 `cursor`（同时传 `offset`/`page` 时以 cursor 为准）和 1 起的 `page`。优化的目录相关性分页只取当前页和一条前瞻记录（`limit + 1`），无 cursor 时另实际遍历要跳过的前缀，不为总数扫描全部命中。`total_count` 无 cursor 时等于已观察前缀的数量：有下一页时是总数下界；无下一页时，第一页或含结果的页面才确认精确总数。无 cursor 的非零 offset 空页返回 0，未经短路证明全查询为空时 `total_count_exact=false`，不能直接把 offset 当成计数。
+- 带 cursor 的优化目录页只计该 cursor 之后当前页和前瞻记录，通常为 `returned_count + 1`，末页为 `returned_count`，**不是整个查询的总数**，不能累加或用于计算最终页数。有下一页时 `total_count_exact=false`，末页为 `true`；末页的标记只确认该游标范围已穷尽，不能把局部计数解释为全查询总数。短路证明整个查询为空时返回精确的 0。带筛选或非相关性排序的 SQL 目录查询则返回精确的全查询总数。
+- 目录搜索以非空 `next_cursor` 作为继续翻页的依据；末页省略该字段。内部 `has_more` 来自前瞻记录，不是 `SearchPage` 响应字段。界面在 `total_count_exact=false` 时显示“至少/≥”，导航结合已走过的位置与 `next_cursor`，不能把 cursor 局部计数当最终总数。游标绑定请求条件、provider 会话和数据库变更修订；`search_path_rev` 只描述目录格式版本，不能替代内容修订。范围、筛选、排序、库内容或 provider 会话变化后拒绝旧游标并从第一页重取。`POST /search` 见下表。
 - 扫描历史与客户端本机播放历史使用 `limit` + `offset`；服务端兼容 `/history/plays` 始终返回 `[]`。
 
 ## 6. 端点清单

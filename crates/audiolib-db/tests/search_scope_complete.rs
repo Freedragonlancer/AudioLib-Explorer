@@ -140,16 +140,16 @@ fn optimized_cursor_binds_query_scope_visibility_revision_and_provider_session()
 }
 
 #[test]
-fn optimized_cursor_preserves_global_position_and_reports_count_accuracy() {
+fn optimized_cursor_reports_observed_suffix_and_deep_offset_counts() {
     let (_temp, provider) = fixture();
     let mut selection = request(SearchScope::Path, "corridor");
     selection.limit = 1;
     let mut all = Vec::new();
-    for index in 0..3 {
+    for (index, observed_count) in [2, 2, 1].into_iter().enumerate() {
         let page = provider.search(&selection).unwrap();
         all.extend(page.results.iter().map(|file| file.id));
         assert_eq!(page.total_count_exact, index == 2);
-        assert_eq!(page.total_count, if index == 0 { 2 } else { 3 });
+        assert_eq!(page.total_count, observed_count);
         selection.cursor = page.next_cursor;
         // Cursor position wins over a caller's unrelated offset.
         selection.offset = 900;

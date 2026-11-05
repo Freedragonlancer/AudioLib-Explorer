@@ -113,15 +113,17 @@
   - 第 0 层「主字段完整命中」：整串在主表命中，分数 = 主表 bm25，顺序与 s8 **逐条一致**（直接执行 s8 的 `ORDER BY bm25,id LIMIT`）。
   - 第 1 层「混合」：部分词在主表、部分在路径，同层按文件 rowid 升序。
   - 第 2 层「纯路径」：全部词只在路径命中，同层按文件 rowid 升序（#208 PS-23/PG-17/VN-13）。
-- 执行：conn1 跑主表 TOP-k（s8 原句）；conn2 并行算各词目录集（目录 FTS + 内存展开）；只在当前页落到 1/2 层时才**按页**把目录集展开为文件（按 dir_runs 顺序流式取，取满一页即停），高频路径词不物化文件集合。纯路径词无主表命中时用 conn3 取它在主表的 rowid 集，与 conn1 并行。
-- 取消：三条连接各持 `InterruptHandle`，取消时全部 `sqlite3_interrupt`。
+- 执行：主表 TOP-k、目录集和结果 Metadata 共用固定的读事务。混合层按 rowid 升序归并各词主表命中流，每流每批最多 256 行；完整主表命中的排除也使用有界流，续批推进 rowid 下界，不逐文件重启 MATCH、不物化整张命中表。纯路径层按 `dir_runs` 顺序每批最多 256 行展开，只取当前页所需结果及前瞻。
+- 目录成员按实际 `folder_id` 核对；不能把 run 范围内的 `folder_id=NULL` 文件认作该目录成员。未分配目录的文件仍计入库文件总数，并可由主字段命中。
+- 取消：查询继续使用提供者的取消令牌和 SQLite 中断机制，覆盖同一读事务中的各阶段。
 - 带筛选或非相关性排序的 `all/path` 使用参数化 SQL，将逐词 FTS5 目录匹配与闭包成员条件交给 SQLite；不在应用内物化全部文件 ID。目录、专辑、收藏及 Metadata 条件与普通搜索共用。相关性排序仍按以上三层；显式排序作用于整个命中集合，游标同时绑定请求和库修订号。folder/album facets 使用同一集合与读事务。
 
 ### 3.3 HTTP 契约
 - 请求 DTO：`scope=main|all|path|filename`（默认 `main` = s8 行为）、不透明 `cursor`、`limit`；`offset/page` 保留兼容，**同时传以 cursor 为准**。目录相关性游标与筛选/排序游标使用不同内部编码，调用方不得自行构造。
-- 响应页含记录、`total_count`、`total_count_exact` 和 `next_cursor`（末页为 `null`）。优化的目录分页在未遍历完时返回已知下界，`total_count_exact=false`；界面显示“至少/≥”，不把下界当最终页数。客户端以 `next_cursor` 和已走过的位置导航，最后一页才确认精确总数。普通/文件名及 SQL 筛选页返回精确总数。
+- 响应使用 `SearchPage`：`results`、`returned_count`、`total_count`、`total_count_exact` 和 `next_cursor`（末页省略）。优化的非空目录分页只观察当前页、一条前瞻及实际跳过的前缀，不为总数遍历全部命中。无 cursor 时 `total_count` 是已观察前缀的数量，有下一页时只是下界；无下一页时，第一页或含结果的页面才确认精确总数。无 cursor 的非零 offset 空页返回 0，未经短路证明全查询为空时 `total_count_exact=false`，不能凭 offset 制造计数。有 cursor 时只计该 cursor 之后当前页和前瞻记录，有下一页时 `total_count_exact=false`，末页为 `true`；末页的标记只确认该游标范围已穷尽，局部计数仍不是全查询总数。短路证明全查询为空时返回精确的 0。主表、文件名、空查询浏览、不可用时的 `all` 主表回退以及 SQL 筛选/排序页保持精确总数。详见 [API 分页契约](api/README.md#5-分页)。
+- 目录分页以 `next_cursor` 和已走过的位置导航；内部 `has_more` 不增加到响应中。`total_count_exact=false` 时界面显示“至少/≥”，不能把 cursor 局部计数或下界当最终总数/页数。
 - 游标绑定请求条件、provider 会话和数据库变更修订；改查询、范围、筛选、排序、库内容或重开库后必须拒绝旧游标并从第一页重取。DataProvider 的 `CURSOR_STALE` 在现有 HTTP 搜索中映射为409，其他无效输入映射为400 `VALIDATION`。`search_path_rev` 仍描述目录格式版本，不能替代内容修订。
-- 现状：服务端已有 `GET /api/v1/search` 和 `POST /api/v1/search`，使用上述四种 scope 和 DataProvider 契约；`POST /search/folders` 尚未实现。RemoteProvider 日常查询仍在校验后的本地只读快照上执行，与本地库共用查询实现，不通过在线搜索路由。
+- 现状：服务端已有 `GET /api/v1/search` 和 `POST /api/v1/search`，使用上述四种 scope 和 DataProvider 契约；`POST /search/folders` 尚未实现。RemoteProvider 日常查询仍在校验后的本地只读快照上执行，与本地库共用查询实现，不通过在线搜索路由。迁移工具的搜索动作另投影为 `ids`、`next_cursor`（末页为 `null`），不返回 `SearchPage.total_count`。
 
 ### 3.4 实测（bench 副本 909,342 行，schema 8 基线 vs 目录段方案）
 口径（Paul 定）：每条查询 5 轮，每轮 3 次预热 + 60 次，取各轮 p95 的中位数，**≤ s8 × 1.2 即过**。
