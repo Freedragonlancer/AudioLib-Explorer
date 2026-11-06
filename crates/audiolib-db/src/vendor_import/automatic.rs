@@ -1,6 +1,7 @@
 // crates/audiolib-db/src/vendor_import/automatic.rs
 //! Source-owned supplementary Metadata from successfully scanned WAVs in the
-//! table's own subtree or its sibling `*--Docs` / `*--Sounds*` subtrees.
+//! table's own subtree or, for a `{stem}--Docs` / `{stem}--Sounds*` table
+//! directory, the subtrees of its same-stem sibling pack folders.
 //! Parsing is isolated; each durable batch replaces only this source's events.
 mod rooted;
 
@@ -69,6 +70,16 @@ fn identity(sheet: &VendorSheetPreview, cells: &[String]) -> Option<String> {
         (Some(name), _) | (_, Some(name)) => Some(name),
         _ => None,
     }
+}
+
+/// The case-folded pack stem of a `{stem}--Docs` or `{stem}--Sounds*` folder.
+fn pack_stem(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    let stem = match lower.strip_suffix("--docs") {
+        Some(stem) => stem,
+        None => &lower[..lower.rfind("--sounds")?],
+    };
+    (!stem.is_empty()).then(|| stem.to_owned())
 }
 
 fn mtime(metadata: &fs::Metadata) -> Result<i64> {
@@ -513,9 +524,9 @@ impl SqliteProvider {
     }
 
     /// Folders whose WAVs one table may describe: the table directory's whole
-    /// subtree, plus the subtrees of sibling `*--Docs` / `*--Sounds*` folders
-    /// when the table is below the scan root. This never widens to the library
-    /// root, so coincident basenames elsewhere in a library are not candidates.
+    /// subtree and, only when that directory is itself `{stem}--Docs` or
+    /// `{stem}--Sounds*`, the subtrees of siblings with the same stem. Other
+    /// packs side by side and the library root are never candidates.
     fn automatic_scope(&self, parent: &Path, root: &Path) -> Result<Vec<(i64, String)>> {
         let conn = self.writer()?;
         let own_text = crate::folder_path_text(parent);
@@ -526,17 +537,25 @@ impl SqliteProvider {
         }
         let approved = PathBuf::from(crate::display_path(root));
         let own = PathBuf::from(crate::display_path(parent));
+        let own_stem = parent
+            .file_name()
+            .and_then(|name| pack_stem(&name.to_string_lossy()));
         if own != approved
+            && let Some(own_stem) = own_stem
             && let Some(grand) = own.parent().filter(|path| path.starts_with(&approved))
             && let Some(grand) =
                 crate::path_identity::folder_id(&conn, &crate::folder_path_text(grand))?
         {
             let mut query = conn
-                .prepare_cached("SELECT id,folder_path FROM folders WHERE parent_id=?1 AND (folder_name LIKE '%--docs' OR folder_name LIKE '%--sounds%') ORDER BY id")
+                .prepare_cached("SELECT id,folder_path,folder_name FROM folders WHERE parent_id=?1 AND (folder_name LIKE '%--docs' OR folder_name LIKE '%--sounds%') ORDER BY id")
                 .map_err(db_error)?;
             let siblings = query
                 .query_map([grand], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(db_error)?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -544,8 +563,11 @@ impl SqliteProvider {
             anchors.extend(
                 siblings
                     .into_iter()
-                    .filter(|(_, path)| crate::normalize_source_path_identity(path) != own_key)
-                    .map(|(id, _)| id),
+                    .filter(|(_, path, name)| {
+                        crate::normalize_source_path_identity(path) != own_key
+                            && pack_stem(name).as_deref() == Some(own_stem.as_str())
+                    })
+                    .map(|(id, _, _)| id),
             );
         }
         let mut scope = BTreeMap::new();

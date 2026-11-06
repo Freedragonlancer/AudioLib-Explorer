@@ -504,3 +504,80 @@ fn duplicate_basenames_inside_the_table_subtree_remain_ambiguous() {
     assert_eq!((summary.matched, summary.ambiguous), (0, 1));
     assert_eq!(description(&provider, &root, "Lib/A/hit.wav"), None);
 }
+
+#[test]
+fn side_by_side_packs_only_pair_docs_and_sounds_with_the_same_stem() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    for directory in [
+        "Foley/PackA--Docs",
+        "Foley/PackA--Sounds",
+        "Foley/PackB--Docs",
+        "Foley/PackB--Sounds 48k",
+    ] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    fs::write(root.join("Foley/PackA--Sounds/a1.wav"), wav()).unwrap();
+    fs::write(root.join("Foley/PackB--Sounds 48k/b1.wav"), wav()).unwrap();
+    let root = root.canonicalize().unwrap();
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    let session = ScanService::new(provider.clone())
+        .scan(
+            &root,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap()
+        .session_id;
+    let table = "Filename,Description\na1.wav,alpha\nb1.wav,beta\n";
+    fs::write(root.join("Foley/PackA--Docs/table.csv"), table).unwrap();
+    let a = refresh(&provider, &root, "Foley/PackA--Docs/table.csv", session);
+    assert_eq!((a.matched, a.unmatched), (1, 1));
+    assert_eq!(
+        description(&provider, &root, "Foley/PackA--Sounds/a1.wav").as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        description(&provider, &root, "Foley/PackB--Sounds 48k/b1.wav"),
+        None
+    );
+
+    // A table in a Sounds folder sees its own pack's siblings, not the other pack.
+    fs::write(
+        root.join("Foley/PackB--Sounds 48k/table.csv"),
+        "Filename,Description\na1.wav,wrong\n",
+    )
+    .unwrap();
+    let b = refresh(
+        &provider,
+        &root,
+        "Foley/PackB--Sounds 48k/table.csv",
+        session,
+    );
+    assert_eq!((b.matched, b.unmatched), (0, 1));
+
+    // A table in an ordinary folder does not widen to sibling packs at all.
+    fs::create_dir_all(root.join("Foley/Notes")).unwrap();
+    fs::write(root.join("Foley/Notes/table.csv"), table).unwrap();
+    let n = refresh(&provider, &root, "Foley/Notes/table.csv", session);
+    assert_eq!((n.matched, n.unmatched), (0, 2));
+}
+
+#[test]
+fn pack_stems_are_case_insensitive_and_require_a_marker() {
+    assert_eq!(
+        pack_stem("Rustle_Tones--Docs").as_deref(),
+        Some("rustle_tones")
+    );
+    assert_eq!(
+        pack_stem("Rustle_Tones--Sounds 48k").as_deref(),
+        Some("rustle_tones")
+    );
+    assert_eq!(
+        pack_stem("RUSTLE_TONES--SOUNDS").as_deref(),
+        Some("rustle_tones")
+    );
+    assert_eq!(pack_stem("Rustle_Tones"), None);
+    assert_eq!(pack_stem("--Docs"), None);
+}
