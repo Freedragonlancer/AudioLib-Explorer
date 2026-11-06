@@ -539,7 +539,7 @@ component OverviewBar inherits Rectangle {
 // new bounds of any element whose size changes, so one rectangle growing by a
 // pixel per frame would repaint the whole played area on every frame. Here only
 // the tile under the playhead changes, and a frame repaints at most two tiles.
-component PlayedRegion {
+export component PlayedRegion {
     in property <float> fraction;
     in property <float> position;
     in property <float> duration;
@@ -551,6 +551,13 @@ component PlayedRegion {
     in property <bool> faded: false;
     property <length> head: root.fraction * root.width;
     property <length> tile: 32px;
+    // Partial damage floors its left edge, while rectangle drawing rounds it.
+    // Keep shared edges a quarter physical pixel inside the same rounding cell:
+    // f32 coordinate conversions then cannot erase the preceding tile's last
+    // pixel. Raster edges stay unchanged, with no overlapping translucent fill.
+    function snapped-x(value: length) -> length {
+        return (round((root.absolute-position.x + value) / 1phx) + 0.25) * 1phx - root.absolute-position.x;
+    }
     // The played range for assistive technology. It has no fill, so it never
     // repaints anything when it grows.
     Rectangle {
@@ -559,8 +566,10 @@ component PlayedRegion {
         accessible-value: root.position; accessible-value-minimum: 0; accessible-value-maximum: root.duration;
     }
     for i in root.paint ? Math.ceil(root.width / root.tile) : 0: Rectangle {
-        x: i * root.tile; y: 0px; height: root.height;
-        width: clamp(root.head - i * root.tile, 0px, root.tile);
+        property <length> start: i == 0 ? 0px : root.snapped-x(i * root.tile);
+        property <length> end: (i + 1) * root.tile >= root.width ? root.width : root.snapped-x((i + 1) * root.tile);
+        x: self.start; y: 0px; height: root.height;
+        width: clamp(root.head - self.start, 0px, max(0px, self.end - self.start));
         background: root.tint;
         opacity: root.faded ? 0.5 : 1;
         animate opacity { duration: Theme.motion-slow; }
@@ -577,6 +586,7 @@ component ClassicTool inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> active: false;
     in property <bool> checkable: false;
+    in property <bool> active-underline: true;
     in property <bool> primary: false;
     /// A mouse click must not claim keyboard focus, so transport keys (e.g. Space
     /// for the result list) keep working right after a click. Tabbed focus still
@@ -643,7 +653,7 @@ component ClassicTool inherits Rectangle {
             horizontal-alignment: center; vertical-alignment: center;
             animate color { duration: Theme.motion-fast; }
         }
-        if root.checkable && root.active: Rectangle {
+        if root.checkable && root.active && root.active-underline: Rectangle {
             width: 12px * Theme.ui-scale; height: 2px * Theme.ui-scale;
             x: (parent.width - self.width) / 2; y: parent.height - self.height - 2px * Theme.ui-scale;
             border-radius: 1px; background: root.primary ? Theme.on-accent : Theme.accent;
@@ -842,7 +852,7 @@ component ClassicAuditionPanel inherits Rectangle {
                     }
                     ClassicTool {
                         height: 28px * Theme.ui-scale; icon: @image-url("icons/play.svg");
-                        label: root.chinese ? "播放" : "Play"; tip-align: -1; primary: true; checkable: true;
+                        label: root.chinese ? "播放" : "Play"; tip-align: -1; checkable: true; active-underline: false;
                         active: root.transport-ready && root.state == 3;
                         enabled: root.transport-ready && root.state != 3;
                         hint: !root.transport-ready ? root.unavailable
