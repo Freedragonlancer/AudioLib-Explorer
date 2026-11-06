@@ -790,6 +790,18 @@ pub enum Notice {
     },
 }
 
+/// True when `current` parses as a SemVer at or above `minimum`.
+/// An unparsable side does not count as meeting the minimum.
+fn client_version_meets(current: &str, minimum: &str) -> bool {
+    match (
+        semver::Version::parse(current.trim()),
+        semver::Version::parse(minimum.trim()),
+    ) {
+        (Ok(current), Ok(minimum)) => current >= minimum,
+        _ => false,
+    }
+}
+
 impl Notice {
     /// Session de-duplication key (progress changes do not re-show a notice).
     pub fn key(&self) -> &'static str {
@@ -809,6 +821,21 @@ impl Notice {
             self,
             Self::Migrating { .. } | Self::MigrationPaused { .. } | Self::MigrationFailed { .. }
         )
+    }
+
+    /// Same as [`Self::offers_update_check`], except a client already at or newer
+    /// than an advertised `min_client_version` is not prompted.
+    pub fn offers_update_check_for(&self, current_version: &str) -> bool {
+        if !self.offers_update_check() {
+            return false;
+        }
+        match self {
+            Self::ClientUpgradeAvailable {
+                version: Some(minimum),
+                ..
+            } => !client_version_meets(current_version, minimum),
+            _ => true,
+        }
     }
 
     pub fn text(&self, chinese: bool) -> String {
@@ -1260,6 +1287,34 @@ mod tests {
         assert_eq!(failed.state, MigrationState::Failed);
         assert_eq!(failed.error.as_deref(), Some("read_only"));
         assert_eq!(parse_schema_migration_header(""), None);
+    }
+
+    #[test]
+    fn current_client_is_not_offered_an_update_at_or_above_min_client_version() {
+        let current = "0.9.1";
+        let at_minimum = Notice::ClientUpgradeAvailable {
+            version: Some(current.into()),
+            level: ClientUpgradeLevel::Recommended,
+        };
+        assert!(at_minimum.offers_update_check());
+        assert!(!at_minimum.offers_update_check_for(current));
+        assert!(!at_minimum.offers_update_check_for("0.9.2"));
+        assert!(!at_minimum.offers_update_check_for("0.9.1+local.1"));
+        assert!(at_minimum.offers_update_check_for("0.9.0"));
+        assert!(at_minimum.offers_update_check_for("0.9.1-beta.1"));
+        let newer = Notice::ClientUpgradeAvailable {
+            version: Some("0.9.2".into()),
+            level: ClientUpgradeLevel::Recommended,
+        };
+        assert!(newer.offers_update_check_for(current));
+        let unmarked = Notice::ClientUpgradeAvailable {
+            version: None,
+            level: ClientUpgradeLevel::Recommended,
+        };
+        assert!(unmarked.offers_update_check_for(current));
+        let path = Notice::PathSearchNeedsUpgrade;
+        assert!(path.offers_update_check_for(current));
+        assert!(!Notice::Migrating { percent: None }.offers_update_check_for(current));
     }
 
     #[test]

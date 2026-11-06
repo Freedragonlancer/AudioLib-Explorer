@@ -1214,6 +1214,7 @@ impl Controller {
         self.start_revision_poller();
         if let Some(startup) = startup {
             let deferred = startup.state.is_none();
+            let opened_cache = startup.state.is_some();
             self.remote_mode.store(true, Ordering::Release);
             self.remote.lock().unwrap().state = startup.state;
             if let Some(ui) = self.ui.upgrade() {
@@ -1235,6 +1236,11 @@ impl Controller {
                         self.remote.lock().unwrap().startup_check = true;
                     }
                 }
+            }
+            if opened_cache {
+                // The last snapshot is already open. Read `/capabilities` the same
+                // way a successful sync does, without waiting for that sync.
+                self.refresh_server_manage();
             }
             self.start_sync(false, deferred);
         } else if let Some(ui) = self.ui.upgrade() {
@@ -4365,6 +4371,268 @@ mod tests {
         .unwrap();
         assert_eq!(kind, NOTICE_UPDATE);
         assert!(text.contains("a → b"), "{text}");
+    }
+
+    #[test]
+    fn opening_a_cached_snapshot_refreshes_capabilities_without_a_user_sync() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::remote_mode::tests::child_cached_snapshot_refreshes_capabilities",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "Cached snapshot capability refresh failed: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated cached snapshot capability refresh"]
+    fn child_cached_snapshot_refreshes_capabilities() {
+        use std::io::{Read, Write};
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let saw_catalog = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server_catalog = saw_catalog.clone();
+        let capabilities = serde_json::to_vec(&serde_json::json!({
+            "compatibility": audiolib_core::compatibility::compatibility_manifest(),
+            "can_manage": true,
+            "client_upgrade": {
+                "level": "recommended",
+                "min_client_version": env!("CARGO_PKG_VERSION"),
+                "missing_features": ["search_path"],
+                "served_snapshot_format": audiolib_core::compatibility::PLAN_B_FORMAT
+            }
+        }))
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            while !server_stop.load(Ordering::Acquire) {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => return,
+                };
+                socket.set_nonblocking(false).unwrap();
+                let capabilities = capabilities.clone();
+                let saw_catalog = server_catalog.clone();
+                std::thread::spawn(move || {
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        if socket.read(&mut byte).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        request.push(byte[0]);
+                        if request.len() > 64 * 1024 {
+                            return;
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request);
+                    let line = request.lines().next().unwrap_or("");
+                    let (status, content_type, body) = if line
+                        .starts_with("GET /api/v1/capabilities ")
+                    {
+                        let marked = request.lines().any(|header| {
+                            header
+                                .to_ascii_lowercase()
+                                .starts_with("x-audiolib-client-compatibility:")
+                        });
+                        if marked {
+                            saw_catalog.store(true, Ordering::Release);
+                        }
+                        (200, "application/json", capabilities)
+                    } else if line.starts_with("GET /api/v1/health ") {
+                        (
+                            200,
+                            "application/json",
+                            br#"{"status":"ok","version":"0.9.1"}"#.to_vec(),
+                        )
+                    } else {
+                        (
+                            500,
+                            "application/json",
+                            br#"{"error_code":"UNAVAILABLE","message":"library is not part of this test"}"#
+                                .to_vec(),
+                        )
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes());
+                    let _ = socket.write_all(&body);
+                });
+            }
+        });
+
+        let root = std::env::temp_dir().join(format!(
+            "audiolib-desktop-capabilities-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let snapshot = root.join("snapshot.db");
+        drop(SqliteProvider::open(&snapshot).unwrap());
+        let provider = Arc::new(SqliteProvider::open_read_only(&snapshot).unwrap());
+        let mut config = AppConfig::load_in(root.join("preferences")).unwrap();
+        config.data_source.mode = DataSourceMode::Server;
+        config.data_source.server_url = url.clone();
+        config.data_source.poll_interval_secs = 0;
+        config.data_source.auto_sync = false;
+        let state = audiolib_remote::CacheState {
+            library_id: "startup-cache".into(),
+            server_url: url.clone(),
+            schema_version: 9,
+            ..Default::default()
+        };
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            ..Default::default()
+        };
+        let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new_with_source(
+            &ui,
+            provider.clone(),
+            engine.handle(),
+            config,
+            playback,
+            Some(RemoteStartup {
+                provider: provider.clone(),
+                state: Some(state.clone()),
+            }),
+        );
+        let mut swap_config = AppConfig::load_in(root.join("preferences")).unwrap();
+        swap_config.data_source.mode = DataSourceMode::Server;
+        swap_config.data_source.server_url = url.clone();
+        swap_config.data_source.poll_interval_secs = 0;
+        swap_config.data_source.auto_sync = false;
+        let swap_ui = AppWindow::new().unwrap();
+        let swapped = Controller::new(
+            &swap_ui,
+            provider,
+            engine.handle(),
+            swap_config,
+            PlaybackConfig {
+                volume: 0.0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            swapped
+                .remote
+                .lock()
+                .unwrap()
+                .manage
+                .capabilities_for(&url)
+                .is_none()
+        );
+        let startup = controller.clone();
+        let swap_wait = swapped.clone();
+        let server_url = url.clone();
+        let startup_ui = ui.as_weak();
+        let startup_seen = std::rc::Rc::new(std::cell::Cell::new(false));
+        let swap_started = std::rc::Rc::new(std::cell::Cell::new(false));
+        let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+        let saw_startup = startup_seen.clone();
+        let started_swap = swap_started.clone();
+        let done = finished.clone();
+        let timer = slint::Timer::default();
+        let started = Instant::now();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(20),
+            move || {
+                assert!(
+                    started.elapsed() < Duration::from_secs(20),
+                    "capabilities were not read after opening the cached snapshot"
+                );
+                if !saw_startup.get() {
+                    let stored = startup
+                        .remote
+                        .lock()
+                        .unwrap()
+                        .manage
+                        .capabilities_for(&server_url)
+                        .is_some();
+                    if !stored {
+                        return;
+                    }
+                    assert!(
+                        saw_catalog.load(Ordering::Acquire),
+                        "GET /capabilities must carry the client compatibility catalog"
+                    );
+                    assert!(
+                        startup_ui
+                            .upgrade()
+                            .is_some_and(|window| !window.get_update_visible()),
+                        "a client at min_client_version must not open the update dialog"
+                    );
+                    assert!(
+                        startup.remote_artwork_context().is_some(),
+                        "artwork can use the refreshed capabilities without another sync"
+                    );
+                    saw_startup.set(true);
+                }
+                if !started_swap.get() {
+                    // A provider swap bumps the library generation and discards a
+                    // capabilities read started before that snapshot was current.
+                    started_swap.set(true);
+                    swap_wait.run_library_operation(LibraryOperation::DataSource(
+                        DataSourceSwitch::Server {
+                            database: snapshot.clone(),
+                            state: Some(Box::new(state.clone())),
+                        },
+                    ));
+                    return;
+                }
+                let stored = swap_wait
+                    .remote
+                    .lock()
+                    .unwrap()
+                    .manage
+                    .capabilities_for(&server_url)
+                    .is_some();
+                if stored && !done.replace(true) {
+                    assert!(swap_wait.remote_artwork_context().is_some());
+                    slint::quit_event_loop().unwrap();
+                }
+            },
+        );
+        ui.show().unwrap();
+        swap_ui.show().unwrap();
+        slint::run_event_loop().unwrap();
+        timer.stop();
+        assert!(startup_seen.get());
+        assert!(finished.get());
+        controller.shutdown();
+        swapped.shutdown();
+        ui.hide().unwrap();
+        swap_ui.hide().unwrap();
+        stop.store(true, Ordering::Release);
+        let _ = std::net::TcpStream::connect(url.trim_start_matches("http://"));
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

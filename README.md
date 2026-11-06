@@ -30,7 +30,7 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 
 AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes WAV, FLAC and Ogg libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 added Linux x64 server and Docker amd64/arm64 deliverables. This README describes the current development source; published packages retain the features and identity of their own release tag.
 
-- **Source development version:** 0.9.1 (workspace `Cargo.toml`)
+- **Source development version:** 0.9.2 (workspace `Cargo.toml`)
 - **HTTP API:** `/api/v1/` for library/audio operations; `/api/vendor-import/` for managed vendor import
 - **Database schema:** ordinary local writers use 8; explicit server migration can publish 9. Known complete schema 3–9 snapshots are readable only after format validation.
 - **Writable library format:** ordinary local writers target `ale-s8-cld1-t3-m2-p1-a1`; only the dedicated server writer writes completed `ale-s9-cld1-t3-m2-p1-a1-sd1`. Client snapshots stay read-only. Shared albums and original Metadata JSON TEXT are retained; Metadata compression is deferred, while snapshot transport uses zstd.
@@ -167,7 +167,7 @@ Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the 
 $releaseCommit = (git rev-parse HEAD).Trim()
 $buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.9.1 -ExpectedCommit $releaseCommit -BuildReport $buildProof -ValidateRuntime
+pwsh ./tools/package-macos-client.ps1 -Tag v0.9.2 -ExpectedCommit $releaseCommit -BuildReport $buildProof -ValidateRuntime
 ```
 
 Run the Mac packaging command in a logged-in desktop session to complete structural and native acceptance together once. If that session is unavailable, omit `-ValidateRuntime` and complete runtime acceptance later. Run `validate-macos-client.ps1` separately only if runtime acceptance was deferred, artifacts changed or a different host must verify them; see the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.

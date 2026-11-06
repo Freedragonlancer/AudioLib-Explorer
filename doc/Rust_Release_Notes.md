@@ -1,8 +1,19 @@
+# 0.9.2：服务器模式重启后保留封面，并避免对当前客户端误弹升级窗
+
+程序 0.9.2 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
+
+以已发布的 `v0.9.1` 为基线。完整格式保持 `ale-s8-cld1-t3-m2-p1-a1` / 服务端 `ale-s9-cld1-t3-m2-p1-a1-sd1`，不引入数据库迁移。
+
+- **服务器模式封面与启动同步（#236）**：打开上次缓存快照后就会请求 `/capabilities`，不再只在点同步成功后才拉取。在 capabilities 尚未就绪时继续使用已经读到的磁盘封面，避免重启后封面空白、必须再同步一次。
+- **升级提示**：GET `/capabilities` 带上兼容头；当正在运行的客户端已经达到 `min_client_version` 时，不再弹出 Software update 窗口。
+
+本次不改变源 WAV、Metadata 存储格式、HTTP API 或服务端写目标。
+
 # 0.9.1：sidecar-v1 跨子目录与 Docs/Sounds 兄弟目录匹配
 
 程序 0.9.1 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-以已发布的 `v0.9.0` 为基线。完整格式保持 `ale-s8-cld1-t3-m2-p1-a1` / 服务端 `ale-s9-cld1-t3-m2-p1-a1-sd1`，不引入数据库迁移。
+已发布。以已发布的 `v0.9.0` 为基线。完整格式保持 `ale-s8-cld1-t3-m2-p1-a1` / 服务端 `ale-s9-cld1-t3-m2-p1-a1-sd1`，不引入数据库迁移。
 
 - **扫描 sidecar-v1 表格匹配（#233）**：自动发现的 CSV/TSV/XLS/XLSX 在匹配 WAV 时，可覆盖表格目录子树，以及扫描根下同 stem 的 `{stem}--Docs` / `{stem}--Sounds*` 兄弟目录。
 - 仅当表格所在目录本身是 `{stem}--Docs` 或 `{stem}--Sounds*` 时，才扩展到同 stem 兄弟；并排不同 pack 不会交叉匹配。
