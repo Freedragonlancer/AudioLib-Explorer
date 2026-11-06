@@ -393,3 +393,191 @@ fn opened_file_and_parent_are_pinned_until_source_copy_finishes() {
     drop(source);
     fs::rename(&path, parent.join("moved.csv")).unwrap();
 }
+
+fn description(provider: &SqliteProvider, root: &Path, relative: &str) -> Option<String> {
+    let id = provider
+        .find_audio_by_path(&root.join(relative))
+        .unwrap()
+        .unwrap()
+        .id;
+    metadata(provider, id)["vendor_metadata"]["fields"]["description"]
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value["value"].as_str().map(str::to_owned))
+        })
+}
+
+#[test]
+fn tables_match_their_subtree_and_docs_sounds_siblings_but_not_the_library_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    for directory in [
+        "Lib/Sub",
+        "Other",
+        "Pack/Pack--Docs",
+        "Pack/Pack--Sounds 48k",
+        "Pack/Extras",
+    ] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    for file in [
+        "Lib/same.wav",
+        "Lib/Sub/child.wav",
+        "Other/elsewhere.wav",
+        "Pack/Pack--Sounds 48k/sibling.wav",
+        "Pack/Extras/extra.wav",
+    ] {
+        fs::write(root.join(file), wav()).unwrap();
+    }
+    let root = root.canonicalize().unwrap();
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    let session = ScanService::new(provider.clone())
+        .scan(
+            &root,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap()
+        .session_id;
+    fs::write(
+        root.join("Lib/table.csv"),
+        "Filename,Description\nsame.wav,alpha\nchild.wav,beta\nelsewhere.wav,delta\nsame,nosuffix\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("Pack/Pack--Docs/table.csv"),
+        "Filename,Description\nsibling.wav,gamma\nextra.wav,epsilon\n",
+    )
+    .unwrap();
+
+    let lib = refresh(&provider, &root, "Lib/table.csv", session);
+    assert_eq!((lib.matched, lib.unmatched, lib.ambiguous), (2, 2, 0));
+    let pack = refresh(&provider, &root, "Pack/Pack--Docs/table.csv", session);
+    assert_eq!((pack.matched, pack.unmatched, pack.ambiguous), (1, 1, 0));
+
+    assert_eq!(
+        description(&provider, &root, "Lib/same.wav").as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        description(&provider, &root, "Lib/Sub/child.wav").as_deref(),
+        Some("beta")
+    );
+    assert_eq!(
+        description(&provider, &root, "Pack/Pack--Sounds 48k/sibling.wav").as_deref(),
+        Some("gamma")
+    );
+    assert_eq!(description(&provider, &root, "Other/elsewhere.wav"), None);
+    assert_eq!(description(&provider, &root, "Pack/Extras/extra.wav"), None);
+}
+
+#[test]
+fn duplicate_basenames_inside_the_table_subtree_remain_ambiguous() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    fs::create_dir_all(root.join("Lib/A")).unwrap();
+    fs::create_dir_all(root.join("Lib/B")).unwrap();
+    fs::write(root.join("Lib/A/hit.wav"), wav()).unwrap();
+    fs::write(root.join("Lib/B/hit.wav"), wav()).unwrap();
+    let root = root.canonicalize().unwrap();
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    let session = ScanService::new(provider.clone())
+        .scan(
+            &root,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap()
+        .session_id;
+    fs::write(
+        root.join("Lib/table.csv"),
+        "Filename,Description\nhit.wav,boom\n",
+    )
+    .unwrap();
+    let summary = refresh(&provider, &root, "Lib/table.csv", session);
+    assert_eq!((summary.matched, summary.ambiguous), (0, 1));
+    assert_eq!(description(&provider, &root, "Lib/A/hit.wav"), None);
+}
+
+#[test]
+fn side_by_side_packs_only_pair_docs_and_sounds_with_the_same_stem() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("audio");
+    for directory in [
+        "Foley/PackA--Docs",
+        "Foley/PackA--Sounds",
+        "Foley/PackB--Docs",
+        "Foley/PackB--Sounds 48k",
+    ] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    fs::write(root.join("Foley/PackA--Sounds/a1.wav"), wav()).unwrap();
+    fs::write(root.join("Foley/PackB--Sounds 48k/b1.wav"), wav()).unwrap();
+    let root = root.canonicalize().unwrap();
+    let provider = Arc::new(SqliteProvider::open(&temp.path().join("library.db")).unwrap());
+    let session = ScanService::new(provider.clone())
+        .scan(
+            &root,
+            &ScanOptions::default(),
+            &ScanCancellation::default(),
+            |_| {},
+        )
+        .unwrap()
+        .session_id;
+    let table = "Filename,Description\na1.wav,alpha\nb1.wav,beta\n";
+    fs::write(root.join("Foley/PackA--Docs/table.csv"), table).unwrap();
+    let a = refresh(&provider, &root, "Foley/PackA--Docs/table.csv", session);
+    assert_eq!((a.matched, a.unmatched), (1, 1));
+    assert_eq!(
+        description(&provider, &root, "Foley/PackA--Sounds/a1.wav").as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        description(&provider, &root, "Foley/PackB--Sounds 48k/b1.wav"),
+        None
+    );
+
+    // A table in a Sounds folder sees its own pack's siblings, not the other pack.
+    fs::write(
+        root.join("Foley/PackB--Sounds 48k/table.csv"),
+        "Filename,Description\na1.wav,wrong\n",
+    )
+    .unwrap();
+    let b = refresh(
+        &provider,
+        &root,
+        "Foley/PackB--Sounds 48k/table.csv",
+        session,
+    );
+    assert_eq!((b.matched, b.unmatched), (0, 1));
+
+    // A table in an ordinary folder does not widen to sibling packs at all.
+    fs::create_dir_all(root.join("Foley/Notes")).unwrap();
+    fs::write(root.join("Foley/Notes/table.csv"), table).unwrap();
+    let n = refresh(&provider, &root, "Foley/Notes/table.csv", session);
+    assert_eq!((n.matched, n.unmatched), (0, 2));
+}
+
+#[test]
+fn pack_stems_are_case_insensitive_and_require_a_marker() {
+    assert_eq!(
+        pack_stem("Rustle_Tones--Docs").as_deref(),
+        Some("rustle_tones")
+    );
+    assert_eq!(
+        pack_stem("Rustle_Tones--Sounds 48k").as_deref(),
+        Some("rustle_tones")
+    );
+    assert_eq!(
+        pack_stem("RUSTLE_TONES--SOUNDS").as_deref(),
+        Some("rustle_tones")
+    );
+    assert_eq!(pack_stem("Rustle_Tones"), None);
+    assert_eq!(pack_stem("--Docs"), None);
+}
