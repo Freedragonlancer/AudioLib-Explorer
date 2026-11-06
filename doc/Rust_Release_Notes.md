@@ -8,7 +8,7 @@
 - 仅当表格所在目录本身是 `{stem}--Docs` 或 `{stem}--Sounds*` 时，才扩展到同 stem 兄弟；并排不同 pack 不会交叉匹配。
 - 身份与文件名校验不变；范围内重名 basename 仍视为歧义；不会按 basename 搜索资料库根。
 
-本次不改变源 WAV、Metadata 存储格式、HTTP API 或服务端写目标。生产 8790 与 #97 不在本版发布范围内。
+本次不改变源 WAV、Metadata 存储格式、HTTP API 或服务端写目标。
 
 # 0.9.0：扩展搜索与 Metadata 来源
 
