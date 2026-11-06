@@ -116,7 +116,10 @@ pub(super) fn upgrade_notice(
         .entry((url.to_string(), library_id.to_string()))
         .or_default()
         .take(status);
-    let offer_update_check = notices.iter().any(|notice| notice.offers_update_check());
+    let current = env!("CARGO_PKG_VERSION");
+    let offer_update_check = notices
+        .iter()
+        .any(|notice| notice.offers_update_check_for(current));
     let texts: Vec<String> = notices
         .into_iter()
         .map(|notice| notice.text(chinese))
@@ -330,7 +333,8 @@ impl Controller {
         true
     }
 
-    /// Ask the active server's `/capabilities` for the menu gate (after each sync).
+    /// Ask the active server's `/capabilities` for the menu gate (after each sync
+    /// and after a cached snapshot is opened).
     pub(crate) fn refresh_server_manage(self: &Arc<Self>) {
         let settings = self.config.lock().unwrap().data_source.clone();
         let generation = self.library_generation.load(Ordering::Acquire);
@@ -849,6 +853,44 @@ mod upgrade_notice_tests {
             "another library at the same URL has its own notices"
         );
         assert!(another.text.unwrap().contains("路径搜索"));
+    }
+
+    #[test]
+    fn current_client_does_not_open_the_update_dialog_for_its_own_minimum() {
+        let current = env!("CARGO_PKG_VERSION");
+        let status = ServerUpgradeStatus {
+            path_search: PathSearch::Available,
+            main_search: true,
+            vendor_import: None,
+            migration: None,
+            path_results_absent: false,
+            notices: vec![Notice::ClientUpgradeAvailable {
+                version: Some(current.into()),
+                level: audiolib_core::server_upgrade::ClientUpgradeLevel::Recommended,
+            }],
+        };
+        let notice = upgrade_notice(
+            "http://upgrade-notice-current.test",
+            "library-current",
+            &status,
+            false,
+        );
+        assert!(notice.text.unwrap().contains(current));
+        assert!(!notice.offer_update_check);
+        let newer = ServerUpgradeStatus {
+            notices: vec![Notice::ClientUpgradeAvailable {
+                version: Some("99.0.0".into()),
+                level: audiolib_core::server_upgrade::ClientUpgradeLevel::Recommended,
+            }],
+            ..status
+        };
+        let prompted = upgrade_notice(
+            "http://upgrade-notice-newer.test",
+            "library-newer",
+            &newer,
+            false,
+        );
+        assert!(prompted.offer_update_check);
     }
 
     #[test]

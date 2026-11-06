@@ -2778,6 +2778,12 @@ impl Controller {
                     if succeeded {
                         c2.refresh_source_manager_after_swap(&ui);
                         c2.reconcile_source_manager_after_swap(&ui);
+                        // A provider swap bumps the library generation, so a
+                        // `/capabilities` read started before the snapshot opened
+                        // is discarded. Fetch again once this snapshot is current.
+                        if c2.remote_read_only() && c2.remote.lock().unwrap().state.is_some() {
+                            c2.refresh_server_manage();
+                        }
                     }
                     c2.publish_metadata_recovery_notice(&ui);
                 }
