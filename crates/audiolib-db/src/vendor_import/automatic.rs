@@ -1,5 +1,6 @@
 // crates/audiolib-db/src/vendor_import/automatic.rs
-//! Source-owned supplementary Metadata from successfully scanned sibling WAVs.
+//! Source-owned supplementary Metadata from successfully scanned WAVs in the
+//! table's own subtree or its sibling `*--Docs` / `*--Sounds*` subtrees.
 //! Parsing is isolated; each durable batch replaces only this source's events.
 mod rooted;
 
@@ -222,7 +223,7 @@ impl SqliteProvider {
         stage.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=262144;
           CREATE TABLE auto_rows(ordinal INTEGER PRIMARY KEY,sheet TEXT NOT NULL,row_number INTEGER NOT NULL,cells TEXT NOT NULL);
           CREATE TABLE auto_sheets(name TEXT PRIMARY KEY,value TEXT NOT NULL);
-          CREATE TABLE auto_candidates(id INTEGER PRIMARY KEY,path TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,mtime INTEGER NOT NULL);
+          CREATE TABLE auto_candidates(id INTEGER PRIMARY KEY,path TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,mtime INTEGER NOT NULL,dir TEXT NOT NULL);
           CREATE INDEX auto_candidate_name ON auto_candidates(name,id);
           CREATE TABLE desired(audio_id INTEGER NOT NULL,field TEXT NOT NULL,value TEXT NOT NULL,source_file TEXT NOT NULL,sheet TEXT NOT NULL,row_number INTEGER NOT NULL,language TEXT NOT NULL,PRIMARY KEY(audio_id,field,value,language,source_file,sheet,row_number)) WITHOUT ROWID;
           CREATE TABLE work(id INTEGER PRIMARY KEY);
@@ -277,7 +278,8 @@ impl SqliteProvider {
         }
         stage.execute_batch("COMMIT").map_err(db_error)?;
         checkpoint(&summary, callback)?;
-        self.automatic_candidates(&stage, &parent, session_id, &summary, callback)?;
+        let scope = self.automatic_scope(&parent, root)?;
+        self.automatic_candidates(&stage, &scope, session_id, &summary, callback)?;
         let mut query = stage.prepare("SELECT r.sheet,r.row_number,r.cells,s.value FROM auto_rows r JOIN auto_sheets s ON s.name=r.sheet ORDER BY r.ordinal").map_err(db_error)?;
         let mut rows = query.query([]).map_err(db_error)?;
         stage.execute_batch("BEGIN IMMEDIATE").map_err(db_error)?;
@@ -362,7 +364,7 @@ impl SqliteProvider {
         };
         preview
             .warnings
-            .push("Automatic same-directory WAV Metadata; resume by rescanning.".into());
+            .push("Automatic table-subtree WAV Metadata; resume by rescanning.".into());
         if summary.unmatched > 0 || summary.ambiguous > 0 {
             preview.warnings.push("This table is not fully associated: all previous source contributions are retained alongside safe new matches. Correct the table or explicitly roll back its source to converge.".into());
         }
@@ -443,7 +445,6 @@ impl SqliteProvider {
             &encoded,
             &content_hash,
             root,
-            &parent,
             session_id,
             &mut summary,
             callback,
@@ -511,61 +512,113 @@ impl SqliteProvider {
         }
     }
 
+    /// Folders whose WAVs one table may describe: the table directory's whole
+    /// subtree, plus the subtrees of sibling `*--Docs` / `*--Sounds*` folders
+    /// when the table is below the scan root. This never widens to the library
+    /// root, so coincident basenames elsewhere in a library are not candidates.
+    fn automatic_scope(&self, parent: &Path, root: &Path) -> Result<Vec<(i64, String)>> {
+        let conn = self.writer()?;
+        let own_text = crate::folder_path_text(parent);
+        let own_key = crate::normalize_source_path_identity(&own_text);
+        let mut anchors = Vec::new();
+        if let Some(id) = crate::path_identity::folder_id(&conn, &own_text)? {
+            anchors.push(id);
+        }
+        let approved = PathBuf::from(crate::display_path(root));
+        let own = PathBuf::from(crate::display_path(parent));
+        if own != approved
+            && let Some(grand) = own.parent().filter(|path| path.starts_with(&approved))
+            && let Some(grand) =
+                crate::path_identity::folder_id(&conn, &crate::folder_path_text(grand))?
+        {
+            let mut query = conn
+                .prepare_cached("SELECT id,folder_path FROM folders WHERE parent_id=?1 AND (folder_name LIKE '%--docs' OR folder_name LIKE '%--sounds%') ORDER BY id")
+                .map_err(db_error)?;
+            let siblings = query
+                .query_map([grand], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(db_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(db_error)?;
+            anchors.extend(
+                siblings
+                    .into_iter()
+                    .filter(|(_, path)| crate::normalize_source_path_identity(path) != own_key)
+                    .map(|(id, _)| id),
+            );
+        }
+        let mut scope = BTreeMap::new();
+        let mut query = conn
+            .prepare_cached("SELECT f.id,f.folder_path FROM folder_closure c JOIN folders f ON f.id=c.descendant_id WHERE c.ancestor_id=?1")
+            .map_err(db_error)?;
+        for anchor in anchors {
+            let rows = query
+                .query_map([anchor], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(db_error)?;
+            for row in rows {
+                let (id, path) = row.map_err(db_error)?;
+                scope.insert(id, path);
+            }
+        }
+        Ok(scope.into_iter().collect())
+    }
+
     fn automatic_candidates(
         &self,
         stage: &Connection,
-        parent: &Path,
+        scope: &[(i64, String)],
         session: i64,
         summary: &VendorScanSummary,
         callback: &mut impl FnMut(&VendorScanSummary) -> bool,
     ) -> Result<()> {
-        let mut after = None::<i64>;
-        loop {
-            let mut count = 0;
-            {
-                let conn = self.writer()?;
-                crate::ensure_scan_seen_table(&conn)?;
-                let Some(folder) =
-                    crate::path_identity::folder_id(&conn, &crate::folder_path_text(parent))?
-                else {
-                    return Ok(());
-                };
-                let mut query=conn.prepare("SELECT id,file_path,coalesce(file_size,0),source_mtime_ns FROM audio_files a WHERE folder_id=?1 AND missing IS 0 AND (?3 IS NULL OR id>?3) AND (seen_scan_id=?2 OR EXISTS(SELECT 1 FROM temp.scan_seen s WHERE s.session_id=?2 AND s.audio_id=a.id)) ORDER BY id LIMIT 1024").map_err(db_error)?;
-                let mut rows = query
-                    .query(params![folder, session, after])
-                    .map_err(db_error)?;
-                stage.execute_batch("BEGIN IMMEDIATE").map_err(db_error)?;
-                while let Some(row) = rows.next().map_err(db_error)? {
-                    after = Some(row.get::<_, i64>(0).map_err(db_error)?);
-                    count += 1;
-                    let path: String = row.get(1).map_err(db_error)?;
-                    let path_object = Path::new(&path);
-                    if !path_object
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
-                    {
-                        continue;
+        for (folder, folder_path) in scope {
+            let directory = crate::normalize_source_path_identity(folder_path);
+            let mut after = None::<i64>;
+            loop {
+                let mut count = 0;
+                {
+                    let conn = self.writer()?;
+                    crate::ensure_scan_seen_table(&conn)?;
+                    let mut query=conn.prepare("SELECT id,file_path,coalesce(file_size,0),source_mtime_ns FROM audio_files a WHERE folder_id=?1 AND missing IS 0 AND (?3 IS NULL OR id>?3) AND (seen_scan_id=?2 OR EXISTS(SELECT 1 FROM temp.scan_seen s WHERE s.session_id=?2 AND s.audio_id=a.id)) ORDER BY id LIMIT 1024").map_err(db_error)?;
+                    let mut rows = query
+                        .query(params![folder, session, after])
+                        .map_err(db_error)?;
+                    stage.execute_batch("BEGIN IMMEDIATE").map_err(db_error)?;
+                    while let Some(row) = rows.next().map_err(db_error)? {
+                        after = Some(row.get::<_, i64>(0).map_err(db_error)?);
+                        count += 1;
+                        let path: String = row.get(1).map_err(db_error)?;
+                        let path_object = Path::new(&path);
+                        if !path_object
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+                        {
+                            continue;
+                        }
+                        let Some(timestamp) = row.get::<_, Option<i64>>(3).map_err(db_error)?
+                        else {
+                            continue;
+                        };
+                        let Some(name) = path_object.file_name() else {
+                            continue;
+                        };
+                        if crate::source_parent_path_identity(&path) != directory {
+                            continue;
+                        }
+                        stage.execute("INSERT INTO auto_candidates(id,path,name,size,mtime,dir) VALUES(?1,?2,?3,?4,?5,?6)",params![row.get::<_,i64>(0).map_err(db_error)?,path,matching::fold(&name.to_string_lossy()),row.get::<_,i64>(2).map_err(db_error)?,timestamp,directory]).map_err(db_error)?;
                     }
-                    let Some(timestamp) = row.get::<_, Option<i64>>(3).map_err(db_error)? else {
-                        continue;
-                    };
-                    let Some(name) = path_object.file_name() else {
-                        continue;
-                    };
-                    if crate::source_parent_path_identity(&path)
-                        != crate::normalize_source_path_identity(&crate::folder_path_text(parent))
-                    {
-                        continue;
-                    }
-                    stage.execute("INSERT INTO auto_candidates(id,path,name,size,mtime) VALUES(?1,?2,?3,?4,?5)",params![row.get::<_,i64>(0).map_err(db_error)?,path,matching::fold(&name.to_string_lossy()),row.get::<_,i64>(2).map_err(db_error)?,timestamp]).map_err(db_error)?;
+                    stage.execute_batch("COMMIT").map_err(db_error)?;
                 }
-                stage.execute_batch("COMMIT").map_err(db_error)?;
-            }
-            checkpoint(summary, callback)?;
-            if count < 1024 {
-                return Ok(());
+                checkpoint(summary, callback)?;
+                if count < 1024 {
+                    break;
+                }
             }
         }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -577,7 +630,6 @@ impl SqliteProvider {
         encoded: &str,
         content_hash: &str,
         root: &Path,
-        parent: &Path,
         session: i64,
         summary: &mut VendorScanSummary,
         callback: &mut impl FnMut(&VendorScanSummary) -> bool,
@@ -604,19 +656,20 @@ impl SqliteProvider {
             for audio_id in &ids {
                 let candidate = stage
                     .query_row(
-                        "SELECT path,size,mtime FROM auto_candidates WHERE id=?1",
+                        "SELECT path,size,mtime,dir FROM auto_candidates WHERE id=?1",
                         [audio_id],
                         |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
                                 row.get::<_, i64>(1)?,
                                 row.get::<_, i64>(2)?,
+                                row.get::<_, String>(3)?,
                             ))
                         },
                     )
                     .optional()
                     .map_err(db_error)?;
-                let Some((path, size, timestamp)) = candidate else {
+                let Some((path, size, timestamp, dir)) = candidate else {
                     continue;
                 };
                 let mut capability = rooted::open(root, Path::new(&path))?;
@@ -627,7 +680,9 @@ impl SqliteProvider {
                     || &head[8..] != b"WAVE"
                     || i64::try_from(metadata.len()).ok() != Some(size)
                     || mtime(&metadata)? != timestamp
-                    || capability.path.parent() != Some(parent)
+                    || capability.path.parent().map(|folder| {
+                        crate::normalize_source_path_identity(&crate::folder_path_text(folder))
+                    }) != Some(dir)
                 {
                     continue;
                 }
