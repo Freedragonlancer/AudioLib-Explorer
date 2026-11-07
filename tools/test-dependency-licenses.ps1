@@ -35,6 +35,24 @@ try{
     Expect-LicenseFailure {Test-AudioLibLicenseBundle -PayloadRoot $payload -ExpectedRoots @('audiolib-desktop','audiolib-cli') -Target 'aarch64-apple-darwin' -ExpectedArtifacts @('client.bin')} 'build selection differs'
     Add-Content -LiteralPath (Join-Path $payload 'client.bin') -Value 'changed';Expect-LicenseFailure $check 'executable identity mismatch';Set-Content -LiteralPath (Join-Path $payload 'client.bin') -Value 'Synthetic binary identity, never executable.'
     Set-Content -LiteralPath (Join-Path $payload 'licenses/secret.txt') -Value 'unlisted';Expect-LicenseFailure $check 'Uninventoried';Remove-Item -LiteralPath (Join-Path $payload 'licenses/secret.txt')
+    # Native Mac dependencies published without standalone notices must still
+    # produce a complete bundle through their exact audited catalog entries.
+    $macSpecs=@(@('block2','0.5.1','MIT'),@('dispatch','0.2.0','MIT'),@('dispatch2','0.3.1','Zlib OR Apache-2.0 OR MIT'),@('objc-sys','0.3.5','MIT'),@('objc2','0.5.3','MIT'),@('objc2-app-kit','0.2.2','MIT'),@('objc2-audio-toolbox','0.3.2','Zlib OR Apache-2.0 OR MIT'),@('objc2-core-audio','0.3.2','Zlib OR Apache-2.0 OR MIT'),@('objc2-core-audio-types','0.3.2','Zlib OR Apache-2.0 OR MIT'),@('objc2-foundation','0.2.2','MIT'))
+    $catalog=@(Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'license-notices.json')|ConvertFrom-Json)
+    $macPackages=@();foreach($spec in $macSpecs){
+        $dir=Join-Path $ownedRoot ('mac-registry/'+$spec[0]+'-'+$spec[1]);New-Item -ItemType Directory -Path $dir -Force|Out-Null;Set-Content -LiteralPath (Join-Path $dir 'Cargo.toml') -Value 'synthetic published Mac dependency without embedded license text'
+        $entry=@($catalog|Where-Object {$_.name -ceq $spec[0] -and $_.version -ceq $spec[1]});if($entry.Count -ne 1){throw 'Native Mac dependency notice catalog entry missing or ambiguous.'}
+        if($entry[0].PSObject.Properties['fallback_kind']){@{git=@{sha1=$entry[0].upstream_commit}}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $dir '.cargo_vcs_info.json')}
+        $macPackages += [pscustomobject]@{name=$spec[0];version=$spec[1];license=$spec[2];source='registry+public';repository=$null;license_file=$null;manifest_path=(Join-Path $dir 'Cargo.toml')}
+    }
+    $macGraph=[pscustomobject]@{packages=@($fixturePackages|Where-Object name -CLike 'audiolib-*')+$macPackages;roots=@('audiolib-desktop','audiolib-cli');target='aarch64-apple-darwin';features=@();no_default_features=$true}
+    $macPayload=Join-Path $ownedRoot 'mac-payload';New-Item -ItemType Directory -Path $macPayload|Out-Null
+    $null=Write-AudioLibLicenseBundle -Graph $macGraph -Root $ownedRoot -PayloadRoot $macPayload -Artifacts @{}
+    $null=Test-AudioLibLicenseBundle -PayloadRoot $macPayload -ExpectedRoots @('audiolib-desktop','audiolib-cli') -Target 'aarch64-apple-darwin' -NoDefaultFeatures -ExpectedArtifacts @()
+    $unknown=$macPackages[0].PSObject.Copy();$unknown.version='0.5.999'
+    Expect-LicenseFailure {Get-AudioLibNoticePlan -Graph ([pscustomobject]@{packages=@($unknown)}) -Root $ownedRoot} 'Required license text unavailable'
+    $wrongLicense=$macPackages[0].PSObject.Copy();$wrongLicense.license='Apache-2.0'
+    Expect-LicenseFailure {Get-AudioLibNoticePlan -Graph ([pscustomobject]@{packages=@($wrongLicense)}) -Root $ownedRoot} 'license expression changed'
     # Real pinned fallback metadata, synthetic source package and no execution.
     $fallback=@(Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'license-notices.json')|ConvertFrom-Json|Where-Object {$_.PSObject.Properties['fallback_kind']})
     foreach($pinned in $fallback){
@@ -43,9 +61,15 @@ try{
         $fallbackGraph=[pscustomobject]@{packages=@($one);roots=@($pinned.name);target='fixture';features=@();no_default_features=$true};$dest=Join-Path $ownedRoot ('fallback-'+$pinned.name);New-Item -ItemType Directory -Path $dest|Out-Null
         $null=Write-AudioLibLicenseBundle -Graph $fallbackGraph -Root $ownedRoot -PayloadRoot $dest -Artifacts @{}
         $argsForFallback=@{PayloadRoot=$dest;ExpectedRoots=@($pinned.name);Target='fixture';NoDefaultFeatures=$true;ExpectedArtifacts=@()};$null=Test-AudioLibLicenseBundle @argsForFallback
+        $vcsPath=Join-Path $dir '.cargo_vcs_info.json';$vcsBytes=[IO.File]::ReadAllBytes($vcsPath);@{git=@{sha1=('0'*40)}}|ConvertTo-Json|Set-Content -LiteralPath $vcsPath
+        Expect-LicenseFailure {Get-AudioLibNoticePlan -Graph $fallbackGraph -Root $ownedRoot} 'upstream commit differs';[IO.File]::WriteAllBytes($vcsPath,$vcsBytes)
+        $wrongLicense=$one.PSObject.Copy();$wrongLicense.license='Apache-2.0'
+        Expect-LicenseFailure {Get-AudioLibNoticePlan -Graph ([pscustomobject]@{packages=@($wrongLicense)}) -Root $ownedRoot} 'license expression changed'
+        $standardPath=Join-Path $dest ('licenses/'+$pinned.name+'-'+$pinned.version+'/LICENSE-MIT-STANDARD.txt');$standardBytes=[IO.File]::ReadAllBytes($standardPath);Add-Content -LiteralPath $standardPath -Value 'tampered'
+        Expect-LicenseFailure {Test-AudioLibLicenseBundle @argsForFallback} 'notice identity mismatch';[IO.File]::WriteAllBytes($standardPath,$standardBytes)
         $path=Join-Path $dest 'licenses/inventory.json';$data=Get-Content -Raw -LiteralPath $path|ConvertFrom-Json;$data.packages[0].provenance.upstream_commit='0000000000000000000000000000000000000000';$data|ConvertTo-Json -Depth 14|Set-Content -LiteralPath $path;Expect-LicenseFailure {Test-AudioLibLicenseBundle @argsForFallback} 'fallback provenance mismatch'
     }
-    if($fallback.Count -ne 2){throw 'Both explicit upstream-declaration fallbacks must be exercised.'}
+    if($fallback.Count -ne 3 -or @($fallback|Where-Object name -CEQ 'dispatch').Count -ne 1){throw 'All three explicit upstream-declaration fallbacks must be exercised.'}
     # A fresh index checkout must retain the pinned bytes even when a Windows
     # user's Git configuration requests CRLF. No commit, hook or compiler runs.
     $gitFixture=Join-Path $ownedRoot 'git-eol';$fresh=Join-Path $ownedRoot 'fresh-eol';$emptyTemplate=Join-Path $ownedRoot 'empty-template';New-Item -ItemType Directory -Path $gitFixture,$fresh,$emptyTemplate|Out-Null
@@ -57,7 +81,7 @@ try{
     & git -c core.autocrlf=true -c core.eol=crlf -C $gitFixture add -- tools/license-notices;if($LASTEXITCODE){throw 'Owned Git EOL fixture staging failed.'}
     & git -c core.autocrlf=true -c core.eol=crlf -C $gitFixture checkout-index --all ('--prefix='+$fresh.Replace('\','/')+'/');if($LASTEXITCODE){throw 'Owned fresh Git EOL checkout failed.'}
     $index=0;foreach($pinnedFile in $pinnedFiles){if((Get-FileHash -LiteralPath (Join-Path $fresh "tools/license-notices/LICENSE-pinned-$index.txt") -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pinnedFile.sha256){throw 'Pinned license text changed with Windows Git EOL configuration.'};$index++}
-    Write-Output 'License regression passed: selected normal/build closure; dev/platform exclusion; complete notice/text/EXE identity; missing parser/codec notices; pinned fallback tampering; fresh autocrlf checkout byte identity.'
+    Write-Output 'License regression passed: selected normal/build closure; dev/platform exclusion; complete notice/text/EXE identity; ten native Mac dependency notices without embedded text; exact version/SPDX/VCS rejection; pinned fallback text/provenance tampering; fresh autocrlf checkout byte identity.'
 }finally{
     Remove-Item Function:\cargo -ErrorAction SilentlyContinue
     $resolved=Assert-LicensePath $ownedRoot $parent;if(Test-Path -LiteralPath $resolved){Remove-Item -LiteralPath $resolved -Recurse -Force}
