@@ -32,7 +32,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Changes in the current Windows portable release |
-| [0.9.3 release preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.9.3.md) | Waveform fixes, beta promotion gates and the full client/server release matrix |
+| [0.9.3 release record](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.9.3.md) | Published assets, checksums, validation identities and platform coverage |
 | [0.8.7 release preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.8.7.md) | Beta scope, original validation evidence, unresolved gates and delivery plan |
 | [0.9.0 release and migration preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Release_0.9.0.md) | Proposed next-version scope, client/server migration matrix, evidence identities and pending delivery gates |
 | [Automatic updates](Rust_Auto_Update.md) | Startup GitHub release checks, stable/beta channels, verified downloads and deployment |
