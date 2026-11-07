@@ -18,9 +18,12 @@ cp "$SOURCE/server/deploy/redeploy-server.sh" "$TEST_ROOT/repo/server/deploy/"
 # Existing Python is used only to emulate macOS plutil and exercise the optional
 # Linux reader here; no parser is installed or added to application packages.
 TEST_PYTHON="${TEST_PYTHON:-$(command -v python || command -v python3)}"
+# Optional native CLI exercises WAL backup behavior of the host SQLite shell.
+TEST_SQLITE3="${TEST_SQLITE3:-}"
+[ -z "$TEST_SQLITE3" ] || [ -x "$TEST_SQLITE3" ] || { echo 'TEST_SQLITE3 must be an executable path' >&2; exit 2; }
 TEST_ROOT_NATIVE="$TEST_ROOT"
 if command -v cygpath >/dev/null 2>&1; then TEST_ROOT_NATIVE="$(cygpath -w "$TEST_ROOT")"; fi
-export TEST_PYTHON TEST_ROOT TEST_ROOT_NATIVE
+export TEST_PYTHON TEST_SQLITE3 TEST_ROOT TEST_ROOT_NATIVE
 TEST_CASES=0
 cat > "$TEST_ROOT/mock-bin/plutil" <<'EOF'
 #!/bin/sh
@@ -160,6 +163,7 @@ if [ "${MOCK_REAL_DB:-0}" = 1 ]; then exec "$TEST_PYTHON" "$TEST_ROOT/sqlite-cli
 [ "${MOCK_SCHEMA_READ_FAIL:-0}" != 1 ] || exit 1
 case " $* " in
     *'.backup '*) exec "$TEST_PYTHON" "$TEST_ROOT/sqlite-cli.py" --copy-placeholder "$@" ;;
+    *'PRAGMA journal_mode=DELETE;'*) [ "$#" = 2 ] && printf '%s\n' delete ;;
     *'PRAGMA quick_check;'*) printf '%s\n' ok ;;
     *'PRAGMA user_version;'*)
         if [ -f "$BETA_APP_DIR/schema-version" ]; then cat "$BETA_APP_DIR/schema-version"; else printf '%s\n' 8; fi ;;
@@ -167,7 +171,7 @@ case " $* " in
 esac
 EOF
 cat > "$TEST_ROOT/sqlite-cli.py" <<'EOF'
-import os, pathlib, shlex, sqlite3, sys
+import os, pathlib, shlex, sqlite3, subprocess, sys
 
 def native(value):
     root=pathlib.Path(os.environ['TEST_ROOT_NATIVE'])
@@ -188,19 +192,40 @@ if args[0]=='--migrate':
         db.execute('PRAGMA user_version=9')
         db.execute("INSERT INTO preserved VALUES ('during-drain')")
     sys.exit(0)
-assert len(args)==3 and args[0]=='-readonly'
-source=pathlib.Path(native(args[1])).resolve()
+readonly=len(args)==3 and args[0]=='-readonly'
+assert readonly or (len(args)==2 and args[1]=='PRAGMA journal_mode=DELETE;')
+source=pathlib.Path(native(args[1] if readonly else args[0])).resolve()
+sql=args[2] if readonly else args[1]
 assert source.is_file()
-with sqlite3.connect(source.as_uri()+'?mode=ro',uri=True) as db:
-    if args[2].startswith('.backup '):
-        if os.environ.get('MOCK_GENERIC_BACKUP_FAIL')=='1': raise RuntimeError('owned injected generic backup failure')
-        if os.environ.get('MOCK_OLD_BACKUP_FAIL')=='1' and 'library-before-refresh.' in args[2]: raise RuntimeError('owned injected backup failure')
-        target=pathlib.Path(native(shlex.split(args[2])[1]))
-        assert not target.exists()
-        assert target.parent.is_dir(), repr((args[2],str(target)))
-        with sqlite3.connect(target) as backup: db.backup(backup)
-    else:
-        for row in db.execute(args[2]): print('|'.join(str(x) for x in row))
+root=pathlib.Path(os.environ['TEST_ROOT_NATIVE']).resolve()
+assert source.is_relative_to(root)
+targets=root/'owned-backup-targets.txt'
+target=None
+if sql.startswith('.backup '):
+    assert readonly, 'original backup sources must remain read-only'
+    if os.environ.get('MOCK_GENERIC_BACKUP_FAIL')=='1': raise RuntimeError('owned injected generic backup failure')
+    if os.environ.get('MOCK_OLD_BACKUP_FAIL')=='1' and 'library-before-refresh.' in args[2]: raise RuntimeError('owned injected backup failure')
+    target=pathlib.Path(native(shlex.split(args[2])[1])).resolve()
+    assert target.is_relative_to(root) and not target.exists()
+    assert target.parent.is_dir(), repr((args[2],str(target)))
+elif not readonly:
+    assert targets.exists() and str(source) in targets.read_text().splitlines(), 'only new owned backups may be finalized'
+    failure=os.environ.get('MOCK_FINALIZE_FAIL')
+    if failure=='exit': raise RuntimeError('owned injected backup finalization failure')
+    if failure=='mode': print('wal'); sys.exit(0)
+native_cli=os.environ.get('TEST_SQLITE3')
+if native_cli:
+    result=subprocess.run([native_cli,*args]).returncode
+    if result: sys.exit(result)
+else:
+    mode='ro' if readonly else 'rw'
+    with sqlite3.connect(source.as_uri()+'?mode='+mode,uri=True) as db:
+        if target is not None:
+            with sqlite3.connect(target) as backup: db.backup(backup)
+        else:
+            for row in db.execute(sql): print('|'.join(str(x) for x in row))
+if target is not None:
+    with targets.open('a') as registered: registered.write(str(target)+'\n')
 EOF
 cat > "$TEST_ROOT/mock-bin/cargo" <<'EOF'
 #!/bin/sh
@@ -326,6 +351,8 @@ run_case() {
         [ "$status" -ne 0 ] && [ "$(cat "$app/start-count")" = 2 ] && grep -F 'explicit executable NEW_MIGRATOR' "$work/unpaired.log" >/dev/null || { echo 'Installed pair silently downgraded to binary-only deployment' >&2; exit 1; }
     fi
 }
+# Select just the affected backup paths for native SQLite acceptance.
+if [ "${TEST_OWNED_BACKUPS_ONLY:-0}" != 1 ]; then
 run_case development '' 0.6.2-0 0 1
 run_case candidate v0.6.2-beta.12 0.6.2-beta.12 0 1
 run_case stable v0.6.2 0.6.2 0 1
@@ -615,6 +642,7 @@ EOF
 for fault in missing-migrator missing-receipt receipt-tamper wrong-migrator wrong-source no-production-proof missing-database stage-failure partial-swap corrupt-installed-pair changed-schema schema-changed-during-drain; do run_pair_fault "$fault" "$fault"; done
 run_pair_fault initial-partial-swap partial-swap 0
 run_pair_fault initial-corrupt-installed-pair corrupt-installed-pair 0
+fi
 
 run_with_db_case() {
     TEST_CASES=$((TEST_CASES + 1))
@@ -635,36 +663,62 @@ with sqlite3.connect(path/'production # source.db') as db:
 db=sqlite3.connect(path/'library.db')
 db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA wal_autocheckpoint=0');db.execute('PRAGMA user_version=8')
 db.execute('CREATE TABLE preserved(value TEXT)');db.execute("INSERT INTO preserved VALUES ('baseline-WAL')");db.commit()
+db.execute('CREATE TABLE vendor_metadata(note TEXT)');db.execute("INSERT INTO vendor_metadata VALUES ('retain extension Metadata')");db.commit()
 os._exit(0) # Owned fixture generator intentionally leaves committed WAL; no user process is stopped.
 EOF
     for file in "$data/library.db" "$data/library.db-wal" "$data/library.db-shm" "$data/library.db.server-state.json" "$data/production # source.db" "$app/bin/audiolib-server" "$app/bin/audiolib-migrate" "$plist" "$app/bin/audiolib-launcher"; do cp "$file" "$file.expected"; done
     make_receipt "$work/accepted.json"
-    bootout_fail=0; stuck=0; drain_migration=0; health_fail=0; backup_fail=0; generic_backup_fail=0
-    with_db_args=(--with-db)
+    bootout_fail=0; stuck=0; drain_migration=0; health_fail=0; backup_fail=0; generic_backup_fail=0; finalize_fail=0
+    with_db_option=--with-db
     case "$name" in
         stop-failure) bootout_fail=1 ;;
         stop-timeout) stuck=1 ;;
         during-drain) drain_migration=1; health_fail=1 ;;
         backup-failure) backup_fail=1 ;;
-        generic-backup-failure) with_db_args=(); generic_backup_fail=1 ;;
-        generic-drain-migration) with_db_args=(); drain_migration=1 ;;
+        candidate-finalize-failure) finalize_fail=mode ;;
+        generic-finalize-failure) with_db_option=; finalize_fail=exit ;;
+        generic-backup-failure) with_db_option=; generic_backup_fail=1 ;;
+        generic-drain-migration) with_db_option=; drain_migration=1 ;;
+        generic-success) with_db_option= ;;
         success) ;;
         *) exit 2 ;;
     esac
     status=0
     BETA_APP_DIR="$app" BETA_DATA_DIR="$data" BETA_DATABASE_PATH="$data/library.db" PROD_DB="$data/production # source.db" SERVICE_NAME=synthetic.beta WORK_DIR="$work" LAUNCHD_PLIST="$plist" \
         STOP_TIMEOUT=0 BETA_WAIT_SECS=1 MOCK_REAL_DB=1 MOCK_BOOTOUT_FAIL="$bootout_fail" MOCK_LAUNCHD_STUCK="$stuck" \
-        MOCK_DB_MIGRATE_ON_STOP="$drain_migration" MOCK_REDEPLOY_FAIL="$health_fail" MOCK_OLD_BACKUP_FAIL="$backup_fail" MOCK_GENERIC_BACKUP_FAIL="$generic_backup_fail" \
-        bash "$TEST_ROOT/repo/tools/beta-refresh.sh" "${with_db_args[@]}" --no-build "$TEST_ROOT/server-binary" --migrator "$TEST_ROOT/migrator-binary" --accepted-receipt "$work/accepted.json" --receipt-sha256 "$(test_sha "$work/accepted.json")" > "$work/output.log" 2>&1 || status=$?
+        MOCK_DB_MIGRATE_ON_STOP="$drain_migration" MOCK_REDEPLOY_FAIL="$health_fail" MOCK_OLD_BACKUP_FAIL="$backup_fail" MOCK_GENERIC_BACKUP_FAIL="$generic_backup_fail" MOCK_FINALIZE_FAIL="$finalize_fail" \
+        bash "$TEST_ROOT/repo/tools/beta-refresh.sh" ${with_db_option:+"$with_db_option"} --no-build "$TEST_ROOT/server-binary" --migrator "$TEST_ROOT/migrator-binary" --accepted-receipt "$work/accepted.json" --receipt-sha256 "$(test_sha "$work/accepted.json")" > "$work/output.log" 2>&1 || status=$?
     starts=0; [ ! -f "$app/start-count" ] || starts="$(cat "$app/start-count")"
-    if [ "$name" = success ]; then [ "$status" = 0 ] && [ "$starts" = 1 ] || { cat "$work/output.log" >&2; exit 1; }
+    if [ "$name" = success ] || [ "$name" = generic-success ]; then [ "$status" = 0 ] && [ "$starts" = 1 ] || { cat "$work/output.log" >&2; exit 1; }
     else [ "$status" -ne 0 ] || exit 1; fi
     case "$name" in
         stop-failure|stop-timeout)
             [ "$starts" = 0 ] || exit 1
             for file in "$data/library.db" "$data/library.db-wal" "$data/library.db-shm" "$data/library.db.server-state.json" "$app/bin/audiolib-server" "$app/bin/audiolib-migrate"; do cmp -s "$file" "$file.expected" || { echo "Failed stop changed $file" >&2; exit 1; }; done ;;
-        backup-failure|generic-backup-failure)
-            [ "$starts" = 0 ] && cmp -s "$data/library.db" "$data/library.db.expected" && cmp -s "$app/bin/audiolib-server" "$app/bin/audiolib-server.expected" || exit 1 ;;
+        backup-failure|generic-backup-failure|candidate-finalize-failure|generic-finalize-failure)
+            [ "$starts" = 0 ] && cmp -s "$data/library.db" "$data/library.db.expected" && cmp -s "$app/bin/audiolib-server" "$app/bin/audiolib-server.expected" && cmp -s "$app/bin/audiolib-migrate" "$app/bin/audiolib-migrate.expected" || exit 1
+            if [ "$name" = candidate-finalize-failure ]; then ! grep -E '^(bootout|bootstrap)\|' "$app/launchctl-events" >/dev/null 2>&1 || exit 1; fi
+            if [ "$name" = generic-finalize-failure ]; then grep -F 'backup finalization failed; no binary replaced and service remains stopped' "$work"/beta-refresh-*.log >/dev/null || exit 1; fi ;;
+        generic-success)
+            stopped_backup="$(find "$work/beta-backups" -name library.db -type f)"
+            [ -n "$stopped_backup" ] && grep -Fx '1|new' "$app/pair-start-events" >/dev/null || exit 1
+            "$TEST_PYTHON" - "$TEST_ROOT_NATIVE" "${stopped_backup#$TEST_ROOT/}" <<'EOF'
+import os,pathlib,shutil,sqlite3,subprocess,sys
+path=pathlib.Path(sys.argv[1])/sys.argv[2]
+assert path.read_bytes()[18:20]==b'\x01\x01', 'owned snapshot must have a standalone rollback-journal header'
+standalone=path.parent/'standalone # snapshot.db'
+shutil.copyfile(path,standalone)
+with sqlite3.connect(standalone.as_uri()+'?mode=ro',uri=True) as db:
+    assert db.execute('PRAGMA quick_check').fetchone()==('ok',)
+    assert db.execute('PRAGMA user_version').fetchone()==(8,)
+    assert db.execute('SELECT value FROM preserved').fetchall()==[('baseline-WAL',)]
+    assert db.execute('SELECT note FROM vendor_metadata').fetchall()==[('retain extension Metadata',)]
+if os.environ.get('TEST_SQLITE3'):
+    result=subprocess.run([os.environ['TEST_SQLITE3'],'-readonly',str(standalone),'PRAGMA quick_check; PRAGMA user_version; SELECT value FROM preserved; SELECT note FROM vendor_metadata;'],check=True,capture_output=True,text=True)
+    assert result.stdout.splitlines()==['ok','8','baseline-WAL','retain extension Metadata'], result.stdout
+assert not pathlib.Path(str(standalone)+'-wal').exists() and not pathlib.Path(str(standalone)+'-shm').exists()
+EOF
+            cmp -s "$data/library.db" "$data/library.db.expected" && cmp -s "$data/library.db-wal" "$data/library.db-wal.expected" || exit 1 ;;
         generic-drain-migration)
             [ "$starts" = 0 ] && cmp -s "$app/bin/audiolib-server" "$app/bin/audiolib-server.expected" && cmp -s "$app/bin/audiolib-migrate" "$app/bin/audiolib-migrate.expected" || exit 1
             stopped_backup="$(find "$work/beta-backups" -name library.db -type f)"
@@ -672,6 +726,7 @@ EOF
             "$TEST_PYTHON" - "$TEST_ROOT_NATIVE" "${stopped_backup#$TEST_ROOT/}" <<'EOF'
 import pathlib,sqlite3,sys
 path=pathlib.Path(sys.argv[1])/sys.argv[2]
+assert path.read_bytes()[18:20]==b'\x01\x01'
 with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True) as db:
     assert db.execute('PRAGMA quick_check').fetchone()==('ok',)
     assert db.execute('PRAGMA user_version').fetchone()==(9,)
@@ -686,6 +741,7 @@ EOF
             "$TEST_PYTHON" - "$TEST_ROOT_NATIVE" "${old_backup#$TEST_ROOT/}" "${data#$TEST_ROOT/}/library.db" "$name" <<'EOF'
 import pathlib,sqlite3,sys
 base=pathlib.Path(sys.argv[1]);old=base/sys.argv[2];current=base/sys.argv[3]
+assert old.read_bytes()[18:20]==b'\x01\x01'
 with sqlite3.connect(old.as_uri()+'?mode=ro',uri=True) as db:
     assert db.execute('PRAGMA quick_check').fetchone()==('ok',)
     rows=db.execute('SELECT value FROM preserved ORDER BY value').fetchall()
@@ -701,6 +757,10 @@ EOF
     esac
     for file in "$data/production # source.db" "$plist" "$app/bin/audiolib-launcher"; do cmp -s "$file" "$file.expected" || exit 1; done
 }
-for db_case in stop-failure stop-timeout backup-failure success during-drain generic-backup-failure generic-drain-migration; do run_with_db_case "$db_case"; done
-printf 'Deployment scenario cases: %s\n' "$((TEST_CASES + 2))"
-printf '%s\n' 'Beta deployment regressions passed: startup/rollback identities, launchd bootout/wait/bootstrap routing and recovery, short-hash prefix commit match; migration timeout retained only an explicitly identified structured upgrade, exited nonzero and never restarted twice; plutil route and optional Python fallback, invalid/nested JSON and ordinary failure rollback covered; private health messages and owned launcher/plist/configuration/database preserved.'
+for db_case in stop-failure stop-timeout backup-failure candidate-finalize-failure generic-finalize-failure success during-drain generic-success generic-backup-failure generic-drain-migration; do run_with_db_case "$db_case"; done
+if [ "${TEST_OWNED_BACKUPS_ONLY:-0}" = 1 ]; then
+    printf 'Owned backup deployment cases passed: %s (native SQLite: %s)\n' "$TEST_CASES" "${TEST_SQLITE3:-Python adapter}"
+else
+    printf 'Deployment scenario cases: %s\n' "$((TEST_CASES + 2))"
+    printf '%s\n' 'Beta deployment regressions passed: startup/rollback identities, launchd bootout/wait/bootstrap routing and recovery, short-hash prefix commit match; migration timeout retained only an explicitly identified structured upgrade, exited nonzero and never restarted twice; plutil route and optional Python fallback, invalid/nested JSON and ordinary failure rollback covered; private health messages and owned launcher/plist/configuration/database preserved.'
+fi

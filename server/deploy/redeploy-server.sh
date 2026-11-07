@@ -573,8 +573,12 @@ if [ -f "$DB" ]; then
     snapshot="$DEST/$(basename "$DB")"
     quoted_snapshot="$(printf '%s' "$snapshot" | sed 's/\\/\\\\/g; s/"/\\"/g')"
     log "backing up the stopped library logical image to $DEST"
-    sqlite3 -readonly "$DB" ".backup \"$quoted_snapshot\"" &&
-        [ "$(sqlite3 -readonly "$snapshot" 'PRAGMA quick_check;')" = ok ] || die "stopped-library backup failed; no binary replaced and service remains stopped"
+    sqlite3 -readonly "$DB" ".backup \"$quoted_snapshot\"" || die "stopped-library backup failed; no binary replaced and service remains stopped"
+    # A WAL-mode backup can retain its WAL header without companion files.
+    # Finalize only this new owned image so it is independently readable.
+    [ -f "$snapshot" ] && [ ! -L "$snapshot" ] &&
+        snapshot_mode="$(sqlite3 "$snapshot" 'PRAGMA journal_mode=DELETE;')" && [ "$snapshot_mode" = delete ] || die "stopped-library backup finalization failed; no binary replaced and service remains stopped"
+    [ "$(sqlite3 -readonly "$snapshot" 'PRAGMA quick_check;')" = ok ] || die "stopped-library backup validation failed; no binary replaced and service remains stopped"
 else
     log "library is absent after drain; no logical backup available"
 fi
