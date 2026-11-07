@@ -20,6 +20,8 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Schema 9 server migration](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/codex/release-090-prepare/doc/Rust_Schema9_Migration.md) | Resumable directory-only migration, shared CLI/HTTP reports and rollback |
 | [Remote Mode (client)](Rust_Remote_Mode.md) | Server data source: settings/secrets, snapshot sync, WebDAV URL mapping, read-only rules and playback cache |
 | [Server API](api/README.md) | `server/audiolib-server` HTTP contract and client behaviour |
+| [Server deployment](Server_Deployment.md) | Install a release server, configure it, run systemd/launchd/Docker, upgrade, migrate schema 9 and check health |
+| [Managing sound libraries on the server](Server_Library_Guide.md) | Roots, full and incremental scans, sidecar-v1 spreadsheets, covers, snapshots and scan errors |
 | [Spectral Peaks and Audition](Rust_Spectral_Audition.md) | Waveform colors, bounded analysis and playback transforms |
 | [Debug Mode and Bug Reports](Rust_Debug_Reports.md) | Session-only diagnostic recording, private-data boundaries, report preview and GitHub handoff |
 | [Rust Validation](Rust_Validation.md) | Actual checks, performance measurements and hardware limits |

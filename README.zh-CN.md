@@ -125,7 +125,29 @@ cp server/audiolib-server/config.example.toml /etc/audiolib/config.toml   # 编�
 audiolib-server --config /etc/audiolib/config.toml
 ```
 
-**部署与使用指南：** [server/README.zh-CN.md](server/README.zh-CN.md)（构建、首次使用、客户端连接、外网访问）与 [server/deploy/README.md](server/deploy/README.md)（systemd/launchd/Docker、升级、备份）。配置、认证与部署（systemd、launchd、Docker 示例）见 [server/README.zh-CN.md](server/README.zh-CN.md)，API 契约见 [doc/api/README.md](doc/api/README.md)。面向公网时请放在带 TLS 的反向代理之后并启用令牌。
+**部署与使用指南：** [服务端部署](doc/Server_Deployment.md)、[服务端音效库管理](doc/Server_Library_Guide.md)。平台单元与管理页仍见 [server/README.zh-CN.md](server/README.zh-CN.md) 与 [server/deploy/README.md](server/deploy/README.md)，API 契约见 [doc/api/README.md](doc/api/README.md)。面向公网时请放在带 TLS 的反向代理之后并启用令牌。
+
+### Linux 服务、Docker、升级与健康检查
+
+Linux x64 归档为 `AudioLibServer-<tag>-linux-x64.tar.gz`，根目录有 `audiolib-server` 与 `audiolib-migrate`。示例 systemd 单元是 [`server/deploy/systemd/audiolib-server.service`](server/deploy/systemd/audiolib-server.service)：以 `audiolib` 用户运行，从 `/etc/audiolib/audiolib.env` 读取令牌，配置为 `/etc/audiolib/config.toml`。单元允许写 `/var/lib/audiolib`，并以只读方式访问 `/srv/audiolib/music`；其他路径需要 override。独立 Linux arm64 包不发布。
+
+v0.9.3 仍发布 `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` 与 `AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。校验 SHA256 后 `docker load`，按 [`server/deploy/docker/docker-compose.release.yml`](server/deploy/docker/docker-compose.release.yml) 重建容器。数据卷里须已有 `/data/library.db`。镜像配置为 `auth_mode = "all"`、`trust_lan_peers = false`、`manage_mode = "off"`，因此要设置 `AUDIOLIB_SERVER_TOKEN`；若希望客户端扫描，请挂载自己的配置。容器内关闭二进制更新，升级时替换镜像并保留数据卷。镜像健康检查请求 `/api/v1/health`，并要求 `"status":"ok"`。
+
+升级前先排空扫描。保留配置、资料库、令牌和音频目录。Windows、macOS arm64 与 Linux x64 在已经装好 0.9 布局（`audiolib-server` 与 `audiolib-migrate` 并列）之后，可由管理页更新，程序目录须可写。从 0.9 之前的包第一次换上该布局须手动解压，旧更新器会拒绝新增的迁移程序。v0.9.3 本身不新增数据库迁移。schema 9 须显式执行 `audiolib-migrate status --db /path/to/library.db`，再 `audiolib-migrate start --db /path/to/library.db`（`pause`、`resume`、`cancel`、`rollback` 使用同一 `--db`）。工具会在库旁保留 `audiolib-rollback-mig9-*.db`。只替换二进制不能把 schema 9 退回 schema 8。
+
+`GET /api/v1/health` 无需令牌，进程在服务时返回 HTTP 200。`"status":"ok"` 表示库已打开；`"starting"` 时其他接口返回 503 `UNAVAILABLE`；`"error"` 表示打开失败且进程会继续重试。裸路径 `/health` 为 404。
+
+```sh
+curl -fsS "http://<server-host>:<port>/api/v1/health"
+```
+
+客户端打开「音效库管理」（Ctrl+D），添加服务器地址 `http://<server-host>:<port>` 或 `https://audiolib.example.com`，测试连接后同步。`auth_mode` 为 `external` 时，局域网直连可以不填令牌。搜索在本机快照上执行。步骤详见 [服务端部署](doc/Server_Deployment.md)。
+
+## 服务端音效库管理
+
+服务端只索引一个资料库。根目录可写在配置的 `[[roots]]` 中，也可在局域网管理页添加，或在客户端「音效库管理」里用「＋ 添加音效库」（须当前数据源已打开快照，且 `manage_mode` 允许本机管理）。删除根目录只删除库中的记录和标注，磁盘上的音频文件保留。日常用增量扫描处理新增和修改；干净的完整扫描还会把找不到的文件标为缺失。同一次扫描会导入 sidecar CSV/TSV/XLS/XLSX：表格若直接放在 `{stem}--Docs` 或 `{stem}--Sounds*` 目录，还可以匹配同 stem 兄弟目录子树里的 WAV。客户端在快照同步之后看到新记录。内嵌封面单独请求，不写进快照。单文件错误（例如 `Audio: Truncated WAV chunk …`、`Audio: Unsupported Ogg audio identification packet`）记在该次扫描上，并使这次完整扫描不再把其他文件标为缺失。
+
+兄弟目录规则、封面、客户端能看到的内容，以及常见扫描错误见 [服务端音效库管理](doc/Server_Library_Guide.md)。
 
 ## 版本规范
 
