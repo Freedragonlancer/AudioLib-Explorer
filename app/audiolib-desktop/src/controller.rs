@@ -370,6 +370,8 @@ struct SearchJob {
     facet_revision: u64,
     provider: Arc<SqliteProvider>,
     path_probe: Option<Arc<dyn DataProvider>>,
+    window: Option<result_window::WindowPlan>,
+    backward_before: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -407,6 +409,8 @@ struct SearchPublication {
     retained_status: Option<String>,
     /// A bounded scrolling window keeps the visible audio anchored during publication.
     result_window: bool,
+    /// A fresh revision rebuild may retain a surviving top ID without requiring it.
+    viewport_anchor: Option<(i64, f32)>,
 }
 
 #[derive(Clone)]
@@ -786,6 +790,7 @@ pub struct Controller {
     library_info_generation: AtomicU64,
     request: Mutex<SearchRequest>,
     result_pages: Mutex<result_page_navigation::ResultPageNavigation>,
+    window_coverage: Mutex<Option<result_window::WindowCoverage>>,
     waveform_generation: AtomicU64,
     waveform_cancel: Mutex<Arc<AtomicBool>>,
     waveform_job: Mutex<Option<WaveJob>>,
@@ -1080,6 +1085,7 @@ impl Controller {
             library_info_generation: AtomicU64::new(0),
             request: Mutex::new(SearchRequest::default()),
             result_pages: Mutex::new(Default::default()),
+            window_coverage: Mutex::new(None),
             waveform_generation: AtomicU64::new(0),
             waveform_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             waveform_job: Mutex::new(None),
@@ -2936,6 +2942,7 @@ impl Controller {
 
     fn reset_library_view(&self, ui: &AppWindow, reset_request: bool, retain_navigation: bool) {
         self.result_pages.lock().unwrap().clear();
+        self.window_coverage.lock().unwrap().take();
         // A forced source reset must invalidate the old import's UI admission and
         // cancel its original provider, while retaining its durable checkpoint.
         self.cancel_vendor_for_transition();
@@ -3413,19 +3420,61 @@ impl Controller {
                         drop(next);
                         continue;
                     }
-                    let job = pending.take().unwrap();
+                    let mut job = pending.take().unwrap();
                     drop(pending);
                     if c.search_generation.load(Ordering::Acquire) != job.generation {
                         continue;
                     }
-                    let provider = &job.provider;
+                    let provider = job.provider.clone();
+                    let cancel = job.cancel.clone();
                     crate::gui_search_benchmark::worker_started(job.generation, false);
                     let revision_before = provider.search_revision().ok().flatten();
+                    if job.window.as_ref().is_some_and(|plan| {
+                        !plan
+                            .coverage
+                            .matches_revision(revision_before, revision_before)
+                    }) {
+                        crate::gui_search_benchmark::worker_completed(job.generation, false);
+                        c.queue_window_refresh(job.generation);
+                        continue;
+                    }
                     let chinese = c.chinese.load(Ordering::Acquire);
-                    let mut result = survive_panic(
+                    let query_count = std::cell::Cell::new(0);
+                    let result = survive_panic(
                         || {
                             c.probe_migrating_path(&job)?;
-                            provider.search_cancellable(&job.request, job.cancel.clone())
+                            let search = |request: &SearchRequest| {
+                                if query_count.get() > 0
+                                    && revision_before.is_some()
+                                    && provider.search_revision().ok().flatten() != revision_before
+                                {
+                                    return Err(audiolib_core::Error::Cancelled);
+                                }
+                                query_count.set(query_count.get() + 1);
+                                provider.search_cancellable(request, cancel.clone())
+                            };
+                            let backward_before = job
+                                .window
+                                .as_ref()
+                                .filter(|plan| plan.direction < 0)
+                                .map(|plan| plan.coverage.before_raw)
+                                .or(job.backward_before);
+                            if let Some(before) = backward_before {
+                                result_window::load_backward(
+                                    &mut job.request,
+                                    before,
+                                    &cancel,
+                                    search,
+                                    |page| c.hide_removed_in_page(page),
+                                )
+                            } else {
+                                result_page_navigation::search_visible_page(
+                                    &mut job.request,
+                                    &cancel,
+                                    search,
+                                    |page| c.hide_removed_in_page(page),
+                                )
+                            }
                         },
                         || {
                             audiolib_core::Error::Database(internal_error(
@@ -3434,18 +3483,26 @@ impl Controller {
                         },
                     );
                     let revision_after = provider.search_revision().ok().flatten();
+                    if job.window.as_ref().is_some_and(|plan| {
+                        !plan
+                            .coverage
+                            .matches_revision(revision_before, revision_after)
+                    }) {
+                        crate::gui_search_benchmark::worker_completed(job.generation, false);
+                        c.queue_window_refresh(job.generation);
+                        continue;
+                    }
+                    let result = if query_count.get() > 1
+                        && revision_before.is_some()
+                        && revision_after != revision_before
+                    {
+                        Err(audiolib_core::Error::Cancelled)
+                    } else {
+                        result
+                    };
                     let workspace_revision =
                         revision_before.filter(|revision| Some(*revision) == revision_after);
                     crate::gui_search_benchmark::worker_completed(job.generation, false);
-                    // Hidden server records do not shorten the queried SQL range.
-                    let source_range = result
-                        .as_ref()
-                        .ok()
-                        .map(result_page_navigation::SourcePage::from);
-                    // Server removals stay hidden until the resync swaps the snapshot.
-                    if let Ok(page) = result.as_mut() {
-                        c.hide_removed_in_page(page);
-                    }
                     if c.search_generation.load(Ordering::Acquire) != job.generation {
                         continue;
                     }
@@ -3469,7 +3526,37 @@ impl Controller {
                             return;
                         }
                         match result {
-                            Ok(page) => {
+                            Ok(mut reply) => {
+                                let retained_coverage = c2.window_coverage.lock().unwrap().clone();
+                                let same_display_revision = workspace_revision.is_some()
+                                    && retained_coverage.as_ref().is_some_and(|coverage| {
+                                        coverage.revision == workspace_revision
+                                    });
+                                if job.window.is_none()
+                                    && job.backward_before.is_some()
+                                    && reply.page.results.is_empty()
+                                    && let Some(mut coverage) = retained_coverage
+                                {
+                                    let mut request = c2.request.lock().unwrap();
+                                    let mut navigation = c2.result_pages.lock().unwrap();
+                                    navigation.failed(&mut request);
+                                    if !same_display_revision {
+                                        drop(navigation);
+                                        drop(request);
+                                        c2.refresh_result_window(&ui);
+                                        return;
+                                    }
+                                    coverage.first_offset = Some(request.offset);
+                                    ui.set_can_next(navigation.install_window(&request, &coverage));
+                                    ui.set_can_previous(false);
+                                    drop(navigation);
+                                    drop(request);
+                                    *c2.window_coverage.lock().unwrap() = Some(coverage);
+                                    c2.search_page_published(&ui, job.generation, true);
+                                    ui.set_searching(false);
+                                    c2.search_task_page_ready(&ui, workspace_revision);
+                                    return;
+                                }
                                 let result_window =
                                     c2.search_publication.lock().unwrap().as_ref().is_some_and(
                                         |state| {
@@ -3477,6 +3564,27 @@ impl Controller {
                                                 && state.result_window
                                         },
                                     );
+                                if let Some(plan) = &job.window {
+                                    let Some(joined) = result_window::join(
+                                        &c2.records.lock().unwrap(),
+                                        &plan.coverage,
+                                        reply,
+                                        plan.direction,
+                                    ) else {
+                                        c2.search_page_published(&ui, job.generation, true);
+                                        ui.set_searching(false);
+                                        return;
+                                    };
+                                    reply = joined;
+                                    job.request.offset = reply.coverage.before_raw;
+                                    job.request.limit =
+                                        reply.page.results.len().div_ceil(PAGE_SIZE).clamp(1, 3)
+                                            * PAGE_SIZE;
+                                    job.request.cursor = None;
+                                }
+                                let page = reply.page;
+                                let mut coverage = reply.coverage;
+                                coverage.revision = workspace_revision;
                                 // An exact cursor count can describe only the remaining
                                 // suffix. Opaque continuations cannot establish a global
                                 // total for offset clamping or result labels.
@@ -3509,6 +3617,12 @@ impl Controller {
                                                 .zip(&page.results)
                                                 .all(|(old, new)| old.id == new.id)
                                     };
+                                let refresh_anchor = c2
+                                    .search_publication
+                                    .lock()
+                                    .unwrap()
+                                    .as_mut()
+                                    .and_then(|state| state.viewport_anchor.take());
                                 let preserved_y = if result_window {
                                     let y = result_window::result_window_scroll_y(
                                         &c2.records.lock().unwrap(),
@@ -3526,9 +3640,16 @@ impl Controller {
                                     }
                                     y
                                 } else {
-                                    None
+                                    refresh_anchor.and_then(|(id, fraction)| {
+                                        page.results.iter().position(|file| file.id == id).map(
+                                            |index| {
+                                                -((index as f32) + fraction)
+                                                    * ui.get_task_result_row_height().max(1.0)
+                                            },
+                                        )
+                                    })
                                 };
-                                if result_window {
+                                if result_window || preserved_y.is_some() {
                                     ui.set_preserve_result_scroll(true);
                                     if !append_only {
                                         ui.set_task_restoring(true);
@@ -3555,13 +3676,21 @@ impl Controller {
                                 if let Some(y) = preserved_y.filter(|_| !append_only) {
                                     ui.invoke_restore_result_window_viewport(y);
                                 }
-                                ui.set_can_previous(job.request.offset > 0);
-                                ui.set_can_next(source_range.as_ref().is_some_and(|source| {
-                                    c2.result_pages
-                                        .lock()
-                                        .unwrap()
-                                        .published(&job.request, source)
-                                }));
+                                if !result_window {
+                                    *c2.request.lock().unwrap() = job.request.clone();
+                                }
+                                {
+                                    let mut navigation = c2.result_pages.lock().unwrap();
+                                    if same_display_revision {
+                                        coverage.first_offset =
+                                            coverage.first_offset.or(navigation.known_first());
+                                    }
+                                    ui.set_can_next(
+                                        navigation.install_window(&job.request, &coverage),
+                                    );
+                                    ui.set_can_previous(navigation.can_previous(&job.request));
+                                }
+                                *c2.window_coverage.lock().unwrap() = Some(coverage);
                                 let first_page = job.request.offset / PAGE_SIZE + 1;
                                 let last_page = (job.request.offset
                                     + page.returned_count.saturating_sub(1))
@@ -3656,11 +3785,19 @@ impl Controller {
                             }
                             Err(error) => {
                                 let mut request = c2.request.lock().unwrap();
-                                c2.result_pages.lock().unwrap().failed(&mut request);
+                                let mut navigation = c2.result_pages.lock().unwrap();
+                                let retained_navigation = navigation.pending_for(&request)
+                                    && c2.window_coverage.lock().unwrap().is_some()
+                                    && c2.available();
+                                navigation.failed(&mut request);
+                                drop(navigation);
                                 drop(request);
                                 ui.set_searching(false);
                                 if c2.retry_migrating_search(&ui, &error, job.generation) {
                                     return;
+                                }
+                                if retained_navigation {
+                                    c2.restore_navigation_readiness(&ui);
                                 }
                                 ui.set_status(error.to_string().into());
                                 let retained_window =
@@ -3670,7 +3807,9 @@ impl Controller {
                                                 && state.result_window
                                         },
                                     );
-                                c2.search_page_published(&ui, job.generation, retained_window);
+                                if !retained_navigation {
+                                    c2.search_page_published(&ui, job.generation, retained_window);
+                                }
                             }
                         }
                     });
@@ -4075,6 +4214,75 @@ impl Controller {
         self.request_navigation_search(ui, immediate, reset);
     }
 
+    /// Revision changes invalidate raw ordinals. Refresh the displayed request
+    /// through the ordinary query/facet path rather than joining a stale window.
+    fn queue_window_refresh(self: &Arc<Self>, generation: u64) {
+        let c = self.clone();
+        post(self.ui.clone(), move |ui| {
+            if c.search_generation.load(Ordering::Acquire) == generation && c.available() {
+                c.refresh_result_window(&ui);
+            }
+        });
+    }
+
+    fn refresh_result_window(self: &Arc<Self>, ui: &AppWindow) {
+        if !self.available() {
+            return;
+        }
+        let height = ui.get_task_result_row_height().max(1.0);
+        let scroll = (-ui.get_task_result_scroll_y()).max(0.0);
+        let anchor = self
+            .records
+            .lock()
+            .unwrap()
+            .get((scroll / height).floor() as usize)
+            .map(|file| (file.id, (scroll % height) / height));
+        self.request_search(ui, true, false);
+        if let Some(state) = self.search_publication.lock().unwrap().as_mut() {
+            state.viewport_anchor = anchor;
+        }
+    }
+
+    /// A failed manual page leaves the displayed model intact. Give that model
+    /// fresh read admission so failed/cancelled facet work cannot settle it later.
+    fn restore_navigation_readiness(self: &Arc<Self>, ui: &AppWindow) {
+        let revision = self
+            .window_coverage
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|coverage| coverage.revision);
+        self.admit_displayed_window_reads();
+        self.search_task_folders_ready(revision);
+        self.search_task_page_ready(ui, revision);
+        self.search_task_directory_ready(ui);
+    }
+
+    /// Admit reads for an already validated displayed model. Callers retain its
+    /// provider/revision gates and restore viewport state separately; this helper
+    /// neither captures nor saves a workspace draft.
+    fn admit_displayed_window_reads(&self) {
+        let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.tree_generation.fetch_add(1, Ordering::AcqRel);
+        self.search_cancel
+            .lock()
+            .unwrap()
+            .store(true, Ordering::Release);
+        *self.search_cancel.lock().unwrap() = Arc::new(AtomicBool::new(false));
+        *self.search_job.lock().unwrap() = None;
+        *self.facet_job.lock().unwrap() = None;
+        *self.search_publication.lock().unwrap() = Some(SearchPublication {
+            generation,
+            page: SearchPagePhase::Published,
+            pending_folders: None,
+            expected_folders: None,
+            model_published: true,
+            retained_status: None,
+            result_window: false,
+            viewport_anchor: None,
+        });
+    }
+
     fn resume_search(self: &Arc<Self>, ui: &AppWindow, retained_status: Option<String>) {
         self.request_search(ui, true, false);
         if let Some(publication) = self.search_publication.lock().unwrap().as_mut() {
@@ -4299,23 +4507,22 @@ impl Controller {
             return false;
         }
         let mut request = self.request.lock().unwrap().clone();
-        let count = self.records.lock().unwrap().len();
-        if count == 0 {
+        let Some(coverage) = self.window_coverage.lock().unwrap().clone() else {
+            return false;
+        };
+        if self.records.lock().unwrap().is_empty() {
             return false;
         }
         request.cursor = None;
-        self.result_pages.lock().unwrap().clear();
-        let span = request.limit;
         if direction < 0 {
-            let added = request.offset.min(PAGE_SIZE);
-            request.offset -= added;
-            request.limit = (span + added).min(PAGE_SIZE * 3);
-        } else if span < PAGE_SIZE * 3 {
-            request.limit = (span + PAGE_SIZE).min(PAGE_SIZE * 3);
+            request.offset = coverage.before_raw.saturating_sub(PAGE_SIZE);
         } else {
-            request.offset = request.offset.saturating_add(PAGE_SIZE);
-            request.limit = PAGE_SIZE * 3;
+            request.offset = coverage.after_raw;
+            if coverage.cursor_limit == PAGE_SIZE {
+                request.cursor.clone_from(&coverage.next_cursor);
+            }
         }
+        request.limit = PAGE_SIZE;
         let generation = self.search_generation.load(Ordering::Acquire);
         {
             let mut publication = self.search_publication.lock().unwrap();
@@ -4331,6 +4538,11 @@ impl Controller {
         // their generation/cancellation scope and only fetch the adjoining rows.
         // A new query, sort, task or library still invalidates the entire scope.
         let job = SearchJob {
+            backward_before: None,
+            window: Some(result_window::WindowPlan {
+                coverage,
+                direction,
+            }),
             path_probe: self.path_probe_provider(&request),
             request,
             generation,
@@ -4525,6 +4737,9 @@ impl Controller {
             self.reject_search(ui, error.to_string());
             return;
         }
+        if !self.result_pages.lock().unwrap().pending_for(&request) {
+            self.window_coverage.lock().unwrap().take();
+        }
         crate::gui_search_benchmark::request(ui, generation, &request);
         ui.set_preserve_result_scroll(false);
         self.begin_task_search(reset);
@@ -4534,6 +4749,8 @@ impl Controller {
         std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
             .store(true, Ordering::Release);
         let job = SearchJob {
+            backward_before: self.result_pages.lock().unwrap().backward_before(),
+            window: None,
             cancel,
             facet_revision: self.facet_revision.load(Ordering::Acquire),
             path_probe: self.path_probe_provider(&request),
@@ -4559,6 +4776,7 @@ impl Controller {
             model_published: false,
             retained_status: None,
             result_window: false,
+            viewport_anchor: None,
         });
         *self.search_job.lock().unwrap() = Some(job.clone());
         *self.facet_job.lock().unwrap() = Some(job);

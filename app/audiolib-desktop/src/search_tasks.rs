@@ -25,7 +25,10 @@ struct TaskCache {
     revision: u64,
     tree: TreeState,
     records: Vec<AudioFile>,
-    /// Original SQL span; server-side removals can hide rows from this cache.
+    /// Raw positions and continuations belonging to exactly these visible records.
+    /// Kept in memory only; a cold restore rebuilds them with bounded queries.
+    window_coverage: Option<result_window::WindowCoverage>,
+    /// Visible row budget; gaps in the original SQL span do not enlarge it.
     limit: usize,
     summary: String,
     page: String,
@@ -641,7 +644,11 @@ impl Controller {
         };
         let request = self.request.lock().unwrap().clone();
         let tree = self.tree.lock().unwrap().clone();
-        let records = self.records.lock().unwrap().clone();
+        let (records, window_coverage) = {
+            let records = self.records.lock().unwrap();
+            let coverage = self.window_coverage.lock().unwrap();
+            (records.clone(), coverage.clone())
+        };
         let selected = self.selected.lock().unwrap().as_ref().map(audio_ref);
         let checked = self.multi_selection.lock().unwrap().clone();
         let anchor = *self.selection_anchor.lock().unwrap();
@@ -775,6 +782,7 @@ impl Controller {
                     revision,
                     tree,
                     records,
+                    window_coverage,
                     limit: request.limit,
                     summary: ui.get_result_summary().to_string(),
                     page: ui.get_page_label().to_string(),
@@ -1261,6 +1269,7 @@ impl Controller {
         // Install one safe runtime for B before any fallible I/O. If validation
         // fails, none of A's request, directory IDs or checked rows can leak into B.
         self.result_pages.lock().unwrap().clear();
+        self.window_coverage.lock().unwrap().take();
         *self.request.lock().unwrap() = task.definition.to_request(
             cache.as_ref().map_or_else(
                 || task_result_window_limit(&task.view, task_viewport_rows(ui)),
@@ -1389,6 +1398,7 @@ impl Controller {
     ) {
         let album_missing = album_filter_unavailable(&task.definition);
         self.result_pages.lock().unwrap().clear();
+        self.window_coverage.lock().unwrap().take();
         apply_task_controls(ui, &task);
         *self.request.lock().unwrap() = task.definition.to_request(
             cache.as_ref().map_or_else(
@@ -1495,6 +1505,17 @@ impl Controller {
         );
         ui.set_can_previous(cache.as_ref().is_some_and(|cache| cache.previous));
         ui.set_can_next(cache.as_ref().is_some_and(|cache| cache.next));
+        if let Some(coverage) = cache
+            .as_ref()
+            .and_then(|cache| cache.window_coverage.clone())
+        {
+            let request = self.request.lock().unwrap().clone();
+            self.result_pages
+                .lock()
+                .unwrap()
+                .install_window(&request, &coverage);
+            *self.window_coverage.lock().unwrap() = Some(coverage);
+        }
         {
             let mut state = self.task_workspace.lock().unwrap();
             state.page_revision = cache.as_ref().map(|cache| cache.revision);
@@ -1530,6 +1551,7 @@ impl Controller {
             self.task_workspace.lock().unwrap().pending_view = Some(task.view.clone());
             self.request_navigation_search(ui, true, false);
         } else {
+            self.admit_displayed_window_reads();
             self.reload_tree();
             // A restored result cache still needs facets for this task's conditions.
             // Reuse the bounded directory worker instead of retaining another tab's albums.
@@ -1538,6 +1560,8 @@ impl Controller {
                 *self.search_cancel.lock().unwrap() = cancel.clone();
                 *self.facet_job.lock().unwrap() = Some(SearchJob {
                     path_probe: None,
+                    window: None,
+                    backward_before: None,
                     request: self.request.lock().unwrap().clone(),
                     generation: self.search_generation.load(Ordering::Acquire),
                     not_before: Instant::now(),
@@ -2030,6 +2054,12 @@ fn resolve_task(
             && !album_missing
             && cache.provider.ptr_eq(&Arc::downgrade(provider))
             && Some(cache.revision) == revision
+            && cache.window_coverage.as_ref().is_some_and(|coverage| {
+                coverage.revision == Some(cache.revision)
+                    && coverage.positions.len() == cache.records.len()
+                    && coverage.positions.len() <= PAGE_SIZE * 3
+                    && coverage.before_raw == task.view.offset
+            })
     });
     Ok((task, cache, selected, folder_missing, Vec::new()))
 }
