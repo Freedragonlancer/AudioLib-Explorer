@@ -116,10 +116,15 @@ if [ "$WITH_DB" = 1 ]; then
     [ "$PROD_DB" != "$DB" ] && { [ ! -e "$DB" ] || [ ! "$PROD_DB" -ef "$DB" ]; } || die "PROD_DB equals beta db"
     [ -f "$PROD_DB" ] && [ -f "$DB" ] || die "production source and existing beta library must both exist; initialize a missing beta library separately"
     backup_readonly() {
+        local destination journal_mode
         # sqlite3 receives the source as a filename, not a URI (# and spaces are literal).
         # The dot-command target is quoted with its documented backslash escapes.
         destination="${2//\\/\\\\}"; destination="${destination//\"/\\\"}"
-        sqlite3 -readonly "$1" ".backup \"$destination\""
+        sqlite3 -readonly "$1" ".backup \"$destination\"" || return 1
+        # Only the newly created owned destination is writable. Normalize its
+        # WAL header before later read-only validation or a main-file move.
+        [ -f "$2" ] && [ ! -L "$2" ] &&
+            journal_mode="$(sqlite3 "$2" 'PRAGMA journal_mode=DELETE;')" && [ "$journal_mode" = delete ]
     }
     CLONE_DIR="$(mktemp -d "$DB_DIRECTORY/.$DB_NAME.refresh.XXXXXX")" || die "cannot reserve beta clone staging"
     CLONE="$CLONE_DIR/library.db"
