@@ -1158,11 +1158,21 @@ fn child_result_window_restore() {
 
     let mut cached_task = task;
     cached_task.view.list_top_row = 20;
+    let revision = fixture.provider.search_revision().unwrap().unwrap();
     let cache = TaskCache {
         provider: Arc::downgrade(&fixture.provider),
-        revision: fixture.provider.search_revision().unwrap().unwrap(),
+        revision,
         tree: controller.tree.lock().unwrap().clone(),
         records,
+        window_coverage: Some(result_window::WindowCoverage {
+            revision: Some(revision),
+            positions: (0..600).collect(),
+            before_raw: 0,
+            after_raw: 600,
+            has_next: false,
+            first_offset: Some(0),
+            ..Default::default()
+        }),
         limit: 600,
         summary: "1–600 of 600 sounds".into(),
         page: "1–3/3".into(),
@@ -1189,6 +1199,9 @@ fn child_result_window_restore() {
     // are filtered out. Restoring or recapturing it must not shorten that span.
     let mut filtered_cache = cache;
     filtered_cache.records.truncate(180);
+    let coverage = filtered_cache.window_coverage.as_mut().unwrap();
+    coverage.positions.truncate(180);
+    coverage.has_next = true;
     filtered_cache.next = true;
     controller.apply_search_task(
         ui,

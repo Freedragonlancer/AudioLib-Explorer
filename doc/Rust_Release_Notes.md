@@ -1,8 +1,20 @@
+# 0.9.3：Waveform、播放反馈与连续浏览修复
+
+程序 0.9.3 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
+
+以已发布的 `v0.9.2` 为基线。完整格式保持 `ale-s8-cld1-t3-m2-p1-a1` / 服务端 `ale-s9-cld1-t3-m2-p1-a1-sd1`，不引入数据库迁移。准备状态及验收边界见 [0.9.3 发布准备](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.9.3.md)。
+
+- **Waveform（#239）**：修复已播放区域在不同 DPI 和缩放位置出现细接缝的问题，保持连续的播放进度着色。
+- **播放反馈（#239）**：简化 Play 按钮的状态外观，移除下划线，以边框强调正在播放的状态。
+- **连续浏览（借鉴 #185 的空页处理）**：服务器移除记录后，连续浏览会越过被隐藏的整页结果，保留前后导航、任务切换与恢复位置。导航失败时保留当前结果；后台资料库变化时重新读取，避免续查遗漏或重复。
+
+本次不改变源 WAV、Metadata 存储格式、HTTP API 或服务端写目标。发布范围包括 Windows x64 / Mac arm64 客户端，Windows x64 / Mac arm64 / Linux x64 服务端，以及 Docker linux/amd64 / linux/arm64，共七个归档及各自 SHA256。执行进度与平台覆盖见上述发布记录。
+
 # 0.9.2：服务器模式重启后保留封面，并避免对当前客户端误弹升级窗
 
 程序 0.9.2 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-以已发布的 `v0.9.1` 为基线。完整格式保持 `ale-s8-cld1-t3-m2-p1-a1` / 服务端 `ale-s9-cld1-t3-m2-p1-a1-sd1`，不引入数据库迁移。
+已发布。以已发布的 `v0.9.1` 为基线。完整格式保持 `ale-s8-cld1-t3-m2-p1-a1` / 服务端 `ale-s9-cld1-t3-m2-p1-a1-sd1`，不引入数据库迁移。
 
 - **服务器模式封面与启动同步（#236）**：打开上次缓存快照后就会请求 `/capabilities`，不再只在点同步成功后才拉取。在 capabilities 尚未就绪时继续使用已经读到的磁盘封面，避免重启后封面空白、必须再同步一次。
 - **升级提示**：GET `/capabilities` 带上兼容头；当正在运行的客户端已经达到 `min_client_version` 时，不再弹出 Software update 窗口。
