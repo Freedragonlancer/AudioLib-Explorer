@@ -135,7 +135,7 @@ Short or damaged Ogg pages can also be warnings inside a file that still indexes
 - **`/api/v1/health` is `starting` or `error`.** Wait for `ok`. `error` with `The library could not be opened; the server keeps retrying` usually means `library_db` is missing, unreadable, or the operating system has not granted the process access to the volume. Details stay in the server log.
 - **503 `UNAVAILABLE`.** The library is not open yet. This is separate from 503 `ROOT_OFFLINE`, which means one configured root did not answer the background stat in time. Check the root's `status` on `GET /api/v1/roots` and that the share is mounted.
 - **403 `MANAGE_FORBIDDEN` or the client root buttons stay disabled.** `manage_mode` is `lan` or `off`, the caller is not LAN-direct, or `/capabilities` has not loaded. The Docker example config sets `manage_mode = "off"` until you replace it.
-- **409 `BUSY` while editing roots.** A scan is still running. Pause or cancel it, or wait until it finishes.
+- **409 `BUSY` while editing roots.** A scan is running or paused. Cancel it and wait for it to finish, or wait for normal completion. Pausing does not release the scan lease.
 - **503 `BUSY`.** Stream, preview or cover slots are full, or a snapshot is still being prepared. Honor `Retry-After`.
 - **503 `TRANSCODER_UNAVAILABLE`.** Only `preview?codec=flac` when `ffmpeg_path` is missing. Original streaming still works.
 - **A spreadsheet did not fill in descriptions.** Confirm the file sits directly in a `{stem}--Docs` or `{stem}--Sounds*` directory if it should see a sibling tree, that the scan root includes that parent, that identity cells are bare WAV file names, and that each name is unique in scope. Ambiguous and unmatched rows keep the previous sidecar values.
