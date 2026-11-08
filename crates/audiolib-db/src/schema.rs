@@ -11,7 +11,9 @@ mod legacy;
 mod search_upgrade;
 #[cfg(feature = "scanner")]
 pub(crate) use audio_sources::metadata_requires_audio_sources;
-pub(crate) use audio_sources::{imported_audio_sources_required, require_audio_sources, require_imported_audio_sources};
+pub(crate) use audio_sources::{
+    imported_audio_sources_required, require_audio_sources, require_imported_audio_sources,
+};
 pub(crate) use current::{
     create_current, current_format_ready, mark_current, needs_upgrade, readable_format_ready,
 };
