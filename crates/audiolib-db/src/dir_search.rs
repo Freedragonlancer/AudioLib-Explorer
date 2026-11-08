@@ -445,9 +445,23 @@ fn write_snapshot_format(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    let format = match version {
-        8 => audiolib_core::compatibility::PLAN_B_FORMAT,
-        9 => audiolib_core::compatibility::PLAN_B_V9_FORMAT,
+    let extended = match crate::schema::feature_version(
+        conn,
+        audiolib_core::compatibility::AUDIO_SOURCES_FEATURE,
+    )? {
+        None => false,
+        Some(1) => true,
+        Some(_) => {
+            return Err(Error::Validation(
+                "Unsupported extended audio source revision".into(),
+            ));
+        }
+    };
+    let format = match (version, extended) {
+        (8, false) => audiolib_core::compatibility::PLAN_B_FORMAT,
+        (8, true) => audiolib_core::compatibility::PLAN_B_AUDIO_FORMAT,
+        (9, false) => audiolib_core::compatibility::PLAN_B_V9_FORMAT,
+        (9, true) => audiolib_core::compatibility::PLAN_B_V9_AUDIO_FORMAT,
         _ => {
             return Err(Error::Validation(
                 "Directory index requires schema 8 or 9".into(),

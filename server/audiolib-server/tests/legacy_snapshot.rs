@@ -17,9 +17,13 @@ fn headers(modern: bool) -> HeaderMap {
     if !modern {
         catalog.application_version = "0.8.7".into();
         catalog.catalog_revision = 1;
-        catalog
-            .snapshot_read_formats
-            .retain(|id| id != PLAN_B_V9_FORMAT);
+        catalog.snapshot_read_formats.retain(|id| {
+            !matches!(
+                id.as_str(),
+                PLAN_B_V9_FORMAT | PLAN_B_AUDIO_FORMAT | PLAN_B_V9_AUDIO_FORMAT
+            )
+        });
+        catalog.features.remove(AUDIO_SOURCES_FEATURE);
     }
     let mut headers = HeaderMap::new();
     for (name, value) in [
@@ -374,7 +378,10 @@ async fn catalog2_reports_actual_server_role_and_peer_specific_upgrade_advice() 
     use audiolib_core::{server_upgrade::*, vendor_import::VendorLimits};
     let client_catalog = compatibility_manifest();
     assert_eq!(client_catalog.catalog_revision, 2);
-    assert_eq!(client_catalog.database_write_formats, [PLAN_B_FORMAT]);
+    assert_eq!(
+        client_catalog.database_write_formats,
+        [PLAN_B_FORMAT, PLAN_B_AUDIO_FORMAT]
+    );
     assert!(
         client_catalog
             .snapshot_read_formats

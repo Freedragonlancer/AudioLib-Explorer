@@ -14,7 +14,7 @@ pub const UPGRADE_AVAILABLE_HEADER: &str = "x-audiolib-upgrade-available";
 pub const MAX_UPGRADE_HEADER_BYTES: usize = 512;
 /// The schema 9 Plan B snapshot format this client recognizes (§3, §6).
 /// Re-export of the schema-9 format this client reads (`sd1`).
-pub use compatibility::PLAN_B_V9_FORMAT;
+pub use compatibility::{PLAN_B_V9_AUDIO_FORMAT, PLAN_B_V9_FORMAT};
 /// Path search rules this client knows (`sd1`, `search_path: 1`).
 pub const SEARCH_PATH_REVISION: u32 = 1;
 /// Compatibility feature names introduced by the design (§6).
@@ -445,7 +445,7 @@ pub enum FormatSupport {
 }
 
 pub fn format_support(id: &str) -> FormatSupport {
-    if id == PLAN_B_V9_FORMAT {
+    if matches!(id, PLAN_B_V9_FORMAT | PLAN_B_V9_AUDIO_FORMAT) {
         return FormatSupport::KnownPathSearch;
     }
     let manifest = compatibility::compatibility_manifest();
@@ -984,11 +984,10 @@ pub fn evaluate(input: &ServerUpgradeInput) -> ServerUpgradeStatus {
         || (!supports.is_empty()
             && supports.contains(&FormatSupport::NewerPathRules)
             && !supports.contains(&FormatSupport::KnownPathSearch));
-    let consistent_v9 = !input.observed_formats.is_empty()
-        && input
-            .observed_formats
-            .iter()
-            .all(|id| id == PLAN_B_V9_FORMAT);
+    let consistent_v9 = input.observed_formats.first().is_some_and(|first| {
+        matches!(first.as_str(), PLAN_B_V9_FORMAT | PLAN_B_V9_AUDIO_FORMAT)
+            && input.observed_formats.iter().all(|id| id == first)
+    });
     let path_search = if incompatible {
         PathSearch::NotOffered
     } else if newer_rules {
@@ -1405,6 +1404,14 @@ mod tests {
             FormatSupport::KnownPathSearch
         );
         assert_eq!(
+            format_support(PLAN_B_V9_AUDIO_FORMAT),
+            FormatSupport::KnownPathSearch
+        );
+        assert_eq!(
+            format_support(compatibility::PLAN_B_AUDIO_FORMAT),
+            FormatSupport::Readable
+        );
+        assert_eq!(
             format_support("ale-s9-cld1-t3-m2-p1-a1-sd2"),
             FormatSupport::NewerPathRules
         );
@@ -1412,6 +1419,8 @@ mod tests {
             "ale-s10-cld1-t3-m2-p1-a1-sd1",
             "ale-s9-cld1-t4-m2-p1-a1-sd1",
             "ale-s9-cld1-t3-m2-p1-a1-sd1-sd2",
+            "ale-s9-cld1-t3-m2-p1-a1-sd1-af2",
+            "ale-s8-cld1-t3-m2-p1-a1-af2",
             "xyz-s9",
             "ale-s9--t3",
         ] {
@@ -1432,6 +1441,20 @@ mod tests {
         assert_eq!(status.path_search, PathSearch::Available);
         assert!(status.main_search);
         assert!(status.notices.is_empty());
+    }
+
+    #[test]
+    fn extended_source_format_keeps_path_search_only_with_matching_observed_formats() {
+        let status = evaluate(&v9_input(
+            &[PLAN_B_V9_AUDIO_FORMAT],
+            &[PLAN_B_V9_AUDIO_FORMAT],
+        ));
+        assert_eq!(status.path_search, PathSearch::Available);
+        let mixed = evaluate(&v9_input(
+            &[PLAN_B_V9_AUDIO_FORMAT],
+            &[PLAN_B_V9_FORMAT, PLAN_B_V9_AUDIO_FORMAT],
+        ));
+        assert_eq!(mixed.path_search, PathSearch::NotOffered);
     }
 
     #[test]

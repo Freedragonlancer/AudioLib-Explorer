@@ -251,7 +251,10 @@ pub fn choose(
             "Library SQLite database (*.db)\0*.db\0All files\0*.*\0\0",
             "db",
         ),
-        (FileKind::Audio, _) => ("WAV / FLAC / Ogg\0*.wav;*.flac;*.ogg;*.oga\0\0", "wav"),
+        (FileKind::Audio, _) => (
+            "WAV / BWF / FLAC / Ogg / MP3 / AIFF\0*.wav;*.bwf;*.flac;*.ogg;*.oga;*.mp3;*.aif;*.aiff\0\0",
+            "wav",
+        ),
         (FileKind::Image, _) => ("PNG / JPEG\0*.png;*.jpg;*.jpeg\0\0", "png"),
         (FileKind::JsonLines, _) => ("JSON Lines (*.jsonl)\0*.jsonl\0\0", "jsonl"),
         (FileKind::Csv, _) => ("CSV (*.csv)\0*.csv\0\0", "csv"),
@@ -377,7 +380,7 @@ pub fn choose(
     };
     let types = match kind {
         FileKind::Database | FileKind::NewLibrary => "db\nsqlite\nsqlite3",
-        FileKind::Audio => "wav\nflac\nogg\noga",
+        FileKind::Audio => "wav\nbwf\nflac\nogg\noga\nmp3\naif\naiff",
         FileKind::Image => "png\njpg\njpeg",
         FileKind::JsonLines => "jsonl",
         FileKind::Csv => "csv",

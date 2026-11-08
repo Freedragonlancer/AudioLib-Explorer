@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod albums;
 mod audio_file;
+mod audio_source;
 pub mod compatibility;
 pub mod config;
 pub mod library;
@@ -28,6 +29,7 @@ pub mod waveform_rate;
 pub mod window_layout;
 pub use albums::{Album, AlbumFacet, AlbumKind, MAX_ALBUM_MEMBERS};
 pub use audio_file::AudioFile;
+pub use audio_source::{SUPPORTED_AUDIO_EXTENSIONS, SourceAudioFormat, source_audio_format};
 pub use library::*;
 pub use list_waveform::{
     LIST_WAVEFORM_COLUMNS, LIST_WAVEFORM_ENCODING_VERSION, ListWaveform, ListWaveformBatch,
@@ -1112,11 +1114,7 @@ pub fn validate_wav_path(path: &Path, allowed_roots: &[PathBuf]) -> Result<PathB
 
 /// File types that can be scanned and decoded by the shipped source-audio pipeline.
 pub fn is_supported_audio_extension(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| {
-        ["wav", "flac", "ogg", "oga"]
-            .iter()
-            .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-    })
+    source_audio_format(path).is_some()
 }
 
 /// Resolve an existing supported audio target before enforcing its configured root.
@@ -1125,7 +1123,7 @@ pub fn validate_audio_path(path: &Path, allowed_roots: &[PathBuf]) -> Result<Pat
     let canonical = path.canonicalize()?;
     if !canonical.is_file() || !is_supported_audio_extension(&canonical) {
         return Err(Error::Validation(
-            "Target must be an existing WAV, FLAC or Ogg audio file".into(),
+            "Target must be an existing supported audio file".into(),
         ));
     }
     let parent = canonical

@@ -2816,16 +2816,34 @@ impl Controller {
                 .insert(target.clone(), file.filename.clone());
         }
         let reader_source = stream.clone();
-        audiolib_audio::register_buffered_stream_source(
-            target.clone(),
-            Arc::new(move || {
-                let reader = reader_source.reader()?;
-                let len = reader.len();
-                let source: Box<dyn audiolib_audio::ByteSource> = Box::new(reader);
-                Ok((source, len))
-            }),
-            Arc::new(StreamBuffer(stream.clone())),
-        );
+        let opener: audiolib_audio::SourceOpener = Arc::new(move || {
+            let reader = reader_source.reader()?;
+            let len = reader.len();
+            let source: Box<dyn audiolib_audio::ByteSource> = Box::new(reader);
+            Ok((source, len))
+        });
+        let buffer: Arc<dyn audiolib_audio::SourceBuffer> = Arc::new(StreamBuffer(stream.clone()));
+        if route == AudioRoute::Stream && file.attributes["container"] == "MP3" {
+            let layout = file.attributes["source_audio_layout"].clone();
+            let metadata = audiolib_core::AudioMetadata {
+                sample_rate: file.sample_rate,
+                channels: file.channels,
+                bit_depth: 0,
+                frames: layout["frames"].as_u64().unwrap_or_default(),
+                duration: file.duration,
+                encoding: "MP3".into(),
+                bext_description: String::new(),
+                attributes: serde_json::json!({"container":"MP3","source_audio_layout":layout}),
+            };
+            audiolib_audio::register_buffered_stream_source_with_metadata(
+                target.clone(),
+                opener,
+                buffer,
+                metadata,
+            );
+        } else {
+            audiolib_audio::register_buffered_stream_source(target.clone(), opener, buffer);
+        }
         tracing::debug!(id = file.id, route = %route.tag(), bandwidth = ?bandwidth().estimate_bps(), "audition stream ready");
         *self.remote_stream.lock().unwrap() = Some(RemotePlayback {
             path: target.clone(),

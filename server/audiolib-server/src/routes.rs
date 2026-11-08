@@ -1670,7 +1670,7 @@ async fn audio_stream(
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(stream::content_type(&path)),
+        HeaderValue::from_static(stream::content_type_for_record(&path, &record)),
     );
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body_len));
     if let Some(value) = content_range.and_then(|value| HeaderValue::try_from(value).ok()) {

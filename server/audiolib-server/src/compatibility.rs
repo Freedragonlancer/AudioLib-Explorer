@@ -347,6 +347,40 @@ mod tests {
     }
 
     #[test]
+    fn extended_sources_refuse_old_schema8_peers_and_preserve_wav_only_schema9_fallback() {
+        use audiolib_core::compatibility::{PLAN_B_AUDIO_FORMAT, PLAN_B_V9_AUDIO_FORMAT};
+        let (mut headers, legacy) = fixture();
+        let mut old = compatibility_manifest();
+        old.snapshot_read_formats
+            .retain(|id| id != PLAN_B_AUDIO_FORMAT && id != PLAN_B_V9_AUDIO_FORMAT);
+        let old_headers = with_catalog(&headers, &old);
+        let actual8 = SnapshotFormat {
+            id: PLAN_B_AUDIO_FORMAT.into(),
+            format: LibraryFormat::target().with_audio_sources(),
+        };
+        assert!(read_format(&old_headers, &actual8, false).is_err());
+        assert!(admit_library_mutation(&old_headers, &actual8).is_err());
+        headers.insert(
+            ACCEPT_FORMATS_HEADER,
+            HeaderValue::from_static(PLAN_B_AUDIO_FORMAT),
+        );
+        assert_eq!(read_format(&headers, &actual8, false).unwrap(), actual8);
+        assert!(admit_library_mutation(&headers, &actual8).is_ok());
+        let actual9 = SnapshotFormat {
+            id: PLAN_B_V9_AUDIO_FORMAT.into(),
+            format: LibraryFormat::server_schema9().with_audio_sources(),
+        };
+        assert_eq!(read_format(&old_headers, &actual9, false).unwrap(), legacy);
+        assert!(admit_library_mutation(&old_headers, &actual9).is_err());
+        headers.insert(
+            ACCEPT_FORMATS_HEADER,
+            HeaderValue::from_static(PLAN_B_V9_AUDIO_FORMAT),
+        );
+        assert_eq!(read_format(&headers, &actual9, false).unwrap(), actual9);
+        assert!(admit_library_mutation(&headers, &actual9).is_ok());
+    }
+
+    #[test]
     fn plain_target_headers_keep_experimental_compressed_read_support() {
         use audiolib_core::compatibility::{METADATA_STORAGE_FEATURE, PLAN_B_V8_COMPRESSED_FORMAT};
         let (headers, format) = fixture();
