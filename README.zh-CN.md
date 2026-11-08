@@ -4,9 +4,9 @@
 
 [English](README.md)
 
-AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。当前开发源码将大型 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis/OGA 音效库索引到 SQLite（FTS5），支持路径、内嵌标签及厂商 Metadata 搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。当前已发布版本为 [v0.9.3](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.3)。
+AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。当前源码将大型 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis/OGA 音效库索引到 SQLite（FTS5），支持路径、内嵌标签及厂商 Metadata 搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。
 
-- **当前源码候选：** 工作区 `Cargo.toml` 为 [0.9.4 发布准备](doc/Rust_Release_0.9.4.md)；当前已发布正式版仍为 [v0.9.3](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.3)。
+- **当前正式版：** [v0.9.4](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.4)，于 2026-11-08 发布；正式包、SHA256、实际平台验收与源码身份见 [0.9.4 发布记录](doc/Rust_Release_0.9.4.md)。
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 普通本地 writer 为8；服务端显式迁移后为9，使用专用 writer；客户端只读校验快照3..=9。
 - **可写库格式：** 本地 base 为 `ale-s8-cld1-t3-m2-p1-a1`，专用服务端 schema-9 base 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`；首次新源成功写入的同一事务启用必需 `audio_sources:1` 及对应 `-af1` 完整格式，旧客户端须升级，详见[兼容说明](doc/api/Library_Migration_Compatibility.md)。受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。
@@ -62,7 +62,7 @@ Windows 客户端要求 MSVC 构建工具以及固定版本的 Rust 工具链（
 
 完成实际编译/测试后，可给本地检查或发布管线加 `-CleanBuildArtifacts`，超过默认 40 GiB 预算才清理 debug 缓存，预算由 `-BuildCacheLimitGiB` 调整。独立预览用 `pwsh tools/clean-build-artifacts.ps1`；release 产物、包、固定安装、SDK 和用户数据保留。详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
-Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.9.3 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。在已登录桌面的 Mac 上给打包命令加 `-ValidateRuntime`，一次完成结构与原生运行验收；仅延后运行验收、产物变化或换机复核时单独运行 `validate-macos-client.ps1`。仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
+Mac 客户端在 Apple Silicon Mac 上构建，需要 Xcode 命令行工具、固定的原生 Rust 工具链和 PowerShell 7.3 以上版本。在已验收的 main/tag 提交上运行 `tools/build-macos-client.ps1 -ExpectedCommit <完整提交> -ReportPath <私有构建证明.json>`，再使用该证明运行 `tools/package-macos-client.ps1 -Tag v0.9.4 -ExpectedCommit <完整提交> -BuildReport <私有构建证明.json>`。在已登录桌面的 Mac 上给打包命令加 `-ValidateRuntime`，一次完成结构与原生运行验收；仅延后运行验收、产物变化或换机复核时单独运行 `validate-macos-client.ps1`。仅结构检查的运行时结果为 `not-run`。完整参数见 [Mac 客户端指南](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md)。
 
 服务端可在 Windows、Linux、macOS 上构建（不需要音频播放支持）。由于仓库的 `.cargo/config.toml` 默认目标是 Windows，需显式指定目标：
 
@@ -131,9 +131,9 @@ audiolib-server --config /etc/audiolib/config.toml
 
 Linux x64 归档为 `AudioLibServer-<tag>-linux-x64.tar.gz`，根目录有 `audiolib-server` 与 `audiolib-migrate`。示例 systemd 单元是 [`server/deploy/systemd/audiolib-server.service`](server/deploy/systemd/audiolib-server.service)：以 `audiolib` 用户运行，从 `/etc/audiolib/audiolib.env` 读取令牌，配置为 `/etc/audiolib/config.toml`。单元允许写 `/var/lib/audiolib`，并以只读方式访问 `/srv/audiolib/music`；其他路径需要 override。独立 Linux arm64 包不发布。
 
-v0.9.3 仍发布 `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` 与 `AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。校验 SHA256 后 `docker load`，按 [`server/deploy/docker/docker-compose.release.yml`](server/deploy/docker/docker-compose.release.yml) 重建容器。数据卷里须已有 `/data/library.db`。镜像配置为 `auth_mode = "all"`、`trust_lan_peers = false`、`manage_mode = "off"`，因此要设置 `AUDIOLIB_SERVER_TOKEN`；若希望客户端扫描，请挂载自己的配置。容器内关闭二进制更新，升级时替换镜像并保留数据卷。镜像健康检查请求 `/api/v1/health`，并要求 `"status":"ok"`。
+v0.9.4 仍发布 `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` 与 `AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。校验 SHA256 后 `docker load`，按 [`server/deploy/docker/docker-compose.release.yml`](server/deploy/docker/docker-compose.release.yml) 重建容器。数据卷里须已有 `/data/library.db`。镜像配置为 `auth_mode = "all"`、`trust_lan_peers = false`、`manage_mode = "off"`，因此要设置 `AUDIOLIB_SERVER_TOKEN`；若希望客户端扫描，请挂载自己的配置。容器内关闭二进制更新，升级时替换镜像并保留数据卷。镜像健康检查请求 `/api/v1/health`，并要求 `"status":"ok"`。
 
-升级前先排空扫描。保留配置、资料库、令牌和音频目录。Windows、macOS arm64 与 Linux x64 在已经装好 0.9 布局（`audiolib-server` 与 `audiolib-migrate` 并列）之后，可由管理页更新，程序目录须可写。从 0.9 之前的包第一次换上该布局须手动解压，旧更新器会拒绝新增的迁移程序。v0.9.3 本身不新增数据库迁移。schema 9 须显式执行 `audiolib-migrate status --db /path/to/library.db`，再 `audiolib-migrate start --db /path/to/library.db`（`pause`、`resume`、`cancel`、`rollback` 使用同一 `--db`）。工具会在库旁保留 `audiolib-rollback-mig9-*.db`。只替换二进制不能把 schema 9 退回 schema 8。
+升级前先排空扫描。保留配置、资料库、令牌和音频目录。Windows、macOS arm64 与 Linux x64 在已经装好 0.9 布局（`audiolib-server` 与 `audiolib-migrate` 并列）之后，可由管理页更新，程序目录须可写。从 0.9 之前的包第一次换上该布局须手动解压，旧更新器会拒绝新增的迁移程序。v0.9.4 保持 schema 8/9 写目标，首次扩展源写入会启用 AF1，扫描前须先升级客户端。schema 9 须显式执行 `audiolib-migrate status --db /path/to/library.db`，再 `audiolib-migrate start --db /path/to/library.db`（`pause`、`resume`、`cancel`、`rollback` 使用同一 `--db`）。工具会在库旁保留 `audiolib-rollback-mig9-*.db`。只替换二进制不能把 schema 9 退回 schema 8。
 
 `GET /api/v1/health` 无需令牌，进程在服务时返回 HTTP 200。`"status":"ok"` 表示库已打开；`"starting"` 时其他接口返回 503 `UNAVAILABLE`；`"error"` 表示打开失败且进程会继续重试。裸路径 `/health` 为 404。
 

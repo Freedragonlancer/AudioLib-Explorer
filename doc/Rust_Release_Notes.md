@@ -2,7 +2,7 @@
 
 程序 0.9.4 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-发布准备中，以已发布 `v0.9.3` 为版本基线，功能来自已合入 beta 的 [#255](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/255) 和 [#256](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/256)。最终 main/tag、七份正式 payload、SHA256 和平台验收尚待完成，详见 [0.9.4 发布准备](Rust_Release_0.9.4.md)。
+已于 2026-11-08 15:28:34 UTC 正式发布 [v0.9.4](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.4)，以 `v0.9.3` 为基线。功能来自 [#255](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/255)、[#256](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/256)，经 [#257](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/257)、[#258](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/258) 提升至 main `f6adb2bd777d4db78d43cbdcee626153592c1482`。七份正式 payload、十四项资产、线上 digest/校验正文和发布后固定安装同步通过，详见 [0.9.4 发布记录](Rust_Release_0.9.4.md)。后续文档提交不改变二进制源码或标签身份。
 
 - **扫描与 Metadata**：默认扫描新增 `.mp3`、`.aif`、`.aiff`、`.bwf`；根据实际容器字节识别格式。MP3 提取有界 ID3 文本、重复及未知字段、可选封面和 ID3v1 fallback；AIFF 提取 NAME/AUTH/ANNO/COMT/ID3，并支持明确的 AIFF/AIFC PCM/float 子集。用户标签、备注、收藏等标注保持独立。
 - **RIFF 边界**：子块遍历限制在 RIFF 或 RF64/BW64 的父容器声明范围内，容器外私有尾信息不再使合法音频误报截断；真正的音频块越界、内部结构异常及错误 PCM 布局仍拒绝。
