@@ -177,6 +177,71 @@ pub(super) fn respond(socket: &mut std::net::TcpStream, status: &str, body: &str
     write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
 }
 
+/// A cached provider may refresh its capability gate without syncing or playing.
+/// Keep that background probe separate from the writes/downloads under test.
+pub(super) struct CapabilityProbeServer {
+    pub(super) url: String,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    worker: std::thread::JoinHandle<()>,
+}
+
+impl CapabilityProbeServer {
+    pub(super) fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = requests.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let worker = std::thread::spawn(move || {
+            loop {
+                let mut socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stopping.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept capability-only mock: {error}"),
+                };
+                socket.set_nonblocking(false).unwrap();
+                let head = request(&mut socket);
+                assert!(
+                    head.starts_with("GET /api/v1/capabilities "),
+                    "Unexpected request while sync/play is suppressed: {head}"
+                );
+                seen.fetch_add(1, Ordering::AcqRel);
+                // This fixture has no live capability service. Fail the optional
+                // read promptly rather than leaving an unserved socket to time out.
+                respond(
+                    &mut socket,
+                    "500 Internal Server Error",
+                    r#"{"error_code":"INTERNAL","message":"capability service unavailable in this fixture"}"#,
+                );
+            }
+        });
+        Self {
+            url,
+            requests,
+            stop,
+            worker,
+        }
+    }
+
+    pub(super) fn request_count(&self) -> usize {
+        self.requests.load(Ordering::Acquire)
+    }
+
+    pub(super) fn finish(self) {
+        self.stop.store(true, Ordering::Release);
+        self.worker.join().unwrap();
+    }
+}
+
 fn legacy_peer_preflight(listener: &std::net::TcpListener) {
     for (path, status, body) in [
         (

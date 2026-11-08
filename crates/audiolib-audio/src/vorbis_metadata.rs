@@ -22,13 +22,7 @@ const MAX_PAGES: usize = 1_000_000;
 /// Default library source extensions with a bundled playback decoder.
 /// Opus comments can be probed separately, but Opus is not scanned by default.
 pub fn is_supported_audio_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| {
-            ["wav", "flac", "ogg", "oga"]
-                .iter()
-                .any(|ext| value.eq_ignore_ascii_case(ext))
-        })
+    audiolib_core::is_supported_audio_extension(path)
 }
 
 fn invalid(message: &str) -> Error {
@@ -200,6 +194,8 @@ fn finish(layout: Layout, comments: Comments, len: u64, include: bool) -> Result
         data_bytes: len,
         block_align: 0,
         format_tag: 0,
+        pcm_layout: None,
+        format_data: Vec::new(),
         artwork: None,
     })
 }

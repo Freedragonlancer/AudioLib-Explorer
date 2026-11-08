@@ -684,10 +684,58 @@ enum ProbeOutcome {
 }
 
 const FINGERPRINT_SQL: &str = "SELECT file_path,id,COALESCE(file_size,0),source_mtime_ns,\
-    COALESCE(json_extract(CASE WHEN json_valid(audiolib_metadata_json(metadata_json)) \
-    THEN audiolib_metadata_json(metadata_json) ELSE '{}' END,\
-    '$.wav_metadata.vorbis_version'),json_extract(CASE WHEN json_valid(audiolib_metadata_json(metadata_json)) \
-    THEN audiolib_metadata_json(metadata_json) ELSE '{}' END,'$.wav_metadata.version'),0) FROM audio_files WHERE path_key=?1";
+    json_extract(CASE WHEN json_valid(audiolib_metadata_json(metadata_json)) THEN audiolib_metadata_json(metadata_json) ELSE '{}' END,\
+    '$.container','$.wav_metadata.version','$.wav_metadata.vorbis_version',\
+    '$.wav_metadata.mp3_version','$.wav_metadata.aiff_version','$.wav_metadata.container_version')\
+    FROM audio_files WHERE path_key=?1";
+
+fn extractor_is_current(path: &Path, row: &rusqlite::Row<'_>) -> rusqlite::Result<bool> {
+    use audiolib_core::SourceAudioFormat;
+    // SQLite returns only these six fingerprint values. Decode that small array
+    // once rather than allocating or decoding the source's complete Metadata.
+    let Some(fields) = row
+        .get_ref(4)?
+        .as_str()
+        .ok()
+        .filter(|json| json.len() <= 512)
+        .and_then(|json| serde_json::from_str::<[serde_json::Value; 6]>(json).ok())
+    else {
+        return Ok(false);
+    };
+    let container = fields[0]
+        .as_str()
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_default();
+    // Only older RF64/BW64 records need the corrected magic identity. Ordinary
+    // RIFF keeps its existing extractor revision and unchanged fast path.
+    if matches!(container.as_str(), "RF64" | "BW64") && fields[5].as_i64() != Some(1) {
+        return Ok(false);
+    }
+    let wav = fields[1].as_i64();
+    let vorbis = fields[2].as_i64();
+    let mp3 = fields[3].as_i64();
+    let aiff = fields[4].as_i64();
+    let family = match container.as_str() {
+        "MP3" => Some(SourceAudioFormat::Mp3),
+        "AIFF" | "AIFC" => Some(SourceAudioFormat::Aiff),
+        "FLAC" => Some(SourceAudioFormat::Flac),
+        "OGG" | "OGG VORBIS" => Some(SourceAudioFormat::Ogg),
+        "WAV" | "RIFF" | "RF64" | "BW64" => Some(SourceAudioFormat::Wav),
+        _ if mp3.is_some() => Some(SourceAudioFormat::Mp3),
+        _ if aiff.is_some() => Some(SourceAudioFormat::Aiff),
+        _ if vorbis.is_some() => Some(SourceAudioFormat::Ogg),
+        _ => audiolib_core::source_audio_format(path),
+    };
+    Ok(match family {
+        Some(SourceAudioFormat::Wav) => wav == Some(audiolib_audio::WAV_METADATA_VERSION),
+        Some(SourceAudioFormat::Flac | SourceAudioFormat::Ogg) => {
+            vorbis == Some(audiolib_audio::VORBIS_METADATA_VERSION)
+        }
+        Some(SourceAudioFormat::Mp3) => mp3 == Some(audiolib_audio::MP3_METADATA_VERSION),
+        Some(SourceAudioFormat::Aiff) => aiff == Some(audiolib_audio::AIFF_METADATA_VERSION),
+        None => false,
+    })
+}
 
 fn probe_entry(
     path: &Path,
@@ -717,28 +765,16 @@ fn probe_entry(
                         row.get::<_, i64>(1)?,
                         crate::unsigned(row, 2)?,
                         row.get::<_, Option<i64>>(3)?,
-                        row.get_ref(4)?.as_i64().unwrap_or_default(),
+                        extractor_is_current(path, row)?,
                     ),
                 ))
             })
             .map_err(db_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(db_error)?;
-        if let Some((id, prior_size, prior_mtime, metadata_version)) =
+        if let Some((id, prior_size, prior_mtime, current_extractor)) =
             crate::path_identity::choose(&text, candidates, true)?
-            && (prior_size, prior_mtime, metadata_version)
-                == (
-                    size,
-                    Some(mtime_ns),
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
-                    {
-                        audiolib_audio::WAV_METADATA_VERSION
-                    } else {
-                        audiolib_audio::VORBIS_METADATA_VERSION
-                    },
-                )
+            && (prior_size, prior_mtime, current_extractor) == (size, Some(mtime_ns), true)
         {
             return Ok(ProbeOutcome::Unchanged(id));
         }

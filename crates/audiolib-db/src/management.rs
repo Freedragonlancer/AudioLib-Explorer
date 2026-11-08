@@ -1338,7 +1338,9 @@ impl SqliteProvider {
                     .as_nanos(),
             )
             .map_err(validation)?;
-            moved_files.push((audio.id, text, key, mtime_ns));
+            let extended_sources =
+                schema::metadata_requires_audio_sources(&real, &metadata.attributes);
+            moved_files.push((audio.id, text, key, mtime_ns, extended_sources));
         }
         drop(statement);
         check_cancel()?;
@@ -1373,8 +1375,11 @@ impl SqliteProvider {
         )
         .map_err(db_error)?;
         crate::dir_search::maintain(&tx, &[root], &[])?;
-        for (id, text, key, mtime) in &moved_files {
+        for (id, text, key, mtime, extended_sources) in &moved_files {
             check_cancel()?;
+            if *extended_sources {
+                schema::require_audio_sources(&tx)?;
+            }
             tx.execute("UPDATE audio_files SET file_path=?2,path_key=?3,source_mtime_ns=?4,missing=0,modified_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?1", params![id,text,key,mtime]).map_err(db_error)?;
             tx.execute("DELETE FROM waveform_cache WHERE audio_file_id=?1", [id])
                 .map_err(db_error)?;
@@ -1402,7 +1407,7 @@ impl SqliteProvider {
         let path = path.canonicalize()?;
         if !path.is_file() || !audiolib_core::is_supported_audio_extension(&path) {
             return Err(validation(
-                "Relink target must be an existing WAV, FLAC or Ogg file",
+                "Relink target must be an existing supported audio file",
             ));
         }
         let before = fs::metadata(&path)?;
