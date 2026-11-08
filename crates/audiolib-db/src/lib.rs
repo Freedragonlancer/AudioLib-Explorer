@@ -248,6 +248,8 @@ pub(crate) fn tokenize(jieba: &Jieba, value: &str) -> String {
 const HEADER_ATTRIBUTES: &[&str] = &[
     "wav_metadata",
     "container",
+    "source_audio_layout",
+    "aiff_compression",
     "bwf_description",
     "bwf_originator",
     "bwf_originator_reference",
@@ -1415,6 +1417,9 @@ impl SqliteProvider {
             bwf_umid=?8,ixml_tape=?9,ixml_circled=?10,ixml_wild_track=?11,ixml_no_good=?12 WHERE id=?1",
         ).map_err(db_error)?;
         for item in items {
+            if schema::metadata_requires_audio_sources(&item.path, &item.metadata.attributes) {
+                schema::require_audio_sources(tx)?;
+            }
             let file_size = i64::try_from(item.size)
                 .map_err(|_| Error::Validation("Audio file exceeds SQLite size range".into()))?;
             let text = display_path(&item.path);
@@ -1728,7 +1733,7 @@ fn finish_scan_transaction(
         ensure_scan_seen_table(tx)?;
         progress.removed = tx.execute(
                 &format!(
-                    "UPDATE audio_files SET missing=1 WHERE {scope} AND missing=0 AND (lower(filename) LIKE '%.wav' OR lower(filename) LIKE '%.flac' OR lower(filename) LIKE '%.ogg' OR lower(filename) LIKE '%.oga')
+                    "UPDATE audio_files SET missing=1 WHERE {scope} AND missing=0 AND (lower(filename) LIKE '%.wav' OR lower(filename) LIKE '%.flac' OR lower(filename) LIKE '%.ogg' OR lower(filename) LIKE '%.oga' OR lower(filename) LIKE '%.mp3' OR lower(filename) LIKE '%.aif' OR lower(filename) LIKE '%.aiff' OR lower(filename) LIKE '%.bwf')
                 AND (seen_scan_id IS NULL OR seen_scan_id<>?2)
                 AND NOT EXISTS(SELECT 1 FROM temp.scan_seen s WHERE s.session_id=?2 AND s.audio_id=audio_files.id)"
                 ),

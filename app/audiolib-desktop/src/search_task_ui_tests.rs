@@ -178,16 +178,73 @@ fn new_task_control_follows_tabs_and_docks_when_resizing_both_themes() {
             settle();
             assert!((follows_last_tab(1) - first_x).abs() < 1.0);
 
-            // Keep the model unchanged while the window crosses the overflow threshold.
+            // Tabs first share the available width instead of immediately scrolling.
             ui.set_search_tasks(tasks(4));
             settle();
             follows_last_tab(4);
+            let wide_tab_width = control("Search task: Task 0").size().width;
+            let bar = control("Search tasks");
+            // Studio's strip is inside the result pane. Include that theme's
+            // surrounding panes when choosing a width that can fit four minimum tabs.
+            let outside_strip = ui
+                .window()
+                .size()
+                .to_logical(ui.window().scale_factor())
+                .width
+                - bar.size().width;
+            let adaptive_window_width = (outside_strip + 712.0 * scale).max(1080.0 * scale);
             if scale == 1.0 {
                 snapshot_if_requested(&ui, &format!("task-add-following-{theme}"));
             }
+            ui.window().set_size(slint::LogicalSize::new(
+                adaptive_window_width,
+                900.0 * scale,
+            ));
+            settle();
+            follows_last_tab(4);
+            let narrow_tab_width = control("Search task: Task 0").size().width;
+            assert!(
+                narrow_tab_width < wide_tab_width - 1.0,
+                "Tabs must shrink before scrolling: wide={wide_tab_width}, narrow={narrow_tab_width}, theme={theme}, scale={scale}"
+            );
+            assert!(narrow_tab_width >= 144.0 * scale - 1.0);
+            for index in 1..4 {
+                assert!(
+                    (control(&format!("Search task: Task {index}")).size().width
+                        - narrow_tab_width)
+                        .abs()
+                        < 1.0,
+                    "Available width must be shared between tabs, theme={theme}, scale={scale}"
+                );
+            }
+            if scale == 1.0 {
+                snapshot_if_requested(&ui, &format!("task-tabs-adaptive-{theme}"));
+            }
+
+            // Only a strip that cannot fit minimum-width tabs gains scrolling.
+            ui.set_search_tasks(tasks(12));
             ui.window()
                 .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
             settle();
+            let first_tab = control("Search task: Task 0");
+            assert!(
+                (first_tab.size().width - 144.0 * scale).abs() < 1.0,
+                "Overflow must retain readable minimum tabs, theme={theme}, scale={scale}"
+            );
+            let strip_id = if ui.global::<crate::Theme>().get_modern_style() {
+                "AppWindow::studio-task-tabs-scroll"
+            } else {
+                "AppWindow::task-tabs-scroll"
+            };
+            let strip = ElementHandle::find_by_element_id(&ui, strip_id)
+                .next()
+                .unwrap();
+            let scrollbar_lane = strip.absolute_position().y + strip.size().height
+                - (first_tab.absolute_position().y + first_tab.size().height);
+            assert!(
+                scrollbar_lane >= 14.0 * scale - 1.0,
+                "The horizontal scrollbar needs a lane below tab content: lane={scrollbar_lane}, theme={theme}, scale={scale}"
+            );
             let plus = control("New search task");
             let bar = control("Search tasks");
             let right_gap = bar.absolute_position().x + bar.size().width
@@ -208,8 +265,13 @@ fn new_task_control_follows_tabs_and_docks_when_resizing_both_themes() {
 
             ui.window()
                 .set_size(slint::LogicalSize::new(2400.0 * scale, 900.0 * scale));
+            ui.set_search_tasks(tasks(4));
             settle();
             follows_last_tab(4);
+            assert!(
+                (control("Search task: Task 0").size().width - wide_tab_width).abs() < 1.0,
+                "Tabs must regain their preferred width when room returns, theme={theme}, scale={scale}"
+            );
             ui.hide().unwrap();
         }
     }
@@ -377,6 +439,109 @@ fn thirty_task_tabs_page_in_both_directions_with_a_fixed_new_task_control() {
                     .next()
                     .is_some()
             );
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for theme in audiolib_core::config::THEME_IDS {
+        for chinese in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            crate::theme::apply_theme(&ui, theme);
+            ui.set_chinese(chinese);
+            ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+            let summary = "Search: distant thunderstorm rolling\nDirectory: D:/Sound Library/Weather/Atmospheres";
+            ui.set_search_tasks(ModelRc::new(VecModel::from(
+                (0..12)
+                    .map(|index| SearchTaskRow {
+                        id: index.to_string().into(),
+                        name: format!("Task {index}").into(),
+                        active: index == 0,
+                        searched: index == 0,
+                        keywords: if index == 0 {
+                            ModelRc::new(VecModel::from(vec![
+                                "distant thunderstorm".into(),
+                                "rolling".into(),
+                            ]))
+                        } else {
+                            ModelRc::default()
+                        },
+                        folder: "Atmospheres".into(),
+                        summary: summary.into(),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+            ui.show().unwrap();
+            settle();
+            let tab_label = if chinese {
+                "搜索任务：Task 0"
+            } else {
+                "Search task: Task 0"
+            };
+            let tab = ElementHandle::find_by_accessible_label(&ui, tab_label)
+                .next()
+                .unwrap();
+            let keyword = ElementHandle::find_by_element_id(&ui, "SearchTaskTab::keyword-label")
+                .next()
+                .expect("Minimum tabs must keep their search keywords visible");
+            let close_label = if chinese {
+                "关闭搜索任务：Task 0"
+            } else {
+                "Close search task: Task 0"
+            };
+            let close = ElementHandle::find_by_accessible_label(&ui, close_label)
+                .next()
+                .unwrap();
+            assert!((tab.size().width - 144.0).abs() < 1.0);
+            assert!(keyword.size().width >= 90.0);
+            assert!(keyword.absolute_position().x >= tab.absolute_position().x);
+            assert!(
+                keyword.absolute_position().x + keyword.size().width <= close.absolute_position().x,
+                "Keyword text must stop before the close control: theme={theme}, chinese={chinese}"
+            );
+            for id in [
+                "SearchTaskTab::search-prefix",
+                "SearchTaskTab::directory-label",
+            ] {
+                assert!(
+                    ElementHandle::find_by_element_id(&ui, id).next().is_none(),
+                    "Auxiliary labels must yield space to long keywords: {id}, theme={theme}, chinese={chinese}"
+                );
+            }
+            assert!(tab.accessible_description().unwrap().contains(summary));
+            let language = if chinese { "cn" } else { "en" };
+            snapshot_if_requested(&ui, &format!("task-keywords-minimum-{theme}-{language}"));
+
+            // Once a short query has room, restore its useful search/directory context.
+            ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
+                id: "0".into(),
+                name: "Task 0".into(),
+                active: true,
+                searched: true,
+                keywords: ModelRc::new(VecModel::from(vec!["wind".into()])),
+                folder: "Atmospheres".into(),
+                summary: summary.into(),
+                ..Default::default()
+            }])));
+            settle();
+            for id in [
+                "SearchTaskTab::search-prefix",
+                "SearchTaskTab::directory-label",
+            ] {
+                assert!(
+                    ElementHandle::find_by_element_id(&ui, id).next().is_some(),
+                    "Auxiliary labels should return when space permits: {id}, theme={theme}, chinese={chinese}"
+                );
+            }
             ui.hide().unwrap();
         }
     }

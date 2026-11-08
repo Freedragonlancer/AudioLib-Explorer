@@ -120,7 +120,17 @@ pub fn source_metadata_search_text(bwf: &str, attributes: &Value) -> String {
     if !bwf.is_empty() {
         values.insert(bwf);
     }
-    for group in ["riff_info", "ixml", "axml", "xmp", "id3", "smed", "vorbis"] {
+    for group in [
+        "riff_info",
+        "ixml",
+        "axml",
+        "xmp",
+        "id3",
+        "id3v1",
+        "smed",
+        "vorbis",
+        "aiff",
+    ] {
         if let Some(fields) = attributes["wav_metadata"][group].as_object() {
             for (key, value) in fields {
                 if group == "vorbis"
@@ -295,5 +305,27 @@ mod tests {
             assert!(text.contains(needle), "{needle} missing from {text:?}");
         }
         assert!(!text.contains("ignored here"));
+    }
+
+    #[test]
+    fn aiff_and_id3v1_text_is_searchable_without_indexing_layout_or_diagnostics() {
+        let attributes = json!({
+            "wav_metadata": {
+                "aiff": {"NAME":"aiff-title-token","ANNO":["aiff-description-token"]},
+                "id3v1": {"artist":"legacy-id3-artist-token"},
+                "warnings":["diagnostic-token"]
+            },
+            "source_audio_layout":{"untrusted":"layout-token"}
+        });
+        let text = super::source_metadata_search_text("", &attributes);
+        for value in [
+            "aiff-title-token",
+            "aiff-description-token",
+            "legacy-id3-artist-token",
+        ] {
+            assert!(text.contains(value));
+        }
+        assert!(!text.contains("diagnostic-token"));
+        assert!(!text.contains("layout-token"));
     }
 }

@@ -10,7 +10,7 @@
 - 公网音频流支持缓存和按需读取，减少试听等待。
 - 服务端数据库同步到本地快照，搜索直接在客户端执行。
 - 支持「主字段」「全部」「仅路径」「仅文件名」四种搜索范围，可与目录和筛选条件组合；路径范围需要准备目录索引。
-- 扫描与试听 WAV、FLAC、Ogg Vorbis 和 OGA/Ogg FLAC；提取 Vorbis 标签。Opus 仅支持标签探测，不支持播放。
+- 扫描与试听 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis 和 OGA/Ogg FLAC；提取内嵌 Metadata。Opus 仅支持标签探测，不支持播放。
 - 本地和服务器模式支持厂商 CSV/TSV/TXT/XLS/XLSX Metadata 导入：先预览和确认匹配，再提交，可回滚导入。
 - 可承载 10 TB 以上的大规模音效素材库。
 
@@ -22,18 +22,18 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 - Internet audio streaming uses caching and on-demand reads to reduce preview waits.
 - The library database syncs to a local snapshot for client-side search.
 - Four search scopes—Main fields, All, Path and Filename—combine with folders and filters. Path requires a prepared directory index.
-- Scan and play WAV, FLAC, Ogg Vorbis and OGA/Ogg FLAC, with Vorbis tag extraction. Opus supports tag probing only, without playback.
+- Scan and play WAV/BWF, MP3, AIFF, FLAC, Ogg Vorbis and OGA/Ogg FLAC, with embedded Metadata extraction. Opus supports tag probing only, without playback.
 - Import vendor CSV/TSV/TXT/XLS/XLSX Metadata locally or on the server: preview and confirm matches before committing, with import rollback.
 - Scales to sound libraries of 10 TB and more.
 
 ![AudioLib Explorer main window / 主界面](resources/screenshot-main.png)
 
-AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes WAV, FLAC and Ogg libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 added Linux x64 server and Docker amd64/arm64 deliverables. This README describes the current development source; published packages retain the features and identity of their own release tag.
+AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes WAV/BWF, MP3, AIFF, FLAC and Ogg libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 added Linux x64 server and Docker amd64/arm64 deliverables. This README describes the current development source; published packages retain the features and identity of their own release tag.
 
-- **Current release:** [v0.9.3](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.3) (workspace `Cargo.toml`: 0.9.3)
+- **Published release:** [v0.9.3](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.3); workspace `Cargo.toml` is the [0.9.4 preparation candidate](doc/Rust_Release_0.9.4.md), not a published release.
 - **HTTP API:** `/api/v1/` for library/audio operations; `/api/vendor-import/` for managed vendor import
 - **Database schema:** ordinary local writers use 8; explicit server migration can publish 9. Known complete schema 3–9 snapshots are readable only after format validation.
-- **Writable library format:** ordinary local writers target `ale-s8-cld1-t3-m2-p1-a1`; only the dedicated server writer writes completed `ale-s9-cld1-t3-m2-p1-a1-sd1`. Client snapshots stay read-only. Shared albums and original Metadata JSON TEXT are retained; Metadata compression is deferred, while snapshot transport uses zstd.
+- **Writable library format:** base formats are `ale-s8-cld1-t3-m2-p1-a1` locally and `ale-s9-cld1-t3-m2-p1-a1-sd1` for the dedicated server writer. The first successful extended-source write atomically enables required `audio_sources:1` and the corresponding `-af1` format; older clients must upgrade, as described in the [compatibility contract](doc/api/Library_Migration_Compatibility.md). Client snapshots stay read-only. Shared albums and original Metadata JSON TEXT are retained; Metadata compression is deferred, while snapshot transport uses zstd.
 - **License:** [GPL-3.0-only](LICENSE)
 
 The program version is read from the workspace `Cargo.toml` and is shared by the client, CLI and server. Current formats are defined by the [compatibility catalog](crates/audiolib-core/src/compatibility.rs); the [historical schema v6 contract](doc/api/Schema_V6_Iteration.md) describes the earlier format.

@@ -24,6 +24,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+fn fallback_audio_filename(file: &AudioFile) -> String {
+    let extension = [file.filename.as_str(), file.file_path.as_str()]
+        .into_iter()
+        .filter_map(|name| Path::new(name).extension()?.to_str())
+        .find(|extension| {
+            audiolib_core::SUPPORTED_AUDIO_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+        .unwrap_or("audio");
+    format!("audio-{}.{}", file.id, extension.to_ascii_lowercase())
+}
+
 /// How long revalidating an existing complete download may take before the cached copy
 /// is used as is: a drag must not wait for a sleeping NAS disk when the file is at hand.
 pub const CACHED_REVALIDATE_TIMEOUT: Duration = Duration::from_millis(2500);
@@ -475,7 +488,7 @@ impl DownloadCache {
                 file.file_path
             )
         });
-        let fallback = format!("audio-{}.wav", file.id);
+        let fallback = fallback_audio_filename(file);
         let name = sanitize_filename(
             probe.filename.as_deref().unwrap_or(&file.filename),
             &fallback,
@@ -1006,6 +1019,24 @@ mod tests {
             file_size: 300_000,
             ..audiolib_core::AudioFileData::default()
         })
+    }
+
+    #[test]
+    fn empty_download_names_retain_the_supported_original_type() {
+        for extension in ["MP3", "aif", "aiff", "bwf", "flac", "ogg"] {
+            let mut file = record();
+            file.filename.clear();
+            file.file_path = format!("/sounds/source.{extension}");
+            let name = sanitize_filename("", &fallback_audio_filename(&file));
+            assert_eq!(
+                Path::new(&name).extension().unwrap().to_str().unwrap(),
+                extension.to_ascii_lowercase()
+            );
+        }
+        let mut unknown = record();
+        unknown.filename.clear();
+        unknown.file_path = "/sounds/unknown.exe".into();
+        assert!(fallback_audio_filename(&unknown).ends_with(".audio"));
     }
 
     fn item(server: &TestServer) -> DownloadItem {

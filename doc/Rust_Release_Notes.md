@@ -1,3 +1,18 @@
+# 0.9.4：新音频源格式与自适应搜索任务标签
+
+程序 0.9.4 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
+
+发布准备中，以已发布 `v0.9.3` 为版本基线，功能来自已合入 beta 的 [#255](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/255) 和 [#256](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/256)。最终 main/tag、七份正式 payload、SHA256 和平台验收尚待完成，详见 [0.9.4 发布准备](Rust_Release_0.9.4.md)。
+
+- **扫描与 Metadata**：默认扫描新增 `.mp3`、`.aif`、`.aiff`、`.bwf`；根据实际容器字节识别格式。MP3 提取有界 ID3 文本、重复及未知字段、可选封面和 ID3v1 fallback；AIFF 提取 NAME/AUTH/ANNO/COMT/ID3，并支持明确的 AIFF/AIFC PCM/float 子集。用户标签、备注、收藏等标注保持独立。
+- **RIFF 边界**：子块遍历限制在 RIFF 或 RF64/BW64 的父容器声明范围内，容器外私有尾信息不再使合法音频误报截断；真正的音频块越界、内部结构异常及错误 PCM 布局仍拒绝。
+- **原文件试听**：非 WAV 远程试听使用原始 `/stream` 字节。MP3 采用实际完整帧计数与已验证的 gapless trim；解码器内存中的可信信息帧避免坏 Xing/Info 字段覆盖准确时长，不改写源文件、HTTP 内容或下载缓存。AIFF 使用明确的字节序、signed PCM 和 float 布局，seek 与 Waveform 共用解码路径。本版不承诺新的实际播放启动延迟或主观音质测量结果。
+- **兼容边界**：首次成功写入新增音频源时，同一事务启用必需 feature `audio_sources:1`。完整格式新增 `ale-s8-cld1-t3-m2-p1-a1-af1` / `ale-s9-cld1-t3-m2-p1-a1-sd1-af1`；未启用扩展源的库保持原格式，schema 数字不变。旧客户端不能凭 schema 8/9 放行 af1；既有 schema-9 WAV-only 兼容投影继续排除新增容器。共享本地库启用新源前须关闭旧版读写实例。
+- **搜索任务标签**：标签先均分可用宽度，最窄为 100% UI scale 下 144 逻辑像素，再进入横向滚动；滚动条保留独立底部空间。关键词优先显示，前缀和目录只在不挤压关键词时出现。
+- **构建缓存工具**：修正隐藏所有权标记的读取，并加入真实 Hidden 标记的预览、清理及 release 输出保留回归；不扩大清理权限或外部缓存的认领范围。
+
+升级前保留受支持的资料库备份；先升级需要访问新源的客户端和服务端，再进行扫描。启用 af1 后，回退旧程序须使用兼容的备份或受支持的只读投影，不能手工移除 feature 标记。旧 `v0.9.3` 的两份客户端替换身份继续按原发布记录保留，不在本版重新计算为新功能。
+
 # 0.9.3：Waveform、播放反馈与连续浏览修复
 
 程序 0.9.3 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9

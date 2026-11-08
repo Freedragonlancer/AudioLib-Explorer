@@ -9,7 +9,7 @@ fn supported_audio_types_resolve_real_paths_while_wav_callers_keep_their_strict_
     let nested = root.join("nested");
     std::fs::create_dir_all(&nested).unwrap();
     let roots = [root.clone()];
-    for extension in ["wav", "FLAC", "ogg", "OGA"] {
+    for extension in ["wav", "FLAC", "ogg", "OGA", "BWF", "mp3", "AIF", "aiff"] {
         let path = root.join(format!("sound.{extension}"));
         std::fs::write(&path, []).unwrap();
         let indirect = nested.join("..").join(path.file_name().unwrap());
@@ -30,13 +30,13 @@ fn audio_paths_reject_missing_nonfiles_unsupported_types_and_root_escapes() {
     std::fs::create_dir(&allowed).unwrap();
     std::fs::create_dir(&outside).unwrap();
     let roots = [allowed.clone()];
-    for extension in ["wav", "flac", "ogg", "oga"] {
+    for extension in ["wav", "flac", "ogg", "oga", "bwf", "mp3", "aif", "aiff"] {
         let name = format!("outside.{extension}");
         std::fs::write(outside.join(&name), []).unwrap();
         assert!(validate_audio_path(&outside.join(&name), &roots).is_err());
         assert!(validate_audio_path(&allowed.join("../allowed-other").join(name), &roots).is_err());
     }
-    for extension in ["opus", "mp3", "txt"] {
+    for extension in ["opus", "aac", "aifc", "txt"] {
         let path = allowed.join(format!("unsupported.{extension}"));
         std::fs::write(&path, []).unwrap();
         assert!(!is_supported_audio_extension(&path));

@@ -4,10 +4,16 @@ use audiolib_core::{Error, Result};
 use jieba_rs::Jieba;
 use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
 use std::sync::Arc;
+mod audio_sources;
 mod current;
 pub(crate) mod definition;
 mod legacy;
 mod search_upgrade;
+#[cfg(feature = "scanner")]
+pub(crate) use audio_sources::metadata_requires_audio_sources;
+pub(crate) use audio_sources::{
+    imported_audio_sources_required, require_audio_sources, require_imported_audio_sources,
+};
 pub(crate) use current::{
     create_current, current_format_ready, mark_current, needs_upgrade, readable_format_ready,
 };
@@ -90,6 +96,7 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
                 "search_path",
                 "vorbis_tags",
                 "vendor_metadata",
+                "audio_sources",
             ]
             .contains(&name.as_str())
             {
@@ -111,6 +118,7 @@ fn validate_feature_revisions(conn: &Connection, tokenization: i64) -> Result<()
         ("search_path", 1),
         ("vorbis_tags", 1),
         ("vendor_metadata", 1),
+        ("audio_sources", 1),
     ] {
         if let Some(version) = feature_version(conn, feature)?
             && version > supported
@@ -416,7 +424,7 @@ const CREATE_LIBRARY_META: &str = "CREATE TABLE IF NOT EXISTS library_meta(
 
 /// Set whenever search text AND the derived tag column were both recomputed for every row
 /// (fresh library, legacy import, full search rebuild).
-const MARK_SOURCE_SEARCH: &str = "CREATE TABLE IF NOT EXISTS library_meta(
+pub(crate) const MARK_SOURCE_SEARCH: &str = "CREATE TABLE IF NOT EXISTS library_meta(
         key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
     INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_search_rev','2');
     INSERT OR REPLACE INTO library_meta(key,value) VALUES('source_tags_rev','2');

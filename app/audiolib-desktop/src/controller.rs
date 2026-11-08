@@ -8073,9 +8073,13 @@ fn present_file(ui: &AppWindow, file: &AudioFile) {
     ui.set_selected_artwork_directory(directory.into());
     ui.set_selected_format(
         format!(
-            "{:.1} kHz / {} bit / {} ch / {}",
+            "{:.1} kHz / {} / {} ch / {}",
             file.sample_rate as f64 / 1000.0,
-            file.bit_depth,
+            if file.bit_depth == 0 {
+                "—".to_owned()
+            } else {
+                format!("{} bit", file.bit_depth)
+            },
             file.channels,
             format_time(file.duration)
         )
@@ -8201,11 +8205,15 @@ fn audio_row(file: &AudioFile) -> AudioRow {
             .into(),
         duration: format!("{:.2}s", file.duration).into(),
         duration_clock: format_time(file.duration).into(),
-        format: format!(
-            "{:.1}k / {}b",
-            file.sample_rate as f64 / 1000.0,
-            file.bit_depth
-        )
+        format: if file.bit_depth == 0 {
+            format!("{:.1}k / —", file.sample_rate as f64 / 1000.0)
+        } else {
+            format!(
+                "{:.1}k / {}b",
+                file.sample_rate as f64 / 1000.0,
+                file.bit_depth
+            )
+        }
         .into(),
         channels: file.channels.to_string().into(),
         tags: audiolib_core::display_tags(&file.tags, &file.attributes).into(),

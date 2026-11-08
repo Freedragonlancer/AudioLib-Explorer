@@ -66,6 +66,17 @@ fn format_ready_at_version(
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()
         .map_err(db_error)?;
     let mut expected = LibraryFormat::target().features;
+    if features.get(audiolib_core::compatibility::AUDIO_SOURCES_FEATURE) == Some(&1) {
+        if features.contains_key("metadata_storage")
+            || features.get("play_history_retired") != Some(&2)
+        {
+            return Ok(false);
+        }
+        expected.insert(
+            audiolib_core::compatibility::AUDIO_SOURCES_FEATURE.into(),
+            1,
+        );
+    }
     if expected_version == 9 {
         expected.insert("search_path".into(), 1);
         // Earlier directory-only s9 files remain readable. New publications commit
@@ -163,7 +174,8 @@ pub(crate) fn mark_current(conn: &Connection) -> Result<()> {
     }
     conn.execute_batch(MARK_SOURCE_SEARCH).map_err(db_error)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(db_error)
+        .map_err(db_error)?;
+    require_imported_audio_sources(conn)
 }
 
 /// Build only a genuinely empty database, using the same reviewed schema recipe.

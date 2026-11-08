@@ -643,6 +643,14 @@ async fn capabilities(
     .await
 }
 
+fn plain_library_server_catalog() -> audiolib_core::compatibility::CompatibilityManifest {
+    let mut catalog = audiolib_core::compatibility::compatibility_manifest();
+    // A ready server reports its actual source-library writer role. The generic
+    // client catalog also supports af1, but this fixture contains ordinary WAVs.
+    catalog.database_write_formats = vec![audiolib_core::compatibility::PLAN_B_FORMAT.into()];
+    catalog
+}
+
 #[tokio::test]
 async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     let f = fixture(&[]);
@@ -663,7 +671,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
-            compatibility: audiolib_core::compatibility::compatibility_manifest(),
+            compatibility: plain_library_server_catalog(),
             library_schema: Some(audiolib_core::server_upgrade::LibrarySchemaInfo {
                 current: Some(8),
                 source_search_rev: Some(2),
@@ -699,7 +707,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, proxied, LAN).await,
         CapabilitiesResponse {
-            compatibility: audiolib_core::compatibility::compatibility_manifest(),
+            compatibility: plain_library_server_catalog(),
             library_schema: Some(audiolib_core::server_upgrade::LibrarySchemaInfo {
                 current: Some(8),
                 source_search_rev: Some(2),
@@ -800,7 +808,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, proxied, LAN).await,
         CapabilitiesResponse {
-            compatibility: audiolib_core::compatibility::compatibility_manifest(),
+            compatibility: plain_library_server_catalog(),
             library_schema: Some(audiolib_core::server_upgrade::LibrarySchemaInfo {
                 current: Some(8),
                 source_search_rev: Some(2),
@@ -836,7 +844,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, public, PUBLIC).await,
         CapabilitiesResponse {
-            compatibility: audiolib_core::compatibility::compatibility_manifest(),
+            compatibility: plain_library_server_catalog(),
             library_schema: Some(audiolib_core::server_upgrade::LibrarySchemaInfo {
                 current: Some(8),
                 source_search_rev: Some(2),
@@ -872,7 +880,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
-            compatibility: audiolib_core::compatibility::compatibility_manifest(),
+            compatibility: plain_library_server_catalog(),
             library_schema: Some(audiolib_core::server_upgrade::LibrarySchemaInfo {
                 current: Some(8),
                 source_search_rev: Some(2),
@@ -966,7 +974,7 @@ async fn manage_mode_gates_scans_and_removals_but_not_reads_or_metadata() {
     assert_eq!(
         capabilities(state, &[], LAN).await,
         CapabilitiesResponse {
-            compatibility: audiolib_core::compatibility::compatibility_manifest(),
+            compatibility: plain_library_server_catalog(),
             library_schema: Some(audiolib_core::server_upgrade::LibrarySchemaInfo {
                 current: Some(8),
                 source_search_rev: Some(2),

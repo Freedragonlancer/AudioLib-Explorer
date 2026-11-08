@@ -309,17 +309,15 @@ fn markers(conn: &Connection) -> Result<Switch> {
     Ok(Switch {
         source_search_rev,
         user_version,
-        features: if user_version == 9 {
+        features: {
             let mut statement = conn.prepare(
-                "SELECT feature FROM audiolib_schema_features WHERE feature IN ('search_path','vorbis_tags','vendor_metadata') AND version=1 ORDER BY feature",
+                "SELECT feature FROM audiolib_schema_features WHERE (feature='audio_sources' OR (?1=9 AND feature IN ('search_path','vorbis_tags','vendor_metadata'))) AND version=1 ORDER BY feature",
             ).map_err(db_error)?;
             statement
-                .query_map([], |row| row.get(0))
+                .query_map([user_version], |row| row.get(0))
                 .map_err(db_error)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(db_error)?
-        } else {
-            vec![]
         },
     })
 }

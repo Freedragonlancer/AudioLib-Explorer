@@ -3,6 +3,25 @@
 use super::*;
 use crate::management::LibraryLease;
 
+fn completed_format(conn: &Connection, schema: i64) -> Result<&'static str> {
+    use audiolib_core::compatibility::{
+        AUDIO_SOURCES_FEATURE, PLAN_B_AUDIO_FORMAT, PLAN_B_FORMAT, PLAN_B_V9_AUDIO_FORMAT,
+        PLAN_B_V9_FORMAT,
+    };
+    let extended = match crate::schema::feature_version(conn, AUDIO_SOURCES_FEATURE)? {
+        None => false,
+        Some(1) => true,
+        Some(_) => return Err(invalid("Unsupported extended audio source revision")),
+    };
+    match (schema, extended) {
+        (8, false) => Ok(PLAN_B_FORMAT),
+        (8, true) => Ok(PLAN_B_AUDIO_FORMAT),
+        (9, false) => Ok(PLAN_B_V9_FORMAT),
+        (9, true) => Ok(PLAN_B_V9_AUDIO_FORMAT),
+        _ => Err(invalid("Unsupported source-audio schema")),
+    }
+}
+
 /// Serialize control admission with batch boundaries and publication. Control
 /// writers acquire this before their administration lease. The runner waits only
 /// outside SQLite write transactions, then observes every admitted command.
@@ -192,6 +211,7 @@ pub(super) fn discard(path: &Path) -> Result<()> {
         return Err(invalid("Cannot cancel a published migration; use rollback"));
     }
     drop_paths(&tx)?;
+    put(&tx, "snapshot_format", completed_format(&tx, 8)?)?;
     tx.commit().map_err(db_error)
 }
 fn put(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -254,11 +274,7 @@ pub(super) fn publish(
         return Err(invalid("Directory index count mismatch"));
     }
     crate::vendor_import::ensure_schema(&tx)?;
-    put(
-        &tx,
-        "snapshot_format",
-        audiolib_core::compatibility::PLAN_B_V9_FORMAT,
-    )?;
+    put(&tx, "snapshot_format", completed_format(&tx, 9)?)?;
     put(&tx, "search_path_rev", "1")?;
     put(&tx, "source_search_rev", "3")?;
     let generation = tx
@@ -332,6 +348,7 @@ pub(super) fn rollback(path: &Path, mut saved: Saved) -> Result<Report> {
     put(&tx, "source_search_rev", "2")?;
     tx.pragma_update(None, "user_version", 8)
         .map_err(db_error)?;
+    put(&tx, "snapshot_format", completed_format(&tx, 8)?)?;
     tx.commit().map_err(db_error)?;
     saved.report.state = State::RolledBack;
     saved.report.error_code = None;
@@ -352,7 +369,7 @@ pub(super) fn validate_ready(conn: &Connection) -> Result<()> {
         )
         .optional()
         .map_err(db_error)?;
-    if format.as_deref() != Some(audiolib_core::compatibility::PLAN_B_V9_FORMAT)
+    if format.as_deref() != Some(completed_format(conn, 9)?)
         || !dir_search::ready(conn)?
         || !crate::schema::definition::matches_sql(
             conn,
