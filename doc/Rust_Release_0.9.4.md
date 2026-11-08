@@ -101,7 +101,7 @@ AF1 在首次成功写入扩展源记录的同一事务中启用；原格式库�
 
 ## 远端核验与发布后安装
 
-发布后只读核验确认正式标题、非 draft、非 prerelease、latest、远端 annotated tag 及其 f6 peeled commit，正式版本与资产两项工具检查通过；精确十四项资产的 GitHub digest/size、七份已下载校验正文通过，无归档下载 fallback。前后快照验证 tag、Release 与资产不可变，线上资产与已验收字节一致。
+发布后只读核验确认正式标题、非 draft、非 prerelease、latest、远端 annotated tag 及其 f6 peeled commit，正式版本与资产两项工具检查通过；精确十四项资产的 GitHub digest/size、七份已下载校验正文通过，无归档下载 fallback。核验前后的 tag、Release 与资产身份未变化，线上资产与已验收字节一致。
 
 随后使用这一成功的远端证明，将同一已验收 Windows payload 与原固定 `local_release/` 同步：唯一一次实际 adapter/隔离启动调用通过，copied=0、verified=908，两个 EXE 身份、CLI 0.9.4、桌面启动及正常数据目录环境恢复均通过。此前两次 wrapper 只读合同诊断未调用安装或启动，其记录保留；实际同步未重建、未重跑 portable 套件、未改变正常库与偏好。
 
