@@ -3965,7 +3965,12 @@ impl Controller {
                         continue;
                     }
                     if let Err(error) = job.source.bind_source_version(&c, &job.cancel) {
-                        c.status(error);
+                        if !c.shutdown.load(Ordering::Acquire)
+                            && !job.cancel.load(Ordering::Acquire)
+                            && c.waveform_generation.load(Ordering::Acquire) == job.generation
+                        {
+                            c.status(error);
+                        }
                         continue;
                     }
                     let request = WaveformRequest {
