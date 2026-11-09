@@ -641,7 +641,7 @@ component HelpPanel inherits FocusScope {
             VerticalLayout { padding: 28px * Theme.ui-scale; spacing: 16px * Theme.ui-scale;
                 Text { text: root.chinese ? "快捷键与基本操作" : "Shortcuts and basics"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }
                 Text { text: root.chinese ? "Ctrl Shift I   添加声音文件夹     ·     Ctrl D   音效库管理\nCtrl F   搜索     ·     Ctrl S   保存 Metadata\nCtrl I   显示 / 隐藏侧栏     ·     F5   刷新素材库\nCtrl ,   全局设置     ·     Ctrl Q   保存草稿并退出\nEsc   关闭当前面板" : "Ctrl Shift I   Add sound folder     ·     Ctrl D   Manage sound library\nCtrl F   Search     ·     Ctrl S   Save Metadata\nCtrl I   Show / hide side panel     ·     F5   Refresh library\nCtrl ,   Global settings     ·     Ctrl Q   Save drafts and exit\nEsc   Close current panel"; color: Theme.ink; wrap: word-wrap; }
-                Text { text: root.chinese ? "新增音效库：使用文件菜单新建本地库、添加已有库或服务器连接。\n新增声音：使用工具栏添加文件夹，或音效库 → 扫描与索引。\n批量编辑：Ctrl 单击切换勾选，Shift 单击连续勾选，再使用批量标注。\n移除：编辑菜单管理当前音效与勾选记录，音效库菜单管理当前目录；只移除数据库记录与标注，源音频文件保留。\n全局偏好：设置 → 全局设置；主题可在顶栏右侧直接切换。" : "Add a library: use File to create a local library, add an existing library or connect to a server.\nAdd sounds: use Add folder in the toolbar or Library → Scan and index.\nBatch edit: Ctrl-click to toggle or Shift-click to check a range, then choose Edit checked records.\nRemove records in Edit, or the current folder in Library; source audio files remain on disk.\nPreferences: Settings → Global settings. Switch themes directly in the upper-right toolbar."; color: Theme.dim; wrap: word-wrap; }
+                Text { text: root.chinese ? "新增音效库：使用文件菜单新建本地库、添加已有库或服务器连接。\n新增声音：使用工具栏添加文件夹，或音效库 → 扫描与索引。\n批量编辑：Ctrl 单击切换勾选，Shift 单击连续勾选，再使用批量标注。\n移除：编辑菜单管理当前音效与勾选记录，音效库菜单管理当前目录；只移除数据库记录与标注，源音频文件保留。\n全局偏好：设置 → 全局设置；主题与语言可在视图菜单内快捷切换。" : "Add a library: use File to create a local library, add an existing library or connect to a server.\nAdd sounds: use Add folder in the toolbar or Library → Scan and index.\nBatch edit: Ctrl-click to toggle or Shift-click to check a range, then choose Edit checked records.\nRemove records in Edit, or the current folder in Library; source audio files remain on disk.\nPreferences: Settings → Global settings. Switch themes and language from the View menu."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: root.chinese ? "日常更新用增量扫描；整理文件后用全量扫描检查缺失。\n修复引用：音效库 → 查看缺失文件，选中声音后在详情面板选择新位置。标签和备注会保留。\n备份与数据库维护收在音效库管理底部的“高级维护”中。" : "Use incremental scans for daily updates; full scans check missing files after reorganizing a folder.\nRepair: Library → Missing files, select a sound, then locate it in Sound details. Annotations are kept.\nBackups and database tools are under Advanced maintenance in library management."; color: Theme.dim; wrap: word-wrap; }
                 close-action := Action { height: 34px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
             }
@@ -773,51 +773,6 @@ component StudioSourceTags inherits Rectangle {
                 }
             }
         }
-    }
-}
-
-component MenuBarItem inherits Rectangle {
-    in property <string> label;
-    in property <bool> enabled: true;
-    callback clicked();
-    height: 32px * Theme.ui-scale;
-    min-width: 38px * Theme.ui-scale;
-    preferred-width: menu-text.preferred-width + 18px * Theme.ui-scale;
-    horizontal-stretch: 0;
-    border-radius: 4px * Theme.ui-scale;
-    background: menu-hit.has-hover ? Theme.hover : transparent;
-    border-width: menu-focus.has-focus ? 1px : 0px; border-color: Theme.accent;
-    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
-    accessible-action-default => { if root.enabled { root.clicked(); } }
-    forward-focus: menu-focus;
-    menu-text := Text { text: root.label; color: root.enabled ? Theme.ink : Theme.muted; font-size: Theme.font(12); vertical-alignment: center; horizontal-alignment: center; }
-    menu-focus := FocusScope { enabled: root.enabled; focus-on-click: false; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } reject } }
-    menu-hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
-}
-
-// Both workbenches share the same in-window menu order and theme control.
-component AppMenuStrip inherits Rectangle {
-    in property <bool> chinese;
-    in property <bool> enabled: true;
-    in property <bool> native-menu: false;
-    in property <[string]> themes;
-    in-out property <int> theme-index;
-    callback menu-opened(int, length, length);
-    callback theme-selected(int);
-    public function focus-theme() { theme-selector.focus(); }
-    height: 42px * Theme.ui-scale;
-    background: Theme.panel;
-    HorizontalLayout { padding-left: 8px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; spacing: 4px * Theme.ui-scale;
-        Text { text: "AudioLib"; color: Theme.ink; font-size: Theme.font(16); font-weight: 600; vertical-alignment: center; }
-        if !root.native-menu: HorizontalLayout { spacing: 0px;
-            for title[index] in (root.chinese ? ["文件", "编辑", "音效库", "视图", "播放", "设置", "帮助"] : ["File", "Edit", "Library", "View", "Playback", "Settings", "Help"]): MenuBarItem {
-                label: title; enabled: root.enabled;
-                clicked => { root.menu-opened(index, self.absolute-position.x, self.absolute-position.y + self.height); }
-            }
-        }
-        Rectangle { horizontal-stretch: 1; }
-        Label { text: root.chinese ? "主题" : "Theme"; }
-        theme-selector := ComboBox { width: 146px * Theme.ui-scale; enabled: root.enabled; model: root.themes; current-index <=> root.theme-index; selected => { root.theme-selected(self.current-index); } }
     }
 }
 
@@ -1305,7 +1260,6 @@ export component AppWindow inherits Window {
         else if root.settings-page == 4 { cache-settings-first.focus(); }
         else { settings-first.focus(); }
     }
-    public function focus-theme-selector() { if Theme.modern-style { studio-menu-strip.focus-theme(); } else { classic-menu-strip.focus-theme(); } }
     // Test-only: lets ui_scale_tests scroll the table to its last column.
     public function scroll-table-to-end() {
         root.table-viewport-x = min(0px, (Theme.modern-style ? studio-result-list.visible-width : result-list.visible-width) - root.table-content-size);
@@ -2088,15 +2042,6 @@ export component AppWindow inherits Window {
             settings-close-return.focus();
         } else { root.finish-settings-close(); }
     }
-    function show-global-menu(index: int, x: length, y: length) {
-        if index == 0 { global-menu-file.show({x: x - global-menu-file.absolute-position.x, y: y - global-menu-file.absolute-position.y}); }
-        else if index == 1 { global-menu-edit.show({x: x - global-menu-edit.absolute-position.x, y: y - global-menu-edit.absolute-position.y}); }
-        else if index == 2 { global-menu-library.show({x: x - global-menu-library.absolute-position.x, y: y - global-menu-library.absolute-position.y}); }
-        else if index == 3 { global-menu-view.show({x: x - global-menu-view.absolute-position.x, y: y - global-menu-view.absolute-position.y}); }
-        else if index == 4 { global-menu-playback.show({x: x - global-menu-playback.absolute-position.x, y: y - global-menu-playback.absolute-position.y}); }
-        else if index == 5 { global-menu-settings.show({x: x - global-menu-settings.absolute-position.x, y: y - global-menu-settings.absolute-position.y}); }
-        else { global-menu-help.show({x: x - global-menu-help.absolute-position.x, y: y - global-menu-help.absolute-position.y}); }
-    }
     function open-batch() {
         if !root.remote-writes-blocked && !root.metadata-writes-blocked { root.batch-visible = true; }
     }
@@ -2528,8 +2473,9 @@ export component AppWindow inherits Window {
     // Measures one tag chip for the Rust row wrapping (tag-probe-width); never shown.
     tag-probe := TagChipView { visible: false; enabled: false; text: root.tag-probe-text; chinese: root.chinese; }
     init => { Palette.color-scheme = ColorScheme.dark; root.content-width = self.width - (Theme.modern-style ? 8px : 32px) * Theme.ui-scale; }
+    // Windows/macOS use the operating system's menu bar; other backends use Slint's standard menu bar.
     MenuBar {
-        visible: root.native-macos;
+        visible: true;
         Menu { title: root.chinese ? "文件" : "File"; enabled: root.menu-ready;
             MenuItem { title: root.chinese ? "新建本地音效库…" : "New local library…"; enabled: root.menu-ready; activated => { root.open-local-library-form(false); } }
             MenuItem { title: root.chinese ? "添加已有本地音效库…" : "Add existing local library…"; enabled: root.menu-ready; activated => { root.open-local-library-form(true); } }
@@ -2574,6 +2520,17 @@ export component AppWindow inherits Window {
             MenuItem { title: (root.chinese ? "移除当前目录（保留源文件）…" : "Remove current folder (keep source files)…") + root.removal-suffix; enabled: root.menu-ready && root.selected-folder-path != "" && root.removal-allowed; activated => { root.folder-action-requested(root.selected-folder-path, 1); } }
         }
         Menu { title: root.chinese ? "视图" : "View"; enabled: root.menu-ready;
+            Menu { title: root.chinese ? "主题" : "Theme";
+                for theme[index] in (root.chinese ? root.theme-names-cn : root.theme-names): MenuItem {
+                    title: theme; enabled: root.menu-ready; checkable: true; checked: root.theme-index == index;
+                    activated => { root.theme-index = index; root.theme-requested(index); }
+                }
+            }
+            Menu { title: root.chinese ? "语言" : "Language";
+                MenuItem { title: "English"; enabled: root.menu-ready; checkable: true; checked: !root.chinese; activated => { root.chinese = false; root.language-requested(false); } }
+                MenuItem { title: "简体中文"; enabled: root.menu-ready; checkable: true; checked: root.chinese; activated => { root.chinese = true; root.language-requested(true); } }
+            }
+            MenuSeparator { }
             MenuItem { title: root.chinese ? "搜索" : "Search"; enabled: root.menu-ready; shortcut: @keys(Control + F); activated => { if Theme.modern-style { studio-search-input.focus(); } else { search-input.focus(); } } }
             MenuItem { title: root.chinese ? "显示素材目录" : "Show library sidebar"; enabled: root.menu-ready; checkable: true; checked <=> root.sidebar-visible; }
             MenuItem { title: root.chinese ? "显示侧栏（筛选 / 详情）" : "Show side panel (filters / details)"; enabled: root.menu-ready; shortcut: @keys(Control + I); checkable: true; checked <=> root.inspector-visible; }
@@ -2674,115 +2631,6 @@ export component AppWindow inherits Window {
     // layout's minimum larger than the window, the whole main view scrolls instead of
     // being cut off. At 1.0 the viewport equals the window, so nothing changes.
 
-global-menu-file := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "文件" : "File"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "新建本地音效库…" : "New local library…"; enabled: root.menu-ready; activated => { root.open-local-library-form(false); } }
-            MenuItem { title: root.chinese ? "添加已有本地音效库…" : "Add existing local library…"; enabled: root.menu-ready; activated => { root.open-local-library-form(true); } }
-            MenuItem { title: root.chinese ? "添加服务器连接…" : "Add server connection…"; enabled: root.menu-ready; activated => { root.open-server-connection(); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "退出" : "Exit"; enabled: root.menu-ready; activated => { root.exit-requested(); } }
-        }
-    }
-global-menu-edit := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "编辑" : "Edit"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "查看 / 编辑 Metadata" : "View / edit Metadata"; enabled: root.menu-ready && root.has-selection; activated => { root.edit-sound-annotations(); } }
-            MenuItem { title: (root.chinese ? "保存 Metadata" : "Save Metadata"); enabled: root.menu-ready && root.has-selection && root.metadata-dirty; activated => { root.save-metadata-requested(); } }
-            MenuItem { title: root.chinese ? "批量标注已勾选的 " + root.checked-count + " 项…" : "Edit checked records (" + root.checked-count + ")…"; enabled: root.menu-ready && root.checked-count > 0; activated => { root.open-batch(); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "勾选已加载结果" : "Check loaded results"; enabled: root.menu-ready; activated => { root.check-current-page(); } }
-            MenuItem { title: root.chinese ? "清除全部选择" : "Clear selection"; enabled: root.menu-ready && root.checked-count > 0; activated => { root.check-page-requested(false); } }
-            MenuItem { title: (root.edit-favorite ? (root.chinese ? "取消收藏" : "Remove from favorites") : (root.chinese ? "添加到收藏" : "Add to favorites")); enabled: root.menu-ready && root.has-selection && !root.remote-writes-blocked && !root.metadata-writes-blocked; activated => { root.file-action-requested(root.selected-id, 5); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "复制所选文件路径" : "Copy selected file path"; enabled: root.menu-ready && root.has-selection; activated => { root.copy-text(root.selected-path); } }
-            MenuItem { title: (root.native-macos ? (root.chinese ? "在访达中显示" : "Reveal in Finder") : (root.chinese ? "在资源管理器中定位" : "Reveal in Explorer")) + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 2); } }
-            MenuItem { title: (root.chinese ? "修复所选文件引用…" : "Repair selected file reference…") + root.ro-suffix; enabled: root.menu-ready && root.has-selection && !root.remote-mode; activated => { root.file-action-requested(root.selected-id, 20); } }
-            MenuSeparator { }
-            MenuItem { title: (root.chinese ? "移除当前音效（保留源音频文件）…" : "Remove current sound (keep source files)…") + root.removal-suffix; enabled: root.menu-ready && root.has-selection && root.removal-allowed; activated => { root.file-action-requested(root.selected-id, 21); } }
-            MenuItem { title: (root.chinese ? "移除已勾选的 " + root.checked-count + " 项（保留源音频文件）…" : "Remove " + root.checked-count + " checked records (keep source files)…") + root.removal-suffix; enabled: root.menu-ready && root.checked-count > 0 && root.removal-allowed; activated => { root.library-action(11); } }
-        }
-    }
-global-menu-view := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "视图" : "View"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "搜索" : "Search"; enabled: root.menu-ready; activated => { studio-search-input.focus(); } }
-            MenuItem { title: root.chinese ? "显示素材目录" : "Show library sidebar"; enabled: root.menu-ready; checkable: true; checked <=> root.sidebar-visible; }
-            MenuItem { title: root.chinese ? "显示侧栏（筛选 / 详情）" : "Show side panel (filters / details)"; enabled: root.menu-ready; checkable: true; checked <=> root.inspector-visible; }
-            MenuItem { title: root.chinese ? "显示筛选" : "Show filters"; enabled: root.menu-ready; activated => { root.filters-visible = true; root.inspector-visible = true; } }
-            MenuItem { title: root.chinese ? "显示声音详情" : "Show sound details"; enabled: root.menu-ready; activated => { root.show-details-page(); } }
-            MenuItem { title: root.chinese ? "重置筛选" : "Reset filters"; enabled: root.menu-ready; activated => { root.reset-filters(); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "全部声音" : "All sounds"; enabled: root.menu-ready; activated => { root.library-sidebar-page = 0; root.favorites-only = false; root.all-library-requested(); } }
-            MenuItem { title: root.chinese ? "我的收藏" : "Favorites"; enabled: root.menu-ready; activated => { root.library-sidebar-page = 1; root.favorites-category = 0; root.favorites-only = true; root.all-library-requested(); } }
-            // Column headers sort; modification time has no column, so it is chosen here.
-            Menu { title: (root.chinese ? "排序：" : "Sort: ") + root.sort-label;
-                MenuItem { title: root.chinese ? "修改时间（新 → 旧）" : "Modified (newest first)"; enabled: root.menu-ready; activated => { root.sort-index = 6; root.sort-descending = true; root.filter-requested(); root.table-layout-changed(); } }
-                MenuItem { title: root.chinese ? "修改时间（旧 → 新）" : "Modified (oldest first)"; enabled: root.menu-ready; activated => { root.sort-index = 6; root.sort-descending = false; root.filter-requested(); root.table-layout-changed(); } }
-                MenuSeparator { }
-                MenuItem { title: root.chinese ? "默认排序" : "Default order"; enabled: root.menu-ready && root.sort-index != 0; activated => { root.sort-table(0); } }
-            }
-            Menu { title: (root.chinese ? "显示文件：" : "Show files: ") + root.visibility-labels[root.visibility-index];
-                for label[index] in root.visibility-labels: MenuItem { title: label; checkable: true; checked: root.visibility-index == index; activated => { root.visibility-index = index; root.filter-requested(); } }
-            }
-            MenuItem { title: root.chinese ? "显示 Waveform 列" : "Show Waveform column"; checkable: true; checked <=> root.list-waveforms-enabled; }
-            MenuItem { title: root.chinese ? "恢复默认列宽" : "Reset column widths"; activated => { root.reset-table-widths(); } }
-        }
-    }
-global-menu-library := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "音效库" : "Library"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "音效库管理…" : "Manage sound library…"; enabled: root.menu-ready; activated => { root.open-library(0); } }
-            MenuItem { title: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; enabled: root.menu-ready && root.vendor-import-available; activated => { root.vendor-import-requested(); } }
-            MenuItem { title: root.chinese ? "查看缺失文件 / 修复引用" : "Missing files / repair references"; enabled: root.menu-ready; activated => { root.show-missing-files(); } }
-            MenuItem { title: root.chinese ? "服务器音效库迁移…" : "Server library migration…"; enabled: root.menu-ready && root.remote-mode; activated => { root.migration-requested(); } }
-            Menu { title: root.chinese ? "扫描与索引" : "Scan and index";
-            MenuItem { title: (root.chinese ? "增量扫描文件夹…" : "Incremental folder scan…") + root.ro-suffix; enabled: root.menu-ready && !root.scanning && !root.remote-mode; activated => { root.prepare-scan(0, ""); } }
-            MenuItem { title: (root.chinese ? "全量扫描文件夹…" : "Full folder rescan…") + root.ro-suffix; enabled: root.menu-ready && !root.scanning && !root.remote-mode; activated => { root.prepare-scan(1, ""); } }
-            MenuSeparator { }
-            MenuItem { title: (root.chinese ? "增量扫描当前目录" : "Incremental scan of current folder") + root.ro-suffix; enabled: root.menu-ready && !root.scanning && root.selected-folder-path != "" && !root.remote-mode; activated => { root.prepare-scan(0, root.selected-folder-path); } }
-            MenuItem { title: (root.chinese ? "全量扫描当前目录" : "Full rescan of current folder") + root.ro-suffix; enabled: root.menu-ready && !root.scanning && root.selected-folder-path != "" && !root.remote-mode; activated => { root.prepare-scan(1, root.selected-folder-path); } }
-            MenuSeparator { }
-            MenuItem { title: root.scan-paused ? (root.chinese ? "继续扫描" : "Resume scan") : (root.chinese ? "暂停扫描" : "Pause scan"); enabled: root.menu-ready && root.scan-controllable && !root.scan-validating; activated => { root.scan-pause-requested(); } }
-            MenuItem { title: root.chinese ? "取消当前扫描" : "Cancel current scan"; enabled: root.menu-ready && root.scan-controllable; activated => { root.scan-cancel-requested(); } }
-            MenuItem { title: root.chinese ? "扫描历史…" : "Scan history…"; enabled: root.menu-ready; activated => { root.open-history(0); } }
-            }
-            MenuItem { title: root.chinese ? "刷新素材库" : "Refresh library"; enabled: root.menu-ready; activated => { root.refresh-requested(); } }
-            MenuSeparator { }
-            MenuItem { title: (root.chinese ? "移除当前目录（保留源文件）…" : "Remove current folder (keep source files)…") + root.removal-suffix; enabled: root.menu-ready && root.selected-folder-path != "" && root.removal-allowed; activated => { root.folder-action-requested(root.selected-folder-path, 1); } }
-        }
-    }
-global-menu-playback := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "播放" : "Playback"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "单击播放" : "Single-click play"; enabled: root.menu-ready; checkable: true; checked: root.audition-play-on-single-click; activated => { root.audition-play-on-single-click = !root.audition-play-on-single-click; root.single-click-play-requested(root.audition-play-on-single-click); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "试听所选文件" : "Audition selected file"; enabled: root.menu-ready && root.has-selection && !root.selected-missing; activated => { root.file-action-requested(root.selected-id, 0); } }
-            MenuItem { title: root.chinese ? "播放" : "Play"; enabled: root.menu-ready && root.audio-ready && !root.selected-missing; activated => { root.start-requested(); } }
-            MenuItem { title: root.chinese ? "暂停" : "Pause"; enabled: root.menu-ready && root.playing; activated => { root.pause-requested(); } }
-            MenuItem { title: root.chinese ? "停止" : "Stop"; enabled: root.menu-ready && (root.audio-ready || root.play-duration > 0); activated => { root.stop-requested(); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "最近播放…" : "Recent playback…"; enabled: root.menu-ready; activated => { root.open-history(1); } }
-            MenuItem { title: root.chinese ? "音频输出设置…" : "Audio output settings…"; enabled: root.menu-ready; activated => { root.open-global-settings(0); } }
-            MenuItem { title: root.chinese ? "Spectral Peaks 设置…" : "Spectral Peaks settings…"; enabled: root.menu-ready; activated => { root.peaks-visible = true; } }
-        }
-    }
-global-menu-settings := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "设置" : "Settings"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "全局设置…" : "Global settings…"; activated => { root.open-global-settings(1); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "通用与界面…" : "General and interface…"; activated => { root.open-global-settings(1); } }
-            MenuItem { title: root.chinese ? "搜索与任务…" : "Search and tasks…"; activated => { root.open-global-settings(2); } }
-            MenuItem { title: root.chinese ? "播放与音频…" : "Audio and playback…"; activated => { root.open-global-settings(0); } }
-            MenuItem { title: root.chinese ? "服务器与同步…" : "Server and sync…"; activated => { root.open-global-settings(3); } }
-            MenuItem { title: root.chinese ? "本机缓存…" : "Local caches…"; activated => { root.open-global-settings(4); } }
-        }
-    }
-global-menu-help := ContextMenuArea { x: 0px; y: 0px; width: 0px; height: 0px;
-        Menu { title: root.chinese ? "帮助" : "Help"; enabled: root.menu-ready;
-            MenuItem { title: root.chinese ? "快捷键与基本操作…" : "Shortcuts and basics…"; enabled: root.menu-ready; activated => { root.help-visible = true; } }
-            MenuItem { title: root.chinese ? "反馈问题 / 诊断报告…" : "Report a bug / diagnostics…"; activated => { root.debug-visible = true; } }
-            MenuItem { title: root.chinese ? "打开日志目录" : "Open log folder"; activated => { root.debug-action-requested(2); } }
-            MenuItem { title: root.chinese ? "Debug 模式 · 记录诊断" : "Debug mode · capture diagnostics"; enabled: root.menu-ready && !root.debug-busy; checkable: true; checked: root.debug-enabled; activated => { root.debug-mode-requested(!root.debug-enabled); } }
-            MenuSeparator { }
-            MenuItem { title: root.chinese ? "关于 AudioLib Explorer" : "About AudioLib Explorer"; enabled: root.menu-ready; activated => { root.about-visible = true; } }
-        }
-    }
 main-scroll := ScrollView {
     visible: !Theme.modern-style;
     width: parent.width; height: parent.height;
@@ -2796,12 +2644,6 @@ main-scroll := ScrollView {
         padding-top: (root.short-layout ? 10px : 16px) * Theme.ui-scale;
         padding-bottom: (root.short-layout ? 10px : 16px) * Theme.ui-scale;
         spacing: (root.short-layout ? 6px : 10px) * Theme.ui-scale;
-        classic-menu-strip := AppMenuStrip {
-            chinese: root.chinese; enabled: root.menu-ready; native-menu: root.native-macos;
-            themes: root.chinese ? root.theme-names-cn : root.theme-names; theme-index <=> root.theme-index;
-            menu-opened(index, x, y) => { root.show-global-menu(index, x, y); }
-            theme-selected(index) => { root.theme-requested(index); root.focus-theme-selector(); }
-        }
         HorizontalLayout { height: 42px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
             Rectangle { horizontal-stretch: 1; min-width: 220px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
@@ -3635,12 +3477,6 @@ main-scroll := ScrollView {
         padding-top: 0px;
         padding-bottom: 2px * Theme.ui-scale;
         spacing: 3px * Theme.ui-scale;
-        studio-menu-strip := AppMenuStrip {
-            chinese: root.chinese; enabled: root.menu-ready; native-menu: root.native-macos;
-            themes: root.chinese ? root.theme-names-cn : root.theme-names; theme-index <=> root.theme-index;
-            menu-opened(index, x, y) => { root.show-global-menu(index, x, y); }
-            theme-selected(index) => { root.theme-requested(index); root.focus-theme-selector(); }
-        }
         // Search and the current source have their own row below the menus.
         Rectangle { height: 46px * Theme.ui-scale; background: Theme.toolbar-surface;
             Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.toolbar-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
