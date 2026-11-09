@@ -60,6 +60,18 @@ const VIEWS: &[(&str, Setup)] = &[
         ui.set_settings_page(1);
         ui.set_settings_visible(true);
     }),
+    ("search-settings", |ui| {
+        ui.set_settings_page(2);
+        ui.set_settings_visible(true);
+    }),
+    ("sync-settings", |ui| {
+        ui.set_settings_page(3);
+        ui.set_settings_visible(true);
+    }),
+    ("cache-settings", |ui| {
+        ui.set_settings_page(4);
+        ui.set_settings_visible(true);
+    }),
     ("about", |ui| ui.set_about_visible(true)),
     ("help", |ui| ui.set_help_visible(true)),
     ("wide", |ui| ui.set_inspector_visible(false)),
@@ -251,12 +263,12 @@ fn main_view_at_2_0_in_1080x700_scrolls_to_its_last_control() {
 #[test]
 fn settings_pages_at_2_0_in_1080x700_scroll_to_their_last_controls() {
     init_software_backend();
-    for page in [0, 1] {
+    for page in 0..5 {
         for chinese in [false, true] {
             let ui = small_window_at_2_0(|ui| ui.set_settings_visible(true));
             ui.set_settings_page(page);
             ui.set_chinese(chinese);
-            let name = if page == 1 { "appearance" } else { "settings" };
+            let name = ["audio", "general", "search", "sync", "cache"][page as usize];
             let language = if chinese { "cn" } else { "en" };
             save_snapshot(&ui, &format!("{name}-{language}-x2-1080x700-scroll0.png"));
             let top = ui.get_settings_panel_top();
@@ -265,9 +277,6 @@ fn settings_pages_at_2_0_in_1080x700_scroll_to_their_last_controls() {
                 top >= 0.0 && panel_bottom <= 700.0,
                 "panel {top}..{panel_bottom}"
             );
-            if page == 0 {
-                assert!(ui.get_settings_last_bottom() > panel_bottom);
-            }
             ui.invoke_scroll_main_to_end();
             save_snapshot(&ui, &format!("{name}-{language}-x2-1080x700-scrollmax.png"));
             let last = ui.get_settings_last_bottom();
@@ -284,7 +293,7 @@ fn settings_pages_at_2_0_in_1080x700_scroll_to_their_last_controls() {
 fn tab_never_reaches_controls_on_the_hidden_settings_page() {
     use slint::platform::{Key, WindowEvent};
     init_software_backend();
-    for page in [0, 1] {
+    for page in 0..5 {
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         ui.set_settings_visible(true);
@@ -430,6 +439,10 @@ fn theme_switch_preserves_transport_view_and_typography() {
     ui.set_folders(synthetic_folders());
     ui.set_has_selection(true);
     ui.set_selected_id("42".into());
+    ui.set_query("rain in forest".into());
+    ui.set_edit_tags("rain, draft".into());
+    ui.set_edit_notes("Unsaved Metadata note".into());
+    ui.set_metadata_dirty(true);
     ui.set_audio_ready(true);
     ui.set_playing(false);
     ui.set_playback_state(4);
@@ -463,6 +476,10 @@ fn theme_switch_preserves_transport_view_and_typography() {
     ] {
         apply_theme(&ui, id);
         assert_eq!(ui.get_selected_id().as_str(), "42");
+        assert_eq!(ui.get_query(), "rain in forest");
+        assert_eq!(ui.get_edit_tags(), "rain, draft");
+        assert_eq!(ui.get_edit_notes(), "Unsaved Metadata note");
+        assert!(ui.get_metadata_dirty());
         assert!(ui.get_audio_ready());
         assert!(!ui.get_playing());
         assert_eq!(ui.get_playback_state(), 4);
@@ -558,7 +575,7 @@ fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
 }
 
 #[test]
-fn appearance_theme_keyboard_selection_applies_the_requested_style() {
+fn top_bar_theme_keyboard_selection_applies_the_requested_style() {
     use crate::theme::{apply_theme, theme_id, theme_index};
     use audiolib_core::config::{DEFAULT_THEME, DEFAULT_V2_THEME, STUDIO_THEME};
     use slint::platform::{Key, WindowEvent};
@@ -569,8 +586,6 @@ fn appearance_theme_keyboard_selection_applies_the_requested_style() {
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
         ui.set_chinese(chinese);
-        ui.set_settings_page(1);
-        ui.set_settings_visible(true);
         apply_theme(&ui, DEFAULT_THEME);
         let requests = Rc::new(Cell::new(0));
         ui.on_theme_requested({
@@ -582,19 +597,24 @@ fn appearance_theme_keyboard_selection_applies_the_requested_style() {
             }
         });
         ui.show().unwrap();
-        ui.invoke_focus_settings_first();
-        for key in [Key::Tab, Key::DownArrow] {
-            ui.window()
-                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
-            ui.window()
-                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
-        }
+        ui.invoke_focus_theme_selector();
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::DownArrow.into(),
+        });
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::DownArrow.into(),
+        });
         assert_eq!(requests.get(), 1);
         assert_eq!(ui.get_theme_index(), theme_index(STUDIO_THEME));
         assert!(ui.global::<crate::Theme>().get_modern_style());
         assert!(ui.global::<crate::Theme>().get_modern_player());
         let language = if chinese { "cn" } else { "en" };
-        save_snapshot(&ui, &format!("appearance-studio-{language}.png"));
+        assert!(
+            !ui.get_settings_visible(),
+            "theme switching needs no dialog"
+        );
+        save_snapshot(&ui, &format!("top-bar-studio-{language}.png"));
+        // Subsequent keys must keep working after the workbench is replaced.
         for event in [
             WindowEvent::KeyPressed {
                 text: Key::DownArrow.into(),
@@ -609,7 +629,7 @@ fn appearance_theme_keyboard_selection_applies_the_requested_style() {
         assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_V2_THEME));
         assert!(ui.global::<crate::Theme>().get_modern_style());
         assert!(!ui.global::<crate::Theme>().get_modern_player());
-        save_snapshot(&ui, &format!("appearance-default-v2-{language}.png"));
+        save_snapshot(&ui, &format!("top-bar-default-v2-{language}.png"));
         for event in [
             WindowEvent::KeyPressed {
                 text: Key::UpArrow.into(),
@@ -638,7 +658,7 @@ fn appearance_theme_keyboard_selection_applies_the_requested_style() {
         assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_THEME));
         assert!(!ui.global::<crate::Theme>().get_modern_style());
         assert!(!ui.global::<crate::Theme>().get_modern_player());
-        save_snapshot(&ui, &format!("appearance-default-{language}.png"));
+        save_snapshot(&ui, &format!("top-bar-default-{language}.png"));
         ui.hide().unwrap();
     }
 }

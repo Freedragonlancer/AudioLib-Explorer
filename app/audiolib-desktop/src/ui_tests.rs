@@ -40,7 +40,6 @@ fn artwork_management_actions_are_reachable_in_both_modes_and_languages() {
                     "移除本目录封面",
                     "恢复本目录默认",
                     "重新加载本目录封面",
-                    "清理本机封面缓存",
                 ]
             } else {
                 [
@@ -48,10 +47,9 @@ fn artwork_management_actions_are_reachable_in_both_modes_and_languages() {
                     "Remove folder cover",
                     "Restore folder default",
                     "Reload folder cover",
-                    "Clear cover thumbnails",
                 ]
             };
-            for (label, action) in labels.into_iter().zip([2, 3, 4, 0, 1]) {
+            for (label, action) in labels.into_iter().zip([2, 3, 4, 0]) {
                 click_label(&ui, label);
                 assert_eq!(actions.borrow().last(), Some(&action));
             }
@@ -66,7 +64,7 @@ fn artwork_management_actions_are_reachable_in_both_modes_and_languages() {
             );
             assert_eq!(
                 actions.borrow().len(),
-                5,
+                4,
                 "busy artwork actions are disabled"
             );
             ui.hide().unwrap();
@@ -98,18 +96,12 @@ fn artwork_preferences_and_actions_are_disabled_during_library_transitions_and_c
             let observed = preferences.clone();
             ui.on_artwork_enabled_requested(move |enabled| observed.borrow_mut().push(enabled));
             ui.show().unwrap();
-            let toggle = if chinese {
-                "显示封面（本地与服务器）"
-            } else {
-                "Show covers (local and server)"
-            };
             let labels = if chinese {
                 [
                     "指定 / 替换本目录图片…",
                     "移除本目录封面",
                     "恢复本目录默认",
                     "重新加载本目录封面",
-                    "清理本机封面缓存",
                 ]
             } else {
                 [
@@ -117,7 +109,6 @@ fn artwork_preferences_and_actions_are_disabled_during_library_transitions_and_c
                     "Remove folder cover",
                     "Restore folder default",
                     "Reload folder cover",
-                    "Clear cover thumbnails",
                 ]
             };
             for gate in 0..4 {
@@ -125,7 +116,6 @@ fn artwork_preferences_and_actions_are_disabled_during_library_transitions_and_c
                 ui.set_library_busy(gate == 1);
                 ui.set_ds_applying(gate == 2);
                 ui.set_closing(gate == 3);
-                click_label(&ui, toggle);
                 for label in labels {
                     click_label(&ui, label);
                 }
@@ -134,11 +124,84 @@ fn artwork_preferences_and_actions_are_disabled_during_library_transitions_and_c
                 assert!(actions.borrow().is_empty());
             }
             ui.set_closing(false);
+            click_label(&ui, labels[1]);
+            assert_eq!(&*actions.borrow(), &[3]);
+            ui.invoke_close_library_manager();
+            ui.invoke_open_global_settings(1);
+            let toggle = if chinese {
+                "显示封面（本地与服务器）"
+            } else {
+                "Show covers (local and server)"
+            };
+            for gate in 0..4 {
+                ui.set_artwork_busy(gate == 0);
+                ui.set_library_busy(gate == 1);
+                ui.set_ds_applying(gate == 2);
+                ui.set_closing(gate == 3);
+                click_label(&ui, toggle);
+                assert!(ui.get_artwork_enabled());
+                assert!(preferences.borrow().is_empty());
+            }
+            ui.set_closing(false);
             click_label(&ui, toggle);
             assert!(!ui.get_artwork_enabled());
             assert_eq!(&*preferences.borrow(), &[false]);
-            click_label(&ui, labels[1]);
-            assert_eq!(&*actions.borrow(), &[3]);
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn local_cover_cache_actions_live_in_global_settings_in_both_modes() {
+    i_slint_backend_testing::init_no_event_loop();
+    for chinese in [false, true] {
+        for remote in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            ui.window()
+                .set_size(slint::LogicalSize::new(1400.0, 1000.0));
+            ui.set_chinese(chinese);
+            ui.set_remote_mode(remote);
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            let observed = requests.clone();
+            ui.on_artwork_action_requested(move |action| observed.borrow_mut().push(action));
+            ui.show().unwrap();
+            ui.invoke_open_global_settings(4);
+            let clear = if chinese {
+                "清理本机封面缓存…"
+            } else {
+                "Clear cover thumbnails"
+            };
+            ui.set_artwork_busy(true);
+            click_label(&ui, clear);
+            assert!(requests.borrow().is_empty());
+            ui.set_artwork_busy(false);
+            click_label(&ui, clear);
+            assert!(
+                requests.borrow().is_empty(),
+                "opening cache cleanup confirmation must not clear anything"
+            );
+            click_label(
+                &ui,
+                if chinese {
+                    "取消清理封面"
+                } else {
+                    "Cancel cover cleanup"
+                },
+            );
+            assert!(requests.borrow().is_empty());
+            click_label(&ui, clear);
+            let confirm = if chinese {
+                "确认清理封面缓存"
+            } else {
+                "Clear cover cache"
+            };
+            ui.set_artwork_busy(true);
+            click_label(&ui, confirm);
+            assert!(requests.borrow().is_empty());
+            ui.set_artwork_busy(false);
+            click_label(&ui, confirm);
+            assert_eq!(&*requests.borrow(), &[1]);
+            assert!(!ui.get_library_visible());
             ui.hide().unwrap();
         }
     }
@@ -263,7 +326,7 @@ fn snapshot_sync_controls_pause_once_and_offer_continue_and_restart_on_both_page
 }
 
 #[test]
-fn server_cache_page_hides_local_scan_buttons_and_keeps_audition_hold_option() {
+fn server_cache_page_hides_local_scans_and_shared_audition_preferences() {
     i_slint_backend_testing::init_no_event_loop();
     for chinese in [false, true] {
         let ui = AppWindow::new().unwrap();
@@ -317,14 +380,8 @@ fn server_cache_page_hides_local_scan_buttons_and_keeps_audition_hold_option() {
             has_label(&ui, scan_note),
             "missing short scan redirect note"
         );
-        assert!(
-            has_label(&ui, audition),
-            "missing Audition / performance section"
-        );
-        assert!(
-            has_label(&ui, hold),
-            "hold list-waveform option must remain"
-        );
+        assert!(!has_label(&ui, audition));
+        assert!(!has_label(&ui, hold));
 
         // Local settings still expose the scan controls unchanged.
         ui.set_remote_mode(false);
@@ -350,8 +407,19 @@ fn server_cache_page_hides_local_scan_buttons_and_keeps_audition_hold_option() {
         );
         assert!(
             !has_label(&ui, hold),
-            "hold list-waveform option is server-mode only"
+            "shared audition preferences do not belong to a local library"
         );
+        ui.invoke_close_library_manager();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let observed = changes.clone();
+        ui.on_hold_list_waveform_batches_requested(move |hold| observed.borrow_mut().push(hold));
+        ui.invoke_open_global_settings(3);
+        for remote in [false, true] {
+            ui.set_remote_mode(remote);
+            click_label(&ui, hold);
+            assert_eq!(changes.borrow().len(), if remote { 2 } else { 1 });
+        }
+        assert_eq!(&*changes.borrow(), &[true, false]);
         ui.hide().unwrap();
     }
 }
@@ -463,7 +531,7 @@ fn scan_progress_controls_pause_resume_cancel_and_guard_terminal_phases() {
         assert!(ui.get_scan_paused());
         click_label(&ui, resume);
         assert!(!ui.get_scan_paused());
-        click_menu_item(&ui, if chinese { "扫描" } else { "Scan" }, pause);
+        click_scan_item(&ui, pause);
         assert!(ui.get_scan_paused());
         click_label(&ui, cancel);
         click_label(&ui, resume);
@@ -911,6 +979,11 @@ fn click_menu_item(ui: &AppWindow, title: &str, label: &str) {
 // Fallback submenus open beside their entry; their items report popup-relative positions.
 fn click_submenu_item(ui: &AppWindow, title: &str, submenu: &str, label: &str) {
     let popup = open_menu(ui, title);
+    let parent_width = ElementHandle::find_by_element_type_name(ui, "MenuFrame")
+        .next()
+        .expect("open parent menu frame")
+        .size()
+        .width;
     let entry = ElementHandle::find_by_accessible_label(ui, submenu)
         .next()
         .unwrap_or_else(|| panic!("Missing {title} submenu: {submenu}"));
@@ -922,7 +995,8 @@ fn click_submenu_item(ui: &AppWindow, title: &str, submenu: &str, label: &str) {
             popup.y + origin.y + size.height / 2.0,
         ),
     );
-    let nested = slint::LogicalPosition::new(popup.x + origin.x + size.width, popup.y + origin.y);
+    // The label is content-sized; Slint opens the submenu beside the full frame.
+    let nested = slint::LogicalPosition::new(popup.x + parent_width, popup.y + origin.y);
     let item = ElementHandle::find_by_accessible_label(ui, label)
         .find(|item| item.absolute_position().x < origin.x + size.width / 2.0)
         .unwrap_or_else(|| panic!("Missing {submenu} item: {label}"));
@@ -936,8 +1010,17 @@ fn click_submenu_item(ui: &AppWindow, title: &str, submenu: &str, label: &str) {
     );
 }
 
+fn click_scan_item(ui: &AppWindow, label: &str) {
+    let (library, scan) = if ui.get_chinese() {
+        ("音效库", "扫描与索引")
+    } else {
+        ("Library", "Scan and index")
+    };
+    click_submenu_item(ui, library, scan, label);
+}
+
 #[test]
-fn library_menu_file_status_and_view_sort_show_a_footer_reset() {
+fn view_menu_file_status_and_sort_show_a_footer_reset() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
@@ -945,7 +1028,7 @@ fn library_menu_file_status_and_view_sort_show_a_footer_reset() {
     let observed = searches.clone();
     ui.on_filter_requested(move || *observed.borrow_mut() += 1);
     ui.show().unwrap();
-    click_submenu_item(&ui, "Library", "Show files: Present files", "Missing files");
+    click_submenu_item(&ui, "View", "Show files: Present files", "Missing files");
     assert_eq!(ui.get_visibility_index(), 1);
     assert_eq!(*searches.borrow(), 1);
     // The footer keeps the menu-only scope visible and restores it in one click.
@@ -1006,13 +1089,17 @@ fn menu_bar_library_workflows_hide_technical_actions_in_both_languages() {
     let observed = actions.clone();
     ui.on_library_action(move |action| observed.borrow_mut().push(action));
     ui.show().unwrap();
-    for chinese in [false, true] {
+    for (theme, chinese) in audiolib_core::config::THEME_IDS
+        .into_iter()
+        .flat_map(|theme| [false, true].map(|chinese| (theme, chinese)))
+    {
+        crate::theme::apply_theme(&ui, theme);
         ui.set_chinese(chinese);
         let titles = if chinese {
-            ["文件", "编辑", "音效库", "扫描", "视图", "播放", "帮助"]
+            ["文件", "编辑", "音效库", "视图", "播放", "设置", "帮助"]
         } else {
             [
-                "File", "Edit", "Library", "Scan", "View", "Playback", "Help",
+                "File", "Edit", "Library", "View", "Playback", "Settings", "Help",
             ]
         };
         for title in titles {
@@ -1104,7 +1191,11 @@ fn menu_bar_library_workflows_hide_technical_actions_in_both_languages() {
             [("Scan history…", 0), ("Recent playback…", 1)]
         } {
             actions.borrow_mut().clear();
-            click_menu_item(&ui, library, label);
+            if kind == 0 {
+                click_scan_item(&ui, label);
+            } else {
+                click_menu_item(&ui, if chinese { "播放" } else { "Playback" }, label);
+            }
             assert_eq!(&*actions.borrow(), &[0]);
             assert_eq!(ui.get_history_kind(), kind);
             assert!(ui.get_library_visible());
@@ -1400,9 +1491,8 @@ fn folder_menu_modal_focus_keeps_path_input_and_tabs_out_of_background_metadata(
         assert_ne!(draft, "original", "Calibrate the background editor focus");
         assert_eq!(*edits.borrow(), 1);
         ui.set_metadata_dirty(false);
-        click_menu_item(
+        click_scan_item(
             &ui,
-            if chinese { "扫描" } else { "Scan" },
             if chinese {
                 "增量扫描文件夹…"
             } else {
@@ -1442,9 +1532,8 @@ fn folder_menu_modal_focus_keeps_path_input_and_tabs_out_of_background_metadata(
         send_keys(&ui, &[slint::platform::Key::Escape.into()]);
         assert!(!ui.get_import_visible());
         // With an empty path, reverse traversal must skip disabled Start to Cancel.
-        click_menu_item(
+        click_scan_item(
             &ui,
-            if chinese { "扫描" } else { "Scan" },
             if chinese {
                 "增量扫描文件夹…"
             } else {
@@ -1600,9 +1689,8 @@ fn pending_scan_dialog_guards_inputs_and_cancels_with_button_or_escape() {
             let observed = browses.clone();
             ui.on_scan_browse_requested(move || *observed.borrow_mut() += 1);
             ui.show().unwrap();
-            click_menu_item(
+            click_scan_item(
                 &ui,
-                if chinese { "扫描" } else { "Scan" },
                 if chinese {
                     "增量扫描文件夹…"
                 } else {
@@ -1749,9 +1837,8 @@ fn folder_scan_dialog_browses_preserves_cancelled_draft_and_guards_submission() 
             ui.set_import_visible(false);
         });
         ui.show().unwrap();
-        click_menu_item(
+        click_scan_item(
             &ui,
-            if chinese { "扫描" } else { "Scan" },
             if chinese {
                 "增量扫描文件夹…"
             } else {
@@ -1850,9 +1937,8 @@ fn folder_scan_dialog_browses_preserves_cancelled_draft_and_guards_submission() 
             "Cancellation preserves the path draft"
         );
         assert!(scans.borrow().is_empty());
-        click_menu_item(
+        click_scan_item(
             &ui,
-            if chinese { "扫描" } else { "Scan" },
             if chinese {
                 "全量扫描文件夹…"
             } else {
@@ -1914,29 +2000,36 @@ fn menu_bar_record_actions_use_displayed_id_and_current_folder_path() {
         ("Add to favorites", 5),
         ("Reveal in Explorer", 2),
         ("Repair selected file reference…", 20),
-        ("Remove selected record (keep WAV)…", 21),
+        ("Remove current sound (keep source files)…", 21),
     ] {
         click_menu_item(&ui, "Edit", label);
         assert_eq!(files.borrow().last(), Some(&("42".to_owned(), action)));
     }
-    click_menu_item(&ui, "Edit", "Remove current folder (keep WAV)…");
+    click_menu_item(&ui, "Library", "Remove current folder (keep source files)…");
     assert_eq!(&*folders.borrow(), &[("D:\\Sounds\\Aircraft".into(), 1)]);
     ui.set_checked_count(2);
-    click_menu_item(&ui, "Edit", "Remove selected records (keep WAV)…");
+    click_menu_item(&ui, "Edit", "Edit checked records (2)…");
+    assert!(ui.get_batch_visible());
+    ui.set_batch_visible(false);
+    click_menu_item(&ui, "Edit", "Remove 2 checked records (keep source files)…");
     assert_eq!(&*library.borrow(), &[11]);
 
     ui.set_has_selection(false);
     ui.set_checked_count(0);
     ui.set_selected_folder_path("".into());
+    click_menu_item(&ui, "Edit", "Edit checked records (0)…");
+    assert!(!ui.get_batch_visible());
+    close_menu(&ui);
     let file_count = files.borrow().len();
     for label in [
-        "Remove selected record (keep WAV)…",
-        "Remove selected records (keep WAV)…",
-        "Remove current folder (keep WAV)…",
+        "Remove current sound (keep source files)…",
+        "Remove 0 checked records (keep source files)…",
     ] {
         click_menu_item(&ui, "Edit", label);
         close_menu(&ui);
     }
+    click_menu_item(&ui, "Library", "Remove current folder (keep source files)…");
+    close_menu(&ui);
     assert_eq!(files.borrow().len(), file_count);
     assert_eq!(folders.borrow().len(), 1);
     assert_eq!(&*library.borrow(), &[11]);
@@ -1963,15 +2056,15 @@ fn menu_bar_scan_modes_and_active_scan_guards_preserve_current_folder() {
     let observed = cancels.clone();
     ui.on_scan_cancel_requested(move || *observed.borrow_mut() += 1);
     ui.show().unwrap();
-    click_menu_item(&ui, "Scan", "Full folder rescan…");
+    click_scan_item(&ui, "Full folder rescan…");
     assert!(ui.get_import_visible());
     assert_eq!(ui.get_scan_mode(), 1);
     ui.set_import_visible(false);
-    click_menu_item(&ui, "Scan", "Incremental folder scan…");
+    click_scan_item(&ui, "Incremental folder scan…");
     assert!(ui.get_import_visible());
     assert_eq!(ui.get_scan_mode(), 0);
     ui.set_import_visible(false);
-    click_menu_item(&ui, "Scan", "Full rescan of current folder");
+    click_scan_item(&ui, "Full rescan of current folder");
     assert!(ui.get_import_visible());
     assert_eq!(ui.get_scan_path(), "D:\\Sounds\\Aircraft");
     assert_eq!(ui.get_scan_mode(), 1);
@@ -1981,7 +2074,7 @@ fn menu_bar_scan_modes_and_active_scan_guards_preserve_current_folder() {
     );
     click_label(&ui, "Start scan");
     assert!(!ui.get_import_visible());
-    click_menu_item(&ui, "Scan", "Incremental scan of current folder");
+    click_scan_item(&ui, "Incremental scan of current folder");
     assert!(ui.get_import_visible());
     assert_eq!(ui.get_scan_path(), "D:\\Sounds\\Aircraft");
     assert_eq!(ui.get_scan_mode(), 0);
@@ -1993,21 +2086,21 @@ fn menu_bar_scan_modes_and_active_scan_guards_preserve_current_folder() {
             ("D:\\Sounds\\Aircraft".into(), 0)
         ]
     );
-    click_menu_item(&ui, "Scan", "Cancel current scan");
+    click_scan_item(&ui, "Cancel current scan");
     assert_eq!(*cancels.borrow(), 0);
     close_menu(&ui);
     ui.set_scanning(true);
-    for (title, label) in [
-        ("Scan", "Incremental folder scan…"),
-        ("Scan", "Full folder rescan…"),
-        ("Scan", "Full rescan of current folder"),
+    for label in [
+        "Incremental folder scan…",
+        "Full folder rescan…",
+        "Full rescan of current folder",
     ] {
-        click_menu_item(&ui, title, label);
+        click_scan_item(&ui, label);
         assert!(!ui.get_import_visible());
         close_menu(&ui);
     }
     assert_eq!(scans.borrow().len(), 2);
-    click_menu_item(&ui, "Scan", "Cancel current scan");
+    click_scan_item(&ui, "Cancel current scan");
     assert_eq!(*cancels.borrow(), 1);
     ui.hide().unwrap();
 }
@@ -2086,7 +2179,12 @@ fn menu_bar_playback_view_and_help_preserve_selection_and_modal_guards() {
     ui.on_library_action(move |action| observed.borrow_mut().push(action));
     click_menu_item(&ui, "Help", "Shortcuts and basics…");
     assert!(ui.get_help_visible());
-    click_menu_item(&ui, "Library", "Manage sound library…");
+    let library_menu = menu_bar_entry(&ui, "Library");
+    let (origin, size) = (library_menu.absolute_position(), library_menu.size());
+    click_at(
+        &ui,
+        slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0),
+    );
     assert!(libraries.borrow().is_empty());
     assert!(!ui.get_library_visible());
     assert!(ui.get_help_visible());
@@ -2152,7 +2250,7 @@ fn menu_bar_shortcuts_dispatch_once_and_respect_all_modal_guards() {
     send_keys(&ui, &[slint::platform::Key::Control.into(), "q".into()]);
     assert_eq!(*exits.borrow(), 1);
 
-    let modal_setters: [fn(&AppWindow, bool); 10] = [
+    let modal_setters: [fn(&AppWindow, bool); 12] = [
         AppWindow::set_library_visible,
         AppWindow::set_confirmation_visible,
         AppWindow::set_batch_visible,
@@ -2161,12 +2259,15 @@ fn menu_bar_shortcuts_dispatch_once_and_respect_all_modal_guards() {
         AppWindow::set_peaks_visible,
         AppWindow::set_about_visible,
         AppWindow::set_help_visible,
+        AppWindow::set_debug_visible,
+        AppWindow::set_update_visible,
         AppWindow::set_library_busy,
         AppWindow::set_closing,
     ];
     for (index, set_modal) in modal_setters.into_iter().enumerate() {
         set_modal(&ui, true);
-        for key in ["d", "s", "q", "i"] {
+        let settings_were_open = ui.get_settings_visible();
+        for key in ["d", "s", "q", "i", ","] {
             send_keys(&ui, &[slint::platform::Key::Control.into(), key.into()]);
         }
         send_keys(&ui, &[slint::platform::Key::F5.into()]);
@@ -2175,6 +2276,11 @@ fn menu_bar_shortcuts_dispatch_once_and_respect_all_modal_guards() {
         assert_eq!(*exits.borrow(), 1, "Guard {index}");
         assert_eq!(*refreshes.borrow(), 1, "Guard {index}");
         assert_eq!(ui.get_inspector_visible(), !inspector, "Guard {index}");
+        assert_eq!(
+            ui.get_settings_visible(),
+            settings_were_open,
+            "Guard {index}"
+        );
         set_modal(&ui, false);
     }
     ui.set_has_selection(false);
@@ -2926,6 +3032,9 @@ fn folder_context_menu_uses_window_coordinates_and_retains_its_original_path() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    // The retained native-menu path supplies a nonzero owner offset even though
+    // Windows workbenches now render their commands inside the main view.
+    ui.set_native_macos(true);
     let original = FolderRow {
         name: "Original folder".into(),
         path: "D:\\Sounds\\Original".into(),
@@ -2950,7 +3059,7 @@ fn folder_context_menu_uses_window_coordinates_and_retains_its_original_path() {
         path: "D:\\Sounds\\Replacement".into(),
         ..Default::default()
     }])));
-    let open = ElementHandle::find_by_accessible_label(&ui, "Open in Explorer")
+    let open = ElementHandle::find_by_accessible_label(&ui, "Open in Finder")
         .next()
         .expect("open folder context action");
     let origin = open.absolute_position();
@@ -3966,21 +4075,9 @@ fn source_connection_fields_accept_pointer_focus_and_keyboard_edits() {
             assert_eq!(ui.get_ds_port(), "18790");
             assert_eq!(ui.get_ds_prefix(), "/sounds");
             assert_eq!(ui.get_ds_token(), "isolated-test-token");
-            click_connection_field(
-                &ui,
-                if chinese {
-                    "版本检查间隔（秒）"
-                } else {
-                    "Revision check interval (seconds)"
-                },
-            );
-            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(100));
-            send_keys(&ui, &[slint::platform::Key::Control.into(), "a".into()]);
-            send_keys(&ui, &["90".into()]);
-            assert_eq!(ui.get_ds_poll_interval(), "90");
             ui.set_ds_applying(true);
             send_keys(&ui, &["ignored".into()]);
-            assert_eq!(ui.get_ds_poll_interval(), "90");
+            assert_eq!(ui.get_ds_token(), "isolated-test-token");
             ui.set_ds_applying(false);
             click_label(
                 &ui,
@@ -3991,6 +4088,19 @@ fn source_connection_fields_accept_pointer_focus_and_keyboard_edits() {
                 },
             );
             assert_eq!(*saves.borrow(), 1);
+            ui.set_ds_dirty(false);
+            ui.invoke_close_library_manager();
+            ui.invoke_open_global_settings(3);
+            ui.invoke_focus_settings_first();
+            send_keys(&ui, &[slint::platform::Key::Control.into(), "a".into()]);
+            send_keys(&ui, &["90".into()]);
+            assert_eq!(ui.get_ds_poll_interval(), "90");
+            assert!(ui.get_shared_sync_dirty());
+            assert!(!ui.get_ds_dirty());
+            ui.set_shared_sync_busy(true);
+            send_keys(&ui, &["ignored".into()]);
+            assert_eq!(ui.get_ds_poll_interval(), "90");
+            ui.set_shared_sync_busy(false);
             assert_eq!(ui.get_query(), "Background query");
             assert_eq!(ui.get_edit_tags(), "Background tags");
             ui.hide().unwrap();
@@ -4679,9 +4789,9 @@ fn unified_source_window_gates_server_scans_and_removals_on_the_active_managed_s
             "Start a scan…"
         };
         let remove = if chinese {
-            "移除所选记录…"
+            "移除已勾选的 2 项…"
         } else {
-            "Remove checked records…"
+            "Remove 2 checked records…"
         };
         let folder = if chinese {
             "删除目录记录…"
@@ -4774,35 +4884,51 @@ fn unified_source_window_gates_server_scans_and_removals_on_the_active_managed_s
 }
 
 #[test]
-fn appearance_settings_live_in_the_view_menu_in_both_languages() {
+fn settings_menu_opens_one_global_dialog_with_the_requested_page() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
     ui.show().unwrap();
     for chinese in [false, true] {
         ui.set_chinese(chinese);
-        let (view, playback, label) = if chinese {
-            ("视图", "播放", "外观设置…")
+        let (view, settings, global, general, audio, sync) = if chinese {
+            (
+                "视图",
+                "设置",
+                "全局设置…",
+                "通用与界面…",
+                "播放与音频…",
+                "服务器与同步…",
+            )
         } else {
-            ("View", "Playback", "Appearance settings…")
+            (
+                "View",
+                "Settings",
+                "Global settings…",
+                "General and interface…",
+                "Audio and playback…",
+                "Server and sync…",
+            )
         };
-        open_menu(&ui, playback);
+        open_menu(&ui, view);
         assert!(
-            ElementHandle::find_by_accessible_label(&ui, label)
+            ElementHandle::find_by_accessible_label(&ui, general)
                 .next()
                 .is_none(),
-            "Appearance settings must no longer be in the Playback menu"
+            "application preferences are reached through Settings"
         );
         close_menu(&ui);
-        ui.set_settings_visible(false);
-        ui.set_settings_page(0);
-        click_menu_item(&ui, view, label);
-        assert!(ui.get_settings_visible(), "View menu must open settings");
-        assert_eq!(
-            ui.get_settings_page(),
-            1,
-            "View menu must open the Appearance page"
-        );
-        ui.set_settings_visible(false);
+        for (label, page) in [(global, 1), (general, 1), (audio, 0), (sync, 3)] {
+            click_menu_item(&ui, settings, label);
+            assert!(ui.get_settings_visible());
+            assert_eq!(ui.get_settings_page(), page);
+            ui.invoke_request_close_settings();
+            assert!(!ui.get_settings_visible());
+        }
+        send_keys(&ui, &[slint::platform::Key::Control.into(), ",".into()]);
+        assert!(ui.get_settings_visible());
+        assert_eq!(ui.get_settings_page(), 1);
+        ui.invoke_request_close_settings();
     }
+    ui.hide().unwrap();
 }

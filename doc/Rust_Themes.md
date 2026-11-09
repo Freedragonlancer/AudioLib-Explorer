@@ -1,6 +1,6 @@
 # Appearance themes
 
-Choose a theme in **View > Appearance > Theme**. The change applies immediately
+Choose a theme from the **Theme** selector in the upper-right toolbar. The change applies immediately
 and is saved with the other preferences in `settings.json`. Switching the interface
 language updates the displayed theme names; the saved identifier stays the same.
 
@@ -16,7 +16,9 @@ Pitch/Rate fields, Waveform ruler, volume and scroll controls while using the
 Studio workbench above it. Studio and Default v2 use one library sidebar instead
 of a separate icon navigation rail. All sounds, favorites and recent playback
 remain in that sidebar; **View > Show library sidebar** reopens it when hidden,
-and **View > Appearance settings** opens appearance preferences. Existing Default
+and **Settings > Global settings > General and interface** opens language, scale,
+font and cover preferences. Theme selection stays outside that dialog. All three
+themes share the same command order and separate menu and search rows. Existing Default
 and Studio player presentations remain available. Frequency colors and non-tonal
 peaks are audio data, so themes do not change Spectral Peaks analysis or rendering
 colors.
@@ -42,7 +44,7 @@ migration is required.
 The built-in registry in
 [`audiolib-core/src/config.rs`](../crates/audiolib-core/src/config.rs) defines stable
 identifiers, bilingual names, workbench styles and player styles. It drives settings
-validation and the Appearance list. The desktop adapter in
+validation and the toolbar's theme list. The desktop adapter in
 [`src/theme.rs`](../app/audiolib-desktop/src/theme.rs) applies the selected palette
 and presentation to the Slint
 [`Theme` global](../app/audiolib-desktop/ui/theme.slint).
@@ -82,7 +84,7 @@ waveform and Spectral Peaks mode, and fails when playback frames keep repainting
 more than a small part of the window. A new theme is covered once it is registered.
 
 For a theme change, verify registry/index mapping, settings round trips, bilingual
-Appearance selection, live switching and representative player states. The
+toolbar selection, continuous keyboard switching and representative player states. The
 headless `ui_scale_tests` cover these UI behaviors. Setting
 `AUDIOLIB_UI_SCALE_SNAPSHOT_DIR` saves synthetic PNGs for visual inspection,
 including all registered themes in both languages and a small scaled window. Use

@@ -395,7 +395,7 @@ pub struct AppConfig {
     /// audition start (deferred, not dropped). Off by default.
     #[serde(default)]
     pub hold_list_waveform_batches_after_audition: bool,
-    /// Maximum open search tasks, set in Appearance and bounded to 1..=30.
+    /// Maximum open search tasks, set in global Search and tasks settings, bounded to 1..=30.
     #[serde(default = "default_max_search_tasks")]
     pub max_search_tasks: u32,
     /// Interface scale in percent: 100-200 in steps of 25, or 0 to follow the system.
@@ -600,7 +600,7 @@ pub const BUILTIN_THEMES: [BuiltinTheme; 3] = [
     },
 ];
 
-/// Theme identifiers offered in the Appearance settings, in display order.
+/// Theme identifiers offered by the top-level theme selector, in display order.
 pub const THEME_IDS: [&str; BUILTIN_THEMES.len()] = {
     let mut ids = [""; BUILTIN_THEMES.len()];
     let mut index = 0;
