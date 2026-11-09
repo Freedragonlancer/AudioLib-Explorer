@@ -530,7 +530,7 @@ fn lenient_max_search_tasks<'de, D: serde::Deserializer<'de>>(
         _ => DEFAULT_MAX_SEARCH_TASKS,
     })
 }
-/// Interface scale choices offered in the Appearance settings, in percent.
+/// Interface scale choices offered in Global settings, in percent.
 pub const UI_SCALE_PERCENTS: [u32; 5] = [100, 125, 150, 175, 200];
 
 /// Keep a supported interface scale; anything else (including 0) follows the system.
@@ -571,9 +571,9 @@ pub enum PlayerStyle {
 pub struct BuiltinTheme {
     /// Stable settings identifier; existing identifiers must retain their appearance.
     pub id: &'static str,
-    /// English name offered in Appearance settings.
+    /// English name offered in View > Theme.
     pub name: &'static str,
-    /// Chinese name offered in Appearance settings.
+    /// Chinese name offered in View > Theme.
     pub name_cn: &'static str,
     /// Navigation, search and library layout belonging to this theme.
     pub workbench_style: WorkbenchStyle,

@@ -575,10 +575,11 @@ fn theme_switch_does_not_replay_expired_or_classic_input_rejections() {
 }
 
 #[test]
-fn top_bar_theme_keyboard_selection_applies_the_requested_style() {
+fn view_theme_menu_keyboard_selection_applies_the_requested_style() {
     use crate::theme::{apply_theme, theme_id, theme_index};
+    use crate::ui_tests::{open_menu, send_keys};
     use audiolib_core::config::{DEFAULT_THEME, DEFAULT_V2_THEME, STUDIO_THEME};
-    use slint::platform::{Key, WindowEvent};
+    use slint::platform::Key;
     use std::{cell::Cell, rc::Rc};
 
     init_software_backend();
@@ -597,68 +598,35 @@ fn top_bar_theme_keyboard_selection_applies_the_requested_style() {
             }
         });
         ui.show().unwrap();
-        ui.invoke_focus_theme_selector();
-        ui.window().dispatch_event(WindowEvent::KeyPressed {
-            text: Key::DownArrow.into(),
-        });
-        ui.window().dispatch_event(WindowEvent::KeyReleased {
-            text: Key::DownArrow.into(),
-        });
-        assert_eq!(requests.get(), 1);
-        assert_eq!(ui.get_theme_index(), theme_index(STUDIO_THEME));
-        assert!(ui.global::<crate::Theme>().get_modern_style());
-        assert!(ui.global::<crate::Theme>().get_modern_player());
         let language = if chinese { "cn" } else { "en" };
-        assert!(
-            !ui.get_settings_visible(),
-            "theme switching needs no dialog"
-        );
-        save_snapshot(&ui, &format!("top-bar-studio-{language}.png"));
-        // Subsequent keys must keep working after the workbench is replaced.
-        for event in [
-            WindowEvent::KeyPressed {
-                text: Key::DownArrow.into(),
-            },
-            WindowEvent::KeyReleased {
-                text: Key::DownArrow.into(),
-            },
-        ] {
-            ui.window().dispatch_event(event);
+        for (step, id) in [STUDIO_THEME, DEFAULT_V2_THEME, DEFAULT_THEME]
+            .into_iter()
+            .enumerate()
+        {
+            open_menu(&ui, if chinese { "视图" } else { "View" });
+            // Theme is the first View command; Right enters its registered choices.
+            send_keys(&ui, &[Key::DownArrow.into()]);
+            send_keys(&ui, &[Key::RightArrow.into()]);
+            for _ in 0..=theme_index(id) {
+                send_keys(&ui, &[Key::DownArrow.into()]);
+            }
+            send_keys(&ui, &[Key::Return.into()]);
+            assert_eq!(requests.get(), step + 1);
+            assert_eq!(ui.get_theme_index(), theme_index(id));
+            assert_eq!(
+                ui.global::<crate::Theme>().get_modern_style(),
+                id != DEFAULT_THEME
+            );
+            assert_eq!(
+                ui.global::<crate::Theme>().get_modern_player(),
+                id == STUDIO_THEME
+            );
+            assert!(
+                !ui.get_settings_visible(),
+                "theme switching needs no dialog"
+            );
+            save_snapshot(&ui, &format!("menu-theme-{id}-{language}.png"));
         }
-        assert_eq!(requests.get(), 2);
-        assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_V2_THEME));
-        assert!(ui.global::<crate::Theme>().get_modern_style());
-        assert!(!ui.global::<crate::Theme>().get_modern_player());
-        save_snapshot(&ui, &format!("top-bar-default-v2-{language}.png"));
-        for event in [
-            WindowEvent::KeyPressed {
-                text: Key::UpArrow.into(),
-            },
-            WindowEvent::KeyReleased {
-                text: Key::UpArrow.into(),
-            },
-        ] {
-            ui.window().dispatch_event(event);
-        }
-        assert_eq!(requests.get(), 3);
-        assert_eq!(ui.get_theme_index(), theme_index(STUDIO_THEME));
-        assert!(ui.global::<crate::Theme>().get_modern_style());
-        assert!(ui.global::<crate::Theme>().get_modern_player());
-        for event in [
-            WindowEvent::KeyPressed {
-                text: Key::UpArrow.into(),
-            },
-            WindowEvent::KeyReleased {
-                text: Key::UpArrow.into(),
-            },
-        ] {
-            ui.window().dispatch_event(event);
-        }
-        assert_eq!(requests.get(), 4);
-        assert_eq!(ui.get_theme_index(), theme_index(DEFAULT_THEME));
-        assert!(!ui.global::<crate::Theme>().get_modern_style());
-        assert!(!ui.global::<crate::Theme>().get_modern_player());
-        save_snapshot(&ui, &format!("top-bar-default-{language}.png"));
         ui.hide().unwrap();
     }
 }

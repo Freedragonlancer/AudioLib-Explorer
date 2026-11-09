@@ -931,24 +931,47 @@ fn click_at(ui: &AppWindow, position: slint::LogicalPosition) {
     });
 }
 
+fn software_menu_bar(ui: &AppWindow) -> ElementHandle {
+    // The compiler-generated MenuBarImpl wrapper has no debug type metadata;
+    // its stock MenuBar child retains this source-qualified element id.
+    ElementHandle::find_by_element_id(ui, "MenuBarImpl::base")
+        .next()
+        .expect("software menu bar")
+}
+
 fn menu_bar_entry(ui: &AppWindow, title: &str) -> ElementHandle {
-    ElementHandle::find_by_element_type_name(ui, "MenuBarItem")
-        .find(|entry| {
+    software_menu_bar(ui)
+        .query_descendants()
+        .match_type_name("MenuBarItem")
+        .match_predicate({
             let title = title.to_owned();
-            entry
-                .query_descendants()
-                .match_predicate(move |element| {
-                    element
-                        .accessible_label()
-                        .is_some_and(|label| label == title)
-                })
-                .find_first()
-                .is_some()
+            move |entry| {
+                let title = title.clone();
+                entry
+                    .query_descendants()
+                    .match_predicate(move |element| {
+                        element
+                            .accessible_label()
+                            .is_some_and(|label| label == title)
+                    })
+                    .find_first()
+                    .is_some()
+            }
         })
+        .find_first()
         .unwrap_or_else(|| panic!("Missing menu bar entry: {title}"))
 }
 
-fn open_menu(ui: &AppWindow, title: &str) -> slint::LogicalPosition {
+fn menu_popup_position(ui: &AppWindow, title: &str) -> slint::LogicalPosition {
+    let entry = menu_bar_entry(ui, title);
+    let bar = software_menu_bar(ui);
+    slint::LogicalPosition::new(
+        entry.absolute_position().x,
+        bar.absolute_position().y + bar.size().height,
+    )
+}
+
+pub(crate) fn open_menu(ui: &AppWindow, title: &str) -> slint::LogicalPosition {
     let entry = menu_bar_entry(ui, title);
     let origin = entry.absolute_position();
     let size = entry.size();
@@ -956,8 +979,34 @@ fn open_menu(ui: &AppWindow, title: &str) -> slint::LogicalPosition {
         ui,
         slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0),
     );
-    // Slint's fallback popup positions are relative to the menu bar entry.
-    slint::LogicalPosition::new(origin.x, origin.y + size.height)
+    // The stock menu uses the complete bar height, independently of item padding.
+    menu_popup_position(ui, title)
+}
+
+fn hover_menu(ui: &AppWindow, title: &str) {
+    let entry = menu_bar_entry(ui, title);
+    let (origin, size) = (entry.absolute_position(), entry.size());
+    ui.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(
+            origin.x + size.width / 2.0,
+            origin.y + size.height / 2.0,
+        ),
+    });
+}
+
+fn open_menu_has_label(ui: &AppWindow, label: &str) -> bool {
+    ElementHandle::find_by_element_type_name(ui, "MenuFrame").any(|frame| {
+        let label = label.to_owned();
+        frame
+            .query_descendants()
+            .match_predicate(move |element| {
+                element
+                    .accessible_label()
+                    .is_some_and(|value| value == label)
+            })
+            .find_first()
+            .is_some()
+    })
 }
 
 fn click_menu_item(ui: &AppWindow, title: &str, label: &str) {
@@ -1017,6 +1066,136 @@ fn click_scan_item(ui: &AppWindow, label: &str) {
         ("Library", "Scan and index")
     };
     click_submenu_item(ui, library, scan, label);
+}
+
+#[test]
+fn menu_hover_switches_only_during_an_open_session_in_all_themes() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        for chinese in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+            crate::theme::apply_theme(&ui, theme);
+            ui.set_chinese(chinese);
+            ui.show().unwrap();
+            let (file, view, help, create, theme_label, shortcuts) = if chinese {
+                (
+                    "文件",
+                    "视图",
+                    "帮助",
+                    "新建本地音效库…",
+                    "主题",
+                    "快捷键与基本操作…",
+                )
+            } else {
+                (
+                    "File",
+                    "View",
+                    "Help",
+                    "New local library…",
+                    "Theme",
+                    "Shortcuts and basics…",
+                )
+            };
+
+            hover_menu(&ui, view);
+            assert!(
+                ElementHandle::find_by_element_type_name(&ui, "MenuFrame")
+                    .next()
+                    .is_none(),
+                "hovering a closed menu must not open it: {theme}/{chinese}"
+            );
+            open_menu(&ui, file);
+            assert!(open_menu_has_label(&ui, create));
+            hover_menu(&ui, view);
+            assert!(open_menu_has_label(&ui, theme_label));
+            assert!(!open_menu_has_label(&ui, create));
+            hover_menu(&ui, help);
+            assert!(open_menu_has_label(&ui, shortcuts));
+            assert!(!open_menu_has_label(&ui, theme_label));
+            close_menu(&ui);
+
+            hover_menu(&ui, file);
+            assert!(
+                ElementHandle::find_by_element_type_name(&ui, "MenuFrame")
+                    .next()
+                    .is_none(),
+                "Escape ends hover switching"
+            );
+            open_menu(&ui, file);
+            click_at(&ui, slint::LogicalPosition::new(1432.0, 450.0));
+            hover_menu(&ui, view);
+            assert!(
+                ElementHandle::find_by_element_type_name(&ui, "MenuFrame")
+                    .next()
+                    .is_none(),
+                "an outside click ends hover switching"
+            );
+
+            click_menu_item(&ui, help, shortcuts);
+            assert!(ui.get_help_visible());
+            assert!(
+                ElementHandle::find_by_element_type_name(&ui, "MenuFrame")
+                    .next()
+                    .is_none(),
+                "activating a command closes its menu"
+            );
+            send_keys(&ui, &[slint::platform::Key::Escape.into()]);
+            assert!(!ui.get_help_visible());
+            hover_menu(&ui, file);
+            assert!(
+                ElementHandle::find_by_element_type_name(&ui, "MenuFrame")
+                    .next()
+                    .is_none(),
+                "a completed command does not leave hover switching armed"
+            );
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn view_language_menu_dispatches_quick_switches_in_every_theme() {
+    i_slint_backend_testing::init_no_event_loop();
+    for theme in audiolib_core::config::THEME_IDS {
+        for initial_chinese in [false, true] {
+            let ui = AppWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+            crate::theme::apply_theme(&ui, theme);
+            ui.set_chinese(initial_chinese);
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            let observed = requests.clone();
+            let weak = ui.as_weak();
+            ui.on_language_requested(move |chinese| {
+                observed.borrow_mut().push(chinese);
+                weak.upgrade().unwrap().set_chinese(chinese);
+            });
+            ui.show().unwrap();
+            for chinese in [!initial_chinese, initial_chinese] {
+                let (view, language) = if ui.get_chinese() {
+                    ("视图", "语言")
+                } else {
+                    ("View", "Language")
+                };
+                click_submenu_item(
+                    &ui,
+                    view,
+                    language,
+                    if chinese { "简体中文" } else { "English" },
+                );
+                assert_eq!(ui.get_chinese(), chinese);
+                assert_eq!(requests.borrow().last(), Some(&chinese));
+                assert!(!ui.get_settings_visible());
+                assert!(
+                    ElementHandle::find_by_element_type_name(&ui, "MenuFrame")
+                        .next()
+                        .is_none()
+                );
+            }
+            assert_eq!(&*requests.borrow(), &[!initial_chinese, initial_chinese]);
+            ui.hide().unwrap();
+        }
+    }
 }
 
 #[test]

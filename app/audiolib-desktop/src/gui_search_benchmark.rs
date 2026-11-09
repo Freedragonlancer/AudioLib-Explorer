@@ -2294,8 +2294,8 @@ mod tests {
         ui.set_perf_marker_enabled(true);
         ui.set_perf_marker_bits(ModelRc::new(VecModel::from(bits.to_vec())));
         for native_menu in [false, true] {
-            // Exercise both the Windows toolbar's zero offset and the retained
-            // native-menu branch through the testing platform's software menu.
+            // Exercise both platform variants through the testing backend's
+            // software menu; the client-coordinate compensation stays identical.
             ui.set_native_macos(native_menu);
             for scale in [1.0_f32, 1.25, 1.5, 2.0] {
                 ui.window()
@@ -2320,14 +2320,10 @@ mod tests {
                     renderer.render(&mut pixels, width);
                 }));
                 slint::platform::update_timers_and_animations();
-                if native_menu {
-                    assert!(
-                        ui.get_perf_marker_parent_y() > 0.0,
-                        "software menu must exercise a nonzero parent offset"
-                    );
-                } else {
-                    assert_eq!(ui.get_perf_marker_parent_y(), 0.0);
-                }
+                assert!(
+                    ui.get_perf_marker_parent_y() > 0.0,
+                    "software menu must exercise a nonzero parent offset"
+                );
                 for (index, bit) in bits.iter().enumerate() {
                     let x = left + (index % 64) * cell_width;
                     let y = top + (index / 64) * cell_height;
