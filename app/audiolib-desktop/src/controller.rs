@@ -77,6 +77,8 @@ mod result_window;
 mod search_tasks;
 #[path = "search_v2_ux.rs"]
 mod search_v2_ux;
+#[path = "waveform_selection.rs"]
+mod waveform_selection;
 
 fn table_sort_order(index: i32) -> SortOrder {
     match index {
@@ -460,6 +462,7 @@ impl FolderFacets {
 
 #[derive(Clone)]
 struct WaveJob {
+    source: waveform_selection::WaveSource,
     path: PathBuf,
     /// Server mode: the record whose waveform the server computes (`/waveform`).
     remote_id: Option<i64>,
@@ -800,6 +803,11 @@ pub struct Controller {
     /// A manual pan stops a zoomed Waveform from paging along with playback
     /// until the next Play or click-to-play.
     wave_follow_paused: AtomicBool,
+    wave_selection_gesture: AtomicBool,
+    slice: Mutex<waveform_selection::SliceState>,
+    slice_wake: Condvar,
+    slice_preview_jobs: crate::slice_jobs::LatestJobQueue,
+    slice_render_jobs: crate::slice_jobs::LatestJobQueue,
     devices: Mutex<Vec<AudioDevice>>,
     device_generation: AtomicU64,
     scan_generation: AtomicU64,
@@ -1093,6 +1101,11 @@ impl Controller {
             waveform_size: Mutex::new((1300, 100)),
             wave_view: Mutex::new((String::new(), WaveView::default())),
             wave_follow_paused: AtomicBool::new(false),
+            wave_selection_gesture: AtomicBool::new(false),
+            slice: Mutex::default(),
+            slice_wake: Condvar::new(),
+            slice_preview_jobs: Default::default(),
+            slice_render_jobs: Default::default(),
             devices: Mutex::new(Vec::new()),
             device_generation: AtomicU64::new(0),
             scan_generation: AtomicU64::new(0),
@@ -1148,6 +1161,7 @@ impl Controller {
         self.bind_search_tasks(ui);
         self.bind_artwork(ui);
         self.bind_search_v2_ux(ui);
+        self.bind_wave_selection(ui);
         let c = self.clone();
         ui.on_exit_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
@@ -1508,6 +1522,7 @@ impl Controller {
         let c = self.clone();
         ui.on_drag_cancel_requested(move || {
             c.drag_cancel.lock().unwrap().store(true, Ordering::Release);
+            c.cancel_slice_preparation();
         });
         let c = self.clone();
         ui.on_local_scan_root_remove_requested(move || {
@@ -1697,6 +1712,9 @@ impl Controller {
                 return;
             }
             let play = c.audio.status().state != PlaybackState::Playing;
+            if play && c.play_wave_selection() {
+                return;
+            }
             if play && let Some(id) = c.audio_reload_target() {
                 c.select_id(id, true);
                 return;
@@ -1720,7 +1738,7 @@ impl Controller {
         ui.on_seek_play_requested(move |position| {
             if c.available() {
                 c.wave_follow_paused.store(false, Ordering::Release);
-                c.command(AudioCommand::SeekAndPlay(position as f64));
+                c.seek_wave_selection(position as f64);
             }
         });
         let c = self.clone();
@@ -1733,6 +1751,9 @@ impl Controller {
                 return;
             }
             c.wave_follow_paused.store(false, Ordering::Release);
+            if c.play_wave_selection() {
+                return;
+            }
             match c.audio_reload_target() {
                 Some(id) => c.select_id(id, true),
                 None => c.command(AudioCommand::Play),
@@ -2254,6 +2275,7 @@ impl Controller {
     }
 
     fn invalidate_library_reads(&self) {
+        self.cancel_all_slices();
         self.cancel_artwork();
         self.artwork_album_hints.lock().unwrap().clear();
         self.artwork_override_migrations.lock().unwrap().clear();
@@ -3937,9 +3959,18 @@ impl Controller {
                     if c.shutdown.load(Ordering::Acquire) {
                         return;
                     }
-                    let job = pending.take().unwrap();
+                    let mut job = pending.take().unwrap();
                     drop(pending);
                     if job.cancel.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    if let Err(error) = job.source.bind_source_version(&c, &job.cancel) {
+                        if !c.shutdown.load(Ordering::Acquire)
+                            && !job.cancel.load(Ordering::Acquire)
+                            && c.waveform_generation.load(Ordering::Acquire) == job.generation
+                        {
+                            c.status(error);
+                        }
                         continue;
                     }
                     let request = WaveformRequest {
@@ -3962,6 +3993,10 @@ impl Controller {
                                 job.sample_rate,
                                 request,
                                 &job.cancel,
+                                job.source
+                                    .remote_version
+                                    .as_ref()
+                                    .expect("Remote Waveform version was bound"),
                                 |data, progress| {
                                     c.publish_waveform(&job, data, progress);
                                 },
@@ -3984,6 +4019,8 @@ impl Controller {
                     {
                         continue;
                     }
+                    let result =
+                        result.and_then(|data| job.source.check_local_version().map(|_| data));
                     match result {
                         Ok(data) => c.publish_waveform(&job, &data, 1.0),
                         Err(error) => c.status(error),
@@ -4094,6 +4131,7 @@ impl Controller {
                     // A zoomed Waveform pages along with playback unless the user panned away.
                     if status.state == PlaybackState::Playing
                         && !c.wave_follow_paused.load(Ordering::Acquire)
+                        && !c.wave_selection_gesture.load(Ordering::Acquire)
                         && c.wave_view.lock().unwrap().1.zoom > 1.0
                         && let Some(file) = c.waveform_file(&status)
                     {
@@ -5446,6 +5484,7 @@ impl Controller {
             {
                 return;
             }
+            c2.publish_wave_source(&ui, &job.source);
             ui.set_waveform_image(Image::from_rgba8(
                 SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels, job.width, job.height),
             ));
@@ -5480,6 +5519,9 @@ impl Controller {
     }
 
     fn waveform_file(&self, status: &audiolib_audio::PlaybackStatus) -> Option<AudioFile> {
+        if let Some(file) = self.slice_wave_file(status) {
+            return Some(file);
+        }
         if self.remote_read_only() {
             let mapped = status
                 .file_path
@@ -5577,6 +5619,7 @@ impl Controller {
         let start_frame = (start * file.sample_rate as f64).round() as u64;
         let end_frame = (end * file.sample_rate as f64).round() as u64;
         *self.waveform_job.lock().unwrap() = Some(WaveJob {
+            source: waveform_selection::WaveSource::capture(self, file),
             path: PathBuf::from(&file.file_path),
             remote_id: (self.remote_read_only() && file.id > 0).then_some(file.id),
             sample_rate: file.sample_rate,
@@ -5863,6 +5906,7 @@ impl Controller {
             // Cover edits accepted before closing own their original destination.
             // Drain them off the event loop and retain any persistence failure.
             let artwork_result = c.wait_artwork_actions();
+            c.wait_slice_workers();
             let metadata_result = metadata_result.and(artwork_result);
             // The finish interrupt was only there so Metadata could take the writer.
             // If the window stays open, clear it before a later rollup observes it.
@@ -7394,6 +7438,8 @@ impl Controller {
 
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
+        self.cancel_all_slices();
+        self.wait_slice_workers();
         self.cancel_vendor_for_transition();
         if let Some(ui) = self.ui.upgrade() {
             self.persist_search_task(&ui);
@@ -7405,6 +7451,8 @@ impl Controller {
             tracing::warn!(%error, "Save artwork settings during shutdown");
         }
         self.shutdown.store(true, Ordering::Release);
+        self.slice_preview_jobs.wake_shutdown();
+        self.slice_render_jobs.wake_shutdown();
         self.cancel_artwork();
         {
             let _writes = self.workspace_writes.lock().unwrap();
@@ -8898,6 +8946,7 @@ mod tests {
         *controller.selected.lock().unwrap() = Some(present.clone());
         present_file(&ui, present);
         let mut job = WaveJob {
+            source: waveform_selection::WaveSource::capture(&controller, present),
             path: PathBuf::from(&present.file_path),
             remote_id: Some(present.id),
             sample_rate: 48000,
@@ -9669,6 +9718,7 @@ mod tests {
             audition_play_on_single_click: false,
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             show_album_artwork: true,
+            slice_export_directory: None,
             max_search_tasks: 6,
             pregenerate_list_waveforms: false,
             hold_list_waveform_batches_after_audition: false,

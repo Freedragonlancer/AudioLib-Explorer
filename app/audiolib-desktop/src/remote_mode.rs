@@ -11,6 +11,8 @@
 use super::{Controller, LibraryOperation, post};
 #[path = "remote_sync_progress.rs"]
 mod remote_sync_progress;
+#[path = "remote_waveform_version.rs"]
+mod remote_waveform_version;
 use crate::AppWindow;
 use audiolib_audio::{WaveformData, WaveformRequest};
 use audiolib_core::AudioFile;
@@ -2608,6 +2610,17 @@ impl Controller {
             flac_unavailable: flac_refused,
         };
         let mut route = choose_route(file, bandwidth().estimate_bps(), options);
+        // A sub-frame selection in a decimated representation must use the
+        // original; never widen its original-material interval to make it play.
+        let route_rate = match route {
+            AudioRoute::Stream => file.sample_rate,
+            AudioRoute::Pcm(params) | AudioRoute::Flac(params) => {
+                params.sample_rate.unwrap_or(file.sample_rate)
+            }
+        };
+        if self.slice_needs_original(file, route_rate) {
+            route = AudioRoute::Stream;
+        }
         let playback_path = |route: &AudioRoute| {
             library_dir.join("stream").join(format!(
                 "{}-{}-{}.wav",
@@ -2616,9 +2629,10 @@ impl Controller {
                 STREAM_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed),
             ))
         };
+        let selection_version = self.slice_original_etag(file);
         let memory_key = |route: &AudioRoute, source: &str| {
             format!(
-                "{}/{}/{}/{}/{}/{}",
+                "{}/{}/{}/{}/{}/{}/{}",
                 state.library_id,
                 file.id,
                 file.file_size,
@@ -2627,6 +2641,7 @@ impl Controller {
                 // Incremental annotation/play writes retain this snapshot filename;
                 // a rescan sync opens a new one even for a same-size replacement WAV.
                 state.database_file,
+                selection_version.as_deref().unwrap_or("unbound"),
             )
         };
         {
@@ -2970,6 +2985,49 @@ impl Controller {
     }
 
     /// Download original files using the destination captured at drag dispatch.
+    pub(super) fn prepare_remote_slice(
+        &self,
+        source: &RemoteDragSource,
+        file: &AudioFile,
+        destination: &Path,
+        expected: Option<&audiolib_remote::OriginalVersion>,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &AtomicBool,
+    ) -> Result<audiolib_remote::OwnedOriginal, String> {
+        let item = DownloadItem {
+            file: file.clone(),
+            source: source.client.download_source(file.id),
+        };
+        let cache =
+            DownloadCache::new(source.cache_directory.clone(), DEFAULT_DOWNLOAD_CACHE_BYTES);
+        let result = match expected {
+            Some(expected) => cache.prepare_owned_original_version(
+                &source.state.library_id,
+                &item,
+                Some(MemoryCache::global()),
+                (destination, expected),
+                progress,
+                cancel,
+            ),
+            None => cache.prepare_owned_original(
+                &source.state.library_id,
+                &item,
+                Some(MemoryCache::global()),
+                destination,
+                progress,
+                cancel,
+            ),
+        };
+        result.map_err(|error| {
+            stream_error_text(
+                &error,
+                root_for_path(&file.file_path, &source.state.roots),
+                self.chinese.load(Ordering::Acquire),
+            )
+        })
+    }
+
+    /// Download original files using the destination captured at drag dispatch.
     pub(super) fn prepare_remote_drag(
         &self,
         source: &RemoteDragSource,
@@ -3027,6 +3085,7 @@ impl Controller {
         sample_rate: u32,
         request: WaveformRequest,
         cancel: &AtomicBool,
+        version: &audiolib_remote::OriginalVersion,
         publish: impl FnMut(&WaveformData, f64),
     ) -> Result<WaveformData, String> {
         let mut deferred_audio = false;
@@ -3035,19 +3094,19 @@ impl Controller {
             sample_rate,
             cancel,
             |part, buckets| {
-                self.remote_waveform_segment(
-                    file_id,
-                    sample_rate,
-                    part,
-                    buckets,
+                self.remote_waveform_versioned_segment(
+                    (file_id, sample_rate),
+                    (part, buckets),
                     cancel,
                     &mut deferred_audio,
+                    version,
                 )
             },
             publish,
         )
     }
 
+    #[cfg(test)]
     fn remote_waveform_segment(
         &self,
         file_id: i64,

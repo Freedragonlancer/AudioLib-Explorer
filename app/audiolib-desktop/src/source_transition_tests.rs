@@ -91,6 +91,7 @@ pub(super) fn configuration(preferences: &Path) -> AppConfig {
         audition_play_on_single_click: false,
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         show_album_artwork: true,
+        slice_export_directory: None,
         pregenerate_list_waveforms: false,
         hold_list_waveform_batches_after_audition: false,
         max_search_tasks: 6,
@@ -2744,9 +2745,23 @@ fn child_ready_preview_viewport() {
     config.data_source.poll_interval_secs = 0;
     let (sent, received) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        for _ in 0..5 {
+        let mut waveforms = 0;
+        while waveforms < 5 {
             let mut socket = accept(&listener);
-            sent.send(request(&mut socket)).unwrap();
+            let head = request(&mut socket);
+            if head.starts_with("HEAD /api/v1/audio/42/stream?download=1 ") {
+                // These version probes are independent of the five viewport
+                // GETs. Supply the real original layout's stable byte length
+                // and strong validator instead of weakening version admission.
+                let original_length = 44 + 96_000_u64 * 6 * 2 * 2;
+                write!(socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {original_length}\r\nETag: \"original-viewport-v1\"\r\nConnection: close\r\n\r\n"
+                ).unwrap();
+                continue;
+            }
+            assert!(head.starts_with("GET /api/v1/audio/42/waveform?"), "{head}");
+            sent.send(head).unwrap();
+            waveforms += 1;
             respond(
                 &mut socket,
                 "403 Forbidden",
