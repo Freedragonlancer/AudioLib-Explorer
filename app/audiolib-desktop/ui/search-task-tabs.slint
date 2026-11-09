@@ -82,20 +82,21 @@ export component SearchTaskTab inherits Rectangle {
         // Keep tinted keywords and the > directory together at the left edge.
         // Directory context yields to long keywords; the tooltip stays complete.
         keyword-label := Text {
+            x: 0px;
             width: directory-label.visible && root.keywords.length > 0 ? min(parent.width, self.preferred-width) : parent.width;
             height: parent.height; visible: root.keywords.length > 0;
             text: (root.keywords.length > 0 ? root.keywords[0] : "")
                 + (root.keywords.length > 1 ? " · " + root.keywords[1] : "")
                 + (root.keywords.length > 2 ? " …" : "");
             color: Theme.accent-hover; font-size: Theme.font(11);
-            vertical-alignment: center; overflow: elide;
+            horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
         directory-separator := Text {
             visible: directory-label.visible && (root.keywords.length > 0 || root.folder != "");
             x: root.keywords.length > 0 ? keyword-label.width + 6px * Theme.ui-scale : 0px;
             width: self.preferred-width; height: parent.height;
             text: ">"; color: Theme.dim; font-size: Theme.font(11);
-            vertical-alignment: center;
+            horizontal-alignment: left; vertical-alignment: center;
         }
         directory-label := Text {
             visible: root.keywords.length == 0 || parent.width >= keyword-label.preferred-width + directory-separator.preferred-width + min(96px * Theme.ui-scale, self.preferred-width) + 12px * Theme.ui-scale;
@@ -105,7 +106,7 @@ export component SearchTaskTab inherits Rectangle {
             height: parent.height;
             text: root.folder != "" ? root.folder : (root.keywords.length > 0 ? (root.chinese ? "全部目录" : "All folders") : (root.chinese ? "筛选" : "Filters"));
             color: root.folder != "" || root.keywords.length > 0 ? Theme.warning : Theme.accent-hover;
-            font-size: Theme.font(11); vertical-alignment: center; overflow: elide;
+            font-size: Theme.font(11); horizontal-alignment: left; vertical-alignment: center; overflow: elide;
         }
     }
     if root.modified: Rectangle {
