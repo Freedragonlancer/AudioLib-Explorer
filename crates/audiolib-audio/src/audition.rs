@@ -57,6 +57,18 @@ impl AuditionDecoder {
         pair: u16,
         settings: AuditionSettings,
     ) -> Result<Self> {
+        let end_frame = decoder.info.metadata.frames;
+        Self::new_bounded(decoder, output_rate, start_frame, end_frame, pair, settings)
+    }
+    /// Only selected source frames reach the resampler and SoundTouch input.
+    pub fn new_bounded(
+        decoder: Decoder,
+        output_rate: u32,
+        start_frame: u64,
+        end_frame: u64,
+        pair: u16,
+        settings: AuditionSettings,
+    ) -> Result<Self> {
         settings.validate()?;
         let metadata = &decoder.info.metadata;
         let channels = usize::from(metadata.channels);
@@ -65,8 +77,10 @@ impl AuditionDecoder {
                 "Source channel pair is outside the loaded WAV channels".into(),
             ));
         }
-        let remaining = ((metadata.frames.saturating_sub(start_frame)) as f64
-            * f64::from(output_rate)
+        if start_frame > end_frame || end_frame > metadata.frames {
+            return Err(Error::Validation("Invalid audition frame range".into()));
+        }
+        let remaining = ((end_frame - start_frame) as f64 * f64::from(output_rate)
             / f64::from(metadata.sample_rate)
             / f64::from(settings.rate))
         .round() as u64;
@@ -82,7 +96,11 @@ impl AuditionDecoder {
             None
         };
         Ok(Self {
-            source: ResampledDecoder::new(decoder, output_rate, start_frame)?,
+            source: if end_frame == metadata.frames {
+                ResampledDecoder::new(decoder, output_rate, start_frame)?
+            } else {
+                ResampledDecoder::new_bounded(decoder, output_rate, start_frame, end_frame)?
+            },
             channels,
             pair: usize::from(pair),
             settings,

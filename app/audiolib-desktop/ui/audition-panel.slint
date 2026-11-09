@@ -716,10 +716,219 @@ component ClassicTool inherits Rectangle {
 }
 // Default v1/v2 retain the original Waveform layout and independent transport
 // actions, with shared state-aware controls and bounded interaction feedback.
+// One pointer owner for both player presentations. Ranges always refer to the
+// original source timeline; image/transport revisions do not identify a source.
+component WaveSelectionOverlay inherits Rectangle {
+    in property <bool> enabled;
+    in property <bool> seek-enabled;
+    in property <string> seek-clock;
+    in property <bool> chinese;
+    in property <bool> selection-active;
+    in property <float> selection-start;
+    in property <float> selection-end;
+    in property <float> view-start;
+    in property <float> view-end;
+    in property <float> duration;
+    in property <string> identity;
+    in property <bool> preparing;
+    in property <string> progress-text;
+    in property <bool> shift-held;
+    in property <int> cancel-revision;
+    callback committed(float,float);
+    callback cleared();
+    callback drag-requested();
+    callback drag-ended();
+    callback cancel-requested();
+    callback seek-play(float);
+    callback zoom-at(float,float);
+    callback cursor-changed(MouseCursor);
+    out property <bool> gesture: root.mode != 0;
+    out property <bool> hovered: hit.has-hover;
+    out property <length> pointer-x: clamp(hit.mouse-x, 0px, root.width);
+    out property <MouseCursor> cursor: root.grip-hovered || root.mode == 6 || root.mode == 7 ? root.grip-cursor : hit.mouse-cursor;
+    out property <float> captured-start;
+    out property <float> captured-end;
+    init => { root.cursor-changed(root.cursor); }
+    changed cursor => { root.cursor-changed(root.cursor); }
+    // 1 draw, 2/3 resize, 4/5 interior drag pending/requested, 6/7 grip drag,
+    // 8 seek-only while audio is ready but its first Waveform is still loading.
+    property <int> mode: 0;
+    property <length> down-x;
+    property <length> down-y;
+    property <length> down-width;
+    // Freeze the original view's upper bound independently of the transport,
+    // which may be empty or still describe a different sound during audition.
+    property <float> captured-limit;
+    property <float> anchor;
+    property <float> draft-start;
+    property <float> draft-end;
+    property <bool> travelled: false;
+    property <bool> grip-hovered: false;
+    property <MouseCursor> grip-cursor: root.preparing ? progress : root.mode >= 6 ? grabbing : grab;
+    property <bool> editing: root.mode > 0 && root.mode < 4;
+    property <float> shown-start: root.editing && (root.mode != 1 || root.travelled) ? min(root.draft-start, root.draft-end) : root.selection-start;
+    property <float> shown-end: root.editing && (root.mode != 1 || root.travelled) ? max(root.draft-start, root.draft-end) : root.selection-end;
+    property <bool> shown-active: root.selection-active || (root.editing && root.travelled);
+    property <float> span: max(0.000001, root.view-end - root.view-start);
+    property <length> left-x: (root.shown-start - root.view-start) / root.span * root.width;
+    property <length> right-x: (root.shown-end - root.view-start) / root.span * root.width;
+    property <bool> near-left: root.selection-active && root.selection-start >= root.view-start && root.selection-start <= root.view-end && abs(hit.mouse-x - root.left-x) <= 5px * Theme.ui-scale;
+    property <bool> near-right: root.selection-active && root.selection-end >= root.view-start && root.selection-end <= root.view-end && abs(hit.mouse-x - root.right-x) <= 5px * Theme.ui-scale;
+    property <bool> inside: root.selection-active && hit.mouse-x > root.left-x && hit.mouse-x < root.right-x;
+    property <string> hint: root.preparing ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "正在准备 WAV 切片 · Esc 取消" : "Preparing WAV slice · Esc cancels"))
+        : root.shift-held ? (root.chinese ? "拖动重新框选 · 松开自动试听" : "Drag a new range · Release to audition")
+        : root.near-left || root.near-right ? (root.chinese ? "拖动边界调整选区 · 松开自动试听" : "Drag the edge to resize · Release to audition")
+        : root.inside ? (root.chinese ? "拖出选区导出 WAV · Shift 拖动重新框选" : "Drag selection out as WAV · Shift-drag to reselect")
+        : (root.chinese ? "拖动框选并试听 · 单击定位播放" : "Drag to select and audition · Click to seek and play");
+    function cancel-gesture() { let was-drag = root.mode >= 4 && root.mode <= 7; root.mode = 0; root.travelled = false; if was-drag { root.drag-ended(); } }
+    changed identity => { root.cancel-gesture(); }
+    changed cancel-revision => { root.cancel-gesture(); }
+    changed enabled => { if !root.enabled && root.mode != 8 { root.cancel-gesture(); } }
+    changed seek-enabled => { if !root.seek-enabled && root.mode == 8 { root.cancel-gesture(); } }
+    // A legacy scrub has no stable source identity. A transport discontinuity
+    // cancels it, while range editing is tied only to the original source.
+    changed seek-clock => { if root.mode == 8 { root.cancel-gesture(); } }
+    changed shown-active => { if !root.shown-active { root.grip-hovered = false; } }
+    function source-time(x: length) -> float {
+        return clamp(root.captured-start + clamp(x / max(1px, root.down-width), 0, 1) * (root.captured-end - root.captured-start), 0, root.captured-limit);
+    }
+    function move-pointer() {
+        if root.mode == 0 || root.mode >= 5 { return; }
+        if abs(hit.mouse-x - root.down-x) >= 6px || abs(hit.mouse-y - root.down-y) >= 6px { root.travelled = true; }
+        if root.mode == 4 {
+            if root.travelled { root.mode = 5; root.drag-requested(); }
+        } else if root.mode == 2 { root.draft-start = root.source-time(hit.mouse-x); }
+        else { root.draft-end = root.source-time(hit.mouse-x); }
+    }
+    accessible-role: groupbox;
+    accessible-label: root.chinese ? "波形选区" : "Waveform selection";
+    accessible-description: root.hint;
+    if root.shown-active && root.shown-end > root.view-start && root.shown-start < root.view-end: Rectangle {
+        x: max(0px, root.left-x); width: max(0px, min(root.width, root.right-x) - self.x); height: parent.height;
+        background: Theme.accent.with-alpha(0.24);
+        accessible-role: text; accessible-label: root.chinese ? "选中的波形区域" : "Selected waveform region";
+    }
+    if root.shown-active && root.shown-start >= root.view-start && root.shown-start <= root.view-end: Rectangle {
+        x: clamp(root.left-x, 0px, max(0px, root.width - 2px)); width: 2px; height: parent.height; background: Theme.accent-hover;
+        Rectangle { width: 5px * Theme.ui-scale; height: 13px * Theme.ui-scale; background: Theme.accent-hover; }
+    }
+    if root.shown-active && root.shown-end >= root.view-start && root.shown-end <= root.view-end: Rectangle {
+        x: clamp(root.right-x - 2px, 0px, max(0px, root.width - 2px)); width: 2px; height: parent.height; background: Theme.accent-hover;
+        Rectangle { x: -3px * Theme.ui-scale; width: 5px * Theme.ui-scale; height: 13px * Theme.ui-scale; background: Theme.accent-hover; }
+    }
+    hit := TouchArea {
+        enabled: root.enabled || root.seek-enabled;
+        mouse-cursor: !root.enabled ? (root.seek-enabled ? pointer : default) : root.preparing ? progress : root.mode >= 4 ? grabbing
+            : root.mode == 2 || root.mode == 3 ? ew-resize : root.mode == 1 || root.shift-held ? crosshair
+            : root.near-left || root.near-right ? ew-resize : root.inside ? grab : crosshair;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.cancel { root.cancel-gesture(); return; }
+            if event.button != PointerEventButton.left { return; }
+            if event.kind == PointerEventKind.down {
+                root.captured-start = root.view-start; root.captured-end = root.view-end;
+                root.captured-limit = max(0, root.enabled ? root.captured-end : root.duration);
+                root.down-width = root.width; root.down-x = self.mouse-x; root.down-y = self.mouse-y;
+                root.anchor = root.source-time(self.mouse-x);
+                root.draft-start = root.selection-start; root.draft-end = root.selection-end;
+                root.travelled = false;
+                if !root.enabled { root.mode = 8; }
+                else if event.modifiers.shift { root.mode = 1; }
+                else if root.near-left || root.near-right {
+                    root.mode = root.near-left && (!root.near-right || abs(self.mouse-x - root.left-x) <= abs(self.mouse-x - root.right-x)) ? 2 : 3;
+                } else { root.mode = root.inside ? 4 : 1; }
+                if root.mode == 1 { root.draft-start = root.anchor; root.draft-end = root.anchor; }
+            } else if event.kind == PointerEventKind.up && root.mode != 0 {
+                root.move-pointer();
+                let mode = root.mode;
+                let moved = root.travelled;
+                let start = min(root.draft-start, root.draft-end);
+                let end = max(root.draft-start, root.draft-end);
+                let resized = (mode == 2 || mode == 3) && (root.draft-start != root.selection-start || root.draft-end != root.selection-end);
+                let time = root.source-time(self.mouse-x);
+                root.cancel-gesture();
+                if ((mode == 1 && moved) || resized) && end > start { root.committed(start, end); }
+                else if mode == 8 || ((mode == 1 || mode == 4) && !moved) { root.seek-play(time); }
+            }
+        }
+        moved => { root.move-pointer(); }
+        scroll-event(event) => {
+            if root.gesture { return accept; }
+            if ((root.enabled && root.view-end > root.view-start) || (root.seek-enabled && root.duration > 0)) && event.delta-y != 0px {
+                root.zoom-at(Math.pow(2, clamp(event.delta-y / 120px, -2, 2)), clamp(self.mouse-x / max(1px, self.width), 0, 1));
+                return accept;
+            }
+            reject
+        }
+    }
+    if root.enabled && hit.has-hover && !root.gesture: Text {
+        x: 7px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: max(0px, root.width - 14px * Theme.ui-scale);
+        text: root.hint; color: Theme.ink; font-size: Theme.font(9); overflow: elide; accessible-role: none;
+    }
+    if root.shown-active: Rectangle {
+        x: 4px * Theme.ui-scale; y: max(0px, root.height - self.height - 3px * Theme.ui-scale);
+        height: 21px * Theme.ui-scale; width: min(root.width - 8px * Theme.ui-scale, range-label.preferred-width + 61px * Theme.ui-scale);
+        background: Theme.tooltip.with-alpha(0.94); border-radius: 3px * Theme.ui-scale;
+        Rectangle {
+            width: 24px * Theme.ui-scale; height: parent.height;
+            accessible-role: button; accessible-label: root.chinese ? "拖出选区 WAV" : "Drag selection as WAV";
+            accessible-description: root.chinese ? "按住并拖出，导出当前选区；短选区也可使用此手柄" : "Press and drag to export the current selection; this handle also works for narrow ranges";
+            background: grip.has-hover ? Theme.control-hover-surface : transparent;
+            Image { source: @image-url("icons/export.svg"); colorize: Theme.accent-hover; width: 15px * Theme.ui-scale; height: self.width; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+            grip := TouchArea {
+                enabled: root.enabled; mouse-cursor: root.grip-cursor;
+                changed has-hover => { root.grip-hovered = self.has-hover; }
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.cancel { if root.mode >= 6 { root.cancel-gesture(); } return; }
+                    if event.button != PointerEventButton.left { return; }
+                    if event.kind == PointerEventKind.down {
+                        root.captured-start = root.view-start; root.captured-end = root.view-end;
+                        root.captured-limit = max(0, root.captured-end);
+                        root.down-x = self.mouse-x; root.down-y = self.mouse-y;
+                        root.mode = 6;
+                    } else if event.kind == PointerEventKind.up && root.mode >= 6 { root.cancel-gesture(); }
+                }
+                moved => {
+                    if root.mode == 6 && (abs(self.mouse-x - root.down-x) >= 6px || abs(self.mouse-y - root.down-y) >= 6px) {
+                        root.mode = 7; root.drag-requested();
+                    }
+                }
+            }
+        }
+        range-label := Text {
+            x: 28px * Theme.ui-scale; width: max(0px, parent.width - 56px * Theme.ui-scale); height: parent.height;
+            text: Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + "  ·  " + Clock.format(root.shown-end - root.shown-start);
+            color: Theme.ink; font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
+            accessible-role: text; accessible-label: root.chinese ? "选区起点、终点和时长" : "Selection start, end and duration";
+        }
+        Tool {
+            x: parent.width - self.width; width: 24px * Theme.ui-scale; height: parent.height; symbol: "×"; symbol-size: Theme.font(14);
+            label: root.preparing ? (root.chinese ? "取消切片准备" : "Cancel slice preparation") : (root.chinese ? "清除波形选区" : "Clear waveform selection");
+            hint: "Esc"; tip-align: 1; subtle: true; clicked => { if root.preparing { root.cancel-requested(); } else { root.cleared(); } }
+        }
+    }
+}
+
 component ClassicAuditionPanel inherits Rectangle {
     in property <bool> compact: false;
     in property <bool> spectral: true;
     in property <bool> chinese;
+    in property <bool> selection-active;
+    in property <float> selection-start;
+    in property <float> selection-end;
+    in property <string> selection-identity;
+    in property <bool> selection-preparing;
+    in property <string> selection-progress;
+    in property <bool> selection-shift-held;
+    in property <int> selection-cancel-revision;
+    callback selection-committed(float,float);
+    callback selection-cleared();
+    callback selection-drag-requested();
+    callback selection-drag-ended();
+    callback selection-cancel-requested();
+    callback selection-cursor-changed(MouseCursor);
+    out property <bool> selection-gesture: scrub.gesture;
+    out property <MouseCursor> selection-cursor: scrub.cursor;
+
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
     in property <int> state: 0;
@@ -776,8 +985,8 @@ component ClassicAuditionPanel inherits Rectangle {
     // Share the current requested range while the renderer finishes its image.
     // Labels, seeks and the transformed old image must describe the same timeline.
     property <bool> has-target: root.target-end > root.target-start;
-    property <float> shown-start: root.has-target ? root.target-start : root.view-start;
-    property <float> shown-end: root.has-target ? root.target-end : root.view-end;
+    property <float> shown-start: scrub.gesture ? scrub.captured-start : (root.has-target ? root.target-start : root.view-start);
+    property <float> shown-end: scrub.gesture ? scrub.captured-end : (root.has-target ? root.target-end : root.view-end);
     property <float> shown-span: max(0.001, root.shown-end - root.shown-start);
     // Keep the original eleven evenly spaced labels without changing the shared
     // renderer's modern, round-tick model.
@@ -805,7 +1014,8 @@ component ClassicAuditionPanel inherits Rectangle {
     // together with the clock this can repaint a whole strip of the player.
     property <bool> at-start: true;
     property <duration> progress-elapsed: root.ready && root.playing && root.smooth-progress ? clamp(animation-tick() - root.anchor-tick, 0ms, 100ms) : 0ms;
-    property <float> visual-position: clamp(root.anchor-position + root.progress-elapsed / 1s * root.playback-rate + root.correction * (1 - root.progress-elapsed / 100ms), 0, root.duration);
+    property <float> visual-position: clamp(root.anchor-position + root.progress-elapsed / 1s * root.playback-rate + root.correction * (1 - root.progress-elapsed / 100ms), 0,
+        root.selection-active && root.selection-end > root.selection-start && root.position >= root.selection-start && root.position <= root.selection-end ? min(root.duration, root.selection-end) : root.duration);
     function sync-progress(allow-correction: bool) {
         let at-start = root.position <= 0;
         if root.at-start != at-start { root.at-start = at-start; }
@@ -823,6 +1033,7 @@ component ClassicAuditionPanel inherits Rectangle {
     // A clock identity survives deferred coalescing of smooth false -> true.
     changed progress-clock => { root.sync-progress(false); }
     function wheel-zoom(delta: length, fraction: float) -> EventResult {
+        if root.selection-gesture { return accept; }
         if root.ready && root.duration > 0 && delta != 0px {
             // Pixel deltas support both mouse detents and precision touchpads.
             root.zoom-at(Math.pow(2, clamp(delta / 120px, -2, 2)), clamp(fraction, 0, 1));
@@ -924,12 +1135,14 @@ component ClassicAuditionPanel inherits Rectangle {
                 x: wave.played-fraction * (parent.width - 1px); width: 1px;
                 background: root.spectral ? #f4faf7 : Theme.accent-hover;
             }
-            if scrub.has-hover && root.ready: Rectangle { x: scrub.mouse-x; width: 1px; background: #ffffff30; }
+            if scrub.hovered && root.ready: Rectangle { x: scrub.pointer-x; width: 1px; background: #ffffff30; }
             // Preserve current keyboard transport without changing the classic layout.
             wave-keys := FocusScope {
-                enabled: root.ready; focus-on-click: false;
+                enabled: root.ready || (root.waveform-ready && root.selection-identity != "" && !root.busy); focus-on-click: false;
                 key-pressed(event) => {
                     if !root.ready { return reject; }
+                    if event.text == Key.Escape { if root.selection-gesture { root.selection-cancel-requested(); } else if root.selection-preparing { root.selection-cancel-requested(); } else { root.selection-cleared(); } return accept; }
+                    if root.selection-gesture { return accept; }
                     if event.text == " " { if root.playing { root.pause(); } else { root.play(); } return accept; }
                     if event.text == Key.LeftArrow || event.text == Key.RightArrow {
                         let nudge = (event.modifiers.shift ? 0.25 : 0.05) * (root.shown-end - root.shown-start);
@@ -942,10 +1155,25 @@ component ClassicAuditionPanel inherits Rectangle {
                     if event.text == "0" { root.zoom-change(0); return accept; }
                     reject
                 }
-                scrub := TouchArea { enabled: root.ready; mouse-cursor: pointer;
-                    clicked => { root.seek-play(root.shown-start + clamp(self.mouse-x/self.width,0,1)*(root.shown-end - root.shown-start)); }
-                    scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
-                }
+                scrub := WaveSelectionOverlay {
+                        width: parent.width; height: parent.height;
+                        enabled: root.waveform-ready && root.selection-identity != "" && !root.busy;
+                        seek-enabled: root.ready && !root.busy && !root.missing;
+                        seek-clock: root.progress-clock;
+                        chinese: root.chinese; duration: root.duration;
+                        view-start: root.shown-start; view-end: root.shown-end;
+                        selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
+                        identity: root.selection-identity; preparing: root.selection-preparing; progress-text: root.selection-progress;
+                        shift-held: root.selection-shift-held; cancel-revision: root.selection-cancel-revision;
+                        committed(start, end) => { root.selection-committed(start, end); }
+                        cleared => { root.selection-cleared(); }
+                        drag-requested => { root.selection-drag-requested(); }
+                        drag-ended => { root.selection-drag-ended(); }
+                        cancel-requested => { root.selection-cancel-requested(); }
+                        seek-play(time) => { root.seek-play(time); }
+                        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+                        cursor-changed(value) => { root.selection-cursor-changed(value); }
+                    }
             }
         }
         Rectangle { height: 24px * Theme.ui-scale; accessible-role: groupbox; accessible-label: root.chinese ? "波形时间尺" : "Waveform time ruler";
@@ -987,6 +1215,23 @@ component WorkbenchAuditionPanel inherits Rectangle {
     in property <bool> narrow: false;
     in property <bool> spectral: true;
     in property <bool> chinese;
+    in property <bool> selection-active;
+    in property <float> selection-start;
+    in property <float> selection-end;
+    in property <string> selection-identity;
+    in property <bool> selection-preparing;
+    in property <string> selection-progress;
+    in property <bool> selection-shift-held;
+    in property <int> selection-cancel-revision;
+    callback selection-committed(float,float);
+    callback selection-cleared();
+    callback selection-drag-requested();
+    callback selection-drag-ended();
+    callback selection-cancel-requested();
+    callback selection-cursor-changed(MouseCursor);
+    out property <bool> selection-gesture: scrub.gesture;
+    out property <MouseCursor> selection-cursor: scrub.cursor;
+
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
     // Why the transport may be unavailable: a missing source or library maintenance.
@@ -1057,7 +1302,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
     property <duration> anchor-tick: 0ms;
     property <float> correction: 0;
     property <duration> progress-elapsed: root.ready && root.playing && root.smooth-progress ? clamp(animation-tick() - root.anchor-tick, 0ms, 100ms) : 0ms;
-    property <float> visual-position: clamp(root.anchor-position + root.progress-elapsed / 1s * root.playback-rate + root.correction * (1 - root.progress-elapsed / 100ms), 0, root.duration);
+    property <float> visual-position: clamp(root.anchor-position + root.progress-elapsed / 1s * root.playback-rate + root.correction * (1 - root.progress-elapsed / 100ms), 0,
+        root.selection-active && root.selection-end > root.selection-start && root.position >= root.selection-start && root.position <= root.selection-end ? min(root.duration, root.selection-end) : root.duration);
     function sync-progress(allow-correction: bool) {
         let previous = root.visual-position;
         let continuous = allow-correction && root.ready && root.playing && root.smooth-progress && abs(previous - root.position) < 0.1 * root.playback-rate;
@@ -1070,15 +1316,11 @@ component WorkbenchAuditionPanel inherits Rectangle {
     changed playing => { root.sync-progress(false); }
     changed smooth-progress => { root.sync-progress(false); }
     changed playback-rate => { root.sync-progress(false); }
-    // A clock identity survives deferred coalescing of smooth false -> true.
-    changed progress-clock => {
-        // generation:transport-revision identifies the engine source/seek clock.
-        // A gesture begun before a discontinuity cannot seek the replacement.
-        root.scrubbing = false;
-        root.sync-progress(false);
-    }
-    changed ready => { if !root.ready { root.scrubbing = false; } }
+    // Transport revisions reset animation; only selection-identity cancels a
+    // range gesture, so an automatic preview cannot invalidate its own range.
+    changed progress-clock => { root.sync-progress(false); }
     function wheel-zoom(delta: length, fraction: float) -> EventResult {
+        if root.selection-gesture { return accept; }
         if root.ready && root.duration > 0 && delta != 0px {
             // Pixel deltas support both mouse detents and precision touchpads.
             root.zoom-at(Math.pow(2, clamp(delta / 120px, -2, 2)), clamp(fraction, 0, 1));
@@ -1098,8 +1340,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
 
     // The range the timeline draws: a pending request wins over the last image.
     property <bool> has-target: root.target-end > root.target-start;
-    property <float> shown-start: root.has-target ? root.target-start : root.view-start;
-    property <float> shown-end: root.has-target ? root.target-end : root.view-end;
+    property <float> shown-start: scrub.gesture ? scrub.captured-start : (root.has-target ? root.target-start : root.view-start);
+    property <float> shown-end: scrub.gesture ? scrub.captured-end : (root.has-target ? root.target-end : root.view-end);
     property <float> shown-span: max(0.001, root.shown-end - root.shown-start);
     function time-at(fraction: float) -> float { return root.shown-start + clamp(fraction, 0, 1) * (root.shown-end - root.shown-start); }
     function seek-to(fraction: float) { root.seek-play(root.time-at(fraction)); }
@@ -1116,8 +1358,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
     property <string> transport-hint: root.ready ? "" : root.unavailable;
 
     // Pointer scrubbing: the playhead preview follows the drag; release seeks.
-    property <bool> scrubbing: false;
-    property <length> scrub-x: 0px;
+    property <bool> scrubbing: scrub.gesture;
+    property <length> scrub-x: scrub.pointer-x;
 
     in-out property <float> premute-db: -12;
     property <bool> muted: root.volume-db <= -59.95;
@@ -1276,8 +1518,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 property <float> color-fraction: clamp((root.visual-position - root.view-start) / max(0.001, root.view-end - root.view-start), 0, 1);
                 property <bool> head-visible: root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end;
                 property <color> head-color: root.show-spectral ? #f4faf7 : Theme.apricot;
-                property <bool> pointer-in: root.ready && (scrub.has-hover || ruler-touch.has-hover || root.scrubbing);
-                property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.has-hover ? scrub.mouse-x : ruler-touch.mouse-x, 0px, wave.width);
+                property <bool> pointer-in: root.ready && (scrub.hovered || ruler-touch.has-hover || root.scrubbing);
+                property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.hovered ? scrub.pointer-x : ruler-touch.mouse-x, 0px, wave.width);
                 changed width => { root.resize(self.width / 1px, self.height / 1px); }
                 changed height => { root.resize(self.width / 1px, self.height / 1px); }
                 // The last image, placed by its own range inside the drawn range: a pending
@@ -1365,7 +1607,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                     viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
                     fill: Theme.accent; stroke: Theme.accent; stroke-width: 1.5px;
                 }
-                if wave.pointer-in: Rectangle {
+                if wave.pointer-in && !scrub.hovered: Rectangle {
                     y: 10px * Theme.ui-scale; height: 18px * Theme.ui-scale; width: pointer-time.preferred-width + 12px * Theme.ui-scale;
                     x: clamp(wave.pointer-x - self.width / 2, 2px, max(2px, wave.width - self.width - 2px));
                     background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-color: root.scrubbing ? Theme.accent : Theme.strong-border; border-radius: 3px * Theme.ui-scale;
@@ -1379,9 +1621,11 @@ component WorkbenchAuditionPanel inherits Rectangle {
                 // Home returns to the start, + / - / 0 zoom. A click does not take focus, so
                 // list navigation keeps working after a seek.
                 wave-keys := FocusScope {
-                    enabled: root.ready; focus-on-click: false;
+                    enabled: root.ready || (root.waveform-ready && root.selection-identity != "" && !root.busy); focus-on-click: false;
                     key-pressed(event) => {
                         if !root.ready { return reject; }
+                        if event.text == Key.Escape { if root.selection-gesture { root.selection-cancel-requested(); } else if root.selection-preparing { root.selection-cancel-requested(); } else { root.selection-cleared(); } return accept; }
+                        if root.selection-gesture { return accept; }
                         if event.text == " " { root.toggle(); return accept; }
                         if event.text == Key.LeftArrow || event.text == Key.RightArrow {
                             let nudge = (event.modifiers.shift ? 0.25 : 0.05) * (root.shown-end - root.shown-start);
@@ -1394,25 +1638,24 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         if event.text == "0" { root.zoom-change(0); return accept; }
                         reject
                     }
-                    scrub := TouchArea { enabled: root.ready; mouse-cursor: pointer;
-                        pointer-event(event) => {
-                            // Slint cancellation uses button=other, including window
-                            // exit and disabled controls; handle it before filtering.
-                            if event.kind == PointerEventKind.cancel {
-                                root.scrubbing = false;
-                                return;
-                            }
-                            if event.button != PointerEventButton.left { return; }
-                            if event.kind == PointerEventKind.down {
-                                root.scrubbing = true;
-                                root.scrub-x = clamp(self.mouse-x, 0px, self.width);
-                            } else if event.kind == PointerEventKind.up && root.scrubbing {
-                                root.scrubbing = false;
-                                root.seek-to(self.mouse-x / max(1px, self.width));
-                            }
-                        }
-                        moved => { if root.scrubbing { root.scrub-x = clamp(self.mouse-x, 0px, self.width); } }
-                        scroll-event(event) => { return root.wheel-zoom(event.delta-y, self.mouse-x / max(1px,self.width)); }
+                    scrub := WaveSelectionOverlay {
+                        width: parent.width; height: parent.height;
+                        enabled: root.waveform-ready && root.selection-identity != "" && !root.busy;
+                        seek-enabled: root.ready && !root.busy && !root.missing;
+                        seek-clock: root.progress-clock;
+                        chinese: root.chinese; duration: root.duration;
+                        view-start: root.shown-start; view-end: root.shown-end;
+                        selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
+                        identity: root.selection-identity; preparing: root.selection-preparing; progress-text: root.selection-progress;
+                        shift-held: root.selection-shift-held; cancel-revision: root.selection-cancel-revision;
+                        committed(start, end) => { root.selection-committed(start, end); }
+                        cleared => { root.selection-cleared(); }
+                        drag-requested => { root.selection-drag-requested(); }
+                        drag-ended => { root.selection-drag-ended(); }
+                        cancel-requested => { root.selection-cancel-requested(); }
+                        seek-play(time) => { root.seek-play(time); }
+                        zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
+                        cursor-changed(value) => { root.selection-cursor-changed(value); }
                     }
                 }
                 // Empty, loading, error, missing and maintenance states explain themselves.
@@ -1500,6 +1743,25 @@ export component AuditionPanel inherits Rectangle {
     callback expanded-requested(bool);
     in property <bool> spectral: true;
     in property <bool> chinese;
+    in property <bool> selection-active;
+    in property <float> selection-start;
+    in property <float> selection-end;
+    in property <string> selection-identity;
+    in property <bool> selection-preparing;
+    in property <string> selection-progress;
+    in property <bool> selection-shift-held;
+    callback selection-committed(float,float);
+    callback selection-cleared();
+    callback selection-drag-requested();
+    callback selection-drag-ended();
+    callback selection-cancel-requested();
+    out property <bool> selection-gesture: root.presenter-selection-gesture;
+    out property <MouseCursor> selection-cursor: root.presenter-selection-cursor;
+    property <bool> presenter-selection-gesture: false;
+    property <MouseCursor> presenter-selection-cursor: default;
+    property <int> selection-cancel-revision: 0;
+    public function cancel-selection-gesture() { root.selection-cancel-revision += 1; }
+
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
     // Why the transport may be unavailable: a missing source or library maintenance.
@@ -1572,8 +1834,8 @@ export component AuditionPanel inherits Rectangle {
     in-out property <float> premute-db: -12;
     in-out property <bool> show-remaining: false;
     property <bool> modern-player: Theme.modern-player;
-    changed modern-player => { root.presenter-volume-adjusting = false; }
-    changed active => { if !root.active { root.presenter-volume-adjusting = false; } }
+    changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; }
+    changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; } }
     height: Theme.modern-player ? (root.expanded ? 260px : 88px) * Theme.ui-scale
         : (root.compact ? 190px : 222px) * Theme.ui-scale;
     if root.active && !Theme.modern-player: ClassicAuditionPanel {
@@ -1581,6 +1843,18 @@ export component AuditionPanel inherits Rectangle {
         compact: root.compact;
         spectral: root.spectral;
         chinese: root.chinese;
+        selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
+        selection-identity: root.selection-identity; selection-preparing: root.selection-preparing; selection-progress: root.selection-progress;
+        selection-shift-held: root.selection-shift-held; selection-cancel-revision: root.selection-cancel-revision;
+        changed selection-gesture => { root.presenter-selection-gesture = self.selection-gesture; }
+        changed selection-cursor => { root.presenter-selection-cursor = self.selection-cursor; }
+        selection-cursor-changed(value) => { root.presenter-selection-cursor = value; }
+        selection-committed(start, end) => { root.selection-committed(start, end); }
+        selection-cleared => { root.selection-cleared(); }
+        selection-drag-requested => { root.selection-drag-requested(); }
+        selection-drag-ended => { root.selection-drag-ended(); }
+        selection-cancel-requested => { root.cancel-selection-gesture(); root.selection-cancel-requested(); }
+
         play-on-single-click: root.play-on-single-click;
         ready: root.ready;
         state: root.state; missing: root.missing; busy: root.busy;
@@ -1632,6 +1906,18 @@ export component AuditionPanel inherits Rectangle {
         compact: root.compact;
         spectral: root.spectral;
         chinese: root.chinese;
+        selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
+        selection-identity: root.selection-identity; selection-preparing: root.selection-preparing; selection-progress: root.selection-progress;
+        selection-shift-held: root.selection-shift-held; selection-cancel-revision: root.selection-cancel-revision;
+        changed selection-gesture => { root.presenter-selection-gesture = self.selection-gesture; }
+        changed selection-cursor => { root.presenter-selection-cursor = self.selection-cursor; }
+        selection-cursor-changed(value) => { root.presenter-selection-cursor = value; }
+        selection-committed(start, end) => { root.selection-committed(start, end); }
+        selection-cleared => { root.selection-cleared(); }
+        selection-drag-requested => { root.selection-drag-requested(); }
+        selection-drag-ended => { root.selection-drag-ended(); }
+        selection-cancel-requested => { root.cancel-selection-gesture(); root.selection-cancel-requested(); }
+
         play-on-single-click: root.play-on-single-click;
         ready: root.ready;
         playing: root.playing;

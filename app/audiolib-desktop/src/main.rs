@@ -28,6 +28,8 @@ mod search_task_ui_tests;
 mod search_v2_ui_tests;
 #[cfg(test)]
 mod sidebar_section_tests;
+mod slice_jobs;
+mod slice_staging;
 mod startup;
 #[cfg(test)]
 mod studio_review_tests;
@@ -44,6 +46,8 @@ mod ui_scale_tests;
 #[cfg(test)]
 mod ui_tests;
 mod updates;
+#[cfg(test)]
+mod waveform_selection_ui_tests;
 mod waveform_view;
 mod window_layout;
 mod window_repaint;

@@ -1287,8 +1287,8 @@ export component AppWindow inherits Window {
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
     out property <length> settings-panel-bottom: settings-panel.absolute-position.y + settings-panel.height;
     out property <length> settings-last-bottom: settings-footer.absolute-position.y + settings-footer.height;
-    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && search-settings-first.has-focus) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
-    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && search-settings-first.has-focus) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
+    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && search-settings-first.has-focus) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
+    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && search-settings-first.has-focus) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
     // Test-only: scroll the main view and the settings dialog to their bottom-right corner.
     public function scroll-main-to-end() {
         if Theme.modern-style { studio-main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); } else { main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); }
@@ -1445,6 +1445,36 @@ export component AppWindow inherits Window {
     // Requested Waveform range while its render is pending (see AuditionPanel).
     in property <float> wave-target-start: 0;
     in property <float> wave-target-end: 0;
+    // Selection belongs to the displayed original source, independently of seeks.
+    in property <bool> wave-selection-active: false;
+    in property <float> wave-selection-start: 0;
+    in property <float> wave-selection-end: 0;
+    in property <string> wave-selection-identity;
+    in property <bool> wave-selection-preparing: false;
+    in property <string> wave-selection-progress;
+    out property <bool> wave-selection-gesture: Theme.modern-style ? studio-audition.selection-gesture : audition.selection-gesture;
+    out property <MouseCursor> wave-selection-cursor: Theme.modern-style ? studio-audition.selection-cursor : audition.selection-cursor;
+    private property <bool> wave-selection-shift-held: false;
+    callback wave-selection-committed(float,float);
+    callback wave-selection-cleared();
+    callback wave-selection-drag-requested();
+    callback wave-selection-drag-ended();
+    callback wave-selection-cancel-requested();
+    callback wave-selection-gesture-changed(bool);
+    changed wave-selection-gesture => { root.wave-selection-gesture-changed(root.wave-selection-gesture); }
+    in property <string> slice-export-directory;
+    callback slice-export-directory-requested();
+    function cancel-wave-selection-gesture() {
+        audition.cancel-selection-gesture(); studio-audition.cancel-selection-gesture();
+    }
+    function dismiss-wave-selection() -> bool {
+        if root.background-blocked { return false; }
+        if root.wave-selection-gesture { root.cancel-wave-selection-gesture(); return true; }
+        if root.wave-selection-preparing { root.wave-selection-cancel-requested(); return true; }
+        if root.wave-selection-active { root.wave-selection-cleared(); return true; }
+        return false;
+    }
+
     callback transform-requested(string,string,bool,bool);
     callback start-requested(); callback pause-requested();
     callback volume-db-requested(float);
@@ -2599,13 +2629,25 @@ export component AppWindow inherits Window {
     shortcuts := FocusScope {
         min-width: 0px; min-height: 0px; preferred-width: 1440px * Theme.ui-scale; preferred-height: 900px * Theme.ui-scale;
         focus-on-click: false;
+        capture-key-pressed(event) => {
+            root.wave-selection-shift-held = event.modifiers.shift || event.text == Key.Shift;
+            if event.text == Key.Escape && root.dismiss-wave-selection() { return accept; }
+            reject
+        }
+        capture-key-released(event) => {
+            root.wave-selection-shift-held = event.text != Key.Shift && event.modifiers.shift;
+            reject
+        }
         key-pressed(event) => {
+            root.wave-selection-shift-held = event.modifiers.shift || event.text == Key.Shift;
             if event.text == Key.Escape {
+                if root.dismiss-wave-selection() { return accept; }
                 root.dismiss-modal();
                 return accept;
             }
             reject
         }
+        key-released(event) => { root.wave-selection-shift-held = event.text != Key.Shift && event.modifiers.shift; reject }
 
     // Menu popups can restore a previous editor/list focus after opening a modal.
     // Capture background keys before any editor or list processes that focus.
@@ -3514,6 +3556,14 @@ main-scroll := ScrollView {
         }
 
         audition := AuditionPanel {
+            selection-active: root.wave-selection-active; selection-start: root.wave-selection-start; selection-end: root.wave-selection-end;
+            selection-identity: root.wave-selection-identity; selection-preparing: root.wave-selection-preparing; selection-progress: root.wave-selection-progress;
+            selection-shift-held: root.wave-selection-shift-held;
+            selection-committed(start, end) => { root.wave-selection-committed(start, end); }
+            selection-cleared => { root.wave-selection-cleared(); }
+            selection-drag-requested => { root.wave-selection-drag-requested(); }
+            selection-drag-ended => { root.wave-selection-drag-ended(); }
+            selection-cancel-requested => { root.wave-selection-cancel-requested(); }
 
             active: !Theme.modern-style;
             premute-db <=> root.audition-premute-db;
@@ -4393,6 +4443,14 @@ main-scroll := ScrollView {
             resized(value) => { root.audition-preferred-height = clamp(-value, 88px * Theme.ui-scale, 360px * Theme.ui-scale); root.audition-expanded = root.audition-preferred-height > 160px * Theme.ui-scale; }
         }
         studio-audition := AuditionPanel {
+            selection-active: root.wave-selection-active; selection-start: root.wave-selection-start; selection-end: root.wave-selection-end;
+            selection-identity: root.wave-selection-identity; selection-preparing: root.wave-selection-preparing; selection-progress: root.wave-selection-progress;
+            selection-shift-held: root.wave-selection-shift-held;
+            selection-committed(start, end) => { root.wave-selection-committed(start, end); }
+            selection-cleared => { root.wave-selection-cleared(); }
+            selection-drag-requested => { root.wave-selection-drag-requested(); }
+            selection-drag-ended => { root.wave-selection-drag-ended(); }
+            selection-cancel-requested => { root.wave-selection-cancel-requested(); }
 
             active: Theme.modern-style;
             premute-db <=> root.audition-premute-db;
@@ -4699,7 +4757,7 @@ main-scroll := ScrollView {
                     }
                 }
                 if root.sm-cw-message != "": Label { text: root.sm-cw-message; wrap: word-wrap; color: Theme.warning; }
-                Label { text: root.chinese ? "清理缓存保留数据库、设置和源音频。" : "Clearing caches preserves databases, settings and source audio."; wrap: word-wrap; }
+                Label { text: root.chinese ? "清理缓存保留数据库、设置、源音频和已导出的切片。" : "Clearing caches preserves databases, settings, source audio and exported slices."; wrap: word-wrap; }
                 Rectangle { height: 1px; background: Theme.border; }
                 Text { text: root.chinese ? "封面缩略图" : "Cover thumbnails"; color: Theme.ink; font-size: Theme.font(15); font-weight: 600; }
                 Label { text: root.artwork-cache-stats-busy ? (root.chinese ? "正在统计封面缓存…" : "Counting cover cache…") : root.artwork-cache-stats; wrap: word-wrap; }
@@ -4717,7 +4775,7 @@ main-scroll := ScrollView {
             }
             audio-page := VerticalLayout { width: parent.width; visible: root.settings-page == 0; spacing: 13px * Theme.ui-scale; alignment: start;
                 Text { text: root.chinese ? "播放与音频" : "Audio and playback"; color: Theme.ink; font-size: Theme.font(19); font-weight: 600; }
-                Label { text: root.chinese ? "输出设备更改需要应用；试听偏好立即保存。" : "Apply output changes to restart audio. Audition preferences are saved immediately."; wrap: word-wrap; }
+                Label { text: root.chinese ? "输出设备更改需要应用；试听偏好与快速导出目录立即保存。" : "Apply output changes to restart audio. Audition preferences and the export folder are saved immediately."; wrap: word-wrap; }
                 HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
                     Label { width: 108px * Theme.ui-scale; text: root.chinese ? "驱动" : "Driver"; }
                     settings-first := ComboBox { horizontal-stretch: 1; enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; model: root.audio-backend-names; current-index <=> root.backend-index; selected => { root.output-dirty = true; if root.backend-index == 0 { root.rate-index = 0; } root.devices-requested(root.backend-index); } }
@@ -4751,6 +4809,21 @@ main-scroll := ScrollView {
                     settings-apply := Action { width: 120px * Theme.ui-scale; primary: true; enabled: root.settings-page == 0 && !root.devices-loading && !root.settings-busy && !root.settings-close-confirm; label: root.output-applying ? (root.chinese ? "应用中…" : "Applying…") : (root.chinese ? "应用音频输出" : "Apply output"); clicked => { root.output-apply-requested(); } }
                 }
                 CheckBox { enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; text: root.chinese ? "单击播放" : "Single-click play"; checked <=> root.audition-play-on-single-click; toggled => { root.single-click-play-requested(self.checked); } }
+                Rectangle { height: 1px; background: Theme.border; }
+            export-page := VerticalLayout { spacing: 13px * Theme.ui-scale; alignment: start;
+                Text { text: root.chinese ? "快速导出" : "Quick export"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }
+                Label { wrap: word-wrap; text: root.chinese ? "在波形上框选，松开自动试听；从选区内部拖出 WAV 切片。" : "Select a waveform range and release to audition. Drag from inside the selection to export a WAV slice."; }
+                Label { text: root.chinese ? "切片保存目录" : "Slice export directory"; }
+                Rectangle { min-height: 44px * Theme.ui-scale; background: Theme.trough; border-width: 1px; border-color: Theme.border; border-radius: 4px * Theme.ui-scale;
+                    Text { x: 8px * Theme.ui-scale; y: 6px * Theme.ui-scale; width: parent.width - 16px * Theme.ui-scale; height: parent.height - 12px * Theme.ui-scale;
+                        text: root.slice-export-directory; wrap: char-wrap; color: Theme.ink; font-size: Theme.font(11);
+                        accessible-role: text; accessible-label: root.chinese ? "当前切片保存目录" : "Current slice export directory";
+                    }
+                }
+                export-first := Action { width: 154px * Theme.ui-scale; enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; label: root.chinese ? "选择保存目录…" : "Choose export folder…"; clicked => { root.slice-export-directory-requested(); } }
+                Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "导出自动命名为“原名_slice_001.wav”，保留源采样率和全部声道。试听变调、速度、音量与单声道设置不影响导出。" : "Slices are named source_slice_001.wav and keep the source sample rate and all channels. Audition Pitch, Rate, volume and Mono do not affect exports."; }
+                Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "服务器模式从原素材准备切片。已导出的文件长期保留，DAW 可持续引用；更改目录不会移动已有切片。" : "Server mode prepares slices from the original source. Exported files remain available for DAW references; changing the folder does not move existing slices."; }
+            }
             }
             }
             }

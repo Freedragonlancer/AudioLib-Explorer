@@ -19,6 +19,7 @@ fn pending_waveform(controller: &Arc<Controller>, ui: &AppWindow, file: &AudioFi
     let cancel = Arc::new(AtomicBool::new(false));
     *controller.waveform_cancel.lock().unwrap() = cancel.clone();
     let job = WaveJob {
+        source: waveform_selection::WaveSource::capture(controller, file),
         path: PathBuf::from(&file.file_path),
         remote_id: None,
         sample_rate: file.sample_rate,

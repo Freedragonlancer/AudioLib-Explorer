@@ -120,7 +120,7 @@ fn read_info_impl(path: &Path, include_metadata: bool, include_artwork: bool) ->
     read_info_reader(file, file_len, include_metadata, include_artwork)
 }
 
-fn read_info_reader(
+pub(crate) fn read_info_reader(
     mut file: impl Read + Seek,
     file_len: u64,
     include_metadata: bool,

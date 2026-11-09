@@ -131,6 +131,25 @@ impl Decoder {
     /// (0 = unbuffered). Decoded samples are identical either way.
     pub fn open_with_read_buffer(path: &Path, read_buffer: usize) -> Result<Self> {
         let info = read_info(path)?;
+        Self::open_prepared(info, source_buffer(path), || open_bytes(path, read_buffer))
+    }
+
+    /// Decode only the consumed, already authorized local file; never consult the
+    /// playback registry or reopen an untrusted path. `info` must describe this handle.
+    pub(crate) fn open_local_file(file: std::fs::File, info: WavInfo) -> Result<Self> {
+        let len = file.metadata()?.len();
+        Self::open_prepared(info, None, || {
+            let mut reader = file.try_clone()?;
+            reader.seek(SeekFrom::Start(0))?;
+            Ok((Box::new(reader), len))
+        })
+    }
+
+    fn open_prepared(
+        info: WavInfo,
+        buffer: Option<Arc<dyn SourceBuffer>>,
+        mut open: impl FnMut() -> Result<(Box<dyn ByteSource>, u64)>,
+    ) -> Result<Self> {
         if info.metadata.encoding == "OPUS" {
             return Err(Error::Audio(
                 "Opus Metadata is supported, but this build has no Opus playback decoder".into(),
@@ -149,7 +168,6 @@ impl Decoder {
                 "Unsupported PCM/float WAV sample width".into(),
             ));
         }
-        let buffer = source_buffer(path);
         let mut probe = None;
         let source = if let Some(layout) = info.pcm_layout {
             layout.validate()?;
@@ -158,7 +176,7 @@ impl Decoder {
             {
                 return Err(Error::Audio("Invalid PCM frame layout".into()));
             }
-            let (file, _) = open_bytes(path, read_buffer)?;
+            let (file, _) = open()?;
             let mut file = tracked(file, &buffer, (f64::from(info.block_align), 0), &mut probe);
             file.seek(SeekFrom::Start(info.data_offset))?;
             Source::Pcm(file)
@@ -167,7 +185,7 @@ impl Decoder {
                 info.metadata.attributes["container"].as_str(),
                 Some("RF64" | "BW64")
             );
-            let (inner, len) = open_bytes(path, read_buffer)?;
+            let (inner, len) = open()?;
             let bytes_per_frame = if info.metadata.frames > 0 {
                 info.data_bytes as f64 / info.metadata.frames as f64
             } else {
@@ -248,7 +266,7 @@ impl Decoder {
                 // and allowing bounded, sample-accurate seeks without a linear scan.
                 // The format reader's own source is no longer read: track the block reader.
                 probe = None;
-                let (file, _) = open_bytes(path, read_buffer)?;
+                let (file, _) = open()?;
                 // Whole blocks are read at a time: one block of slack.
                 let mut file = tracked(
                     file,
@@ -534,6 +552,7 @@ pub(crate) struct ResampledDecoder {
     channels: usize,
     /// Source frames consumed per output frame.
     input_per_output: f64,
+    input_remaining: u64,
 }
 impl ResampledDecoder {
     pub fn is_finished(&self) -> bool {
@@ -545,15 +564,30 @@ impl ResampledDecoder {
             .resampler
             .as_ref()
             .map_or(0, |resampler| resampler.input_frames_max() as u64);
-        self.decoder
-            .is_buffered((frames as f64 * self.input_per_output).ceil() as u64 + block)
+        self.decoder.is_buffered(
+            ((frames as f64 * self.input_per_output).ceil() as u64 + block)
+                .min(self.input_remaining),
+        )
     }
-    pub fn new(mut decoder: Decoder, output_rate: u32, start_frame: u64) -> Result<Self> {
+    pub fn new(decoder: Decoder, output_rate: u32, start_frame: u64) -> Result<Self> {
+        let end_frame = decoder.info.metadata.frames;
+        Self::new_bounded(decoder, output_rate, start_frame, end_frame)
+    }
+    /// Treat the exclusive source end as EOF before resampling, including its lookahead.
+    pub fn new_bounded(
+        mut decoder: Decoder,
+        output_rate: u32,
+        start_frame: u64,
+        end_frame: u64,
+    ) -> Result<Self> {
+        if output_rate == 0 || start_frame > end_frame || end_frame > decoder.info.metadata.frames {
+            return Err(Error::Validation("Invalid bounded decoder range".into()));
+        }
         decoder.seek(start_frame)?;
         let metadata = &decoder.info.metadata;
         let channels = usize::from(metadata.channels);
-        let output_remaining = ((metadata.frames.saturating_sub(start_frame)) as f64
-            * f64::from(output_rate)
+        let input_remaining = end_frame - start_frame;
+        let output_remaining = (input_remaining as f64 * f64::from(output_rate)
             / f64::from(metadata.sample_rate))
         .round() as u64;
         let resampler = if output_rate == metadata.sample_rate {
@@ -581,6 +615,7 @@ impl ResampledDecoder {
             delay_remaining,
             channels,
             input_per_output,
+            input_remaining,
         })
     }
     pub fn next(&mut self) -> Result<Vec<f32>> {
@@ -588,14 +623,18 @@ impl ResampledDecoder {
             return Ok(Vec::new());
         }
         let Some(resampler) = &mut self.resampler else {
-            let samples = self.decoder.read(2048)?;
+            let samples = self.decoder.read(self.input_remaining.min(2048) as usize)?;
+            self.input_remaining -= (samples.len() / self.channels) as u64;
             self.output_remaining = self
                 .output_remaining
                 .saturating_sub((samples.len() / self.channels) as u64);
             return Ok(samples);
         };
         let frames = resampler.input_frames_next();
-        let mut input = self.decoder.read(frames)?;
+        let mut input = self
+            .decoder
+            .read(self.input_remaining.min(frames as u64) as usize)?;
+        self.input_remaining -= (input.len() / self.channels) as u64;
         input.resize(frames * self.channels, 0.0);
         let input = InterleavedSlice::new(&input, self.channels, frames).map_err(audio_error)?;
         let mut output = resampler
