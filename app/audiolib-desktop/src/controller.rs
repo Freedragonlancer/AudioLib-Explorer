@@ -1878,7 +1878,6 @@ impl Controller {
         ui.on_output_settings_requested(move || {
             if let Some(ui) = c.ui.upgrade() {
                 c.restore_output_form(&ui);
-                c.refresh_devices(ui.get_backend_index());
             }
         });
         let c = self.clone();
@@ -5779,6 +5778,18 @@ impl Controller {
         if self.shutdown.load(Ordering::Acquire) {
             return;
         }
+        // A global-settings draft is distinct from the preferences already saved
+        // immediately. Let its own confirmation finish before draining the app.
+        if ui.get_settings_visible()
+            && (ui.get_output_dirty()
+                || ui.get_shared_sync_dirty()
+                || ui.get_output_applying()
+                || ui.get_shared_sync_busy())
+        {
+            ui.set_settings_exit_pending(true);
+            ui.invoke_request_close_settings();
+            return;
+        }
         // The source transition already drained its old-provider drafts before
         // saving the new credentials. A pending network sync can be cancelled
         // immediately; recapturing those drafts here would retarget their writes.
@@ -6509,6 +6520,7 @@ impl Controller {
         ui.set_buffer_frames(playback.buffer_frames.to_string().into());
         ui.set_pair_index(playback.output_pair.to_string().into());
         ui.set_source_pair(playback.source_pair.to_string().into());
+        ui.set_output_dirty(false);
     }
 
     fn refresh_devices(self: &Arc<Self>, backend: i32) {
@@ -6552,12 +6564,14 @@ impl Controller {
                     } else {
                         devices.iter().map(|device| device.name.clone()).collect()
                     };
-                    *c.devices.lock().unwrap() = devices;
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.device_generation.load(Ordering::Acquire) != generation {
                             return;
                         }
+                        // Publish identities and labels together after rejecting stale
+                        // enumeration; a previous driver must not replace this list.
+                        *c2.devices.lock().unwrap() = devices;
                         ui.set_devices_loading(false);
                         ui.set_device_names(ModelRc::new(VecModel::from(
                             names
@@ -6570,12 +6584,12 @@ impl Controller {
                     });
                 }
                 Err(error) => {
-                    *c.devices.lock().unwrap() = Vec::new();
                     let c2 = c.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.device_generation.load(Ordering::Acquire) != generation {
                             return;
                         }
+                        c2.devices.lock().unwrap().clear();
                         ui.set_devices_loading(false);
                         ui.set_device_names(ModelRc::new(VecModel::from(vec![
                             c2.localized("不可用", "Unavailable"),
@@ -6635,7 +6649,16 @@ impl Controller {
     }
 
     fn apply_output(self: &Arc<Self>, ui: &AppWindow, open_panel: bool) {
-        if ui.get_output_applying() || ui.get_devices_loading() {
+        if ui.get_output_applying() {
+            return;
+        }
+        // Validation failures stop an explicitly requested save-and-close chain.
+        // Only a configuration admitted below may resume that chain on success.
+        let close_pending = ui.get_settings_close_pending();
+        let exit_pending = ui.get_settings_exit_pending();
+        ui.set_settings_close_pending(false);
+        ui.set_settings_exit_pending(false);
+        if ui.get_devices_loading() {
             return;
         }
         let frames = match ui.get_buffer_frames().trim().parse::<u32>() {
@@ -6731,6 +6754,8 @@ impl Controller {
             },
         };
         drop(devices);
+        ui.set_settings_close_pending(close_pending);
+        ui.set_settings_exit_pending(exit_pending);
         ui.set_output_applying(true);
         ui.set_device_info(
             if self.chinese.load(Ordering::Acquire) {
@@ -6746,6 +6771,8 @@ impl Controller {
             if let Err(error) = result {
                 post(c.ui.clone(), move |ui| {
                     ui.set_output_applying(false);
+                    ui.set_settings_close_pending(false);
+                    ui.set_settings_exit_pending(false);
                     ui.set_device_info(error.into());
                 });
                 return;
@@ -6755,15 +6782,46 @@ impl Controller {
             }
             let playback = c.playback.lock().unwrap().clone();
             let mut config = c.config.lock().unwrap();
-            config.playback = serde_json::to_value(playback).unwrap_or_default();
-            let saved = config.save();
+            let mut preferences = config.clone();
+            preferences.playback = serde_json::to_value(playback).unwrap_or_default();
+            let saved = preferences.save();
+            if saved.is_ok() {
+                *config = preferences;
+            }
             drop(config);
             if let Err(error) = saved {
                 c.status(error.to_string());
+                post(c.ui.clone(), move |ui| {
+                    ui.set_output_applying(false);
+                    ui.set_settings_close_pending(false);
+                    ui.set_settings_exit_pending(false);
+                    ui.set_device_info(
+                        format!(
+                            "{}: {error}",
+                            if ui.get_chinese() {
+                                "音频输出已应用，但设置保存失败，请重试"
+                            } else {
+                                "Audio output applied, but saving settings failed; retry to save"
+                            }
+                        )
+                        .into(),
+                    );
+                });
+                return;
             }
             post(c.ui.clone(), move |ui| {
                 ui.set_output_applying(false);
-                ui.set_settings_visible(false);
+                ui.set_output_dirty(false);
+                ui.set_device_info(if ui.get_chinese() {
+                    "音频设置已应用。".into()
+                } else {
+                    "Audio settings applied.".into()
+                });
+                if ui.get_settings_close_pending() {
+                    ui.invoke_continue_settings_close();
+                } else if ui.get_settings_exit_pending() {
+                    ui.invoke_request_close_settings();
+                }
             });
             if open_panel {
                 c.command(AudioCommand::ControlPanel);
