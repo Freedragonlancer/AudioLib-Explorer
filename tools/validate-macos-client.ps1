@@ -269,8 +269,8 @@ foreach ($key in $taskExpected.Keys) {
     $canonicalPath = $null
     if (!$taskAllowed.TryGetValue($key, [ref]$canonicalPath) -or $key -cne $canonicalPath) { throw 'File report differs from the exact resource/license paths.' }
 }
-$soundNotices = @($taskNotices | Where-Object { $_.name -ceq 'soundtouch-ffi' -and 'SoundTouch-LGPL.txt' -cin $_.files })
-if (!$noticeIds.Contains('slint-1.17.1') -or !$noticeIds.Contains('soundtouch-0.5.4') -or $soundNotices.Count -ne 1 -or
+$soundNotices = @($taskNotices | Where-Object { $_.name -ceq 'soundtouch-ffi' -and $_.version -ceq '0.4.1' -and 'SoundTouch-LGPL.txt' -cin $_.files })
+if (!$noticeIds.Contains('slint-1.17.1') -or !$noticeIds.Contains('soundtouch-ffi-0.4.1') -or $soundNotices.Count -ne 1 -or
     !$taskExpected.ContainsKey('Contents/Resources/licenses/slint-1.17.1/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md')) { throw 'Required Slint/SoundTouch license materials are missing.' }
 function Assert-BundleFiles([string]$Root, [bool]$CheckModes = $true) {
     Assert-Tree $Root

@@ -37,11 +37,11 @@ try {
     # ancestors must still be inspected rather than silently skipped or failing.
     $hiddenAncestor = Get-Item -LiteralPath (Split-Path -Parent $staleRoot) -Force
     $hiddenAncestor.Attributes = $hiddenAncestor.Attributes -bor [IO.FileAttributes]::Hidden
-    # Minimal license fixture; Cargo and application binaries remain synthetic.
+    # Native-only SoundTouch fixture catches regressions that still require the
+    # removed high-level wrapper. Cargo and application binaries remain synthetic.
     $fixturePackages = @(
         @{name='slint';version='1.17.1';manifest_path=(Join-Path $testRoot 'registry/slint/Cargo.toml')},
-        @{name='soundtouch';version='0.5.4';manifest_path=(Join-Path $testRoot 'registry/soundtouch/Cargo.toml')},
-        @{name='soundtouch-ffi';version='0.4.0';manifest_path=(Join-Path $testRoot 'registry/soundtouch-ffi/Cargo.toml')}
+        @{name='soundtouch-ffi';version='0.4.1';manifest_path=(Join-Path $testRoot 'registry/soundtouch-ffi/Cargo.toml')}
         @{name='audiolib-desktop';version='0.4.4';manifest_path=(Join-Path $testRoot 'registry/audiolib-desktop/Cargo.toml')},
         @{name='audiolib-cli';version='0.4.4';manifest_path=(Join-Path $testRoot 'registry/audiolib-cli/Cargo.toml')},
         @{name='asio-sys';version='99.0.0';manifest_path=(Join-Path $testRoot 'registry/asio-sys/Cargo.toml')},
@@ -74,6 +74,15 @@ try {
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
     $licenseValidator = Join-Path $testRoot 'tools/validate-portable-licenses.ps1'
     & $licenseValidator -BinaryDirectory $staleRoot -WithoutAsio
+    $fixtureNoticePath = Join-Path $staleRoot 'licenses/dependencies.json'
+    $fixtureNoticeText = [IO.File]::ReadAllText($fixtureNoticePath)
+    try {
+        $withoutNative = @((ConvertFrom-Json $fixtureNoticeText) | Where-Object name -CNE 'soundtouch-ffi')
+        [IO.File]::WriteAllText($fixtureNoticePath, ($withoutNative | ConvertTo-Json -Depth 12))
+        $rejected = $false
+        try { & $licenseValidator -BinaryDirectory $staleRoot -WithoutAsio } catch { $rejected = $_.Exception.Message -match 'SoundTouch dependency or license notice missing' }
+        if (!$rejected) { throw 'A missing native SoundTouch dependency notice was accepted.' }
+    } finally { [IO.File]::WriteAllText($fixtureNoticePath, $fixtureNoticeText) }
     $rejected = $false
     try { & $licenseValidator -BinaryDirectory $staleRoot } catch { $rejected = $_.Exception.Message -match 'ASIO SDK license missing' }
     if (!$rejected) { throw 'Default ASIO acceptance allowed a missing SDK license.' }
