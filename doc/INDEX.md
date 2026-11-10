@@ -34,6 +34,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Candidate changes and published client/server release history |
+| [0.9.5 release preparation](Rust_Release_0.9.5.md) | Menu and Waveform candidate scope, reused source evidence, pending beta gates and seven-payload delivery matrix |
 | [0.9.4 release record](Rust_Release_0.9.4.md) | Published f6 payloads and checksums, af1 upgrade boundaries, actual remote verification and fixed-install synchronization |
 | [0.9.3 release record](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.9.3.md) | Published assets, checksums, validation identities and platform coverage |
 | [0.8.7 release preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.8.7.md) | Beta scope, original validation evidence, unresolved gates and delivery plan |
@@ -92,7 +93,7 @@ Rust unit and integration tests live with the Cargo workspace packages. Select t
 | [Rust search benchmark](../crates/audiolib-db/src/bin/search-benchmark.rs) | Actual-service P50/P95/P99 measurements on 1M+ records |
 | [Local checks](../tools/check-local.ps1) | Format and selected package Clippy/tests once; -Package scopes checks, -Asio / -NoDefaultFeatures match the shipped configuration |
 | [Build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md) | Owned Cargo caches only; preview, budget/age, build leases and post-delivery cleanup |
-| [Release pipeline](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md) | One native plan per host; compact JSON, private logs and verified stage reuse |
+| [Release pipeline](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md) | Native plans, early notice checks, parallel payload coordination, verified recovery and release efficiency review |
 | [Windows release compatibility entry](../tools/ci-release.ps1) | Manual tagged Windows build/package entry, replacing separate build/package calls; runtime report remains `not-run` |
 | [Published release verifier](../.github/workflows/release.yml) | Optional manual, read-only release identity, exact asset-set and SHA256 checks |
 

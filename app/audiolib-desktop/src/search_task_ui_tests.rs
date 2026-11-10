@@ -509,7 +509,7 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                 "Keyword text must stop before the close control: theme={theme}, chinese={chinese}"
             );
             for id in [
-                "SearchTaskTab::search-prefix",
+                "SearchTaskTab::directory-separator",
                 "SearchTaskTab::directory-label",
             ] {
                 assert!(
@@ -521,7 +521,7 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
             let language = if chinese { "cn" } else { "en" };
             snapshot_if_requested(&ui, &format!("task-keywords-minimum-{theme}-{language}"));
 
-            // Once a short query has room, restore its useful search/directory context.
+            // Short terms stay together instead of spreading across the tab.
             ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
                 id: "0".into(),
                 name: "Task 0".into(),
@@ -533,15 +533,75 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                 ..Default::default()
             }])));
             settle();
-            for id in [
-                "SearchTaskTab::search-prefix",
-                "SearchTaskTab::directory-label",
-            ] {
-                assert!(
-                    ElementHandle::find_by_element_id(&ui, id).next().is_some(),
-                    "Auxiliary labels should return when space permits: {id}, theme={theme}, chinese={chinese}"
-                );
-            }
+            let keyword = ElementHandle::find_by_element_id(&ui, "SearchTaskTab::keyword-label")
+                .next()
+                .unwrap();
+            let separator =
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-separator")
+                    .next()
+                    .expect("A fitting directory must have its separator");
+            let directory =
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label")
+                    .next()
+                    .expect("A short query must retain its directory context");
+            let keyword_end = keyword.absolute_position().x + keyword.size().width;
+            let separator_end = separator.absolute_position().x + separator.size().width;
+            assert!(
+                (0.0..=8.0).contains(&(separator.absolute_position().x - keyword_end)),
+                "The separator must follow the keyword closely: theme={theme}, chinese={chinese}"
+            );
+            assert!(
+                (0.0..=8.0).contains(&(directory.absolute_position().x - separator_end)),
+                "The directory must follow the separator closely: theme={theme}, chinese={chinese}"
+            );
+            assert!((keyword.absolute_position().y - directory.absolute_position().y).abs() < 1.0);
+            snapshot_if_requested(&ui, &format!("task-keywords-compact-{theme}-{language}"));
+
+            // A directory-only task keeps its marker and the same left alignment.
+            let keyword_start = keyword.absolute_position().x;
+            ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
+                id: "0".into(),
+                name: "Task 0".into(),
+                active: true,
+                searched: true,
+                folder: "Atmospheres".into(),
+                ..Default::default()
+            }])));
+            settle();
+            assert!(
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::keyword-label")
+                    .next()
+                    .is_none()
+            );
+            let separator =
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-separator")
+                    .next()
+                    .unwrap();
+            let directory =
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label")
+                    .next()
+                    .unwrap();
+            assert!((separator.absolute_position().x - keyword_start).abs() < 1.0);
+            assert!(directory.absolute_position().x > separator.absolute_position().x);
+
+            // Filter-only conditions have no directory marker or reserved gap.
+            ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
+                id: "0".into(),
+                name: "Task 0".into(),
+                active: true,
+                searched: true,
+                ..Default::default()
+            }])));
+            settle();
+            assert!(
+                ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-separator")
+                    .next()
+                    .is_none()
+            );
+            let filters = ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label")
+                .next()
+                .unwrap();
+            assert!((filters.absolute_position().x - keyword_start).abs() < 1.0);
             ui.hide().unwrap();
         }
     }

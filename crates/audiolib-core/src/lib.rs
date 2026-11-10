@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod albums;
 mod audio_file;
+mod audio_range;
 mod audio_source;
 pub mod compatibility;
 pub mod config;
@@ -29,6 +30,7 @@ pub mod waveform_rate;
 pub mod window_layout;
 pub use albums::{Album, AlbumFacet, AlbumKind, MAX_ALBUM_MEMBERS};
 pub use audio_file::AudioFile;
+pub use audio_range::AudioFrameRange;
 pub use audio_source::{SUPPORTED_AUDIO_EXTENSIONS, SourceAudioFormat, source_audio_format};
 pub use library::*;
 pub use list_waveform::{

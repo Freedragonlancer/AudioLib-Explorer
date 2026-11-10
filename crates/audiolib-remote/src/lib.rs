@@ -87,7 +87,8 @@ pub use client::{
 };
 pub use download::{
     DEFAULT_DOWNLOAD_CACHE_BYTES, DownloadCache, DownloadItem, DownloadProbe, DownloadProgress,
-    MARKER_FILE, content_disposition_filename, etag_token, probe_download, sanitize_filename,
+    MARKER_FILE, OriginalVersion, OwnedOriginal, content_disposition_filename, etag_token,
+    probe_download, probe_download_with_cancel, sanitize_filename,
 };
 pub use error::{NetworkFailure, RemoteError, Result, TlsFailure};
 pub use list_waveforms::{
