@@ -435,6 +435,7 @@ fn child_table_controller_preferences() {
         tags_width: 150.0,
         order_by: SortOrder::Filename,
         descending: true,
+        ..Default::default()
     };
     let playback = PlaybackConfig {
         volume: 0.25,

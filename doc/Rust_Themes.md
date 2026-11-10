@@ -29,6 +29,14 @@ and Studio player presentations remain available. Frequency colors and non-tonal
 peaks are audio data, so themes do not change Spectral Peaks analysis or rendering
 colors.
 
+The library sidebar's visibility is restored across a normal restart in all three
+themes. `window_layout.sidebar_visible` is optional: older settings keep the
+design default, and an invalid value only discards that field. Layout capture uses
+the sidebar's preferred width independently of visibility, so hiding it does not
+save a collapsed width. Restore applies visibility before first display and pane
+widths after interface scaling, using the existing layout-save and close-drain
+ordering.
+
 Default and Default v2 share refreshed Classic controls with hover, press and
 release feedback, dynamic tooltips and explanations when transport is disabled.
 Their separate Play/Pause buttons and Waveform layout remain intact. The transport

@@ -65,13 +65,13 @@ fn load_forward_until(
     mut search: impl FnMut(&SearchRequest) -> audiolib_core::Result<SearchPage>,
     mut hide_removed: impl FnMut(&mut SearchPage),
 ) -> audiolib_core::Result<WindowPage> {
-    let budget = request.limit.clamp(1, super::PAGE_SIZE * 3);
+    let budget = request.limit.clamp(1, super::MAX_RESULT_WINDOW_ROWS);
     let original_offset = request.offset;
     let mut probe = request.clone();
     probe.limit = budget.min(super::PAGE_SIZE);
-    if probe.limit != request.limit {
-        probe.cursor = None;
-    }
+    // Navigation admits this cursor against the bounded provider-query size,
+    // not the visible UI budget. A 1000-row page may continue a 200-row cursor.
+    // Cold restores and policy changes clear cursors before entering the loader.
     let mut cursors = HashSet::new();
     let mut records = Vec::new();
     let mut positions = Vec::new();
@@ -125,7 +125,7 @@ fn load_forward_until(
         if records.len() >= budget || !has_next {
             let first = first_request.unwrap_or_else(|| probe.clone());
             request.offset = first.offset;
-            request.cursor = (first.limit == budget).then_some(first.cursor).flatten();
+            request.cursor = first.cursor;
             request.limit = budget;
             request.page = None;
             page.results = records;
@@ -182,7 +182,7 @@ pub(super) fn load_backward(
     mut search: impl FnMut(&SearchRequest) -> audiolib_core::Result<SearchPage>,
     mut hide_removed: impl FnMut(&mut SearchPage),
 ) -> audiolib_core::Result<WindowPage> {
-    let budget = request.limit.clamp(1, super::PAGE_SIZE * 3);
+    let budget = request.limit.clamp(1, super::MAX_RESULT_WINDOW_ROWS);
     let mut end = before_raw;
     let mut queried = false;
     let mut output = WindowPage {

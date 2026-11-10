@@ -8,6 +8,8 @@ mod album_review;
 mod favorite_review;
 #[path = "search_task_lifecycle_review_tests.rs"]
 mod lifecycle_review;
+#[path = "pagination_preferences_tests.rs"]
+mod pagination_preferences;
 #[path = "search_task_scope_paging_tests.rs"]
 mod scope_paging;
 #[path = "search_task_ui_review_tests.rs"]

@@ -14,7 +14,12 @@
     "channels_width": 64.0,
     "tags_width": 160.0,
     "order_by": "relevance",
-    "descending": false
+    "descending": false,
+    "pagination_enabled": false,
+    "page_size": 200
+  },
+  "window_layout": {
+    "sidebar_visible": true
   },
   "playback": {
     "backend": "wasapi",

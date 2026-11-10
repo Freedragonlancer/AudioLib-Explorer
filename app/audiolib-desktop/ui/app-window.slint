@@ -1171,6 +1171,10 @@ export component AppWindow inherits Window {
     in property <bool> can-previous: false;
     in property <bool> can-next: false;
     in property <string> page-label: "1";
+    in-out property <bool> pagination-enabled: false;
+    in-out property <int> result-page-size: 200;
+    callback paging-policy-requested(bool, int);
+    out property <bool> paging-policy-settings-blocked: root.settings-busy || root.settings-close-confirm;
     in-out property <bool> favorites-only: false;
     in-out property <bool> tagged-only: false;
     // Canonical include/exclude terms (`engine, -interior`); the chips below mirror it.
@@ -1258,8 +1262,8 @@ export component AppWindow inherits Window {
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
     out property <length> settings-panel-bottom: settings-panel.absolute-position.y + settings-panel.height;
     out property <length> settings-last-bottom: settings-footer.absolute-position.y + settings-footer.height;
-    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && search-settings-first.has-focus) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
-    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && search-settings-first.has-focus) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
+    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
+    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
     // Test-only: scroll the main view and the settings dialog to their bottom-right corner.
     public function scroll-main-to-end() {
         if Theme.modern-style { studio-main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); } else { main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); }
@@ -2310,7 +2314,7 @@ export component AppWindow inherits Window {
     function track-result-scroll() {
         let previous = root.result-last-y;
         root.result-last-y = (Theme.modern-style ? studio-result-list.viewport-y : result-list.viewport-y);
-        if root.result-user-scrolling && !root.searching && !root.background-blocked && !root.task-restoring && root.rows.length > 0 {
+        if !root.pagination-enabled && root.result-user-scrolling && !root.searching && !root.background-blocked && !root.task-restoring && root.rows.length > 0 {
             let buffer = (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height) * 2;
             let remaining = root.rows.length * root.result-row-height + (Theme.modern-style ? studio-result-list.viewport-y : result-list.viewport-y) - (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height);
             if (Theme.modern-style ? studio-result-list.viewport-y : result-list.viewport-y) < previous && root.can-next && remaining <= buffer {
@@ -4604,6 +4608,12 @@ main-scroll := ScrollView {
                     search-settings-first := SpinBox { horizontal-stretch: 1; enabled: root.settings-page == 2 && !root.settings-busy && !root.settings-close-confirm; minimum: 1; maximum: 30; step-size: 1; value <=> root.max-search-tasks; edited(value) => { root.max-search-tasks-requested(value); } }
                 }
                 Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "每个任务保留独立的目录、检索条件和声音列表。最多支持 30 个任务；超出宽度时可横向滚动或使用左右翻页按钮。" : "Each task keeps its own folders, search and sound list. Up to 30 tasks are supported; scroll horizontally or use the arrow buttons when tabs overflow."; }
+                pagination-check := CheckBox { text: root.chinese ? "分页浏览结果" : "Browse results in pages"; checked <=> root.pagination-enabled; enabled: root.settings-page == 2 && !root.settings-busy && !root.settings-close-confirm && !root.library-busy && !root.ds-applying && !root.task-restoring && !root.search-workspace-loading && !root.search-workspace-read-only && !root.closing; toggled => { root.paging-policy-requested(self.checked, root.result-page-size); } }
+                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                    Label { width: 108px * Theme.ui-scale; text: root.chinese ? "每页结果" : "Results per page"; }
+                    pagination-size := SpinBox { horizontal-stretch: 1; minimum: 1; maximum: 1000; step-size: 1; enabled: root.pagination-enabled && root.settings-page == 2 && !root.settings-busy && !root.settings-close-confirm && !root.library-busy && !root.ds-applying && !root.task-restoring && !root.search-workspace-loading && !root.search-workspace-read-only && !root.closing; value <=> root.result-page-size; edited(value) => { root.paging-policy-requested(root.pagination-enabled, value); } }
+                }
+                Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "开启后使用上一页和下一页；关闭后连续滚动浏览。更改浏览方式或页大小会将各任务的结果位置重置到开头，保留检索条件。" : "When enabled, use Previous and Next. When disabled, browse by continuous scrolling. Changing the browsing mode or page size resets each task's result position while keeping its search conditions."; }
             }
             sync-settings-page := VerticalLayout { width: parent.width; visible: root.settings-page == 3; spacing: 13px * Theme.ui-scale; alignment: start;
                 Text { text: root.chinese ? "服务器与同步" : "Server and sync"; color: Theme.ink; font-size: Theme.font(19); font-weight: 600; }
