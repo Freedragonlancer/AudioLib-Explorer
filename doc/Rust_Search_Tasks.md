@@ -14,6 +14,16 @@ New tasks start with an empty query, the whole current library, default filters 
 
 All tasks use the current data source. Switching between libraries saves the old library's task group and restores the destination library's group. Connections to the same server library share that library's personal group, including LAN and external connection profiles. A different server library has a separate group.
 
+## Continuous browsing and pagination
+
+Global settings → Search and tasks offers an optional pagination policy. Existing settings keep continuous browsing: fixed 200-record chunks, automatic adjacent-range loading and the existing bounded 600-row window. Enabling pagination disables automatic range prefetch and uses Previous/Next with 1–1000 visible records per page (default 200). The preferred page size is retained while pagination is disabled, but does not change continuous browsing's chunk size.
+
+These application preferences are stored as `audio_table.pagination_enabled` and `audio_table.page_size` in `settings.json`. Changing the effective policy resets task offsets, scroll anchors, continuation state and cached result windows; it preserves queries, scopes, filters, sorting, favorites, selected/checked record identities and Metadata drafts. The current audition source does not change. Invalid editor drafts remain drafts rather than becoming an unintended new search.
+
+A visible page larger than 200 is assembled from bounded provider requests, each with a limit no greater than 200. Opaque continuations retain their actual provider limit; a changed limit cannot reuse an incompatible cursor. Removal overlays, revision checks, cancellation and failed-navigation rollback still belong to the current result-window pipeline. Pagination does not change the database schema, HTTP API or provider search contracts.
+
+Task view state carries the effective policy in a separate optional navigation hint, not in editor drafts or search conditions. Older readers ignore this additional field without changing the meaning of an empty draft map. An older workspace without the hint means continuous browsing with 200-record chunks. If settings and workspace saves disagree after an interruption, restoration resets navigation and cached rows instead of using an old offset under a different policy; saved search definitions and record references remain intact. An invalid hint only invalidates navigation, rather than making the whole workspace unreadable.
+
 ## Independent and shared state
 
 Each task retains its query text, match scope, complete search filters, selected directory and descendant policy, directory expansion, sort order, page, selected and checked records, selection anchor and view position. Raw filter drafts are retained too: changing tasks does not submit a partially typed tag or turn invalid duration text into a valid search. The current filter/details page and directory/favorites page are part of the task view.

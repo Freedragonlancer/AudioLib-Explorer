@@ -111,6 +111,8 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 
 管线不创建标签、提 PR 或自动发布 Release。发布仍使用已授权的 `release-create.sh` 入口；发布后可选用 `release-assets.json` 合并元数据/集合/摘要检查。该只读计划核对所提供的本地归档，不替代首次从 GitHub 下载后的内容复核。发布后固定安装与正式产物身份同步仍按 AGENTS.md 执行，不把本地构建的相同版本号当作同一发布二进制。
 
+发布助手支持显式 `--draft` 创建未发布草稿，例如 `tools/release-create.sh <tag> --draft --notes-file <reviewed-notes> <assets...>`。草稿总是带 `--latest=false`；beta/rc 草稿仍保留预发布标记。省略 `--draft` 时，原正式版与 beta/rc 发布规则不变。`--dry-run` 只打印命令，不调用 GitHub；它可与 `--draft` 同用来预览草稿命令。字面资产名若以 `-` 开头，放在 `--` 后，助手会保留下游参数边界。该选项不授权发布、不替代本机验收，也不增加续传或同版本资产替换能力。
+
 实际交付建议加 `-CleanBuildArtifacts`，在所有交付阶段成功后追加 debug 缓存维护，默认预算 40 GiB，可用 `-BuildCacheLimitGiB` 调整。管线先释放构建租约，再运行独占清理；交付失败不触发清理，清理失败保留已通过的交付收据供续跑。不要在 ChecksFile 中再清理一遍。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 
 多份计划共享同一受管缓存时，等它们的构建与交付全部结束，再集中维护一次；不要给每条并行计划都追加清理。只复用原有结果、未构建/测试 Rust 的文档或流程任务不触发维护扫描。
