@@ -1,9 +1,9 @@
 # AudioLib Explorer 版本规范
 
-当前准备 `0.9.5` 候选，以已发布 `v0.9.4` 为基线使用 PATCH。程序版本升至 0.9.5，API `/api/v1/`、普通本地写 schema 8、专用服务端迁移 schema 9、快照兼容 `3..=9` 以及 base/af1 完整格式目录均沿用 0.9.4。范围为统一菜单与全局设置、紧凑搜索标签、Waveform 选区试听与原素材 WAV 切片、源版本校验、原生指针、SoundTouch 生命周期与许可证预检。候选整合、beta 门禁、最终 main/tag 身份、七份 payload 与发布状态见 [0.9.5 发布准备](Rust_Release_0.9.5.md)；下文已发布版本的身份和验证记录保持原样。
+当前正式版为 [0.9.5](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.5)，于 2026-11-10 14:34:54 UTC 发布，以 `v0.9.4` 为基线使用 PATCH。七份正式 payload 来自最终 main/tag `7d7a60bad31d8640441b16de0d558d3a4211a0e0`，构建、本地验收、十四项线上资产与校验正文、发布后固定安装身份同步均通过。API `/api/v1/`、普通本地写 schema 8、专用服务端迁移 schema 9、快照兼容 `3..=9` 以及 base/af1 完整格式目录均沿用 0.9.4。范围为统一菜单与全局设置、紧凑搜索标签、Waveform 选区试听与原素材 WAV 切片、源版本校验、原生指针、SoundTouch 生命周期与许可证预检。准确发布状态和原始验证身份见 [0.9.5 发布记录](Rust_Release_0.9.5.md)；下文历史标签、资产和记录保持原样。
 
 Search Metadata v2 的 0.9.0 发布记录见[0.9.0 迁移方案](Rust_Release_0.9.0.md)。
-当前正式版为 [0.9.4](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.4)，于 2026-11-08 发布，相对 `v0.9.3` 为 PATCH。七份正式产物来自 main `f6adb2bd777d4db78d43cbdcee626153592c1482`；十四项线上资产/SHA256 与发布后固定安装同步通过，见[发布记录](Rust_Release_0.9.4.md)。本地写目标仍为 8，显式服务端迁移目标为 9，客户端快照读取范围仍为 3..=9。0.9.4 新增 `audio_sources:1` 与 af1 完整格式，不能据 schema 数字未变声称旧客户端可访问所有新库。后续文档提交不移动标签或改变已验收二进制源码。
+上一正式版 [0.9.4](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.4) 于 2026-11-08 发布，相对 `v0.9.3` 为 PATCH。七份正式产物来自 main `f6adb2bd777d4db78d43cbdcee626153592c1482`；十四项线上资产/SHA256 与发布后固定安装同步通过，见[发布记录](Rust_Release_0.9.4.md)。本地写目标仍为 8，显式服务端迁移目标为 9，客户端快照读取范围仍为 3..=9。0.9.4 新增 `audio_sources:1` 与 af1 完整格式，不能据 schema 数字未变声称旧客户端可访问所有新库。后续文档提交不移动标签或改变已验收二进制源码。
 
 0.9.3 范围为 #239 的 Waveform / Play 反馈修复、借鉴旧 #185 空页处理的连续浏览修复，以及 #241 / #243 的备份与打包修正。本轮桌面回归、严格 Clippy 及七份最终包的验收均通过，原始证据复用身份见发布记录。本次不整合该旧 PR 的视觉重做、分页偏好和草稿工具等新功能。
 
@@ -11,21 +11,21 @@ Search Metadata v2 的 0.9.0 发布记录见[0.9.0 迁移方案](Rust_Release_0.
 
 0.9.4 范围为新音频源 MP3、AIFF/BWF、RIFF/RF64/BW64 边界与解码修正、原始非 WAV 远程试听、搜索任务标签自适应与关键词优先，以及隐藏缓存所有权标记的工具修正。上述 0.9.3 替换历史保持原样。
 
-程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。0.9.4 相对 v0.9.3、0.9.3 相对 v0.9.2 均为 PATCH；0.9.2 相对 `v0.9.1`、0.9.1 相对 `v0.9.0` 均为 PATCH；0.9.0 相对 `v0.8.7` 已完成 MINOR 升版。历史记录保留原来的身份。
+程序、API、schema 和派生 feature 各有版本，兼容性由[共享契约与完整格式目录](api/Library_Migration_Compatibility.md)共同判断，不能互相推导。0.9.5 相对 v0.9.4、0.9.4 相对 v0.9.3、0.9.3 相对 v0.9.2 均为 PATCH；0.9.2 相对 `v0.9.1`、0.9.1 相对 `v0.9.0` 均为 PATCH；0.9.0 相对 `v0.8.7` 已完成 MINOR 升版。历史记录保留原来的身份。
 
-| 版本 | 来源（唯一事实） | v0.9.3 基线 | 0.9.4 | 含义 |
-|---|---|---|---|---|
-| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version` | 0.9.3 | 0.9.4 | 客户端、CLI、服务端共用，发布时一起升 |
-| API 版本 | URL 路径前缀 `/api/v1/` | v1 | v1 | 不兼容改动才换成 `/api/v2/` |
-| 普通本地写目标 | DB `SCHEMA_VERSION` 与 Core `compatibility::TARGET_SCHEMA` | 8 | 8 | 常规本地写者仍拒绝s9写入 |
-| 专用服务端写目标 | Core `compatibility::SERVER_TARGET_SCHEMA`，由 `LibraryFormat::server_schema9()` 使用 | 9 | 9 | 显式服务端迁移及专用s9写者，不从本地常量推导 |
-| 客户端快照读取范围 | DB `MIN_SNAPSHOT_SCHEMA_VERSION` 至 Core `compatibility::SNAPSHOT_SCHEMA_MAX` | 3..=9 | 3..=9 | 还须校验完整格式、feature、结构与身份 |
+| 版本 | 来源（唯一事实） | v0.9.3 基线 | 0.9.4 | 0.9.5 | 含义 |
+|---|---|---|---|---|---|
+| 程序版本 | 工作区 `Cargo.toml` 的 `[workspace.package] version` | 0.9.3 | 0.9.4 | 0.9.5 | 客户端、CLI、服务端共用，发布时一起升 |
+| API 版本 | URL 路径前缀 `/api/v1/` | v1 | v1 | v1 | 不兼容改动才换成 `/api/v2/` |
+| 普通本地写目标 | DB `SCHEMA_VERSION` 与 Core `compatibility::TARGET_SCHEMA` | 8 | 8 | 8 | 常规本地写者仍拒绝s9写入 |
+| 专用服务端写目标 | Core `compatibility::SERVER_TARGET_SCHEMA`，由 `LibraryFormat::server_schema9()` 使用 | 9 | 9 | 9 | 显式服务端迁移及专用s9写者，不从本地常量推导 |
+| 客户端快照读取范围 | DB `MIN_SNAPSHOT_SCHEMA_VERSION` 至 Core `compatibility::SNAPSHOT_SCHEMA_MAX` | 3..=9 | 3..=9 | 3..=9 | 还须校验完整格式、feature、结构与身份 |
 
 普通本地 base 格式仍为 `ale-s8-cld1-t3-m2-p1-a1`，服务端 schema-9 base 格式为 `ale-s9-cld1-t3-m2-p1-a1-sd1`。0.9.4 同时支持必需 feature `audio_sources:1` 对应的 `ale-s8-cld1-t3-m2-p1-a1-af1` / `ale-s9-cld1-t3-m2-p1-a1-sd1-af1`；该 feature 只在首次成功发布扩展源记录的同一事务中启用，原格式库和空库保持原 ID。必需 feature、目录结构和身份按实际完整格式校验，不从程序 PATCH 或 schema 数字推导。
 
 旧客户端不支持 af1；既有 schema-9 WAV-only 投影继续排除新增容器、恢复历史 schema-8 投影身份，不把旧客户端升级为新源能力。导入、迁移和回滚保留 af1 要求；启用共享本地库的新源前关闭旧版读写实例，回退旧程序须使用匹配的兼容备份或受支持的只读投影，不能删除 feature 标记冒充兼容。Metadata 仍为原始 JSON TEXT；压缩实验格式 `ale-s8-cld1-t3-m2-p1-a1-z1` 的 `metadata_storage=1` 仅保留为严格只读兼容来源，不在可写目录或迁移目标中。快照外层 zstd 传输与 Metadata 列存储分别协商。
 
-快照读取边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SNAPSHOT_SCHEMA_MAX`：已发布0.8.7为 `3..=8`，当前 0.9.4 为 `3..=9`。普通本地写目标8不是读取上限，`MAX_KNOWN_SCHEMA` 也不是服务端迁移目标。客户端先验证快照身份、结构、完整性、storage、tokenization、Metadata、feature及迁移协议；完整s8/s9快照按各自契约只读打开。schema3–7的派生升级和共享专辑投影仅在客户端拥有的 staging/copy 中运行，原始只读文件保持不变。收紧读取下限属于不兼容变化，应评估 MAJOR 或 API 版本。
+快照读取边界为 `MIN_SNAPSHOT_SCHEMA_VERSION..=SNAPSHOT_SCHEMA_MAX`：已发布0.8.7为 `3..=8`，当前 0.9.5 为 `3..=9`。普通本地写目标8不是读取上限，`MAX_KNOWN_SCHEMA` 也不是服务端迁移目标。客户端先验证快照身份、结构、完整性、storage、tokenization、Metadata、feature及迁移协议；完整s8/s9快照按各自契约只读打开。schema3–7的派生升级和共享专辑投影仅在客户端拥有的 staging/copy 中运行，原始只读文件保持不变。收紧读取下限属于不兼容变化，应评估 MAJOR 或 API 版本。
 
 ## 规则
 
@@ -33,9 +33,9 @@ Search Metadata v2 的 0.9.0 发布记录见[0.9.0 迁移方案](Rust_Release_0.
 2. 标签必须是 `vX.Y.Z`，预发布为 `vX.Y.Z-rc.N` 或 `vX.Y.Z-beta.N`，且 `X.Y.Z` 必须与 `Cargo.toml` 一致。其他预发布后缀会被拒绝。
 3. 程序版本不得低于基准标签的版本。
 4. 服务端与远程客户端源码中出现的 `/api/vN` 必须只有一个版本。
-5. `doc/Rust_Release_Notes.md` 的现代候选必须有**一行**同时写明程序、API、本地写目标、服务端写目标和实际快照读取范围；旧标签保留原来的单schema版本行。0.9.4 版本行示例为：
+5. `doc/Rust_Release_Notes.md` 的现代候选必须有**一行**同时写明程序、API、本地写目标、服务端写目标和实际快照读取范围；旧标签保留原来的单schema版本行。0.9.5 版本行示例为：
 
-   `程序 0.9.4 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9`
+   `程序 0.9.5 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9`
 
 6. 发布产物附 SHA256：各平台打包器生成 `<archive>.sha256`，本机发布步骤把它连同包上传为 Release 资产，并写入发布说明正文。
    从 0.8.4 起，每个 Release 精确发布六个归档及各自的 `.sha256`，共十二个资产：Windows x64 客户端、Mac arm64 客户端、Mac arm64 服务端、Linux x64 服务端，以及 Docker linux/amd64、linux/arm64 离线镜像。文件名分别为 `AudioLibExplorer-<tag>-win-x64-portable.zip`、`AudioLibExplorer-<tag>-macos-arm64.zip`、`AudioLibServer-<tag>-macos-arm64.tar.gz`、`AudioLibServer-<tag>-linux-x64.tar.gz`、`AudioLibServer-<tag>-docker-linux-amd64.tar.gz`、`AudioLibServer-<tag>-docker-linux-arm64.tar.gz`。0.8.3 保留三个包、六个资产；0.8.2 及更早版本保持两个包、四个资产。Mac 客户端手动更新，Docker 导入镜像并重建容器；Windows 客户端及 Mac arm64、Linux x64 原生服务端保留程序内更新。从 0.8.5（首个纳入版本）起增加 Windows x64 服务端 `AudioLibServer-<tag>-win-x64.zip`，共七个归档、十四个资产（门槛常量见 `tools/verify-release-assets.ps1` 的 `$WindowsServerFirstVersion`）；0.8.4 及更早版本保持原资产集合，源码构建仍可用。详见 [Windows 服务端发布](Rust_Windows_Server_Release.md)。独立 Linux arm64 服务端包不发布。
