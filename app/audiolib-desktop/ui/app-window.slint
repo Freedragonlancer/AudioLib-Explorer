@@ -776,6 +776,22 @@ component StudioSourceTags inherits Rectangle {
     }
 }
 
+// Keep long status summaries readable without letting a tooltip exceed the window.
+component SourceStatusTip inherits Rectangle {
+    in property <string> text;
+    in property <length> available-width;
+    private property <length> tip-width: min(560px * Theme.ui-scale, max(1px, root.available-width - 36px * Theme.ui-scale));
+    width: root.tip-width;
+    preferred-width: root.tip-width;
+    background: Theme.tooltip;
+    border-radius: 4px * Theme.ui-scale;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout { padding: 8px * Theme.ui-scale;
+        Text { text: root.text; color: Theme.ink; font-size: Theme.font(11); wrap: char-wrap; }
+    }
+}
+
 component ExportButton inherits Rectangle {
     in property <string> label;
     in property <string> action-label;
@@ -2645,7 +2661,7 @@ main-scroll := ScrollView {
         padding-bottom: (root.short-layout ? 10px : 16px) * Theme.ui-scale;
         spacing: (root.short-layout ? 6px : 10px) * Theme.ui-scale;
         HorizontalLayout { height: 42px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
-            Rectangle { horizontal-stretch: 1; min-width: 220px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
+            classic-search-group := Rectangle { horizontal-stretch: 0; min-width: 280px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 560px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                     Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.accent; image-fit: contain; }
                     search-input := LineEdit { horizontal-stretch: 1; enabled: !root.background-blocked; text <=> root.query;
@@ -2661,13 +2677,17 @@ main-scroll := ScrollView {
                     Action { width: 64px * Theme.ui-scale; primary: true; label: root.searching ? (root.chinese ? "搜索中" : "Searching") : (root.chinese ? "搜索" : "Search"); clicked => { root.search-requested(true); } }
                 }
             }
-            Rectangle { width: 180px * Theme.ui-scale;
+            // Flexible space is reserved for future search tools.
+            Rectangle { horizontal-stretch: 2; min-width: 0px; preferred-width: 0px; }
+            Rectangle { horizontal-stretch: 1; min-width: 180px * Theme.ui-scale; preferred-width: 360px * Theme.ui-scale; max-width: 520px * Theme.ui-scale;
                 accessible-role: button; accessible-label: root.data-source-label; accessible-enabled: root.menu-ready;
                 accessible-action-default => { if root.menu-ready { root.open-data-source(); } }
                 border-width: source-label-focus.has-focus ? 1px : 0px; border-color: Theme.accent;
                 source-label-focus := FocusScope { enabled: root.menu-ready; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-data-source(); return accept; } reject } }
                 Text { width: 100%; text: root.data-source-label; color: root.remote-mode ? Theme.accent : Theme.dim; font-size: Theme.font(11); vertical-alignment: center; horizontal-alignment: right; overflow: elide; }
                 TouchArea { mouse-cursor: pointer; clicked => { if root.menu-ready { root.open-data-source(); } } }
+                // The frontmost tooltip observer must see moves before the click area consumes them.
+                Tooltip { SourceStatusTip { text: root.data-source-label; available-width: root.width; } }
             }
             Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+  添加文件夹" : "+  Add folder"; clicked => { root.prepare-scan(0, ""); } }
             Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
@@ -3481,7 +3501,7 @@ main-scroll := ScrollView {
         Rectangle { height: 46px * Theme.ui-scale; background: Theme.toolbar-surface;
             Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.toolbar-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
             HorizontalLayout { padding-left: 8px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                Rectangle { horizontal-stretch: 1; min-width: 220px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                studio-search-group := Rectangle { horizontal-stretch: 0; min-width: 280px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 560px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                     background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: studio-search-input.has-focus ? Theme.accent : Theme.strong-border.with-alpha(0.5);
                     HorizontalLayout { padding: 2px * Theme.ui-scale; padding-left: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Image { width: 17px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.dim; image-fit: contain; accessible-role: none; }
@@ -3504,7 +3524,9 @@ main-scroll := ScrollView {
                         StudioAction { width: 48px * Theme.ui-scale; subtle: true; label: root.searching ? "…" : (root.chinese ? "搜索" : "Go"); action-label: root.chinese ? "执行搜索" : "Run search"; clicked => { root.search-requested(true); } }
                     }
                 }
-                Rectangle { width: 180px * Theme.ui-scale;
+                // Flexible space is reserved for future search tools.
+                Rectangle { horizontal-stretch: 2; min-width: 0px; preferred-width: 0px; }
+                Rectangle { horizontal-stretch: 1; min-width: 180px * Theme.ui-scale; preferred-width: 360px * Theme.ui-scale; max-width: 520px * Theme.ui-scale;
                     accessible-role: button; accessible-label: root.data-source-label; accessible-enabled: root.menu-ready;
                     accessible-action-default => { if root.menu-ready { root.open-data-source(); } }
                     border-width: studio-source-label-focus.has-focus ? 1px : 0px; border-color: Theme.accent;
@@ -3513,8 +3535,9 @@ main-scroll := ScrollView {
                         Rectangle { width: 7px * Theme.ui-scale; height: self.width; y: (parent.height - self.height) / 2; border-radius: self.width / 2; background: (root.remote-mode ? 2 : 0) == 3 || root.remote-writes-blocked ? Theme.warning : (!root.remote-mode || (root.remote-mode ? 2 : 0) == 2 ? Theme.accent : Theme.muted); }
                         Text { horizontal-stretch: 1; min-width: 0px; text: root.data-source-label; color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; }
                     }
-                    Tooltip { text: @markdown("\{root.data-source-label}"); }
                     TouchArea { mouse-cursor: pointer; clicked => { if root.menu-ready { root.open-data-source(); } } }
+                    // The frontmost tooltip observer must see moves before the click area consumes them.
+                    Tooltip { SourceStatusTip { text: root.data-source-label; available-width: root.width; } }
                 }
                 StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+ 添加文件夹" : "+ Add folder"; clicked => { root.prepare-scan(0, ""); } }
                 StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
