@@ -1,8 +1,8 @@
-# 0.9.5 候选：统一菜单与 Waveform 选区试听、切片
+# 0.9.5：统一菜单与 Waveform 选区试听、切片
 
 程序 0.9.5 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-以已发布的 `v0.9.4` 为基线，准备 PATCH 发布；目前尚未创建正式标签或发布资产。候选范围、复用证据与待完成门禁见 [0.9.5 发布准备](Rust_Release_0.9.5.md)。API、写目标、快照读取范围及完整格式目录沿用 0.9.4，包括已有 `audio_sources:1` / af1 边界。
+已于 2026-11-10 14:34:54 UTC（北京时间 22:34:54）正式发布 [v0.9.5](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.5)，以 `v0.9.4` 为基线使用 PATCH。经 [#267](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/267)、[#268](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/268) 完成 beta 验收和 main 提升；七份正式 payload 来自 main `7d7a60bad31d8640441b16de0d558d3a4211a0e0`。构建、本地验收、十四项线上资产与校验正文、发布后固定安装身份同步均通过，详见 [0.9.5 发布记录](Rust_Release_0.9.5.md)。API、写目标、快照读取范围及完整格式目录沿用 0.9.4，包括已有 `audio_sources:1` / af1 边界。
 
 - **菜单与设置**：三个主题使用统一的平台菜单栏，提供 View / 视图下的主题、语言和侧栏入口。全局设置按用途分组，音频与同步草稿分别管理；保留已有偏好与播放上下文。搜索工具栏和来源状态提示在窄窗口中保持可用。
 - **紧凑搜索标签**：关键词和目录使用同一行的紧凑文本，关键词优先，目录仅在不挤压关键词时出现；标签文本靠左，完整条件仍可悬停查看。
@@ -12,7 +12,7 @@
 - **音频与诊断**：配对销毁原生 SoundTouch 处理器，修复 Windows 包装层遗漏析构导致的缓冲积累；原生版本与试听算法保持不变。同步 Rust panic 记录省略 panic payload、配置和运行参数，原生崩溃仍需对应系统证据。
 - **发布工具**：在构建前预检实际目标及 feature 所选依赖的精确许可证材料，缺件时阻止继续构建；打包与运行验收保留各自的许可证检查。
 
-正式交付计划保持七个归档及各自 SHA256，共十四项资产。macOS 原生运行与拖出、Explorer/Finder/DAW 接收、真实 ASIO 硬件和声学起音延迟均以实际验收为准，当前不能据 Windows 自动化结果声明这些项目通过。
+七个正式归档及其 SHA256 共十四项线上资产已核验；内部 Linux arm64 原生包仅供 Docker 输入。Mac 已新增严格 Clippy、180 项音频与 93 项 Waveform 测试，并通过最终包的原生运行及 Quit；Windows 固定安装 verified=907、copied=23，CLI 0.9.5 与隔离启动通过，发布后全文件身份再次复核。Windows server 真实服务优雅关闭、Explorer/Finder/DAW 跨程序拖出、真实 ASIO 硬件和声学起音延迟未测；Mac ad-hoc 签名不是 Apple 公证，Linux x64/Docker amd64 验收使用 ARM64 主机仿真。
 
 # 0.9.4：新音频源格式与自适应搜索任务标签
 
