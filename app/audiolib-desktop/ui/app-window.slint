@@ -1422,8 +1422,24 @@ export component AppWindow inherits Window {
     in property <string> wave-selection-identity;
     in property <bool> wave-selection-preparing: false;
     in property <string> wave-selection-progress;
+    // Export readiness is independent of the operation under the pointer.
+    // 0 idle, 1 preparing, 2 ready, 3 native drag, 4 cancelled, 5 error.
+    in property <int> wave-selection-export-state: 0;
+    in-out property <bool> wave-native-cursor: false;
     out property <bool> wave-selection-gesture: Theme.modern-style ? studio-audition.selection-gesture : audition.selection-gesture;
     out property <MouseCursor> wave-selection-cursor: Theme.modern-style ? studio-audition.selection-cursor : audition.selection-cursor;
+    out property <int> wave-pointer-kind: root.background-blocked ? 0 : (Theme.modern-style ? studio-audition.selection-pointer-kind : audition.selection-pointer-kind);
+    out property <image> wave-pointer-image: Theme.modern-style ? studio-audition.selection-pointer-image : audition.selection-pointer-image;
+    out property <float> wave-pointer-hotspot-x: Theme.modern-style ? studio-audition.selection-pointer-hotspot-x : audition.selection-pointer-hotspot-x;
+    out property <float> wave-pointer-hotspot-y: Theme.modern-style ? studio-audition.selection-pointer-hotspot-y : audition.selection-pointer-hotspot-y;
+    out property <float> wave-pointer-scale: Theme.modern-style ? studio-audition.selection-pointer-scale : audition.selection-pointer-scale;
+    callback wave-pointer-feedback-changed();
+    changed wave-pointer-kind => { root.wave-pointer-feedback-changed(); }
+    changed wave-pointer-image => { root.wave-pointer-feedback-changed(); }
+    changed wave-pointer-hotspot-x => { root.wave-pointer-feedback-changed(); }
+    changed wave-pointer-hotspot-y => { root.wave-pointer-feedback-changed(); }
+    changed wave-pointer-scale => { root.wave-pointer-feedback-changed(); }
+    changed background-blocked => { root.wave-pointer-feedback-changed(); }
     private property <bool> wave-selection-shift-held: false;
     callback wave-selection-committed(float,float);
     callback wave-selection-cleared();
@@ -1434,7 +1450,7 @@ export component AppWindow inherits Window {
     changed wave-selection-gesture => { root.wave-selection-gesture-changed(root.wave-selection-gesture); }
     in property <string> slice-export-directory;
     callback slice-export-directory-requested();
-    function cancel-wave-selection-gesture() {
+    public function cancel-wave-selection-gesture() {
         audition.cancel-selection-gesture(); studio-audition.cancel-selection-gesture();
     }
     function dismiss-wave-selection() -> bool {
@@ -1458,7 +1474,7 @@ export component AppWindow inherits Window {
     in property <image> waveform-mask;
     in property <string> playback-path: "";
     in-out property <bool> audition-expanded: false;
-    in-out property <length> audition-preferred-height: 88px * Theme.ui-scale;
+    in-out property <length> audition-preferred-height: 114px * Theme.ui-scale;
     in property <string> playback-name;
     in property <bool> waveform-ready: false;
     in property <string> waveform-info: "";
@@ -3420,6 +3436,8 @@ main-scroll := ScrollView {
         audition := AuditionPanel {
             selection-active: root.wave-selection-active; selection-start: root.wave-selection-start; selection-end: root.wave-selection-end;
             selection-identity: root.wave-selection-identity; selection-preparing: root.wave-selection-preparing; selection-progress: root.wave-selection-progress;
+            selection-export-state: root.wave-selection-export-state; selection-native-cursor: root.wave-native-cursor;
+            selection-pointer-feedback-changed => { root.wave-pointer-feedback-changed(); }
             selection-shift-held: root.wave-selection-shift-held;
             selection-committed(start, end) => { root.wave-selection-committed(start, end); }
             selection-cleared => { root.wave-selection-cleared(); }
@@ -3430,13 +3448,13 @@ main-scroll := ScrollView {
             active: !Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: (root.short-layout ? 190px : 222px) * Theme.ui-scale;
+            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 216px : 248px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
             expanded-requested(value) => {
                 root.audition-expanded = value;
-                root.audition-preferred-height = (value ? 260px : 88px) * Theme.ui-scale;
+                root.audition-preferred-height = (value ? 286px : 114px) * Theme.ui-scale;
             }
             compact: root.short-layout; spectral: root.peak-mode == 1;
             play-on-single-click: root.audition-play-on-single-click;
@@ -3465,7 +3483,7 @@ main-scroll := ScrollView {
             peaks => {
                 if Theme.modern-player {
                     root.audition-expanded = true;
-                    root.audition-preferred-height = max(root.audition-preferred-height, 260px * Theme.ui-scale);
+                    root.audition-preferred-height = max(root.audition-preferred-height, 286px * Theme.ui-scale);
                 }
                 root.peaks-visible = true;
             }
@@ -4299,11 +4317,13 @@ main-scroll := ScrollView {
             label: root.chinese ? "调整试听播放器高度" : "Resize audition dock";
             help: root.chinese ? "向上拖动展开波形，向下拖动收起" : "Drag up to expand the waveform; drag down to compact";
             enabled: !root.background-blocked;
-            resized(value) => { root.audition-preferred-height = clamp(-value, 88px * Theme.ui-scale, 360px * Theme.ui-scale); root.audition-expanded = root.audition-preferred-height > 160px * Theme.ui-scale; }
+            resized(value) => { root.audition-preferred-height = clamp(-value, 114px * Theme.ui-scale, 386px * Theme.ui-scale); root.audition-expanded = root.audition-preferred-height > 186px * Theme.ui-scale; }
         }
         studio-audition := AuditionPanel {
             selection-active: root.wave-selection-active; selection-start: root.wave-selection-start; selection-end: root.wave-selection-end;
             selection-identity: root.wave-selection-identity; selection-preparing: root.wave-selection-preparing; selection-progress: root.wave-selection-progress;
+            selection-export-state: root.wave-selection-export-state; selection-native-cursor: root.wave-native-cursor;
+            selection-pointer-feedback-changed => { root.wave-pointer-feedback-changed(); }
             selection-shift-held: root.wave-selection-shift-held;
             selection-committed(start, end) => { root.wave-selection-committed(start, end); }
             selection-cleared => { root.wave-selection-cleared(); }
@@ -4314,13 +4334,13 @@ main-scroll := ScrollView {
             active: Theme.modern-style;
             premute-db <=> root.audition-premute-db;
             show-remaining <=> root.audition-show-remaining;
-            height: Theme.modern-player ? root.audition-preferred-height : (root.short-layout ? 190px : 222px) * Theme.ui-scale;
+            height: Theme.modern-player ? max(114px * Theme.ui-scale, root.audition-preferred-height) : (root.short-layout ? 216px : 248px) * Theme.ui-scale;
             expanded: root.audition-expanded;
             narrow: root.content-width < 1440px * Theme.ui-scale;
             waveform-mask: root.waveform-mask;
             expanded-requested(value) => {
                 root.audition-expanded = value;
-                root.audition-preferred-height = (value ? 260px : 88px) * Theme.ui-scale;
+                root.audition-preferred-height = (value ? 286px : 114px) * Theme.ui-scale;
             }
             compact: root.short-layout; spectral: root.peak-mode == 1;
             play-on-single-click: root.audition-play-on-single-click;
@@ -4349,7 +4369,7 @@ main-scroll := ScrollView {
             peaks => {
                 if Theme.modern-player {
                     root.audition-expanded = true;
-                    root.audition-preferred-height = max(root.audition-preferred-height, 260px * Theme.ui-scale);
+                    root.audition-preferred-height = max(root.audition-preferred-height, 286px * Theme.ui-scale);
                 }
                 root.peaks-visible = true;
             }

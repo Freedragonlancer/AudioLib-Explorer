@@ -714,10 +714,19 @@ component ClassicTool inherits Rectangle {
         show: root.tip-ready && !hit.pressed && !root.keyboard-held;
     }
 }
-// Default v1/v2 retain the original Waveform layout and independent transport
-// actions, with shared state-aware controls and bounded interaction feedback.
-// One pointer owner for both player presentations. Ranges always refer to the
-// original source timeline; image/transport revisions do not identify a source.
+// One shared SVG vocabulary is used by the native cursor bridge and the
+// paint-only fallback. Cursor size follows system DPI, independently of GUI zoom.
+// Hotspots are expressed in unscaled 20x20 source pixels.
+component WaveformPointer inherits Image {
+    in property <image> cursor-image;
+    in property <float> cursor-scale: 1;
+    source: root.cursor-image;
+    width: 20px * root.cursor-scale; height: 20px * root.cursor-scale;
+    image-fit: contain; accessible-role: none;
+}
+
+// The plot and its independent feedback row share one gesture owner. The row
+// never participates in source-time mapping, even for a very narrow selection.
 component WaveSelectionOverlay inherits Rectangle {
     in property <bool> enabled;
     in property <bool> seek-enabled;
@@ -731,6 +740,9 @@ component WaveSelectionOverlay inherits Rectangle {
     in property <float> duration;
     in property <string> identity;
     in property <bool> preparing;
+    // 0 idle, 1 preparing, 2 ready, 3 native drag, 4 cancelled, 5 error.
+    in property <int> export-state;
+    in property <bool> native-cursor: false;
     in property <string> progress-text;
     in property <bool> shift-held;
     in property <int> cancel-revision;
@@ -742,29 +754,62 @@ component WaveSelectionOverlay inherits Rectangle {
     callback seek-play(float);
     callback zoom-at(float,float);
     callback cursor-changed(MouseCursor);
+    callback pointer-feedback-changed();
+    out property <length> feedback-height: 26px * Theme.ui-scale;
+    out property <length> plot-height: max(1px, root.height - root.feedback-height);
     out property <bool> gesture: root.mode != 0;
     out property <bool> hovered: hit.has-hover;
     out property <length> pointer-x: clamp(hit.mouse-x, 0px, root.width);
-    out property <MouseCursor> cursor: root.grip-hovered || root.mode == 6 || root.mode == 7 ? root.grip-cursor : hit.mouse-cursor;
     out property <float> captured-start;
     out property <float> captured-end;
-    init => { root.cursor-changed(root.cursor); }
+    // 0 unowned, 1 crosshair, 2/3 left/right marquee, 4/5 start/end resize,
+    // 6 export hover, 7 export held, 8 waiting, 9 seek, 10 unavailable, 11 native.
+    out property <int> pointer-kind: root.export-state == 3 ? 11 : !root.pointer-owned ? 0
+        : root.mode == 1 ? (hit.mouse-x < root.down-x ? 2 : 3)
+        : root.mode == 2 ? (root.draft-start <= root.draft-end ? 4 : 5)
+        : root.mode == 3 ? (root.draft-end >= root.draft-start ? 5 : 4)
+        : root.mode == 5 || root.mode == 7 ? (root.is-preparing ? 8 : 7)
+        : root.mode == 4 || root.mode == 6 ? 7 : root.mode == 8 ? 9
+        : !root.enabled ? (root.seek-enabled ? 9 : 10)
+        : grip.has-hover ? 6 : root.shift-held ? 1
+        : root.near-left || root.near-right ? (root.left-wins ? 4 : 5)
+        : root.inside ? 6 : 1;
+    property <image> empty-image;
+    out property <image> pointer-image: root.pointer-kind == 1 ? @image-url("icons/wave-cursor-crosshair.svg")
+        : root.pointer-kind == 2 ? @image-url("icons/wave-cursor-select-left.svg")
+        : root.pointer-kind == 3 ? @image-url("icons/wave-cursor-select-right.svg")
+        : root.pointer-kind == 4 ? @image-url("icons/wave-cursor-resize-start.svg")
+        : root.pointer-kind == 5 ? @image-url("icons/wave-cursor-resize-end.svg")
+        : root.pointer-kind == 6 ? @image-url("icons/wave-cursor-hand-open.svg")
+        : root.pointer-kind == 7 ? @image-url("icons/wave-cursor-hand-closed.svg")
+        : root.pointer-kind == 8 ? @image-url("icons/wave-cursor-hand-wait.svg")
+        : root.pointer-kind == 9 ? @image-url("icons/wave-cursor-seek.svg")
+        : root.pointer-kind == 10 ? @image-url("icons/wave-cursor-unavailable.svg") : root.empty-image;
+    out property <float> pointer-hotspot-x: root.pointer-kind == 9 || root.pointer-kind == 10 ? 3 : 10;
+    out property <float> pointer-hotspot-y: root.pointer-kind == 9 || root.pointer-kind == 10 ? 2 : 10;
+    out property <float> pointer-scale: 1;
+    // The backend sees a stable stock cursor in native mode, so leaving the
+    // owner restores the stock cursor rather than a hidden-cursor state.
+    out property <MouseCursor> cursor: root.pointer-kind == 0 || root.pointer-kind == 11 ? default : root.native-cursor ? crosshair : none;
+    init => { root.cursor-changed(root.cursor); root.pointer-feedback-changed(); }
     changed cursor => { root.cursor-changed(root.cursor); }
-    // 1 draw, 2/3 resize, 4/5 interior drag pending/requested, 6/7 grip drag,
-    // 8 seek-only while audio is ready but its first Waveform is still loading.
+    changed pointer-kind => { root.pointer-feedback-changed(); }
+    changed pointer-image => { root.pointer-feedback-changed(); }
+    changed pointer-hotspot-x => { root.pointer-feedback-changed(); }
+    changed pointer-hotspot-y => { root.pointer-feedback-changed(); }
+    changed pointer-scale => { root.pointer-feedback-changed(); }
+    changed native-cursor => { root.pointer-feedback-changed(); }
+    // 1 draw, 2/3 resize, 4/5 interior pending/requested, 6/7 grip, 8 seek-only.
     property <int> mode: 0;
     property <length> down-x;
     property <length> down-y;
     property <length> down-width;
-    // Freeze the original view's upper bound independently of the transport,
-    // which may be empty or still describe a different sound during audition.
     property <float> captured-limit;
     property <float> anchor;
     property <float> draft-start;
     property <float> draft-end;
     property <bool> travelled: false;
-    property <bool> grip-hovered: false;
-    property <MouseCursor> grip-cursor: root.preparing ? progress : root.mode >= 6 ? grabbing : grab;
+    property <bool> is-preparing: root.preparing || root.export-state == 1;
     property <bool> editing: root.mode > 0 && root.mode < 4;
     property <float> shown-start: root.editing && (root.mode != 1 || root.travelled) ? min(root.draft-start, root.draft-end) : root.selection-start;
     property <float> shown-end: root.editing && (root.mode != 1 || root.travelled) ? max(root.draft-start, root.draft-end) : root.selection-end;
@@ -774,21 +819,46 @@ component WaveSelectionOverlay inherits Rectangle {
     property <length> right-x: (root.shown-end - root.view-start) / root.span * root.width;
     property <bool> near-left: root.selection-active && root.selection-start >= root.view-start && root.selection-start <= root.view-end && abs(hit.mouse-x - root.left-x) <= 5px * Theme.ui-scale;
     property <bool> near-right: root.selection-active && root.selection-end >= root.view-start && root.selection-end <= root.view-end && abs(hit.mouse-x - root.right-x) <= 5px * Theme.ui-scale;
+    property <bool> left-wins: root.near-left && (!root.near-right || abs(hit.mouse-x - root.left-x) <= abs(hit.mouse-x - root.right-x));
     property <bool> inside: root.selection-active && hit.mouse-x > root.left-x && hit.mouse-x < root.right-x;
-    property <string> hint: root.preparing ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "正在准备 WAV 切片 · Esc 取消" : "Preparing WAV slice · Esc cancels"))
+    property <bool> grip-gesture: root.mode == 6 || root.mode == 7;
+    property <length> paint-x: root.grip-gesture || (root.mode == 0 && grip.has-hover) ? grip-frame.x + grip.mouse-x : hit.mouse-x;
+    property <length> paint-y: root.grip-gesture || (root.mode == 0 && grip.has-hover) ? feedback.y + grip-frame.y + grip.mouse-y : hit.mouse-y;
+    // Ownership never reads paint geometry: the feedback text depends on the
+    // pointer kind and can change its row's layout. Snapshot the grip origin at
+    // Down, then use only input-local coordinates and that value while captured.
+    property <length> grip-origin-x;
+    property <length> grip-origin-y;
+    property <bool> hit-in-frame: hit.mouse-x >= 0px && hit.mouse-x <= root.width && hit.mouse-y >= 0px && hit.mouse-y <= root.height;
+    property <bool> grip-in-frame: root.grip-origin-x + grip.mouse-x >= 0px && root.grip-origin-x + grip.mouse-x <= root.width && root.grip-origin-y + grip.mouse-y >= 0px && root.grip-origin-y + grip.mouse-y <= root.height;
+    property <bool> pointer-owned: root.grip-gesture ? root.grip-in-frame
+        : root.mode != 0 ? root.hit-in-frame
+        : grip.has-hover || (hit.has-hover && hit.mouse-y >= 0px && hit.mouse-y <= root.plot-height);
+    property <string> hint: root.pointer-kind == 2 || root.pointer-kind == 3 ? (root.chinese ? "松开试听选区 · Esc 取消本次框选" : "Release to audition · Esc cancels this selection")
+        : root.pointer-kind == 4 ? (root.chinese ? "拖动调整起点 · 松开试听" : "Drag to adjust start · Release to audition")
+        : root.pointer-kind == 5 ? (root.chinese ? "拖动调整终点 · 松开试听" : "Drag to adjust end · Release to audition")
+        : root.pointer-kind == 8 ? (root.chinese ? "保持按住，正在准备 WAV · 松开后可再次拖出" : "Keep holding; preparing WAV · Release and drag again later")
+        : root.pointer-kind == 7 ? (root.chinese ? "拖出窗口导出 WAV · Esc 取消拖出" : "Drag out as WAV · Esc cancels the drag")
+        : root.pointer-kind == 6 ? (grip.has-hover
+            ? (root.chinese ? "拖动此手柄导出选区 WAV" : "Drag this handle to export the selection as WAV")
+            : (root.chinese ? "单击定位播放 · 拖动导出 WAV · Shift 拖动重选" : "Click to seek and play · Drag out as WAV · Shift-drag to reselect"))
+        : root.pointer-kind == 9 ? (root.chinese ? "单击定位播放 · 波形完成后可框选" : "Click to seek and play · Select when Waveform is ready")
+        : root.pointer-kind == 10 ? (root.chinese ? "波形暂不可操作" : "Waveform is currently unavailable")
+        : root.pointer-kind == 11 ? (root.chinese ? "拖到目标应用 · Esc 取消" : "Drop in the target application · Esc cancels")
         : root.shift-held ? (root.chinese ? "拖动重新框选 · 松开自动试听" : "Drag a new range · Release to audition")
-        : root.near-left || root.near-right ? (root.chinese ? "拖动边界调整选区 · 松开自动试听" : "Drag the edge to resize · Release to audition")
-        : root.inside ? (root.chinese ? "拖出选区导出 WAV · Shift 拖动重新框选" : "Drag selection out as WAV · Shift-drag to reselect")
         : (root.chinese ? "拖动框选并试听 · 单击定位播放" : "Drag to select and audition · Click to seek and play");
+    property <string> export-label: root.is-preparing ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "正在准备 WAV…" : "Preparing WAV…"))
+        : root.export-state == 2 ? (root.chinese ? "WAV 已就绪，拖出导出" : "WAV ready; drag out to export")
+        : root.export-state == 3 ? (root.chinese ? "正在拖出 WAV" : "Dragging WAV")
+        : root.export-state == 4 ? (root.chinese ? "已取消 · 再次拖出可重试" : "Cancelled · Drag again to retry")
+        : root.export-state == 5 ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "准备失败 · 再次拖出重试" : "Preparation failed · Drag again to retry"))
+        : root.hint;
     function cancel-gesture() { let was-drag = root.mode >= 4 && root.mode <= 7; root.mode = 0; root.travelled = false; if was-drag { root.drag-ended(); } }
     changed identity => { root.cancel-gesture(); }
     changed cancel-revision => { root.cancel-gesture(); }
     changed enabled => { if !root.enabled && root.mode != 8 { root.cancel-gesture(); } }
     changed seek-enabled => { if !root.seek-enabled && root.mode == 8 { root.cancel-gesture(); } }
-    // A legacy scrub has no stable source identity. A transport discontinuity
-    // cancels it, while range editing is tied only to the original source.
     changed seek-clock => { if root.mode == 8 { root.cancel-gesture(); } }
-    changed shown-active => { if !root.shown-active { root.grip-hovered = false; } }
     function source-time(x: length) -> float {
         return clamp(root.captured-start + clamp(x / max(1px, root.down-width), 0, 1) * (root.captured-end - root.captured-start), 0, root.captured-limit);
     }
@@ -804,27 +874,32 @@ component WaveSelectionOverlay inherits Rectangle {
     accessible-label: root.chinese ? "波形选区" : "Waveform selection";
     accessible-description: root.hint;
     if root.shown-active && root.shown-end > root.view-start && root.shown-start < root.view-end: Rectangle {
-        x: max(0px, root.left-x); width: max(0px, min(root.width, root.right-x) - self.x); height: parent.height;
+        x: max(0px, root.left-x); y: 0px; width: max(0px, min(root.width, root.right-x) - self.x); height: root.plot-height;
         background: Theme.accent.with-alpha(0.24);
         accessible-role: text; accessible-label: root.chinese ? "选中的波形区域" : "Selected waveform region";
     }
     if root.shown-active && root.shown-start >= root.view-start && root.shown-start <= root.view-end: Rectangle {
-        x: clamp(root.left-x, 0px, max(0px, root.width - 2px)); width: 2px; height: parent.height; background: Theme.accent-hover;
-        Rectangle { width: 5px * Theme.ui-scale; height: 13px * Theme.ui-scale; background: Theme.accent-hover; }
+        x: clamp(round(root.left-x / 1px) * 1px, 0px, max(0px, root.width - 1px)); y: 0px; width: 1px; height: root.plot-height;
+        background: root.pointer-kind == 4 ? Theme.accent-hover : Theme.ink.with-alpha(0.82);
+        Rectangle { x: 0px; y: 0px; width: 5px * Theme.ui-scale; height: 1px; background: parent.background; accessible-role: none; }
+        Rectangle { x: 0px; y: parent.height - 1px; width: 5px * Theme.ui-scale; height: 1px; background: parent.background; accessible-role: none; }
     }
     if root.shown-active && root.shown-end >= root.view-start && root.shown-end <= root.view-end: Rectangle {
-        x: clamp(root.right-x - 2px, 0px, max(0px, root.width - 2px)); width: 2px; height: parent.height; background: Theme.accent-hover;
-        Rectangle { x: -3px * Theme.ui-scale; width: 5px * Theme.ui-scale; height: 13px * Theme.ui-scale; background: Theme.accent-hover; }
+        x: clamp(round(root.right-x / 1px) * 1px - 1px, 0px, max(0px, root.width - 1px)); y: 0px; width: 1px; height: root.plot-height;
+        background: root.pointer-kind == 5 ? Theme.accent-hover : Theme.ink.with-alpha(0.82);
+        Rectangle { x: 1px - self.width; y: 0px; width: 5px * Theme.ui-scale; height: 1px; background: parent.background; accessible-role: none; }
+        Rectangle { x: 1px - self.width; y: parent.height - 1px; width: 5px * Theme.ui-scale; height: 1px; background: parent.background; accessible-role: none; }
     }
     hit := TouchArea {
-        enabled: root.enabled || root.seek-enabled;
-        mouse-cursor: !root.enabled ? (root.seek-enabled ? pointer : default) : root.preparing ? progress : root.mode >= 4 ? grabbing
-            : root.mode == 2 || root.mode == 3 ? ew-resize : root.mode == 1 || root.shift-held ? crosshair
-            : root.near-left || root.near-right ? ew-resize : root.inside ? grab : crosshair;
+        x: 0px; y: 0px; width: parent.width; height: root.plot-height;
+        // Always track hover, including unavailable/seek-only plots. Every
+        // mutation below separately checks the actual operation's availability.
+        mouse-cursor: root.native-cursor ? crosshair : (root.pointer-kind > 0 && root.pointer-kind < 11 ? none : default);
         pointer-event(event) => {
             if event.kind == PointerEventKind.cancel { root.cancel-gesture(); return; }
             if event.button != PointerEventButton.left { return; }
             if event.kind == PointerEventKind.down {
+                if (!root.enabled && !root.seek-enabled) || root.export-state == 3 { return; }
                 root.captured-start = root.view-start; root.captured-end = root.view-end;
                 root.captured-limit = max(0, root.enabled ? root.captured-end : root.duration);
                 root.down-width = root.width; root.down-x = self.mouse-x; root.down-y = self.mouse-y;
@@ -833,9 +908,8 @@ component WaveSelectionOverlay inherits Rectangle {
                 root.travelled = false;
                 if !root.enabled { root.mode = 8; }
                 else if event.modifiers.shift { root.mode = 1; }
-                else if root.near-left || root.near-right {
-                    root.mode = root.near-left && (!root.near-right || abs(self.mouse-x - root.left-x) <= abs(self.mouse-x - root.right-x)) ? 2 : 3;
-                } else { root.mode = root.inside ? 4 : 1; }
+                else if root.near-left || root.near-right { root.mode = root.left-wins ? 2 : 3; }
+                else { root.mode = root.inside ? 4 : 1; }
                 if root.mode == 1 { root.draft-start = root.anchor; root.draft-end = root.anchor; }
             } else if event.kind == PointerEventKind.up && root.mode != 0 {
                 root.move-pointer();
@@ -852,7 +926,7 @@ component WaveSelectionOverlay inherits Rectangle {
         }
         moved => { root.move-pointer(); }
         scroll-event(event) => {
-            if root.gesture { return accept; }
+            if root.gesture || root.export-state == 3 { return accept; }
             if ((root.enabled && root.view-end > root.view-start) || (root.seek-enabled && root.duration > 0)) && event.delta-y != 0px {
                 root.zoom-at(Math.pow(2, clamp(event.delta-y / 120px, -2, 2)), clamp(self.mouse-x / max(1px, self.width), 0, 1));
                 return accept;
@@ -860,51 +934,81 @@ component WaveSelectionOverlay inherits Rectangle {
             reject
         }
     }
-    if root.enabled && hit.has-hover && !root.gesture: Text {
-        x: 7px * Theme.ui-scale; y: 3px * Theme.ui-scale; width: max(0px, root.width - 14px * Theme.ui-scale);
-        text: root.hint; color: Theme.ink; font-size: Theme.font(9); overflow: elide; accessible-role: none;
-    }
-    if root.shown-active: Rectangle {
-        x: 4px * Theme.ui-scale; y: max(0px, root.height - self.height - 3px * Theme.ui-scale);
-        height: 21px * Theme.ui-scale; width: min(root.width - 8px * Theme.ui-scale, range-label.preferred-width + 61px * Theme.ui-scale);
-        background: Theme.tooltip.with-alpha(0.94); border-radius: 3px * Theme.ui-scale;
-        Rectangle {
-            width: 24px * Theme.ui-scale; height: parent.height;
-            accessible-role: button; accessible-label: root.chinese ? "拖出选区 WAV" : "Drag selection as WAV";
-            accessible-description: root.chinese ? "按住并拖出，导出当前选区；短选区也可使用此手柄" : "Press and drag to export the current selection; this handle also works for narrow ranges";
-            background: grip.has-hover ? Theme.control-hover-surface : transparent;
-            Image { source: @image-url("icons/export.svg"); colorize: Theme.accent-hover; width: 15px * Theme.ui-scale; height: self.width; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-            grip := TouchArea {
-                enabled: root.enabled; mouse-cursor: root.grip-cursor;
-                changed has-hover => { root.grip-hovered = self.has-hover; }
-                pointer-event(event) => {
-                    if event.kind == PointerEventKind.cancel { if root.mode >= 6 { root.cancel-gesture(); } return; }
-                    if event.button != PointerEventButton.left { return; }
-                    if event.kind == PointerEventKind.down {
-                        root.captured-start = root.view-start; root.captured-end = root.view-end;
-                        root.captured-limit = max(0, root.captured-end);
-                        root.down-x = self.mouse-x; root.down-y = self.mouse-y;
-                        root.mode = 6;
-                    } else if event.kind == PointerEventKind.up && root.mode >= 6 { root.cancel-gesture(); }
-                }
-                moved => {
-                    if root.mode == 6 && (abs(self.mouse-x - root.down-x) >= 6px || abs(self.mouse-y - root.down-y) >= 6px) {
-                        root.mode = 7; root.drag-requested();
+    feedback := Rectangle {
+        y: root.plot-height; width: parent.width; height: root.feedback-height;
+        background: Theme.player;
+        accessible-role: groupbox; accessible-label: root.chinese ? "波形选区操作" : "Waveform selection controls"; accessible-description: root.hint;
+        Rectangle { x: 0px; y: 0px; width: parent.width; height: 1px; background: Theme.player-border; accessible-role: none; }
+        HorizontalLayout {
+            padding-left: 4px * Theme.ui-scale; padding-right: 2px * Theme.ui-scale; padding-top: 1px; spacing: 5px * Theme.ui-scale;
+            grip-frame := Rectangle {
+                visible: root.shown-active;
+                width: !root.shown-active ? 0px : (root.width < 460px * Theme.ui-scale ? 26px : 92px) * Theme.ui-scale;
+                height: 24px * Theme.ui-scale; background: grip.has-hover ? Theme.control-hover-surface : transparent; border-radius: 3px * Theme.ui-scale;
+                property <bool> tip-ready: false;
+                accessible-role: button; accessible-label: root.chinese ? "拖出选区 WAV" : "Drag selection as WAV";
+                accessible-enabled: root.enabled && root.selection-active && root.export-state != 3;
+                accessible-description: root.chinese ? "按住并拖出，导出当前选区；短选区也可使用此手柄" : "Press and drag to export the current selection; this handle also works for narrow ranges";
+                Image { source: @image-url("icons/export.svg"); colorize: Theme.accent-hover; width: 15px * Theme.ui-scale; height: self.width; x: 5px * Theme.ui-scale; y: (parent.height - self.height) / 2; }
+                if root.width >= 460px * Theme.ui-scale: Text { x: 25px * Theme.ui-scale; width: parent.width - self.x; height: parent.height; text: root.chinese ? "拖出 WAV" : "Drag WAV"; color: Theme.ink; font-size: Theme.font(10); vertical-alignment: center; accessible-role: none; }
+                grip := TouchArea {
+                    changed has-hover => { if !self.has-hover { grip-frame.tip-ready = false; } }
+                    mouse-cursor: root.native-cursor ? crosshair : (root.pointer-kind > 0 && root.pointer-kind < 11 ? none : default);
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.cancel { if root.mode >= 6 { root.cancel-gesture(); } return; }
+                        if event.button != PointerEventButton.left { return; }
+                        if event.kind == PointerEventKind.down {
+                            if !root.enabled || !root.selection-active || root.export-state == 3 || root.mode != 0 { return; }
+                            root.captured-start = root.view-start; root.captured-end = root.view-end;
+                            root.captured-limit = max(0, root.captured-end);
+                            root.grip-origin-x = grip-frame.x;
+                            root.grip-origin-y = feedback.y + grip-frame.y;
+                            root.down-x = self.mouse-x; root.down-y = self.mouse-y;
+                            root.mode = 6;
+                        } else if event.kind == PointerEventKind.up && root.mode >= 6 { root.cancel-gesture(); }
+                    }
+                    moved => {
+                        if root.mode == 6 && (abs(self.mouse-x - root.down-x) >= 6px || abs(self.mouse-y - root.down-y) >= 6px) {
+                            root.mode = 7; root.drag-requested();
+                        }
                     }
                 }
+                Timer { interval: Theme.tooltip-delay; running: grip.has-hover && !root.gesture && !grip-frame.tip-ready; triggered => { grip-frame.tip-ready = true; } }
+                Tip { z: 10; anchor-width: parent.width; anchor-height: parent.height; align: -1; text: root.hint; show: grip-frame.tip-ready && grip.has-hover && !root.gesture; }
+            }
+            if root.shown-active: Text {
+                width: (root.width >= 650px * Theme.ui-scale ? 245px : root.width >= 420px * Theme.ui-scale ? 190px : 82px) * Theme.ui-scale;
+                text: root.width >= 420px * Theme.ui-scale ? Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + "  ·  " + Clock.format(root.shown-end - root.shown-start) : "Δ " + Clock.format(root.shown-end - root.shown-start);
+                color: Theme.ink; font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
+                accessible-role: text; accessible-label: root.chinese ? "选区起点、终点和时长" : "Selection start, end and duration";
+                accessible-description: Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + " · " + Clock.format(root.shown-end - root.shown-start);
+            }
+            Text {
+                horizontal-stretch: 1; min-width: 0px; text: root.editing || root.mode >= 4 ? root.hint : root.export-label;
+                color: root.export-state == 5 && !root.gesture ? Theme.danger : root.export-state == 2 && !root.gesture ? Theme.accent-hover : Theme.dim;
+                font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
+                accessible-role: text; accessible-label: root.chinese ? "波形导出状态" : "Waveform export status";
+                accessible-description: root.export-label;
+            }
+            if root.is-preparing: Tool {
+                width: (root.chinese ? 42px : 52px) * Theme.ui-scale; height: 24px * Theme.ui-scale;
+                symbol: root.chinese ? "取消" : "Cancel"; symbol-size: Theme.font(10); subtle: true;
+                label: root.chinese ? "取消切片准备" : "Cancel slice preparation"; hint: "Esc"; tip-align: 1;
+                clicked => { root.cancel-gesture(); root.cancel-requested(); }
+            }
+            if root.shown-active: Tool {
+                width: 24px * Theme.ui-scale; height: 24px * Theme.ui-scale; symbol: "×"; symbol-size: Theme.font(14); subtle: true;
+                label: root.chinese ? "清除波形选区" : "Clear waveform selection"; hint: "Esc"; tip-align: 1;
+                clicked => { root.cancel-gesture(); root.cleared(); }
             }
         }
-        range-label := Text {
-            x: 28px * Theme.ui-scale; width: max(0px, parent.width - 56px * Theme.ui-scale); height: parent.height;
-            text: Clock.format(root.shown-start) + " – " + Clock.format(root.shown-end) + "  ·  " + Clock.format(root.shown-end - root.shown-start);
-            color: Theme.ink; font-size: Theme.font(9); vertical-alignment: center; overflow: elide;
-            accessible-role: text; accessible-label: root.chinese ? "选区起点、终点和时长" : "Selection start, end and duration";
-        }
-        Tool {
-            x: parent.width - self.width; width: 24px * Theme.ui-scale; height: parent.height; symbol: "×"; symbol-size: Theme.font(14);
-            label: root.preparing ? (root.chinese ? "取消切片准备" : "Cancel slice preparation") : (root.chinese ? "清除波形选区" : "Clear waveform selection");
-            hint: "Esc"; tip-align: 1; subtle: true; clicked => { if root.preparing { root.cancel-requested(); } else { root.cleared(); } }
-        }
+    }
+    // Paint-only final layer follows the owning input, including active gestures
+    // passing over the row. Native OLE feedback always takes ownership in phase 3.
+    if !root.native-cursor && root.pointer-kind > 0 && root.pointer-kind < 11: WaveformPointer {
+        x: round(root.paint-x / 1px) * 1px - root.pointer-hotspot-x * 1px * root.pointer-scale;
+        y: round(root.paint-y / 1px) * 1px - root.pointer-hotspot-y * 1px * root.pointer-scale;
+        cursor-image: root.pointer-image; cursor-scale: root.pointer-scale;
     }
 }
 
@@ -917,6 +1021,8 @@ component ClassicAuditionPanel inherits Rectangle {
     in property <float> selection-end;
     in property <string> selection-identity;
     in property <bool> selection-preparing;
+    in property <int> selection-export-state;
+    in property <bool> selection-native-cursor: false;
     in property <string> selection-progress;
     in property <bool> selection-shift-held;
     in property <int> selection-cancel-revision;
@@ -926,8 +1032,14 @@ component ClassicAuditionPanel inherits Rectangle {
     callback selection-drag-ended();
     callback selection-cancel-requested();
     callback selection-cursor-changed(MouseCursor);
+    callback selection-pointer-feedback-changed();
     out property <bool> selection-gesture: scrub.gesture;
     out property <MouseCursor> selection-cursor: scrub.cursor;
+    out property <int> selection-pointer-kind: scrub.pointer-kind;
+    out property <image> selection-pointer-image: scrub.pointer-image;
+    out property <float> selection-pointer-hotspot-x: scrub.pointer-hotspot-x;
+    out property <float> selection-pointer-hotspot-y: scrub.pointer-hotspot-y;
+    out property <float> selection-pointer-scale: scrub.pointer-scale;
 
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
@@ -1041,7 +1153,7 @@ component ClassicAuditionPanel inherits Rectangle {
         }
         return reject;
     }
-    height: root.compact ? 190px * Theme.ui-scale : 222px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
+    height: root.compact ? 216px * Theme.ui-scale : 248px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
     VerticalLayout { padding: 9px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
         HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
             Rectangle {
@@ -1114,31 +1226,35 @@ component ClassicAuditionPanel inherits Rectangle {
             ClassicTool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
             ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; tip-align: 1; clicked => { root.output-settings(); } }
         }
-        wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: root.compact ? 45px * Theme.ui-scale : 70px * Theme.ui-scale; background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
-            accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
-            property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / max(0.001, root.shown-end - root.shown-start), 0, 1) : 0;
-            changed width => { root.resize(self.width / 1px, self.height / 1px); }
-            changed height => { root.resize(self.width / 1px, self.height / 1px); }
-            Image {
-                source: root.waveform; height: parent.height; image-fit: fill;
-                x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
-                width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+        wave-frame := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.compact ? 45px : 70px) * Theme.ui-scale + 26px * Theme.ui-scale;
+            wave := Rectangle { x: 0px; y: 0px; width: parent.width; height: max(1px, parent.height - scrub.feedback-height); background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
+                accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
+                property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / max(0.001, root.shown-end - root.shown-start), 0, 1) : 0;
+                changed width => { root.resize(self.width / 1px, self.height / 1px); }
+                changed height => { root.resize(self.width / 1px, self.height / 1px); }
+                Image {
+                    source: root.waveform; height: parent.height; image-fit: fill;
+                    x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
+                    width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+                }
+                if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
+                // These overlays are paint-only, leaving click/scroll ownership to scrub.
+                if root.ready && root.duration > 0: PlayedRegion {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    fraction: wave.played-fraction; position: root.position; duration: root.duration; chinese: root.chinese;
+                    tint: root.spectral ? #183c3428 : #8faea622;
+                }
+                if root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end: Rectangle {
+                    x: wave.played-fraction * (parent.width - 1px); width: 1px;
+                    background: root.spectral ? #f4faf7 : Theme.accent-hover;
+                }
+                if scrub.hovered && root.ready && root.selection-identity == "": Rectangle { x: scrub.pointer-x; width: 1px; background: #ffffff30; }
+                // Preserve current keyboard transport without changing the classic layout.
+
             }
-            if !root.waveform-ready: Text { text: root.busy || root.missing || root.state == 1 || root.state == 7 ? root.unavailable : root.ready ? (root.spectral ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在分析波形…" : "Analyzing waveform…")) : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition")); color: root.spectral ? #263238 : Theme.dim; horizontal-alignment: center; vertical-alignment: center; font-size: Theme.font(11); }
-            // These overlays are paint-only, leaving click/scroll ownership to scrub.
-            if root.ready && root.duration > 0: PlayedRegion {
-                x: 0px; y: 0px; width: parent.width; height: parent.height;
-                fraction: wave.played-fraction; position: root.position; duration: root.duration; chinese: root.chinese;
-                tint: root.spectral ? #183c3428 : #8faea622;
-            }
-            if root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end: Rectangle {
-                x: wave.played-fraction * (parent.width - 1px); width: 1px;
-                background: root.spectral ? #f4faf7 : Theme.accent-hover;
-            }
-            if scrub.hovered && root.ready: Rectangle { x: scrub.pointer-x; width: 1px; background: #ffffff30; }
-            // Preserve current keyboard transport without changing the classic layout.
             wave-keys := FocusScope {
-                enabled: root.ready || (root.waveform-ready && root.selection-identity != "" && !root.busy); focus-on-click: false;
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                focus-on-tab-navigation: root.ready || (root.waveform-ready && root.selection-identity != "" && !root.busy); focus-on-click: false;
                 key-pressed(event) => {
                     if !root.ready { return reject; }
                     if event.text == Key.Escape { if root.selection-gesture { root.selection-cancel-requested(); } else if root.selection-preparing { root.selection-cancel-requested(); } else { root.selection-cleared(); } return accept; }
@@ -1164,6 +1280,7 @@ component ClassicAuditionPanel inherits Rectangle {
                         view-start: root.shown-start; view-end: root.shown-end;
                         selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
                         identity: root.selection-identity; preparing: root.selection-preparing; progress-text: root.selection-progress;
+                        export-state: root.selection-export-state; native-cursor: root.selection-native-cursor;
                         shift-held: root.selection-shift-held; cancel-revision: root.selection-cancel-revision;
                         committed(start, end) => { root.selection-committed(start, end); }
                         cleared => { root.selection-cleared(); }
@@ -1173,6 +1290,7 @@ component ClassicAuditionPanel inherits Rectangle {
                         seek-play(time) => { root.seek-play(time); }
                         zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
                         cursor-changed(value) => { root.selection-cursor-changed(value); }
+                        pointer-feedback-changed => { root.selection-pointer-feedback-changed(); }
                     }
             }
         }
@@ -1220,6 +1338,8 @@ component WorkbenchAuditionPanel inherits Rectangle {
     in property <float> selection-end;
     in property <string> selection-identity;
     in property <bool> selection-preparing;
+    in property <int> selection-export-state;
+    in property <bool> selection-native-cursor: false;
     in property <string> selection-progress;
     in property <bool> selection-shift-held;
     in property <int> selection-cancel-revision;
@@ -1229,8 +1349,14 @@ component WorkbenchAuditionPanel inherits Rectangle {
     callback selection-drag-ended();
     callback selection-cancel-requested();
     callback selection-cursor-changed(MouseCursor);
+    callback selection-pointer-feedback-changed();
     out property <bool> selection-gesture: scrub.gesture;
     out property <MouseCursor> selection-cursor: scrub.cursor;
+    out property <int> selection-pointer-kind: scrub.pointer-kind;
+    out property <image> selection-pointer-image: scrub.pointer-image;
+    out property <float> selection-pointer-hotspot-x: scrub.pointer-hotspot-x;
+    out property <float> selection-pointer-hotspot-y: scrub.pointer-hotspot-y;
+    out property <float> selection-pointer-scale: scrub.pointer-scale;
 
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
@@ -1388,7 +1514,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
     in property <image> waveform-mask;
     callback expanded-requested(bool);
     private property <bool> show-spectral: root.expanded && root.spectral;
-    height: 88px * Theme.ui-scale;
+    height: 114px * Theme.ui-scale;
     background: Theme.player-surface;
     Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.player-backdrop; image-fit: fill; accessible-role: none; }
     Rectangle { x: 0px; y: 0px; height: 1px; background: Theme.player-border; }
@@ -1510,118 +1636,163 @@ component WorkbenchAuditionPanel inherits Rectangle {
             }
         }
         VerticalLayout { row: 0; col: 2; horizontal-stretch: 1; min-width: 220px * Theme.ui-scale; spacing: 0px;
-            wave := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.zoom > 1 ? 44px : 54px) * Theme.ui-scale; background: root.show-spectral && root.waveform-ready ? Theme.spectral-canvas : Theme.normal-canvas;
-                border-color: wave-keys.has-focus ? Theme.accent : (root.show-spectral ? Theme.player-border : transparent); border-width: 1px; clip: true;
-                animate border-color { duration: Theme.motion-fast; }
-                accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
-                property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / root.shown-span, 0, 1) : 0;
-                property <float> color-fraction: clamp((root.visual-position - root.view-start) / max(0.001, root.view-end - root.view-start), 0, 1);
-                property <bool> head-visible: root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end;
-                property <color> head-color: root.show-spectral ? #f4faf7 : Theme.apricot;
-                property <bool> pointer-in: root.ready && (scrub.hovered || ruler-touch.has-hover || root.scrubbing);
-                property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.hovered ? scrub.pointer-x : ruler-touch.mouse-x, 0px, wave.width);
-                changed width => { root.resize(self.width / 1px, self.height / 1px); }
-                changed height => { root.resize(self.width / 1px, self.height / 1px); }
-                // The last image, placed by its own range inside the drawn range: a pending
-                // zoom or pan moves the old picture until the new render replaces it.
-                Image {
-                    visible: root.show-spectral; source: root.waveform; height: parent.height; image-fit: fill;
-                    x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
-                    width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
-                    opacity: root.waveform-ready ? 1 : 0;
-                    animate opacity { duration: Theme.motion-slow; easing: ease-out; }
-                }
-                Image {
-                    visible: !root.show-spectral; source: root.waveform-mask; colorize: Theme.dim; height: parent.height; image-fit: fill;
-                    x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
-                    width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
-                    opacity: root.waveform-ready ? 1 : 0;
-                    animate opacity { duration: Theme.motion-slow; easing: ease-out; }
-                }
-                // Played waveform in a gradient from the start (accent) to the playhead
-                // (apricot), drawn as 64 bands. The bands are laid out over `span`, a
-                // little more than the played width, in 1/16 steps, and each band is cut
-                // at the playhead itself. Between steps only the band under the playhead
-                // changes, so a frame repaints one band instead of the whole played
-                // waveform; the gradient re-spreads at each step. `span` is assigned,
-                // not bound: a binding on the playhead would mark every band changed on
-                // every frame. Each band draws only its own slice of the mask
-                // (source-clip), so a cut band never repaints the whole timeline.
-                if !root.show-spectral && root.waveform-ready: Rectangle {
-                    x: 0px; y: 0px; width: wave.width; height: wave.height;
-                    property <length> head: wave.played-fraction * wave.width;
-                    property <length> span: 32px;
-                    init => { self.span = root.band-span(self.head, wave.width, self.span); }
-                    changed head => { self.span = root.band-span(self.head, wave.width, self.span); }
-                    property <length> image-x: (root.view-start - root.shown-start) / root.shown-span * wave.width;
-                    property <length> image-w: max(1px, (root.view-end - root.view-start) / root.shown-span * wave.width);
-                    for stripe in 64: Rectangle {
-                        private property <float> fraction: stripe / 63.0;
-                        private property <color> tone: self.fraction <= 0.78 ? Theme.accent.mix(Theme.mint, 1 - self.fraction / 0.78) : Theme.mint.mix(Theme.apricot, 1 - (self.fraction - 0.78) / 0.22);
-                        private property <length> band-x: parent.span * stripe / 64;
-                        private property <length> band-w: parent.span / 64 + 1px;
-                        private property <length> image-x: parent.image-x;
-                        private property <length> image-w: parent.image-w;
-                        private property <length> from: max(self.band-x, self.image-x);
-                        private property <length> to: min(self.band-x + self.band-w, self.image-x + self.image-w);
-                        x: self.band-x; y: 0px; height: parent.height; clip: true;
-                        width: clamp(parent.head - self.band-x, 0px, self.band-w);
-                        Image {
-                            source: root.waveform-mask; colorize: parent.tone; image-fit: fill;
-                            x: parent.from - parent.band-x; y: 0px; height: wave.height;
-                            width: max(0px, parent.to - parent.from);
-                            source-clip-x: Math.floor((parent.from - parent.image-x) / parent.image-w * root.waveform-mask.width);
-                            source-clip-width: max(1, Math.round(max(0px, parent.to - parent.from) / parent.image-w * root.waveform-mask.width));
-                            source-clip-y: 0; source-clip-height: root.waveform-mask.height;
-                            opacity: root.waveform-ready ? 1 : 0;
-                            animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+            wave-frame := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.zoom > 1 ? 44px : 54px) * Theme.ui-scale + 26px * Theme.ui-scale;
+                wave := Rectangle { x: 0px; y: 0px; width: parent.width; height: max(1px, parent.height - scrub.feedback-height); background: root.show-spectral && root.waveform-ready ? Theme.spectral-canvas : Theme.normal-canvas;
+                    border-color: wave-keys.has-focus ? Theme.accent : (root.show-spectral ? Theme.player-border : transparent); border-width: 1px; clip: true;
+                    animate border-color { duration: Theme.motion-fast; }
+                    accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
+                    property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / root.shown-span, 0, 1) : 0;
+                    property <float> color-fraction: clamp((root.visual-position - root.view-start) / max(0.001, root.view-end - root.view-start), 0, 1);
+                    property <bool> head-visible: root.ready && root.duration > 0 && root.visual-position >= root.shown-start && root.visual-position <= root.shown-end;
+                    property <color> head-color: root.show-spectral ? #f4faf7 : Theme.apricot;
+                    property <bool> pointer-in: root.ready && (scrub.hovered || ruler-touch.has-hover || root.scrubbing);
+                    property <length> pointer-x: root.scrubbing ? root.scrub-x : clamp(scrub.hovered ? scrub.pointer-x : ruler-touch.mouse-x, 0px, wave.width);
+                    changed width => { root.resize(self.width / 1px, self.height / 1px); }
+                    changed height => { root.resize(self.width / 1px, self.height / 1px); }
+                    // The last image, placed by its own range inside the drawn range: a pending
+                    // zoom or pan moves the old picture until the new render replaces it.
+                    Image {
+                        visible: root.show-spectral; source: root.waveform; height: parent.height; image-fit: fill;
+                        x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
+                        width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+                        opacity: root.waveform-ready ? 1 : 0;
+                        animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                    }
+                    Image {
+                        visible: !root.show-spectral; source: root.waveform-mask; colorize: Theme.dim; height: parent.height; image-fit: fill;
+                        x: (root.view-start - root.shown-start) / root.shown-span * parent.width;
+                        width: max(0px, (root.view-end - root.view-start) / root.shown-span * parent.width);
+                        opacity: root.waveform-ready ? 1 : 0;
+                        animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                    }
+                    // Played waveform in a gradient from the start (accent) to the playhead
+                    // (apricot), drawn as 64 bands. The bands are laid out over `span`, a
+                    // little more than the played width, in 1/16 steps, and each band is cut
+                    // at the playhead itself. Between steps only the band under the playhead
+                    // changes, so a frame repaints one band instead of the whole played
+                    // waveform; the gradient re-spreads at each step. `span` is assigned,
+                    // not bound: a binding on the playhead would mark every band changed on
+                    // every frame. Each band draws only its own slice of the mask
+                    // (source-clip), so a cut band never repaints the whole timeline.
+                    if !root.show-spectral && root.waveform-ready: Rectangle {
+                        x: 0px; y: 0px; width: wave.width; height: wave.height;
+                        property <length> head: wave.played-fraction * wave.width;
+                        property <length> span: 32px;
+                        init => { self.span = root.band-span(self.head, wave.width, self.span); }
+                        changed head => { self.span = root.band-span(self.head, wave.width, self.span); }
+                        property <length> image-x: (root.view-start - root.shown-start) / root.shown-span * wave.width;
+                        property <length> image-w: max(1px, (root.view-end - root.view-start) / root.shown-span * wave.width);
+                        for stripe in 64: Rectangle {
+                            private property <float> fraction: stripe / 63.0;
+                            private property <color> tone: self.fraction <= 0.78 ? Theme.accent.mix(Theme.mint, 1 - self.fraction / 0.78) : Theme.mint.mix(Theme.apricot, 1 - (self.fraction - 0.78) / 0.22);
+                            private property <length> band-x: parent.span * stripe / 64;
+                            private property <length> band-w: parent.span / 64 + 1px;
+                            private property <length> image-x: parent.image-x;
+                            private property <length> image-w: parent.image-w;
+                            private property <length> from: max(self.band-x, self.image-x);
+                            private property <length> to: min(self.band-x + self.band-w, self.image-x + self.image-w);
+                            x: self.band-x; y: 0px; height: parent.height; clip: true;
+                            width: clamp(parent.head - self.band-x, 0px, self.band-w);
+                            Image {
+                                source: root.waveform-mask; colorize: parent.tone; image-fit: fill;
+                                x: parent.from - parent.band-x; y: 0px; height: wave.height;
+                                width: max(0px, parent.to - parent.from);
+                                source-clip-x: Math.floor((parent.from - parent.image-x) / parent.image-w * root.waveform-mask.width);
+                                source-clip-width: max(1, Math.round(max(0px, parent.to - parent.from) / parent.image-w * root.waveform-mask.width));
+                                source-clip-y: 0; source-clip-height: root.waveform-mask.height;
+                                opacity: root.waveform-ready ? 1 : 0;
+                                animate opacity { duration: Theme.motion-slow; easing: ease-out; }
+                            }
+                        }
+                    }
+                    // Loading: faint channel lanes. Static, so a slow analysis never keeps the
+                    // window repainting every frame.
+                    if root.phase == 1 && !root.waveform-ready: Rectangle {
+                        property <color> lane: Theme.dim.with-alpha(0.12);
+                        Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
+                        Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
+                    }
+                    // Render progress while a partial Waveform is already on screen.
+                    if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
+                        y: 0px; height: 2px * Theme.ui-scale; background: #00000020;
+                        Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
+                    }
+                    // These overlays are paint-only, leaving click/scroll ownership to scrub.
+                    if root.ready && root.duration > 0: PlayedRegion {
+                        x: 0px; y: 0px; width: parent.width; height: parent.height;
+                        fraction: wave.played-fraction; position: root.position; duration: root.duration; chinese: root.chinese;
+                        tint: #183c3428; paint: root.show-spectral; faded: root.state == 6;
+                    }
+                    if wave.head-visible: Rectangle {
+                        x: wave.played-fraction * (parent.width - 1px); width: 1px;
+                        background: wave.head-color;
+                    }
+                    // Pointer: a hairline (accent while scrubbing) and the time under it.
+                    if wave.pointer-in && root.selection-identity == "": Rectangle { x: wave.pointer-x; width: 1px; background: root.scrubbing ? Theme.accent : (root.show-spectral ? #ffffff80 : #ffffff40); }
+                    if wave.pointer-in && root.scrubbing && root.selection-identity == "": Path {
+                        x: wave.pointer-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
+                        viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
+                        fill: Theme.accent; stroke: Theme.accent; stroke-width: 1.5px;
+                    }
+                    if wave.pointer-in && !scrub.hovered: Rectangle {
+                        y: 10px * Theme.ui-scale; height: 18px * Theme.ui-scale; width: pointer-time.preferred-width + 12px * Theme.ui-scale;
+                        x: clamp(wave.pointer-x - self.width / 2, 2px, max(2px, wave.width - self.width - 2px));
+                        background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-color: root.scrubbing ? Theme.accent : Theme.strong-border; border-radius: 3px * Theme.ui-scale;
+                        pointer-time := Text {
+                            text: Clock.format(root.time-at(wave.pointer-x / max(1px, wave.width)));
+                            color: root.scrubbing ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(10);
+                            horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
+                        }
+                    }
+                    // Keyboard (after Tab): Space plays/pauses, Left/Right nudge (Shift: larger),
+                    // Home returns to the start, + / - / 0 zoom. A click does not take focus, so
+                    // list navigation keeps working after a seek.
+
+                    // Empty, loading, error, missing and maintenance states explain themselves.
+                    if root.phase == 0 || root.phase == 1: VerticalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
+                        Text {
+                            horizontal-alignment: center; font-size: Theme.font(11); color: root.show-spectral && root.waveform-ready ? #263238 : Theme.dim;
+                            text: root.phase == 1
+                            ? (root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在加载声音…" : "Loading sound…"))
+                            : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition"));
+                        }
+                    }
+                    if root.phase >= 3: VerticalLayout { alignment: center;
+                        HorizontalLayout { alignment: center;
+                            Rectangle {
+                                background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
+                                border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
+                                HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+                                    VerticalLayout { alignment: center;
+                                        Image {
+                                            width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; accessible-role: none;
+                                            source: root.phase == 4 ? @image-url("icons/file-missing.svg") : @image-url("icons/alert.svg");
+                                            colorize: root.phase == 3 ? Theme.danger : Theme.warning;
+                                        }
+                                    }
+                                    VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
+                                        Text {
+                                            font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
+                                            text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
+                                            : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
+                                            : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
+                                        }
+                                        if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
+                                    }
+                                    if root.phase == 3: VerticalLayout { alignment: center;
+                                        Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
+                                    }
+                                    if root.phase == 4: VerticalLayout { alignment: center;
+                                        Tool { width: 96px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重新关联…" : "Locate file…"; symbol-size: Theme.font(11); label: root.chinese ? "选择新位置，修复引用" : "Locate the moved WAV and repair"; primary: true; enabled: root.relink-enabled; clicked => { root.relink(); } }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                // Loading: faint channel lanes. Static, so a slow analysis never keeps the
-                // window repainting every frame.
-                if root.phase == 1 && !root.waveform-ready: Rectangle {
-                    property <color> lane: Theme.dim.with-alpha(0.12);
-                    Rectangle { y: parent.height * 0.25 - 1px; height: 2px; background: parent.lane; }
-                    Rectangle { y: parent.height * 0.75 - 1px; height: 2px; background: parent.lane; }
-                }
-                // Render progress while a partial Waveform is already on screen.
-                if root.ready && root.waveform-ready && root.waveform-progress < 1: Rectangle {
-                    y: 0px; height: 2px * Theme.ui-scale; background: #00000020;
-                    Rectangle { x: 0px; height: parent.height; width: parent.width * clamp(root.waveform-progress, 0, 1); background: Theme.accent; animate width { duration: Theme.motion-base; } }
-                }
-                // These overlays are paint-only, leaving click/scroll ownership to scrub.
-                if root.ready && root.duration > 0: PlayedRegion {
-                    x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    fraction: wave.played-fraction; position: root.position; duration: root.duration; chinese: root.chinese;
-                    tint: #183c3428; paint: root.show-spectral; faded: root.state == 6;
-                }
-                if wave.head-visible: Rectangle {
-                    x: wave.played-fraction * (parent.width - 1px); width: 1px;
-                    background: wave.head-color;
-                }
-                // Pointer: a hairline (accent while scrubbing) and the time under it.
-                if wave.pointer-in: Rectangle { x: wave.pointer-x; width: 1px; background: root.scrubbing ? Theme.accent : (root.show-spectral ? #ffffff80 : #ffffff40); }
-                if wave.pointer-in && root.scrubbing: Path {
-                    x: wave.pointer-x - 6px * Theme.ui-scale; y: 0px; width: 12px * Theme.ui-scale; height: 8px * Theme.ui-scale;
-                    viewbox-width: 12; viewbox-height: 8; commands: "M 0.75 0.75 L 11.25 0.75 L 6 7.25 Z";
-                    fill: Theme.accent; stroke: Theme.accent; stroke-width: 1.5px;
-                }
-                if wave.pointer-in && !scrub.hovered: Rectangle {
-                    y: 10px * Theme.ui-scale; height: 18px * Theme.ui-scale; width: pointer-time.preferred-width + 12px * Theme.ui-scale;
-                    x: clamp(wave.pointer-x - self.width / 2, 2px, max(2px, wave.width - self.width - 2px));
-                    background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-color: root.scrubbing ? Theme.accent : Theme.strong-border; border-radius: 3px * Theme.ui-scale;
-                    pointer-time := Text {
-                        text: Clock.format(root.time-at(wave.pointer-x / max(1px, wave.width)));
-                        color: root.scrubbing ? Theme.accent-hover : Theme.ink; font-family: "Consolas"; font-size: Theme.font(10);
-                        horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
-                    }
-                }
-                // Keyboard (after Tab): Space plays/pauses, Left/Right nudge (Shift: larger),
-                // Home returns to the start, + / - / 0 zoom. A click does not take focus, so
-                // list navigation keeps working after a seek.
                 wave-keys := FocusScope {
-                    enabled: root.ready || (root.waveform-ready && root.selection-identity != "" && !root.busy); focus-on-click: false;
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    focus-on-tab-navigation: root.ready || (root.waveform-ready && root.selection-identity != "" && !root.busy); focus-on-click: false;
                     key-pressed(event) => {
                         if !root.ready { return reject; }
                         if event.text == Key.Escape { if root.selection-gesture { root.selection-cancel-requested(); } else if root.selection-preparing { root.selection-cancel-requested(); } else { root.selection-cleared(); } return accept; }
@@ -1647,6 +1818,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         view-start: root.shown-start; view-end: root.shown-end;
                         selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
                         identity: root.selection-identity; preparing: root.selection-preparing; progress-text: root.selection-progress;
+                        export-state: root.selection-export-state; native-cursor: root.selection-native-cursor;
                         shift-held: root.selection-shift-held; cancel-revision: root.selection-cancel-revision;
                         committed(start, end) => { root.selection-committed(start, end); }
                         cleared => { root.selection-cleared(); }
@@ -1656,47 +1828,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         seek-play(time) => { root.seek-play(time); }
                         zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
                         cursor-changed(value) => { root.selection-cursor-changed(value); }
-                    }
-                }
-                // Empty, loading, error, missing and maintenance states explain themselves.
-                if root.phase == 0 || root.phase == 1: VerticalLayout { alignment: center; spacing: 6px * Theme.ui-scale;
-                    Text {
-                        horizontal-alignment: center; font-size: Theme.font(11); color: root.show-spectral && root.waveform-ready ? #263238 : Theme.dim;
-                        text: root.phase == 1
-                        ? (root.ready ? (root.chinese ? "正在分析频谱峰值…" : "Analyzing spectral peaks…") : (root.chinese ? "正在加载声音…" : "Loading sound…"))
-                        : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition"));
-                    }
-                }
-                if root.phase >= 3: VerticalLayout { alignment: center;
-                    HorizontalLayout { alignment: center;
-                        Rectangle {
-                            background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
-                            border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
-                            HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
-                                VerticalLayout { alignment: center;
-                                    Image {
-                                        width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; accessible-role: none;
-                                        source: root.phase == 4 ? @image-url("icons/file-missing.svg") : @image-url("icons/alert.svg");
-                                        colorize: root.phase == 3 ? Theme.danger : Theme.warning;
-                                    }
-                                }
-                                VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
-                                    Text {
-                                        font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
-                                        text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
-                                        : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
-                                        : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
-                                    }
-                                    if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
-                                }
-                                if root.phase == 3: VerticalLayout { alignment: center;
-                                    Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
-                                }
-                                if root.phase == 4: VerticalLayout { alignment: center;
-                                    Tool { width: 96px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重新关联…" : "Locate file…"; symbol-size: Theme.font(11); label: root.chinese ? "选择新位置，修复引用" : "Locate the moved WAV and repair"; primary: true; enabled: root.relink-enabled; clicked => { root.relink(); } }
-                                }
-                            }
-                        }
+                        pointer-feedback-changed => { root.selection-pointer-feedback-changed(); }
                     }
                 }
             }
@@ -1748,6 +1880,8 @@ export component AuditionPanel inherits Rectangle {
     in property <float> selection-end;
     in property <string> selection-identity;
     in property <bool> selection-preparing;
+    in property <int> selection-export-state;
+    in property <bool> selection-native-cursor: false;
     in property <string> selection-progress;
     in property <bool> selection-shift-held;
     callback selection-committed(float,float);
@@ -1757,10 +1891,31 @@ export component AuditionPanel inherits Rectangle {
     callback selection-cancel-requested();
     out property <bool> selection-gesture: root.presenter-selection-gesture;
     out property <MouseCursor> selection-cursor: root.presenter-selection-cursor;
+    callback selection-pointer-feedback-changed();
+    out property <int> selection-pointer-kind: root.presenter-pointer-kind;
+    out property <image> selection-pointer-image: root.presenter-pointer-image;
+    out property <float> selection-pointer-hotspot-x: root.presenter-pointer-hotspot-x;
+    out property <float> selection-pointer-hotspot-y: root.presenter-pointer-hotspot-y;
+    out property <float> selection-pointer-scale: root.presenter-pointer-scale;
+    property <int> presenter-pointer-kind: 0;
+    property <image> presenter-pointer-image;
+    property <image> empty-pointer-image;
+    property <float> presenter-pointer-hotspot-x: 10;
+    property <float> presenter-pointer-hotspot-y: 10;
+    property <float> presenter-pointer-scale: 1;
+    function reset-pointer-feedback() {
+        root.presenter-pointer-kind = 0; root.presenter-pointer-image = root.empty-pointer-image;
+        root.selection-pointer-feedback-changed();
+    }
     property <bool> presenter-selection-gesture: false;
     property <MouseCursor> presenter-selection-cursor: default;
     property <int> selection-cancel-revision: 0;
-    public function cancel-selection-gesture() { root.selection-cancel-revision += 1; }
+    public function cancel-selection-gesture() {
+        // Reflect cancellation immediately to callers; the revision also reaches
+        // the current presenter's input owner at the next change boundary.
+        root.presenter-selection-gesture = false;
+        root.selection-cancel-revision += 1;
+    }
 
     in property <bool> play-on-single-click: false;
     in property <bool> ready;
@@ -1834,10 +1989,10 @@ export component AuditionPanel inherits Rectangle {
     in-out property <float> premute-db: -12;
     in-out property <bool> show-remaining: false;
     property <bool> modern-player: Theme.modern-player;
-    changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; }
-    changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; } }
-    height: Theme.modern-player ? (root.expanded ? 260px : 88px) * Theme.ui-scale
-        : (root.compact ? 190px : 222px) * Theme.ui-scale;
+    changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); }
+    changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); } }
+    height: Theme.modern-player ? (root.expanded ? 286px : 114px) * Theme.ui-scale
+        : (root.compact ? 216px : 248px) * Theme.ui-scale;
     if root.active && !Theme.modern-player: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
         compact: root.compact;
@@ -1845,10 +2000,19 @@ export component AuditionPanel inherits Rectangle {
         chinese: root.chinese;
         selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
         selection-identity: root.selection-identity; selection-preparing: root.selection-preparing; selection-progress: root.selection-progress;
+        selection-export-state: root.selection-export-state; selection-native-cursor: root.selection-native-cursor;
         selection-shift-held: root.selection-shift-held; selection-cancel-revision: root.selection-cancel-revision;
         changed selection-gesture => { root.presenter-selection-gesture = self.selection-gesture; }
         changed selection-cursor => { root.presenter-selection-cursor = self.selection-cursor; }
         selection-cursor-changed(value) => { root.presenter-selection-cursor = value; }
+        selection-pointer-feedback-changed => {
+            root.presenter-pointer-kind = self.selection-pointer-kind;
+            root.presenter-pointer-image = self.selection-pointer-image;
+            root.presenter-pointer-hotspot-x = self.selection-pointer-hotspot-x;
+            root.presenter-pointer-hotspot-y = self.selection-pointer-hotspot-y;
+            root.presenter-pointer-scale = self.selection-pointer-scale;
+            root.selection-pointer-feedback-changed();
+        }
         selection-committed(start, end) => { root.selection-committed(start, end); }
         selection-cleared => { root.selection-cleared(); }
         selection-drag-requested => { root.selection-drag-requested(); }
@@ -1908,10 +2072,19 @@ export component AuditionPanel inherits Rectangle {
         chinese: root.chinese;
         selection-active: root.selection-active; selection-start: root.selection-start; selection-end: root.selection-end;
         selection-identity: root.selection-identity; selection-preparing: root.selection-preparing; selection-progress: root.selection-progress;
+        selection-export-state: root.selection-export-state; selection-native-cursor: root.selection-native-cursor;
         selection-shift-held: root.selection-shift-held; selection-cancel-revision: root.selection-cancel-revision;
         changed selection-gesture => { root.presenter-selection-gesture = self.selection-gesture; }
         changed selection-cursor => { root.presenter-selection-cursor = self.selection-cursor; }
         selection-cursor-changed(value) => { root.presenter-selection-cursor = value; }
+        selection-pointer-feedback-changed => {
+            root.presenter-pointer-kind = self.selection-pointer-kind;
+            root.presenter-pointer-image = self.selection-pointer-image;
+            root.presenter-pointer-hotspot-x = self.selection-pointer-hotspot-x;
+            root.presenter-pointer-hotspot-y = self.selection-pointer-hotspot-y;
+            root.presenter-pointer-scale = self.selection-pointer-scale;
+            root.selection-pointer-feedback-changed();
+        }
         selection-committed(start, end) => { root.selection-committed(start, end); }
         selection-cleared => { root.selection-cleared(); }
         selection-drag-requested => { root.selection-drag-requested(); }
