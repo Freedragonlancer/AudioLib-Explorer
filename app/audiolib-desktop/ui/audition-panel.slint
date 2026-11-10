@@ -1757,38 +1757,6 @@ component WorkbenchAuditionPanel inherits Rectangle {
                             : (root.play-on-single-click ? (root.chinese ? "单击声音即可试听" : "Click a sound to audition") : (root.chinese ? "选择声音查看波形 · 双击试听" : "Select a sound to view its waveform · Double-click to audition"));
                         }
                     }
-                    if root.phase >= 3: VerticalLayout { alignment: center;
-                        HorizontalLayout { alignment: center;
-                            Rectangle {
-                                background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
-                                border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
-                                HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
-                                    VerticalLayout { alignment: center;
-                                        Image {
-                                            width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; accessible-role: none;
-                                            source: root.phase == 4 ? @image-url("icons/file-missing.svg") : @image-url("icons/alert.svg");
-                                            colorize: root.phase == 3 ? Theme.danger : Theme.warning;
-                                        }
-                                    }
-                                    VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
-                                        Text {
-                                            font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
-                                            text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
-                                            : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
-                                            : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
-                                        }
-                                        if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
-                                    }
-                                    if root.phase == 3: VerticalLayout { alignment: center;
-                                        Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
-                                    }
-                                    if root.phase == 4: VerticalLayout { alignment: center;
-                                        Tool { width: 96px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重新关联…" : "Locate file…"; symbol-size: Theme.font(11); label: root.chinese ? "选择新位置，修复引用" : "Locate the moved WAV and repair"; primary: true; enabled: root.relink-enabled; clicked => { root.relink(); } }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
                 wave-keys := FocusScope {
                 x: 0px; y: 0px; width: parent.width; height: parent.height;
@@ -1829,6 +1797,41 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         zoom-at(factor, fraction) => { root.zoom-at(factor, fraction); }
                         cursor-changed(value) => { root.selection-cursor-changed(value); }
                         pointer-feedback-changed => { root.selection-pointer-feedback-changed(); }
+                    }
+                }
+                if root.phase >= 3: Rectangle { x: 0px; y: 0px; width: parent.width; height: wave.height; background: transparent; clip: true;
+                    VerticalLayout { alignment: center;
+                        HorizontalLayout { alignment: center;
+                            Rectangle {
+                                background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
+                                border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
+                                TouchArea { mouse-cursor: default; }
+                                HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
+                                    VerticalLayout { alignment: center;
+                                        Image {
+                                            width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale; accessible-role: none;
+                                            source: root.phase == 4 ? @image-url("icons/file-missing.svg") : @image-url("icons/alert.svg");
+                                            colorize: root.phase == 3 ? Theme.danger : Theme.warning;
+                                        }
+                                    }
+                                    VerticalLayout { alignment: center; spacing: 2px * Theme.ui-scale;
+                                        Text {
+                                            font-size: Theme.font(11); font-weight: 600; color: Theme.ink;
+                                            text: root.phase == 3 ? (root.chinese ? "无法加载此声音" : "Couldn't load this sound")
+                                            : root.phase == 4 ? (root.chinese ? "文件缺失：原位置找不到此 WAV" : "File missing at its original location")
+                                            : (root.chinese ? "音效库维护中，暂不可试听" : "Library maintenance in progress · Audition unavailable");
+                                        }
+                                        if root.phase == 3 && root.error-text != "": Text { max-width: 420px * Theme.ui-scale; text: root.error-text; overflow: elide; font-size: Theme.font(10); color: Theme.dim; }
+                                    }
+                                    if root.phase == 3: VerticalLayout { alignment: center;
+                                        Tool { width: 64px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重试" : "Retry"; symbol-size: Theme.font(11); label: root.chinese ? "重新加载并试听" : "Reload and audition"; primary: true; clicked => { root.retry(); } }
+                                    }
+                                    if root.phase == 4: VerticalLayout { alignment: center;
+                                        Tool { width: 96px * Theme.ui-scale; height: 26px * Theme.ui-scale; symbol: root.chinese ? "重新关联…" : "Locate file…"; symbol-size: Theme.font(11); label: root.chinese ? "选择新位置，修复引用" : "Locate the moved WAV and repair"; primary: true; enabled: root.relink-enabled; clicked => { root.relink(); } }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
