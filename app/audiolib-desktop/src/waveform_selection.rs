@@ -262,11 +262,27 @@ impl Drop for DragBusy {
     }
 }
 
+/// Presentation phases do not change the selected source/range or audio state.
+#[repr(i32)]
+enum ExportFeedback {
+    Idle = 0,
+    Preparing = 1,
+    Ready = 2,
+    NativeDrag = 3,
+    Cancelled = 4,
+    Error = 5,
+}
+
+fn show_export_feedback(ui: &AppWindow, phase: ExportFeedback) {
+    ui.set_wave_selection_preparing(matches!(phase, ExportFeedback::Preparing));
+    ui.set_wave_selection_export_state(phase as i32);
+}
+
 fn selection_ui_clear(ui: &AppWindow) {
     ui.set_wave_selection_active(false);
     ui.set_wave_selection_start(0.0);
     ui.set_wave_selection_end(0.0);
-    ui.set_wave_selection_preparing(false);
+    show_export_feedback(ui, ExportFeedback::Idle);
     ui.set_wave_selection_progress("".into());
 }
 
@@ -545,7 +561,7 @@ impl Controller {
         ui.set_wave_selection_active(true);
         ui.set_wave_selection_start(range.start_seconds() as f32);
         ui.set_wave_selection_end(range.end_seconds() as f32);
-        ui.set_wave_selection_preparing(true);
+        show_export_feedback(&ui, ExportFeedback::Preparing);
         ui.set_wave_selection_progress(
             if self.chinese.load(Ordering::Acquire) {
                 "正在准备 WAV 切片…"
@@ -858,7 +874,7 @@ impl Controller {
         state.drag_requested = false;
         drop(state);
         if let Some(ui) = self.ui.upgrade() {
-            ui.set_wave_selection_preparing(false);
+            show_export_feedback(&ui, ExportFeedback::Cancelled);
             ui.set_wave_selection_progress(
                 if self.chinese.load(Ordering::Acquire) {
                     "已取消；再次拖动可重新准备切片"
@@ -1052,7 +1068,7 @@ impl Controller {
                 {
                     return;
                 }
-                ui.set_wave_selection_preparing(false);
+                show_export_feedback(&ui, ExportFeedback::Ready);
                 match result {
                     Ok(ready) => {
                         c2.slice.lock().unwrap().ready = Some(ready);
@@ -1069,6 +1085,8 @@ impl Controller {
                         }
                     }
                     Err(error) => {
+                        show_export_feedback(&ui, ExportFeedback::Error);
+                        ui.invoke_cancel_wave_selection_gesture();
                         ui.set_wave_selection_progress(error.clone().into());
                         ui.set_status(error.into());
                     }
@@ -1108,7 +1126,7 @@ impl Controller {
             self.publish_slice_drag(selection);
         } else if retry {
             if let Some(ui) = self.ui.upgrade() {
-                ui.set_wave_selection_preparing(true);
+                show_export_feedback(&ui, ExportFeedback::Preparing);
             }
             self.prepare_wave_slice(selection);
         }
@@ -1132,7 +1150,7 @@ impl Controller {
         let guard = Worker::new(self);
         let busy = DragBusy(self.clone());
         if let Some(ui) = self.ui.upgrade() {
-            ui.set_wave_selection_preparing(true);
+            show_export_feedback(&ui, ExportFeedback::Preparing);
             ui.set_wave_selection_progress(
                 if self.chinese.load(Ordering::Acquire) {
                     "正在准备拖出 WAV…"
@@ -1173,7 +1191,7 @@ impl Controller {
                     return;
                 }
                 let requested = c2.slice.lock().unwrap().drag_requested;
-                ui.set_wave_selection_preparing(false);
+                show_export_feedback(&ui, ExportFeedback::Ready);
                 ui.set_wave_selection_progress(
                     if c2.chinese.load(Ordering::Acquire) {
                         "切片已就绪，拖动选区可再次导出"
@@ -1188,9 +1206,36 @@ impl Controller {
                             && !ui.get_background_blocked()
                             && audiolib_windows::primary_button_down() =>
                     {
-                        match audiolib_windows::drag_files(std::slice::from_ref(&published.path)) {
+                        show_export_feedback(&ui, ExportFeedback::NativeDrag);
+                        ui.set_wave_selection_progress(
+                            if c2.chinese.load(Ordering::Acquire) {
+                                "拖放到目标程序 · Esc 取消"
+                            } else {
+                                "Drop into the target app · Esc cancels"
+                            }
+                            .into(),
+                        );
+                        crate::waveform_cursor::suspend_for_native_drag(&ui);
+                        let outcome =
+                            audiolib_windows::drag_files(std::slice::from_ref(&published.path));
+                        // Native loops may consume the button release. Always
+                        // finish this gesture before accepting another one.
+                        ui.invoke_cancel_wave_selection_gesture();
+                        crate::waveform_cursor::resume_after_native_drag(&ui);
+                        match outcome {
                             Ok(audiolib_windows::DragOutcome::Copied) => {
                                 published.keep = true;
+                                if c2.selection_current(&selection) {
+                                    show_export_feedback(&ui, ExportFeedback::Ready);
+                                    ui.set_wave_selection_progress(
+                                        if c2.chinese.load(Ordering::Acquire) {
+                                            "已导出 · 可再次拖出 WAV"
+                                        } else {
+                                            "Exported · Drag out again for another WAV"
+                                        }
+                                        .into(),
+                                    );
+                                }
                                 ui.set_status(
                                     format!(
                                         "{} {}",
@@ -1204,8 +1249,26 @@ impl Controller {
                                     .into(),
                                 );
                             }
-                            Ok(audiolib_windows::DragOutcome::Cancelled) => {}
-                            Err(error) => ui.set_status(error.to_string().into()),
+                            Ok(audiolib_windows::DragOutcome::Cancelled) => {
+                                if c2.selection_current(&selection) {
+                                    show_export_feedback(&ui, ExportFeedback::Cancelled);
+                                    ui.set_wave_selection_progress(
+                                        if c2.chinese.load(Ordering::Acquire) {
+                                            "已取消拖出 · 再次拖动可重试"
+                                        } else {
+                                            "Drag cancelled · Drag again to retry"
+                                        }
+                                        .into(),
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                if c2.selection_current(&selection) {
+                                    show_export_feedback(&ui, ExportFeedback::Error);
+                                    ui.set_wave_selection_progress(error.to_string().into());
+                                }
+                                ui.set_status(error.to_string().into());
+                            }
                         }
                     }
                     Ok(published) => {
@@ -1224,6 +1287,8 @@ impl Controller {
                         state.ready = None;
                         state.published = None;
                         drop(state);
+                        show_export_feedback(&ui, ExportFeedback::Error);
+                        ui.invoke_cancel_wave_selection_gesture();
                         ui.set_wave_selection_progress(error.clone().into());
                         ui.set_status(error.into());
                     }

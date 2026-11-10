@@ -163,6 +163,159 @@ fn save_snapshot(ui: &AppWindow, file: &str) {
     }
 }
 
+fn long_remote_source_label(chinese: bool) -> &'static str {
+    if chinese {
+        "服务器模式 · 影视制作音效资料库 — 当前项目使用的远端扩展拟音合集 · 音效库：木门、机械装置与室内环境素材 · 同步状态：已更新完整资料与目录，可继续检索与试听 · 较长的无空格服务器标识：sound-archive-production-foley-current-project.example.test:8791"
+    } else {
+        "Server mode · Production archive — Extended Foley collection for the current project · Library: doors, mechanisms and interiors · Synchronization: complete metadata and directories, ready for search and audition · Long server identifier: sound-archive-production-foley-current-project.example.test:8791"
+    }
+}
+
+fn remote_toolbar_window(
+    theme: &str,
+    chinese: bool,
+    width: f32,
+    height: f32,
+    scale: f32,
+) -> AppWindow {
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(width, height));
+    crate::theme::apply_theme(&ui, theme);
+    ui.global::<crate::Theme>().set_ui_scale(scale);
+    ui.set_chinese(chinese);
+    ui.set_remote_mode(true);
+    ui.set_data_source_label(long_remote_source_label(chinese).into());
+    ui.set_query("metal door".into());
+    ui.set_search_scope_index(1);
+    ui.set_rows(synthetic_rows());
+    ui.set_folders(synthetic_folders());
+    ui.show().unwrap();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    ui
+}
+
+#[test]
+fn source_label_hover_reveals_full_remote_status_without_changing_search() {
+    use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+    use slint::platform::WindowEvent;
+    use std::time::Duration;
+
+    init_software_backend();
+    for theme in audiolib_core::config::THEME_IDS {
+        for chinese in [false, true] {
+            let ui = remote_toolbar_window(theme, chinese, 1080.0, 700.0, 1.0);
+            ui.on_search_requested(|_| panic!("Source hover must not request a search"));
+            ui.on_search_scope_changed(|| panic!("Source hover must not change search scope"));
+            ui.on_sm_open_requested(|_| panic!("Source hover must not open source management"));
+            ui.on_library_action(|_| panic!("Source hover must not open library management"));
+            let label = long_remote_source_label(chinese);
+            let source = ElementHandle::find_by_accessible_label(&ui, label)
+                .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+                .expect("current remote source control");
+            let language = if chinese { "cn" } else { "en" };
+            save_snapshot(&ui, &format!("source-before-hover-{theme}-{language}.png"));
+            let before = ElementHandle::find_by_accessible_label(&ui, label).count();
+            let (origin, size) = (source.absolute_position(), source.size());
+            ui.window().dispatch_event(WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    origin.x + size.width / 2.0,
+                    origin.y + size.height / 2.0,
+                ),
+            });
+            i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+            i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
+            save_snapshot(&ui, &format!("source-after-hover-{theme}-{language}.png"));
+
+            // The badge already exposes this label. A newly visible copy proves
+            // that the tooltip also exposes the complete, unabridged summary.
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, label).count() > before,
+                "source tooltip must expose the complete summary: {theme}/{language}"
+            );
+            assert_eq!(ui.get_data_source_label(), label);
+            assert_eq!(ui.get_query(), "metal door");
+            assert_eq!(ui.get_search_scope_index(), 1);
+            assert!(!ui.get_library_visible());
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
+fn search_and_library_actions_remain_reachable_with_long_source_labels() {
+    use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+    use slint::platform::PointerEventButton;
+    use std::{cell::RefCell, rc::Rc};
+
+    init_software_backend();
+    for theme in audiolib_core::config::THEME_IDS {
+        for chinese in [false, true] {
+            for (layout, width, height) in [("compact", 1080.0, 700.0), ("wide", 1440.0, 900.0)] {
+                for scale in [1.0, 1.5, 2.0] {
+                    let ui = remote_toolbar_window(theme, chinese, width, height, scale);
+                    let language = if chinese { "cn" } else { "en" };
+                    save_snapshot(
+                        &ui,
+                        &format!("search-source-{theme}-{language}-{layout}-x{scale}.png"),
+                    );
+                    // Larger scales are inspected in the snapshots; exercise
+                    // pointer routing at the application's minimum window size.
+                    if layout == "compact" && scale == 1.0 {
+                        let searches = Rc::new(RefCell::new(Vec::new()));
+                        let observed = searches.clone();
+                        ui.on_search_requested(move |explicit| {
+                            observed.borrow_mut().push(explicit);
+                        });
+                        ui.on_search_scope_changed(|| {
+                            panic!("Toolbar actions must retain the search scope")
+                        });
+                        let managers = Rc::new(RefCell::new(Vec::new()));
+                        let observed = managers.clone();
+                        ui.on_sm_open_requested(move |page| observed.borrow_mut().push(page));
+                        let libraries = Rc::new(RefCell::new(Vec::new()));
+                        let observed = libraries.clone();
+                        ui.on_library_action(move |action| observed.borrow_mut().push(action));
+                        let search_label =
+                            match (ui.global::<crate::Theme>().get_modern_style(), chinese) {
+                                (false, false) => "Search",
+                                (false, true) => "搜索",
+                                (true, false) => "Run search",
+                                (true, true) => "执行搜索",
+                            };
+                        ElementHandle::find_by_accessible_label(&ui, search_label)
+                            .find(|element| {
+                                element.accessible_role() == Some(AccessibleRole::Button)
+                            })
+                            .expect("visible search action")
+                            .mock_single_click(PointerEventButton::Left);
+                        assert_eq!(&*searches.borrow(), &[true]);
+                        assert!(managers.borrow().is_empty());
+                        ElementHandle::find_by_accessible_label(
+                            &ui,
+                            if chinese {
+                                "管理音效库"
+                            } else {
+                                "Manage library"
+                            },
+                        )
+                        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+                        .expect("visible library management action")
+                        .mock_single_click(PointerEventButton::Left);
+                        assert_eq!(&*managers.borrow(), &[1]);
+                        assert_eq!(&*libraries.borrow(), &[0]);
+                        assert!(ui.get_library_visible());
+                        assert_eq!(ui.get_query(), "metal door");
+                        assert_eq!(ui.get_search_scope_index(), 1);
+                    }
+                    ui.hide().unwrap();
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn wide_table_at_1_5_scrolls_horizontally_to_the_last_column() {
     init_software_backend();

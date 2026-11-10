@@ -494,7 +494,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
- "soundtouch",
+ "soundtouch-ffi",
  "symphonia",
  "tempfile",
 ]
@@ -5847,15 +5847,6 @@ dependencies = [
  "web-sys",
  "windows-sys 0.61.2",
  "x11rb",
-]
-
-[[package]]
-name = "soundtouch"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6a9d07f6efdc0d9e76f0a14bea5f0cfd8b90f3ae2d3d63bd1710867864630e3"
-dependencies = [
- "soundtouch-ffi",
 ]
 
 [[package]]
