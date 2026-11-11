@@ -2,7 +2,7 @@
 
 程序 0.9.6 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-以已发布的 `v0.9.5` 为基线使用 PATCH。功能来自 [#271](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/271)、[#272](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/272)，经 [#273](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/273) 将已验收 beta 提升至 main。API、普通本地与专用服务端写目标、快照读取范围及完整格式目录沿用 0.9.5，包括已有 `audio_sources:1` / af1 边界。
+已于 2026-11-11 07:40:41 UTC（北京时间 15:40:41）正式发布 [v0.9.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.6)，以 `v0.9.5` 为基线使用 PATCH。功能来自 [#271](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/271)、[#272](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/272)，经 [#273](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/273) 功能晋升和 [#274](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/274)、[#275](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/275) 升版，七份正式 payload 来自最终 main/tag `460629144d6a0df24af9c69303c9409c38efbde2`。API、普通本地与专用服务端写目标、快照读取范围及完整格式目录沿用 0.9.5，包括已有 `audio_sources:1` / af1 边界。详见 [0.9.6 发布记录](Rust_Release_0.9.6.md)。
 
 - **分页偏好**：全局设置 → 搜索和任务新增可选分页，每页可设置 1–1000 条，默认 200。原有设置继续使用连续浏览、200 条分段和最多 600 行窗口；切换模式保留搜索条件、筛选、排序与记录选择。
 - **侧栏与恢复**：三个主题均保存音效库侧栏的显示状态，重启后恢复，并保留隐藏前的宽度；修正恢复卡的指针热区，使实际鼠标点击能够触发卡片操作。
@@ -10,7 +10,7 @@
 - **搜索工具栏**：字段范围移至音效库 → 搜索字段范围菜单，当前项显示勾选；更新前进、后退按钮图形，搜索框保留一个原生清空 X。
 - **发布工具**：`release-create.sh` 新增显式 `--draft`，可创建未发布草稿；原正式发布和预发布命名规则保持不变。
 
-正式发布包含 Windows x64 ASIO / macOS arm64 客户端、Windows x64 / macOS arm64 / Linux x64 服务端，以及 Docker linux/amd64 / linux/arm64，共七份归档与各自 SHA256。内部 Linux arm64 原生包仅供 Docker 输入。最终 main/tag 的包身份、平台验收和发布后固定安装同步应在本次发布记录完成后填入；此候选说明不声称正式包已构建、验收或发布。
+七份正式归档、十四项线上资产与 SHA256、七份下载校验正文及正式发布身份均已核验。Windows 固定 `local_release/` 已更新，907 个包文件、CLI 0.9.6 与隔离启动通过；发布后安装身份与缓存维护见发布记录。内部 Linux arm64 原生包仅供 Docker 输入。Mac ad-hoc 签名不是 Apple 公证；Linux x64 / Docker amd64 使用 ARM64 主机仿真，真实 ASIO 硬件、声学起音与真实 DAW 拖出未新增验收。源码检查复用原始身份，保留最初失败与相关修复后通过的记录。
 
 # 0.9.5：统一菜单与 Waveform 选区试听、切片
 
