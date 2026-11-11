@@ -1,11 +1,12 @@
 # tools/verify-release-assets.ps1
 # Read-only release identity and asset/checksum verification. Metadata is the JSON
 # from `gh release view <tag> --json tagName,name,isPrerelease,assets`.
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Verify')]
 param(
     [Parameter(Mandatory)][string]$Tag,
-    [Parameter(Mandatory)][string]$ReleaseJsonPath,
-    [string]$AssetDirectory
+    [Parameter(Mandatory, ParameterSetName = 'Verify')][string]$ReleaseJsonPath,
+    [Parameter(ParameterSetName = 'Verify')][string]$AssetDirectory,
+    [Parameter(Mandatory, ParameterSetName = 'List')][switch]$ListExpectedAssets
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -32,6 +33,11 @@ if ($includesLinuxDocker) {
 }
 if ($includesWindowsServer) { $packages += "AudioLibServer-$Tag-win-x64.zip" }
 $expectedAssets = @($packages | ForEach-Object { $_; "$_.sha256" })
+if ($PSCmdlet.ParameterSetName -eq 'List') {
+    # Offline public contract: every archive and sidecar, one basename per line.
+    $expectedAssets
+    return
+}
 
 $releaseText = [IO.File]::ReadAllText([IO.Path]::GetFullPath($ReleaseJsonPath))
 if (!$releaseText.TrimStart().StartsWith('{', [StringComparison]::Ordinal)) { throw 'Release metadata must be one JSON object.' }
