@@ -1,5 +1,7 @@
 # AudioLib Explorer 版本规范
 
+正在准备 0.9.6，以已发布的 v0.9.5 为基线使用 PATCH。范围为 #271 分页与侧栏偏好及恢复卡点击修正、#272 每任务会话搜索历史与搜索工具栏调整，以及显式 Release 草稿入口。API /api/v1/、本地写 schema 8、服务端迁移 schema 9、快照兼容 3..=9 和完整格式目录保持不变。已验收 beta 经 #273 晋升；正式 payload 仍须从最终升版 main/tag 构建、验收及发布，旧版与 beta 产物不替代。
+
 当前正式版为 [0.9.5](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.5)，于 2026-11-10 14:34:54 UTC 发布，以 `v0.9.4` 为基线使用 PATCH。七份正式 payload 来自最终 main/tag `7d7a60bad31d8640441b16de0d558d3a4211a0e0`，构建、本地验收、十四项线上资产与校验正文、发布后固定安装身份同步均通过。API `/api/v1/`、普通本地写 schema 8、专用服务端迁移 schema 9、快照兼容 `3..=9` 以及 base/af1 完整格式目录均沿用 0.9.4。范围为统一菜单与全局设置、紧凑搜索标签、Waveform 选区试听与原素材 WAV 切片、源版本校验、原生指针、SoundTouch 生命周期与许可证预检。准确发布状态和原始验证身份见 [0.9.5 发布记录](Rust_Release_0.9.5.md)；下文历史标签、资产和记录保持原样。
 
 Search Metadata v2 的 0.9.0 发布记录见[0.9.0 迁移方案](Rust_Release_0.9.0.md)。
