@@ -34,6 +34,10 @@ function Manifest([string]$ReleaseTag, [string[]]$Names, [object]$Prerelease = $
     $path
 }
 function Accepted([string]$ReleaseTag, [string]$Metadata, [string[]]$ExpectedPackages, [string]$Directory) {
+    $listed = @(& $validator -Tag $ReleaseTag -ListExpectedAssets)
+    $expectedNames = @(AssetNames $ExpectedPackages)
+    if (($listed -join '|') -cne ($expectedNames -join '|')) { throw 'Offline asset contract returned the wrong archive/sidecar names.' }
+    $script:assertionCount++
     $arguments = @{Tag=$ReleaseTag; ReleaseJsonPath=$Metadata}
     if ($Directory) { $arguments.AssetDirectory = $Directory }
     $actual = @(& $validator @arguments 6>$null)
