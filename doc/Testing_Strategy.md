@@ -11,7 +11,7 @@
 | 单个 Rust 模块或功能 | 格式检查一次，受影响 package 的严格 Clippy，以及覆盖改变行为的定向测试。 |
 | UI 文案、布局、图标及资源 | 编译受影响桌面目标，按实际改动和风险选择相关交互或视觉验收；涉及 Rust 代码时加格式和严格 Clippy。只有真实状态、事件或行为回归才新增测试。 |
 | 公共 DTO、DataProvider 或跨层 contract | 验证实现层和直接消费者；按调用关系扩大 package 和测试范围。 |
-| 锁文件、共享构建配置或影响范围无法判断 | 本地执行全 workspace 的格式、严格 Clippy 和测试。 |
+| 单项依赖或锁文件变化 | 确认依赖变化影响的包及消费者，只验证该范围；工具链、全局构建配置变化或无法可靠限定影响时执行全 workspace。 |
 | 持久化、并发写入、路径或音频后端 | 定向测试加下表对应回归；不能用一次界面启动替代数据完整性验证。 |
 
 先读改动和直接调用方，再选命令。下列示例使用仓库现有 package 和测试名称，按任务选用，不是依次执行的清单：
@@ -33,6 +33,24 @@ cargo check -p audiolib-desktop --bin AudioLibExplorer --locked
 ```
 
 Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试、构建和 Clippy 目的不同，但每一步只选一次所需范围。不要为了增加数量而写与实现镜像的断言或重复用例；优先补真实错误、边界、状态转换和用户行为的回归。
+
+### 稳定模块的回归精简
+
+默认不执行稳定且未受影响模块的单元测试、集成测试和专项回归。判断单位是本次改变的行为及其依赖关系，不把整个 package 永久标为免测，也不以“很久没出问题”代替证据。保留正式测试和验证脚本，精简的是执行范围。
+
+满足以下条件即可沿用原基线：有覆盖相关行为的通过记录（命令、源码身份、target/features、结果或日志路径）；没有尚未解决的相关失败；本次没有改变该行为及其调用契约、依赖闭包、测试/fixture、平台或环境假设。其他模块的变更、文档提交、版本号或标签本身不使它失效；版本逻辑本身受影响时仍需相应验证。没有可靠基线时补足该模块的相关检查，不自动扩展为整套历史回归。
+
+| 模块/边界 | 满足稳定条件时省略 | 重新触发相关检查的变化 |
+| --- | --- | --- |
+| 数据库格式、库管理、扫描及 Metadata 写入 | 库管理、review-fixes、ACL、旧库导入等专项及无关集成测试 | schema/SQL/索引、写入顺序、锁、配置落盘、恢复、重链接、路径权限、源文件保留及调用契约变化；保留对应数据安全覆盖。 |
+| 播放、设备与 IPC | 音频/IPC 全包测试、实际播放回归、ASIO 硬件验收 | 解码、transport、设备后端、回调、会话、IPC 协议或相关依赖变化。 |
+| 搜索、Waveform 与界面 | 未改视图的 GUI 回归、无关搜索测试、百万记录基准 | 查询语义、分页/取消/旧响应、绘制或交互状态变化；性能路径受影响或明确要求测量时才跑相应基准。 |
+| 远程同步、服务端与跨平台分支 | 仅客户端局部改动时的服务端/远程整套测试与其他平台业务测试 | API、快照格式、鉴权、缓存发布、平台路径或共享依赖契约变化；验证受影响的实际平台。 |
+| 打包、许可证与安装工具 | 工具规则未变时的合成边界回归 | 对应工具或包规则变化；每份新交付物的身份、许可证、启动及安装验收仍按交付流程执行。 |
+
+每次先列出改动行为和直接/传递影响，选定相关测试 target 或模块 filter，再补数据安全、平台及性能触发项。公共 contract 变化覆盖实际消费者；仅新增一个局部依赖不要求无关包重测。影响无法界定时扩大到包级或 workspace，不能通过筛掉失败用例缩小范围。
+
+在现有任务/发布记录中简短区分“本次执行”“复用原基线（注明原身份/路径）”“未受影响，未运行”“缺少环境，未验证”；未运行和已知失败不能记为通过。无需增加独立台账、人工审批或定期全量刷新。历史套件不因发布新版本自动恢复为必跑项。
 
 ### 重型回归的触发条件
 
@@ -62,14 +80,20 @@ Clippy 已检查的目标不再额外跑相同配置的 `cargo check`；测试�
 
 GitHub 普通 CI 仅保留一个 Linux 作业，只运行 `cargo fmt --all -- --check`。相关 `main`、`beta`、`codex/**` 推送会触发，纯文档和截图推送跳过；所有 Pull Request 均须返回 required `Linux (fmt)` 结果。`.github/workflows/release.yml` 仅在手动触发时只读核对已发布 Release 的身份、精确资产集合与 SHA256，不构建、不打包、不上传，也不承担运行验收。
 
-开发与发布都按实际改动、直接消费者和发布配置选择验证范围，不因打标签自动扩大到全 workspace。`check-local.ps1 -Package <packages>` 将格式、所选包的严格 Clippy 和测试执行一次；仅影响广泛或无法可靠判断时省略 `-Package`。已有更窄的行为测试时继续直接运行 Cargo 定向测试，不必为使用统一入口扩大范围。
+开发与发布都按实际改动、直接消费者和发布配置选择验证范围，不因打标签自动扩大到全 workspace。`check-local.ps1` 必须显式选择 `-Package <packages>` 或 `-Workspace`，不再因遗漏参数运行全量检查。单包可用 `-Lib`、`-Bin <name>` 或 `-Test <integration-target>` 三选一，并以 `-TestFilter <substring>` 选择其中的模块或行为；格式、该包 all-targets 的严格 Clippy 仍各执行一次，测试仅执行所选范围。定向执行使用标准 Rust test harness；没有通过测试（包括 filter 未命中、全部 ignored 或缺少结果摘要）会失败。多个目标/过滤条件可直接使用 Cargo 并复用本轮格式/Clippy 结果，避免多次调用入口重复静态检查。
 
 ```powershell
-# 受影响的 Windows 客户端包；不要再附加无 ASIO 整套检查。
-./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio
+# 仅改变桌面搜索任务行为：其他稳定模块及 CLI 测试不进入本轮。
+./tools/check-local.ps1 -Package audiolib-desktop -Bin AudioLibExplorer -TestFilter controller::search_tasks::tests:: -Asio
+# 只改变数据库搜索片段行为：运行对应集成 target。
+./tools/check-local.ps1 -Package audiolib-db -Test search_fragments
 # 受影响的 Linux 服务端；按无播放设备的发布配置测试，不启动客户端矩阵。
 ./tools/check-local.ps1 -Package audiolib-server -NoDefaultFeatures -Target x86_64-unknown-linux-gnu
+# 工具链或全局构建配置改变、影响无法限定时才选择全工作区。
+./tools/check-local.ps1 -Workspace -Asio
 ```
+
+仅传 `-Package` 仍执行该包全部 target 的测试，适用于包内影响广泛或无法进一步限定的情况。定向测试的包名和 target 名必须明确，不接受会扩展范围的通配符；`TestFilter` 是 Rust 测试名称的子串匹配。旧脚本若省略了包选择，需要补 `-Package` 或显式 `-Workspace`；发布 ChecksFile 也使用相同参数。上述搜索示例只说明路由，任务同时影响分页、UI 或共享查询契约时仍需加入相应测试，不能机械地只跑一个 filter。
 
 无 ASIO 条件分支仅在本次改动影响它时，按受影响 package/测试补测；明确交付无 ASIO 版本时才选择不带 `-Asio` 的完整入口。ASIO 实际设备验收只在驱动/后端行为变化时按相关硬件执行。普通业务改动不重复两种构建配置的同一套测试。
 
