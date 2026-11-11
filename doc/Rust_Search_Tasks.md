@@ -14,6 +14,12 @@ New tasks start with an empty query, the whole current library, default filters 
 
 All tasks use the current data source. Switching between libraries saves the old library's task group and restores the destination library's group. Connections to the same server library share that library's personal group, including LAN and external connection profiles. A different server library has a separate group.
 
+## Search history and field scope
+
+Each open task has its own session history of up to 20 searches, including the current entry. The back and forward arrows beside the search field restore the query, field scope, directory, filters, sorting and saved view through the normal identity-validation path. The arrows are disabled at the ends of the history. A new search after going back removes that task's forward branch. Successfully published searches, including empty results, enter history; invalid, cancelled or failed requests do not. Consecutive live text edits share one entry; a one-second pause, an explicit search or a task switch ends that input group. Paging, scrolling and refreshing update the current view without adding an entry. History is kept in memory for the open task and starts from its restored conditions after restarting the application or reopening the library.
+
+The search field scopes are available in **Library → Search fields** (音效库 → 搜索字段范围), with the active choice checked. Path remains disabled when the library cannot search its directory index.
+
 ## Continuous browsing and pagination
 
 Global settings → Search and tasks offers an optional pagination policy. Existing settings keep continuous browsing: fixed 200-record chunks, automatic adjacent-range loading and the existing bounded 600-row window. Enabling pagination disables automatic range prefetch and uses Previous/Next with 1–1000 visible records per page (default 200). The preferred page size is retained while pagination is disabled, but does not change continuous browsing's chunk size.

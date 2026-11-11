@@ -3589,6 +3589,7 @@ impl Controller {
                                     c2.search_page_published(&ui, job.generation, true);
                                     ui.set_searching(false);
                                     c2.search_task_page_ready(&ui, workspace_revision);
+                                    c2.commit_search_history(&ui);
                                     return;
                                 }
                                 let result_window =
@@ -3823,8 +3824,10 @@ impl Controller {
                                 // and its navigation bounds have been published together.
                                 ui.set_searching(false);
                                 c2.search_task_page_ready(&ui, workspace_revision);
+                                c2.commit_search_history(&ui);
                             }
                             Err(error) => {
+                                c2.task_workspace.lock().unwrap().pending_history = None;
                                 let mut request = c2.request.lock().unwrap();
                                 let mut navigation = c2.result_pages.lock().unwrap();
                                 let retained_navigation = navigation.pending_for(&request)
@@ -4709,6 +4712,7 @@ impl Controller {
             return;
         }
         self.persist_search_task(ui);
+        self.task_workspace.lock().unwrap().pending_history = None;
         // Even invalid input supersedes queued/in-flight work and its UI publications.
         self.search_cancel
             .lock()
@@ -4836,6 +4840,7 @@ impl Controller {
         self.begin_task_search(reset);
         *self.request.lock().unwrap() = request.clone();
         self.persist_search_task(ui);
+        self.task_workspace.lock().unwrap().pending_history = Some(!immediate);
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
             .store(true, Ordering::Release);
