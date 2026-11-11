@@ -95,6 +95,70 @@ component Action inherits Rectangle {
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
+component SearchHistoryButton inherits Action {
+    in property <image> navigation-icon;
+    preferred-width: 35px * Theme.ui-scale;
+    preferred-height: 28px * Theme.ui-scale;
+    min-width: 35px * Theme.ui-scale;
+    min-height: 28px * Theme.ui-scale;
+    max-width: 35px * Theme.ui-scale;
+    max-height: 28px * Theme.ui-scale;
+    subtle: true;
+    border-radius: 4px * Theme.ui-scale;
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 20px * Theme.ui-scale;
+        height: 20px * Theme.ui-scale;
+        source: root.navigation-icon;
+        colorize: root.has-focus ? Theme.accent : Theme.ink;
+        image-fit: contain;
+        accessible-role: none;
+    }
+}
+
+component SearchHistoryNavigation inherits Rectangle {
+    in property <bool> chinese;
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    callback navigate(int);
+    width: 76px * Theme.ui-scale;
+    height: 30px * Theme.ui-scale;
+    horizontal-stretch: 0;
+    background: Theme.trough;
+    border-radius: 6px * Theme.ui-scale;
+    border-width: 1px;
+    border-color: Theme.border;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 1px;
+        height: 14px * Theme.ui-scale;
+        background: Theme.strong-border.with-alpha(0.35);
+    }
+    HorizontalLayout {
+        padding-left: 2px * Theme.ui-scale;
+        padding-right: 2px * Theme.ui-scale;
+        padding-top: 1px * Theme.ui-scale;
+        padding-bottom: 1px * Theme.ui-scale;
+        spacing: 2px * Theme.ui-scale;
+        back := SearchHistoryButton {
+            navigation-icon: @image-url("icons/search-back.svg");
+            action-label: root.chinese ? "后退搜索历史" : "Back in search history";
+            enabled: root.can-back;
+            clicked => { root.navigate(-1); }
+            Tooltip { text: @markdown("\{back.action-label}"); }
+        }
+        forward := SearchHistoryButton {
+            navigation-icon: @image-url("icons/search-forward.svg");
+            action-label: root.chinese ? "前进搜索历史" : "Forward in search history";
+            enabled: root.can-forward;
+            clicked => { root.navigate(1); }
+            Tooltip { text: @markdown("\{forward.action-label}"); }
+        }
+    }
+}
+
 component Label inherits Text { color: Theme.dim; font-size: Theme.font(11); vertical-alignment: center; }
 
 // The number of active filters on a panel switch.
@@ -889,10 +953,14 @@ export component AppWindow inherits Window {
     in-out property <bool> chinese: false;
     in-out property <string> query: "";
     // Stable controller indexes: 0=all, 1=main fields, 2=path, 3=filename.
-    // The displayed choices put filename before path and hide unavailable path.
+    // Menu choices put filename before path and disable unavailable path.
     in-out property <int> search-scope-index: 0;
     in property <bool> path-search-available: false;
     callback search-scope-changed();
+    in property <bool> search-history-can-back: false;
+    in property <bool> search-history-can-forward: false;
+    callback search-history-requested(int);
+    property <bool> search-history-ready: !root.background-blocked && !root.search-workspace-loading && !root.task-restoring && !root.closing;
     in property <[SearchTaskRow]> search-tasks: [];
     in property <int> active-search-task-index: 0;
     in property <[SavedSearchTaskRow]> saved-search-tasks: [];
@@ -1171,6 +1239,10 @@ export component AppWindow inherits Window {
     in property <bool> can-previous: false;
     in property <bool> can-next: false;
     in property <string> page-label: "1";
+    in-out property <bool> pagination-enabled: false;
+    in-out property <int> result-page-size: 200;
+    callback paging-policy-requested(bool, int);
+    out property <bool> paging-policy-settings-blocked: root.settings-busy || root.settings-close-confirm;
     in-out property <bool> favorites-only: false;
     in-out property <bool> tagged-only: false;
     // Canonical include/exclude terms (`engine, -interior`); the chips below mirror it.
@@ -1258,8 +1330,8 @@ export component AppWindow inherits Window {
     out property <length> settings-panel-top: settings-panel.absolute-position.y;
     out property <length> settings-panel-bottom: settings-panel.absolute-position.y + settings-panel.height;
     out property <length> settings-last-bottom: settings-footer.absolute-position.y + settings-footer.height;
-    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && search-settings-first.has-focus) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
-    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && search-settings-first.has-focus) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
+    out property <bool> settings-hidden-page-focused: (root.settings-page != 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page != 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page != 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page != 3 && sync-settings-first.has-focus) || (root.settings-page != 4 && cache-settings-first.has-focus);
+    out property <bool> settings-visible-page-focused: (root.settings-page == 0 && (settings-first.has-focus || settings-device.has-focus || settings-rate.has-focus || settings-buffer.has-focus || settings-source.has-focus || settings-pair.has-focus || settings-apply.has-focus || export-first.has-focus)) || (root.settings-page == 1 && (appearance-first.has-focus || appearance-ui-font.has-focus || appearance-list-font.has-focus)) || (root.settings-page == 2 && (search-settings-first.has-focus || pagination-check.has-focus || pagination-size.has-focus)) || (root.settings-page == 3 && sync-settings-first.has-focus) || (root.settings-page == 4 && cache-settings-first.has-focus) || settings-nav-general.has-focus || settings-nav-search.has-focus || settings-nav-audio.has-focus || settings-nav-sync.has-focus || settings-nav-cache.has-focus || appearance-close.has-focus || settings-close-return.has-focus;
     // Test-only: scroll the main view and the settings dialog to their bottom-right corner.
     public function scroll-main-to-end() {
         if Theme.modern-style { studio-main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); } else { main-scroll.viewport-y = min(0px, (Theme.modern-style ? studio-main-scroll.visible-height : main-scroll.visible-height) - (Theme.modern-style ? studio-main-scroll.viewport-height : main-scroll.viewport-height)); }
@@ -2310,7 +2382,7 @@ export component AppWindow inherits Window {
     function track-result-scroll() {
         let previous = root.result-last-y;
         root.result-last-y = (Theme.modern-style ? studio-result-list.viewport-y : result-list.viewport-y);
-        if root.result-user-scrolling && !root.searching && !root.background-blocked && !root.task-restoring && root.rows.length > 0 {
+        if !root.pagination-enabled && root.result-user-scrolling && !root.searching && !root.background-blocked && !root.task-restoring && root.rows.length > 0 {
             let buffer = (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height) * 2;
             let remaining = root.rows.length * root.result-row-height + (Theme.modern-style ? studio-result-list.viewport-y : result-list.viewport-y) - (Theme.modern-style ? studio-result-list.visible-height : result-list.visible-height);
             if (Theme.modern-style ? studio-result-list.viewport-y : result-list.viewport-y) < previous && root.can-next && remaining <= buffer {
@@ -2533,6 +2605,12 @@ export component AppWindow inherits Window {
         }
         Menu { title: root.chinese ? "音效库" : "Library"; enabled: root.menu-ready;
             MenuItem { title: root.chinese ? "音效库管理…" : "Manage sound library…"; enabled: root.menu-ready; shortcut: @keys(Control + D); activated => { root.open-library(0); } }
+            Menu { title: root.chinese ? "搜索字段范围" : "Search fields"; enabled: root.menu-ready && !root.task-restoring;
+                MenuItem { title: root.chinese ? "全部" : "All"; enabled: root.menu-ready && !root.task-restoring; checkable: true; checked: root.search-scope-index == 0; activated => { if root.search-scope-index != 0 { root.search-scope-index = 0; root.search-scope-changed(); } } }
+                MenuItem { title: root.chinese ? "主字段" : "Main fields"; enabled: root.menu-ready && !root.task-restoring; checkable: true; checked: root.search-scope-index == 1; activated => { if root.search-scope-index != 1 { root.search-scope-index = 1; root.search-scope-changed(); } } }
+                MenuItem { title: root.chinese ? "仅文件名" : "Filename"; enabled: root.menu-ready && !root.task-restoring; checkable: true; checked: root.search-scope-index == 3; activated => { if root.search-scope-index != 3 { root.search-scope-index = 3; root.search-scope-changed(); } } }
+                MenuItem { title: root.chinese ? "仅路径" : "Path"; enabled: root.menu-ready && !root.task-restoring && root.path-search-available; checkable: true; checked: root.search-scope-index == 2; activated => { if root.search-scope-index != 2 { root.search-scope-index = 2; root.search-scope-changed(); } } }
+            }
             MenuItem { title: root.chinese ? "导入厂商资料…" : "Import vendor metadata…"; enabled: root.menu-ready && root.vendor-import-available; activated => { root.vendor-import-requested(); } }
             MenuItem { title: root.chinese ? "查看缺失文件 / 修复引用" : "Missing files / repair references"; enabled: root.menu-ready; activated => { root.show-missing-files(); } }
             MenuItem { title: root.chinese ? "服务器音效库迁移…" : "Server library migration…"; enabled: root.menu-ready && root.remote-mode; activated => { root.migration-requested(); } }
@@ -2677,19 +2755,19 @@ main-scroll := ScrollView {
         padding-bottom: (root.short-layout ? 10px : 16px) * Theme.ui-scale;
         spacing: (root.short-layout ? 6px : 10px) * Theme.ui-scale;
         HorizontalLayout { height: 42px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
-            classic-search-group := Rectangle { horizontal-stretch: 0; min-width: 280px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 560px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
+            classic-search-group := Rectangle { horizontal-stretch: 0; min-width: 280px * Theme.ui-scale; preferred-width: 516px * Theme.ui-scale; max-width: 516px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                     Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.accent; image-fit: contain; }
                     search-input := LineEdit { horizontal-stretch: 1; enabled: !root.background-blocked; text <=> root.query;
                         placeholder-text: root.chinese ? "搜索声音、标签和源文件 Metadata…" : "Search sounds, tags and source Metadata…";
                         edited => { root.search-requested(false); } accepted => { root.search-requested(true); }
                     }
-                    ComboBox { width: root.chinese ? 96px * Theme.ui-scale : 110px * Theme.ui-scale; enabled: !root.background-blocked;
-                        model: root.path-search-available ? (root.chinese ? ["全部", "主字段", "仅文件名", "仅路径"] : ["All", "Main fields", "Filename", "Path"]) : (root.chinese ? ["全部", "主字段", "仅文件名"] : ["All", "Main fields", "Filename"]);
-                        current-index: root.search-scope-index == 3 ? 2 : root.search-scope-index == 2 ? 3 : root.search-scope-index;
-                        selected => { root.search-scope-index = self.current-index == 2 ? 3 : self.current-index == 3 ? 2 : self.current-index; root.search-scope-changed(); }
+                    SearchHistoryNavigation {
+                        chinese: root.chinese;
+                        can-back: root.search-history-ready && root.search-history-can-back;
+                        can-forward: root.search-history-ready && root.search-history-can-forward;
+                        navigate(direction) => { root.search-history-requested(direction); }
                     }
-                    if root.query != "": Action { width: 38px * Theme.ui-scale; subtle: true; label: "×"; action-label: root.chinese ? "清空" : "Clear"; clicked => { root.query = ""; root.search-requested(true); search-input.focus(); } }
                     Action { width: 64px * Theme.ui-scale; primary: true; label: root.searching ? (root.chinese ? "搜索中" : "Searching") : (root.chinese ? "搜索" : "Search"); clicked => { root.search-requested(true); } }
                 }
             }
@@ -3519,7 +3597,7 @@ main-scroll := ScrollView {
         Rectangle { height: 46px * Theme.ui-scale; background: Theme.toolbar-surface;
             Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: Theme.toolbar-backdrop; opacity: Theme.workbench-backdrop-opacity; image-fit: fill; accessible-role: none; }
             HorizontalLayout { padding-left: 8px * Theme.ui-scale; padding-right: 8px * Theme.ui-scale; spacing: 8px * Theme.ui-scale;
-                studio-search-group := Rectangle { horizontal-stretch: 0; min-width: 280px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 560px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                studio-search-group := Rectangle { horizontal-stretch: 0; min-width: 280px * Theme.ui-scale; preferred-width: 528px * Theme.ui-scale; max-width: 528px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                     background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: studio-search-input.has-focus ? Theme.accent : Theme.strong-border.with-alpha(0.5);
                     HorizontalLayout { padding: 2px * Theme.ui-scale; padding-left: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Image { width: 17px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.dim; image-fit: contain; accessible-role: none; }
@@ -3528,16 +3606,12 @@ main-scroll := ScrollView {
                             edited => { root.search-requested(false); }
                             accepted => { root.search-requested(true); }
                         }
-                        ComboBox {
-                            width: root.chinese ? 88px * Theme.ui-scale : 100px * Theme.ui-scale;
-                            enabled: !root.background-blocked;
-                            model: root.path-search-available
-                                ? (root.chinese ? ["全部", "主字段", "仅文件名", "仅路径"] : ["All", "Main fields", "Filename", "Path"])
-                                : (root.chinese ? ["全部", "主字段", "仅文件名"] : ["All", "Main fields", "Filename"]);
-                            current-index: root.search-scope-index == 3 ? 2 : root.search-scope-index == 2 ? 3 : root.search-scope-index;
-                            selected => { root.search-scope-index = self.current-index == 2 ? 3 : self.current-index == 3 ? 2 : self.current-index; root.search-scope-changed(); }
+                        SearchHistoryNavigation {
+                            chinese: root.chinese;
+                            can-back: root.search-history-ready && root.search-history-can-back;
+                            can-forward: root.search-history-ready && root.search-history-can-forward;
+                            navigate(direction) => { root.search-history-requested(direction); }
                         }
-                        if root.query != "": StudioAction { width: 26px * Theme.ui-scale; subtle: true; label: "×"; action-label: root.chinese ? "清空" : "Clear"; clicked => { root.query = ""; root.search-requested(true); studio-search-input.focus(); } }
                         if root.content-width >= 1280px * Theme.ui-scale: Label { width: 40px * Theme.ui-scale; text: "Ctrl F"; horizontal-alignment: center; font-size: Theme.font(10); }
                         StudioAction { width: 48px * Theme.ui-scale; subtle: true; label: root.searching ? "…" : (root.chinese ? "搜索" : "Go"); action-label: root.chinese ? "执行搜索" : "Run search"; clicked => { root.search-requested(true); } }
                     }
@@ -4604,6 +4678,12 @@ main-scroll := ScrollView {
                     search-settings-first := SpinBox { horizontal-stretch: 1; enabled: root.settings-page == 2 && !root.settings-busy && !root.settings-close-confirm; minimum: 1; maximum: 30; step-size: 1; value <=> root.max-search-tasks; edited(value) => { root.max-search-tasks-requested(value); } }
                 }
                 Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "每个任务保留独立的目录、检索条件和声音列表。最多支持 30 个任务；超出宽度时可横向滚动或使用左右翻页按钮。" : "Each task keeps its own folders, search and sound list. Up to 30 tasks are supported; scroll horizontally or use the arrow buttons when tabs overflow."; }
+                pagination-check := CheckBox { text: root.chinese ? "分页浏览结果" : "Browse results in pages"; checked <=> root.pagination-enabled; enabled: root.settings-page == 2 && !root.settings-busy && !root.settings-close-confirm && !root.library-busy && !root.ds-applying && !root.task-restoring && !root.search-workspace-loading && !root.search-workspace-read-only && !root.closing; toggled => { root.paging-policy-requested(self.checked, root.result-page-size); } }
+                HorizontalLayout { height: 30px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
+                    Label { width: 108px * Theme.ui-scale; text: root.chinese ? "每页结果" : "Results per page"; }
+                    pagination-size := SpinBox { horizontal-stretch: 1; minimum: 1; maximum: 1000; step-size: 1; enabled: root.pagination-enabled && root.settings-page == 2 && !root.settings-busy && !root.settings-close-confirm && !root.library-busy && !root.ds-applying && !root.task-restoring && !root.search-workspace-loading && !root.search-workspace-read-only && !root.closing; value <=> root.result-page-size; edited(value) => { root.paging-policy-requested(root.pagination-enabled, value); } }
+                }
+                Label { wrap: word-wrap; font-size: Theme.font(11); text: root.chinese ? "开启后使用上一页和下一页；关闭后连续滚动浏览。更改浏览方式或页大小会将各任务的结果位置重置到开头，保留检索条件。" : "When enabled, use Previous and Next. When disabled, browse by continuous scrolling. Changing the browsing mode or page size resets each task's result position while keeping its search conditions."; }
             }
             sync-settings-page := VerticalLayout { width: parent.width; visible: root.settings-page == 3; spacing: 13px * Theme.ui-scale; alignment: start;
                 Text { text: root.chinese ? "服务器与同步" : "Server and sync"; color: Theme.ink; font-size: Theme.font(19); font-weight: 600; }

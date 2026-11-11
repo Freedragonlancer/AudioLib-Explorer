@@ -30,7 +30,10 @@ use audiolib_core::{
 use audiolib_db::{ScanCancellation, ScanOptions, ScanService, SqliteProvider};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
+// A provider continuation belongs to this query size, independently of the
+// configurable visible page. Never send a 1000-row UI request with a 200-row cursor.
 const PAGE_SIZE: usize = 200;
+const MAX_RESULT_WINDOW_ROWS: usize = audiolib_core::config::MAX_SEARCH_PAGE_SIZE as usize;
 /// Sidebar album covers are read only for the first rows; later rows show text only.
 const ALBUM_THUMBNAILS: usize = 12;
 const HISTORY_SIZE: usize = 50;
@@ -171,6 +174,8 @@ fn table_preferences(ui: &AppWindow) -> AudioTablePreferences {
         tags_width: ui.get_table_tags_width(),
         order_by: table_sort_order(ui.get_sort_index()),
         descending: ui.get_sort_descending(),
+        pagination_enabled: ui.get_pagination_enabled(),
+        page_size: ui.get_result_page_size().max(1) as u32,
     }
     .normalized()
 }
@@ -988,6 +993,8 @@ impl Controller {
         ui.set_table_tags_width(table.tags_width);
         ui.set_sort_index(sort_index(table.order_by));
         ui.set_sort_descending(table.descending);
+        ui.set_pagination_enabled(table.pagination_enabled);
+        ui.set_result_page_size(table.page_size as i32);
         ui.set_search_scope_index(search_scope_index(search_scope_from_pref(
             &config.search_scope,
         )));
@@ -1300,6 +1307,12 @@ impl Controller {
                 *c.audio_table.lock().unwrap() = table_preferences(&ui);
                 *c.single_click_play_pending.lock().unwrap() = true;
                 c.single_click_play_wake.notify_one();
+            }
+        });
+        let c = self.clone();
+        ui.on_paging_policy_requested(move |enabled, size| {
+            if let Some(ui) = c.ui.upgrade() {
+                c.apply_paging_policy(&ui, enabled, size);
             }
         });
         let c = self.clone();
@@ -3576,6 +3589,7 @@ impl Controller {
                                     c2.search_page_published(&ui, job.generation, true);
                                     ui.set_searching(false);
                                     c2.search_task_page_ready(&ui, workspace_revision);
+                                    c2.commit_search_history(&ui);
                                     return;
                                 }
                                 let result_window =
@@ -3611,14 +3625,15 @@ impl Controller {
                                 // total for offset clamping or result labels.
                                 let global_count_exact =
                                     page.total_count_exact && job.request.cursor.is_none();
+                                let page_size = c2.result_page_size();
                                 if global_count_exact
                                     && job.request.offset > 0
                                     && (job.request.offset as u64) >= page.total_count
                                 {
                                     c2.request.lock().unwrap().offset =
-                                        (page.total_count.saturating_sub(1) / PAGE_SIZE as u64)
+                                        (page.total_count.saturating_sub(1) / page_size as u64)
                                             as usize
-                                            * PAGE_SIZE;
+                                            * page_size;
                                     let retained_status = c2
                                         .search_publication
                                         .lock()
@@ -3700,7 +3715,7 @@ impl Controller {
                                 if !result_window {
                                     *c2.request.lock().unwrap() = job.request.clone();
                                 }
-                                {
+                                let explicit_page_label = {
                                     let mut navigation = c2.result_pages.lock().unwrap();
                                     if same_display_revision {
                                         coverage.first_offset =
@@ -3710,23 +3725,29 @@ impl Controller {
                                         navigation.install_window(&job.request, &coverage),
                                     );
                                     ui.set_can_previous(navigation.can_previous(&job.request));
-                                }
+                                    navigation.explicit_page_label(
+                                        global_count_exact
+                                            .then(|| page.total_count.div_ceil(page_size as u64)),
+                                    )
+                                };
                                 *c2.window_coverage.lock().unwrap() = Some(coverage);
-                                let first_page = job.request.offset / PAGE_SIZE + 1;
+                                let first_page = job.request.offset / page_size + 1;
                                 let last_page = (job.request.offset
                                     + page.returned_count.saturating_sub(1))
-                                    / PAGE_SIZE
+                                    / page_size
                                     + 1;
                                 let pages = if global_count_exact {
                                     page.total_count
-                                        .div_ceil(PAGE_SIZE as u64)
+                                        .div_ceil(page_size as u64)
                                         .max(1)
                                         .to_string()
                                 } else {
                                     "?".into()
                                 };
                                 ui.set_page_label(
-                                    if first_page == last_page {
+                                    if c2.audio_table.lock().unwrap().pagination_enabled {
+                                        explicit_page_label
+                                    } else if first_page == last_page {
                                         format!("{first_page}/{pages}")
                                     } else {
                                         format!("{first_page}–{last_page}/{pages}")
@@ -3803,8 +3824,10 @@ impl Controller {
                                 // and its navigation bounds have been published together.
                                 ui.set_searching(false);
                                 c2.search_task_page_ready(&ui, workspace_revision);
+                                c2.commit_search_history(&ui);
                             }
                             Err(error) => {
+                                c2.task_workspace.lock().unwrap().pending_history = None;
                                 let mut request = c2.request.lock().unwrap();
                                 let mut navigation = c2.result_pages.lock().unwrap();
                                 let retained_navigation = navigation.pending_for(&request)
@@ -3885,11 +3908,18 @@ impl Controller {
                     });
                     let cache_hit = cached.is_some();
                     let chinese = c.chinese.load(Ordering::Acquire);
+                    // Directory facets belong to the definition, not a UI page
+                    // or its bounded-provider continuation.
+                    let mut facet_request = job.request.clone();
+                    facet_request.offset = 0;
+                    facet_request.limit = PAGE_SIZE;
+                    facet_request.cursor = None;
+                    facet_request.page = None;
                     let count_folders = || {
                         survive_panic(
                             || {
                                 provider
-                                    .search_folders_cancellable(&job.request, job.cancel.clone())
+                                    .search_folders_cancellable(&facet_request, job.cancel.clone())
                                     .map(Arc::new)
                             },
                             || {
@@ -4511,6 +4541,30 @@ impl Controller {
         });
     }
 
+    /// Continuous browsing retains its proven 200-row chunks/600-row window.
+    /// The configurable size is used only for an explicit page.
+    fn result_page_size(&self) -> usize {
+        let preferences = self.audio_table.lock().unwrap();
+        if preferences.pagination_enabled {
+            preferences
+                .page_size
+                .clamp(1, audiolib_core::config::MAX_SEARCH_PAGE_SIZE) as usize
+        } else {
+            PAGE_SIZE
+        }
+    }
+
+    fn result_window_limit(&self) -> usize {
+        let preferences = self.audio_table.lock().unwrap();
+        if preferences.pagination_enabled {
+            preferences
+                .page_size
+                .clamp(1, audiolib_core::config::MAX_SEARCH_PAGE_SIZE) as usize
+        } else {
+            PAGE_SIZE * 3
+        }
+    }
+
     fn request_page(self: &Arc<Self>, ui: &AppWindow, delta: i32) {
         if !self.available()
             || ui.get_searching()
@@ -4522,11 +4576,12 @@ impl Controller {
         {
             return;
         }
+        let page_size = self.result_page_size();
         let mut request = self.request.lock().unwrap();
         self.result_pages
             .lock()
             .unwrap()
-            .step(&mut request, delta, PAGE_SIZE);
+            .step(&mut request, delta, page_size);
         drop(request);
         self.request_navigation_search(ui, true, false);
     }
@@ -4534,6 +4589,7 @@ impl Controller {
     /// Keep at most three pages resident, loading before the viewport reaches an edge.
     fn extend_result_window(self: &Arc<Self>, ui: &AppWindow, direction: i32) -> bool {
         if !self.available()
+            || self.audio_table.lock().unwrap().pagination_enabled
             || ui.get_searching()
             || ui.get_background_blocked()
             || ui.get_task_restoring()
@@ -4656,6 +4712,7 @@ impl Controller {
             return;
         }
         self.persist_search_task(ui);
+        self.task_workspace.lock().unwrap().pending_history = None;
         // Even invalid input supersedes queued/in-flight work and its UI publications.
         self.search_cancel
             .lock()
@@ -4690,9 +4747,10 @@ impl Controller {
             self.queue_unavailable_album_choices(ui, generation);
             return;
         }
-        request.limit = request.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3);
+        let page_size = self.result_page_size();
+        request.limit = request.limit.clamp(page_size, self.result_window_limit());
         if reset {
-            request.limit = PAGE_SIZE;
+            request.limit = page_size;
             request.offset = 0;
         }
         let samples = [0, 44_100, 48_000, 88_200, 96_000, 192_000];
@@ -4782,6 +4840,7 @@ impl Controller {
         self.begin_task_search(reset);
         *self.request.lock().unwrap() = request.clone();
         self.persist_search_task(ui);
+        self.task_workspace.lock().unwrap().pending_history = Some(!immediate);
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut *self.search_cancel.lock().unwrap(), cancel.clone())
             .store(true, Ordering::Release);

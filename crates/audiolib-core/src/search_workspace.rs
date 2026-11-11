@@ -170,6 +170,16 @@ impl SearchTaskDefinition {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchTaskView {
+    /// Optional UI browsing-policy hint. Older readers ignore this field while
+    /// retaining editor drafts and executable filter definitions unchanged.
+    /// Missing hints mean the legacy continuous-200 policy; an unknown or
+    /// malformed hint makes the desktop reset only its navigation position.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_result_paging_policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_paging_policy: Option<String>,
     pub offset: usize,
     pub expanded_folders: Vec<SearchFolderRef>,
     pub folder_scroll_y: f32,
@@ -190,6 +200,21 @@ pub struct SearchTaskView {
     pub sidebar_page: i32,
     pub favorites_category: i32,
     pub filters_visible: bool,
+}
+
+fn deserialize_result_paging_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    // Keep malformed/oversized input as an unknown hint rather than treating it
+    // as a legacy missing field or rejecting the complete owned workspace.
+    Ok(Some(
+        value
+            .as_str()
+            .filter(|value| value.len() <= 64)
+            .unwrap_or_default()
+            .to_owned(),
+    ))
 }
 
 impl SearchTaskView {
@@ -373,6 +398,117 @@ fn invalid(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_reader_ignores_paging_hint_without_creating_editor_drafts() {
+        // Relevant 0.9.5 fields: unknown view keys are ignored, and empty
+        // raw_inputs means filter controls must use the executable definition.
+        #[derive(Default, Serialize, Deserialize)]
+        #[serde(default)]
+        struct LegacyView095 {
+            offset: usize,
+            raw_inputs: BTreeMap<String, String>,
+            selected_audio: Option<SearchAudioRef>,
+            checked_audio: Vec<SearchAudioRef>,
+            selection_anchor: Option<SearchAudioRef>,
+            sample_filter: i32,
+            bit_filter: i32,
+            channel_filter: i32,
+            visibility_index: i32,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct LegacyTask095 {
+            id: String,
+            title: String,
+            title_is_custom: bool,
+            definition: SearchTaskDefinition,
+            view: LegacyView095,
+            saved_search_id: Option<String>,
+        }
+        let audio = SearchAudioRef {
+            id: 42,
+            file_path: "/sounds/wind.wav".into(),
+        };
+        let mut task = SearchTask {
+            id: "task".into(),
+            saved_search_id: Some("favorite".into()),
+            view: SearchTaskView {
+                result_paging_policy: Some("page:1000".into()),
+                offset: 1000,
+                selected_audio: Some(audio.clone()),
+                checked_audio: vec![audio.clone()],
+                selection_anchor: Some(audio),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        task.definition.query = "wind".into();
+        task.definition.filters.sample_rate = Some(48_000);
+        task.definition.filters.bit_depth = Some(24);
+        task.definition.filters.channels = Some(2);
+        task.definition.filters.visibility = crate::FileVisibility::Missing;
+        task.definition.filters.favorites_only = true;
+        let legacy: LegacyTask095 =
+            serde_json::from_value(serde_json::to_value(&task).unwrap()).unwrap();
+        assert!(legacy.view.raw_inputs.is_empty());
+        assert_eq!(legacy.definition, task.definition);
+        assert_eq!(legacy.view.selected_audio, task.view.selected_audio);
+        assert_eq!(legacy.view.checked_audio, task.view.checked_audio);
+        let saved_by_legacy: SearchTask =
+            serde_json::from_value(serde_json::to_value(legacy).unwrap()).unwrap();
+        assert!(saved_by_legacy.view.result_paging_policy.is_none());
+        assert!(saved_by_legacy.view.raw_inputs.is_empty());
+        assert_eq!(saved_by_legacy.definition, task.definition);
+        assert_eq!(saved_by_legacy.saved_search_id, task.saved_search_id);
+        assert_eq!(
+            saved_by_legacy.view.selected_audio,
+            task.view.selected_audio
+        );
+        assert_eq!(saved_by_legacy.view.checked_audio, task.view.checked_audio);
+        assert_eq!(
+            saved_by_legacy.view.selection_anchor,
+            task.view.selection_anchor
+        );
+    }
+
+    #[test]
+    fn optional_paging_policy_is_lenient_without_losing_the_view_or_editor_drafts() {
+        let legacy: SearchTaskView = serde_json::from_str(r#"{"offset":800}"#).unwrap();
+        assert!(legacy.result_paging_policy.is_none());
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("result_paging_policy")
+                .is_none()
+        );
+        for hint in [
+            serde_json::json!("page:997"),
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(1000),
+            serde_json::json!({"unexpected": "value"}),
+            serde_json::json!("x".repeat(65)),
+        ] {
+            let view: SearchTaskView = serde_json::from_value(serde_json::json!({
+                "result_paging_policy": hint,
+                "offset": 800,
+                "raw_inputs": {"query": "unfinished OR"},
+                "selected_audio": {"id": 42, "file_path": "/sounds/wind.wav"},
+            }))
+            .unwrap();
+            view.validate().unwrap();
+            assert_eq!(view.offset, 800);
+            assert_eq!(view.raw_inputs["query"], "unfinished OR");
+            assert_eq!(view.selected_audio.as_ref().unwrap().id, 42);
+            assert_eq!(
+                view.result_paging_policy.as_deref(),
+                Some(if hint == "page:997" { "page:997" } else { "" })
+            );
+            let restored: SearchTaskView =
+                serde_json::from_value(serde_json::to_value(&view).unwrap()).unwrap();
+            assert_eq!(restored, view);
+        }
+    }
 
     #[test]
     fn saved_scopes_round_trip_and_legacy_definitions_keep_main_fields() {

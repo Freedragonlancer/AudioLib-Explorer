@@ -8,12 +8,52 @@ use audiolib_core::search_workspace::{
 };
 use std::collections::BTreeMap;
 
+fn paging_policy_key(preferences: &AudioTablePreferences) -> String {
+    if preferences.pagination_enabled {
+        format!(
+            "page:{}",
+            preferences
+                .page_size
+                .clamp(1, audiolib_core::config::MAX_SEARCH_PAGE_SIZE)
+        )
+    } else {
+        "continuous:200".into()
+    }
+}
+
+fn reset_paging_view(view: &mut SearchTaskView, preferences: &AudioTablePreferences) {
+    view.offset = 0;
+    view.list_scroll_y = 0.0;
+    view.list_scroll_x = 0.0;
+    view.list_top_row = 0;
+    view.list_row_offset = 0.0;
+    view.result_paging_policy = Some(paging_policy_key(preferences));
+}
+
+fn reconcile_paging_view(view: &mut SearchTaskView, preferences: &AudioTablePreferences) -> bool {
+    let expected = paging_policy_key(preferences);
+    let saved = view
+        .result_paging_policy
+        .as_deref()
+        .unwrap_or("continuous:200");
+    if saved == expected {
+        false
+    } else {
+        reset_paging_view(view, preferences);
+        true
+    }
+}
+
 #[cfg(test)]
 #[path = "search_task_tests.rs"]
 mod tests;
 
 #[path = "search_task_presentation.rs"]
 mod presentation;
+
+#[path = "search_task_history.rs"]
+mod history;
+use history::SearchHistory;
 
 #[path = "search_task_album_bindings.rs"]
 mod album_bindings;
@@ -41,6 +81,8 @@ pub(super) struct TaskWorkspaceState {
     pub(super) workspace: SearchWorkspace,
     target: Option<SearchWorkspaceTarget>,
     caches: HashMap<String, TaskCache>,
+    histories: HashMap<String, SearchHistory>,
+    pub(super) pending_history: Option<bool>,
     page_revision: Option<u64>,
     folders_revision: Option<u64>,
     page_complete: bool,
@@ -63,6 +105,8 @@ impl Default for TaskWorkspaceState {
             workspace: SearchWorkspace::for_scope(""),
             target: None,
             caches: HashMap::new(),
+            histories: HashMap::new(),
+            pending_history: None,
             page_revision: None,
             folders_revision: None,
             page_complete: false,
@@ -181,6 +225,168 @@ fn same_search_definition(left: &SearchTaskDefinition, right: &SearchTaskDefinit
 }
 
 impl Controller {
+    /// Only successfully published searches enter this task's session history.
+    pub(super) fn commit_search_history(&self, ui: &AppWindow) {
+        {
+            let mut state = self.task_workspace.lock().unwrap();
+            let Some(coalesce) = state.pending_history.take() else {
+                return;
+            };
+            let Some(task) = state
+                .workspace
+                .session
+                .tasks
+                .iter()
+                .find(|task| Some(&task.id) == state.workspace.session.active_task_id.as_ref())
+                .cloned()
+            else {
+                return;
+            };
+            state
+                .histories
+                .entry(task.id.clone())
+                .or_insert_with(|| SearchHistory::new(&task))
+                .record(&task, coalesce);
+        }
+        self.publish_search_tasks(ui);
+    }
+
+    fn navigate_search_history(self: &Arc<Self>, delta: i32) {
+        if !self.available() || !matches!(delta, -1 | 1) {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else { return };
+        if ui.get_background_blocked()
+            || ui.get_search_workspace_loading()
+            || ui.get_task_restoring()
+        {
+            return;
+        }
+        if let Err(error) = self.enqueue_current_metadata(&ui) {
+            ui.set_status(error.into());
+            return;
+        }
+        self.capture_search_task(&ui);
+        let id =
+            {
+                let mut state = self.task_workspace.lock().unwrap();
+                let Some(id) = state.workspace.session.active_task_id.clone() else {
+                    return;
+                };
+                let definition = state
+                    .workspace
+                    .session
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .map(|task| task.definition.clone());
+                let Some(history) = state.histories.get_mut(&id) else {
+                    return;
+                };
+                // A pending or failed new query has no history entry yet. Back
+                // returns to the last successful query before stepping further.
+                let unrecorded = history.current().zip(definition.as_ref()).is_some_and(
+                    |(entry, definition)| !same_search_definition(&entry.definition, definition),
+                );
+                let entry = if delta < 0 && unrecorded {
+                    history.finish_typing();
+                    history.current().cloned()
+                } else {
+                    history.step(delta)
+                };
+                let Some(entry) = entry else {
+                    return;
+                };
+                let Some(task) = state
+                    .workspace
+                    .session
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == id)
+                else {
+                    return;
+                };
+                task.definition = entry.definition;
+                task.view = entry.view;
+                state.caches.remove(&id);
+                state.pending_history = None;
+                id
+            };
+        // Use the ordinary identity checks, cancellation and generation barriers.
+        // Restoring a selection does not load or start the shared audio engine.
+        self.restore_search_task(&id);
+    }
+
+    /// Change only the global browsing policy. Definitions, Metadata drafts,
+    /// checked/selected record identities and the audition source remain owned
+    /// by their existing task/provider; only range state becomes invalid.
+    pub(super) fn apply_paging_policy(self: &Arc<Self>, ui: &AppWindow, enabled: bool, size: i32) {
+        let previous = self.audio_table.lock().unwrap().clone();
+        let blocked = {
+            let state = self.task_workspace.lock().unwrap();
+            state.loading || state.restoring || state.restore_failed || state.protected
+        };
+        if !self.available()
+            || self.search_v2_ux.lock().unwrap().declined
+            || (ui.get_background_blocked() && !ui.get_settings_visible())
+            || ui.get_paging_policy_settings_blocked()
+            || ui.get_task_restoring()
+            || blocked
+        {
+            ui.set_pagination_enabled(previous.pagination_enabled);
+            ui.set_result_page_size(previous.page_size as i32);
+            return;
+        }
+        let mut next = previous.clone();
+        next.pagination_enabled = enabled;
+        next.page_size = size.clamp(1, audiolib_core::config::MAX_SEARCH_PAGE_SIZE as i32) as u32;
+        ui.set_pagination_enabled(next.pagination_enabled);
+        ui.set_result_page_size(next.page_size as i32);
+        if next.pagination_enabled == previous.pagination_enabled
+            && next.page_size == previous.page_size
+        {
+            return;
+        }
+        let changed = paging_policy_key(&previous) != paging_policy_key(&next);
+        if changed {
+            self.persist_search_task(ui);
+        }
+        *self.audio_table.lock().unwrap() = next.clone();
+        if changed {
+            {
+                let mut state = self.task_workspace.lock().unwrap();
+                for task in &mut state.workspace.session.tasks {
+                    reset_paging_view(&mut task.view, &next);
+                }
+                state.caches.clear();
+                state.page_revision = None;
+                state.folders_revision = None;
+                state.page_complete = false;
+                state.pending_view = None;
+                state.deferred_search = None;
+                state.epoch += 1;
+            }
+            self.result_pages.lock().unwrap().clear();
+            self.window_coverage.lock().unwrap().take();
+            {
+                let mut request = self.request.lock().unwrap();
+                request.offset = 0;
+                request.limit = self.result_page_size();
+                request.cursor = None;
+                request.page = None;
+            }
+            ui.invoke_reset_result_list_scroll();
+            ui.set_can_previous(false);
+            ui.set_can_next(false);
+            ui.set_page_label("1".into());
+            // Facets did not change, but the ordinary query path cancels and
+            // generations out every queued/in-flight range publication.
+            self.request_navigation_search(ui, true, true);
+        }
+        *self.single_click_play_pending.lock().unwrap() = true;
+        self.single_click_play_wake.notify_one();
+    }
+
     pub(super) fn begin_task_search(&self, reset: bool) {
         let mut state = self.task_workspace.lock().unwrap();
         state.restore_failed = false;
@@ -282,6 +488,8 @@ impl Controller {
         ui.on_search_task_selected(move |id| c.switch_search_task(&id));
         let c = self.clone();
         ui.on_search_task_closed(move |id| c.close_search_task(&id));
+        let c = self.clone();
+        ui.on_search_history_requested(move |delta| c.navigate_search_history(delta));
         let c = self.clone();
         ui.on_search_task_favorite_toggled(move |id| c.toggle_search_task_favorite(&id));
         let c = self.clone();
@@ -480,6 +688,8 @@ impl Controller {
             state.loading = true;
             state.deferred_search = None;
             state.caches.clear();
+            state.histories.clear();
+            state.pending_history = None;
             state.page_revision = None;
             state.folders_revision = None;
             state.page_complete = false;
@@ -673,6 +883,7 @@ impl Controller {
         let row_height = ui.get_task_result_row_height().max(1.0);
         let scroll_y = ui.get_task_result_scroll_y();
         let view = SearchTaskView {
+            result_paging_policy: Some(paging_policy_key(&self.audio_table.lock().unwrap())),
             offset: request.offset,
             raw_inputs: raw,
             expanded_folders: {
@@ -768,6 +979,30 @@ impl Controller {
             task.definition = definition;
             task.view = view;
         }
+        if let Some(task) = state
+            .workspace
+            .session
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .cloned()
+            .filter(task_inputs_valid)
+        {
+            // Navigation controls can already describe the next search while
+            // the request still describes the displayed results.
+            state
+                .histories
+                .entry(id.clone())
+                .or_insert_with(|| SearchHistory::new(&task))
+                .capture(&task);
+        } else if let Some(previous) = previous.as_ref().filter(|task| task_inputs_valid(task)) {
+            // The first capture may contain a new draft. Seed from the prior
+            // valid task without replacing an existing history entry's view.
+            state
+                .histories
+                .entry(id.clone())
+                .or_insert_with(|| SearchHistory::new(previous));
+        }
         if let Some(revision) = state.page_revision.filter(|revision| {
             state.page_complete
                 && state.folders_revision == Some(*revision)
@@ -803,6 +1038,25 @@ impl Controller {
 
     pub(super) fn publish_search_tasks(&self, ui: &AppWindow) {
         let state = self.task_workspace.lock().unwrap();
+        let history = state
+            .workspace
+            .session
+            .active_task_id
+            .as_ref()
+            .and_then(|id| state.histories.get(id));
+        let unrecorded =
+            history
+                .and_then(SearchHistory::current)
+                .zip(
+                    state.workspace.session.tasks.iter().find(|task| {
+                        Some(&task.id) == state.workspace.session.active_task_id.as_ref()
+                    }),
+                )
+                .is_some_and(|(entry, task)| {
+                    !same_search_definition(&entry.definition, &task.definition)
+                });
+        ui.set_search_history_can_back(unrecorded || history.is_some_and(SearchHistory::can_back));
+        ui.set_search_history_can_forward(history.is_some_and(SearchHistory::can_forward));
         let chinese = self.chinese.load(Ordering::Acquire);
         let rows = state
             .workspace
@@ -984,6 +1238,7 @@ impl Controller {
         let active = state.workspace.session.active_task_id.as_deref() == Some(id);
         state.workspace.session.tasks.remove(index);
         state.caches.remove(id);
+        state.histories.remove(id);
         if state.workspace.session.tasks.is_empty() {
             state.workspace.session.tasks.push(fresh_task(
                 SortOrder::Relevance,
@@ -1221,8 +1476,20 @@ impl Controller {
         ui: &AppWindow,
         id: &str,
     ) -> Option<(SearchTask, Option<TaskCache>, u64)> {
+        let preferences = self.audio_table.lock().unwrap().clone();
         let (task, cache, epoch) = {
             let mut state = self.task_workspace.lock().unwrap();
+            // Reconcile every cold task before restoring any of its positions.
+            // A settings save and workspace save need not finish together.
+            let mut reset_ids = Vec::new();
+            for task in &mut state.workspace.session.tasks {
+                if reconcile_paging_view(&mut task.view, &preferences) {
+                    reset_ids.push(task.id.clone());
+                }
+            }
+            for id in reset_ids {
+                state.caches.remove(&id);
+            }
             let task = state
                 .workspace
                 .session
@@ -1230,6 +1497,12 @@ impl Controller {
                 .iter()
                 .find(|task| task.id == id)
                 .cloned()?;
+            state
+                .histories
+                .entry(task.id.clone())
+                .or_insert_with(|| SearchHistory::new(&task))
+                .finish_typing();
+            state.pending_history = None;
             state.workspace.session.active_task_id = Some(task.id.clone());
             state.epoch += 1;
             state.page_revision = None;
@@ -1272,8 +1545,18 @@ impl Controller {
         self.window_coverage.lock().unwrap().take();
         *self.request.lock().unwrap() = task.definition.to_request(
             cache.as_ref().map_or_else(
-                || task_result_window_limit(&task.view, task_viewport_rows(ui)),
-                |cache| cache.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3),
+                || {
+                    task_result_window_limit_with_policy(
+                        &task.view,
+                        task_viewport_rows(ui),
+                        &preferences,
+                    )
+                },
+                |cache| {
+                    cache
+                        .limit
+                        .clamp(self.result_page_size(), self.result_window_limit())
+                },
             ),
             task.view.offset,
         );
@@ -1300,7 +1583,11 @@ impl Controller {
         ui.set_can_previous(false);
         ui.set_can_next(false);
         ui.set_result_summary("".into());
-        ui.set_page_label((task.view.offset / PAGE_SIZE + 1).to_string().into());
+        ui.set_page_label(
+            (task.view.offset / self.result_page_size() + 1)
+                .to_string()
+                .into(),
+        );
         ui.set_folders(ModelRc::new(VecModel::<FolderRow>::default()));
         ui.set_crumbs(ModelRc::new(VecModel::<CrumbRow>::default()));
         self.publish_search_tasks(ui);
@@ -1397,13 +1684,24 @@ impl Controller {
         folders: Vec<Folder>,
     ) {
         let album_missing = album_filter_unavailable(&task.definition);
+        let preferences = self.audio_table.lock().unwrap().clone();
         self.result_pages.lock().unwrap().clear();
         self.window_coverage.lock().unwrap().take();
         apply_task_controls(ui, &task);
         *self.request.lock().unwrap() = task.definition.to_request(
             cache.as_ref().map_or_else(
-                || task_result_window_limit(&task.view, task_viewport_rows(ui)),
-                |cache| cache.limit.clamp(PAGE_SIZE, PAGE_SIZE * 3),
+                || {
+                    task_result_window_limit_with_policy(
+                        &task.view,
+                        task_viewport_rows(ui),
+                        &preferences,
+                    )
+                },
+                |cache| {
+                    cache
+                        .limit
+                        .clamp(self.result_page_size(), self.result_window_limit())
+                },
             ),
             task.view.offset,
         );
@@ -1523,6 +1821,18 @@ impl Controller {
             state.page_complete = cache.is_some();
             state.unavailable_folder = task.definition.folder.clone().filter(|_| folder_missing);
             state.unavailable_album = task.definition.filters.album_id.filter(|_| album_missing);
+            let previous = state
+                .workspace
+                .session
+                .tasks
+                .iter()
+                .find(|stored| stored.id == task.id)
+                .map(|stored| stored.definition.clone());
+            if let Some(previous) = previous
+                && let Some(history) = state.histories.get_mut(&task.id)
+            {
+                history.reconcile_current(&previous, &task);
+            }
             if let Some(stored) = state
                 .workspace
                 .session
@@ -1759,13 +2069,27 @@ fn task_viewport_rows(ui: &AppWindow) -> usize {
 }
 
 /// Include the saved top row's full screen when no result cache survives.
-/// Persisted positions cannot expand the result window beyond 600 rows.
-fn task_result_window_limit(view: &SearchTaskView, visible_rows: usize) -> usize {
+/// Continuous positions stay within 600 rows; explicit pages use their fixed size.
+fn task_result_window_limit_with_policy(
+    view: &SearchTaskView,
+    visible_rows: usize,
+    preferences: &AudioTablePreferences,
+) -> usize {
+    if preferences.pagination_enabled {
+        return preferences
+            .page_size
+            .clamp(1, audiolib_core::config::MAX_SEARCH_PAGE_SIZE) as usize;
+    }
     view.list_top_row
         .saturating_add(visible_rows.max(1))
         .div_ceil(PAGE_SIZE)
         .clamp(1, 3)
         * PAGE_SIZE
+}
+
+#[cfg(test)]
+fn task_result_window_limit(view: &SearchTaskView, visible_rows: usize) -> usize {
+    task_result_window_limit_with_policy(view, visible_rows, &AudioTablePreferences::default())
 }
 
 fn task_inputs_valid(task: &SearchTask) -> bool {
@@ -2057,7 +2381,7 @@ fn resolve_task(
             && cache.window_coverage.as_ref().is_some_and(|coverage| {
                 coverage.revision == Some(cache.revision)
                     && coverage.positions.len() == cache.records.len()
-                    && coverage.positions.len() <= PAGE_SIZE * 3
+                    && coverage.positions.len() <= MAX_RESULT_WINDOW_ROWS
                     && coverage.before_raw == task.view.offset
             })
     });

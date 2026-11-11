@@ -10,9 +10,9 @@ use slint::ComponentHandle;
 
 use crate::AppWindow;
 
-/// Apply the saved window size, position, maximized state and sidebar visibility
+/// Apply the saved window size, position, maximized state and pane visibility
 /// before the window is first shown, so it does not visibly jump on startup.
-/// The sidebar always opens on the details page, so the saved page is not applied.
+/// The right side panel always opens on details, so the saved page is not applied.
 pub(crate) fn restore_before_show(ui: &AppWindow, layout: &WindowLayoutPreferences) {
     let window = ui.window();
     if let (Some(width), Some(height)) = (layout.width, layout.height) {
@@ -20,6 +20,9 @@ pub(crate) fn restore_before_show(ui: &AppWindow, layout: &WindowLayoutPreferenc
     }
     if let (Some(x), Some(y)) = (layout.x, layout.y) {
         window.set_position(slint::PhysicalPosition::new(x, y));
+    }
+    if let Some(visible) = layout.sidebar_visible {
+        ui.set_sidebar_visible(visible);
     }
     if let Some(visible) = layout.inspector_visible {
         ui.set_inspector_visible(visible);
@@ -118,6 +121,7 @@ pub(crate) fn capture(
     }
     let scale = interface_scale(ui);
     layout.sidebar_width = Some(ui.get_sidebar_preferred_width() / scale);
+    layout.sidebar_visible = Some(ui.get_sidebar_visible());
     layout.inspector_width = Some(ui.get_inspector_preferred_width() / scale);
     layout.inspector_visible = Some(ui.get_inspector_visible());
     layout.folders_section_expanded = Some(ui.get_folders_section_expanded());
@@ -149,6 +153,7 @@ mod tests {
             ui.global::<crate::Theme>().set_ui_scale(scale);
             let saved = WindowLayoutPreferences {
                 sidebar_width: Some(260.0),
+                sidebar_visible: Some(false),
                 inspector_width: Some(340.0),
                 inspector_visible: Some(false),
                 filters_visible: Some(true),
@@ -160,10 +165,12 @@ mod tests {
             restore_before_show(&ui, &saved);
             restore_panes(&ui, &saved);
             assert_eq!(ui.get_sidebar_preferred_width(), 260.0 * scale);
+            assert!(!ui.get_sidebar_visible());
             // A saved filter page is not restored: every start shows sound details.
             assert!(!ui.get_inspector_visible() && !ui.get_filters_visible());
             let captured = capture(&ui, &saved);
             assert_eq!(captured.sidebar_width, Some(260.0));
+            assert_eq!(captured.sidebar_visible, Some(false));
             assert_eq!(captured.inspector_width, Some(340.0));
             assert_eq!(captured.inspector_visible, Some(false));
             assert_eq!(captured.filters_visible, Some(true));
@@ -199,7 +206,11 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         let sidebar = ui.get_sidebar_preferred_width();
         let inspector = ui.get_inspector_preferred_width();
-        let visible = (ui.get_inspector_visible(), ui.get_filters_visible());
+        let visible = (
+            ui.get_sidebar_visible(),
+            ui.get_inspector_visible(),
+            ui.get_filters_visible(),
+        );
         let sections = (
             ui.get_folders_section_expanded(),
             ui.get_libraries_section_expanded(),
@@ -211,7 +222,11 @@ mod tests {
         assert_eq!(ui.get_sidebar_preferred_width(), sidebar);
         assert_eq!(ui.get_inspector_preferred_width(), inspector);
         assert_eq!(
-            (ui.get_inspector_visible(), ui.get_filters_visible()),
+            (
+                ui.get_sidebar_visible(),
+                ui.get_inspector_visible(),
+                ui.get_filters_visible(),
+            ),
             visible
         );
         assert_eq!(
@@ -222,6 +237,69 @@ mod tests {
             ),
             sections
         );
+    }
+
+    #[test]
+    fn library_sidebar_visibility_survives_restart_and_scale_changes() {
+        i_slint_backend_testing::init_no_event_loop();
+        for theme in audiolib_core::config::THEME_IDS {
+            for percent in [100, 150, 200] {
+                let older: WindowLayoutPreferences = serde_json::from_value(serde_json::json!({
+                    "width": 1280,
+                    "height": 800,
+                    "sidebar_width": 275,
+                    "inspector_width": 340,
+                    "inspector_visible": false,
+                    "filters_visible": true,
+                    "folders_section_expanded": false,
+                    "libraries_section_expanded": true,
+                    "folders_section_ratio": 0.7
+                }))
+                .unwrap();
+                let ui = AppWindow::new().unwrap();
+                crate::theme::apply_theme(&ui, theme);
+                restore_before_show(&ui, &older);
+                crate::controller::apply_ui_scale(&ui, percent);
+                restore_panes(&ui, &older);
+                assert!(ui.get_sidebar_visible());
+
+                ui.set_sidebar_visible(false);
+                let captured = capture(&ui, &older);
+                assert_eq!(captured.sidebar_visible, Some(false));
+                assert_eq!(captured.sidebar_width, Some(275.0));
+                assert_eq!(captured.inspector_width, Some(340.0));
+                assert_eq!(captured.inspector_visible, Some(false));
+                assert_eq!(captured.filters_visible, Some(true));
+                assert_eq!(captured.folders_section_expanded, Some(false));
+                assert_eq!(captured.libraries_section_expanded, Some(true));
+                assert_eq!(captured.folders_section_ratio, Some(0.7));
+
+                let saved = serde_json::to_string(&captured).unwrap();
+                let restored: WindowLayoutPreferences = serde_json::from_str(&saved).unwrap();
+                let restarted = AppWindow::new().unwrap();
+                crate::theme::apply_theme(&restarted, theme);
+                restore_before_show(&restarted, &restored);
+                let next_percent = if percent == 200 { 100 } else { 200 };
+                crate::controller::apply_ui_scale(&restarted, next_percent);
+                restore_panes(&restarted, &restored);
+                assert!(!restarted.get_sidebar_visible());
+                assert_eq!(
+                    restarted.get_sidebar_preferred_width(),
+                    275.0 * next_percent as f32 / 100.0
+                );
+                assert!(!restarted.get_inspector_visible());
+                assert!(!restarted.get_filters_visible());
+
+                restarted.set_sidebar_visible(true);
+                let shown = capture(&restarted, &restored);
+                assert_eq!(shown.sidebar_visible, Some(true));
+                assert_eq!(shown.sidebar_width, Some(275.0));
+                let reopened = AppWindow::new().unwrap();
+                reopened.set_sidebar_visible(false);
+                restore_before_show(&reopened, &shown);
+                assert!(reopened.get_sidebar_visible());
+            }
+        }
     }
 
     #[test]

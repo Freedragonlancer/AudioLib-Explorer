@@ -141,7 +141,7 @@ fn child_scopes_survive_task_switches() {
     finish(&fixture);
 }
 
-fn seed_path_pages(fixture: &Fixture) {
+pub(super) fn seed_path_pages(fixture: &Fixture) {
     let conn = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
     audiolib_db::register_library_functions(&conn).unwrap();
     let wind = fixture
@@ -169,11 +169,11 @@ fn seed_path_pages(fixture: &Fixture) {
     fixture.provider.rebuild_directory_search().unwrap();
 }
 
-fn seed_extra_path_pages(fixture: &Fixture, count: i64) {
+pub(super) fn seed_extra_path_pages(fixture: &Fixture, count: i64) {
     seed_folder_pages(fixture, "wind", 3_000, count);
 }
 
-fn seed_folder_pages(fixture: &Fixture, folder_name: &str, first: i64, count: i64) {
+pub(super) fn seed_folder_pages(fixture: &Fixture, folder_name: &str, first: i64, count: i64) {
     let conn = rusqlite::Connection::open(fixture.provider.database_path()).unwrap();
     audiolib_db::register_library_functions(&conn).unwrap();
     let folder = fixture
@@ -195,7 +195,10 @@ fn seed_folder_pages(fixture: &Fixture, folder_name: &str, first: i64, count: i6
     fixture.provider.rebuild_directory_search().unwrap();
 }
 
-fn reference_pages(provider: &SqliteProvider, mut request: SearchRequest) -> Vec<AudioFile> {
+pub(super) fn reference_pages(
+    provider: &SqliteProvider,
+    mut request: SearchRequest,
+) -> Vec<AudioFile> {
     let mut output = Vec::new();
     loop {
         let page = provider.search(&request).unwrap();

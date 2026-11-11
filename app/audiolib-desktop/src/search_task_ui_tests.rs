@@ -89,6 +89,103 @@ fn activate_popup(ui: &AppWindow, label: &str, steps_from_end: usize) {
 }
 
 #[test]
+fn search_history_buttons_navigate_only_when_available_in_both_search_bars() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        let ui = window();
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        ui.global::<crate::Theme>().set_modern_player(modern);
+        ui.set_query("boom".into());
+        settle();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        ui.on_search_history_requested(move |direction| observed.borrow_mut().push(direction));
+        let assert_enabled = |label: &str, enabled| {
+            assert_eq!(
+                ElementHandle::find_by_accessible_label(&ui, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("Missing search history control: {label}"))
+                    .accessible_enabled(),
+                Some(enabled),
+                "Unexpected availability for {label}, modern={modern}"
+            );
+        };
+
+        assert_enabled("Back in search history", false);
+        assert_enabled("Forward in search history", false);
+        click(&ui, "Back in search history");
+        click(&ui, "Forward in search history");
+        assert!(events.borrow().is_empty());
+
+        ui.set_search_history_can_back(true);
+        settle();
+        assert_enabled("Back in search history", true);
+        assert_enabled("Forward in search history", false);
+        click(&ui, "Back in search history");
+        click(&ui, "Forward in search history");
+        assert_eq!(&*events.borrow(), &[-1]);
+
+        ui.set_search_history_can_forward(true);
+        ui.set_chinese(true);
+        settle();
+        assert_enabled("后退搜索历史", true);
+        assert_enabled("前进搜索历史", true);
+        click(&ui, "前进搜索历史");
+        assert_eq!(&*events.borrow(), &[-1, 1]);
+        snapshot_if_requested(
+            &ui,
+            if modern {
+                "search-history-studio-cn"
+            } else {
+                "search-history-classic-cn"
+            },
+        );
+
+        // A pending result may be superseded by history navigation. Workspace
+        // restoration and application overlays must still block those actions.
+        ui.set_searching(true);
+        settle();
+        assert_enabled("后退搜索历史", true);
+        click(&ui, "后退搜索历史");
+        assert_eq!(&*events.borrow(), &[-1, 1, -1]);
+        events.borrow_mut().clear();
+        ui.set_startup_busy(true);
+        settle();
+        assert_enabled("后退搜索历史", false);
+        assert_enabled("前进搜索历史", false);
+        click(&ui, "后退搜索历史");
+        click(&ui, "前进搜索历史");
+        ui.set_startup_busy(false);
+        ui.set_search_workspace_loading(true);
+        settle();
+        assert_enabled("后退搜索历史", false);
+        assert_enabled("前进搜索历史", false);
+        click(&ui, "后退搜索历史");
+        click(&ui, "前进搜索历史");
+        ui.set_search_workspace_loading(false);
+        ui.set_task_restoring(true);
+        settle();
+        assert_enabled("后退搜索历史", false);
+        assert_enabled("前进搜索历史", false);
+        click(&ui, "后退搜索历史");
+        click(&ui, "前进搜索历史");
+        assert!(events.borrow().is_empty());
+        ui.set_task_restoring(false);
+        settle();
+        assert_enabled("后退搜索历史", true);
+        assert_enabled("前进搜索历史", true);
+        click(&ui, "前进搜索历史");
+        assert_eq!(&*events.borrow(), &[1]);
+        ui.hide().unwrap();
+    }
+}
+
+#[test]
 fn active_task_toolbar_favorite_and_background_close_do_not_select_a_task() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = window();
