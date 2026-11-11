@@ -6,6 +6,8 @@ use super::super::*;
 mod album_review;
 #[path = "search_task_favorite_review_tests.rs"]
 mod favorite_review;
+#[path = "search_task_history_tests.rs"]
+mod history_navigation;
 #[path = "search_task_lifecycle_review_tests.rs"]
 mod lifecycle_review;
 #[path = "pagination_preferences_tests.rs"]

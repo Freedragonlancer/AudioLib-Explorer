@@ -51,6 +51,10 @@ mod tests;
 #[path = "search_task_presentation.rs"]
 mod presentation;
 
+#[path = "search_task_history.rs"]
+mod history;
+use history::SearchHistory;
+
 #[path = "search_task_album_bindings.rs"]
 mod album_bindings;
 use album_bindings::{album_filter_unavailable, reconcile_workspace_albums, resolve_album_filter};
@@ -77,6 +81,8 @@ pub(super) struct TaskWorkspaceState {
     pub(super) workspace: SearchWorkspace,
     target: Option<SearchWorkspaceTarget>,
     caches: HashMap<String, TaskCache>,
+    histories: HashMap<String, SearchHistory>,
+    pub(super) pending_history: Option<bool>,
     page_revision: Option<u64>,
     folders_revision: Option<u64>,
     page_complete: bool,
@@ -99,6 +105,8 @@ impl Default for TaskWorkspaceState {
             workspace: SearchWorkspace::for_scope(""),
             target: None,
             caches: HashMap::new(),
+            histories: HashMap::new(),
+            pending_history: None,
             page_revision: None,
             folders_revision: None,
             page_complete: false,
@@ -217,6 +225,98 @@ fn same_search_definition(left: &SearchTaskDefinition, right: &SearchTaskDefinit
 }
 
 impl Controller {
+    /// Only successfully published searches enter this task's session history.
+    pub(super) fn commit_search_history(&self, ui: &AppWindow) {
+        {
+            let mut state = self.task_workspace.lock().unwrap();
+            let Some(coalesce) = state.pending_history.take() else {
+                return;
+            };
+            let Some(task) = state
+                .workspace
+                .session
+                .tasks
+                .iter()
+                .find(|task| Some(&task.id) == state.workspace.session.active_task_id.as_ref())
+                .cloned()
+            else {
+                return;
+            };
+            state
+                .histories
+                .entry(task.id.clone())
+                .or_insert_with(|| SearchHistory::new(&task))
+                .record(&task, coalesce);
+        }
+        self.publish_search_tasks(ui);
+    }
+
+    fn navigate_search_history(self: &Arc<Self>, delta: i32) {
+        if !self.available() || !matches!(delta, -1 | 1) {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else { return };
+        if ui.get_background_blocked()
+            || ui.get_search_workspace_loading()
+            || ui.get_task_restoring()
+        {
+            return;
+        }
+        if let Err(error) = self.enqueue_current_metadata(&ui) {
+            ui.set_status(error.into());
+            return;
+        }
+        self.capture_search_task(&ui);
+        let id =
+            {
+                let mut state = self.task_workspace.lock().unwrap();
+                let Some(id) = state.workspace.session.active_task_id.clone() else {
+                    return;
+                };
+                let definition = state
+                    .workspace
+                    .session
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .map(|task| task.definition.clone());
+                let Some(history) = state.histories.get_mut(&id) else {
+                    return;
+                };
+                // A pending or failed new query has no history entry yet. Back
+                // returns to the last successful query before stepping further.
+                let unrecorded = history.current().zip(definition.as_ref()).is_some_and(
+                    |(entry, definition)| !same_search_definition(&entry.definition, definition),
+                );
+                let entry = if delta < 0 && unrecorded {
+                    history.finish_typing();
+                    history.current().cloned()
+                } else {
+                    history.step(delta)
+                };
+                let Some(entry) = entry else {
+                    return;
+                };
+                let Some(task) = state
+                    .workspace
+                    .session
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == id)
+                else {
+                    return;
+                };
+                task.definition = entry.definition;
+                task.view = entry.view;
+                state.caches.remove(&id);
+                state.pending_history = None;
+                id
+            };
+        // Use the ordinary identity checks, cancellation and generation barriers.
+        // Restoring a selection does not load or start the shared audio engine.
+        self.restore_search_task(&id);
+    }
+
     /// Change only the global browsing policy. Definitions, Metadata drafts,
     /// checked/selected record identities and the audition source remain owned
     /// by their existing task/provider; only range state becomes invalid.
@@ -388,6 +488,8 @@ impl Controller {
         ui.on_search_task_selected(move |id| c.switch_search_task(&id));
         let c = self.clone();
         ui.on_search_task_closed(move |id| c.close_search_task(&id));
+        let c = self.clone();
+        ui.on_search_history_requested(move |delta| c.navigate_search_history(delta));
         let c = self.clone();
         ui.on_search_task_favorite_toggled(move |id| c.toggle_search_task_favorite(&id));
         let c = self.clone();
@@ -586,6 +688,8 @@ impl Controller {
             state.loading = true;
             state.deferred_search = None;
             state.caches.clear();
+            state.histories.clear();
+            state.pending_history = None;
             state.page_revision = None;
             state.folders_revision = None;
             state.page_complete = false;
@@ -875,6 +979,30 @@ impl Controller {
             task.definition = definition;
             task.view = view;
         }
+        if let Some(task) = state
+            .workspace
+            .session
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .cloned()
+            .filter(task_inputs_valid)
+        {
+            // Navigation controls can already describe the next search while
+            // the request still describes the displayed results.
+            state
+                .histories
+                .entry(id.clone())
+                .or_insert_with(|| SearchHistory::new(&task))
+                .capture(&task);
+        } else if let Some(previous) = previous.as_ref().filter(|task| task_inputs_valid(task)) {
+            // The first capture may contain a new draft. Seed from the prior
+            // valid task without replacing an existing history entry's view.
+            state
+                .histories
+                .entry(id.clone())
+                .or_insert_with(|| SearchHistory::new(previous));
+        }
         if let Some(revision) = state.page_revision.filter(|revision| {
             state.page_complete
                 && state.folders_revision == Some(*revision)
@@ -910,6 +1038,25 @@ impl Controller {
 
     pub(super) fn publish_search_tasks(&self, ui: &AppWindow) {
         let state = self.task_workspace.lock().unwrap();
+        let history = state
+            .workspace
+            .session
+            .active_task_id
+            .as_ref()
+            .and_then(|id| state.histories.get(id));
+        let unrecorded =
+            history
+                .and_then(SearchHistory::current)
+                .zip(
+                    state.workspace.session.tasks.iter().find(|task| {
+                        Some(&task.id) == state.workspace.session.active_task_id.as_ref()
+                    }),
+                )
+                .is_some_and(|(entry, task)| {
+                    !same_search_definition(&entry.definition, &task.definition)
+                });
+        ui.set_search_history_can_back(unrecorded || history.is_some_and(SearchHistory::can_back));
+        ui.set_search_history_can_forward(history.is_some_and(SearchHistory::can_forward));
         let chinese = self.chinese.load(Ordering::Acquire);
         let rows = state
             .workspace
@@ -1091,6 +1238,7 @@ impl Controller {
         let active = state.workspace.session.active_task_id.as_deref() == Some(id);
         state.workspace.session.tasks.remove(index);
         state.caches.remove(id);
+        state.histories.remove(id);
         if state.workspace.session.tasks.is_empty() {
             state.workspace.session.tasks.push(fresh_task(
                 SortOrder::Relevance,
@@ -1349,6 +1497,12 @@ impl Controller {
                 .iter()
                 .find(|task| task.id == id)
                 .cloned()?;
+            state
+                .histories
+                .entry(task.id.clone())
+                .or_insert_with(|| SearchHistory::new(&task))
+                .finish_typing();
+            state.pending_history = None;
             state.workspace.session.active_task_id = Some(task.id.clone());
             state.epoch += 1;
             state.page_revision = None;
@@ -1667,6 +1821,18 @@ impl Controller {
             state.page_complete = cache.is_some();
             state.unavailable_folder = task.definition.folder.clone().filter(|_| folder_missing);
             state.unavailable_album = task.definition.filters.album_id.filter(|_| album_missing);
+            let previous = state
+                .workspace
+                .session
+                .tasks
+                .iter()
+                .find(|stored| stored.id == task.id)
+                .map(|stored| stored.definition.clone());
+            if let Some(previous) = previous
+                && let Some(history) = state.histories.get_mut(&task.id)
+            {
+                history.reconcile_current(&previous, &task);
+            }
             if let Some(stored) = state
                 .workspace
                 .session
