@@ -3495,28 +3495,21 @@ pub(super) fn waking_hint(name: &str, waited: Duration, chinese: bool) -> Option
     })
 }
 
-/// Header suffix for roots that are not plainly online (§6.4), e.g. ` · 根目录离线：SFX`.
+/// Source-label suffix for offline roots (§6.4). Transient waking status belongs to
+/// the current audition's live wait hint, not this periodically refreshed label.
 pub(super) fn root_summary(roots: &[RemoteRoot], chinese: bool) -> String {
-    let mut summary = String::new();
-    for (state, label_cn, label_en) in [
-        (RootState::Offline, "根目录离线", "root offline"),
-        (RootState::Waking, "磁盘唤醒中", "disk waking"),
-    ] {
-        let names: Vec<_> = roots
-            .iter()
-            .filter(|root| root.state() == state)
-            .map(|root| root.name.as_str())
-            .collect();
-        if names.is_empty() {
-            continue;
-        }
-        if chinese {
-            summary.push_str(&format!(" · {label_cn}：{}", names.join("、")));
-        } else {
-            summary.push_str(&format!(" · {label_en}: {}", names.join(", ")));
-        }
+    let names: Vec<_> = roots
+        .iter()
+        .filter(|root| root.state() == RootState::Offline)
+        .map(|root| root.name.as_str())
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else if chinese {
+        format!(" · 根目录离线：{}", names.join("、"))
+    } else {
+        format!(" · root offline: {}", names.join(", "))
     }
-    summary
 }
 
 /// Notice for offline roots (shown when no revision notice is pending): their records stay
@@ -4287,6 +4280,13 @@ mod tests {
             started.elapsed() < WAKING_HINT_AFTER,
             "A known waking root is shown immediately"
         );
+        controller.publish_data_source(&ui);
+        assert!(!ui.get_data_source_label().contains("disk waking"));
+        assert!(
+            ui.get_remote_audition_status()
+                .contains("owned waiting sound.wav"),
+            "The live audition hint remains while the cached root warning is hidden"
+        );
         ui.set_status("Ready interleaved with remote wait".into());
         let weak = ui.as_weak();
         run_until(&ui, move || {
@@ -4413,8 +4413,8 @@ mod tests {
                 .is_some_and(|ui| ui.get_remote_audition_status().is_empty())
         });
 
-        // Root warnings precede long identity/address text, so elision retains
-        // their useful part even when no audition is currently waiting.
+        // A cached Waking root must not leave a second hint after the live
+        // audition wait has finished, including after a language change.
         controller.config.lock().unwrap().data_source.server_url =
             "https://long-owned-library-address.example.test:8790".into();
         controller.remote.lock().unwrap().live_roots = Some(vec![RemoteRoot {
@@ -4425,19 +4425,26 @@ mod tests {
             ..Default::default()
         }]);
         controller.publish_data_source(&ui);
-        assert!(
-            ui.get_data_source_label()
-                .starts_with("Server mode · disk waking: Owned sleeping disk · ")
-        );
+        assert!(!ui.get_data_source_label().contains("disk waking"));
         assert!(
             ui.get_data_source_label()
                 .contains("long-owned-library-address.example.test")
         );
         controller.chinese.store(true, Ordering::Release);
         controller.publish_data_source(&ui);
-        assert!(
-            ui.get_data_source_label()
-                .starts_with("服务器模式 · 磁盘唤醒中：Owned sleeping disk · ")
+        assert!(!ui.get_data_source_label().contains("磁盘唤醒中"));
+        assert!(ui.get_remote_audition_status().is_empty());
+        assert_eq!(
+            controller
+                .remote
+                .lock()
+                .unwrap()
+                .live_roots
+                .as_ref()
+                .unwrap()[0]
+                .state(),
+            RootState::Waking,
+            "Hiding a footer warning must not change the server's root state"
         );
         controller.shutdown();
         ui.hide().unwrap();
@@ -4512,11 +4519,10 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert_eq!(
-            super::root_summary(&roots, true),
-            " · 根目录离线：SFX · 磁盘唤醒中：Foley"
-        );
-        assert_eq!(super::root_summary(&roots[2..], false), "");
+        assert_eq!(super::root_summary(&roots, true), " · 根目录离线：SFX");
+        assert_eq!(super::root_summary(&roots, false), " · root offline: SFX");
+        assert!(super::root_summary(&roots[1..], false).is_empty());
+        assert!(super::root_summary(&roots[1..], true).is_empty());
         let notice = super::root_notice(&roots, true).unwrap();
         assert!(
             notice.contains("「SFX」（Root directory not found") && notice.contains("不标为缺失"),

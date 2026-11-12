@@ -85,6 +85,7 @@ export component AiQuickSearch inherits Rectangle {
     in property <[AiSuggestion]> rows;
     in property <int> selected: -1;
     callback search(int);
+    callback new-task(int);
     min-width: 144px * Theme.ui-scale;
     preferred-width: 400px * Theme.ui-scale;
     horizontal-stretch: 1;
@@ -105,26 +106,59 @@ export component AiQuickSearch inherits Rectangle {
             y: root.overflowing ? 0px : (root.height - self.height) / 2;
             width: root.chip-width;
             height: 26px * Theme.ui-scale;
-            background: index == root.selected ? Theme.selected : hit.has-hover && root.enabled ? Theme.hover : Theme.panel;
+            background: index == root.selected ? Theme.selected : body-hit.has-hover && root.enabled ? Theme.hover : Theme.panel;
             border-radius: 14px * Theme.ui-scale;
-            border-width: 1px; border-color: focus.has-focus || index == root.selected ? Theme.accent : Theme.strong-border;
+            border-width: 1px; border-color: body-focus.has-focus || index == root.selected ? Theme.accent : Theme.strong-border;
             opacity: root.enabled ? 1 : 0.45;
-            accessible-role: button;
-            accessible-label: (root.chinese ? "快捷搜索：" : "Quick search: ") + row.text;
-            accessible-description: row.detail;
-            accessible-enabled: root.enabled;
-            accessible-action-default => { if root.enabled { root.search(index); } }
-            forward-focus: focus;
-            tag-text := Text { x: 10px * Theme.ui-scale; y: 0px; width: parent.width - 20px * Theme.ui-scale; height: parent.height; text: row.text; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; }
-            focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.search(index); return accept; } reject } }
-            hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.search(index); } }
-            Tooltip {
+            // Sibling hit areas keep + from also searching the current task.
+            tag-body := Rectangle {
+                x: 0px; y: 0px; width: parent.width - 30px * Theme.ui-scale; height: parent.height;
+                accessible-role: button;
+                accessible-label: (root.chinese ? "快捷搜索：" : "Quick search: ") + row.text;
+                accessible-description: row.detail;
+                accessible-enabled: root.enabled;
+                accessible-action-default => { if root.enabled { root.search(index); } }
+                forward-focus: body-focus;
+                tag-text := Text { x: 10px * Theme.ui-scale; y: 0px; width: max(0px, parent.width - 18px * Theme.ui-scale); height: parent.height; text: row.text; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; accessible-role: none; }
+                body-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.search(index); return accept; } reject } }
+                body-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.search(index); } }
+                Tooltip {
+                    Rectangle {
+                        width: min(420px * Theme.ui-scale, max(144px * Theme.ui-scale, root.width));
+                        background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
+                        border-width: 1px; border-color: Theme.strong-border;
+                        VerticalLayout { padding: 8px * Theme.ui-scale;
+                            Text { text: row.text + (row.detail != "" ? "\n" + row.detail : ""); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                        }
+                    }
+                }
+            }
+            new-task-button := Rectangle {
+                x: parent.width - self.width; y: 0px; width: 30px * Theme.ui-scale; height: parent.height;
+                accessible-role: button;
+                accessible-label: (root.chinese ? "以推荐词新建搜索任务：" : "New search task: ") + row.text;
+                accessible-description: root.chinese ? "沿用当前目录和筛选条件，在独立任务搜索此推荐词" : "Search this suggestion in a separate task using the current directory and filters";
+                accessible-enabled: root.enabled;
+                accessible-action-default => { if root.enabled { root.new-task(index); } }
+                forward-focus: new-task-focus;
                 Rectangle {
-                    width: min(420px * Theme.ui-scale, max(144px * Theme.ui-scale, root.width));
-                    background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
-                    border-width: 1px; border-color: Theme.strong-border;
-                    VerticalLayout { padding: 8px * Theme.ui-scale;
-                        Text { text: row.text + (row.detail != "" ? "\n" + row.detail : ""); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                    x: 2px * Theme.ui-scale; y: 2px * Theme.ui-scale; width: parent.width - 4px * Theme.ui-scale; height: parent.height - 4px * Theme.ui-scale;
+                    border-radius: self.height / 2;
+                    background: root.enabled && new-task-hit.pressed ? Theme.accent.darker(0.18) : root.enabled && new-task-hit.has-hover ? Theme.accent : Theme.accent.with-alpha(0.16);
+                    border-width: new-task-focus.has-focus ? 2px : 1px;
+                    border-color: new-task-focus.has-focus ? Theme.ink : Theme.accent;
+                    Text { x: 0px; y: root.enabled && new-task-hit.pressed ? 1px * Theme.ui-scale : 0px; width: parent.width; height: parent.height; text: "+"; color: root.enabled && (new-task-hit.has-hover || new-task-hit.pressed) ? Theme.on-accent : Theme.accent; font-size: Theme.font(16); font-weight: 700; horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
+                }
+                new-task-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.new-task(index); return accept; } reject } }
+                new-task-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.new-task(index); } }
+                Tooltip {
+                    Rectangle {
+                        width: 280px * Theme.ui-scale;
+                        background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
+                        border-width: 1px; border-color: Theme.strong-border;
+                        VerticalLayout { padding: 8px * Theme.ui-scale;
+                            Text { text: (root.chinese ? "新建任务搜索：" : "Search in a new task: ") + row.text + (root.chinese ? "\n沿用当前目录和筛选条件" : "\nUses the current directory and filters"); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                        }
                     }
                 }
             }
@@ -180,7 +214,8 @@ export component AiSearchPanel inherits Rectangle {
     // 5 suggestion selection, 6 apply, 7 new task, 8 save, 9 new profile,
     // 10 remove, 11 models, 12 protocol preset, 16 quick search, 17 model test,
     // 18 reset draft, 20 search all current recommendations, 21 search a recommendation,
-    // 22 open AI settings from the application menu, 23 set sidebar collapse state.
+    // 22 open AI settings from the application menu, 23 set sidebar collapse state,
+    // 24 create a task from one quick-search recommendation.
     callback action(int, int);
     callback collapse();
     background: Theme.panel;

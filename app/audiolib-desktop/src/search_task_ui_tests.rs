@@ -652,6 +652,79 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
 }
 
 #[test]
+fn ai_tag_edge_creates_a_task_without_triggering_the_tag_body() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        for chinese in [false, true] {
+            let ui = window();
+            ui.global::<crate::Theme>().set_modern_style(modern);
+            ui.global::<crate::Theme>().set_ui_scale(1.0);
+            ui.set_chinese(chinese);
+            ui.set_ai_visible(true);
+            ui.set_ai_collapsed(true);
+            ui.set_ai_quick_rows(ModelRc::new(VecModel::from(vec![
+                crate::AiSuggestion {
+                    text: "wind".into(),
+                    detail: "Air movement".into(),
+                },
+                crate::AiSuggestion {
+                    text: "metal impact".into(),
+                    detail: "Hard impact".into(),
+                },
+            ])));
+            let actions = Rc::new(RefCell::new(Vec::new()));
+            let observed = actions.clone();
+            ui.on_ai_action(move |kind, index| observed.borrow_mut().push((kind, index)));
+            let new_task = if chinese {
+                "以推荐词新建搜索任务：metal impact"
+            } else {
+                "New search task: metal impact"
+            };
+            let body = if chinese {
+                "快捷搜索：metal impact"
+            } else {
+                "Quick search: metal impact"
+            };
+            click(&ui, new_task);
+            assert_eq!(actions.borrow().as_slice(), &[(24, 1)]);
+            click(&ui, body);
+            assert_eq!(actions.borrow().as_slice(), &[(24, 1), (16, 1)]);
+            for (busy, restoring, loading) in [
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ] {
+                ui.set_ai_busy(busy);
+                ui.set_task_restoring(restoring);
+                ui.set_search_workspace_loading(loading);
+                settle();
+                for label in [new_task, body] {
+                    let control = ElementHandle::find_by_accessible_label(&ui, label)
+                        .next()
+                        .unwrap();
+                    assert_eq!(control.accessible_enabled(), Some(false));
+                    control.mock_single_click(PointerEventButton::Left);
+                    settle();
+                }
+                assert_eq!(actions.borrow().as_slice(), &[(24, 1), (16, 1)]);
+            }
+            ui.set_ai_busy(false);
+            ui.set_task_restoring(false);
+            ui.set_search_workspace_loading(false);
+            click(&ui, new_task);
+            assert_eq!(actions.borrow().as_slice(), &[(24, 1), (16, 1), (24, 1)]);
+            snapshot_if_requested(&ui, &format!("ai-tag-new-task-{modern}-{chinese}"));
+            ui.hide().unwrap();
+        }
+    }
+}
+
+#[test]
 fn ai_switch_routes_the_shared_search_field_and_retains_both_drafts() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
         mock_time: true,

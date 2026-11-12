@@ -2877,6 +2877,7 @@ main-scroll := ScrollView {
                 rows: root.ai-quick-rows; selected: root.ai-selected; chinese: root.chinese;
                 enabled: !root.background-blocked && !root.ai-busy && !root.task-restoring;
                 search(index) => { root.ai-action(16,index); }
+                new-task(index) => { root.ai-action(24,index); }
             }
             if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
             Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+  添加文件夹" : "+  Add folder"; clicked => { root.prepare-scan(0, ""); } }
@@ -3717,6 +3718,7 @@ main-scroll := ScrollView {
                     rows: root.ai-quick-rows; selected: root.ai-selected; chinese: root.chinese;
                     enabled: !root.background-blocked && !root.ai-busy && !root.task-restoring;
                     search(index) => { root.ai-action(16,index); }
+                    new-task(index) => { root.ai-action(24,index); }
                 }
                 if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
                 StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+ 添加文件夹" : "+ Add folder"; clicked => { root.prepare-scan(0, ""); } }

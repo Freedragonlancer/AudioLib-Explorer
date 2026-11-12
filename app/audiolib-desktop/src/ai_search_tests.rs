@@ -903,6 +903,22 @@ fn child_long_model_queries() {
         assert!(row.detail.contains(&source));
     }
     assert_cached_ai_queries(&fixture, 1, &["wind".into(), "wind roar".into()]);
+    let saved_usage = || {
+        audiolib_ai::storage::ProfileStore::open(&fixture.root.join("preferences"))
+            .unwrap()
+            .usage(ui.get_ai_profile_id().as_str())
+            .requests
+    };
+    let requests = saved_usage();
+    assert_eq!(requests, 1);
+    // The provider accepted exactly one generation. The edge action uses the
+    // second verified tag directly, without generating or charging another call.
+    ui.invoke_ai_action(24, 1);
+    wait_for(ui, |ui| {
+        ui.get_search_tasks().row_count() == 4 && !ui.get_task_restoring() && !ui.get_searching()
+    });
+    assert_eq!(ui.get_query(), "wind roar");
+    assert_eq!(saved_usage(), requests);
     // The two-term limit belongs to recommendations, never ordinary user searches.
     ui.invoke_ai_action(1, 0);
     search(&fixture, "heavy strong wind roar", 0);
@@ -1508,6 +1524,114 @@ fn child_provider_drafts() {
 #[test]
 fn ai_all_recommendations_keep_scope_and_reject_partial_creation() {
     isolated("ai_search::child_all_tasks");
+}
+
+#[test]
+fn ai_tag_new_task_preserves_its_source_and_rejects_invalid_admission() {
+    isolated("ai_search::child_tag_new_task");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_tag_new_task() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.set_ai_auto_search(false);
+    seed_ai_filename_hits(&fixture);
+    choose_gore(&fixture);
+    ui.set_tag_filter("gore".into());
+    ui.set_search_scope_index(3);
+    search(&fixture, "gore", 3);
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.set_ai_prompt("科幻爆炸".into());
+    ui.invoke_ai_action(2, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_quick_rows().row_count() == 4
+    });
+    fixture.controller.capture_search_task(ui);
+    let (source_id, before, original_results) = {
+        let state = fixture.controller.task_workspace.lock().unwrap();
+        let source = &state.workspace.session.tasks[0];
+        (
+            source.id.clone(),
+            source.definition.clone(),
+            state.caches[&source.id]
+                .records
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert!(before.folder.is_some());
+    assert_ne!(before.filters, audiolib_core::SearchFilters::default());
+    let tag = ui.get_ai_quick_rows().row_data(1).unwrap().text;
+    assert_ne!(tag, ui.get_ai_query());
+    for index in [-1, 5, i32::MAX] {
+        ui.invoke_ai_action(24, index);
+        assert_eq!(ui.get_search_tasks().row_count(), 1);
+        assert_eq!(ui.get_query(), "gore");
+    }
+    ui.set_duration_min("unfinished".into());
+    ui.invoke_ai_action(24, 1);
+    assert_eq!(ui.get_search_tasks().row_count(), 1);
+    assert_eq!(ui.get_duration_min(), "unfinished");
+    assert_eq!(ui.get_query(), "gore");
+    ui.set_duration_min("".into());
+    fixture
+        .controller
+        .max_search_tasks
+        .store(1, Ordering::Release);
+    ui.invoke_ai_action(24, 1);
+    assert_eq!(ui.get_search_tasks().row_count(), 1);
+    assert!(ui.get_ai_status().contains("No new tasks"));
+    assert_eq!(ui.get_query(), "gore");
+    fixture
+        .controller
+        .max_search_tasks
+        .store(12, Ordering::Release);
+    ui.invoke_ai_action(24, 1);
+    let ready = fixture.controller.clone();
+    wait_for(ui, move |ui| {
+        ui.get_search_tasks().row_count() == 2
+            && !ui.get_task_restoring()
+            && !ui.get_searching()
+            && fully_published(&ready)
+    });
+    assert_eq!(ui.get_query(), tag);
+    {
+        let state = fixture.controller.task_workspace.lock().unwrap();
+        let source = &state.workspace.session.tasks[0];
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.definition, before);
+        assert_eq!(
+            state.caches[&source_id]
+                .records
+                .iter()
+                .map(|file| file.id)
+                .collect::<Vec<_>>(),
+            original_results
+        );
+        let created = &state.workspace.session.tasks[1];
+        let mut expected = before.clone();
+        expected.query = tag.to_string();
+        assert_eq!(created.definition, expected);
+        assert_eq!(
+            state.workspace.session.active_task_id.as_ref(),
+            Some(&created.id)
+        );
+        assert_eq!(state.caches[&created.id].records.len(), 1);
+    }
+    fixture.controller.switch_search_task(&source_id);
+    wait_for(ui, |ui| !ui.get_task_restoring() && !ui.get_searching());
+    assert_eq!(ui.get_query(), "gore");
+    assert_eq!(ui.get_tag_filter(), "gore");
+    ui.invoke_ai_action(3, 0);
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 0);
+    ui.invoke_ai_action(24, 1);
+    assert_eq!(ui.get_search_tasks().row_count(), 2);
+    assert_eq!(ui.get_query(), "gore");
+    finish(&fixture);
 }
 
 #[test]

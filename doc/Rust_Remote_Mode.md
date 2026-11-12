@@ -529,15 +529,29 @@ its root status cache and never touches the NAS). Each root carries `online`, `s
 online, and the older `available`/`reachable` names are accepted as `online`
 (`RemoteRoot::state()`).
 
-| State | Header | Notice / status |
+| State | Data-source label | Notice / status |
 |---|---|---|
 | all online | — | — |
-| `waking` (no answer from the disk for > 5 s) | `· disk waking: <root>` | no notice; playback of its records shows the waking hint at once |
+| `waking` (no answer from the disk for > 5 s) | no waking suffix | no notice; playback of its records shows the live audition wait hint at once |
 | `offline` | `· root offline: <root>` | offline roots with their reason; their records stay listed (not missing), cached copies still play (shown when no revision notice is pending) |
 
-The source label appears at the native window's bottom right. Root warnings precede
-the longer server/library identity so the waking/offline state remains readable
-when the label is elided; the tooltip retains the complete identity.
+The accent-colored source label appears at the native window's bottom right. It does
+not repeat the cached `waking` state: the separate foreground audition wait hint
+indicates an actual pending audio request. Offline-root warnings still precede the
+longer server/library identity so they remain readable when the label is elided;
+the tooltip retains the complete identity. Root polling and the status displayed in
+the library management dialog are unchanged.
+
+2026-11-13 beta correction: the cached root warning could appear after the actual
+audition wait and remain until a later revision poll. The footer now keeps only the
+live audition hint for waking; offline warnings and management-page root states
+remain available. Three desktop regressions passed for wait completion/cancellation,
+stale callbacks, mixed root states, both languages and Classic / Studio footer
+layout. The final desktop ASIO strict Clippy and format checks also passed after
+the accompanying AI tag-button change. Evidence: `.rust-validation/wake-hint-single-status/`.
+No server, root-polling, audio transport or library-write behavior changed; those
+unchanged paths retain their previous acceptance identity. Real NAS sleep cycles
+were not forced for this UI correction.
 
 The Data source dialog lists each root with its status (warning color when offline), and
 `remote test` lists `N roots: name status; …`. An offline root does **not** mark its
@@ -824,8 +838,10 @@ any shared cache entry alive.
    `Retry-After`). With a user-configured WebDAV URL for the root a failed server stream
    falls back to WebDAV (original file); while `/roots` reports the root offline WebDAV is
    tried first.
-   The bottom-right wake hint belongs to the current audition, so search completion
-   and background sync cannot replace it. It clears when the stream is ready,
+   The bottom-right foreground wake hint (white in the dark theme) belongs to the
+   current audition, so search completion and background sync cannot replace it.
+   The adjacent accent-colored data-source label does not duplicate the server's
+   cached `waking` state. The live hint clears when the stream is ready,
    fails or is cancelled, and on selection, task or source changes. Old queued
    updates cannot restore a cancelled hint or clear the next audition's hint.
 9. **Waveform.** `GET /audio/{id}/waveform?buckets=<segment columns>&colors=1&start_frame=&end_frame=`

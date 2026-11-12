@@ -314,7 +314,7 @@ impl Controller {
                         ui.set_ai_detail(row.detail);
                     }
                 }
-                6 | 7 | 16 | 20 | 21 => {
+                6 | 7 | 16 | 20 | 21 | 24 => {
                     if !c.available() || ui.get_ai_batch_blocked() {
                         return;
                     }
@@ -335,7 +335,7 @@ impl Controller {
                         return;
                     }
                     c.cancel_ai_task_batch(&ui);
-                    let query = if kind == 16 {
+                    let query = if matches!(kind, 16 | 24) {
                         let Some(row) = usize::try_from(index)
                             .ok()
                             .filter(|i| *i < MAX_AI_RECOMMENDATIONS)
@@ -368,10 +368,19 @@ impl Controller {
                         ));
                         return;
                     }
-                    if kind != 7 {
+                    if !matches!(kind, 7 | 24) {
                         ui.set_query(query.into());
                         c.request_search(&ui, true, true);
                         *c.ai.context.lock().unwrap() = Some(c.ai_context());
+                    } else if kind == 24 {
+                        if !c.open_ai_queries(&ui, std::slice::from_ref(&query)).is_empty() {
+                            let message = c.localized(
+                                &format!("已新建搜索任务：{query}"),
+                                &format!("New search task created: {query}"),
+                            );
+                            ui.set_ai_status(message.clone());
+                            ui.set_status(message);
+                        }
                     } else {
                         c.open_ai_query(&ui, &query);
                     }
