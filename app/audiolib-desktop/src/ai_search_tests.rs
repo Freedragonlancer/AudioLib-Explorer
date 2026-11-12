@@ -1212,6 +1212,210 @@ fn ai_provider_drafts_names_and_saved_selection_survive_reopening() {
     isolated("ai_search::child_provider_drafts");
 }
 
+fn seed_saved_ai_profile(fixture: &Fixture, custom_preset: bool) {
+    use audiolib_ai::{
+        config::{Profile, Protocol},
+        storage::ProfileStore,
+    };
+    let mut store = ProfileStore::open(&fixture.root.join("preferences")).unwrap();
+    store
+        .save(
+            Profile {
+                id: "sidebar-provider".into(),
+                name: "Sound design".into(),
+                protocol: Protocol::ChatCompletions,
+                base_url: "https://example.test/v1".into(),
+                model: "saved-model".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    if custom_preset {
+        store
+            .save_prompt(true, "Prefer raw material for layered sound design")
+            .unwrap();
+    }
+}
+
+#[test]
+fn ai_sidebar_opens_setup_without_a_saved_provider() {
+    isolated("ai_search::child_sidebar_missing_provider");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_missing_provider() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_visible());
+    assert!(!ui.get_ai_collapsed());
+    assert!(ui.get_ai_settings());
+    assert_eq!(ui.get_ai_providers().row_count(), 1);
+    ui.set_ai_profile_name("Unsaved provider".into());
+    ui.set_ai_model("draft-model".into());
+    ui.set_ai_dirty(true);
+    ui.invoke_ai_action(1, 0);
+    ui.invoke_ai_action(0, 0);
+    assert!(!ui.get_ai_collapsed());
+    assert!(ui.get_ai_settings());
+    assert_eq!(ui.get_ai_profile_name(), "Unsaved provider");
+    assert_eq!(ui.get_ai_model(), "draft-model");
+    finish(&fixture);
+}
+
+#[test]
+fn ai_sidebar_stays_collapsed_with_a_saved_provider_and_default_preset() {
+    isolated("ai_search::child_sidebar_default_preset");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_default_preset() {
+    saved_ai_sidebar_preset(false);
+}
+
+#[test]
+fn ai_sidebar_stays_collapsed_with_a_saved_provider_and_custom_preset() {
+    isolated("ai_search::child_sidebar_custom_preset");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_custom_preset() {
+    saved_ai_sidebar_preset(true);
+}
+
+fn saved_ai_sidebar_preset(custom_preset: bool) {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    seed_saved_ai_profile(&fixture, custom_preset);
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_visible());
+    assert!(ui.get_ai_collapsed());
+    assert_eq!(ui.get_ai_provider_index(), 1);
+    assert_eq!(ui.get_ai_preset_index(), i32::from(custom_preset));
+    // Saved configuration is sufficient; opening the mode does not call or
+    // authenticate a provider, and a key is not required to hide the sidebar.
+    assert!(!ui.get_ai_saved_key());
+    ui.set_ai_collapsed(false);
+    ui.invoke_ai_action(1, 0);
+    ui.invoke_ai_action(0, 0);
+    assert!(ui.get_ai_collapsed());
+    finish(&fixture);
+}
+
+#[test]
+fn ai_settings_open_explicitly_during_loading_and_keep_unsaved_drafts() {
+    isolated("ai_search::child_sidebar_explicit_setup");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_explicit_setup() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    seed_saved_ai_profile(&fixture, true);
+    ui.invoke_ai_action(0, 0);
+    assert!(ui.get_ai_busy());
+    ui.invoke_ai_action(22, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_visible());
+    assert!(!ui.get_ai_collapsed());
+    assert!(ui.get_ai_settings());
+    ui.set_ai_model("draft-model".into());
+    ui.set_ai_key("unsaved-draft-key".into());
+    ui.set_ai_dirty(true);
+    ui.set_ai_collapsed(true);
+    ui.invoke_ai_action(22, 0);
+    assert!(!ui.get_ai_collapsed());
+    assert!(ui.get_ai_settings());
+    assert_eq!(ui.get_ai_model(), "draft-model");
+    assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
+    assert!(ui.get_ai_dirty());
+    ui.invoke_ai_action(1, 0);
+    ui.invoke_ai_action(22, 0);
+    assert!(ui.get_ai_visible());
+    assert!(!ui.get_ai_collapsed());
+    assert_eq!(ui.get_ai_model(), "draft-model");
+    assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
+    let persisted =
+        std::fs::read_to_string(fixture.root.join("preferences/ai/profiles.json")).unwrap();
+    assert!(!persisted.contains("unsaved-draft-key"));
+    assert!(!persisted.contains("draft-model"));
+    finish(&fixture);
+}
+
+#[test]
+fn ai_initial_configuration_load_does_not_reopen_an_exited_mode() {
+    isolated("ai_search::child_sidebar_exit_during_load");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_exit_during_load() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.invoke_ai_action(0, 0);
+    assert!(ui.get_ai_busy());
+    ui.invoke_ai_action(1, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_visible());
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_visible());
+    assert!(!ui.get_ai_collapsed());
+    assert!(ui.get_ai_settings());
+    finish(&fixture);
+}
+
+#[test]
+fn ai_loading_respects_manual_sidebar_expansion_with_a_saved_provider() {
+    isolated("ai_search::child_sidebar_expand_during_load");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_expand_during_load() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    seed_saved_ai_profile(&fixture, false);
+    ui.invoke_ai_action(0, 0);
+    assert!(ui.get_ai_busy());
+    ui.invoke_ai_action(23, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_visible());
+    assert!(!ui.get_ai_collapsed());
+    assert_eq!(ui.get_ai_provider_index(), 1);
+    finish(&fixture);
+}
+
+#[test]
+fn ai_loading_respects_manual_sidebar_collapse_without_a_saved_provider() {
+    isolated("ai_search::child_sidebar_collapse_during_load");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_sidebar_collapse_during_load() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.invoke_ai_action(0, 0);
+    assert!(ui.get_ai_busy());
+    ui.invoke_ai_action(23, 1);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_visible());
+    assert!(ui.get_ai_collapsed());
+    assert_eq!(ui.get_ai_providers().row_count(), 1);
+    ui.invoke_ai_action(22, 0);
+    assert!(!ui.get_ai_collapsed());
+    assert!(ui.get_ai_settings());
+    finish(&fixture);
+}
+
 #[test]
 #[ignore = "runs in an owned isolated child"]
 fn child_provider_drafts() {

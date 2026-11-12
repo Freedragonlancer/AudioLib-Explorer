@@ -114,7 +114,13 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     ui.set_ai_detail("成品 / 科幻爆炸 · UCS: EXPLDsgn".into());
     let actions = Rc::new(RefCell::new(Vec::new()));
     let recorded = actions.clone();
-    ui.on_ai_action(move |kind, index| recorded.borrow_mut().push((kind, index)));
+    let weak = ui.as_weak();
+    ui.on_ai_action(move |kind, index| {
+        recorded.borrow_mut().push((kind, index));
+        if kind == 23 {
+            weak.upgrade().unwrap().set_ai_collapsed(index != 0);
+        }
+    });
     settle();
     snapshot_if_requested(&ui, "ai-search-panel");
     click(&ui, "生成查询建议");
@@ -512,7 +518,7 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     click(&ui, "收起");
     click(&ui, "生成后自动搜索 3 个任务");
     assert!(!ui.get_ai_auto_search());
-    click(&ui, "供应商");
+    click(&ui, "AI 搜索设置");
     assert!(ui.get_ai_settings());
     ui.set_ai_protocol(6);
     ui.set_ai_endpoint("https://api.deepseek.com".into());
@@ -539,14 +545,27 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     ui.set_ai_saved_protocol(6);
     settle();
     snapshot_if_requested(&ui, "ai-provider-panel");
+    click(&ui, "Skill 与预设");
+    assert_eq!(ui.get_ai_settings_page(), 1);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "AI Skill")
+            .next()
+            .is_some()
+    );
+    snapshot_if_requested(&ui, "ai-skill-preset-panel");
+    click(&ui, "保存提示词");
+    assert_eq!(actions.borrow().last(), Some(&(15, 0)));
+    click(&ui, "供应商");
+    assert_eq!(ui.get_ai_settings_page(), 0);
+    assert_eq!(ui.get_ai_model(), "deepseek-flash");
     click(&ui, "退出 AI 搜索");
     assert_eq!(actions.borrow().last(), Some(&(1, 0)));
-    click(&ui, "返回搜索");
+    click(&ui, "返回 AI 搜索");
     assert!(
         !ui.get_ai_auto_search(),
         "Provider navigation must preserve the auto-search choice"
     );
-    click(&ui, "供应商");
+    click(&ui, "AI 搜索设置");
     // An existing modal takes Escape priority over the temporarily hidden AI panel.
     ui.set_about_visible(true);
     settle();
@@ -589,11 +608,13 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
     ui.set_ai_timeout(31);
     ui.set_ai_request_cap(123);
     ui.set_ai_subscription(true);
+    ui.set_ai_preset_index(1);
+    ui.set_ai_instruction("Preserved sound design instruction".into());
     let actions = Rc::new(RefCell::new(Vec::new()));
     let observed = actions.clone();
     ui.on_ai_action(move |kind, index| observed.borrow_mut().push((kind, index)));
     for _ in 0..3 {
-        click(&ui, "Providers");
+        click(&ui, "AI search settings");
         assert_eq!(
             ui.get_ai_protocol(),
             5,
@@ -607,7 +628,14 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
         assert_eq!(ui.get_ai_timeout(), 31);
         assert_eq!(ui.get_ai_request_cap(), 123);
         assert!(ui.get_ai_subscription());
-        click(&ui, "Search");
+        click(&ui, "Skill and presets");
+        assert_eq!(ui.get_ai_settings_page(), 1);
+        assert_eq!(ui.get_ai_preset_index(), 1);
+        assert_eq!(ui.get_ai_instruction(), "Preserved sound design instruction");
+        click(&ui, "Providers");
+        assert_eq!(ui.get_ai_settings_page(), 0);
+        assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
+        click(&ui, "Return to AI search");
         ui.set_ai_visible(false);
         settle();
         ui.set_ai_visible(true);

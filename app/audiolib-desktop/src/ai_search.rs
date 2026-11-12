@@ -125,6 +125,7 @@ struct PendingApply {
 pub(super) struct Runtime {
     store: Mutex<Option<ProfileStore>>,
     busy: AtomicBool,
+    sidebar_pending: AtomicBool,
     revision: AtomicU64,
     cancel: Mutex<Arc<AtomicBool>>,
     context: Mutex<Option<Context>>,
@@ -200,25 +201,42 @@ impl Controller {
             if c.closing.load(Ordering::Acquire) || c.shutdown.load(Ordering::Acquire) {
                 return;
             }
-            if c.ai.busy.load(Ordering::Acquire) && !matches!(kind, 1 | 3) {
-                if kind == 0 {
-                    ui.set_ai_visible(true);
+            if matches!(kind, 0 | 22) {
+                if ui.get_ai_prompt().trim().is_empty() {
+                    ui.set_ai_prompt(ui.get_query());
+                }
+                // Start collapsed while reading saved profiles, avoiding a drawer
+                // flash for configured users. Explicit settings always opens it.
+                c.ai.sidebar_pending.store(kind == 0, Ordering::Release);
+                ui.set_ai_collapsed(kind == 0);
+                if kind == 22 {
+                    ui.set_ai_settings(true);
+                    ui.set_ai_settings_page(0);
+                }
+                ui.set_ai_visible(true);
+                let loaded = c.ai.store.lock().unwrap().is_some();
+                if loaded {
+                    c.publish_ai_profiles(&ui);
+                    c.apply_ai_sidebar_default(&ui);
+                } else if !c.ai.busy.load(Ordering::Acquire) {
+                    c.ai_job(&ui, Job::Load);
                 }
                 return;
             }
+            if kind == 23 {
+                // Manual drawer gestures supersede the pending first-load default.
+                c.ai.sidebar_pending.store(false, Ordering::Release);
+                ui.set_ai_collapsed(index != 0);
+                return;
+            }
+            if c.ai.busy.load(Ordering::Acquire) && !matches!(kind, 1 | 3) {
+                return;
+            }
             match kind {
-                0 => {
-                    if ui.get_ai_prompt().trim().is_empty() {
-                        ui.set_ai_prompt(ui.get_query());
-                    }
-                    ui.set_ai_visible(true);
-                    if c.ai.store.lock().unwrap().is_none() {
-                        c.ai_job(&ui, Job::Load);
-                    } else {
-                        c.publish_ai_profiles(&ui);
-                    }
-                }
                 1 | 3 => {
+                    if kind == 1 {
+                        c.ai.sidebar_pending.store(false, Ordering::Release);
+                    }
                     let retained = (kind == 1)
                         .then(|| c.ai.context.lock().unwrap().clone())
                         .flatten();
@@ -488,6 +506,24 @@ impl Controller {
                 _ => {}
             }
         });
+    }
+
+    fn apply_ai_sidebar_default(&self, ui: &AppWindow) {
+        if !self.ai.sidebar_pending.swap(false, Ordering::AcqRel) || !ui.get_ai_visible() {
+            return;
+        }
+        let configured = self.ai.store.lock().unwrap().as_ref().is_some_and(|store| {
+            store
+                .profiles()
+                .iter()
+                .any(|profile| profile.validate().is_ok())
+                && validate_instruction(store.prompt().effective()).is_ok()
+        });
+        ui.set_ai_collapsed(configured);
+        if !configured {
+            ui.set_ai_settings(true);
+            ui.set_ai_settings_page(0);
+        }
     }
 
     pub(super) fn cancel_ai_task_batch(&self, ui: &AppWindow) {
@@ -1514,6 +1550,7 @@ impl Controller {
                         } else { 0 };
                         ui.set_ai_provider_index(index);
                         c.select_ai_profile(&ui, index);
+                        c.apply_ai_sidebar_default(&ui);
                         ui.set_ai_status(if index == 0 { c.localized(
                             "本地词表已就绪，无需 API Key",
                             "Local reference ready; no API key needed",
@@ -1534,7 +1571,10 @@ impl Controller {
                         "模型列表格式无法识别；检查接口或手动填写模型 ID",
                         "Unrecognized model list; check the endpoint or enter a model ID manually",
                     )),
-                    Err(e) => c.ai_error(&ui, e),
+                    Err(e) => {
+                        c.apply_ai_sidebar_default(&ui);
+                        c.ai_error(&ui, e);
+                    }
                 }
             }) {
                 rejected.ai.busy.store(false, Ordering::Release);

@@ -948,7 +948,6 @@ export component AppWindow inherits Window {
     changed query => { if !root.ai-visible { root.search-entry-text = root.query; } }
     changed ai-prompt => { if root.ai-visible { root.search-entry-text = root.ai-prompt; } }
     changed ai-visible => {
-        if root.ai-visible { root.ai-collapsed = false; }
         root.search-entry-text = root.ai-visible ? root.ai-prompt : root.query;
         if Theme.modern-style { studio-search-input.focus(); } else { search-input.focus(); }
     }
@@ -963,6 +962,7 @@ export component AppWindow inherits Window {
     in-out property <[AiSuggestion]> ai-quick-rows;
     callback ai-action(int, int);
     in-out property <bool> ai-settings <=> ai-panel.settings;
+    in-out property <int> ai-settings-page <=> ai-panel.settings-page;
     in-out property <string> ai-prompt <=> ai-panel.prompt;
     in-out property <int> ai-preset-index <=> ai-panel.preset-index;
     in-out property <string> ai-instruction <=> ai-panel.instruction;
@@ -2773,6 +2773,7 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: root.chinese ? "通用与界面…" : "General and interface…"; activated => { root.open-global-settings(1); } }
             MenuItem { title: root.chinese ? "搜索与任务…" : "Search and tasks…"; activated => { root.open-global-settings(2); } }
+            MenuItem { title: root.chinese ? "AI智能搜索…" : "AI Search…"; activated => { root.ai-action(22,0); } }
             MenuItem { title: root.chinese ? "播放与音频…" : "Audio and playback…"; activated => { root.open-global-settings(0); } }
             MenuItem { title: root.chinese ? "服务器与同步…" : "Server and sync…"; activated => { root.open-global-settings(3); } }
             MenuItem { title: root.chinese ? "本机缓存…" : "Local caches…"; activated => { root.open-global-settings(4); } }
@@ -6055,13 +6056,13 @@ main-scroll := ScrollView {
         batch-completed: root.ai-batch-completed;
         batch-total: root.ai-batch-total;
         action(kind, index) => { root.ai-action(kind, index); }
-        collapse => { root.ai-collapsed = true; }
+        collapse => { root.ai-action(23,1); }
     }
     if root.ai-visible && root.ai-collapsed && (!root.background-blocked || root.ai-batch-restoring) && root.ai-restore-y >= 0px: AiSidebarToggle {
         collapsed: true; chinese: root.chinese;
         x: ai-panel.x + ai-panel.width - self.width;
         y: root.ai-restore-y;
-        clicked => { root.ai-collapsed = false; }
+        clicked => { root.ai-action(23,0); }
     }
     if root.perf-marker-enabled && !root.closing && !root.startup-busy: Rectangle {
         x: root.perf-marker-x - shortcuts.absolute-position.x;
