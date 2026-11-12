@@ -77,8 +77,11 @@ fn decision(body: &Value, selected: &str) -> Value {
 fn jev_sends_wind_keywords_ucs_and_recipes_through_the_typed_endpoint() {
     for (intent, kind, expected_text, layers) in [
         ("wind", "keyword", "wind", false),
+        ("wind", "keyword", "wind", true),
         ("我要找远处的风声", "keyword", "wind", false),
         ("EXPLDsgn", "ucs", "EXPLDsgn", false),
+        ("EXPLDsgn", "ucs", "EXPLDsgn", true),
+        ("科幻爆炸", "recipe", "scifi explosion", false),
         ("科幻爆炸", "recipe", "scifi explosion", true),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -99,8 +102,12 @@ fn jev_sends_wind_keywords_ucs_and_recipes_through_the_typed_endpoint() {
             );
             assert_eq!(body["model"], "jev-latest");
             assert_eq!(body["state"]["intent"], intent);
+            assert_eq!(
+                body["state"]["mode"],
+                if layers { "layers" } else { "direct" }
+            );
             let state = body["state"].as_object().unwrap();
-            assert_eq!(state.len(), 2);
+            assert_eq!(state.len(), 3);
             let criteria = body["questions"]["recipe"]["criteria"].as_object().unwrap();
             assert!(criteria.len() <= 255);
             assert!(criteria.contains_key("other_or_unclear"));
@@ -116,8 +123,14 @@ fn jev_sends_wind_keywords_ucs_and_recipes_through_the_typed_endpoint() {
                 })
                 .map(|(id, _)| id.clone())
                 .expect("Expected candidate must reach the API");
+            let sent_queries: Vec<String> = body["state"]["candidates"][&selected]["queries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect();
             reply(&mut stream, "200 OK", &decision(&body, &selected));
-            selected
+            (selected, sent_queries)
         });
         let output = generate(
             &profile,
@@ -129,8 +142,17 @@ fn jev_sends_wind_keywords_ucs_and_recipes_through_the_typed_endpoint() {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let selected = server.join().unwrap();
+        let (selected, sent_queries) = server.join().unwrap();
         assert_eq!(output.plan.intent, intent);
+        assert_eq!(
+            output
+                .plan
+                .queries
+                .iter()
+                .map(|query| &query.text)
+                .collect::<Vec<_>>(),
+            sent_queries.iter().collect::<Vec<_>>()
+        );
         assert!(
             output
                 .plan

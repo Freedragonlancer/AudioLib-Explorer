@@ -169,7 +169,8 @@ impl IntentTerms {
 impl ReferenceIndex {
     /// Supply every recipe plus bounded lexical keyword/UCS matches, with stable local IDs.
     /// The current corpus admits at most 67 candidates, leaving room for an uncertainty option.
-    pub fn decision_candidates(&self, intent: &str) -> Vec<DecisionCandidate> {
+    /// Query text and ordering match the plan admitted for the requested layer mode.
+    pub fn decision_candidates(&self, intent: &str, layers: bool) -> Vec<DecisionCandidate> {
         if validate_intent(intent).is_err() {
             return Vec::new();
         }
@@ -182,24 +183,11 @@ impl ReferenceIndex {
                 id: recipe.id.clone(),
                 kind: "recipe",
                 title: recipe.title.clone(),
-                queries: recipe
-                    .queries
-                    .iter()
-                    .chain(recipe.layers.iter().flat_map(|layer| &layer.queries))
-                    .cloned()
-                    .collect(),
-                note: format!(
-                    "{}；{}；主查询：{}；素材层：{}",
-                    recipe.title,
-                    recipe.note,
-                    recipe.queries.join(" / "),
-                    recipe
-                        .layers
-                        .iter()
-                        .map(|layer| format!("{}: {}", layer.role, layer.queries.join(" / ")))
-                        .collect::<Vec<_>>()
-                        .join("；")
-                ),
+                queries: self
+                    .selection_plan(intent, &recipe.id, layers)
+                    .map(|plan| plan.queries.into_iter().map(|query| query.text).collect())
+                    .unwrap_or_default(),
+                note: format!("{}；{}", recipe.title, recipe.note),
             })
             .collect();
         let mut words: Vec<_> = self
@@ -229,7 +217,7 @@ impl ReferenceIndex {
                 kind: "keyword",
                 title: format!("{} — {}", word.term, word.zh),
                 queries: self
-                    .selection_plan(intent, &word.id, false)
+                    .selection_plan(intent, &word.id, layers)
                     .map(|plan| plan.queries.into_iter().map(|query| query.text).collect())
                     .unwrap_or_default(),
                 note: format!("{}；领域：{}；{}", word.zh, word.domain, word.note),
@@ -266,7 +254,10 @@ impl ReferenceIndex {
                     category.category_zh,
                     category.subcategory_zh
                 ),
-                queries: vec![category.id.clone()],
+                queries: self
+                    .selection_plan(intent, &category.id, layers)
+                    .map(|plan| plan.queries.into_iter().map(|query| query.text).collect())
+                    .unwrap_or_default(),
                 note: format!(
                     "{}；{}；{}；UCS CatID 仅适合带有此命名或 Metadata 的素材",
                     category.description, category.synonyms, category.synonyms_zh
@@ -337,13 +328,13 @@ mod tests {
         ] {
             assert!(
                 index
-                    .decision_candidates(intent)
+                    .decision_candidates(intent, false)
                     .iter()
                     .any(|candidate| { candidate.kind == "keyword" && candidate.id == id }),
                 "missing {id} for {intent}"
             );
         }
-        let wood = index.decision_candidates("木地板上的脚步");
+        let wood = index.decision_candidates("木地板上的脚步", false);
         assert!(wood.iter().any(|candidate| candidate.id == "P0120"));
         assert!(wood.iter().any(|candidate| {
             candidate.id == "footsteps"
@@ -365,7 +356,7 @@ mod tests {
         ] {
             assert!(
                 index
-                    .decision_candidates(intent)
+                    .decision_candidates(intent, false)
                     .iter()
                     .any(|candidate| { candidate.kind == "ucs" && candidate.id == id }),
                 "missing {id} for {intent}"
@@ -377,7 +368,7 @@ mod tests {
     fn decision_options_are_bounded_unique_stable_and_keep_all_recipes() {
         let index = ReferenceIndex::embedded();
         let intent = "风雨雷电 火焰 冰 狗猫鸟 水流 脚步 木材 金属 发动机 爆炸";
-        let candidates = index.decision_candidates(intent);
+        let candidates = index.decision_candidates(intent, true);
         assert_eq!(
             candidates
                 .iter()
@@ -398,7 +389,7 @@ mod tests {
         assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
         assert_eq!(
             serde_json::to_value(&candidates).unwrap(),
-            serde_json::to_value(index.decision_candidates(intent)).unwrap()
+            serde_json::to_value(index.decision_candidates(intent, true)).unwrap()
         );
         for candidate in candidates {
             let plan = index.selection_plan(intent, &candidate.id, true).unwrap();
@@ -410,14 +401,66 @@ mod tests {
         }
         assert!(
             index
-                .decision_candidates("声音")
+                .decision_candidates("声音", true)
                 .iter()
                 .all(|candidate| candidate.kind == "recipe")
         );
-        assert!(index.decision_candidates("").is_empty());
-        assert!(index.decision_candidates(&"风".repeat(501)).is_empty());
+        assert!(index.decision_candidates("", true).is_empty());
+        assert!(
+            index
+                .decision_candidates(&"风".repeat(501), true)
+                .is_empty()
+        );
         assert!(index.selection_plan("wind", "fabricated", false).is_err());
         assert!(index.selection_plan("", "P0300", false).is_err());
+    }
+
+    #[test]
+    fn candidate_queries_match_selected_plans_in_both_layer_modes() {
+        let index = ReferenceIndex::embedded();
+        for layers in [false, true] {
+            for intent in [
+                "科幻爆炸",
+                "wind",
+                "木地板上的脚步",
+                "风雨雷电 火焰 冰 狗猫鸟 水流 脚步 木材 金属 发动机 爆炸",
+            ] {
+                for candidate in index.decision_candidates(intent, layers) {
+                    let expected = index
+                        .selection_plan(intent, &candidate.id, layers)
+                        .unwrap()
+                        .queries
+                        .into_iter()
+                        .map(|query| query.text)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        candidate.queries, expected,
+                        "{}; layers={layers}",
+                        candidate.id
+                    );
+                    assert!(candidate.queries.len() <= MAX_AI_QUERIES);
+                }
+            }
+        }
+
+        let direct = index
+            .decision_candidates("sub boom", false)
+            .into_iter()
+            .find(|candidate| candidate.id == "scifi-explosion")
+            .unwrap();
+        assert_eq!(direct.queries.len(), 3);
+        assert!(!direct.queries.iter().any(|query| query == "sub boom"));
+        assert!(!direct.note.contains("sub boom"));
+
+        let layered = index
+            .decision_candidates("reverb tail", true)
+            .into_iter()
+            .find(|candidate| candidate.id == "scifi-explosion")
+            .unwrap();
+        assert_eq!(layered.queries.len(), MAX_AI_QUERIES);
+        assert!(layered.queries.iter().any(|query| query == "sub boom"));
+        assert!(!layered.queries.iter().any(|query| query == "reverb tail"));
+        assert!(!layered.note.contains("reverb tail"));
     }
 
     #[test]

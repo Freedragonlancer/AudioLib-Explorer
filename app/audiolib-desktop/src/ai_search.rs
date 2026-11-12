@@ -1351,7 +1351,7 @@ impl Controller {
                         validate_instruction(&guidance)?;
                         // Validate the finite request before reserving provider usage.
                         if profile.protocol == Protocol::Jev {
-                            audiolib_ai::jev::request(&profile.model, &intent, &guidance)?;
+                            audiolib_ai::jev::request(&profile.model, &intent, layers, &guidance)?;
                         }
                         let key = {
                             let mut store = c.ai.store.lock().unwrap();

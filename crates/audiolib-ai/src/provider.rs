@@ -209,7 +209,7 @@ pub fn generate(
             )
         }
         Protocol::Jev => {
-            let (body, candidates) = jev::request(&profile.model, intent, guidance)?;
+            let (body, candidates) = jev::request(&profile.model, intent, layers, guidance)?;
             ids = candidates;
             ("/systemone".into(), body)
         }

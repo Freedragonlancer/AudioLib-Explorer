@@ -43,8 +43,8 @@ fn response(ids: &[String], choice: &str) -> Value {
     json!({"answers":answers})
 }
 
-fn request_for(intent: &str) -> (Value, Vec<String>) {
-    request("jev-latest", intent, crate::config::DEFAULT_PROMPT).unwrap()
+fn request_for(intent: &str, layers: bool) -> (Value, Vec<String>) {
+    request("jev-latest", intent, layers, crate::config::DEFAULT_PROMPT).unwrap()
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn finite_selection_supports_keywords_ucs_and_recipes() {
         ("WINDGust", "WINDGust", "WINDGust"),
         ("科幻爆炸", "scifi-explosion", "scifi explosion"),
     ] {
-        let (body, ids) = request_for(intent);
+        let (body, ids) = request_for(intent, true);
         assert!(ids.iter().any(|candidate| candidate == id), "{intent}");
         let (plan, decision) = parse(&response(&ids, id), &ids, intent, true).unwrap();
         assert!(plan.queries.iter().any(|q| q.text == expected_query));
@@ -77,7 +77,7 @@ fn finite_selection_supports_keywords_ucs_and_recipes() {
 
 #[test]
 fn selected_candidate_uses_its_own_independent_fit() {
-    let (_, ids) = request_for("科幻爆炸");
+    let (_, ids) = request_for("科幻爆炸", false);
     let choice = "scifi-explosion";
     let mut value = response(&ids, choice);
     value["answers"][fit_key(choice)] = score(0.4);
@@ -95,7 +95,7 @@ fn selected_candidate_uses_its_own_independent_fit() {
 #[test]
 fn material_conflict_does_not_override_the_selected_candidate_fit() {
     let intent = "木地板上的脚步";
-    let (_, ids) = request_for(intent);
+    let (_, ids) = request_for(intent, false);
     let mut value = response(&ids, "P0120");
     value["answers"][fit_key("footsteps")] = score(0.0);
     let (plan, _) = parse(&value, &ids, intent, false).unwrap();
@@ -116,7 +116,7 @@ fn material_conflict_does_not_override_the_selected_candidate_fit() {
 
 #[test]
 fn unknown_intent_still_has_bounded_candidates_and_an_other_outcome() {
-    let (body, ids) = request_for("qzxqzxqzxqzxq");
+    let (body, ids) = request_for("qzxqzxqzxqzxq", false);
     assert!(ids.len() >= 20);
     assert!(ids.len() <= MAX_CHOICE_OPTIONS);
     assert_eq!(body["questions"].as_object().unwrap().len(), ids.len() + 1);
@@ -128,7 +128,7 @@ fn unknown_intent_still_has_bounded_candidates_and_an_other_outcome() {
 
 #[test]
 fn response_rejects_wrong_types_missing_extra_and_invalid_answers() {
-    let (_, ids) = request_for("wind");
+    let (_, ids) = request_for("wind", false);
     let choice = "P0300";
     let baseline = response(&ids, choice);
     let mut cases = Vec::new();
@@ -226,18 +226,19 @@ fn option_bounds_include_other_and_reject_duplicate_ids() {
 
 #[test]
 fn caller_ids_cannot_authorize_an_unknown_registry_entry() {
-    let (_, mut ids) = request_for("wind");
+    let (_, mut ids) = request_for("wind", false);
     let candidate = ids.iter_mut().find(|id| id.as_str() != OTHER).unwrap();
     *candidate = "invented-id".into();
     assert!(matches!(
         parse(&response(&ids, "invented-id"), &ids, "wind", false),
         Err(AiError::Response)
     ));
-    assert!(request("jev-latest", "", crate::config::DEFAULT_PROMPT).is_err());
+    assert!(request("jev-latest", "", false, crate::config::DEFAULT_PROMPT).is_err());
     assert!(
         request(
             "jev-latest",
             &"风".repeat(501),
+            false,
             crate::config::DEFAULT_PROMPT
         )
         .is_err()
@@ -251,53 +252,97 @@ fn wide_requests_keep_candidate_context_once_with_utf8_safe_limits() {
     let wide_intent = format!("{broad}{}", "声".repeat(500 - broad.chars().count()));
     let full = "chain cloth pat explosion balloon foley scrape scratch scrub squash squeak squeeze stretch stutter squeak squeak sizzle squeeze bomb whistle jingle rustle chatter air blood disembowel gore AIRBlow AIRBrst AIRHiss AIRMisc AIRSuck AERODoor AEROHeli AEROInt AEROJet AEROMech AEROMil AEROMisc AEROProp AERORadio AERORckt ALRMBell ALRMBuzr ALRMClok ALRMElec ALRMMisc ALRMSirn AMBAir AMBAlpn AMBAmus";
     let full_intent = format!("{full}{}", "声".repeat(500 - full.chars().count()));
-    for intent in [
-        wide_intent.as_str(),
-        full_intent.as_str(),
-        "wind",
-        "EXPLDsgn",
-    ] {
-        let (body, ids) = request("jev-latest", intent, &guidance).unwrap();
-        let body_bytes = serde_json::to_vec(&body).unwrap().len();
-        let state_bytes = serde_json::to_vec(&body["state"]).unwrap().len();
-        let questions = body["questions"].as_object().unwrap();
-        let largest_question_bytes = questions
-            .values()
-            .map(|question| serde_json::to_vec(question).unwrap().len())
-            .max()
-            .unwrap();
-        eprintln!(
-            "Jev request: {} options, {body_bytes} body bytes, {} state + largest-question bytes",
-            ids.len(),
-            state_bytes + largest_question_bytes
-        );
-        // Byte budgets catch payload growth; they are not tokenizer or context-length claims.
-        assert!(body_bytes <= 96 * 1024, "{intent}: {body_bytes} body bytes");
-        assert!(
-            state_bytes + largest_question_bytes <= 32 * 1024,
-            "{intent}: {} state + largest-question bytes",
-            state_bytes + largest_question_bytes
-        );
-        assert!(ids.len() <= 68);
-        if intent == full_intent {
-            assert_eq!(ids.len(), 68);
-        }
-        for (id, candidate) in body["state"]["candidates"].as_object().unwrap() {
-            assert!(
-                candidate["title"].as_str().unwrap().chars().count() <= MAX_CANDIDATE_TITLE_CHARS
+    for layers in [false, true] {
+        for intent in [
+            wide_intent.as_str(),
+            full_intent.as_str(),
+            "wind",
+            "EXPLDsgn",
+        ] {
+            let (body, ids) = request("jev-latest", intent, layers, &guidance).unwrap();
+            let body_bytes = serde_json::to_vec(&body).unwrap().len();
+            let state_bytes = serde_json::to_vec(&body["state"]).unwrap().len();
+            let questions = body["questions"].as_object().unwrap();
+            let largest_question_bytes = questions
+                .values()
+                .map(|question| serde_json::to_vec(question).unwrap().len())
+                .max()
+                .unwrap();
+            eprintln!(
+                "Jev request: {} options, {body_bytes} body bytes, {} state + largest-question bytes",
+                ids.len(),
+                state_bytes + largest_question_bytes
             );
+            // Byte budgets catch payload growth; they are not tokenizer or context-length claims.
+            assert!(body_bytes <= 96 * 1024, "{intent}: {body_bytes} body bytes");
             assert!(
-                candidate["note"].as_str().unwrap().chars().count() <= MAX_CANDIDATE_NOTE_CHARS
+                state_bytes + largest_question_bytes <= 32 * 1024,
+                "{intent}: {} state + largest-question bytes",
+                state_bytes + largest_question_bytes
             );
-            assert!(body["questions"]["recipe"]["criteria"][id].is_string());
-            if id != OTHER {
-                assert_eq!(
-                    body["questions"][fit_key(id)]["instructions"]["candidate_id"],
-                    *id
-                );
+            assert!(ids.len() <= 68);
+            if intent == full_intent {
+                assert_eq!(ids.len(), 68);
             }
+            for (id, candidate) in body["state"]["candidates"].as_object().unwrap() {
+                assert!(
+                    candidate["title"].as_str().unwrap().chars().count()
+                        <= MAX_CANDIDATE_TITLE_CHARS
+                );
+                assert!(
+                    candidate["note"].as_str().unwrap().chars().count() <= MAX_CANDIDATE_NOTE_CHARS
+                );
+                assert!(body["questions"]["recipe"]["criteria"][id].is_string());
+                if id != OTHER {
+                    assert_eq!(
+                        body["questions"][fit_key(id)]["instructions"]["candidate_id"],
+                        *id
+                    );
+                }
+            }
+            let decoded: Value =
+                serde_json::from_slice(&serde_json::to_vec(&body).unwrap()).unwrap();
+            assert_eq!(decoded, body);
         }
-        let decoded: Value = serde_json::from_slice(&serde_json::to_vec(&body).unwrap()).unwrap();
-        assert_eq!(decoded, body);
+    }
+}
+
+#[test]
+fn candidate_queries_match_selected_plan_in_each_mode() {
+    let intent = "科幻爆炸";
+    for layers in [false, true] {
+        let (body, ids) = request_for(intent, layers);
+        assert_eq!(
+            body["state"]["mode"],
+            if layers { "layers" } else { "direct" }
+        );
+        let candidates = body["state"]["candidates"].as_object().unwrap();
+        let recipes: Vec<_> = candidates
+            .iter()
+            .filter(|(_, candidate)| candidate["kind"] == "recipe")
+            .collect();
+        assert_eq!(recipes.len(), 19);
+        for (id, candidate) in recipes {
+            let (plan, _) = parse(&response(&ids, id), &ids, intent, layers).unwrap();
+            let queries: Vec<_> = plan
+                .queries
+                .iter()
+                .map(|query| query.text.as_str())
+                .collect();
+            assert_eq!(candidate["queries"], json!(queries), "{id} in {layers}");
+        }
+        let scifi = &candidates["scifi-explosion"];
+        let queries = scifi["queries"].as_array().unwrap();
+        let note = scifi["note"].as_str().unwrap();
+        assert!(!queries.iter().any(|query| query == "reverb tail"));
+        assert!(!note.contains("reverb tail"));
+        if layers {
+            assert_eq!(queries.len(), audiolib_core::ai_search::MAX_AI_QUERIES);
+            assert!(queries.iter().any(|query| query == "sub boom"));
+        } else {
+            assert_eq!(queries.len(), 3);
+            assert!(!queries.iter().any(|query| query == "sub boom"));
+            assert!(!note.contains("sub boom"));
+        }
     }
 }
