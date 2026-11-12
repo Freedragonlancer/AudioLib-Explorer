@@ -4,7 +4,7 @@
 
 ## 来源与范围
 
-本次整合 AI 分支 `90edcfac68bacd7033df14b1304d02076f15fb5b` 与 beta `0185f1f39a13305ce940e827ae38ec2ca557e3d7`，源分支合并提交为 `f1e37a430c4cef1ffdc413adc693a5f4d465a8be`，经 [#285](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/285) 申请纳入 beta。后者包含已发布 `v0.9.6` 的分页偏好、会话搜索历史，以及之后的发布工具修正和 [#281](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/281) RIFF 兼容修复。最终 beta 候选提交以该 PR 的实际合并结果为准，不能用两个父提交之一冒充集成结果。
+本次整合 AI 分支 `90edcfac68bacd7033df14b1304d02076f15fb5b` 与 beta `0185f1f39a13305ce940e827ae38ec2ca557e3d7`，源分支合并提交为 `f1e37a430c4cef1ffdc413adc693a5f4d465a8be`，经 [#285](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/285) 合入 beta，实际候选为 `a01a19bcdbabf53de68284ef39114a7dff53c4cc`。后者包含已发布 `v0.9.6` 的分页偏好、会话搜索历史，以及之后的发布工具修正和 [#281](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/281) RIFF 兼容修复。该候选保留已验证的集成源码树，不能用两个父提交之一冒充集成结果。
 
 - AI 使用本地关键词、UCS 和素材配方，支持多协议供应商、提示词、模型列表与保存前测试、会话草稿、Windows DPAPI 密钥及请求尝试上限。最多展示五项经过当前实际查询核验的推荐；手动五任务和可选自动三任务均先校验容量。详见 [AI 智能搜索](Rust_AI_Search.md)。
 - AI 结果绑定描述、供应商修订和资料库身份；目录过滤保留已完成推荐，过期生成仍拒绝。查询草稿与来源引用的审查修正、跨任务和历史恢复，以及侧栏、状态栏和紧凑播放器纳入本次集成。
@@ -39,14 +39,22 @@
 | UI 复用边界 | Slint 文件与原 AI 分支相同，复用其实际渲染基线，并由本轮集成交互测试补验；未宣称重新进行所有历史截图验收 |
 | 原生计划与资产契约 | 四份原生计划预览通过；精确七归档、十四资产契约已核对。这些是计划/集合检查，不是原生包验收 |
 | RIFF 与扫描直接消费者 | 当前 Rust 1.97.1 MSVC 下音频 ASIO strict Clippy、数据库边界测试目标 strict Clippy 通过；`riff_boundary_tests` 11 项、`scan_riff_boundaries` 3 项全过。证据为 `audio-clippy.log`、`riff-tests.log`、`scan-clippy.log`、`scan-tests.log`；原 #281 使用不同工具链的记录另保留 |
-| Windows 集成包交付 | build/package/portable、固定安装身份/CLI/隔离启动待完成；不能复用原 AI payload 充当本次集成包 |
+| Windows 集成包交付 | 从 beta `a01a19b` 新执行 MSVC ASIO release 构建（1594.2 秒）、打包及隔离 portable 验收，均通过；固定 `local_release/` 的 908 个包文件 SHA256 一致（复制 11 个），CLI 1.0.0 与安装后隔离桌面启动通过。私有交付索引为隔离工作树 `.rust-validation/v1-preparation/final-delivery.json`；安装父 checkout 收据为 `.rust-validation/local-install/240f359617314ad996f4f3af43c80f90/report.json` |
 
 AI 后端业务及其输入未变，继续保留原 15 项测试基线；本轮不重复无关全工作区或百万记录套件。Mac beta-refresh、Windows beta-smoke 和最终 main/tag 七份正式 payload 的门禁仍未完成。
+
+安装后已调用一次 40 GiB debug 缓存预算维护；另一 debug 构建持有共享租约，维护返回 `blocked`，未删除缓存或终止进程。该次未测量逻辑容量，预算状态尚未核验；已通过的交付和安装收据保留。原始结果见同一私有目录 `cache.log`。
+
+### 跨平台源码复查与文档链接
+
+2026-11-12 对上述 beta 候选作只读源码复查：AI 使用已有的 `ureq/platform-verifier` 依赖路径，Windows 专用依赖受 cfg 限制；非 Windows 密钥保存有会话守卫。关键词 JSONL、Slint 与 SVG 在编译时嵌入，不依赖安装包中的 `.agents` 或 Excel。客户端打包器沿用按实际 Cargo 依赖图生成 notices 的流程，新增本地 crate 使用工作区 GPL LICENSE。未发现新增的跨平台源码或运行资源阻塞；这不等于原生编译、许可证材料预检或启动验收通过。macOS AI 及直接消费者测试、原生客户端构建与签名启动，以及 macOS/Linux 对应依赖材料和 payload 验收仍按矩阵完成。
+
+本次文档补充将已打包 Markdown 中新增、但不在包清单内的 AI／发布准备页面链接固定到上述候选的 GitHub blob，保留源码页面内部相对导航。包规则、应用源码和资源不变，不复制 `.agents`、Excel 或私有验证证据。Windows 候选构建及验收身份仍为 `a01a19bcdbabf53de68284ef39114a7dff53c4cc`，文档补充复用该应用结果。
 
 ## 候选和最终交付的剩余工作
 
 1. 合并冲突审查和本轮选定源码检查已完成：格式、桌面/音频及扫描边界 strict Clippy、35 项定向测试通过，原始身份与 UI 复用边界见上节。Windows 使用与交付相同的 ASIO 配置，不追加无关全工作区套件。
-2. 完成合并后候选的 Windows build/package/portable 和固定 `local_release/` 安装身份、CLI 与隔离启动。用原生脚本，保留用户库、偏好和源音频；原 AI 分支的成功不能替代集成包验收。
+2. 合并后候选的 Windows build/package/portable 和固定 `local_release/` 安装已通过，原始身份见上节。工作库、偏好和源音频保留；缓存维护的占用阻塞单独记录，待租约可用后处理。
 3. 冻结 beta 候选，按 [Beta testing flow](../AGENTS.md#beta-testing-flow) 完成 Mac beta-refresh 的 served commit / health / roots，以及 Windows beta-smoke 的快照、流读取和预期 EXE 身份。当前未宣称这些门禁通过；后续执行沿用对应部署授权和数据边界。
 4. 门禁通过并进入正式发布任务后，经 PR 晋升 main，冻结最终 main/tag；以下每份 payload 从该最终身份构建、打包并验收一次。准备工作不创建 Release 或部署生产服务。
 

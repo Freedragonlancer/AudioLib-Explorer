@@ -1,6 +1,6 @@
 # AudioLib Explorer 版本规范
 
-当前工作区版本为 **1.0.0，未发布 beta 集成候选**，以正式 `v0.9.6` 为基线，整合 AI 智能搜索、RIFF 兼容及发布工具修正。API、schema、快照读取范围与完整资料库格式不变；该候选版本号不代表已发布正式 1.0。来源、复用证据及尚未完成的最终 main/tag 交付见 [1.0.0 发布准备](Rust_Release_1.0.0.md)。
+当前工作区版本为 **1.0.0，未发布 beta 集成候选**，以正式 `v0.9.6` 为基线，整合 AI 智能搜索、RIFF 兼容及发布工具修正。API、schema、快照读取范围与完整资料库格式不变；该候选版本号不代表已发布正式 1.0。来源、复用证据及尚未完成的最终 main/tag 交付见 [1.0.0 发布准备](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/a01a19bcdbabf53de68284ef39114a7dff53c4cc/doc/Rust_Release_1.0.0.md)。
 
 当前正式版为 [0.9.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.6)，于 2026-11-11 07:40:41 UTC（北京时间 15:40:41）发布，以 `v0.9.5` 为基线使用 PATCH。范围为 #271 分页、侧栏偏好与恢复卡点击修正，#272 每任务会话搜索历史和搜索工具栏，以及显式 Release 草稿入口。七份正式 payload 来自最终 main/tag `460629144d6a0df24af9c69303c9409c38efbde2`；本地验收、十四项线上资产与下载校验正文通过。API `/api/v1/`、本地写 schema 8、服务端迁移 schema 9、快照兼容 `3..=9` 和完整格式目录均沿用 0.9.5，详细安装、维护与原始证据见 [0.9.6 发布记录](Rust_Release_0.9.6.md)。后续文档不移动标签或改变已验收二进制源码。
 
