@@ -14,7 +14,7 @@
 
 提示词预设默认是 **“作为资深声音设计师，请根据输入内容，合理匹配声音设计需要用的专业Keyword”**，按用户要求原文保留。可在“Skill 与预设”页选择默认或自定义预设并编辑；建议面板原有“编辑提示词”入口也保留，最多 2000 字符。修改立即用于下一次远程 AI 请求；“保存提示词”原子保存到当前数据目录，重启后保留。切回默认不会丢失最后保存的自定义内容。提示词与具体声音描述分开，也不绑定某个供应商。离线词表不执行自由文本提示词。
 
-通用 LLM 将该提示词和固定 JSON 查询契约一起使用。Jev 将其用于配方 Choice 的角色与匹配指导，仍然只返回既有候选，Score / Noul 结构和查询校验不受提示词改写影响。
+通用 LLM 将该提示词和固定 JSON 查询契约一起使用。Jev 将其用于既有候选 Choice 的角色与匹配指导，候选包括配方、关键词和 UCS；Score / Noul 结构和查询校验不受提示词改写影响。
 
 以下保留此前隔离测试数据下的实际 Slint 渲染；[Studio 搜索条](assets/ai-search-studio-runtime.png)、[供应商与模型获取](assets/ai-provider-runtime.png) 和 [预设提示词编辑](assets/ai-search-prompt-runtime.png) 属于此前检查记录，截图中的旧按钮文字不代表当前 beta 界面。
 
@@ -38,13 +38,17 @@
 
 DeepSeek 接入按 [官方接入地址](https://api-docs.deepseek.com/)、[模型列表](https://api-docs.deepseek.com/api/list-models/)、[JSON 输出](https://api-docs.deepseek.com/guides/json_mode/) 和 [thinking 开关](https://api-docs.deepseek.com/guides/thinking_mode/) 实现；模型 ID 以账户实际返回的列表为准。
 
-Jev 接收本地检索出的最多六个配方，以及 `other_or_unclear`。三个问题各有明确类型：
+Jev 接收全部 19 个配方，以及从公开参考数据召回的最多 24 个关键词条目、24 个 UCS 条目，再加 `other_or_unclear`，当前最多 68 个选项。配方不再以词法命中作为调用前提，固定 `wind` 自检可以提交关键词候选。关键词与 UCS 召回支持英文词界和未分词中文的短片段，中文通用指令词不参与匹配；这仍是有界词法召回，不保证开放词汇或任意中文改写都能覆盖。没有合适候选时可返回不确定，不能据此判定账号或网络故障。
 
-- **Choice**：选一个既有配方；答案必须属于提交的候选 ID 集合，概率分布必须完整、有限且归一。
-- **Score**：按 0–2 有序标准评估匹配；检查数值、置信度及概率键。
+- **Choice**（`recipe` 为兼容保留的问题键）：选择一个既有配方、关键词或 UCS ID；答案必须属于本次提交的候选集合，概率分布必须完整、有限且归一。选项说明包含类型、标题、本地查询与材质／层次说明。
+- **Score**（`fit_<候选 ID>`）：每个候选独立按 0–2 有序标准评估匹配；检查全部答案的类型、数值、置信度及概率键，再读取实际选中 ID 对应的分数。同次请求的问题独立执行，不让一个 Score 隐式引用另一个 Choice 的答案。
 - **Noul**：估计是否需要澄清，取值 0–1，不能按普通聊天文本或 Choice 的置信度解释。
 
-当前接受条件是 Choice confidence ≥0.65、Score ≥1.25、Noul <0.5，且不选 `other_or_unclear`。这些是应用策略阈值，尚未经实际音效语料校准，不代表保证准确率。通过后由本地配方确定查询，Jev 不能生成任意关键词。未通过时保留用户控制，不自动调用另一个收费 LLM。
+当前接受条件是 Choice confidence ≥0.65、所选候选的 Score ≥1.25、Noul <0.5，且不选 `other_or_unclear`。这些是应用策略阈值，尚未经实际音效语料校准，不代表保证准确率。界面分别展示所选候选的概率 `p` 与分布集中度 `confidence`。通过后由 Rust 根据 ID 重建本地查询、来源和 CatID，Jev 不能生成任意关键词或身份；配方分层查询先覆盖每层再补第二候选，最多 12 条。UCS ID 仅作为普通查询建议，不会变成专用分类过滤器。未通过时保留用户控制，不自动调用另一个收费 LLM。
+
+官方单个 Choice 最多 255 项；当前 68 项上限符合接口容量，但不是已测可靠决策规模。没有把全部 431 词条、753 UCS 子类或其组合一次性平铺；本轮也没有实现 UCS 全分类树的多轮选择。接口与容量依据：[Choice](https://docs.typesafe.ai/primitives/choice)、[Score](https://docs.typesafe.ai/primitives/score)、[问题独立性](https://docs.typesafe.ai/introduction)。
+
+候选查询与短摘要只在 `state.candidates` 保存一份；Choice 使用简短标签，各 Score 根据 `candidate_id` 引用对应条目。发送的标题最多 64 个 Unicode 字符、说明最多 128 个字符，完整本地资料与最终查询不受摘要截断影响。宽输入回归同时覆盖 68 项、500 字意图与 2000 字提示词，约束序列化请求不超过 96 KiB、状态加最大单题不超过 32 KiB；这些是工程字节预算，不是 Jev tokenizer 或真实模型准确率验收。
 
 OpenCode Go 使用已订阅工作区的 Console 个人 API Key；模型列表请求为 `/inference/go/v1/models`，生成请求为 `/inference/go/openai/v1/chat/completions`。亦接受 SDK 示例中的 `/inference/go/openai/v1` Base URL，以及 `opencode-go/<model-id>` 名称，发送前只规范路径和模型前缀，不改变凭据所属主机。旧 `go_use_authorized` 字段保留以读取既有配置，不再作为客户端请求门槛。用户报告的“用途尚未确认”来自这个本地门槛，并非供应商返回的认证失败。
 
@@ -207,3 +211,11 @@ AI/core 测试独立运行；桌面以 ASIO 特性运行。把纯 AI 测试包�
 本轮最终 Windows MSVC ASIO 格式检查、桌面 strict Clippy 与 4 项 AI 控制器／UI 回归通过：原任务和条件保持、拒绝无效准入、供应商请求次数不增加，以及 Classic / Studio 中英文“+”与正文点击隔离和忙碌禁用。已检查两种布局和短窗口放大截图。与本轮磁盘提示修复合计 7 项不同回归，证据位于 `.rust-validation/wake-hint-single-status/`。AI 后端、配置存储、音频、数据库和关闭排空未改动，复用先前 `6f05768a5789d8734009ca9bac7c78da8ae07d6a` 安装及其引用的稳定模块基线；未调用真实供应商付费接口。
 
 协议参考：[OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)、[Anthropic Messages](https://platform.claude.com/docs/en/api/messages)、[Gemini structured output](https://ai.google.dev/gemini-api/docs/structured-output)、[TypeSafe API](https://api.typesafe.ai/redoc)、[OpenCode Go](https://opencode.ai/docs/go/)。
+
+### Jev 结构化召回修复（2026-11-13）
+
+基于 beta `6f05768` 修复固定 `wind` 自检在零配方时无法发出请求的问题，加入关键词／UCS 选择、独立候选适配评分、中文短片段召回与分层轮询。格式及 AI／桌面 MSVC ASIO strict Clippy 通过；后端 29 项不同测试的覆盖由首轮未受摘要修复影响的通过结果和最终定向重跑组成，桌面 AI 控制器 25 项通过。新增控制器用本机 HTTP 服务验证未保存／已保存配置的实际自检、密钥复用、记账、草稿保留及不确定结果拒绝，所有资料库均为隔离 fixture。
+
+首轮后端为 27 通过、1 失败，HTTP 体积检查捕获重复候选造成的超大请求；去重后原 HTTP 路径通过。第二轮新增字节预算检查发现状态加单题为 33,340 字节，收紧摘要后预算回归通过，68 项／500 字意图／2000 字提示词的两组宽输入分别为 73,099／71,672 请求字节，状态加最大单题分别为 30,183／28,756 字节。保留失败日志，仅重跑受影响检查：最终 Jev／HTTP 10 项及独立预算 1 项通过，未重复执行已通过且未变的参考索引／通用协议／配置存储测试。
+
+证据位于开发工作区 `.rust-validation/jev-structured/`：`first-ai-tests.log`、`second-jev-tests.log` 保留初次失败，`retry-clippy.log`、`retry-jev-tests.log`、`budget-retry.log` 和 `desktop-tests.log` 为最终结果。数据库、扫描、Metadata、关闭写入、远程服务和音频后端未变，沿用 `90edcfac68bacd7033df14b1304d02076f15fb5b` 的既有数据安全／关闭记录及 beta 设置入口验收基线，不触发相关整套回归或百万条基准。没有调用真实付费供应商；模型语义准确率、阈值校准及实际 tokenizer 用量仍未验证。Windows 包与固定安装的实际交付身份另存本轮私有收据，不能用源码检查替代包验收。

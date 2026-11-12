@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+mod decision;
+pub use decision::DecisionCandidate;
+
 const WORDS: &str =
     include_str!("../../../.agents/skills/audio-keyword-search/data/keywords.jsonl");
 const UCS: &str = include_str!("../../../.agents/skills/audio-keyword-search/data/ucs.jsonl");
@@ -25,6 +28,7 @@ struct Keyword {
     zh: String,
     domain: String,
     ucs_catids: Vec<String>,
+    note: String,
 }
 #[derive(Deserialize)]
 struct Category {
@@ -35,6 +39,7 @@ struct Category {
     subcategory_zh: String,
     synonyms: String,
     synonyms_zh: String,
+    description: String,
 }
 /// One read-only design recipe supplied to the decision provider as a candidate.
 #[derive(Clone, Debug, Deserialize)]
@@ -185,8 +190,19 @@ impl ReferenceIndex {
             );
         }
         if layers {
-            for layer in &recipe.layers {
-                for text in &layer.queries {
+            // Visit every layer before adding its second alternative, so a bounded
+            // plan retains the tail and other late layers in larger recipes.
+            let alternatives = recipe
+                .layers
+                .iter()
+                .map(|layer| layer.queries.len())
+                .max()
+                .unwrap_or(0);
+            for alternative in 0..alternatives {
+                for layer in &recipe.layers {
+                    let Some(text) = layer.queries.get(alternative) else {
+                        continue;
+                    };
                     Self::add(
                         &mut queries,
                         text,
