@@ -631,7 +631,10 @@ fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
         click(&ui, "Skill and presets");
         assert_eq!(ui.get_ai_settings_page(), 1);
         assert_eq!(ui.get_ai_preset_index(), 1);
-        assert_eq!(ui.get_ai_instruction(), "Preserved sound design instruction");
+        assert_eq!(
+            ui.get_ai_instruction(),
+            "Preserved sound design instruction"
+        );
         click(&ui, "Providers");
         assert_eq!(ui.get_ai_settings_page(), 0);
         assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
