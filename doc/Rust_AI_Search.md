@@ -219,3 +219,5 @@ AI/core 测试独立运行；桌面以 ASIO 特性运行。把纯 AI 测试包�
 首轮后端为 27 通过、1 失败，HTTP 体积检查捕获重复候选造成的超大请求；去重后原 HTTP 路径通过。第二轮新增字节预算检查发现状态加单题为 33,340 字节，收紧摘要后预算回归通过，68 项／500 字意图／2000 字提示词的两组宽输入分别为 73,099／71,672 请求字节，状态加最大单题分别为 30,183／28,756 字节。保留失败日志，仅重跑受影响检查：最终 Jev／HTTP 10 项及独立预算 1 项通过，未重复执行已通过且未变的参考索引／通用协议／配置存储测试。
 
 证据位于开发工作区 `.rust-validation/jev-structured/`：`first-ai-tests.log`、`second-jev-tests.log` 保留初次失败，`retry-clippy.log`、`retry-jev-tests.log`、`budget-retry.log` 和 `desktop-tests.log` 为最终结果。数据库、扫描、Metadata、关闭写入、远程服务和音频后端未变，沿用 `90edcfac68bacd7033df14b1304d02076f15fb5b` 的既有数据安全／关闭记录及 beta 设置入口验收基线，不触发相关整套回归或百万条基准。没有调用真实付费供应商；模型语义准确率、阈值校准及实际 tokenizer 用量仍未验证。Windows 包与固定安装的实际交付身份另存本轮私有收据，不能用源码检查替代包验收。
+
+随后接入 beta `87d005c` 的 AI tag 任务按钮及磁盘唤醒提示修复，AI 后端源码与上述验收版本一致。因桌面 AI 调用方变化，重新执行 `check-local.ps1 -Package audiolib-desktop -Bin AudioLibExplorer -TestFilter controller::search_tasks::tests::ai_search:: -Asio`，格式、strict Clippy 与 26 项控制器回归通过；日志为 `.rust-validation/local-checks/1e894f064b164ac1a20a1539c21c64f0/`。未重复运行未变的后端测试。
