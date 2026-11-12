@@ -38,6 +38,27 @@ pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.9.0 -Stage accept -Tail 15 
 
 Windows 客户端计划按打包器的实际常规输出记录 `dist/latest/AudioLibExplorer-latest-win-x64-portable.zip` 及其 `.sha256`；`-Tag` 写入包的版本身份，不改变这两个本地文件名。
 
+### 固定安装目录与版本来源
+
+Windows 客户端计划声明 `InstallDestination` 和 `VersionManifest` 两个变量，默认分别为当前源码根的 `local_release/` 与 `Cargo.toml`。隔离 worktree 发布时，用 `-VariablesFile` 指向私有 JSON，将安装目录设为原仓库的固定 `local_release/`，版本来源仍绑定最终发布源码的 manifest；不再复制或改写安装器：
+
+```json
+{
+  "InstallDestination": "<原仓库绝对路径>/local_release",
+  "VersionManifest": "<最终发布源码绝对路径>/Cargo.toml"
+}
+```
+
+单独安装已验收 payload 时，正式入口为：
+
+```powershell
+pwsh tools/install-local-release.ps1 -Source $acceptedPayload -Destination $fixedInstallation -VersionManifest $releaseManifest
+```
+
+三个变量须先绑定实际绝对路径。`Destination` 必须以 `local_release` 为目录名，父目录须为 AudioLib 工作区；该工作区自己的程序版本可以较旧。`VersionManifest` 单独选择 `[workspace.package]` 版本来源，路径及 SHA256 写入安装收据。安装器在关闭应用或复制文件前检查目录、manifest、链接、重叠、包白名单及版本，不修改原工作区的 Cargo 文件。
+
+安装锁和证据位于安装目录父工作区的 `.rust-validation/`，不同源码 checkout 指向同一固定安装时共享排他锁。计划把所选 manifest 声明为安装阶段的 `input_files`、固定安装声明为输出。只更改安装路径或 manifest 身份会重新验证安装，不使仍有效的 build/package/accept 收据失效；实际源码、工具链或打包输入改变仍按原管线规则失效。
+
 四个原生计划在 release 构建前执行 `license-preflight`，复用 `dependency-licenses.ps1` 的选定依赖图与 notice 解析，检查实际 target、roots、features 及固定材料身份。此阶段只使用 locked/offline Cargo 元数据，不编译、不下载、不生成包。它每次 Run 都重新检查外部依赖缓存中的材料；输入不变时收据身份稳定，不使后面的成功构建失效。打包与验收仍执行原有许可证检查，ASIO SDK 等额外材料仍由原准备/打包流程验证。离线缓存不完整时先准备依赖，不通过一次试编译发现缺件。`-ChecksFile` 的源码检查仍在版本预检之后插入；若本轮还需执行耗时源码检查，在前期环境核对时先单独运行下面的轻量许可证预检。
 
 候选构建若不经过标签管线，也应先调用同一预检入口；服务端通过不能替代客户端闭包通过：
@@ -89,7 +110,7 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 - Linux x64/arm64 共用 `server-unix.json` 的 `unix-server` 计划名。两者显式使用不同 `-RunDirectory`，并核对 Target/Suffix、构建缓存及输出隔离，不能只换 VariablesFile 后沿用默认运行目录。
 - 某架构 Linux 包验收通过即可启动该架构 Docker，无需等待其他平台。Docker 导出/压缩失败可使用已有 `-ExistingImageId sha256:...` 恢复；入口仍会检查原生包和镜像内二进制身份。
 - 同一 Run 负责判断哪些收据可复用。打包失败时保留构建，验收驱动失败时保留实际 payload；输入变化导致管线判定失效时按其结果执行，不删除状态或手写通过收据。新预检改变了计划身份，首次使用新版计划时已有旧收据可能失效，不承诺跨这次工具更新复用历史构建。
-- 上传失败先检查已有 draft/Release 和完整资产，保留已完成的传输与原字节。大 Docker 归档优先从持有已验收文件、网络可用且已有授权凭据的主机上传，避免经另一台电脑中转 NAS 大文件。继续使用正式发布入口；`release-create.sh` 当前没有通用续传或替换开关，不虚构参数。
+- 上传失败先检查已有 draft/Release 和完整资产，保留已完成的传输与原字节。大 Docker 归档优先从持有已验收文件、网络可用且已有授权凭据的主机上传，避免经另一台电脑中转 NAS 大文件。原上传会话结束后可用下文的 `--resume-draft` 补传；它不替换现有资产，不使用 `--clobber`。
 - 发布完成后的说明/验收记录更新不触发重建。保留实际源码和二进制身份；同版本替换仅限明确授权的 payload，不能移动 tag，也不能顺带重建、上传其余包。普通标签计划要求 tag 与 checkout 相同；替换使用明确的独立流程和真实来源证明，不能伪造标签身份。例见 [0.9.3 客户端替换记录](Rust_Release_0.9.3.md)。
 
 发布后如果固定安装已与正式 payload 全文件哈希一致，按 AGENTS.md 完成发布身份和安装核对即可；不因“已发布”再跑一遍完整 portable 套件。生产服务更新另按请求授权和部署契约执行。
@@ -112,6 +133,33 @@ Docker 继续通过 `package-server-docker.ps1` / `validate-server-docker.ps1` �
 ## 发布、缓存和工具验证
 
 管线不创建标签、提 PR 或自动发布 Release。发布仍使用已授权的 `release-create.sh` 入口；发布后可选用 `release-assets.json` 合并元数据/集合/摘要检查。该只读计划核对所提供的本地归档，不替代首次从 GitHub 下载后的内容复核。发布后固定安装与正式产物身份同步仍按 AGENTS.md 执行，不把本地构建的相同版本号当作同一发布二进制。
+
+发布助手支持显式 `--draft` 创建未发布草稿，例如 `tools/release-create.sh <tag> --draft --notes-file <reviewed-notes> <assets...>`。草稿总是带 `--latest=false`；beta/rc 草稿仍保留预发布标记。省略 `--draft` 时，原正式版与 beta/rc 发布规则不变。创建模式的 `--dry-run` 只打印命令，不调用 GitHub。实际创建前通过已认证的 Release 列表检查同标签草稿或正式 Release，不能仅凭按 tag 查询的 404 认定不存在。字面资产名若以 `-` 开头，放在 `--` 后，助手会保留下游参数边界。
+
+### 草稿续传与显式发布
+
+`--resume-draft` 只处理已存在的同标签草稿，默认保留草稿状态；`--publish` 必须与它同用，只有完整资产核验通过后才发布。它们不授权一次实际发布操作，发布权限仍来自当前任务。先确认原上传进程或会话已经结束，避免两个上传者竞争同一资产；该入口不声称提供跨主机分布式锁。
+
+以下 Bash 示例中的 `tag`、`notes` 和 `assets` 分别指已有标签、原审定正文和全部已验收正式文件路径数组：
+
+```bash
+# 只读预览会查询草稿与资产；与完全离线的创建预览不同。
+tools/release-create.sh "$tag" --resume-draft --dry-run --notes-file "$notes" "${assets[@]}"
+# 仅补传缺失文件，保持草稿。
+tools/release-create.sh "$tag" --resume-draft --notes-file "$notes" "${assets[@]}"
+# 完整核验后显式发布；稳定版/beta/rc 的 Latest、预发布规则保持。
+tools/release-create.sh "$tag" --resume-draft --publish --notes-file "$notes" "${assets[@]}"
+```
+
+续传使用 `gh` 的只读 JSON 查询、原生 SHA256 工具和 PowerShell 7 的离线资产合同，不增加 Python 或独立 jq 依赖。合同清单来自唯一入口：
+
+```powershell
+pwsh tools/verify-release-assets.ps1 -Tag v0.9.6 -ListExpectedAssets
+```
+
+清单逐行返回归档及 `.sha256` 的精确文件名，不读取 Release 元数据、不连接 GitHub。续传必须提供该标签合同要求的完整集合；缺项、额外项、重名、既有正式 Release、源码 tag object、标题、预发布标记或审定正文不一致均拒绝。已有上传资产只有名称、状态、大小与服务器 SHA256 全部匹配时才跳过；缺失资产才上传，缺少可信 digest 或任何冲突会停止，不下载大包、不覆盖或删除资产。发布前再次读取并核验草稿与完整资产集；失败后保留已完成资产，下一次同一续传命令继续处理缺项。
+
+这些检查不替代原生 payload 验收。恢复后的正式 Release 仍需做线上元数据/摘要核验和固定安装同步；同版本资产替换仍须单独授权。
 
 实际交付建议加 `-CleanBuildArtifacts`，在所有交付阶段成功后追加 debug 缓存维护，默认预算 40 GiB，可用 `-BuildCacheLimitGiB` 调整。管线先释放构建租约，再运行独占清理；交付失败不触发清理，清理失败保留已通过的交付收据供续跑。不要在 ChecksFile 中再清理一遍。SDK、正式包和固定安装均保留，详见[编译缓存维护](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md)。
 

@@ -3725,7 +3725,7 @@ impl Controller {
                                 if !result_window {
                                     *c2.request.lock().unwrap() = job.request.clone();
                                 }
-                                {
+                                let explicit_page_label = {
                                     let mut navigation = c2.result_pages.lock().unwrap();
                                     if same_display_revision {
                                         coverage.first_offset =
@@ -3735,7 +3735,11 @@ impl Controller {
                                         navigation.install_window(&job.request, &coverage),
                                     );
                                     ui.set_can_previous(navigation.can_previous(&job.request));
-                                }
+                                    navigation.explicit_page_label(
+                                        global_count_exact
+                                            .then(|| page.total_count.div_ceil(page_size as u64)),
+                                    )
+                                };
                                 *c2.window_coverage.lock().unwrap() = Some(coverage);
                                 let first_page = job.request.offset / page_size + 1;
                                 let last_page = (job.request.offset
@@ -3751,7 +3755,9 @@ impl Controller {
                                     "?".into()
                                 };
                                 ui.set_page_label(
-                                    if first_page == last_page {
+                                    if c2.audio_table.lock().unwrap().pagination_enabled {
+                                        explicit_page_label
+                                    } else if first_page == last_page {
                                         format!("{first_page}/{pages}")
                                     } else {
                                         format!("{first_page}–{last_page}/{pages}")

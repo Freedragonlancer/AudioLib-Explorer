@@ -74,7 +74,8 @@ impl SourcePage {
 struct Transition {
     from: Position,
     forward: bool,
-    popped: Option<Position>,
+    popped: Option<(Position, Option<usize>)>,
+    page_number: Option<usize>,
 }
 
 #[derive(Default)]
@@ -84,7 +85,8 @@ pub(super) struct ResultPageNavigation {
     next_cursor: Option<String>,
     cursor_limit: usize,
     returned: usize,
-    previous: Vec<Position>,
+    previous: Vec<(Position, Option<usize>)>,
+    page_number: Option<usize>,
     requested: bool,
     pending: Option<Transition>,
     first_offset: Option<usize>,
@@ -126,29 +128,37 @@ impl ResultPageNavigation {
         } else {
             None
         };
-        let target = if direction < 0 {
-            popped.clone().unwrap_or(Position {
-                offset: from.offset.saturating_sub(page_size),
-                limit: page_size,
-                cursor: None,
-            })
-        } else {
-            self.previous.push(from.clone());
-            Position {
-                offset: from.offset.saturating_add(self.returned),
-                limit: page_size,
-                cursor: if self.cursor_limit == page_size.min(super::PAGE_SIZE) {
-                    self.next_cursor.clone()
-                } else {
-                    None
+        let (target, page_number) = if direction < 0 {
+            popped.clone().unwrap_or((
+                Position {
+                    offset: from.offset.saturating_sub(page_size),
+                    limit: page_size,
+                    cursor: None,
                 },
-            }
+                self.page_number
+                    .and_then(|page| page.checked_sub(1).filter(|page| *page > 0)),
+            ))
+        } else {
+            self.previous.push((from.clone(), self.page_number));
+            (
+                Position {
+                    offset: from.offset.saturating_add(self.returned),
+                    limit: page_size,
+                    cursor: if self.cursor_limit == page_size.min(super::PAGE_SIZE) {
+                        self.next_cursor.clone()
+                    } else {
+                        None
+                    },
+                },
+                self.page_number.and_then(|page| page.checked_add(1)),
+            )
         };
         target.apply(request);
         self.pending = Some(Transition {
             from,
             forward: direction > 0,
             popped,
+            page_number,
         });
         self.requested = true;
     }
@@ -205,6 +215,18 @@ impl ResultPageNavigation {
         self.first_offset
     }
 
+    /// Visible page order is proven by navigation, never inferred from raw SQL
+    /// positions. A cold restored range has no known ordinal until its prefix
+    /// has been traversed back to the beginning.
+    pub(super) fn explicit_page_label(&self, total_pages: Option<u64>) -> String {
+        format!(
+            "{}/{}",
+            self.page_number
+                .map_or_else(|| "?".into(), |page| page.to_string()),
+            total_pages.map_or_else(|| "?".into(), |pages| pages.max(1).to_string())
+        )
+    }
+
     /// A cold backwards step has no displayed position to restore. Search the
     /// preceding raw region instead of following an empty span forwards again.
     pub(super) fn backward_before(&self) -> Option<usize> {
@@ -227,6 +249,21 @@ impl ResultPageNavigation {
         coverage: &super::result_window::WindowCoverage,
     ) -> bool {
         let identity = key(request);
+        let same_definition = self.key == identity;
+        let page_number = if same_definition {
+            self.pending.as_ref().map_or_else(
+                || {
+                    if self.current.as_ref() == Some(&Position::of(request)) {
+                        self.page_number
+                    } else {
+                        None
+                    }
+                },
+                |transition| transition.page_number,
+            )
+        } else {
+            None
+        };
         if self.key != identity {
             self.previous.clear();
         }
@@ -236,6 +273,11 @@ impl ResultPageNavigation {
         self.next_cursor.clone_from(&coverage.next_cursor);
         self.cursor_limit = coverage.cursor_limit;
         self.first_offset = coverage.first_offset;
+        self.page_number = if request.offset == 0 || coverage.first_offset == Some(request.offset) {
+            Some(1)
+        } else {
+            page_number
+        };
         self.requested = false;
         self.pending = None;
         coverage.has_next

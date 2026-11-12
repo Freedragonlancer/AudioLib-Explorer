@@ -191,7 +191,7 @@ if(Test-Path -LiteralPath target/move-head){
     }
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'target') -Force | Out-Null
     $taskStub=@'
-param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,$BinaryDirectory,$Source,[string[]]$Package,[switch]$Asio)
+param($Tag,$Profile,[switch]$WithoutAsio,[switch]$SkipBuild,$BinaryDirectory,$Source,$Destination,$VersionManifest,[string[]]$Package,[switch]$Asio)
 $ErrorActionPreference='Stop'
 $fixtureRoot=[IO.Path]::GetFullPath((Get-Location).Path)
 $fixtureTarget=Join-Path $fixtureRoot 'target'
@@ -203,7 +203,7 @@ function Write-FixtureFile([string]$Relative,[string]$Contents) {
     [IO.File]::WriteAllText($path,$Contents)
 }
 $scriptName=[IO.Path]::GetFileName($MyInvocation.MyCommand.Path)
-@{script=$scriptName;profile=$Profile;without_asio=[bool]$WithoutAsio;asio=[bool]$Asio;packages=@($Package)} | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $fixtureTarget 'profile-calls.jsonl')
+@{script=$scriptName;profile=$Profile;without_asio=[bool]$WithoutAsio;asio=[bool]$Asio;packages=@($Package);destination=$Destination;version_manifest=$VersionManifest} | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $fixtureTarget 'profile-calls.jsonl')
 # Model what each real tool produces, independently of the plan's declarations.
 switch -Exact ($scriptName) {
     'check-release-licenses.ps1' {
@@ -227,12 +227,18 @@ switch -Exact ($scriptName) {
     }
     'install-local-release.ps1' {
         if ($Source -cne 'dist/latest/portable') { throw 'Profile installation selected another payload.' }
-        Write-FixtureFile 'local_release/installed.txt' ([IO.File]::ReadAllText((Join-Path $fixtureRoot 'dist/latest/portable/AudioLibExplorer.exe')))
+        $install=[IO.Path]::GetFullPath($Destination,$fixtureRoot)
+        $ownedParent=[IO.Path]::GetDirectoryName($fixtureRoot)
+        if (!$install.StartsWith($ownedParent+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($install) -cne 'local_release') { throw 'Fake installation escaped the owned fixture.' }
+        if (!(Test-Path -LiteralPath $VersionManifest -PathType Leaf)) { throw 'Profile lost the selected version manifest.' }
+        New-Item -ItemType Directory -Path $install -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $install 'installed.txt'),[IO.File]::ReadAllText((Join-Path $fixtureRoot 'dist/latest/portable/AudioLibExplorer.exe')))
     }
 }
 '@
     $taskPlan=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-plans/windows-client.json') -Raw | ConvertFrom-Json -AsHashtable
     $taskPlan.require_tag=$false; $taskPlan.host='any'; $taskPlan.environment_tools=@()
+    [IO.File]::WriteAllText((Join-Path $taskRoot 'Cargo.toml'),"[workspace.package]`nversion = `"0.0.1`"`n")
     New-Item -ItemType Directory -Path (Join-Path $taskRoot 'tools') -Force | Out-Null
     foreach($taskStep in $taskPlan.stages){[IO.File]::WriteAllText((Join-Path $taskRoot $taskStep.script),$taskStub)}
     [IO.File]::WriteAllText((Join-Path $taskRoot 'tools/check-local.ps1'),$taskStub)
@@ -284,6 +290,32 @@ switch -Exact ($scriptName) {
     if(($taskCalls.script -join ',') -cne 'check-local.ps1,check-release-licenses.ps1,build-release.ps1,package-portable.ps1,validate-portable.ps1,install-local-release.ps1'){throw 'Feature change repeated unrelated preflight or omitted affected stages.'}
     if(($taskCalls | Where-Object script -eq 'check-local.ps1').asio -or @($taskCalls | Where-Object { $_.script -in @('check-release-licenses.ps1','build-release.ps1','package-portable.ps1','validate-portable.ps1') -and $_.without_asio }).Count -ne 4){throw 'Non-ASIO override did not select one consistent check/build/package/accept configuration.'}
     Write-Host 'PASS: actual Windows plan and checks example route both ASIO selections consistently without Cargo or application execution.'
+    # Route only installation to an owned sibling checkout. Its older manifest
+    # must remain untouched; selected manifest bytes invalidate only installation.
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    $taskOwnedParent=[IO.Path]::GetDirectoryName($taskRoot)
+    $taskOriginalRoot=Join-Path $taskOwnedParent 'original checkout with spaces'
+    $taskSelectedManifest=Join-Path $taskOwnedParent 'final manifest with spaces/Cargo.toml'
+    $taskSelectedInstall=Join-Path $taskOriginalRoot 'local_release'
+    New-Item -ItemType Directory -Path $taskSelectedInstall,([IO.Path]::GetDirectoryName($taskSelectedManifest)) -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $taskOriginalRoot 'Cargo.toml'),"[workspace.package]`nversion = `"0.0.0`"`n")
+    [IO.File]::WriteAllText($taskSelectedManifest,"[workspace.package]`nversion = `"0.0.1`"`n")
+    [IO.File]::WriteAllText((Join-Path $taskSelectedInstall 'user-file.keep'),'preserve original installation data')
+    @{WithoutAsio=$true;InstallDestination=$taskSelectedInstall;VersionManifest=$taskSelectedManifest} | ConvertTo-Json | Set-Content -LiteralPath $taskVariables -Encoding utf8
+    $null=Invoke-Pipeline 'Run' 0 @('-ChecksFile',$taskChecksPath,'-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    $taskInstallCall=@($taskCalls|Where-Object script -eq 'install-local-release.ps1')
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,install-local-release.ps1' -or $taskInstallCall[0].destination -cne $taskSelectedInstall -or $taskInstallCall[0].version_manifest -cne $taskSelectedManifest -or !(Test-Path -LiteralPath (Join-Path $taskSelectedInstall 'installed.txt')) -or @('build','package','accept'|Where-Object{(Read-State).stages[$_].status -ne 'reused'}).Count){throw 'Installation routing restarted payload stages or lost destination/manifest parameters.'}
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    $null=Invoke-Pipeline 'Run' 0 @('-ChecksFile',$taskChecksPath,'-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1' -or (Read-State).stages.install.status -ne 'reused'){throw 'Unchanged selected installation was replayed.'}
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    [IO.File]::AppendAllText($taskSelectedManifest,"# changed manifest identity`n")
+    $null=Invoke-Pipeline 'Run' 0 @('-ChecksFile',$taskChecksPath,'-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,install-local-release.ps1' -or (Read-State).stages.install.status -ne 'passed' -or [IO.File]::ReadAllText((Join-Path $taskSelectedInstall 'user-file.keep')) -cne 'preserve original installation data' -or [IO.File]::ReadAllText((Join-Path $taskOriginalRoot 'Cargo.toml')) -notmatch '0\.0\.0'){throw 'Selected manifest invalidation repeated unrelated work or changed original state.'}
+    Write-Host 'PASS: fixed installation and manifest routing reuse payload receipts; manifest identity invalidates only installation; original data survives.'
     Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
     $env:SLINT_EMIT_DEBUG_INFO=if($taskSavedSlint -eq '1'){'0'}else{'1'}
     $null=Invoke-Pipeline 'Run' 0 @('-ChecksFile',$taskChecksPath,'-VariablesFile',$taskVariables)

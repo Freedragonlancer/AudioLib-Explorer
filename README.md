@@ -30,7 +30,7 @@ A free, open-source sound effects (SFX) library manager for sound design, game a
 
 AudioLib Explorer is a fast, local-first sound-effects library manager written in Rust with a [Slint](https://slint.dev) desktop UI. It indexes WAV/BWF, MP3, AIFF, FLAC and Ogg libraries into SQLite (FTS5), previews sounds through WASAPI (optionally ASIO) on Windows, and can browse a remote library served by `audiolib-server`. The macOS arm64 client uses CoreAudio. Version 0.8.4 added Linux x64 server and Docker amd64/arm64 deliverables. This README describes the current development source; published packages retain the features and identity of their own release tag.
 
-- **Published release:** [v0.9.5](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.5), published 2026-11-10. All seven packages, fourteen online assets and checksums, platform acceptance and fixed-install synchronization are recorded in the [0.9.5 release record](doc/Rust_Release_0.9.5.md). The payload source remains final main/tag `7d7a60b`; later documentation does not rebuild or replace those bytes.
+- **Published release:** [v0.9.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.6), published 2026-11-11. All seven packages, fourteen verified online assets and checksums, platform acceptance and fixed-install synchronization are recorded in the [0.9.6 release record](doc/Rust_Release_0.9.6.md). The payload source remains final main/tag `4606291`; later documentation does not rebuild or replace those bytes.
 - **HTTP API:** `/api/v1/` for library/audio operations; `/api/vendor-import/` for managed vendor import
 - **Database schema:** ordinary local writers use 8; explicit server migration can publish 9. Known complete schema 3–9 snapshots are readable only after format validation.
 - **Writable library format:** base formats are `ale-s8-cld1-t3-m2-p1-a1` locally and `ale-s9-cld1-t3-m2-p1-a1-sd1` for the dedicated server writer. The first successful extended-source write atomically enables required `audio_sources:1` and the corresponding `-af1` format; older clients must upgrade, as described in the [compatibility contract](doc/api/Library_Migration_Compatibility.md). Client snapshots stay read-only. Shared albums and original Metadata JSON TEXT are retained; Metadata compression is deferred, while snapshot transport uses zstd.
@@ -141,7 +141,7 @@ Docker releases use `AudioLibServer-<tag>-docker-linux-amd64.tar.gz` and `AudioL
 
 Stop the process after scans drain. Keep the config, library, tokens and audio directories. Native Windows, macOS arm64 and Linux x64 servers update from the admin page once the 0.9 layout (`audiolib-server` beside `audiolib-migrate`) is installed; the program directory must be writable. The first move off a pre-0.9 package is a manual extract, because that updater rejects the added migrator. Docker upgrades replace the image and keep the data volume.
 
-0.9.5 retains the 0.9.4 write-target schemas 8/9; the first successful extended-source write enables AF1, so upgrade clients before scanning new formats. Schema 9 is explicit: `audiolib-migrate status --db /path/to/library.db`, then `audiolib-migrate start --db /path/to/library.db` (`pause`, `resume`, `cancel` and `rollback` use the same `--db`). The tool keeps `audiolib-rollback-mig9-*.db` beside the library. Replacing the binary does not downgrade schema 9. Full steps: [Server deployment](doc/Server_Deployment.md).
+0.9.6 retains the existing write-target schemas 8/9; the first successful extended-source write enables AF1, so upgrade clients before scanning new formats. Schema 9 is explicit: `audiolib-migrate status --db /path/to/library.db`, then `audiolib-migrate start --db /path/to/library.db` (`pause`, `resume`, `cancel` and `rollback` use the same `--db`). The tool keeps `audiolib-rollback-mig9-*.db` beside the library. Replacing the binary does not downgrade schema 9. Full steps: [Server deployment](doc/Server_Deployment.md).
 
 `GET /api/v1/health` needs no token and returns HTTP 200. `"status":"ok"` means the library is open; `"starting"` means other routes answer 503 `UNAVAILABLE`; `"error"` means open failed and the process keeps retrying. Bare `/health` is 404.
 
@@ -187,13 +187,13 @@ For tagged local delivery, `pwsh tools/release-pipeline.ps1 -Action Run -Tag <ta
 
 After actual build/test work, add `-CleanBuildArtifacts` to local checks or the release pipeline to prune debug caches above the default 40 GiB budget (`-BuildCacheLimitGiB` adjusts it). Preview separately with `pwsh tools/clean-build-artifacts.ps1`; release outputs, packages, installations, SDKs and user data are retained. See [build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md).
 
-Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. From the accepted main/tag checkout:
+Build the Mac client on an Apple Silicon Mac with Xcode command-line tools, the pinned native Rust toolchain and PowerShell 7.3 or newer. Use a clean checkout of the intended release tag (`v0.9.6`, commit `4606291`, in this example):
 
 ```powershell
 $releaseCommit = (git rev-parse HEAD).Trim()
 $buildProof = Join-Path ([IO.Path]::GetTempPath()) ('audiolib-mac-build-' + [guid]::NewGuid().ToString('N') + '.json')
 pwsh ./tools/build-macos-client.ps1 -ExpectedCommit $releaseCommit -ReportPath $buildProof
-pwsh ./tools/package-macos-client.ps1 -Tag v0.9.5 -ExpectedCommit $releaseCommit -BuildReport $buildProof -ValidateRuntime
+pwsh ./tools/package-macos-client.ps1 -Tag v0.9.6 -ExpectedCommit $releaseCommit -BuildReport $buildProof -ValidateRuntime
 ```
 
 Run the Mac packaging command in a logged-in desktop session to complete structural and native acceptance together once. If that session is unavailable, omit `-ValidateRuntime` and complete runtime acceptance later. Run `validate-macos-client.ps1` separately only if runtime acceptance was deferred, artifacts changed or a different host must verify them; see the [Mac client guide](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/MACOS_README.md). Structural checks alone record runtime validation as `not-run`.

@@ -81,6 +81,26 @@ fn assert_audio(path: &Path, bytes: &[u8]) {
 }
 
 #[test]
+fn riff_size_including_header_is_accepted_only_with_complete_chunks() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("inclusive-size.wav");
+    let mut bytes = riff(&body());
+    let inclusive_size = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&inclusive_size.to_le_bytes());
+    assert_audio(&path, &bytes);
+
+    // An eight-byte-short physical file can have the same parent-size mismatch,
+    // but its data chunk is genuinely incomplete and must still be rejected.
+    let mut contents = fmt();
+    contents.extend(chunk(b"data", &[0; 16]));
+    let mut truncated = riff(&contents);
+    truncated.truncate(truncated.len() - 8);
+    fs::write(&path, truncated).unwrap();
+    assert!(probe(&path).is_err());
+    assert!(Decoder::open(&path).is_err());
+}
+
+#[test]
 fn riff_external_trailers_do_not_become_chunks_or_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("tail.wav");

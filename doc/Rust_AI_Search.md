@@ -187,6 +187,8 @@ AI/core 测试独立运行；桌面以 ASIO 特性运行。把纯 AI 测试包�
 
 最终格式、AI 后端及桌面 ASIO strict Clippy 通过，AI 后端 15 项测试与 18 项不同的桌面回归通过。新引用规则识别出旧 mock 中借用另一查询出处的问题，模拟生成词改为空引用后，仅重跑受影响用例；该用例和两项隔离回归并行执行，3 项全过，未重复运行其余已通过用例。原失败记录、最终完整选择及重跑结果分别在 `checks.log`、`final-desktop-tests.log`、`retry-desktop-tests.log`，最终桌面 Clippy 为 `retry-desktop-clippy.log`。这些结果不替代真实供应商账户、真实睡眠 NAS 或音频硬件验收。
 
+提交 `90edcfac68bacd7033df14b1304d02076f15fb5b` 随后完成 Windows MSVC ASIO release 构建（14m20s）、许可证预检、便携打包和隔离 `validate-portable.ps1`。固定 `local_release/` 的 908 个包内文件哈希核验、`AudioLibCli 1.0.0` 和安装后隔离桌面启动通过；安装收据为 `.rust-validation/local-install/603d5d373b0d4937ae52ba956b3e7230/report.json`，交付摘要为 `.rust-validation/ai-cr-push/final-delivery.json`。原分支 CI run `43236216741` 成功；交付后缓存维护通过，逻辑剩余约 33.45 GiB，40 GiB 预算达标。这里保留该功能分支的原始交付身份，不代表合并后 beta 或最终 main/tag 产物已验收；未创建标签或发布 GitHub Release。
+
 当前不包含音频 embedding、账户购买/OAuth、供应商账单同步、跨平台持久密钥库、批量自动新建全部素材层任务或自动查询反馈迭代。概念线框里的这些延伸交互不代表本次已交付。
 
 协议参考：[OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)、[Anthropic Messages](https://platform.claude.com/docs/en/api/messages)、[Gemini structured output](https://ai.google.dev/gemini-api/docs/structured-output)、[TypeSafe API](https://api.typesafe.ai/redoc)、[OpenCode Go](https://opencode.ai/docs/go/)。

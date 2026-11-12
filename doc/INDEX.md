@@ -36,6 +36,8 @@ AI 智能搜索使用与实现见 [Rust AI Search](Rust_AI_Search.md)；研究�
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Candidate changes and published client/server release history |
+| [1.0.0 release preparation](Rust_Release_1.0.0.md) | Unreleased beta candidate, AI and RIFF scope, original evidence, native payload matrix and remaining gates |
+| [0.9.6 release record](Rust_Release_0.9.6.md) | Published 4606291 payloads, fourteen verified online assets, source-evidence reuse, fixed installation and actual platform limits |
 | [0.9.5 release record](Rust_Release_0.9.5.md) | Published 7d payloads and hashes, fourteen online assets, fixed-install synchronization, original versus new checks and actual platform limits |
 | [0.9.4 release record](Rust_Release_0.9.4.md) | Published f6 payloads and checksums, af1 upgrade boundaries, actual remote verification and fixed-install synchronization |
 | [0.9.3 release record](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_0.9.3.md) | Published assets, checksums, validation identities and platform coverage |

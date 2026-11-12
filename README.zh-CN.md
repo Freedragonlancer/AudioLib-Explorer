@@ -6,7 +6,7 @@
 
 AudioLib Explorer 是一款本地优先音效库管理软件，使用 Rust 编写，桌面界面基于 [Slint](https://slint.dev)。当前源码将大型 WAV/BWF、MP3、AIFF、FLAC、Ogg Vorbis/OGA 音效库索引到 SQLite（FTS5），支持路径、内嵌标签及厂商 Metadata 搜索，在 Windows 上通过 WASAPI（可选 ASIO）试听，也可以浏览由 `audiolib-server` 提供的远程音效库。macOS arm64 客户端使用 CoreAudio；0.8.4 增加 Linux x64 服务端和 Docker amd64/arm64 离线镜像。
 
-- **当前正式版：** [v0.9.5](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.5)，于 2026-11-10 发布；七份正式包、十四项线上资产与 SHA256、实际平台验收及发布后固定安装同步见 [0.9.5 发布记录](doc/Rust_Release_0.9.5.md)。二进制源码仍为最终 main/tag `7d7a60b`，后续文档提交不重建或替换原产物。
+- **当前正式版：** [v0.9.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.6)，于 2026-11-11 发布；七份正式包、十四项线上资产与 SHA256、实际平台验收及发布后固定安装同步见 [0.9.6 发布记录](doc/Rust_Release_0.9.6.md)。二进制源码仍为最终 main/tag `4606291`，后续文档提交不重建或替换原产物。
 - **HTTP API：** `/api/v1/`（客户端与服务端）
 - **数据库 schema：** 普通本地 writer 为8；服务端显式迁移后为9，使用专用 writer；客户端只读校验快照3..=9。
 - **可写库格式：** 本地 base 为 `ale-s8-cld1-t3-m2-p1-a1`，专用服务端 schema-9 base 为 `ale-s9-cld1-t3-m2-p1-a1-sd1`；首次新源成功写入的同一事务启用必需 `audio_sources:1` 及对应 `-af1` 完整格式，旧客户端须升级，详见[兼容说明](doc/api/Library_Migration_Compatibility.md)。受支持的 schema 3–7 仅作为只读迁移来源。schema 8 使用共享专辑实体，Metadata 保留为原始 JSON TEXT。Metadata 压缩暂缓，快照传输仍使用 zstd。

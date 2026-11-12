@@ -206,6 +206,8 @@ fn child_real_provider_paging() {
                 );
                 let mut navigation = result_page_navigation::ResultPageNavigation::default();
                 assert!(navigation.install_window(&request, &first.coverage));
+                assert_eq!(navigation.explicit_page_label(None), "1/?");
+                assert!(!navigation.can_previous(&request));
                 navigation.step(&mut request, 1, size);
                 navigation.prepare_query(&mut request, false);
                 let admitted_cursor = request.cursor.clone();
@@ -227,9 +229,11 @@ fn child_real_provider_paging() {
                     );
                 }
                 assert!(navigation.install_window(&request, &second.coverage));
+                assert_eq!(navigation.explicit_page_label(None), "2/?");
                 let second_request = request.clone();
                 navigation.step(&mut request, 1, size);
                 navigation.failed(&mut request);
+                assert_eq!(navigation.explicit_page_label(None), "2/?");
                 assert_eq!(
                     (request.offset, request.limit, &request.cursor),
                     (
@@ -251,8 +255,15 @@ fn child_real_provider_paging() {
                         .collect::<Vec<_>>(),
                     expected[..size]
                 );
+                navigation.install_window(&request, &previous.coverage);
+                assert_eq!(navigation.explicit_page_label(None), "1/?");
+                let mut cold_navigation = result_page_navigation::ResultPageNavigation::default();
+                cold_navigation.install_window(&second_request, &second.coverage);
+                assert_eq!(cold_navigation.explicit_page_label(None), "?/?");
                 let mut cold_request = second_request;
                 let before = cold_request.offset;
+                cold_navigation.step(&mut cold_request, -1, size);
+                cold_navigation.prepare_query(&mut cold_request, false);
                 let cold =
                     result_window::load_backward(&mut cold_request, before, &cancel, search, hide)
                         .unwrap();
@@ -263,6 +274,15 @@ fn child_real_provider_paging() {
                         .map(|file| file.id)
                         .collect::<Vec<_>>(),
                     expected[..size]
+                );
+                cold_navigation.install_window(&cold_request, &cold.coverage);
+                assert_eq!(
+                    cold_navigation.explicit_page_label(None),
+                    if cold.coverage.first_offset == Some(cold_request.offset) {
+                        "1/?"
+                    } else {
+                        "?/?"
+                    }
                 );
             }
         }
