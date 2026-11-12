@@ -1872,6 +1872,7 @@ fn child_jev_provider_probe() {
     ui.set_ai_key("draft-jev-key".into());
     ui.set_ai_prompt("private-current-sound-description".into());
     ui.set_ai_instruction("private-custom-instruction".into());
+    ui.set_ai_layers(true);
     ui.set_ai_auto_search(true);
     let original_task_count = ui.get_search_tasks().row_count();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1926,6 +1927,7 @@ fn child_jev_provider_probe() {
             let request: Value = serde_json::from_str(&body).unwrap();
             assert_eq!(request["model"], "jev-latest");
             assert_eq!(request["state"]["intent"], "wind");
+            assert_eq!(request["state"]["mode"], "direct");
             let questions = request["questions"].as_object().unwrap();
             let criteria = questions["recipe"]["criteria"].as_object().unwrap();
             let keyword = request["state"]["candidates"]
