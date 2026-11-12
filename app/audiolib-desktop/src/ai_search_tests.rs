@@ -1847,6 +1847,185 @@ fn child_provider_discovery() {
 }
 
 #[test]
+fn jev_provider_probe_uses_keyword_choices_and_preserves_unsaved_drafts() {
+    isolated("ai_search::child_jev_provider_probe");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_jev_provider_probe() {
+    use serde_json::{Value, json};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    ui.invoke_ai_action(9, 0);
+    ui.set_ai_protocol(4);
+    ui.invoke_ai_action(12, 4);
+    ui.set_ai_profile_name("Jev test".into());
+    ui.set_ai_model("jev-latest".into());
+    ui.set_ai_key("draft-jev-key".into());
+    ui.set_ai_prompt("private-current-sound-description".into());
+    ui.set_ai_instruction("private-custom-instruction".into());
+    ui.set_ai_auto_search(true);
+    let original_task_count = ui.get_search_tasks().row_count();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    ui.set_ai_endpoint(format!("http://{}", listener.local_addr().unwrap()).into());
+    let private_root = fixture.root.to_string_lossy().into_owned();
+    let server = std::thread::spawn(move || {
+        for step in 0..4 {
+            // A missing network request must fail this regression promptly,
+            // rather than leave a server blocked in accept after a local error.
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(started.elapsed() < Duration::from_secs(8));
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("owned probe listener failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("POST /systemone HTTP/1.1"));
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("authorization: bearer draft-jev-key")
+            );
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut bytes = vec![0; length];
+            stream.read_exact(&mut bytes).unwrap();
+            let body = String::from_utf8(bytes).unwrap();
+            assert!(!body.contains("private-current-sound-description"));
+            assert!(!body.contains("private-custom-instruction"));
+            assert!(!body.contains(&private_root));
+            let request: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(request["model"], "jev-latest");
+            assert_eq!(request["state"]["intent"], "wind");
+            let questions = request["questions"].as_object().unwrap();
+            let criteria = questions["recipe"]["criteria"].as_object().unwrap();
+            let keyword = request["state"]["candidates"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .find_map(|(id, option)| {
+                    (option["kind"] == "keyword"
+                        && option["queries"]
+                            .as_array()
+                            .is_some_and(|queries| queries.iter().any(|query| query == "wind")))
+                    .then(|| id.clone())
+                })
+                .expect("wind must be submitted as a structured keyword choice");
+            let chosen = if step == 1 {
+                "other_or_unclear"
+            } else {
+                &keyword
+            };
+            let probability = if step == 2 { 0.55 } else { 0.95 };
+            let alternative = if step == 1 {
+                &keyword
+            } else {
+                "other_or_unclear"
+            };
+            let probabilities = criteria
+                .keys()
+                .map(|id| {
+                    (
+                        id.clone(),
+                        json!(if id == chosen {
+                            probability
+                        } else if id == alternative {
+                            1.0 - probability
+                        } else {
+                            0.0
+                        }),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            let uniform = 1.0 / criteria.len() as f64;
+            let confidence = (probability - uniform) / (1.0 - uniform);
+            let answers = questions.iter().map(|(id, question)| {
+                let answer = match question["type"].as_str().unwrap() {
+                    "choice" => json!({"type":"choice", "choice":chosen, "confidence":confidence, "probabilities":probabilities}),
+                    "score" => {
+                        let selected = id == &format!("fit_{keyword}");
+                        json!({"type":"score", "score":if selected {2.0} else {0.0}, "confidence":1.0,
+                            "probabilities":{"0":if selected {0.0} else {1.0},"1":0.0,"2":if selected {1.0} else {0.0}}})
+                    }
+                    "noul" => json!({"type":"noul", "noul":0.1}),
+                    other => panic!("unexpected Jev question type: {other}"),
+                };
+                (id.clone(), answer)
+            }).collect::<serde_json::Map<_, _>>();
+            let response =
+                json!({"answers":answers,"usage":{"input_tokens":40,"output_tokens":20}})
+                    .to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+        }
+    });
+
+    for step in 0..3 {
+        ui.invoke_ai_action(17, 0);
+        wait_for(ui, |ui| !ui.get_ai_busy());
+        if step == 0 {
+            assert!(!ui.get_ai_error());
+            assert!(ui.get_ai_status().contains("Model test passed"));
+        } else {
+            assert!(ui.get_ai_error());
+            assert!(ui.get_ai_status().contains("Jev decision uncertain"));
+            assert!(!ui.get_ai_status().contains("Model test passed"));
+        }
+        assert!(ui.get_ai_profile_id().is_empty());
+        assert_eq!(ui.get_ai_key(), "draft-jev-key");
+        assert_eq!(ui.get_ai_prompt(), "private-current-sound-description");
+        assert_eq!(ui.get_search_tasks().row_count(), original_task_count);
+        assert_eq!(ui.get_ai_quick_rows().row_count(), 0);
+        assert!(!fixture.root.join("preferences/ai/profiles.json").exists());
+    }
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| {
+        !ui.get_ai_busy() && ui.get_ai_provider_index() == 1
+    });
+    assert!(ui.get_ai_key().is_empty());
+    ui.invoke_ai_action(17, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(!ui.get_ai_error());
+    assert!(ui.get_ai_status().contains("Model test passed"));
+    let usage = audiolib_ai::storage::ProfileStore::open(&fixture.root.join("preferences"))
+        .unwrap()
+        .usage(ui.get_ai_profile_id().as_str());
+    assert_eq!(usage.requests, 1);
+    assert_eq!(usage.output_tokens, 20);
+    assert_eq!(ui.get_search_tasks().row_count(), original_task_count);
+    server.join().unwrap();
+    finish(&fixture);
+}
+
+#[test]
 fn repeated_ai_search_and_quick_queries_survive_result_refresh() {
     isolated("ai_search::child_repeated_ai_search");
 }

@@ -384,6 +384,9 @@ fn parse_text(value: &Value) -> Result<Value> {
 }
 
 #[cfg(test)]
+mod jev_http_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{io::Write, net::TcpListener, thread};

@@ -1349,7 +1349,7 @@ impl Controller {
                         audiolib_core::ai_search::validate_intent(&intent)
                             .map_err(|_| AiError::Invalid)?;
                         validate_instruction(&guidance)?;
-                        // Candidate absence is not a paid decision request.
+                        // Validate the finite request before reserving provider usage.
                         if profile.protocol == Protocol::Jev {
                             audiolib_ai::jev::request(&profile.model, &intent, &guidance)?;
                         }
@@ -1393,8 +1393,8 @@ impl Controller {
                             .decision
                             .map(|d| {
                                 format!(
-                                    "Jev Choice={} p={:.2} · Score={:.2}/2 · Noul={:.2}",
-                                    d.recipe, d.confidence, d.fit, d.clarification
+                                    "Jev Choice={} p={:.2} · confidence={:.2} · Score={:.2}/2 · Noul={:.2}",
+                                    d.recipe, d.probability, d.confidence, d.fit, d.clarification
                                 )
                             })
                             .unwrap_or_default();
