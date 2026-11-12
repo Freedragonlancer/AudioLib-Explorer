@@ -489,7 +489,13 @@ impl Entry {
             if let Some(failure) = &state.failure {
                 return Err(io::Error::other(failure.to_string()));
             }
-            if state.cancelled || state.worker.is_none() {
+            if state.cancelled {
+                // Replacing a selection cancels its fetch before the audio worker
+                // receives the next Load. Its old decoder must stop quietly just
+                // like a read interrupted by Stop, rather than publish an I/O fault.
+                return Err(audiolib_core::read_interrupted_error());
+            }
+            if state.worker.is_none() {
                 return Err(io::Error::other("audio stream cancelled"));
             }
             Self::note_reader(&mut state, offset);
@@ -2206,13 +2212,19 @@ mod tests {
         let stream = start("5", format!("{}/s", server.url));
         ready(&stream);
         // A decoder is reading the first version: it must not get bytes of the second.
-        let _reader = stream.reader().unwrap();
+        let mut reader = stream.reader().unwrap();
         assert!(matches!(
             stream.wait_complete(Duration::from_secs(10)),
             Err(RemoteError::Changed(_))
         ));
         assert!(stream.is_failed());
         assert!(stream.reader().is_err());
+        // Cancelling after a real source-version failure must not relabel it as
+        // an intentional read interruption and hide the actual fault.
+        stream.cancel();
+        reader.seek(SeekFrom::Start(200_000)).unwrap();
+        let error = audiolib_core::Error::Io(reader.read(&mut [0; 16]).unwrap_err());
+        assert!(!error.is_read_interrupted(), "{error}");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -2592,7 +2604,8 @@ mod tests {
         assert!(wait_until(|| !stream.is_active()));
         let started = Instant::now();
         reader.seek(SeekFrom::Start(1_900_000)).unwrap();
-        assert!(reader.read(&mut [0; 16]).is_err());
+        let error = audiolib_core::Error::Io(reader.read(&mut [0; 16]).unwrap_err());
+        assert!(error.is_read_interrupted(), "{error}");
         assert!(started.elapsed() < Duration::from_secs(2));
         // The bytes that had arrived are still readable.
         reader.seek(SeekFrom::Start(0)).unwrap();
@@ -2603,6 +2616,61 @@ mod tests {
             stream.wait_complete(Duration::from_secs(1)),
             Err(RemoteError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn cancelling_a_stream_interrupts_an_already_waiting_decoder_read() {
+        let bytes = data(256 * 1024, 6);
+        let server = TestServer::start(move |request| {
+            serve(request, &bytes, "\"v1\"").slow(16 * 1024, Duration::from_secs(5))
+        });
+        let stream = start("cancel-waiting-reader", format!("{}/s", server.url));
+        ready(&stream);
+        assert!(wait_until(|| stream.is_buffered(0, 16 * 1024)));
+        let mut reader = stream.reader().unwrap();
+        // Stay inside the minimum seek-jump distance, so the read waits for
+        // sequential body data instead of starting another ranged request.
+        reader.seek(SeekFrom::Start(60_000)).unwrap();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            finished.send(reader.read(&mut [0; 16])).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        let cancelled_at = Instant::now();
+        stream.cancel();
+        let error = audiolib_core::Error::Io(
+            result
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err(),
+        );
+        assert!(error.is_read_interrupted(), "{error}");
+        assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_stopped_fetch_without_explicit_cancellation_remains_an_io_failure() {
+        let bytes = data(256 * 1024, 7);
+        let server = TestServer::start(move |request| {
+            serve(request, &bytes, "\"v1\"").slow(16 * 1024, Duration::from_secs(5))
+        });
+        let stream = start("stopped-fetch-reader", format!("{}/s", server.url));
+        ready(&stream);
+        assert!(wait_until(|| stream.is_buffered(0, 16 * 1024)));
+        let mut reader = stream.reader().unwrap();
+        // A reader can outlive the last stream handle. With no explicit cancel
+        // intent, missing bytes remain a real failure instead of a quiet Stop.
+        drop(stream);
+        reader.seek(SeekFrom::Start(60_000)).unwrap();
+        let error = audiolib_core::Error::Io(reader.read(&mut [0; 16]).unwrap_err());
+        assert!(!error.is_read_interrupted(), "{error}");
     }
 
     #[test]

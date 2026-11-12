@@ -141,13 +141,22 @@ export component AiQuickSearch inherits Rectangle {
                 accessible-enabled: root.enabled;
                 accessible-action-default => { if root.enabled { root.new-task(index); } }
                 forward-focus: new-task-focus;
+                // A quiet embedded action: one outer tag outline, no nested ring.
                 Rectangle {
-                    x: 2px * Theme.ui-scale; y: 2px * Theme.ui-scale; width: parent.width - 4px * Theme.ui-scale; height: parent.height - 4px * Theme.ui-scale;
-                    border-radius: self.height / 2;
-                    background: root.enabled && new-task-hit.pressed ? Theme.accent.darker(0.18) : root.enabled && new-task-hit.has-hover ? Theme.accent : Theme.accent.with-alpha(0.16);
-                    border-width: new-task-focus.has-focus ? 2px : 1px;
-                    border-color: new-task-focus.has-focus ? Theme.ink : Theme.accent;
-                    Text { x: 0px; y: root.enabled && new-task-hit.pressed ? 1px * Theme.ui-scale : 0px; width: parent.width; height: parent.height; text: "+"; color: root.enabled && (new-task-hit.has-hover || new-task-hit.pressed) ? Theme.on-accent : Theme.accent; font-size: Theme.font(16); font-weight: 700; horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
+                    width: 20px * Theme.ui-scale; height: self.width;
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    border-radius: 6px * Theme.ui-scale;
+                    background: !root.enabled ? transparent : new-task-hit.pressed ? Theme.accent.with-alpha(0.24) : new-task-hit.has-hover || new-task-focus.has-focus ? Theme.accent.with-alpha(0.12) : transparent;
+                    border-width: 1px;
+                    border-color: root.enabled && new-task-focus.has-focus ? Theme.accent : transparent;
+                    animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
+                }
+                Image {
+                    width: 12px * Theme.ui-scale; height: self.width;
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    source: @image-url("icons/plus.svg"); image-fit: contain;
+                    colorize: root.enabled && (new-task-hit.has-hover || new-task-hit.pressed || new-task-focus.has-focus) ? Theme.accent : Theme.dim;
+                    accessible-role: none;
                 }
                 new-task-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.new-task(index); return accept; } reject } }
                 new-task-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.new-task(index); } }

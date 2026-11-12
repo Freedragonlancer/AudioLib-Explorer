@@ -844,6 +844,25 @@ any shared cache entry alive.
    cached `waking` state. The live hint clears when the stream is ready,
    fails or is cancelled, and on selection, task or source changes. Old queued
    updates cannot restore a cancelled hint or clear the next audition's hint.
+   Cancelling an old stream during a selection change stops its reader quietly;
+   it is not a playback failure. Genuine current-stream errors remain visible.
+   Once playback recovers, the status bar removes its own previous error without
+   replacing newer search or Metadata feedback. Late snapshots from an older
+   source or transport cannot restore the cancelled error or consume the next
+   confirmed audition update.
+
+   2026-11-13 cancellation correction: explicit stream cancellation now uses the
+   existing typed read interruption. An absent fetch worker and real source failures
+   remain I/O errors. The status worker commits its error, audition and progress
+   publication state only after validating the queued snapshot, so superseded
+   callbacks cannot consume a later recovery or overwrite unconfirmed GUI drafts.
+   Selected Windows MSVC ASIO validation passed: strict Clippy for the remote and
+   desktop packages, four remote-stream regressions, two audio interruption
+   consumers and four desktop playback-feedback/button regressions. The unchanged
+   audio backend, AI provider/storage and library write paths retain their earlier
+   acceptance baselines; tests used owned fixtures and loopback streams. Package,
+   installed-startup and playback/IPC delivery evidence is recorded separately in
+   `.rust-validation/tag-button-polish-playback-status/`.
 9. **Waveform.** `GET /audio/{id}/waveform?buckets=<segment columns>&colors=1&start_frame=&end_frame=`
    with `Accept-Encoding: zstd` and `If-None-Match`, drawn independently of the audio:
    memory (per revision) → disk `cache/waveforms/server/<library>/<key>.json` + `.etag`

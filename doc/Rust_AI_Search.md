@@ -208,6 +208,10 @@ AI/core 测试独立运行；桌面以 ASIO 特性运行。把纯 AI 测试包�
 
 推荐 tag 右缘新增独立“+”按钮，正文继续在当前任务搜索。“+”沿用已核验推荐、目录、搜索范围和筛选条件，创建并切入单个新任务；原任务查询与结果缓存保留，不重复调用供应商。按钮提供悬停、按下、键盘焦点和禁用反馈，成功创建后显示状态消息；名额不足、无效筛选或过期推荐仍经过已有准入检查。
 
+按钮随后调整为轻量的嵌入式细线图标：默认去掉内圆框，悬停和按下时显示柔和圆角底，键盘焦点使用单层细框。图标在各状态和缩放下保持居中，新建任务与正文搜索的触区仍独立。
+
+2026-11-13 的视觉修正使用独立 SVG，避免字体基线造成“+”偏移。已检查 Classic / Studio 在 100%、125%、200% 缩放下的默认、悬停、按下和禁用真实渲染，复用既有按钮交互及 AI 面板回归。证据位于 `.rust-validation/tag-button-polish-playback-status/`。AI 推荐生成、供应商和任务准入逻辑未改动，沿用 beta `a10b288342634ed5cc39aa51c8361104a0f08abc` 的 Jev／任务回归基线。
+
 本轮最终 Windows MSVC ASIO 格式检查、桌面 strict Clippy 与 4 项 AI 控制器／UI 回归通过：原任务和条件保持、拒绝无效准入、供应商请求次数不增加，以及 Classic / Studio 中英文“+”与正文点击隔离和忙碌禁用。已检查两种布局和短窗口放大截图。与本轮磁盘提示修复合计 7 项不同回归，证据位于 `.rust-validation/wake-hint-single-status/`。AI 后端、配置存储、音频、数据库和关闭排空未改动，复用先前 `6f05768a5789d8734009ca9bac7c78da8ae07d6a` 安装及其引用的稳定模块基线；未调用真实供应商付费接口。
 
 协议参考：[OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)、[Anthropic Messages](https://platform.claude.com/docs/en/api/messages)、[Gemini structured output](https://ai.google.dev/gemini-api/docs/structured-output)、[TypeSafe API](https://api.typesafe.ai/redoc)、[OpenCode Go](https://opencode.ai/docs/go/)。

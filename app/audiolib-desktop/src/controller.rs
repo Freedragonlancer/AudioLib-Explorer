@@ -4076,9 +4076,7 @@ impl Controller {
             .spawn(move || {
                 let mut playback_history = PlaybackHistoryTracker::default();
                 let mut external_wave_generation = None;
-                let mut last_audition = None;
-                let mut last_playback_error = None;
-                let mut playback_progress = PlaybackProgress::default();
+                let playback_ui = Arc::new(Mutex::new(PlaybackUiState::default()));
                 // Network audition waiting for data: since when, and whether the hint shows.
                 let mut buffering_since: Option<Instant> = None;
                 let mut buffering_shown = false;
@@ -4184,11 +4182,8 @@ impl Controller {
                             c.queue_waveform(&file);
                         }
                     }
-                    let audition_changed = last_audition != Some(status.audition);
-                    let error_changed = last_playback_error != status.error;
-                    last_playback_error = status.error.clone();
-                    let progress_continues = playback_progress.observe(&status);
-                    last_audition = Some(status.audition);
+                    let playback_error =
+                        (source_generation, status.generation, status.error.clone());
                     c.playback.lock().unwrap().audition = status.audition;
                     // Server mode plays a cache copy: show the record's own file name.
                     let playback_name = status
@@ -4203,9 +4198,23 @@ impl Controller {
                         .map(|path| c.playback_source_path(path));
                     let buffering = buffering_shown;
                     let c2 = c.clone();
+                    let playback_ui = playback_ui.clone();
                     post(c.ui.clone(), move |ui| {
                         if c2.library_generation.load(Ordering::Acquire) != library_generation
+                            || c2.source_generation.load(Ordering::Acquire) != source_generation
                             || c2.library_busy.load(Ordering::Acquire)
+                        {
+                            return;
+                        }
+                        // A queued failure can outlive its cancelled stream or the
+                        // recovery command. Never publish an older engine source or
+                        // error after a successful Load/Play has already replaced it.
+                        let current = c2.audio.status();
+                        if current.generation != status.generation
+                            || current.transport_revision != status.transport_revision
+                            || current.file_path != status.file_path
+                            || current.error != status.error
+                            || current.audition != status.audition
                         {
                             return;
                         }
@@ -4219,6 +4228,8 @@ impl Controller {
                                 ui.set_local_waveform_progress(text.into());
                             }
                         }
+                        let mut publication = playback_ui.lock().unwrap();
+                        let progress_continues = publication.progress.observe(&status);
                         publish_playback_progress(&ui, &status, progress_continues);
                         publish_player_state(&ui, &status, buffering);
                         let ready = !matches!(
@@ -4236,12 +4247,28 @@ impl Controller {
                             ui.set_playback_path(playback_path.into());
                         }
                         c2.publish_confirmed_volume(&ui, status.volume);
-                        if audition_changed {
+                        if publication.audition != Some(status.audition) {
                             publish_audition(&ui, status.audition);
+                            publication.audition = Some(status.audition);
                         }
                         ui.set_output_summary(output_summary(&status).into());
-                        if error_changed && let Some(error) = status.error {
-                            ui.set_status(error.into());
+                        if publication.error.as_ref() != Some(&playback_error) {
+                            if let Some(error) = &status.error {
+                                ui.set_status(error.as_str().into());
+                            } else if let Some(previous) = publication
+                                .error
+                                .as_ref()
+                                .and_then(|(_, _, error)| error.as_deref())
+                                && ui.get_status().as_str() == previous
+                            {
+                                // Recovery owns only its previous error text. Search,
+                                // Metadata and other later feedback retain their turn.
+                                ui.set_status("".into());
+                            }
+                            // Only an accepted UI snapshot consumes this transition.
+                            // A superseded recovery must leave the old error owned
+                            // until another current snapshot can clear it.
+                            publication.error = Some(playback_error);
                         }
                     });
                     std::thread::sleep(Duration::from_millis(65));
@@ -5506,9 +5533,27 @@ impl Controller {
             }
             Err(error) => {
                 // A load interrupted by Stop is not a failure worth reporting.
-                if !download_cancel.load(Ordering::Acquire) {
+                if !download_cancel.load(Ordering::Acquire)
+                    && !matches!(error, audiolib_core::Error::Cancelled)
+                    && !error.is_read_interrupted()
+                {
                     loading.selection_request_completed(generation);
-                    loading.status(error.to_string());
+                    let failed = loading.audio.status();
+                    let controller = loading.clone();
+                    post(loading.ui.clone(), move |ui| {
+                        let current = controller.audio.status();
+                        if controller.available()
+                            && !ui.get_closing()
+                            && !controller.close_retains_status.load(Ordering::Acquire)
+                            && !download_cancel.load(Ordering::Acquire)
+                            && controller.selection_generation.load(Ordering::Acquire) == generation
+                            && current.generation == failed.generation
+                            && current.transport_revision == failed.transport_revision
+                            && current.error == failed.error
+                        {
+                            ui.set_status(error.to_string().into());
+                        }
+                    });
                 }
             }
         }
@@ -8463,6 +8508,14 @@ pub(crate) fn zoom_waveform_at_pointer(
     let fraction = f64::from(fraction).clamp(0.0, 1.0);
     let anchor = start + (end - start) * fraction;
     view.zoom_at_anchor(f64::from(factor), anchor, fraction, duration);
+}
+
+/// UI publication state advances only after a current playback snapshot is accepted.
+#[derive(Default)]
+struct PlaybackUiState {
+    audition: Option<AuditionSettings>,
+    error: Option<(u64, u64, Option<String>)>,
+    progress: PlaybackProgress,
 }
 
 /// A transport discontinuity invalidates prediction even between two Playing snapshots.

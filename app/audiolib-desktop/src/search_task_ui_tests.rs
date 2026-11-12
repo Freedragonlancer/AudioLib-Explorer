@@ -65,6 +65,82 @@ fn snapshot_if_requested(ui: &AppWindow, name: &str) {
     .unwrap();
 }
 
+// Optional visual evidence uses real rendered pixels, cropped around one tag.
+fn snapshot_tag_button_states_if_requested(ui: &AppWindow, modern: bool, body: &str, plus: &str) {
+    let Some(directory) = std::env::var_os("AUDIOLIB_MULTI_SEARCH_SNAPSHOT_DIR") else {
+        return;
+    };
+    for scale in [1.0, 1.25, 2.0] {
+        ui.window()
+            .set_size(slint::LogicalSize::new(1600.0 * scale, 900.0 * scale));
+        ui.global::<crate::Theme>().set_ui_scale(scale);
+        click(ui, body);
+        let tag = ElementHandle::find_by_accessible_label(ui, body)
+            .next()
+            .unwrap();
+        let button = ElementHandle::find_by_accessible_label(ui, plus)
+            .next()
+            .unwrap();
+        let center = slint::LogicalPosition::new(
+            button.absolute_position().x + button.size().width / 2.0,
+            button.absolute_position().y + button.size().height / 2.0,
+        );
+        for state in ["default", "hover", "pressed", "disabled"] {
+            ui.set_ai_busy(state == "disabled");
+            ui.window().dispatch_event(WindowEvent::PointerMoved {
+                position: if state == "default" {
+                    slint::LogicalPosition::new(0.0, 0.0)
+                } else {
+                    center
+                },
+            });
+            if state == "pressed" {
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position: center,
+                    button: PointerEventButton::Left,
+                });
+            }
+            settle();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(120));
+            let pixels = ui.window().take_snapshot().unwrap();
+            let image = image::RgbaImage::from_raw(
+                pixels.width(),
+                pixels.height(),
+                pixels.as_bytes().to_vec(),
+            )
+            .unwrap();
+            let factor = ui.window().scale_factor();
+            let x = ((tag.absolute_position().x - 6.0 * scale) * factor)
+                .max(0.0)
+                .floor() as u32;
+            let y = ((tag.absolute_position().y - 6.0 * scale) * factor)
+                .max(0.0)
+                .floor() as u32;
+            let right = ((button.absolute_position().x + button.size().width + 6.0 * scale)
+                * factor)
+                .ceil()
+                .min(pixels.width() as f32) as u32;
+            let bottom = ((tag.absolute_position().y + tag.size().height + 6.0 * scale) * factor)
+                .ceil()
+                .min(pixels.height() as f32) as u32;
+            image::imageops::crop_imm(&image, x, y, right - x, bottom - y)
+                .to_image()
+                .save(
+                    std::path::Path::new(&directory)
+                        .join(format!("tag-button-{modern}-{scale}-{state}.png")),
+                )
+                .unwrap();
+            if state == "pressed" {
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position: center,
+                    button: PointerEventButton::Left,
+                });
+            }
+        }
+        ui.set_ai_busy(false);
+    }
+}
+
 #[test]
 fn ai_panel_actions_and_provider_view_are_renderable() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
@@ -719,6 +795,9 @@ fn ai_tag_edge_creates_a_task_without_triggering_the_tag_body() {
             click(&ui, new_task);
             assert_eq!(actions.borrow().as_slice(), &[(24, 1), (16, 1), (24, 1)]);
             snapshot_if_requested(&ui, &format!("ai-tag-new-task-{modern}-{chinese}"));
+            if chinese {
+                snapshot_tag_button_states_if_requested(&ui, modern, body, new_task);
+            }
             ui.hide().unwrap();
         }
     }
