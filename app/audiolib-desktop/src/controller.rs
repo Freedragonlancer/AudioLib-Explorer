@@ -65,6 +65,8 @@ struct ScanTerminal {
     admitted: bool,
     result: audiolib_core::Result<audiolib_core::ScanProgress>,
 }
+#[path = "ai_search.rs"]
+mod ai_search;
 #[cfg(test)]
 #[path = "client_review_tests.rs"]
 mod client_review_tests;
@@ -717,6 +719,7 @@ impl MetadataState {
 const REMOTE_CLOSE_GRACE: Duration = Duration::from_secs(15);
 
 pub struct Controller {
+    ai: ai_search::Runtime,
     ui: slint::Weak<AppWindow>,
     sqlite: RwLock<Arc<SqliteProvider>>,
     library_generation: AtomicU64,
@@ -839,6 +842,9 @@ pub struct Controller {
     remote_plays_wake: Condvar,
     remote_cancel: Mutex<audiolib_remote::SyncControl>,
     remote_audio_cancel: Mutex<Arc<AtomicBool>>,
+    /// Each remote wait owns a UI status epoch; stale callbacks cannot affect a
+    /// newer selection, source, or representation of the same selected record.
+    remote_audition_status_epoch: Arc<AtomicU64>,
     /// The selected record whose Load has not been confirmed. Local or server
     /// cancellation may leave the previous record in the engine, so Play reloads
     /// the selection until a current Load succeeds.
@@ -1017,6 +1023,7 @@ impl Controller {
         ui.set_source_pair(playback.source_pair.to_string().into());
         ui.set_asio_enabled(cfg!(all(windows, feature = "asio")));
         let controller = Arc::new(Self {
+            ai: ai_search::Runtime::default(),
             ui: ui.as_weak(),
             sqlite: RwLock::new(sqlite),
             library_generation: AtomicU64::new(0),
@@ -1132,6 +1139,7 @@ impl Controller {
             remote_plays_wake: Condvar::new(),
             remote_cancel: Mutex::new(audiolib_remote::SyncControl::new()),
             remote_audio_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            remote_audition_status_epoch: Arc::new(AtomicU64::new(0)),
             audio_reload: Mutex::new(None),
             remote_stream: Mutex::new(None),
             remote_retained_stream: Mutex::new(None),
@@ -1166,6 +1174,7 @@ impl Controller {
 
     fn bind(self: &Arc<Self>, ui: &AppWindow) {
         self.bind_search_tasks(ui);
+        self.bind_ai_search(ui);
         self.bind_artwork(ui);
         self.bind_search_v2_ux(ui);
         self.bind_wave_selection(ui);
@@ -2288,6 +2297,7 @@ impl Controller {
     }
 
     fn invalidate_library_reads(&self) {
+        self.clear_remote_audition_status();
         self.cancel_all_slices();
         self.cancel_artwork();
         self.artwork_album_hints.lock().unwrap().clear();
@@ -5133,8 +5143,8 @@ impl Controller {
                         }
                     };
                     if let Some(retained_status) = ready_status {
-                        c2.search_task_directory_ready(&ui);
                         ui.set_searching(false);
+                        c2.search_task_directory_ready(&ui);
                         ui.set_status(
                             retained_status
                                 .unwrap_or_else(|| {
@@ -5199,6 +5209,7 @@ impl Controller {
         // Explicit selection may reveal its row; range publication only reindexes it.
         ui.set_preserve_result_scroll(false);
         let generation = self.selection_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.clear_remote_audition_status();
         self.invalidate_waveform();
         self.remote_audio_cancel
             .lock()
@@ -5227,6 +5238,7 @@ impl Controller {
             && Arc::ptr_eq(&job.provider, &self.provider())
         {
             job.generation = self.selection_generation.fetch_add(1, Ordering::AcqRel) + 1;
+            self.clear_remote_audition_status();
             self.invalidate_waveform();
             *remembered = Some(job.clone());
             *self.selection_job.lock().unwrap() = Some(job);
@@ -5435,7 +5447,17 @@ impl Controller {
             Err(error) => {
                 if !download_cancel.load(Ordering::Acquire) {
                     loading.selection_request_completed(generation);
-                    loading.status(error);
+                    let controller = loading.clone();
+                    post(loading.ui.clone(), move |ui| {
+                        if controller.available()
+                            && !ui.get_closing()
+                            && !controller.close_retains_status.load(Ordering::Acquire)
+                            && !download_cancel.load(Ordering::Acquire)
+                            && controller.selection_generation.load(Ordering::Acquire) == generation
+                        {
+                            ui.set_status(error.into());
+                        }
+                    });
                 }
                 return;
             }
@@ -5941,6 +5963,7 @@ impl Controller {
         self.cancel_pending_task_restore_for_close(ui);
         self.cancel_remote();
         tracing::info!(barrier, "Desktop close requested; draining Metadata");
+        self.ai.cancel();
         self.invalidate_library_reads();
         ui.set_searching(false);
         ui.set_close_recovery_available(false);
@@ -5965,8 +5988,12 @@ impl Controller {
             // Cover edits accepted before closing own their original destination.
             // Drain them off the event loop and retain any persistence failure.
             let artwork_result = c.wait_artwork_actions();
+            let ai_result = c.ai.wait_saves();
             c.wait_slice_workers();
-            let metadata_result = metadata_result.and(artwork_result);
+            let metadata_result =
+                metadata_result
+                    .and(artwork_result)
+                    .and(if recover { Ok(()) } else { ai_result });
             // The finish interrupt was only there so Metadata could take the writer.
             // If the window stays open, clear it before a later rollup observes it.
             // Shutdown still aborts that statement instead of starting it over.
@@ -7497,6 +7524,10 @@ impl Controller {
 
     /// Stop background workers before the desktop event loop is dropped.
     pub fn shutdown(&self) {
+        self.ai.cancel();
+        if let Err(error) = self.ai.wait_saves() {
+            tracing::warn!(%error, "Save AI settings during shutdown");
+        }
         self.cancel_all_slices();
         self.wait_slice_workers();
         self.cancel_vendor_for_transition();

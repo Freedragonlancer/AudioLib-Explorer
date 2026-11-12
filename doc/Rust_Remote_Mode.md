@@ -535,6 +535,10 @@ online, and the older `available`/`reachable` names are accepted as `online`
 | `waking` (no answer from the disk for > 5 s) | `· disk waking: <root>` | no notice; playback of its records shows the waking hint at once |
 | `offline` | `· root offline: <root>` | offline roots with their reason; their records stay listed (not missing), cached copies still play (shown when no revision notice is pending) |
 
+The source label appears at the native window's bottom right. Root warnings precede
+the longer server/library identity so the waking/offline state remains readable
+when the label is elided; the tooltip retains the complete identity.
+
 The Data source dialog lists each root with its status (warning color when offline), and
 `remote test` lists `N roots: name status; …`. An offline root does **not** mark its
 records as missing (the server never reconciles files of an unreachable root): rows keep
@@ -820,6 +824,10 @@ any shared cache entry alive.
    `Retry-After`). With a user-configured WebDAV URL for the root a failed server stream
    falls back to WebDAV (original file); while `/roots` reports the root offline WebDAV is
    tried first.
+   The bottom-right wake hint belongs to the current audition, so search completion
+   and background sync cannot replace it. It clears when the stream is ready,
+   fails or is cancelled, and on selection, task or source changes. Old queued
+   updates cannot restore a cancelled hint or clear the next audition's hint.
 9. **Waveform.** `GET /audio/{id}/waveform?buckets=<segment columns>&colors=1&start_frame=&end_frame=`
    with `Accept-Encoding: zstd` and `If-None-Match`, drawn independently of the audio:
    memory (per revision) → disk `cache/waveforms/server/<library>/<key>.json` + `.etag`

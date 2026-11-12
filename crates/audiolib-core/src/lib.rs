@@ -8,6 +8,7 @@ use std::sync::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod ai_search;
 pub mod albums;
 mod audio_file;
 mod audio_range;

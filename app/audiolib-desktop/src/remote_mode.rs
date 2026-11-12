@@ -46,6 +46,16 @@ pub(super) const SELECTION_SETTLE: Duration = Duration::from_millis(180);
 /// representations of the same record and route. Reused streams keep their path.
 static STREAM_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
+struct RemoteAuditionWait {
+    epoch: u64,
+    selection: u64,
+    library: u64,
+    source: u64,
+    cancel: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+}
+
 /// One sync worker owns the busy flag until all of its cache work has drained.
 /// Releasing it cannot depend on UI delivery or the request generation: cancellation
 /// invalidates that generation while the same worker still owns its cache work.
@@ -1772,24 +1782,23 @@ impl Controller {
                 }
                 _ => String::new(),
             };
-            let freshness = freshness
-                + &remote_state
-                    .live_roots
-                    .as_deref()
-                    .map(|roots| root_summary(roots, chinese))
-                    .unwrap_or_default();
+            let roots = remote_state
+                .live_roots
+                .as_deref()
+                .map(|roots| root_summary(roots, chinese))
+                .unwrap_or_default();
             match &remote_state.state {
                 Some(state) => {
                     let synced = format_time(state.checked_at.max(state.downloaded_at));
                     if chinese {
                         format!(
-                            "服务器模式 · {server} · 库 {} · r{} · 同步于 {synced}{freshness}",
+                            "服务器模式{roots} · {server} · 库 {} · r{} · 同步于 {synced}{freshness}",
                             short_id(&state.library_id),
                             state.revision
                         )
                     } else {
                         format!(
-                            "Server mode · {server} · library {} · r{} · synced {synced}{freshness}",
+                            "Server mode{roots} · {server} · library {} · r{} · synced {synced}{freshness}",
                             short_id(&state.library_id),
                             state.revision
                         )
@@ -1797,9 +1806,9 @@ impl Controller {
                 }
                 None => {
                     if chinese {
-                        format!("服务器模式 · {server} · 尚未同步")
+                        format!("服务器模式{roots} · {server} · 尚未同步")
                     } else {
-                        format!("Server mode · {server} · not synced yet")
+                        format!("Server mode{roots} · {server} · not synced yet")
                     }
                 }
             }
@@ -2560,7 +2569,7 @@ impl Controller {
     pub(super) fn playable_path(
         self: &Arc<Self>,
         file: &AudioFile,
-        cancel: &AtomicBool,
+        cancel: &Arc<AtomicBool>,
         generation: u64,
     ) -> Result<PathBuf, String> {
         let source_pair = self.playback.lock().unwrap().source_pair;
@@ -2572,7 +2581,7 @@ impl Controller {
     pub(super) fn playable_path_for_pair(
         self: &Arc<Self>,
         file: &AudioFile,
-        cancel: &AtomicBool,
+        cancel: &Arc<AtomicBool>,
         generation: u64,
         source_pair: u16,
         retain_current: bool,
@@ -2674,14 +2683,6 @@ impl Controller {
             .unwrap_or_else(|| without_status(&state.roots));
         let root = root_for_path(&file.file_path, &roots);
         let webdav = configured_webdav_source(file, &state.roots, &settings, &secrets);
-        let waking = root.is_some_and(|root| root.state() == RootState::Waking);
-        if waking {
-            self.status(if chinese {
-                format!("正在唤醒音效库磁盘…（{}）", file.filename)
-            } else {
-                format!("Waking the library disk… ({})", file.filename)
-            });
-        }
         // The server route with its fallbacks: 415 on `codec=pcm` → `codec=flac`; FLAC
         // refused (415, or 503 TRANSCODER_UNAVAILABLE) → the original `/stream`; a preview
         // endpoint the server lacks (404/400 from an older server) → `/stream`. A 503 BUSY
@@ -2869,21 +2870,143 @@ impl Controller {
         Ok(target)
     }
 
+    /// Clear only the status owned before this source/selection boundary. Calls
+    /// from workers post back to Slint; later waits supersede that queued clear.
+    pub(super) fn clear_remote_audition_status(&self) {
+        let epoch = self
+            .remote_audition_status_epoch
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_remote_audition_status("".into());
+        } else {
+            let current = self.remote_audition_status_epoch.clone();
+            post(self.ui.clone(), move |ui| {
+                if current.load(Ordering::Acquire) == epoch {
+                    ui.set_remote_audition_status("".into());
+                }
+            });
+        }
+    }
+
+    fn begin_remote_audition_wait(
+        self: &Arc<Self>,
+        selection: u64,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<RemoteAuditionWait, RemoteError> {
+        let wait = loop {
+            let epoch = self.remote_audition_status_epoch.load(Ordering::Acquire);
+            let library = self.library_generation.load(Ordering::Acquire);
+            let source = self.source_generation.load(Ordering::Acquire);
+            if !self.available()
+                || cancel.load(Ordering::Acquire)
+                || self.selection_generation.load(Ordering::Acquire) != selection
+            {
+                return Err(RemoteError::Cancelled);
+            }
+            if self
+                .remote_audition_status_epoch
+                .compare_exchange(
+                    epoch,
+                    epoch.wrapping_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break RemoteAuditionWait {
+                    epoch: epoch.wrapping_add(1),
+                    selection,
+                    library,
+                    source,
+                    cancel: cancel.clone(),
+                    finished: Arc::new(AtomicBool::new(false)),
+                };
+            }
+        };
+        self.publish_remote_audition_wait(&wait, String::new());
+        Ok(wait)
+    }
+
+    fn publish_remote_audition_wait(self: &Arc<Self>, wait: &RemoteAuditionWait, text: String) {
+        let controller = self.clone();
+        let wait = wait.clone();
+        post(self.ui.clone(), move |ui| {
+            if controller
+                .remote_audition_status_epoch
+                .load(Ordering::Acquire)
+                != wait.epoch
+            {
+                return;
+            }
+            if !controller.available()
+                || ui.get_closing()
+                || wait.cancel.load(Ordering::Acquire)
+                || wait.finished.load(Ordering::Acquire)
+                || controller.selection_generation.load(Ordering::Acquire) != wait.selection
+                || controller.library_generation.load(Ordering::Acquire) != wait.library
+                || controller.source_generation.load(Ordering::Acquire) != wait.source
+            {
+                ui.set_remote_audition_status("".into());
+                return;
+            }
+            ui.set_remote_audition_status(text.into());
+        });
+    }
+
+    fn finish_remote_audition_wait(&self, wait: &RemoteAuditionWait) {
+        wait.finished.store(true, Ordering::Release);
+        let epoch = wait.epoch;
+        let current = self.remote_audition_status_epoch.clone();
+        post(self.ui.clone(), move |ui| {
+            if current.load(Ordering::Acquire) == epoch {
+                ui.set_remote_audition_status("".into());
+            }
+        });
+    }
+
     /// Start (or reuse) an in-memory stream and wait for its first response.
     fn open_stream(
         self: &Arc<Self>,
         key: &str,
         file: &AudioFile,
         source: StreamSource,
-        cancel: &AtomicBool,
+        cancel: &Arc<AtomicBool>,
         generation: u64,
     ) -> Result<MemoryStream, RemoteError> {
-        let stream = MemoryStream::start(MemoryCache::global(), key, source)?;
+        let status = self.begin_remote_audition_wait(generation, cancel)?;
+        let stream = match MemoryStream::start(MemoryCache::global(), key, source) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.finish_remote_audition_wait(&status);
+                return Err(error);
+            }
+        };
         // A NAS disk may need 20-30 s to spin up before the first byte: wait up to the
         // source's first-byte timeout, show a "waking the library disk…" status after
         // 1.5 s, and give up at once when a newer selection or Stop sets `cancel`.
         let chinese = self.chinese.load(Ordering::Acquire);
-        let mut shown: Option<u64> = None;
+        let waking = self
+            .remote
+            .lock()
+            .unwrap()
+            .live_roots
+            .as_deref()
+            .is_some_and(|roots| {
+                root_for_path(&file.file_path, roots)
+                    .is_some_and(|root| root.state() == RootState::Waking)
+            });
+        let mut shown = waking.then(|| {
+            self.publish_remote_audition_wait(
+                &status,
+                if chinese {
+                    format!("正在唤醒音效库磁盘…（{}）", file.filename)
+                } else {
+                    format!("Waking the library disk… ({})", file.filename)
+                },
+            );
+            0
+        });
         let waited = stream.wait_ready_with(
             cancel,
             stream.first_byte_timeout() + STREAM_READY_MARGIN,
@@ -2895,30 +3018,15 @@ impl Controller {
                 }
                 if let Some(text) = waking_hint(&file.filename, waited, chinese) {
                     shown = Some(waited.as_secs());
-                    self.status(text);
+                    self.publish_remote_audition_wait(&status, text);
                 }
             },
         );
+        self.finish_remote_audition_wait(&status);
         match waited {
-            Ok(_) => {
-                if shown.is_some() {
-                    self.status(if chinese {
-                        format!("音效库磁盘已唤醒：{}", file.filename)
-                    } else {
-                        format!("Library disk awake: {}", file.filename)
-                    });
-                }
-                Ok(stream)
-            }
+            Ok(_) => Ok(stream),
             Err(error) => {
                 stream.cancel();
-                if matches!(error, RemoteError::Cancelled) && shown.is_some() {
-                    self.status(if chinese {
-                        format!("已取消读取：{}", file.filename)
-                    } else {
-                        format!("Cancelled: {}", file.filename)
-                    });
-                }
                 Err(error)
             }
         }
@@ -2928,6 +3036,7 @@ impl Controller {
     /// decoder reads blocked on missing network data (the stream itself continues), so
     /// the audio engine handles Stop at once instead of after the read stall timeout.
     pub(super) fn interrupt_remote_audio(&self) {
+        self.clear_remote_audition_status();
         if !self.remote_read_only() {
             return;
         }
@@ -3065,6 +3174,7 @@ impl Controller {
 
     /// Cancel and unregister the server-mode playback stream (mode switch, shutdown).
     pub(super) fn stop_remote_stream(&self) {
+        self.clear_remote_audition_status();
         if let Some(playback) = self.remote_retained_stream.lock().unwrap().take() {
             playback.stream.cancel();
             audiolib_audio::unregister_stream_source(&playback.path);
@@ -4095,6 +4205,245 @@ mod tests {
     }
 
     #[test]
+    fn remote_audition_wait_survives_background_status_and_rejects_stale_callbacks() {
+        super::source_transition_tests::isolated_module(
+            "tests",
+            "child_remote_audition_wait_status",
+        );
+    }
+
+    #[test]
+    #[ignore = "owned loopback regression run in an isolated process"]
+    fn child_remote_audition_wait_status() {
+        use super::source_transition_tests::{configuration, root, run_until};
+        use audiolib_remote::{StreamSource, WAKING_HINT_AFTER};
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = root();
+        let config = configuration(&root.join("preferences"));
+        let provider = Arc::new(SqliteProvider::open(&config.paths.database).unwrap());
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            ..Default::default()
+        };
+        let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider, engine.handle(), config, playback);
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| !ui.get_searching() && !ui.get_task_restoring())
+        });
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.remote.lock().unwrap().live_roots = Some(vec![RemoteRoot {
+            name: "Owned sleeping disk".into(),
+            server_path: "/sounds".into(),
+            online: Some(true),
+            status: Some("waking".into()),
+            ..Default::default()
+        }]);
+        let file = AudioFile::from(audiolib_core::AudioFileData {
+            id: 42,
+            filename: "owned waiting sound.wav".into(),
+            file_path: "/sounds/owned waiting sound.wav".into(),
+            ..Default::default()
+        });
+        let url = serve_stream_after(
+            vec![1; 4096],
+            Arc::new(Mutex::new(Vec::new())),
+            Duration::from_millis(2300),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        *controller.remote_audio_cancel.lock().unwrap() = cancel.clone();
+        let generation = controller.selection_generation.load(Ordering::Acquire);
+        let done = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (c, file, cancel, done) = (
+                controller.clone(),
+                file.clone(),
+                cancel.clone(),
+                done.clone(),
+            );
+            std::thread::spawn(move || {
+                let result = c.open_stream(
+                    "owned-wake-success",
+                    &file,
+                    StreamSource::new(url, SourceAuth::None),
+                    &cancel,
+                    generation,
+                );
+                done.store(true, Ordering::Release);
+                result
+            })
+        };
+        let started = Instant::now();
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade().is_some_and(|ui| {
+                ui.get_remote_audition_status()
+                    .contains("owned waiting sound.wav")
+            })
+        });
+        assert!(
+            started.elapsed() < WAKING_HINT_AFTER,
+            "A known waking root is shown immediately"
+        );
+        ui.set_status("Ready interleaved with remote wait".into());
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade().is_some_and(|ui| {
+                ui.get_status() == "Ready interleaved with remote wait"
+                    && !ui.get_remote_audition_status().is_empty()
+            })
+        });
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            done.load(Ordering::Acquire)
+                && weak
+                    .upgrade()
+                    .is_some_and(|ui| ui.get_remote_audition_status().is_empty())
+        });
+        let stream = worker.join().unwrap().unwrap();
+        stream.cancel();
+        assert_eq!(ui.get_status(), "Ready interleaved with remote wait");
+
+        // With no advertised root state, an actual slow response produces the
+        // delayed hint; Stop cancels it and clears its independent status.
+        controller.remote.lock().unwrap().live_roots = None;
+        let url = serve_stream_after(
+            vec![2; 4096],
+            Arc::new(Mutex::new(Vec::new())),
+            Duration::from_secs(3),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        *controller.remote_audio_cancel.lock().unwrap() = cancel.clone();
+        let worker = {
+            let (c, file, cancel) = (controller.clone(), file.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                c.open_stream(
+                    "owned-wake-cancel",
+                    &file,
+                    StreamSource::new(url, SourceAuth::None),
+                    &cancel,
+                    generation,
+                )
+            })
+        };
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| !ui.get_remote_audition_status().is_empty())
+        });
+        controller.enqueue_stop().unwrap();
+        assert!(ui.get_remote_audition_status().is_empty());
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(RemoteError::Cancelled)
+        ));
+
+        // Old queued updates, old completion, and a late old worker's begin
+        // cannot claim or clear the new selected record's status owner.
+        let old_generation = controller.selection_generation.load(Ordering::Acquire);
+        let old = controller
+            .begin_remote_audition_wait(old_generation, &Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        controller.publish_remote_audition_wait(&old, "stale wait".into());
+        let generation = controller
+            .selection_generation
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        controller.clear_remote_audition_status();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let current = controller
+            .begin_remote_audition_wait(generation, &cancel)
+            .unwrap();
+        controller.publish_remote_audition_wait(&current, "new selected record waiting".into());
+        controller.publish_remote_audition_wait(&old, "late old update".into());
+        controller.finish_remote_audition_wait(&old);
+        assert!(matches!(
+            controller
+                .begin_remote_audition_wait(old_generation, &Arc::new(AtomicBool::new(false))),
+            Err(RemoteError::Cancelled)
+        ));
+        assert_eq!(
+            controller
+                .remote_audition_status_epoch
+                .load(Ordering::Acquire),
+            current.epoch
+        );
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| ui.get_remote_audition_status() == "new selected record waiting")
+        });
+        cancel.store(true, Ordering::Release);
+        controller.publish_remote_audition_wait(&current, "cancelled update".into());
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| ui.get_remote_audition_status().is_empty())
+        });
+        let epoch = controller
+            .remote_audition_status_epoch
+            .load(Ordering::Acquire);
+        assert!(matches!(
+            controller.begin_remote_audition_wait(generation, &cancel),
+            Err(RemoteError::Cancelled)
+        ));
+        assert_eq!(
+            controller
+                .remote_audition_status_epoch
+                .load(Ordering::Acquire),
+            epoch
+        );
+        // Even a transport that fails before headers must release its own wait.
+        assert!(
+            controller
+                .open_stream(
+                    "owned-wake-invalid-source",
+                    &file,
+                    StreamSource::new("not a valid stream URL", SourceAuth::None),
+                    &Arc::new(AtomicBool::new(false)),
+                    generation,
+                )
+                .is_err()
+        );
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| ui.get_remote_audition_status().is_empty())
+        });
+
+        // Root warnings precede long identity/address text, so elision retains
+        // their useful part even when no audition is currently waiting.
+        controller.config.lock().unwrap().data_source.server_url =
+            "https://long-owned-library-address.example.test:8790".into();
+        controller.remote.lock().unwrap().live_roots = Some(vec![RemoteRoot {
+            name: "Owned sleeping disk".into(),
+            server_path: "/sounds".into(),
+            online: Some(true),
+            status: Some("waking".into()),
+            ..Default::default()
+        }]);
+        controller.publish_data_source(&ui);
+        assert!(
+            ui.get_data_source_label()
+                .starts_with("Server mode · disk waking: Owned sleeping disk · ")
+        );
+        assert!(
+            ui.get_data_source_label()
+                .contains("long-owned-library-address.example.test")
+        );
+        controller.chinese.store(true, Ordering::Release);
+        controller.publish_data_source(&ui);
+        assert!(
+            ui.get_data_source_label()
+                .starts_with("服务器模式 · 磁盘唤醒中：Owned sleeping disk · ")
+        );
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
+
+    #[test]
     fn waking_hint_appears_after_the_threshold_with_seconds() {
         assert_eq!(
             super::waking_hint("雷声.wav", Duration::from_millis(1000), true),
@@ -4960,7 +5309,7 @@ mod tests {
         controller.remote.lock().unwrap().live_roots = None;
 
         // Without a synced snapshot the selection reports why it cannot play.
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
         let error = controller.playable_path(&file, &cancel, 0).unwrap_err();
         assert!(!error.is_empty());
         assert!(is_remote_cache_path(&preferences, &snapshot));
@@ -5224,7 +5573,7 @@ mod tests {
         let started = Instant::now();
         let generation = controller.selection_generation.load(Ordering::Acquire);
         let woken = controller
-            .playable_path(&file, &AtomicBool::new(false), generation)
+            .playable_path(&file, &Arc::new(AtomicBool::new(false)), generation)
             .unwrap();
         assert!(started.elapsed() >= wake - Duration::from_millis(200));
         // Stop removed the previous registration and the owned cache was cleared.
@@ -5237,7 +5586,7 @@ mod tests {
         assert_eq!(controller.playback_display_name(&woken), file.filename);
         let woken_stream = controller.remote_stream.lock().unwrap().clone().unwrap();
         let reused = controller
-            .playable_path(&file, &AtomicBool::new(false), generation)
+            .playable_path(&file, &Arc::new(AtomicBool::new(false)), generation)
             .unwrap();
         assert_eq!(reused, woken);
         assert!(

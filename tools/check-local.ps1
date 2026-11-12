@@ -3,7 +3,9 @@
 .SYNOPSIS
 Run local Rust validation once with the selected build features.
 .DESCRIPTION
-Runs format, strict Clippy and selected package tests once, failing at the first error.
+Runs format, strict Clippy and selected tests once, failing at the first error.
+Select Package or explicitly select Workspace. Stable, unaffected modules do not
+need a new test run. Lib/Bin/Test narrow tests; Clippy still covers package targets.
 Asio selects the release feature configuration after verified SDK preparation;
 it does not add a second pass. Omit Asio to validate a non-ASIO build.
 Logs stay in .rust-validation/local-checks/<run>/.
@@ -15,8 +17,19 @@ restore the saved value afterward. Do not change the global Rustup toolchain.
 .PARAMETER Asio
 Enable desktop/CLI ASIO features for the single Clippy/test pass.
 .PARAMETER Package
-Packages affected by the change, including relevant direct consumers. Omit for
-an explicitly requested workspace-wide check; release tags do not require it.
+Packages affected by the change, including relevant direct consumers.
+.PARAMETER Workspace
+Explicitly check the whole workspace for broad or uncertain impact.
+.PARAMETER Lib
+Test only the library target of one Package.
+.PARAMETER Bin
+Test only the named binary target of one Package; no target/package wildcards.
+.PARAMETER Test
+Run only the named integration test target of one Package; no target/package wildcards.
+.PARAMETER TestFilter
+Substring filter within the selected Lib/Bin/Test target (for example a module
+name). A targeted run must report at least one passed test; zero matches or only
+ignored tests are not acceptance evidence. Use the standard Rust test harness.
 .PARAMETER NoDefaultFeatures
 Match a release built with --no-default-features (for example the headless server).
 .PARAMETER Target
@@ -27,20 +40,25 @@ ASIO requires a Windows MSVC target; omitting Target retains repository defaults
 After checks pass, prune debug caches above BuildCacheLimitGiB (default 40).
 Requires pwsh 7.3+; do not nest this cleanup inside an active release pipeline.
 .EXAMPLE
-./tools/check-local.ps1
+./tools/check-local.ps1 -Package audiolib-db -Test search_fragments
 .EXAMPLE
-./tools/check-local.ps1 -Asio
+./tools/check-local.ps1 -Package audiolib-desktop -Bin AudioLibExplorer -TestFilter controller::search_tasks::tests:: -Asio
 .EXAMPLE
 ./tools/check-local.ps1 -Package audiolib-desktop,audiolib-cli -Asio
 .EXAMPLE
 ./tools/check-local.ps1 -Package audiolib-server -NoDefaultFeatures -Target x86_64-unknown-linux-gnu
 .EXAMPLE
-./tools/check-local.ps1 -Target aarch64-apple-darwin
+./tools/check-local.ps1 -Workspace -Target aarch64-apple-darwin
 #>
 [CmdletBinding()]
 param(
     [switch]$Asio,
     [ValidateNotNullOrEmpty()][string[]]$Package,
+    [switch]$Workspace,
+    [switch]$Lib,
+    [ValidateNotNullOrEmpty()][string]$Bin,
+    [ValidateNotNullOrEmpty()][string]$Test,
+    [ValidateNotNullOrEmpty()][string]$TestFilter,
     [switch]$NoDefaultFeatures,
     [ValidateNotNullOrEmpty()][string]$Target,
     [switch]$CleanBuildArtifacts,
@@ -48,6 +66,25 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+if ([bool]$Package -eq [bool]$Workspace) {
+    throw 'Select -Package <packages> or -Workspace explicitly, not both. No checks were started.'
+}
+if ($Package) { $Package = @($Package | Select-Object -Unique) }
+$testTargetCount = [int][bool]$Lib + [int][bool]$Bin + [int][bool]$Test
+if ($testTargetCount -gt 1) { throw 'Select only one of -Lib, -Bin or -Test.' }
+if ($TestFilter -and !$testTargetCount) { throw '-TestFilter requires -Lib, -Bin or -Test.' }
+if ($testTargetCount -and ($Workspace -or @($Package).Count -ne 1)) {
+    throw 'Targeted tests require exactly one -Package; check direct consumers separately.'
+}
+if ($testTargetCount -and (@($Package[0], $Bin, $Test) -match '[*?\[\]]').Count) {
+    throw 'Targeted tests require literal package and target names; wildcards can select multiple targets.'
+}
+foreach ($testSelection in @($Bin, $Test, $TestFilter)) {
+    if ($testSelection -and ($testSelection.StartsWith('-') -or [string]::IsNullOrWhiteSpace($testSelection))) {
+        throw 'Test names and filters must be nonblank names, not options.'
+    }
+}
+[string[]]$testTargetArguments = if ($Lib) { @('--lib') } elseif ($Bin) { @('--bin', $Bin) } elseif ($Test) { @('--test', $Test) } else { @('--all-targets') }
 $effectiveTarget = if ($Target) { $Target } elseif ($env:CARGO_BUILD_TARGET) { $env:CARGO_BUILD_TARGET } else { 'x86_64-pc-windows-msvc' }
 if ($Asio -and $effectiveTarget -notmatch '-windows-msvc$') {
     throw 'ASIO checks require a Windows MSVC target; choose a matching -Target.'
@@ -55,7 +92,6 @@ if ($Asio -and $effectiveTarget -notmatch '-windows-msvc$') {
 $selectionArguments = @('--workspace')
 $featureArguments = @()
 if ($Package) {
-    $Package = @($Package | Select-Object -Unique)
     $selectionArguments = @($Package | ForEach-Object { '-p'; $_ })
 }
 if ($Asio) {
@@ -113,11 +149,22 @@ try {
         Invoke-LoggedCheck 'prepare-asio' { . (Join-Path $PSScriptRoot 'prepare-asio.ps1') }
     }
     $configuration = if ($Asio) { 'asio' } else { 'default' }
-    $checkArguments = $selectionArguments + @('--all-targets', '--locked') + $targetArguments + $featureArguments
-    Invoke-CargoCheck "$configuration-clippy" (@('clippy') + $checkArguments + @('--', '-D', 'warnings'))
-    Invoke-CargoCheck "$configuration-tests" (@('test') + $checkArguments)
+    $checkArguments = $selectionArguments + @('--locked') + $targetArguments + $featureArguments
+    Invoke-CargoCheck "$configuration-clippy" (@('clippy') + $checkArguments + @('--all-targets', '--', '-D', 'warnings'))
+    $testArguments = @('test') + $checkArguments + $testTargetArguments
+    if ($TestFilter) { $testArguments += @('--', $TestFilter) }
+    Invoke-CargoCheck "$configuration-tests" $testArguments
+    if ($testTargetCount) {
+        $testLog = Join-Path $logs "$configuration-tests.log"
+        # One target uses one top-level libtest summary, after any child summaries.
+        $testSummary = Select-String -LiteralPath $testLog -Pattern '^test result: ok\. (\d+) passed;' | Select-Object -Last 1
+        if (!$testSummary -or [long]$testSummary.Matches[0].Groups[1].Value -eq 0) {
+            throw "Targeted tests did not report any passed tests; verify the target/filter and ignored status. Log: $testLog"
+        }
+    }
     $selection = if ($Package) { $Package -join ', ' } else { 'workspace' }
-    $scope = "$selection, $configuration configuration only; no-default-features=$([bool]$NoDefaultFeatures)"
+    $testScope = if ($testTargetCount) { ($testTargetArguments -join ' ') + $(if ($TestFilter) { "; filter=$TestFilter" }) } else { 'all targets' }
+    $scope = "$selection, $configuration configuration only; no-default-features=$([bool]$NoDefaultFeatures); tests=$testScope"
     Write-Host "Local checks passed ($scope). Logs: $logs"
 } finally {
     if ($buildLease) { $buildLease.Dispose() }

@@ -1,0 +1,16 @@
+[package]
+name = "audiolib-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+audiolib-core = { path = "../audiolib-core" }
+audiolib-windows = { path = "../audiolib-windows" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq = { workspace = true, features = ["platform-verifier"] }
+uuid.workspace = true
+tempfile.workspace = true

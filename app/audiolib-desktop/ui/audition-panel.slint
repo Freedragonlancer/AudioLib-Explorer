@@ -755,7 +755,8 @@ component WaveSelectionOverlay inherits Rectangle {
     callback zoom-at(float,float);
     callback cursor-changed(MouseCursor);
     callback pointer-feedback-changed();
-    out property <length> feedback-height: 26px * Theme.ui-scale;
+    // Passive instructions do not reserve a row; active range/export controls do.
+    out property <length> feedback-height: root.shown-active || root.is-preparing || root.export-state != 0 ? 26px * Theme.ui-scale : 0px;
     out property <length> plot-height: max(1px, root.height - root.feedback-height);
     out property <bool> gesture: root.mode != 0;
     out property <bool> hovered: hit.has-hover;
@@ -846,7 +847,7 @@ component WaveSelectionOverlay inherits Rectangle {
         : root.pointer-kind == 10 ? (root.chinese ? "波形暂不可操作" : "Waveform is currently unavailable")
         : root.pointer-kind == 11 ? (root.chinese ? "拖到目标应用 · Esc 取消" : "Drop in the target application · Esc cancels")
         : root.shift-held ? (root.chinese ? "拖动重新框选 · 松开自动试听" : "Drag a new range · Release to audition")
-        : (root.chinese ? "拖动框选并试听 · 单击定位播放" : "Drag to select and audition · Click to seek and play");
+        : "";
     property <string> export-label: root.is-preparing ? (root.progress-text != "" ? root.progress-text : (root.chinese ? "正在准备 WAV…" : "Preparing WAV…"))
         : root.export-state == 2 ? (root.chinese ? "WAV 已就绪，拖出导出" : "WAV ready; drag out to export")
         : root.export-state == 3 ? (root.chinese ? "正在拖出 WAV" : "Dragging WAV")
@@ -935,6 +936,7 @@ component WaveSelectionOverlay inherits Rectangle {
         }
     }
     feedback := Rectangle {
+        visible: root.feedback-height > 0px;
         y: root.plot-height; width: parent.width; height: root.feedback-height;
         background: Theme.player;
         accessible-role: groupbox; accessible-label: root.chinese ? "波形选区操作" : "Waveform selection controls"; accessible-description: root.hint;
@@ -1034,6 +1036,9 @@ component ClassicAuditionPanel inherits Rectangle {
     callback selection-cursor-changed(MouseCursor);
     callback selection-pointer-feedback-changed();
     out property <bool> selection-gesture: scrub.gesture;
+    out property <length> selection-feedback-height: scrub.feedback-height;
+    callback selection-feedback-resized(length);
+    changed selection-feedback-height => { root.selection-feedback-resized(root.selection-feedback-height); }
     out property <MouseCursor> selection-cursor: scrub.cursor;
     out property <int> selection-pointer-kind: scrub.pointer-kind;
     out property <image> selection-pointer-image: scrub.pointer-image;
@@ -1137,7 +1142,7 @@ component ClassicAuditionPanel inherits Rectangle {
         root.anchor-tick = animation-tick();
         root.correction = continuous ? previous - root.position : 0;
     }
-    init => { root.sync-progress(false); }
+    init => { root.sync-progress(false); root.selection-feedback-resized(root.selection-feedback-height); }
     changed position => { root.sync-progress(true); }
     changed playing => { root.sync-progress(false); }
     changed smooth-progress => { root.sync-progress(false); }
@@ -1153,8 +1158,8 @@ component ClassicAuditionPanel inherits Rectangle {
         }
         return reject;
     }
-    height: root.compact ? 216px * Theme.ui-scale : 248px * Theme.ui-scale; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
-    VerticalLayout { padding: 9px * Theme.ui-scale; spacing: 5px * Theme.ui-scale;
+    height: (root.compact ? 176px : 204px) * Theme.ui-scale + root.selection-feedback-height; background: Theme.player; border-width: 1px; border-color: Theme.player-border; border-radius: 7px * Theme.ui-scale;
+    VerticalLayout { padding: 6px * Theme.ui-scale; spacing: 3px * Theme.ui-scale;
         HorizontalLayout { height: 32px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
             Rectangle {
                 width: 141px * Theme.ui-scale; height: 32px * Theme.ui-scale;
@@ -1226,7 +1231,7 @@ component ClassicAuditionPanel inherits Rectangle {
             ClassicTool { icon: @image-url("icons/peaks.svg"); label: root.chinese ? "波形显示设置" : "Peak display settings"; tip-align: 1; clicked => { root.peaks(); } }
             ClassicTool { icon: @image-url("icons/settings.svg"); label: root.chinese ? "音频输出" : "Audio output"; tip-align: 1; clicked => { root.output-settings(); } }
         }
-        wave-frame := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.compact ? 45px : 70px) * Theme.ui-scale + 26px * Theme.ui-scale;
+        wave-frame := Rectangle { horizontal-stretch: 1; vertical-stretch: 1; min-height: (root.compact ? 45px : 70px) * Theme.ui-scale + scrub.feedback-height;
             wave := Rectangle { x: 0px; y: 0px; width: parent.width; height: max(1px, parent.height - scrub.feedback-height); background: root.spectral ? Theme.spectral-canvas : Theme.normal-canvas; border-color: Theme.player-border; border-width: 1px; clip: true;
                 accessible-role: groupbox; accessible-label: root.chinese ? "波形时间轴" : "Waveform timeline";
                 property <float> played-fraction: root.duration > 0 ? clamp((root.visual-position - root.shown-start) / max(0.001, root.shown-end - root.shown-start), 0, 1) : 0;
@@ -1311,16 +1316,16 @@ component ClassicAuditionPanel inherits Rectangle {
             ClassicTool { width: 38px * Theme.ui-scale; height: 18px * Theme.ui-scale; icon: @image-url("icons/fit.svg"); label: root.chinese ? "显示完整声音" : "Fit entire sound"; enabled: root.ready; clicked => { root.zoom-change(0); } }
         }
         HorizontalLayout { height: 25px * Theme.ui-scale; spacing: 12px * Theme.ui-scale;
-            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center; }
+            Text { accessible-role: text; accessible-label: root.chinese ? "试听时间" : "Audition time"; width: 208px * Theme.ui-scale; height: 25px * Theme.ui-scale; text: root.time + "  /  " + root.end-time; color: Theme.ink; font-family: "Consolas"; font-size: Theme.font(14); vertical-alignment: center; }
             Rectangle { width: 1px; background: Theme.player-border; }
             if root.state != 0 || root.missing || root.busy: Rectangle {
-                width: phase.preferred-width + 14px * Theme.ui-scale; height: 20px * Theme.ui-scale;
+                width: phase.preferred-width + 14px * Theme.ui-scale; height: 20px * Theme.ui-scale; y: (25px * Theme.ui-scale - self.height) / 2;
                 background: Theme.raised; border-radius: 4px * Theme.ui-scale;
                 accessible-role: text; accessible-label: root.chinese ? "播放状态" : "Playback status"; accessible-description: root.state-label;
                 phase := Text { text: root.state-label; color: root.state == 7 || root.missing ? Theme.danger : (root.state == 3 ? Theme.accent-hover : Theme.dim); font-size: Theme.font(10); horizontal-alignment: center; vertical-alignment: center; }
             }
-            Text { horizontal-stretch: 1; min-width: 0px; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; }
-            Caption { text: root.info; font-size: Theme.font(10); }
+            Text { horizontal-stretch: 1; min-width: 0px; height: 25px * Theme.ui-scale; text: root.name == "" ? (root.chinese ? "未加载声音" : "No sound loaded") : root.name; overflow: elide; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; accessible-role: text; accessible-label: root.chinese ? "当前试听文件" : "Audition filename"; }
+            Caption { height: 25px * Theme.ui-scale; text: root.info; font-size: Theme.font(10); }
         }
     }
 }
@@ -1351,6 +1356,9 @@ component WorkbenchAuditionPanel inherits Rectangle {
     callback selection-cursor-changed(MouseCursor);
     callback selection-pointer-feedback-changed();
     out property <bool> selection-gesture: scrub.gesture;
+    out property <length> selection-feedback-height: scrub.feedback-height;
+    callback selection-feedback-resized(length);
+    changed selection-feedback-height => { root.selection-feedback-resized(root.selection-feedback-height); }
     out property <MouseCursor> selection-cursor: scrub.cursor;
     out property <int> selection-pointer-kind: scrub.pointer-kind;
     out property <image> selection-pointer-image: scrub.pointer-image;
@@ -1437,7 +1445,7 @@ component WorkbenchAuditionPanel inherits Rectangle {
         root.anchor-tick = animation-tick();
         root.correction = continuous ? previous - root.position : 0;
     }
-    init => { root.sync-progress(false); }
+    init => { root.sync-progress(false); root.selection-feedback-resized(root.selection-feedback-height); }
     changed position => { root.sync-progress(true); }
     changed playing => { root.sync-progress(false); }
     changed smooth-progress => { root.sync-progress(false); }
@@ -1799,13 +1807,13 @@ component WorkbenchAuditionPanel inherits Rectangle {
                         pointer-feedback-changed => { root.selection-pointer-feedback-changed(); }
                     }
                 }
-                if root.phase >= 3: Rectangle { x: 0px; y: 0px; width: parent.width; height: wave.height; background: transparent; clip: true;
+                // Recovery controls sit above the hover/selection hit area.
+                if root.phase >= 3: Rectangle { x: 0px; y: 0px; width: wave.width; height: wave.height; z: 1; clip: true;
                     VerticalLayout { alignment: center;
                         HorizontalLayout { alignment: center;
                             Rectangle {
                                 background: Theme.tooltip.with-alpha(0.9); border-width: 1px; border-radius: 6px * Theme.ui-scale;
                                 border-color: root.phase == 3 ? Theme.danger.with-alpha(0.6) : (root.phase == 4 ? Theme.warning.with-alpha(0.6) : Theme.strong-border);
-                                TouchArea { mouse-cursor: default; }
                                 HorizontalLayout { padding: 8px * Theme.ui-scale; padding-left: 12px * Theme.ui-scale; spacing: 10px * Theme.ui-scale;
                                     VerticalLayout { alignment: center;
                                         Image {
@@ -1893,6 +1901,8 @@ export component AuditionPanel inherits Rectangle {
     callback selection-drag-ended();
     callback selection-cancel-requested();
     out property <bool> selection-gesture: root.presenter-selection-gesture;
+    // Scaled presentation space, not persisted application state.
+    out property <length> selection-feedback-height: root.presenter-selection-feedback-height;
     out property <MouseCursor> selection-cursor: root.presenter-selection-cursor;
     callback selection-pointer-feedback-changed();
     out property <int> selection-pointer-kind: root.presenter-pointer-kind;
@@ -1911,6 +1921,7 @@ export component AuditionPanel inherits Rectangle {
         root.selection-pointer-feedback-changed();
     }
     property <bool> presenter-selection-gesture: false;
+    property <length> presenter-selection-feedback-height: 0px;
     property <MouseCursor> presenter-selection-cursor: default;
     property <int> selection-cancel-revision: 0;
     public function cancel-selection-gesture() {
@@ -1992,10 +2003,10 @@ export component AuditionPanel inherits Rectangle {
     in-out property <float> premute-db: -12;
     in-out property <bool> show-remaining: false;
     property <bool> modern-player: Theme.modern-player;
-    changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); }
-    changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.reset-pointer-feedback(); } }
+    changed modern-player => { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.presenter-selection-feedback-height = 0px; root.reset-pointer-feedback(); }
+    changed active => { if !root.active { root.presenter-volume-adjusting = false; root.presenter-selection-gesture = false; root.presenter-selection-feedback-height = 0px; root.reset-pointer-feedback(); } }
     height: Theme.modern-player ? (root.expanded ? 286px : 114px) * Theme.ui-scale
-        : (root.compact ? 216px : 248px) * Theme.ui-scale;
+        : (root.compact ? 176px : 204px) * Theme.ui-scale + root.selection-feedback-height;
     if root.active && !Theme.modern-player: ClassicAuditionPanel {
         width: parent.width; height: parent.height;
         compact: root.compact;
@@ -2006,6 +2017,7 @@ export component AuditionPanel inherits Rectangle {
         selection-export-state: root.selection-export-state; selection-native-cursor: root.selection-native-cursor;
         selection-shift-held: root.selection-shift-held; selection-cancel-revision: root.selection-cancel-revision;
         changed selection-gesture => { root.presenter-selection-gesture = self.selection-gesture; }
+        selection-feedback-resized(value) => { root.presenter-selection-feedback-height = value; }
         changed selection-cursor => { root.presenter-selection-cursor = self.selection-cursor; }
         selection-cursor-changed(value) => { root.presenter-selection-cursor = value; }
         selection-pointer-feedback-changed => {
@@ -2078,6 +2090,7 @@ export component AuditionPanel inherits Rectangle {
         selection-export-state: root.selection-export-state; selection-native-cursor: root.selection-native-cursor;
         selection-shift-held: root.selection-shift-held; selection-cancel-revision: root.selection-cancel-revision;
         changed selection-gesture => { root.presenter-selection-gesture = self.selection-gesture; }
+        selection-feedback-resized(value) => { root.presenter-selection-feedback-height = value; }
         changed selection-cursor => { root.presenter-selection-cursor = self.selection-cursor; }
         selection-cursor-changed(value) => { root.presenter-selection-cursor = value; }
         selection-pointer-feedback-changed => {
