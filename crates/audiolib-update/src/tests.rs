@@ -438,6 +438,35 @@ fn installed_beta_marker_is_bound_to_binary_core_version() {
 }
 
 #[test]
+fn local_one_zero_install_does_not_offer_older_releases() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("update-channel.txt"), "stable\n").unwrap();
+    std::fs::write(root.path().join("update-version.txt"), "1.0.0\n").unwrap();
+    let client = UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).unwrap();
+    assert_eq!(client.current_version(), "1.0.0");
+    assert!(
+        client
+            .select(vec![
+                release("v0.9.5", false, false),
+                release("v0.9.99", false, false),
+                release("v1.0.0", false, false)
+            ])
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        client
+            .select(vec![release("v1.0.1", false, false)])
+            .unwrap()
+            .unwrap()
+            .version,
+        "1.0.1"
+    );
+    std::fs::write(root.path().join("update-version.txt"), "0.9.5\n").unwrap();
+    assert!(UpdateClient::for_install(NATIVE_PRODUCT, "1.0.0", root.path()).is_err());
+}
+
+#[test]
 fn installed_development_markers_retain_identity_and_require_matching_binary_version() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("update-channel.txt"), "beta\n").unwrap();

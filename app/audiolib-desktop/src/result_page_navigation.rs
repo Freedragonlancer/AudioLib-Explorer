@@ -137,7 +137,7 @@ impl ResultPageNavigation {
             Position {
                 offset: from.offset.saturating_add(self.returned),
                 limit: page_size,
-                cursor: if self.cursor_limit == page_size {
+                cursor: if self.cursor_limit == page_size.min(super::PAGE_SIZE) {
                     self.next_cursor.clone()
                 } else {
                     None

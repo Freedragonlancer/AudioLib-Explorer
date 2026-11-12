@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "date": "2026-11-12",
+  "ucs_version": "8.2.1",
+  "personal_rows": 303,
+  "expanded_rows": 431,
+  "editorial_rows": 128,
+  "ucs_rows": 753,
+  "ucs_categories": 82,
+  "recipes": 19,
+  "source_workbook_sha256": "5548a9fb8493236b6630cfa3783e09a2750db084f47eaa6040847c867c96b75c",
+  "ucs_workbooks": {
+    "UCS v8.2.1 Full List.xlsx": "e67a664803fe83e0cdf20947fb960a255f9dc087cc0df00187231891c47d76d6",
+    "UCS v8.2.1 Full Translations.xlsx": "caca08099b40203897365c02b6a52f5556ada7beb695adce2a6c64640aa9e195"
+  },
+  "data_sha256": {
+    "keywords.jsonl": "07a8f2d8ca2c22f5a2b2e34eeeba53739181ba5f186f62b8983b8cea3647771e",
+    "recipes.jsonl": "c730abf441e701b89e2ddd3423a6eaf65b4a428178ec9ee5b8f1560b9965e7c7",
+    "ucs.jsonl": "75ef342425971c4d4a52f25cdaf514065b243612157abdc21473a85641abea99"
+  }
+}

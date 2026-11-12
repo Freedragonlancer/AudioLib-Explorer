@@ -4,6 +4,8 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 
 ## Current implementation
 
+AI 智能搜索使用与实现见 [Rust AI Search](Rust_AI_Search.md)；研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](AI_Keyword_Search_Design.md)。
+
 | Document | Purpose |
 |----------|---------|
 | [README](../README.md) | Build, launch, user-data layout and release operations |

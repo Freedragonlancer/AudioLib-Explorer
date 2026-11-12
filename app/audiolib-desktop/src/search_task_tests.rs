@@ -2,12 +2,18 @@
 //! Isolated controller regressions for task identity, saved definitions and persistence.
 use super::super::*;
 
+#[path = "ai_search_tests.rs"]
+mod ai_search;
 #[path = "album_review_tests.rs"]
 mod album_review;
 #[path = "search_task_favorite_review_tests.rs"]
 mod favorite_review;
+#[path = "search_task_history_tests.rs"]
+mod history_navigation;
 #[path = "search_task_lifecycle_review_tests.rs"]
 mod lifecycle_review;
+#[path = "pagination_preferences_tests.rs"]
+mod pagination_preferences;
 #[path = "search_task_scope_paging_tests.rs"]
 mod scope_paging;
 #[path = "search_task_ui_review_tests.rs"]
@@ -18,9 +24,13 @@ mod waveform_review;
 const ROOT_ENV: &str = "AUDIOLIB_SEARCH_TASK_TEST_ROOT";
 
 fn isolated(child: &str) {
+    // SystemTime may repeat across concurrent test threads on Windows. Keep
+    // every child library distinct even within one clock tick.
+    static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "audiolib-search-tasks-{}-{}",
+        "audiolib-search-tasks-{}-{}-{}",
         std::process::id(),
+        ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1162,6 +1172,7 @@ fn child_result_window_restore() {
     let cache = TaskCache {
         provider: Arc::downgrade(&fixture.provider),
         revision,
+        executed_scope: cached_task.definition.scope,
         tree: controller.tree.lock().unwrap().clone(),
         records,
         window_coverage: Some(result_window::WindowCoverage {

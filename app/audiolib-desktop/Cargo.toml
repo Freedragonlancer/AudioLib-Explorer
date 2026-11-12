@@ -17,6 +17,7 @@ asio = ["audiolib-audio/asio"]
 [dependencies]
 anyhow.workspace = true
 audiolib-core = { path = "../../crates/audiolib-core" }
+audiolib-ai = { path = "../../crates/audiolib-ai" }
 audiolib-db = { path = "../../crates/audiolib-db" }
 audiolib-audio = { path = "../../crates/audiolib-audio", features = ["playback"] }
 audiolib-ipc = { path = "../../crates/audiolib-ipc" }

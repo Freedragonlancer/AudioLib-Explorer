@@ -1,0 +1,6 @@
+interface:
+  display_name: "Audio Keyword Search"
+  short_description: "结合个人经验词表和 UCS，把声音设计需求转换为可执行关键词与分层查询"
+  default_prompt: "使用 $audio-keyword-search，把我要设计科幻爆炸声转换为 AudioLib Explorer 可直接查询的关键词组合。"
+policy:
+  allow_implicit_invocation: true

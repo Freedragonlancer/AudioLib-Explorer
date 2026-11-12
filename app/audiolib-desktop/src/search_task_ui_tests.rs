@@ -65,12 +65,643 @@ fn snapshot_if_requested(ui: &AppWindow, name: &str) {
     .unwrap();
 }
 
+#[test]
+fn ai_panel_actions_and_provider_view_are_renderable() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let ui = window();
+    ui.window()
+        .set_size(slint::LogicalSize::new(1920.0, 1080.0));
+    ui.set_chinese(true);
+    ui.set_data_source_label("本地音效库 · 验收示例".into());
+    ui.set_ai_visible(true);
+    ui.set_ai_prompt("我要设计科幻爆炸声".into());
+    ui.set_ai_providers(ModelRc::new(VecModel::from(vec![
+        "本地词表（离线）".into(),
+    ])));
+    ui.set_ai_rows(ModelRc::new(VecModel::from(vec![
+        crate::AiSuggestion {
+            text: "scifi explosion".into(),
+            detail: "direct · 科幻爆炸".into(),
+        },
+        crate::AiSuggestion {
+            text: "sub boom".into(),
+            detail: "低频层".into(),
+        },
+    ])));
+    ui.set_ai_query("explosion".into());
+    ui.set_ai_selected(0);
+    ui.set_ai_quick_rows(ModelRc::new(VecModel::from(
+        [
+            "explosion",
+            "scifi explosion",
+            "sub boom",
+            "metal impact",
+            "plasma hum",
+        ]
+        .into_iter()
+        .map(|text| crate::AiSuggestion {
+            text: text.into(),
+            detail: "推荐素材 / suggested source".into(),
+        })
+        .collect::<Vec<_>>(),
+    )));
+    ui.set_ai_rows(ui.get_ai_quick_rows());
+    ui.set_ai_detail("成品 / 科幻爆炸 · UCS: EXPLDsgn".into());
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let recorded = actions.clone();
+    ui.on_ai_action(move |kind, index| recorded.borrow_mut().push((kind, index)));
+    settle();
+    snapshot_if_requested(&ui, "ai-search-panel");
+    click(&ui, "生成查询建议");
+    assert!(actions.borrow().contains(&(2, 0)));
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "AI 生成进度")
+            .next()
+            .is_none()
+    );
+    ui.set_ai_busy(true);
+    ui.set_ai_generating(true);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "AI 生成进度")
+            .next()
+            .is_some()
+    );
+    let count = actions.borrow().len();
+    click(&ui, "生成 AI 查询建议");
+    click(&ui, "生成查询建议");
+    assert_eq!(
+        actions.borrow().len(),
+        count,
+        "Generation cannot be submitted twice"
+    );
+    snapshot_if_requested(&ui, "ai-generating");
+    for modern in [false, true] {
+        for scale in [1.0, 2.0] {
+            ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+            ui.global::<crate::Theme>().set_modern_style(modern);
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            settle();
+            let field = ElementHandle::find_by_accessible_label(&ui, "AI 声音描述")
+                .next()
+                .unwrap();
+            let submit = ElementHandle::find_by_accessible_label(&ui, "生成 AI 查询建议")
+                .next()
+                .unwrap();
+            let tag = ElementHandle::find_by_accessible_label(&ui, "快捷搜索：explosion")
+                .next()
+                .unwrap();
+            assert!(
+                field.absolute_position().x + field.size().width <= submit.absolute_position().x
+            );
+            assert!(
+                submit.absolute_position().x + submit.size().width <= tag.absolute_position().x,
+                "Generating caption must not overlap the recommendations"
+            );
+            snapshot_if_requested(&ui, &format!("ai-generating-short-{modern}-{scale}"));
+        }
+    }
+    ui.global::<crate::Theme>().set_modern_style(false);
+    ui.global::<crate::Theme>().set_ui_scale(1.0);
+    ui.window()
+        .set_size(slint::LogicalSize::new(1920.0, 1080.0));
+    settle();
+    click(&ui, "取消");
+    assert_eq!(actions.borrow().last(), Some(&(3, 0)));
+    click(&ui, "退出 AI 搜索");
+    assert_eq!(actions.borrow().last(), Some(&(1, 0)));
+    ui.set_ai_generating(false);
+    ui.set_ai_busy(false);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "AI 生成进度")
+            .next()
+            .is_none()
+    );
+    for (index, text) in [
+        "explosion",
+        "scifi explosion",
+        "sub boom",
+        "metal impact",
+        "plasma hum",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        click(&ui, &format!("快捷搜索：{text}"));
+        assert!(actions.borrow().contains(&(16, index as i32)));
+    }
+    assert!(!ui.get_ai_auto_search());
+    click(&ui, "生成后自动搜索 3 个任务");
+    assert!(ui.get_ai_auto_search());
+    click(&ui, "查询全部推荐");
+    assert!(actions.borrow().contains(&(20, 0)));
+    ui.set_ai_batch_searching(true);
+    ui.set_ai_batch_total(5);
+    ui.set_ai_batch_completed(2);
+    settle();
+    let task_selections = Rc::new(RefCell::new(Vec::new()));
+    let selected_tasks = task_selections.clone();
+    ui.on_search_task_selected(move |id| selected_tasks.borrow_mut().push(id.to_string()));
+    ui.set_search_workspace_loading(true);
+    ui.set_task_restoring(true);
+    settle();
+    assert!(ui.get_background_blocked());
+    assert!(!ui.get_ai_batch_blocked());
+    let task = ElementHandle::find_by_accessible_label(&ui, "搜索任务：Task 1")
+        .next()
+        .unwrap();
+    assert_eq!(task.accessible_enabled(), Some(true));
+    click(&ui, "搜索任务：Task 1");
+    assert_eq!(task_selections.borrow().as_slice(), &["1"]);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "关闭搜索任务：Task 1")
+            .next()
+            .unwrap()
+            .accessible_enabled(),
+        Some(false)
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "取消")
+            .next()
+            .is_some()
+    );
+    click(&ui, "收起 AI 侧栏");
+    assert!(ui.get_ai_collapsed());
+    click(&ui, "展开 AI 侧栏");
+    assert!(!ui.get_ai_collapsed());
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+    settle();
+    assert_eq!(actions.borrow().last(), Some(&(1, 0)));
+    ui.set_about_visible(true);
+    settle();
+    assert!(ui.get_ai_batch_blocked());
+    assert_eq!(task.accessible_enabled(), Some(false));
+    ui.set_about_visible(false);
+    ui.set_search_workspace_loading(false);
+    ui.set_task_restoring(false);
+    settle();
+    let count = actions.borrow().len();
+    click(&ui, "查询全部推荐");
+    assert_eq!(actions.borrow().len(), count);
+    click(&ui, "取消");
+    assert_eq!(actions.borrow().last(), Some(&(3, 0)));
+    ui.set_ai_batch_searching(false);
+    for modern in [false, true] {
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        settle();
+        let batch = ElementHandle::find_by_accessible_label(&ui, "查询全部推荐")
+            .next()
+            .unwrap();
+        let tag = ElementHandle::find_by_accessible_label(&ui, "快捷搜索：scifi explosion")
+            .next()
+            .unwrap();
+        let field = ElementHandle::find_by_accessible_label(&ui, "AI 声音描述")
+            .next()
+            .unwrap();
+        let query = ElementHandle::find_by_accessible_label(&ui, "AI query")
+            .next()
+            .unwrap();
+        assert!(tag.absolute_position().x >= field.absolute_position().x + field.size().width);
+        assert!(
+            (tag.absolute_position().y + tag.size().height / 2.0
+                - field.absolute_position().y
+                - field.size().height / 2.0)
+                .abs()
+                < 12.0,
+            "Recommendations belong in the search toolbar"
+        );
+        assert!(batch.absolute_position().x >= query.absolute_position().x + query.size().width);
+        assert!(
+            (batch.absolute_position().y + batch.size().height / 2.0
+                - query.absolute_position().y
+                - query.size().height / 2.0)
+                .abs()
+                < 4.0
+        );
+        click(&ui, "收起 AI 侧栏");
+        assert!(ui.get_ai_visible());
+        assert!(ui.get_ai_collapsed());
+        let reopen = ElementHandle::find_by_accessible_label(&ui, "展开 AI 侧栏")
+            .next()
+            .unwrap();
+        let tabs = ElementHandle::find_by_accessible_label(&ui, "搜索任务")
+            .next()
+            .unwrap();
+        assert!(
+            reopen.size().width > reopen.size().height,
+            "Restore is a compact horizontal control"
+        );
+        assert!(reopen.absolute_position().y >= field.absolute_position().y + field.size().height);
+        assert!(
+            reopen.absolute_position().y <= tabs.absolute_position().y + tabs.size().height,
+            "Restore belongs in the top task band"
+        );
+        assert!(
+            reopen.absolute_position().x + reopen.size().width
+                <= ui
+                    .window()
+                    .size()
+                    .to_logical(ui.window().scale_factor())
+                    .width
+        );
+        for label in ["管理音效库", "声音详情页"] {
+            let other = ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap();
+            let a = reopen.absolute_position();
+            let b = other.absolute_position();
+            assert!(
+                a.x + reopen.size().width <= b.x
+                    || b.x + other.size().width <= a.x
+                    || a.y + reopen.size().height <= b.y
+                    || b.y + other.size().height <= a.y,
+                "AI restore must not cover {label}"
+            );
+        }
+        snapshot_if_requested(
+            &ui,
+            if modern {
+                "ai-keyword-tags-studio"
+            } else {
+                "ai-keyword-tags-classic"
+            },
+        );
+        ui.set_inspector_visible(false);
+        settle();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "展开 AI 侧栏")
+                .next()
+                .is_some()
+        );
+        ui.set_inspector_visible(true);
+        settle();
+        click(&ui, "快捷搜索：metal impact");
+        click(&ui, "展开 AI 侧栏");
+        assert!(!ui.get_ai_collapsed());
+        snapshot_if_requested(
+            &ui,
+            if modern {
+                "ai-sidebar-studio"
+            } else {
+                "ai-sidebar-classic"
+            },
+        );
+    }
+    // The drawer stays in the native window even when the workbench scrolls
+    // horizontally. Exercise enough tabs to place overflow/add controls nearby.
+    ui.set_search_tasks(tasks(12));
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+    ui.global::<crate::Theme>().set_ui_scale(2.0);
+    for modern in [false, true] {
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        click(&ui, "收起 AI 侧栏");
+        let reopen = ElementHandle::find_by_accessible_label(&ui, "展开 AI 侧栏")
+            .next()
+            .unwrap();
+        let tabs = ElementHandle::find_by_accessible_label(&ui, "搜索任务")
+            .next()
+            .unwrap();
+        if !modern {
+            assert!(
+                tabs.absolute_position().x + tabs.size().width
+                    <= ui
+                        .window()
+                        .size()
+                        .to_logical(ui.window().scale_factor())
+                        .width,
+                "Classic tab reservation must fit the native window"
+            );
+        } else {
+            assert!(
+                reopen.absolute_position().y + reopen.size().height <= tabs.absolute_position().y,
+                "Studio restore must stay above the task controls"
+            );
+        }
+        snapshot_if_requested(&ui, &format!("ai-drawer-tabs-short-{modern}"));
+        for label in ["新建搜索任务", "向右翻页搜索任务"] {
+            let Some(other) = ElementHandle::find_by_accessible_label(&ui, label).next() else {
+                // Studio's horizontally scrollable workbench can put the task
+                // controls off-screen; its separate vertical lane still applies.
+                assert!(modern, "Missing Classic task control: {label}");
+                continue;
+            };
+            let a = reopen.absolute_position();
+            let b = other.absolute_position();
+            assert!(
+                a.x + reopen.size().width <= b.x
+                    || b.x + other.size().width <= a.x
+                    || a.y + reopen.size().height <= b.y
+                    || b.y + other.size().height <= a.y,
+                "AI restore must not cover {label} at large UI scale"
+            );
+        }
+        ui.invoke_scroll_main_to_end();
+        settle();
+        let band = tabs.absolute_position();
+        let restore = ElementHandle::find_by_accessible_label(&ui, "展开 AI 侧栏").next();
+        if band.y + tabs.size().height <= 0.0 {
+            assert!(
+                restore.is_none(),
+                "A scrolled-away AI band must not leave an overlay over the content"
+            );
+        }
+        if let Some(restore) = restore {
+            if let Some(details) = ElementHandle::find_by_accessible_label(&ui, "声音详情页").next()
+            {
+                assert!(
+                    restore.absolute_position().y + restore.size().height
+                        <= details.absolute_position().y,
+                    "Scrolling must preserve clearance above Metadata controls"
+                );
+            }
+            click(&ui, "展开 AI 侧栏");
+        } else {
+            // The top-band control returns when the user scrolls back to it;
+            // use the model here to continue fixed-panel compact acceptance.
+            ui.set_ai_collapsed(false);
+        }
+        assert!(!ui.get_ai_collapsed());
+    }
+    ui.set_search_tasks(tasks(2));
+    ui.global::<crate::Theme>().set_ui_scale(1.0);
+    ui.window()
+        .set_size(slint::LogicalSize::new(1920.0, 1080.0));
+    ui.global::<crate::Theme>().set_modern_style(false);
+    ui.invoke_scroll_main_to_end();
+    settle();
+    click(&ui, "编辑提示词");
+    snapshot_if_requested(&ui, "ai-prompt-preset");
+    // The editable prompt may outgrow a short or scaled sidebar. Its body can
+    // scroll, while both search actions must remain reachable without scrolling.
+    for scale in [1.0, 1.5, 2.0] {
+        for chinese in [false, true] {
+            ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+            ui.global::<crate::Theme>().set_ui_scale(scale);
+            ui.set_chinese(chinese);
+            ui.set_ai_detail(
+                "科幻爆炸素材来源和分层说明 / layered sound source details. "
+                    .repeat(20)
+                    .into(),
+            );
+            ui.set_ai_status(
+                "保留目录与筛选条件 / Preserves the current directory and filters. "
+                    .repeat(20)
+                    .into(),
+            );
+            settle();
+            let count = actions.borrow().len();
+            click(
+                &ui,
+                if chinese {
+                    "在当前任务搜索"
+                } else {
+                    "Search current task"
+                },
+            );
+            click(
+                &ui,
+                if chinese {
+                    "以此关键词新建搜索任务"
+                } else {
+                    "New search task with this keyword"
+                },
+            );
+            click(
+                &ui,
+                if chinese {
+                    "查询全部推荐"
+                } else {
+                    "Search all recommendations"
+                },
+            );
+            click(
+                &ui,
+                if chinese {
+                    "退出 AI 搜索"
+                } else {
+                    "Exit AI"
+                },
+            );
+            assert_eq!(
+                &actions.borrow()[count..],
+                &[(6, 0), (7, 0), (20, 0), (1, 0)],
+                "Expanded prompt must leave all search and exit actions clickable at scale {scale}"
+            );
+            snapshot_if_requested(&ui, &format!("ai-prompt-short-{scale}-{chinese}"));
+        }
+    }
+    ui.global::<crate::Theme>().set_ui_scale(1.0);
+    ui.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
+    ui.set_chinese(true);
+    ui.set_ai_status("".into());
+    ui.set_ai_detail("成品 / 科幻爆炸 · UCS: EXPLDsgn".into());
+    settle();
+    click(&ui, "保存提示词");
+    assert!(actions.borrow().contains(&(15, 0)));
+    click(&ui, "收起");
+    click(&ui, "生成后自动搜索 3 个任务");
+    assert!(!ui.get_ai_auto_search());
+    click(&ui, "供应商");
+    assert!(ui.get_ai_settings());
+    ui.set_ai_protocol(6);
+    ui.set_ai_endpoint("https://api.deepseek.com".into());
+    ui.set_ai_model("".into());
+    ui.set_ai_profile_name("DeepSeek".into());
+    assert!(ui.get_ai_profile_id().is_empty());
+    click(&ui, "获取模型列表");
+    assert!(actions.borrow().contains(&(11, 0)));
+    ui.set_ai_model("deepseek-flash".into());
+    click(&ui, "测试模型调用");
+    assert!(actions.borrow().contains(&(17, 0)));
+    let count = actions.borrow().len();
+    ui.set_ai_busy(true);
+    assert!(
+        !ui.get_ai_generating(),
+        "Provider operations do not generate recommendations"
+    );
+    click(&ui, "获取模型列表");
+    assert_eq!(actions.borrow().len(), count);
+    ui.set_ai_busy(false);
+    ui.set_ai_profile_id("saved-deepseek".into());
+    ui.set_ai_saved_key(true);
+    ui.set_ai_saved_endpoint("https://api.deepseek.com".into());
+    ui.set_ai_saved_protocol(6);
+    settle();
+    snapshot_if_requested(&ui, "ai-provider-panel");
+    click(&ui, "退出 AI 搜索");
+    assert_eq!(actions.borrow().last(), Some(&(1, 0)));
+    click(&ui, "返回搜索");
+    assert!(
+        !ui.get_ai_auto_search(),
+        "Provider navigation must preserve the auto-search choice"
+    );
+    click(&ui, "供应商");
+    // An existing modal takes Escape priority over the temporarily hidden AI panel.
+    ui.set_about_visible(true);
+    settle();
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+    settle();
+    assert!(!ui.get_about_visible());
+    assert!(ui.get_ai_visible());
+    ui.hide().unwrap();
+}
+
 fn open_saved_menu(ui: &AppWindow) {
     let control = ElementHandle::find_by_accessible_label(ui, "Manage saved search: Forest")
         .next()
         .unwrap();
     control.mock_single_click(PointerEventButton::Left);
     settle();
+}
+
+#[test]
+fn ai_provider_form_survives_page_recreation_and_panel_reopening() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = window();
+    ui.set_ai_visible(true);
+    ui.set_ai_providers(ModelRc::new(VecModel::from(vec![
+        "Local reference".into(),
+        "Work".into(),
+    ])));
+    ui.set_ai_provider_index(1);
+    ui.set_ai_profile_id("saved-profile".into());
+    ui.set_ai_profile_name("Work".into());
+    ui.set_ai_protocol(5);
+    ui.set_ai_endpoint("https://example.test/go".into());
+    ui.set_ai_model("saved-model".into());
+    ui.set_ai_key("unsaved-draft-key".into());
+    ui.set_ai_timeout(31);
+    ui.set_ai_request_cap(123);
+    ui.set_ai_subscription(true);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let observed = actions.clone();
+    ui.on_ai_action(move |kind, index| observed.borrow_mut().push((kind, index)));
+    for _ in 0..3 {
+        click(&ui, "Providers");
+        assert_eq!(
+            ui.get_ai_protocol(),
+            5,
+            "Recreating the protocol selector must not write its default index into the draft"
+        );
+        assert_eq!(ui.get_ai_provider_index(), 1);
+        assert_eq!(ui.get_ai_profile_name(), "Work");
+        assert_eq!(ui.get_ai_endpoint(), "https://example.test/go");
+        assert_eq!(ui.get_ai_model(), "saved-model");
+        assert_eq!(ui.get_ai_key(), "unsaved-draft-key");
+        assert_eq!(ui.get_ai_timeout(), 31);
+        assert_eq!(ui.get_ai_request_cap(), 123);
+        assert!(ui.get_ai_subscription());
+        click(&ui, "Search");
+        ui.set_ai_visible(false);
+        settle();
+        ui.set_ai_visible(true);
+        settle();
+    }
+    assert!(
+        actions.borrow().is_empty(),
+        "Recreating a view must not dispatch user selections"
+    );
+    ui.hide().unwrap();
+}
+
+#[test]
+fn ai_switch_routes_the_shared_search_field_and_retains_both_drafts() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        let ui = window();
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        ui.set_chinese(false);
+        ui.set_query("wind".into());
+        ui.set_ai_prompt("science fiction explosion".into());
+        let ai = Rc::new(RefCell::new(Vec::new()));
+        let seen = ai.clone();
+        let weak = ui.as_weak();
+        ui.on_ai_action(move |kind, _| {
+            seen.borrow_mut().push(kind);
+            let ui = weak.upgrade().unwrap();
+            if kind == 0 {
+                ui.set_ai_visible(true);
+            } else if kind == 1 {
+                ui.set_ai_visible(false);
+            }
+        });
+        let searches = Rc::new(RefCell::new(Vec::new()));
+        let seen = searches.clone();
+        ui.on_search_requested(move |immediate| seen.borrow_mut().push(immediate));
+        settle();
+        assert_eq!(ui.get_search_entry_text(), "wind");
+        click(&ui, "AI search mode");
+        assert!(ui.get_ai_visible());
+        assert_eq!(ui.get_search_entry_text(), "science fiction explosion");
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&ui, "AI search mode")
+                .next()
+                .unwrap()
+                .accessible_checked(),
+            Some(true)
+        );
+        ui.set_search_entry_text("layered alien explosion".into());
+        ui.invoke_edit_search_entry();
+        click(&ui, "Generate AI query suggestions");
+        settle();
+        assert_eq!(ui.get_ai_prompt(), "layered alien explosion");
+        assert_eq!(ui.get_query(), "wind");
+        assert!(searches.borrow().is_empty());
+        assert!(ai.borrow().contains(&2));
+        let count = ai.borrow().len();
+        ui.set_ai_busy(true);
+        click(&ui, "Generate AI query suggestions");
+        assert_eq!(ai.borrow().len(), count);
+        ui.set_ai_busy(false);
+        snapshot_if_requested(
+            &ui,
+            if modern {
+                "ai-integrated-studio"
+            } else {
+                "ai-integrated-classic"
+            },
+        );
+        click(&ui, "AI search mode");
+        assert!(!ui.get_ai_visible());
+        assert_eq!(ui.get_search_entry_text(), "wind");
+        ui.set_search_entry_text("metal".into());
+        ui.invoke_edit_search_entry();
+        click(&ui, "Run search");
+        settle();
+        assert_eq!(ui.get_query(), "metal");
+        assert_eq!(ui.get_ai_prompt(), "layered alien explosion");
+        assert_eq!(*searches.borrow(), vec![false, true]);
+        for _ in 0..5 {
+            click(&ui, "AI search mode");
+            assert_eq!(ui.get_search_entry_text(), "layered alien explosion");
+            click(&ui, "AI search mode");
+            assert_eq!(ui.get_search_entry_text(), "metal");
+            click(&ui, "Run search");
+        }
+        assert_eq!(searches.borrow().len(), 7);
+        ui.hide().unwrap();
+    }
 }
 
 fn activate_popup(ui: &AppWindow, label: &str, steps_from_end: usize) {
@@ -86,6 +717,103 @@ fn activate_popup(ui: &AppWindow, label: &str, steps_from_end: usize) {
             .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
     }
     settle();
+}
+
+#[test]
+fn search_history_buttons_navigate_only_when_available_in_both_search_bars() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        let ui = window();
+        ui.global::<crate::Theme>().set_modern_style(modern);
+        ui.global::<crate::Theme>().set_modern_player(modern);
+        ui.set_query("boom".into());
+        settle();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        ui.on_search_history_requested(move |direction| observed.borrow_mut().push(direction));
+        let assert_enabled = |label: &str, enabled| {
+            assert_eq!(
+                ElementHandle::find_by_accessible_label(&ui, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("Missing search history control: {label}"))
+                    .accessible_enabled(),
+                Some(enabled),
+                "Unexpected availability for {label}, modern={modern}"
+            );
+        };
+
+        assert_enabled("Back in search history", false);
+        assert_enabled("Forward in search history", false);
+        click(&ui, "Back in search history");
+        click(&ui, "Forward in search history");
+        assert!(events.borrow().is_empty());
+
+        ui.set_search_history_can_back(true);
+        settle();
+        assert_enabled("Back in search history", true);
+        assert_enabled("Forward in search history", false);
+        click(&ui, "Back in search history");
+        click(&ui, "Forward in search history");
+        assert_eq!(&*events.borrow(), &[-1]);
+
+        ui.set_search_history_can_forward(true);
+        ui.set_chinese(true);
+        settle();
+        assert_enabled("后退搜索历史", true);
+        assert_enabled("前进搜索历史", true);
+        click(&ui, "前进搜索历史");
+        assert_eq!(&*events.borrow(), &[-1, 1]);
+        snapshot_if_requested(
+            &ui,
+            if modern {
+                "search-history-studio-cn"
+            } else {
+                "search-history-classic-cn"
+            },
+        );
+
+        // A pending result may be superseded by history navigation. Workspace
+        // restoration and application overlays must still block those actions.
+        ui.set_searching(true);
+        settle();
+        assert_enabled("后退搜索历史", true);
+        click(&ui, "后退搜索历史");
+        assert_eq!(&*events.borrow(), &[-1, 1, -1]);
+        events.borrow_mut().clear();
+        ui.set_startup_busy(true);
+        settle();
+        assert_enabled("后退搜索历史", false);
+        assert_enabled("前进搜索历史", false);
+        click(&ui, "后退搜索历史");
+        click(&ui, "前进搜索历史");
+        ui.set_startup_busy(false);
+        ui.set_search_workspace_loading(true);
+        settle();
+        assert_enabled("后退搜索历史", false);
+        assert_enabled("前进搜索历史", false);
+        click(&ui, "后退搜索历史");
+        click(&ui, "前进搜索历史");
+        ui.set_search_workspace_loading(false);
+        ui.set_task_restoring(true);
+        settle();
+        assert_enabled("后退搜索历史", false);
+        assert_enabled("前进搜索历史", false);
+        click(&ui, "后退搜索历史");
+        click(&ui, "前进搜索历史");
+        assert!(events.borrow().is_empty());
+        ui.set_task_restoring(false);
+        settle();
+        assert_enabled("后退搜索历史", true);
+        assert_enabled("前进搜索历史", true);
+        click(&ui, "前进搜索历史");
+        assert_eq!(&*events.borrow(), &[1]);
+        ui.hide().unwrap();
+    }
 }
 
 #[test]
@@ -467,12 +1195,9 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                         active: index == 0,
                         searched: index == 0,
                         keywords: if index == 0 {
-                            ModelRc::new(VecModel::from(vec![
-                                "distant thunderstorm".into(),
-                                "rolling".into(),
-                            ]))
+                            "distant thunderstorm · rolling".into()
                         } else {
-                            ModelRc::default()
+                            Default::default()
                         },
                         folder: "Atmospheres".into(),
                         summary: summary.into(),
@@ -527,7 +1252,7 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
                 name: "Task 0".into(),
                 active: true,
                 searched: true,
-                keywords: ModelRc::new(VecModel::from(vec!["wind".into()])),
+                keywords: "wind".into(),
                 folder: "Atmospheres".into(),
                 summary: summary.into(),
                 ..Default::default()
@@ -556,9 +1281,80 @@ fn minimum_width_tabs_keep_keywords_ahead_of_auxiliary_labels_in_both_languages(
             );
             assert!((keyword.absolute_position().y - directory.absolute_position().y).abs() < 1.0);
             snapshot_if_requested(&ui, &format!("task-keywords-compact-{theme}-{language}"));
+            let keyword_start = keyword.absolute_position().x;
+
+            // The directory follows the full query as more terms are added.
+            // Wider tabs retain it; narrower tabs give the keywords that space.
+            let mut previous_keyword_width = 0.0;
+            let mut previous_directory_x = 0.0;
+            for (stage, keywords) in [
+                "water · runoff",
+                "water · runoff · gutter · gush",
+                "water · runoff · gutter · gush · torrential · storm · drainage",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
+                    id: "0".into(),
+                    name: "Task 0".into(),
+                    active: true,
+                    searched: true,
+                    keywords: keywords.into(),
+                    ..Default::default()
+                }])));
+                settle();
+                let keyword =
+                    ElementHandle::find_by_element_id(&ui, "SearchTaskTab::keyword-label")
+                        .next()
+                        .unwrap();
+                let close = ElementHandle::find_by_accessible_label(&ui, close_label)
+                    .next()
+                    .unwrap();
+                assert!(
+                    keyword.absolute_position().x + keyword.size().width
+                        <= close.absolute_position().x,
+                    "Every query length must leave the close control clear: theme={theme}, chinese={chinese}"
+                );
+                if stage == 1 {
+                    assert!(
+                        keyword.size().width > previous_keyword_width,
+                        "Third and fourth terms must use available tab space: theme={theme}, chinese={chinese}"
+                    );
+                }
+                let directory =
+                    ElementHandle::find_by_element_id(&ui, "SearchTaskTab::directory-label").next();
+                if let Some(directory) = directory {
+                    if stage == 1 {
+                        assert!(
+                            directory.absolute_position().x > previous_directory_x,
+                            "The directory must move after the expanded query: theme={theme}, chinese={chinese}"
+                        );
+                    }
+                    assert!(
+                        directory.absolute_position().x + directory.size().width
+                            <= close.absolute_position().x
+                    );
+                    previous_directory_x = directory.absolute_position().x;
+                } else {
+                    assert!(stage > 0);
+                    assert!(
+                        ElementHandle::find_by_element_id(
+                            &ui,
+                            "SearchTaskTab::directory-separator"
+                        )
+                        .next()
+                        .is_none()
+                    );
+                }
+                previous_keyword_width = keyword.size().width;
+                snapshot_if_requested(
+                    &ui,
+                    &format!("task-keywords-expanded-{stage}-{theme}-{language}"),
+                );
+            }
 
             // A directory-only task keeps its marker and the same left alignment.
-            let keyword_start = keyword.absolute_position().x;
             ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
                 id: "0".into(),
                 name: "Task 0".into(),
@@ -622,11 +1418,7 @@ fn search_tab_hover_exposes_the_complete_query_and_directory_without_selecting_t
         ui.set_search_tasks(ModelRc::new(VecModel::from(vec![SearchTaskRow {
             id: "hover-task".into(),
             name: "Mustang impacts".into(),
-            keywords: ModelRc::new(VecModel::from(vec![
-                "hard".into(),
-                "metal hit".into(),
-                "glass".into(),
-            ])),
+            keywords: "hard · metal hit · glass".into(),
             folder: "P-51 Mustang".into(),
             summary: summary.into(),
             searched: true,

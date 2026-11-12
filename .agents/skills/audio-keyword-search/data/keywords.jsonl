@@ -1,0 +1,431 @@
+{"id":"P0002","term":"chain","alternatives":["chain"],"zh":"铁链,锁链","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A2:C2"}
+{"id":"P0003","term":"cloth pat","alternatives":["cloth pat"],"zh":"拍打衣服","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A3:C3"}
+{"id":"P0004","term":"explosion balloon","alternatives":["explosion balloon"],"zh":"气球爆炸","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A4:C4"}
+{"id":"P0005","term":"foley","alternatives":["foley"],"zh":"拟音(Foley的中文)","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A5:C5"}
+{"id":"P0006","term":"scrape","alternatives":["scrape"],"zh":"刮擦,一般指材质表面的刮擦,包括金属刮削等","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A6:C6"}
+{"id":"P0007","term":"scratch","alternatives":["scratch"],"zh":"刮,多种材质的刮擦","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A7:C7"}
+{"id":"P0008","term":"scrub","alternatives":["scrub"],"zh":"擦洗","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A8:C8"}
+{"id":"P0009","term":"squash","alternatives":["squash"],"zh":"压扁的,压碎的,压力发生变形的声音素材","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A9:C9"}
+{"id":"P0010","term":"squeak","alternatives":["squeak"],"zh":"吱,紧张的,短促的尖叫声","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A10:C10"}
+{"id":"P0011","term":"squeeze","alternatives":["squeeze"],"zh":"挤","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A11:C11"}
+{"id":"P0012","term":"stretch","alternatives":["stretch"],"zh":"伸展","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A12:C12"}
+{"id":"P0013","term":"stutter","alternatives":["stutter"],"zh":"突突的响 科幻飞行器载具等","domain":"Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A13:C13"}
+{"id":"P0014","term":"squeak","alternatives":["squeak","creak"],"zh":"捏紧拳头,骨头bone嘎吱嘎吱声","domain":"Foley,Gore,动作","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A14:C14"}
+{"id":"P0015","term":"squeak","alternatives":["squeak"],"zh":"嘎吱嘎吱响","domain":"Foley,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A15:C15"}
+{"id":"P0016","term":"sizzle","alternatives":["sizzle"],"zh":"啸叫声,煎炸的声音","domain":"Foley,技能,电","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A16:C16"}
+{"id":"P0017","term":"squeeze","alternatives":["squeeze"],"zh":"挤压物体","domain":"Foley,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A17:C17"}
+{"id":"P0018","term":"bomb whistle","alternatives":["bomb whistle"],"zh":"投弹哨声,弹道多普勒whoosh声","domain":"Foley,武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A18:C18"}
+{"id":"P0019","term":"jingle","alternatives":["jingle"],"zh":"金属叮铃当啷的碰撞声,比如钥匙环,装备带,一般在foley拟音中作为细节层使用；UI中多用来表示乐音表达喜悦的音效","domain":"Foley,细节","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A19:C19"}
+{"id":"P0020","term":"rustle","alternatives":["rustle"],"zh":"衣服布料摩擦沙沙声,foley细节声音","domain":"Foley,细节","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A20:C20"}
+{"id":"P0021","term":"chatter","alternatives":["chatter"],"zh":"颤动,Sweetener常用音色,咔嚓咔嚓的音色和材质","domain":"Foley,音色,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A21:C21"}
+{"id":"P0022","term":"air","alternatives":["air"],"zh":"气流,空气的,气流的,动作/技能音效技能设计常用关键词","domain":"Foley,自然,动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A22:C22"}
+{"id":"P0023","term":"blood","alternatives":["blood","bloody"],"zh":"血 血液的","domain":"Gore","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A23:C23"}
+{"id":"P0024","term":"disembowel","alternatives":["disembowel"],"zh":"开膛破肚、内脏、排泄物","domain":"Gore","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A24:C24"}
+{"id":"P0025","term":"gore","alternatives":["gore"],"zh":"血肉拟音,血腥效果拟音,一般用瓜果蔬菜肉类拟音获得","domain":"Gore","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A25:C25"}
+{"id":"P0026","term":"flesh","alternatives":["flesh"],"zh":"割肉流血","domain":"Gore,动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A26:C26"}
+{"id":"P0027","term":"click","alternatives":["click"],"zh":"点击","domain":"UI","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A27:C27"}
+{"id":"P0028","term":"slide","alternatives":["slide"],"zh":"UI音效素材表示\"菜单滑动\"；通用情况就是滑动","domain":"UI","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A28:C28"}
+{"id":"P0029","term":"ui","alternatives":["ui"],"zh":"UI界面音效,用户交互界面","domain":"UI","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A29:C29"}
+{"id":"P0030","term":"pop","alternatives":["pop"],"zh":"泡泡类型的,卡通风格液体,ui常用风格","domain":"UI,材质,液体","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A30:C30"}
+{"id":"P0031","term":"button","alternatives":["button"],"zh":"按键,按钮","domain":"UI,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A31:C31"}
+{"id":"P0032","term":"switch","alternatives":["switch"],"zh":"开关","domain":"UI,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A32:C32"}
+{"id":"P0033","term":"lock","alternatives":["lock"],"zh":"锁,锁定,锁住","domain":"UI,物件,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A33:C33"}
+{"id":"P0034","term":"cry","alternatives":["cry"],"zh":"哭","domain":"Vocal","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A34:C34"}
+{"id":"P0035","term":"vocal","alternatives":["vocal"],"zh":"语音内容,包含语音内容的音效,一般指环境","domain":"Vocal","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A35:C35"}
+{"id":"P0036","term":"vox","alternatives":["vox"],"zh":"语音效果,语音特效,常指代语怪物语音效果","domain":"Vocal","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A36:C36"}
+{"id":"P0037","term":"carpet","alternatives":["carpet"],"zh":"地毯","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A37:C37"}
+{"id":"P0038","term":"crack","alternatives":["crack"],"zh":"破裂,爆裂","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A38:C38"}
+{"id":"P0039","term":"dirt","alternatives":["dirt"],"zh":"普通泥土表面,泥土路,土路,一般指干一些泥土地面,脚步声和载具常用材质表面(dry dirt soil)","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A39:C39"}
+{"id":"P0040","term":"friction","alternatives":["friction"],"zh":"摩擦","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A40:C40"}
+{"id":"P0041","term":"grass","alternatives":["grass"],"zh":"草,草的表面材质,草的刮擦声音","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A41:C41"}
+{"id":"P0042","term":"gravel","alternatives":["gravel"],"zh":"碎石,碎石地面,砂砾","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A42:C42"}
+{"id":"P0043","term":"iron","alternatives":["iron"],"zh":"铁","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A43:C43"}
+{"id":"P0044","term":"liquid","alternatives":["liquid"],"zh":"液体的,液","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A44:C44"}
+{"id":"P0045","term":"magnet","alternatives":["magnet"],"zh":"磁,电磁","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A45:C45"}
+{"id":"P0046","term":"materials","alternatives":["materials"],"zh":"材料,材质声音","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A46:C46"}
+{"id":"P0047","term":"metal","alternatives":["metal"],"zh":"金属","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A47:C47"}
+{"id":"P0048","term":"mud","alternatives":["mud"],"zh":"泥,非常湿的泥浆地面,设计中可以用于一些厚重液体感的物理音效设计","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A48:C48"}
+{"id":"P0049","term":"puddle","alternatives":["puddle"],"zh":"水坑","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A49:C49"}
+{"id":"P0050","term":"sand","alternatives":["sand"],"zh":"沙子,沙滩地面材质","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A50:C50"}
+{"id":"P0051","term":"soft","alternatives":["soft"],"zh":"柔软的,一般在材质搜索中寻找柔性材质","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A51:C51"}
+{"id":"P0052","term":"wood boomy","alternatives":["wood boomy"],"zh":"木松散的,木质嗡嗡声","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A52:C52"}
+{"id":"P0053","term":"wood hard","alternatives":["wood hard"],"zh":"木质坚硬","domain":"材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A53:C53"}
+{"id":"P0054","term":"bush","alternatives":["bush"],"zh":"灌木丛摩擦声音","domain":"材质,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A54:C54"}
+{"id":"P0055","term":"organic","alternatives":["organic"],"zh":"有机物的,蠕动的,令人感到恶心范围的黏着运动声音,克苏鲁和触手题材常用材质音效","domain":"材质,Gore","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A55:C55"}
+{"id":"P0056","term":"creak","alternatives":["creak"],"zh":"咯吱声,金属或其他材质扭曲咯吱咯吱声音,材质扭曲","domain":"材质,设计,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A56:C56"}
+{"id":"P0057","term":"leaves","alternatives":["leaves"],"zh":"树叶","domain":"材质,武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A57:C57"}
+{"id":"P0058","term":"machine","alternatives":["machine"],"zh":"机械","domain":"材质,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A58:C58"}
+{"id":"P0059","term":"pebble","alternatives":["pebble"],"zh":"鹅卵石","domain":"材质,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A59:C59"}
+{"id":"P0060","term":"rock","alternatives":["rock"],"zh":"岩","domain":"材质,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A60:C60"}
+{"id":"P0061","term":"wood","alternatives":["wood"],"zh":"木,木质的","domain":"材质,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A61:C61"}
+{"id":"P0062","term":"wet","alternatives":["wet"],"zh":"湿声,音频领域表示有混响的音源素材；作材质时(wet materials)表示湿的材料","domain":"材质,音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"可指有混响或湿润材质；两者分别检索。","source":"personal:工作表1!A62:C62"}
+{"id":"P0063","term":"wronk","alternatives":["wronk"],"zh":"巨型金属翁声","domain":"材质,音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"个人/供应商拟声词，保留；优先补试 metal groan / metal stress。","source":"personal:工作表1!A63:C63"}
+{"id":"P0064","term":"sparks","alternatives":["sparks"],"zh":"火花,电火花","domain":"电","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A64:C64"}
+{"id":"P0065","term":"arc","alternatives":["arc"],"zh":"弧","domain":"电,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A65:C65"}
+{"id":"P0066","term":"buzz","alternatives":["buzz"],"zh":"蜂鸣器的滋滋声","domain":"电子","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A66:C66"}
+{"id":"P0067","term":"buzzer","alternatives":["buzzer"],"zh":"蜂鸣风格的声音","domain":"电子","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A67:C67"}
+{"id":"P0068","term":"electronic","alternatives":["electronic","ele"],"zh":"电子音色,电子的,电流","domain":"电子","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A68:C68"}
+{"id":"P0069","term":"glitch","alternatives":["glitch"],"zh":"电子信号失真声音,故障失真声音效果,常用于科幻类的声音设计,故障失真效果,常用于科幻类的声音","domain":"电子","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A69:C69"}
+{"id":"P0070","term":"radio","alternatives":["radio"],"zh":"无线电","domain":"电子","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A70:C70"}
+{"id":"P0071","term":"radius","alternatives":["radius"],"zh":"辐射,辐射范围,辐射风格的","domain":"电子,氛围","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"主要是空间概念，非稳定音效关键词；仅作探索词。","source":"personal:工作表1!A71:C71"}
+{"id":"P0072","term":"monster","alternatives":["monster"],"zh":"怪物","domain":"动物","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A72:C72"}
+{"id":"P0073","term":"roar","alternatives":["roar"],"zh":"怒吼,怪物嘶吼","domain":"动物","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A73:C73"}
+{"id":"P0074","term":"growl","alternatives":["growl"],"zh":"吠声,吼叫声,怪物嘶吼","domain":"动物,技能","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A74:C74"}
+{"id":"P0075","term":"attack","alternatives":["attack"],"zh":"攻击","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A75:C75"}
+{"id":"P0076","term":"blast","alternatives":["blast"],"zh":"爆破","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A76:C76"}
+{"id":"P0077","term":"body","alternatives":["body"],"zh":"身体,一般是动作action类的碰撞foley声音素材","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A77:C77"}
+{"id":"P0078","term":"body fall","alternatives":["body fall"],"zh":"身体摔倒","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A78:C78"}
+{"id":"P0079","term":"boots","alternatives":["boots"],"zh":"靴子","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A79:C79"}
+{"id":"P0080","term":"drag","alternatives":["drag"],"zh":"拖动","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A80:C80"}
+{"id":"P0081","term":"draw gun","alternatives":["draw gun"],"zh":"掏枪,拔出枪,拔枪","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A81:C81"}
+{"id":"P0082","term":"dying","alternatives":["dying"],"zh":"垂死,死去","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A82:C82"}
+{"id":"P0083","term":"fall","alternatives":["fall"],"zh":"下降","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A83:C83"}
+{"id":"P0084","term":"finger","alternatives":["finger"],"zh":"手指","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A84:C84"}
+{"id":"P0085","term":"jump down","alternatives":["jump down"],"zh":"跳下","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A85:C85"}
+{"id":"P0086","term":"knock","alternatives":["knock"],"zh":"敲打","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A86:C86"}
+{"id":"P0087","term":"land","alternatives":["land"],"zh":"落地","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A87:C87"}
+{"id":"P0088","term":"marching","alternatives":["marching"],"zh":"行军","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A88:C88"}
+{"id":"P0089","term":"moving","alternatives":["moving"],"zh":"移动","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A89:C89"}
+{"id":"P0090","term":"punch","alternatives":["punch"],"zh":"击打,拳击,重击","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A90:C90"}
+{"id":"P0091","term":"punch","alternatives":["punch"],"zh":"格斗打击","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A91:C91"}
+{"id":"P0092","term":"rip","alternatives":["rip"],"zh":"裂开、撕裂","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A92:C92"}
+{"id":"P0093","term":"run","alternatives":["run"],"zh":"跑","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A93:C93"}
+{"id":"P0094","term":"slide","alternatives":["slide"],"zh":"滑道、物体滑动","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A94:C94"}
+{"id":"P0095","term":"smash","alternatives":["smash"],"zh":"粉碎,砸","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A95:C95"}
+{"id":"P0096","term":"spin","alternatives":["spin"],"zh":"旋转,物体旋转","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A96:C96"}
+{"id":"P0097","term":"weapon whoosh","alternatives":["weapon whoosh"],"zh":"武器挥舞","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A97:C97"}
+{"id":"P0098","term":"whoosh dowel","alternatives":["whoosh dowel"],"zh":"舞枪弄棒","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A98:C98"}
+{"id":"P0099","term":"wing","alternatives":["wing","flapping","flight"],"zh":"翅膀扑扇","domain":"动作","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A99:C99"}
+{"id":"P0100","term":"cloth","alternatives":["cloth"],"zh":"布,也长用于运动拟音音色关键词","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A100:C100"}
+{"id":"P0101","term":"pants","alternatives":["pants"],"zh":"裤子","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A101:C101"}
+{"id":"P0102","term":"stab","alternatives":["stab"],"zh":"刺,刺入,刺入血肉,穿刺,一般用在Action或者Gore类音效设计中","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A102:C102"}
+{"id":"P0103","term":"swing","alternatives":["swing"],"zh":"摇摆,挥砍","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A103:C103"}
+{"id":"P0104","term":"swish","alternatives":["swish"],"zh":"一般指武器或其他类型的挥砍破风声,foley音效为主","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A104:C104"}
+{"id":"P0105","term":"twirl","alternatives":["twirl"],"zh":"旋转","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A105:C105"}
+{"id":"P0106","term":"walk","alternatives":["walk"],"zh":"步行","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A106:C106"}
+{"id":"P0107","term":"whip multiple","alternatives":["whip multiple","whipmultiple","whip spin"],"zh":"多次旋转 连续旋转","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"疑似供应商拼接命名；不是通用术语。","source":"personal:工作表1!A107:C107"}
+{"id":"P0108","term":"whoosh","alternatives":["whoosh"],"zh":"呼呼,嗖,气流或液体以及其他虚构材质的运动音效","domain":"动作,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A108:C108"}
+{"id":"P0109","term":"palm","alternatives":["palm"],"zh":"手掌击打,棕榈环境","domain":"动作,Foley,自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A109:C109"}
+{"id":"P0110","term":"break","alternatives":["break"],"zh":"打破,打碎,打断,动作声音设计中一般属于Gore类音效","domain":"动作,Gore,技能,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A110:C110"}
+{"id":"P0111","term":"hurt","alternatives":["hurt"],"zh":"伤害,受伤","domain":"动作,Vocal","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A111:C111"}
+{"id":"P0112","term":"rip","alternatives":["rip"],"zh":"撕,撕裂,划破,扯开,撕某种材质","domain":"动作,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A112:C112"}
+{"id":"P0113","term":"roll","alternatives":["roll"],"zh":"滚","domain":"动作,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A113:C113"}
+{"id":"P0114","term":"shake","alternatives":["shake"],"zh":"抖动,震动,颤动的音色和材质","domain":"动作,材质,音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A114:C114"}
+{"id":"P0115","term":"hit","alternatives":["hit"],"zh":"击打/撞击；先加材质或身体部位，再试听力度与瞬态。","domain":"动作,技能","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"","source":"personal:工作表1!A115:C115"}
+{"id":"P0116","term":"bullet body","alternatives":["bullet body"],"zh":"子弹射进身体","domain":"动作,武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A116:C116"}
+{"id":"P0117","term":"sword sheath","alternatives":["sword sheath"],"zh":"拔剑","domain":"动作,武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A117:C117"}
+{"id":"P0118","term":"gears","alternatives":["gears"],"zh":"机械结构,齿轮,机械档位,载具档位,换档","domain":"动作,物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A118:C118"}
+{"id":"P0119","term":"kick","alternatives":["kick"],"zh":"踢；音乐中也表示底鼓音色,音效设计中常用来做Impact短促bass drop音头叠层,加强低频","domain":"动作,音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A119:C119"}
+{"id":"P0120","term":"footsteps","alternatives":["footsteps","fs"],"zh":"脚步声","domain":"动作,自然","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A120:C120"}
+{"id":"P0121","term":"key chain","alternatives":["key chain"],"zh":"钥匙链","domain":"动作细节","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A121:C121"}
+{"id":"P0122","term":"walla","alternatives":["walla"],"zh":"群杂声音,环境中的人群声,人群背景噪声","domain":"环境","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A122:C122"}
+{"id":"P0123","term":"storm","alternatives":["storm"],"zh":"风暴","domain":"环境,技能","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A123:C123"}
+{"id":"P0124","term":"warble","alternatives":["warble"],"zh":"鸟鸣颤声","domain":"环境,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A124:C124"}
+{"id":"P0125","term":"cast","alternatives":["cast"],"zh":"施放动作；单独检索会混入金属铸造，组合 spell cast / magic cast。","domain":"技能","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"","source":"personal:工作表1!A125:C125"}
+{"id":"P0126","term":"spell","alternatives":["spell"],"zh":"念咒,施法","domain":"技能","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A126:C126"}
+{"id":"P0127","term":"aura","alternatives":["aura","auras"],"zh":"光环","domain":"技能,设计","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"光环风格通常需要 tonal / shimmer / drone 等声音词。","source":"personal:工作表1!A127:C127"}
+{"id":"P0128","term":"magic","alternatives":["magic"],"zh":"魔法、法术类","domain":"技能,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A128:C128"}
+{"id":"P0129","term":"scan","alternatives":["scan"],"zh":"扫描","domain":"科幻","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A129:C129"}
+{"id":"P0130","term":"sci-fi","alternatives":["sci-fi"],"zh":"科幻的,高技术科幻的声音素材风格","domain":"科幻","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"同时尝试 scifi / sci fi；连字符不是通配符。","source":"personal:工作表1!A130:C130"}
+{"id":"P0131","term":"anger","alternatives":["anger"],"zh":"愤怒","domain":"情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A131:C131"}
+{"id":"P0132","term":"comical","alternatives":["comical"],"zh":"滑稽的","domain":"情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A132:C132"}
+{"id":"P0133","term":"happy","alternatives":["happy"],"zh":"快乐","domain":"情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A133:C133"}
+{"id":"P0134","term":"nice","alternatives":["nice"],"zh":"好的","domain":"情绪","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"主观泛词，优先替换为明亮、短促等可听特征。","source":"personal:工作表1!A134:C134"}
+{"id":"P0135","term":"provoke","alternatives":["provoke"],"zh":"惹","domain":"情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A135:C135"}
+{"id":"P0136","term":"scream","alternatives":["scream"],"zh":"尖叫,呐喊,一般是恐怖主题的音色","domain":"情绪,Vocal","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A136:C136"}
+{"id":"P0137","term":"sweetener","alternatives":["sweetener"],"zh":"声音设计专用的词汇,分层,叠层,特殊Layer,质感叠层,表示加强叠层,效果甜味剂,一般用于低频和高频Transient瞬态质感提升,常用于Impact,爆炸,动作打击等音效设计加强叠层","domain":"设计,技能","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A137:C137"}
+{"id":"P0138","term":"impact","alternatives":["impact","imp"],"zh":"碰撞,冲击类音效,命中也可用,声音设计中也可以将短促的impact音色用于声音的Transient设计","domain":"设计,技能,音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A138:C138"}
+{"id":"P0139","term":"actions","alternatives":["actions","act"],"zh":"动作,操作","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A139:C139"}
+{"id":"P0140","term":"alien","alternatives":["alien"],"zh":"外星人,异形","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A140:C140"}
+{"id":"P0141","term":"atom","alternatives":["atom"],"zh":"原子的,微小的","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A141:C141"}
+{"id":"P0142","term":"boost","alternatives":["boost"],"zh":"推进,爆发启动","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A142:C142"}
+{"id":"P0143","term":"cinematic","alternatives":["cinematic"],"zh":"影视风格音效,是一个大类,其中包括了一系列低频饱满的音效,这一类音效通常设计用来增强视觉体验,营造情感氛围,支持故事情节,以及提供视听上的沉浸感\n通常适合拿来制作视觉效果优良的预告片以及CG","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A143:C143"}
+{"id":"P0144","term":"close","alternatives":["close"],"zh":"关","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"可指关闭动作或近距离透视；close door 与 close mic 分开。","source":"personal:工作表1!A144:C144"}
+{"id":"P0145","term":"common","alternatives":["common"],"zh":"常规,通用","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A145:C145"}
+{"id":"P0146","term":"energy","alternatives":["energy"],"zh":"能源,能量","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A146:C146"}
+{"id":"P0147","term":"fast","alternatives":["fast"],"zh":"快速","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A147:C147"}
+{"id":"P0148","term":"high tech","alternatives":["high tech","hitech","high tec","hi tech"],"zh":"高科技的","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"风格词；与动作或声源组合。","source":"personal:工作表1!A148:C148"}
+{"id":"P0149","term":"open","alternatives":["open"],"zh":"打开","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A149:C149"}
+{"id":"P0150","term":"outfit","alternatives":["outfit"],"zh":"套装,服装","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A150:C150"}
+{"id":"P0151","term":"slow","alternatives":["slow"],"zh":"慢","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A151:C151"}
+{"id":"P0152","term":"sprinkler","alternatives":["sprinkler"],"zh":"洒水","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A152:C152"}
+{"id":"P0153","term":"stable","alternatives":["stable"],"zh":"稳定,循环类音效的描述词","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A153:C153"}
+{"id":"P0154","term":"start","alternatives":["start"],"zh":"开始","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A154:C154"}
+{"id":"P0155","term":"startup","alternatives":["startup"],"zh":"启动","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A155:C155"}
+{"id":"P0156","term":"stop","alternatives":["stop"],"zh":"停止","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A156:C156"}
+{"id":"P0157","term":"tiny","alternatives":["tiny"],"zh":"微小","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A157:C157"}
+{"id":"P0158","term":"transform","alternatives":["transform"],"zh":"转换","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A158:C158"}
+{"id":"P0159","term":"transition","alternatives":["transition"],"zh":"过渡,过渡效果","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A159:C159"}
+{"id":"P0160","term":"ufo","alternatives":["ufo"],"zh":"飞碟 不明飞行物的","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A160:C160"}
+{"id":"P0161","term":"unstable","alternatives":["unstable"],"zh":"不稳定","domain":"通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A161:C161"}
+{"id":"P0162","term":"heavy","alternatives":["heavy","hvy"],"zh":"重型","domain":"通用,音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A162:C162"}
+{"id":"P0163","term":"huge","alternatives":["huge"],"zh":"巨大的声音","domain":"通用,音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A163:C163"}
+{"id":"P0164","term":"arrow","alternatives":["arrow"],"zh":"飞箭","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A164:C164"}
+{"id":"P0165","term":"axe","alternatives":["axe"],"zh":"斧子","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A165:C165"}
+{"id":"P0166","term":"blade","alternatives":["blade"],"zh":"刀刃,剑刃,单刃剑,双刃剑","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A166:C166"}
+{"id":"P0167","term":"blast","alternatives":["blast"],"zh":"爆发射击,爆发","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A167:C167"}
+{"id":"P0168","term":"bullet","alternatives":["bullet"],"zh":"子弹","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A168:C168"}
+{"id":"P0169","term":"cannon","alternatives":["cannon"],"zh":"加农炮,一般指平射和直射火炮","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A169:C169"}
+{"id":"P0170","term":"flail","alternatives":["flail"],"zh":"链条抽打","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A170:C170"}
+{"id":"P0171","term":"gear","alternatives":["gear"],"zh":"枪栓","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"齿轮、装备或枪械机构；不固定翻译成枪栓。","source":"personal:工作表1!A171:C171"}
+{"id":"P0172","term":"gearbox","alternatives":["gearbox"],"zh":"齿轮箱","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A172:C172"}
+{"id":"P0173","term":"grenade","alternatives":["grenade"],"zh":"手榴弹","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A173:C173"}
+{"id":"P0174","term":"gun","alternatives":["gun"],"zh":"枪","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A174:C174"}
+{"id":"P0175","term":"gun silenced","alternatives":["gun silenced","silencer gun"],"zh":"消音枪声","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A175:C175"}
+{"id":"P0176","term":"knife","alternatives":["knife"],"zh":"刀,轻型刀,匕首","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A176:C176"}
+{"id":"P0177","term":"laser","alternatives":["laser"],"zh":"激光","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A177:C177"}
+{"id":"P0178","term":"laser gun","alternatives":["laser gun"],"zh":"激光枪","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A178:C178"}
+{"id":"P0179","term":"launch","alternatives":["launch"],"zh":"发射","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A179:C179"}
+{"id":"P0180","term":"machine gun","alternatives":["machine gun"],"zh":"机枪","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A180:C180"}
+{"id":"P0181","term":"pistol","alternatives":["pistol"],"zh":"手枪","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A181:C181"}
+{"id":"P0182","term":"plasma","alternatives":["plasma"],"zh":"等离子体,等离子武器","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A182:C182"}
+{"id":"P0183","term":"rake","alternatives":["rake"],"zh":"耙子","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A183:C183"}
+{"id":"P0184","term":"load","alternatives":["load"],"zh":"装子弹、加载","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A184:C184"}
+{"id":"P0185","term":"saber","alternatives":["saber"],"zh":"军刀","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A185:C185"}
+{"id":"P0186","term":"sharp","alternatives":["sharp"],"zh":"锋利的","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A186:C186"}
+{"id":"P0187","term":"shell","alternatives":["shell"],"zh":"弹壳","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A187:C187"}
+{"id":"P0188","term":"shot","alternatives":["shot"],"zh":"射击","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A188:C188"}
+{"id":"P0189","term":"shotgun","alternatives":["shotgun"],"zh":"霰弹枪","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A189:C189"}
+{"id":"P0190","term":"silenced gun","alternatives":["silenced gun","suppressed gun","silencer gun","sliener gun"],"zh":"消音枪声","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原拼写保留为历史别名；优先 suppressed gun / silenced gun。","source":"personal:工作表1!A190:C190"}
+{"id":"P0191","term":"sword","alternatives":["sword"],"zh":"剑,单手剑","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A191:C191"}
+{"id":"P0192","term":"sword","alternatives":["sword"],"zh":"剑、巨剑","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A192:C192"}
+{"id":"P0193","term":"sword sharp","alternatives":["sword sharp","sword ring"],"zh":"剑鸣,冷兵器震动高频声音","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A193:C193"}
+{"id":"P0194","term":"whip","alternatives":["whip"],"zh":"鞭子","domain":"武器","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A194:C194"}
+{"id":"P0195","term":"scrape","alternatives":["scrape"],"zh":"刮、擦、蹭","domain":"武器,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A195:C195"}
+{"id":"P0196","term":"sword scrape","alternatives":["sword scrape","sword schings"],"zh":"巨剑在地上拖、摩擦","domain":"武器,Foley","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A196:C196"}
+{"id":"P0197","term":"whip","alternatives":["whip"],"zh":"鞭子,鞭子的声音,也可作为一些其他软性物体的高速运动叠层,比如触手","domain":"武器,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A197:C197"}
+{"id":"P0198","term":"claw","alternatives":["claw"],"zh":"金属利爪","domain":"武器,技能","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A198:C198"}
+{"id":"P0199","term":"beam","alternatives":["beam"],"zh":"粒子束,能量射线,光线性质的强能量音","domain":"武器,技能,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A199:C199"}
+{"id":"P0200","term":"boom","alternatives":["boom"],"zh":"爆炸,隆隆声的爆炸","domain":"武器,战争","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A200:C200"}
+{"id":"P0201","term":"bullet whiz","alternatives":["bullet whiz"],"zh":"子弹飞过,flyby","domain":"武器,战争","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A201:C201"}
+{"id":"P0202","term":"fly by","alternatives":["fly by"],"zh":"飞过,弹道飞过,子弹或者其他实体弹道,超音速或者亚音速的多普勒效果","domain":"武器,战争","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A202:C202"}
+{"id":"P0203","term":"box fall","alternatives":["box fall"],"zh":"箱子倒下","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A203:C203"}
+{"id":"P0204","term":"brick","alternatives":["brick"],"zh":"砖头,板砖","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A204:C204"}
+{"id":"P0205","term":"clink","alternatives":["clink"],"zh":"碰杯","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A205:C205"}
+{"id":"P0206","term":"drone","alternatives":["drone"],"zh":"无人机(不常用)","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"多义：无人机声源 / 持续音设计；按原分类保留两条。","source":"personal:工作表1!A206:C206"}
+{"id":"P0207","term":"flat","alternatives":["flat"],"zh":"平面","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A207:C207"}
+{"id":"P0208","term":"gear","alternatives":["gear"],"zh":"汽车挂挡、拉枪栓","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"齿轮、装备或枪械机构；不固定翻译成枪栓。","source":"personal:工作表1!A208:C208"}
+{"id":"P0209","term":"machine","alternatives":["machine","mechanical"],"zh":"机器、机械","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A209:C209"}
+{"id":"P0210","term":"propeller","alternatives":["propeller"],"zh":"螺旋桨","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A210:C210"}
+{"id":"P0211","term":"robot","alternatives":["robot"],"zh":"机器人","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A211:C211"}
+{"id":"P0212","term":"rod","alternatives":["rod"],"zh":"竿","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A212:C212"}
+{"id":"P0213","term":"screw","alternatives":["screw"],"zh":"螺丝","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A213:C213"}
+{"id":"P0214","term":"spring","alternatives":["spring"],"zh":"弹簧","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A214:C214"}
+{"id":"P0215","term":"stone","alternatives":["stone"],"zh":"石头","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A215:C215"}
+{"id":"P0216","term":"tools","alternatives":["tools"],"zh":"工具 小工具","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A216:C216"}
+{"id":"P0217","term":"vine","alternatives":["vine"],"zh":"蔓藤","domain":"物件","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A217:C217"}
+{"id":"P0218","term":"bamboo","alternatives":["bamboo"],"zh":"竹,竹子的","domain":"物件,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A218:C218"}
+{"id":"P0219","term":"blood","alternatives":["blood","juicy"],"zh":"血液,液体飞溅","domain":"液体,Gore","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A219:C219"}
+{"id":"P0220","term":"splash","alternatives":["splash"],"zh":"液体飞溅,水花","domain":"液体,Gore","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A220:C220"}
+{"id":"P0221","term":"braams","alternatives":["braams"],"zh":"低频嗡嗡嗡,Cinematic电影预告片常用过场低频氛围音","domain":"音乐,Cinematic","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A221:C221"}
+{"id":"P0222","term":"bass","alternatives":["bass"],"zh":"低音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A222:C222"}
+{"id":"P0223","term":"bell tree","alternatives":["bell tree","belltree","mark tree"],"zh":"摇晃的铃铛","domain":"音乐/细节","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"bell tree 与 mark tree 是相关但不同的乐器；试听确认。","source":"personal:工作表1!A223:C223"}
+{"id":"P0224","term":"bright","alternatives":["bright"],"zh":"明亮的,亮的音色","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A224:C224"}
+{"id":"P0225","term":"chime bell","alternatives":["chime bell"],"zh":"风铃,类风铃的音色","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A225:C225"}
+{"id":"P0226","term":"clean","alternatives":["clean"],"zh":"干净的","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A226:C226"}
+{"id":"P0227","term":"close","alternatives":["close"],"zh":"近距离的声音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"可指关闭动作或近距离透视；close door 与 close mic 分开。","source":"personal:工作表1!A227:C227"}
+{"id":"P0228","term":"continuous","alternatives":["continuous","constant"],"zh":"不断的,连续的","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A228:C228"}
+{"id":"P0229","term":"contact mic","alternatives":["contact mic","contmic","contact microphone"],"zh":"接触式麦克风的内容","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"接触式麦克风录音；优先完整词。","source":"personal:工作表1!A229:C229"}
+{"id":"P0230","term":"ding","alternatives":["ding"],"zh":"拟声词,“叮”鸣声","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A230:C230"}
+{"id":"P0231","term":"distant","alternatives":["distant"],"zh":"远距离的声音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A231:C231"}
+{"id":"P0232","term":"doppler","alternatives":["doppler"],"zh":"物理多普勒运动声音效果,一般指速度变化导致的声学音高变化效果","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A232:C232"}
+{"id":"P0233","term":"drop","alternatives":["drop","drop down"],"zh":"下降","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"可能指物体落下或音高下降；先辨义。","source":"personal:工作表1!A233:C233"}
+{"id":"P0234","term":"emotions","alternatives":["emotions"],"zh":"情绪","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A234:C234"}
+{"id":"P0235","term":"frequency","alternatives":["frequency"],"zh":"频率,音频","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A235:C235"}
+{"id":"P0236","term":"glisten","alternatives":["glisten","glistens","glitter"],"zh":"闪光","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"视觉隐喻，改试 shimmer / sparkle 可扩大召回。","source":"personal:工作表1!A236:C236"}
+{"id":"P0237","term":"grain","alternatives":["grain"],"zh":"粒子的,很小颗粒的,粒子合成或采样的音频效果处理,粒子离散风格的声音素材","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A237:C237"}
+{"id":"P0238","term":"hard","alternatives":["hard"],"zh":"硬","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A238:C238"}
+{"id":"P0239","term":"hiss","alternatives":["hiss"],"zh":"嘶,","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A239:C239"}
+{"id":"P0240","term":"light","alternatives":["light","lit"],"zh":"发光,点亮,轻的","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A240:C240"}
+{"id":"P0241","term":"long","alternatives":["long"],"zh":"长","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A241:C241"}
+{"id":"P0242","term":"middle","alternatives":["middle","mid"],"zh":"中,中等的","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A242:C242"}
+{"id":"P0243","term":"modulated","alternatives":["modulated"],"zh":"调制的,调制处理后的声音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A243:C243"}
+{"id":"P0244","term":"musical","alternatives":["musical"],"zh":"音乐性的声音,乐音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A244:C244"}
+{"id":"P0245","term":"pad","alternatives":["pad"],"zh":"合成音色","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A245:C245"}
+{"id":"P0246","term":"processed gong","alternatives":["processed gong","tonal texture","granular","subtle motion"],"zh":"粒子的,粒子合成或采样的音频效果处理,粒子离散风格的声音素材","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原项为一组描述维度，不是同义词串。","source":"personal:工作表1!A246:C246"}
+{"id":"P0247","term":"percussion","alternatives":["percussion"],"zh":"打击乐器","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A247:C247"}
+{"id":"P0248","term":"pitch up","alternatives":["pitch up"],"zh":"音高升起,升调的声音,多用于蓄力音效描述","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A248:C248"}
+{"id":"P0249","term":"quick","alternatives":["quick"],"zh":"快","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A249:C249"}
+{"id":"P0250","term":"rapid","alternatives":["rapid"],"zh":"快速","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A250:C250"}
+{"id":"P0251","term":"rattle","alternatives":["rattle"],"zh":"嘎嘎声","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A251:C251"}
+{"id":"P0252","term":"retro","alternatives":["retro"],"zh":"复古的","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A252:C252"}
+{"id":"P0253","term":"ring","alternatives":["ring"],"zh":"高频的嗡鸣,响亮的,圆环碰撞引起的悦耳嗡鸣声,连续振铃声","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A253:C253"}
+{"id":"P0254","term":"rough","alternatives":["rough"],"zh":"粗","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A254:C254"}
+{"id":"P0255","term":"rude","alternatives":["rude"],"zh":"无礼","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"泛情绪词；补试 harsh / rough / aggressive。","source":"personal:工作表1!A255:C255"}
+{"id":"P0256","term":"rumble","alternatives":["rumble"],"zh":"低频隆隆","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A256:C256"}
+{"id":"P0257","term":"sharp","alternatives":["sharp"],"zh":"尖锐刺耳的声音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A257:C257"}
+{"id":"P0258","term":"smooth","alternatives":["smooth"],"zh":"平滑的,平缓的,舒缓的声音","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A258:C258"}
+{"id":"P0259","term":"sub","alternatives":["sub"],"zh":"低频,极低频","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A259:C259"}
+{"id":"P0260","term":"weight","alternatives":["weight"],"zh":"重量","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A260:C260"}
+{"id":"P0261","term":"stinger","alternatives":["stinger"],"zh":"尖刺的；交互音乐的一个插入段落音乐的专用术语","domain":"音色,Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A261:C261"}
+{"id":"P0262","term":"toys","alternatives":["toys"],"zh":"玩具,长用来设计动画和卡通音色","domain":"音色,Foley,卡通","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A262:C262"}
+{"id":"P0263","term":"clank","alternatives":["clank"],"zh":"铮铮,金属的沉重碰撞晃动声音","domain":"音色,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A263:C263"}
+{"id":"P0264","term":"dry","alternatives":["dry"],"zh":"干声,音频领域表示无混响的音源素材；作材质时(dry materials)表示干的材料","domain":"音色,材质","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"可指无混响或干燥材质；不从词语推定客观声学测量。","source":"personal:工作表1!A264:C264"}
+{"id":"P0265","term":"bubble","alternatives":["bubble"],"zh":"泡泡声,泡泡效果的音色,常用于卡通风格声音设计","domain":"音色,材质,液体","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A265:C265"}
+{"id":"P0266","term":"impulse","alternatives":["impulse"],"zh":"脉冲,脉冲风格的","domain":"音色,电子","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A266:C266"}
+{"id":"P0267","term":"shepard tones","alternatives":["Shepard Tones"],"zh":"谢菲尔德音调,循环升调,用于循环蓄力音效,蓄力loop的设计；在一些情况下可以反过来做循环降调,在特殊时间缓慢的特殊场景的声音设计中使用","domain":"音色,技能","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A267:C267"}
+{"id":"P0268","term":"codes","alternatives":["codes"],"zh":"代码,数码风格的","domain":"音色,科幻","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"泛词易噪声；补试 data / digital / telemetry。","source":"personal:工作表1!A268:C268"}
+{"id":"P0269","term":"codes storm","alternatives":["codes storm"],"zh":"代码风暴","domain":"音色,科幻","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"个人/供应商描述；补试 data glitch / digital burst。","source":"personal:工作表1!A269:C269"}
+{"id":"P0270","term":"dark","alternatives":["dark"],"zh":"黑暗的音色","domain":"音色,情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A270:C270"}
+{"id":"P0271","term":"negative","alternatives":["negative"],"zh":"负面的消极的情绪,阴暗的音色,一般用于魔法技能声音情绪layer","domain":"音色,情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A271:C271"}
+{"id":"P0272","term":"neutral","alternatives":["neutral"],"zh":"中性情绪的,中性音色,一般用于魔法技能声音情绪layer","domain":"音色,情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A272:C272"}
+{"id":"P0273","term":"positive","alternatives":["positive"],"zh":"正面的积极的情绪,阳光的音色,一般用于魔法技能声音情绪layer","domain":"音色,情绪","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A273:C273"}
+{"id":"P0274","term":"bass drop","alternatives":["bass drop"],"zh":"时间停止声音设计,低频音高骤降,一般用于时间停止的进入,或者cinematic风格的转场,一般配合Impact音效出现,多数可作为Sweetener\n另外一些短促的Bass Drop声音素材可以作为Impact和Punch声音设计的音头低频加强","domain":"音色,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A274:C274"}
+{"id":"P0275","term":"transition","alternatives":["transition"],"zh":"转场","domain":"设计/转场","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A275:C275"}
+{"id":"P0276","term":"bitcrush","alternatives":["bitcrush"],"zh":"类似8bit 噪声","domain":"音色,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A276:C276"}
+{"id":"P0277","term":"poof","alternatives":["poof"],"zh":"低频出现声音,一般作为Sweetener,低频瞬态音头","domain":"音色,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A277:C277"}
+{"id":"P0278","term":"drone","alternatives":["drone"],"zh":"嗡嗡的低频氛围声,一般做背景烘托,持续低频脉冲氛围；低频PAD类的drone音色常用于技能背景铺底,Cinematic 循环氛围烘托,也长用于","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"多义：无人机声源 / 持续音设计；按原分类保留两条。","source":"personal:工作表1!A278:C278"}
+{"id":"P0279","term":"shimmer","alternatives":["shimmer","shimmers"],"zh":"高频明亮的颤音","domain":"音色,音乐","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"持续闪烁亮感；与 sparkle / chime 相关但不等同。","source":"personal:工作表1!A279:C279"}
+{"id":"P0280","term":"burnout","alternatives":["burnout"],"zh":"载具烧胎声音","domain":"载具","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A280:C280"}
+{"id":"P0281","term":"drift","alternatives":["drift"],"zh":"载具漂移打滑声音","domain":"载具","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A281:C281"}
+{"id":"P0282","term":"engine","alternatives":["engine"],"zh":"发动机,引擎","domain":"载具","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A282:C282"}
+{"id":"P0283","term":"skid","alternatives":["skid"],"zh":"载具轮胎打滑,刹车打滑声音","domain":"载具","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A283:C283"}
+{"id":"P0284","term":"idle","alternatives":["idle"],"zh":"待机, 人物或机械待机状态","domain":"载具,通用","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A284:C284"}
+{"id":"P0285","term":"passby","alternatives":["passby"],"zh":"经过,擦身而过,一般指载具从身边经过的胎噪引擎声和气流声音,带有明显的多普勒运动音调变化效果","domain":"载具,音色,设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A285:C285"}
+{"id":"P0286","term":"flour explosion","alternatives":["flour explosion"],"zh":"面粉爆炸","domain":"战斗","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A286:C286"}
+{"id":"P0287","term":"explosion","alternatives":["explosion","expl"],"zh":"爆炸","domain":"战争","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A287:C287"}
+{"id":"P0288","term":"gun distant","alternatives":["gun distant"],"zh":"远处枪声","domain":"战争","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A288:C288"}
+{"id":"P0289","term":"soldier","alternatives":["soldier","army"],"zh":"士兵、部队、军队","domain":"战争","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"原表并列检索词；不保证互为同义词，分别尝试。","source":"personal:工作表1!A289:C289"}
+{"id":"P0290","term":"tank","alternatives":["tank"],"zh":"坦克","domain":"战争","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A290:C290"}
+{"id":"P0291","term":"ambience","alternatives":["ambience","amb","ambient","atmosphere"],"zh":"环境声,氛围","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"环境底声；amb 是常见缩写但匹配噪声可能多。","source":"personal:工作表1!A291:C291"}
+{"id":"P0292","term":"animal","alternatives":["animal"],"zh":"动物","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A292:C292"}
+{"id":"P0293","term":"forest","alternatives":["forest"],"zh":"森林","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A293:C293"}
+{"id":"P0294","term":"fountain","alternatives":["fountain"],"zh":"喷泉","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A294:C294"}
+{"id":"P0295","term":"rain","alternatives":["rain"],"zh":"雨","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A295:C295"}
+{"id":"P0296","term":"thunder","alternatives":["thunder"],"zh":"雷,雷电,低频雷电的轰隆隆和闪电的音爆声","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A296:C296"}
+{"id":"P0297","term":"waterfall","alternatives":["waterfall"],"zh":"瀑布","domain":"自然","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A297:C297"}
+{"id":"P0298","term":"birds","alternatives":["birds"],"zh":"鸟类,鸟叫声音","domain":"自然,环境","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A298:C298"}
+{"id":"P0299","term":"water","alternatives":["water"],"zh":"水,水系魔法风格的,水材质的","domain":"自然,技能,材质","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A299:C299"}
+{"id":"P0300","term":"wind","alternatives":["wind"],"zh":"风声；按 gust、howl、whistle、buffet、树叶或室内漏风细化。","domain":"风","layer":"按语境","ucs_catids":[],"status":"personal-reviewed","note":"","source":"personal:工作表1!A300:C300"}
+{"id":"P0301","term":"glitter","alternatives":["glitter"],"zh":"魔法类 亮晶晶、星光","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A301:C301"}
+{"id":"P0302","term":"stress","alternatives":["stress"],"zh":"压力、挤压、因压力使什么东西破坏。缓慢折断等。","domain":"自然、Foley","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A302:C302"}
+{"id":"P0303","term":"riser","alternatives":["riser"],"zh":"蓄力","domain":"音色","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A303:C303"}
+{"id":"P0304","term":"flyby","alternatives":["flyby"],"zh":"箭矢、子弹等运动物体穿过耳边的咻咻声","domain":"设计","layer":"按语境","ucs_catids":[],"status":"personal","note":"","source":"personal:工作表1!A304:C304"}
+{"id":"E0001","term":"detonation","alternatives":["explosion","blast"],"zh":"爆轰、爆炸主体","domain":"爆炸","layer":"主体","ucs_catids":["EXPLReal"],"status":"editorial-expansion","note":"写实爆炸的替代检索词","source":"editorial:2026-11-12"}
+{"id":"E0002","term":"shockwave","alternatives":["shock wave","pressure wave"],"zh":"冲击波、压力波","domain":"科幻/爆炸","layer":"主体","ucs_catids":["EXPLDsgn"],"status":"editorial-expansion","note":"常用于设计爆炸；不是每个库都使用","source":"editorial:2026-11-12"}
+{"id":"E0003","term":"implosion","alternatives":["collapse","suction"],"zh":"内爆、向内塌缩","domain":"科幻/爆炸","layer":"主体","ucs_catids":["EXPLDsgn"],"status":"editorial-expansion","note":"可结合 reverse / vacuum 寻找吸入感","source":"editorial:2026-11-12"}
+{"id":"E0004","term":"debris","alternatives":["rubble","fragments"],"zh":"碎片、飞散残骸","domain":"破坏","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"与 glass / metal / concrete 组合","source":"editorial:2026-11-12"}
+{"id":"E0005","term":"rubble","alternatives":["debris","rock fall"],"zh":"坍塌瓦砾","domain":"破坏","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"主体爆炸和瓦砾尾音分开查","source":"editorial:2026-11-12"}
+{"id":"E0006","term":"shrapnel","alternatives":["debris whiz","metal flyby"],"zh":"弹片、碎片掠过","domain":"爆炸","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"相关替代而非严格同义","source":"editorial:2026-11-12"}
+{"id":"E0007","term":"concussion","alternatives":["blast","thump"],"zh":"强冲击、爆炸震荡","domain":"爆炸","layer":"主体","ucs_catids":["EXPLDsgn"],"status":"editorial-expansion","note":"优先与 explosion 组合","source":"editorial:2026-11-12"}
+{"id":"E0008","term":"thump","alternatives":["thud","low hit"],"zh":"沉闷短促撞击","domain":"设计","layer":"低频","ucs_catids":["DSGNImpt"],"status":"editorial-expansion","note":"补低中频力度","source":"editorial:2026-11-12"}
+{"id":"E0009","term":"thud","alternatives":["thump","body fall"],"zh":"闷响、重物落下","domain":"拟音","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"动作与材质决定用途","source":"editorial:2026-11-12"}
+{"id":"E0010","term":"sub boom","alternatives":["sub hit","sub impact"],"zh":"超低频轰鸣冲击","domain":"设计","layer":"低频","ucs_catids":["DSGNBoom"],"status":"editorial-expansion","note":"sub 为词语标签，不代表测量频段","source":"editorial:2026-11-12"}
+{"id":"E0011","term":"low end","alternatives":["bass","sub"],"zh":"低频部分","domain":"设计","layer":"低频","ucs_catids":["DSGNRmbl"],"status":"editorial-expansion","note":"与 impact / rumble 组合","source":"editorial:2026-11-12"}
+{"id":"E0012","term":"transient","alternatives":["attack","snap"],"zh":"瞬态音头","domain":"设计","layer":"音头","ucs_catids":["DSGNImpt"],"status":"editorial-expansion","note":"attack 同时可指攻击动作","source":"editorial:2026-11-12"}
+{"id":"E0013","term":"snap","alternatives":["crack","pop"],"zh":"短促啪声、断裂","domain":"拟音","layer":"音头","ucs_catids":[],"status":"editorial-expansion","note":"可作攻击音头","source":"editorial:2026-11-12"}
+{"id":"E0014","term":"crackle","alternatives":["crackling","sparks"],"zh":"连续细小噼啪","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"火焰、电流、冰裂分别试","source":"editorial:2026-11-12"}
+{"id":"E0015","term":"crunch","alternatives":["crush","grind"],"zh":"挤碎、碾碎的密集颗粒","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"用于碎骨、积雪或瓦砾需辨义","source":"editorial:2026-11-12"}
+{"id":"E0016","term":"crush","alternatives":["crunch","squash"],"zh":"压碎、挤压破坏","domain":"破坏","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"与具体材质组合","source":"editorial:2026-11-12"}
+{"id":"E0017","term":"shatter","alternatives":["glass break","ice break"],"zh":"脆性碎裂","domain":"破坏","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"优先指定 glass / ice","source":"editorial:2026-11-12"}
+{"id":"E0018","term":"collapse","alternatives":["crumble","fall"],"zh":"坍塌、结构失稳","domain":"破坏","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"也可用于内爆尾声","source":"editorial:2026-11-12"}
+{"id":"E0019","term":"crumble","alternatives":["rubble","debris"],"zh":"碎裂剥落、逐渐崩解","domain":"破坏","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"较渐进的颗粒","source":"editorial:2026-11-12"}
+{"id":"E0020","term":"concrete","alternatives":["cement","rubble"],"zh":"混凝土材质","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"用于建筑爆炸碎片","source":"editorial:2026-11-12"}
+{"id":"E0021","term":"glass","alternatives":["glass shards","glass break"],"zh":"玻璃材质","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"碎裂、摩擦、共振分开查","source":"editorial:2026-11-12"}
+{"id":"E0022","term":"ice","alternatives":["ice crack","ice break"],"zh":"冰材质","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"冰魔法与写实冰裂都可取材","source":"editorial:2026-11-12"}
+{"id":"E0023","term":"ceramic","alternatives":["pottery","porcelain"],"zh":"陶瓷材质","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"尖锐碎片与脆性音头","source":"editorial:2026-11-12"}
+{"id":"E0024","term":"plastic","alternatives":["plastic flex","plastic crack"],"zh":"塑料材质","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"变形与断裂分开","source":"editorial:2026-11-12"}
+{"id":"E0025","term":"rubber","alternatives":["rubber stretch","rubber squeak"],"zh":"橡胶材质","domain":"材质","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"卡通拉伸与生物皮肤可探索","source":"editorial:2026-11-12"}
+{"id":"E0026","term":"leather","alternatives":["leather creak","leather movement"],"zh":"皮革","domain":"拟音","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"装备与角色动作","source":"editorial:2026-11-12"}
+{"id":"E0027","term":"convolution","alternatives":["impulse response","IR"],"zh":"卷积处理","domain":"处理","layer":"空间","ucs_catids":[],"status":"editorial-expansion","note":"处理方法，不自动当声源","source":"editorial:2026-11-12"}
+{"id":"E0028","term":"reverb tail","alternatives":["reverberation","echo"],"zh":"混响尾音","domain":"空间","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"echo 与 reverb 有区别；试听选择","source":"editorial:2026-11-12"}
+{"id":"E0029","term":"decay","alternatives":["tail","ring out"],"zh":"声音衰减、尾部","domain":"空间","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"与 tonal / impact 组合","source":"editorial:2026-11-12"}
+{"id":"E0030","term":"resonance","alternatives":["resonant","ring"],"zh":"共鸣、共振","domain":"音色","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"可检索具体物体共振","source":"editorial:2026-11-12"}
+{"id":"E0031","term":"ring out","alternatives":["metal ring","resonance"],"zh":"撞击后的鸣响","domain":"音色","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"与短瞬态分开找","source":"editorial:2026-11-12"}
+{"id":"E0032","term":"tail","alternatives":["decay","reverb tail"],"zh":"尾音","domain":"设计","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"通常需要补主体词","source":"editorial:2026-11-12"}
+{"id":"E0033","term":"reverse","alternatives":["reversed","reverse swell"],"zh":"倒放吸入感","domain":"设计","layer":"前奏","ucs_catids":["DSGNRise"],"status":"editorial-expansion","note":"是处理方向，不是素材真实性","source":"editorial:2026-11-12"}
+{"id":"E0034","term":"swell","alternatives":["build","riser"],"zh":"渐强、涌起","domain":"设计","layer":"前奏","ucs_catids":["DSGNRise"],"status":"editorial-expansion","note":"既可音量也可质感渐变","source":"editorial:2026-11-12"}
+{"id":"E0035","term":"build up","alternatives":["buildup","charge up"],"zh":"蓄力、逐步增强","domain":"设计","layer":"前奏","ucs_catids":["DSGNRise"],"status":"editorial-expansion","note":"组合 charge / energy","source":"editorial:2026-11-12"}
+{"id":"E0036","term":"charge up","alternatives":["power up","charging"],"zh":"能量蓄力","domain":"科幻","layer":"前奏","ucs_catids":["DSGNRise"],"status":"editorial-expansion","note":"完整能量武器前奏","source":"editorial:2026-11-12"}
+{"id":"E0037","term":"power down","alternatives":["shutdown","power off"],"zh":"断电、停机","domain":"科幻","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"与 engine / electronic 组合","source":"editorial:2026-11-12"}
+{"id":"E0038","term":"energy burst","alternatives":["plasma burst","electric burst"],"zh":"能量爆发","domain":"科幻","layer":"主体","ucs_catids":["EXPLDsgn"],"status":"editorial-expansion","note":"科幻爆炸成品候选","source":"editorial:2026-11-12"}
+{"id":"E0039","term":"electric arc","alternatives":["arc discharge","zap"],"zh":"电弧放电","domain":"电","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"与火花不是同一物理现象","source":"editorial:2026-11-12"}
+{"id":"E0040","term":"zap","alternatives":["electric hit","laser shot"],"zh":"短促电击","domain":"电","layer":"音头","ucs_catids":[],"status":"editorial-expansion","note":"拟声词","source":"editorial:2026-11-12"}
+{"id":"E0041","term":"discharge","alternatives":["electric discharge","air release"],"zh":"放电、释压","domain":"电/机械","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"需要限定声源","source":"editorial:2026-11-12"}
+{"id":"E0042","term":"static","alternatives":["radio static","noise"],"zh":"静电、无线电噪声","domain":"电子","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"静态形容词也可能误召回","source":"editorial:2026-11-12"}
+{"id":"E0043","term":"interference","alternatives":["radio interference","static"],"zh":"信号干扰","domain":"电子","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"可用于受损通讯","source":"editorial:2026-11-12"}
+{"id":"E0044","term":"telemetry","alternatives":["data","transmission"],"zh":"遥测、数据通信","domain":"科幻","layer":"细节","ucs_catids":["UIData"],"status":"editorial-expansion","note":"风格探索词","source":"editorial:2026-11-12"}
+{"id":"E0045","term":"servo","alternatives":["motor","robot movement"],"zh":"伺服电机","domain":"机械","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"机器人动作层","source":"editorial:2026-11-12"}
+{"id":"E0046","term":"hydraulic","alternatives":["hydraulics","piston"],"zh":"液压机构","domain":"机械","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"不要与 pneumatic 合并成同义词","source":"editorial:2026-11-12"}
+{"id":"E0047","term":"pneumatic","alternatives":["air pressure","air release"],"zh":"气动机构","domain":"机械","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"压力释放层","source":"editorial:2026-11-12"}
+{"id":"E0048","term":"piston","alternatives":["hydraulic piston","engine piston"],"zh":"活塞往复","domain":"机械","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"指定动力系统","source":"editorial:2026-11-12"}
+{"id":"E0049","term":"ratchet","alternatives":["ratcheting","gear click"],"zh":"棘轮、单向咔哒","domain":"机械","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"机械锁定层","source":"editorial:2026-11-12"}
+{"id":"E0050","term":"latch","alternatives":["lock click","clasp"],"zh":"门闩、扣锁","domain":"机械","layer":"音头","ucs_catids":[],"status":"editorial-expansion","note":"区别于门板撞击","source":"editorial:2026-11-12"}
+{"id":"E0051","term":"hinge","alternatives":["door hinge","hinge squeak"],"zh":"铰链","domain":"机械","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"门轴摩擦","source":"editorial:2026-11-12"}
+{"id":"E0052","term":"slam","alternatives":["door slam","metal slam"],"zh":"猛关、重击","domain":"拟音","layer":"音头","ucs_catids":[],"status":"editorial-expansion","note":"动作词应搭配对象","source":"editorial:2026-11-12"}
+{"id":"E0053","term":"grind","alternatives":["grinding","scrape"],"zh":"研磨、粗糙摩擦","domain":"材质","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"偏持续颗粒","source":"editorial:2026-11-12"}
+{"id":"E0054","term":"groan","alternatives":["metal groan","creature groan"],"zh":"低沉呻吟、结构受力","domain":"材质/生物","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"必须按声源消歧","source":"editorial:2026-11-12"}
+{"id":"E0055","term":"stress metal","alternatives":["metal stress","metal bend"],"zh":"金属受力变形","domain":"材质","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"可作为大型物体崩塌层","source":"editorial:2026-11-12"}
+{"id":"E0056","term":"bowed metal","alternatives":["metal resonance","bowed"],"zh":"弓擦金属持续共鸣","domain":"设计","layer":"持续","ucs_catids":["DSGNTonl"],"status":"editorial-expansion","note":"恐怖持续音取材","source":"editorial:2026-11-12"}
+{"id":"E0057","term":"breath","alternatives":["breathing","exhale"],"zh":"呼吸、气息","domain":"生物","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"怪物、魔法气流均可取材","source":"editorial:2026-11-12"}
+{"id":"E0058","term":"snarl","alternatives":["growl","monster snarl"],"zh":"龇牙低吼","domain":"生物","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"不是完整吼叫同义替代","source":"editorial:2026-11-12"}
+{"id":"E0059","term":"snort","alternatives":["animal snort","breath"],"zh":"喷鼻、鼻息","domain":"生物","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"生物动作细节","source":"editorial:2026-11-12"}
+{"id":"E0060","term":"gurgle","alternatives":["bubbling","liquid gurgle"],"zh":"咕噜湿声","domain":"液体/生物","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"液体与喉音需辨义","source":"editorial:2026-11-12"}
+{"id":"E0061","term":"squelch","alternatives":["squish","mud footstep"],"zh":"黏湿挤压声","domain":"液体/拟音","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"湿泥、血肉、黏液均可探索","source":"editorial:2026-11-12"}
+{"id":"E0062","term":"squish","alternatives":["squelch","wet squeeze"],"zh":"软湿挤压","domain":"液体/拟音","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"按材质拆分","source":"editorial:2026-11-12"}
+{"id":"E0063","term":"slime","alternatives":["goo","slime movement"],"zh":"黏液质感","domain":"生物","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"幻想素材常见标签","source":"editorial:2026-11-12"}
+{"id":"E0064","term":"tentacle","alternatives":["slime movement","whip"],"zh":"触手动作","domain":"生物","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"可从绳鞭和湿素材组合","source":"editorial:2026-11-12"}
+{"id":"E0065","term":"heartbeat","alternatives":["heart beat","pulse"],"zh":"心跳","domain":"生物","layer":"低频","ucs_catids":[],"status":"editorial-expansion","note":"pulse 也用于合成器","source":"editorial:2026-11-12"}
+{"id":"E0066","term":"pulse","alternatives":["pulsing","rhythmic"],"zh":"脉冲、周期起伏","domain":"设计","layer":"持续","ucs_catids":["DSGNRythm"],"status":"editorial-expansion","note":"需明确生理或电子","source":"editorial:2026-11-12"}
+{"id":"E0067","term":"sparkle","alternatives":["shimmer","glitter"],"zh":"闪亮细点","domain":"魔法","layer":"细节","ucs_catids":["MAGShim"],"status":"editorial-expansion","note":"亮晶晶魔法层","source":"editorial:2026-11-12"}
+{"id":"E0068","term":"twinkle","alternatives":["sparkle","chime"],"zh":"星点闪烁","domain":"魔法","layer":"细节","ucs_catids":["MAGShim"],"status":"editorial-expansion","note":"短亮音色","source":"editorial:2026-11-12"}
+{"id":"E0069","term":"portal","alternatives":["teleport","rift"],"zh":"传送门","domain":"魔法/科幻","layer":"主体","ucs_catids":["MAGMisc"],"status":"editorial-expansion","note":"先查成品，失败拆能量与气流","source":"editorial:2026-11-12"}
+{"id":"E0070","term":"teleport","alternatives":["teleportation","portal"],"zh":"瞬移、传送","domain":"魔法/科幻","layer":"主体","ucs_catids":["MAGMisc"],"status":"editorial-expansion","note":"可组合 whoosh / impact","source":"editorial:2026-11-12"}
+{"id":"E0071","term":"shield","alternatives":["barrier","force field"],"zh":"护盾","domain":"魔法/科幻","layer":"主体","ucs_catids":["MAGSpel"],"status":"editorial-expansion","note":"风格标签；区分激活与命中","source":"editorial:2026-11-12"}
+{"id":"E0072","term":"spell cast","alternatives":["magic cast","casting"],"zh":"施法动作","domain":"魔法","layer":"主体","ucs_catids":["MAGSpel"],"status":"editorial-expansion","note":"避免 cast 单独造成铸造歧义","source":"editorial:2026-11-12"}
+{"id":"E0073","term":"fireball","alternatives":["fire burst","flame whoosh"],"zh":"火球魔法","domain":"魔法","layer":"主体","ucs_catids":["MAGElem"],"status":"editorial-expansion","note":"需要前奏、飞行、命中分层","source":"editorial:2026-11-12"}
+{"id":"E0074","term":"frost","alternatives":["freeze","ice crack"],"zh":"霜冻、冰结","domain":"魔法","layer":"细节","ucs_catids":["MAGElem"],"status":"editorial-expansion","note":"可取玻璃与冰裂","source":"editorial:2026-11-12"}
+{"id":"E0075","term":"gust","alternatives":["wind gust","air rush"],"zh":"阵风","domain":"自然","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"风力变化","source":"editorial:2026-11-12"}
+{"id":"E0076","term":"howl","alternatives":["wind howl","wolf howl"],"zh":"呼啸或动物嗥叫","domain":"自然/生物","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"不可只按中文一个含义过滤","source":"editorial:2026-11-12"}
+{"id":"E0077","term":"whistle","alternatives":["wind whistle","steam whistle"],"zh":"哨声、尖锐气流","domain":"自然/动作","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"可作为高速运动层","source":"editorial:2026-11-12"}
+{"id":"E0078","term":"buffet","alternatives":["wind buffeting","wind blast"],"zh":"风拍、阵风冲击","domain":"自然","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"罕见词，保留补查 wind","source":"editorial:2026-11-12"}
+{"id":"E0079","term":"room tone","alternatives":["roomtone","interior ambience"],"zh":"室内底噪","domain":"环境","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"不是绝对静音","source":"editorial:2026-11-12"}
+{"id":"E0080","term":"air conditioning","alternatives":["HVAC","ventilation"],"zh":"空调环境底声","domain":"环境","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"机械环境层","source":"editorial:2026-11-12"}
+{"id":"E0081","term":"urban ambience","alternatives":["city ambience","traffic ambience"],"zh":"城市环境","domain":"环境","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"用时段、人流细化","source":"editorial:2026-11-12"}
+{"id":"E0082","term":"crowd murmur","alternatives":["walla","crowd chatter"],"zh":"人群低声嘈杂","domain":"环境","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"不保证没有可辨语言","source":"editorial:2026-11-12"}
+{"id":"E0083","term":"dawn chorus","alternatives":["birds dawn","morning birds"],"zh":"清晨鸟鸣","domain":"自然","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"具体场景关键词","source":"editorial:2026-11-12"}
+{"id":"E0084","term":"distant thunder","alternatives":["thunder rumble","storm rumble"],"zh":"远雷","domain":"自然","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"大型爆炸尾部可探索","source":"editorial:2026-11-12"}
+{"id":"E0085","term":"underwater","alternatives":["submerged","underwater ambience"],"zh":"水下视角","domain":"空间","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"滤波听感与真实水听录音要区分","source":"editorial:2026-11-12"}
+{"id":"E0086","term":"muffled","alternatives":["muted","dull"],"zh":"闷、遮挡后的听感","domain":"空间","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"不等同低音量","source":"editorial:2026-11-12"}
+{"id":"E0087","term":"interior","alternatives":["inside","indoor"],"zh":"室内、内部","domain":"空间","layer":"空间","ucs_catids":[],"status":"editorial-expansion","note":"车辆内与房间内需限定","source":"editorial:2026-11-12"}
+{"id":"E0088","term":"exterior","alternatives":["outside","outdoor"],"zh":"室外、外部","domain":"空间","layer":"空间","ucs_catids":[],"status":"editorial-expansion","note":"空间维度","source":"editorial:2026-11-12"}
+{"id":"E0089","term":"one shot","alternatives":["oneshot","single"],"zh":"单发、单次事件","domain":"时序","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"也可能指产品采样格式","source":"editorial:2026-11-12"}
+{"id":"E0090","term":"loop","alternatives":["looping","seamless"],"zh":"循环素材","domain":"时序","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"标签不保证无缝；试听验证","source":"editorial:2026-11-12"}
+{"id":"E0091","term":"staccato","alternatives":["short","abrupt"],"zh":"短促断续","domain":"时序","layer":"音头","ucs_catids":[],"status":"editorial-expansion","note":"节奏质感","source":"editorial:2026-11-12"}
+{"id":"E0092","term":"sustain","alternatives":["sustained","continuous"],"zh":"持续段","domain":"时序","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"与 attack / decay 对照","source":"editorial:2026-11-12"}
+{"id":"E0093","term":"layer","alternatives":["sweetener","element"],"zh":"叠层素材","domain":"设计","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"检索加工元素；不要求素材已写 layer","source":"editorial:2026-11-12"}
+{"id":"E0094","term":"source","alternatives":["raw","unprocessed"],"zh":"原始设计声源","domain":"设计","layer":"素材","ucs_catids":["DSGNSrce"],"status":"editorial-expansion","note":"标记不保证未处理","source":"editorial:2026-11-12"}
+{"id":"E0095","term":"distorted","alternatives":["distortion","overdrive"],"zh":"失真质感","domain":"音色","layer":"主体","ucs_catids":["DSGNDist"],"status":"editorial-expansion","note":"处理类型与输入意图分开","source":"editorial:2026-11-12"}
+{"id":"E0096","term":"granular","alternatives":["grain","particle"],"zh":"颗粒质感","domain":"音色","layer":"细节","ucs_catids":["DSGNGran"],"status":"editorial-expansion","note":"可指颗粒合成或声音听感","source":"editorial:2026-11-12"}
+{"id":"E0097","term":"tonal","alternatives":["tone","resonant"],"zh":"有明确音高的质感","domain":"音色","layer":"持续","ucs_catids":["DSGNTonl"],"status":"editorial-expansion","note":"不保证固定乐音","source":"editorial:2026-11-12"}
+{"id":"E0098","term":"atonal","alternatives":["inharmonic","dissonant"],"zh":"无明确调性","domain":"音色","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"相关但非等价","source":"editorial:2026-11-12"}
+{"id":"E0099","term":"inharmonic","alternatives":["metallic","dissonant"],"zh":"非谐波共振","domain":"音色","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"适合不安持续音探索","source":"editorial:2026-11-12"}
+{"id":"E0100","term":"harsh","alternatives":["abrasive","rough"],"zh":"刺耳、粗厉","domain":"音色","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"与亮度不等价","source":"editorial:2026-11-12"}
+{"id":"E0101","term":"hollow","alternatives":["resonant","wood hollow"],"zh":"空腔、空洞","domain":"音色","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"物体结构听感","source":"editorial:2026-11-12"}
+{"id":"E0102","term":"airy","alternatives":["breathy","air"],"zh":"带气流、高频空气感","domain":"音色","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"和 air 单查比较召回","source":"editorial:2026-11-12"}
+{"id":"E0103","term":"warped","alternatives":["morph","modulated"],"zh":"扭曲变形音色","domain":"设计","layer":"主体","ucs_catids":["DSGNMorph"],"status":"editorial-expansion","note":"风格形容词","source":"editorial:2026-11-12"}
+{"id":"E0104","term":"warning","alternatives":["alert","alarm"],"zh":"警告提示","domain":"UI","layer":"主体","ucs_catids":["UIAlert"],"status":"editorial-expansion","note":"警报与短提示有时间尺度差别","source":"editorial:2026-11-12"}
+{"id":"E0105","term":"confirmation","alternatives":["confirm","success"],"zh":"确认成功反馈","domain":"UI","layer":"主体","ucs_catids":["UIBeep"],"status":"editorial-expansion","note":"先动作再正向情绪","source":"editorial:2026-11-12"}
+{"id":"E0106","term":"error","alternatives":["deny","failure"],"zh":"错误反馈","domain":"UI","layer":"主体","ucs_catids":["UIAlert"],"status":"editorial-expansion","note":"不等同硬件故障声","source":"editorial:2026-11-12"}
+{"id":"E0107","term":"notification","alternatives":["notify","message"],"zh":"通知","domain":"UI","layer":"主体","ucs_catids":["UIBeep"],"status":"editorial-expansion","note":"短提示","source":"editorial:2026-11-12"}
+{"id":"E0108","term":"hover","alternatives":["focus","rollover"],"zh":"悬停反馈","domain":"UI","layer":"细节","ucs_catids":["UIClick"],"status":"editorial-expansion","note":"极短小音效","source":"editorial:2026-11-12"}
+{"id":"E0109","term":"navigation","alternatives":["menu move","selection"],"zh":"菜单导航","domain":"UI","layer":"动作","ucs_catids":["UIMvmt"],"status":"editorial-expansion","note":"和地图导航区分","source":"editorial:2026-11-12"}
+{"id":"E0110","term":"reload","alternatives":["gun reload","magazine"],"zh":"装弹","domain":"武器","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"与 firing 分开","source":"editorial:2026-11-12"}
+{"id":"E0111","term":"cocking","alternatives":["gun cock","bolt action"],"zh":"上膛、扳动机构","domain":"武器","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"具体机械动作","source":"editorial:2026-11-12"}
+{"id":"E0112","term":"ricochet","alternatives":["bullet ricochet","bullet whiz"],"zh":"跳弹、反弹掠过","domain":"武器","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"不是所有 whiz 都是跳弹","source":"editorial:2026-11-12"}
+{"id":"E0113","term":"suppressed gun","alternatives":["silenced gun","silencer gun"],"zh":"抑制器枪声","domain":"武器","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"保留供应商不同叫法","source":"editorial:2026-11-12"}
+{"id":"E0114","term":"bullet casing","alternatives":["shell drop","casing drop"],"zh":"弹壳落地","domain":"武器","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"金属细节层","source":"editorial:2026-11-12"}
+{"id":"E0115","term":"jet flyby","alternatives":["jet passby","aircraft flyby"],"zh":"喷气机掠过","domain":"载具","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"运动路径优先","source":"editorial:2026-11-12"}
+{"id":"E0116","term":"engine rev","alternatives":["revving","accelerate"],"zh":"发动机升转","domain":"载具","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"区别稳态 idle","source":"editorial:2026-11-12"}
+{"id":"E0117","term":"brake squeal","alternatives":["braking","brake squeak"],"zh":"刹车尖叫","domain":"载具","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"与轮胎侧滑区分","source":"editorial:2026-11-12"}
+{"id":"E0118","term":"quad copter","alternatives":["quadcopter","drone propeller"],"zh":"四旋翼无人机","domain":"载具","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"消除 drone 持续音歧义","source":"editorial:2026-11-12"}
+{"id":"E0119","term":"footstep concrete","alternatives":["footsteps concrete","shoe concrete"],"zh":"混凝土地面脚步","domain":"拟音","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"鞋型与步速后加","source":"editorial:2026-11-12"}
+{"id":"E0120","term":"footstep gravel","alternatives":["footsteps gravel","boots gravel"],"zh":"碎石脚步","domain":"拟音","layer":"动作","ucs_catids":[],"status":"editorial-expansion","note":"保留颗粒与鞋底两个维度","source":"editorial:2026-11-12"}
+{"id":"E0121","term":"cloth movement","alternatives":["cloth rustle","fabric movement"],"zh":"衣物动作","domain":"拟音","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"避免 foley 单查过宽","source":"editorial:2026-11-12"}
+{"id":"E0122","term":"rope tension","alternatives":["rope stretch","rope creak"],"zh":"绳索拉紧","domain":"拟音","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"弓弦、船缆等分别检索","source":"editorial:2026-11-12"}
+{"id":"E0123","term":"water drip","alternatives":["dripping","drip"],"zh":"滴水","domain":"液体","layer":"细节","ucs_catids":[],"status":"editorial-expansion","note":"与水流背景分开","source":"editorial:2026-11-12"}
+{"id":"E0124","term":"water gush","alternatives":["gushing","water burst"],"zh":"涌水、喷流","domain":"液体","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"水魔法主体","source":"editorial:2026-11-12"}
+{"id":"E0125","term":"steam hiss","alternatives":["steam release","hiss"],"zh":"蒸汽嘶声","domain":"气体","layer":"持续","ucs_catids":[],"status":"editorial-expansion","note":"蒸汽与无线电噪声区分","source":"editorial:2026-11-12"}
+{"id":"E0126","term":"vacuum","alternatives":["suction","air suck"],"zh":"真空吸入风格","domain":"科幻","layer":"前奏","ucs_catids":[],"status":"editorial-expansion","note":"可能检出吸尘器，需语境","source":"editorial:2026-11-12"}
+{"id":"E0127","term":"sonic boom","alternatives":["supersonic","shockwave"],"zh":"音爆","domain":"自然/载具","layer":"主体","ucs_catids":[],"status":"editorial-expansion","note":"与设计低频 boom 不等价","source":"editorial:2026-11-12"}
+{"id":"E0128","term":"heartbeat stop","alternatives":["bass drop","sub drop"],"zh":"心跳骤停的设计转折","domain":"设计","layer":"尾音","ucs_catids":[],"status":"editorial-expansion","note":"创意取材；不是医学音频识别","source":"editorial:2026-11-12"}

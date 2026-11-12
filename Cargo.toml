@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/audiolib-core", "crates/audiolib-db", "crates/audiolib-audio", "crates/audiolib-windows", "crates/audiolib-ipc", "app/audiolib-desktop", "app/audiolib-cli", "crates/audiolib-remote", "crates/audiolib-update", "server/audiolib-server"]
+members = ["crates/audiolib-core", "crates/audiolib-ai", "crates/audiolib-db", "crates/audiolib-audio", "crates/audiolib-windows", "crates/audiolib-ipc", "app/audiolib-desktop", "app/audiolib-cli", "crates/audiolib-remote", "crates/audiolib-update", "server/audiolib-server"]
 exclude = ["vendor/libsqlite3-sys"]
 
 [workspace.package]
-version = "0.9.5"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-only"

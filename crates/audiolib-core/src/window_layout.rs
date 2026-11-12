@@ -40,6 +40,9 @@ pub struct WindowLayoutPreferences {
     pub maximized: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<f32>,
+    /// Whether the library sidebar is visible; absent keeps the design default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inspector_width: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +95,7 @@ impl WindowLayoutPreferences {
             y: coordinate("y"),
             maximized: flag("maximized").unwrap_or(false),
             sidebar_width: number("sidebar_width").map(|value| value as f32),
+            sidebar_visible: flag("sidebar_visible"),
             inspector_width: number("inspector_width").map(|value| value as f32),
             inspector_visible: flag("inspector_visible"),
             filters_visible: flag("filters_visible"),
@@ -129,6 +133,7 @@ impl WindowLayoutPreferences {
             y,
             maximized: self.maximized,
             sidebar_width: pane(self.sidebar_width, SIDEBAR_WIDTH_RANGE),
+            sidebar_visible: self.sidebar_visible,
             inspector_width: pane(self.inspector_width, INSPECTOR_WIDTH_RANGE),
             inspector_visible: self.inspector_visible,
             filters_visible: self.filters_visible,
@@ -256,6 +261,7 @@ mod tests {
             y: Some(40),
             maximized: true,
             sidebar_width: Some(240.0),
+            sidebar_visible: Some(false),
             inspector_width: Some(360.0),
             inspector_visible: Some(false),
             filters_visible: Some(true),
@@ -274,6 +280,53 @@ mod tests {
         assert_eq!(value, json!({"maximized": false}));
         let parsed: WindowLayoutPreferences = serde_json::from_value(value).unwrap();
         assert_eq!(parsed, WindowLayoutPreferences::default());
+    }
+
+    #[test]
+    fn library_sidebar_visibility_is_optional_and_independent_from_its_width() {
+        let older = WindowLayoutPreferences::from_value(&json!({
+            "sidebar_width": 260,
+            "inspector_visible": false
+        }));
+        assert_eq!(older.sidebar_visible, None);
+        assert_eq!(older.sidebar_width, Some(260.0));
+        assert_eq!(older.inspector_visible, Some(false));
+
+        for visible in [false, true] {
+            let layout = WindowLayoutPreferences::from_value(&json!({
+                "sidebar_width": 260,
+                "sidebar_visible": visible,
+                "inspector_visible": false
+            }));
+            assert_eq!(layout.sidebar_visible, Some(visible));
+            assert_eq!(layout.sidebar_width, Some(260.0));
+            assert_eq!(layout.inspector_visible, Some(false));
+            let saved = serde_json::to_value(&layout).unwrap();
+            assert_eq!(saved["sidebar_visible"], json!(visible));
+            let restored: WindowLayoutPreferences = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored, layout);
+        }
+    }
+
+    #[test]
+    fn malformed_library_sidebar_visibility_keeps_other_layout_preferences() {
+        for invalid in [json!(null), json!(0), json!("false"), json!([false])] {
+            let layout = WindowLayoutPreferences::from_value(&json!({
+                "width": 1280,
+                "height": 800,
+                "sidebar_width": 275,
+                "sidebar_visible": invalid,
+                "inspector_visible": false,
+                "folders_section_expanded": false,
+                "folders_section_ratio": 0.7
+            }));
+            assert_eq!(layout.sidebar_visible, None);
+            assert_eq!((layout.width, layout.height), (Some(1280.0), Some(800.0)));
+            assert_eq!(layout.sidebar_width, Some(275.0));
+            assert_eq!(layout.inspector_visible, Some(false));
+            assert_eq!(layout.folders_section_expanded, Some(false));
+            assert_eq!(layout.folders_section_ratio, Some(0.7));
+        }
     }
 
     #[test]

@@ -124,7 +124,7 @@ fn child_snapshot_audio() {
     let (controller, ui, _engine) = fixture(&url);
     let file = file(&old);
     controller
-        .playable_path(&file, &AtomicBool::new(false), 0)
+        .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
         .unwrap();
     assert_eq!(stream_bytes(&controller), old);
     // A server annotation increments revision but leaves the opened snapshot identity.
@@ -137,7 +137,7 @@ fn child_snapshot_audio() {
         .unwrap()
         .revision = 2;
     controller
-        .playable_path(&file, &AtomicBool::new(false), 0)
+        .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
         .unwrap();
     assert_eq!(stream_bytes(&controller), old);
     assert_eq!(requests.load(Ordering::Acquire), 1);
@@ -149,7 +149,7 @@ fn child_snapshot_audio() {
         state.database_file = "library-r3.db".into();
     }
     controller
-        .playable_path(&file, &AtomicBool::new(false), 0)
+        .playable_path(&file, &Arc::new(AtomicBool::new(false)), 0)
         .unwrap();
     assert_eq!(stream_bytes(&controller), new);
     assert_eq!(requests.load(Ordering::Acquire), 2);
