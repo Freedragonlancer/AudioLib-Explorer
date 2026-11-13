@@ -26,6 +26,6 @@ Play 提交后继续按既有约定消费 `latest_selection`，防止切库恢�
 - 使用桌面/CLI ASIO 隔离开发构建执行 `validate-playback-ipc.ps1 -CleanCheckout`：**最终候选 20 项通过**，包括 3 次独立播放会话、暂停/seek 保持会话、客户端本地历史与源 WAV 哈希保护；仅使用 owned 合成静音 WAV 和临时设置/数据库。首次 Windows 音频客户端激活出现 `RPC_E_CHANGED_MODE`；同机已验收 1.0 release、同配置未修改 beta `3ad9674` 和源码/EXE 校验还原后的最终 P2 候选均通过隔离对照。原失败保留，原因未确认，未声称后端问题已修复，也未改设备配置。
 - 原 review 在 `ab9c0d7` 的 core 设置兼容 2 项和 Windows 单元 27 项基线仍适用：本补丁未修改其源码、契约、特性或平台假设。AI 与 RIFF 模块继续复用 [1.0.0 发布记录](../Rust_Release_1.0.0.md) 的未变基线；不重复 workspace、百万记录或无关管理/Metadata 套件。
 
-私有执行日志位于本轮 checkout 的 `.rust-validation/p2-fixes/`。成功验证后对本 worktree 的 owned target 执行 40 GiB Incremental 缓存维护；首轮在盘点后发现新的编译器进程而受阻，保留剩余候选，不终止进程。原收据 `cache-maintenance.json` 保留，最终维护状态以续跑收据为准；release 输出和正式证据保留。
+私有执行日志位于本轮 checkout 的 `.rust-validation/p2-fixes/`。成功验证后对本 worktree 的 owned target 执行 40 GiB Incremental 缓存维护；首轮发现新的编译器进程而受阻，保留剩余候选、不终止进程，确认占用结束后续跑通过。最终逻辑估算 **11.34 GiB／40 GiB**、预算达标，本轮合计移除约 **30.52 逻辑 GiB**，不是实际磁盘回收量。首轮和最终收据为 `cache-maintenance.json`、`cache-maintenance-resume.json`；release 输出、已编译依赖、正式证据和未登记历史缓存保留。
 
 本次是开发修复，不部署服务、发布新版本或更新 `local_release/`。真实 NAS 与原生前台切换未作端到端验收；回归通过受控首包等待和同一个生产失焦 handler 验证取消顺序。未新增 ASIO 硬件、声学延迟或百万记录测量，性能目标仍为 **P95 latency <500ms for 1M+ records**。
