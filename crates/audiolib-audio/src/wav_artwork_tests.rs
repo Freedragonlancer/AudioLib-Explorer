@@ -118,7 +118,7 @@ fn assert_text_only(attributes: &Value) {
     );
     assert!(attributes["wav_metadata"]["smed"]["MAGIC/Picture"].is_null());
     assert!(!attributes.to_string().contains(&STANDARD.encode(PNG)));
-    assert_eq!(attributes["wav_metadata"]["version"], 4);
+    assert_eq!(attributes["wav_metadata"]["version"], 5);
 }
 
 #[test]
