@@ -1,6 +1,6 @@
 # tools/package-portable.ps1
 [CmdletBinding()]
-param([switch]$SkipBuild, [switch]$WithoutAsio, [string]$Tag)
+param([switch]$SkipBuild, [switch]$WithoutAsio, [string]$Tag, [string]$PackageId, [switch]$NoArchive)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot 'dependency-licenses.ps1')
@@ -11,6 +11,8 @@ $packageVersion = $versionMatch.Groups[1].Value
 if (!$Tag) { $Tag = 'v' + $packageVersion }
 $tagMatch = [regex]::Match($Tag, '^v(\d+\.\d+\.\d+)(?:-(?:rc|beta)\.(?:0|[1-9]\d*))?$')
 if (!$tagMatch.Success -or $tagMatch.Groups[1].Value -cne $packageVersion) { throw 'Portable tag must match the workspace version (vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N).' }
+if ($PackageId -and $PackageId -cnotmatch '^build-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$') { throw 'Invalid portable package ID.' }
+if ($NoArchive -and !$PackageId) { throw 'Folder-only portable output requires a unique package ID.' }
 $updateChannel = if ($Tag.Contains('-')) { 'beta' } else { 'stable' }
 function Assert-WorkspacePath([string]$Path) {
     $cursor = [IO.Path]::GetFullPath($Path)
@@ -24,7 +26,11 @@ function Assert-WorkspacePath([string]$Path) {
     }
 }
 if (!$SkipBuild) { & (Join-Path $PSScriptRoot 'build-release.ps1') -WithoutAsio:$WithoutAsio }
-$latestRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot 'dist/latest'))
+$latestRoot = if ($PackageId) {
+    [IO.Path]::GetFullPath((Join-Path $taskRoot ("dist/builds/$PackageId")))
+} else {
+    [IO.Path]::GetFullPath((Join-Path $taskRoot 'dist/latest'))
+}
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $latestRoot 'portable'))
 if (!$outputRoot.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Portable path escaped the intended workspace.'
@@ -39,6 +45,7 @@ foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
 # Build in a fresh owned staging directory. Reusing a previous payload would
 # retain obsolete reports, screenshots or local files even after source removal.
 Assert-WorkspacePath $latestRoot
+if ($PackageId -and (Test-Path -LiteralPath $latestRoot)) { throw "Portable package already exists: $latestRoot" }
 New-Item -ItemType Directory -Force -Path $latestRoot | Out-Null
 if ((Get-Item -LiteralPath $latestRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked package output is not supported.' }
 $portableRoot = [IO.Path]::GetFullPath((Join-Path $latestRoot ('.portable-stage-' + [guid]::NewGuid().ToString('N'))))
@@ -78,8 +85,9 @@ $compatibilityEntries = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -For
 })
 & (Join-Path $PSScriptRoot 'validate-update-compatibility.ps1') -Product Desktop -Entries $compatibilityEntries
 & (Join-Path $PSScriptRoot 'validate-package-privacy.ps1') -BinaryDirectory $portableRoot
-# Replace only the verified generated output, never local_release or runtime data.
+# Replace only the legacy latest output. A named package always uses a new directory.
 if (Test-Path -LiteralPath $outputRoot) {
+    if ($PackageId) { throw "Portable package already exists: $outputRoot" }
     Assert-WorkspacePath $outputRoot
     if ((Get-Item -LiteralPath $outputRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
         @(Get-ChildItem -LiteralPath $outputRoot -Recurse -Force -Attributes ReparsePoint).Count -gt 0) { throw 'Linked previous package output is not supported.' }
@@ -97,34 +105,39 @@ foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
     $binaryHash = (Get-FileHash -LiteralPath (Join-Path $portableRoot $binary) -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText($sidecar, ($binaryHash + '  ' + $binary + "`n"), [Text.Encoding]::ASCII)
 }
-$archivePath = Join-Path $latestRoot 'AudioLibExplorer-latest-win-x64-portable.zip'
-Assert-WorkspacePath $archivePath
-Assert-WorkspacePath ($archivePath + '.sha256')
-# Cargo archives may give notices pre-1980 timestamps, which ZIP cannot represent.
-# Adjust only the copied package files; registry and project sources stay untouched.
-$zipEpoch = [datetime]::new(1980, 1, 1)
-Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File |
-    Where-Object { $_.LastWriteTime -lt $zipEpoch } |
-    ForEach-Object { $_.LastWriteTime = $zipEpoch }
-# Write entries one by one with forward-slash names: Windows PowerShell 5's
-# Compress-Archive stores `\` separators, which the updater rejects as non-public.
-Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
-$packageFiles = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File | Where-Object { $_.DirectoryName -ne $portableRoot -or $sidecarNames -notcontains $_.Name } | Sort-Object FullName)
-$plannedEntries = @($packageFiles | ForEach-Object { $_.FullName.Substring($portableRoot.Length).TrimStart('\', '/').Replace('\', '/') })
-$zip = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Create)
-try {
-    for ($index = 0; $index -lt $packageFiles.Count; $index++) {
-        $entry = $zip.CreateEntry($plannedEntries[$index], [IO.Compression.CompressionLevel]::Optimal)
-        $entry.LastWriteTime = [DateTimeOffset]$packageFiles[$index].LastWriteTime
-        $source = [IO.File]::OpenRead($packageFiles[$index].FullName)
-        try { $target = $entry.Open(); try { $source.CopyTo($target) } finally { $target.Dispose() } } finally { $source.Dispose() }
-    }
-} finally { $zip.Dispose() }
-& (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $archivePath -ExpectedEntries $plannedEntries
-$hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-Set-Content -LiteralPath ($archivePath + '.sha256') -Value ($hash + '  ' + [IO.Path]::GetFileName($archivePath)) -Encoding ASCII
-Write-Host "Portable package ready: $archivePath"
+if ($NoArchive) {
+    Write-Host "Portable folder ready: $portableRoot"
+} else {
+    $archiveName = if ($PackageId) { "AudioLibExplorer-$PackageId-win-x64-portable.zip" } else { 'AudioLibExplorer-latest-win-x64-portable.zip' }
+    $archivePath = Join-Path $latestRoot $archiveName
+    Assert-WorkspacePath $archivePath
+    Assert-WorkspacePath ($archivePath + '.sha256')
+    # Cargo archives may give notices pre-1980 timestamps, which ZIP cannot represent.
+    # Adjust only the copied package files; registry and project sources stay untouched.
+    $zipEpoch = [datetime]::new(1980, 1, 1)
+    Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File |
+        Where-Object { $_.LastWriteTime -lt $zipEpoch } |
+        ForEach-Object { $_.LastWriteTime = $zipEpoch }
+    # Write entries one by one with forward-slash names: Windows PowerShell 5's
+    # Compress-Archive stores `\` separators, which the updater rejects as non-public.
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
+    $packageFiles = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -Force -File | Where-Object { $_.DirectoryName -ne $portableRoot -or $sidecarNames -notcontains $_.Name } | Sort-Object FullName)
+    $plannedEntries = @($packageFiles | ForEach-Object { $_.FullName.Substring($portableRoot.Length).TrimStart('\', '/').Replace('\', '/') })
+    $zip = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        for ($index = 0; $index -lt $packageFiles.Count; $index++) {
+            $entry = $zip.CreateEntry($plannedEntries[$index], [IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = [DateTimeOffset]$packageFiles[$index].LastWriteTime
+            $source = [IO.File]::OpenRead($packageFiles[$index].FullName)
+            try { $target = $entry.Open(); try { $source.CopyTo($target) } finally { $target.Dispose() } } finally { $source.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+    & (Join-Path $PSScriptRoot 'validate-portable-zip.ps1') -Archive $archivePath -ExpectedEntries $plannedEntries
+    $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    Set-Content -LiteralPath ($archivePath + '.sha256') -Value ($hash + '  ' + [IO.Path]::GetFileName($archivePath)) -Encoding ASCII
+    Write-Host "Portable package ready: $archivePath"
+}
 } finally {
     # A failed build may leave a stage, but never delete the published payload here.
     if ($portableRoot -ne $outputRoot -and (Test-Path -LiteralPath $portableRoot)) {

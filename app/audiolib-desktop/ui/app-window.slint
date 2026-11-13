@@ -26,6 +26,7 @@ export struct AudioRow {
     duration-clock: string,
     album: string,
     favorite: bool,
+    played: bool,
     missing: bool,
     checked: bool,
     marker: color,
@@ -1567,6 +1568,9 @@ export component AppWindow inherits Window {
     in-out property <bool> audition-repeat: false;
     in-out property <bool> audition-play-on-single-click: false;
     callback single-click-play-requested(bool);
+    in-out property <bool> stop-playback-on-focus-loss: false;
+    in property <bool> focus-loss-stop-supported: false;
+    callback stop-playback-on-focus-loss-requested(bool);
     in-out property <float> volume-db: -1.9;
     private property <float> audition-premute-db: -12;
     private property <bool> audition-show-remaining: false;
@@ -3308,7 +3312,7 @@ main-scroll := ScrollView {
                                 changed visible-height => { if !Theme.modern-style { root.report-result-window(); } }
                                 changed viewport-width => { if !Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // Fixed child layout widths let ListView measure its horizontal scroll extent.
-                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: (row.played ? (root.chinese ? "已播放：" : "Played: ") : "") + row.name;
                                     background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
@@ -3339,7 +3343,7 @@ main-scroll := ScrollView {
                                                 }
                                             }
                                         }
-                                        table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : Theme.ink; font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                        table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : (row.played ? Theme.accent : Theme.ink); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                         table-duration-cell := Text { width: root.table-duration-size - 24px * Theme.ui-scale; text: row.duration; color: Theme.ink; horizontal-alignment: right; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
                                         table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(10); overflow: elide; }
                                         table-channels-cell := Text { width: root.table-channels-size - 24px * Theme.ui-scale; text: row.channels; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
@@ -4164,12 +4168,12 @@ main-scroll := ScrollView {
                                 changed visible-height => { if Theme.modern-style { root.report-result-window(); } }
                                 changed viewport-width => { if Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // The real cell layout supplies ListView's minimum horizontal extent.
-                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.studio-result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.studio-result-row-height; accessible-role: list-item; accessible-label: (row.played ? (root.chinese ? "已播放：" : "Played: ") : "") + row.name;
                                     background: root.selected-row == index ? Theme.selected : (row.checked ? Theme.checked : (studio-result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.table-alternate : Theme.table-surface)));
                                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border.with-alpha(0.35); }
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: root.table-state-size + 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
-                                        studio-table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: root.selected-row == index ? Theme.accent : (row.missing ? Theme.warning : Theme.ink); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                        studio-table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: root.selected-row == index ? Theme.accent : (row.missing ? Theme.warning : (row.played ? Theme.accent : Theme.ink)); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                         if root.list-waveforms-visible: studio-table-wave-cell := Rectangle { width: root.table-wave-size - 24px * Theme.ui-scale; height: root.studio-result-row-height;
                                             if row.wave-state == 0 || row.wave-state == 3: Rectangle { y: (parent.height - self.height) / 2; width: row.wave-state == 0 ? parent.width : parent.width * 0.4; height: 2px * Theme.ui-scale; background: Theme.strong-border; opacity: row.wave-state == 0 ? 0.7 : 0.35; }
                                             if row.wave-state == 2: Rectangle { y: parent.height / 2; width: parent.width; height: 1px; background: Theme.dim; opacity: 0.6; }
@@ -4895,6 +4899,7 @@ main-scroll := ScrollView {
                     settings-apply := Action { width: 120px * Theme.ui-scale; primary: true; enabled: root.settings-page == 0 && !root.devices-loading && !root.settings-busy && !root.settings-close-confirm; label: root.output-applying ? (root.chinese ? "应用中…" : "Applying…") : (root.chinese ? "应用音频输出" : "Apply output"); clicked => { root.output-apply-requested(); } }
                 }
                 CheckBox { enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; text: root.chinese ? "单击播放" : "Single-click play"; checked <=> root.audition-play-on-single-click; toggled => { root.single-click-play-requested(self.checked); } }
+                CheckBox { visible: root.focus-loss-stop-supported; enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; text: root.chinese ? "切换到其他软件时停止播放" : "Stop playback when switching to another app"; checked <=> root.stop-playback-on-focus-loss; toggled => { root.stop-playback-on-focus-loss-requested(self.checked); } }
                 Rectangle { height: 1px; background: Theme.border; }
             export-page := VerticalLayout { spacing: 13px * Theme.ui-scale; alignment: start;
                 Text { text: root.chinese ? "快速导出" : "Quick export"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }

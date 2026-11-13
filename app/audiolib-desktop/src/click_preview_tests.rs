@@ -108,6 +108,7 @@ fn child_real_pointer_preview_modes() {
         language: "en".into(),
         playback: serde_json::to_value(&playback).unwrap(),
         audition_play_on_single_click: false,
+        stop_playback_on_focus_loss: false,
         play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
         show_album_artwork: true,
         slice_export_directory: None,
