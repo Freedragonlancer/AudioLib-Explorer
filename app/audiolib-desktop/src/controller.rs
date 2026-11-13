@@ -796,6 +796,8 @@ pub struct Controller {
     history_generation: AtomicU64,
     history_offset: Mutex<usize>,
     plays: Mutex<Vec<audiolib_db::local_play_history::LocalPlayRecord>>,
+    /// Successful auditions in this process, scoped to the source library.
+    played_this_session: Mutex<HashSet<(String, i64, String)>>,
     pending_history_clear: Mutex<Option<history::PendingClear>>,
     scans: Mutex<Vec<ScanSession>>,
     audio: AudioHandle,
@@ -804,6 +806,7 @@ pub struct Controller {
     config: Arc<Mutex<AppConfig>>,
     /// Latest GUI preference; its worker serializes disk writes with other settings.
     single_click_play: AtomicBool,
+    stop_playback_on_focus_loss: AtomicBool,
     show_album_artwork: AtomicBool,
     /// Latest table layout, captured on the event loop and saved by the preferences worker.
     audio_table: Mutex<AudioTablePreferences>,
@@ -1045,6 +1048,8 @@ impl Controller {
             ui.set_audio_backend_names(ModelRc::new(VecModel::from(vec!["CoreAudio".into()])));
         }
         ui.set_audition_play_on_single_click(config.audition_play_on_single_click);
+        ui.set_stop_playback_on_focus_loss(config.stop_playback_on_focus_loss);
+        ui.set_focus_loss_stop_supported(cfg!(any(windows, target_os = "macos")));
         ui.set_pregenerate_list_waveforms(config.pregenerate_list_waveforms);
         ui.set_artwork_enabled(config.show_album_artwork);
         ui.set_hold_list_waveform_batches(config.hold_list_waveform_batches_after_audition);
@@ -1100,11 +1105,13 @@ impl Controller {
             history_generation: AtomicU64::new(0),
             history_offset: Mutex::new(0),
             plays: Mutex::new(Vec::new()),
+            played_this_session: Mutex::new(HashSet::new()),
             pending_history_clear: Mutex::new(None),
             scans: Mutex::new(Vec::new()),
             audio,
             removed_audio_generation: AtomicU64::new(u64::MAX),
             single_click_play: AtomicBool::new(config.audition_play_on_single_click),
+            stop_playback_on_focus_loss: AtomicBool::new(config.stop_playback_on_focus_loss),
             show_album_artwork: AtomicBool::new(config.show_album_artwork),
             list_waveforms: ListWaveforms::new(config.pregenerate_list_waveforms)
                 .with_hold_after_audition(config.hold_list_waveform_batches_after_audition),
@@ -1289,6 +1296,16 @@ impl Controller {
             // Never wait for settings I/O on the event loop. A single worker coalesces
             // requests, and shutdown flushes the latest atomic value under the save lock.
             c.single_click_play.store(enabled, Ordering::Release);
+            *c.single_click_play_pending.lock().unwrap() = true;
+            c.single_click_play_wake.notify_one();
+        });
+        let c = self.clone();
+        ui.on_stop_playback_on_focus_loss_requested(move |enabled| {
+            if !c.available() {
+                return;
+            }
+            c.stop_playback_on_focus_loss
+                .store(enabled, Ordering::Release);
             *c.single_click_play_pending.lock().unwrap() = true;
             c.single_click_play_wake.notify_one();
         });
@@ -3374,6 +3391,8 @@ impl Controller {
                         }
                         config.audition_play_on_single_click =
                             c.single_click_play.load(Ordering::Acquire);
+                        config.stop_playback_on_focus_loss =
+                            c.stop_playback_on_focus_loss.load(Ordering::Acquire);
                         config.show_album_artwork = c.show_album_artwork.load(Ordering::Acquire);
                         config.pregenerate_list_waveforms =
                             c.pregenerate_list_waveforms.load(Ordering::Acquire);
@@ -4140,6 +4159,7 @@ impl Controller {
                 let mut playback_history = PlaybackHistoryTracker::default();
                 let mut external_wave_generation = None;
                 let playback_ui = Arc::new(Mutex::new(PlaybackUiState::default()));
+                let mut was_foreground = None;
                 // Network audition waiting for data: since when, and whether the hint shows.
                 let mut buffering_since: Option<Instant> = None;
                 let mut buffering_shown = false;
@@ -4153,6 +4173,21 @@ impl Controller {
                     let library_generation = c.library_generation.load(Ordering::Acquire);
                     let source_generation = c.source_generation.load(Ordering::Acquire);
                     let mut status = c.audio.status();
+                    if let Some(foreground) = audiolib_windows::foreground_application_is_current()
+                    {
+                        if should_stop_on_focus_loss(
+                            was_foreground,
+                            foreground,
+                            c.stop_playback_on_focus_loss.load(Ordering::Acquire),
+                            status.state,
+                        ) {
+                            if let Err(error) = c.enqueue_stop() {
+                                c.status(error.to_string());
+                            }
+                            status = c.audio.status();
+                        }
+                        was_foreground = Some(foreground);
+                    }
                     c.list_waveforms.observe_playback(matches!(
                         status.state,
                         PlaybackState::Loading | PlaybackState::Playing
@@ -7245,11 +7280,27 @@ impl Controller {
 
     /// Keep already known list Waveforms on rows being (re)published.
     fn decorate_list_waveforms(&self, mut rows: Vec<AudioRow>) -> Vec<AudioRow> {
+        let played = self.history_target().ok().map(|target| {
+            let played = self.played_this_session.lock().unwrap();
+            rows.iter()
+                .filter_map(|row| {
+                    let id = row.id.parse::<i64>().ok()?;
+                    played
+                        .contains(&(target.library_id.clone(), id, row.file_path.to_string()))
+                        .then_some(id)
+                })
+                .collect::<HashSet<_>>()
+        });
         let scale = self
             .ui
             .upgrade()
             .map_or(1.0, |ui| ui.window().scale_factor());
         for row in &mut rows {
+            row.played = row
+                .id
+                .parse::<i64>()
+                .ok()
+                .is_some_and(|id| played.as_ref().is_some_and(|ids| ids.contains(&id)));
             if let Ok(id) = row.id.parse::<i64>()
                 && let Some(cell) = self.list_waveforms.cached(id)
             {
@@ -7321,15 +7372,19 @@ impl Controller {
         let c = self.clone();
         std::thread::spawn(move || {
             #[cfg(windows)]
-            if let Err(error) = std::process::Command::new("explorer.exe")
-                .arg(if select_file {
-                    format!("/select,{path}")
-                } else {
-                    path
-                })
-                .spawn()
             {
-                c.status(error.to_string());
+                let result = if select_file {
+                    audiolib_windows::reveal_path(Path::new(&path))
+                } else {
+                    std::process::Command::new("explorer.exe")
+                        .arg(&path)
+                        .spawn()
+                        .map(|_| ())
+                        .map_err(audiolib_core::Error::from)
+                };
+                if let Err(error) = result {
+                    c.status(error.to_string());
+                }
             }
             #[cfg(target_os = "macos")]
             {
@@ -7764,6 +7819,8 @@ impl Controller {
             .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4));
         let mut config = self.config.lock().unwrap();
         config.audition_play_on_single_click = self.single_click_play.load(Ordering::Acquire);
+        config.stop_playback_on_focus_loss =
+            self.stop_playback_on_focus_loss.load(Ordering::Acquire);
         config.show_album_artwork = self.show_album_artwork.load(Ordering::Acquire);
         config.pregenerate_list_waveforms = self.pregenerate_list_waveforms.load(Ordering::Acquire);
         config.hold_list_waveform_batches_after_audition =
@@ -7881,6 +7938,18 @@ impl Controller {
             Err(error) => audiolib_core::failure(&error.to_string()),
         }
     }
+}
+
+fn should_stop_on_focus_loss(
+    was_foreground: Option<bool>,
+    foreground: bool,
+    enabled: bool,
+    state: PlaybackState,
+) -> bool {
+    enabled
+        && was_foreground == Some(true)
+        && !foreground
+        && matches!(state, PlaybackState::Playing | PlaybackState::Loading)
 }
 
 /// Refresh or append a retained row prefix in place, preserving native gestures,
@@ -8896,6 +8965,33 @@ impl PlaybackHistoryTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_loss_stops_only_active_playback_after_leaving_this_app() {
+        assert!(should_stop_on_focus_loss(
+            Some(true),
+            false,
+            true,
+            PlaybackState::Playing
+        ));
+        assert!(should_stop_on_focus_loss(
+            Some(true),
+            false,
+            true,
+            PlaybackState::Loading
+        ));
+        for (previous, current, enabled, state) in [
+            (None, false, true, PlaybackState::Playing),
+            (Some(false), false, true, PlaybackState::Playing),
+            (Some(true), true, true, PlaybackState::Playing),
+            (Some(true), false, false, PlaybackState::Playing),
+            (Some(true), false, true, PlaybackState::Paused),
+        ] {
+            assert!(!should_stop_on_focus_loss(
+                previous, current, enabled, state
+            ));
+        }
+    }
 
     /// Timers and loop exit work, but every cross-thread UI notification fails.
     /// This reproduces the lost close-completion path without a native user window.
@@ -9982,6 +10078,7 @@ mod tests {
             language: "en".into(),
             playback: serde_json::to_value(&playback).unwrap(),
             audition_play_on_single_click: false,
+            stop_playback_on_focus_loss: false,
             play_history_limit: audiolib_core::config::PLAY_HISTORY_LIMIT_PER_LIBRARY,
             show_album_artwork: true,
             slice_export_directory: None,

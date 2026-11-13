@@ -4,9 +4,9 @@ use super::*;
 use audiolib_db::local_play_history::{LocalPlayHistory, LocalPlayRecord, local_library_id};
 
 #[derive(Clone)]
-struct Target {
+pub(super) struct Target {
     data_root: PathBuf,
-    library_id: String,
+    pub(super) library_id: String,
     limit: u32,
 }
 
@@ -62,7 +62,7 @@ fn played_at_local(value: &str) -> String {
 impl Controller {
     /// Resolve on a worker: local IDs use canonical library identity; server IDs
     /// come from the opened snapshot and never from its replaceable cache filename.
-    fn history_target(&self) -> audiolib_core::Result<Target> {
+    pub(super) fn history_target(&self) -> audiolib_core::Result<Target> {
         let config = self.config.lock().unwrap().clone();
         let library_id = if self.remote_read_only() {
             self.remote
@@ -89,7 +89,7 @@ impl Controller {
     /// Called only by the status worker after a successful playback-session start.
     /// A failure is diagnostic; the caller consumes the event without affecting audio.
     #[cfg(test)]
-    pub(super) fn record_local_history(&self, path: &Path) -> audiolib_core::Result<()> {
+    pub(super) fn record_local_history(self: &Arc<Self>, path: &Path) -> audiolib_core::Result<()> {
         self.record_history_for_generation(
             path,
             self.library_generation.load(Ordering::Acquire),
@@ -98,7 +98,7 @@ impl Controller {
     }
 
     pub(super) fn record_history_best_effort(
-        &self,
+        self: &Arc<Self>,
         path: &Path,
         library_generation: u64,
         source_generation: u64,
@@ -112,7 +112,7 @@ impl Controller {
     }
 
     pub(super) fn record_history_for_generation(
-        &self,
+        self: &Arc<Self>,
         path: &Path,
         library_generation: u64,
         source_generation: u64,
@@ -145,6 +145,42 @@ impl Controller {
             || self.source_generation.load(Ordering::Acquire) != source_generation
         {
             return Err(audiolib_core::Error::Cancelled);
+        }
+        if let Some(id) = audio_id
+            && self.played_this_session.lock().unwrap().insert((
+                target.library_id.clone(),
+                id,
+                file_path.clone(),
+            ))
+        {
+            let controller = self.clone();
+            let scope = target.library_id.clone();
+            let played_path = file_path.clone();
+            post(self.ui.clone(), move |ui| {
+                if controller.library_generation.load(Ordering::Acquire) != library_generation
+                    || controller.source_generation.load(Ordering::Acquire) != source_generation
+                    || controller
+                        .history_target()
+                        .ok()
+                        .map(|target| target.library_id)
+                        != Some(scope)
+                {
+                    return;
+                }
+                let rows = ui.get_rows();
+                let Some(model) = rows.as_any().downcast_ref::<VecModel<AudioRow>>() else {
+                    return;
+                };
+                for index in 0..model.row_count() {
+                    if let Some(mut row) = model.row_data(index)
+                        && row.id.parse::<i64>().ok() == Some(id)
+                        && row.file_path.as_str() == played_path
+                    {
+                        row.played = true;
+                        model.set_row_data(index, row);
+                    }
+                }
+            });
         }
         if target
             .open()?

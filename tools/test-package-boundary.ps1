@@ -72,6 +72,42 @@ try {
     try { & $compatibilityValidator -Product Desktop -Entries @('LICENSE', 'license') } catch { $rejected = $_.Exception.Message -match 'Duplicate update compatibility entry' }
     if (!$rejected) { throw 'Old-updater file policy accepted case-alias duplicate names.' }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
+    $originalPortableHash = (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash
+    $originalLatestArchive = Join-Path $testRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'
+    $originalLatestArchiveHash = (Get-FileHash -LiteralPath $originalLatestArchive).Hash
+    $packageId = 'build-20261112-181304-8f21058c'
+    $namedRoot = Join-Path $testRoot "dist/builds/$packageId"
+    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $packageId
+    $namedArchive = Join-Path $namedRoot "AudioLibExplorer-$packageId-win-x64-portable.zip"
+    if (!(Test-Path -LiteralPath (Join-Path $namedRoot 'portable/AudioLibExplorer.exe')) -or
+        !(Test-Path -LiteralPath $namedArchive) -or !(Test-Path -LiteralPath ($namedArchive + '.sha256')) -or
+        (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash -cne $originalPortableHash) {
+        throw 'Named portable package did not preserve the existing latest package.'
+    }
+    $namedArchiveHash = (Get-FileHash -LiteralPath $namedArchive).Hash
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $packageId } catch { $rejected = $_.Exception.Message -match 'already exists' }
+    if (!$rejected -or (Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash) {
+        throw 'A repeated named package was not rejected.'
+    }
+    foreach ($folderOnlyParameters in @(
+        @{PackageId='build-20261112-181305-8f21058d';NoArchive=$true},
+        @{PackageId='build-20261112-181306-8f21058e';SkipArchive=$true}
+    )) {
+        $folderOnlyRoot = Join-Path $testRoot ("dist/builds/" + $folderOnlyParameters.PackageId)
+        & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio @folderOnlyParameters
+        if (!(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe')) -or
+            !(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe.sha256')) -or
+            @(Get-ChildItem -LiteralPath $folderOnlyRoot -Filter '*.zip*' -File).Count -ne 0 -or
+            (Get-FileHash -LiteralPath $originalLatestArchive).Hash -cne $originalLatestArchiveHash -or
+            (Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash -or
+            (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash -cne $originalPortableHash) {
+            throw 'Named folder-only output created an archive or changed an older latest/named package.'
+        }
+    }
+    $rejected = $false
+    try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -NoArchive } catch { $rejected = $_.Exception.Message -match 'requires a unique package ID' }
+    if (!$rejected) { throw 'Folder-only output without a unique package ID was accepted.' }
     $licenseValidator = Join-Path $testRoot 'tools/validate-portable-licenses.ps1'
     & $licenseValidator -BinaryDirectory $staleRoot -WithoutAsio
     $fixtureNoticePath = Join-Path $staleRoot 'licenses/dependencies.json'
@@ -141,6 +177,7 @@ try {
     }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
     if (!(Test-Path -LiteralPath ($acceptedArchive + '.sha256'))) { throw 'Normal packaging did not recreate its archive/checksum after local delivery.' }
+    if ((Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash) { throw 'Latest directory-only delivery modified a named package.' }
     Write-Host 'PASS: directory-only delivery retains identity/licenses/runtime routing, removes stale archives and allows normal packaging afterward.'
     $acceptedHash = (Get-FileHash -LiteralPath $acceptedArchive).Hash
     $fixtureLicenseText = [IO.File]::ReadAllText($fixtureSlint)

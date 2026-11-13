@@ -351,6 +351,23 @@ switch -Exact ($scriptName) {
             (Read-State).source_checks -ne 'not-requested') { throw 'Local delivery retry repeated build/package or reported unrequested source checks as passed.' }
     }
     Write-Host 'PASS: local plan routes both feature configurations, gates installation on acceptance and resumes without rebuilding or repackaging.'
+    # The local plan must also target the original fixed installation when its
+    # accepted source lives in an isolated checkout, without redoing the payload.
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    $null=Invoke-Pipeline 'Run' 0 @('-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    $taskInstallCall=@($taskCalls|Where-Object script -eq 'install-local-release.ps1')
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,install-local-release.ps1' -or
+        $taskInstallCall[0].destination -cne $taskSelectedInstall -or $taskInstallCall[0].version_manifest -cne $taskSelectedManifest -or
+        @('build','package','accept'|Where-Object{(Read-State).stages[$_].status -ne 'reused'}).Count){throw 'Local plan lost fixed-install routing or repeated accepted payload stages.'}
+    Remove-Item -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl')
+    [IO.File]::AppendAllText($taskSelectedManifest,"# changed local delivery manifest identity`n")
+    $null=Invoke-Pipeline 'Run' 0 @('-VariablesFile',$taskVariables)
+    $taskCalls=Get-Content -LiteralPath (Join-Path $taskRoot 'target/profile-calls.jsonl') | ForEach-Object{$_|ConvertFrom-Json}
+    if(($taskCalls.script -join ',') -cne 'check-release-licenses.ps1,install-local-release.ps1' -or
+        (Read-State).stages.install.status -ne 'passed' -or
+        [IO.File]::ReadAllText((Join-Path $taskSelectedInstall 'user-file.keep')) -cne 'preserve original installation data'){throw 'Local manifest identity did not invalidate only installation or original data changed.'}
+    Write-Host 'PASS: local delivery routes fixed installation and selected manifest; only installation reruns on routing/manifest changes.'
 } finally {
     [Environment]::SetEnvironmentVariable('AUDIOLIB_PIPELINE_TEST',$taskSaved)
     $env:GH_TOKEN=$taskSavedGhToken

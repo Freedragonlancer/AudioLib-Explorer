@@ -415,10 +415,54 @@ pub fn reveal_path(path: &std::path::Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer.exe")
-            .arg("/select,")
-            .arg(path)
-            .spawn()?;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+        };
+        use windows::Win32::UI::Shell::{
+            ILFindLastID, SHOpenFolderAndSelectItems, SHParseDisplayName,
+        };
+
+        let parent = path.parent().ok_or_else(|| {
+            audiolib_core::Error::Validation("Cannot reveal a path without a parent folder".into())
+        })?;
+        // The shell API accepts a parent PIDL and the selected child's relative PIDL.
+        // Passing Explorer a /select command line can silently open Documents when
+        // it misparses a file path containing spaces or other special characters.
+        let folder_name: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
+        let item_name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: This worker thread owns the COM apartment until every shell PIDL
+        // has been released. Both UTF-16 buffers are NUL-terminated and live for
+        // the synchronous shell calls below.
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let mut folder = std::ptr::null_mut();
+            let mut item = std::ptr::null_mut();
+            let result = (|| {
+                SHParseDisplayName(
+                    windows::core::PCWSTR(folder_name.as_ptr()),
+                    None,
+                    &mut folder,
+                    0,
+                    None,
+                )?;
+                SHParseDisplayName(
+                    windows::core::PCWSTR(item_name.as_ptr()),
+                    None,
+                    &mut item,
+                    0,
+                    None,
+                )?;
+                let child = ILFindLastID(item);
+                SHOpenFolderAndSelectItems(folder, Some(&[child.cast_const()]), 0)
+            })();
+            CoTaskMemFree(Some(item.cast()));
+            CoTaskMemFree(Some(folder.cast()));
+            CoUninitialize();
+            result.map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -432,6 +476,38 @@ pub fn reveal_path(path: &std::path::Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether this process owns the foreground window. `None` means the owner is
+/// temporarily unknown or this platform has no supported activation check.
+pub fn foreground_application_is_current() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId,
+        };
+        // SAFETY: Both calls only inspect the current foreground HWND. The PID
+        // pointer is valid for the duration of GetWindowThreadProcessId.
+        unsafe {
+            let window = GetForegroundWindow();
+            if window.0.is_null() {
+                return None;
+            }
+            let mut process_id = 0;
+            if GetWindowThreadProcessId(window, Some(&mut process_id)) == 0 || process_id == 0 {
+                return None;
+            }
+            Some(process_id == std::process::id())
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // NSRunningApplication is thread safe and reports app-level activation,
+        // so this app's own sheets and dialogs remain foreground activity.
+        Some(objc2_app_kit::NSRunningApplication::currentApplication().isActive())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    None
 }
 
 #[cfg(test)]

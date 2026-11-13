@@ -45,6 +45,8 @@ pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json
 
 `-SkipArchive` 仍生成两份 EXE 的校验 sidecar；它会移除 `dist/latest/` 下上一份 latest ZIP 及其 `.sha256`，避免旧归档被误认为当前产物。此时只交付已验证的目录，不能声称生成了可发布归档。需要分享 ZIP 或正式发布时用普通 `windows-client` 计划；该计划仍要求真实标签并生成归档。两种计划共用构建、打包和安装目录，必须串行执行。
 
+打包器已有的 `-PackageId build-YYYYMMDD-HHMMSS-xxxxxxxx` 使用独立 `dist/builds/<id>/`，拒绝覆盖同名产物；该模式支持 `-NoArchive` 或 `-SkipArchive`，不会替换或清理 `dist/latest/`。原 `-NoArchive` 仍要求 `PackageId`；`windows-local` 使用不带 `PackageId` 的 `-SkipArchive` 更新 latest 目录。命名目录只用于保存打包产物，固定工作安装仍为 `local_release/`。
+
 安装器仅复制哈希不同的文件，继续核对所有包内文件、CLI 版本及一次隔离桌面启动，不重复完整 portable 套件。相同源码/环境/产物的 Run 会复用成功阶段；验收或安装失败时保留已通过的构建/打包证据。源码、feature、工具链或产物变化仍使对应结果失效。
 
 ## 选择范围与配置
@@ -62,7 +64,7 @@ Windows 客户端计划按打包器的实际常规输出记录 `dist/latest/Audi
 
 ### 固定安装目录与版本来源
 
-Windows 客户端计划声明 `InstallDestination` 和 `VersionManifest` 两个变量，默认分别为当前源码根的 `local_release/` 与 `Cargo.toml`。隔离 worktree 发布时，用 `-VariablesFile` 指向私有 JSON，将安装目录设为原仓库的固定 `local_release/`，版本来源仍绑定最终发布源码的 manifest；不再复制或改写安装器：
+两个 Windows 客户端计划（`windows-client` / `windows-local`）都声明 `InstallDestination` 和 `VersionManifest` 两个变量，默认分别为当前源码根的 `local_release/` 与 `Cargo.toml`。隔离 worktree 试用或发布时，用 `-VariablesFile` 指向私有 JSON，将安装目录设为原仓库的固定 `local_release/`，版本来源仍绑定最终交付源码的 manifest；不再复制或改写安装器：
 
 ```json
 {
