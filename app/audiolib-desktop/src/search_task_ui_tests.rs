@@ -126,6 +126,42 @@ fn ai_tag_control_in_view(ui: &AppWindow, label: &str) -> ElementHandle {
     panic!("AI recommendation is not reachable by horizontal scrolling: {label}");
 }
 
+fn ai_tag_width_in_view(ui: &AppWindow, query: &str) -> f32 {
+    let body = ai_tag_control_in_view(
+        ui,
+        &format!(
+            "{}{query}",
+            if ui.get_chinese() {
+                "快捷搜索："
+            } else {
+                "Quick search: "
+            }
+        ),
+    );
+    let plus = ElementHandle::find_by_accessible_label(
+        ui,
+        &format!(
+            "{}{query}",
+            if ui.get_chinese() {
+                "以推荐词新建搜索任务："
+            } else {
+                "New search task: "
+            }
+        ),
+    )
+    .next()
+    .unwrap();
+    let viewport = ai_quick_viewport(ui);
+    let left = body.absolute_position().x;
+    let right = plus.absolute_position().x + plus.size().width;
+    assert!(body.size().width > 0.0 && plus.size().width > 0.0);
+    assert!((left + body.size().width - plus.absolute_position().x).abs() <= 0.5);
+    assert!((body.absolute_position().y - plus.absolute_position().y).abs() <= 0.5);
+    assert!(left >= viewport.absolute_position().x - 0.5);
+    assert!(right <= viewport.absolute_position().x + viewport.size().width + 0.5);
+    right - left
+}
+
 fn settle() {
     // Declarative Timer.running changes start their native timer in the change
     // handler pass, after the mock backend's timer activation pass. Flush that
@@ -317,7 +353,7 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     );
     snapshot_if_requested(&ui, "ai-generating");
     for modern in [false, true] {
-        for scale in [1.0, 2.0] {
+        for scale in [1.0, 1.5, 2.0] {
             ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
             ui.global::<crate::Theme>().set_modern_style(modern);
             ui.global::<crate::Theme>().set_ui_scale(scale);
@@ -844,7 +880,7 @@ fn ai_tag_edge_creates_a_task_without_triggering_the_tag_body() {
     .unwrap();
     for modern in [false, true] {
         for chinese in [false, true] {
-            for scale in [1.0, 2.0] {
+            for scale in [1.0, 1.5, 2.0] {
                 let ui = window();
                 ui.window()
                     .set_size(slint::LogicalSize::new(1920.0 * scale, 1080.0 * scale));
@@ -897,11 +933,15 @@ fn ai_tag_edge_creates_a_task_without_triggering_the_tag_body() {
                     .unwrap();
                 let first_x = first.absolute_position().x;
                 let last = ElementHandle::find_by_accessible_label(&ui, new_task).next();
-                assert!(
-                    last.is_none_or(|last| last.absolute_position().x + last.size().width
-                        > viewport.absolute_position().x + viewport.size().width),
-                    "Eight readable tags should use horizontal scrolling in this toolbar"
-                );
+                let last_body = ElementHandle::find_by_accessible_label(&ui, body).next();
+                let needs_scroll = match (last_body, last) {
+                    (Some(body), Some(plus)) => {
+                        body.absolute_position().x < viewport.absolute_position().x - 0.5
+                            || plus.absolute_position().x + plus.size().width
+                                > viewport.absolute_position().x + viewport.size().width + 0.5
+                    }
+                    _ => true,
+                };
                 snapshot_if_requested(
                     &ui,
                     &format!("ai-mixed-eight-tags-{modern}-{chinese}-{scale}"),
@@ -944,10 +984,13 @@ fn ai_tag_edge_creates_a_task_without_triggering_the_tag_body() {
                 assert_eq!(actions.borrow().as_slice(), &[(24, 7)]);
                 click(&ui, body);
                 assert_eq!(actions.borrow().as_slice(), &[(24, 7), (16, 7)]);
-                assert!(
-                    first.absolute_position().x < first_x - 1.0,
-                    "The eighth tag must be reached through actual horizontal scrolling"
-                );
+                if needs_scroll {
+                    assert!(
+                        first.absolute_position().x < first_x - 1.0,
+                        "A clipped eighth tag must be reached through actual horizontal scrolling"
+                    );
+                }
+                assert!(ai_tag_width_in_view(&ui, "debris fall") <= 240.0 * scale + 1.0);
                 snapshot_if_requested(
                     &ui,
                     &format!("ai-mixed-eight-tags-end-{modern}-{chinese}-{scale}"),
@@ -979,6 +1022,397 @@ fn ai_tag_edge_creates_a_task_without_triggering_the_tag_body() {
                 if chinese && scale == 1.0 {
                     snapshot_tag_button_states_if_requested(&ui, modern, body, new_task);
                 }
+                ui.hide().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn ai_thin_scrollbar_preserves_tag_space_and_reaches_the_eighth_action() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        for chinese in [false, true] {
+            for scale in [1.0, 1.5, 2.0] {
+                let ui = window();
+                ui.window()
+                    .set_size(slint::LogicalSize::new(1080.0 * scale, 700.0 * scale));
+                ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                ui.set_chinese(chinese);
+                ui.set_ai_visible(true);
+                ui.set_ai_collapsed(true);
+                ui.set_ai_quick_rows(ModelRc::new(VecModel::from(
+                    [
+                        "victory",
+                        "win stinger",
+                        "reward jingle",
+                        "level complete",
+                        "achievement",
+                        "success fanfare",
+                        "bell sparkle",
+                        "orchestral rise",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, text)| crate::AiSuggestion {
+                        text: text.into(),
+                        is_layer: index >= 6,
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>(),
+                )));
+                let actions = Rc::new(RefCell::new(Vec::new()));
+                let observed = actions.clone();
+                ui.on_ai_action(move |kind, index| observed.borrow_mut().push((kind, index)));
+                settle();
+                let viewport = ai_quick_viewport(&ui);
+                let scrollbar = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "AI 推荐词滚动条"
+                    } else {
+                        "AI recommendations scrollbar"
+                    },
+                )
+                .next()
+                .expect("Overflowing recommendations have an accessible scrollbar");
+                let first = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "快捷搜索：victory"
+                    } else {
+                        "Quick search: victory"
+                    },
+                )
+                .next()
+                .unwrap();
+                let first_x = first.absolute_position().x;
+                assert_eq!(
+                    scrollbar.accessible_role(),
+                    Some(i_slint_backend_testing::AccessibleRole::Slider)
+                );
+                assert!(scrollbar.size().height > 0.0);
+                assert!(scrollbar.size().height < first.size().height / 2.0);
+                assert!(
+                    scrollbar.absolute_position().y
+                        >= first.absolute_position().y + first.size().height,
+                    "The scrollbar hit area must not cover the tag or its + button"
+                );
+                let value = || {
+                    scrollbar
+                        .accessible_value()
+                        .unwrap()
+                        .parse::<f32>()
+                        .unwrap()
+                };
+                let maximum = scrollbar.accessible_value_maximum().unwrap();
+                let minimum = scrollbar.accessible_value_minimum().unwrap();
+                assert!(maximum > minimum);
+                let body_label = if chinese {
+                    "快捷搜索：orchestral rise"
+                } else {
+                    "Quick search: orchestral rise"
+                };
+                let plus_label = if chinese {
+                    "以推荐词新建搜索任务：orchestral rise"
+                } else {
+                    "New search task: orchestral rise"
+                };
+                // Do not use the auto-scrolling tag helper: these controls must
+                // be fully visible as a result of each scrollbar interaction.
+                let last_actions_in_view = || {
+                    let body = ElementHandle::find_by_accessible_label(&ui, body_label)
+                        .next()
+                        .expect("Scrolled eighth recommendation body");
+                    let plus = ElementHandle::find_by_accessible_label(&ui, plus_label)
+                        .next()
+                        .expect("Scrolled eighth recommendation + action");
+                    assert!(body.absolute_position().x >= viewport.absolute_position().x - 0.5);
+                    assert!(
+                        plus.absolute_position().x + plus.size().width
+                            <= viewport.absolute_position().x + viewport.size().width + 0.5
+                    );
+                    (body, plus)
+                };
+                viewport.scroll(-viewport.size().width / 2.0, 0.0);
+                settle();
+                assert!(value() > minimum);
+                assert!(first.absolute_position().x < first_x - 1.0);
+                assert!(actions.borrow().is_empty());
+
+                scrollbar.set_accessible_value(minimum.to_string());
+                settle();
+                assert!((value() - minimum).abs() < 0.01);
+                scrollbar.mock_drag(
+                    slint::LogicalPosition::new(
+                        scrollbar.absolute_position().x + scrollbar.size().width - scale,
+                        scrollbar.absolute_position().y + scrollbar.size().height / 2.0,
+                    ),
+                    PointerEventButton::Left,
+                );
+                settle();
+                assert!(
+                    (value() - maximum).abs() < 0.01,
+                    "Scrollbar drag did not reach the end: modern={modern}, chinese={chinese}, scale={scale}, value={}, maximum={maximum}, slider=({:?}, {:?}), viewport=({:?}, {:?}), first_x_delta={}",
+                    value(),
+                    scrollbar.absolute_position(),
+                    scrollbar.size(),
+                    viewport.absolute_position(),
+                    viewport.size(),
+                    first.absolute_position().x - first_x,
+                );
+                last_actions_in_view();
+                assert!(actions.borrow().is_empty());
+
+                // Pointer input focuses the slider; Home/End remain usable
+                // without dispatching a recommendation's default action.
+                scrollbar.mock_single_click(PointerEventButton::Left);
+                for (key, expected) in [(Key::Home, minimum), (Key::End, maximum)] {
+                    ui.window()
+                        .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+                    ui.window()
+                        .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+                    settle();
+                    assert!((value() - expected).abs() < 0.01);
+                }
+                last_actions_in_view();
+                scrollbar.invoke_accessible_decrement_action();
+                settle();
+                assert!(value() < maximum);
+                scrollbar.set_accessible_value(maximum.to_string());
+                settle();
+                let (body, plus) = last_actions_in_view();
+                assert!(actions.borrow().is_empty());
+                snapshot_if_requested(
+                    &ui,
+                    &format!("ai-thin-scrollbar-{modern}-{chinese}-{scale}"),
+                );
+                body.mock_single_click(PointerEventButton::Left);
+                settle();
+                assert_eq!(actions.borrow().as_slice(), &[(16, 7)]);
+                plus.mock_single_click(PointerEventButton::Left);
+                settle();
+                assert_eq!(actions.borrow().as_slice(), &[(16, 7), (24, 7)]);
+                ui.hide().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn ai_tag_widths_follow_text_metrics_without_stretching() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let queries = [
+        "WWWWWW",
+        "iiiiii",
+        "victory",
+        "victory celebration",
+        "a very long victorious cinematic orchestral reward celebration with shimmering bells",
+    ];
+    for modern in [false, true] {
+        for chinese in [false, true] {
+            for scale in [1.0, 1.5, 2.0] {
+                let ui = window();
+                ui.window()
+                    .set_size(slint::LogicalSize::new(1920.0 * scale, 1080.0 * scale));
+                ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                ui.set_chinese(chinese);
+                ui.set_ai_visible(true);
+                ui.set_ai_collapsed(true);
+                ui.set_ai_quick_rows(ModelRc::new(VecModel::from(
+                    queries
+                        .into_iter()
+                        .map(|text| crate::AiSuggestion {
+                            text: text.into(),
+                            ..Default::default()
+                        })
+                        .collect::<Vec<_>>(),
+                )));
+                settle();
+                let widths = queries.map(|query| ai_tag_width_in_view(&ui, query));
+                assert!(
+                    widths[0] > widths[1] + 5.0 * scale,
+                    "Equal-length text must use glyph metrics: {widths:?}, modern={modern}"
+                );
+                assert!(widths[3] > widths[2] + 10.0 * scale);
+                assert!(widths[4] > widths[3]);
+                assert!(widths.iter().all(|width| *width <= 240.0 * scale + 1.0));
+                ui.window()
+                    .set_size(slint::LogicalSize::new(2560.0 * scale, 1440.0 * scale));
+                settle();
+                for (query, width) in queries.into_iter().zip(widths) {
+                    assert!(
+                        (ai_tag_width_in_view(&ui, query) - width).abs() <= 1.0,
+                        "Widening the toolbar must not stretch the recommendation: {query}"
+                    );
+                }
+                ui.hide().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        for chinese in [false, true] {
+            for (width, height, scale) in [(2560.0, 1600.0, 1.5), (1080.0, 700.0, 1.0)] {
+                let ui = window();
+                ui.window().set_size(slint::LogicalSize::new(width, height));
+                ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                ui.set_chinese(chinese);
+                ui.set_ai_visible(true);
+                ui.set_ai_collapsed(true);
+                ui.set_data_source_label("Victory sound-design fixture".into());
+                ui.set_ai_quick_rows(ModelRc::new(VecModel::from(
+                    [
+                        ("victory", false),
+                        ("win stinger", false),
+                        ("reward jingle", false),
+                        ("level complete", false),
+                        ("achievement", false),
+                        ("success fanfare", false),
+                        ("bell sparkle", true),
+                        ("orchestral rise", true),
+                    ]
+                    .into_iter()
+                    .map(|(text, is_layer)| crate::AiSuggestion {
+                        text: text.into(),
+                        detail: "Victory / success feedback".into(),
+                        is_layer,
+                    })
+                    .collect::<Vec<_>>(),
+                )));
+                let ai_actions = Rc::new(RefCell::new(Vec::new()));
+                let observed = ai_actions.clone();
+                ui.on_ai_action(move |kind, index| observed.borrow_mut().push((kind, index)));
+                let history = Rc::new(RefCell::new(Vec::new()));
+                let observed = history.clone();
+                ui.on_search_history_requested(move |direction| {
+                    observed.borrow_mut().push(direction)
+                });
+                let library = Rc::new(RefCell::new(Vec::new()));
+                let observed = library.clone();
+                ui.on_library_action(move |action| observed.borrow_mut().push(action));
+                settle();
+                let viewport = ai_quick_viewport(&ui);
+                let manage_label = if chinese {
+                    "管理音效库"
+                } else {
+                    "Manage library"
+                };
+                let manage = ElementHandle::find_by_accessible_label(&ui, manage_label)
+                    .next()
+                    .unwrap();
+                let field = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "AI 声音描述"
+                    } else {
+                        "AI sound description"
+                    },
+                )
+                .next()
+                .unwrap();
+                assert!(field.size().width >= 70.0 * scale);
+                assert!(field.size().width <= 640.0 * scale);
+                assert!(
+                    field.absolute_position().x + field.size().width
+                        <= viewport.absolute_position().x
+                );
+                assert!(
+                    viewport.absolute_position().x + viewport.size().width
+                        <= manage.absolute_position().x + 0.5
+                );
+                assert!(manage.absolute_position().x + manage.size().width <= width + 0.5);
+                snapshot_if_requested(
+                    &ui,
+                    &format!("ai-victory-eight-{modern}-{chinese}-{width}-{scale}"),
+                );
+                let body = if chinese {
+                    "快捷搜索：orchestral rise"
+                } else {
+                    "Quick search: orchestral rise"
+                };
+                let plus = if chinese {
+                    "以推荐词新建搜索任务：orchestral rise"
+                } else {
+                    "New search task: orchestral rise"
+                };
+                assert!(ai_tag_width_in_view(&ui, "orchestral rise") <= 240.0 * scale + 1.0);
+                click(&ui, body);
+                click(&ui, plus);
+                assert_eq!(ai_actions.borrow().as_slice(), &[(16, 7), (24, 7)]);
+                snapshot_if_requested(
+                    &ui,
+                    &format!("ai-victory-eight-end-{modern}-{chinese}-{width}-{scale}"),
+                );
+                ui.set_search_entry_text("victory reward feedback".into());
+                ui.invoke_edit_search_entry();
+                click(
+                    &ui,
+                    if chinese {
+                        "生成 AI 查询建议"
+                    } else {
+                        "Generate AI query suggestions"
+                    },
+                );
+                assert_eq!(ui.get_ai_prompt(), "victory reward feedback");
+                assert_eq!(ai_actions.borrow().last(), Some(&(2, 0)));
+                ui.set_ai_visible(false);
+                ui.set_search_history_can_back(true);
+                ui.set_search_history_can_forward(true);
+                settle();
+                click(
+                    &ui,
+                    if chinese {
+                        "后退搜索历史"
+                    } else {
+                        "Back in search history"
+                    },
+                );
+                click(
+                    &ui,
+                    if chinese {
+                        "前进搜索历史"
+                    } else {
+                        "Forward in search history"
+                    },
+                );
+                assert_eq!(history.borrow().as_slice(), &[-1, 1]);
+                click(&ui, manage_label);
+                assert!(ui.get_library_visible());
+                assert_eq!(library.borrow().as_slice(), &[0]);
+                click(
+                    &ui,
+                    if chinese {
+                        "添加文件夹…"
+                    } else {
+                        "Add folder…"
+                    },
+                );
+                assert!(ui.get_import_visible());
+                assert_eq!(ui.get_scan_mode(), 0);
+                assert!(ui.get_scan_path().is_empty());
                 ui.hide().unwrap();
             }
         }

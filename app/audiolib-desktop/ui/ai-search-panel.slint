@@ -79,6 +79,82 @@ export component AiSearchAction inherits Rectangle {
 
 export struct AiSuggestion { text: string, detail: string, is-layer: bool }
 
+// A thin local scroll affordance keeps the native viewport's wheel and focus
+// handling while leaving most of the toolbar height to the recommendation tags.
+component AiTagScrollBar inherits Rectangle {
+    in property <bool> chinese;
+    in property <length> content-width;
+    in property <length> visible-width;
+    in-out property <length> scroll-x;
+    property <length> max-scroll: max(0px, root.content-width - root.visible-width);
+    property <bool> active: root.max-scroll > 0px;
+    property <float> fraction: root.active ? clamp(-root.scroll-x / root.max-scroll, 0, 1) : 0;
+    property <float> page-step: root.active ? root.visible-width / root.max-scroll : 0;
+    property <length> thumb-width: min(root.width, max(24px * Theme.ui-scale, root.width * (root.visible-width / max(1px, root.content-width))));
+    property <length> travel: max(0px, root.width - root.thumb-width);
+    property <length> grab-offset: 0px;
+    forward-focus: scroll-focus;
+    accessible-role: slider;
+    accessible-label: root.chinese ? "AI 推荐词滚动条" : "AI recommendations scrollbar";
+    accessible-description: root.chinese ? "左右方向键滚动；Home 到开头，End 到末尾" : "Use arrow keys to scroll, Home for the start and End for the end";
+    accessible-enabled: root.active;
+    accessible-value: root.fraction;
+    accessible-value-minimum: 0; accessible-value-maximum: 1; accessible-value-step: 0.1;
+    accessible-action-increment => { root.move-to(root.fraction + 0.1); }
+    accessible-action-decrement => { root.move-to(root.fraction - 0.1); }
+    accessible-action-set-value(v) => { if v.is-float() { root.move-to(v.to-float()); } }
+    function move-to(value: float) {
+        if root.active { root.scroll-x = -clamp(value, 0, 1) * root.max-scroll; }
+    }
+    Rectangle {
+        y: (parent.height - self.height) / 2; width: parent.width;
+        height: 3px * Theme.ui-scale; border-radius: self.height / 2;
+        background: Theme.strong-border.with-alpha(0.25);
+    }
+    thumb := Rectangle {
+        x: root.travel * root.fraction; width: root.thumb-width;
+        y: (parent.height - self.height) / 2;
+        height: (scroll-touch.has-hover || scroll-touch.pressed || scroll-focus.has-focus ? 4px : 3px) * Theme.ui-scale;
+        border-radius: self.height / 2;
+        background: scroll-touch.pressed || scroll-focus.has-focus ? Theme.accent : scroll-touch.has-hover ? Theme.ink : Theme.dim;
+        animate height, background { duration: Theme.motion-fast; easing: ease-out; }
+    }
+    scroll-touch := TouchArea {
+        enabled: root.active; mouse-cursor: pointer;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                scroll-focus.focus();
+                let on-thumb = self.mouse-x >= thumb.x && self.mouse-x <= thumb.x + thumb.width;
+                root.grab-offset = on-thumb ? self.mouse-x - thumb.x : root.thumb-width / 2;
+                if !on-thumb && root.travel > 0px { root.move-to((self.mouse-x - root.grab-offset) / root.travel); }
+            }
+        }
+        moved => { if self.pressed && root.travel > 0px { root.move-to((self.mouse-x - root.grab-offset) / root.travel); } }
+        scroll-event(event) => {
+            let delta = event.delta-x != 0px ? event.delta-x : event.delta-y;
+            if !root.active || delta == 0px { return reject; }
+            root.move-to(root.fraction - delta / root.max-scroll);
+            return accept;
+        }
+    }
+    scroll-focus := FocusScope {
+        enabled: root.active;
+        // The touch area owns the first press and explicitly gives us focus.
+        // Automatic click focus would consume that press before drag capture.
+        focus-on-click: false;
+        key-pressed(event) => {
+            if !root.active || event.modifiers.alt || event.modifiers.control { return reject; }
+            if event.text == Key.LeftArrow || event.text == Key.UpArrow { root.move-to(root.fraction - 0.1); return accept; }
+            if event.text == Key.RightArrow || event.text == Key.DownArrow { root.move-to(root.fraction + 0.1); return accept; }
+            if event.text == Key.PageUp { root.move-to(root.fraction - root.page-step); return accept; }
+            if event.text == Key.PageDown { root.move-to(root.fraction + root.page-step); return accept; }
+            if event.text == Key.Home { root.move-to(0); return accept; }
+            if event.text == Key.End { root.move-to(1); return accept; }
+            reject
+        }
+    }
+}
+
 export component AiQuickSearch inherits Rectangle {
     in property <bool> chinese;
     in property <bool> enabled: true;
@@ -87,12 +163,11 @@ export component AiQuickSearch inherits Rectangle {
     callback search(int);
     callback new-task(int);
     min-width: 144px * Theme.ui-scale;
-    preferred-width: 400px * Theme.ui-scale;
+    preferred-width: max(self.min-width, root.content-width);
     horizontal-stretch: 1;
     height: 42px * Theme.ui-scale;
     private property <int> count: min(8, root.rows.length);
-    private property <length> chip-width: clamp((root.width - max(0, root.count - 1) * 6px * Theme.ui-scale) / max(1, root.count), 144px * Theme.ui-scale, 240px * Theme.ui-scale);
-    private property <length> content-width: root.count * root.chip-width + max(0, root.count - 1) * 6px * Theme.ui-scale;
+    private property <length> content-width: quick-lane.preferred-width;
     private property <bool> overflowing: root.content-width > root.width + 1px;
     // A single toolbar lane: short windows scroll sideways without taking list height.
     quick-scroll := ScrollView {
@@ -102,88 +177,98 @@ export component AiQuickSearch inherits Rectangle {
         accessible-description: root.chinese ? "横向滚动查看并搜索所有推荐词" : "Scroll horizontally to view and search every recommendation";
         viewport-width: root.content-width; viewport-height: self.height;
         vertical-scrollbar-policy: always-off;
-        horizontal-scrollbar-policy: root.overflowing ? always-on : always-off;
-        for row[index] in root.rows: Rectangle {
-            visible: index < root.count;
-            x: index * (root.chip-width + 6px * Theme.ui-scale);
-            y: root.overflowing ? 0px : (root.height - self.height) / 2;
-            width: root.chip-width;
-            height: 26px * Theme.ui-scale;
-            background: tag-body.role-color.with-alpha(index == root.selected ? 0.24 : body-hit.has-hover && root.enabled ? 0.16 : 0.08);
-            border-radius: 14px * Theme.ui-scale;
-            border-width: body-focus.has-focus ? 2px : 1px;
-            border-color: body-focus.has-focus || index == root.selected ? tag-body.role-color : tag-body.role-color.with-alpha(0.52);
-            opacity: root.enabled ? 1 : 0.45;
-            // Sibling hit areas keep + from also searching the current task.
-            tag-body := Rectangle {
-                property <color> role-color: row.is-layer ? Theme.apricot : Theme.mint;
-                property <string> role-label: row.is-layer ? (root.chinese ? "分层推荐" : "Layer recommendation") : (root.chinese ? "主体推荐" : "Main recommendation");
-                x: 0px; y: 0px; width: parent.width - 30px * Theme.ui-scale; height: parent.height;
-                accessible-role: button;
-                accessible-label: (root.chinese ? "快捷搜索：" : "Quick search: ") + row.text;
-                accessible-description: self.role-label + (row.detail != "" ? " · " + row.detail : "");
-                accessible-enabled: root.enabled;
-                accessible-action-default => { if root.enabled { root.search(index); } }
-                forward-focus: body-focus;
-                Rectangle {
-                    x: 5px * Theme.ui-scale; y: (parent.height - self.height) / 2;
-                    width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale;
-                    border-radius: 5px * Theme.ui-scale; background: tag-body.role-color.with-alpha(0.18);
-                    Text { width: parent.width; height: parent.height; text: row.is-layer ? (root.chinese ? "层" : "L") : (root.chinese ? "主" : "M"); color: tag-body.role-color; font-size: Theme.font(10); font-weight: 700; vertical-alignment: center; horizontal-alignment: center; accessible-role: none; }
-                }
-                tag-text := Text { x: 28px * Theme.ui-scale; y: 0px; width: max(0px, parent.width - 34px * Theme.ui-scale); height: parent.height; text: row.text; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; accessible-role: none; }
-                body-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.search(index); return accept; } reject } }
-                body-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.search(index); } }
-                Tooltip {
+        horizontal-scrollbar-policy: always-off;
+        quick-lane := HorizontalLayout {
+            x: 0px; y: root.overflowing ? 1px * Theme.ui-scale : (root.height - self.height) / 2;
+            width: self.preferred-width; height: 30px * Theme.ui-scale;
+            padding: 0px; spacing: 6px * Theme.ui-scale;
+            for index in root.count: Rectangle {
+                width: clamp(tag-measure.preferred-width + 64px * Theme.ui-scale, 84px * Theme.ui-scale, 240px * Theme.ui-scale);
+                height: 30px * Theme.ui-scale;
+                background: tag-body.role-color.with-alpha(index == root.selected ? 0.24 : body-hit.has-hover && root.enabled ? 0.16 : 0.08);
+                border-radius: 14px * Theme.ui-scale;
+                border-width: body-focus.has-focus ? 2px : 1px;
+                border-color: body-focus.has-focus || index == root.selected ? tag-body.role-color : tag-body.role-color.with-alpha(0.52);
+                opacity: root.enabled ? 1 : 0.45;
+                // Measure full rendered text independently of the visible elided label.
+                tag-measure := Text { text: root.rows[index].text; font-size: Theme.font(11); wrap: no-wrap; visible: false; accessible-role: none; }
+                // Sibling hit areas keep + from also searching the current task.
+                tag-body := Rectangle {
+                    property <color> role-color: root.rows[index].is-layer ? Theme.apricot : Theme.mint;
+                    property <string> role-label: root.rows[index].is-layer ? (root.chinese ? "分层推荐" : "Layer recommendation") : (root.chinese ? "主体推荐" : "Main recommendation");
+                    x: 0px; y: 0px; width: parent.width - 30px * Theme.ui-scale; height: parent.height;
+                    accessible-role: button;
+                    accessible-label: (root.chinese ? "快捷搜索：" : "Quick search: ") + root.rows[index].text;
+                    accessible-description: self.role-label + (root.rows[index].detail != "" ? " · " + root.rows[index].detail : "");
+                    accessible-enabled: root.enabled;
+                    accessible-action-default => { if root.enabled { root.search(index); } }
+                    forward-focus: body-focus;
                     Rectangle {
-                        width: min(420px * Theme.ui-scale, max(144px * Theme.ui-scale, root.width));
-                        background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
-                        border-width: 1px; border-color: Theme.strong-border;
-                        VerticalLayout { padding: 8px * Theme.ui-scale;
-                            Text { text: tag-body.role-label + " · " + row.text + (row.detail != "" ? "\n" + row.detail : ""); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                        x: 5px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                        width: 18px * Theme.ui-scale; height: 18px * Theme.ui-scale;
+                        border-radius: 5px * Theme.ui-scale; background: tag-body.role-color.with-alpha(0.18);
+                        Text { width: parent.width; height: parent.height; text: root.rows[index].is-layer ? (root.chinese ? "层" : "L") : (root.chinese ? "主" : "M"); color: tag-body.role-color; font-size: Theme.font(10); font-weight: 700; vertical-alignment: center; horizontal-alignment: center; accessible-role: none; }
+                    }
+                    tag-text := Text { x: 28px * Theme.ui-scale; y: 0px; width: max(0px, parent.width - 34px * Theme.ui-scale); height: parent.height; text: root.rows[index].text; color: Theme.ink; font-size: Theme.font(11); vertical-alignment: center; overflow: elide; accessible-role: none; }
+                    body-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.search(index); return accept; } reject } }
+                    body-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.search(index); } }
+                    Tooltip {
+                        Rectangle {
+                            width: min(420px * Theme.ui-scale, max(144px * Theme.ui-scale, root.width));
+                            background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
+                            border-width: 1px; border-color: Theme.strong-border;
+                            VerticalLayout { padding: 8px * Theme.ui-scale;
+                                Text { text: tag-body.role-label + " · " + root.rows[index].text + (root.rows[index].detail != "" ? "\n" + root.rows[index].detail : ""); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                            }
                         }
                     }
                 }
-            }
-            new-task-button := Rectangle {
-                x: parent.width - self.width; y: 0px; width: 30px * Theme.ui-scale; height: parent.height;
-                accessible-role: button;
-                accessible-label: (root.chinese ? "以推荐词新建搜索任务：" : "New search task: ") + row.text;
-                accessible-description: tag-body.role-label + (root.chinese ? " · 沿用当前目录和筛选条件，在独立任务搜索此推荐词" : " · Search this suggestion in a separate task using the current directory and filters");
-                accessible-enabled: root.enabled;
-                accessible-action-default => { if root.enabled { root.new-task(index); } }
-                forward-focus: new-task-focus;
-                // A quiet embedded action: one outer tag outline, no nested ring.
-                Rectangle {
-                    width: 20px * Theme.ui-scale; height: self.width;
-                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                    border-radius: 6px * Theme.ui-scale;
-                    background: !root.enabled ? transparent : new-task-hit.pressed ? tag-body.role-color.with-alpha(0.30) : new-task-hit.has-hover || new-task-focus.has-focus ? tag-body.role-color.with-alpha(0.18) : transparent;
-                    border-width: 1px;
-                    border-color: root.enabled && new-task-focus.has-focus ? tag-body.role-color : transparent;
-                    animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
-                }
-                Image {
-                    width: 12px * Theme.ui-scale; height: self.width;
-                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                    source: @image-url("icons/plus.svg"); image-fit: contain;
-                    colorize: root.enabled && (new-task-hit.has-hover || new-task-hit.pressed || new-task-focus.has-focus) ? tag-body.role-color : Theme.dim;
-                    accessible-role: none;
-                }
-                new-task-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.new-task(index); return accept; } reject } }
-                new-task-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.new-task(index); } }
-                Tooltip {
+                new-task-button := Rectangle {
+                    x: parent.width - self.width; y: 0px; width: 30px * Theme.ui-scale; height: parent.height;
+                    accessible-role: button;
+                    accessible-label: (root.chinese ? "以推荐词新建搜索任务：" : "New search task: ") + root.rows[index].text;
+                    accessible-description: tag-body.role-label + (root.chinese ? " · 沿用当前目录和筛选条件，在独立任务搜索此推荐词" : " · Search this suggestion in a separate task using the current directory and filters");
+                    accessible-enabled: root.enabled;
+                    accessible-action-default => { if root.enabled { root.new-task(index); } }
+                    forward-focus: new-task-focus;
+                    // A quiet embedded action: one outer tag outline, no nested ring.
                     Rectangle {
-                        width: 280px * Theme.ui-scale;
-                        background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
-                        border-width: 1px; border-color: Theme.strong-border;
-                        VerticalLayout { padding: 8px * Theme.ui-scale;
-                            Text { text: tag-body.role-label + "\n" + (root.chinese ? "新建任务搜索：" : "Search in a new task: ") + row.text + (root.chinese ? "\n沿用当前目录和筛选条件" : "\nUses the current directory and filters"); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                        width: 20px * Theme.ui-scale; height: self.width;
+                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                        border-radius: 6px * Theme.ui-scale;
+                        background: !root.enabled ? transparent : new-task-hit.pressed ? tag-body.role-color.with-alpha(0.30) : new-task-hit.has-hover || new-task-focus.has-focus ? tag-body.role-color.with-alpha(0.18) : transparent;
+                        border-width: 1px;
+                        border-color: root.enabled && new-task-focus.has-focus ? tag-body.role-color : transparent;
+                        animate background, border-color { duration: Theme.motion-fast; easing: ease-out; }
+                    }
+                    Image {
+                        width: 12px * Theme.ui-scale; height: self.width;
+                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                        source: @image-url("icons/plus.svg"); image-fit: contain;
+                        colorize: root.enabled && (new-task-hit.has-hover || new-task-hit.pressed || new-task-focus.has-focus) ? tag-body.role-color : Theme.dim;
+                        accessible-role: none;
+                    }
+                    new-task-focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.new-task(index); return accept; } reject } }
+                    new-task-hit := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; enabled: root.enabled; mouse-cursor: pointer; clicked => { root.new-task(index); } }
+                    Tooltip {
+                        Rectangle {
+                            width: 280px * Theme.ui-scale;
+                            background: Theme.tooltip; border-radius: 5px * Theme.ui-scale;
+                            border-width: 1px; border-color: Theme.strong-border;
+                            VerticalLayout { padding: 8px * Theme.ui-scale;
+                                Text { text: tag-body.role-label + "\n" + (root.chinese ? "新建任务搜索：" : "Search in a new task: ") + root.rows[index].text + (root.chinese ? "\n沿用当前目录和筛选条件" : "\nUses the current directory and filters"); color: Theme.ink; font-size: Theme.font(11); wrap: word-wrap; }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+    if root.overflowing: AiTagScrollBar {
+        x: 0px; y: parent.height - self.height; width: parent.width; height: 10px * Theme.ui-scale;
+        chinese: root.chinese;
+        content-width: root.content-width; visible-width: quick-scroll.visible-width;
+        scroll-x <=> quick-scroll.viewport-x;
     }
 }
 

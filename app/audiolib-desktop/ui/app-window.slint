@@ -709,7 +709,7 @@ component HelpPanel inherits FocusScope {
             VerticalLayout { padding: 28px * Theme.ui-scale; spacing: 16px * Theme.ui-scale;
                 Text { text: root.chinese ? "快捷键与基本操作" : "Shortcuts and basics"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }
                 Text { text: root.chinese ? "Ctrl Shift I   添加声音文件夹     ·     Ctrl D   音效库管理\nCtrl F   搜索     ·     Ctrl S   保存 Metadata\nCtrl I   显示 / 隐藏侧栏     ·     F5   刷新素材库\nCtrl ,   全局设置     ·     Ctrl Q   保存草稿并退出\nEsc   关闭当前面板" : "Ctrl Shift I   Add sound folder     ·     Ctrl D   Manage sound library\nCtrl F   Search     ·     Ctrl S   Save Metadata\nCtrl I   Show / hide side panel     ·     F5   Refresh library\nCtrl ,   Global settings     ·     Ctrl Q   Save drafts and exit\nEsc   Close current panel"; color: Theme.ink; wrap: word-wrap; }
-                Text { text: root.chinese ? "新增音效库：使用文件菜单新建本地库、添加已有库或服务器连接。\n新增声音：使用工具栏添加文件夹，或音效库 → 扫描与索引。\n批量编辑：Ctrl 单击切换勾选，Shift 单击连续勾选，再使用批量标注。\n移除：编辑菜单管理当前音效与勾选记录，音效库菜单管理当前目录；只移除数据库记录与标注，源音频文件保留。\n全局偏好：设置 → 全局设置；主题与语言可在视图菜单内快捷切换。" : "Add a library: use File to create a local library, add an existing library or connect to a server.\nAdd sounds: use Add folder in the toolbar or Library → Scan and index.\nBatch edit: Ctrl-click to toggle or Shift-click to check a range, then choose Edit checked records.\nRemove records in Edit, or the current folder in Library; source audio files remain on disk.\nPreferences: Settings → Global settings. Switch themes and language from the View menu."; color: Theme.dim; wrap: word-wrap; }
+                Text { text: root.chinese ? "新增音效库：使用文件菜单新建本地库、添加已有库或服务器连接。\n新增声音：使用音效库 → 扫描与索引。\n批量编辑：Ctrl 单击切换勾选，Shift 单击连续勾选，再使用批量标注。\n移除：编辑菜单管理当前音效与勾选记录，音效库菜单管理当前目录；只移除数据库记录与标注，源音频文件保留。\n全局偏好：设置 → 全局设置；主题与语言可在视图菜单内快捷切换。" : "Add a library: use File to create a local library, add an existing library or connect to a server.\nAdd sounds: use Library → Scan and index.\nBatch edit: Ctrl-click to toggle or Shift-click to check a range, then choose Edit checked records.\nRemove records in Edit, or the current folder in Library; source audio files remain on disk.\nPreferences: Settings → Global settings. Switch themes and language from the View menu."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: root.chinese ? "日常更新用增量扫描；整理文件后用全量扫描检查缺失。\n修复引用：音效库 → 查看缺失文件，选中声音后在详情面板选择新位置。标签和备注会保留。\n备份与数据库维护收在音效库管理底部的“高级维护”中。" : "Use incremental scans for daily updates; full scans check missing files after reorganizing a folder.\nRepair: Library → Missing files, select a sound, then locate it in Sound details. Annotations are kept.\nBackups and database tools are under Advanced maintenance in library management."; color: Theme.dim; wrap: word-wrap; }
                 close-action := Action { height: 34px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
             }
@@ -2864,7 +2864,7 @@ main-scroll := ScrollView {
                 can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                 navigate(direction) => { root.search-history-requested(direction); }
             }
-            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: 340px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 773px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
+            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: 320px * Theme.ui-scale; preferred-width: 480px * Theme.ui-scale; max-width: 640px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                     Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.accent; image-fit: contain; }
                     search-input := LineEdit { horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
@@ -2886,8 +2886,7 @@ main-scroll := ScrollView {
                 new-task(index) => { root.ai-action(24,index); }
             }
             if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
-            Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+  添加文件夹" : "+  Add folder"; clicked => { root.prepare-scan(0, ""); } }
-            Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
+            Action { width: 100px * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
         }
 
         if root.remote-mode && root.remote-notice != "": Rectangle { height: 34px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning;
@@ -3703,7 +3702,7 @@ main-scroll := ScrollView {
                     can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                     navigate(direction) => { root.search-history-requested(direction); }
                 }
-                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: 340px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 773px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: 320px * Theme.ui-scale; preferred-width: 480px * Theme.ui-scale; max-width: 640px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                     background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: studio-search-input.has-focus || root.ai-visible ? Theme.accent : Theme.strong-border.with-alpha(0.5);
                     HorizontalLayout { padding: 2px * Theme.ui-scale; padding-left: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Image { width: 17px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.dim; image-fit: contain; accessible-role: none; }
@@ -3727,8 +3726,7 @@ main-scroll := ScrollView {
                     new-task(index) => { root.ai-action(24,index); }
                 }
                 if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
-                StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+ 添加文件夹" : "+ Add folder"; clicked => { root.prepare-scan(0, ""); } }
-                StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
+                StudioAction { width: 100px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
             }
             Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
         }
