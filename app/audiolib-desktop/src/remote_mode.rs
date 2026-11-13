@@ -47,7 +47,9 @@ pub(super) const SELECTION_SETTLE: Duration = Duration::from_millis(180);
 static STREAM_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
-struct RemoteAuditionWait {
+/// One foreground audition wait; network preparation and engine acknowledgment
+/// share its epoch-owned presentation so older completions cannot clear a newer hint.
+pub(super) struct RemoteAuditionWait {
     epoch: u64,
     selection: u64,
     library: u64,
@@ -1463,7 +1465,9 @@ impl Controller {
                 c2.list_waveforms.roots_online(&online_root_names(&updated));
                 c2.publish_remote_notice(&ui);
                 c2.publish_data_source(&ui);
-                ui.set_status(message.into());
+                if !ui.get_closing() && !c2.close_retains_status.load(Ordering::Acquire) {
+                    ui.set_status(message.into());
+                }
             });
         });
     }
@@ -2879,17 +2883,20 @@ impl Controller {
             + 1;
         if let Some(ui) = self.ui.upgrade() {
             ui.set_remote_audition_status("".into());
+            ui.set_audio_buffering_status("".into());
         } else {
             let current = self.remote_audition_status_epoch.clone();
             post(self.ui.clone(), move |ui| {
                 if current.load(Ordering::Acquire) == epoch {
                     ui.set_remote_audition_status("".into());
+                    ui.set_audio_buffering_status("".into());
                 }
             });
         }
     }
 
-    fn begin_remote_audition_wait(
+    /// Replace the foreground wait for this still-current selection.
+    pub(super) fn begin_remote_audition_wait(
         self: &Arc<Self>,
         selection: u64,
         cancel: &Arc<AtomicBool>,
@@ -2928,7 +2935,12 @@ impl Controller {
         Ok(wait)
     }
 
-    fn publish_remote_audition_wait(self: &Arc<Self>, wait: &RemoteAuditionWait, text: String) {
+    /// Deliver progress only while this wait still owns the current audition.
+    pub(super) fn publish_remote_audition_wait(
+        self: &Arc<Self>,
+        wait: &RemoteAuditionWait,
+        text: String,
+    ) {
         let controller = self.clone();
         let wait = wait.clone();
         post(self.ui.clone(), move |ui| {
@@ -2941,6 +2953,7 @@ impl Controller {
             }
             if !controller.available()
                 || ui.get_closing()
+                || controller.close_retains_status.load(Ordering::Acquire)
                 || wait.cancel.load(Ordering::Acquire)
                 || wait.finished.load(Ordering::Acquire)
                 || controller.selection_generation.load(Ordering::Acquire) != wait.selection
@@ -2954,7 +2967,8 @@ impl Controller {
         });
     }
 
-    fn finish_remote_audition_wait(&self, wait: &RemoteAuditionWait) {
+    /// Retire this wait without clearing feedback belonging to a later audition.
+    pub(super) fn finish_remote_audition_wait(&self, wait: &RemoteAuditionWait) {
         wait.finished.store(true, Ordering::Release);
         let epoch = wait.epoch;
         let current = self.remote_audition_status_epoch.clone();
@@ -3412,23 +3426,6 @@ impl Controller {
         audiolib_audio::waveform_with_cancel(&path, request, cancel)
             .map_err(|error| error.to_string())
     }
-
-    /// Show (or clear) the "buffering" hint while network audition waits for data.
-    pub(super) fn buffering_hint(&self, on: bool) {
-        let chinese = self.chinese.load(Ordering::Acquire);
-        let text = cn_or(
-            chinese,
-            "正在缓冲音频…（网络较慢，数据到达后自动继续）",
-            "Buffering audio… (slow network; playback resumes by itself)",
-        );
-        post(self.ui.clone(), move |ui| {
-            if on {
-                ui.set_status(text.into());
-            } else if ui.get_status().as_str() == text {
-                ui.set_status(slint::SharedString::new());
-            }
-        });
-    }
 }
 
 /// Validate the server's source range before storing or reusing its peaks.
@@ -3495,28 +3492,21 @@ pub(super) fn waking_hint(name: &str, waited: Duration, chinese: bool) -> Option
     })
 }
 
-/// Header suffix for roots that are not plainly online (§6.4), e.g. ` · 根目录离线：SFX`.
+/// Source-label suffix for offline roots (§6.4). Transient waking status belongs to
+/// the current audition's live wait hint, not this periodically refreshed label.
 pub(super) fn root_summary(roots: &[RemoteRoot], chinese: bool) -> String {
-    let mut summary = String::new();
-    for (state, label_cn, label_en) in [
-        (RootState::Offline, "根目录离线", "root offline"),
-        (RootState::Waking, "磁盘唤醒中", "disk waking"),
-    ] {
-        let names: Vec<_> = roots
-            .iter()
-            .filter(|root| root.state() == state)
-            .map(|root| root.name.as_str())
-            .collect();
-        if names.is_empty() {
-            continue;
-        }
-        if chinese {
-            summary.push_str(&format!(" · {label_cn}：{}", names.join("、")));
-        } else {
-            summary.push_str(&format!(" · {label_en}: {}", names.join(", ")));
-        }
+    let names: Vec<_> = roots
+        .iter()
+        .filter(|root| root.state() == RootState::Offline)
+        .map(|root| root.name.as_str())
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else if chinese {
+        format!(" · 根目录离线：{}", names.join("、"))
+    } else {
+        format!(" · root offline: {}", names.join(", "))
     }
-    summary
 }
 
 /// Notice for offline roots (shown when no revision notice is pending): their records stay
@@ -4205,6 +4195,303 @@ mod tests {
     }
 
     #[test]
+    fn focus_loss_cancels_remote_audition_before_first_bytes() {
+        super::source_transition_tests::isolated_module(
+            "tests",
+            "child_focus_loss_cancels_remote_audition",
+        );
+    }
+
+    #[test]
+    #[ignore = "owned loopback regression run in an isolated process"]
+    fn child_focus_loss_cancels_remote_audition() {
+        use super::source_transition_tests::{
+            accept, configuration, indexed_sounds, request, root, run_until,
+        };
+        use std::io::Write;
+        use std::sync::mpsc;
+
+        struct GatedPlay {
+            path: PathBuf,
+            entered: Arc<AtomicBool>,
+            release: mpsc::SyncSender<()>,
+        }
+
+        impl GatedPlay {
+            fn new(path: &Path, audio: AudioHandle) -> Self {
+                let bytes = std::fs::read(path).unwrap();
+                let entered = Arc::new(AtomicBool::new(false));
+                let opened = entered.clone();
+                let (release, released) = mpsc::sync_channel(1);
+                let released = Mutex::new(released);
+                let first_ready_open = AtomicBool::new(true);
+                let opener: audiolib_audio::SourceOpener = Arc::new(move || {
+                    // Decoder preparation may open several times during Loading.
+                    // Gate Play's first reopen while still Ready, before any device
+                    // opens. Unrelated Waveform reads must not consume the gate.
+                    if std::thread::current().name() == Some("audio-control")
+                        && audio.status().state == PlaybackState::Ready
+                        && first_ready_open.swap(false, Ordering::AcqRel)
+                    {
+                        opened.store(true, Ordering::Release);
+                        released
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10))
+                            .unwrap();
+                    }
+                    let source: Box<dyn audiolib_audio::ByteSource> =
+                        Box::new(std::io::Cursor::new(bytes.clone()));
+                    Ok((source, bytes.len() as u64))
+                });
+                audiolib_audio::register_stream_source(path, opener);
+                Self {
+                    path: path.to_owned(),
+                    entered,
+                    release,
+                }
+            }
+
+            fn release(&self) {
+                let _ = self.release.try_send(());
+            }
+        }
+
+        impl Drop for GatedPlay {
+            fn drop(&mut self) {
+                self.release();
+                audiolib_audio::unregister_stream_source(&self.path);
+            }
+        }
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let root = root();
+        let (provider, file) = indexed_sounds(&root);
+        let file_id = file.id;
+        let local_path = PathBuf::from(&file.file_path);
+        let body = std::fs::read(&file.file_path).unwrap();
+        let mut config = configuration(&root.join("preferences"));
+        config.paths.database = provider.database_path().into();
+        // Keep unrelated revision probes idle; the controlled request is audio only.
+        config.data_source.poll_interval_secs = 0;
+        let playback = PlaybackConfig {
+            volume: 0.0,
+            device_id: Some("owned-focus-loss-no-output".into()),
+            ..Default::default()
+        };
+        let engine = audiolib_audio::AudioEngine::new(playback.clone()).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let controller = Controller::new(&ui, provider.clone(), engine.handle(), config, playback);
+        let weak = ui.as_weak();
+        run_until(&ui, move || {
+            weak.upgrade()
+                .is_some_and(|ui| !ui.get_searching() && !ui.get_task_restoring())
+        });
+        controller.remote_mode.store(true, Ordering::Release);
+        controller.remote.lock().unwrap().state = Some(CacheState {
+            library_id: "owned-focus-loss".into(),
+            database_file: "owned-snapshot.db".into(),
+            ..Default::default()
+        });
+        let generation = controller
+            .selection_generation
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        let job = SelectionJob {
+            id: file.id,
+            play: true,
+            generation,
+            barrier: 0,
+            provider,
+        };
+        *controller.latest_selection.lock().unwrap() = Some(job.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        *controller.remote_audio_cancel.lock().unwrap() = cancel.clone();
+
+        // Disabled settings, a missing focus edge, navigation and a stale pending
+        // request must leave the current generation and cancellation token intact.
+        assert!(!controller.stop_on_focus_loss(Some(true), false).unwrap());
+        controller
+            .stop_playback_on_focus_loss
+            .store(true, Ordering::Release);
+        for (previous, foreground) in [(None, false), (Some(false), false), (Some(true), true)] {
+            assert!(!controller.stop_on_focus_loss(previous, foreground).unwrap());
+        }
+        controller
+            .latest_selection
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .play = false;
+        assert!(!controller.stop_on_focus_loss(Some(true), false).unwrap());
+        *controller.latest_selection.lock().unwrap() = Some(SelectionJob {
+            generation: generation - 1,
+            ..job.clone()
+        });
+        assert!(!controller.stop_on_focus_loss(Some(true), false).unwrap());
+        assert_eq!(
+            controller.selection_generation.load(Ordering::Acquire),
+            generation
+        );
+        assert!(!cancel.load(Ordering::Acquire));
+        *controller.latest_selection.lock().unwrap() = Some(job);
+
+        // The server accepts the real request, then withholds every response byte
+        // until after focus loss. No sleeps or actual foreground window are needed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        controller.config.lock().unwrap().data_source.server_url =
+            format!("http://{}", listener.local_addr().unwrap());
+        let (accepted, request_received) = mpsc::channel();
+        let (release, send_response) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            let head = request(&mut socket);
+            assert!(head.starts_with("GET /api/v1/audio/"), "{head}");
+            assert!(head.lines().next().unwrap().contains("/stream "), "{head}");
+            accepted.send(()).unwrap();
+            send_response.recv_timeout(Duration::from_secs(5)).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"owned-focus\"\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            // Cancellation may already have closed the client's connection.
+            let _ = socket.write_all(response.as_bytes());
+            let _ = socket.write_all(&body);
+        });
+        let before = controller.audio.status();
+        assert_eq!(before.state, PlaybackState::Empty);
+        let worker = {
+            let (controller, cancel) = (controller.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                controller.load_selection_audio(SelectionAudioJob {
+                    file,
+                    play: true,
+                    remote: true,
+                    generation,
+                    cancel,
+                });
+            })
+        };
+        request_received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(controller.audio.status().state, PlaybackState::Empty);
+        assert!(controller.stop_on_focus_loss(Some(true), false).unwrap());
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(controller.latest_selection.lock().unwrap().is_none());
+        assert!(controller.selection_job.lock().unwrap().is_none());
+        assert!(controller.selection_audio_job.lock().unwrap().is_none());
+        release.send(()).unwrap();
+        server.join().unwrap();
+        worker.join().unwrap();
+        let after = controller
+            .audio
+            .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4))
+            .unwrap();
+        assert_eq!(
+            after.generation, before.generation,
+            "late response must not queue Load"
+        );
+        assert_eq!(after.play_session_id, before.play_session_id);
+        assert!(
+            after.file_path.is_none(),
+            "cancelled audition must never reach the engine"
+        );
+        assert_eq!(after.state, PlaybackState::Empty);
+        // Stop may retain completed remote bytes for reuse. A late response is
+        // harmless once the generation/cancel guard rejects its engine Load.
+        // Unregister the fixture explicitly before changing its source mode.
+        controller.stop_remote_stream();
+        assert!(controller.remote_stream.lock().unwrap().is_none());
+
+        // Drive the real selection worker through Load and Play. Gate Play's
+        // decoder reopen while the engine is still Ready, then make a newer
+        // navigation cancel the old selection observer. That does not cancel
+        // the already admitted Play, so its actual ACK must remain tracked.
+        controller.remote_mode.store(false, Ordering::Release);
+        let other_id = controller
+            .provider()
+            .search(&SearchRequest {
+                query: "wind".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .results[0]
+            .id;
+        for lose_focus in [false, true] {
+            let gate = GatedPlay::new(&local_path, controller.audio.clone());
+            controller.select_id(file_id, true);
+            let observed = gate.entered.clone();
+            run_until(&ui, move || observed.load(Ordering::Acquire));
+            let ready = controller.audio.status();
+            assert_eq!(ready.state, PlaybackState::Ready);
+            assert!(controller.latest_selection.lock().unwrap().is_none());
+            let consumed = controller.selection_generation.load(Ordering::Acquire);
+            controller.resume_source_selection(true);
+            assert!(controller.latest_selection.lock().unwrap().is_none());
+            assert_eq!(
+                controller.selection_generation.load(Ordering::Acquire),
+                consumed
+            );
+            controller.select_id(other_id, false);
+            let generation = controller.selection_generation.load(Ordering::Acquire);
+            assert!(generation > consumed);
+            assert!(controller.prune_pending_selection_plays());
+            assert_eq!(controller.audio.status().state, PlaybackState::Ready);
+            if lose_focus {
+                assert!(controller.stop_on_focus_loss(Some(true), false).unwrap());
+                assert!(
+                    controller
+                        .pending_selection_plays
+                        .lock()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(controller.selection_generation.load(Ordering::Acquire) > generation);
+            } else {
+                assert!(!controller.stop_on_focus_loss(Some(false), false).unwrap());
+                assert_eq!(
+                    controller.selection_generation.load(Ordering::Acquire),
+                    generation
+                );
+            }
+            gate.release();
+            let completed = controller
+                .audio
+                .send_and_wait(AudioCommand::Synchronize, Duration::from_secs(4))
+                .unwrap();
+            if lose_focus {
+                assert_eq!(completed.state, PlaybackState::Stopped);
+                assert!(completed.error.is_none());
+            } else {
+                // The deliberately unavailable output rejects Play, completing
+                // its observer with an error; terminal errors must be pruned too.
+                assert!(completed.error.is_some());
+            }
+            assert!(!controller.prune_pending_selection_plays());
+            assert!(
+                controller
+                    .pending_selection_plays
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(completed.generation, ready.generation);
+            assert_eq!(completed.play_session_id, 0);
+            // The non-playing newer navigation has not published on Slint yet.
+            // Cancel it before another test iteration drains queued callbacks.
+            controller
+                .enqueue_stop()
+                .unwrap()
+                .wait(Duration::from_secs(4))
+                .unwrap();
+        }
+        controller.shutdown();
+        ui.hide().unwrap();
+    }
+
+    #[test]
     fn remote_audition_wait_survives_background_status_and_rejects_stale_callbacks() {
         super::source_transition_tests::isolated_module(
             "tests",
@@ -4286,6 +4573,13 @@ mod tests {
         assert!(
             started.elapsed() < WAKING_HINT_AFTER,
             "A known waking root is shown immediately"
+        );
+        controller.publish_data_source(&ui);
+        assert!(!ui.get_data_source_label().contains("disk waking"));
+        assert!(
+            ui.get_remote_audition_status()
+                .contains("owned waiting sound.wav"),
+            "The live audition hint remains while the cached root warning is hidden"
         );
         ui.set_status("Ready interleaved with remote wait".into());
         let weak = ui.as_weak();
@@ -4413,8 +4707,8 @@ mod tests {
                 .is_some_and(|ui| ui.get_remote_audition_status().is_empty())
         });
 
-        // Root warnings precede long identity/address text, so elision retains
-        // their useful part even when no audition is currently waiting.
+        // A cached Waking root must not leave a second hint after the live
+        // audition wait has finished, including after a language change.
         controller.config.lock().unwrap().data_source.server_url =
             "https://long-owned-library-address.example.test:8790".into();
         controller.remote.lock().unwrap().live_roots = Some(vec![RemoteRoot {
@@ -4425,19 +4719,26 @@ mod tests {
             ..Default::default()
         }]);
         controller.publish_data_source(&ui);
-        assert!(
-            ui.get_data_source_label()
-                .starts_with("Server mode · disk waking: Owned sleeping disk · ")
-        );
+        assert!(!ui.get_data_source_label().contains("disk waking"));
         assert!(
             ui.get_data_source_label()
                 .contains("long-owned-library-address.example.test")
         );
         controller.chinese.store(true, Ordering::Release);
         controller.publish_data_source(&ui);
-        assert!(
-            ui.get_data_source_label()
-                .starts_with("服务器模式 · 磁盘唤醒中：Owned sleeping disk · ")
+        assert!(!ui.get_data_source_label().contains("磁盘唤醒中"));
+        assert!(ui.get_remote_audition_status().is_empty());
+        assert_eq!(
+            controller
+                .remote
+                .lock()
+                .unwrap()
+                .live_roots
+                .as_ref()
+                .unwrap()[0]
+                .state(),
+            RootState::Waking,
+            "Hiding a footer warning must not change the server's root state"
         );
         controller.shutdown();
         ui.hide().unwrap();
@@ -4512,11 +4813,10 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert_eq!(
-            super::root_summary(&roots, true),
-            " · 根目录离线：SFX · 磁盘唤醒中：Foley"
-        );
-        assert_eq!(super::root_summary(&roots[2..], false), "");
+        assert_eq!(super::root_summary(&roots, true), " · 根目录离线：SFX");
+        assert_eq!(super::root_summary(&roots, false), " · root offline: SFX");
+        assert!(super::root_summary(&roots[1..], false).is_empty());
+        assert!(super::root_summary(&roots[1..], true).is_empty());
         let notice = super::root_notice(&roots, true).unwrap();
         assert!(
             notice.contains("「SFX」（Root directory not found") && notice.contains("不标为缺失"),

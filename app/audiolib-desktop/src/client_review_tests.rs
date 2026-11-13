@@ -46,6 +46,174 @@ fn clearing_filters_leaves_missing_view_and_restores_present_results() {
 }
 
 #[test]
+fn buffering_feedback_preserves_general_status_and_clears_at_source_boundaries() {
+    let (_root, ui, _engine, controller) = fixture();
+    let mut status = audiolib_audio::PlaybackStatus {
+        state: PlaybackState::Playing,
+        buffering: true,
+        ..Default::default()
+    };
+    ui.set_status("Metadata feedback".into());
+    publish_audio_buffering_status(&ui, &status, true, false);
+    assert!(!ui.get_audio_buffering_status().is_empty());
+    assert_eq!(ui.get_status(), "Metadata feedback");
+
+    status.state = PlaybackState::Ready;
+    publish_audio_buffering_status(&ui, &status, true, false);
+    assert!(ui.get_audio_buffering_status().is_empty());
+    assert_eq!(ui.get_status(), "Metadata feedback");
+
+    status.state = PlaybackState::Playing;
+    status.error = Some("A real source failure".into());
+    publish_audio_buffering_status(&ui, &status, true, false);
+    assert!(ui.get_audio_buffering_status().is_empty());
+    status.error = None;
+    publish_audio_buffering_status(&ui, &status, false, false);
+    assert!(ui.get_audio_buffering_status().is_empty());
+
+    publish_audio_buffering_status(&ui, &status, true, false);
+    ui.set_remote_audition_status("Previous source waiting".into());
+    controller.source_generation.fetch_add(1, Ordering::AcqRel);
+    controller.clear_remote_audition_status();
+    assert!(ui.get_audio_buffering_status().is_empty());
+    assert!(ui.get_remote_audition_status().is_empty());
+    assert_eq!(ui.get_status(), "Metadata feedback");
+
+    publish_audio_buffering_status(&ui, &status, true, false);
+    ui.set_status("Metadata close recovery".into());
+    publish_audio_buffering_status(&ui, &status, true, true);
+    assert!(ui.get_audio_buffering_status().is_empty());
+    assert_eq!(ui.get_status(), "Metadata close recovery");
+    controller.shutdown();
+}
+
+#[test]
+fn queued_status_feedback_cannot_hide_close_recovery() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "controller::client_review_tests::child_close_recovery_feedback",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "queued close feedback uses an isolated event loop"]
+fn child_close_recovery_feedback() {
+    fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
+        let started = Instant::now();
+        let timer = slint::Timer::default();
+        let finished = std::cell::Cell::new(false);
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(10),
+            move || {
+                if finished.get() {
+                    return;
+                }
+                assert!(started.elapsed() < Duration::from_secs(10));
+                if ready() {
+                    finished.set(true);
+                    slint::quit_event_loop().unwrap();
+                }
+            },
+        );
+        ui.show().unwrap();
+        slint::run_event_loop().unwrap();
+        timer.stop();
+    }
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let (_root, ui, _engine, controller) = make_fixture();
+    let c = controller.clone();
+    run_until(&ui, move || {
+        c.ui.upgrade().is_some_and(|ui| {
+            !ui.get_searching() && !ui.get_search_workspace_loading() && !ui.get_task_restoring()
+        }) && c
+            .search_publication
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| state.page == SearchPagePhase::Published && state.model_published)
+    });
+    // Both generic feedback and a real playback failure are queued before the
+    // close failure claims the status line. Delivering them must retain recovery.
+    controller.status("Older queued work feedback".into());
+    assert!(
+        controller
+            .audio
+            .send_and_wait(AudioCommand::Seek(f64::NAN), Duration::from_secs(2))
+            .is_err()
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    controller
+        .close_retains_status
+        .store(true, Ordering::Release);
+    ui.set_status("Metadata close recovery".into());
+    controller
+        .search_publication
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .retained_status = Some("Metadata close recovery".into());
+    // A scan can still change revisions after Metadata rejects closing. The
+    // internal refresh must retain recovery both immediately and after results.
+    controller.refresh_result_window(&ui);
+    assert_eq!(ui.get_status(), "Metadata close recovery");
+    assert_eq!(
+        controller
+            .search_publication
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .retained_status
+            .as_deref(),
+        Some("Metadata close recovery")
+    );
+    let started = Instant::now();
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    run_until(&ui, move || {
+        let ui = weak.upgrade().unwrap();
+        assert_eq!(ui.get_status(), "Metadata close recovery");
+        started.elapsed() >= Duration::from_millis(200)
+            && !ui.get_playback_error().is_empty()
+            && !ui.get_searching()
+            && c.search_publication
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|state| {
+                    state.page == SearchPagePhase::Published && state.model_published
+                })
+    });
+    // A skipped publication did not consume the error transition. Releasing
+    // recovery protection lets the current real error be reported normally.
+    controller
+        .close_retains_status
+        .store(false, Ordering::Release);
+    let c = controller.clone();
+    run_until(&ui, move || {
+        c.audio.status().error.as_ref().is_some_and(|error| {
+            c.ui.upgrade()
+                .is_some_and(|ui| ui.get_status().as_str() == error)
+        })
+    });
+    controller.shutdown();
+    ui.hide().unwrap();
+}
+
+#[test]
 fn persistent_playback_error_does_not_replace_later_feedback() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -122,7 +290,46 @@ fn child_playback_feedback() {
                         c.audio.status().error.is_some(),
                         "the original engine error remains active"
                     );
+                    c.command(AudioCommand::Stop);
                     observed.set(3);
+                }
+                3 if c.audio.status().error.is_none() && ui.get_playback_error().is_empty() => {
+                    assert_eq!(
+                        ui.get_status(),
+                        "Later Metadata feedback",
+                        "Recovery must preserve unrelated feedback that replaced the error"
+                    );
+                    c.command(AudioCommand::Seek(f64::NAN));
+                    observed.set(4);
+                }
+                4 if c
+                    .audio
+                    .status()
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| ui.get_status().as_str() == error) =>
+                {
+                    let recovered = c
+                        .audio
+                        .send_and_wait(AudioCommand::Stop, Duration::from_secs(2))
+                        .unwrap();
+                    // Queue a recovery while the UI is held, then supersede its
+                    // transport revision before those callbacks can publish. The
+                    // next accepted None/error snapshot must still clear the old
+                    // playback feedback rather than treating it as already seen.
+                    std::thread::sleep(Duration::from_millis(200));
+                    let replaced = c
+                        .audio
+                        .send_and_wait(AudioCommand::Seek(0.0), Duration::from_secs(2))
+                        .unwrap();
+                    assert!(replaced.transport_revision > recovered.transport_revision);
+                    observed.set(5);
+                }
+                5 if c.audio.status().error.is_none()
+                    && ui.get_playback_error().is_empty()
+                    && ui.get_status().is_empty() =>
+                {
+                    observed.set(6);
                     c.shutdown();
                     ui.hide().unwrap();
                     slint::quit_event_loop().unwrap();
@@ -133,7 +340,146 @@ fn child_playback_feedback() {
     );
     ui.run().unwrap();
     timer.stop();
-    assert_eq!(stage.get(), 3);
+    assert_eq!(stage.get(), 6);
+}
+
+#[test]
+fn queued_playback_errors_do_not_replace_a_recovered_source() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "controller::client_review_tests::child_queued_playback_error",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "queued status snapshots use an isolated event loop"]
+fn child_queued_playback_error() {
+    fn run_until(ui: &AppWindow, ready: impl Fn() -> bool + 'static) {
+        let started = Instant::now();
+        let timer = slint::Timer::default();
+        let finished = std::cell::Cell::new(false);
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(10),
+            move || {
+                if finished.get() {
+                    return;
+                }
+                assert!(started.elapsed() < Duration::from_secs(10));
+                if ready() {
+                    finished.set(true);
+                    slint::quit_event_loop().unwrap();
+                }
+            },
+        );
+        ui.show().unwrap();
+        slint::run_event_loop().unwrap();
+        timer.stop();
+    }
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let (root, ui, _engine, controller) = make_fixture();
+    let c = controller.clone();
+    run_until(&ui, move || {
+        c.ui.upgrade().is_some_and(|ui| {
+            !ui.get_searching() && !ui.get_search_workspace_loading() && !ui.get_task_restoring()
+        }) && c
+            .search_publication
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| state.page == SearchPagePhase::Published && state.model_published)
+    });
+    let mut wav = Vec::new();
+    wav.extend(b"RIFF");
+    wav.extend(38u32.to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend(1u16.to_le_bytes());
+    wav.extend(1u16.to_le_bytes());
+    wav.extend(48_000u32.to_le_bytes());
+    wav.extend(96_000u32.to_le_bytes());
+    wav.extend(2u16.to_le_bytes());
+    wav.extend(16u16.to_le_bytes());
+    wav.extend(b"data");
+    wav.extend(2u32.to_le_bytes());
+    wav.extend(0i16.to_le_bytes());
+    let path = root.path().join("recovered.wav");
+    std::fs::write(&path, wav).unwrap();
+    // Hold the UI event loop while the status worker queues an old failure.
+    assert!(
+        controller
+            .audio
+            .send_and_wait(AudioCommand::Seek(f64::NAN), Duration::from_secs(2))
+            .is_err()
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let recovered = controller
+        .audio
+        .send_and_wait(AudioCommand::Load(path.clone()), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(recovered.state, PlaybackState::Ready);
+    assert!(recovered.error.is_none());
+    let audition = AuditionSettings {
+        pitch_semitones: 3.0,
+        rate: 1.25,
+        mono: true,
+        loop_enabled: true,
+    };
+    let transformed = controller
+        .audio
+        .send_and_wait(AudioCommand::SetAudition(audition), Duration::from_secs(2))
+        .unwrap();
+    // Queue the confirmed transform while the UI is blocked, then Seek makes
+    // that transform snapshot stale without changing the transform itself.
+    std::thread::sleep(Duration::from_millis(200));
+    let moved = controller
+        .audio
+        .send_and_wait(AudioCommand::Seek(0.0), Duration::from_secs(2))
+        .unwrap();
+    assert!(moved.transport_revision > transformed.transport_revision);
+    ui.set_status("New source ready".into());
+    let started = Instant::now();
+    let weak = ui.as_weak();
+    run_until(&ui, move || {
+        let ui = weak.upgrade().unwrap();
+        assert_eq!(
+            ui.get_status(),
+            "New source ready",
+            "A queued error from the previous engine generation must not publish"
+        );
+        started.elapsed() >= Duration::from_millis(200)
+            && ui.get_playback_error().is_empty()
+            && ui.get_audio_ready()
+            && ui.get_pitch_text() == "3.00"
+            && ui.get_speed_text() == "1.25"
+            && ui.get_audition_mono()
+            && ui.get_audition_repeat()
+    });
+    // An unchanged confirmed transform must not overwrite an input draft at
+    // each polling tick after the accepted transform has been published once.
+    ui.set_pitch_text("editing pitch".into());
+    ui.set_speed_text("editing rate".into());
+    let started = Instant::now();
+    let weak = ui.as_weak();
+    run_until(&ui, move || {
+        let ui = weak.upgrade().unwrap();
+        assert_eq!(ui.get_pitch_text(), "editing pitch");
+        assert_eq!(ui.get_speed_text(), "editing rate");
+        started.elapsed() >= Duration::from_millis(200)
+    });
+    controller.shutdown();
+    ui.hide().unwrap();
 }
 
 #[test]

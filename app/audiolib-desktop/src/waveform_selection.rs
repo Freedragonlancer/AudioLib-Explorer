@@ -1,5 +1,6 @@
 // app/audiolib-desktop/src/waveform_selection.rs
 //! Source-bound Waveform ranges, ordered audition and durable native drag exports.
+use super::status_feedback::AudioActivity;
 use super::*;
 use audiolib_core::AudioFrameRange;
 use std::io::{Read, Write};
@@ -589,12 +590,13 @@ impl Controller {
             let _prepare = c.remote_audio_prepare.lock().unwrap();
             if !c.selection_current(&selection)
                 || c.selection_generation.load(Ordering::Acquire) != selection.generation
+                || selection.preview_cancel.load(Ordering::Acquire)
             {
                 return;
             }
             if let Err(error) = selection.source.check_local_version() {
                 selection.preview_ready.store(true, Ordering::Release);
-                c.status(error);
+                c.report_wave_preview_error(&selection, error);
                 return;
             }
             if let Err(error) = selection
@@ -602,9 +604,7 @@ impl Controller {
                 .check_remote_version(&c, &selection.preview_cancel)
             {
                 selection.preview_ready.store(true, Ordering::Release);
-                if c.selection_current(&selection) {
-                    c.status(error);
-                }
+                c.report_wave_preview_error(&selection, error);
                 return;
             }
             let prepared = if selection.source.remote {
@@ -620,9 +620,7 @@ impl Controller {
                 Ok(path) => path,
                 Err(error) => {
                     selection.preview_ready.store(true, Ordering::Release);
-                    if c.selection_current(&selection) {
-                        c.status(error);
-                    }
+                    c.report_wave_preview_error(&selection, error);
                     return;
                 }
             };
@@ -633,12 +631,19 @@ impl Controller {
                         if !c.selection_current(&selection)
                             || c.selection_generation.load(Ordering::Acquire)
                                 != selection.generation
+                            || selection.preview_cancel.load(Ordering::Acquire)
                         {
-                            return Ok(());
+                            return Err(audiolib_core::Error::Cancelled);
                         }
                         c.audio.enqueue_with_ack(AudioCommand::Load(path.clone()))?
                     };
-                    completion.wait(Duration::from_secs(4))?;
+                    c.wait_audio_confirmation(
+                        &completion,
+                        &selection.preview_cancel,
+                        selection.generation,
+                        AudioActivity::Loading,
+                        |controller| controller.selection_current(&selection),
+                    )?;
                 }
                 selection
                     .source
@@ -652,8 +657,9 @@ impl Controller {
                     let _admission = c.latest_selection.lock().unwrap();
                     if !c.selection_current(&selection)
                         || c.selection_generation.load(Ordering::Acquire) != selection.generation
+                        || selection.preview_cancel.load(Ordering::Acquire)
                     {
-                        return Ok(());
+                        return Err(audiolib_core::Error::Cancelled);
                     }
                     let status = c.audio.status();
                     c.audio.enqueue_with_ack(AudioCommand::PlayRange {
@@ -661,27 +667,52 @@ impl Controller {
                         expected_generation: status.generation,
                     })?
                 };
-                completion.wait(Duration::from_secs(4))?;
+                c.wait_audio_confirmation(
+                    &completion,
+                    &selection.preview_cancel,
+                    selection.generation,
+                    AudioActivity::Previewing,
+                    |controller| controller.selection_current(&selection),
+                )?;
+                let _admission = c.latest_selection.lock().unwrap();
+                if !c.selection_current(&selection)
+                    || c.selection_generation.load(Ordering::Acquire) != selection.generation
+                    || selection.preview_cancel.load(Ordering::Acquire)
+                {
+                    return Err(audiolib_core::Error::Cancelled);
+                }
                 c.list_waveforms.note_audition_start();
                 c.clear_audio_reload(selection.source.file.id);
                 Ok(())
             })();
             selection.preview_ready.store(true, Ordering::Release);
             if let Err(error) = result {
-                if c.selection_current(&selection) {
-                    c.status(error.to_string());
+                if !matches!(error, audiolib_core::Error::Cancelled) && !error.is_read_interrupted()
+                {
+                    c.report_wave_preview_error(&selection, error.to_string());
                 }
             } else {
                 let c2 = c.clone();
                 post(c.ui.clone(), move |ui| {
                     if c2.selection_current(&selection)
                         && c2.selection_generation.load(Ordering::Acquire) == selection.generation
+                        && !selection.preview_cancel.load(Ordering::Acquire)
                     {
                         ui.set_audio_ready(true);
                     }
                 });
             }
         }));
+    }
+
+    /// An old preview may finish after a newer selection already owns the status line.
+    fn report_wave_preview_error(self: &Arc<Self>, selection: &Selection, message: String) {
+        let selection = selection.clone();
+        self.status_when(message, move |controller| {
+            controller.selection_current(&selection)
+                && controller.selection_generation.load(Ordering::Acquire) == selection.generation
+                && !selection.preview_cancel.load(Ordering::Acquire)
+        });
     }
 
     /// Replaying a selected Waveform must never reload the inspector's other file.
@@ -767,11 +798,16 @@ impl Controller {
         let c = self.clone();
         self.slice_preview_jobs.submit(Box::new(move || {
             let _guard = guard;
-            let current = || {
-                c.available()
+            let current = |controller: &Controller| {
+                controller.available()
                     && !cancel.load(Ordering::Acquire)
-                    && c.selection_generation.load(Ordering::Acquire) == generation
-                    && c.slice
+                    && controller.source_generation.load(Ordering::Acquire)
+                        == source.source_generation
+                    && controller.library_generation.load(Ordering::Acquire)
+                        == source.library_generation
+                    && controller.selection_generation.load(Ordering::Acquire) == generation
+                    && controller
+                        .slice
                         .lock()
                         .unwrap()
                         .source
@@ -782,32 +818,39 @@ impl Controller {
                 return;
             }
             let _prepare = c.remote_audio_prepare.lock().unwrap();
-            if !current() {
+            if !current(&c) {
                 return;
             }
-            let result = (|| -> Result<(), String> {
-                source.check_remote_version(&c, &cancel)?;
+            let result = (|| -> audiolib_core::Result<()> {
+                source
+                    .check_remote_version(&c, &cancel)
+                    .map_err(audiolib_core::Error::Validation)?;
                 let path = if source.remote {
-                    c.playable_path(&source.file, &cancel, generation)?
+                    c.playable_path(&source.file, &cancel, generation)
+                        .map_err(audiolib_core::Error::Validation)?
                 } else {
                     PathBuf::from(&source.file.file_path)
                 };
                 let completion = {
                     let _admission = c.latest_selection.lock().unwrap();
-                    if !current() {
+                    if !current(&c) {
                         return Ok(());
                     }
-                    c.audio
-                        .enqueue_with_ack(AudioCommand::Load(path.clone()))
-                        .map_err(|e| e.to_string())?
+                    c.audio.enqueue_with_ack(AudioCommand::Load(path.clone()))?
                 };
-                completion
-                    .wait(Duration::from_secs(4))
-                    .map_err(|e| e.to_string())?;
-                source.check_preview_version(&c, &path, &cancel)?;
+                c.wait_audio_confirmation(
+                    &completion,
+                    &cancel,
+                    generation,
+                    AudioActivity::Seeking,
+                    current,
+                )?;
+                source
+                    .check_preview_version(&c, &path, &cancel)
+                    .map_err(audiolib_core::Error::Validation)?;
                 let range_completion = {
                     let _admission = c.latest_selection.lock().unwrap();
-                    if !current() {
+                    if !current(&c) {
                         return Ok(());
                     }
                     let range = c.slice.lock().unwrap().selection.as_ref().map(|s| s.range);
@@ -818,28 +861,48 @@ impl Controller {
                                 expected_generation: c.audio.status().generation,
                             })
                         })
-                        .transpose()
-                        .map_err(|e| e.to_string())?
+                        .transpose()?
                 };
                 if let Some(completion) = range_completion {
-                    completion
-                        .wait(Duration::from_secs(4))
-                        .map_err(|e| e.to_string())?;
+                    c.wait_audio_confirmation(
+                        &completion,
+                        &cancel,
+                        generation,
+                        AudioActivity::Seeking,
+                        current,
+                    )?;
                 }
                 let _admission = c.latest_selection.lock().unwrap();
-                if !current() {
+                if !current(&c) {
                     return Ok(());
                 }
-                c.audio
-                    .send(AudioCommand::SeekAndPlay(position))
-                    .map_err(|e| e.to_string())?;
+                c.audio.send(AudioCommand::SeekAndPlay(position))?;
                 c.clear_audio_reload(source.file.id);
                 Ok(())
             })();
-            if current()
+            if current(&c)
                 && let Err(error) = result
+                && !matches!(error, audiolib_core::Error::Cancelled)
+                && !error.is_read_interrupted()
             {
-                c.status(error);
+                let key = source.key.clone();
+                let source_generation = source.source_generation;
+                let library_generation = source.library_generation;
+                let cancel = cancel.clone();
+                c.status_when(error.to_string(), move |controller| {
+                    !cancel.load(Ordering::Acquire)
+                        && controller.source_generation.load(Ordering::Acquire) == source_generation
+                        && controller.library_generation.load(Ordering::Acquire)
+                            == library_generation
+                        && controller.selection_generation.load(Ordering::Acquire) == generation
+                        && controller
+                            .slice
+                            .lock()
+                            .unwrap()
+                            .source
+                            .as_ref()
+                            .is_some_and(|shown| shown.key == key)
+                });
             }
         }));
     }

@@ -2,12 +2,15 @@
 //! Embedded reference retrieval. Never reads a working library or source audio.
 use crate::{AiError, Result};
 use audiolib_core::ai_search::{
-    AiQuery, AiQueryPlan, MAX_AI_QUERIES, validate_ai_query, validate_intent,
+    AiQuery, AiQueryKind, AiQueryPlan, MAX_AI_QUERIES, validate_ai_query, validate_intent,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::OnceLock;
+
+mod decision;
+pub use decision::DecisionCandidate;
 
 const WORDS: &str =
     include_str!("../../../.agents/skills/audio-keyword-search/data/keywords.jsonl");
@@ -25,6 +28,7 @@ struct Keyword {
     zh: String,
     domain: String,
     ucs_catids: Vec<String>,
+    note: String,
 }
 #[derive(Deserialize)]
 struct Category {
@@ -35,6 +39,7 @@ struct Category {
     subcategory_zh: String,
     synonyms: String,
     synonyms_zh: String,
+    description: String,
 }
 /// One read-only design recipe supplied to the decision provider as a candidate.
 #[derive(Clone, Debug, Deserialize)]
@@ -146,6 +151,7 @@ impl ReferenceIndex {
     fn add(
         queries: &mut Vec<AiQuery>,
         text: &str,
+        kind: AiQueryKind,
         layer: &str,
         reason: &str,
         id: &str,
@@ -159,6 +165,7 @@ impl ReferenceIndex {
         }
         queries.push(AiQuery {
             text: text.into(),
+            kind,
             layer: layer.into(),
             reason: reason.chars().take(300).collect(),
             source_ids: vec![id.into()],
@@ -178,6 +185,7 @@ impl ReferenceIndex {
             Self::add(
                 &mut queries,
                 text,
+                AiQueryKind::Main,
                 "direct",
                 &recipe.title,
                 &recipe.id,
@@ -185,11 +193,23 @@ impl ReferenceIndex {
             );
         }
         if layers {
-            for layer in &recipe.layers {
-                for text in &layer.queries {
+            // Visit every layer before adding its second alternative, so a bounded
+            // plan retains the tail and other late layers in larger recipes.
+            let alternatives = recipe
+                .layers
+                .iter()
+                .map(|layer| layer.queries.len())
+                .max()
+                .unwrap_or(0);
+            for alternative in 0..alternatives {
+                for layer in &recipe.layers {
+                    let Some(text) = layer.queries.get(alternative) else {
+                        continue;
+                    };
                     Self::add(
                         &mut queries,
                         text,
+                        AiQueryKind::Layer,
                         &layer.role,
                         &recipe.title,
                         &recipe.id,
@@ -220,6 +240,7 @@ impl ReferenceIndex {
                         Self::add(
                             &mut plan.queries,
                             q,
+                            AiQueryKind::Main,
                             "direct",
                             &r.title,
                             &r.id,
@@ -257,13 +278,22 @@ impl ReferenceIndex {
             Self::add(
                 &mut queries,
                 &k.term,
+                AiQueryKind::Main,
                 "keyword",
                 &k.zh,
                 &k.id,
                 &k.ucs_catids,
             );
             for alt in k.alternatives.iter().take(2) {
-                Self::add(&mut queries, alt, "keyword", &k.zh, &k.id, &k.ucs_catids);
+                Self::add(
+                    &mut queries,
+                    alt,
+                    AiQueryKind::Main,
+                    "keyword",
+                    &k.zh,
+                    &k.id,
+                    &k.ucs_catids,
+                );
             }
         }
         if queries.len() < 5 {
@@ -292,6 +322,7 @@ impl ReferenceIndex {
                 Self::add(
                     &mut queries,
                     &c.id,
+                    AiQueryKind::Main,
                     "UCS",
                     &format!("{} / {}", c.category, c.subcategory),
                     &c.id,
@@ -333,6 +364,53 @@ impl ReferenceIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_kinds_distinguish_recipe_layers_without_inventing_keyword_layers() {
+        let index = ReferenceIndex::embedded();
+        let direct = index.local_plan("科幻爆炸", false).unwrap();
+        assert!(
+            direct
+                .queries
+                .iter()
+                .all(|query| query.kind == AiQueryKind::Main)
+        );
+        let layered = index.local_plan("科幻爆炸", true).unwrap();
+        assert_eq!(&layered.queries[..direct.queries.len()], &direct.queries);
+        let layers = &layered.queries[direct.queries.len()..];
+        assert!(layers.len() > 2);
+        assert!(layers.iter().all(|query| {
+            query.kind == AiQueryKind::Layer
+                && query.source_ids == ["scifi-explosion"]
+                && !query.layer.is_empty()
+        }));
+        let impact = layers
+            .iter()
+            .find(|query| query.text == "metal impact")
+            .unwrap();
+        assert_eq!(impact.layer, "音头");
+        assert_eq!(impact.reason, direct.queries[0].reason);
+
+        // Permission to consider layers does not turn keyword alternatives into
+        // layers, and neither the local word nor its provenance is changed.
+        let wind = index.local_plan("wind", false).unwrap();
+        assert_eq!(index.local_plan("wind", true).unwrap(), wind);
+        assert!(
+            wind.queries
+                .iter()
+                .all(|query| query.kind == AiQueryKind::Main)
+        );
+        let category = index.selection_plan("狗叫", "ANMLDog", true).unwrap();
+        assert!(
+            category
+                .queries
+                .iter()
+                .all(|query| query.kind == AiQueryKind::Main)
+        );
+        assert_eq!(category.queries[0].source_ids, ["ANMLDog"]);
+        assert_eq!(category.queries[0].cat_ids, ["ANMLDog"]);
+    }
+
     #[test]
     fn corpus_and_chinese_recipes_remain_executable() {
         let index = ReferenceIndex::embedded();

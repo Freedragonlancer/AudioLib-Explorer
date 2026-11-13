@@ -2,7 +2,7 @@
   "EM-01": {
     "bext_invalid_utf8": {
       "probe": {
-        "attributes_sha256": "740fa930f6a47d22618ca11e6dfa813c1edd94532611433dccb309102bf70b78",
+        "attributes_sha256": "3372b897efaf316303dab322879d935a79f85814153610a20e6dc4fd07c5e535",
         "bext_description": "ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ",
         "ok": true
       },
@@ -25,7 +25,7 @@
     },
     "bext_short": {
       "probe": {
-        "attributes_sha256": "f1cb18de453ad398bef39026303d7825c2f17a670d45e0805c6e1ffa4f0d3ce4",
+        "attributes_sha256": "3314ec81df0cdccd196cb6e612c2ee18dd54488c804ebad11c4034f8dcf6ee3e",
         "bext_description": "",
         "ok": true
       },
@@ -36,7 +36,7 @@
   "EM-02": {
     "ixml_bad_encoding": {
       "probe": {
-        "attributes_sha256": "fe30995fcd7ddb8c1b0ca761447d1de8b2d9806abe3aefb704cdb3fba0e35370",
+        "attributes_sha256": "8837b6e0ea020ff96a6144bb15c146770521980ddbeefbcd5dd3c60f57a0651a",
         "bext_description": "bextsurvives",
         "ok": true
       },
@@ -45,7 +45,7 @@
     },
     "ixml_binary": {
       "probe": {
-        "attributes_sha256": "6d3d7c6b22f484e6a77af84a5e1bb2e5a26617d206a6e523dd1de536214aaa9d",
+        "attributes_sha256": "17c4105def8ed1039e853c242372070c9781c6c405428ffbdddd6ec7deef746a",
         "bext_description": "bextsurvives",
         "ok": true
       },
@@ -54,7 +54,7 @@
     },
     "ixml_unterminated": {
       "probe": {
-        "attributes_sha256": "e1c5ad6bec27bc84e52e93ff915f937d8f76235d588b327056e67ef3b3d423c4",
+        "attributes_sha256": "1af189fc3a1cc265cd2178655343b25f199befe92944c91985bfdfbe283f9132",
         "bext_description": "bextsurvives",
         "ok": true
       },
@@ -63,7 +63,7 @@
     },
     "ixml_utf16_odd": {
       "probe": {
-        "attributes_sha256": "e6b602f7b586b56a09ddd59f0fd8e75f4b8d4d9a9d2cc7671c8c3f0cf70aca55",
+        "attributes_sha256": "70728a39979fbddefcf9330baf062c426362f0005705457f10949c2830d763b9",
         "bext_description": "bextsurvives",
         "ok": true
       },
@@ -74,7 +74,7 @@
   "EM-03": {
     "comm_size_overflow": {
       "probe": {
-        "attributes_sha256": "e5dbc570dcb5b88c5405052b8599595def472e383ab4017dee24af81c87545a6",
+        "attributes_sha256": "b15125247326902202a1cb2c787f3bac18f386bdfa4e010554664cfd04189155",
         "bext_description": "",
         "ok": true
       },
@@ -83,7 +83,7 @@
     },
     "comm_truncated_lang": {
       "probe": {
-        "attributes_sha256": "580e114324779f6cb50e1b77e3ca087f91130e3faca32c2e1ccd59b32cd3a49b",
+        "attributes_sha256": "3d0b26f14c1f1927cef81639627be78982486a72d2eb291342e8471ffe8f9fc2",
         "bext_description": "",
         "ok": true
       },
@@ -92,7 +92,7 @@
     },
     "tag_size_lies": {
       "probe": {
-        "attributes_sha256": "aa10e5beda5ba440d0b8b4ad262b9d50c53a30651a8a8e56afd67cf259d598a2",
+        "attributes_sha256": "2b31c506d088dae10f005354031ba8004c7abec4871bb4648571a6748fefd2f0",
         "bext_description": "",
         "ok": true
       },
@@ -101,7 +101,7 @@
     },
     "txxx_bad_utf16": {
       "probe": {
-        "attributes_sha256": "13bcdc1fbefb78971ae812c999ef2e2fd782db1d2c4e54c9c30e896a59ff6261",
+        "attributes_sha256": "63a7d4b5f8082edfb58ca4b34ab84a9a4fe3fee0b7a6d6a415eec60e11254b04",
         "bext_description": "",
         "ok": true
       },
@@ -110,7 +110,7 @@
     },
     "txxx_no_separator": {
       "probe": {
-        "attributes_sha256": "269d81bccacc691a3be6b303b84ea51853e71abc4079bc9b7fe7abaccc146594",
+        "attributes_sha256": "67aeec240a57312756464e2ac02e068dc54e659c9b3f9b920fca4d4ddccc910f",
         "bext_description": "",
         "ok": true
       },
@@ -119,7 +119,7 @@
     },
     "txxx_zero": {
       "probe": {
-        "attributes_sha256": "86647e6a75992e315ff1c0fd9878061ea86497457a8d1bb35b65afa7e4716347",
+        "attributes_sha256": "eb50f8d8cdaaa6bece1af52dd991b30740d613bc33d5f24f8161ed6cf2db1075",
         "bext_description": "",
         "ok": true
       },
@@ -131,7 +131,7 @@
     "gbk": {
       "attributes": {
         "bwf_coding_history": "",
-        "bwf_description": "±¬Õ¨",
+        "bwf_description": "爆炸",
         "bwf_origination_date": "",
         "bwf_origination_time": "",
         "bwf_originator": "",
@@ -161,15 +161,15 @@
             }
           ],
           "fields": {
-            "description": "±¬Õ¨"
+            "description": "爆炸"
           },
           "riff_info": {
-            "ICMT": "±¬Õ¨"
+            "ICMT": "爆炸"
           },
-          "version": 4
+          "version": 5
         }
       },
-      "bext_description": "±¬Õ¨"
+      "bext_description": "爆炸"
     },
     "latin1": {
       "attributes": {
@@ -209,7 +209,7 @@
           "riff_info": {
             "ICMT": "café"
           },
-          "version": 4
+          "version": 5
         }
       },
       "bext_description": "café"
@@ -217,7 +217,7 @@
     "shift_jis": {
       "attributes": {
         "bwf_coding_history": "",
-        "bwf_description": "Œø‰Ê‰¹",
+        "bwf_description": "効果音",
         "bwf_origination_date": "",
         "bwf_origination_time": "",
         "bwf_originator": "",
@@ -247,22 +247,22 @@
             }
           ],
           "fields": {
-            "description": "Œø‰Ê‰¹"
+            "description": "効果音"
           },
           "riff_info": {
-            "ICMT": "Œø‰Ê‰¹"
+            "ICMT": "効果音"
           },
-          "version": 4
+          "version": 5
         }
       },
-      "bext_description": "Œø‰Ê‰¹"
+      "bext_description": "効果音"
     }
   },
   "EM-05": {
     "ixml_101mb": {
       "after_chunk_extracted": true,
       "probe": {
-        "attributes_sha256": "3f402da317f4f18d9beb4ba9ee8c8e6089d09756e9586e5faf612739e5f15d9e",
+        "attributes_sha256": "e15653f9889371ddab86e95525f5fa1b4a1bded1184b790a1779c790f19df669",
         "bext_description": "",
         "ok": true
       },
@@ -279,7 +279,7 @@
     "junk_101mb": {
       "after_chunk_extracted": true,
       "probe": {
-        "attributes_sha256": "4c9c70291612047bcbf8efeba613ea25a8f0043c78073ccee3b9dd78a47a44cf",
+        "attributes_sha256": "cd76182c0c43a9bc19737ac82141cfb373bb6fda91b7b688bf12afc50e38dcb0",
         "bext_description": "",
         "ok": true
       },

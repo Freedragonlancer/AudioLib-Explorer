@@ -5,6 +5,110 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[test]
+fn search_revision_drift_refreshes_before_or_after_joining_multiple_pages() {
+    for change_after in [1, 2] {
+        let revision = Cell::new(7);
+        let calls = Cell::new(0);
+        let guard = SearchRevisionGuard::new(Some(revision.get()));
+        let mut request = SearchRequest {
+            limit: 2,
+            ..Default::default()
+        };
+        let result = result_window::load_forward(
+            &mut request,
+            &AtomicBool::new(false),
+            |_| {
+                guard.search(
+                    || Some(revision.get()),
+                    || {
+                        let call = calls.get() + 1;
+                        calls.set(call);
+                        if call == change_after {
+                            revision.set(8);
+                        }
+                        Ok(audiolib_core::SearchPage {
+                            results: vec![AudioFile::from(audiolib_core::AudioFileData {
+                                id: call,
+                                ..Default::default()
+                            })],
+                            returned_count: 1,
+                            total_count: 2,
+                            total_count_exact: true,
+                            ..Default::default()
+                        })
+                    },
+                )
+            },
+            |_| {},
+        );
+        if change_after == 1 {
+            assert!(matches!(result, Err(audiolib_core::Error::Cancelled)));
+            assert_eq!(calls.get(), 1, "The obsolete second query must not run");
+        } else {
+            assert_eq!(result.unwrap().page.results.len(), 2);
+        }
+        assert!(guard.requires_refresh(Some(revision.get())));
+        assert!(
+            guard.requires_refresh(Some(7)),
+            "A detected internal invalidation remains distinct from user cancellation"
+        );
+    }
+}
+
+#[test]
+fn search_revision_refresh_does_not_swallow_provider_cancellation_or_single_pages() {
+    let cancelled = SearchRevisionGuard::new(Some(7));
+    let result = cancelled.search(|| Some(7), || Err(audiolib_core::Error::Cancelled));
+    assert!(matches!(result, Err(audiolib_core::Error::Cancelled)));
+    assert!(!cancelled.requires_refresh(Some(7)));
+
+    let single = SearchRevisionGuard::new(Some(7));
+    single
+        .search(|| Some(7), || Ok(audiolib_core::SearchPage::default()))
+        .unwrap();
+    assert!(
+        !single.requires_refresh(Some(8)),
+        "One completed query does not join rows across separate provider calls"
+    );
+
+    let unknown = SearchRevisionGuard::new(None);
+    for _ in 0..2 {
+        unknown
+            .search(|| None, || Ok(audiolib_core::SearchPage::default()))
+            .unwrap();
+    }
+    assert!(
+        !unknown.requires_refresh(None),
+        "An unavailable revision token is not evidence of internal invalidation"
+    );
+
+    let unavailable = SearchRevisionGuard::new(Some(7));
+    unavailable
+        .search(|| Some(7), || Ok(audiolib_core::SearchPage::default()))
+        .unwrap();
+    let result = unavailable.search(|| None, || panic!("Unverified rows must not be joined"));
+    assert!(matches!(result, Err(audiolib_core::Error::Cancelled)));
+    assert!(!unavailable.requires_refresh(None));
+    assert!(!unavailable.requires_refresh(Some(7)));
+
+    let missing_final = SearchRevisionGuard::new(Some(7));
+    for _ in 0..2 {
+        missing_final
+            .search(|| Some(7), || Ok(audiolib_core::SearchPage::default()))
+            .unwrap();
+    }
+    assert!(!missing_final.requires_refresh(None));
+    assert!(matches!(
+        missing_final.finish(None, Ok(())),
+        Err(audiolib_core::Error::Cancelled)
+    ));
+    assert!(matches!(
+        missing_final.finish::<()>(None, Err(audiolib_core::Error::Cancelled)),
+        Err(audiolib_core::Error::Cancelled)
+    ));
+}
+
+#[test]
 fn search_updates_navigation_counts_and_preserves_cross_folder_choices() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([

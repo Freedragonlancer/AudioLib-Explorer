@@ -26,6 +26,7 @@ export struct AudioRow {
     duration-clock: string,
     album: string,
     favorite: bool,
+    played: bool,
     missing: bool,
     checked: bool,
     marker: color,
@@ -708,7 +709,7 @@ component HelpPanel inherits FocusScope {
             VerticalLayout { padding: 28px * Theme.ui-scale; spacing: 16px * Theme.ui-scale;
                 Text { text: root.chinese ? "快捷键与基本操作" : "Shortcuts and basics"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }
                 Text { text: root.chinese ? "Ctrl Shift I   添加声音文件夹     ·     Ctrl D   音效库管理\nCtrl F   搜索     ·     Ctrl S   保存 Metadata\nCtrl I   显示 / 隐藏侧栏     ·     F5   刷新素材库\nCtrl ,   全局设置     ·     Ctrl Q   保存草稿并退出\nEsc   关闭当前面板" : "Ctrl Shift I   Add sound folder     ·     Ctrl D   Manage sound library\nCtrl F   Search     ·     Ctrl S   Save Metadata\nCtrl I   Show / hide side panel     ·     F5   Refresh library\nCtrl ,   Global settings     ·     Ctrl Q   Save drafts and exit\nEsc   Close current panel"; color: Theme.ink; wrap: word-wrap; }
-                Text { text: root.chinese ? "新增音效库：使用文件菜单新建本地库、添加已有库或服务器连接。\n新增声音：使用工具栏添加文件夹，或音效库 → 扫描与索引。\n批量编辑：Ctrl 单击切换勾选，Shift 单击连续勾选，再使用批量标注。\n移除：编辑菜单管理当前音效与勾选记录，音效库菜单管理当前目录；只移除数据库记录与标注，源音频文件保留。\n全局偏好：设置 → 全局设置；主题与语言可在视图菜单内快捷切换。" : "Add a library: use File to create a local library, add an existing library or connect to a server.\nAdd sounds: use Add folder in the toolbar or Library → Scan and index.\nBatch edit: Ctrl-click to toggle or Shift-click to check a range, then choose Edit checked records.\nRemove records in Edit, or the current folder in Library; source audio files remain on disk.\nPreferences: Settings → Global settings. Switch themes and language from the View menu."; color: Theme.dim; wrap: word-wrap; }
+                Text { text: root.chinese ? "新增音效库：使用文件菜单新建本地库、添加已有库或服务器连接。\n新增声音：使用音效库 → 扫描与索引。\n批量编辑：Ctrl 单击切换勾选，Shift 单击连续勾选，再使用批量标注。\n移除：编辑菜单管理当前音效与勾选记录，音效库菜单管理当前目录；只移除数据库记录与标注，源音频文件保留。\n全局偏好：设置 → 全局设置；主题与语言可在视图菜单内快捷切换。" : "Add a library: use File to create a local library, add an existing library or connect to a server.\nAdd sounds: use Library → Scan and index.\nBatch edit: Ctrl-click to toggle or Shift-click to check a range, then choose Edit checked records.\nRemove records in Edit, or the current folder in Library; source audio files remain on disk.\nPreferences: Settings → Global settings. Switch themes and language from the View menu."; color: Theme.dim; wrap: word-wrap; }
                 Text { text: root.chinese ? "日常更新用增量扫描；整理文件后用全量扫描检查缺失。\n修复引用：音效库 → 查看缺失文件，选中声音后在详情面板选择新位置。标签和备注会保留。\n备份与数据库维护收在音效库管理底部的“高级维护”中。" : "Use incremental scans for daily updates; full scans check missing files after reorganizing a folder.\nRepair: Library → Missing files, select a sound, then locate it in Sound details. Annotations are kept.\nBackups and database tools are under Advanced maintenance in library management."; color: Theme.dim; wrap: word-wrap; }
                 close-action := Action { height: 34px * Theme.ui-scale; primary: true; label: root.chinese ? "关闭" : "Close"; clicked => { root.close(); } }
             }
@@ -932,12 +933,13 @@ export component AppWindow inherits Window {
     private property <length> application-footer-height: max(20px * Theme.ui-scale, Theme.font(10) + 6px * Theme.ui-scale);
     private property <string> application-status-text: root.drag-preparing && root.drag-progress != "" ? root.drag-progress
         : root.remote-audition-status != "" ? root.remote-audition-status
+        : root.audio-buffering-status != "" ? root.audio-buffering-status
         : root.scanning ? (root.chinese ? "正在扫描音效文件夹" : "Scanning sound folder") + (root.status != "" ? " · " + root.status : "") : root.status;
-    private property <length> priority-status-width: root.remote-audition-status != "" || (root.drag-preparing && root.drag-progress != "")
+    private property <length> priority-status-width: root.remote-audition-status != "" || root.audio-buffering-status != "" || (root.drag-preparing && root.drag-progress != "")
         ? min(240px * Theme.ui-scale, max(0px, root.width - (40px + (root.drag-preparing ? 60px : 0px)) * Theme.ui-scale - 1px) * 0.6) : 0px;
     in-out property <bool> ai-visible: false;
     in-out property <bool> ai-collapsed: false;
-    private property <length> ai-restore-reserve: root.ai-visible && root.ai-collapsed && !Theme.modern-style ? 104px * Theme.ui-scale : 0px;
+    private property <length> ai-restore-reserve: root.ai-visible && root.ai-collapsed && !Theme.modern-style ? ai-summary.width + 8px * Theme.ui-scale : 0px;
     private property <length> ai-restore-y: ai-panel.y + (Theme.modern-style ? studio-main-scroll.viewport-y : main-scroll.viewport-y);
     changed ai-restore-reserve => { root.update-task-tabs-overflow(); }
     property <bool> ai-batch-restoring: root.ai-batch-searching && root.task-restoring && !root.ai-batch-blocked;
@@ -948,7 +950,6 @@ export component AppWindow inherits Window {
     changed query => { if !root.ai-visible { root.search-entry-text = root.query; } }
     changed ai-prompt => { if root.ai-visible { root.search-entry-text = root.ai-prompt; } }
     changed ai-visible => {
-        if root.ai-visible { root.ai-collapsed = false; }
         root.search-entry-text = root.ai-visible ? root.ai-prompt : root.query;
         if Theme.modern-style { studio-search-input.focus(); } else { search-input.focus(); }
     }
@@ -963,6 +964,7 @@ export component AppWindow inherits Window {
     in-out property <[AiSuggestion]> ai-quick-rows;
     callback ai-action(int, int);
     in-out property <bool> ai-settings <=> ai-panel.settings;
+    in-out property <int> ai-settings-page <=> ai-panel.settings-page;
     in-out property <string> ai-prompt <=> ai-panel.prompt;
     in-out property <int> ai-preset-index <=> ai-panel.preset-index;
     in-out property <string> ai-instruction <=> ai-panel.instruction;
@@ -985,6 +987,22 @@ export component AppWindow inherits Window {
     in-out property <int> ai-protocol <=> ai-panel.protocol;
     in-out property <string> ai-endpoint <=> ai-panel.endpoint;
     in-out property <string> ai-model <=> ai-panel.model;
+    // The generation profile is saved independently from the editable form draft.
+    in-out property <string> ai-selected-model;
+    private property <string> ai-model-caption: root.ai-provider-index == 0
+        ? (root.chinese ? "AI：本地词表（离线）" : "AI: Local reference (offline)")
+        : (root.chinese ? "AI 模型：" : "AI model: ") + (root.ai-selected-model == "" ? (root.chinese ? "未选择" : "Not selected") : root.ai-selected-model);
+    out property <string> ai-notice-message;
+    out property <int> ai-notice-revision: 0;
+    private property <length> ai-notice-list-left: max(16px * Theme.ui-scale, (Theme.modern-style ? studio-results-panel.absolute-position.x : results-panel.absolute-position.x) - shortcuts.absolute-position.x);
+    private property <length> ai-notice-list-right: min(root.ai-sidebar-expanded ? ai-panel.x - 8px * Theme.ui-scale : root.width - 16px * Theme.ui-scale, (Theme.modern-style ? studio-results-panel.absolute-position.x + studio-results-panel.width : results-panel.absolute-position.x + results-panel.width) - shortcuts.absolute-position.x);
+    private property <bool> ai-notice-in-list: root.ai-notice-list-right - root.ai-notice-list-left >= 180px * Theme.ui-scale;
+    public function show-ai-notice(message: string) {
+        root.ai-notice-message = message;
+        root.ai-notice-revision += 1;
+        ai-notice-timer.running = true;
+        ai-notice-timer.restart();
+    }
     in-out property <string> ai-key <=> ai-panel.key;
     in-out property <bool> ai-dirty <=> ai-panel.dirty;
     in-out property <bool> ai-error <=> ai-panel.error;
@@ -1325,6 +1343,7 @@ export component AppWindow inherits Window {
     in property <string> status: "";
     // Selection-owned remote waits survive unrelated search/sync status updates.
     in property <string> remote-audition-status: "";
+    in property <string> audio-buffering-status: "";
     in property <bool> searching: false;
     in property <bool> scanning: false;
     in property <bool> can-previous: false;
@@ -1565,6 +1584,9 @@ export component AppWindow inherits Window {
     in-out property <bool> audition-repeat: false;
     in-out property <bool> audition-play-on-single-click: false;
     callback single-click-play-requested(bool);
+    in-out property <bool> stop-playback-on-focus-loss: false;
+    in property <bool> focus-loss-stop-supported: false;
+    callback stop-playback-on-focus-loss-requested(bool);
     in-out property <float> volume-db: -1.9;
     private property <float> audition-premute-db: -12;
     private property <bool> audition-show-remaining: false;
@@ -2564,6 +2586,13 @@ export component AppWindow inherits Window {
     // Menu dismissal restores the old input focus after its activated callback.
     // Defer once past dismissal; zero-interval timers can expire again before
     // running=false is applied, repeatedly stealing focus from modal editors.
+    ai-notice-timer := Timer {
+        running: false; interval: 3s;
+        triggered => {
+            self.running = false;
+            root.ai-notice-message = "";
+        }
+    }
     modal-focus-timer := Timer {
         running: false;
         interval: 1ms;
@@ -2773,6 +2802,7 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: root.chinese ? "通用与界面…" : "General and interface…"; activated => { root.open-global-settings(1); } }
             MenuItem { title: root.chinese ? "搜索与任务…" : "Search and tasks…"; activated => { root.open-global-settings(2); } }
+            MenuItem { title: root.chinese ? "AI智能搜索…" : "AI Search…"; activated => { root.ai-action(22,0); } }
             MenuItem { title: root.chinese ? "播放与音频…" : "Audio and playback…"; activated => { root.open-global-settings(0); } }
             MenuItem { title: root.chinese ? "服务器与同步…" : "Server and sync…"; activated => { root.open-global-settings(3); } }
             MenuItem { title: root.chinese ? "本机缓存…" : "Local caches…"; activated => { root.open-global-settings(4); } }
@@ -2857,7 +2887,7 @@ main-scroll := ScrollView {
                 can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                 navigate(direction) => { root.search-history-requested(direction); }
             }
-            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: 340px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 773px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
+            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                     Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.accent; image-fit: contain; }
                     search-input := LineEdit { horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
@@ -2876,10 +2906,10 @@ main-scroll := ScrollView {
                 rows: root.ai-quick-rows; selected: root.ai-selected; chinese: root.chinese;
                 enabled: !root.background-blocked && !root.ai-busy && !root.task-restoring;
                 search(index) => { root.ai-action(16,index); }
+                new-task(index) => { root.ai-action(24,index); }
             }
             if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
-            Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+  添加文件夹" : "+  Add folder"; clicked => { root.prepare-scan(0, ""); } }
-            Action { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
+            Action { width: 100px * Theme.ui-scale; height: 32px * Theme.ui-scale; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
         }
 
         if root.remote-mode && root.remote-notice != "": Rectangle { height: 34px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: root.remote-notice-kind == 1 ? Theme.accent : Theme.warning;
@@ -3304,7 +3334,7 @@ main-scroll := ScrollView {
                                 changed visible-height => { if !Theme.modern-style { root.report-result-window(); } }
                                 changed viewport-width => { if !Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // Fixed child layout widths let ListView measure its horizontal scroll extent.
-                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.classic-result-row-height; accessible-role: list-item; accessible-label: (row.played ? (root.chinese ? "已播放：" : "Played: ") : "") + row.name;
                                     background: row.checked ? (root.selected-row == index ? Theme.selected : Theme.checked) : (result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.alternate : Theme.panel));
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
@@ -3335,7 +3365,7 @@ main-scroll := ScrollView {
                                                 }
                                             }
                                         }
-                                        table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : Theme.ink; font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                        table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: row.missing ? Theme.warning : (row.played ? Theme.accent : Theme.ink); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                         table-duration-cell := Text { width: root.table-duration-size - 24px * Theme.ui-scale; text: row.duration; color: Theme.ink; horizontal-alignment: right; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
                                         table-format-cell := Text { width: root.table-format-size - 24px * Theme.ui-scale; text: row.format; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(10); overflow: elide; }
                                         table-channels-cell := Text { width: root.table-channels-size - 24px * Theme.ui-scale; text: row.channels; color: Theme.dim; vertical-alignment: center; font-size: Theme.list-font(11); overflow: elide; }
@@ -3695,7 +3725,7 @@ main-scroll := ScrollView {
                     can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                     navigate(direction) => { root.search-history-requested(direction); }
                 }
-                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: 340px * Theme.ui-scale; preferred-width: 560px * Theme.ui-scale; max-width: 773px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                     background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: studio-search-input.has-focus || root.ai-visible ? Theme.accent : Theme.strong-border.with-alpha(0.5);
                     HorizontalLayout { padding: 2px * Theme.ui-scale; padding-left: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Image { width: 17px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.dim; image-fit: contain; accessible-role: none; }
@@ -3716,10 +3746,10 @@ main-scroll := ScrollView {
                     rows: root.ai-quick-rows; selected: root.ai-selected; chinese: root.chinese;
                     enabled: !root.background-blocked && !root.ai-busy && !root.task-restoring;
                     search(index) => { root.ai-action(16,index); }
+                    new-task(index) => { root.ai-action(24,index); }
                 }
                 if root.ai-quick-rows.length == 0: Rectangle { horizontal-stretch: 1; }
-                StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; primary: true; enabled: root.menu-ready && !root.scanning && !root.remote-mode; label: root.chinese ? "+ 添加文件夹" : "+ Add folder"; clicked => { root.prepare-scan(0, ""); } }
-                StudioAction { width: 112px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
+                StudioAction { width: 100px * Theme.ui-scale; height: 32px * Theme.ui-scale; y: (parent.height - self.height) / 2; subtle: true; enabled: root.menu-ready; label: root.chinese ? "管理音效库" : "Manage library"; clicked => { root.open-library(0); } }
             }
             Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
         }
@@ -4159,12 +4189,12 @@ main-scroll := ScrollView {
                                 changed visible-height => { if Theme.modern-style { root.report-result-window(); } }
                                 changed viewport-width => { if Theme.modern-style { if !root.table-empty && abs(self.viewport-width - root.table-content-size) < 1px { root.sync-table-viewport(); } } }
                                 // The real cell layout supplies ListView's minimum horizontal extent.
-                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.studio-result-row-height; accessible-role: list-item; accessible-label: row.name;
+                                for row[index] in root.rows: Rectangle { width: root.table-content-size; height: root.studio-result-row-height; accessible-role: list-item; accessible-label: (row.played ? (root.chinese ? "已播放：" : "Played: ") : "") + row.name;
                                     background: root.selected-row == index ? Theme.selected : (row.checked ? Theme.checked : (studio-result-hit.has-hover ? Theme.hover : (Math.mod(index, 2) == 0 ? Theme.table-alternate : Theme.table-surface)));
                                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border.with-alpha(0.35); }
                                     Rectangle { x: 0px; y: 0px; height: parent.height; width: 3px * Theme.ui-scale; background: root.selected-row == index ? Theme.accent : row.marker; }
                                     HorizontalLayout { alignment: start; padding-left: root.table-state-size + 12px * Theme.ui-scale; padding-right: 12px * Theme.ui-scale; spacing: 24px * Theme.ui-scale;
-                                        studio-table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: root.selected-row == index ? Theme.accent : (row.missing ? Theme.warning : Theme.ink); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
+                                        studio-table-name-cell := Text { width: root.table-name-size - 24px * Theme.ui-scale; height: root.studio-result-row-height; text: (row.missing ? (root.chinese ? "[缺失] " : "[Missing] ") : "") + row.name; color: root.selected-row == index ? Theme.accent : (row.missing ? Theme.warning : (row.played ? Theme.accent : Theme.ink)); font-size: Theme.list-font-size; overflow: elide; vertical-alignment: center; }
                                         if root.list-waveforms-visible: studio-table-wave-cell := Rectangle { width: root.table-wave-size - 24px * Theme.ui-scale; height: root.studio-result-row-height;
                                             if row.wave-state == 0 || row.wave-state == 3: Rectangle { y: (parent.height - self.height) / 2; width: row.wave-state == 0 ? parent.width : parent.width * 0.4; height: 2px * Theme.ui-scale; background: Theme.strong-border; opacity: row.wave-state == 0 ? 0.7 : 0.35; }
                                             if row.wave-state == 2: Rectangle { y: parent.height / 2; width: parent.width; height: 1px; background: Theme.dim; opacity: 0.6; }
@@ -4890,6 +4920,7 @@ main-scroll := ScrollView {
                     settings-apply := Action { width: 120px * Theme.ui-scale; primary: true; enabled: root.settings-page == 0 && !root.devices-loading && !root.settings-busy && !root.settings-close-confirm; label: root.output-applying ? (root.chinese ? "应用中…" : "Applying…") : (root.chinese ? "应用音频输出" : "Apply output"); clicked => { root.output-apply-requested(); } }
                 }
                 CheckBox { enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; text: root.chinese ? "单击播放" : "Single-click play"; checked <=> root.audition-play-on-single-click; toggled => { root.single-click-play-requested(self.checked); } }
+                CheckBox { visible: root.focus-loss-stop-supported; enabled: root.settings-page == 0 && !root.settings-busy && !root.settings-close-confirm; text: root.chinese ? "切换到其他软件时停止播放" : "Stop playback when switching to another app"; checked <=> root.stop-playback-on-focus-loss; toggled => { root.stop-playback-on-focus-loss-requested(self.checked); } }
                 Rectangle { height: 1px; background: Theme.border; }
             export-page := VerticalLayout { spacing: 13px * Theme.ui-scale; alignment: start;
                 Text { text: root.chinese ? "快速导出" : "Quick export"; color: Theme.ink; font-size: Theme.font(23); font-weight: 600; }
@@ -6055,13 +6086,58 @@ main-scroll := ScrollView {
         batch-completed: root.ai-batch-completed;
         batch-total: root.ai-batch-total;
         action(kind, index) => { root.ai-action(kind, index); }
-        collapse => { root.ai-collapsed = true; }
+        collapse => { root.ai-action(23,1); }
     }
-    if root.ai-visible && root.ai-collapsed && (!root.background-blocked || root.ai-batch-restoring) && root.ai-restore-y >= 0px: AiSidebarToggle {
-        collapsed: true; chinese: root.chinese;
+    ai-summary := Rectangle {
+        visible: root.ai-visible && root.ai-collapsed && (!root.background-blocked || root.ai-batch-restoring) && root.ai-restore-y >= 0px;
+        width: model-hint.width + 104px * Theme.ui-scale;
+        height: 30px * Theme.ui-scale;
         x: ai-panel.x + ai-panel.width - self.width;
         y: root.ai-restore-y;
-        clicked => { root.ai-collapsed = false; }
+        model-hint := Rectangle {
+            x: 0px; y: 0px;
+            // Classic shares this band with tasks: retain one full tab plus
+            // navigation/add controls before allocating the model caption.
+            width: min(model-caption.preferred-width, Theme.modern-style ? 280px * Theme.ui-scale
+                : max(0px, min(280px * Theme.ui-scale, root.width - root.task-tab-min-width - (32px + 47px + 78px + 112px) * Theme.ui-scale)));
+            height: parent.height;
+            accessible-role: text;
+            accessible-label: root.chinese ? "当前 AI 模型" : "Current AI model";
+            accessible-description: root.ai-model-caption;
+            model-caption := Text {
+                width: parent.width; height: parent.height;
+                text: root.ai-model-caption; color: Theme.dim; font-size: Theme.font(11);
+                vertical-alignment: center; overflow: elide;
+                accessible-role: none;
+            }
+            Tooltip { text: @markdown("\{root.ai-model-caption}"); }
+        }
+        AiSidebarToggle {
+            collapsed: true; chinese: root.chinese;
+            x: parent.width - self.width;
+            clicked => { root.ai-action(23,0); }
+        }
+    }
+    // Passive, bounded feedback never takes focus or installs an input shield.
+    if root.ai-notice-message != "" && !root.background-blocked: Rectangle {
+        width: min(560px * Theme.ui-scale, root.ai-notice-in-list ? root.ai-notice-list-right - root.ai-notice-list-left - 16px * Theme.ui-scale : root.width - 32px * Theme.ui-scale);
+        height: notice-copy.preferred-height + 24px * Theme.ui-scale;
+        x: root.ai-notice-in-list ? (root.ai-notice-list-left + root.ai-notice-list-right - self.width) / 2 : (root.width - self.width) / 2;
+        y: root.ai-sidebar-expanded && !root.ai-notice-in-list
+            ? max(0px, root.height - self.height - root.application-footer-height - 8px * Theme.ui-scale)
+            : min(112px * Theme.ui-scale, max(0px, root.height - self.height - root.application-footer-height - 8px * Theme.ui-scale));
+        background: Theme.panel; border-radius: 7px * Theme.ui-scale;
+        border-width: 1px; border-color: Theme.warning;
+        accessible-role: text;
+        accessible-label: root.chinese ? "AI 异常提示" : "AI error notice";
+        accessible-description: root.ai-notice-message;
+        accessible-live-region: polite;
+        notice-copy := Text {
+            x: 12px * Theme.ui-scale; y: 12px * Theme.ui-scale;
+            width: parent.width - 24px * Theme.ui-scale;
+            text: root.ai-notice-message; color: Theme.ink; font-size: Theme.font(12);
+            wrap: word-wrap; accessible-role: none;
+        }
     }
     if root.perf-marker-enabled && !root.closing && !root.startup-busy: Rectangle {
         x: root.perf-marker-x - shortcuts.absolute-position.x;

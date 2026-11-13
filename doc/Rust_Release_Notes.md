@@ -1,14 +1,30 @@
-# 1.0.0：本地 AI 搜索开发候选（未发布）
+# 1.0.0：AI 智能搜索与播放可靠性
 
 程序 1.0.0 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
 
-按用户要求将当前功能分支本地版本提升为 1.0.0，使升级比较不再把 0.9.x 当作更高版本；不代表正式 1.0 发布。现有资料库格式、API 和迁移边界不变。
+已于 2026-11-13 02:17:52 UTC（北京时间 10:17:52）正式发布 [v1.0.0](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v1.0.0)。七份正式 payload 来自 main/tag `1fc6f825520bdf24d01e2889dbcc7c96831be04c`，经 [#291](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/291) 从已验收 beta 晋升。API、资料库写目标、快照读取范围和完整格式沿用 0.9.6，包括已有 `audio_sources:1` / af1 边界，不引入新的资料库迁移。源码复用、平台验收、十四资产及发布后固定安装同步见 [1.0.0 发布记录](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.0.md)。
 
-- 搜索条随窗口扩展，AI 激活开关与搜索／生成按钮合为一组。
-- 本地关键词、UCS 与素材配方检索，默认及自定义提示词，通用 LLM、Jev 类型化决策和 OpenCode Go 适配。
-- 修复新供应商配置必须先填模型才能获取模型列表的循环；支持直接测试当前表单、获取模型后保存，并加入 DeepSeek 官方接口。
+- **AI 智能搜索**：本地关键词、UCS 与素材配方检索，默认及自定义提示词；支持通用 LLM、Jev 类型化决策、OpenCode Go 与 DeepSeek 等协议。设置入口集中供应商与 Skill／预设，合法已保存配置下侧栏默认收起；供应商支持保存前获取模型和测试，会话草稿独立保留。Jev 增加关键词／UCS／配方结构化召回，候选与真实模式及输出上限一致，并限制请求体预算；Windows 密钥使用当前用户 DPAPI，其他平台暂只保留会话密钥。
+- **推荐与搜索任务**：按当前目录、范围和筛选实际核验候选，最多展示五个、每项最多两个英文关键词，首项保留单关键词。tag 正文在当前任务搜索，右缘“+”沿用当前条件新建独立任务，无需再次调用供应商，按钮提供独立点击及缩放反馈。默认生成后由用户选择执行；可显式查询全部五项，或勾选自动创建最多三项任务。目录过滤保留已完成推荐，在途旧响应与跨资料库结果仍拒绝；普通 query 草稿不再阻断合法推荐，来源引用必须属于本次提供的参考条目。
+- **界面与音频反馈**：可收展 AI 侧栏、横向推荐标签、固定底部操作与原生窗口状态栏；Classic 播放器压缩空闲区域。GUI 等待实际音频确认，分别显示准备、NAS 首响应与缓冲进度，成功或取消后结束；过期素材／来源消息不覆盖新反馈。关闭恢复提示和内部一致性刷新保留原搜索作用域，真实执行错误仍显示。
+- **RIFF 兼容**：兼容父 RIFF size 误将八字节头计入、且子块结构完整的文件；保留实际截断、内部越界、错误布局及 RF64/BW64 边界检查，不改写音频。
+- **发布工具**：Windows 原生计划支持明确的固定安装目的地和版本清单；草稿续传核对完整资产身份，只上传缺失项，显式发布前再次验证。稳定模块按实际影响选择检查，保留原始验证身份。
 
-使用方法、验收范围和真实账户联调限制见 [AI 智能搜索](Rust_AI_Search.md)。以下历史发布身份保持原样。
+使用方法见 [AI 智能搜索](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)。七份归档、十四项线上 digest 与七份下载校验文件均已核验；同一 `local_release/` 的 908 文件、CLI 1.0.0 及发布后隔离启动通过。Mac ad-hoc 不是 Apple 公证，Linux x64／Docker amd64 使用 ARM64 主机仿真；真实供应商账户、Jev 语义／阈值、真实休眠 NAS、ASIO 硬件和声学起音延迟仍未新增验收。发布后工具 #290 和 tag 冻结后 beta 的 #292 不属于本版。以下历史发布记录保持原身份，后续文档不移动 tag 或重建原字节。
+
+# 0.9.6：分页偏好与搜索历史导航
+
+程序 0.9.6 | API /api/v1/ | 本地写 schema 8 | 服务端迁移 schema 9 | 快照兼容 3..=9
+
+已于 2026-11-11 07:40:41 UTC（北京时间 15:40:41）正式发布 [v0.9.6](https://github.com/Freedragonlancer/AudioLib-Explorer/releases/tag/v0.9.6)，以 `v0.9.5` 为基线使用 PATCH。功能来自 [#271](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/271)、[#272](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/272)，经 [#273](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/273) 功能晋升和 [#274](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/274)、[#275](https://github.com/Freedragonlancer/AudioLib-Explorer/pull/275) 升版，七份正式 payload 来自最终 main/tag `460629144d6a0df24af9c69303c9409c38efbde2`。API、普通本地与专用服务端写目标、快照读取范围及完整格式目录沿用 0.9.5，包括已有 `audio_sources:1` / af1 边界。详见 [0.9.6 发布记录](Rust_Release_0.9.6.md)。
+
+- **分页偏好**：全局设置 → 搜索和任务新增可选分页，每页可设置 1–1000 条，默认 200。原有设置继续使用连续浏览、200 条分段和最多 600 行窗口；切换模式保留搜索条件、筛选、排序与记录选择。
+- **侧栏与恢复**：三个主题均保存音效库侧栏的显示状态，重启后恢复，并保留隐藏前的宽度；修正恢复卡的指针热区，使实际鼠标点击能够触发卡片操作。
+- **搜索历史**：每个打开的任务独立保留最多 20 条会话内搜索历史，包含当前条目。搜索框旁的后退、前进按钮恢复关键词、字段范围、目录、筛选、排序及浏览位置；后退后执行新搜索会替换该任务的前进分支。历史不跨应用重启保存，重启后从恢复的当前搜索条件开始。
+- **搜索工具栏**：字段范围移至音效库 → 搜索字段范围菜单，当前项显示勾选；更新前进、后退按钮图形，搜索框保留一个原生清空 X。
+- **发布工具**：`release-create.sh` 新增显式 `--draft`，可创建未发布草稿；原正式发布和预发布命名规则保持不变。
+
+七份正式归档、十四项线上资产与 SHA256、七份下载校验正文及正式发布身份均已核验。Windows 固定 `local_release/` 已更新，907 个包文件、CLI 0.9.6 与隔离启动通过；发布后安装身份与缓存维护见发布记录。内部 Linux arm64 原生包仅供 Docker 输入。Mac ad-hoc 签名不是 Apple 公证；Linux x64 / Docker amd64 使用 ARM64 主机仿真，真实 ASIO 硬件、声学起音与真实 DAW 拖出未新增验收。源码检查复用原始身份，保留最初失败与相关修复后通过的记录。
 
 # 0.9.5：统一菜单与 Waveform 选区试听、切片
 
