@@ -4,7 +4,7 @@ AudioLib Explorer is a Rust + Slint Windows desktop application with SQLite FTS5
 
 ## Current implementation
 
-AI 智能搜索使用与实现见 [Rust AI Search](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/ecbe972b17774aeaabdba413ec60301d42c3e4af/doc/Rust_AI_Search.md)；研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/a01a19bcdbabf53de68284ef39114a7dff53c4cc/doc/AI_Keyword_Search_Design.md)。
+AI 智能搜索使用与实现见 [Rust AI Search](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/Rust_AI_Search.md)；研究、Agent skill、补全词表及概念设计见 [AI Keyword Search](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/v1.0.0/doc/AI_Keyword_Search_Design.md)。
 
 | Document | Purpose |
 |----------|---------|
@@ -36,7 +36,7 @@ AI 智能搜索使用与实现见 [Rust AI Search](https://github.com/Freedragon
 | [Scan and Search Performance](Rust_Scan_Search_Performance.md) | Bounded Metadata workers, batch writes and measured scan/search latency |
 | [Large-library GUI Search](Rust_GUI_Search_Performance.md) | Query cancellation, directory facet reuse, virtualized tree models and GUI benchmark |
 | [Release Notes](Rust_Release_Notes.md) | Candidate changes and published client/server release history |
-| [1.0.0 release preparation](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/beta/doc/Rust_Release_1.0.0.md) | Unreleased ecbe972 application candidate, completed fixes, original evidence, seven-payload matrix and release runbook |
+| [1.0.0 release record](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_1.0.0.md) | Published 1fc6f825 payloads, fourteen verified assets, beta/native evidence, fixed installation and actual platform limits |
 | [0.9.6 release record](Rust_Release_0.9.6.md) | Published 4606291 payloads, fourteen verified online assets, source-evidence reuse, fixed installation and actual platform limits |
 | [0.9.5 release record](Rust_Release_0.9.5.md) | Published 7d payloads and hashes, fourteen online assets, fixed-install synchronization, original versus new checks and actual platform limits |
 | [0.9.4 release record](Rust_Release_0.9.4.md) | Published f6 payloads and checksums, af1 upgrade boundaries, actual remote verification and fixed-install synchronization |
