@@ -378,7 +378,7 @@ mod tests {
         let layered = index.local_plan("科幻爆炸", true).unwrap();
         assert_eq!(&layered.queries[..direct.queries.len()], &direct.queries);
         let layers = &layered.queries[direct.queries.len()..];
-        assert!(!layers.is_empty());
+        assert!(layers.len() > 2);
         assert!(layers.iter().all(|query| {
             query.kind == AiQueryKind::Layer
                 && query.source_ids == ["scifi-explosion"]

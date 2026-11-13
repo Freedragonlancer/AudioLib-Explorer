@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Maximum raw candidates admitted before current-library hit verification.
 pub const MAX_AI_QUERIES: usize = 12;
 
-/// Maximum verified main recommendations displayed, with or without layers.
+/// Maximum verified recommendations displayed when none are source layers.
 pub const MAX_AI_MAIN_RECOMMENDATIONS: usize = 6;
 
 /// Maximum verified main and layer recommendations displayed together.

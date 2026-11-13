@@ -274,8 +274,7 @@ impl Controller {
                         return;
                     }
                     if c.ai_search_probe_request(&ui).is_none() {
-                        ui.set_ai_error(true);
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "请先完成当前目录和筛选条件的搜索，再生成推荐",
                             "Finish a valid search for the current directory and filters before generating suggestions",
                         ));
@@ -291,7 +290,7 @@ impl Controller {
                         let Some(p) = store.as_ref().and_then(|s| {
                             s.profiles().get((ui.get_ai_provider_index() - 1) as usize)
                         }) else {
-                            ui.set_ai_status(
+                            c.ai_failure(&ui,
                                 c.localized("请先保存供应商配置", "Save a provider profile first"),
                             );
                             return;
@@ -368,7 +367,7 @@ impl Controller {
                         ui.get_ai_query().trim().to_owned()
                     };
                     if validate_ai_query(&query).is_err() {
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "请输入不含布尔运算符的关键词，最多 500 字符",
                             "Use plain keywords without Boolean operators, up to 500 characters",
                         ));
@@ -504,7 +503,7 @@ impl Controller {
                 }
                 15 => {
                     if validate_instruction(&ui.get_ai_instruction()).is_err() {
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "提示词需为 1–2000 字符",
                             "Prompt must contain 1–2000 characters",
                         ));
@@ -567,10 +566,13 @@ impl Controller {
         // request so applying it cannot silently broaden the search conditions.
         self.capture_search_task(ui);
         if self.ai_captured_condition_request().is_none() {
-            ui.set_ai_status(self.localized(
-                "请先完成当前目录和筛选条件的有效搜索",
-                "Finish a valid search for the current directory and filters first",
-            ));
+            self.ai_failure(
+                ui,
+                self.localized(
+                    "请先完成当前目录和筛选条件的有效搜索",
+                    "Finish a valid search for the current directory and filters first",
+                ),
+            );
             return false;
         }
         true
@@ -741,12 +743,17 @@ impl Controller {
             return;
         }
         let edit = ui.get_ai_query();
+        let has_main = rows.iter().any(|row| !row.is_layer);
         if let Some(index) = rows
             .iter()
             .position(|row| row.text.split_whitespace().count() == 1)
+            .filter(|_| has_main)
         {
             let single = rows.remove(index);
             rows.insert(0, single);
+            if rows.iter().all(|row| !row.is_layer) {
+                rows.truncate(MAX_AI_MAIN_RECOMMENDATIONS);
+            }
             ui.set_ai_quick_rows(ModelRc::new(VecModel::from(rows.clone())));
             ui.set_ai_rows(ModelRc::new(VecModel::from(rows.clone())));
             if let Some(index) = rows
@@ -764,8 +771,8 @@ impl Controller {
                 ui.set_ai_detail("".into());
             }
         } else {
-            // Do not retain a pair-only plan after its sole verified broad
-            // single disappears. Keep an unrelated custom editor draft intact.
+            // A pruned plan still needs both a main sound and a verified single.
+            // Keep an unrelated custom editor draft intact when either is lost.
             self.clear_ai_suggestions(ui);
             if ai_query_key(&edit) != key {
                 ui.set_ai_query(edit);
@@ -820,12 +827,11 @@ impl Controller {
                 .is_empty())
         };
         let mut seen = std::collections::HashSet::new();
-        let mut verified = Vec::new();
+        let mut verified: Vec<audiolib_core::ai_search::AiQuery> = Vec::new();
         let mut ranked_queries = std::mem::take(&mut plan.queries);
         ranked_queries.retain(|query| allow_layers || query.kind == AiQueryKind::Main);
-        // A repeated search is represented once as a main sound rather than as
-        // its component. Preserve provider ranking within each role.
-        ranked_queries.sort_by_key(|query| query.kind == AiQueryKind::Layer);
+        // Keep provider ranking across roles. If a later main query duplicates
+        // a verified layer, it owns that existing rank slot and provenance.
         for mut query in ranked_queries.iter().cloned() {
             if cancelled() {
                 return Err(audiolib_core::Error::Cancelled);
@@ -836,6 +842,16 @@ impl Controller {
                     return Err(audiolib_core::Error::Cancelled);
                 }
                 if !seen.insert(ai_query_key(&text)) {
+                    if let Some(previous) = verified
+                        .iter_mut()
+                        .find(|previous| ai_query_key(&previous.text) == ai_query_key(&text))
+                    {
+                        if query.kind == AiQueryKind::Main && previous.kind == AiQueryKind::Layer {
+                            query.text = text;
+                            *previous = query.clone();
+                        }
+                        break;
+                    }
                     continue;
                 }
                 if text.split_whitespace().count() == 1 && is_ai_query_modifier(&text) {
@@ -895,16 +911,23 @@ impl Controller {
         } else {
             MAX_AI_MAIN_RECOMMENDATIONS
         };
-        let mut main_count = 0;
-        verified.retain(|query| {
-            if query.kind == AiQueryKind::Main {
-                main_count += 1;
-                main_count <= MAX_AI_MAIN_RECOMMENDATIONS
-            } else {
-                true
+        if let Some(main) = verified
+            .iter()
+            .position(|query| query.kind == AiQueryKind::Main)
+        {
+            if main >= limit {
+                let main = verified.remove(main);
+                verified.truncate(limit - 1);
+                verified.push(main);
             }
-        });
+        } else {
+            // Layer-only hits cannot stand in for the requested main sound.
+            verified.clear();
+        }
         verified.truncate(limit);
+        if verified.iter().all(|query| query.kind == AiQueryKind::Main) {
+            verified.truncate(MAX_AI_MAIN_RECOMMENDATIONS);
+        }
         if cancelled() || provider.search_revision()? != Some(revision) {
             return Err(audiolib_core::Error::Cancelled);
         }
@@ -1004,7 +1027,7 @@ impl Controller {
                 .is_some_and(|publication| publication.page == SearchPagePhase::Failed)
         {
             self.cancel_ai_task_batch(ui);
-            ui.set_ai_status(self.localized(
+            self.ai_failure(ui, self.localized(
                 "批量搜索已停止；已创建的任务保留，可逐个重试",
                 "Batch search stopped; created tasks are retained and can be retried individually",
             ));
@@ -1163,6 +1186,9 @@ impl Controller {
                 ..Default::default()
             }
         };
+        // The toolbar describes the saved profile actually used by generation;
+        // restoring an unsaved editor draft below must not change this value.
+        ui.set_ai_selected_model(saved.model.clone().into());
         drop(store);
         let cached = self.ai.drafts.lock().unwrap().get(&saved.id).cloned();
         if let Some(cached) = cached {
@@ -1223,8 +1249,16 @@ impl Controller {
         drop(store);
         self.refresh_ai_name_hint(ui);
     }
-    fn ai_error(&self, ui: &AppWindow, error: AiError) {
+    fn ai_failure(&self, ui: &AppWindow, message: slint::SharedString) {
         ui.set_ai_error(true);
+        ui.set_ai_status(message.clone());
+        ui.invoke_show_ai_notice(message);
+    }
+    fn ai_error(&self, ui: &AppWindow, error: AiError) {
+        if matches!(error, AiError::Cancelled) {
+            ui.set_ai_status(error.to_string().into());
+            return;
+        }
         let message=match error {
             AiError::Invalid=>self.localized("配置或输入无效；检查模型 ID、URL、长度，更换地址须重新输入密钥", "Invalid input/config: check model, URL, limits; re-enter key after changing endpoint"),
             AiError::Uncertain=>self.localized("Jev 判断不够确定；请细化描述或切换本地词表", "Jev decision uncertain; refine the description or use local reference"),
@@ -1238,7 +1272,7 @@ impl Controller {
             AiError::Budget=>self.localized("已达到本应用的每月请求上限", "This app's monthly request cap has been reached"),
             other=>other.to_string().into(),
         };
-        ui.set_ai_status(message);
+        self.ai_failure(ui, message);
     }
 
     fn ai_job(self: &Arc<Self>, ui: &AppWindow, job: Job) {
@@ -1471,8 +1505,7 @@ impl Controller {
                 if (cancel.load(Ordering::Acquire)
                     || c.ai_context() != context
                     || !Arc::ptr_eq(&probe_provider, &c.provider())
-                    || (matches!(&result, Ok(Reply::Plan(..) | Reply::SearchFailed))
-                        && SearchControls::capture(&ui) != probe_controls))
+                    || (generating && SearchControls::capture(&ui) != probe_controls))
                     && !matches!(
                         &result,
                         Ok(Reply::Loaded | Reply::Saved | Reply::Removed | Reply::PromptSaved)
@@ -1609,13 +1642,12 @@ impl Controller {
                     }
                     Ok(Reply::SearchFailed) => {
                         c.clear_ai_suggestions(&ui);
-                        ui.set_ai_error(true);
-                        ui.set_ai_status(c.localized(
+                        c.ai_failure(&ui, c.localized(
                             "资料库查询验证失败；请稍后重新生成推荐，未创建搜索任务",
                             "Library query verification failed; regenerate suggestions later. No tasks were created",
                         ));
                     }
-                    Err(AiError::Response) if discovery => ui.set_ai_status(c.localized(
+                    Err(AiError::Response) if discovery => c.ai_failure(&ui, c.localized(
                         "模型列表格式无法识别；检查接口或手动填写模型 ID",
                         "Unrecognized model list; check the endpoint or enter a model ID manually",
                     )),
