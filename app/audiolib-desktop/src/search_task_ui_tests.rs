@@ -178,6 +178,7 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
             "sub boom",
             "metal impact",
             "plasma hum",
+            "bass drop",
         ]
         .into_iter()
         .map(|text| crate::AiSuggestion {
@@ -271,6 +272,7 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
         "sub boom",
         "metal impact",
         "plasma hum",
+        "bass drop",
     ]
     .into_iter()
     .enumerate()
@@ -278,13 +280,17 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
         click(&ui, &format!("快捷搜索：{text}"));
         assert!(actions.borrow().contains(&(16, index as i32)));
     }
+    let actions_before_plus = actions.borrow().len();
+    click(&ui, "以推荐词新建搜索任务：bass drop");
+    assert_eq!(actions.borrow().len(), actions_before_plus + 1);
+    assert_eq!(actions.borrow().last(), Some(&(24, 5)));
     assert!(!ui.get_ai_auto_search());
     click(&ui, "生成后自动搜索 3 个任务");
     assert!(ui.get_ai_auto_search());
     click(&ui, "查询全部推荐");
     assert!(actions.borrow().contains(&(20, 0)));
     ui.set_ai_batch_searching(true);
-    ui.set_ai_batch_total(5);
+    ui.set_ai_batch_total(6);
     ui.set_ai_batch_completed(2);
     settle();
     let task_selections = Rc::new(RefCell::new(Vec::new()));

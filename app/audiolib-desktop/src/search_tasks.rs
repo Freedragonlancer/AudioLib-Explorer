@@ -1238,7 +1238,7 @@ impl Controller {
         let _ = self.open_ai_queries(ui, &[query.to_owned()]);
     }
 
-    /// Create at most five tasks from one captured scope, then activate the first.
+    /// Create a bounded batch from one captured scope, then activate the first.
     /// Return the new IDs so AI batching can prime their ordinary result caches.
     pub(super) fn open_ai_queries(
         self: &Arc<Self>,
@@ -1246,7 +1246,7 @@ impl Controller {
         queries: &[String],
     ) -> Vec<String> {
         if queries.is_empty()
-            || queries.len() > 5
+            || queries.len() > super::ai_search::MAX_AI_RECOMMENDATIONS
             || queries
                 .iter()
                 .any(|q| audiolib_core::ai_search::validate_ai_query(q).is_err())
