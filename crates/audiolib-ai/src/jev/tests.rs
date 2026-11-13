@@ -94,6 +94,15 @@ fn selected_plans_keep_explicit_kinds_instead_of_inferring_labels() {
                 .any(|query| query.kind == AiQueryKind::Layer),
             layers
         );
+        if layers {
+            assert!(
+                plan.queries
+                    .iter()
+                    .filter(|query| query.kind == AiQueryKind::Layer)
+                    .count()
+                    > 2
+            );
+        }
         assert!(
             plan.queries
                 .iter()

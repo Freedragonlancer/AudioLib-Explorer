@@ -115,6 +115,62 @@ fn install_owned_ai_provider(
     worker
 }
 
+// Fixed owned replies exercise current errors and cancellation without exposing
+// raw provider bodies or contacting an external service.
+fn owned_ai_error_server(
+    replies: Vec<(u16, &'static str, Option<AiResponseGate>)>,
+) -> (
+    String,
+    std::sync::mpsc::Receiver<serde_json::Value>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (observed, requests) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        for (status, body, gate) in replies {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut header = Vec::new();
+            let mut byte = [0];
+            while !header.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+            }
+            let header = String::from_utf8(header).unwrap();
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or_default();
+            let mut request = vec![0; length];
+            stream.read_exact(&mut request).unwrap();
+            observed
+                .send(serde_json::from_slice(&request).unwrap_or(serde_json::Value::Null))
+                .unwrap();
+            if let Some((accepted, released)) = gate {
+                accepted.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            if status != 0 {
+                // A cancelled request may already have closed its socket.
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Owned\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        }
+    });
+    (endpoint, requests, worker)
+}
+
 fn scifi_queries() -> Vec<String> {
     audiolib_ai::reference::ReferenceIndex::embedded()
         .local_plan("科幻爆炸", true)
@@ -653,6 +709,118 @@ fn child_zero_hit_tag_pruning() {
             unrelated.definition
         );
     }
+    // Pruning must reapply role-dependent admission rather than leaving a
+    // layer-only plan or seven main recommendations under an old eight-tag cap.
+    use audiolib_core::ai_search::AiQueryKind::{Layer, Main};
+    let layer_terms = ["spark", "debris", "metal", "bass", "rattle", "tail", "ring"];
+    let sole_main = std::iter::once(("anchor", Main))
+        .chain(layer_terms.iter().map(|term| (*term, Layer)))
+        .collect::<Vec<_>>();
+    let main_pairs = [
+        "deep impact",
+        "metal hit",
+        "air whoosh",
+        "noise burst",
+        "glass break",
+        "bell strike",
+    ];
+    let sole_layer = std::iter::once(("glow", Layer))
+        .chain(main_pairs.iter().map(|term| (*term, Main)))
+        .chain([("rumble", Main)])
+        .collect::<Vec<_>>();
+    seed_owned_ai_terms(
+        &fixture,
+        &std::iter::once("anchor")
+            .chain(layer_terms)
+            .collect::<Vec<_>>(),
+    );
+    search(&fixture, "", 4);
+    let server = install_owned_ai_provider(
+        &fixture,
+        vec![owned_ai_plan(&sole_main), owned_ai_plan(&sole_layer)],
+        None,
+    );
+    ui.set_ai_layers(true);
+    ui.set_ai_auto_search(false);
+    ui.set_ai_prompt("owned layered sound".into());
+    ui.invoke_ai_action(2, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 8);
+    assert_eq!(
+        ui.get_ai_quick_rows()
+            .iter()
+            .filter(|row| !row.is_layer)
+            .count(),
+        1
+    );
+    seed_owned_ai_terms(&fixture, &layer_terms);
+    ui.invoke_ai_action(16, 0);
+    ui.set_ai_query("custom draft after main pruning".into());
+    wait_for(ui, |ui| !ui.get_searching());
+    assert_eq!(ui.get_query(), "anchor");
+    assert_eq!(ui.get_rows().row_count(), 0);
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 0);
+    assert_eq!(ui.get_ai_rows().row_count(), 0);
+    assert_eq!(ui.get_ai_selected(), -1);
+    assert_eq!(ui.get_ai_query(), "custom draft after main pruning");
+
+    seed_owned_ai_terms(
+        &fixture,
+        &sole_layer.iter().map(|(text, _)| *text).collect::<Vec<_>>(),
+    );
+    search(&fixture, "", 4);
+    ui.invoke_ai_action(2, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_quick_rows().row_count(), 8);
+    assert_eq!(
+        ui.get_ai_quick_rows()
+            .iter()
+            .filter(|row| row.is_layer)
+            .count(),
+        1
+    );
+    assert_eq!(ui.get_ai_quick_rows().row_data(0).unwrap().text, "glow");
+    seed_owned_ai_terms(
+        &fixture,
+        &main_pairs
+            .iter()
+            .copied()
+            .chain(["rumble"])
+            .collect::<Vec<_>>(),
+    );
+    ui.invoke_ai_action(16, 0);
+    ui.set_ai_query("custom draft after layer pruning".into());
+    wait_for(ui, |ui| !ui.get_searching());
+    let rows = ui.get_ai_quick_rows().iter().collect::<Vec<_>>();
+    assert_eq!(ui.get_query(), "glow");
+    assert_eq!(ui.get_rows().row_count(), 0);
+    assert_eq!(rows.len(), 6);
+    assert_eq!(ui.get_ai_rows().row_count(), 6);
+    assert!(rows.iter().all(|row| !row.is_layer));
+    assert_eq!(rows[0].text, "rumble");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.text.to_string())
+            .collect::<Vec<_>>(),
+        [
+            "rumble",
+            "deep impact",
+            "metal hit",
+            "air whoosh",
+            "noise burst",
+            "glass break"
+        ]
+    );
+    assert_eq!(ui.get_ai_selected(), -1);
+    assert_eq!(ui.get_ai_query(), "custom draft after layer pruning");
+    assert_eq!(ui.get_search_tasks().row_count(), 2);
+    let state = fixture.controller.task_workspace.lock().unwrap();
+    assert_eq!(
+        state.workspace.session.tasks[0].definition,
+        unrelated.definition
+    );
+    drop(state);
+    server.join().unwrap();
     finish(&fixture);
 }
 
@@ -768,7 +936,12 @@ fn child_layered_limit_admission() {
         "crackle",
     ];
     let layers = ["spark", "debris", "metal", "bass", "rattle", "tail"];
-    let terms = mains.iter().chain(&layers).copied().collect::<Vec<_>>();
+    let terms = mains
+        .iter()
+        .chain(&layers)
+        .copied()
+        .chain(["ring", "splash"])
+        .collect::<Vec<_>>();
     seed_owned_ai_terms(&fixture, &terms);
     search(&fixture, "", 4);
     let main_queries = mains.iter().map(|text| (*text, Main)).collect::<Vec<_>>();
@@ -782,6 +955,29 @@ fn child_layered_limit_admission() {
         .map(|text| (*text, Main))
         .chain(layers.iter().map(|text| (*text, Layer)))
         .collect::<Vec<_>>();
+    // Ranking across roles matters: six useful layers must survive even when
+    // six lower-ranked main alternatives would otherwise fill a main quota.
+    let layers_ranked_first = layers
+        .iter()
+        .map(|text| (*text, Layer))
+        .chain(mains[..6].iter().map(|text| (*text, Main)))
+        .collect::<Vec<_>>();
+    let main_heavy_queries = mains[..7]
+        .iter()
+        .map(|text| (*text, Main))
+        .chain([("spark", Layer)])
+        .collect::<Vec<_>>();
+    let main_ranked_last = layers
+        .iter()
+        .map(|text| (*text, Layer))
+        .chain([("ring", Layer), ("splash", Layer), ("explosion", Main)])
+        .collect::<Vec<_>>();
+    let duplicate_main_later = [
+        ("spark", Layer),
+        ("explosion", Layer),
+        ("explosion", Main),
+        ("debris", Layer),
+    ];
     let server = install_owned_ai_provider(
         &fixture,
         vec![
@@ -789,14 +985,25 @@ fn child_layered_limit_admission() {
             owned_ai_plan(&zero_hit_queries),
             owned_ai_plan(&disabled_queries),
             owned_ai_plan(&layer_heavy_queries),
+            owned_ai_plan(&layers_ranked_first),
+            owned_ai_plan(&main_heavy_queries),
+            owned_ai_plan(&main_ranked_last),
+            owned_ai_plan(&duplicate_main_later),
         ],
         None,
     );
     ui.set_ai_auto_search(false);
     ui.set_ai_prompt("owned layered sound".into());
-    for (allow_layers, expected, expected_layers) in
-        [(true, 6, 0), (true, 6, 0), (false, 6, 0), (true, 8, 6)]
-    {
+    for (allow_layers, expected, expected_layers, first) in [
+        (true, 6, 0, "explosion"),
+        (true, 6, 0, "explosion"),
+        (false, 6, 0, "explosion"),
+        (true, 8, 6, "explosion"),
+        (true, 8, 6, "spark"),
+        (true, 8, 1, "explosion"),
+        (true, 8, 7, "spark"),
+        (true, 3, 2, "spark"),
+    ] {
         ui.set_ai_layers(allow_layers);
         ui.invoke_ai_action(2, 0);
         wait_for(ui, |ui| !ui.get_ai_busy());
@@ -808,8 +1015,8 @@ fn child_layered_limit_admission() {
             rows.iter().filter(|row| row.is_layer).count(),
             expected_layers
         );
-        assert!(rows.iter().filter(|row| !row.is_layer).count() <= 6);
-        assert_eq!(rows[0].text, "explosion");
+        assert!(rows.iter().any(|row| !row.is_layer));
+        assert_eq!(rows[0].text, first);
         assert_eq!(
             rows.iter()
                 .map(|row| row.text.to_string())
@@ -826,6 +1033,13 @@ fn child_layered_limit_admission() {
                     .collect::<Vec<_>>(),
                 mains[..6]
             );
+        } else if expected == 3 {
+            let main = rows.iter().find(|row| row.text == "explosion").unwrap();
+            assert!(
+                !main.is_layer,
+                "A later Main owns the duplicate layer's slot"
+            );
+            assert_eq!(rows[1].text, "explosion");
         }
     }
     server.join().unwrap();
@@ -853,10 +1067,15 @@ fn child_eight_typed_tags() {
         "rumble",
         "crackle",
     ];
-    let mut queries = mains.iter().map(|text| (*text, Main)).collect::<Vec<_>>();
+    let mut queries = mains[..6]
+        .iter()
+        .map(|text| (*text, Main))
+        .collect::<Vec<_>>();
     queries.extend([
         ("spark", Layer),
         ("debris", Layer),
+        ("rumble", Main),
+        ("crackle", Main),
         // A duplicate layer must not recolor a verified main recommendation.
         ("explosion", Layer),
         ("blast", Main),
@@ -1675,7 +1894,7 @@ fn child_admitted_main_fallback() {
 }
 
 #[test]
-fn ai_provider_drafts_names_and_saved_selection_survive_reopening() {
+fn ai_selected_model_tracks_saved_generation_profile_without_draft_leak() {
     isolated("ai_search::child_provider_drafts");
 }
 
@@ -1902,7 +2121,7 @@ fn child_provider_drafts() {
                     name: format!("{} 1", protocol.display_name()),
                     protocol,
                     base_url: protocol.default_url().into(),
-                    model: "saved-model".into(),
+                    model: format!("{id}-saved-model"),
                     ..Default::default()
                 },
                 Some(ApiKey::new("owned-fixture-key".into()).unwrap()),
@@ -1914,7 +2133,8 @@ fn child_provider_drafts() {
     wait_for(ui, |ui| !ui.get_ai_busy());
     assert_eq!(ui.get_ai_provider_index(), 2);
     assert_eq!(ui.get_ai_profile_name(), "OpenCode Go 1");
-    assert_eq!(ui.get_ai_model(), "saved-model");
+    assert_eq!(ui.get_ai_model(), "go-saved-model");
+    assert_eq!(ui.get_ai_selected_model(), "go-saved-model");
     assert_eq!(ui.get_ai_saved_key(), cfg!(windows));
     assert!(ui.get_ai_key().is_empty());
     ui.set_ai_settings(true);
@@ -1927,6 +2147,7 @@ fn child_provider_drafts() {
         ui.invoke_ai_action(0, 0);
         assert!(ui.get_ai_settings());
         assert_eq!(ui.get_ai_model(), "draft-model");
+        assert_eq!(ui.get_ai_selected_model(), "go-saved-model");
         assert_eq!(ui.get_ai_key(), "unsaved-private-key");
         // Re-selecting the current protocol must not apply defaults again.
         ui.invoke_ai_action(12, 5);
@@ -1934,8 +2155,10 @@ fn child_provider_drafts() {
         assert_eq!(ui.get_ai_key(), "unsaved-private-key");
         ui.invoke_ai_action(4, 1);
         assert_eq!(ui.get_ai_profile_name(), "DeepSeek 1");
+        assert_eq!(ui.get_ai_selected_model(), "deep-saved-model");
         ui.invoke_ai_action(4, 2);
         assert_eq!(ui.get_ai_model(), "draft-model");
+        assert_eq!(ui.get_ai_selected_model(), "go-saved-model");
         assert_eq!(ui.get_ai_key(), "unsaved-private-key");
         assert!(ui.get_ai_dirty());
     }
@@ -1943,22 +2166,25 @@ fn child_provider_drafts() {
     assert!(!persisted.contains("unsaved-private-key"));
     assert!(!persisted.contains("draft-model"));
     ui.invoke_ai_action(18, 0);
-    assert_eq!(ui.get_ai_model(), "saved-model");
+    assert_eq!(ui.get_ai_model(), "go-saved-model");
     assert_eq!(ui.get_ai_endpoint(), Protocol::OpenCodeGo.default_url());
     assert!(ui.get_ai_key().is_empty());
     assert_eq!(ui.get_ai_saved_key(), cfg!(windows));
     assert!(!ui.get_ai_dirty());
     for number in 2..=3 {
         ui.invoke_ai_action(9, 0);
+        assert!(ui.get_ai_selected_model().is_empty());
         ui.set_ai_protocol(5);
         ui.invoke_ai_action(12, 5);
         assert!(ui.get_ai_profile_name().is_empty());
         assert_eq!(ui.get_ai_auto_name(), format!("OpenCode Go {number}"));
         ui.set_ai_model("new-model".into());
+        assert!(ui.get_ai_selected_model().is_empty());
         ui.set_ai_key("new-fixture-key".into());
         ui.invoke_ai_action(8, 0);
         wait_for(ui, |ui| !ui.get_ai_busy());
         assert_eq!(ui.get_ai_profile_name(), format!("OpenCode Go {number}"));
+        assert_eq!(ui.get_ai_selected_model(), "new-model");
         assert!(ui.get_ai_key().is_empty());
         assert!(ui.get_ai_saved_key());
     }
@@ -1969,6 +2195,124 @@ fn child_provider_drafts() {
     assert_eq!(saved.profiles().len(), 4);
     assert_eq!(saved.selected().unwrap().name, "My sound design");
     assert_eq!(saved.has_key(saved.selected().unwrap()), cfg!(windows));
+    drop(saved);
+    ui.invoke_ai_action(10, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_provider_index(), 0);
+    assert!(ui.get_ai_selected_model().is_empty());
+    finish(&fixture);
+}
+
+#[test]
+fn ai_failures_publish_notices_but_cancelled_and_stale_replies_do_not() {
+    isolated("ai_search::child_failure_notices");
+}
+
+#[test]
+#[ignore = "runs in an owned isolated child"]
+fn child_failure_notices() {
+    let fixture = fixture();
+    let ui = &fixture.ui;
+    let profile_file = fixture.root.join("preferences/ai/profiles.json");
+    std::fs::create_dir_all(profile_file.parent().unwrap()).unwrap();
+    std::fs::write(&profile_file, b"{owned-invalid-profile").unwrap();
+    let mut revision = ui.get_ai_notice_revision();
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    revision += 1;
+    assert_eq!(ui.get_ai_notice_revision(), revision);
+    assert_eq!(ui.get_ai_notice_message(), ui.get_ai_status());
+    assert!(ui.get_ai_error());
+    assert!(!ui.get_ai_notice_message().contains("owned-invalid-profile"));
+    std::fs::remove_file(&profile_file).unwrap();
+    ui.invoke_ai_action(0, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert!(ui.get_ai_selected_model().is_empty());
+
+    // Identical synchronous validation failures must each restart the notice.
+    ui.set_ai_instruction("".into());
+    for _ in 0..2 {
+        ui.invoke_ai_action(15, 0);
+        revision += 1;
+        assert_eq!(ui.get_ai_notice_revision(), revision);
+        assert_eq!(ui.get_ai_notice_message(), ui.get_ai_status());
+        assert!(ui.get_ai_error());
+    }
+    ui.set_ai_instruction(audiolib_ai::config::DEFAULT_PROMPT.into());
+    ui.invoke_ai_action(9, 0);
+    ui.invoke_ai_action(8, 0);
+    revision += 1;
+    assert_eq!(ui.get_ai_notice_revision(), revision);
+    assert_eq!(ui.get_ai_notice_message(), ui.get_ai_status());
+
+    let (cancel_accepted, cancel_received) = std::sync::mpsc::sync_channel(1);
+    let (cancel_released, cancel_release) = std::sync::mpsc::sync_channel(1);
+    let (stale_accepted, stale_received) = std::sync::mpsc::sync_channel(1);
+    let (stale_released, stale_release) = std::sync::mpsc::sync_channel(1);
+    let (endpoint, requests, server) = owned_ai_error_server(vec![
+        (401, "{\"error\":\"owned-private-server-body\"}", None),
+        (200, "{\"unexpected\":\"owned-private-server-body\"}", None),
+        (403, "{\"error\":\"owned-private-server-body\"}", None),
+        (0, "", None),
+        (403, "{}", Some((cancel_accepted, cancel_release))),
+        (500, "{}", Some((stale_accepted, stale_release))),
+    ]);
+    ui.set_ai_endpoint(endpoint.into());
+    ui.set_ai_model("saved-generation-model".into());
+    ui.set_ai_key("owned-private-key".into());
+    ui.invoke_ai_action(8, 0);
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_selected_model(), "saved-generation-model");
+    ui.set_ai_model("unsaved-draft-model".into());
+    ui.set_ai_dirty(true);
+    ui.set_ai_prompt("wind".into());
+    for (action, expected) in [
+        (2, "401"),
+        (11, "model list"),
+        (17, "403"),
+        (17, "Connection failed"),
+    ] {
+        ui.invoke_ai_action(action, 0);
+        wait_for(ui, |ui| !ui.get_ai_busy());
+        revision += 1;
+        assert_eq!(ui.get_ai_notice_revision(), revision);
+        assert_eq!(ui.get_ai_notice_message(), ui.get_ai_status());
+        assert!(
+            ui.get_ai_notice_message().contains(expected),
+            "{}",
+            ui.get_ai_notice_message()
+        );
+        assert!(ui.get_ai_error());
+        assert!(!ui.get_ai_notice_message().contains("owned-private"));
+        assert_eq!(ui.get_ai_selected_model(), "saved-generation-model");
+        let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        if action == 2 {
+            // The header model is the actual generation model, not the editor draft.
+            assert_eq!(request["model"], "saved-generation-model");
+        }
+    }
+    let before_cancel = ui.get_ai_notice_message();
+    ui.invoke_ai_action(2, 0);
+    cancel_received
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    ui.invoke_ai_action(3, 0);
+    cancel_released.send(()).unwrap();
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_notice_revision(), revision);
+    assert_eq!(ui.get_ai_notice_message(), before_cancel);
+
+    ui.invoke_ai_action(2, 0);
+    stale_received.recv_timeout(Duration::from_secs(5)).unwrap();
+    // An unsent filter edit changes the generating request's displayed context
+    // without setting its explicit cancellation flag or advancing search state.
+    ui.set_duration_min("invalid-draft".into());
+    stale_released.send(()).unwrap();
+    wait_for(ui, |ui| !ui.get_ai_busy());
+    assert_eq!(ui.get_ai_notice_revision(), revision);
+    assert_eq!(ui.get_ai_notice_message(), before_cancel);
+    assert!(!ui.get_ai_error());
+    server.join().unwrap();
     finish(&fixture);
 }
 

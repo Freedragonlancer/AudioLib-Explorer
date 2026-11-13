@@ -800,6 +800,286 @@ fn ai_panel_actions_and_provider_view_are_renderable() {
     ui.hide().unwrap();
 }
 
+#[test]
+fn ai_selected_model_hint_tracks_saved_selection_without_covering_controls() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        for chinese in [false, true] {
+            for (width, height, scale) in [
+                (1920.0, 1080.0, 1.0),
+                (2560.0, 1600.0, 1.5),
+                (1080.0, 700.0, 2.0),
+            ] {
+                let ui = window();
+                ui.window().set_size(slint::LogicalSize::new(width, height));
+                ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                ui.set_chinese(chinese);
+                ui.set_search_tasks(tasks(12));
+                ui.set_ai_providers(ModelRc::new(VecModel::from(vec![
+                    "Local".into(),
+                    "Work".into(),
+                ])));
+                ui.set_ai_provider_index(1);
+                ui.set_ai_selected_model("deepseek-flash".into());
+                ui.set_ai_model("unsaved-other-model".into());
+                ui.set_ai_visible(true);
+                ui.set_ai_collapsed(true);
+                settle();
+                let hint_label = if chinese {
+                    "当前 AI 模型"
+                } else {
+                    "Current AI model"
+                };
+                let restore_label = if chinese {
+                    "展开 AI 侧栏"
+                } else {
+                    "Expand AI sidebar"
+                };
+                let hint = ElementHandle::find_by_accessible_label(&ui, hint_label)
+                    .next()
+                    .unwrap();
+                let description = hint.accessible_description().unwrap();
+                assert!(description.contains("deepseek-flash"));
+                assert!(!description.contains("unsaved-other-model"));
+                for selected in [
+                    "provider/sound-design/deepseek-flash-reasoning-a-very-long-model-name-2026-11",
+                    "gpt-5.1",
+                    "",
+                ] {
+                    ui.set_ai_selected_model(selected.into());
+                    settle();
+                    let hint = ElementHandle::find_by_accessible_label(&ui, hint_label)
+                        .next()
+                        .unwrap();
+                    assert!(hint.accessible_description().unwrap().contains(
+                        if selected.is_empty() {
+                            if chinese { "未选择" } else { "Not selected" }
+                        } else {
+                            selected
+                        }
+                    ));
+                    let restore = ElementHandle::find_by_accessible_label(&ui, restore_label)
+                        .next()
+                        .unwrap();
+                    assert!(hint.absolute_position().x >= 0.0);
+                    let hint_position = hint.absolute_position();
+                    let hint_size = hint.size();
+                    let restore_position = restore.absolute_position();
+                    let restore_size = restore.size();
+                    if hint_position.x + hint_size.width > restore_position.x {
+                        snapshot_if_requested(&ui, "ai-model-hint-overlap-diagnostic");
+                    }
+                    assert!(
+                        hint_position.x + hint_size.width <= restore_position.x,
+                        "Model hint and restore overlap: modern={modern}, chinese={chinese}, width={width}, scale={scale}, selected={selected}, hint={:?}/{:?}, restore={:?}/{:?}",
+                        hint_position,
+                        hint_size,
+                        restore_position,
+                        restore_size
+                    );
+                    assert!(restore.absolute_position().x + restore.size().width <= width);
+                    if !modern {
+                        let first_tab = ElementHandle::find_by_accessible_label(
+                            &ui,
+                            if chinese {
+                                "搜索任务：Task 0"
+                            } else {
+                                "Search task: Task 0"
+                            },
+                        )
+                        .next()
+                        .expect("At least one task remains visible beside the model hint");
+                        assert!(
+                            first_tab.size().width > restore.size().width,
+                            "Model captions must leave a readable task, even at large UI scale"
+                        );
+                        assert!(
+                            first_tab.absolute_position().x + first_tab.size().width
+                                <= hint.absolute_position().x,
+                            "A full task must fit before the model hint"
+                        );
+                    }
+                    let new_task_label = if chinese {
+                        "新建搜索任务"
+                    } else {
+                        "New search task"
+                    };
+                    if let Some(add) =
+                        ElementHandle::find_by_accessible_label(&ui, new_task_label).next()
+                    {
+                        let a = hint.absolute_position();
+                        let b = add.absolute_position();
+                        assert!(
+                            a.x + hint.size().width <= b.x
+                                || b.x + add.size().width <= a.x
+                                || a.y + hint.size().height <= b.y
+                                || b.y + add.size().height <= a.y,
+                            "Model hint must not cover task controls: modern={modern}, chinese={chinese}, width={width}, scale={scale}"
+                        );
+                    }
+                }
+                ui.set_ai_selected_model("deepseek-flash".into());
+                settle();
+                snapshot_if_requested(
+                    &ui,
+                    &format!("ai-selected-model-{modern}-{chinese}-{width}-{scale}"),
+                );
+                ui.set_ai_provider_index(0);
+                settle();
+                let offline = ElementHandle::find_by_accessible_label(&ui, hint_label)
+                    .next()
+                    .unwrap();
+                let description = offline.accessible_description().unwrap();
+                assert!(description.contains(if chinese { "离线" } else { "offline" }));
+                assert!(!description.contains("deepseek"));
+                let actions = Rc::new(RefCell::new(Vec::new()));
+                let recorded = actions.clone();
+                ui.on_ai_action(move |kind, index| recorded.borrow_mut().push((kind, index)));
+                click(&ui, restore_label);
+                assert_eq!(&*actions.borrow(), &[(23, 0)]);
+                ui.set_ai_visible(false);
+                settle();
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, hint_label)
+                        .next()
+                        .is_none()
+                );
+                ui.hide().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn ai_error_notice_expires_restarts_and_preserves_input_focus() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for modern in [false, true] {
+        for chinese in [false, true] {
+            for (width, height, scale) in [(1920.0, 1080.0, 1.0), (1080.0, 700.0, 2.0)] {
+                let ui = window();
+                ui.window().set_size(slint::LogicalSize::new(width, height));
+                ui.global::<crate::Theme>().set_modern_style(modern);
+                ui.global::<crate::Theme>().set_ui_scale(scale);
+                ui.set_chinese(chinese);
+                ui.set_ai_visible(false);
+                ui.set_query("".into());
+                settle();
+                let field = ElementHandle::find_by_accessible_label(
+                    &ui,
+                    if chinese {
+                        "搜索关键词"
+                    } else {
+                        "Search keywords"
+                    },
+                )
+                .next()
+                .unwrap();
+                field.mock_single_click(PointerEventButton::Left);
+                let message = if chinese {
+                    "AI 连接失败或超时，请检查服务地址、网络和密钥。"
+                } else {
+                    "AI connection failed or timed out; check the endpoint, network and key."
+                };
+                ui.invoke_show_ai_notice(message.into());
+                settle();
+                let notice_label = if chinese {
+                    "AI 异常提示"
+                } else {
+                    "AI error notice"
+                };
+                let notice = ElementHandle::find_by_accessible_label(&ui, notice_label)
+                    .next()
+                    .unwrap();
+                assert_eq!(notice.accessible_description().unwrap(), message);
+                assert!(notice.absolute_position().x >= 0.0);
+                assert!(notice.absolute_position().x + notice.size().width <= width);
+                assert!(
+                    notice.absolute_position().y
+                        >= field.absolute_position().y + field.size().height
+                );
+                assert!(notice.absolute_position().y + notice.size().height <= height);
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: "x".into() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: "x".into() });
+                settle();
+                assert_eq!(
+                    ui.get_query(),
+                    "x",
+                    "Transient notices must not take editor focus"
+                );
+                snapshot_if_requested(
+                    &ui,
+                    &format!("ai-error-notice-{modern}-{chinese}-{width}-{scale}"),
+                );
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(2800));
+                assert_eq!(ui.get_ai_notice_message(), message);
+                let previous_revision = ui.get_ai_notice_revision();
+                ui.invoke_show_ai_notice(message.into());
+                settle();
+                assert_eq!(ui.get_ai_notice_revision(), previous_revision + 1);
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+                assert_eq!(
+                    ui.get_ai_notice_message(),
+                    message,
+                    "Old expiry must not hide a repeated error"
+                );
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(2500));
+                assert_eq!(ui.get_ai_notice_message(), message);
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+                assert!(ui.get_ai_notice_message().is_empty());
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, notice_label)
+                        .next()
+                        .is_none()
+                );
+                ui.set_ai_visible(true);
+                ui.set_ai_collapsed(true);
+                ui.invoke_show_ai_notice(message.into());
+                settle();
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, notice_label)
+                        .next()
+                        .is_some(),
+                    "Errors must remain visible when the AI sidebar is collapsed"
+                );
+                snapshot_if_requested(
+                    &ui,
+                    &format!("ai-error-notice-collapsed-{modern}-{chinese}-{width}-{scale}"),
+                );
+                ui.set_about_visible(true);
+                settle();
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, notice_label)
+                        .next()
+                        .is_none()
+                );
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(3100));
+                ui.set_about_visible(false);
+                settle();
+                assert!(ui.get_ai_notice_message().is_empty());
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, notice_label)
+                        .next()
+                        .is_none()
+                );
+                ui.hide().unwrap();
+            }
+        }
+    }
+}
+
 fn open_saved_menu(ui: &AppWindow) {
     let control = ElementHandle::find_by_accessible_label(ui, "Manage saved search: Forest")
         .next()
