@@ -3,6 +3,104 @@
 use super::*;
 use audiolib_db::local_play_history::{LocalPlayHistory, LocalPlayRecord, local_library_id};
 
+/// An owned source key that is safe to inspect on the event loop. A local
+/// provider already owns its opened path; resolving that path stays on workers.
+#[derive(Clone)]
+pub(super) enum Scope {
+    Local(Weak<SqliteProvider>),
+    Server(String),
+}
+
+impl PartialEq for Scope {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(left), Self::Local(right)) => Weak::ptr_eq(left, right),
+            (Self::Server(left), Self::Server(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Scope {}
+
+impl std::hash::Hash for Scope {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Local(provider) => provider.as_ptr().hash(state),
+            Self::Server(id) => id.hash(state),
+        }
+    }
+}
+
+impl Scope {
+    fn resolve(&self) -> audiolib_core::Result<String> {
+        match self {
+            Self::Local(provider) => {
+                let provider = provider.upgrade().ok_or(audiolib_core::Error::Cancelled)?;
+                local_library_id(provider.database_path())
+            }
+            Self::Server(id) => Ok(format!("server-{id}")),
+        }
+    }
+}
+
+/// Resolved history identities outlive reader generations, so reopening the same
+/// library or replacing its server snapshot preserves this session's markers.
+#[derive(Default)]
+pub(super) struct IdentityCache {
+    identities: Mutex<HashMap<Scope, String>>,
+    #[cfg(test)]
+    resolutions: AtomicU64,
+}
+
+impl IdentityCache {
+    fn get(&self, scope: &Scope) -> Option<String> {
+        self.identities.lock().unwrap().get(scope).cloned()
+    }
+
+    fn resolve_with(
+        &self,
+        scope: &Scope,
+        resolve: impl FnOnce() -> audiolib_core::Result<String>,
+        current: impl FnOnce() -> bool,
+    ) -> audiolib_core::Result<String> {
+        if let Some(identity) = self.get(scope) {
+            return if current() {
+                Ok(identity)
+            } else {
+                Err(audiolib_core::Error::Cancelled)
+            };
+        }
+        #[cfg(test)]
+        self.resolutions.fetch_add(1, Ordering::Relaxed);
+        // Never retain the cache lock across filesystem resolution: the event
+        // loop must still be able to read an empty cache while this worker waits.
+        let identity = resolve()?;
+        if !current() {
+            return Err(audiolib_core::Error::Cancelled);
+        }
+        let mut identities = self.identities.lock().unwrap();
+        identities.retain(
+            |scope, _| !matches!(scope, Scope::Local(provider) if provider.strong_count() == 0),
+        );
+        identities.insert(scope.clone(), identity.clone());
+        Ok(identity)
+    }
+
+    #[cfg(test)]
+    pub(super) fn resolution_count(&self) -> u64 {
+        self.resolutions.load(Ordering::Relaxed)
+    }
+}
+
+struct Source {
+    scope: Scope,
+    provider: Weak<SqliteProvider>,
+    library_generation: u64,
+    source_generation: u64,
+}
+
 #[derive(Clone)]
 pub(super) struct Target {
     data_root: PathBuf,
@@ -60,25 +158,90 @@ fn played_at_local(value: &str) -> String {
 }
 
 impl Controller {
-    /// Resolve on a worker: local IDs use canonical library identity; server IDs
-    /// come from the opened snapshot and never from its replaceable cache filename.
-    pub(super) fn history_target(&self) -> audiolib_core::Result<Target> {
-        let config = self.config.lock().unwrap().clone();
-        let library_id = if self.remote_read_only() {
+    /// Capture only owned in-memory identity inputs. No path probing or database
+    /// query occurs here, including when called for event-loop row decoration.
+    fn history_source(&self) -> audiolib_core::Result<Source> {
+        if self.source_changing.load(Ordering::Acquire) {
+            return Err(audiolib_core::Error::Cancelled);
+        }
+        let library_generation = self.library_generation.load(Ordering::Acquire);
+        let source_generation = self.source_generation.load(Ordering::Acquire);
+        let provider = self.provider();
+        let scope = if self.remote_read_only() {
             self.remote
                 .lock()
                 .unwrap()
                 .state
                 .as_ref()
-                .map(|state| format!("server-{}", state.library_id))
+                .map(|state| Scope::Server(state.library_id.clone()))
                 .ok_or_else(|| {
                     audiolib_core::Error::Validation(
                         "Sync a server library before recording playback history".into(),
                     )
                 })?
         } else {
-            local_library_id(self.provider().database_path())?
+            Scope::Local(Arc::downgrade(&provider))
         };
+        if self.library_generation.load(Ordering::Acquire) != library_generation
+            || self.source_generation.load(Ordering::Acquire) != source_generation
+            || !Arc::ptr_eq(&provider, &self.provider())
+        {
+            return Err(audiolib_core::Error::Cancelled);
+        }
+        Ok(Source {
+            scope,
+            provider: Arc::downgrade(&provider),
+            library_generation,
+            source_generation,
+        })
+    }
+
+    fn history_source_is_current(&self, source: &Source) -> bool {
+        self.history_source().is_ok_and(|current| {
+            current.library_generation == source.library_generation
+                && current.source_generation == source.source_generation
+                && Weak::ptr_eq(&current.provider, &source.provider)
+                && current.scope == source.scope
+        })
+    }
+
+    /// Read a worker-published history identity without filesystem access.
+    pub(super) fn cached_history_scope(&self) -> Option<String> {
+        let source = self.history_source().ok()?;
+        self.history_identity_cache.get(&source.scope)
+    }
+
+    /// Prepare marker decoration before a search is published. A cancelled or
+    /// replaced provider cannot publish an identity for a different source.
+    pub(super) fn prepare_session_history_scope(&self, provider: &Arc<SqliteProvider>) {
+        if self.played_this_session.lock().unwrap().is_empty()
+            || self.source_changing.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let Ok(source) = self.history_source() else {
+            return;
+        };
+        if !Weak::ptr_eq(&source.provider, &Arc::downgrade(provider)) {
+            return;
+        }
+        let _ = self.history_identity_cache.resolve_with(
+            &source.scope,
+            || source.scope.resolve(),
+            || self.history_source_is_current(&source),
+        );
+    }
+
+    /// Resolve on a worker: local IDs use canonical library identity; server IDs
+    /// come from the opened snapshot and never from its replaceable cache filename.
+    pub(super) fn history_target(&self) -> audiolib_core::Result<Target> {
+        let config = self.config.lock().unwrap().clone();
+        let source = self.history_source()?;
+        let library_id = self.history_identity_cache.resolve_with(
+            &source.scope,
+            || source.scope.resolve(),
+            || self.history_source_is_current(&source),
+        )?;
         Ok(Target {
             data_root: config.data_root(),
             library_id,
@@ -159,11 +322,7 @@ impl Controller {
             post(self.ui.clone(), move |ui| {
                 if controller.library_generation.load(Ordering::Acquire) != library_generation
                     || controller.source_generation.load(Ordering::Acquire) != source_generation
-                    || controller
-                        .history_target()
-                        .ok()
-                        .map(|target| target.library_id)
-                        != Some(scope)
+                    || controller.cached_history_scope() != Some(scope)
                 {
                     return;
                 }
@@ -448,5 +607,84 @@ impl Controller {
             });
         });
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn identity_cache_reads_remain_responsive_during_worker_resolution() {
+        let cache = Arc::new(IdentityCache::default());
+        let scope = Scope::Server("owned-test-library".into());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_cache = cache.clone();
+        let worker_scope = scope.clone();
+        let worker = std::thread::spawn(move || {
+            worker_cache.resolve_with(
+                &worker_scope,
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok("server-owned-test-library".into())
+                },
+                || true,
+            )
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(2));
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader_cache = cache.clone();
+        let reader_scope = scope.clone();
+        let reader = std::thread::spawn(move || {
+            read_tx.send(reader_cache.get(&reader_scope)).unwrap();
+        });
+        let read = read_rx.recv_timeout(Duration::from_millis(500));
+        // Always release and join both threads before checking the watchdogs.
+        release_tx.send(()).ok();
+        let resolved = worker.join().unwrap();
+        reader.join().unwrap();
+        assert!(
+            entered.is_ok(),
+            "Resolver did not reach its controlled wait"
+        );
+        assert_eq!(read.unwrap(), None, "A cold UI read must not wait for I/O");
+        assert_eq!(resolved.unwrap(), "server-owned-test-library");
+        assert_eq!(
+            cache.get(&scope).as_deref(),
+            Some("server-owned-test-library")
+        );
+    }
+
+    #[test]
+    fn identity_cache_rejects_source_changed_during_resolution() {
+        let cache = IdentityCache::default();
+        let scope = Scope::Server("retired-owned-library".into());
+        assert!(matches!(
+            cache.resolve_with(
+                &scope,
+                || Ok("server-retired-owned-library".into()),
+                || false
+            ),
+            Err(audiolib_core::Error::Cancelled)
+        ));
+        assert!(cache.get(&scope).is_none());
+        cache
+            .resolve_with(
+                &scope,
+                || Ok("server-retired-owned-library".into()),
+                || true,
+            )
+            .unwrap();
+        assert!(matches!(
+            cache.resolve_with(
+                &scope,
+                || panic!("Cached identity must not be resolved"),
+                || false
+            ),
+            Err(audiolib_core::Error::Cancelled)
+        ));
     }
 }

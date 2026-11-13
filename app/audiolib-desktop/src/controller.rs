@@ -798,6 +798,7 @@ pub struct Controller {
     plays: Mutex<Vec<audiolib_db::local_play_history::LocalPlayRecord>>,
     /// Successful auditions in this process, scoped to the source library.
     played_this_session: Mutex<HashSet<(String, i64, String)>>,
+    history_identity_cache: history::IdentityCache,
     pending_history_clear: Mutex<Option<history::PendingClear>>,
     scans: Mutex<Vec<ScanSession>>,
     audio: AudioHandle,
@@ -838,6 +839,8 @@ pub struct Controller {
     selection_generation: AtomicU64,
     selection_job: Mutex<Option<SelectionJob>>,
     latest_selection: Mutex<Option<SelectionJob>>,
+    /// Admitted selection Plays remain pending until their exact engine ACK.
+    pending_selection_plays: Mutex<Vec<audiolib_audio::CommandCompletion>>,
     selection_wake: Condvar,
     selection_audio_job: Mutex<Option<SelectionAudioJob>>,
     selection_audio_wake: Condvar,
@@ -1106,6 +1109,7 @@ impl Controller {
             history_offset: Mutex::new(0),
             plays: Mutex::new(Vec::new()),
             played_this_session: Mutex::new(HashSet::new()),
+            history_identity_cache: history::IdentityCache::default(),
             pending_history_clear: Mutex::new(None),
             scans: Mutex::new(Vec::new()),
             audio,
@@ -1150,6 +1154,7 @@ impl Controller {
             selection_generation: AtomicU64::new(0),
             selection_job: Mutex::new(None),
             latest_selection: Mutex::new(None),
+            pending_selection_plays: Mutex::new(Vec::new()),
             selection_wake: Condvar::new(),
             selection_audio_job: Mutex::new(None),
             selection_audio_wake: Condvar::new(),
@@ -3614,6 +3619,12 @@ impl Controller {
                         continue;
                     }
                     let result = revision_guard.finish(revision_after, result);
+                    if result.is_ok()
+                        && c.search_generation.load(Ordering::Acquire) == job.generation
+                        && !job.cancel.load(Ordering::Acquire)
+                    {
+                        c.prepare_session_history_scope(&provider);
+                    }
                     let workspace_revision =
                         revision_before.filter(|revision| Some(*revision) == revision_after);
                     crate::gui_search_benchmark::worker_completed(job.generation, false);
@@ -4166,6 +4177,7 @@ impl Controller {
                 let mut buffering_source = None;
                 let mut last_wave_progress = Instant::now() - Duration::from_secs(1);
                 while !c.shutdown.load(Ordering::Acquire) {
+                    c.prune_pending_selection_plays();
                     if c.library_busy.load(Ordering::Acquire) {
                         std::thread::sleep(Duration::from_millis(65));
                         continue;
@@ -4175,16 +4187,13 @@ impl Controller {
                     let mut status = c.audio.status();
                     if let Some(foreground) = audiolib_windows::foreground_application_is_current()
                     {
-                        if should_stop_on_focus_loss(
-                            was_foreground,
-                            foreground,
-                            c.stop_playback_on_focus_loss.load(Ordering::Acquire),
-                            status.state,
-                        ) {
-                            if let Err(error) = c.enqueue_stop() {
+                        match c.stop_on_focus_loss(was_foreground, foreground) {
+                            Ok(true) => status = c.audio.status(),
+                            Ok(false) => {}
+                            Err(error) => {
                                 c.status(error.to_string());
+                                status = c.audio.status();
                             }
-                            status = c.audio.status();
                         }
                         was_foreground = Some(foreground);
                     }
@@ -5648,16 +5657,22 @@ impl Controller {
                 {
                     *remembered = None;
                 }
-                // Stop pressed after the first response (while loading) wins.
-                if play && !download_cancel.load(Ordering::Acquire) {
-                    loading.command(AudioCommand::Play);
+                // Keep the actual Play acknowledgment after consuming the selection:
+                // focus loss can cancel a queued Play while the engine is still Ready,
+                // and source recovery must not replay that already-dispatched Play.
+                if play
+                    && !download_cancel.load(Ordering::Acquire)
+                    && let Err(error) = loading.enqueue_selection_play_locked()
+                {
+                    loading.status(error.to_string());
                 }
                 drop(remembered);
                 let confirmed = loading.clone();
+                let confirmed_cancel = download_cancel.clone();
                 post(loading.ui.clone(), move |ui| {
                     if confirmed.available()
                         && !ui.get_closing()
-                        && !download_cancel.load(Ordering::Acquire)
+                        && !confirmed_cancel.load(Ordering::Acquire)
                         && confirmed.selection_generation.load(Ordering::Acquire) == generation
                     {
                         ui.set_audio_ready(true);
@@ -5694,6 +5709,26 @@ impl Controller {
 
     fn mark_audio_reload(&self, id: i64) {
         *self.audio_reload.lock().unwrap() = Some(id);
+    }
+
+    /// Dispatch under `latest_selection`; source recovery still sees a consumed job.
+    fn enqueue_selection_play_locked(&self) -> audiolib_core::Result<()> {
+        self.prune_pending_selection_plays();
+        self.list_waveforms.note_audition_start();
+        let completion = self.audio.enqueue_with_ack(AudioCommand::Play)?;
+        self.pending_selection_plays
+            .lock()
+            .unwrap()
+            .push(completion);
+        Ok(())
+    }
+
+    /// Discard only terminal command ACKs, without waiting for the audio worker.
+    /// New navigation or source generations cannot cancel an already queued Play.
+    fn prune_pending_selection_plays(&self) -> bool {
+        let mut pending = self.pending_selection_plays.lock().unwrap();
+        pending.retain(|completion| matches!(completion.wait_slice(Duration::ZERO), Ok(None)));
+        !pending.is_empty()
     }
 
     fn clear_audio_reload(&self, id: i64) {
@@ -7280,13 +7315,13 @@ impl Controller {
 
     /// Keep already known list Waveforms on rows being (re)published.
     fn decorate_list_waveforms(&self, mut rows: Vec<AudioRow>) -> Vec<AudioRow> {
-        let played = self.history_target().ok().map(|target| {
+        let played = self.cached_history_scope().map(|scope| {
             let played = self.played_this_session.lock().unwrap();
             rows.iter()
                 .filter_map(|row| {
                     let id = row.id.parse::<i64>().ok()?;
                     played
-                        .contains(&(target.library_id.clone(), id, row.file_path.to_string()))
+                        .contains(&(scope.clone(), id, row.file_path.to_string()))
                         .then_some(id)
                 })
                 .collect::<HashSet<_>>()
@@ -7326,6 +7361,50 @@ impl Controller {
     /// No audio acknowledgment or network I/O is awaited while holding the lock.
     fn enqueue_stop(&self) -> audiolib_core::Result<audiolib_audio::CommandCompletion> {
         let mut remembered = self.latest_selection.lock().unwrap();
+        let completion = self.enqueue_stop_locked(&mut remembered);
+        drop(remembered);
+        self.metadata_wake.notify_all();
+        completion
+    }
+
+    /// Cancel a foreground audition before its remote bytes or engine Load arrive.
+    /// The selection admission lock binds the pending-play check to cancellation.
+    fn stop_on_focus_loss(
+        &self,
+        was_foreground: Option<bool>,
+        foreground: bool,
+    ) -> audiolib_core::Result<bool> {
+        let enabled = self.stop_playback_on_focus_loss.load(Ordering::Acquire);
+        if !enabled || was_foreground != Some(true) || foreground {
+            return Ok(false);
+        }
+        let mut remembered = self.latest_selection.lock().unwrap();
+        let generation = self.selection_generation.load(Ordering::Acquire);
+        let queued_play = self.prune_pending_selection_plays();
+        let pending_play = queued_play
+            || remembered
+                .as_ref()
+                .is_some_and(|job| job.play && job.generation == generation);
+        if !should_stop_on_focus_loss(
+            was_foreground,
+            foreground,
+            enabled,
+            self.audio.status().state,
+            pending_play,
+        ) {
+            return Ok(false);
+        }
+        let completion = self.enqueue_stop_locked(&mut remembered);
+        drop(remembered);
+        self.metadata_wake.notify_all();
+        completion.map(|_| true)
+    }
+
+    /// Shared Stop admission; the caller owns `latest_selection` until Stop queues.
+    fn enqueue_stop_locked(
+        &self,
+        remembered: &mut Option<SelectionJob>,
+    ) -> audiolib_core::Result<audiolib_audio::CommandCompletion> {
         self.selection_generation.fetch_add(1, Ordering::AcqRel);
         *remembered = None;
         *self.selection_job.lock().unwrap() = None;
@@ -7337,8 +7416,9 @@ impl Controller {
         // Interrupt decoder reads blocked on an incomplete server stream too.
         self.interrupt_remote_audio();
         let completion = self.audio.enqueue_with_ack(AudioCommand::Stop);
-        drop(remembered);
-        self.metadata_wake.notify_all();
+        if completion.is_ok() {
+            self.pending_selection_plays.lock().unwrap().clear();
+        }
         completion
     }
     fn status(&self, message: String) {
@@ -7945,11 +8025,12 @@ fn should_stop_on_focus_loss(
     foreground: bool,
     enabled: bool,
     state: PlaybackState,
+    pending_play: bool,
 ) -> bool {
     enabled
         && was_foreground == Some(true)
         && !foreground
-        && matches!(state, PlaybackState::Playing | PlaybackState::Loading)
+        && (pending_play || matches!(state, PlaybackState::Playing | PlaybackState::Loading))
 }
 
 /// Refresh or append a retained row prefix in place, preserving native gestures,
@@ -8967,29 +9048,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn focus_loss_stops_only_active_playback_after_leaving_this_app() {
+    fn focus_loss_stops_active_or_pending_playback_after_leaving_this_app() {
         assert!(should_stop_on_focus_loss(
             Some(true),
             false,
             true,
-            PlaybackState::Playing
+            PlaybackState::Playing,
+            false
         ));
         assert!(should_stop_on_focus_loss(
             Some(true),
             false,
             true,
-            PlaybackState::Loading
+            PlaybackState::Loading,
+            false
         ));
+        for state in [
+            PlaybackState::Empty,
+            PlaybackState::Ready,
+            PlaybackState::Paused,
+            PlaybackState::Stopped,
+            PlaybackState::Ended,
+            PlaybackState::Error,
+        ] {
+            assert!(should_stop_on_focus_loss(
+                Some(true),
+                false,
+                true,
+                state,
+                true
+            ));
+            assert!(!should_stop_on_focus_loss(
+                Some(true),
+                false,
+                true,
+                state,
+                false
+            ));
+        }
         for (previous, current, enabled, state) in [
             (None, false, true, PlaybackState::Playing),
             (Some(false), false, true, PlaybackState::Playing),
             (Some(true), true, true, PlaybackState::Playing),
             (Some(true), false, false, PlaybackState::Playing),
-            (Some(true), false, true, PlaybackState::Paused),
         ] {
-            assert!(!should_stop_on_focus_loss(
-                previous, current, enabled, state
-            ));
+            for pending_play in [false, true] {
+                assert!(!should_stop_on_focus_loss(
+                    previous,
+                    current,
+                    enabled,
+                    state,
+                    pending_play
+                ));
+            }
         }
     }
 
