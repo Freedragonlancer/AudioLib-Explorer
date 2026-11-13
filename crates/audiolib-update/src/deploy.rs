@@ -315,10 +315,13 @@ pub(crate) fn apply_helper_plan(plan_path: &Path) -> Result<()> {
         "Update plan too large"
     );
     let plan: Plan = serde_json::from_slice(&std::fs::read(&plan_path)?)?;
-    validate_install(&plan.install)?;
     ensure!(
         Some(plan.install.as_path()) == stage.parent(),
         "Staging does not belong to this installation"
+    );
+    ensure!(
+        package::required(plan.product).contains(&plan.executable.as_str()),
+        "Invalid restart executable"
     );
     let lock_path = plan.install.join(".audiolib-update.lock");
     validate_unlinked(&lock_path)?;
@@ -341,6 +344,17 @@ pub(crate) fn apply_helper_plan(plan_path: &Path) -> Result<()> {
                 bail!("Application did not release the update handoff lock: {error}");
             }
         }
+    }
+    if let Err(error) = validate_install(&plan.install) {
+        record_result(
+            &plan,
+            stage,
+            &format!("Update preflight failed; installation unchanged: {error:#}"),
+        );
+        restart_command(&plan)
+            .spawn()
+            .context("Restart previous application after update preflight failure")?;
+        return Ok(());
     }
     let result = deploy(&plan, stage, None);
     match result {
@@ -366,11 +380,7 @@ pub(crate) fn apply_helper_plan(plan_path: &Path) -> Result<()> {
                     .context("Restart previous application")?;
                 return Ok(());
             }
-            record_result(
-                &plan,
-                stage,
-                "Update installed and application restarted.\n",
-            );
+            record_result(&plan, stage, SUCCESS_RESULT);
         }
         Err(error) => {
             record_result(&plan, stage, &format!("Update failed: {error:#}"));
@@ -391,6 +401,66 @@ fn record_result(plan: &Plan, stage: &Path, text: &str) {
         let _ = std::fs::write(path, text);
     }
     eprintln!("AudioLib update: {text}");
+}
+
+const SUCCESS_RESULT: &str = "Update installed and application restarted.\n";
+
+/// Best-effort next-launch cleanup. The helper retains its stage while its copied
+/// executable is running, so the first new process may observe the handoff lock busy;
+/// a later launch removes only stages carrying the helper's exact success marker.
+pub(crate) fn cleanup_successful_update(install: &Path) {
+    if validate_unlinked(install).is_err() {
+        return;
+    }
+    let Ok(install) = install.canonicalize() else {
+        return;
+    };
+    let lock_path = install.join(".audiolib-update.lock");
+    if validate_unlinked(&lock_path).is_err() {
+        return;
+    }
+    let Ok(lock) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+    else {
+        return;
+    };
+    if lock.try_lock().is_err() {
+        return;
+    }
+    let mut retained_stage = true;
+    if let Ok(entries) = std::fs::read_dir(&install) {
+        retained_stage = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if !name
+                .to_str()
+                .is_some_and(|name| name.starts_with(".audiolib-update-"))
+                || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                || validate_unlinked(&path).is_err()
+            {
+                continue;
+            }
+            match std::fs::read_to_string(path.join("update-result.txt")) {
+                Ok(result) if result == SUCCESS_RESULT => {
+                    if let Err(error) = std::fs::remove_dir_all(&path) {
+                        retained_stage = true;
+                        tracing::warn!(path = %path.display(), %error, "Cannot remove completed update stage");
+                    }
+                }
+                _ => retained_stage = true,
+            }
+        }
+    }
+    let _ = File::unlock(&lock);
+    drop(lock);
+    if !retained_stage {
+        let _ = std::fs::remove_file(lock_path);
+    }
 }
 
 #[derive(Debug)]
@@ -424,6 +494,16 @@ pub(crate) fn validate_install(directory: &Path) -> Result<()> {
         directory.is_dir() && directory.parent().is_some(),
         "Invalid installation directory"
     );
+    #[cfg(all(test, windows))]
+    if std::env::var_os("AUDIOLIB_UPDATE_TEST_READ_ONLY").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected read-only installation",
+        )
+        .into());
+    }
     // Staging belongs inside the installation; /opt itself need not be writable.
     let probe = tempfile::Builder::new()
         .prefix(".audiolib-update-probe-")
@@ -768,6 +848,71 @@ mod process_tests {
         assert_eq!(
             std::fs::read(stage.path().join("backup/AudioLibCli.exe")).unwrap(),
             b"old"
+        );
+    }
+
+    #[test]
+    fn windows_helper_restarts_previous_server_after_read_only_probe_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        std::fs::create_dir(&install).unwrap();
+        let stage = tempfile::Builder::new()
+            .prefix(".audiolib-update-")
+            .tempdir_in(&install)
+            .unwrap();
+        let installed = install.join("audiolib-server.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+        let plan = Plan {
+            install: install.canonicalize().unwrap(),
+            product: Product::Server,
+            executable: "audiolib-server.exe".into(),
+            arguments: [
+                "--exact",
+                "deploy::process_tests::restart_fixture",
+                "--ignored",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+            working_directory: root.path().canonicalize().unwrap(),
+            files: Vec::new(),
+        };
+        let plan_path = stage.path().join("plan.json");
+        std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(install.join(".audiolib-update.lock"))
+            .unwrap();
+        let helper = stage.path().join("update-helper.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &helper).unwrap();
+        let marker = root.path().join("restarted.txt");
+        let output = Command::new(helper)
+            .args([
+                "--exact",
+                "deploy::process_tests::helper_fixture",
+                "--ignored",
+            ])
+            .env("AUDIOLIB_UPDATE_TEST_PLAN", &plan_path)
+            .env("AUDIOLIB_UPDATE_TEST_MARKER", &marker)
+            .env("AUDIOLIB_UPDATE_TEST_SENTINEL", "inherited-value")
+            .env("AUDIOLIB_UPDATE_TEST_READ_ONLY", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "previous server was not restarted");
+        assert_eq!(
+            std::fs::read(&installed).unwrap(),
+            std::fs::read(std::env::current_exe().unwrap()).unwrap()
         );
     }
 }
