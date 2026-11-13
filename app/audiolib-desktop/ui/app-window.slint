@@ -2864,7 +2864,7 @@ main-scroll := ScrollView {
                 can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                 navigate(direction) => { root.search-history-requested(direction); }
             }
-            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: 320px * Theme.ui-scale; preferred-width: 480px * Theme.ui-scale; max-width: 640px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
+            classic-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; background: Theme.panel; border-radius: 6px * Theme.ui-scale; border-width: 1px; border-color: search-input.has-focus || root.ai-visible ? Theme.accent : Theme.border;
                 HorizontalLayout { padding: 5px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                     Image { width: 20px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.accent; image-fit: contain; }
                     search-input := LineEdit { horizontal-stretch: 1; min-width: 70px * Theme.ui-scale; enabled: !root.background-blocked; text <=> root.search-entry-text;
@@ -3702,7 +3702,7 @@ main-scroll := ScrollView {
                     can-forward: !root.ai-visible && root.search-history-ready && root.search-history-can-forward;
                     navigate(direction) => { root.search-history-requested(direction); }
                 }
-                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: 320px * Theme.ui-scale; preferred-width: 480px * Theme.ui-scale; max-width: 640px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
+                studio-search-group := Rectangle { horizontal-stretch: 3; min-width: clamp(root.width - 1040px * Theme.ui-scale, 360px * Theme.ui-scale, 500px * Theme.ui-scale); preferred-width: 560px * Theme.ui-scale; max-width: 720px * Theme.ui-scale; height: 34px * Theme.ui-scale; y: (parent.height - self.height) / 2;
                     background: Theme.panel; border-radius: 4px * Theme.ui-scale; border-width: 1px; border-color: studio-search-input.has-focus || root.ai-visible ? Theme.accent : Theme.strong-border.with-alpha(0.5);
                     HorizontalLayout { padding: 2px * Theme.ui-scale; padding-left: 10px * Theme.ui-scale; spacing: 6px * Theme.ui-scale;
                         Image { width: 17px * Theme.ui-scale; source: @image-url("../assets/search.svg"); colorize: Theme.dim; image-fit: contain; accessible-role: none; }

@@ -1274,7 +1274,11 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
     .unwrap();
     for modern in [false, true] {
         for chinese in [false, true] {
-            for (width, height, scale) in [(2560.0, 1600.0, 1.5), (1080.0, 700.0, 1.0)] {
+            for (width, height, scale, comfortable_input) in [
+                (1920.0, 1080.0, 1.0, true),
+                (2560.0, 1600.0, 1.5, true),
+                (1080.0, 700.0, 1.0, false),
+            ] {
                 let ui = window();
                 ui.window().set_size(slint::LogicalSize::new(width, height));
                 ui.global::<crate::Theme>().set_modern_style(modern);
@@ -1282,6 +1286,10 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
                 ui.set_chinese(chinese);
                 ui.set_ai_visible(true);
                 ui.set_ai_collapsed(true);
+                ui.set_query("wind".into());
+                ui.set_ai_prompt(
+                    "victory with a bright reward jingle and orchestral finish".into(),
+                );
                 ui.set_data_source_label("Victory sound-design fixture".into());
                 ui.set_ai_quick_rows(ModelRc::new(VecModel::from(
                     [
@@ -1333,10 +1341,27 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
                 )
                 .next()
                 .unwrap();
-                assert!(field.size().width >= 70.0 * scale);
-                assert!(field.size().width <= 640.0 * scale);
+                let submit_label = if chinese {
+                    "生成 AI 查询建议"
+                } else {
+                    "Generate AI query suggestions"
+                };
+                let submit = ElementHandle::find_by_accessible_label(&ui, submit_label)
+                    .next()
+                    .unwrap();
+                assert!(
+                    field.size().width
+                        >= submit.size().width * if comfortable_input { 2.0 } else { 1.0 },
+                    "The description needs readable space beside Generate: modern={modern}, chinese={chinese}, window_width={width}, scale={scale}, field_width={}, submit_width={}",
+                    field.size().width,
+                    submit.size().width,
+                );
                 assert!(
                     field.absolute_position().x + field.size().width
+                        <= submit.absolute_position().x
+                );
+                assert!(
+                    submit.absolute_position().x + submit.size().width
                         <= viewport.absolute_position().x
                 );
                 assert!(
@@ -1366,17 +1391,36 @@ fn ai_compact_toolbar_preserves_actions_with_eight_mixed_tags() {
                     &ui,
                     &format!("ai-victory-eight-end-{modern}-{chinese}-{width}-{scale}"),
                 );
-                ui.set_search_entry_text("victory reward feedback".into());
-                ui.invoke_edit_search_entry();
-                click(
-                    &ui,
-                    if chinese {
-                        "生成 AI 查询建议"
-                    } else {
-                        "Generate AI query suggestions"
-                    },
-                );
-                assert_eq!(ui.get_ai_prompt(), "victory reward feedback");
+                let long_prompt = if chinese {
+                    "制作游戏胜利提示：明亮的奖励铃声、简短的管弦乐结尾和轻盈的闪光层，避免长混响与沉重的低频，保留清晰的节奏和足够的对话空间"
+                } else {
+                    "Design a game victory cue with a bright reward jingle, a short orchestral finish and a light sparkle layer; avoid long reverb and heavy bass, leaving room for dialogue"
+                };
+                ui.set_search_entry_text("".into());
+                field.mock_single_click(PointerEventButton::Left);
+                ui.window().dispatch_event(WindowEvent::KeyPressed {
+                    text: long_prompt.into(),
+                });
+                ui.window().dispatch_event(WindowEvent::KeyReleased {
+                    text: long_prompt.into(),
+                });
+                settle();
+                assert_eq!(ui.get_search_entry_text(), long_prompt);
+                assert_eq!(ui.get_ai_prompt(), long_prompt);
+                assert_eq!(ui.get_query(), "wind");
+                let submitted = ai_actions.borrow().len();
+                ui.window().dispatch_event(WindowEvent::KeyPressed {
+                    text: Key::Return.into(),
+                });
+                ui.window().dispatch_event(WindowEvent::KeyReleased {
+                    text: Key::Return.into(),
+                });
+                settle();
+                assert_eq!(ai_actions.borrow().len(), submitted + 1);
+                assert_eq!(ai_actions.borrow().last(), Some(&(2, 0)));
+                click(&ui, submit_label);
+                assert_eq!(ai_actions.borrow().len(), submitted + 2);
+                assert_eq!(ui.get_ai_prompt(), long_prompt);
                 assert_eq!(ai_actions.borrow().last(), Some(&(2, 0)));
                 ui.set_ai_visible(false);
                 ui.set_search_history_can_back(true);
