@@ -95,9 +95,9 @@ Rust unit and integration tests live with the Cargo workspace packages. Select t
 | [Spectral UI validation](../tools/validate-spectral-ui.ps1) | Waveform and UI snapshots with isolated data |
 | [Portable validation](../tools/validate-portable.ps1) | Packaged executable identity, startup and license materials |
 | [Rust search benchmark](../crates/audiolib-db/src/bin/search-benchmark.rs) | Actual-service P50/P95/P99 measurements on 1M+ records |
-| [Local checks](../tools/check-local.ps1) | Explicit -Package / -Workspace scope; -Lib / -Bin / -Test and -TestFilter narrow tests; -Asio / -NoDefaultFeatures match the shipped configuration |
+| [Local checks](../tools/check-local.ps1) | Explicit -Package / -Workspace scope; target/filter selection; -Stage Tests / Clippy for individual stages (default All); -Asio / -NoDefaultFeatures match the shipped configuration |
 | [Build cache maintenance](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Build_Cache.md) | Owned Cargo caches only; preview, budget/age, build leases and post-delivery cleanup |
-| [Release pipeline](https://github.com/Freedragonlancer/AudioLib-Explorer/blob/main/doc/Rust_Release_Pipeline.md) | Native plans, early notice checks, parallel payload coordination, verified recovery and release efficiency review |
+| [Release pipeline](Rust_Release_Pipeline.md) | Native plans; windows-local for directory-only local acceptance; early notice checks, verified recovery and release efficiency review |
 | [Windows release compatibility entry](../tools/ci-release.ps1) | Manual tagged Windows build/package entry, replacing separate build/package calls; runtime report remains `not-run` |
 | [Published release verifier](../.github/workflows/release.yml) | Optional manual, read-only release identity, exact asset-set and SHA256 checks |
 

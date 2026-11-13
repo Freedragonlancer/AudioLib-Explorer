@@ -61,6 +61,7 @@ function Invoke-PipelineCase([string]$Script, [hashtable]$Parameters, [string]$F
     $taskCaught = $null
     $taskCaseLog = Join-Path $taskArtifacts ([guid]::NewGuid().ToString('N') + '.log')
     try { & (Join-Path $taskTools $Script) @Parameters *> $taskCaseLog } catch { $taskCaught = $_ }
+    $taskState.LastOutput = Get-Content -LiteralPath $taskCaseLog -Raw
     if (!$Failure -and $taskCaught) { throw "Unexpected $Script failure: $taskCaught. Log: $taskCaseLog" }
     if ($Failure -and (!$taskCaught -or ($taskCaught.ToString() + ' ' + $taskCaught.FullyQualifiedErrorId) -notmatch $Failure)) { throw "Expected $Script failure ($Failure), got: $taskCaught. Log: $taskCaseLog" }
     if ((Get-Location).Path -cne $taskBeforeLocation) { throw "$Script did not restore the working directory." }
@@ -110,6 +111,7 @@ try {
 
     Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true}
     Assert-SingleWorkspacePass
+    if ($taskState.LastOutput -notmatch 'format=passed; clippy=passed; tests=passed') { throw 'Default check summary lost its executed scope.' }
     if ($taskCalls.Count -ne 3 -or $taskState.Prepared -ne 0) { throw 'Default checks unexpectedly add ASIO work.' }
     Write-Host 'PASS: explicit workspace checks run once without SDK preparation.'
 
@@ -175,6 +177,56 @@ try {
     }
     Write-Host 'PASS: integration, library and binary tests stay targeted with matching features and strict Clippy.'
 
+    foreach ($taskStage in @('Clippy','Tests')) {
+        foreach ($taskSelection in @(
+            @{Package=@('audiolib-db');Stage=$taskStage},
+            @{Package=@('audiolib-desktop');Stage=$taskStage;Asio=$true},
+            @{Package=@('audiolib-server');Stage=$taskStage;NoDefaultFeatures=$true;Target='x86_64-unknown-linux-gnu'}
+        )) {
+            if ($taskStage -eq 'Tests') {
+                if ($taskSelection.Asio) { $taskSelection.Bin = 'AudioLibExplorer' }
+                elseif ($taskSelection.NoDefaultFeatures) { $taskSelection.Lib = $true }
+                else { $taskSelection.Test = 'search_fragments' }
+                $taskSelection.TestFilter = 'selected_behavior'
+            }
+            Invoke-PipelineCase 'check-local.ps1' $taskSelection
+            $taskExpectedCommand = if ($taskStage -eq 'Tests') { 'test' } else { 'clippy' }
+            if ($taskCalls.Count -ne 1 -or $taskCalls[0].Arguments[0] -ne $taskExpectedCommand) { throw 'A single-stage check repeated or added another Cargo stage.' }
+            $taskCall = $taskCalls[0]
+            if ((@(Get-SelectedPackages $taskCall) -join ',') -cne ($taskSelection.Package -join ',') -or
+                $taskCall.Arguments -contains '--workspace' -or $taskCall.Arguments -notcontains '--locked' -or
+                ($taskCall.Arguments -contains '--no-default-features') -ne [bool]$taskSelection.NoDefaultFeatures -or
+                ($taskCall.Arguments -contains '--features') -ne [bool]$taskSelection.Asio -or
+                $taskCall.Prepared -ne [int][bool]$taskSelection.Asio) { throw 'A single-stage check changed package, features or SDK preparation.' }
+            if ($taskSelection.Asio -and $taskCall.Arguments -notcontains 'audiolib-desktop/asio') { throw 'Single-stage ASIO selected unrequested packages.' }
+            if ($taskSelection.Target) {
+                $taskTargetIndex = [array]::IndexOf($taskCall.Arguments, '--target')
+                if ($taskTargetIndex -lt 0 -or $taskCall.Arguments[$taskTargetIndex + 1] -cne $taskSelection.Target) { throw 'A single-stage check lost its target.' }
+            }
+            if ($taskStage -eq 'Clippy') {
+                if ($taskCall.Arguments -notcontains '--all-targets' -or ($taskCall.Arguments -join ' ') -notmatch '-- -D warnings$' -or
+                    $taskState.LastOutput -notmatch 'format=not-requested; clippy=passed; tests=not-requested') { throw 'Clippy-only checks lost strictness or misreported skipped stages.' }
+            } else {
+                [string[]]$taskSuffix = if ($taskSelection.Bin) { '--bin'; 'AudioLibExplorer' } elseif ($taskSelection.Lib) { '--lib' } else { '--test'; 'search_fragments' }
+                $taskSuffix += @('--', 'selected_behavior')
+                if ($taskCall.Arguments -contains '--all-targets' -or
+                    ($taskCall.Arguments[($taskCall.Arguments.Count - $taskSuffix.Count)..($taskCall.Arguments.Count - 1)] -join '|') -cne ($taskSuffix -join '|') -or
+                    $taskState.LastOutput -notmatch 'format=not-requested; clippy=not-requested; tests=passed') { throw 'Tests-only checks expanded target/filter or misreported skipped stages.' }
+            }
+        }
+        $taskState.FailAt = 1
+        Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-desktop');Stage=$taskStage;Asio=$true} 'cargo exited with code 17'
+        if ($taskCalls.Count -ne 1) { throw 'A failed single stage started another Cargo command.' }
+        $taskState.FailAt = 0
+        $taskState.FailPreparation = $true
+        Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-desktop');Stage=$taskStage;Asio=$true} 'Synthetic SDK preparation failed'
+        if ($taskCalls.Count) { throw 'A single-stage check continued after SDK preparation failed.' }
+        $taskState.FailPreparation = $false
+    }
+    Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Stage='Clippy';Test='search_fragments'} 'does not run tests'
+    if ($taskCalls.Count -or $taskState.Prepared) { throw 'Clippy-only checks silently ignored a test selector.' }
+    Write-Host 'PASS: individual stages preserve scope, reject irrelevant selectors, report skipped work and propagate failures.'
+
     foreach ($taskInvalidSelection in @(
         @{Package=@('audiolib-db');Lib=$true;Test='search_fragments'},
         @{Workspace=$true;Lib=$true},
@@ -196,6 +248,9 @@ try {
         Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Test='search_fragments';TestFilter='missing'} 'did not report any passed tests'
         if ($taskCalls.Count -ne 3 -or $taskState.Cleaned) { throw 'Empty targeted results were accepted or repeated.' }
     }
+    $taskState.TestOutput = 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out;'
+    Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Stage='Tests';Test='search_fragments';TestFilter='missing'} 'did not report any passed tests'
+    if ($taskCalls.Count -ne 1) { throw 'Tests-only empty results repeated other stages.' }
     $taskState.TestOutput = $taskPassedOutput
     Write-Host 'PASS: ambiguous scopes, wildcard targets, option-like filters, missing summaries and zero executed tests are rejected.'
 
@@ -236,6 +291,15 @@ try {
         Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$true} 'cargo exited with code 17'
         if ($taskState.Cleaned -ne 1) { throw 'Failed checks cleaned their build/diagnostic cache.' }
         $taskState.FailAt = 0
+        foreach ($taskStage in @('Clippy','Tests')) {
+            $taskCleanedBefore = $taskState.Cleaned
+            Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Stage=$taskStage;CleanBuildArtifacts=$true}
+            if ($taskCalls.Count -ne 1 -or $taskState.Cleaned -ne ($taskCleanedBefore + 1)) { throw 'A successful single stage did not release its lease before cleanup.' }
+            $taskState.FailAt = 1
+            Invoke-PipelineCase 'check-local.ps1' @{Package=@('audiolib-db');Stage=$taskStage;CleanBuildArtifacts=$true} 'cargo exited with code 17'
+            if ($taskState.Cleaned -ne ($taskCleanedBefore + 1)) { throw 'A failed single stage cleaned its diagnostic cache.' }
+            $taskState.FailAt = 0
+        }
     } else {
         Invoke-PipelineCase 'check-local.ps1' @{Workspace=$true;CleanBuildArtifacts=$true} 'pwsh 7.3'
         if ($taskCalls.Count -or $taskState.Cleaned) { throw 'Unsupported cleanup started work.' }

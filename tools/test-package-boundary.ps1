@@ -73,6 +73,8 @@ try {
     if (!$rejected) { throw 'Old-updater file policy accepted case-alias duplicate names.' }
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
     $originalPortableHash = (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash
+    $originalLatestArchive = Join-Path $testRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'
+    $originalLatestArchiveHash = (Get-FileHash -LiteralPath $originalLatestArchive).Hash
     $packageId = 'build-20261112-181304-8f21058c'
     $namedRoot = Join-Path $testRoot "dist/builds/$packageId"
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $packageId
@@ -88,14 +90,20 @@ try {
     if (!$rejected -or (Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash) {
         throw 'A repeated named package was not rejected.'
     }
-    $folderOnlyId = 'build-20261112-181305-8f21058d'
-    $folderOnlyRoot = Join-Path $testRoot "dist/builds/$folderOnlyId"
-    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -PackageId $folderOnlyId -NoArchive
-    if (!(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe')) -or
-        !(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe.sha256')) -or
-        @(Get-ChildItem -LiteralPath $folderOnlyRoot -Filter '*.zip*' -File).Count -ne 0 -or
-        (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash -cne $originalPortableHash) {
-        throw 'Folder-only portable output created an archive or changed an older package.'
+    foreach ($folderOnlyParameters in @(
+        @{PackageId='build-20261112-181305-8f21058d';NoArchive=$true},
+        @{PackageId='build-20261112-181306-8f21058e';SkipArchive=$true}
+    )) {
+        $folderOnlyRoot = Join-Path $testRoot ("dist/builds/" + $folderOnlyParameters.PackageId)
+        & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio @folderOnlyParameters
+        if (!(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe')) -or
+            !(Test-Path -LiteralPath (Join-Path $folderOnlyRoot 'portable/AudioLibExplorer.exe.sha256')) -or
+            @(Get-ChildItem -LiteralPath $folderOnlyRoot -Filter '*.zip*' -File).Count -ne 0 -or
+            (Get-FileHash -LiteralPath $originalLatestArchive).Hash -cne $originalLatestArchiveHash -or
+            (Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash -or
+            (Get-FileHash -LiteralPath (Join-Path $staleRoot 'AudioLibExplorer.exe')).Hash -cne $originalPortableHash) {
+            throw 'Named folder-only output created an archive or changed an older latest/named package.'
+        }
     }
     $rejected = $false
     try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -NoArchive } catch { $rejected = $_.Exception.Message -match 'requires a unique package ID' }
@@ -148,13 +156,38 @@ try {
     & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
     # Reject missing required materials before replacing the last good archive.
     $acceptedArchive = Join-Path $testRoot 'dist/latest/AudioLibExplorer-latest-win-x64-portable.zip'
+    # Local delivery skips compression but retains the complete payload, notices
+    # and EXE identities. An older ZIP must not masquerade as this new directory.
+    foreach ($withoutAsio in @($true, $false)) {
+        & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio:$withoutAsio
+        & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -SkipArchive -WithoutAsio:$withoutAsio
+        if ((Test-Path -LiteralPath $acceptedArchive) -or (Test-Path -LiteralPath ($acceptedArchive + '.sha256'))) { throw 'Directory-only packaging retained a stale archive/checksum.' }
+        & $licenseValidator -BinaryDirectory $staleRoot -WithoutAsio:$withoutAsio
+        foreach ($binary in @('AudioLibExplorer.exe', 'AudioLibCli.exe')) {
+            $expectedHash = (Get-FileHash -LiteralPath (Join-Path $env:CARGO_TARGET_DIR ('x86_64-pc-windows-msvc/release/' + $binary))).Hash.ToLowerInvariant()
+            if ((Get-FileHash -LiteralPath (Join-Path $staleRoot $binary)).Hash.ToLowerInvariant() -cne $expectedHash -or
+                [IO.File]::ReadAllText((Join-Path $staleRoot ($binary + '.sha256'))).Trim() -cne ($expectedHash + '  ' + $binary)) { throw 'Directory-only packaging lost executable identity.' }
+        }
+        function Start-Process { throw 'Synthetic runtime boundary reached.' }
+        try {
+            $reachedRuntime = $false
+            try { & (Join-Path $testRoot 'tools/validate-portable.ps1') -BinaryDirectory $staleRoot -WithoutAsio:$withoutAsio } catch { $reachedRuntime = $_.Exception.Message -eq 'Synthetic runtime boundary reached.' }
+            if (!$reachedRuntime) { throw 'Directory-only acceptance did not reach isolated startup after identity/license checks.' }
+        } finally { Remove-Item Function:\Start-Process }
+    }
+    & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio
+    if (!(Test-Path -LiteralPath ($acceptedArchive + '.sha256'))) { throw 'Normal packaging did not recreate its archive/checksum after local delivery.' }
+    if ((Get-FileHash -LiteralPath $namedArchive).Hash -cne $namedArchiveHash) { throw 'Latest directory-only delivery modified a named package.' }
+    Write-Host 'PASS: directory-only delivery retains identity/licenses/runtime routing, removes stale archives and allows normal packaging afterward.'
     $acceptedHash = (Get-FileHash -LiteralPath $acceptedArchive).Hash
     $fixtureLicenseText = [IO.File]::ReadAllText($fixtureSlint)
     Remove-Item -LiteralPath $fixtureSlint
     try {
-        $rejected = $false
-        try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio } catch { $rejected = $_.Exception.Message -match 'Selected Slint license text missing' }
-        if (!$rejected -or (Get-FileHash -LiteralPath $acceptedArchive).Hash -cne $acceptedHash) { throw 'License failure replaced a validated package.' }
+        foreach ($skipArchive in @($false, $true)) {
+            $rejected = $false
+            try { & (Join-Path $testRoot 'tools/package-portable.ps1') -SkipBuild -WithoutAsio -SkipArchive:$skipArchive } catch { $rejected = $_.Exception.Message -match 'Selected Slint license text missing' }
+            if (!$rejected -or (Get-FileHash -LiteralPath $acceptedArchive).Hash -cne $acceptedHash) { throw 'License failure replaced a validated package.' }
+        }
     } finally { [IO.File]::WriteAllText($fixtureSlint, $fixtureLicenseText) }
     # Regression: entries must be forward-slash file names (no `\`, no directory entries).
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
