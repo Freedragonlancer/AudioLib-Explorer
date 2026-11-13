@@ -192,6 +192,9 @@ mod artwork_controller;
 #[path = "click_preview_tests.rs"]
 mod click_preview_tests;
 #[cfg(test)]
+#[path = "favorite_list_tests.rs"]
+mod favorite_list_tests;
+#[cfg(test)]
 #[path = "folder_search_tests.rs"]
 mod folder_search_tests;
 #[cfg(test)]
@@ -601,6 +604,8 @@ struct MetadataDraft {
 enum MetadataWrite {
     Draft(MetadataDraft),
     QuickAction(i32),
+    /// Persist only the favorite flag. Tags and notes stay in any open draft.
+    SetFavorite(bool),
 }
 
 #[derive(Clone)]
@@ -1611,6 +1616,12 @@ impl Controller {
         ui.on_file_action_requested(move |id, action| {
             if let Ok(id) = id.parse::<i64>() {
                 c.file_action(id, action);
+            }
+        });
+        let c = self.clone();
+        ui.on_favorite_set_requested(move |id, favorite| {
+            if let Ok(id) = id.parse::<i64>() {
+                c.set_favorite(id, favorite);
             }
         });
         let c = self.clone();
@@ -3450,6 +3461,13 @@ impl Controller {
                                     })?;
                                 provider.update_metadata(job.id, &patch)
                             }
+                            MetadataWrite::SetFavorite(favorite) => provider.update_metadata(
+                                job.id,
+                                &MetadataPatch {
+                                    favorite: Some(*favorite),
+                                    ..Default::default()
+                                },
+                            ),
                         }
                     };
                     let result = survive_panic(
@@ -3503,6 +3521,9 @@ impl Controller {
                                 }
                             }
                             Err(error) => {
+                                if let MetadataWrite::SetFavorite(favorite) = job.write {
+                                    c2.revert_unconfirmed_favorite(&ui, job.id, favorite);
+                                }
                                 // Mirror the Ok path: close owns the status while draining,
                                 // and after a rejected close until the user saves again.
                                 if c2.closing.load(Ordering::Acquire)
@@ -7456,16 +7477,10 @@ impl Controller {
             ui.set_status(error.into());
             return;
         }
-        // Match the inspector's favorite button: update its draft without
-        // implicitly submitting unrelated tags and notes. Selection autosaves it.
-        if ui.get_selected_id().as_str() == id.to_string()
-            && let Some(patch) = quick_metadata_patch(action, ui.get_edit_favorite())
-        {
-            if let Some(favorite) = patch.favorite {
-                ui.set_edit_favorite(favorite);
-            }
-            ui.set_metadata_dirty(true);
-            self.capture_metadata(&ui);
+        // The row and inspector stars persist the favorite immediately. A dirty
+        // tag or note draft is left in place and is not submitted by the click.
+        if action == 5 {
+            self.set_favorite(id, !self.displayed_favorite(&ui, id));
             return;
         }
         if action == 20 {
@@ -7481,12 +7496,88 @@ impl Controller {
                 Ok(file) => c.open_explorer(file.into_data().file_path, true),
                 Err(error) => c.status(error.to_string()),
             });
-        } else if quick_metadata_patch(action, false).is_some() {
-            self.metadata
-                .lock()
-                .unwrap()
-                .enqueue(id, MetadataWrite::QuickAction(action));
-            self.metadata_wake.notify_all();
+        }
+    }
+
+    /// Favorite currently shown for `id`: the inspector draft when it is selected,
+    /// otherwise the row loaded for the current page.
+    fn displayed_favorite(&self, ui: &AppWindow, id: i64) -> bool {
+        if ui.get_selected_id().as_str() == id.to_string() {
+            return ui.get_edit_favorite();
+        }
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|file| file.id == id)
+            .map(|file| file.favorite)
+            .unwrap_or(false)
+    }
+
+    /// Save one favorite without a second Metadata save. The current folder and
+    /// any unsaved tags or notes stay as they are.
+    fn set_favorite(self: &Arc<Self>, id: i64, favorite: bool) {
+        if !self.available()
+            || self.closing.load(Ordering::Acquire)
+            || self.library_busy.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if let Err(error) = self.require_metadata_writable() {
+            ui.set_status(error.into());
+            return;
+        }
+        {
+            let mut state = self.metadata.lock().unwrap();
+            if let Some(draft) = state.drafts.get_mut(&id) {
+                draft.patch.favorite = Some(favorite);
+            }
+            state.enqueue(id, MetadataWrite::SetFavorite(favorite));
+        }
+        self.metadata_wake.notify_all();
+        if ui.get_selected_id().as_str() == id.to_string() {
+            ui.set_edit_favorite(favorite);
+        }
+        self.publish_favorite_row(&ui, id, favorite);
+    }
+
+    fn publish_favorite_row(&self, ui: &AppWindow, id: i64, favorite: bool) {
+        let checked = self.multi_selection.lock().unwrap().clone();
+        let rows = {
+            let mut records = self.records.lock().unwrap();
+            let Some(file) = records.iter_mut().find(|file| file.id == id) else {
+                return;
+            };
+            file.favorite = favorite;
+            records
+                .iter()
+                .map(|file| {
+                    let mut row = audio_row(file);
+                    row.checked = checked.contains(&file.id);
+                    row
+                })
+                .collect()
+        };
+        publish_audio_rows(ui, self.decorate_list_waveforms(rows));
+    }
+
+    /// A failed favorite write must not leave the row showing a value that was not stored.
+    fn revert_unconfirmed_favorite(&self, ui: &AppWindow, id: i64, attempted: bool) {
+        let still_attempted = self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|file| file.id == id)
+            .is_some_and(|file| file.favorite == attempted);
+        if still_attempted {
+            self.publish_favorite_row(ui, id, !attempted);
+        }
+        if ui.get_selected_id().as_str() == id.to_string() && ui.get_edit_favorite() == attempted {
+            ui.set_edit_favorite(!attempted);
         }
     }
 
@@ -9546,7 +9637,8 @@ mod tests {
             .next()
             .unwrap();
         favorite.mock_single_click(PointerEventButton::Left);
-        assert!(ui.get_edit_favorite() && ui.get_metadata_dirty());
+        assert!(ui.get_edit_favorite());
+        assert!(!ui.get_metadata_dirty());
         favorite.invoke_accessible_default_action();
         assert!(!ui.get_edit_favorite());
 
