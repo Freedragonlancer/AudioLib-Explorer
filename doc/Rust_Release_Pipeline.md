@@ -26,11 +26,33 @@ pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.9.0 -Stage accept -Tail 15 
 
 记录默认位于 `.rust-validation/release-pipeline/<tag>/<plan-name>/`，属于私有、本机生成证据，不得作为 Release 资产。`Status` 不重新证明当前输入有效；只有 `Run` 才执行复用判定。日志查看同时限制行数和 stdout/stderr 的合计字符数，单行巨型 JSON 也不会整段进入工具输出。失败保留日志、当前阶段状态和其他有效的成功收据；失败阶段自身的旧收据失效，不继续后续阶段。进程中断后同样通过 `Run` 重试。运行目录和子阶段各有独占锁；父执行器中断但构建/安装子进程仍在运行时，重试会被拒绝，等待子进程退出后再续跑，不强制终止它。
 
+## 本地快速验收
+
+仅在明确要求本地试用或安装交付时使用 `windows-local` 计划。它沿用现有执行器：许可证预检 → 增量 release 构建 → portable 目录打包 → 一次完整 portable 验收 → 固定安装。省略本地安装不需要的 ZIP 压缩、归档哈希和 ZIP 检查；EXE 身份、许可证、隐私、旧更新器兼容边界及启动验收仍保留。
+
+```powershell
+# 干净且已提交的 checkout；vX.Y.Z 必须对应 Cargo.toml 的版本。
+# 此计划的 -Tag 只用于包版本和运行目录，不要求或创建 Git 标签。
+pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0
+pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0 -Action Run
+# 失败后用同一 Run 续跑；Status/Logs 也需保持同一 PlanFile、Tag。
+pwsh tools/release-pipeline.ps1 -PlanFile tools/release-plans/windows-local.json -Tag v1.0.0 -Action Status
+```
+
+已有仍有效的源码检查无需再加入；还需执行时通过 `-ChecksFile` 选择实际影响范围，未选择记为 `not-requested`。成功交付且本次实际构建过 Rust 后维护一次编译缓存，可在 Run 添加 `-CleanBuildArtifacts`；同一任务不在每阶段清理。保留 release 缓存以利用 Cargo 增量判定，网络 checkout 可复用已配置的本机 SSD `CARGO_TARGET_DIR`；构建、打包、验收必须使用同一个目录和 ASIO 配置。无需为了试用增加版本提交或创建标签。
+
+尚未提交的试用源码无法使用有干净身份要求的管线；可以按顺序单独调用 `check-release-licenses.ps1 -Profile WindowsClient`、`build-release.ps1`、`package-portable.ps1 -SkipBuild -SkipArchive`、`validate-portable.ps1 -BinaryDirectory dist/latest/portable`、`install-local-release.ps1`，每步成功才进入下一步。无 ASIO 时前四步都加 `-WithoutAsio`。检查对应最新源码，只复用输入仍一致的结果；不要使用旧 EXE，也不要为源码草稿伪造已提交身份。
+
+`-SkipArchive` 仍生成两份 EXE 的校验 sidecar；它会移除 `dist/latest/` 下上一份 latest ZIP 及其 `.sha256`，避免旧归档被误认为当前产物。此时只交付已验证的目录，不能声称生成了可发布归档。需要分享 ZIP 或正式发布时用普通 `windows-client` 计划；该计划仍要求真实标签并生成归档。两种计划共用构建、打包和安装目录，必须串行执行。
+
+安装器仅复制哈希不同的文件，继续核对所有包内文件、CLI 版本及一次隔离桌面启动，不重复完整 portable 套件。相同源码/环境/产物的 Run 会复用成功阶段；验收或安装失败时保留已通过的构建/打包证据。源码、feature、工具链或产物变化仍使对应结果失效。
+
 ## 选择范围与配置
 
 | 计划 | 平台与职责 |
 | --- | --- |
 | `tools/release-plans/windows-client.json` | Windows x64 客户端，默认 ASIO，包含固定 `local_release/` 安装 |
+| `tools/release-plans/windows-local.json` | Windows 本地快速试用，不要求 Git 标签、不生成 ZIP，保留 portable 验收和固定安装 |
 | `tools/release-plans/server.json` | Windows x64 无播放服务端，显式构建验收 fixture 所需 benchmark |
 | `tools/release-plans/server-unix.json` | 对应本机 Linux/macOS 服务端，不额外构建 Windows fixture helper |
 | `tools/release-plans/macos-client.json` | Apple Silicon Mac 客户端，结构与原生验收合并运行；需要已登录桌面 |
@@ -38,7 +60,7 @@ pwsh tools/release-pipeline.ps1 -Action Logs -Tag v0.9.0 -Stage accept -Tail 15 
 
 Windows 客户端计划按打包器的实际常规输出记录 `dist/latest/AudioLibExplorer-latest-win-x64-portable.zip` 及其 `.sha256`；`-Tag` 写入包的版本身份，不改变这两个本地文件名。
 
-四个原生计划在 release 构建前执行 `license-preflight`，复用 `dependency-licenses.ps1` 的选定依赖图与 notice 解析，检查实际 target、roots、features 及固定材料身份。此阶段只使用 locked/offline Cargo 元数据，不编译、不下载、不生成包。它每次 Run 都重新检查外部依赖缓存中的材料；输入不变时收据身份稳定，不使后面的成功构建失效。打包与验收仍执行原有许可证检查，ASIO SDK 等额外材料仍由原准备/打包流程验证。离线缓存不完整时先准备依赖，不通过一次试编译发现缺件。`-ChecksFile` 的源码检查仍在版本预检之后插入；若本轮还需执行耗时源码检查，在前期环境核对时先单独运行下面的轻量许可证预检。
+原生构建计划在 release 构建前执行 `license-preflight`，复用 `dependency-licenses.ps1` 的选定依赖图与 notice 解析，检查实际 target、roots、features 及固定材料身份。此阶段只使用 locked/offline Cargo 元数据，不编译、不下载、不生成包。它每次 Run 都重新检查外部依赖缓存中的材料；输入不变时收据身份稳定，不使后面的成功构建失效。打包与验收仍执行原有许可证检查，ASIO SDK 等额外材料仍由原准备/打包流程验证。离线缓存不完整时先准备依赖，不通过一次试编译发现缺件。`-ChecksFile` 的源码检查在版本预检之后插入，没有版本预检的计划则插入最前面；若本轮还需执行耗时源码检查，在前期环境核对时先单独运行下面的轻量许可证预检。
 
 候选构建若不经过标签管线，也应先调用同一预检入口；服务端通过不能替代客户端闭包通过：
 
